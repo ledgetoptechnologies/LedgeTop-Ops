@@ -77,6 +77,8 @@ describe("portal relation hierarchy compatibility", () => {
         VALUES ('directory-dept','ws-acme','manager','directory.read','allow','department','dept-field','project_alpha','active')`),
       db.prepare(`INSERT INTO portal_v2_entitlements(id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,source_type,status)
         VALUES ('manage-dept','ws-acme','manager','member.manage','allow','department','dept-field','project_alpha','active')`),
+      db.prepare(`INSERT INTO portal_v2_entitlements(id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,source_type,status)
+        VALUES ('delivery-dept','ws-acme','manager','delivery.view','allow','department','dept-field','project_alpha','active')`),
     ]);
     env = { DELIVERY_DB: db, CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true", CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED: "true", CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED: "true", PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED: "true" } as Env;
   }, 30_000);

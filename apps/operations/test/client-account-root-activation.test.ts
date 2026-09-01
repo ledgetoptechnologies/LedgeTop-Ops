@@ -353,7 +353,12 @@ describe("post-0121 client account root activation on the real Client migration 
     await seedSecondaryActivationSources(opsDb);
     const preflight = await listClientAccountRootActivation(env);
     expect(preflight.workspaceMigrationApplied).toBe(true);
-    expect(preflight.accounts.find(account => account.id === "late-account")?.activationState).toBe("unlinked");
+    expect(preflight.accounts.find(account => account.id === "late-account")).toMatchObject({
+      activationState: "unlinked",
+      verifiedIdentityCount: 1,
+      activeMemberCount: 1,
+      activeManagerCount: 1,
+    });
     expect(preflight.sources.some(source => source.clientId.includes("secondary"))).toBe(false);
     const beforeUnsupported = (await deliveryDb.prepare("SELECT * FROM client_accounts ORDER BY id").all()).results;
     const beforeAudit = await deliveryDb.prepare("SELECT COUNT(*) count FROM audit_log").first<number>("count");

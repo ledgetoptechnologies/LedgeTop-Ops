@@ -46,7 +46,7 @@ describe("Client Hub project feedback history",{timeout:60_000},()=>{
     expect(new Set(combined.map(item=>item.feedbackId)).size).toBe(31);
     expect(combined.find(item=>item.feedbackId===records[0]!.id)?.events.map(event=>event.action)).toEqual(["submitted","completed"]);
     expect(JSON.stringify(combined)).not.toMatch(/Private feedback|Private completion|actor|message|note|sourceOwner|storageKey|identity|fingerprint|guard/i);
-    expect(combined.every(item=>item.detailPath===`/operations/feedback/${encodeURIComponent(item.feedbackId)}?status=all`)).toBe(true);
+    expect(combined.every(item=>item.detailPath===`/clients/feedback/${encodeURIComponent(item.feedbackId)}?status=all`)).toBe(true);
   });
 
   it("never borrows primary feedback for a secondary source with the same raw IDs",async()=>{

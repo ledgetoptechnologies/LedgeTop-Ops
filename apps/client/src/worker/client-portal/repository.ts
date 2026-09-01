@@ -70,11 +70,14 @@ interface ProjectRow {
 
 interface FileRow {
   r2_key: string;
+  etag?: string;
   size: number;
   uploaded_at: string;
   content_type: string | null;
   media_kind: string;
   association_prefix: string;
+  association_id?: string;
+  source_id?: string;
 }
 
 interface FolderAssociationRow {
@@ -1153,7 +1156,9 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
     const row = await portalDb(env)
       .prepare(
         `
-      SELECT f.r2_key,f.size,f.uploaded_at,f.content_type,f.media_kind,association.r2_prefix association_prefix
+      SELECT f.r2_key,f.etag,f.size,f.uploaded_at,f.content_type,f.media_kind,
+        association.id association_id,association.r2_prefix association_prefix,
+        COALESCE(a.project_alpha_source_id,'delivery:local') source_id
       FROM client_folder_associations association
       JOIN file_index f ON f.r2_key=? AND substr(f.r2_key,1,length(association.r2_prefix))=association.r2_prefix
       ${sessionJoin}
@@ -1178,7 +1183,11 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
           : [key, session.accountId, session.identityId, scope, ...associationGrantFilter.bindings]),
       )
       .first<FileRow>();
-    return row ? { ...mapFile(row, projectId || null, fileId), storageKey: key } : null;
+    return row && row.etag && row.association_id && row.source_id ? {
+      ...mapFile(row, projectId || null, fileId), storageKey: key, etag: row.etag,
+      authority: { sourceId: row.source_id, accountId: session.accountId, identityId: session.identityId,
+        projectId: projectId || null, associationId: row.association_id },
+    } : null;
   },
 
   async listDeliveries(

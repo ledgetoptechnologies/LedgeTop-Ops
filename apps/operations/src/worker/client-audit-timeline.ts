@@ -2,6 +2,7 @@ import {
   CLIENT_AUDIT_TIMELINE_ACTORS,
   CLIENT_AUDIT_TIMELINE_ACCESS_ADAPTERS,
   CLIENT_AUDIT_TIMELINE_CATEGORIES,
+  CLIENT_AUDIT_TIMELINE_CONTENT_ADAPTERS,
   CLIENT_AUDIT_TIMELINE_NOTIFICATION_ADAPTERS,
   CLIENT_AUDIT_TIMELINE_PROJECT_ADAPTERS,
   CLIENT_AUDIT_TIMELINE_RESULTS,
@@ -67,7 +68,7 @@ interface FeedbackCandidatePage {
   hasMore: boolean;
 }
 interface TimelineCursor {
-  v: 8;
+  v: 9;
   actor: string;
   root: [string, string, string, string];
   projectId: string | null;
@@ -85,6 +86,7 @@ interface TimelineCursor {
   operationalProjectSchema: boolean;
   organizationContactSchema:boolean;
   projectAccessHistory: string | null;
+  authenticatedContentHistory: string | null;
   feedbackSchema: boolean;
   feedbackPolicy: string;
   feedbackAfter: [string, string] | null;
@@ -110,7 +112,7 @@ const filtersSchema = z.object({
   to: timestamp.nullable(),
 }).strict();
 const cursorSchema = z.object({
-  v: z.literal(8), actor: identifier, root: z.tuple([identifier, identifier, identifier, identifier]),
+  v: z.literal(9), actor: identifier, root: z.tuple([identifier, identifier, identifier, identifier]),
   projectId: identifier.nullable(), context: proof, scope: proof, project: proof.nullable(),
   businessPolicy: proof, businessSource: proof, businessRevision: z.number().int().nonnegative(), deliveryAuditPolicy: proof,
   viewerManagePolicy: proof, portalPolicy: proof,
@@ -119,6 +121,7 @@ const cursorSchema = z.object({
   operationalProjectSchema: z.boolean(),
   organizationContactSchema:z.boolean(),
   projectAccessHistory: timestamp.nullable(),
+  authenticatedContentHistory: timestamp.nullable(),
   feedbackSchema: z.boolean(), feedbackPolicy: proof,
   feedbackAfter: z.tuple([timestamp, identifier]).nullable(),
   filters: filtersSchema, asOf: timestamp,
@@ -147,7 +150,7 @@ const changed = (): never => { throw new HTTPException(409, { message: "Timeline
 async function cursorKey(env: Env): Promise<CryptoKey> {
   if (!env.OPERATIONS_SESSION_SECRET || env.OPERATIONS_SESSION_SECRET.length < 32)
     throw new Error("Client timeline cursor configuration unavailable");
-  const material = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`client-audit-timeline:v8:${env.OPERATIONS_SESSION_SECRET}`));
+  const material = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`client-audit-timeline:v9:${env.OPERATIONS_SESSION_SECRET}`));
   return crypto.subtle.importKey("raw", material, "AES-GCM", false, ["encrypt", "decrypt"]);
 }
 function decodeBase64Url(value: string): Uint8Array<ArrayBuffer> {
@@ -158,7 +161,7 @@ function decodeBase64Url(value: string): Uint8Array<ArrayBuffer> {
 async function encodeCursor(env: Env, actor: StaffPrincipal, value: TimelineCursor): Promise<string> {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const body = await crypto.subtle.encrypt({ name: "AES-GCM", iv,
-    additionalData: new TextEncoder().encode(`client-audit-timeline:v8:${actor.id}`) }, await cursorKey(env),
+    additionalData: new TextEncoder().encode(`client-audit-timeline:v9:${actor.id}`) }, await cursorKey(env),
   new TextEncoder().encode(JSON.stringify(value)));
   return `${base64Url(iv)}.${base64Url(new Uint8Array(body))}`;
 }
@@ -168,7 +171,7 @@ async function decodeCursor(env: Env, actor: StaffPrincipal, raw: string): Promi
     const parts = raw.split(".");
     if (parts.length !== 2) throw new Error();
     const body = await crypto.subtle.decrypt({ name: "AES-GCM", iv: decodeBase64Url(parts[0]!),
-      additionalData: new TextEncoder().encode(`client-audit-timeline:v8:${actor.id}`) }, await cursorKey(env), decodeBase64Url(parts[1]!));
+      additionalData: new TextEncoder().encode(`client-audit-timeline:v9:${actor.id}`) }, await cursorKey(env), decodeBase64Url(parts[1]!));
     return cursorSchema.parse(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body)));
   } catch { throw new HTTPException(400, { message: "Client timeline cursor is invalid" }); }
 }
@@ -190,6 +193,26 @@ async function projectAccessHistoryState(env:Env):Promise<{collectedSince:string
   if(rows.length!==2)throw new Error('Project access authority history schema is incomplete');
   const raw=await db.prepare(`SELECT collection_started_at FROM portal_project_access_authority_history_state WHERE singleton=1`).first<string>('collection_started_at');
   const collectedSince=normalizeTime(raw);if(!collectedSince)throw new Error('Project access authority history coverage is invalid');
+  return {collectedSince,proof:await sha256(JSON.stringify([rows.map(row=>row.name),collectedSince]))};
+}
+async function authenticatedContentHistoryState(env:Env):Promise<{collectedSince:string|null;proof:string}> {
+  const db=env.DELIVERY_DB.withSession("first-primary"),names=[
+    "portal_authenticated_content_history_state","portal_authenticated_content_events",
+    "portal_authenticated_content_retention_control",
+    "idx_portal_authenticated_content_legacy_timeline","idx_portal_authenticated_content_native_timeline",
+    "portal_authenticated_content_events_immutable_update","portal_authenticated_content_events_retention_delete_guard",
+    "portal_authenticated_content_history_state_immutable_delete","portal_authenticated_content_history_state_immutable_update",
+  ];
+  const rows=(await db.prepare(`SELECT name FROM sqlite_master WHERE name IN (${names.map(()=>"?").join(",")}) ORDER BY name`)
+    .bind(...names).all<{name:string}>()).results;
+  if(rows.length===0)return {collectedSince:null,proof:await sha256("authenticated-content-history:absent")};
+  if(rows.length!==names.length)throw new Error("Authenticated content history schema is incomplete");
+  const state=await db.prepare(`SELECT schema_version schemaVersion,collection_started_at collectionStartedAt
+    FROM portal_authenticated_content_history_state WHERE singleton=1`)
+    .first<{schemaVersion:number;collectionStartedAt:string|null}>();
+  if(state?.schemaVersion!==1)throw new Error("Authenticated content history coverage is invalid");
+  const collectedSince=state.collectionStartedAt===null?null:normalizeTime(state.collectionStartedAt);
+  if(state.collectionStartedAt!==null&&!collectedSince)throw new Error("Authenticated content history coverage is invalid");
   return {collectedSince,proof:await sha256(JSON.stringify([rows.map(row=>row.name),collectedSince]))};
 }
 function actor(value: string | null | undefined): ClientAuditTimelineItem["actor"] {
@@ -227,9 +250,15 @@ async function maxRowid(db: D1DatabaseSession, table: string): Promise<number> {
 
 async function deliveryScope(env: Env, context: ClientHubCollectionContext, projectId: string | null): Promise<DeliveryScope> {
   const root = context.root, db = env.DELIVERY_DB.withSession("first-primary");
-  if (root.root_namespace === "business" && root.source_id !== PRIMARY_ALPHA_SOURCE_ID)
-    return { accountId: null, projectId: null, projectPublicId: null, workspaceId: null,
-      proof: await sha256(JSON.stringify([rootTuple(context), "secondary-source-records-only"])) };
+  if (root.root_namespace === "business" && root.source_id !== PRIMARY_ALPHA_SOURCE_ID) {
+    const native = root.workspace_id ? (await db.prepare(`SELECT id,project_alpha_source_id,status FROM portal_v2_workspaces
+      WHERE id=? AND project_alpha_source_id=? AND status='active' LIMIT 2`).bind(root.workspace_id,root.source_id)
+      .all<{id:string;project_alpha_source_id:string;status:string}>()).results : [];
+    if(native.length>1)changed();
+    return { accountId: null, projectId: null, projectPublicId: native.length===1?projectId:null,
+      workspaceId: native.length===1?root.workspace_id:null,
+      proof: await sha256(JSON.stringify([rootTuple(context),projectId,native])) };
+  }
   let accounts: Array<{ id: string; status: string; project_alpha_source_id: string | null;
     project_alpha_client_id: string | null; project_alpha_organization_id: string | null }> = [];
   if (root.root_namespace === "account" && root.source_id === "delivery:local") {
@@ -259,7 +288,8 @@ async function deliveryScope(env: Env, context: ClientHubCollectionContext, proj
   const project = projects[0] ?? null;
   const stable = [rootTuple(context), account, project, root.workspace_id ?? null];
   return { accountId: account?.id ?? null, projectId: project?.id ?? null,
-    projectPublicId: project?.project_alpha_project_id ?? null, workspaceId: root.workspace_id ?? null,
+    projectPublicId: root.root_namespace==="business"&&root.workspace_id ? projectId : project?.project_alpha_project_id ?? null,
+    workspaceId: root.workspace_id ?? null,
     proof: await sha256(JSON.stringify(stable)) };
 }
 
@@ -626,7 +656,7 @@ async function feedbackCandidates(env: Env, principal: StaffPrincipal, context: 
       ? "feedback.started" : "feedback.completed";
     const timelineItem = item({ sourceId: context.root.source_id, producer, producerEventId, category: "feedback",
       action, actor: actor(row.actor_type), resource: { type: "client_feedback", id: record.id,
-        label: "Client feedback", detailPath: `/operations/feedback/${encodeURIComponent(record.id)}?status=all` },
+        label: "Client feedback", detailPath: `/clients/feedback/${encodeURIComponent(record.id)}?status=all` },
       result: "succeeded", occurredAt });
     candidates.push({item:timelineItem,record,recordProof:verified.recordProof,scopeProof:verified.scopeProof});
     scan.push({ position: [occurredAt, producerEventId], itemId: timelineItem.id });
@@ -763,6 +793,37 @@ async function deliveryCandidates(env: Env, context: ClientHubCollectionContext,
   });
 }
 
+async function authenticatedContentCandidates(env:Env,context:ClientHubCollectionContext,scope:DeliveryScope,
+  filters:ClientAuditTimelineFilters,asOf:string,after:TimelineCursor["after"],water:number,
+  limit:number):Promise<ClientAuditTimelineItem[]> {
+  if(!context.access.delivery||!allowedByFilters(filters,"delivery","client","informational"))return [];
+  const predicates:string[]=[],values:string[]=[];
+  if(scope.accountId){
+    predicates.push(`(event.authority_mode='legacy_delivery' AND event.account_id=?${scope.projectId?" AND event.project_id=?":""})`);
+    values.push(scope.accountId,...(scope.projectId?[scope.projectId]:[]));
+  }
+  if(scope.workspaceId){
+    predicates.push(`(event.authority_mode='native_delivery' AND event.source_id=? AND event.workspace_id=?${scope.projectPublicId?" AND event.project_public_id=?":""})`);
+    values.push(context.root.source_id,scope.workspaceId,...(scope.projectPublicId?[scope.projectPublicId]:[]));
+  }
+  if(!predicates.length)return [];
+  const producer:Producer="client_delivery",at="event.occurred_at",bounds=timeBounds(filters,asOf,at),
+    continuation=seek(at,"'authenticated-content:'||event.id",producer,after);
+  const rows=await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT event.recorded_sequence rowid,
+    event.id event_id,event.action,event.occurred_at,event.resource_label
+    FROM portal_authenticated_content_events event
+    WHERE event.recorded_sequence<=? AND (${predicates.join(" OR ")})
+      AND event.action IN ('file.preview_requested','file.download_requested')
+      AND ${bounds.sql}${continuation.sql}
+    ORDER BY event.occurred_at DESC,event.id ASC LIMIT ?`).bind(water,...values,...bounds.values,...continuation.values,limit+1)
+    .all<CandidateRow>();
+  return rows.results.map(row=>item({sourceId:context.root.source_id,producer,
+    producerEventId:`authenticated-content:${String(row.event_id)}`,category:"delivery",
+    action:row.action==="file.download_requested"?"file.download_requested":"file.preview_requested",
+    actor:actor("client"),resource:{type:"authenticated_content",label:safeText(row.resource_label,"Client content",180)},
+    result:"informational",occurredAt:normalizeTime(row.occurred_at)!}));
+}
+
 const PROJECT_ACCESS_COLLABORATOR_NOTICE_TABLES = [
   "portal_project_access_notice_audit", "portal_project_access_notice_outbox", "portal_project_access_terms",
 ] as const;
@@ -896,7 +957,7 @@ async function currentWatermarks(env: Env, context: ClientHubCollectionContext, 
   policies: { portal: boolean; deliveryAudit: boolean; viewerManage: boolean },
   collaboratorNoticeSchema: boolean, companionNoticeSchema: boolean,
   operationalProjectSchema: boolean,organizationContactSchema:boolean,projectAccessHistoryAvailable:boolean,
-  projectPublicId:string|null,feedbackAvailable:boolean): Promise<Record<string, number>> {
+  projectPublicId:string|null,feedbackAvailable:boolean,authenticatedContentAvailable:boolean): Promise<Record<string, number>> {
   const ops = env.OPS_DB.withSession("first-primary"), delivery = env.DELIVERY_DB.withSession("first-primary");
   const waters: Record<string, number> = {};
   if (context.root.root_namespace === "business") waters.business = await ops.prepare("SELECT COALESCE(MAX(sequence),0) value FROM client_business_activity").first<number>("value") ?? 0;
@@ -926,6 +987,7 @@ async function currentWatermarks(env: Env, context: ClientHubCollectionContext, 
     FROM portal_project_access_authority_events WHERE workspace_id=? AND source_id=? ${projectPublicId?'AND project_public_id=?':''}`)
     .bind(context.root.workspace_id,context.root.source_id,...(projectPublicId?[projectPublicId]:[])).first<number>('value')??0;
   if (feedbackAvailable) waters.feedbackEvents = await maxRowid(delivery, "client_feedback_events");
+  if(authenticatedContentAvailable)waters.authenticatedContent=await maxRowid(delivery,"portal_authenticated_content_events");
   return waters;
 }
 
@@ -958,6 +1020,7 @@ export async function listClientAuditTimeline(env: Env, principal: StaffPrincipa
     feedbackSchema=await d1TablesPresent(env.DELIVERY_DB,FEEDBACK_TABLES),
     feedbackPolicy=await readFeedbackTimelinePolicy(env,principal,feedbackSchema),
     projectAccessHistory=await projectAccessHistoryState(env),
+    authenticatedContentHistory=await authenticatedContentHistoryState(env),
     source = context.root.root_namespace === "business" ? await clientHubBusinessProjectSourceProof(env, context)
       : await sha256(JSON.stringify([rootTuple(context), "not-business"]));
   const businessRevision = context.root.root_namespace === "business"
@@ -977,7 +1040,8 @@ export async function listClientAuditTimeline(env: Env, principal: StaffPrincipa
     || cursor.organizationContactSchema!==organizationContactSchema
     || cursor.feedbackSchema!==feedbackSchema
     || cursor.feedbackPolicy!==feedbackPolicy.proof
-    || cursor.projectAccessHistory !== projectAccessHistory.collectedSince)) changed();
+    || cursor.projectAccessHistory !== projectAccessHistory.collectedSince
+    || cursor.authenticatedContentHistory!==authenticatedContentHistory.collectedSince)) changed();
   const accessPolicies = { portal: context.access.requests && portalPolicy.allowed, deliveryAudit: deliveryAuditPolicy.allowed,
     viewerManage: viewerManagePolicy.allowed };
   const feedbackSupported=context.root.root_namespace==='business'&&context.root.source_id===PRIMARY_ALPHA_SOURCE_ID;
@@ -986,9 +1050,13 @@ export async function listClientAuditTimeline(env: Env, principal: StaffPrincipa
   // and a policy that proves complete project + delivery-target coverage.
   const feedbackAvailable=feedbackSupported&&feedbackSchema&&Boolean(projectId)&&Boolean(scope.accountId)&&Boolean(scope.projectId)
     &&feedbackPolicy.allowed;
+  const authenticatedContentApplicable=context.access.delivery&&(Boolean(scope.accountId)||Boolean(scope.workspaceId));
+  const authenticatedContentAvailable=authenticatedContentHistory.collectedSince!==null&&authenticatedContentApplicable
+    &&deliveryAuditPolicy.allowed;
   const asOf = cursor?.asOf ?? new Date().toISOString(), waters = cursor?.waters
     ?? await currentWatermarks(env, context, scope, accessPolicies, collaboratorNoticeSchema, companionNoticeSchema,
-      operationalProjectSchema,organizationContactSchema,projectAccessHistory.collectedSince!==null,projectId,feedbackAvailable);
+      operationalProjectSchema,organizationContactSchema,projectAccessHistory.collectedSince!==null,projectId,feedbackAvailable,
+      authenticatedContentAvailable);
   const secondary = context.root.root_namespace === "business" && context.root.source_id !== PRIMARY_ALPHA_SOURCE_ID;
   const sourceAvailable = context.root.root_namespace === "business";
   const requestAvailable = !secondary && Boolean(scope.accountId) && context.access.requests;
@@ -1038,6 +1106,12 @@ export async function listClientAuditTimeline(env: Env, principal: StaffPrincipa
         : !scope.workspaceId || !noticeScope.available ? "not_applicable" : !accessPolicies.portal ? "permission_required" : "not_collected";
     return [adapter, coverage(available, reason)];
   })) as ClientAuditTimelinePage["notificationCoverage"];
+  const contentCoverage=Object.fromEntries(CLIENT_AUDIT_TIMELINE_CONTENT_ADAPTERS.map(adapter=>{
+    const reason:CoverageReason=authenticatedContentAvailable?null
+      :authenticatedContentHistory.collectedSince===null?"not_collected"
+        :!authenticatedContentApplicable?"not_applicable":"permission_required";
+    return [adapter,{...coverage(authenticatedContentAvailable,reason),collectedSince:authenticatedContentHistory.collectedSince}];
+  })) as ClientAuditTimelinePage["contentCoverage"];
   const notificationAvailable = Object.values(notificationCoverage).some(value => value.available);
   const notificationUnavailableReason: CoverageReason = secondary ? "unsupported_source"
     : Object.values(notificationCoverage).some(value => value.reason === "permission_required") ? "permission_required"
@@ -1053,7 +1127,9 @@ export async function listClientAuditTimeline(env: Env, principal: StaffPrincipa
       : context.root.root_namespace!=="business"||!projectId||!feedbackSchema ? "not_collected"
         : !scope.accountId||!scope.projectId ? "not_applicable" : "permission_required"),
     access: coverage(responseAccessAvailable,responseAccessReason),
-    delivery: coverage(deliveryAvailable, secondary ? "unsupported_source" : !scope.accountId ? "not_applicable" : "permission_required"),
+    delivery: coverage(deliveryAvailable||authenticatedContentAvailable,
+      authenticatedContentApplicable&&authenticatedContentHistory.collectedSince===null?"not_collected"
+        :!authenticatedContentApplicable&&!scope.accountId?"not_applicable":"permission_required"),
     notification: coverage(notificationAvailable, notificationUnavailableReason),
   };
   const feedbackPage=feedbackAvailable&&feedbackPolicy.access
@@ -1071,6 +1147,8 @@ export async function listClientAuditTimeline(env: Env, principal: StaffPrincipa
       projectAccessAvailable?projectAccessHistory.collectedSince:null) : [],
     projectAccessAvailable ? projectAccessHistoryCandidates(env,context,filters,projectId,asOf,cursor?.after??null,waters.projectAccessHistory??0,limit):[],
     deliveryAvailable ? deliveryCandidates(env, context, scope, filters, asOf, cursor?.after ?? null, waters.deliveryAudit ?? 0, limit) : [],
+    authenticatedContentAvailable?authenticatedContentCandidates(env,context,scope,filters,asOf,cursor?.after??null,
+      waters.authenticatedContent??0,limit):[],
     projectAccessCollaboratorNoticeAvailable ? projectAccessNoticeCandidates(env, context, filters, projectId, asOf,
       cursor?.after ?? null, waters.projectAccessNotices ?? 0, limit, projectAccessCollaboratorNoticeAvailable) : [],
     projectAccessCompanionNoticeAvailable ? projectAccessCompanionNoticeCandidates(env, context, filters, projectId, asOf,
@@ -1087,6 +1165,7 @@ export async function listClientAuditTimeline(env: Env, principal: StaffPrincipa
   const [currentScope, currentPolicy, currentSource, currentRevision, currentDetail, currentDeliveryAuditPolicy,
     currentViewerManagePolicy, currentPortalPolicy, currentNoticeScope, currentCollaboratorNoticeSchema,
     currentCompanionNoticeSchema, currentOperationalProjectSchema,currentOrganizationContactSchema,currentProjectAccessHistory,
+    currentAuthenticatedContentHistory,
     currentFeedbackSchema,currentFeedbackPolicy] = await Promise.all([
     deliveryScope(env, context, projectId), readClientHubBusinessProjectPolicy(env, principal),
     context.root.root_namespace === "business" ? clientHubBusinessProjectSourceProof(env, context) : Promise.resolve(source),
@@ -1101,6 +1180,7 @@ export async function listClientAuditTimeline(env: Env, principal: StaffPrincipa
     d1TablesPresent(env.OPS_DB, OPERATIONAL_PROJECT_EVENT_TABLES),
     d1TablesPresent(env.OPS_DB,ORGANIZATION_CONTACT_EVENT_TABLES),
     projectAccessHistoryState(env),
+    authenticatedContentHistoryState(env),
     d1TablesPresent(env.DELIVERY_DB,FEEDBACK_TABLES),
     readFeedbackTimelinePolicy(env,principal,feedbackSchema),
   ]);
@@ -1114,6 +1194,7 @@ export async function listClientAuditTimeline(env: Env, principal: StaffPrincipa
     || currentOperationalProjectSchema !== operationalProjectSchema
     || currentOrganizationContactSchema!==organizationContactSchema
     || currentProjectAccessHistory.proof!==projectAccessHistory.proof
+    || currentAuthenticatedContentHistory.proof!==authenticatedContentHistory.proof
     || currentFeedbackSchema!==feedbackSchema
     || currentFeedbackPolicy.proof!==feedbackPolicy.proof
     || (currentDetail && await sha256(JSON.stringify(currentDetail.project)) !== projectProof)) changed();
@@ -1161,14 +1242,15 @@ export async function listClientAuditTimeline(env: Env, principal: StaffPrincipa
   const last = pageItems.at(-1);
   return { canonicalRoot: context.canonicalRoot, projectId, contextVersion: context.contextVersion,
     refreshedAt: new Date().toISOString(), asOf, coverage: responseCoverage, projectCoverage, accessCoverage: adapterCoverage,
-    notificationCoverage,
+    notificationCoverage,contentCoverage,
     filters, items: pageItems,
     page: { returned: pageItems.length, limit, hasMore, nextCursor: hasMore ? await encodeCursor(env, principal, {
-      v: 8, actor: principal.id, root: rootTuple(context), projectId, context: context.contextVersion, scope: scope.proof,
+      v: 9, actor: principal.id, root: rootTuple(context), projectId, context: context.contextVersion, scope: scope.proof,
       project: projectProof, businessPolicy: policy.proof, businessSource: source, businessRevision,
       deliveryAuditPolicy: deliveryAuditPolicy.proof, viewerManagePolicy: viewerManagePolicy.proof,
       portalPolicy: portalPolicy.proof, noticeScope: noticeScope.proof, collaboratorNoticeSchema, companionNoticeSchema,
       operationalProjectSchema,organizationContactSchema,projectAccessHistory:projectAccessHistory.collectedSince,
+      authenticatedContentHistory:authenticatedContentHistory.collectedSince,
       feedbackSchema,feedbackPolicy:feedbackPolicy.proof,feedbackAfter,
       filters, asOf, waters, after:last?[last.occurredAt,last.producer,last.producerEventId]:cursor?.after??null,
       expires: Date.now() + 30 * 60_000,

@@ -170,12 +170,44 @@ function fixture(base) {
       groupName: STAGING_CLIENT_PORTAL.groupName,
       protectedPaths: [...STAGING_CLIENT_PORTAL.protectedPaths],
       protectedDestinations: [...STAGING_CLIENT_PORTAL.protectedDestinations],
+      accessReadbackEvidenceRef: "ticket:client-access:readback",
+      rollbackSnapshotRef: "ticket:client-access:rollback-snapshot",
       publicAccess: { applicationName: STAGING_CLIENT_PORTAL.publicApplicationName, applicationId: "client-public-app-id", policyId: "client-public-policy-id", decision: "bypass", include: "everyone", destination: STAGING_CLIENT_PORTAL.publicHostname, workerPublicPaths: [...STAGING_CLIENT_PORTAL.publicPaths] },
       approvalRef: "ticket:client-access",
-      tests: { portalDisabled404: true, invalidAudienceDenied: true, unprovisionedIdentityDenied: true, crossAccountDenied: true, staffAclDenied: true, publicShareAnonymousReachable: true, publicSharePasswordRechecked: true, accessHeaderAbsentOnPublicShare: true, secondaryDnsTlsReady: true, sameAudienceBothHosts: true, primaryHardRefresh: true, secondaryHardRefresh: true, domainSwitchSso: true, secondarySameOriginMutation: true, mixedOriginDenied: true, canonicalPublicLinkPreserved: true, secondaryPublicNamespaceDenied: true, observedAt: "2026-07-30T12:00:00Z", evidenceRef: "ticket:client-e2e" },
+      tests: {
+        portalDisabled404: true,
+        invalidAudienceDenied: true,
+        unprovisionedIdentityDenied: true,
+        crossAccountDenied: true,
+        staffAclDenied: true,
+        publicShareAnonymousReachable: true,
+        publicSharePasswordRechecked: true,
+        accessHeaderAbsentOnPublicShare: true,
+        secondaryDnsTlsReady: true,
+        sameAccessApplicationBothHosts: true,
+        sameAudienceBothHosts: true,
+        samePolicySetBothHosts: true,
+        primarySignIn: true,
+        secondarySignIn: true,
+        primaryHardRefresh: true,
+        secondaryHardRefresh: true,
+        domainSwitchSso: true,
+        primaryLogout: true,
+        secondaryLogout: true,
+        sessionExpiryDeniedBothHosts: true,
+        revocationDeniedBothHosts: true,
+        unauthorizedIdentityDeniedBothHosts: true,
+        crossTenantDeniedBothHosts: true,
+        secondarySameOriginMutation: true,
+        mixedOriginDenied: true,
+        canonicalPublicLinkPreserved: true,
+        secondaryPublicNamespaceDenied: true,
+        observedAt: "2026-07-30T12:00:00Z",
+        evidenceRef: "ticket:client-e2e",
+      },
     },
     migrations: {
-      delivery: { expected: [...REQUIRED_STAGING_MIGRATIONS.delivery], appliedToStaging: true, listEvidenceRef: "ticket:migrations:delivery:list", applyEvidenceRef: "ticket:migrations:delivery:apply", secondListEmpty: true, foreignKeyCheckPassed: true, idempotentReapplyPassed: true, videoRecoveryCompleted: true, videoRowsPendingForTrueNas: true, legacyBridgeAcceptanceMatrixPassed: true, serviceAssignmentV2ExpandApplied: true, serviceAssignmentCompatibleWriterVersionId: "delivery-staging-compatible-writer-version", serviceAssignmentOldWritersDrained: true, serviceAssignmentContractMigrationsApplied: true, serviceAssignmentBarrierEvidenceRef: "ticket:migrations:delivery:service-assignment-barrier", nativePortalMigrationsAppliedBeforeFinalWorkers: true, nativePortalCapabilitiesDefaultOffAtDeploy: true, nativePortalRollbackDrainReviewed: true, nativePortalReleaseEvidenceRef: "ticket:migrations:native-portal-release", verifiedAt: "2026-07-30T12:00:00Z", verificationEvidenceRef: "ticket:migrations:delivery:verify" },
+      delivery: { expected: [...REQUIRED_STAGING_MIGRATIONS.delivery], appliedToStaging: true, listEvidenceRef: "ticket:migrations:delivery:list", applyEvidenceRef: "ticket:migrations:delivery:apply", secondListEmpty: true, foreignKeyCheckPassed: true, idempotentReapplyPassed: true, videoRecoveryCompleted: true, videoRowsPendingForTrueNas: true, legacyBridgeAcceptanceMatrixPassed: true, serviceAssignmentV2ExpandApplied: true, serviceAssignmentCompatibleWriterVersionId: "delivery-staging-compatible-writer-version", serviceAssignmentOldWritersDrained: true, serviceAssignmentContractMigrationsApplied: true, serviceAssignmentBarrierEvidenceRef: "ticket:migrations:delivery:service-assignment-barrier", nativePortalMigrationsAppliedBeforeFinalWorkers: true, nativePortalCapabilitiesDefaultOffAtDeploy: true, nativePortalRollbackDrainReviewed: true, nativePortalReleaseEvidenceRef: "ticket:migrations:native-portal-release", authenticatedContentMigrationAppliedBeforeFinalWorkers: true, authenticatedContentCollectionNotStarted: true, authenticatedContentRetentionGateClosed: true, authenticatedContentSecretProvisioned: true, authenticatedContentDefaultOffAtDeploy: true, authenticatedContentReleaseEvidenceRef: "ticket:migrations:authenticated-content-release", verifiedAt: "2026-07-30T12:00:00Z", verificationEvidenceRef: "ticket:migrations:delivery:verify" },
       operations: { expected: [...REQUIRED_STAGING_MIGRATIONS.operations], appliedToStaging: true, listEvidenceRef: "ticket:migrations:operations:list", applyEvidenceRef: "ticket:migrations:operations:apply", secondListEmpty: true, foreignKeyCheckPassed: true, idempotentReapplyPassed: true, verifiedAt: "2026-07-30T12:00:00Z", verificationEvidenceRef: "ticket:migrations:operations:verify" },
       productionUnchanged: true,
     },
@@ -318,6 +350,45 @@ test("fails closed on client Access reuse, public-share bypass drift, and missin
     assert(errors.some((error) => error.includes(expected)), `${expected}: ${errors.join(" | ")}`);
   }
 });
+
+test("requires explicit two-host Access and authorization parity evidence", () => {
+  for (const gate of [
+    "sameAccessApplicationBothHosts",
+    "sameAudienceBothHosts",
+    "samePolicySetBothHosts",
+    "primarySignIn",
+    "secondarySignIn",
+    "primaryHardRefresh",
+    "secondaryHardRefresh",
+    "domainSwitchSso",
+    "primaryLogout",
+    "secondaryLogout",
+    "sessionExpiryDeniedBothHosts",
+    "revocationDeniedBothHosts",
+    "unauthorizedIdentityDeniedBothHosts",
+    "crossTenantDeniedBothHosts",
+    "secondarySameOriginMutation",
+    "mixedOriginDenied",
+    "canonicalPublicLinkPreserved",
+    "secondaryPublicNamespaceDenied",
+  ]) {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-evidence-client-domain-parity-"));
+    const { configs, evidence } = fixture(base);
+    evidence.clientPortal.tests[gate] = false;
+    const errors = validateEvidence(evidence, { base, head: evidence.releaseCommit, configs, configHashes: evidence.configSha256, now, sourceControlVerified: true });
+    assert(errors.some((error) => error.includes(`client portal test ${gate} must be confirmed true`)), `${gate}: ${errors.join(" | ")}`);
+  }
+});
+
+test("requires referenced Access readback and rollback evidence", () => {
+  for (const field of ["accessReadbackEvidenceRef", "rollbackSnapshotRef"]) {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-evidence-client-access-reference-"));
+    const { configs, evidence } = fixture(base);
+    evidence.clientPortal[field] = "";
+    const errors = validateEvidence(evidence, { base, head: evidence.releaseCommit, configs, configHashes: evidence.configSha256, now, sourceControlVerified: true });
+    assert(errors.some((error) => error.includes(field === "accessReadbackEvidenceRef" ? "readback needs an evidence reference" : "rollback snapshot needs an evidence reference")), `${field}: ${errors.join(" | ")}`);
+  }
+});
 test("requires evidence for the 0179 compatible-writer drain before 0180-0186", () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-evidence-assignment-barrier-"));
   const { evidence, configs, configHashes } = fixture(base);
@@ -340,6 +411,16 @@ test("requires native portal migration-first, default-off, and rollback-drain ev
   for (const expected of ["nativePortalMigrationsAppliedBeforeFinalWorkers", "nativePortalCapabilitiesDefaultOffAtDeploy", "nativePortalRollbackDrainReviewed", "0184-0186/0050"]) {
     assert(errors.some((error) => error.includes(expected)), `${expected}: ${errors.join(" | ")}`);
   }
+});
+test("requires authenticated content audit migration-first, closed-state, secret, and default-off evidence", () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-evidence-authenticated-content-barrier-"));
+  const { evidence, configs, configHashes } = fixture(base);
+  for (const proof of ["authenticatedContentMigrationAppliedBeforeFinalWorkers", "authenticatedContentCollectionNotStarted", "authenticatedContentRetentionGateClosed", "authenticatedContentSecretProvisioned", "authenticatedContentDefaultOffAtDeploy"])
+    evidence.migrations.delivery[proof] = false;
+  evidence.migrations.delivery.authenticatedContentReleaseEvidenceRef = "";
+  const errors = validateEvidence(evidence, { base, head: evidence.releaseCommit, configs, configHashes, now, sourceControlVerified: true });
+  for (const expected of ["authenticatedContentMigrationAppliedBeforeFinalWorkers", "authenticatedContentCollectionNotStarted", "authenticatedContentRetentionGateClosed", "authenticatedContentSecretProvisioned", "authenticatedContentDefaultOffAtDeploy", "0187 schema/state/gate/secret/default-off"])
+    assert(errors.some((error) => error.includes(expected)), `${expected}: ${errors.join(" | ")}`);
 });
 test("fails closed when any portal-v2 external dependency lacks current evidence", () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-evidence-gate-"));
@@ -477,7 +558,7 @@ test("checked-in evidence example stays complete as migrations, flags, gates, an
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const example = JSON.parse(fs.readFileSync(path.join(root, "docs", "staging", "release-evidence.json.example"), "utf8"));
   for (const app of ["delivery", "operations"]) assert.deepEqual(example.migrations[app].expected, [...REQUIRED_STAGING_MIGRATIONS[app]], `migrations.${app}`);
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-8), [
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-9), [
     "0179_service_assignment_policy_proof_v2.sql",
     "0180_service_assignment_policy_v1_contract.sql",
     "0181_service_assignment_request_policy_reviews.sql",
@@ -486,6 +567,7 @@ test("checked-in evidence example stays complete as migrations, flags, gates, an
     "0184_native_client_feedback.sql",
     "0185_native_service_request_ownership.sql",
     "0186_delivery_notification_authority_provenance.sql",
+    "0187_authenticated_content_audit.sql",
   ]);
   for (const app of ["delivery", "operations", "ops-sync"]) assert.deepEqual(new Set(example.deployments[app].disabledFeatureFlags), new Set(REQUIRED_DISABLED_FEATURE_FLAGS[app]), `deployments.${app}.disabledFeatureFlags`);
   assert.deepEqual(new Set(Object.keys(example.externalGates)), new Set(REQUIRED_EXTERNAL_GATES));

@@ -128,15 +128,23 @@ function statusTone(status: string): "neutral" | "success" | "warning" | "danger
     ? "danger" : status === "suspended" ? "warning" : "neutral";
 }
 
-export function clientPortalStatus(client: ClientSummary) {
+export function clientPortalStatus(client: ClientSummary): { label: string; tone: "neutral" | "success" | "warning" | "danger"; description?: string } {
   if (client.portal_status === "not_supported")
     return { label: "Portal unavailable for this source", tone: "neutral" as const };
   if (client.portal_status === "mapping_conflict")
     return { label: "Portal link needs review", tone: "warning" as const };
   if (client.portal_status === "mapping_unavailable" || (client.root_namespace === "business" && !client.pa_public_id && !client.workspace_id))
-    return { label: "Portal link not verified", tone: "neutral" as const };
+    return { label: "No portal workspace linked", tone: "neutral" as const,
+      description: "This Project Alpha business record has no exact portal workspace mapping. This is not an access approval decision." };
   return { label: client.portal_status === "not_provisioned" ? "Portal not set up" : client.portal_status.replaceAll("_", " "),
     tone: statusTone(client.portal_status) };
+}
+
+function ClientPortalStatusPill({ client }: { client: ClientSummary }) {
+  const portal = clientPortalStatus(client);
+  return <span className="client-directory-portal-state"
+    aria-label={portal.description ? `${portal.label}. ${portal.description}` : portal.label}
+    title={portal.description}><StatusPill tone={portal.tone}>{portal.label}</StatusPill></span>;
 }
 
 export function ClientDirectory() {
@@ -155,6 +163,7 @@ export function ClientDirectory() {
   const failedCursor = useRef<string | null>(null);
   const controller = useRef<AbortController | null>(null);
   const requestNumber = useRef(0);
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const load = useCallback(async (selection: DirectoryQuery, cursor: string | null) => {
     controller.current?.abort();
@@ -208,6 +217,7 @@ export function ClientDirectory() {
   }, [query.q, query.kind, query.source, query.sort, load]);
   useEffect(() => {
     const restore = () => {
+      if (searchTimer.current) clearTimeout(searchTimer.current);
       const restored = readQuery();
       setQuery(restored);
       setDraft(restored.q);
@@ -216,49 +226,64 @@ export function ClientDirectory() {
     return () => removeEventListener("popstate", restore);
   }, []);
 
-  const changeQuery = (selection: DirectoryQuery) => {
+  const changeQuery = useCallback((selection: DirectoryQuery, historyMode: "push" | "replace" = "push") => {
+    if (searchTimer.current) clearTimeout(searchTimer.current);
     const normalized = { ...selection, q: selection.q.trim() };
     const href = `/clients${queryString(normalized)}`;
-    if (`${location.pathname}${location.search}` !== href) history.pushState(null, "", href);
+    if (`${location.pathname}${location.search}` !== href)
+      history[historyMode === "replace" ? "replaceState" : "pushState"](history.state, "", href);
     setDraft(normalized.q);
     setQuery(normalized);
-  };
+  }, []);
+  useEffect(() => {
+    if (draft.trim() === query.q) return;
+    searchTimer.current = setTimeout(() => {
+      searchTimer.current = null;
+      changeQuery({ ...query, q: draft }, "replace");
+    }, 250);
+    return () => {
+      if (searchTimer.current) clearTimeout(searchTimer.current);
+      searchTimer.current = null;
+    };
+  }, [draft, query, changeQuery]);
   const search = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     changeQuery({ ...query, q: draft });
   };
 
   return <section className="client-directory-workspace" aria-label="Client directory">
-    <form className="client-directory-search" role="search" onSubmit={search}>
-      <label htmlFor="client-directory-query">Search clients</label>
-      <div>
-        <input id="client-directory-query" type="search" value={draft} maxLength={200}
-          placeholder={searchCapabilities.businessContacts ? "Client name, business contact, or project" : "Client or project name"}
-          aria-describedby="client-directory-search-help" autoComplete="off"
-          onChange={event => setDraft(event.target.value)} />
-        <button type="submit" className="button-orange">Search</button>
-        {(draft || query.q) && <button type="button" className="button-ghost"
-          onClick={() => changeQuery({ ...query, q: "" })}>Clear search</button>}
-      </div>
-      <small id="client-directory-search-help">
-        Search client names{searchCapabilities.businessContacts ? ", business contacts (name, email, phone)," : ""} and permitted project names, including clients not loaded below.
-        {searchCapabilities.portalContacts ? " Portal contact records are also searchable." : " Portal-only contact and login search is not available."}
-      </small>
-    </form>
-    <div className="client-directory-selectors">{(sources.length > 0 || query.source) && <label className="client-directory-source" htmlFor="client-directory-source">
-      Client source
-      <select id="client-directory-source" value={query.source}
-        onChange={event => changeQuery({ ...query, source: event.target.value })}>
-        <option value="">All available sources</option>
-        {query.source && !sources.some(source => source.source_id === query.source) && <option value={query.source} disabled>Unavailable source</option>}
-        {sources.map(source => <option key={source.source_id} value={source.source_id}>{source.display_name}</option>)}
-      </select>
-    </label>}
-      <label className="client-directory-sort" htmlFor="client-directory-sort">Sort clients
-        <select id="client-directory-sort" value={query.sort} onChange={event => changeQuery({ ...query, sort: event.target.value === "name" ? "name" : "recent" })}>
-          <option value="recent">Recent business updates</option><option value="name">Name (A–Z)</option>
+    <div className="client-directory-toolbar">
+      <form className="client-directory-search" role="search" onSubmit={search}>
+        <label htmlFor="client-directory-query">Search clients</label>
+        <div>
+          <input id="client-directory-query" type="search" value={draft} maxLength={200}
+            placeholder={searchCapabilities.businessContacts ? "Client name, business contact, or project" : "Client or project name"}
+            aria-describedby="client-directory-search-help" autoComplete="off"
+            onChange={event => setDraft(event.target.value)} />
+          <button type="submit" className="button-orange">Search</button>
+          {(draft || query.q) && <button type="button" className="button-ghost"
+            onClick={() => changeQuery({ ...query, q: "" })}>Clear search</button>}
+        </div>
+        <small id="client-directory-search-help">
+          Results update as you type. Search client names{searchCapabilities.businessContacts ? ", business contacts (name, email, phone)," : ""} and permitted project names.
+          {searchCapabilities.portalContacts ? " Portal contact records are also searchable." : " Portal-only contact and login search is not available."}
+        </small>
+      </form>
+      <div className="client-directory-selectors">{(sources.length > 0 || query.source) && <label className="client-directory-source" htmlFor="client-directory-source">
+        Client source
+        <select id="client-directory-source" value={query.source}
+          onChange={event => changeQuery({ ...query, source: event.target.value })}>
+          <option value="">All available sources</option>
+          {query.source && !sources.some(source => source.source_id === query.source) && <option value={query.source} disabled>Unavailable source</option>}
+          {sources.map(source => <option key={source.source_id} value={source.source_id}>{source.display_name}</option>)}
         </select>
-      </label>
+      </label>}
+        <label className="client-directory-sort" htmlFor="client-directory-sort">Sort clients
+          <select id="client-directory-sort" value={query.sort} onChange={event => changeQuery({ ...query, sort: event.target.value === "name" ? "name" : "recent" })}>
+            <option value="recent">Recent business updates</option><option value="name">Name (A–Z)</option>
+          </select>
+        </label>
+      </div>
     </div>
     <p className="client-directory-status">Recent order uses business record updates you can access; synchronization and page views do not count.</p>
     <div className="client-directory-filters" role="group" aria-label="Client type">
@@ -283,7 +308,7 @@ export function ClientDirectory() {
       {clients.map(client => <a className="client-directory-card" key={clientKey(client)}
         href={detailPath(client, query)} aria-label={`Open ${client.business_party_name || client.display_name} client workspace`}>
         <div className="client-directory-card-header"><small>{client.kind === "organization" ? "Organization" : "Individual client"}</small>
-          {!client.business_party_id && <StatusPill tone={clientPortalStatus(client).tone}>{clientPortalStatus(client).label}</StatusPill>}</div>
+          {!client.business_party_id && <ClientPortalStatusPill client={client} />}</div>
         <h3>{client.business_party_name || client.display_name}</h3>
         {client.business_party_id ? <><small>Linked customer · {number(client.business_party_member_count || 0)} business records</small>
           <p className="client-directory-status">Open each source workspace for its contacts, history and access.</p></>

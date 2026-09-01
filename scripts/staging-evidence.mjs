@@ -262,6 +262,10 @@ export function validateEvidence(evidence, options = {}) {
   if (!sameSet(portal.protectedPaths, STAGING_CLIENT_PORTAL.protectedPaths)) errors.push("client portal protected paths must exactly match the portal Access contract");
   if (!sameSet(portal.protectedDestinations, STAGING_CLIENT_PORTAL.protectedDestinations))
     errors.push("client portal Access destinations must cover both hosts with the exact protected paths");
+  if (!populated(portal.accessReadbackEvidenceRef))
+    errors.push("client portal Access application, audience, destination, and policy readback needs an evidence reference");
+  if (!populated(portal.rollbackSnapshotRef))
+    errors.push("client portal Access and custom-domain rollback snapshot needs an evidence reference");
   const publicAccess = portal.publicAccess ?? {};
   if (publicAccess.applicationName !== STAGING_CLIENT_PORTAL.publicApplicationName || !populated(publicAccess.applicationId) || !populated(publicAccess.policyId)) errors.push("client public paths need a separately identified Access Bypass application and policy");
   if (publicAccess.decision !== "bypass" || publicAccess.include !== "everyone") errors.push("client public path policy must be Bypass Everyone");
@@ -270,7 +274,35 @@ export function validateEvidence(evidence, options = {}) {
   if (!populated(portal.approvalRef)) errors.push("client portal Access setup needs an approval reference");
 
   const portalTests = portal.tests ?? {};
-  for (const gate of ["portalDisabled404", "invalidAudienceDenied", "unprovisionedIdentityDenied", "crossAccountDenied", "staffAclDenied", "publicShareAnonymousReachable", "publicSharePasswordRechecked", "accessHeaderAbsentOnPublicShare", "secondaryDnsTlsReady", "sameAudienceBothHosts", "primaryHardRefresh", "secondaryHardRefresh", "domainSwitchSso", "secondarySameOriginMutation", "mixedOriginDenied", "canonicalPublicLinkPreserved", "secondaryPublicNamespaceDenied"]) {
+  for (const gate of [
+    "portalDisabled404",
+    "invalidAudienceDenied",
+    "unprovisionedIdentityDenied",
+    "crossAccountDenied",
+    "staffAclDenied",
+    "publicShareAnonymousReachable",
+    "publicSharePasswordRechecked",
+    "accessHeaderAbsentOnPublicShare",
+    "secondaryDnsTlsReady",
+    "sameAccessApplicationBothHosts",
+    "sameAudienceBothHosts",
+    "samePolicySetBothHosts",
+    "primarySignIn",
+    "secondarySignIn",
+    "primaryHardRefresh",
+    "secondaryHardRefresh",
+    "domainSwitchSso",
+    "primaryLogout",
+    "secondaryLogout",
+    "sessionExpiryDeniedBothHosts",
+    "revocationDeniedBothHosts",
+    "unauthorizedIdentityDeniedBothHosts",
+    "crossTenantDeniedBothHosts",
+    "secondarySameOriginMutation",
+    "mixedOriginDenied",
+    "canonicalPublicLinkPreserved",
+    "secondaryPublicNamespaceDenied",
+  ]) {
     if (portalTests[gate] !== true) errors.push(`client portal test ${gate} must be confirmed true`);
   }
   if (!recentDate(portalTests.observedAt, now) || !populated(portalTests.evidenceRef)) errors.push("client portal end-to-end evidence must be current and referenced");
@@ -301,6 +333,11 @@ export function validateEvidence(evidence, options = {}) {
   }
   if (!populated(deliveryMigration.nativePortalReleaseEvidenceRef))
     errors.push("native portal release barrier needs referenced 0184-0186/0050 migration-first and rollback-drain evidence");
+  for (const proof of ["authenticatedContentMigrationAppliedBeforeFinalWorkers", "authenticatedContentCollectionNotStarted", "authenticatedContentRetentionGateClosed", "authenticatedContentSecretProvisioned", "authenticatedContentDefaultOffAtDeploy"]) {
+    if (deliveryMigration[proof] !== true) errors.push(`authenticated content audit release barrier must prove ${proof}`);
+  }
+  if (!populated(deliveryMigration.authenticatedContentReleaseEvidenceRef))
+    errors.push("authenticated content audit release barrier needs referenced 0187 schema/state/gate/secret/default-off evidence");
   if (migrations.productionUnchanged !== true) errors.push("production migrations must be confirmed unchanged");
 
   const externalGates = evidence.externalGates ?? {};

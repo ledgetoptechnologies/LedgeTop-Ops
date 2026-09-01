@@ -93,7 +93,15 @@ describe("durable authenticated connector registry", () => {
       .toBe("pa_connector_draft_quote_credentials");
   });
 
-  it("allows only the absent-primary scalar adapter, never a secondary fallback", async () => {
+  it("rejects primary enrollment before Ops Sync has durably attested its signing identity", async () => {
+    const operationsOnly = { ...env, PROJECT_ALPHA_WEBHOOK_ED25519_PUBLIC_KEY: undefined,
+      PROJECT_ALPHA_WEBHOOK_ED25519_PREVIOUS_PUBLIC_KEY: undefined, PROJECT_ALPHA_WEBHOOK_HMAC_SECRET: undefined };
+    await expect(registerProjectAlphaConnector(operationsOnly, primaryInput, author))
+      .rejects.toMatchObject({ code: "credentials_unavailable" });
+    expect(await listProjectAlphaConnectors(env)).toEqual([]);
+  });
+
+  it("allows only the primary scalar adapter when enrollment is absent, never a secondary fallback", async () => {
     const resolved = await resolveProjectAlphaConnector(env, primary, "snapshot");
     expect(resolved.proof).toMatchObject({ mode: "legacy_primary", sourceId: primary, revision: 0 });
     expect(resolved.snapshot).toEqual({ baseUrl: "https://primary.example.test/", apiKey: "original-api-key", applicationKey: "ltds_ops" });
@@ -112,9 +120,6 @@ describe("durable authenticated connector registry", () => {
       .rejects.toMatchObject({ code: "credentials_unavailable" });
     await expect(registerProjectAlphaConnector({ ...env, PROJECT_ALPHA_BASE_URL: undefined }, primaryInput, author))
       .rejects.toMatchObject({ code: "credentials_unavailable" });
-    await expect(registerProjectAlphaConnector({ ...env, PROJECT_ALPHA_WEBHOOK_ED25519_PUBLIC_KEY: undefined,
-      PROJECT_ALPHA_WEBHOOK_ED25519_PREVIOUS_PUBLIC_KEY: undefined, PROJECT_ALPHA_WEBHOOK_HMAC_SECRET: undefined }, primaryInput, author))
-      .rejects.toMatchObject({ code: "credentials_unavailable" });
     expect(await listProjectAlphaConnectors(env)).toEqual([]);
   });
 
@@ -127,15 +132,17 @@ describe("durable authenticated connector registry", () => {
     expect(await listProjectAlphaConnectors(env)).toEqual([]);
   });
 
-  it("registers pending with atomic audit, preserves primary visibility and stops implicit scalar ingress immediately", async () => {
+  it("stages primary enrollment without interrupting the established scalar adapter", async () => {
     const legacy = await resolveProjectAlphaConnector(env, primary, "events");
-    const created = await registerProjectAlphaConnector(env, primaryInput, author);
+    const operationsOnly = { ...env, PROJECT_ALPHA_WEBHOOK_ED25519_PUBLIC_KEY: undefined,
+      PROJECT_ALPHA_WEBHOOK_ED25519_PREVIOUS_PUBLIC_KEY: undefined, PROJECT_ALPHA_WEBHOOK_HMAC_SECRET: undefined };
+    const created = await registerProjectAlphaConnector(operationsOnly, primaryInput, author);
     expect(created).toMatchObject({ state: "pending", readVisible: true, activeRevision: 1, version: 1 });
-    await expect(resolveProjectAlphaConnector(env, primary, "events")).rejects.toMatchObject({ code: "changed" });
-    await expect(assertProjectAlphaConnectorProof(env, legacy.proof)).rejects.toMatchObject({ code: "changed" });
-    await expect(db.batch([connectorFenceStatement(db, legacy.proof), db.prepare("UPDATE pa_clients SET name='Must not apply' WHERE id='historical-client'")]))
-      .rejects.toThrow(/pa_connector_active_revision_guard/);
-    expect(await db.prepare("SELECT name FROM pa_clients WHERE id='historical-client'").first("name")).toBe("Historical");
+    expect(await resolveProjectAlphaConnector(env, primary, "events")).toMatchObject({ proof: { mode: "legacy_primary" } });
+    await expect(assertProjectAlphaConnectorProof(env, legacy.proof)).resolves.toBeUndefined();
+    await expect(db.batch([connectorFenceStatement(db, legacy.proof), db.prepare("UPDATE pa_clients SET name='Legacy adapter active' WHERE id='historical-client'")]))
+      .resolves.toBeDefined();
+    expect(await db.prepare("SELECT name FROM pa_clients WHERE id='historical-client'").first("name")).toBe("Legacy adapter active");
     await expect(setProjectAlphaConnectorState(env, primary, { expectedVersion: 1, state: "pending", readVisible: false }, author))
       .rejects.toMatchObject({ code: "invalid" });
     expect(await db.prepare("SELECT count(*) count FROM pa_connector_audit WHERE source_id=?").bind(primary).first("count")).toBe(1);
@@ -144,10 +151,16 @@ describe("durable authenticated connector registry", () => {
   });
 
   it("requires explicitly active primary enrollment before activating or resolving secondary business ingress", async () => {
+    const stagedPrimary = await resolveProjectAlphaConnector(env, primary, "events");
     const value = await registered("secondary", "secondary");
     await expect(activate(value.sourceId)).rejects.toMatchObject({ code: "conflict" });
     expect(await currentVersion(value.sourceId)).toBe(1);
-    await activate(primary); await activate(value.sourceId);
+    await activate(primary);
+    await expect(assertProjectAlphaConnectorProof(env, stagedPrimary.proof)).rejects.toMatchObject({ code: "changed" });
+    await expect(db.batch([connectorFenceStatement(db, stagedPrimary.proof), db.prepare("UPDATE pa_clients SET name='Must not apply' WHERE id='historical-client'")]))
+      .rejects.toThrow(/pa_connector_active_revision_guard/);
+    expect(await db.prepare("SELECT name FROM pa_clients WHERE id='historical-client'").first("name")).toBe("Legacy adapter active");
+    await activate(value.sourceId);
     const resolved = await resolveProjectAlphaConnector(env, value.sourceId, "events");
     expect(resolved.source).toEqual({ sourceId: value.sourceId, staffAuthority: false });
     expect(resolved.proof).toMatchObject({ mode: "registry", revision: 1, version: 2, profile: "business_data" });

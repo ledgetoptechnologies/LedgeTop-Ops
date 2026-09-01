@@ -17,6 +17,7 @@ import { nativeRequestSchemaReady, nativeServiceRequestsEnabled } from './native
 import { requestAttachmentsAvailable } from './request-attachments';
 import { z } from 'zod';
 import { clientPortalRequestOriginAllowed } from '../origin-policy';
+import { appendAuthenticatedContentStart,authenticatedContentAuditRequired } from './authenticated-content-audit';
 
 type Bindings = {Bindings:Env;Variables:{clientPrincipal:VerifiedClientPrincipal}};
 type Ctx = Context<Bindings>;
@@ -27,6 +28,7 @@ const unavailable = ():never => {throw new HTTPException(404,{message:'Delivery 
 const changed = ():never => {throw new HTTPException(409,{message:'Workspace access changed. Refresh this workspace to continue.'});};
 const invalid = ():never => {throw new HTTPException(400,{message:'Invalid delivery cursor'});};
 const clean = (value:string,max=500) => value.replace(/[\u0000-\u001f\u007f]/g,'').slice(0,max);
+const canonicalEtag=(value:string)=>value.trim().replace(/^W\//,'').replace(/^"|"$/g,'');
 function envelope(context:NativePortalReadContext) {return {workspaceId:context.workspaceId,sourceId:context.sourceId,contextVersion:context.contextVersion};}
 function database(env:Env){return env.DELIVERY_DB.withSession('first-primary');}
 async function boundedJson(c:Ctx):Promise<unknown>{
@@ -271,7 +273,7 @@ export function createNativePortalWorkspaceRouter():Hono<Bindings> {
     // No R2 operation before fresh context, grant and exact indexed key checks.
     await grantFor(c,context,handle);await recheck(c,context);
     const head=await c.env.DATA_BUCKET.head(row.r2_key);
-    if(!head||isMovedSourceMarker(head)||head.etag!==row.etag||head.size!==row.size)return unavailable();
+    if(!head||isMovedSourceMarker(head)||canonicalEtag(head.httpEtag)!==canonicalEtag(row.etag)||head.size!==row.size)return unavailable();
     let range:ReturnType<typeof parseRange>;
     try{range=parseRange(!c.req.header('If-Range')||c.req.header('If-Range')===head.httpEtag?c.req.header('Range'):undefined,head.size);
       if(range&&head.size===0)throw new Error('Empty range');}
@@ -288,6 +290,24 @@ export function createNativePortalWorkspaceRouter():Hono<Bindings> {
     if(isMovedSourceMarker(object)||object.etag!==head.etag){void object.body.cancel().catch(()=>{});return unavailable();}
     try{await grantFor(c,context,handle);await readFile(c,context,handle,grant);await recheck(c,context);}
     catch(error){void object.body.cancel().catch(()=>{});throw error;}
+    const authorizedAt=new Date();
+    let auditRequired=false;
+    try{auditRequired=await authenticatedContentAuditRequired(c.env);}
+    catch{void object.body.cancel().catch(()=>{});throw new HTTPException(503,{message:'File access auditing is temporarily unavailable'});}
+    if(auditRequired){
+      try{await appendAuthenticatedContentStart(c.env,{
+        authorityMode:'native_delivery',sourceId:context.sourceId,workspaceId:context.workspaceId,
+        identityId:context.identityId,projectPublicId:grant.owner_scope_type==='project'?grant.owner_public_id:null,
+        folderBindingId:grant.folder_binding_id,grantId:grant.grant_id,grantVersion:grant.grant_version,
+        grantSource:grant.source,bindingSourceVersion:grant.binding_source_version,
+        ownerScopeType:grant.owner_scope_type,ownerPublicId:grant.owner_public_id,
+        action:disposition==='inline'?'file.preview_requested':'file.download_requested',
+        storageKey:row.r2_key,contentVersion:row.etag,
+      },authorizedAt);}
+      catch{void object.body.cancel().catch(()=>{});throw new HTTPException(503,{message:'File access auditing is temporarily unavailable'});}
+      try{await grantFor(c,context,handle);await readFile(c,context,handle,grant);await recheck(c,context);}
+      catch(error){void object.body.cancel().catch(()=>{});throw error;}
+    }
     // Once handed off, an in-flight stream cannot be recalled. No bytes are
     // handed to the client before this final fresh authorization check.
     return new Response(object.body,{status:range?206:200,headers});

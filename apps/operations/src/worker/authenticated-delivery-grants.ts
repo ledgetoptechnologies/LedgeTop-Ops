@@ -85,7 +85,14 @@ export interface AuthenticatedDeliveryGrantPreview {
   operation:Omit<AuthenticatedDeliveryGrantInput,'expectedContextVersion'>;contextVersion:string;
   folderBindingId:string;workspaceId:string;workspaceLabel:string;sourceId:'project-alpha:primary';
   projectName:string|null;accessTermsSupported:boolean;projectEndSupported:boolean;
-  audienceLabel:string;recipientCount:number;accessTerms:ProjectAccessTermsInput|null;effectiveAccessExpiresAt:string|null;
+  audienceLabel:string;recipientCount:number;dynamicAudience:boolean;
+  recipientPreview:{mode:'exact'|'dynamic';currentAuthorizedCount:number|null;truncated:boolean};
+  accessTerms:ProjectAccessTermsInput|null;effectiveAccessExpiresAt:string|null;
+}
+
+export interface AuthenticatedDeliveryGrantAudienceSearchResult {
+  type:AuthenticatedGrantAudienceType;publicId:string;displayName:string;email?:string|null;
+  recipientMode:'exact'|'dynamic';currentAuthorizedRecipientCount?:number;recipientCountTruncated?:boolean;
 }
 
 export interface AuthenticatedDeliveryGrantListItem extends AuthenticatedDeliveryGrantView {
@@ -497,6 +504,11 @@ async function explicitPrimaryReview(env:Env,principal:StaffPrincipal,context:Bi
     targets:[{scopeType:'folder',publicId:context.id}],relations:env.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED==='true'?1:0,
     denylist:env.CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED==='true'?1:0,audienceType:operation.audienceType,audienceId:operation.audiencePublicId});
   const before=await readPrimaryProof(env,input),selected=await audience(env,context,operation.audienceType,operation.audiencePublicId),selectedRecipients=await recipients(env,context,operation.audienceType,operation.audiencePublicId);
+  const dynamicAudience=operation.audienceType!=='principal';
+  // A group grant is reevaluated dynamically. Until Project Alpha projects a
+  // versioned group-membership set, reporting the folder-wide eligible count
+  // as a department/organization count would be misleading.
+  const recipientPreview={currentAuthorizedCount:dynamicAudience?null:selectedRecipients.length,truncated:false};
   for(const recipient of terms?selectedRecipients:[]){
     const person=await deliveryDb(env).prepare('SELECT issuer,subject,verified_email email FROM portal_v2_identities WHERE id=?').bind(recipient.identityId)
       .first<{issuer:string;subject:string;email:string}>();
@@ -511,7 +523,9 @@ async function explicitPrimaryReview(env:Env,principal:StaffPrincipal,context:Bi
     folderBindingId:context.id,workspaceId:context.workspaceId,workspaceLabel:context.workspaceLabel,sourceId:'project-alpha:primary',
     projectName:context.ownerType==='project'?context.ownerName:null,accessTermsSupported:context.ownerType==='project'&&Boolean(await primaryProjectOwner(env,context)),
     projectEndSupported:context.ownerType==='project'&&lifecycle!==null,audienceLabel:selected.displayName,
-    recipientCount:selectedRecipients.length,accessTerms:terms,effectiveAccessExpiresAt:prepared?.view.effectiveExpiresAt??operation.expiresAt??null};
+    recipientCount:selectedRecipients.length,dynamicAudience,
+    recipientPreview:{mode:dynamicAudience?'dynamic':'exact',...recipientPreview},
+    accessTerms:terms,effectiveAccessExpiresAt:prepared?.view.effectiveExpiresAt??operation.expiresAt??null};
   return {input,proof,opsProof:ops.json,terms,selected,recipients:selectedRecipients,preview};
 }
 export async function previewAuthenticatedDeliveryGrant(env:Env,principal:StaffPrincipal,input:AuthenticatedDeliveryGrantInput):Promise<AuthenticatedDeliveryGrantPreview>{
@@ -521,12 +535,15 @@ export async function previewAuthenticatedDeliveryGrant(env:Env,principal:StaffP
   return (await explicitPrimaryReview(env,principal,context,grantOperation(input))).preview;
 }
 
-export async function searchAuthenticatedDeliveryGrantAudiences(env: Env, principal: StaffPrincipal, bindingId: string, queryValue: string) {
+export async function searchAuthenticatedDeliveryGrantAudiences(env: Env, principal: StaffPrincipal, bindingId: string, queryValue: string,
+  typeFilter?:AuthenticatedGrantAudienceType) {
   requireEnabled(env);
   const context = await bindingContext(env, bindingId);
   await requirePermission(env, principal, "delivery.share.create", { divisionId: context.divisionId }, true);
   const query = queryValue.trim().toLowerCase();
   if (query.length < 2 || query.length > 100) throw new HTTPException(400, { message: "Audience search is invalid" });
+  if(typeFilter&&!['organization','department','client','project','principal'].includes(typeFilter))
+    throw new HTTPException(400,{message:'Audience type is invalid'});
   const like = `%${query.replace(/[\\%_]/g, value => `\\${value}`)}%`;
   const db = deliveryDb(env);
   const [entities, principals] = await Promise.all([
@@ -536,7 +553,8 @@ export async function searchAuthenticatedDeliveryGrantAudiences(env: Env, princi
         AND entity.public_id=ancestry.public_id
       WHERE ancestry.entity_type IN ('organization','department','client','project')
         AND lower(entity.display_name) LIKE ? ESCAPE '\\'
-      ORDER BY ancestry.depth,lower(entity.display_name),ancestry.public_id LIMIT ?`)
+      GROUP BY ancestry.entity_type,ancestry.public_id,entity.display_name
+      ORDER BY min(ancestry.depth),lower(entity.display_name),ancestry.public_id LIMIT ?`)
       .bind(...ancestryBindings(context), context.workspaceId, context.generationId, like, SEARCH_LIMIT)
       .all<{ entity_type: Exclude<AuthenticatedGrantAudienceType, "principal">; public_id: string; display_name: string }>(),
     db.prepare(`${ancestrySql()} SELECT principal.public_id,principal.display_name,identity.verified_email
@@ -577,9 +595,14 @@ export async function searchAuthenticatedDeliveryGrantAudiences(env: Env, princi
         env.CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED ?? "false", context.workspaceId, context.workspaceId,
         SEARCH_LIMIT).all<{ public_id: string; display_name: string; verified_email: string | null }>(),
   ]);
-  return { audiences: [...entities.results.map(row => ({ type: row.entity_type, publicId: row.public_id, displayName: row.display_name })),
-    ...principals.results.map(row => ({ type: "principal" as const, publicId: row.public_id,
-      displayName: row.display_name, email: row.verified_email }))].slice(0, SEARCH_LIMIT) };
+  const options:AuthenticatedDeliveryGrantAudienceSearchResult[]=[
+    ...entities.results.map(row=>({type:row.entity_type,publicId:row.public_id,displayName:row.display_name,
+      recipientMode:'dynamic' as const})),
+    ...principals.results.map(row=>({type:'principal' as const,publicId:row.public_id,displayName:row.display_name,email:row.verified_email,
+      recipientMode:'exact' as const,currentAuthorizedRecipientCount:1,recipientCountTruncated:false})),
+  ];
+  return {folderBindingId:context.id,workspaceId:context.workspaceId,workspaceLabel:context.workspaceLabel,
+    scopeTypeFilter:typeFilter??null,audiences:options.filter(option=>!typeFilter||option.type===typeFilter).slice(0,SEARCH_LIMIT)};
 }
 
 function grantTermsColumns(ready:boolean):string {

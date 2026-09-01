@@ -172,7 +172,7 @@ export function ProjectAlphaConnections() {
     if (busy) return;
     const form = new FormData(event.currentTarget), sourceId = field(form, "sourceId");
     if (!window.confirm(sourceId === PRIMARY
-      ? "Enroll the existing primary connection? It must match the deployed producer and signing keys. Enrollment pauses legacy synchronization until you activate this connection."
+      ? "Stage enrollment for the existing primary connection? It must match the deployed producer and signing keys. The current deployment connection keeps synchronizing until you activate this reviewed enrollment."
       : "Register this business-data source? It starts pending and hidden, without staff or client access.")) return;
     void submit("", "POST", { sourceId, producerBindingId: field(form, "producerBindingId"), displayName: field(form, "displayName"),
       snapshotOrigin: field(form, "snapshotOrigin"), applicationKey: field(form, "applicationKey"), profile: sourceId === PRIMARY ? "primary_legacy" : "business_data",
@@ -195,13 +195,14 @@ export function ProjectAlphaConnections() {
       {data?.legacyPrimary && <section className="alpha-connection">
         <h3>Primary connection</h3>
         <p>Using the existing deployment configuration. Signed events and daily reconciliation remain enabled when configured.</p>
+        {data.connectors.some(row => row.sourceId === PRIMARY && row.state === "pending") && <p className="notice">A replacement enrollment is staged for review. It does not interrupt this primary connection until activation.</p>}
         <SyncHealth health={data.health.find(row => row.sourceId === PRIMARY)} />
         <button type="button" disabled={controlsBusy} onClick={() => void submit(`/${encodeURIComponent(PRIMARY)}/sync`, "POST", {}, "Primary synchronization finished.")}>Sync primary now</button>
       </section>}
       {data?.connectors.map(connector => <section key={connector.sourceId} className="alpha-connection" aria-label={`${connector.displayName} connection`}>
         <h3>{connector.displayName}</h3>
         <p><strong>{connector.state}</strong> · {connector.profile === "primary_legacy" ? "Primary staff authority" : "Business data only"} · {connector.readVisible ? "Business records visible" : "Business records hidden"}</p>
-        {connector.sourceId === PRIMARY && connector.state === "pending" && <p className="notice">Primary synchronization is paused until this connection is activated. Existing business records and client grants are retained.</p>}
+        {connector.sourceId === PRIMARY && connector.state === "pending" && <p className="notice">This enrollment is staged. The existing deployment connection remains active until this reviewed connection is activated.</p>}
         <SyncHealth health={data.health.find(row => row.sourceId === connector.sourceId)} />
         {connector.sourceId !== PRIMARY && connector.profile === "business_data" && <ScheduledRecovery
           connector={connector} primaryActive={data.connectors.some(row => row.sourceId === PRIMARY && row.state === "active")}
@@ -291,8 +292,18 @@ function PortalPurpose({ connector, status, primaryActive, disabled, onAction }:
   </div>;
 }
 function SyncHealth({ health }: { health?: Health }) {
+  const errorLabels:Record<string,string>={
+    "project-alpha-network-timeout":"Project Alpha did not respond before the request timed out.",
+    "project-alpha-network-dns":"Project Alpha's hostname could not be resolved.",
+    "project-alpha-network-tls":"The secure connection to Project Alpha could not be verified.",
+    "project-alpha-network-refused":"Project Alpha refused the connection.",
+    "project-alpha-network-reset":"The connection closed before the snapshot finished.",
+    "project-alpha-network-redirect":"Project Alpha redirected the server-to-server snapshot request.",
+    "project-alpha-network-error":"The server-to-server request failed before Project Alpha returned an HTTP response.",
+  };
+  const failure=health?.lastErrorCode?errorLabels[health.lastErrorCode]??health.lastErrorCode:null;
   return <p>Sync: {health?.status ?? "Not yet run"}<br />Last attempt: {date(health?.lastAttemptAt ?? null)} · Last success: {date(health?.lastSuccessAt ?? null)}
-    {health?.lastErrorCode && <><br />Last error: {health.lastErrorCode}</>}</p>;
+    {failure && <><br />Last error: {failure}</>}</p>;
 }
 
 function RecoveryTime({ value }: { value: string | null }) {

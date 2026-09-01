@@ -233,11 +233,11 @@ test("Sync now addresses exactly the selected source and disables competing acti
   await expect(card.getByRole("button", { name: "Sync now", exact: true })).toBeEnabled();
 });
 
-test("primary enrollment warns that pending pauses legacy synchronization and submits references, never credentials", async ({ page }) => {
+test("pending primary enrollment preserves legacy synchronization and submits references, never credentials", async ({ page }) => {
   const data = { ...directory([]), legacyPrimary: true };
   const requests = await fixture(page, data, async (route, path) => {
     if (route.request().method() !== "POST" || path !== endpoint) return false;
-    data.legacyPrimary = false; data.connectors.push({ ...connector(primary, "pending"), displayName: "Registered company", version: 1 });
+    data.connectors.push({ ...connector(primary, "pending"), displayName: "Registered company", version: 1 });
     await route.fulfill({ json: { connector: data.connectors[0] } }); return true;
   });
   await page.goto("/administration");
@@ -245,7 +245,7 @@ test("primary enrollment warns that pending pauses legacy synchronization and su
   await expect(form.locator('input[type="password"]')).toHaveCount(0);
   await expect(form.getByLabel(/API token|API secret|Signing key|Private key|Password/i)).toHaveCount(0);
   await expect(form.getByLabel("Credential reference")).toHaveAttribute("placeholder", "Deployed secret reference, not the secret");
-  await confirmation(page, () => form.getByRole("button", { name: "Register pending connection" }).click(), /Enrollment pauses legacy synchronization until you activate/, false);
+  await confirmation(page, () => form.getByRole("button", { name: "Register pending connection" }).click(), /current deployment connection keeps synchronizing until you activate/, false);
   expect(requests.filter(row => row.method === "POST")).toHaveLength(0);
   await confirmation(page, () => form.getByRole("button", { name: "Register pending connection" }).click(), /must match the deployed producer and signing keys/, true);
   const request = requests.find(row => row.method === "POST")!;
@@ -256,6 +256,8 @@ test("primary enrollment warns that pending pauses legacy synchronization and su
       accessAudience: "audience-registered", accessSubject: "producer-subject" } });
   const card = page.getByRole("region", { name: "Registered company connection" });
   await expect(card).toContainText("pending");
+  await expect(card).toContainText("existing deployment connection remains active");
+  await expect(page.getByText("A replacement enrollment is staged for review.", { exact: false })).toBeVisible();
   await expect(card.getByRole("button", { name: "Sync now", exact: true })).toBeDisabled();
   await expect(card.getByRole("button", { name: /Hide business records|Show business records/ })).toHaveCount(0);
 });

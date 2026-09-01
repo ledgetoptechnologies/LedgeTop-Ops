@@ -136,6 +136,16 @@ describe('primary staff project access terms and real customer history',{timeout
     const made=await create(f);expect(made.grant.accessTerms).toBeNull();
     const old=await createAuthenticatedDeliveryGrant(env,staff,f.operation,`legacy-unreviewed-${f.n}`);expect(old.grant.accessTerms).toBeNull();
   });
+  it('previews a dynamic organization with a bounded current count without snapshotting or widening identities',async()=>{
+    const f=await fixture(true),operation={...f.operation,audienceType:'organization' as const,audiencePublicId:f.rootPublic};
+    const preview=await previewAuthenticatedDeliveryGrant(env,staff,operation);
+    expect(preview).toMatchObject({audienceLabel:`Root ${f.n}`,dynamicAudience:true,recipientCount:0,
+      recipientPreview:{mode:'dynamic',currentAuthorizedCount:null,truncated:false}});
+    const created=await createAuthenticatedDeliveryGrant(env,staff,{...operation,expectedContextVersion:preview.contextVersion},`dynamic-organization-${f.n}`);
+    expect(created.grant).toMatchObject({audience:{type:'organization',publicId:f.rootPublic},recipientCount:0});
+    expect(await delivery.prepare('SELECT count(*) n FROM portal_v2_authenticated_delivery_grant_recipients WHERE grant_id=?')
+      .bind(created.grant.id).first<number>('n')).toBe(0);
+  });
   it('uses the shared explicit-date policy without a primary-only one-year ceiling',async()=>{
     const f=await fixture(),expiresAt=new Date(Date.now()+730*86400_000).toISOString();
     const preview=await previewAuthenticatedDeliveryGrant(env,staff,{...f.operation,expiresAt,accessTerms:{kind:'collaborator',mode:'specific_date',expiresAt}});

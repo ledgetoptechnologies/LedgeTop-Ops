@@ -35,6 +35,7 @@
     "EXPECTED_HOST": "client.ledgetopdroneservices.com",
     "ENVIRONMENT": "production",
     "CLIENT_PORTAL_ENABLED": "true",
+    "CLIENT_PORTAL_CONTENT_AUDIT_ENABLED": "false",
     "CLIENT_PORTAL_REQUEST_V2_ENABLED": "false",
     "CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED": "false",
     "PROJECT_ALPHA_CATALOG_SYNC_ENABLED": "false",

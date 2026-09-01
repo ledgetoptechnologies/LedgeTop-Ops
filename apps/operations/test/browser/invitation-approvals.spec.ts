@@ -2,7 +2,7 @@ import { expect, test, type Page, type Route } from "@playwright/test";
 import type { InvitationRequest } from "../../src/client/invitation-administration-api";
 
 const base = "/api/client-portal/invitation-requests", sourceId = "project-alpha:primary", workspaceId = "workspace-one";
-const detailPath = `/operations/invitation-requests/request-one?sourceId=${encodeURIComponent(sourceId)}&workspaceId=${workspaceId}`;
+const detailPath = `/clients/invitation-requests/request-one?sourceId=${encodeURIComponent(sourceId)}&workspaceId=${workspaceId}`;
 const hubPath = "/clients/sources/project-alpha%3Aprimary/business/organizations/org-one";
 const policyPath = `/api/client-portal/workspaces/${workspaceId}/invitation-policy`;
 function row(overrides: Partial<InvitationRequest> = {}): InvitationRequest {return {id: "request-one", workspaceId, workspaceName: "Acme Construction — North shoreline restoration", sourceId, sourceName: "Project Alpha", requesterIdentityId: "manager-one", requesterEmail: "manager@example.test", email: "collaborator@example.test", version: 1, status: "pending", scope: {type: "project", publicId: "project-one"}, capabilities: ["workspace.view", "delivery.view", "request.create"], accessTerms: {id: "terms-one", kind: "collaborator", mode: "project_end", expiresAt: null, effectiveExpiresAt: null, completionPending: true, expired: false}, policyVersion: 2, createdAt: "2026-08-26T12:00:00Z", updatedAt: "2026-08-26T12:00:00Z", invitationId: null, reasonCode: null, canCancel: true, ...overrides};}
@@ -34,10 +34,10 @@ async function openReview(page: Page) {await page.goto(detailPath); await expect
 async function openPolicy(page: Page) {await page.goto(hubPath); await page.getByRole("button", {name: "Show invitation policy"}).click(); await expect(page.getByRole("combobox", {name: "Invitation policy", exact: true})).toBeVisible();}
 async function late(route: Route, json: unknown) {await route.fulfill({json}).catch(() => undefined);}
 
-test("explicit review capability admits its own Inbox queue without inferred global permissions", async ({page}) => {
-  const calls = await fixture(page, undefined, {permissions: []}); await page.goto("/"); await expect(page).toHaveURL(/\/operations\/inbox$/);
+test("explicit review capability admits its own Client Hub queue without inferred global permissions", async ({page}) => {
+  const calls = await fixture(page, undefined, {permissions: []}); await page.goto("/"); await expect(page).toHaveURL(/\/clients\/invitation-requests$/);
   const queue = page.getByRole("region", {name: "Invitation approvals", exact: true}); await expect(queue).toContainText("collaborator@example.test");
-  await expect(queue.getByRole("link", {name: /Review invitation request/})).toHaveAttribute("href", detailPath);
+  await expect(queue.getByRole("link", {name: "collaborator@example.test"})).toHaveAttribute("href", detailPath);
   expect(calls.find(call => call.path === base)?.query.get("status")).toBe("open"); expect(calls.some(call => /\/inbox\/requests$|\/operations\/feedback$|\/notifications\/deliveries$/.test(call.path))).toBe(false); expect(mutations(calls)).toHaveLength(0);
 });
 
@@ -85,19 +85,19 @@ test("stale requests remain independently rejectable, never approvable", async (
 });
 
 test("invalid exact coordinates fail without an ID-only detail probe", async ({page}) => {
-  const calls = await fixture(page); await page.goto("/operations/invitation-requests/request-one?workspaceId=workspace-one"); await expect(page.getByRole("heading", {name: "Invitation request link invalid"})).toBeVisible(); expect(calls.some(call => call.path === `${base}/request-one`)).toBe(false);
+  const calls = await fixture(page); await page.goto("/clients/invitation-requests/request-one?workspaceId=workspace-one"); await expect(page.getByRole("heading", {name: "Invitation request link invalid"})).toBeVisible(); expect(calls.some(call => call.path === `${base}/request-one`)).toBe(false);
 });
 
 test("list search, open filter and Back survive reload with bounded empty pages", async ({page}) => {
   const calls = await fixture(page, (route, call) => call.path === base ? route.fulfill({json: call.query.has("cursor") ? list() : list([], "page-two")}) : undefined);
-  await page.goto("/operations/invitation-requests"); await expect(page.getByLabel("Request status")).toHaveValue("open"); await expect(page.getByText("No matching requests in this page.", {exact: false})).toBeVisible(); await page.getByRole("button", {name: "Load more invitation requests"}).click(); await expect(page.getByRole("link", {name: "collaborator@example.test"})).toBeVisible();
+  await page.goto("/clients/invitation-requests"); await expect(page.getByLabel("Request status")).toHaveValue("open"); await expect(page.getByText("No matching requests in this page.", {exact: false})).toBeVisible(); await page.getByRole("button", {name: "Load more invitation requests"}).click(); await expect(page.getByRole("link", {name: "collaborator@example.test"})).toBeVisible();
   await page.getByLabel("Search invitation requests").fill("Acme & Sons"); await page.getByRole("button", {name: "Search", exact: true}).click(); await expect(page).toHaveURL(/q=Acme\+%26\+Sons/); await page.reload(); await expect(page.getByLabel("Search invitation requests")).toHaveValue("Acme & Sons"); expect(calls.filter(call => call.path === base).at(-1)?.query.get("q")).toBe("Acme & Sons"); await page.goBack(); await expect(page.getByLabel("Search invitation requests")).toHaveValue("");
 });
 
 test("late old search cannot overwrite new results", async ({page}) => {
   let release!: () => void; const wait = new Promise<void>(resolve => {release = resolve;}); let started = false;
   await fixture(page, (route, call) => call.path === base && call.query.get("q") === "old" ? (started = true, wait.then(() => late(route, list([row({email: "old@example.test"})])))) : undefined);
-  await page.goto("/operations/invitation-requests?q=old"); await expect.poll(() => started).toBe(true); await page.getByLabel("Search invitation requests").fill("new"); await page.getByRole("button", {name: "Search", exact: true}).click(); await expect(page.getByRole("link", {name: "collaborator@example.test"})).toBeVisible(); release(); await expect(page.getByText("old@example.test", {exact: true})).toHaveCount(0);
+  await page.goto("/clients/invitation-requests?q=old"); await expect.poll(() => started).toBe(true); await page.getByLabel("Search invitation requests").fill("new"); await page.getByRole("button", {name: "Search", exact: true}).click(); await expect(page.getByRole("link", {name: "collaborator@example.test"})).toBeVisible(); release(); await expect(page.getByText("old@example.test", {exact: true})).toHaveCount(0);
 });
 
 test("policy review is exact-workspace and cancel has no mutation", async ({page}) => {

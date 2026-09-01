@@ -12,6 +12,7 @@ import { ClientBusinessParty, SourceBusinessParty, type BusinessPartyReference }
 import { ClientBusinessActivity } from "./ClientBusinessActivity";
 import { ClientAuditTimeline } from "./ClientAuditTimeline";
 import { ClientInvitationPolicy } from "./ClientInvitationPolicy";
+import { ClientPortalBootstrap } from "./ClientPortalBootstrap";
 import { OrganizationOperationalContacts } from "./OrganizationOperationalContacts";
 import type { InvitationAdministrationAccess } from "./invitation-administration-api";
 
@@ -495,7 +496,7 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess }: { route
         : <Card title="Portal logins"><p>Portal login information is unavailable. Refresh this client workspace to try again.</p></Card>}
       <Card title="Accounts"><ClientCollection {...collectionProps} collection="accounts" label="Accounts" initial={data.accounts} page={data.pages?.accounts}
         emptyTitle="No accounts" emptyDetail="No linked portal account is active.">
-        {items => <div className="simple-rows">{items.map(account => <div key={collectionKey("accounts", account)}><div><strong>{account.display_name}</strong><small>Explicit account record</small>{canReviewFeedback && <a href={`/operations/feedback?accountId=${encodeURIComponent(account.id)}`}>View client feedback</a>}</div><StatusPill tone={tone(account.status)}>{account.status}</StatusPill></div>)}</div>}
+        {items => <div className="simple-rows">{items.map(account => <div key={collectionKey("accounts", account)}><div><strong>{account.display_name}</strong><small>Explicit account record</small>{canReviewFeedback && <a href={`/clients/feedback?accountId=${encodeURIComponent(account.id)}`}>View client feedback</a>}</div><StatusPill tone={tone(account.status)}>{account.status}</StatusPill></div>)}</div>}
       </ClientCollection></Card>
       <span id="client-business-projects" className="client-hub-anchor" aria-hidden="true" />
       {data.businessProjects && <BusinessProjects {...collectionProps} initial={data.businessProjects} page={data.pages?.businessProjects}
@@ -534,7 +535,7 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess }: { route
   </>;
 }
 
-export function ClientHub({ mapToken, permissions, feedbackEnabled=false, invitationAccess }: { mapToken: string | null; permissions: Permission[]; feedbackEnabled?: boolean; invitationAccess?: InvitationAdministrationAccess }) {
+export function ClientHub({ mapToken, permissions, feedbackEnabled=false, invitationAccess, canManagePortalSetup=false }: { mapToken: string | null; permissions: Permission[]; feedbackEnabled?: boolean; invitationAccess?: InvitationAdministrationAccess; canManagePortalSetup?: boolean }) {
   const [, setLocationRevision] = useState(0);
   useEffect(() => {
     const sync = () => setLocationRevision(value => value + 1);
@@ -559,6 +560,7 @@ export function ClientHub({ mapToken, permissions, feedbackEnabled=false, invita
     {canReview && <section className="client-hub-queue"><ClientRequestWorkflow mapToken={mapToken} basePath="/clients/requests" pendingOnly /></section>}
     {canViewDirectory && <section>
       <div className="client-hub-section-heading"><div><h2>Clients</h2><p>Organizations and standalone clients with their contacts, access, and shared work.</p></div></div>
+      {canReview && canManagePortalSetup && <ClientPortalBootstrap />}
       <ClientDirectory />
     </section>}
   </>;

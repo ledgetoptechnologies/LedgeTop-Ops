@@ -73,6 +73,7 @@ test("desktop navigation exposes the canonical Client Hub and independently auth
   await primary.getByRole("button", { name: "Administration" }).click();
   await expect(primary.getByRole("link", { name: "3D Viewer" })).toHaveCount(0);
   await expect(primary.getByRole("link", { name: "Team" })).toBeVisible();
+  await expect(primary.getByRole("link", { name: "Configurations" })).toHaveCount(0);
   await expect(primary.getByRole("link", { name: "Administration" })).toBeVisible();
   const menuLayout = await page.locator(".ops-header").evaluate((header) => {
     const navigation = header.querySelector<HTMLElement>(".ops-desktop-nav");
@@ -155,6 +156,21 @@ test("direct and history navigation normalize unauthorized global pages before r
   await page.evaluate(() => { history.pushState(null, "", "/administration"); dispatchEvent(new PopStateEvent("popstate")); });
   await expect(page).toHaveURL(/\/$/);
   expect(viewerOverviewRequested).toBe(false);
+});
+
+test("Client Hub normalizes unavailable nested views instead of rendering a blank page", async ({ page }) => {
+  await mockSession(page, ["team.view"]);
+  await page.goto("/clients/feedback?status=new");
+  await expect(page).toHaveURL(/\/clients\?status=new$/);
+  await expect(page.getByRole("heading", { name: "Clients", exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Client feedback", exact: true })).toHaveCount(0);
+
+  await page.evaluate(() => {
+    history.pushState(null, "", "/clients/invitation-requests");
+    dispatchEvent(new PopStateEvent("popstate"));
+  });
+  await expect(page).toHaveURL(/\/clients$/);
+  await expect(page.getByRole("heading", { name: "Clients", exact: true })).toBeVisible();
 });
 
 test("Data Back and Forward normalize an unavailable nested tab without exposing it", async ({ page }) => {
@@ -257,7 +273,10 @@ test("administration.view opens the read-only Administration page without privil
   await page.goto("/administration");
   await expect(page).toHaveURL(/\/administration$/);
   await expect(page.getByRole("heading", { name: "Administration", exact: true })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Project Alpha" })).toBeVisible();
+  await expect(page.getByLabel("Configurations").getByRole("heading", { name: "Project Alpha" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Configurations", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "3D Viewer" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Delivery service" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Security model" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Sync now" })).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Audit history" })).toHaveCount(0);
@@ -282,7 +301,7 @@ for (const width of [320, 390, 768]) {
     await expect(drawer.getByRole("link", { name: "Models", exact: true })).toHaveAttribute("href", "/viewer");
     await expect(drawer.getByRole("link", { name: "SOP Library" })).toHaveCount(0);
     await expect(drawer.getByRole("link")).toHaveText([
-      "Dashboard", "Airspace", "Operations", "Client Hub", "Models", "Data", "Team", "Configurations", "Administration",
+      "Dashboard", "Airspace", "Operations", "Client Hub", "Models", "Data", "Team", "Administration",
     ]);
     await expect(drawer.getByRole("link", { name: "Data" })).toHaveAttribute("href", "/delivery");
     await expect(drawer.getByRole("link", { name: "Data" })).toHaveCSS("min-height", "44px");

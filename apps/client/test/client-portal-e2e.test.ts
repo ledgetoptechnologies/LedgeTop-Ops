@@ -94,7 +94,7 @@ describe("client portal migrated-D1 end-to-end contract", () => {
       db.prepare("INSERT INTO client_folder_associations (id,scope_type,project_id,account_id,r2_prefix,created_by) VALUES ('folder-project-percent','project','project-a','account-a','clients/acme/%/','staff-owner')"),
       db.prepare("INSERT INTO client_folder_associations (id,scope_type,project_id,account_id,r2_prefix,created_by) VALUES ('folder-project-case','project','project-a','account-a','clients/acme/Case/','staff-owner')"),
       db.prepare("INSERT INTO client_folder_associations (id,scope_type,project_id,account_id,r2_prefix,created_by) VALUES ('folder-client-a','client',NULL,'account-a','clients/acme/archive/','staff-owner')"),
-      db.prepare("INSERT INTO file_index (r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES ('clients/acme/north/report.pdf','etag-report',123,'2026-08-01T12:00:00Z','application/pdf','pdf')"),
+      db.prepare(`INSERT INTO file_index (r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES ('clients/acme/north/report.pdf','"etag-report"',123,'2026-08-01T12:00:00Z','application/pdf','pdf')`),
       db.prepare("INSERT INTO file_index (r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES ('clients/acme/archive/old.txt','etag-old',12,'2026-07-01T12:00:00Z','text/plain','text')"),
       db.prepare("INSERT INTO file_index (r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES ('clients/acme/%/literal.txt','etag-literal',10,'2026-08-01T12:00:00Z','text/plain','text')"),
       db.prepare("INSERT INTO file_index (r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES ('clients/acme/x/wildcard-leak.txt','etag-wildcard',10,'2026-08-01T12:00:00Z','text/plain','text')"),
@@ -129,6 +129,7 @@ describe("client portal migrated-D1 end-to-end contract", () => {
             : source;
           return key === "clients/acme/north/report.pdf" ? {
             body: new ReadableStream({ start(controller) { controller.enqueue(bytes); controller.close(); } }),
+            etag: "etag-report",
             httpEtag: '"etag-report"',
             writeHttpMetadata(headers: Headers) { headers.set("Content-Type", "application/pdf"); },
           } : null;
@@ -427,6 +428,132 @@ describe("client portal migrated-D1 end-to-end contract", () => {
     const restoredDownload = await portal().request(`${portalOrigin}${routePath}`, {}, env);
     expect(restoredDownload.status).toBe(200);
     expect(bucketGetKeys).toEqual(["clients/acme/north/report.pdf"]);
+  }, 20_000);
+
+  it("records only successful authenticated preview and download requests with bounded dedupe", async () => {
+    env.CLIENT_PORTAL_CONTENT_AUDIT_ENABLED = "true";
+    env.CLIENT_PORTAL_CONTENT_AUDIT_HMAC_SECRET = "test-client-content-audit-secret-that-is-long-enough";
+    try {
+      const root = await portal().request(`${portalOrigin}/projects/project-a/files`, {}, env);
+      const folders = (await root.json() as { folders: Array<{ id: string; name: string }> }).folders;
+      const north = folders.find(folder => folder.name === "north")!;
+      const page = await portal().request(
+        `${portalOrigin}/projects/project-a/files?folder=${encodeURIComponent(north.id)}`, {}, env,
+      );
+      const report = (await page.json() as { files: Array<{ id: string; name: string; downloadPath: string; previewPath: string }> })
+        .files.find(file => file.name === "report.pdf")!;
+      const downloadPath = report.downloadPath.replace(/^\/api\/client/, "");
+      const previewPath = report.previewPath.replace(/^\/api\/client/, "");
+
+      expect((await portal().request(`${portalOrigin}${downloadPath}`, {}, env)).status).toBe(200);
+      expect((await portal().request(`${portalOrigin}${downloadPath}`, { headers: { Range: "bytes=0-2" } }, env)).status).toBe(206);
+      expect((await portal().request(`${portalOrigin}${previewPath}`, {}, env)).status).toBe(200);
+      expect((await portal().request(`${portalOrigin}${previewPath}`, { method: "HEAD" }, env)).status).toBe(200);
+      expect((await portal().request(`${portalOrigin}${previewPath}`, { headers: { "If-None-Match": '"etag-report"' } }, env)).status).toBe(304);
+
+      const events = (await db.prepare(`SELECT action,authority_mode,source_id,account_id,identity_id,project_id,
+        association_id,resource_label FROM portal_authenticated_content_events ORDER BY action`).all()).results;
+      expect(events).toEqual([
+        { action: "file.download_requested", authority_mode: "legacy_delivery", source_id: "delivery:local",
+          account_id: "account-a", identity_id: "identity-a", project_id: "project-a",
+          association_id: "folder-project-a", resource_label: "report.pdf" },
+        { action: "file.preview_requested", authority_mode: "legacy_delivery", source_id: "delivery:local",
+          account_id: "account-a", identity_id: "identity-a", project_id: "project-a",
+          association_id: "folder-project-a", resource_label: "report.pdf" },
+      ]);
+      const serialized = JSON.stringify(events);
+      expect(serialized).not.toContain("clients/acme/");
+      expect(serialized).not.toContain("etag-report");
+
+      await db.prepare("UPDATE client_project_grants SET revoked_at=datetime('now') WHERE account_id='account-a' AND project_id='project-a'").run();
+      expect((await portal().request(`${portalOrigin}${downloadPath}`, {}, env)).status).toBe(404);
+      expect(await db.prepare("SELECT COUNT(*) count FROM portal_authenticated_content_events").first("count")).toBe(2);
+      await db.prepare("UPDATE client_project_grants SET revoked_at=NULL WHERE account_id='account-a' AND project_id='project-a'").run();
+
+      env.CLIENT_PORTAL_CONTENT_AUDIT_ENABLED = "false";
+      delete env.CLIENT_PORTAL_CONTENT_AUDIT_HMAC_SECRET;
+      expect((await portal().request(`${portalOrigin}${downloadPath}`, {}, env)).status).toBe(503);
+      expect(await db.prepare("SELECT COUNT(*) count FROM portal_authenticated_content_events").first("count")).toBe(2);
+    } finally {
+      // Collection is intentionally irreversible in this shared database.
+      // Keep the producer ready for every later body-bearing fixture request.
+      env.CLIENT_PORTAL_CONTENT_AUDIT_ENABLED = "true";
+      env.CLIENT_PORTAL_CONTENT_AUDIT_HMAC_SECRET = "test-client-content-audit-secret-that-is-long-enough";
+    }
+  }, 20_000);
+
+  it("keeps an authorized-request event but cancels the body when authority is revoked after append", async () => {
+    const root = await portal().request(`${portalOrigin}/projects/project-a/files`, {}, env);
+    const folders = (await root.json() as { folders: Array<{ id: string; name: string }> }).folders;
+    const north = folders.find(folder => folder.name === "north")!;
+    const page = await portal().request(
+      `${portalOrigin}/projects/project-a/files?folder=${encodeURIComponent(north.id)}`, {}, env,
+    );
+    const report = (await page.json() as { files: Array<{ name: string; downloadPath: string }> })
+      .files.find(file => file.name === "report.pdf")!;
+    const downloadPath = report.downloadPath.replace(/^\/api\/client/, "");
+    const eventCount = await db.prepare("SELECT COUNT(*) count FROM portal_authenticated_content_events").first<number>("count") ?? 0;
+    let revokedAt = "";
+    let revoked = false;
+    let bodyCancelled = false;
+    const wrappedDb = new Proxy(db as object, {
+      get(target, property) {
+        if (property === "withSession") return (constraint: D1SessionConstraint) => {
+          const session = (target as D1Database).withSession(constraint);
+          return new Proxy(session as object, {
+            get(sessionTarget, sessionProperty) {
+              if (sessionProperty === "batch") return async (statements: D1PreparedStatement[]) => {
+                const result = await (sessionTarget as D1DatabaseSession).batch(statements);
+                if (!revoked) {
+                  revoked = true;
+                  revokedAt = new Date().toISOString();
+                  await db.prepare(`UPDATE client_project_grants SET revoked_at=?
+                    WHERE account_id='account-a' AND project_id='project-a'`).bind(revokedAt).run();
+                }
+                return result;
+              };
+              const value = Reflect.get(sessionTarget, sessionProperty);
+              return typeof value === "function" ? value.bind(sessionTarget) : value;
+            },
+          }) as unknown as D1DatabaseSession;
+        };
+        const value = Reflect.get(target, property);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as unknown as D1Database;
+    const raceEnv = {
+      ...env,
+      DELIVERY_DB: wrappedDb,
+      CLIENT_PORTAL_CONTENT_AUDIT_ENABLED: "true",
+      CLIENT_PORTAL_CONTENT_AUDIT_HMAC_SECRET: "independent-race-audit-secret-that-is-long-enough",
+      DATA_BUCKET: {
+        head: env.DATA_BUCKET.head.bind(env.DATA_BUCKET),
+        get: async (key: string) => key === "clients/acme/north/report.pdf" ? {
+          body: new ReadableStream({
+            start(controller) { controller.enqueue(new TextEncoder().encode("report")); },
+            cancel() { bodyCancelled = true; },
+          }),
+          etag: "etag-report",
+          httpEtag: '"etag-report"',
+          writeHttpMetadata(headers: Headers) { headers.set("Content-Type", "application/pdf"); },
+        } : null,
+      } as unknown as R2Bucket,
+    } as Env;
+    try {
+      const response = await portal().request(`${portalOrigin}${downloadPath}`, {}, raceEnv);
+      expect(response.status).toBe(404);
+      expect(revoked).toBe(true);
+      expect(bodyCancelled).toBe(true);
+      const event = await db.prepare(`SELECT action,occurred_at occurredAt FROM portal_authenticated_content_events
+        ORDER BY recorded_sequence DESC LIMIT 1`).first<{ action: string; occurredAt: string }>();
+      expect(event).toMatchObject({ action: "file.download_requested" });
+      expect(Date.parse(event!.occurredAt)).toBeLessThanOrEqual(Date.parse(revokedAt));
+      expect(await db.prepare("SELECT COUNT(*) count FROM portal_authenticated_content_events").first("count"))
+        .toBe(eventCount + 1);
+    } finally {
+      await db.prepare(`UPDATE client_project_grants SET revoked_at=NULL
+        WHERE account_id='account-a' AND project_id='project-a'`).run();
+    }
   }, 20_000);
 
   it("lists only immediate indexed children with bounded opaque pagination and rejects handle reuse", async () => {

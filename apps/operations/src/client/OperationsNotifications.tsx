@@ -154,7 +154,7 @@ export function OperationsNotifications() {
   useEffect(() => {
     mounted.current = true;
     const syncRoute = () => {
-      if (location.pathname !== "/operations/notifications") return;
+      if (location.pathname !== "/notifications" && location.pathname !== "/operations/notifications") return;
       const next = readRoute();
       setDraft(next.q);
       if (next.view === currentRoute.current.view && next.q === currentRoute.current.q && next.batchId === currentRoute.current.batchId && next.kind === currentRoute.current.kind && next.invalid === currentRoute.current.invalid) return;
@@ -197,7 +197,7 @@ export function OperationsNotifications() {
     if (next.q) params.set("q", next.q);
     if (next.batchId && next.kind !== "folder_changes") params.set("kind", next.kind);
     if (next.batchId) params.set("batchId", next.batchId);
-    history.pushState(null, "", `/operations/notifications${params.size ? `?${params}` : ""}`);
+    history.pushState(null, "", `/notifications${params.size ? `?${params}` : ""}`);
     currentRoute.current = next; setRoute(next);
   };
   const search = (event: FormEvent) => { event.preventDefault(); navigate({ ...route, q: draft.trim().slice(0, 200) }); };

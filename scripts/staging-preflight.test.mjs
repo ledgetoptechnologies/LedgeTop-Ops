@@ -218,14 +218,17 @@ test("requires every portal-v2 and Operations capability to be explicitly false"
 });
 
 test("pins the native portal migration-first and default-off release contract", () => {
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-3), [
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-4), [
     "0184_native_client_feedback.sql",
     "0185_native_service_request_ownership.sql",
     "0186_delivery_notification_authority_provenance.sql",
+    "0187_authenticated_content_audit.sql",
   ]);
   assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.at(-1), "0050_project_alpha_draft_quote_credentials.sql");
   assert(REQUIRED_DISABLED_FEATURE_FLAGS.delivery.includes("CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED"));
+  assert(REQUIRED_DISABLED_FEATURE_FLAGS.delivery.includes("CLIENT_PORTAL_CONTENT_AUDIT_ENABLED"));
   assert.equal(STAGING_STATIC_VARS.delivery.CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED, "false");
+  assert.equal(STAGING_STATIC_VARS.delivery.CLIENT_PORTAL_CONTENT_AUDIT_ENABLED, "false");
   assert.deepEqual(FEATURE_FLAG_ACTIVATION_POLICIES.delivery.CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED.gates, [
     "projectAlphaCatalogProjection", "projectAlphaPortalProjection", "nativePortalRequests",
   ]);

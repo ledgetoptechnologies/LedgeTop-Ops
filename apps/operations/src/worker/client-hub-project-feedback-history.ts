@@ -183,7 +183,7 @@ export async function listClientHubProjectFeedbackHistory(env: Env, actor: Staff
       throw new HTTPException(503,{message:"Project feedback history is unavailable"});
     shown.push({record,scopeProof:scope.proof,item:{feedbackId:record.id,createdAt:record.createdAt,status:record.status,
       events:history.map(event=>({revision:event.revision,action:action(event.status),occurredAt:event.createdAt})),
-      detailPath:`/operations/feedback/${encodeURIComponent(record.id)}?status=all`}});
+      detailPath:`/clients/feedback/${encodeURIComponent(record.id)}?status=all`}});
     if (shown.length === limit) break;
   }
   const [currentMapping,currentProjectProof,currentFeedbackPolicy] = await Promise.all([

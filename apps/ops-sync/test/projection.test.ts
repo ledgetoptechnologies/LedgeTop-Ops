@@ -168,7 +168,7 @@ describe("entitlement projection",()=>{
     const organization:ProjectionEvent={event_id:"3cd9380b-1b91-4622-873e-0e440dd97a6b",event_type:"projection.changed",occurred_at:"2026-08-01T14:01:00.000000Z",schema_version:1,application_key:"ltds_ops",projection:{entity_type:"organization",entity_id:"80",action:"revoke",source_updated_at:"2026-08-01T14:01:00.000000Z",data:{id:80,name:"Portal Organization"}}};
     await expect(applyProjectionEvent(env(delivery),organization,"organization-hash")).resolves.toBe("applied");
     expect(await db.prepare("SELECT active FROM pa_organizations WHERE id='80'").first("active")).toBe(0);
-  });
+  },30_000);
 
   it("fails closed when a portal projection is missing DELIVERY_DB",async()=>{
     const client:ProjectionEvent={event_id:"4f19dfc1-4f73-46de-b364-da1b7c10fdc2",event_type:"projection.changed",occurred_at:"2026-08-01T14:02:00.000000Z",schema_version:1,application_key:"ltds_ops",projection:{entity_type:"client",entity_id:"72",action:"revoke",source_updated_at:"2026-08-01T14:02:00.000000Z",data:{id:72,name:"Revoked Client"}}};

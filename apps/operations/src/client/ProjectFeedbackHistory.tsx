@@ -20,7 +20,7 @@ function safeDetailPath(value: string, feedbackId: string): boolean {
   if (/[\\\u0000-\u001f\u007f]/.test(value)) return false;
   try {
     const url = new URL(value,location.origin);
-    return url.origin === location.origin && url.pathname === `/operations/feedback/${encodeURIComponent(feedbackId)}`
+    return url.origin === location.origin && (url.pathname === `/clients/feedback/${encodeURIComponent(feedbackId)}` || url.pathname === `/operations/feedback/${encodeURIComponent(feedbackId)}`)
       && url.searchParams.size === 1 && url.searchParams.get("status") === "all";
   } catch { return false; }
 }

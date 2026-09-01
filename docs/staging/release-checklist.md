@@ -59,8 +59,17 @@ The Client staging Worker and the single staging Client Portal Access
 application must include both reviewed portal hosts:
 `client-staging.ledgetopdroneservices.com` and
 `portal-staging.ledgetoptechnologies.com`. Read back one unchanged audience and
-policy set across both hosts, and prove login, hard refresh, host switching,
-same-origin mutation, mixed-origin denial, and canonical public-link isolation.
+policy set across both hosts. Record separate evidence for sign-in, hard
+refresh, and same-origin Access logout on each host; authenticated host
+switching; session-expiry denial on both hosts; immediate membership/grant
+revocation on both hosts; unauthorized identity denial on both hosts;
+cross-tenant denial on both hosts; same-origin mutation; and mixed-origin
+denial. Canonical public links must remain on the reviewed public host,
+reachable without Access, and absent from the secondary portal namespace. A
+result from one host cannot be copied or inferred for the other host. Reference
+both the exact post-change application/audience/
+destination/policy readback and the pre-change Access/custom-domain rollback
+snapshot in the evidence packet; a bare boolean is not sufficient readback.
 
 The attachment upload CORS artifact is
 `docs/staging/request-attachments-r2-cors.json`. Preflight requires that exact
@@ -165,6 +174,7 @@ Delivery:
 - `CLIENT_REQUEST_ATTACHMENT_R2_ACCESS_KEY_ID`
 - `CLIENT_REQUEST_ATTACHMENT_R2_SECRET_ACCESS_KEY`
 - `CLIENT_DELEGATED_SHARE_SESSION_SECRET`
+- `CLIENT_PORTAL_CONTENT_AUDIT_HMAC_SECRET`
 - `PROJECT_ALPHA_CONNECTOR_CREDENTIALS` (the same reviewed source-key envelope
   provisioned independently to Delivery, Operations, and Ops Sync)
 
@@ -358,7 +368,9 @@ hoc, edit the migration ledger, or execute these files as raw SQL.
    migrations `0182`/`0183` in order. With native capabilities still unavailable,
    apply `0184_native_client_feedback.sql`,
    `0185_native_service_request_ownership.sql`, and
-   `0186_delivery_notification_authority_provenance.sql` in order. Then apply
+   `0186_delivery_notification_authority_provenance.sql`, followed by
+   `0187_authenticated_content_audit.sql`, in order. Verify the 0187 collection
+   state is still unset and its retention-delete gate is closed. Then apply
    Operations through `0050_project_alpha_draft_quote_credentials.sql` and
    deploy the paired final applications.
 5. Record `serviceAssignmentV2ExpandApplied`, the compatible writer version,
@@ -379,7 +391,7 @@ through `0171_secondary_workspace_membership_management.sql` (`0113` is
 intentionally reserved), apply `0172_project_access_authority_history.sql`
 only at its writer-first barrier, then `0173`-`0179` with `0179` as the final
 expand step. Apply `0180`-`0183` only after the compatible-writer drain above,
-then apply `0184`-`0186` migration-first before the paired final applications.
+then apply `0184`-`0187` migration-first before the paired final applications.
 Confirm Operations
 `0014_staff_acl_controls.sql` through
 `0050_project_alpha_draft_quote_credentials.sql`. Migration `0100` removes
@@ -428,7 +440,7 @@ storage-only account exclusion, and exact outbound destination.
 For rollback, first disable `CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED`, withdraw the
 two native source features, confirm signed capability readback, and drain request
 mutations, attachment finalization, quote commands, feedback transitions, and
-completion-notification leases. Retain migrations `0184`-`0186` and `0050`.
+completion-notification leases. Retain migrations `0184`-`0187` and `0050`.
 After the first native storage binding or registered draft-quote fingerprint is
 created, do not roll back to code that lacks storage-account exclusion or
 connector-fingerprint enforcement; use the last compatible version or fix
@@ -491,6 +503,19 @@ ingress/schedulers only after the event and coverage evidence pass. A partial sc
 hard failure. Retain the new writers, immutable start row and
 `PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED=false` during rollback; fix forward
 instead of restoring an older writer or guessing a backfill.
+
+After applying 0187, verify all three authenticated-content tables, both
+timeline indexes, and all four immutability/delete-guard triggers exist. The
+singleton history row must have `collection_started_at=NULL`, and the retention
+control row must have `delete_enabled=0,delete_before=NULL`. Upload and deploy
+the compatible Client and Operations versions with
+`CLIENT_PORTAL_CONTENT_AUDIT_ENABLED=false`; the Client version must already
+carry the independently provisioned `CLIENT_PORTAL_CONTENT_AUDIT_HMAC_SECRET`.
+Only a separately approved activation version may turn the flag on and establish
+the immutable collection boundary. After that boundary exists, rollback keeps
+0187 and compatible code in place: returning the flag to false deliberately
+fails body-bearing authenticated preview/download requests rather than creating
+an unaudited gap.
 
 ## Separately approved version and deployment sequence
 

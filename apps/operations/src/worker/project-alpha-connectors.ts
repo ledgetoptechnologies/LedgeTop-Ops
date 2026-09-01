@@ -223,8 +223,16 @@ async function pinPrimaryEnrollment(env: ProjectAlphaConnectorEnvironment, value
   } catch { return fail("credentials_unavailable", "Existing primary snapshot ownership must be configured before enrollment"); }
   if (value.snapshotOrigin !== url.origin || value.revision.snapshotBasePath !== (url.pathname.replace(/\/+$/, "") || "/")
     || value.applicationKey !== env.APPLICATION_KEY?.trim().toLowerCase()) fail("conflict", "Primary enrollment must preserve the existing producer destination");
-  const known = await legacyKeys(env);
-  if (!known.length || [current, ...(previous ? [previous] : [])].some(key => !known.some(old => old.fingerprint === key.fingerprint)))
+  const local = await legacyKeys(env);
+  const reserved = (await database(env).prepare(`SELECT fingerprint,algorithm FROM pa_connector_signing_keys
+    WHERE source_id=? LIMIT ?`).bind(PRIMARY_ALPHA_SOURCE_ID, 8).all<{ fingerprint: string; algorithm: ConnectorSigningKey["algorithm"] }>()).results;
+  // Ops Sync owns the legacy webhook secret and records only its fingerprint
+  // in the shared registry. Operations may use that durable attestation rather
+  // than receiving a second copy of the webhook credential.
+  const known = new Map([...local.map(key => [key.fingerprint, key.algorithm] as const),
+    ...reserved.map(key => [key.fingerprint, key.algorithm] as const)]);
+  if (!known.size || [current, ...(previous ? [previous] : [])]
+    .some(key => known.get(key.fingerprint) !== key.algorithm))
     fail("credentials_unavailable", "Primary enrollment requires its already configured signing identity");
 }
 function summary(row: ConnectorRow): ProjectAlphaConnectorSummary {
@@ -254,7 +262,13 @@ function validProof(value: ProjectAlphaConnectorProof): void {
 }
 export function connectorFenceSql(value: ProjectAlphaConnectorProof): { sql: string; bindings: (string | number)[] } {
   validProof(value);
-  if (value.mode === "legacy_primary") return { sql: "NOT EXISTS(SELECT 1 FROM pa_connectors WHERE source_id=?)", bindings: [PRIMARY_ALPHA_SOURCE_ID] };
+  if (value.mode === "legacy_primary") return {
+    // A pending primary row is only a staged enrollment. Keep the already
+    // deployed scalar adapter live until activation commits the handoff. A
+    // concurrent activation makes this fence fail in the same write batch.
+    sql: "NOT EXISTS(SELECT 1 FROM pa_connectors WHERE source_id=? AND state<>'pending')",
+    bindings: [PRIMARY_ALPHA_SOURCE_ID],
+  };
   const result = { sql: `EXISTS(SELECT 1 FROM pa_connectors connector WHERE connector.source_id=? AND connector.state='active'
     AND connector.active_revision=? AND connector.version=? AND connector.profile=?
     AND (connector.source_id='project-alpha:primary' OR EXISTS(SELECT 1 FROM pa_connectors primary_source
@@ -300,8 +314,8 @@ async function verifiedConfiguration(env: ProjectAlphaConnectorEnvironment, row:
   if (keys.current.keyId !== revision.current_key_id || keys.current.fingerprint !== revision.current_key_fingerprint
     || (keys.previous?.keyId ?? null) !== revision.previous_key_id || (keys.previous?.fingerprint ?? null) !== revision.previous_key_fingerprint)
     return fail("credentials_unavailable", "Connector signing configuration does not match its enrolled revision");
-  if ((keys.draftQuoteFingerprints?.apiKey ?? null) !== revision.draft_quote_api_key_fingerprint
-    || (keys.draftQuoteFingerprints?.hmac ?? null) !== revision.draft_quote_hmac_fingerprint)
+  if ((keys.draftQuoteFingerprints?.apiKey ?? null) !== (revision.draft_quote_api_key_fingerprint ?? null)
+    || (keys.draftQuoteFingerprints?.hmac ?? null) !== (revision.draft_quote_hmac_fingerprint ?? null))
     return fail("credentials_unavailable", "Connector draft quote configuration does not match its enrolled revision");
   if (row.source_id !== PRIMARY_ALPHA_SOURCE_ID) {
     // Enrolled primary uses its exact revision, not an obsolete scalar verifier.
@@ -318,7 +332,7 @@ async function verifiedConfiguration(env: ProjectAlphaConnectorEnvironment, row:
 export async function resolveProjectAlphaConnector(env: ProjectAlphaConnectorEnvironment, requestedSource: string,
   purpose: "snapshot" | "events" | "draft_quote"): Promise<ResolvedProjectAlphaConnector> {
   const id = sourceId(requestedSource), db = database(env), row = await read(db, id);
-  if (!row) {
+  if (!row || (id === PRIMARY_ALPHA_SOURCE_ID && row.state === "pending")) {
     if (id !== PRIMARY_ALPHA_SOURCE_ID) return fail("unavailable", "Connector is not registered");
     // Trusted deployment configuration, not caller authentication: retain old
     // key ownership even if it is rotated away before explicit enrollment.
@@ -374,12 +388,20 @@ function reservationStatements(db: RegistryDatabase, rows: { key: ConnectorSigni
 function revisionStatement(db: RegistryDatabase, id: string, revision: number, value: ProjectAlphaConnectorRevisionInput,
   current: ConnectorSigningKey, previous: ConnectorSigningKey | null, actorId: string,
   draftQuoteFingerprints: { apiKey: string; hmac: string } | null) {
+  // Ordered migration verification exercises the connector registry before
+  // migration 0050 adds the optional quote-purpose columns. Omit them only
+  // when no quote credential exists; configured credentials still require the
+  // complete schema and therefore fail closed if migration 0050 is absent.
+  if (!draftQuoteFingerprints) return db.prepare(`INSERT INTO pa_connector_revisions(source_id,revision,credential_ref,snapshot_base_path,
+    access_issuer,access_audience,access_subject,current_key_id,current_key_fingerprint,previous_key_id,previous_key_fingerprint,created_by)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).bind(id, revision, value.credentialRef, value.snapshotBasePath, value.accessIssuer, value.accessAudience,
+      value.accessSubject, current.keyId, current.fingerprint, previous?.keyId ?? null, previous?.fingerprint ?? null, actorId);
   return db.prepare(`INSERT INTO pa_connector_revisions(source_id,revision,credential_ref,snapshot_base_path,
     access_issuer,access_audience,access_subject,current_key_id,current_key_fingerprint,previous_key_id,previous_key_fingerprint,created_by,
     draft_quote_api_key_fingerprint,draft_quote_hmac_fingerprint)
     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(id, revision, value.credentialRef, value.snapshotBasePath, value.accessIssuer, value.accessAudience,
       value.accessSubject, current.keyId, current.fingerprint, previous?.keyId ?? null, previous?.fingerprint ?? null, actorId,
-      draftQuoteFingerprints?.apiKey ?? null,draftQuoteFingerprints?.hmac ?? null);
+      draftQuoteFingerprints.apiKey,draftQuoteFingerprints.hmac);
 }
 function draftQuoteReservationStatements(db: RegistryDatabase, owner: string,
   rows: DraftQuoteCredentialReservation[]): D1PreparedStatement[] {

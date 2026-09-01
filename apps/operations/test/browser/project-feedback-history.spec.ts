@@ -18,7 +18,7 @@ function item(index:number){const feedbackId=`feedback-${String(index).padStart(
     events:done?[{revision:1,action:"submitted" as const,occurredAt:`2026-08-${String(20-index).padStart(2,"0")}T12:00:00.000Z`},
       {revision:2,action:"completed" as const,occurredAt:`2026-08-${String(21-index).padStart(2,"0")}T12:00:00.000Z`}]
       :[{revision:1,action:"submitted" as const,occurredAt:`2026-08-${String(20-index).padStart(2,"0")}T12:00:00.000Z`}],
-    detailPath:`/operations/feedback/${feedbackId}?status=all`};}
+    detailPath:`/clients/feedback/${feedbackId}?status=all`};}
 function page(items:ReturnType<typeof item>[],nextCursor:string|null):ProjectFeedbackHistoryPage{return {canonicalRoot:root,projectId:"project-one",
   contextVersion:"project-context",refreshedAt:"2026-08-25T12:00:00.000Z",asOf:"2026-08-25T12:00:00.000Z",coverage:"feedback_only",items,
   page:{available:true,reason:null,nextCursor,hasMore:Boolean(nextCursor),returned:items.length,limit:nextCursor==="cursor-a"?5:25}};}
@@ -51,7 +51,7 @@ test("feedback history is lazy, pages 5 then 25, preserves an empty continuation
   await expect(history(pageObject).getByText("5 feedback records shown",{exact:true})).toBeVisible();
   expect(calls.find(call=>call.url.pathname===historyApi)?.url.searchParams.get("limit")).toBe("5");
   await expect(history(pageObject).getByText(/Private|message|note|actor/i)).toHaveCount(0);
-  await expect(history(pageObject).getByRole("link",{name:/Open done feedback 1 submitted/i}).first()).toHaveAttribute("href","/operations/feedback/feedback-00?status=all");
+  await expect(history(pageObject).getByRole("link",{name:/Open done feedback 1 submitted/i}).first()).toHaveAttribute("href","/clients/feedback/feedback-00?status=all");
   const more=history(pageObject).getByRole("button",{name:"Load more feedback history",exact:true});await more.focus();await pageObject.keyboard.press("Enter");
   await expect(history(pageObject).getByText("5 feedback records shown",{exact:true})).toBeVisible();await expect(more).toBeFocused();
   expect(calls.filter(call=>call.url.pathname===historyApi)[1]?.url.searchParams.get("limit")).toBe("25");

@@ -210,7 +210,7 @@ describe("Client Hub source visibility errors through the Operations entrypoint"
     expect(page).toMatchObject({ canonicalRoot: { sourceId, rootNamespace: "business", publicId: client.id },
       coverage: { project: { available: true, reason: null }, request: { available: false, reason: "unsupported_source" },
         feedback: { available: false, reason: "unsupported_source" }, access: { available: false, reason: "unsupported_source" },
-        delivery: { available: false, reason: "unsupported_source" }, notification: { available: false, reason: "unsupported_source" } },
+        delivery: { available: false, reason: "not_applicable" }, notification: { available: false, reason: "unsupported_source" } },
       page: { returned: 1, hasMore: true, limit: 1 } });
     expect(page.items[0]).toMatchObject({ sourceId, producer: "project_alpha", category: "project",
       actor: null, result: "informational", resource: { label: client.name } });

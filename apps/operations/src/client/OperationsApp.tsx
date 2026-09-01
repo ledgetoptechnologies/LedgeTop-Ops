@@ -36,10 +36,9 @@ import { JobBriefPanel } from "./JobBriefPanel";
 import { SopLibrary } from "./SopLibrary";
 import { OperationsNotifications } from "./OperationsNotifications";
 import { OperationsFeedback } from "./OperationsFeedback";
-import { StaffInbox } from "./StaffInbox";
 import { InvitationApprovals } from "./InvitationApprovals";
+import "./StaffInbox.css";
 import { loadInvitationAdministrationAccess, type InvitationAdministrationAccess } from "./invitation-administration-api";
-import { inboxSources } from "./staff-inbox";
 import { WorkContextSops } from "./WorkContextSops";
 import { TeamAssignedWork } from "./TeamAssignedWork";
 import { ImageLocationMap } from "./ImageLocationMap";
@@ -142,7 +141,7 @@ const NAV: Array<{
   {
     page: "operations",
     label: "Operations",
-    permissions: ["operations.view", "projects.view", "tasks.view", "sops.view", "delivery.share.audit", "operations.manage"],
+    permissions: ["operations.view", "projects.view", "tasks.view", "sops.view"],
   },
   { page: "clients", label: "Client Hub", href: "/clients", permissions: ["team.view", "operations.manage"] },
   { page: "viewer", label: "Models", href: "/viewer", permissions: ["viewer.view"] },
@@ -150,7 +149,6 @@ const NAV: Array<{
 ];
 const MANAGE_NAV: typeof NAV = [
   { page: "team", label: "Team", permissions: ["team.view"] },
-  { page: "configurations", label: "Configurations", permissions: ["administration.view"] },
   {
     page: "administration",
     label: "Administration",
@@ -162,9 +160,15 @@ function allowed(user: SessionUser, permission: Permission) {
 }
 function navAllowed(user: OperationsUser, item: (typeof NAV)[number], feedbackEnabled=false, invitationReview=false) {
   return (
-    (item.permissions.some((permission) => allowed(user, permission)) || (item.page === "operations" && (feedbackEnabled || invitationReview || user.isAdministrator && allowed(user, "integrations.manage") && allowed(user, "administration.view")))) &&
+    (item.permissions.some((permission) => allowed(user, permission)) || (item.page === "clients" && (feedbackEnabled || invitationReview))) &&
     (!item.administrator || user.isAdministrator)
   );
+}
+function clientLandingPath(user: OperationsUser, feedbackEnabled=false, invitationReview=false) {
+  if (allowed(user, "team.view") || allowed(user, "operations.manage")) return "/clients";
+  if (feedbackEnabled) return "/clients/feedback";
+  if (invitationReview) return "/clients/invitation-requests";
+  return "/clients";
 }
 function date(value?: string | null) {
   if (!value) return "Not scheduled";
@@ -195,25 +199,40 @@ export function OperationsApp() {
     manageMenu = useRef<HTMLDivElement>(null),
     manageTrigger = useRef<HTMLButtonElement>(null);
   const routeForPage = (requested: Page, user: OperationsUser, feedbackEnabled=false, invitationReview=false): { page: Page; href: string } | null => {
+    if (requested === "notifications")
+      return allowed(user, "delivery.share.audit") ? { page: "notifications", href: "/notifications" } : null;
     const item = [...NAV, ...MANAGE_NAV].find(candidate => candidate.page === requested);
     return item && navAllowed(user, item, feedbackEnabled, invitationReview)
-      ? { page: item.page, href: item.page === "operations" ? operationsLandingPath(user.permissions, feedbackEnabled, invitationReview) : item.href || (item.page === "dashboard" ? "/" : `/${item.page}`) }
+      ? { page: item.page, href: item.page === "operations" ? operationsLandingPath(user.permissions, feedbackEnabled, invitationReview)
+        : item.page === "clients" ? clientLandingPath(user, feedbackEnabled, invitationReview)
+        : item.href || (item.page === "dashboard" ? "/" : `/${item.page}`) }
       : null;
   };
   const normalizeLocation = (value: Session) => {
     const requested = pathPage(location.pathname);
     const feedbackEnabled = value.capabilities?.clientFeedback?.enabled === true;
     const invitationReview = value.invitationAdministration?.enabled === true && value.invitationAdministration.canReview;
-    if (location.pathname === "/operations/invitation-requests" || location.pathname.startsWith("/operations/invitation-requests/")) {setPage("operations"); return;}
     const authorized = routeForPage(requested, value.user, feedbackEnabled, invitationReview);
     const fallbackItem = [...NAV, ...MANAGE_NAV].find(item => navAllowed(value.user, item, feedbackEnabled, invitationReview));
-    const fallback = fallbackItem ? routeForPage(fallbackItem.page, value.user, feedbackEnabled, invitationReview) : null;
+    const fallback = fallbackItem?.page === "delivery" && allowed(value.user, "delivery.share.audit") && !allowed(value.user, "delivery.browse")
+      ? routeForPage("notifications", value.user, feedbackEnabled, invitationReview)
+      : fallbackItem ? routeForPage(fallbackItem.page, value.user, feedbackEnabled, invitationReview) : null;
     const target = authorized || fallback;
     if (!target) return;
     setPage(target.page);
     if (authorized && requested === "clients") {
       const canonical = canonicalClientPath(location.pathname);
-      if (canonical !== location.pathname) history.replaceState(null, "", `${canonical}${location.search}`);
+      const next = canonical === "/clients" && location.pathname === "/clients"
+        ? clientLandingPath(value.user, feedbackEnabled, invitationReview) : canonical;
+      if (next !== location.pathname) history.replaceState(null, "", `${next}${location.search}`);
+      return;
+    }
+    if (authorized && requested === "notifications" && location.pathname !== "/notifications") {
+      history.replaceState(null, "", `/notifications${location.search}`);
+      return;
+    }
+    if (authorized && requested === "administration" && location.pathname === "/configurations") {
+      history.replaceState(null, "", `/administration${location.search}${location.hash}`);
       return;
     }
     if (!authorized && location.pathname !== target.href)
@@ -289,7 +308,7 @@ export function OperationsApp() {
   function navigate(next: Page, href?: string) {
     setPage(next);
     history.pushState(null, "", href || (next === "dashboard" ? "/" : `/${next}`));
-    if (next === "operations" || next === "delivery" || next === "clients")
+    if (next === "operations" || next === "delivery" || next === "clients" || next === "notifications")
       dispatchEvent(new PopStateEvent("popstate"));
     setMobileNavOpen(false);
     setManageOpen(false);
@@ -312,7 +331,9 @@ export function OperationsApp() {
   const primaryNavigation = NAV.filter((item) => navAllowed(session.user, item, session.capabilities?.clientFeedback?.enabled === true, invitationReview));
   const manageNavigation = MANAGE_NAV.filter((item) => navAllowed(session.user, item));
   const navigationLink = (item: (typeof NAV)[number], mobile = false) => {
-    const href = item.page === "operations" ? operationsLandingPath(session.user.permissions, session.capabilities?.clientFeedback?.enabled === true, invitationReview) : item.href || (item.page === "dashboard" ? "/" : `/${item.page}`);
+    const href = item.page === "operations" ? operationsLandingPath(session.user.permissions, session.capabilities?.clientFeedback?.enabled === true, invitationReview)
+      : item.page === "clients" ? clientLandingPath(session.user, session.capabilities?.clientFeedback?.enabled === true, invitationReview)
+      : item.href || (item.page === "dashboard" ? "/" : `/${item.page}`);
     return <a
       key={`${mobile ? "mobile" : "desktop"}-${item.page}`}
       href={href}
@@ -332,9 +353,9 @@ export function OperationsApp() {
           </div>}
         </nav>
         <button ref={mobileNavTrigger} className="ops-nav-trigger" type="button" aria-label="Open navigation" aria-expanded={mobileNavOpen} aria-controls="ops-mobile-navigation" onClick={() => setMobileNavOpen(true)}><span className="nav-hamburger" aria-hidden="true"><i /><i /><i /></span></button>
-        {!!inboxSources({ permissions: session.user.permissions, isAdministrator: session.user.isAdministrator, feedbackEnabled: session.capabilities?.clientFeedback?.enabled === true, invitationReview }).length && <a
-          className="ops-inbox-link" href="/operations/inbox" aria-label="Open staff inbox" title="Needs attention" aria-current={location.pathname === "/operations/inbox" ? "page" : undefined}
-          onClick={event => { if (!event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey && event.button === 0) { event.preventDefault(); navigate("operations", "/operations/inbox"); } }}>
+        {allowed(session.user, "delivery.share.audit") && <a
+          className="ops-inbox-link" href="/notifications" aria-label="Open notifications" title="Notifications" aria-current={page === "notifications" ? "page" : undefined}
+          onClick={event => { if (!event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey && event.button === 0) { event.preventDefault(); navigate("notifications", "/notifications"); } }}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9Z" /><path d="M9 20h6" /></svg>
         </a>}
         <AccountMenu className="profile" displayName={session.user.displayName}
@@ -355,9 +376,10 @@ export function OperationsApp() {
         <PageHeading page={page} />
         {page === "dashboard" && <Dashboard {...props} />}{" "}
         {page === "operations" && <OperationsHub {...props} />}{" "}
-        {page === "clients" && (allowed(session.user, "team.view") || allowed(session.user, "operations.manage")) && (
-          <ClientHubWorkspaceRouter mapToken={session.mapboxPublicToken} permissions={session.user.permissions} feedbackEnabled={session.capabilities?.clientFeedback?.enabled === true} invitationAccess={session.invitationAdministration} />
+        {page === "clients" && (allowed(session.user, "team.view") || allowed(session.user, "operations.manage") || session.capabilities?.clientFeedback?.enabled === true || invitationReview) && (
+          <ClientHubSurface session={session} />
         )}{" "}
+        {page === "notifications" && allowed(session.user, "delivery.share.audit") && <OperationsNotifications />}{" "}
         {page === "airspace" && <Airspace />}{" "}
         {page === "delivery" && canAccessDataPage(session.user.permissions) && (
           <DeliveryHub {...props} />
@@ -367,9 +389,6 @@ export function OperationsApp() {
         )}{" "}
         {page === "team" && allowed(session.user, "team.view") && (
           <Team {...props} />
-        )}{" "}
-        {page === "configurations" && allowed(session.user, "administration.view") && (
-          <Configurations session={session} />
         )}{" "}
         {page === "administration" &&
           allowed(session.user, "administration.view") && (
@@ -394,6 +413,10 @@ function PageHeading({ page }: { page: Page }) {
       "Client Hub",
       "Review requests and open each client workspace for contacts, access, projects, and shared work.",
     ],
+    notifications: [
+      "Notifications",
+      "Review delivery notices and notification history without mixing them into operational work.",
+    ],
     airspace: [
       "Airspace awareness",
       "Official FAA TFR and special-use airspace information for Wisconsin.",
@@ -410,13 +433,9 @@ function PageHeading({ page }: { page: Page }) {
       "Team",
       "Project Alpha-managed staff access, divisions, and role assignments.",
     ],
-    configurations: [
-      "Configurations",
-      "Connections to Project Alpha, the 3D Viewer, delivery services, and future platform providers.",
-    ],
     administration: [
       "Administration",
-      "Integration synchronization, security, and audit history.",
+      "Connected services, integration synchronization, security, and audit history.",
     ],
   };
   return (
@@ -704,9 +723,61 @@ function SimpleRows({
   );
 }
 
+type ClientHubSection = "directory" | "feedback" | "invitation-requests";
+function clientHubSection(pathname: string): ClientHubSection {
+  if (pathname === "/clients/feedback" || pathname.startsWith("/clients/feedback/")) return "feedback";
+  if (pathname === "/clients/invitation-requests" || pathname.startsWith("/clients/invitation-requests/")) return "invitation-requests";
+  return "directory";
+}
+
+function ClientHubSurface({ session }: { session: Session }) {
+  const invitationAccess = session.invitationAdministration ?? { enabled: false, canReview: false, canManagePolicy: false };
+  const sections: Array<{ id: ClientHubSection; label: string; href: string; visible: boolean }> = [
+    { id: "directory", label: "Clients & requests", href: "/clients", visible: allowed(session.user, "team.view") || allowed(session.user, "operations.manage") },
+    { id: "feedback", label: "Client feedback", href: "/clients/feedback", visible: session.capabilities?.clientFeedback?.enabled === true },
+    { id: "invitation-requests", label: "Invitation approvals", href: "/clients/invitation-requests", visible: invitationAccess.enabled && invitationAccess.canReview },
+  ];
+  const visible = sections.filter(section => section.visible);
+  const initialSection = useRef<ClientHubSection>(clientHubSection(location.pathname));
+  const [section, setSection] = useState<ClientHubSection>(initialSection.current);
+  useEffect(() => {
+    const sync = () => setSection(clientHubSection(location.pathname));
+    addEventListener("popstate", sync);
+    return () => removeEventListener("popstate", sync);
+  }, []);
+  const open = (next: typeof visible[number]) => {
+    if (location.pathname !== next.href) history.pushState(null, "", next.href);
+    setSection(next.id);
+    dispatchEvent(new PopStateEvent("popstate"));
+    window.scrollTo(0, 0);
+  };
+  // Keep an initially addressed invitation review mounted when its capability
+  // is unavailable so the user gets its explicit recovery/denial state. Later
+  // navigation to hidden views still normalizes to the first permitted tab.
+  const selectedItem = section === "invitation-requests" && initialSection.current === "invitation-requests"
+    ? sections.find(item => item.id === section) ?? visible[0]
+    : visible.find(item => item.id === section) ?? visible[0];
+  const selected = selectedItem?.id ?? "directory";
+  useEffect(() => {
+    if (!selectedItem || selectedItem.id === section) return;
+    history.replaceState(null, "", `${selectedItem.href}${location.search}`);
+    setSection(selectedItem.id);
+  }, [section, selectedItem?.href, selectedItem?.id]);
+  return <>
+    {visible.length > 1 && <nav className="operations-subtabs" role="tablist" aria-label="Client Hub views">
+      {visible.map(item => <button key={item.id} role="tab" aria-selected={selected === item.id}
+        className={selected === item.id ? "active" : ""} onClick={() => open(item)}>{item.label}</button>)}
+    </nav>}
+    {selected === "directory" && <ClientHubWorkspaceRouter mapToken={session.mapboxPublicToken} permissions={session.user.permissions}
+      feedbackEnabled={session.capabilities?.clientFeedback?.enabled === true} invitationAccess={session.invitationAdministration}
+      canManagePortalSetup={session.user.isAdministrator && allowed(session.user, "operations.manage")} />}
+    {selected === "feedback" && session.capabilities?.clientFeedback?.enabled === true && <OperationsFeedback />}
+    {selected === "feedback" && session.capabilities?.clientFeedback?.enabled !== true && <Card><EmptyState title="Client feedback unavailable" detail="Feedback-review access is required." /></Card>}
+    {selected === "invitation-requests" && <InvitationApprovals access={invitationAccess} />}
+  </>;
+}
+
 function OperationsHub({ session }: { session: Session }) {
-  const invitationAccess = session.invitationAdministration ?? {enabled: false, canReview: false, canManagePolicy: false};
-  const inboxAccess = { permissions: session.user.permissions, isAdministrator: session.user.isAdministrator, feedbackEnabled: session.capabilities?.clientFeedback?.enabled === true, invitationReview: invitationAccess.enabled && invitationAccess.canReview, invitationError: invitationAccess.error };
   const sections: Array<{
     id: OperationsSection;
     label: string;
@@ -716,17 +787,11 @@ function OperationsHub({ session }: { session: Session }) {
     { id: "projects", label: "Projects", permission: "projects.view" },
     { id: "tasks", label: "Tasks", permission: "tasks.view" },
     { id: "sops", label: "SOP Library", permission: "sops.view" },
-    { id: "notifications", label: "Notifications", permission: "delivery.share.audit" },
-    { id: "feedback", label: "Client feedback", permission: "operations.manage" },
-    { id: "inbox", label: "Inbox", permission: "operations.manage" },
-    { id: "invitation-requests", label: "Invitation approvals", permission: "team.manage" },
   ];
-  const visible = sections.filter((item) =>
-    item.id === "invitation-requests" ? inboxAccess.invitationReview : item.id === "inbox" ? inboxSources(inboxAccess).length > 0 : item.id === "feedback" ? session.capabilities?.clientFeedback?.enabled === true : allowed(session.user, item.permission),
-  );
+  const visible = sections.filter((item) => allowed(session.user, item.permission));
   const initial = pathOperationsSection(location.pathname);
   const [section, setSection] = useState<OperationsSection>(
-    initial === "invitation-requests" || visible.some((item) => item.id === initial)
+    visible.some((item) => item.id === initial)
       ? initial
       : visible[0]?.id || "operations",
   );
@@ -734,7 +799,7 @@ function OperationsHub({ session }: { session: Session }) {
     const sync = () => {
       if (pathPage(location.pathname) !== "operations") return;
       const requested = pathOperationsSection(location.pathname),
-        next = requested === "invitation-requests" || visible.some((item) => item.id === requested)
+        next = visible.some((item) => item.id === requested)
           ? requested
           : visible[0]?.id || "operations";
       setSection(next);
@@ -742,15 +807,13 @@ function OperationsHub({ session }: { session: Session }) {
       const isSopRoute = next === "sops" &&
         (location.pathname === "/sops" || location.pathname.startsWith("/sops/") ||
           location.pathname === expected || location.pathname.startsWith(`${expected}/`));
-      const isFeedbackRoute = next === "feedback" && location.pathname.startsWith(`${expected}/`);
-      const isInvitationRoute = next === "invitation-requests" && location.pathname.startsWith(`${expected}/`);
-      if (!isSopRoute && !isFeedbackRoute && !isInvitationRoute && location.pathname !== expected)
+      if (!isSopRoute && location.pathname !== expected)
         history.replaceState(null, "", expected);
     };
     sync();
     addEventListener("popstate", sync);
     return () => removeEventListener("popstate", sync);
-  }, [session.user.permissions.join("|"), session.user.isAdministrator, session.capabilities?.clientFeedback?.enabled, inboxAccess.invitationReview]);
+  }, [session.user.permissions.join("|")]);
   const open = (next: OperationsSection) => {
     if (next === section) return;
     setSection(next);
@@ -784,10 +847,6 @@ function OperationsHub({ session }: { session: Session }) {
       )}{" "}
       {section === "tasks" && allowed(session.user, "tasks.view") && <Tasks />}
       {section === "sops" && allowed(session.user, "sops.view") && <SopLibrary user={session.user} />}
-      {section === "notifications" && allowed(session.user, "delivery.share.audit") && <OperationsNotifications />}
-      {section === "feedback" && session.capabilities?.clientFeedback?.enabled === true && <OperationsFeedback />}
-      {section === "inbox" && inboxSources(inboxAccess).length > 0 && <StaffInbox access={inboxAccess} />}
-      {section === "invitation-requests" && <InvitationApprovals access={invitationAccess} />}
     </>
   );
 }
@@ -1685,6 +1744,15 @@ type DeliveryOperation = {
 function joinDeliveryPath(prefix: string, name: string, folder = false) {
   const base = prefix.endsWith("/") ? prefix : `${prefix}/`;
   return `${base}${name.replace(/^\/+/, "")}${folder ? "/" : ""}`;
+}
+function deliveryItemReferenceForKey(key: string) {
+  const bytes = new TextEncoder().encode(key);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
 }
 function itemKey(item: DeliveryItem) {
   return item.physicalKey || item.prefix || "";
@@ -2911,6 +2979,19 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
       return { name, prefix: built };
     });
   }, [prefix]);
+  const currentFolderShareTarget = useMemo<DeliveryItem>(() => {
+    const activePrefix = prefixFromDeliveryPath(deliveryPathFromPrefix(prefix));
+    const key = activePrefix.replace(/\/$/, "");
+    const name = key.split("/").pop() || "Jobs";
+    return {
+      id: deliveryItemReferenceForKey(key),
+      prefix: activePrefix,
+      physicalKey: activePrefix,
+      name,
+      displayName: name,
+      kind: "folder",
+    };
+  }, [prefix]);
   const selectedItems = items.filter((item) =>
     selected.includes(itemRef(item)),
   );
@@ -3235,24 +3316,36 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
             </span>
           )}
         </div>
-        <nav className="delivery-crumbs" aria-label="Current delivery folder">
-          {session.capabilities?.deliveryJobsRoot?.enabled ? (
-            <button title="Jobs" onClick={() => openFolder(DELIVERY_JOBS_PREFIX)}>
-              Jobs
-            </button>
-          ) : <span>Jobs</span>}
-          {crumbs.slice(1).map((crumb) => (
-            <span key={crumb.prefix}>
-              /
-              <button
-                title={crumb.name}
-                onClick={() => openFolder(crumb.prefix)}
-              >
-                {crumb.name}
+        <div className="delivery-folder-bar">
+          <nav className="delivery-crumbs" aria-label="Current delivery folder">
+            {session.capabilities?.deliveryJobsRoot?.enabled ? (
+              <button title="Jobs" onClick={() => openFolder(DELIVERY_JOBS_PREFIX)}>
+                Jobs
               </button>
-            </span>
-          ))}
-        </nav>
+            ) : <span>Jobs</span>}
+            {crumbs.slice(1).map((crumb) => (
+              <span key={crumb.prefix}>
+                /
+                <button
+                  title={crumb.name}
+                  onClick={() => openFolder(crumb.prefix)}
+                >
+                  {crumb.name}
+                </button>
+              </span>
+            ))}
+          </nav>
+          {canShare && (
+            <button
+              type="button"
+              className="button-ghost button-small share-current-folder"
+              disabled={loading}
+              onClick={() => setPreview({ shareTarget: currentFolderShareTarget })}
+            >
+              Share current folder
+            </button>
+          )}
+        </div>
       </div>
       {selectionMode && (
         <div className="delivery-selection-bar">
@@ -4602,12 +4695,12 @@ type AuthenticatedGrant = {
   updatedAt: string;
 };
 
-function AuthenticatedDeliveryGrantPanel({ folder, canRevoke }: { folder: { id: string }; canRevoke: boolean }) {
-  const [expanded, setExpanded] = useState(false);
+function AuthenticatedDeliveryGrantPanel({ folder, canRevoke, embedded = false }: { folder: { id: string }; canRevoke: boolean; embedded?: boolean }) {
+  const [expanded, setExpanded] = useState(embedded);
   const [mode, setMode] = useState<"primary" | "native">("primary");
   const [nativeBusy, setNativeBusy] = useState(false);
   return <section className="client-workspace-grant authenticated-grant-panel">
-    <button type="button" className="button-ghost button-small" aria-expanded={expanded} disabled={nativeBusy} onClick={() => setExpanded(value => !value)}>{expanded ? "Close authenticated portal grants" : "Grant to Client Portal"}</button>
+    {!embedded && <button type="button" className="button-ghost button-small" aria-expanded={expanded} disabled={nativeBusy} onClick={() => setExpanded(value => !value)}>{expanded ? "Close authenticated portal grants" : "Grant to Client Portal"}</button>}
     {expanded && <div className="client-workspace-grant-panel">
       <div className="form-grid native-grant-connection"><label className="full">Portal connection<select value={mode} disabled={nativeBusy} onChange={event => setMode(event.target.value as "primary" | "native")}><option value="primary">Primary portal</option><option value="native">Connected workspace</option></select></label></div>
       {mode === "native" ? <NativeDeliveryGrantPanel key={folder.id} folder={folder} onBusyChange={setNativeBusy} /> : <PrimaryAuthenticatedDeliveryGrantPanel key={folder.id} folder={folder} canRevoke={canRevoke} onBusyChange={setNativeBusy} />}
@@ -4713,7 +4806,7 @@ function AuthenticatedDeliveryNoticePolicyEditor({ physicalGrantId, audienceLabe
 function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, onBusyChange }: { folder: { id: string }; canRevoke: boolean; onBusyChange?: (busy: boolean) => void }) {
   type Context = { folderBindingId: string; sourceId: string; projectName: string | null; accessTermsSupported: boolean; projectEndSupported: boolean };
   type Input = {folderBindingId: string; audienceType: AuthenticatedGrantAudienceType; audiencePublicId: string; reasonCode: string; expiresAt: string | null; accessTerms?: PrimaryGrantTerms};
-  type Preview = Context & {operation: Input; contextVersion: string; workspaceId: string; workspaceLabel: string; audienceLabel: string; recipientCount: number; accessTerms: PrimaryGrantTerms | null; effectiveAccessExpiresAt: string | null};
+  type Preview = Context & {operation: Input; contextVersion: string; workspaceId: string; workspaceLabel: string; audienceLabel: string; recipientCount: number; dynamicAudience: boolean; recipientPreview: {mode: "exact" | "dynamic"; currentAuthorizedCount: number | null; truncated: boolean}; accessTerms: PrimaryGrantTerms | null; effectiveAccessExpiresAt: string | null};
   type Pending = {path: string; body: string; key: string; action: "create" | "restore" | "revoke"; context: Context; audience: AuthenticatedGrant["audience"]; terms: PrimaryGrantTerms | null; version: number; grantId?: string};
   const [folderBindingId, setFolderBindingId] = useState("");
   const [context, setContext] = useState<Context | null>(null);
@@ -4721,6 +4814,8 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, onBusyChang
   const [query, setQuery] = useState("");
   const [options, setOptions] = useState<AuthenticatedGrantAudience[]>([]);
   const [selected, setSelected] = useState<AuthenticatedGrantAudience | null>(null);
+  const [targetType, setTargetType] = useState<"principal" | "department" | "organization">("principal");
+  const [searchStatus, setSearchStatus] = useState("");
   const [reasonCode, setReasonCode] = useState("client_delivery_access");
   const [expiresAt, setExpiresAt] = useState("");
   const [accessKind, setAccessKind] = useState<PrimaryGrantTerms["kind"] | "">(""), [accessMode, setAccessMode] = useState<PrimaryGrantTerms["mode"] | "">("");
@@ -4728,6 +4823,7 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, onBusyChang
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [portalSetupNeeded, setPortalSetupNeeded] = useState(false);
   const alive = useRef(false), epoch = useRef(0), mutationBusy = useRef(false), pending = useRef<Pending | null>(null);
   const readController = useRef<AbortController | null>(null), searchController = useRef<AbortController | null>(null), previewController = useRef<AbortController | null>(null), mutationController = useRef<AbortController | null>(null), reviewTitle = useRef<HTMLHeadingElement>(null);
   const text = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 4096;
@@ -4738,8 +4834,19 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, onBusyChang
   const validGrant = (value: AuthenticatedGrant) => !!value && text(value.id) && text(value.grantId) && Number.isSafeInteger(value.version) && value.version > 0 && !!value.audience && ["organization", "department", "client", "project", "principal"].includes(value.audience.type) && text(value.audience.publicId) && ["active", "revoked", "expired"].includes(value.status) && validTerms(value.accessTerms) && (value.effectiveAccessExpiresAt === null || dateValue(value.effectiveAccessExpiresAt));
   const invalidResponse = () => new ApiError("The access response could not be verified. Refresh authenticated access before continuing.", 409, {});
   const abortReads = useCallback(() => { readController.current?.abort(); searchController.current?.abort(); previewController.current?.abort(); }, []);
-  const clearContext = useCallback(() => { epoch.current++; abortReads(); setContext(null); setFolderBindingId(""); setGrants([]); setSelected(null); setQuery(""); setOptions([]); setPreview(null); setRestoreTarget(null); setLoading(false); setBusy(false); }, [abortReads]);
-  const handleError = useCallback((caught: unknown) => { if (caught instanceof ApiError && [401, 403, 404, 409].includes(caught.status)) { clearContext(); pending.current = null; setUncertain(false); } setError((caught as Error).message || "Authenticated access could not be loaded."); }, [clearContext]);
+  const clearContext = useCallback(() => { epoch.current++; abortReads(); setContext(null); setFolderBindingId(""); setGrants([]); setSelected(null); setQuery(""); setOptions([]); setSearchStatus(""); setPreview(null); setRestoreTarget(null); setLoading(false); setBusy(false); }, [abortReads]);
+  const handleError = useCallback((caught: unknown) => {
+    if (caught instanceof ApiError && [401, 403, 404, 409].includes(caught.status)) {
+      clearContext(); pending.current = null; setUncertain(false);
+      setPortalSetupNeeded(caught.status === 404);
+      setError(caught.status === 404
+        ? "This folder is not linked to a Client Portal workspace yet. Sync its Project Alpha workspace and membership, then refresh; no workspace or access will be created automatically."
+        : caught.message);
+      return;
+    }
+    setPortalSetupNeeded(false);
+    setError((caught as Error).message || "Authenticated access could not be loaded.");
+  }, [clearContext]);
   useEffect(() => { alive.current = true; return () => { alive.current = false; epoch.current++; abortReads(); mutationController.current?.abort(); }; }, [folder.id, abortReads]);
   useEffect(() => { onBusyChange?.(busy || uncertain); return () => onBusyChange?.(false); }, [busy, uncertain, onBusyChange]);
   useEffect(() => { if (preview) reviewTitle.current?.focus(); }, [preview]);
@@ -4747,7 +4854,7 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, onBusyChang
   const clearReview = () => { epoch.current++; previewController.current?.abort(); setPreview(null); setError(""); setMessage(""); };
 
   const load = useCallback(async () => {
-    readController.current?.abort(); const controller = new AbortController(), generation = epoch.current; readController.current = controller; setLoading(true); setError("");
+    readController.current?.abort(); const controller = new AbortController(), generation = epoch.current; readController.current = controller; setLoading(true); setError(""); setPortalSetupNeeded(false);
     try {
       const value = await api<Context & {grants: AuthenticatedGrant[]}>(`/api/delivery/authenticated-grants?folderRef=${encodeURIComponent(folder.id)}`, {signal: controller.signal});
       if (!alive.current || controller.signal.aborted || generation !== epoch.current) return;
@@ -4765,22 +4872,28 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, onBusyChang
   useEffect(() => {
     if (!folderBindingId || selected || query.trim().length < 2 || busy || uncertain) {
       setOptions([]);
+      if (query.trim().length < 2) setSearchStatus("");
       return;
     }
     const controller = new AbortController(), generation = epoch.current; searchController.current = controller;
+    setSearchStatus(`Searching authorized ${targetType === "principal" ? "individuals" : `${targetType}s`}…`);
     const timer = window.setTimeout(() => {
-      api<{ audiences: AuthenticatedGrantAudience[] }>(
-        `/api/delivery/authenticated-grants/audiences?folderBindingId=${encodeURIComponent(folderBindingId)}&q=${encodeURIComponent(query.trim())}`,
+      api<{ folderBindingId: string; workspaceId: string; workspaceLabel: string; scopeTypeFilter: AuthenticatedGrantAudienceType | null; audiences: AuthenticatedGrantAudience[] }>(
+        `/api/delivery/authenticated-grants/audiences?folderBindingId=${encodeURIComponent(folderBindingId)}&q=${encodeURIComponent(query.trim())}&audienceType=${encodeURIComponent(targetType)}`,
         { signal: controller.signal },
       ).then(value => {
         if (controller.signal.aborted || !alive.current || generation !== epoch.current) return;
-        if (!Array.isArray(value.audiences) || value.audiences.some(item => !item || !["organization", "department", "client", "project", "principal"].includes(item.type) || !text(item.publicId) || !text(item.displayName))) throw invalidResponse();
-        setOptions(value.audiences);
-        setError(value.audiences.length ? "" : "No authorized client audience matches this folder.");
+        if (value.folderBindingId !== folderBindingId || value.scopeTypeFilter !== targetType || !text(value.workspaceId) || !text(value.workspaceLabel)
+          || !Array.isArray(value.audiences) || value.audiences.some(item => !item || !["organization", "department", "client", "project", "principal"].includes(item.type) || !text(item.publicId) || !text(item.displayName))) throw invalidResponse();
+        const matches = value.audiences.filter(item => item.type === targetType);
+        setOptions(matches);
+        setSearchStatus(matches.length ? "" : targetType === "principal"
+          ? "No verified individual matches this folder. The person must be synced from Project Alpha, have active portal membership, and be authorized for this workspace."
+          : `No authorized ${targetType} matches this folder. Confirm that it is synced into this workspace and within the folder's scope.`);
       }).catch(caught => { if (!controller.signal.aborted && alive.current && generation === epoch.current) handleError(caught); });
     }, 250);
     return () => { window.clearTimeout(timer); controller.abort(); };
-  }, [folderBindingId, query, selected, busy, uncertain, handleError]);
+  }, [folderBindingId, query, selected, busy, uncertain, handleError, targetType]);
 
   const review = async () => {
     if (!selected || !context || busy || uncertain || mutationBusy.current) return;
@@ -4801,7 +4914,8 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, onBusyChang
     try {
       const value = await api<Preview>("/api/delivery/authenticated-grants/preview", {method: "POST", body: JSON.stringify(input), signal: controller.signal});
       if (controller.signal.aborted || !alive.current || generation !== epoch.current) return;
-      if (!validContext(value) || value.folderBindingId !== folderBindingId || value.projectName !== context.projectName || value.accessTermsSupported !== context.accessTermsSupported || value.projectEndSupported !== context.projectEndSupported || !value.operation || Object.entries(input).some(([key, field]) => key !== "accessTerms" && value.operation[key as keyof Input] !== field) || !sameTerms(value.operation.accessTerms, input.accessTerms) || !sameTerms(value.accessTerms, input.accessTerms) || !/^[a-f0-9]{64}$/.test(value.contextVersion) || !text(value.workspaceId) || !text(value.workspaceLabel) || !text(value.audienceLabel) || !Number.isSafeInteger(value.recipientCount) || value.recipientCount < 0 || !(value.effectiveAccessExpiresAt === null || dateValue(value.effectiveAccessExpiresAt)) || input.accessTerms?.mode === "specific_date" && value.effectiveAccessExpiresAt !== input.accessTerms.expiresAt || input.accessTerms?.mode === "until_revoked" && value.effectiveAccessExpiresAt !== null) throw invalidResponse();
+      const exact = selected.type === "principal";
+      if (!validContext(value) || value.folderBindingId !== folderBindingId || value.projectName !== context.projectName || value.accessTermsSupported !== context.accessTermsSupported || value.projectEndSupported !== context.projectEndSupported || !value.operation || Object.entries(input).some(([key, field]) => key !== "accessTerms" && value.operation[key as keyof Input] !== field) || !sameTerms(value.operation.accessTerms, input.accessTerms) || !sameTerms(value.accessTerms, input.accessTerms) || !/^[a-f0-9]{64}$/.test(value.contextVersion) || !text(value.workspaceId) || !text(value.workspaceLabel) || !text(value.audienceLabel) || !Number.isSafeInteger(value.recipientCount) || value.recipientCount < 0 || typeof value.dynamicAudience !== "boolean" || !value.recipientPreview || !["exact", "dynamic"].includes(value.recipientPreview.mode) || typeof value.recipientPreview.truncated !== "boolean" || !(value.recipientPreview.currentAuthorizedCount === null || Number.isSafeInteger(value.recipientPreview.currentAuthorizedCount) && value.recipientPreview.currentAuthorizedCount >= 0) || value.dynamicAudience === exact || value.recipientPreview.mode !== (exact ? "exact" : "dynamic") || exact && (value.recipientCount !== 1 || value.recipientPreview.currentAuthorizedCount !== 1) || !exact && value.recipientPreview.currentAuthorizedCount !== null || !(value.effectiveAccessExpiresAt === null || dateValue(value.effectiveAccessExpiresAt)) || input.accessTerms?.mode === "specific_date" && value.effectiveAccessExpiresAt !== input.accessTerms.expiresAt || input.accessTerms?.mode === "until_revoked" && value.effectiveAccessExpiresAt !== null) throw invalidResponse();
       setPreview(value);
     } catch (caught) { if (!controller.signal.aborted && alive.current && generation === epoch.current) handleError(caught); }
     finally { if (!controller.signal.aborted && alive.current) setBusy(false); }
@@ -4842,19 +4956,33 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, onBusyChang
   for (const grant of grants) latestVersions.set(grant.grantId, Math.max(latestVersions.get(grant.grantId) ?? 0, grant.version));
   return <div className="client-workspace-grant-panel primary-authenticated-grant-panel">
       <strong>Authenticated Client Portal access</strong>
-      <small>This permission is checked against current verified identity, workspace membership, hierarchy, deny policy, and folder source version. It never creates a bearer link.</small>
+      <small>This permission covers this folder and everything underneath it. It is checked against current verified identity, workspace membership, hierarchy, deny policy, and folder source version. It never creates a bearer link.</small>
       <button type="button" className="button-ghost button-small" disabled={busy || loading} onClick={() => { if (!uncertain) { clearContext(); resetTerms(); } void load(); }}>Refresh authenticated access</button>
       {loading && <Loading />}
       {context && <>
         {project ? <p>Project: <strong>{context.projectName}</strong></p> : <p>Project-specific access terms require a folder linked to one project. This folder uses existing access rules, without a customer or collaborator classification.</p>}
         {project && !context.accessTermsSupported && <p role="status">Reviewed project access terms are unavailable until the database update is ready. Existing grants can still be reviewed and revoked.</p>}
         {restoreTarget && <p role="status">Reviewing a new version for {restoreTarget.audienceLabel}. Existing grant terms are not silently reused.</p>}
-        <label htmlFor="authenticated-grant-audience">Organization, department, client, project, or person</label>
+        <fieldset className="workspace-audience-types">
+          <legend>Share with</legend>
+          {([ ["principal", "Individual"], ["department", "Department"], ["organization", "Organization"] ] as const).map(([value, label]) => <button
+            key={value}
+            type="button"
+            className={targetType === value ? "active" : "button-ghost"}
+            aria-pressed={targetType === value}
+            disabled={disabled}
+            onClick={() => {
+              clearReview(); resetTerms(); setTargetType(value); setSelected(null); setRestoreTarget(null);
+              setQuery(""); setOptions([]); setSearchStatus("");
+            }}
+          >{label}</button>)}
+        </fieldset>
+        <label htmlFor="authenticated-grant-audience">Search {targetType === "principal" ? "individuals" : `${targetType}s`}</label>
         <input id="authenticated-grant-audience" type="search" role="combobox" aria-autocomplete="list"
           aria-expanded={options.length > 0} aria-controls="authenticated-grant-options" autoComplete="off"
-          placeholder="Type at least 2 characters" value={query} disabled={disabled}
+          placeholder={targetType === "principal" ? "Type a client name or email" : `Type a ${targetType} name`} value={query} disabled={disabled}
           onKeyDown={focusFirstTypeaheadOption}
-          onChange={event => { clearReview(); resetTerms(); setQuery(event.target.value); setSelected(null); setRestoreTarget(null); }} />
+          onChange={event => { clearReview(); resetTerms(); setQuery(event.target.value); setSelected(null); setRestoreTarget(null); setSearchStatus(""); }} />
         {options.length > 0 && <div id="authenticated-grant-options" className="client-workspace-typeahead" role="listbox">
           {options.map(option => <button type="button" role="option" aria-selected={selected?.publicId === option.publicId}
             key={`${option.type}:${option.publicId}`}
@@ -4863,8 +4991,11 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, onBusyChang
             <strong>{option.displayName}</strong><small>{option.type === "principal" ? option.email || "Verified person" : `${option.type} · dynamic current members`}</small>
           </button>)}
         </div>}
+        {searchStatus && <small className="workspace-search-guidance" role="status">{searchStatus}</small>}
         {selected && <small className="selected-audience-note">
-          {selected.type === "principal" ? "Exact verified person snapshot" : "Dynamic current authorized members"}
+          {selected.type === "principal"
+            ? "Exact verified person only. Their organization membership does not widen this grant."
+            : `All currently authorized members of this ${selected.type}; membership changes are applied dynamically.`}
         </small>}
         <div className="form-grid authenticated-grant-fields">
           <label>Reason code<input value={reasonCode} disabled={disabled} maxLength={80} pattern="[A-Za-z0-9][A-Za-z0-9._:-]{0,79}" onChange={event => { setReasonCode(event.target.value); clearReview(); }} /></label>
@@ -4877,9 +5008,9 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, onBusyChang
         {project && accessMode === "project_end" && <p>Access ends seven days after the first verified project completion. Reopening does not renew expired access.</p>}
         {project && accessKind === "collaborator" && accessMode === "until_revoked" && <p>Access will not end automatically when the project completes. It remains until revoked.</p>}
         {!preview && <button type="button" className="button-orange button-small" disabled={disabled || !selected || !reasonCode || project && (!context.accessTermsSupported || !accessKind || !accessMode)} onClick={() => void review()}>Review authenticated access</button>}
-        {preview && <section className="primary-authenticated-grant-review" aria-label="Review authenticated portal access"><h4 ref={reviewTitle} tabIndex={-1}>Confirm authenticated access</h4><dl>{[["Workspace", preview.workspaceLabel], ["Project", preview.projectName ?? "No project-specific access terms"], ["Audience", preview.audienceLabel], ["Audience rule", selected?.type === "principal" ? "Exact verified person" : "Dynamic current authorized members"], ["Access terms", termsLabel(preview.accessTerms)], ["Access ends", preview.effectiveAccessExpiresAt ? date(preview.effectiveAccessExpiresAt) : preview.accessTerms?.mode === "project_end" ? "Awaiting verified project completion, then 7 days" : "When revoked"]].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>{preview.accessTerms?.mode === "project_end" && <p>Reopening does not renew expired access.</p>}<p>This grants only the reviewed folder access. Current identity and audience checks still apply; no public link is created.</p><div className="actions"><button type="button" className="button-orange" disabled={disabled} onClick={create}>{restoreTarget ? "Restore authenticated access" : "Grant authenticated access"}</button><button type="button" className="button-ghost" disabled={busy || uncertain} onClick={() => setPreview(null)}>Cancel review</button></div></section>}
+        {preview && <section className="primary-authenticated-grant-review" aria-label="Review authenticated portal access"><h4 ref={reviewTitle} tabIndex={-1}>Confirm authenticated access</h4><dl>{[["Workspace", preview.workspaceLabel], ["Project", preview.projectName ?? "No project-specific access terms"], ["Recipient", preview.audienceLabel], ["Target type", selected?.type === "principal" ? "Individual" : selected?.type === "department" ? "Department" : "Organization"], ["Recipient rule", selected?.type === "principal" ? "This exact verified person only" : "Current authorized members; membership is rechecked"], ["Recipient preview", selected?.type === "principal" ? `${preview.recipientCount} exact verified person` : preview.recipientCount > 0 ? `${preview.recipientPreview?.truncated ? "At least " : "Up to "}${preview.recipientCount} currently eligible people; final membership is checked when opened` : "Dynamic membership; final recipients are checked when opened"], ["Access terms", termsLabel(preview.accessTerms)], ["Access ends", preview.effectiveAccessExpiresAt ? date(preview.effectiveAccessExpiresAt) : preview.accessTerms?.mode === "project_end" ? "Awaiting verified project completion, then 7 days" : "When revoked"]].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>{preview.accessTerms?.mode === "project_end" && <p>Reopening does not renew expired access.</p>}<p>Confirm this recipient and scope. This grants only the reviewed folder access; it never widens an individual to their organization and creates no public link.</p><div className="actions"><button type="button" className="button-orange" disabled={disabled} onClick={create}>{restoreTarget ? "Restore authenticated access" : "Grant authenticated access"}</button><button type="button" className="button-ghost" disabled={busy || uncertain} onClick={() => setPreview(null)}>Cancel review</button></div></section>}
       </>}
-      {error && <small className="error" role="alert">{error}</small>}
+      {error && <small className="error" role="alert">{error}{portalSetupNeeded && <> <a href="/clients#client-portal-setup">Open Client Hub portal setup</a> to review the exact client account, workspace, and verified membership.</>}</small>}
       {message && <small role="status">{message}</small>}
       {uncertain && pending.current && <button type="button" className="button-orange" disabled={busy || loading || !context || pending.current.action === "revoke" && !canRevoke} onClick={() => void execute(pending.current!)}>Retry same access operation</button>}
       {grants.length > 0 && <div className="authenticated-grant-list" aria-label="Authenticated portal grant history">
@@ -4940,6 +5071,42 @@ function ShareDialog({
   const [recipientOptions, setRecipientOptions] = useState<ShareDirectoryAudience[]>([]);
   const [recipientSearchError, setRecipientSearchError] = useState("");
   const [imageLocationMapEnabled, setImageLocationMapEnabled] = useState(false);
+  const [shareMode, setShareMode] = useState<"public" | "workspace">("public");
+  const dialog = useRef<HTMLDivElement>(null);
+  const closeButton = useRef<HTMLButtonElement>(null);
+  const opener = useRef<HTMLElement | null>(null);
+  const closeRef = useRef(close);
+  const busyRef = useRef(busy);
+  closeRef.current = close;
+  busyRef.current = busy;
+
+  useEffect(() => {
+    opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    queueMicrotask(() => closeButton.current?.focus());
+    return () => {
+      const target = opener.current;
+      queueMicrotask(() => { if (target?.isConnected) target.focus(); });
+    };
+  }, []);
+
+  const handleDialogKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Escape" && !busyRef.current) {
+      event.preventDefault();
+      closeRef.current();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = [...(dialog.current?.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])',
+    ) ?? [])].filter(element => element.getClientRects().length > 0);
+    if (!focusable.length) return;
+    const first = focusable[0]!, last = focusable[focusable.length - 1]!;
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault(); last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault(); first.focus();
+    }
+  };
 
   useEffect(() => {
     let mounted = true;
@@ -5053,10 +5220,12 @@ function ShareDialog({
 
   return (
     <div className="modal-backdrop">
-      <Card
+      <div ref={dialog} className="share-dialog" role="dialog" aria-modal="true" aria-label={`Share ${targetLabel}`} onKeyDown={handleDialogKeyDown}>
+        <Card
         title={`Share ${targetLabel}`}
         action={
           <button
+            ref={closeButton}
             className="button-ghost button-small"
             onClick={close}
             disabled={busy}
@@ -5065,7 +5234,45 @@ function ShareDialog({
           </button>
         }
       >
-        {activeLoadError ? (
+        <div className="share-folder-path">
+          <span>{fileTarget ? "File" : "Folder"}</span>
+          <code>{fileTarget ? displayName(folder) : folder.prefix}</code>
+        </div>
+        {!fileTarget && <div className="share-mode-selector" role="tablist" aria-label="Sharing method">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={shareMode === "public"}
+            className={shareMode === "public" ? "active" : "button-ghost"}
+            onClick={() => setShareMode("public")}
+            disabled={busy}
+          >Public link</button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={shareMode === "workspace"}
+            className={shareMode === "workspace" ? "active" : "button-ghost"}
+            onClick={() => setShareMode("workspace")}
+            disabled={busy}
+          >Client Workspace</button>
+        </div>}
+        {!fileTarget && shareMode === "workspace" ? (
+          <section className="share-mode-panel" role="tabpanel" aria-label="Client Workspace sharing">
+            <header>
+              <strong>Authenticated Client Workspace access</strong>
+              <small>Choose an exact individual, a department, or an organization. Access covers this folder and every nested folder and file. This does not create a public link.</small>
+            </header>
+            {authenticatedGrantsEnabled
+              ? canManageAuthenticatedGrants
+                ? <AuthenticatedDeliveryGrantPanel folder={folder} canRevoke={canRevoke} embedded />
+                : <div className="notice" role="status">Administrator access is required to manage Client Workspace grants. Existing public-link sharing remains available.</div>
+              : <div className="notice" role="status">Client Workspace sharing is not available for this deployment yet. The folder must be linked to a synced Project Alpha workspace before recipients can be granted access. <a href="/clients#client-portal-setup">Open Client Hub portal setup</a> to check readiness; setup will not grant access without an existing verified membership and explicit permissions.</div>}
+            {canProvisionDelegated && <details className="workspace-sharing-advanced">
+              <summary>Advanced client-created link policy</summary>
+              <ClientDelegatedFolderProvisioning folder={folder} />
+            </details>}
+          </section>
+        ) : activeLoadError ? (
           <div className="notice error" role="alert">
             <strong>Share status unavailable.</strong> {activeLoadError}
             <div className="actions">
@@ -5078,16 +5285,7 @@ function ShareDialog({
           <Loading />
         ) : (
           <>
-            <div className="share-folder-path">
-              <span>{fileTarget ? "File" : "Folder"}</span>
-              <code>{fileTarget ? displayName(folder) : folder.prefix}</code>
-            </div>
-            {!fileTarget && (authenticatedGrantsEnabled
-              ? canManageAuthenticatedGrants
-                ? <AuthenticatedDeliveryGrantPanel folder={folder} canRevoke={canRevoke} />
-                : <p role="status">Administrator access is required to manage authenticated Client Portal grants. You can still use ordinary delivery sharing below.</p>
-              : <ClientWorkspaceGrant prefix={folder.prefix} />)}
-            {!fileTarget && canProvisionDelegated && <ClientDelegatedFolderProvisioning folder={folder} />}
+            {!fileTarget && <p className="share-mode-description">Create a bearer link for anyone who receives the complete URL. Use an access code when the content should not be open to everyone holding the link.</p>}
             {shown && (
               <div className="current-share">
                 <div>
@@ -5209,7 +5407,7 @@ function ShareDialog({
                 </label>
               )}
               {directoryRecipientsEnabled ? <div className="full share-recipient-field">
-                <label htmlFor="share-recipient-search">Notification recipient</label>
+                <label htmlFor="share-recipient-search">Notification only (does not control access)</label>
                 <input
                   id="share-recipient-search"
                   type="search"
@@ -5244,10 +5442,10 @@ function ShareDialog({
                 </div>}
                 {recipientSearchError && <small role="status">{recipientSearchError}</small>}
                 <small>
-                  Optional. This selects a notification recipient from the client directory; it does not restrict who can use the complete bearer link. Clear the field for an unaddressed link. Access codes are never emailed.
+                  Optional. This only chooses who receives the link notification. It does not grant Client Workspace access or restrict who can use the complete bearer link. Clear the field for an unaddressed link. Access codes are never emailed.
                 </small>
               </div> : <label className="full">
-                Recipient email
+                Notification email only (does not control access)
                 <input
                   type="email"
                   value={recipientEmail}
@@ -5259,8 +5457,7 @@ function ShareDialog({
                   disabled={busy}
                 />
                 <small>
-                  Delivery and access notifications will be sent here. Access
-                  codes are never emailed.
+                  The public-link notification will be sent here. This does not grant Client Workspace access or restrict link use. Access codes are never emailed.
                 </small>
               </label>}
               {!fileTarget && <label className="check full">
@@ -5392,7 +5589,8 @@ function ShareDialog({
             )}
           </>
         )}
-      </Card>
+        </Card>
+      </div>
     </div>
   );
 }
@@ -6597,7 +6795,7 @@ function Configurations({ session }: { session: Session }) {
   return <div className="dashboard-grid configurations-grid">
     <Card title="Project Alpha">
       <p>Client identity, portal eligibility, projects, and operational records synchronize through the configured Project Alpha connection.</p>
-      <a className="button-ghost button-small" href="/administration">Open connection administration</a>
+      {session.user.isAdministrator && allowed(session.user, "integrations.manage") && <a className="button-ghost button-small" href="#project-alpha-connections">Open connection administration</a>}
     </Card>
     <Card title="3D Viewer">
       <p>Review Viewer health, processing capacity, storage, and model access from the dedicated workspace.</p>
@@ -6614,6 +6812,10 @@ function Administration({ session }: { session: Session }) {
   const canManageConnections = session.user.isAdministrator && allowed(session.user, "integrations.manage");
   return (
     <>
+      <section aria-labelledby="administration-configurations-heading">
+        <div className="client-hub-section-heading"><div><h2 id="administration-configurations-heading">Configurations</h2><p>Connected applications and services used by Operations.</p></div></div>
+        <Configurations session={session} />
+      </section>
       <div className="dashboard-grid">
         {canManageConnections && <div id="project-alpha-connections"><ProjectAlphaConnections /></div>}
         {!canManageConnections && <Card title="Project Alpha"><p>Connection management requires an administrator with global integration-management permission.</p></Card>}

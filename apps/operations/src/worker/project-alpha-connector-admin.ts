@@ -119,6 +119,7 @@ export function registerProjectAlphaConnectorAdminRoutes(app: App): void {
   });
   app.get(ROOT, async c => {
     const connectors = await listProjectAlphaConnectors(c.env);
+    const registeredPrimary = connectors.find(row => row.sourceId === "project-alpha:primary");
     const ids = ["project-alpha:primary", ...connectors.map(row => row.sourceId).filter(id => id !== "project-alpha:primary")];
     const health = await c.env.OPS_DB.withSession("first-primary").prepare(`SELECT projection_source_id sourceId,status,last_attempt_at lastAttemptAt,
       last_success_at lastSuccessAt,last_error_code lastErrorCode,consecutive_failures consecutiveFailures
@@ -130,7 +131,7 @@ export function registerProjectAlphaConnectorAdminRoutes(app: App): void {
     const portal = await getConnectorPortalStatus(c.env);
     const projectManagement = await listProjectAlphaProjectManagementRoutes(c.env);
     return c.json({ connectors, health: safeHealth, recovery, portal, projectManagement,
-      legacyPrimary: !connectors.some(row => row.sourceId === "project-alpha:primary") });
+      legacyPrimary: !registeredPrimary || registeredPrimary.state === "pending" });
   });
   app.post(ROOT, async c => c.json({ connector: await registerProjectAlphaConnector(c.env,
     await json(c.req.raw, registration), c.get("principal").id) }, 201));

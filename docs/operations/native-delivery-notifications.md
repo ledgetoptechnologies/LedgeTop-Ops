@@ -19,6 +19,13 @@ not change the Viewer, thumbnail workers, mail provider, or portal eligibility.
   group fan-out, recipient selection and subscriptions for native uploads are
   not implemented by this increment. A delivery-ready notice is not a count of
   added or removed files.
+- The later
+  [exact authenticated-delivery change notification](authenticated-delivery-change-notifications.md)
+  increment does cover general R2 additions and removals for an explicitly
+  opted-in, exact-principal grant. Uploads without that policy still send
+  nothing. Group, contact, organization, department, client, and project
+  fan-out remain deliberately unsupported; operational contacts never imply a
+  notification subscription.
 - Public-share mail, service-request mail and the other existing outboxes retain
   their current producer contracts. The staff center is not a universal mail log.
 

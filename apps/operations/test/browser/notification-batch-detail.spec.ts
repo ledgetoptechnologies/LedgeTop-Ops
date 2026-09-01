@@ -1,6 +1,6 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 
-const base="/operations/notifications",apiBase="/api/notifications/deliveries",at="2026-08-25T12:00:00Z";
+const base="/notifications",apiBase="/api/notifications/deliveries",at="2026-08-25T12:00:00Z";
 function item(id="selected-batch",status="pending") {
   return {id,status,revision:7,accountName:"Same customer",folderLabel:"Selected delivery",recipientEmail:"exact-recipient@example.test",
     addedCount:40,removedCount:0,eligibleAt:"2026-08-25T12:05:00Z",createdAt:at,updatedAt:at,deliveredAt:status==="sent"?at:null,

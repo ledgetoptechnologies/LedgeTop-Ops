@@ -19,12 +19,6 @@ describe("consolidated Operations routes", () => {
     ["/operations/projects", "projects"],
     ["/operations/tasks", "tasks"],
     ["/operations/sops", "sops"],
-    ["/operations/notifications", "notifications"],
-    ["/operations/inbox", "inbox"],
-    ["/operations/invitation-requests", "invitation-requests"],
-    ["/operations/invitation-requests/request-one", "invitation-requests"],
-    ["/operations/feedback", "feedback"],
-    ["/operations/feedback/feedback-one", "feedback"],
   ] as const)("resolves %s to the Operations page and %s section", (pathname, section) => {
     expect(pathPage(pathname)).toBe("operations");
     expect(pathOperationsSection(pathname)).toBe(section);
@@ -37,9 +31,15 @@ describe("consolidated Operations routes", () => {
     expect(pathPage("/clients/requests/request-a")).toBe("clients");
     expect(pathPage("/operations/client-requests")).toBe("clients");
     expect(pathPage("/operations/client-requests/request-a")).toBe("clients");
-    expect(pathOperationsSection("/operations/client-requests/request-a")).toBe("client-requests");
+    expect(pathOperationsSection("/operations/client-requests/request-a")).toBe("operations");
     expect(canonicalClientPath("/operations/client-requests")).toBe("/clients");
     expect(canonicalClientPath("/operations/client-requests/request-a")).toBe("/clients/requests/request-a");
+    expect(pathPage("/operations/feedback/feedback-a")).toBe("clients");
+    expect(pathPage("/operations/invitation-requests/request-a")).toBe("clients");
+    expect(pathPage("/operations/inbox")).toBe("clients");
+    expect(canonicalClientPath("/operations/feedback/feedback-a")).toBe("/clients/feedback/feedback-a");
+    expect(canonicalClientPath("/operations/invitation-requests/request-a")).toBe("/clients/invitation-requests/request-a");
+    expect(canonicalClientPath("/operations/inbox")).toBe("/clients");
   });
 
   it("nests SOPs under Operations while retaining the legacy alias", () => {
@@ -53,8 +53,8 @@ describe("consolidated Operations routes", () => {
     expect(operationsLandingPath(["operations.view", "sops.view"])).toBe("/operations");
   });
 
-  it("lands notification auditors under Operations without granting other operation views", () => {
-    expect(operationsLandingPath(["delivery.share.audit"])).toBe("/operations/notifications");
+  it("does not mix notification access into the Operations landing", () => {
+    expect(operationsLandingPath(["delivery.share.audit"])).toBe("/operations");
     expect(operationsLandingPath(["sops.view", "delivery.share.audit"])).toBe("/operations/sops");
     expect(operationsLandingPath(["tasks.view", "delivery.share.audit"])).toBe("/operations/tasks");
     expect(operationsLandingPath(["projects.view", "delivery.share.audit"])).toBe("/operations/projects");
@@ -62,11 +62,11 @@ describe("consolidated Operations routes", () => {
     expect(operationsLandingPath([])).toBe("/operations");
   });
 
-  it("uses only the explicit feedback capability for a feedback-only landing", () => {
-    expect(operationsLandingPath([], false, true)).toBe("/operations/inbox");
-    expect(operationsLandingPath(["delivery.share.audit"], false, true)).toBe("/operations/notifications");
-    expect(operationsLandingPath([], true)).toBe("/operations/feedback");
-    expect(operationsLandingPath(["operations.manage"], false)).toBe("/operations/inbox");
+  it("keeps Client Hub capabilities out of the Operations landing", () => {
+    expect(operationsLandingPath([], false, true)).toBe("/operations");
+    expect(operationsLandingPath(["delivery.share.audit"], false, true)).toBe("/operations");
+    expect(operationsLandingPath([], true)).toBe("/operations");
+    expect(operationsLandingPath(["operations.manage"], false)).toBe("/operations");
     expect(operationsLandingPath(["sops.view"], true)).toBe("/operations/sops");
   });
 
@@ -93,7 +93,9 @@ describe("consolidated Operations routes", () => {
     ["/jobs/archive", "delivery"],
     ["/airspace", "airspace"],
     ["/viewer", "viewer"],
-    ["/configurations", "configurations"],
+    ["/notifications", "notifications"],
+    ["/operations/notifications", "notifications"],
+    ["/configurations", "administration"],
   ] as const)("keeps %s outside the Operations route group", (pathname, page) => {
     expect(pathPage(pathname)).toBe(page);
   });

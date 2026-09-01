@@ -14,6 +14,7 @@ const projectAdapters = ["source_record_activity", "operational_project_activity
 const accessAdapters = ["workspace_membership", "workspace_invitation_request", "workspace_peer_administrator",
   "portal_identity_denial", "authenticated_delivery_grant", "delegated_client_share", "viewer_client_grant", "project_access"] as const;
 const notificationAdapters = ["delivery_share_notification", "project_access_collaborator_notice", "project_access_companion_notice"] as const;
+const contentAdapters=["authenticated_content_activity"] as const;
 type Category = (typeof categories)[number];
 type CoveredCategory = (typeof coveredCategories)[number];
 type ActorType = (typeof actorTypes)[number];
@@ -37,6 +38,7 @@ interface AuditResponse {
   projectCoverage: Record<(typeof projectAdapters)[number], Coverage>;
   accessCoverage: Record<(typeof accessAdapters)[number], Coverage>;
   notificationCoverage: Record<(typeof notificationAdapters)[number], Coverage>;
+  contentCoverage:Record<(typeof contentAdapters)[number],Coverage>;
   page: { nextCursor: string | null; hasMore: boolean; returned: number; limit: number };
 }
 interface FilterDraft { category: Category; actorType: ActorType; result: AuditResult; from: string; to: string }
@@ -116,6 +118,17 @@ function validNotificationCoverage(value: unknown): value is AuditResponse["noti
   });
 }
 
+function validContentCoverage(value:unknown):value is AuditResponse["contentCoverage"]{
+  if(!value||typeof value!=="object"||Array.isArray(value))return false;
+  const record=value as Record<string,unknown>;
+  return Object.keys(record).length===contentAdapters.length&&contentAdapters.every(adapter=>{
+    const entry=record[adapter];if(!entry||typeof entry!=="object"||Array.isArray(entry))return false;
+    const item=entry as Partial<Coverage>,collected=item.collectedSince==null?item.collectedSince:businessTimestamp(item.collectedSince);
+    return typeof item.available==="boolean"&&(item.available?item.reason===null:isValue(coverageReasons,item.reason))
+      &&(item.available?typeof collected==="string":item.collectedSince==null||typeof collected==="string");
+  });
+}
+
 function draftFromUrl(): FilterDraft | null {
   const params = new URLSearchParams(window.location.search);
   if (params.get("audit.active") !== "1") return null;
@@ -163,9 +176,9 @@ function detailHref(item: AuditItem): string | null {
   } catch { return null; }
 }
 
-function CoverageDisclosure({ coverage, projectCoverage, accessCoverage, notificationCoverage }: { coverage: Record<CoveredCategory, Coverage>;
+function CoverageDisclosure({ coverage, projectCoverage, accessCoverage, notificationCoverage,contentCoverage }: { coverage: Record<CoveredCategory, Coverage>;
   projectCoverage: AuditResponse["projectCoverage"]; accessCoverage: AuditResponse["accessCoverage"];
-  notificationCoverage: AuditResponse["notificationCoverage"] }) {
+  notificationCoverage: AuditResponse["notificationCoverage"];contentCoverage:AuditResponse["contentCoverage"] }) {
   const available = coveredCategories.filter(category => coverage[category].available);
   const unavailable = coveredCategories.filter(category => !coverage[category].available);
   const reason = (value: CoverageReason) => value === "permission_required" ? "permission required"
@@ -188,6 +201,11 @@ function CoverageDisclosure({ coverage, projectCoverage, accessCoverage, notific
           : reason(accessCoverage[adapter].reason!)}</dd></div>)}
       {notificationAdapters.map(adapter => <div key={adapter}><dt>Notifications · {adapter.replaceAll("_", " ")}</dt>
         <dd>{notificationCoverage[adapter].available ? "available" : reason(notificationCoverage[adapter].reason!)}</dd></div>)}
+      {contentAdapters.map(adapter=><div key={adapter}><dt>Delivery · {adapter.replaceAll("_"," ")}</dt>
+        <dd>{contentCoverage[adapter].available&&contentCoverage[adapter].collectedSince
+          ?<>available since <time dateTime={businessTimestamp(contentCoverage[adapter].collectedSince!)!}>
+            {new Date(businessTimestamp(contentCoverage[adapter].collectedSince!)!).toLocaleString()}</time></>
+          :reason(contentCoverage[adapter].reason!)}</dd></div>)}
     </dl>
   </details>;
 }
@@ -202,6 +220,7 @@ export function ClientAuditTimeline({ root, contextVersion, contextSignal, proje
   const [projectCoverage, setProjectCoverage] = useState<AuditResponse["projectCoverage"] | null>(null);
   const [accessCoverage, setAccessCoverage] = useState<AuditResponse["accessCoverage"] | null>(null);
   const [notificationCoverage, setNotificationCoverage] = useState<AuditResponse["notificationCoverage"] | null>(null);
+  const [contentCoverage,setContentCoverage]=useState<AuditResponse["contentCoverage"]|null>(null);
   const [page, setPage] = useState<AuditResponse["page"] | null>(null), [busy, setBusy] = useState(false);
   const [requested, setRequested] = useState(false), [error, setError] = useState(""), [filterError, setFilterError] = useState("");
   const pending = useRef<AbortController | null>(null), sequence = useRef(0), failedCursor = useRef<string | null>(null);
@@ -226,7 +245,7 @@ export function ClientAuditTimeline({ root, contextVersion, contextSignal, proje
     const abort = () => { pending.current?.abort(); pending.current = null; sequence.current += 1; };
     const restore = () => {
       abort(); const restored = draftFromUrl();
-      setDraft(restored ?? defaults); setApplied(null); setItems([]); setCoverage(null); setProjectCoverage(null); setAccessCoverage(null); setNotificationCoverage(null);
+      setDraft(restored ?? defaults); setApplied(null); setItems([]); setCoverage(null); setProjectCoverage(null); setAccessCoverage(null); setNotificationCoverage(null);setContentCoverage(null);
       setPage(null); setBusy(false); setRequested(false); setError(""); setFilterError(""); failedCursor.current = null;
       if (restored) void load(requestedFilters(restored)!, null);
     };
@@ -253,6 +272,7 @@ export function ClientAuditTimeline({ root, contextVersion, contextSignal, proje
         || response.projectId !== (projectId ?? null) || !businessTimestamp(response.refreshedAt) || !asOf
         || !validCoverage(response.coverage) || !validProjectCoverage(response.projectCoverage) || !validAccessCoverage(response.accessCoverage)
         || !validNotificationCoverage(response.notificationCoverage)
+        || !validContentCoverage(response.contentCoverage)
         || !response.filters || !sameFilters(response.filters, filters)
         || !next || typeof next.hasMore !== "boolean" || !(next.nextCursor === null || scalar(next.nextCursor, 4096))
         || !Number.isInteger(next.returned) || !Number.isInteger(next.limit) || next.limit < 1 || next.limit > 100
@@ -261,7 +281,7 @@ export function ClientAuditTimeline({ root, contextVersion, contextSignal, proje
         throw new Error("This audit timeline could not be verified. Retry this section.");
       }
       setItems(previous => [...new Map([...(cursor ? previous : []), ...response.items].map(item => [itemKey(item), item])).values()]);
-      setCoverage(response.coverage); setProjectCoverage(response.projectCoverage); setAccessCoverage(response.accessCoverage); setNotificationCoverage(response.notificationCoverage);
+      setCoverage(response.coverage); setProjectCoverage(response.projectCoverage); setAccessCoverage(response.accessCoverage); setNotificationCoverage(response.notificationCoverage);setContentCoverage(response.contentCoverage);
       setPage(next); setApplied(filters); failedCursor.current = null;
     } catch (caught) {
       if (contextSignal.aborted || controller.signal.aborted || sequence.current !== request) return;
@@ -312,8 +332,8 @@ export function ClientAuditTimeline({ root, contextVersion, contextSignal, proje
         <button type="button" className="button-ghost" disabled={busy && !requested} onClick={reset}>Reset timeline</button></div>
     </form>
     {filterError && <p role="alert">{filterError}</p>}
-    {coverage && projectCoverage && accessCoverage && notificationCoverage && <CoverageDisclosure coverage={coverage}
-      projectCoverage={projectCoverage} accessCoverage={accessCoverage} notificationCoverage={notificationCoverage} />}
+    {coverage && projectCoverage && accessCoverage && notificationCoverage&&contentCoverage && <CoverageDisclosure coverage={coverage}
+      projectCoverage={projectCoverage} accessCoverage={accessCoverage} notificationCoverage={notificationCoverage} contentCoverage={contentCoverage} />}
     {items.length > 0 && <ol className="client-audit-events">{items.map(item => {
       const occurred = businessTimestamp(item.occurredAt)!, href = detailHref(item);
       return <li key={itemKey(item)}><div className="client-audit-event-heading"><div><strong>{item.resource.label}</strong><small>{labels[item.category]} · {item.action.replaceAll("_", " ")}</small></div>

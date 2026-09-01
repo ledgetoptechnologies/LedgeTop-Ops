@@ -1,7 +1,7 @@
 import {HTTPException} from 'hono/http-exception';
 import {NATIVE_PORTAL_TARGET_SCOPES_SQL,PRE_RELATION_NATIVE_PORTAL_TARGET_SCOPES_SQL,readNativeTargetScopes} from './native-portal-scopes';
 import {projectAccessReadColumns,projectAccessRowAllows,type ProjectAccessReadRow} from './project-access-read';
-import {projectAccessTermsExpirySql,type ProjectAccessTermsView} from './project-access-terms';
+import {projectAccessTermsExpirySql,projectAccessTermsReady,type ProjectAccessTermsView} from './project-access-terms';
 import {projectAccessCapacitySql} from './project-access-capacity';
 import type {PortalAuthorizationEnv,PortalWorkspaceCapability,PortalWorkspaceTarget} from './workspace-v2';
 
@@ -12,11 +12,12 @@ const authoritySchemaTables=['portal_v2_directory_generation_contracts','portal_
   'pa_portal_projection_generation_contracts','pa_portal_projection_relations','pa_portal_projection_project_lifecycle',
   'portal_project_access_terms','portal_project_access_deadlines','portal_project_access_current_lifecycle','portal_workspace_invitation_policies',
   'portal_project_invitation_fences','portal_project_access_write_fences','portal_v2_identity_denials','portal_v2_identity_eligibility_blocks'] as const;
-const delegationQuery=(scopeQuery:string,legacy:boolean,available:ReadonlySet<string>)=>{
+const relationSchemaTables=authoritySchemaTables.slice(0,6);
+const delegationQuery=(scopeQuery:string,termsReady:boolean,available:ReadonlySet<string>)=>{
  const scopesSql=scopeQuery.replace(/\?([1-5])\b/g,(_,index:string)=>replacements[Number(index)-1]!);
- const accessColumns=projectAccessReadColumns('e',!legacy),capacity=projectAccessCapacitySql('e',!legacy);
- const termsExpiry=legacy?'NULL':projectAccessTermsExpirySql('e.access_terms_id');
- const termsMode=legacy?'NULL':"(SELECT mode FROM portal_project_access_terms WHERE id=e.access_terms_id)";
+ const accessColumns=projectAccessReadColumns('e',termsReady),capacity=projectAccessCapacitySql('e',termsReady);
+ const termsExpiry=termsReady?projectAccessTermsExpirySql('e.access_terms_id'):'NULL';
+ const termsMode=termsReady?"(SELECT mode FROM portal_project_access_terms WHERE id=e.access_terms_id)":'NULL';
  const denials=available.has('portal_v2_identity_denials')?`(SELECT json_group_array(json_object('id',id,'scope',scope_type,'target',scope_public_id,'workspace',workspace_id,
    'status',status,'revoked',revoked_at,'validFrom',valid_from,'expiresAt',expires_at,
    'live',CASE WHEN status='active' AND revoked_at IS NULL AND datetime(valid_from)<=datetime('now')
@@ -77,21 +78,26 @@ export async function captureProjectInvitationDelegation(env:PortalAuthorization
  * caller's responsibility after this capture and before its atomic fence. */
 export async function captureWorkspaceInvitationDelegation(env:PortalAuthorizationEnv,input:{workspaceId:string;target:PortalWorkspaceTarget;identityId:string;issuer:string;subject:string;email:string},
   capabilities:PortalWorkspaceCapability[],terms:ProjectAccessTermsView|null){
-  const root=await env.DELIVERY_DB.withSession('first-primary').prepare(`SELECT root_type,COALESCE(pa_organization_public_id,pa_client_public_id) root_id
+  const session=env.DELIVERY_DB.withSession('first-primary');
+  const root=await session.prepare(`SELECT root_type,COALESCE(pa_organization_public_id,pa_client_public_id) root_id
     FROM portal_v2_workspaces WHERE id=? AND status='active'`).bind(input.workspaceId).first<{root_type:'organization'|'standalone_client';root_id:string}>();
   if(!root)exceeds();
   const relations=env.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED==='true';
-  const available=new Set((await env.DELIVERY_DB.withSession('first-primary').prepare(
+  const available=new Set((await session.prepare(
     `SELECT name FROM sqlite_master WHERE type='table' AND name IN (${authoritySchemaTables.map(()=>'?').join(',')})`,
   ).bind(...authoritySchemaTables).all<{name:string}>()).results.map(row=>row.name));
-  const contractReady=available.has('portal_v2_directory_generation_contracts');
-  const preRelationContract=!relations&&!contractReady;
+  const relationSchemaCount=relationSchemaTables.filter(name=>available.has(name)).length;
+  if((relationSchemaCount!==0&&relationSchemaCount!==relationSchemaTables.length)||(relations&&relationSchemaCount===0))
+    throw new HTTPException(503,{message:'portal_relation_schema_unavailable'});
+  const preRelationContract=relationSchemaCount===0;
   const legacyIncompatible=authoritySchemaTables.filter(name=>name!=='portal_v2_identity_denials'&&name!=='portal_v2_identity_eligibility_blocks');
   if(preRelationContract&&legacyIncompatible.some(name=>available.has(name)))exceeds();
-  const query=delegationQuery(preRelationContract?PRE_RELATION_NATIVE_PORTAL_TARGET_SCOPES_SQL:NATIVE_PORTAL_TARGET_SCOPES_SQL,preRelationContract,available);
+  const termsReady=await projectAccessTermsReady(session);
+  if(terms&&!termsReady)throw new HTTPException(503,{message:'project_access_terms_unavailable'});
+  const query=delegationQuery(preRelationContract?PRE_RELATION_NATIVE_PORTAL_TARGET_SCOPES_SQL:NATIVE_PORTAL_TARGET_SCOPES_SQL,termsReady,available);
   const targetInput=input.target.scopeType==='workspace'?{scopeType:root.root_type,publicId:root.root_id}:input.target;
   const encoded=JSON.stringify({...input,targets:[targetInput],relations:relations?1:0});
-  const proof=await env.DELIVERY_DB.withSession('first-primary').prepare(query).bind(encoded,...authoritySchemaTables).first<string>('proof');
+  const proof=await session.prepare(query).bind(encoded,...authoritySchemaTables).first<string>('proof');
   if(!proof||new TextEncoder().encode(proof).byteLength>192*1024)exceeds();
   const state=JSON.parse(proof) as {membership:{expiresAt:string|null}|null;workspace:{id:string;rootType:'organization'|'standalone_client';rootPublicId:string;generationId:string}|null;
     entitlements:Entitlement[];denials:unknown[];blocks:unknown[];scopeRows:unknown[];schema:string[]};
@@ -117,7 +123,7 @@ export async function captureWorkspaceInvitationDelegation(env:PortalAuthorizati
   }
   // The caller performs the canonical deny-aware per-capability checks AFTER
   // this capture. Its first write then compares the very same bounded facts.
-  return {proof,fence:(id:string)=>preRelationContract
+  return {proof,fence:(id:string)=>!termsReady
     ?env.DELIVERY_DB.prepare(`UPDATE portal_v2_workspace_memberships SET status=status WHERE workspace_id=? AND identity_id=?
       AND (${query})=?`).bind(input.workspaceId,input.identityId,encoded,...authoritySchemaTables,proof)
     :env.DELIVERY_DB.prepare(`INSERT INTO portal_project_invitation_fences(id,write_guard)

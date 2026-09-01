@@ -22,7 +22,7 @@ function path(route: Route, id: string | null = null): string {
   const params = new URLSearchParams({ status: route.status });
   if (route.q) params.set("q", route.q);
   if (route.accountId) params.set("accountId", route.accountId);
-  return `/operations/feedback${id ? `/${encodeURIComponent(id)}` : ""}?${params}`;
+  return `/clients/feedback${id ? `/${encodeURIComponent(id)}` : ""}?${params}`;
 }
 function itemValid(value: unknown): value is StaffClientFeedbackItem {
   if (!value || typeof value !== "object") return false;

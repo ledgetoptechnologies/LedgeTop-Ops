@@ -742,7 +742,7 @@ describe("client workspace hierarchy v2", () => {
     await db.prepare(`UPDATE portal_v2_invitation_rate_limits
       SET window_started_at='2000-01-01T00:00:00Z',request_count=0
       WHERE workspace_id='workspace-account-a' AND actor_identity_id='identity-one'`).run();
-  }, 30_000);
+  }, 60_000);
 
   it("denies acceptance when enrollment revocation arrives before its receipt", async () => {
     const accessReadyEnv = { ...env, CLIENT_PORTAL_ACCESS_ENROLLMENT_READY: "true" };

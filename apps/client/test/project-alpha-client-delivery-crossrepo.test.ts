@@ -142,11 +142,12 @@ describe("Project Alpha to authenticated Client delivery cross-repository contra
           if (key !== "clients/acme/north/report.pdf") return null;
           const bytes = new TextEncoder().encode("report");
           return { body: new ReadableStream({ start(controller) { controller.enqueue(bytes); controller.close(); } }),
-            httpEtag: '"etag-report"', writeHttpMetadata(headers: Headers) { headers.set("Content-Type", "application/pdf"); } };
+            etag: "etag-report", httpEtag: '"etag-report"',
+            writeHttpMetadata(headers: Headers) { headers.set("Content-Type", "application/pdf"); } };
         },
       } as unknown as R2Bucket,
     } as Env;
-  }, 30_000);
+  }, 60_000);
 
   afterAll(async () => miniflare.dispose());
 
@@ -269,7 +270,7 @@ describe("Project Alpha to authenticated Client delivery cross-repository contra
     expect((await request("/projects")).status).toBe(403);
     expect((await request(downloadPath)).status).toBe(403);
     expect(bucketReads).toEqual([]);
-  }, 30_000);
+  }, 60_000);
 
   it("hard-fails closed across workspaces and when either rollout flag is off", async () => {
     const disabledPortal = { ...env, CLIENT_PORTAL_ENABLED: "false" } as Env;

@@ -223,6 +223,27 @@ function validatePage(value: unknown): Snapshot {
 
 function retryableSnapshotResponse(response: Response): boolean { return response.status === 429 || response.status >= 500; }
 async function retryDelay(milliseconds: number): Promise<void> { await new Promise((resolve) => setTimeout(resolve,milliseconds)); }
+function projectAlphaNetworkError(error:unknown):Error{
+  const candidate=error instanceof Error?error:null;
+  const cause=candidate&&typeof candidate.cause==="object"&&candidate.cause!==null
+    ? candidate.cause as {code?:unknown;message?:unknown}:null;
+  const code=typeof cause?.code==="string"?cause.code.toUpperCase():"";
+  const detail=`${candidate?.name??""} ${candidate?.message??""} ${typeof cause?.message==="string"?cause.message:""}`.toLowerCase();
+  // Persist only a bounded category. Fetch errors can contain target URLs,
+  // request metadata or platform details and must never be copied into D1/UI.
+  if(candidate?.name==="TimeoutError"||candidate?.name==="AbortError"||detail.includes("timed out")||detail.includes("timeout"))
+    return new Error("project-alpha-network-timeout");
+  if(code==="ENOTFOUND"||code==="EAI_AGAIN"||detail.includes("dns")||detail.includes("name resolution"))
+    return new Error("project-alpha-network-dns");
+  if(code.startsWith("ERR_TLS")||code.startsWith("CERT_")||detail.includes("certificate")||detail.includes("tls"))
+    return new Error("project-alpha-network-tls");
+  if(code==="ECONNREFUSED"||detail.includes("connection refused"))
+    return new Error("project-alpha-network-refused");
+  if(code==="ECONNRESET"||code==="UND_ERR_SOCKET"||detail.includes("connection reset")||detail.includes("socket closed"))
+    return new Error("project-alpha-network-reset");
+  if(detail.includes("redirect"))return new Error("project-alpha-network-redirect");
+  return new Error("project-alpha-network-error");
+}
 async function cancelSnapshotBody(response:Response,budget?:RecoveryBudget):Promise<void>{
   if(!budget){await response.body?.cancel();return;}
   let timer:ReturnType<typeof setTimeout>|undefined;
@@ -246,8 +267,7 @@ async function fetchSnapshotPage(url: URL, connection: ProjectAlphaSourceConnect
     }
     await retryDelay(50*2**(attempt-1));
   }
-  throw new Error(lastError instanceof Error && lastError.name === "TimeoutError"
-    ? "project-alpha-network-timeout" : "project-alpha-network-error");
+  throw projectAlphaNetworkError(lastError);
 }
 
 async function readSnapshotPage(response: Response,budget?:RecoveryBudget): Promise<unknown> {

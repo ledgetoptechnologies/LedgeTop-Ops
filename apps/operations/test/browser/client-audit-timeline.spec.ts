@@ -29,6 +29,7 @@ const notificationCoverage = {
   project_access_collaborator_notice: { available: false, reason: "not_collected" },
   project_access_companion_notice: { available: false, reason: "not_collected" },
 };
+const contentCoverage={authenticated_content_activity:{available:false,reason:"not_collected",collectedSince:null}};
 type Filters = { category: string; actorType: string; result: string; from: string | null; to: string | null };
 function item(id: string, overrides: Record<string, unknown> = {}) {
   return { id, sourceId: source, producer: "portal_access", producerEventId: `event-${id}`, category: "access", action: "member_denied",
@@ -40,7 +41,7 @@ function filters(url: URL): Filters {
     result: url.searchParams.get("result") || "all", from: url.searchParams.get("from"), to: url.searchParams.get("to") };
 }
 function timeline(url: URL, items = [item("one")], nextCursor: string | null = null, contextVersion = "client-context", projectId: string | null = null) {
-  return { canonicalRoot, projectId, contextVersion, refreshedAt: asOf, asOf, coverage, projectCoverage, accessCoverage, notificationCoverage,
+  return { canonicalRoot, projectId, contextVersion, refreshedAt: asOf, asOf, coverage, projectCoverage, accessCoverage, notificationCoverage,contentCoverage,
     filters: filters(url), items,
     page: { nextCursor, hasMore: Boolean(nextCursor), returned: items.length, limit: 10 } };
 }

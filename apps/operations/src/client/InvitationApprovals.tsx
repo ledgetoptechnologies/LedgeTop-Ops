@@ -8,7 +8,7 @@ import "./InvitationAdministration.css";
 interface Route {id: string | null; sourceId: string; workspaceId: string; status: string; q: string; invalid: boolean}
 export function readInvitationApprovalRoute(path = location.pathname, search = location.search): Route {
   const parts = path.split("/").filter(Boolean), params = new URLSearchParams(search);
-  let id: string | null = null, invalid = parts[0] !== "operations" || parts[1] !== "invitation-requests" || parts.length > 3;
+  let id: string | null = null, invalid = !(["clients", "operations"].includes(parts[0] || "") && parts[1] === "invitation-requests") || parts.length > 3;
   try {id = parts[2] ? decodeURIComponent(parts[2]) : null;} catch {invalid = true;}
   const sourceId = params.get("sourceId") ?? "", workspaceId = params.get("workspaceId") ?? "", status = params.get("status") ?? "open", q = params.get("q") ?? "";
   invalid ||= Boolean(id && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(id)) || Boolean(sourceId && !/^project-alpha:[A-Za-z0-9_-]+$/.test(sourceId)) || Boolean(workspaceId && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(workspaceId)) || Boolean(id && (!sourceId || !workspaceId)) || Boolean(sourceId) !== Boolean(workspaceId)
@@ -64,7 +64,7 @@ function ApprovalView({route, navigate}: {route: Route; navigate: (route: Route)
       else {setUncertain(true); setError("The decision is not confirmed. Retry the same decision before making another change.");}
     }} finally {if (!controller.signal.aborted && run === epoch.current) {mutation.current = null; setBusy(false);}}
   }
-  return <section className="invitation-administration" aria-label="Invitation approvals"><header><div><h2>{route.id ? "Review invitation request" : "Invitation approvals"}</h2><p>Review the exact proposed access. Approval requests are not invitations or memberships.</p></div><a className="button button-ghost" href={route.id ? listPath(route) : "/operations/inbox"}>{route.id ? "Back to invitation approvals" : "Back to inbox"}</a></header>
+  return <section className="invitation-administration" aria-label="Invitation approvals"><header><div><h2>{route.id ? "Review invitation request" : "Invitation approvals"}</h2><p>Review the exact proposed access. Approval requests are not invitations or memberships.</p></div><a className="button button-ghost" href={route.id ? listPath(route) : "/clients"}>{route.id ? "Back to invitation approvals" : "Back to Client Hub"}</a></header>
     {!route.id && <form className="invitation-administration-search" onSubmit={search}><label>Search invitation requests<input value={draft} maxLength={100} onChange={event => setDraft(event.target.value)} /></label><label>Request status<select value={route.status} onChange={event => navigate({...route, status: event.target.value})}>{["open", "pending", "approving", "approved", "rejected", "cancelled", "stale", "all"].map(status => <option key={status} value={status}>{status === "open" ? "Needs review" : status === "all" ? "All" : invitationRequestStatus(status as InvitationRequest["status"])}</option>)}</select></label><button className="button-orange">Search</button></form>}
     <button className="button-ghost" disabled={loading || busy || uncertain} onClick={() => void load()}>Refresh invitation requests</button>
     {loading && <p role="status">Loading invitation requests…</p>}{notice && <p role="status">{notice}</p>}

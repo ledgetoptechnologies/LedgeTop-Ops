@@ -108,6 +108,8 @@ describe('source-owned native portal resources with real signed projection and l
       new URL('../../client/migrations/0172_project_access_authority_history.sql',import.meta.url),'utf8')).map(sql=>db.prepare(sql)));
     await db.batch(splitD1MigrationStatements(readFileSync(
       new URL('../../client/migrations/0184_native_client_feedback.sql',import.meta.url),'utf8')).map(sql=>db.prepare(sql)));
+    await db.batch(splitD1MigrationStatements(readFileSync(
+      new URL('../../client/migrations/0187_authenticated_content_audit.sql',import.meta.url),'utf8')).map(sql=>db.prepare(sql)));
     opsDb=await runtime.getD1Database('OPS_DB') as D1Database;
     for(const name of readdirSync(new URL('../migrations/',import.meta.url)).filter(n=>n.endsWith('.sql')&&n<'0041_').sort())
       await opsDb.batch(splitD1MigrationStatements(readFileSync(new URL(`../migrations/${name}`,import.meta.url),'utf8')).map(sql=>opsDb.prepare(sql)));
@@ -197,9 +199,9 @@ describe('source-owned native portal resources with real signed projection and l
       f.binding=(await db.prepare('SELECT binding_id FROM portal_native_staff_grants WHERE grant_id=?').bind(f.grant).first<string>('binding_id'))!;
       expect(await db.prepare('SELECT state FROM portal_native_staff_grants WHERE grant_id=?').bind(f.grant).first('state')).toBe('active');
       await db.batch([
-      db.prepare(`INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES(?,?,8,'2026-08-26T12:00:00Z','text/plain','text')`).bind(`native/${f.name}/report.txt`,`etag-${f.name}`),
-      db.prepare(`INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES(?,?,8,'2026-08-26T12:00:00Z','text/plain','text')`).bind(`native/${f.name}/child/deep.txt`,`etag-${f.name}`),
-      db.prepare(`INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES(?,?,8,'2026-08-26T12:00:00Z','text/plain','text')`).bind(`native/${f.name}/_LTDS/private.txt`,`etag-${f.name}`),
+      db.prepare(`INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES(?,?,8,'2026-08-26T12:00:00Z','text/plain','text')`).bind(`native/${f.name}/report.txt`,`"etag-${f.name}"`),
+      db.prepare(`INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES(?,?,8,'2026-08-26T12:00:00Z','text/plain','text')`).bind(`native/${f.name}/child/deep.txt`,`"etag-${f.name}"`),
+      db.prepare(`INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES(?,?,8,'2026-08-26T12:00:00Z','text/plain','text')`).bind(`native/${f.name}/_LTDS/private.txt`,`"etag-${f.name}"`),
       ]);
     }
   },180_000);
@@ -424,6 +426,29 @@ describe('source-owned native portal resources with real signed projection and l
     const reader=download.body!.getReader();expect(new TextDecoder().decode((await reader.read()).value)).toBe('sou');await reader.cancel();
     expect((await request(file.downloadPath,{headers:{Range:'bytes=20-21'}})).status).toBe(416);
   });
+  it('audits native preview and download requests once without storing source paths',async()=>{
+    env.CLIENT_PORTAL_CONTENT_AUDIT_ENABLED='true';
+    env.CLIENT_PORTAL_CONTENT_AUDIT_HMAC_SECRET='native-content-audit-secret-that-is-long-enough';
+    try{
+      const file=(await files(b)).files[0]!;
+      expect((await request(file.downloadPath,{method:'HEAD'})).status).toBe(200);
+      expect((await request(file.downloadPath,{headers:{Range:'bytes=0-2'}})).status).toBe(206);
+      expect((await request(file.downloadPath,{headers:{Range:'bytes=3-5'}})).status).toBe(206);
+      expect((await request(file.previewPath!)).status).toBe(200);
+      const events=(await db.prepare(`SELECT action,authority_mode,source_id,workspace_id,project_public_id,
+        resource_label FROM portal_authenticated_content_events ORDER BY action`).all()).results;
+      expect(events).toEqual([
+        {action:'file.download_requested',authority_mode:'native_delivery',source_id:b.source,
+          workspace_id:b.workspace,project_public_id:projectId,resource_label:'report.txt'},
+        {action:'file.preview_requested',authority_mode:'native_delivery',source_id:b.source,
+          workspace_id:b.workspace,project_public_id:projectId,resource_label:'report.txt'},
+      ]);
+      expect(JSON.stringify(events)).not.toContain('native/b/');
+      expect(JSON.stringify(events)).not.toContain('etag-b');
+    }finally{
+      env.CLIENT_PORTAL_CONTENT_AUDIT_ENABLED='false';delete env.CLIENT_PORTAL_CONTENT_AUDIT_HMAC_SECRET;
+    }
+  });
   it('source suspension hides only that source and never touches its bucket',async()=>{
     const file=(await files(b)).files[0]!;await state(b,'suspended');reads=[];
     try{expect((await request(`${base(b)}/context`)).status).toBe(404);expect((await request(file.downloadPath)).status).toBe(404);expect(reads).toEqual([]);
@@ -469,7 +494,7 @@ describe('source-owned native portal resources with real signed projection and l
   });
   it('file pages remain bounded and their cursor cannot be borrowed by another folder',async()=>{
     await db.batch(Array.from({length:27},(_,i)=>db.prepare(`INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind)
-      VALUES(?,?,8,'2026-08-26T12:00:00Z','text/plain','text')`).bind(`native/a/paged-${String(i).padStart(2,'0')}.txt`,'etag-a')));
+      VALUES(?,?,8,'2026-08-26T12:00:00Z','text/plain','text')`).bind(`native/a/paged-${String(i).padStart(2,'0')}.txt`,'"etag-a"')));
     try{
       const id=await folder(a),first=await (await request(`${base(a)}/folders/${id}`)).json() as ClientFilePage;
       expect(first.files.length+(first.folders?.length??0)).toBe(25);expect(first.cursor).toBeTruthy();

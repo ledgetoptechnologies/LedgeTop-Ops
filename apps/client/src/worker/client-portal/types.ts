@@ -80,6 +80,14 @@ export interface ClientPortalFile {
 
 export interface AuthorizedClientPortalFile extends ClientPortalFile {
   storageKey: string;
+  etag: string;
+  authority: {
+    sourceId: string;
+    accountId: string;
+    identityId: string;
+    projectId: string | null;
+    associationId: string;
+  };
 }
 
 export interface ClientPortalFolder {

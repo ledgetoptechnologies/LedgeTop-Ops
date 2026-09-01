@@ -667,6 +667,33 @@ Production activation order:
    flags back off. Do not erase or remap the audited PA root. Investigate and
    fix forward from the preserved shadow projection.
 
+Authenticated content-request auditing is an independent, default-off rollout.
+Apply Client migration `0187`, provision a distinct 32-byte-or-longer
+`CLIENT_PORTAL_CONTENT_AUDIT_HMAC_SECRET`, deploy while
+`CLIENT_PORTAL_CONTENT_AUDIT_ENABLED=false`, and verify the migration-created
+history state, append-only event ledger, indexes, triggers, and closed retention
+gate. Enabling the flag causes the first ready producer request to establish the
+immutable `collection_started_at`; Operations must report content activity as
+`not_collected` before that moment. Events mean an authorized preview or
+download was **requested** and prepared, not that bytes reached the browser or
+were consumed. They store only an HMAC-derived resource/version pseudonym and a
+sanitized basename. A filename can itself contain customer or project PII, so
+only tenant-scoped staff timeline authorization may expose it.
+
+This first schema has no overlapping HMAC-key version. Rotate the audit HMAC
+only after at least the ten-minute dedupe window has elapsed and accept an
+intentional pseudonym discontinuity at the rotation boundary; rotating inside
+the window can create one additional requested event. Never reuse an Access,
+portal, session, catalog, or delivery secret. Before first activation, the
+default-off flag is transparent. After `collection_started_at` exists, turning
+the flag off intentionally fails body-bearing authenticated preview/download
+requests with a temporary-unavailable response; it cannot silently create an
+audit gap while content continues to flow. Recovery restores the same dedicated
+secret and re-enables the producer. Never delete or reset the collection
+boundary or ledger. Online rows are archived before the guarded 365-day
+retention deletion described in
+`docs/operations/authenticated-content-audit-retention.md`.
+
 Invitation and member mutations have a second independent gate,
 `CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED`, also checked in as `false`.
 

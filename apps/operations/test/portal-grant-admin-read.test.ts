@@ -57,25 +57,40 @@ describe("bounded staff grant and denial reads", () => {
       INSERT INTO portal_v2_identities(id,issuer,subject,verified_email) VALUES
         ('identity-a','https://access.test','subject-a','person@example.test'),
         ('identity-b','https://access.test','subject-b','private-outside-scope@example.test'),
-        ('identity-c','https://access.test','subject-c','manager-c@example.test');
-      INSERT INTO portal_v2_workspaces(id,root_type,pa_organization_public_id,display_name,status) VALUES ('workspace-a','organization','org-a','Acme Workspace','active');
+        ('identity-c','https://access.test','subject-c','manager-c@example.test'),
+        ('identity-foreign','https://access.test','subject-foreign','foreign@example.test');
+      INSERT INTO portal_v2_workspaces(id,root_type,pa_organization_public_id,display_name,status) VALUES
+        ('workspace-a','organization','org-a','Acme Workspace','active'),
+        ('workspace-foreign','organization','org-foreign','Foreign Workspace','active');
       INSERT INTO portal_v2_workspace_memberships(id,workspace_id,identity_id,status) VALUES
         ('membership-a','workspace-a','identity-a','active'),('membership-b','workspace-a','identity-b','active'),
-        ('membership-c','workspace-a','identity-c','active');
-      INSERT INTO portal_v2_directory_generations(id,workspace_id,status,complete) VALUES ('generation-a','workspace-a','active',1);
-      INSERT INTO portal_v2_directory_checkpoints(workspace_id,active_generation_id) VALUES ('workspace-a','generation-a');
+        ('membership-c','workspace-a','identity-c','active'),
+        ('membership-foreign','workspace-foreign','identity-foreign','active');
+      INSERT INTO portal_v2_directory_generations(id,workspace_id,status,complete) VALUES
+        ('generation-a','workspace-a','active',1),('generation-foreign','workspace-foreign','active',1);
+      INSERT INTO portal_v2_directory_checkpoints(workspace_id,active_generation_id) VALUES
+        ('workspace-a','generation-a'),('workspace-foreign','generation-foreign');
       INSERT INTO portal_v2_directory_entities(workspace_id,generation_id,entity_type,public_id,parent_public_id,display_name,source_version) VALUES
         ('workspace-a','generation-a','organization','org-a',NULL,'Acme Organization','org-v1'),
-        ('workspace-a','generation-a','project','project-a','org-a','Hilly Haven','project-v1');
+        ('workspace-a','generation-a','department','department-a','org-a','Athletic Department','department-v1'),
+        ('workspace-a','generation-a','project','project-a','org-a','Hilly Haven','project-v1'),
+        ('workspace-foreign','generation-foreign','organization','org-foreign',NULL,'Foreign Organization','org-foreign-v1'),
+        ('workspace-foreign','generation-foreign','project','project-foreign','org-foreign','Foreign Project','project-foreign-v1');
+      INSERT INTO portal_v2_directory_relations(workspace_id,generation_id,relation_type,from_type,from_public_id,to_type,to_public_id,active)
+        VALUES ('workspace-a','generation-a','contains','department','department-a','project','project-a',1);
       INSERT INTO portal_v2_folder_bindings(id,workspace_id,owner_scope_type,owner_public_id,r2_prefix,source_version)
         VALUES ('binding-a','workspace-a','project','project-a','Jobs/Clients/Acme/','binding-v1');
       INSERT INTO portal_v2_entitlements(id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id)
         VALUES ('delivery-a','workspace-a','identity-a','delivery.view','allow','project','project-a'),
           ('manage-b','workspace-a','identity-b','member.manage','allow','project','project-a'),
-          ('manage-c','workspace-a','identity-c','member.manage','allow','project','project-a');
+          ('manage-c','workspace-a','identity-c','member.manage','allow','project','project-a'),
+          ('delivery-c','workspace-a','identity-c','delivery.view','allow','department','department-a'),
+          ('delivery-foreign','workspace-foreign','identity-foreign','delivery.view','allow','project','project-foreign');
       INSERT INTO pa_portal_principals(workspace_id,public_id,identity_id,email_hint,display_name,source_version,status)
         VALUES ('workspace-a','principal-a','identity-a','display@example.test','Alex Client','principal-v1','active'),
-          ('workspace-a','principal-b','identity-b','private-outside-scope@example.test','Second Private Client','principal-b-v1','active');
+          ('workspace-a','principal-b','identity-b','private-outside-scope@example.test','Second Private Client','principal-b-v1','active'),
+          ('workspace-a','principal-c','identity-c','manager-c@example.test','Craig Athletic Director','principal-c-v1','active'),
+          ('workspace-foreign','principal-foreign','identity-foreign','foreign@example.test','Foreign Client','principal-foreign-v1','active');
       INSERT INTO portal_v2_authenticated_delivery_grants(id,logical_grant_id,grant_version,workspace_id,folder_binding_id,binding_source_version,
         audience_type,audience_public_id,audience_source_version,reason_code,created_by_staff_id)
         VALUES ('grant-a-v1','grant-a',1,'workspace-a','binding-a','binding-v1','organization','org-a','org-v1','client_delivery','staff-admin');
@@ -125,8 +140,29 @@ describe("bounded staff grant and denial reads", () => {
     expect(hidden.audiences).toEqual([]);
     expect(JSON.stringify(hidden)).not.toContain("private-outside-scope@example.test");
     const visible = await searchAuthenticatedDeliveryGrantAudiences(searchEnv, principal, "binding-a", "Alex");
-    expect(visible.audiences).toContainEqual({ type: "principal", publicId: "principal-a",
-      displayName: "Alex Client", email: "person@example.test" });
+    expect(visible.audiences).toContainEqual(expect.objectContaining({ type: "principal", publicId: "principal-a",
+      displayName: "Alex Client", email: "person@example.test",recipientMode:'exact',
+      currentAuthorizedRecipientCount:1,recipientCountTruncated:false }));
+    expect(visible).toMatchObject({folderBindingId:'binding-a',workspaceId:'workspace-a',workspaceLabel:'Acme Workspace'});
+  });
+
+  it('returns explicit department and organization scopes with bounded dynamic recipient metadata',async()=>{
+    const department=await searchAuthenticatedDeliveryGrantAudiences(env,principal,'binding-a','Athletic','department');
+    expect(department).toMatchObject({scopeTypeFilter:'department',audiences:[{type:'department',publicId:'department-a',
+      displayName:'Athletic Department',recipientMode:'dynamic'}]});
+    expect(department.audiences[0]).not.toHaveProperty('currentAuthorizedRecipientCount');
+    const organization=await searchAuthenticatedDeliveryGrantAudiences(env,principal,'binding-a','Acme','organization');
+    expect(organization.audiences).toEqual([expect.objectContaining({type:'organization',publicId:'org-a',recipientMode:'dynamic'})]);
+    expect(JSON.stringify(department)).not.toContain('Jobs/Clients');
+  });
+
+  it('never crosses workspace tenants or widens an exact individual to their organization',async()=>{
+    const foreign=await searchAuthenticatedDeliveryGrantAudiences(env,principal,'binding-a','Foreign');
+    expect(foreign.audiences).toEqual([]);
+    const person=await searchAuthenticatedDeliveryGrantAudiences({...env,CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED:'false'},principal,'binding-a','Craig','principal');
+    expect(person.audiences).toEqual([expect.objectContaining({type:'principal',publicId:'principal-c',recipientMode:'exact',
+      currentAuthorizedRecipientCount:1})]);
+    expect(person.audiences.some(item=>item.type==='organization')).toBe(false);
   });
 
   it("lists denial history with display-only identity and scope labels", async () => {

@@ -100,7 +100,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   // The digest intentionally moved with the reviewed exact two-host portal
   // allowlist. Keep the field assertions below so a future config change
   // cannot hide behind a digest refresh.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "5f4c420d7da3d13a0fc96b4318501ba2825bf784be4074331d1ee806326ceb7b");
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "5997e8fa2f6ec1e5d03498921e0c550dbcdc7e0b0bab5605011df2c5e4af6032");
   const config = readJson("apps/client/wrangler.jsonc");
   assert.equal(config.name, "ltds-clients");
   assert.equal(config.main, "src/worker/index.ts");
@@ -123,6 +123,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.equal(config.vars.CLIENT_PORTAL_ORIGIN, "https://client.ledgetopdroneservices.com");
   assert.equal(config.vars.CLIENT_PORTAL_ORIGINS, "https://client.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com");
   assert.equal(config.vars.CLIENT_PORTAL_ENABLED, "true");
+  assert.equal(config.vars.CLIENT_PORTAL_CONTENT_AUDIT_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_HMAC_KEY_ID, "");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_KEY_ID, "");
   assert.equal(config.vars.PROJECT_ALPHA_PORTAL_HMAC_KEY_ID, "");

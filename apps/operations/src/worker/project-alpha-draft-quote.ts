@@ -410,6 +410,8 @@ async function quoteRuntime(env: Env, sourceId: string): Promise<QuoteRuntime> {
   }
   if (env.PROJECT_ALPHA_DRAFT_QUOTES_ENABLED !== "true")
     throw new ProjectAlphaDraftQuoteError(503, "integration_disabled", "Project Alpha draft creation is not enabled");
+  if (!env.OPS_DB)
+    throw new ProjectAlphaDraftQuoteError(409, "scope_denied", "This request's catalog source has no configured quote connection");
   try {
     const connector = await resolveProjectAlphaConnector(env, sourceId, "draft_quote");
     if (!connector.draftQuote)
@@ -424,7 +426,7 @@ async function quoteRuntime(env: Env, sourceId: string): Promise<QuoteRuntime> {
   } catch (error) {
     if (error instanceof ProjectAlphaDraftQuoteError) throw error;
     if (error instanceof ProjectAlphaConnectorError) {
-      const denied = error.code === "unavailable";
+      const denied = error.code === "invalid" || error.code === "unavailable";
       const changed = error.code === "changed" || error.code === "conflict";
       throw new ProjectAlphaDraftQuoteError(denied || changed ? 409 : 503,
         denied ? "scope_denied" : changed ? "destination_changed" : "integration_disabled", error.message);
@@ -594,11 +596,11 @@ async function requestForDraft(env: Env, requestId: string): Promise<RequestRow 
   ).bind(requestId).first<RequestRow>();
 }
 
-async function latestReceipt(env: Env, requestId: string): Promise<ReceiptRow | null> {
+async function latestReceipt(env: Env, requestId: string, sourceId: string): Promise<ReceiptRow | null> {
   return database(env).prepare(
-    `${receiptSelect} WHERE receipt.request_id=? AND receipt.scope_stale_at IS NULL
+    `${receiptSelect} WHERE receipt.request_id=? AND receipt.source_id=? AND receipt.scope_stale_at IS NULL
      ORDER BY receipt.request_revision DESC,receipt.area_revision DESC,receipt.created_at DESC LIMIT 1`,
-  ).bind(requestId).first<ReceiptRow>();
+  ).bind(requestId, sourceId).first<ReceiptRow>();
 }
 
 const receiptSelect = `SELECT receipt.*,command.editor_origin
@@ -606,9 +608,11 @@ const receiptSelect = `SELECT receipt.*,command.editor_origin
   LEFT JOIN request_pa_draft_quote_commands command ON command.id=receipt.command_id
     AND command.source_id=receipt.source_id`;
 
-async function exactReceipt(env: Env, requestId: string, revision: number, areaRevision: number): Promise<ReceiptRow | null> {
-  return database(env).prepare(`${receiptSelect} WHERE receipt.request_id=? AND receipt.request_revision=? AND receipt.area_revision=?`)
-    .bind(requestId, revision, areaRevision).first<ReceiptRow>();
+async function exactReceipt(env: Env, requestId: string, sourceId: string,
+  revision: number, areaRevision: number): Promise<ReceiptRow | null> {
+  return database(env).prepare(`${receiptSelect} WHERE receipt.request_id=?
+      AND receipt.request_revision=? AND receipt.area_revision=? AND receipt.source_id=?`)
+    .bind(requestId, revision, areaRevision, sourceId).first<ReceiptRow>();
 }
 
 interface QuoteCommandRow {
@@ -959,14 +963,19 @@ export function registerProjectAlphaDraftQuoteRoutes(app: App): void {
     const request = await requestForDraft(c.env, requestId);
     if (!request) throw new HTTPException(404, { message: "Client request not found" });
     c.header("Cache-Control", "no-store");
-    const receipt = await latestReceipt(c.env, requestId);
-    let capability = request.catalog_source_id === PRIMARY_ALPHA_SOURCE_ID
+    const primarySource = request.catalog_source_id === PRIMARY_ALPHA_SOURCE_ID;
+    let receipt: ReceiptRow | null = null;
+    let receiptAuthorityProven = primarySource;
+    let capability = primarySource
       ? projectAlphaDraftQuoteCapability(c.env) : { enabled: c.env.PROJECT_ALPHA_DRAFT_QUOTES_ENABLED === "true", reason: null as string | null };
-    if (capability.enabled) {
+    if (!primarySource && (!request.portal_workspace_id || !request.portal_project_public_id)) {
+      capability = { enabled: false, reason: "This request's catalog source has no configured quote connection" };
+    } else if (capability.enabled) {
       try {
         const runtime = await quoteRuntime(c.env, request.catalog_source_id);
         const native = runtime.connectorProof ? await resolveNativeDraftAuthority(c.env, request, runtime.connectorProof) : undefined;
         await buildPayload(c.env, request, native);
+        receiptAuthorityProven = true;
         if (!["under_review", "accepted_pending_pa_linkage"].includes(request.status))
           capability = { enabled: false, reason: "Review or accept the request before creating a Project Alpha draft" };
         else if (await hasUnresolvedOtherCommand(c.env, request))
@@ -977,6 +986,8 @@ export function registerProjectAlphaDraftQuoteRoutes(app: App): void {
         else throw error;
       }
     }
+    if (receiptAuthorityProven)
+      receipt = await latestReceipt(c.env, requestId, request.catalog_source_id);
     c.header("Cache-Control", "no-store");
     return c.json({
       capability,
@@ -992,6 +1003,9 @@ export function registerProjectAlphaDraftQuoteRoutes(app: App): void {
     if (!request) throw new HTTPException(404, { message: "Client request not found" });
     if (c.env.PROJECT_ALPHA_DRAFT_QUOTES_ENABLED !== "true")
       return c.json({ error: "Project Alpha draft creation is not enabled", code: "integration_disabled" }, 503);
+    if (request.catalog_source_id !== PRIMARY_ALPHA_SOURCE_ID &&
+      (!request.portal_workspace_id || !request.portal_project_public_id))
+      throw new HTTPException(409, { message: "This request's catalog source has no configured quote connection" });
     if (!["under_review", "accepted_pending_pa_linkage"].includes(request.status))
       throw new HTTPException(409, { message: "Review or accept the request before creating a Project Alpha draft" });
 
@@ -1015,7 +1029,8 @@ export function registerProjectAlphaDraftQuoteRoutes(app: App): void {
       areaRevision,
     );
     c.header("Cache-Control", "no-store");
-    const existing = await exactReceipt(c.env, requestId, request.request_revision, areaRevision);
+    const existing = await exactReceipt(c.env, requestId, request.catalog_source_id,
+      request.request_revision, areaRevision);
     if (existing) {
       if (existing.source_id !== request.catalog_source_id || existing.payload_hash !== payloadHash || existing.idempotency_key !== idempotencyKey)
         return c.json({ error: "This Project Alpha draft revision has a conflicting recorded payload", code: "idempotency_conflict" }, 409);
@@ -1103,9 +1118,11 @@ export function registerProjectAlphaDraftQuoteRoutes(app: App): void {
            FROM request_pa_draft_quote_receipts WHERE id=?`,
         ).bind(principal.id, details, receiptId),
       ]);
-      saved = await exactReceipt(c.env, requestId, request.request_revision, areaRevision);
+      saved = await exactReceipt(c.env, requestId, request.catalog_source_id,
+        request.request_revision, areaRevision);
     } catch {
-      const raced = await exactReceipt(c.env, requestId, request.request_revision, areaRevision);
+      const raced = await exactReceipt(c.env, requestId, request.catalog_source_id,
+        request.request_revision, areaRevision);
       if (!raced)
         return c.json({ error: "Project Alpha may have created the draft, but its receipt could not be saved. Retry the saved command to reconcile it.", code: "receipt_unconfirmed" }, 503);
       if (raced.command_id !== command.id || raced.source_id !== command.source_id ||

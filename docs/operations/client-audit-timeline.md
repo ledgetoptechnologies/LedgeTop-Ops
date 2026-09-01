@@ -44,10 +44,10 @@ project-access collaborator, and project-access companion notices. One available
 cannot hide permission-required, unsupported, not-applicable, or not-collected
 adapters.
 
-The version-eight AES-GCM cursor is actor-bound and includes the exact source-qualified root,
+The version-nine AES-GCM cursor is actor-bound and includes the exact source-qualified root,
 optional project, normalized filters, current context and scope proofs, an
 `asOf` time, bounded producer high-water marks, separate collaborator/companion notice schema
-readiness, the project-access authority collection start, the last global sort
+readiness, the project-access authority and authenticated-content collection starts, the last global sort
 tuple and a 30-minute expiry. A cursor authorizes
 nothing. Every continuation repeats live authorization and schema-readiness
 checks. Items sort by event time descending, producer and immutable event ID,
@@ -71,6 +71,9 @@ The checkpoint includes:
   grant authority lifecycle beginning at its immutable collection start;
 - primary/local staff delivery-link lifecycle and its durable notification
   outcomes;
+- authenticated client preview/download requests from migration 0187, selected
+  only through an exact legacy account/project or native
+  source/workspace/project tuple and current global `delivery.share.audit`;
 - migration-0169 collaborator, inviter, and access-creator project-access notice
   staging, sending, suppression, retry and terminal failure outcomes for the
   exact current primary workspace and, where selected, exact source-qualified
@@ -143,11 +146,22 @@ revoked, reassigned or unauthorized row fails with a refresh-required conflict
 rather than being exposed or skipped. Native/local feedback remains
 `not_collected` in this timeline adapter even though the separately default-off
 native feedback workflow now has authoritative routing; timeline collection
-requires its own bounded source-qualified adapter. Cursor v8 binds the feedback schema and policy proofs, the event-row
+requires its own bounded source-qualified adapter. Cursor v9 binds the feedback schema and policy proofs, the event-row
 high-water mark, and a bounded adapter seek position so project-feedback
 pagination cannot cross a policy, schema, or snapshot boundary. Ordinary authenticated
-preview/download events are not inferred from page loads and are not yet
-produced. Public share session/manifest/preview events remain excluded because
+preview/download requests are read from the immutable migration-0187 ledger only.
+`contentCoverage.authenticated_content_activity` reports its exact **available
+since** timestamp; pre-migration absence is `not_collected`, a partial schema is
+a hard error. Readiness requires the state, event, and retention tables plus
+both timeline indexes and all migration-owned immutability/delete-guard
+triggers—not merely the presence of event rows. After collection begins, the
+Client producer fails body-bearing access closed if its flag or dedicated secret
+is unavailable, so the continuous coverage claim cannot hide a disabled period.
+Continuations bind the timestamp and recorded-sequence
+high-water mark. The adapter selects only the allowlisted action and sanitized
+resource label and reports the result as informational. A request event never
+claims that bytes reached the browser or user. It never selects identity IDs, storage keys, resource/version
+fingerprints, grants, folder bindings, account IDs, or dedupe keys. Public share session/manifest/preview events remain excluded because
 the meaningful-content and noise policy is unresolved.
 
 ## Redaction and retention boundary
@@ -202,8 +216,9 @@ notification ledgers, authoritative-term mismatch rejection, strict redaction,
 meaningful-event allowlists, exact project/sibling isolation, stable high-water
 pagination, malformed cross-workspace rejection, mid-read permission loss,
 per-adapter coverage and pre-migration not-collected behavior, category/actor/result/date filters, actor/filter/scope-bound
-continuation, operational-event project/source/root isolation, redaction and
-stable high-water behavior, and exact secondary source isolation. Focused browser tests
+continuation, authenticated-content schema/start proof, legacy and native
+source/workspace/project isolation, strict redaction, stable content high-water
+behavior, operational-event project/source/root isolation, and exact secondary source isolation. Focused browser tests
 cover refresh/back/forward restoration of every applied filter, preservation
 of unrelated query parameters, reset behavior, 44-pixel controls and
 desktop/mobile overflow, plus the **available since** coverage label.

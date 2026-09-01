@@ -581,7 +581,7 @@ describe("verified Project Alpha quote linkage", () => {
         }
         if (sql.startsWith("SELECT receipt.*") && sql.includes("FROM request_pa_draft_quote_receipts receipt")) {
           expect(sql).toContain("command.source_id=receipt.source_id");
-          expect(values).toEqual(["request-a", 3, 0]);
+          expect(values).toEqual(["request-a", 3, 0, "project-alpha:primary"]);
           if (!journal.receipt) return null;
           sequence.push("receipt-readback");
           return { ...journal.receipt, editor_origin: journal.command?.editor_origin ?? null };
@@ -779,9 +779,10 @@ describe("verified Project Alpha quote linkage", () => {
         if (kind !== "delivery") return null;
         if (sql.includes("request_revision") && sql.includes("FROM client_service_requests")) return requestRow;
         if (sql.includes("FROM request_pa_draft_quote_receipts receipt") &&
-          sql.includes("WHERE receipt.request_id=? AND receipt.request_revision=? AND receipt.area_revision=?")) {
+          sql.includes("WHERE receipt.request_id=?") && sql.includes("receipt.request_revision=?") &&
+          sql.includes("receipt.area_revision=?") && sql.includes("receipt.source_id=?")) {
           expect(sql).toContain("command.source_id=receipt.source_id");
-          expect(values).toEqual(["request-a", 3, 0]);
+          expect(values).toEqual(["request-a", 3, 0, "project-alpha:primary"]);
           return {
             request_revision: 3, area_revision: 0,
             source_id: "project-alpha:primary", command_id: null, editor_origin: null, scope_stale_at: null,

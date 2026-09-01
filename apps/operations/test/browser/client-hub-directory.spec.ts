@@ -154,7 +154,7 @@ test("directory loads bounded direct-link cards and appends pages without losing
   await expect(page.getByText("Shared projects", { exact: true })).toHaveCount(4);
   await expect(page.getByText("Contact records", { exact: true })).toHaveCount(4);
   await expect(page.getByText("Portal workspace · business link pending", { exact: true })).toBeVisible();
-  await expect(page.getByText("Portal link not verified", { exact: true })).toHaveCount(2);
+  await expect(page.getByText("No portal workspace linked", { exact: true })).toHaveCount(2);
   await expect(page.getByRole("link", { name: "Open Alpha individual client workspace" })).toHaveAttribute("href", first[1]!.detail_path);
   await expect(page.getByRole("link", { name: "Open Portal individual client workspace" })).toHaveAttribute("href", first[3]!.detail_path);
   await expect(page.getByRole("link", { name: "Open Acme client workspace" })).toHaveAttribute("href", first[0]!.detail_path);
@@ -217,6 +217,35 @@ test("server search finds unloaded clients and preserves query and kind through 
   await expect(page.getByRole("searchbox", { name: "Search clients" })).toHaveValue("");
 });
 
+test("typing searches after a debounce without flooding history and popstate restores committed queries", async ({ page }) => {
+  const requested = await mock(page, (route, url) => {
+    const q = url.searchParams.get("q") || "Initial";
+    return route.fulfill({ json: { clients: [client(q, `${q} customer`)], nextCursor: null, capabilities } });
+  });
+  await page.goto("/clients?kind=organization");
+  await expect(page.getByRole("link", { name: "Open Initial customer client workspace" })).toBeVisible();
+  const initialHistoryLength = await page.evaluate(() => history.length);
+
+  await page.getByRole("searchbox", { name: "Search clients" }).fill("Acme");
+  await expect(page).toHaveURL(/\/clients\?q=Acme&kind=organization$/);
+  await expect(page.getByRole("link", { name: "Open Acme customer client workspace" })).toBeVisible();
+  expect(await page.evaluate(() => history.length)).toBe(initialHistoryLength);
+  expect(requested.filter(url => url.searchParams.get("q") === "Acme")).toHaveLength(1);
+
+  await page.getByRole("searchbox", { name: "Search clients" }).fill("Immediate");
+  await page.getByRole("searchbox", { name: "Search clients" }).press("Enter");
+  await expect(page).toHaveURL(/\/clients\?q=Immediate&kind=organization$/);
+  await expect(page.getByRole("link", { name: "Open Immediate customer client workspace" })).toBeVisible();
+  expect(await page.evaluate(() => history.length)).toBe(initialHistoryLength + 1);
+
+  await page.goBack();
+  await expect(page.getByRole("searchbox", { name: "Search clients" })).toHaveValue("Acme");
+  await expect(page.getByRole("link", { name: "Open Acme customer client workspace" })).toBeVisible();
+  await page.goForward();
+  await expect(page.getByRole("searchbox", { name: "Search clients" })).toHaveValue("Immediate");
+  await expect(page.getByRole("link", { name: "Open Immediate customer client workspace" })).toBeVisible();
+});
+
 test("namespace routes stay explicit and older detail links remain refresh-safe", async ({ page }) => {
   const requested = await mock(page, route => route.fulfill({ json: { clients: [], capabilities } }));
   for (const path of [
@@ -250,8 +279,10 @@ test("search scope and verified legacy portal connections are represented honest
   await expect(page.getByRole("searchbox", { name: "Search clients" })).toHaveAttribute("aria-describedby", "client-directory-search-help");
   const legacyCard = page.getByRole("link", { name: "Open Verified legacy client client workspace" });
   await expect(legacyCard.getByText("active", { exact: true })).toBeVisible();
-  await expect(legacyCard.getByText("Portal link not verified")).toHaveCount(0);
-  await expect(page.getByRole("link", { name: "Open Unmapped client client workspace" }).getByText("Portal link not verified")).toBeVisible();
+  await expect(legacyCard.getByText("No portal workspace linked")).toHaveCount(0);
+  const unmappedCard = page.getByRole("link", { name: "Open Unmapped client client workspace" });
+  await expect(unmappedCard.getByText("No portal workspace linked")).toBeVisible();
+  await expect(unmappedCard.locator(".client-directory-portal-state")).toHaveAttribute("aria-label", /not an access approval decision/);
   await expect(page.getByRole("link", { name: "Open Portal-only client client workspace" }).getByText("Portal workspace · business link pending")).toBeVisible();
 });
 

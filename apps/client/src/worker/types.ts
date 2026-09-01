@@ -20,6 +20,10 @@ export interface Env {
   CLIENT_PORTAL_ENABLED?: string;
   CLIENT_PORTAL_ORIGIN?: string;
   CLIENT_PORTAL_ORIGINS?: string;
+  /** Immutable, privacy-bounded authenticated content-start audit producer. Default-off. */
+  CLIENT_PORTAL_CONTENT_AUDIT_ENABLED?: string;
+  /** Dedicated HMAC key for content/version fingerprints; never reused for IP or sessions. */
+  CLIENT_PORTAL_CONTENT_AUDIT_HMAC_SECRET?: string;
   CLIENT_PORTAL_REQUEST_V2_ENABLED?: string;
   /** Source-qualified requests from native PA workspaces. Independent and default-off. */
   CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED?: string;

@@ -132,6 +132,22 @@ describe("Project Alpha snapshot synchronization", () => {
     expect(db.allSql()).toContain("status='failed'");
   });
 
+  it.each([
+    [Object.assign(new TypeError("fetch failed"),{cause:{code:"ENOTFOUND",message:"host lookup failed"}}),"project-alpha-network-dns"],
+    [Object.assign(new TypeError("fetch failed"),{cause:{code:"CERT_HAS_EXPIRED",message:"certificate expired"}}),"project-alpha-network-tls"],
+    [Object.assign(new TypeError("fetch failed"),{cause:{code:"ECONNREFUSED",message:"connection refused"}}),"project-alpha-network-refused"],
+    [Object.assign(new TypeError("fetch failed"),{cause:{code:"ECONNRESET",message:"connection reset"}}),"project-alpha-network-reset"],
+    [new TypeError("redirect mode is set to error"),"project-alpha-network-redirect"],
+    [Object.assign(new Error("request timed out"),{name:"TimeoutError"}),"project-alpha-network-timeout"],
+  ])("stores a bounded network failure category without leaking fetch details",async(failure,expected)=>{
+    const db=new Database();
+    vi.stubGlobal("fetch",vi.fn().mockRejectedValue(failure));
+    await expect(syncProjectAlpha(environment(db))).rejects.toThrow(expected);
+    const failed=db.runs.find(statement=>statement.sql.includes("UPDATE sync_runs SET status='failed'"));
+    expect(failed?.values[0]).toBe(expected);
+    expect([...db.runs,...db.batches.flat()].flatMap(statement=>statement.values)).not.toContain("host lookup failed");
+  });
+
   it("accepts two stable multi-page passes with fresh generated_at values per page", async () => {
     const db=new Database();
     const fetchMock=vi.fn()

@@ -15,11 +15,11 @@ afterEach(() => vi.unstubAllGlobals());
 describe("invitation administration frontend contracts", () => {
   it("accepts the actual three invitable capabilities without inferring roles", () => {expect(invitationRequestSchema.parse(row).capabilities).toEqual(row.capabilities); expect(() => invitationRequestSchema.parse({...row, capabilities: ["member.manage"]})).toThrow();});
   it("opens only exact source/workspace request coordinates", () => {
-    const href = invitationRequestHref(current.request); expect(href).toBe("/operations/invitation-requests/request-one?sourceId=project-alpha%3Aprimary&workspaceId=workspace-one");
+    const href = invitationRequestHref(current.request); expect(href).toBe("/clients/invitation-requests/request-one?sourceId=project-alpha%3Aprimary&workspaceId=workspace-one");
     const url = new URL(href, "https://ops.test"); expect(readInvitationApprovalRoute(url.pathname, url.search).invalid).toBe(false);
     expect(readInvitationApprovalRoute(url.pathname, "?workspaceId=workspace-one").invalid).toBe(true);
     expect(readInvitationApprovalRoute(url.pathname, `${url.search}&sourceId=project-alpha%3Ab`).invalid).toBe(true);
-    expect(readInvitationApprovalRoute("/operations/invitation-requests", "").status).toBe("open");
+    expect(readInvitationApprovalRoute("/clients/invitation-requests", "").status).toBe("open");
   });
   it("never grants an Inbox source from administrator or raw team permissions alone", () => {
     expect(inboxSources({permissions: ["team.manage", "team.view"], isAdministrator: true, feedbackEnabled: false})).toEqual([]);

@@ -197,6 +197,7 @@ import {
   restoreAuthenticatedDeliveryGrant,
   revokeAuthenticatedDeliveryGrant,
   searchAuthenticatedDeliveryGrantAudiences,
+  type AuthenticatedGrantAudienceType,
 } from "./authenticated-delivery-grants";
 import { projectAccessTermsInputSchema } from '../../../client/src/worker/client-portal/project-access-terms';
 import {
@@ -1141,6 +1142,7 @@ app.post("/api/team/clients/eligibility-blocks/:blockId/revoke", async c => {
 app.get("/api/delivery/authenticated-grants/audiences", async (c) => c.json(
   await searchAuthenticatedDeliveryGrantAudiences(
     c.env, c.get("principal"), c.req.query("folderBindingId") || "", c.req.query("q") || "",
+    (c.req.query("audienceType")||undefined) as AuthenticatedGrantAudienceType|undefined,
   ),
 ));
 app.get("/api/delivery/authenticated-grants", async (c) => {

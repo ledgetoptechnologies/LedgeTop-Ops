@@ -23,6 +23,7 @@
     "TEAM_DOMAIN": "https://ledgetoptechnologies.cloudflareaccess.com",
     "POLICY_AUD": "f6942c97e306d81d206c94746dc731413d5e59461b35d9b213f13fdf96b62835",
     "CLIENT_PORTAL_ENABLED": "false",
+    "CLIENT_PORTAL_CONTENT_AUDIT_ENABLED": "false",
     "CLIENT_PORTAL_REQUEST_V2_ENABLED": "false",
     "CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED": "false",
     "PROJECT_ALPHA_CATALOG_SYNC_ENABLED": "false",

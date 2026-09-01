@@ -458,6 +458,7 @@ test("Delivery navigation defaults to the Jobs/Clients workspace", async ({ page
   await expect(
     page.getByRole("navigation", { name: "Current delivery folder" }),
   ).toContainText("Jobs/Clients");
+  await expect(page.getByRole("button", { name: "Share current folder" })).toHaveCount(0);
 });
 
 test("enabled Jobs breadcrumb opens the true Jobs root", async ({ page }) => {
@@ -875,6 +876,62 @@ test("delivery search and per-item menu stay discoverable without selection mode
   await expect(listMenu).toHaveCount(0);
 });
 
+test("permission-gated current-folder sharing uses the normalized active folder and separates workspace access", async ({ page }) => {
+  let activePrefix = "", activeItemRef: string | null = "unexpected", authenticatedFolderRef = "";
+  await page.route("**/api/**", async route => {
+    const request = route.request(), url = new URL(request.url());
+    if (url.pathname === "/api/session") return route.fulfill({ json: { user: {
+      id: "staff-current-folder-share", email: "staff@example.test", displayName: "Folder Share Staff",
+      status: "Active", profileType: "Administrator", isAdministrator: true,
+      permissions: ["delivery.browse", "delivery.share.create", "delivery.share.revoke"], divisions: [],
+    }, csrfToken: "csrf-current-folder-share", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null,
+      capabilities: { deliveryJobsRoot: { enabled: true }, authenticatedDeliveryGrants: { enabled: true } } } });
+    if (url.pathname === "/api/delivery/folders") return route.fulfill({ json: { prefix: url.searchParams.get("prefix"), folders: [], files: [], nextCursor: null } });
+    if (url.pathname === "/api/delivery/folders/locations") return route.fulfill({ json: { points: [], imageCount: 0, truncated: false } });
+    if (url.pathname === "/api/delivery/shares/active") {
+      activePrefix = url.searchParams.get("prefix") || ""; activeItemRef = url.searchParams.get("itemRef");
+      return route.fulfill({ json: { share: null } });
+    }
+    if (url.pathname === "/api/delivery/authenticated-grants") {
+      authenticatedFolderRef = url.searchParams.get("folderRef") || "";
+      return route.fulfill({ status: 404, json: { error: "No linked workspace" } });
+    }
+    if (url.pathname === "/api/delivery/shares") return route.fulfill({ json: { shares: [] } });
+    return route.fulfill({ status: 404, json: { error: "Not found" } });
+  });
+
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.goto("/delivery/DC%20Construction");
+  const shareTrigger = page.getByRole("button", { name: "Share current folder" });
+  await shareTrigger.click();
+  const dialog = page.getByRole("dialog", { name: "Share folder" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Close" })).toBeFocused();
+  await expect(page.getByRole("tab", { name: "Public link" })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("button", { name: "Create link" })).toBeVisible();
+  const layout = await dialog.evaluate(element => {
+    const bounds = element.getBoundingClientRect(), style = getComputedStyle(element);
+    return { top: bounds.top, bottom: bounds.bottom, viewportHeight: innerHeight,
+      overflowY: style.overflowY, clientHeight: element.clientHeight, scrollHeight: element.scrollHeight };
+  });
+  expect(layout.top).toBeGreaterThanOrEqual(0);
+  expect(layout.bottom).toBeLessThanOrEqual(layout.viewportHeight);
+  expect(layout.overflowY).toBe("auto");
+  expect(layout.scrollHeight).toBeGreaterThan(layout.clientHeight);
+  expect(activePrefix).toBe("Jobs/Clients/DC Construction/");
+  expect(activeItemRef).toBeNull();
+  expect(authenticatedFolderRef).toBe("");
+
+  await page.getByRole("tab", { name: "Client Workspace" }).click();
+  await expect(page.getByRole("alert").filter({ hasText: "not linked to a Client Portal workspace" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Open Client Hub portal setup" })).toHaveAttribute("href", "/clients#client-portal-setup");
+  expect(authenticatedFolderRef).toBe(Buffer.from("Jobs/Clients/DC Construction").toString("base64url"));
+  await expect(page.getByRole("button", { name: "Create link" })).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect(shareTrigger).toBeFocused();
+});
+
 test("Share dialog replaces a failed lookup with an explicit retry state", async ({ page }) => {
   let activeRequests = 0; let shareWrites = 0;
   await page.route("**/api/**", async route => {
@@ -954,10 +1011,10 @@ test("Share dialog selects a scoped directory recipient without presenting it as
   await page.goto("/delivery");
   await page.getByRole("button", { name: "Actions for Acme" }).click();
   await page.getByRole("menuitem", { name: "Share" }).click();
-  const recipient = page.getByRole("combobox", { name: "Notification recipient" });
+  const recipient = page.getByRole("combobox", { name: "Notification only (does not control access)" });
   await recipient.fill("Acme");
   await page.getByRole("option", { name: /Acme Project Lead/ }).click();
-  await expect(page.getByText(/does not restrict who can use the complete bearer link/)).toBeVisible();
+  await expect(page.getByText(/does not grant Client Workspace access or restrict who can use the complete bearer link/)).toBeVisible();
   await page.getByRole("button", { name: "Create link" }).click();
   await expect.poll(() => posted).not.toBeNull();
   expect(posted).toMatchObject({ r2Prefix: "Jobs/Clients/Acme/", recipientAudience: { type: "principal", publicId: "pa-principal-acme" } });

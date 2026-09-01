@@ -74,7 +74,8 @@ export const REQUIRED_STAGING_SECRETS = Object.freeze({
     "PROJECT_ALPHA_PRICING_HINT_API_KEY", "PROJECT_ALPHA_PRICING_HINT_HMAC_SECRET",
     "CLIENT_REQUEST_ATTACHMENT_SCANNER_SECRET",
     "CLIENT_REQUEST_ATTACHMENT_R2_ACCESS_KEY_ID", "CLIENT_REQUEST_ATTACHMENT_R2_SECRET_ACCESS_KEY",
-    "CLIENT_DELEGATED_SHARE_SESSION_SECRET", "PROJECT_ALPHA_CONNECTOR_CREDENTIALS",
+    "CLIENT_DELEGATED_SHARE_SESSION_SECRET", "CLIENT_PORTAL_CONTENT_AUDIT_HMAC_SECRET",
+    "PROJECT_ALPHA_CONNECTOR_CREDENTIALS",
   ]),
   operations: Object.freeze([
     "OPERATIONS_SESSION_SECRET", "DELIVERY_TOKEN_SECRET", "DELIVERY_ACCESS_CODE_PEPPER",
@@ -225,6 +226,7 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0184_native_client_feedback.sql",
     "0185_native_service_request_ownership.sql",
     "0186_delivery_notification_authority_provenance.sql",
+    "0187_authenticated_content_audit.sql",
   ]),
   operations: Object.freeze([
     "0014_staff_acl_controls.sql",
@@ -273,6 +275,7 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
 export const REQUIRED_DISABLED_FEATURE_FLAGS = Object.freeze({
   delivery: Object.freeze([
     "CLIENT_PORTAL_ENABLED",
+    "CLIENT_PORTAL_CONTENT_AUDIT_ENABLED",
     "CLIENT_PORTAL_REQUEST_V2_ENABLED",
     "CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED",
     "PROJECT_ALPHA_CATALOG_SYNC_ENABLED",
@@ -454,6 +457,7 @@ export const REQUIRED_EXTERNAL_GATE_PROOFS = Object.freeze({
 export const FEATURE_FLAG_ACTIVATION_POLICIES = Object.freeze({
   delivery: Object.freeze({
     CLIENT_PORTAL_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaPortalProjection", "projectionParityAndAlerts"]) }),
+    CLIENT_PORTAL_CONTENT_AUDIT_ENABLED: Object.freeze({ prohibitedReason: "Authenticated content auditing requires migration 0187, the dedicated HMAC secret, immutable collection-start verification, retention readiness, and explicit live acceptance before first activation" }),
     CLIENT_PORTAL_REQUEST_V2_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaCatalogProjection", "projectAlphaPortalProjection"]) }),
     CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaCatalogProjection", "projectAlphaPortalProjection", "nativePortalRequests"]) }),
     PROJECT_ALPHA_CATALOG_SYNC_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaCatalogProjection", "projectionParityAndAlerts"]) }),
@@ -568,6 +572,7 @@ export const STAGING_STATIC_VARS = Object.freeze({
     PUBLIC_BASE_URL: `https://${STAGING_HOSTS.delivery}`,
     PUBLIC_SHARE_ORIGIN: `https://${STAGING_HOSTS.delivery}`,
     CLIENT_PORTAL_ENABLED: "false",
+    CLIENT_PORTAL_CONTENT_AUDIT_ENABLED: "false",
     CLIENT_PORTAL_ORIGIN: `https://${STAGING_HOSTS.client}`,
     CLIENT_PORTAL_ORIGINS: `https://${STAGING_HOSTS.client},https://${STAGING_CLIENT_PORTAL.secondaryHostname}`,
     CLIENT_ACCESS_TEAM_DOMAIN: "https://ledgetoptechnologies.cloudflareaccess.com",
@@ -669,7 +674,7 @@ export const STAGING_STATIC_VARS = Object.freeze({
 export const STAGING_ALLOWED_VAR_NAMES = Object.freeze({
   delivery: Object.freeze([
     "PUBLIC_BASE_URL", "PUBLIC_SHARE_ORIGIN", "EXPECTED_HOST", "ENVIRONMENT", "TEAM_DOMAIN", "POLICY_AUD",
-    "CLIENT_PORTAL_ENABLED", "CLIENT_PORTAL_REQUEST_V2_ENABLED", "CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED",
+    "CLIENT_PORTAL_ENABLED", "CLIENT_PORTAL_CONTENT_AUDIT_ENABLED", "CLIENT_PORTAL_REQUEST_V2_ENABLED", "CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED",
     "PROJECT_ALPHA_CATALOG_SYNC_ENABLED", "PROJECT_ALPHA_CATALOG_APPLICATION_KEY",
     "PROJECT_ALPHA_CATALOG_ACCESS_TEAM_DOMAIN", "PROJECT_ALPHA_CATALOG_ACCESS_AUD",
     "PROJECT_ALPHA_CATALOG_HMAC_KEY_ID", "PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_KEY_ID",

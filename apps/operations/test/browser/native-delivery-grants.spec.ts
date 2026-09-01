@@ -34,7 +34,7 @@ async function mock(page: Page, override?: (route: Route, call: Call) => Promise
 }
 async function openPanel(page: Page) {
   await page.goto("/delivery"); await page.getByRole("button", {name: "Actions for Acme"}).click(); await page.getByRole("menuitem", {name: "Share", exact: true}).click();
-  await page.getByRole("button", {name: "Grant to Client Portal"}).click(); await page.getByRole("combobox", {name: "Portal connection"}).selectOption("native");
+  await page.getByRole("tab", {name: "Client Workspace"}).click(); await page.getByRole("combobox", {name: "Portal connection"}).selectOption("native");
   await expect(page.getByRole("region", {name: "Connected workspace folder access"})).toBeVisible();
 }
 async function selectProject(page: Page) {
@@ -145,7 +145,7 @@ test("mode switching aborts stale native history and preserves the existing prim
   let release!: () => void; const wait = new Promise<void>(resolve => {release = resolve;});
   await mock(page, (route, call) => call.path === "/api/delivery/native-grants" && call.method === "GET" ? wait.then(() => late(route, {grants: [grant()]})) : undefined);
   await openPanel(page); await page.getByRole("combobox", {name: "Portal connection"}).selectOption("primary"); release();
-  await expect(page.getByRole("combobox", {name: /Organization, department, client, project, or person/})).toBeVisible();
+  await expect(page.getByRole("combobox", {name: "Search individuals"})).toBeVisible();
   await expect(page.getByRole("region", {name: "Connected workspace folder access"})).toHaveCount(0); await expect(page.getByText("Casey Coastal", {exact: true})).toHaveCount(0);
   await page.getByRole("combobox", {name: "Portal connection"}).scrollIntoViewIfNeeded();
   await page.screenshot({path: testInfo.outputPath("primary-grant-panel-after-native-switch.png")});
@@ -266,7 +266,9 @@ test("uncertain create refresh supports cancellation and uncertain cancel retrie
 
 test("grant feature flag off does not probe native endpoints", async ({page}) => {
   const calls = await mock(page, undefined, false); await page.goto("/delivery"); await page.getByRole("button", {name: "Actions for Acme"}).click(); await page.getByRole("menuitem", {name: "Share", exact: true}).click();
-  await expect(page.getByRole("button", {name: "Grant to Client Portal"})).toHaveCount(0); expect(calls.some(call => call.path.startsWith("/api/delivery/native-grants"))).toBe(false);
+  await page.getByRole("tab", {name: "Client Workspace"}).click();
+  await expect(page.getByRole("status").filter({hasText: "not available for this deployment"})).toBeVisible();
+  expect(calls.some(call => call.path.startsWith("/api/delivery/native-grants"))).toBe(false);
 });
 
 for (const width of [375, 640, 1280, 3440]) test(`connected folder grant review is readable at ${width}px`, async ({page}, testInfo) => {

@@ -15,7 +15,8 @@ const missingTables=["pa_snapshot_recovery_scheduler","pa_snapshot_recovery_sour
 const safeErrors=new Set(["lease_expired","configuration_changed","connector_invalid","connector_unavailable","connector_conflict",
   "connector_credentials_unavailable","connector_capacity","connector_changed","project-alpha-sync-busy","project-alpha-circuit-open",
   "project-alpha-recovery-configuration-changed","project-alpha-recovery-time-budget","project-alpha-recovery-query-budget","project-alpha-recovery-byte-budget",
-  "project-alpha-network-timeout","project-alpha-network-error","project-alpha-page-too-large","project-alpha-empty-page","project-alpha-body-timeout",
+  "project-alpha-network-timeout","project-alpha-network-dns","project-alpha-network-tls","project-alpha-network-refused",
+  "project-alpha-network-reset","project-alpha-network-redirect","project-alpha-network-error","project-alpha-page-too-large","project-alpha-empty-page","project-alpha-body-timeout",
   "project-alpha-page-invalid-json","project-alpha-record-limit","project-alpha-page-limit","project-alpha-pagination","project-alpha-snapshot-unstable",
   "project-alpha-snapshot-time-regressed","project-alpha-sync-lease-lost","project-alpha-source-record-id-invalid","project-alpha-source-map-incomplete",
   "project-alpha-source-id-conflict","project-alpha-source-reference-unmapped","project-alpha-recovery-failed"]);

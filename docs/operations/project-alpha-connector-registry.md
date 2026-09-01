@@ -19,10 +19,15 @@ activation have been changed. This document is not a release announcement.
   is terminal and blocks all connector ingestion; this increment has no supported
   reactivation path.
 - Primary enrollment must match the existing deployment's destination,
-  application key, and known signing identity. Pending primary enrollment pauses
-  legacy ingestion until explicit activation; the UI warns before enrollment and
-  continues to show that warning afterward. Never enroll a replacement producer
-  over an old primary's numeric IDs.
+  application key, and known signing identity. Ops Sync owns the webhook secret
+  and records its non-secret signing fingerprint in the shared registry;
+  Operations validates enrollment against that attestation instead of receiving
+  another copy of the webhook credential. Pending primary enrollment is staged
+  and does not interrupt the existing scalar snapshot or event path. Activation
+  atomically invalidates the scalar proof and hands synchronization to the
+  reviewed connector revision. Suspending or retiring the registered primary
+  never falls back. Never enroll a replacement producer over an old primary's
+  numeric IDs.
 - Credential sets are deploy-managed secret references, not browser-supplied
   secrets or database credentials. Current and previous key fingerprints remain
   source-owned after rotation and retirement. Observed trusted legacy primary

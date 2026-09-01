@@ -1,6 +1,6 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 
-const centerPath = "/operations/notifications", endpoint = "/api/notifications/deliveries";
+const centerPath = "/notifications", endpoint = "/api/notifications/deliveries";
 const now = "2026-08-25T12:00:00Z";
 function batch(id = "batch-one", overrides: Record<string, unknown> = {}) {
   return { id, kind: "folder_changes", revision: 1, status: "pending", accountName: "Acme Construction", folderLabel: "Church survey · Edited",
@@ -58,11 +58,12 @@ async function open(page: Page, suffix = "") {
   await expect(center(page).getByRole("heading", { name: "Notifications", exact: true })).toBeVisible();
 }
 
-test("audit-only staff land on Notifications inside Operations without other operation or mutation access", async ({ page }) => {
+test("audit-only staff land in the dedicated notification center without operation or mutation access", async ({ page }) => {
   const calls = await mock(page, route => route.fulfill({ json: result() }));
   await page.goto("/");
   await expect(page).toHaveURL(new RegExp(`${centerPath}$`));
-  await expect(page.getByRole("tab", { name: "Notifications", exact: true })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("heading", { name: "Notifications", exact: true }).first()).toBeVisible();
+  await expect(page.getByRole("link", { name: "Open notifications" })).toHaveAttribute("aria-current", "page");
   await expect(page.getByRole("tab", { name: "Operations", exact: true })).toHaveCount(0);
   await expect(article(page)).toBeVisible();
   await expect(center(page).getByText(/Legacy folder subscriptions, explicit Project Alpha delivery notices, and opt-in summaries/)).toBeVisible();
@@ -95,10 +96,10 @@ test("exact authenticated change notices use a distinct deep link and action rou
   expect(action?.key).toMatch(/^[0-9a-f-]{36}$/);
 });
 
-test("notifications remain an authorized subtab and preserve SOP navigation and browser history", async ({ page }) => {
+test("the notification bell preserves SOP navigation and browser history", async ({ page }) => {
   await mock(page, route => route.fulfill({ json: result() }), ["sops.view", "delivery.share.audit"]);
   await page.goto("/operations/sops");
-  await page.getByRole("tab", { name: "Notifications", exact: true }).click();
+  await page.getByRole("link", { name: "Open notifications" }).click();
   await expect(page).toHaveURL(new RegExp(`${centerPath}$`));
   await expect(article(page)).toBeVisible();
   await page.goBack();
@@ -113,7 +114,7 @@ test("staff without audit permission never probe notification APIs", async ({ pa
   await page.goto(centerPath);
   await expect(page).toHaveURL(/\/operations\/sops$/);
   await expect(center(page)).toHaveCount(0);
-  await expect(page.getByRole("tab", { name: "Notifications", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "Open notifications" })).toHaveCount(0);
   expect(calls.filter(call => call.path.startsWith(endpoint))).toHaveLength(0);
 });
 
@@ -371,7 +372,7 @@ test("unmount aborts a pending notification read and later responses cannot inte
   await mock(page, route => { pending = route; return Promise.resolve(); }, ["sops.view", "delivery.share.audit"]);
   await open(page);
   await expect.poll(() => Boolean(pending)).toBe(true);
-  await page.getByRole("tab", { name: "SOP Library" }).click();
+  await page.evaluate(() => { history.pushState(null, "", "/operations/sops"); dispatchEvent(new PopStateEvent("popstate")); });
   await late(pending!, result());
   await expect(page).toHaveURL(/\/operations\/sops$/);
   await expect(center(page)).toHaveCount(0);

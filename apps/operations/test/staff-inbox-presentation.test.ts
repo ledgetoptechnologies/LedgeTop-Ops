@@ -23,13 +23,13 @@ describe("staff inbox presentation contract", () => {
   });
   it("preserves safe feedback deep links and a bounded comment preview", () => {
     const page = parseInboxPage("feedback", { items: [{ id: "feedback-a", accountName: "Acme", message: "x".repeat(1000), status: "in_progress", createdAt, target: { label: "Roof", projectName: null } }], nextCursor: null }, "");
-    expect(page.items[0]?.href).toBe("/operations/feedback/feedback-a?status=all");
+    expect(page.items[0]?.href).toBe("/clients/feedback/feedback-a?status=all");
     expect(page.items[0]?.detail).toBe(`Acme — ${"x".repeat(240)}…`);
   });
   it("opens the authorized notices workflow and never embeds a recipient or invokes a mutation", () => {
     const page = parseInboxPage("deliveries", { coverage: "delivery_notifications_v2", availability: { folderChanges: true, nativeDeliveries: true }, items: [{ kind: "folder_changes", id: "batch-a", accountName: "Acme & Sons", folderLabel: "Edited", status: "pending", createdAt, addedCount: 1234, removedCount: 2, recipientEmail: "private@example.test" }], nextCursor: null }, "");
     expect(page.items[0]?.detail).toBe("Acme & Sons · 1,234 added · 2 removed");
-    expect(page.items[0]?.href).toBe("/operations/notifications?batchId=batch-a");
+    expect(page.items[0]?.href).toBe("/notifications?batchId=batch-a");
     expect(JSON.stringify(page)).not.toContain("private@");
   });
   it("keeps native and folder identities separate and opens exact native notices without recipient leakage or fabricated counts", () => {
@@ -40,7 +40,7 @@ describe("staff inbox presentation contract", () => {
     const page = parseInboxPage("deliveries", { coverage: "delivery_notifications_v2", availability: { folderChanges: true, nativeDeliveries: true }, items: rows, nextCursor: null }, "");
     expect(page.items.map(row => row.id)).toEqual(["folder_changes:same-id", "portal_delivery:same-id"]);
     expect(page.items[1]?.detail).toBe("Acme workspace · Survey source · Delivery ready");
-    expect(page.items[1]?.href).toBe("/operations/notifications?kind=portal_delivery&batchId=same-id");
+    expect(page.items[1]?.href).toBe("/notifications?kind=portal_delivery&batchId=same-id");
     expect(JSON.stringify(page)).not.toContain("private@");
     expect(new URL(inboxEndpoint("deliveries", "Acme", null), "https://ops.test").searchParams.get("format")).toBe("combined");
   });
@@ -51,7 +51,7 @@ describe("staff inbox presentation contract", () => {
         status: "pending", createdAt, addedCount: 40, removedCount: 2, recipientEmail: "private@example.test", r2Prefix: "clients/acme/private/" }], nextCursor: null }, "");
     expect(page.items).toEqual([{ id: "authenticated_delivery:exact-one", title: "Edited photos",
       detail: "Acme workspace · 40 added · 2 removed", status: "Pending", date: createdAt,
-      href: "/operations/notifications?kind=authenticated_delivery&batchId=exact-one", action: "Review notice" }]);
+      href: "/notifications?kind=authenticated_delivery&batchId=exact-one", action: "Review notice" }]);
     expect(JSON.stringify(page)).not.toContain("private@");
     expect(JSON.stringify(page)).not.toContain("clients/acme");
   });

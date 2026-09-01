@@ -55,7 +55,7 @@ Send an actionable alert to the team channel/email for: failed or stale rclone s
 
 ## Cost and retention controls
 
-Review monthly R2 storage, Class A/Class B operations, egress, Workers requests/CPU, D1 reads/writes, Container compute, Stream minutes/storage, queue usage, and email volume. Set a budget alert before enabling client bulk downloads at scale. Temporary ZIPs and inbound objects must have lifecycle expiry; derivative objects are rebuildable and should have a documented retention window. The consolidated Operations schedule gzip-archives aged audit/sync rows under the hidden `_ltds/audit-archive/` prefix before deleting D1 rows. Configure TrueNAS to pull that archive prefix into protected backup storage. Never use lifecycle deletion on `Jobs/` originals without a separately approved retention policy.
+Review monthly R2 storage, Class A/Class B operations, egress, Workers requests/CPU, D1 reads/writes, Container compute, Stream minutes/storage, queue usage, and email volume. Set a budget alert before enabling client bulk downloads at scale. Temporary ZIPs and inbound objects must have lifecycle expiry; derivative objects are rebuildable and should have a documented retention window. The consolidated Operations schedule gzip-archives aged audit/sync rows under the hidden `_ltds/audit-archive/` prefix before deleting D1 rows. Authenticated content-read events remain online for 365 days and use the guarded archive-before-delete procedure in [Authenticated content audit retention](authenticated-content-audit-retention.md). Configure TrueNAS to pull that archive prefix into protected backup storage. Never use lifecycle deletion on `Jobs/` originals without a separately approved retention policy.
 
 ## Incident order
 

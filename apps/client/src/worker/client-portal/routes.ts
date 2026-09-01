@@ -12,6 +12,7 @@ import { projectAccessTermsInputSchema } from './project-access-terms';
 import type { Env } from "../types";
 import { clientPortalRequestOriginAllowed, configuredClientPortalOrigins } from "../origin-policy";
 import { serveAuthorizedThumbnail } from "../thumbnails";
+import { appendAuthenticatedContentStart, authenticatedContentAuditRequired } from "./authenticated-content-audit";
 import { d1ClientPortalRepository } from "./repository";
 import { clientFeedbackSchemaAvailable, createClientFeedbackRouter } from "./feedback-routes";
 import type {
@@ -1189,6 +1190,21 @@ export function createClientPortalRouter(
     return file;
   }
 
+  async function recheckAuthorizedFile(c: any, expected: Awaited<ReturnType<typeof resolveAuthorizedFile>>) {
+    const current = await resolveAuthorizedFile(c);
+    const unchanged = current.storageKey === expected.storageKey
+      && current.id === expected.id
+      && current.name === expected.name
+      && current.size === expected.size
+      && current.contentType === expected.contentType
+      && current.kind === expected.kind
+      && current.previewPath === expected.previewPath
+      && current.downloadPath === expected.downloadPath;
+    const sameAuthority = current.etag === expected.etag
+      && JSON.stringify(current.authority) === JSON.stringify(expected.authority);
+    if (!unchanged || !sameAuthority) throw new HTTPException(404, { message: "File not found" });
+  }
+
   async function authorizedFile(c: any, disposition: "inline" | "attachment") {
     const file = await resolveAuthorizedFile(c);
     const contentType = (file.contentType || "application/octet-stream")
@@ -1205,8 +1221,13 @@ export function createClientPortalRouter(
       /^video\/(?:mp4|mpeg|ogg|quicktime|webm)$/.test(contentType);
     if (disposition === "inline" && (!file.previewPath || !safeInline))
       throw new HTTPException(415, { message: "Preview unavailable" });
+    // Match the native portal's authorization fencing. No storage metadata,
+    // object body, or access event may cross a revocation or replacement that
+    // races the initial file lookup.
+    await recheckAuthorizedFile(c, file);
     const head = await c.env.DATA_BUCKET.head(file.storageKey);
-    if (!head || isMovedSourceMarker(head)) throw new HTTPException(404, { message: "File not found" });
+    if (!head || isMovedSourceMarker(head) || clientFileCanonicalEtag(head.httpEtag) !== clientFileCanonicalEtag(file.etag))
+      throw new HTTPException(404, { message: "File not found" });
     const rangeHeader = c.req.header("Range");
     const ifRange = c.req.header("If-Range");
     let requestedRange: ClientFileRange | undefined;
@@ -1253,6 +1274,7 @@ export function createClientPortalRouter(
         `bytes ${requestedRange.offset}-${requestedRange.offset + requestedRange.length - 1}/${head.size}`,
       );
     }
+    await recheckAuthorizedFile(c, file);
     if (!requestedRange && disposition === "inline" && clientFileEtagMatches(c.req.header("If-None-Match"), head.httpEtag)) {
       headers.delete("Content-Length");
       return new Response(null, { status: 304, headers });
@@ -1260,9 +1282,50 @@ export function createClientPortalRouter(
     if (c.req.method === "HEAD") return new Response(null, { status: requestedRange ? 206 : 200, headers });
     const object = await c.env.DATA_BUCKET.get(
       file.storageKey,
-      requestedRange ? { range: requestedRange } : undefined,
+      { ...(requestedRange ? { range: requestedRange } : {}), onlyIf: { etagMatches: head.etag } },
     );
-    if (!object || isMovedSourceMarker(object)) throw new HTTPException(404, { message: "File not found" });
+    if (!object || !("body" in object) || isMovedSourceMarker(object) || object.etag !== head.etag)
+      throw new HTTPException(404, { message: "File not found" });
+    try {
+      await recheckAuthorizedFile(c, file);
+    } catch (error) {
+      void object.body.cancel().catch(() => {});
+      throw error;
+    }
+    const authorizedAt = new Date();
+    let auditRequired = false;
+    try {
+      auditRequired = await authenticatedContentAuditRequired(c.env);
+    } catch {
+      void object.body.cancel().catch(() => {});
+      throw new HTTPException(503, { message: "File access auditing is temporarily unavailable" });
+    }
+    if (auditRequired) {
+      try {
+        const workspace = selectedWorkspace(c);
+        await appendAuthenticatedContentStart(c.env, {
+          authorityMode: "legacy_delivery",
+          sourceId: file.authority.sourceId,
+          workspaceId: workspace?.workspaceId ?? null,
+          accountId: file.authority.accountId,
+          identityId: file.authority.identityId,
+          projectId: file.authority.projectId,
+          associationId: file.authority.associationId,
+          action: disposition === "inline" ? "file.preview_requested" : "file.download_requested",
+          storageKey: file.storageKey,
+          contentVersion: file.etag,
+        }, authorizedAt);
+      } catch {
+        void object.body.cancel().catch(() => {});
+        throw new HTTPException(503, { message: "File access auditing is temporarily unavailable" });
+      }
+      try {
+        await recheckAuthorizedFile(c, file);
+      } catch (error) {
+        void object.body.cancel().catch(() => {});
+        throw error;
+      }
+    }
     return new Response(object.body, { status: requestedRange ? 206 : 200, headers });
   }
 
@@ -2138,9 +2201,12 @@ function clientFileRange(value: string | undefined, size: number): ClientFileRan
 
 function clientFileEtagMatches(value: string | undefined, current: string): boolean {
   if (!value) return false;
-  const clean = (etag: string) => etag.trim().replace(/^W\//, "").replace(/^"|"$/g, "");
-  const expected = clean(current);
-  return value.split(",").some(candidate => candidate.trim() === "*" || clean(candidate) === expected);
+  const expected = clientFileCanonicalEtag(current);
+  return value.split(",").some(candidate => candidate.trim() === "*" || clientFileCanonicalEtag(candidate) === expected);
+}
+
+function clientFileCanonicalEtag(value: string): string {
+  return value.trim().replace(/^W\//, "").replace(/^"|"$/g, "");
 }
 
 function clientFileStrongEtagMatches(value: string, current: string): boolean {

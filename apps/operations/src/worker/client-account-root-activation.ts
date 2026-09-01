@@ -10,6 +10,9 @@ export interface ClientAccountRootActivationAccount {
   projectAlphaClientId: string | null;
   projectAlphaOrganizationId: string | null;
   updatedAt: string;
+  verifiedIdentityCount: number;
+  activeMemberCount: number;
+  activeManagerCount: number;
   activationState: "unlinked" | "linked" | "projection_missing" | "manual_review" | "projected";
 }
 
@@ -30,6 +33,9 @@ interface AccountRow {
   project_alpha_organization_id: string | null;
   project_alpha_source_id: string | null;
   updated_at: string;
+  verified_identity_count: number;
+  active_member_count: number;
+  active_manager_count: number;
 }
 
 interface SourceRow {
@@ -423,13 +429,29 @@ export async function listClientAccountRootActivation(env: Env): Promise<{
 }> {
   const db = deliveryDatabase(env);
   const storageBindingsPresent = await tablePresent(db, "portal_native_request_storage_bindings");
+  const memberReadinessPresent = (await Promise.all([
+    tablePresent(db, "client_identity_links"),
+    tablePresent(db, "client_account_members"),
+  ])).every(Boolean);
+  const memberReadinessColumns = memberReadinessPresent ? `
+      (SELECT COUNT(*) FROM client_identity_links identity
+        WHERE identity.account_id=account.id AND identity.revoked_at IS NULL) verified_identity_count,
+      (SELECT COUNT(*) FROM client_account_members member
+        JOIN client_identity_links identity ON identity.id=member.identity_id AND identity.account_id=member.account_id
+        WHERE member.account_id=account.id AND member.revoked_at IS NULL AND identity.revoked_at IS NULL) active_member_count,
+      (SELECT COUNT(*) FROM client_account_members member
+        JOIN client_identity_links identity ON identity.id=member.identity_id AND identity.account_id=member.account_id
+        WHERE member.account_id=account.id AND member.role='manager'
+          AND member.revoked_at IS NULL AND identity.revoked_at IS NULL) active_manager_count`
+    : "0 verified_identity_count,0 active_member_count,0 active_manager_count";
   const [schemaPresent, accountsResult, sourceResult] = await Promise.all([
     workspaceSchemaPresent(db),
-    db.prepare(`SELECT id,display_name,status,project_alpha_client_id,
-      project_alpha_organization_id,project_alpha_source_id,updated_at
-      FROM client_accounts WHERE (project_alpha_source_id IS NULL OR project_alpha_source_id='project-alpha:primary')
-        AND ${excludesNativeRequestStorageAccount("client_accounts", storageBindingsPresent)}
-      ORDER BY lower(display_name),id`).all<AccountRow>(),
+    db.prepare(`SELECT account.id,account.display_name,account.status,account.project_alpha_client_id,
+      account.project_alpha_organization_id,account.project_alpha_source_id,account.updated_at,
+      ${memberReadinessColumns}
+      FROM client_accounts account WHERE (account.project_alpha_source_id IS NULL OR account.project_alpha_source_id='project-alpha:primary')
+        AND ${excludesNativeRequestStorageAccount("account", storageBindingsPresent)}
+      ORDER BY lower(account.display_name),account.id`).all<AccountRow>(),
     env.OPS_DB.withSession("first-primary").prepare(`${SOURCE_SELECT}
       AND client.active=1
         AND (client.organization_id IS NULL OR organization.id IS NOT NULL)
@@ -477,6 +499,9 @@ export async function listClientAccountRootActivation(env: Env): Promise<{
         projectAlphaClientId: row.project_alpha_client_id,
         projectAlphaOrganizationId: row.project_alpha_organization_id,
         updatedAt: row.updated_at,
+        verifiedIdentityCount: Number(row.verified_identity_count || 0),
+        activeMemberCount: Number(row.active_member_count || 0),
+        activeManagerCount: Number(row.active_manager_count || 0),
         activationState: projectionStates.get(row.id) === "complete"
           ? "projected"
           : projectionStates.get(row.id) === "partial_or_conflicting"

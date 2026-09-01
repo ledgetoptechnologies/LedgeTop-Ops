@@ -13,6 +13,7 @@ let runtime: Miniflare, db: D1Database, environment: Env & Pick<ProjectAlphaConn
 let accessKeys: Awaited<ReturnType<typeof generateKeyPair>>;
 let publicJwk: Awaited<ReturnType<typeof exportJWK>>;
 const keys = new Map<string,CryptoKeyPair>();
+let legacyAttestation: { status: number; algorithms: string[] };
 const accessIssuer=(source:string)=>source===primary?"https://primary.cloudflareaccess.com":"https://secondary.cloudflareaccess.com";
 const b64=(bytes:Uint8Array)=>btoa(String.fromCharCode(...bytes)).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/g,"");
 
@@ -92,9 +93,19 @@ describe("authenticated connector business ingress",{timeout:30_000},()=>{
       CF_ACCESS_GROUP_API_TOKEN:"fixture-token",PROJECT_ALPHA_ALLOW_LEGACY_HMAC:"true",PROJECT_ALPHA_WEBHOOK_HMAC_SECRET:"fixture-primary-hmac-secret-at-least-32-bytes",
       PROJECT_ALPHA_CONNECTOR_CREDENTIALS:JSON.stringify({version:1,sets}),PROJECT_ALPHA_BASE_URL:"https://primary.example",PROJECT_ALPHA_API_KEY:"fixture-snapshot-secret",
       PROJECT_ALPHA_WEBHOOK_ED25519_PUBLIC_KEY:sets.primary!.eventCurrent.value};
+    // Exercise the deployed split before enrollment: Ops Sync accepts the
+    // scalar-primary event and records only non-secret signing identities in
+    // the shared database. Operations can then stage the matching connector
+    // without receiving a second copy of either webhook credential.
+    const legacyResponse=await handleRequest(await request(primary,event(),{legacy:true,hmac:true}),environment,async()=>({}));
+    const attested=(await db.prepare("SELECT algorithm FROM pa_connector_signing_keys WHERE source_id=? ORDER BY algorithm")
+      .bind(primary).all<{algorithm:string}>()).results;
+    legacyAttestation={status:legacyResponse.status,algorithms:attested.map(row=>row.algorithm)};
     for(const source of [primary,secondary]){
       const suffix=source===primary?"primary":"secondary";
-      await registerProjectAlphaConnector(environment,{sourceId:source,producerBindingId:`producer-${suffix}`,snapshotOrigin:`https://${suffix}.example`,
+      const connectorEnvironment=source===primary?{...environment,PROJECT_ALPHA_WEBHOOK_HMAC_SECRET:undefined,
+        PROJECT_ALPHA_WEBHOOK_ED25519_PUBLIC_KEY:undefined,PROJECT_ALPHA_WEBHOOK_ED25519_PREVIOUS_PUBLIC_KEY:undefined}:environment;
+      await registerProjectAlphaConnector(connectorEnvironment,{sourceId:source,producerBindingId:`producer-${suffix}`,snapshotOrigin:`https://${suffix}.example`,
         applicationKey:"ltds_ops",profile:source===primary?"primary_legacy":"business_data",displayName:suffix,
         revision:{credentialRef:suffix,snapshotBasePath:"/",accessIssuer:accessIssuer(source),accessAudience:`aud-${source}`,accessSubject:`subject-${source}`}},"fixture-admin");
       await setProjectAlphaConnectorState(environment,source,{expectedVersion:1,state:"active"},"fixture-admin");
@@ -110,6 +121,10 @@ describe("authenticated connector business ingress",{timeout:30_000},()=>{
   });
   afterEach(()=>vi.unstubAllGlobals());
   afterAll(async()=>{await runtime?.dispose();});
+
+  it("attests a valid legacy HMAC event before Operations stages the primary connector",()=>{
+    expect(legacyAttestation).toEqual({status:200,algorithms:["ed25519","hmac-sha256"]});
+  });
 
   it("isolates equal external event and entity IDs, retries, versions, and health by authenticated source",async()=>{
     const item=event();

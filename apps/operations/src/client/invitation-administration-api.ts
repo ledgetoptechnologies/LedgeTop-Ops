@@ -5,7 +5,7 @@ import { invitationRequestSchema, type PortalInvitationRequest } from "../../../
 export { invitationRequestSchema };
 export type InvitationRequest = PortalInvitationRequest;
 export interface InvitationAdministrationAccess { enabled: boolean; canReview: boolean; canManagePolicy: boolean; error?: string }
-export const invitationAdministrationPath = "/operations/invitation-requests";
+export const invitationAdministrationPath = "/clients/invitation-requests";
 const id = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/), source = z.string().regex(/^project-alpha:[A-Za-z0-9_-]+$/);
 export const invitationPolicySchema = z.object({workspaceId: id, sourceId: source, workspaceName: z.string().max(1000),
   policy: z.enum(["allowed", "disabled", "require_approval"]), version: z.number().int().nonnegative(), contextVersion: z.string().min(1).max(512), capabilities: z.object({canManagePolicy: z.boolean()})});

@@ -63,6 +63,12 @@ function primaryContext(): ClientHubCollectionContext {
   value.access = { directory: true, requests: true, delivery: true, viewer: true };
   return value;
 }
+function secondaryContext():ClientHubCollectionContext{
+  const value=primaryContext();
+  value.root={...value.root,source_id:"project-alpha:secondary",workspace_id:"workspace-other"};
+  value.canonicalRoot={...value.canonicalRoot,sourceId:"project-alpha:secondary"};
+  return value;
+}
 
 describe("staff Client Hub audit timeline", { timeout: 60_000 }, () => {
   let runtime: Miniflare, delivery: D1Database, ops: D1Database, env: Env;
@@ -107,6 +113,20 @@ describe("staff Client Hub audit timeline", { timeout: 60_000 }, () => {
       CREATE TABLE viewer_client_grants(id TEXT PRIMARY KEY,account_id TEXT,project_id TEXT);
       CREATE TABLE viewer_client_grant_audit(id TEXT PRIMARY KEY,grant_id TEXT,action TEXT,actor_staff_id TEXT,
         idempotency_key TEXT,details_json TEXT,created_at TEXT);
+      CREATE TABLE portal_authenticated_content_history_state(singleton INTEGER PRIMARY KEY,schema_version INTEGER,collection_started_at TEXT);
+      INSERT INTO portal_authenticated_content_history_state VALUES(1,1,'2026-08-24T00:00:00.000Z');
+      CREATE TABLE portal_authenticated_content_events(recorded_sequence INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT UNIQUE,
+        authority_mode TEXT,source_id TEXT,workspace_id TEXT,account_id TEXT,project_id TEXT,project_public_id TEXT,
+        action TEXT,resource_label TEXT,occurred_at TEXT);
+      CREATE TABLE portal_authenticated_content_retention_control(singleton INTEGER PRIMARY KEY,delete_enabled INTEGER,delete_before TEXT);
+      INSERT INTO portal_authenticated_content_retention_control VALUES(1,0,NULL);
+      CREATE INDEX idx_portal_authenticated_content_legacy_timeline ON portal_authenticated_content_events(account_id,project_id,occurred_at DESC,recorded_sequence DESC);
+      CREATE INDEX idx_portal_authenticated_content_native_timeline ON portal_authenticated_content_events(source_id,workspace_id,project_public_id,occurred_at DESC,recorded_sequence DESC);
+      CREATE TRIGGER portal_authenticated_content_events_immutable_update BEFORE UPDATE ON portal_authenticated_content_events BEGIN SELECT RAISE(ABORT,'immutable'); END;
+      CREATE TRIGGER portal_authenticated_content_events_retention_delete_guard BEFORE DELETE ON portal_authenticated_content_events BEGIN SELECT RAISE(ABORT,'guarded'); END;
+      CREATE TRIGGER portal_authenticated_content_history_state_immutable_delete BEFORE DELETE ON portal_authenticated_content_history_state BEGIN SELECT RAISE(ABORT,'immutable'); END;
+      CREATE TRIGGER portal_authenticated_content_history_state_immutable_update BEFORE UPDATE ON portal_authenticated_content_history_state
+        WHEN 0 BEGIN SELECT RAISE(ABORT,'immutable'); END;
     `.replace(/\s*\n\s*/g, " "));
     await ops.exec(`CREATE TABLE client_business_activity_state(singleton INTEGER PRIMARY KEY,revision INTEGER);
       INSERT INTO client_business_activity_state VALUES(1,1);
@@ -213,6 +233,79 @@ describe("staff Client Hub audit timeline", { timeout: 60_000 }, () => {
       expect(result.coverage.delivery).toEqual({ available: false, reason: "permission_required" });
       expect(result.items).toEqual([]);
     } finally { projectPolicy.deliveryAudit = true; }
+  });
+
+  it("federates exact legacy and native authenticated content starts with redaction, permissions, and stable watermarks",async()=>{
+    await delivery.batch([
+      ...[1,2,3].map(index=>delivery.prepare(`INSERT INTO portal_authenticated_content_events
+        (id,authority_mode,source_id,workspace_id,account_id,project_id,project_public_id,action,resource_label,occurred_at)
+        VALUES(?, 'legacy_delivery','delivery:local','legacy-workspace',?,'project-local',NULL,?,?,?)`)
+        .bind(`legacy-${index}`,accountId,index===2?'file.download_requested':'file.preview_requested',`Roof image ${index}.jpg`,
+          `2026-08-25T1${4-index}:00:00.000Z`)),
+      delivery.prepare(`INSERT INTO portal_authenticated_content_events
+        (id,authority_mode,source_id,workspace_id,account_id,project_id,project_public_id,action,resource_label,occurred_at)
+        VALUES('legacy-other','legacy_delivery','delivery:local','legacy-workspace','other-account','project-local',NULL,
+          'file.preview_requested','Private sibling.jpg','2026-08-25T13:30:00.000Z')`),
+      delivery.prepare(`INSERT INTO portal_authenticated_content_events
+        (id,authority_mode,source_id,workspace_id,account_id,project_id,project_public_id,action,resource_label,occurred_at)
+        VALUES('native-primary','native_delivery','project-alpha:primary','workspace-one',NULL,NULL,'project-one',
+          'file.download_requested','Native model.glb','2026-08-25T15:00:00.000Z')`),
+      delivery.prepare(`INSERT INTO portal_authenticated_content_events
+        (id,authority_mode,source_id,workspace_id,account_id,project_id,project_public_id,action,resource_label,occurred_at)
+        VALUES('native-secondary','native_delivery','project-alpha:secondary','workspace-other',NULL,NULL,'project-one',
+          'file.preview_requested','Secondary map.tif','2026-08-25T16:00:00.000Z')`),
+      delivery.prepare(`INSERT INTO portal_authenticated_content_events
+        (id,authority_mode,source_id,workspace_id,account_id,project_id,project_public_id,action,resource_label,occurred_at)
+        VALUES('native-wrong-workspace','native_delivery','project-alpha:secondary','workspace-one',NULL,NULL,'project-one',
+          'file.preview_requested','Wrong workspace.jpg','2026-08-25T17:00:00.000Z')`),
+    ]);
+    const filters={category:"delivery",actorType:"client",result:"informational",from:null,to:null} as const;
+    const first=await listClientAuditTimeline(env,staff,context(),{limit:1,filters});
+    expect(first.contentCoverage.authenticated_content_activity).toEqual({available:true,reason:null,
+      collectedSince:"2026-08-24T00:00:00.000Z"});
+    expect(first.items[0]).toMatchObject({producerEventId:"authenticated-content:legacy-1",category:"delivery",
+      action:"file.preview_requested",actor:{type:"client",label:"Client"},
+      resource:{type:"authenticated_content",label:"Roof image 1.jpg"},result:"informational"});
+    await delivery.prepare(`INSERT INTO portal_authenticated_content_events
+      (id,authority_mode,source_id,workspace_id,account_id,project_id,project_public_id,action,resource_label,occurred_at)
+      VALUES('legacy-after-water','legacy_delivery','delivery:local','legacy-workspace',?,'project-local',NULL,
+        'file.preview_requested','Late secret.jpg','2026-08-25T18:00:00.000Z')`).bind(accountId).run();
+    const rest=[];let cursor=first.page.nextCursor;
+    while(cursor){const page=await listClientAuditTimeline(env,staff,context(),{limit:1,filters,cursor});rest.push(...page.items);cursor=page.page.nextCursor;}
+    expect([...first.items,...rest].map(event=>event.producerEventId)).toEqual([
+      "authenticated-content:legacy-1","authenticated-content:legacy-2","authenticated-content:legacy-3",
+    ]);
+    expect(JSON.stringify([first.items,...rest])).not.toMatch(/other-account|Private sibling|Late secret|storage|fingerprint|identity-/i);
+
+    const primary=await listClientAuditTimeline(env,staff,primaryContext(),{projectId:"project-one",limit:10,filters});
+    expect(primary.items.map(event=>event.producerEventId)).toContain("authenticated-content:native-primary");
+    const secondary=await listClientAuditTimeline(env,staff,secondaryContext(),{projectId:"project-one",limit:10,filters});
+    expect(secondary.items.map(event=>event.producerEventId)).toEqual(["authenticated-content:native-secondary"]);
+    projectPolicy.deliveryAudit=false;
+    try{
+      const denied=await listClientAuditTimeline(env,staff,secondaryContext(),{projectId:"project-one",limit:10,filters});
+      expect(denied.contentCoverage.authenticated_content_activity).toEqual({available:false,reason:"permission_required",
+        collectedSince:"2026-08-24T00:00:00.000Z"});
+      expect(denied.items).toEqual([]);
+    }finally{projectPolicy.deliveryAudit=true;}
+  });
+
+  it("binds content collection start into cursor v9",async()=>{
+    const filters={category:"delivery",actorType:"client",result:"informational",from:null,to:null} as const;
+    await delivery.prepare(`UPDATE portal_authenticated_content_history_state SET collection_started_at=NULL WHERE singleton=1`).run();
+    const inactive=await listClientAuditTimeline(env,staff,secondaryContext(),{projectId:"project-one",limit:1,filters});
+    expect(inactive.contentCoverage.authenticated_content_activity).toEqual({available:false,reason:"not_collected",collectedSince:null});
+    expect(inactive.coverage.delivery).toEqual({available:false,reason:"not_collected"});
+    await delivery.prepare(`UPDATE portal_authenticated_content_history_state SET collection_started_at='2026-08-24T00:00:00.000Z' WHERE singleton=1`).run();
+    const first=await listClientAuditTimeline(env,staff,context(),{limit:1,filters});
+    expect(first.page.nextCursor).toBeTruthy();
+    await delivery.prepare(`UPDATE portal_authenticated_content_history_state SET collection_started_at='2026-08-24T00:00:01.000Z' WHERE singleton=1`).run();
+    try{
+      await expect(listClientAuditTimeline(env,staff,context(),{limit:1,filters,cursor:first.page.nextCursor!}))
+        .rejects.toMatchObject({status:409});
+    }finally{
+      await delivery.prepare(`UPDATE portal_authenticated_content_history_state SET collection_started_at='2026-08-24T00:00:00.000Z' WHERE singleton=1`).run();
+    }
   });
 
   it("filters mixed workspace membership actors before applying the adapter limit", async () => {

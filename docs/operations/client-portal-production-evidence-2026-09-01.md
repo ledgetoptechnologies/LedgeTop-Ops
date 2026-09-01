@@ -61,9 +61,23 @@ claim that the complete client-portal goal is live accepted.
   of a consolidated production CORS policy that retains Operations staff upload
   access while allowing both exact portal origins.
 - Signed-in acceptance remains outstanding. It must cover both domains, direct
-  links, hard refresh, Back/Forward, mixed-host navigation, an unprovisioned
-  identity, explicit workspace membership, cross-tenant denial, revocation, and
-  session expiry. Hostname is never authorization.
+  links, Back/Forward, and mixed-host navigation. For each domain, separately
+  record successful sign-in, hard refresh, same-origin Access logout,
+  unauthorized/unprovisioned identity denial, cross-tenant denial, and
+  membership/grant revocation, plus session-expiry denial on each host. Also
+  read back and record that both destinations
+  still use the same Access application, audience, and policy set. Hostname is
+  never authorization, and a passing result on one domain is not evidence for
+  the other.
+- The acceptance packet must reference the exact post-change Access
+  application/audience/destination/policy readback and the retained pre-change
+  Access/custom-domain rollback snapshot. Neither reference is committed here
+  yet, so this checkpoint remains incomplete.
+- Recheck the canonical public-link boundary in the same acceptance packet:
+  an anonymous current link remains reachable without Access on
+  `client.ledgetopdroneservices.com`, no Access assertion reaches that Worker
+  request, password/expiry/revocation still apply, and the equivalent public
+  namespace remains unavailable on `portal.ledgetoptechnologies.com`.
 
 ## Next safe activation sequence
 
@@ -77,4 +91,3 @@ claim that the complete client-portal goal is live accepted.
    revocation during reads.
 5. Enable later capabilities one closed dependency window at a time, retaining
    the false flag and rollback evidence for every window.
-

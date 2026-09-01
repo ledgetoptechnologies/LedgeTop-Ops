@@ -81,7 +81,7 @@ export function parseInboxPage(source: InboxSource, value: unknown, q: string): 
     return { nextCursor: page.nextCursor, items: page.items.map(row => ({ id: row.id, title: row.target.label,
       detail: `${[row.accountName, row.target.projectName].filter(Boolean).join(" · ")} — ${row.message.slice(0, 240)}${row.message.length > 240 ? "…" : ""}`,
       date: row.createdAt, status: row.status === "new" ? "New" : "In progress",
-      href: `/operations/feedback/${encodeURIComponent(row.id)}?status=all`, action: "Review feedback" })) };
+      href: `/clients/feedback/${encodeURIComponent(row.id)}?status=all`, action: "Review feedback" })) };
   }
   if (source === "deliveries") {
     const page = deliveryPage.parse(value);
@@ -93,7 +93,7 @@ export function parseInboxPage(source: InboxSource, value: unknown, q: string): 
         : row.kind === "authenticated_delivery" ? `${row.workspaceName || "Authenticated delivery"} · ${row.addedCount.toLocaleString("en-US")} added · ${row.removedCount.toLocaleString("en-US")} removed`
         : `${row.workspaceName} · ${row.sourceName} · ${row.eventLabel}`,
       date: row.createdAt, status: row.status === "pending" ? "Pending" : "Processing",
-      href: `/operations/notifications?${new URLSearchParams(row.kind === "folder_changes" ? { batchId: row.id } : { kind: row.kind, batchId: row.id })}`, action: "Review notice" })) };
+      href: `/notifications?${new URLSearchParams(row.kind === "folder_changes" ? { batchId: row.id } : { kind: row.kind, batchId: row.id })}`, action: "Review notice" })) };
   }
   const page = connectionPage.parse(value), names = new Map(page.connectors.filter(row => row.state === "active").map(row => [row.sourceId, row.displayName]));
   if (page.legacyPrimary) names.set("project-alpha:primary", "Project Alpha · Primary");

@@ -63,9 +63,9 @@ describe("portal grant and deny management read routes", () => {
   });
 
   it("validates and forwards bounded audience and denial scope searches", async () => {
-    const audience = await worker.fetch(new Request("https://ops.example/api/delivery/authenticated-grants/audiences?folderBindingId=binding-a&q=Acme"), env, context);
+    const audience = await worker.fetch(new Request("https://ops.example/api/delivery/authenticated-grants/audiences?folderBindingId=binding-a&q=Acme&audienceType=organization"), env, context);
     expect(audience.status).toBe(200);
-    expect(mocks.searchAudiences).toHaveBeenCalledWith(env, principal, "binding-a", "Acme");
+    expect(mocks.searchAudiences).toHaveBeenCalledWith(env, principal, "binding-a", "Acme", "organization");
 
     const scope = await worker.fetch(new Request("https://ops.example/api/client-portal/identity-denials/scopes?scopeType=project&q=Hilly"), env, context);
     expect(scope.status).toBe(200);
