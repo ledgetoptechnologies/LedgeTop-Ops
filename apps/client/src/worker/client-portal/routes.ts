@@ -13,7 +13,10 @@ import type { Env } from "../types";
 import { clientPortalRequestOriginAllowed, configuredClientPortalOrigins } from "../origin-policy";
 import { serveAuthorizedThumbnail } from "../thumbnails";
 import { appendAuthenticatedContentStart, authenticatedContentAuditRequired } from "./authenticated-content-audit";
-import { d1ClientPortalRepository } from "./repository";
+import {
+  d1ClientPortalRepository,
+  NativeNotificationAuthorizationOverflowError,
+} from "./repository";
 import { clientFeedbackSchemaAvailable, createClientFeedbackRouter } from "./feedback-routes";
 import type {
   ClientPortalRepository,
@@ -162,6 +165,11 @@ const serviceRequestBody = z
       )
       .max(20)
       .optional(),
+    services: z.array(z.object({
+      publicId: opaqueId,
+      sourceVersion: catalogSourceVersion,
+      answers: z.record(z.string().max(64), z.unknown()),
+    }).strict()).max(10).optional(),
   })
   .strict()
   .superRefine((value, context) => {
@@ -436,7 +444,7 @@ export function createClientPortalRouter(
             canViewBilling: workspace.canViewBilling,
           };
         } else {
-          const nativeRequestPath = /^\/(?:request-readiness|service-catalog(?:\/page)?|service-request-drafts|service-requests)(?:\/|$)/
+          const nativeRequestPath = /^\/(?:request-readiness|service-catalog(?:\/page)?|service-request-drafts|service-requests|notifications)(?:\/|$)/
             .test(c.req.path);
           const native = selectedWorkspace && nativeRequestPath && nativeServiceRequestsEnabled(c.env)
             ? await resolveNativePortalWorkspaceReadContext(c.env, principal, selectedWorkspace)
@@ -565,6 +573,14 @@ export function createClientPortalRouter(
 
   function selectedWorkspace(c: { get(name: "clientWorkspace"): EffectivePortalWorkspaceContext | null }): EffectivePortalWorkspaceContext | null {
     return c.get("clientWorkspace");
+  }
+
+  function rejectUnsupportedNativeRequestMutation(c: ClientPortalContext, operation: string): void {
+    if (!c.get("clientSession").nativeSourceId) return;
+    throw new HTTPException(501, { res: Response.json({
+      error: `${operation} is not yet available for this Project Alpha workspace.`,
+      code: "native_operation_unavailable",
+    }, { status: 501 }) });
   }
 
   async function requireLegacyTeamManagement(c: ClientPortalContext): Promise<void> {
@@ -863,7 +879,17 @@ export function createClientPortalRouter(
       throw new HTTPException(400, { message: "Cursor is invalid" });
     if (!(await notificationSchemaAvailable(c.env)))
       return c.json({ notifications: [], unreadCount: 0, cursor: null });
-    const page = await repository.listNotifications(c.env, c.get("clientSession"), cursor);
+    let page;
+    try {
+      page = await repository.listNotifications(c.env, c.get("clientSession"), cursor);
+    } catch (error) {
+      if (error instanceof NativeNotificationAuthorizationOverflowError)
+        return c.json({
+          error: "Notifications are temporarily unavailable while access is reconciled.",
+          code: "notification_authorization_unavailable",
+        }, 503);
+      throw error;
+    }
     const workspace = selectedWorkspace(c);
     if (!workspace) return c.json(page);
     const authorized = (await Promise.all(page.notifications.map(async notification => ({
@@ -1915,6 +1941,7 @@ export function createClientPortalRouter(
 
   router.post("/service-requests", async (c) => {
     requireSameRequestOrigin(c.req.raw, c.env);
+    const activeSession = c.get("clientSession");
     const limiter = c.env.PUBLIC_BULK_RATE_LIMITER;
     if (!limiter || typeof limiter.limit !== "function") {
       throw new HTTPException(503, {
@@ -1922,7 +1949,9 @@ export function createClientPortalRouter(
       });
     }
     const rateLimit = await limiter.limit({
-      key: `client-service-request:create:${c.get("clientSession").accountId}`,
+      key: `client-service-request:create:${activeSession.nativeSourceId
+        ? `native:${activeSession.nativeSourceId}:${activeSession.workspaceId}:${activeSession.nativePortalIdentityId}`
+        : activeSession.accountId}`,
     });
     if (!rateLimit.success) {
       c.header("Retry-After", String(SERVICE_REQUEST_RATE_LIMIT_SECONDS));
@@ -1944,13 +1973,23 @@ export function createClientPortalRouter(
       throw new HTTPException(400, {
         message: "The service request is invalid",
       });
+    if (!activeSession.nativeSourceId && parsed.data.services !== undefined)
+      throw new HTTPException(400, { res: Response.json({
+        error: "Service selections require an exact Project Alpha workspace.",
+        code: "native_workspace_required",
+      }, { status: 400 }) });
+    if (activeSession.nativeSourceId && !parsed.data.services?.length)
+      throw new HTTPException(422, { res: Response.json({
+        error: "Select at least one service from this Project Alpha workspace before submitting.",
+        code: "native_services_required",
+      }, { status: 422 }) });
     if (parsed.data.projectId
       ? !(await authorizeProject(c, "request.create", parsed.data.projectId))
       : !(await authorizeRoot(c, "request.create")))
       throw new HTTPException(404, { message: "Project not found or service requests are not permitted" });
     const result = await repository.createServiceRequest(
       c.env,
-      c.get("clientSession"),
+      activeSession,
       {
         ...parsed.data,
         projectId: parsed.data.projectId ?? null,
@@ -1983,6 +2022,26 @@ export function createClientPortalRouter(
         message:
           "This Idempotency-Key was already used for a different request",
       });
+    if (result.kind === "blocked") {
+      const messages = {
+        request_fields_incomplete: "Complete the required request details before submitting.",
+        answers_incomplete: "Complete the required service questions before submitting.",
+        geometry_required: "Draw the required work area before submitting.",
+        catalog_changed: "The service catalog changed. Refresh the request before submitting.",
+        service_assignments_changed: "The available services changed. Refresh the request before submitting.",
+        attachments_pending: "Wait for request attachments to finish processing before submitting.",
+        attachments_rejected: "Remove rejected request attachments before submitting.",
+        attachments_expired: "Remove expired request attachments before submitting.",
+      } as const;
+      const status = result.reason === "catalog_changed" || result.reason === "service_assignments_changed" ? 409 : 422;
+      return c.json({
+        error: messages[result.reason],
+        code: result.reason,
+        servicePublicIds: result.servicePublicIds,
+        attachmentCount: result.attachmentCount,
+        draftId: result.draftId,
+      }, status);
+    }
     return c.json(
       { request: result.request },
       result.kind === "created" ? 201 : 200,
@@ -2000,6 +2059,7 @@ export function createClientPortalRouter(
       .safeParse(c.req.header("If-Match"));
     if (!requestId.success)
       throw new HTTPException(404, { message: "Service request not found" });
+    rejectUnsupportedNativeRequestMutation(c, "Editing a submitted request");
     const workspace = selectedWorkspace(c);
     if (workspace && !(await authorizeEffectiveWorkspaceRequest(
       c.env, c.get("clientPrincipal"), workspace, requestId.data,
@@ -2088,6 +2148,7 @@ export function createClientPortalRouter(
     const parsedKey = idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
     if (!parentId.success)
       throw new HTTPException(404, { message: "Service request not found" });
+    rejectUnsupportedNativeRequestMutation(c, "Creating a change request");
     const workspace = selectedWorkspace(c);
     if (workspace && !(await authorizeEffectiveWorkspaceRequest(c.env, c.get("clientPrincipal"), workspace, parentId.data)))
       throw new HTTPException(404, { message: "Service request not found" });
@@ -2145,6 +2206,7 @@ export function createClientPortalRouter(
     const parsedKey = idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
     if (!requestId.success)
       throw new HTTPException(404, { message: "Service request not found" });
+    rejectUnsupportedNativeRequestMutation(c, "Responding to an estimate");
     const workspace = selectedWorkspace(c);
     if (workspace && !(await authorizeEffectiveWorkspaceRequest(
       c.env, c.get("clientPrincipal"), workspace, requestId.data,

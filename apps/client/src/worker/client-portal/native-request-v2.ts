@@ -11,6 +11,7 @@ import type {
   ClientServiceRequestDraftInput,
   ClientServiceRequestDraftSummary,
   ClientServiceDraftSubmitResult,
+  ClientServiceDraftSubmitBlockReason,
 } from "./types";
 import {
   calculateRequestAreaSquareMeters,
@@ -89,24 +90,74 @@ function mapRequest(row: Record<string, unknown>): ClientServiceRequest {
 async function selections(
   env: Env, sourceId: string, input: ClientServiceRequestDraftInput,
 ): Promise<{ kind: "resolved"; services: ClientServiceDraftSelection[] }
-  | { kind: "catalog_changed"; servicePublicIds: string[] } | { kind: "invalid" }> {
+  | { kind: "catalog_changed"; servicePublicIds: string[] }
+  | { kind: "invalid"; reason: "selection" | "answers"; servicePublicIds?: string[] }> {
   if (input.services.length > 10 || new Set(input.services.map(item => item.publicId)).size !== input.services.length)
-    return { kind: "invalid" };
+    return { kind: "invalid", reason: "selection" };
   const resolved: ClientServiceDraftSelection[] = [];
   const changed: string[] = [];
   for (const selected of input.services) {
-    if (!PUBLIC_ID.test(selected.publicId) || !SOURCE_VERSION.test(selected.sourceVersion)) return { kind: "invalid" };
+    if (!PUBLIC_ID.test(selected.publicId) || !SOURCE_VERSION.test(selected.sourceVersion))
+      return { kind: "invalid", reason: "selection" };
     const row = await database(env).prepare(`SELECT public_id,source_version,name,summary,category,display_order,
       geometry_requirement,question_schema_json FROM pa_service_catalog_items
       WHERE source_id=? AND public_id=? AND active=1`).bind(sourceId, selected.publicId).first<CatalogRow>();
     const item = row ? mapServiceCatalogItem(row) : null;
     if (!item || item.sourceVersion !== selected.sourceVersion) { changed.push(selected.publicId); continue; }
     const answers = validateServiceAnswers(item.questions, selected.answers, true);
-    if (!answers) return { kind: "invalid" };
+    if (!answers) return { kind: "invalid", reason: "answers", servicePublicIds: [selected.publicId] };
     resolved.push({ ...item, answers });
   }
   return changed.length ? { kind: "catalog_changed", servicePublicIds: changed }
     : { kind: "resolved", services: resolved };
+}
+
+export async function validateNativeDirectServiceRequest(
+  env: Env,
+  session: ClientPortalSession,
+  input: ClientServiceRequestDraftInput,
+): Promise<{
+  kind: "ready";
+} | {
+  kind: "blocked";
+  reason: ClientServiceDraftSubmitBlockReason;
+  servicePublicIds?: string[];
+} | null> {
+  const authority = await resolveNativeRequestAuthority(env, session, input.projectId);
+  if (!authority) return null;
+  if (!input.title.trim() || !input.details.trim())
+    return { kind: "blocked", reason: "request_fields_incomplete" };
+  const assignment = await policy(env, session, input.projectId, input.services);
+  if (assignment.kind !== "ready") return {
+    kind: "blocked",
+    reason: assignment.kind,
+    servicePublicIds: assignment.servicePublicIds,
+  };
+  const resolved = await selections(env, authority.sourceId, input);
+  if (resolved.kind === "catalog_changed") return {
+    kind: "blocked",
+    reason: resolved.kind,
+    servicePublicIds: resolved.servicePublicIds,
+  };
+  if (resolved.kind === "invalid") return resolved.reason === "answers" ? {
+    kind: "blocked",
+    reason: "answers_incomplete",
+    servicePublicIds: resolved.servicePublicIds,
+  } : null;
+  const incomplete = resolved.services
+    .filter(service => validateServiceAnswers(service.questions, service.answers) === null)
+    .map(service => service.publicId);
+  if (incomplete.length) return {
+    kind: "blocked",
+    reason: "answers_incomplete",
+    servicePublicIds: incomplete,
+  };
+  const geometry = resolved.services
+    .filter(service => service.geometryRequirement === "required" && input.areaGeoJson === null)
+    .map(service => service.publicId);
+  return geometry.length
+    ? { kind: "blocked", reason: "geometry_required", servicePublicIds: geometry }
+    : { kind: "ready" };
 }
 
 async function catalogChanges(env: Env, sourceId: string, services: ReadonlyArray<{ publicId: string; sourceVersion: string }>) {

@@ -142,6 +142,9 @@ export interface ClientServiceRequestInput {
   longitude?: number | null;
   areaGeoJson?: { type: "Polygon"; coordinates: [number, number][][] } | null;
   poiPoints?: Array<{ longitude: number; latitude: number; label?: string | null }>;
+  /** Exact catalog selections used by source-owned native workspaces. The
+   * route rejects this field unless an exact native workspace is active. */
+  services?: ClientServiceDraftSelectionInput[];
 }
 
 export type ClientServiceQuestion =
@@ -370,6 +373,16 @@ export type ClientServiceRequestCreateResult =
   | { kind: "created" | "replayed"; request: ClientServiceRequest }
   | { kind: "conflict" };
 
+export type ClientServiceRequestDirectCreateResult =
+  | ClientServiceRequestCreateResult
+  | {
+      kind: "blocked";
+      reason: ClientServiceDraftSubmitBlockReason;
+      servicePublicIds?: string[];
+      attachmentCount?: number;
+      draftId?: string;
+    };
+
 export type ClientServiceRequestCancelResult =
   | { kind: "cancelled" | "replayed"; request: ClientServiceRequest }
   | {
@@ -399,7 +412,7 @@ export interface ClientPortalRepository {
   updateNotification(env: Env, session: ClientPortalSession, notificationId: string, action: "read" | "dismiss"): Promise<boolean>;
   listServiceRequests(env: Env, session: ClientPortalSession): Promise<ClientServiceRequest[]>;
   getServiceRequest(env: Env, session: ClientPortalSession, requestId: string): Promise<ClientServiceRequest | null>;
-  createServiceRequest(env: Env, session: ClientPortalSession, input: ClientServiceRequestInput): Promise<ClientServiceRequestCreateResult | null>;
+  createServiceRequest(env: Env, session: ClientPortalSession, input: ClientServiceRequestInput): Promise<ClientServiceRequestDirectCreateResult | null>;
   updateServiceRequest(env: Env, session: ClientPortalSession, requestId: string, input: ClientServiceRequestInput): Promise<ClientServiceRequest | null>;
   cancelServiceRequest?(env: Env, session: ClientPortalSession, requestId: string, mutationKey: string): Promise<ClientServiceRequestCancelResult | null>;
   createChangeRequest(env: Env, session: ClientPortalSession, parentRequestId: string, input: ClientServiceRequestInput): Promise<ClientServiceRequestCreateResult | null>;

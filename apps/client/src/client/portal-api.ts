@@ -187,6 +187,8 @@ export interface PortalServiceRequestInput {
   longitude?: number | null;
   areaGeoJson?: PortalAreaGeoJson | null;
   poiPoints?: PortalPoi[];
+  /** Required by the direct endpoint for a source-owned native workspace. */
+  services?: Array<{ publicId: string; sourceVersion: string; answers: Record<string, unknown> }>;
 }
 
 export type PortalRequest = typeof requestJson;

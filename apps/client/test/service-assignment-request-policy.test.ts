@@ -2,6 +2,11 @@ import { readFileSync, readdirSync } from "node:fs";
 import { Miniflare } from "miniflare";
 import { PRIMARY_CATALOG_SOURCE } from "@ltds/shared";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { createClientPortalRouter } from "../src/worker/client-portal/routes";
+import {
+  d1ClientPortalRepository,
+  NativeNotificationAuthorizationOverflowError,
+} from "../src/worker/client-portal/repository";
 import {
   readServiceAssignmentPolicy,
   serviceAssignmentPolicyProofStillCurrent,
@@ -73,7 +78,7 @@ describe("exact-target service-assignment request policy", { timeout: 60_000 }, 
       compatibilityDate: "2026-08-06",
       modules: true,
       script: "export default {fetch(){return new Response('ok')}}",
-      d1Databases: Object.fromEntries(Array.from({ length: 16 }, (_, index) =>
+      d1Databases: Object.fromEntries(Array.from({ length: 24 }, (_, index) =>
         [`POLICY_DB_${index}`, `service-assignment-policy-${index}`])),
     });
   });
@@ -306,12 +311,16 @@ describe("exact-target service-assignment request policy", { timeout: 60_000 }, 
     ]);
   }
 
-  it("keeps native request ownership, catalog collisions, replay, attachments, history, and cancellation source-qualified", async () => {
-    await seedSecondaryPolicyContext();
+  async function enableSecondaryRequestPolicy() {
     await db.prepare(`INSERT INTO pa_service_assignment_request_policy_reviews
       (source_id,revision,review_id,state,reviewed_by_type,reviewed_by_id,review_reference,rationale,reviewed_at)
       VALUES (?,1,'native-request-policy-review','enabled','staff','test-operator','TEST-NATIVE-REQUEST',
         'Explicit native request policy test',datetime('now'))`).bind(secondarySourceId).run();
+  }
+
+  it("keeps native request ownership, catalog collisions, replay, attachments, history, and cancellation source-qualified", async () => {
+    await seedSecondaryPolicyContext();
+    await enableSecondaryRequestPolicy();
     const services = await listNativeServiceCatalog(env, secondarySession, null);
     expect(services.map(item => [item.publicId, item.name])).toEqual([
       ["root-service", "Secondary colliding service"],
@@ -388,6 +397,228 @@ describe("exact-target service-assignment request policy", { timeout: 60_000 }, 
       .toMatchObject({ kind: "cancelled", request: { status: "cancelled" } });
     expect(await cancelNativeServiceRequest(env, secondarySession, submitted.request.id, "native-cancel-key-0001"))
       .toMatchObject({ kind: "replayed", request: { status: "cancelled" } });
+  });
+
+  it("composes native direct creation through the exact-source draft lifecycle and rejects ambiguous selections", async () => {
+    await seedSecondaryPolicyContext();
+    await enableSecondaryRequestPolicy();
+    const portal = createClientPortalRouter({
+      resolvePrincipal: async () => ({
+        issuer: "https://issuer.test", subject: "policy-subject", email: "policy@example.test",
+      }),
+    });
+    const requestEnv = {
+      ...env,
+      CLIENT_PORTAL_ENABLED: "true",
+      CLIENT_PORTAL_ORIGIN: "https://client.example",
+      PUBLIC_BULK_RATE_LIMITER: { limit: async () => ({ success: true }) },
+    } as Env;
+    const headers = {
+      Origin: "https://client.example",
+      "Content-Type": "application/json",
+      "Idempotency-Key": "native-direct-request-0001",
+      "X-LTDS-Workspace-Id": secondarySession.workspaceId!,
+    };
+    const body = {
+      projectId: null, requestType: "service" as const, title: "Native direct request", details: "Use exact source service",
+      location: null, preferredStartAt: null,
+      services: [{ publicId: "secondary-only", sourceVersion: "service-v1", answers: {} }],
+    };
+    const created = await portal.request("https://client.example/service-requests", {
+      method: "POST", headers, body: JSON.stringify(body),
+    }, requestEnv);
+    expect(created.status).toBe(201);
+    const createdBody = await created.json() as { request: { id: string } };
+    const owner = await db.prepare(`SELECT catalog_source_id,portal_workspace_id,portal_identity_id
+      FROM client_service_requests WHERE id=?`).bind(createdBody.request.id)
+      .first<{ catalog_source_id: string; portal_workspace_id: string; portal_identity_id: string }>();
+    expect(owner).toEqual({ catalog_source_id: secondarySourceId, portal_workspace_id: secondarySession.workspaceId,
+      portal_identity_id: secondarySession.nativePortalIdentityId });
+
+    const replayed = await portal.request("https://client.example/service-requests", {
+      method: "POST", headers, body: JSON.stringify(body),
+    }, requestEnv);
+    expect(replayed.status).toBe(200);
+    expect(await replayed.json()).toMatchObject({ request: { id: createdBody.request.id } });
+
+    const missing = await portal.request("https://client.example/service-requests", {
+      method: "POST", headers: { ...headers, "Idempotency-Key": "native-direct-request-0002" },
+      body: JSON.stringify({ ...body, services: undefined }),
+    }, requestEnv);
+    expect(missing.status).toBe(422);
+    expect(await missing.json()).toEqual({
+      error: "Select at least one service from this Project Alpha workspace before submitting.",
+      code: "native_services_required",
+    });
+    const invalid = await portal.request("https://client.example/service-requests", {
+      method: "POST", headers: { ...headers, "Idempotency-Key": "native-direct-request-0003" },
+      body: JSON.stringify({ ...body, services: [{ ...body.services[0], sourceVersion: "invalid version" }] }),
+    }, requestEnv);
+    expect(invalid.status).toBe(400);
+
+    const crossSource = await portal.request("https://client.example/service-requests", {
+      method: "POST", headers: { ...headers, "Idempotency-Key": "native-direct-request-0004" },
+      body: JSON.stringify({ ...body, services: [{ publicId: "project-service", sourceVersion: "service-v1", answers: {} }] }),
+    }, requestEnv);
+    expect(crossSource.status).toBe(409);
+    expect(await crossSource.json()).toMatchObject({ code: "service_assignments_changed" });
+    expect(await db.prepare("SELECT COUNT(*) count FROM client_service_requests WHERE portal_workspace_id=?")
+      .bind(secondarySession.workspaceId).first<number>("count")).toBe(1);
+
+    const primaryDowngrade = await portal.request("https://client.example/service-requests", {
+      method: "POST",
+      headers: {
+        Origin: "https://client.example",
+        "Content-Type": "application/json",
+        "Idempotency-Key": "native-direct-request-0005",
+      },
+      body: JSON.stringify(body),
+    }, { ...requestEnv, CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "false" } as Env);
+    expect(primaryDowngrade.status).toBe(400);
+    expect(await primaryDowngrade.json()).toMatchObject({ code: "native_workspace_required" });
+    expect(await d1ClientPortalRepository.createServiceRequest(env, session, {
+      ...body,
+      idempotencyKey: "native-direct-request-0005-repository",
+      parentRequestId: null,
+    })).toBeNull();
+
+    await db.prepare(`UPDATE pa_service_catalog_items SET geometry_requirement='required'
+      WHERE source_id=? AND public_id='secondary-only'`).bind(secondarySourceId).run();
+    const blocked = await portal.request("https://client.example/service-requests", {
+      method: "POST", headers: { ...headers, "Idempotency-Key": "native-direct-request-0006" },
+      body: JSON.stringify(body),
+    }, requestEnv);
+    expect(blocked.status).toBe(422);
+    expect(await blocked.json()).toMatchObject({ code: "geometry_required", servicePublicIds: ["secondary-only"] });
+    expect(await db.prepare("SELECT COUNT(*) count FROM client_service_request_drafts WHERE portal_workspace_id=?")
+      .bind(secondarySession.workspaceId).first<number>("count")).toBe(1);
+
+    await db.prepare(`UPDATE pa_service_catalog_items SET geometry_requirement='optional',question_schema_json=?
+      WHERE source_id=? AND public_id='secondary-only'`).bind(JSON.stringify([{
+        id: "instructions", label: "Instructions", type: "text", required: true,
+      }]), secondarySourceId).run();
+    const invalidAnswers = await portal.request("https://client.example/service-requests", {
+      method: "POST", headers: { ...headers, "Idempotency-Key": "native-direct-request-0007" },
+      body: JSON.stringify(body),
+    }, requestEnv);
+    expect(invalidAnswers.status).toBe(422);
+    expect(await invalidAnswers.json()).toMatchObject({
+      code: "answers_incomplete", servicePublicIds: ["secondary-only"],
+    });
+    expect(await db.prepare("SELECT COUNT(*) count FROM client_service_request_drafts WHERE portal_workspace_id=?")
+      .bind(secondarySession.workspaceId).first<number>("count")).toBe(1);
+  }, 120_000);
+
+  it("lists and counts only exact-recipient service-request notifications for the active native source", async () => {
+    await seedSecondaryPolicyContext();
+    await enableSecondaryRequestPolicy();
+    const direct = await d1ClientPortalRepository.createServiceRequest(env, secondarySession, {
+      idempotencyKey: "native-notification-request-0001", projectId: null, requestType: "service",
+      title: "Secondary notification request", details: "Keep the notification source-qualified",
+      location: null, preferredStartAt: null,
+      services: [{ publicId: "secondary-only", sourceVersion: "service-v1", answers: {} }],
+    });
+    if (!direct || !("request" in direct)) throw new Error("native request was not created");
+    const nativeOwner = await db.prepare(`SELECT account_id,created_by_identity_id FROM client_service_requests WHERE id=?`)
+      .bind(direct.request.id).first<{ account_id: string; created_by_identity_id: string }>();
+    await db.batch([
+      db.prepare(`INSERT INTO client_service_requests
+        (id,account_id,project_id,created_by_identity_id,request_type,title,details,status,catalog_source_id,
+          idempotency_key,request_fingerprint)
+        VALUES ('primary-notification-request','policy-account',NULL,'policy-identity','service','Primary request',
+          'Primary notification fixture','submitted',?,'primary-notification-request-key',?)`).bind(sourceId, "p".repeat(43)),
+      db.prepare(`INSERT INTO client_portal_notifications
+        (id,account_id,recipient_identity_id,event_type,source_type,source_id,dedupe_key,title,body,action_path)
+        VALUES ('primary-notice','policy-account','policy-identity','request_status','service_request',
+          'primary-notification-request','primary-notice','Primary update','Primary body','/portal/requests')`),
+      db.prepare(`INSERT INTO client_portal_notifications
+        (id,account_id,recipient_identity_id,event_type,source_type,source_id,dedupe_key,title,body,action_path)
+        VALUES ('secondary-notice',?,?, 'request_status','service_request',?,'secondary-notice',
+          'Secondary update','Secondary body','/portal/requests')`)
+        .bind(nativeOwner!.account_id, nativeOwner!.created_by_identity_id, direct.request.id),
+    ]);
+    expect(await d1ClientPortalRepository.listNotifications(env, session)).toMatchObject({
+      notifications: [{ id: "primary-notice" }], unreadCount: 1,
+    });
+    expect(await d1ClientPortalRepository.listNotifications(env, secondarySession)).toMatchObject({
+      notifications: [{ id: "secondary-notice" }], unreadCount: 1,
+    });
+    const portal = createClientPortalRouter({ resolvePrincipal: async () => ({
+      issuer: "https://issuer.test", subject: "policy-subject", email: "policy@example.test",
+    }) });
+    const requestEnv = { ...env, CLIENT_PORTAL_ENABLED: "true", CLIENT_PORTAL_ORIGIN: "https://client.example" } as Env;
+    const mutation = (id: string, action: "read" | "dismiss") => portal.request(
+      `https://client.example/notifications/${id}`,
+      { method: "PATCH", headers: { Origin: "https://client.example", "Content-Type": "application/json",
+        "X-LTDS-Workspace-Id": secondarySession.workspaceId! }, body: JSON.stringify({ action }) }, requestEnv,
+    );
+    expect((await mutation("secondary-notice", "read")).status).toBe(200);
+    expect(await db.prepare("SELECT read_at IS NOT NULL value FROM client_portal_notifications WHERE id='secondary-notice'")
+      .first<number>("value")).toBe(1);
+    expect((await mutation("primary-notice", "dismiss")).status).toBe(404);
+    expect(await db.prepare("SELECT dismissed_at FROM client_portal_notifications WHERE id='primary-notice'")
+      .first<string | null>("dismissed_at")).toBeNull();
+    expect((await mutation("secondary-notice", "dismiss")).status).toBe(200);
+    expect(await d1ClientPortalRepository.listNotifications(env, secondarySession)).toMatchObject({
+      notifications: [], unreadCount: 0,
+    });
+  });
+
+  it("fails explicitly instead of reporting zero native notifications beyond the safe authority bound", async () => {
+    await seedSecondaryPolicyContext();
+    await enableSecondaryRequestPolicy();
+    const direct = await d1ClientPortalRepository.createServiceRequest(env, secondarySession, {
+      idempotencyKey: "native-notification-overflow-owner", projectId: null, requestType: "service",
+      title: "Establish native storage", details: "Create the exact-source storage owner",
+      location: null, preferredStartAt: null,
+      services: [{ publicId: "secondary-only", sourceVersion: "service-v1", answers: {} }],
+    });
+    if (!direct || !("request" in direct)) throw new Error("native request was not created");
+    const owner = await db.prepare(`SELECT account_id,created_by_identity_id FROM client_service_requests WHERE id=?`)
+      .bind(direct.request.id).first<{ account_id: string; created_by_identity_id: string }>();
+    await db.prepare(`WITH RECURSIVE sequence(value) AS (
+        SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<201
+      ) INSERT INTO portal_v2_directory_entities
+        (workspace_id,generation_id,entity_type,public_id,parent_public_id,display_name,source_version,active)
+      SELECT ?,'secondary-directory-1','project','overflow-project-' || value,'pa-org-policy',
+        'Overflow project ' || value,'overflow-project-v1',1 FROM sequence`)
+      .bind(secondarySession.workspaceId).run();
+    await db.prepare(`WITH RECURSIVE sequence(value) AS (
+        SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<201
+      ) INSERT INTO client_service_requests
+        (id,account_id,project_id,created_by_identity_id,request_type,title,details,status,catalog_source_id,
+          idempotency_key,request_fingerprint,portal_workspace_id,portal_identity_id,portal_project_public_id)
+      SELECT 'overflow-request-' || value,?,NULL,?,'service','Overflow fixture','Authority bound fixture',
+        'submitted',?,'overflow-idempotency-key-' || value,?, ?,?,'overflow-project-' || value FROM sequence`)
+      .bind(owner!.account_id, owner!.created_by_identity_id, secondarySourceId, "o".repeat(43),
+        secondarySession.workspaceId, secondarySession.nativePortalIdentityId).run();
+    await expect(d1ClientPortalRepository.listNotifications(env, secondarySession))
+      .rejects.toBeInstanceOf(NativeNotificationAuthorizationOverflowError);
+  });
+
+  it("returns an explicit not-yet-available response for unsupported native submitted-request mutations", async () => {
+    await seedSecondaryPolicyContext();
+    const portal = createClientPortalRouter({
+      resolvePrincipal: async () => ({
+        issuer: "https://issuer.test", subject: "policy-subject", email: "policy@example.test",
+      }),
+    });
+    const requestEnv = {
+      ...env, CLIENT_PORTAL_ENABLED: "true", CLIENT_PORTAL_ORIGIN: "https://client.example",
+    } as Env;
+    const headers = { Origin: "https://client.example", "X-LTDS-Workspace-Id": secondarySession.workspaceId! };
+    const mutations = [
+      ["PATCH", "/service-requests/native-request", { "Content-Type": "application/json" }, {}],
+      ["POST", "/service-requests/native-request/change-request", { "Content-Type": "application/json" }, {}],
+      ["POST", "/service-requests/native-request/estimate-response", { "Content-Type": "application/json" }, {}],
+    ] as const;
+    for (const [method, path, extra, body] of mutations) {
+      const response = await portal.request(`https://client.example${path}`, {
+        method, headers: { ...headers, ...extra }, body: JSON.stringify(body),
+      }, requestEnv);
+      expect(response.status).toBe(501);
+      expect(await response.json()).toMatchObject({ code: "native_operation_unavailable" });
+    }
   });
 
   it("invalidates one attachment authority proof across every native revocation and generation boundary", async () => {

@@ -45,11 +45,19 @@ import {
   listNativeServiceRequests,
   saveNativeServiceRequestDraft,
   submitNativeServiceRequestDraft,
+  validateNativeDirectServiceRequest,
 } from "./native-request-v2";
-import { resolveNativeRequestAuthority } from "./native-request-authority";
+import { nativeRequestMutationGuardSql, resolveNativeRequestAuthority } from "./native-request-authority";
 
 const CLIENT_FILE_PAGE_SIZE = 150;
 const CLIENT_FILE_QUERY_LIMIT = CLIENT_FILE_PAGE_SIZE + 1;
+
+export class NativeNotificationAuthorizationOverflowError extends Error {
+  constructor() {
+    super("Native notification authorization exceeded its safe evaluation bound");
+    this.name = "NativeNotificationAuthorizationOverflowError";
+  }
+}
 
 interface ProjectRow {
   id: string;
@@ -751,6 +759,178 @@ async function getServiceRequestByIdempotency(
     .first<IdempotentServiceRequestRow>());
 }
 
+async function nativeNotificationTargets(env: Env, session: ClientPortalSession): Promise<{
+  root: boolean;
+  projectIds: string[];
+} | null> {
+  if (!session.workspaceId || !session.nativePortalIdentityId || !session.nativeSourceId) return null;
+  const targets = await portalDb(env).prepare(`SELECT DISTINCT portal_project_public_id project_id
+    FROM client_service_requests WHERE portal_workspace_id=? AND portal_identity_id=? AND catalog_source_id=?
+    LIMIT 201`).bind(session.workspaceId, session.nativePortalIdentityId, session.nativeSourceId)
+    .all<{ project_id: string | null }>();
+  if (targets.results.length > 200) throw new NativeNotificationAuthorizationOverflowError();
+  let root = false;
+  const projectIds: string[] = [];
+  for (const target of targets.results) {
+    const authority = await resolveNativeRequestAuthority(env, session, target.project_id);
+    if (!authority || authority.sourceId !== session.nativeSourceId) continue;
+    if (target.project_id === null) root = true;
+    else projectIds.push(target.project_id);
+  }
+  return { root, projectIds };
+}
+
+async function listNativeNotifications(
+  env: Env,
+  session: ClientPortalSession,
+  cursor?: string | null,
+): Promise<{ notifications: ClientPortalNotification[]; unreadCount: number; cursor: string | null }> {
+  const targets = await nativeNotificationTargets(env, session);
+  if (!targets || !session.workspaceId || !session.nativePortalIdentityId || !session.nativeSourceId)
+    return { notifications: [], unreadCount: 0, cursor: null };
+  const projects = JSON.stringify(targets.projectIds);
+  const authority = `(request.portal_project_public_id IS NULL AND ?=1 OR
+    request.portal_project_public_id IS NOT NULL AND request.portal_project_public_id IN (SELECT value FROM json_each(?)))`;
+  const coordinates = `request.portal_workspace_id=? AND request.portal_identity_id=? AND request.catalog_source_id=?
+    AND notification.account_id=request.account_id AND notification.recipient_identity_id=request.created_by_identity_id`;
+  const rows = await portalDb(env).prepare(`SELECT notification.id,notification.event_type,notification.title,
+      notification.body,notification.action_path,notification.read_at,notification.created_at
+    FROM client_portal_notifications notification
+    JOIN client_service_requests request ON notification.source_type='service_request'
+      AND request.id=notification.source_id
+    WHERE ${coordinates} AND notification.dismissed_at IS NULL AND ${authority}
+      AND (?='' OR (notification.created_at,notification.id)<(
+        SELECT cursor.created_at,cursor.id FROM client_portal_notifications cursor
+        JOIN client_service_requests cursor_request ON cursor.source_type='service_request'
+          AND cursor_request.id=cursor.source_id
+        WHERE cursor.id=? AND cursor_request.portal_workspace_id=? AND cursor_request.portal_identity_id=?
+          AND cursor_request.catalog_source_id=? AND cursor.account_id=cursor_request.account_id
+          AND cursor.recipient_identity_id=cursor_request.created_by_identity_id))
+    ORDER BY notification.created_at DESC,notification.id DESC LIMIT 51`)
+    .bind(session.workspaceId, session.nativePortalIdentityId, session.nativeSourceId,
+      targets.root ? 1 : 0, projects, cursor || "", cursor || "", session.workspaceId,
+      session.nativePortalIdentityId, session.nativeSourceId)
+    .all<{ id: string; event_type: ClientPortalNotification["eventType"]; title: string; body: string;
+      action_path: string | null; read_at: string | null; created_at: string }>();
+  const unread = await portalDb(env).prepare(`SELECT COUNT(*) count
+    FROM client_portal_notifications notification
+    JOIN client_service_requests request ON notification.source_type='service_request'
+      AND request.id=notification.source_id
+    WHERE ${coordinates} AND notification.dismissed_at IS NULL AND notification.read_at IS NULL AND ${authority}`)
+    .bind(session.workspaceId, session.nativePortalIdentityId, session.nativeSourceId,
+      targets.root ? 1 : 0, projects).first<{ count: number }>();
+  const page = rows.results.slice(0, 50);
+  return {
+    notifications: page.map(row => ({ id: row.id, eventType: row.event_type, title: row.title, body: row.body,
+      actionPath: row.action_path?.startsWith("/portal/") ? row.action_path : null,
+      readAt: row.read_at, createdAt: row.created_at })),
+    unreadCount: unread?.count || 0,
+    cursor: rows.results.length > 50 ? page.at(-1)!.id : null,
+  };
+}
+
+async function createNativeDirectServiceRequest(
+  env: Env,
+  session: ClientPortalSession,
+  input: ClientServiceRequestInput,
+) {
+  if (!input.services?.length) return null;
+  const keyDigest = await sha256(input.idempotencyKey);
+  const draftInput = {
+    projectId: input.projectId,
+    requestType: input.requestType,
+    title: input.title,
+    details: input.details,
+    location: input.location,
+    preferredStartAt: input.preferredStartAt,
+    deliverables: input.deliverables ?? null,
+    siteContactName: input.siteContactName ?? null,
+    siteContactEmail: input.siteContactEmail ?? null,
+    siteContactPhone: input.siteContactPhone ?? null,
+    desiredCompletionAt: input.desiredCompletionAt ?? null,
+    latitude: input.latitude ?? null,
+    longitude: input.longitude ?? null,
+    areaGeoJson: input.areaGeoJson ?? null,
+    poiPoints: (input.poiPoints ?? []).map(point => ({ ...point, label: point.label ?? null })),
+    services: input.services,
+  };
+  const validation = await validateNativeDirectServiceRequest(env, session, draftInput);
+  if (!validation) return null;
+  if (validation.kind === "blocked") return validation;
+  const created = await createNativeServiceRequestDraft(env, session, draftInput, `direct-create:${keyDigest}`);
+  if (!created) return null;
+  if (!("draft" in created)) {
+    if (created.kind === "conflict") return { kind: "conflict" as const };
+    return {
+      kind: "blocked" as const,
+      reason: created.kind,
+      servicePublicIds: created.servicePublicIds,
+    };
+  }
+  const submitted = await submitNativeServiceRequestDraft(
+    env, session, created.draft.id, created.draft.version, `direct-submit:${keyDigest}`,
+  );
+  if (!submitted) return null;
+  if (!("request" in submitted)) {
+    if (submitted.kind === "conflict") return { kind: "conflict" as const };
+    return {
+      kind: "blocked" as const,
+      reason: submitted.reason,
+      servicePublicIds: submitted.servicePublicIds,
+      attachmentCount: submitted.attachmentCount,
+      draftId: created.draft.id,
+    };
+  }
+  return {
+    kind: created.kind === "created" && submitted.kind === "submitted" ? "created" as const : "replayed" as const,
+    request: submitted.request,
+  };
+}
+
+async function updateNativeNotification(
+  env: Env,
+  session: ClientPortalSession,
+  notificationId: string,
+  action: "read" | "dismiss",
+): Promise<boolean> {
+  if (!session.workspaceId || !session.nativePortalIdentityId || !session.nativeSourceId) return false;
+  const row = await portalDb(env).prepare(`SELECT request.portal_project_public_id project_id
+    FROM client_portal_notifications notification
+    JOIN client_service_requests request ON notification.source_type='service_request'
+      AND request.id=notification.source_id
+    WHERE notification.id=? AND notification.dismissed_at IS NULL
+      AND request.portal_workspace_id=? AND request.portal_identity_id=? AND request.catalog_source_id=?
+      AND notification.account_id=request.account_id
+      AND notification.recipient_identity_id=request.created_by_identity_id`)
+    .bind(notificationId, session.workspaceId, session.nativePortalIdentityId, session.nativeSourceId)
+    .first<{ project_id: string | null }>();
+  if (!row) return false;
+  const proof = await resolveNativeRequestAuthority(env, session, row.project_id);
+  if (!proof || proof.sourceId !== session.nativeSourceId) return false;
+  const guard = nativeRequestMutationGuardSql(proof);
+  const result = await portalDb(env).prepare(action === "read"
+    ? `UPDATE client_portal_notifications SET read_at=COALESCE(read_at,datetime('now'))
+      WHERE id=? AND dismissed_at IS NULL AND EXISTS(
+        SELECT 1 FROM client_service_requests request
+        WHERE request.id=client_portal_notifications.source_id
+          AND client_portal_notifications.source_type='service_request'
+          AND request.portal_workspace_id=? AND request.portal_identity_id=? AND request.catalog_source_id=?
+          AND client_portal_notifications.account_id=request.account_id
+          AND client_portal_notifications.recipient_identity_id=request.created_by_identity_id
+          AND ${guard.sql})`
+    : `UPDATE client_portal_notifications SET dismissed_at=COALESCE(dismissed_at,datetime('now'))
+      WHERE id=? AND dismissed_at IS NULL AND EXISTS(
+        SELECT 1 FROM client_service_requests request
+        WHERE request.id=client_portal_notifications.source_id
+          AND client_portal_notifications.source_type='service_request'
+          AND request.portal_workspace_id=? AND request.portal_identity_id=? AND request.catalog_source_id=?
+          AND client_portal_notifications.account_id=request.account_id
+          AND client_portal_notifications.recipient_identity_id=request.created_by_identity_id
+          AND ${guard.sql})`)
+    .bind(notificationId, proof.workspaceId, proof.identityId, proof.sourceId, ...guard.bindings).run();
+  return Boolean(result.meta.changes);
+}
+
 export const d1ClientPortalRepository: ClientPortalRepository = {
   async listServiceCatalog(env, session, input) {
     if (session.nativeSourceId) return listNativeServiceCatalog(env, session, input?.projectId ?? null);
@@ -1248,6 +1428,7 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
     session: ClientPortalSession,
     cursor?: string | null,
   ): Promise<{ notifications: ClientPortalNotification[]; unreadCount: number; cursor: string | null }> {
+    if (session.nativeSourceId) return listNativeNotifications(env, session, cursor);
     const rows = await portalDb(env).prepare(`SELECT n.id,n.event_type,n.title,n.body,n.action_path,n.read_at,n.created_at
       FROM client_portal_notifications n ${sessionJoin}
       WHERE n.account_id=a.id AND n.recipient_identity_id=i.id AND n.dismissed_at IS NULL
@@ -1302,6 +1483,7 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
   },
 
   async updateNotification(env: Env, session: ClientPortalSession, notificationId: string, action: "read" | "dismiss"): Promise<boolean> {
+    if (session.nativeSourceId) return updateNativeNotification(env, session, notificationId, action);
     const result = await portalDb(env).prepare(action === "read"
       ? `UPDATE client_portal_notifications SET read_at=COALESCE(read_at,datetime('now')) WHERE id=? AND account_id=? AND recipient_identity_id=? AND dismissed_at IS NULL
           AND EXISTS (SELECT 1 FROM client_accounts a JOIN client_identity_links i ON i.id=? AND i.account_id=a.id AND i.revoked_at IS NULL
@@ -1359,6 +1541,10 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
     session: ClientPortalSession,
     input: ClientServiceRequestInput,
   ) {
+    if (session.nativeSourceId) return createNativeDirectServiceRequest(env, session, input);
+    // Never reinterpret exact native selections through the primary legacy
+    // authority path, including when this repository is called without HTTP.
+    if (input.services !== undefined) return null;
     const requestId = crypto.randomUUID();
     const fingerprint = await serviceRequestFingerprint(input);
     const existing = await getServiceRequestByIdempotency(
@@ -1542,6 +1728,7 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
     requestId: string,
     input: ClientServiceRequestInput,
   ): Promise<ClientServiceRequest | null> {
+    if (session.nativeSourceId) return null;
     const current = await this.getServiceRequest(env, session, requestId);
     if (
       !current ||
@@ -1662,6 +1849,7 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
     parentRequestId: string,
     input: ClientServiceRequestInput,
   ) {
+    if (session.nativeSourceId) return null;
     const parent = await this.getServiceRequest(env, session, parentRequestId);
     if (
       !parent ||
@@ -1672,10 +1860,11 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
     )
       return null;
     if (input.projectId !== parent.projectId) return null;
-    return this.createServiceRequest(env, session, {
+    const result = await this.createServiceRequest(env, session, {
       ...input,
       parentRequestId,
     });
+    return result?.kind === "blocked" ? null : result;
   },
 
   async respondToOperationalEstimate(
@@ -1687,6 +1876,7 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
     note,
     mutationKey,
   ) {
+    if (session.nativeSourceId) return null;
     const current = await this.getServiceRequest(env, session, requestId);
     const responseFingerprint = await sha256(
       JSON.stringify([estimateId, response, note?.trim() || null]),
