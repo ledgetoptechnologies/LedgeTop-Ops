@@ -109,7 +109,8 @@ BEFORE INSERT ON client_service_request_drafts
 WHEN NEW.portal_workspace_id IS NOT NULL OR NEW.portal_identity_id IS NOT NULL
   OR NEW.portal_project_public_id IS NOT NULL
 BEGIN
-  SELECT CASE WHEN NEW.portal_workspace_id IS NULL OR NEW.portal_identity_id IS NULL
+  SELECT RAISE(ABORT,'native request draft ownership is not current')
+  WHERE NEW.portal_workspace_id IS NULL OR NEW.portal_identity_id IS NULL
     OR NOT EXISTS (
       SELECT 1 FROM portal_native_request_storage_bindings binding
       JOIN portal_v2_workspaces workspace ON workspace.id=binding.workspace_id
@@ -143,7 +144,7 @@ BEGIN
             AND project.entity_type='project'
             AND project.public_id=NEW.portal_project_public_id AND project.active=1
           WHERE checkpoint.workspace_id=workspace.id))
-    ) THEN RAISE(ABORT,'native request draft ownership is not current') END;
+    );
 END;
 
 CREATE TRIGGER client_requests_native_owner_insert
@@ -151,7 +152,8 @@ BEFORE INSERT ON client_service_requests
 WHEN NEW.portal_workspace_id IS NOT NULL OR NEW.portal_identity_id IS NOT NULL
   OR NEW.portal_project_public_id IS NOT NULL
 BEGIN
-  SELECT CASE WHEN NEW.portal_workspace_id IS NULL OR NEW.portal_identity_id IS NULL
+  SELECT RAISE(ABORT,'native request ownership is not current')
+  WHERE NEW.portal_workspace_id IS NULL OR NEW.portal_identity_id IS NULL
     OR NOT EXISTS (
       SELECT 1 FROM portal_native_request_storage_bindings binding
       JOIN portal_v2_workspaces workspace ON workspace.id=binding.workspace_id
@@ -185,7 +187,7 @@ BEGIN
             AND project.entity_type='project'
             AND project.public_id=NEW.portal_project_public_id AND project.active=1
           WHERE checkpoint.workspace_id=workspace.id))
-    ) THEN RAISE(ABORT,'native request ownership is not current') END;
+    );
 END;
 
 CREATE TRIGGER client_request_drafts_native_owner_update
