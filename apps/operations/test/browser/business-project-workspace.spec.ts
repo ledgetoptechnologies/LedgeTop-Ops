@@ -30,11 +30,11 @@ function operational(status = "completed", projectId = "project-one") {
   return { canonicalRoot: detail().canonicalRoot, contextVersion: "project-context", project: { id: projectId, sourceId: "project-alpha:primary", status, revision: `${projectId}-revision` },
     contacts: { version: 1, assignments: [{ id: "assignment-one", role: "project_contact", preferredContactMethod: "email", instructions: "Confirm the arrival window.", sortOrder: 0,
       availability: "available", contact: { id: "contact-one", displayName: "Bailey Contact", email: "bailey@example.test" as string | null, phone: "+1 920 555 0123" as string | null } }],
-      revisions: [{ version: 1, actorId: "hidden-staff-id", createdAt: "2026-08-26T12:00:00Z" }] },
+      revisions: [{ version: 1, createdAt: "2026-08-26T12:00:00Z" }] },
     memory: { version: 1, snapshot: { plan: "Photograph the roof.", actualOutcome: "Roof captured.", deviationsAndReasons: "", observations: "", problems: "",
       successes: "Good coverage.", recommendations: "Return in spring.", nextTimeRequests: "Call before arrival." },
       attachments: [] as unknown[],
-      revisions: [{ version: 1, changeKind: "saved", amendmentReason: null, actorId: "hidden-staff-id", createdAt: "2026-08-26T12:05:00Z" }] },
+      revisions: [{ version: 1, changeKind: "saved", amendmentReason: null, createdAt: "2026-08-26T12:05:00Z" }] },
     capabilities: { canManageContacts: true, canManageMemory: true },
     contactOptions: [{ public_id: "contact-one", display_name: "Bailey Contact", email: "bailey@example.test" as string | null, phone: "+1 920 555 0123" as string | null, record_type: "business_contact" as const },
       { public_id: "site-one", display_name: "Site Supervisor", email: null as string | null, phone: "+1 920 555 0100" as string | null, record_type: "business_contact" as const }],
@@ -72,6 +72,10 @@ async function mock(page: Page, handler: (route: Route, url: URL) => Promise<unk
       canonicalRoot: detail().canonicalRoot, contextVersion: url.searchParams.get("expectedContextVersion") || "client-context" } });
     if (url.pathname.endsWith("/operational-workspace")) return operationalHandler ? operationalHandler(route, url)
       : route.fulfill({ json: operational("completed", decodeURIComponent(url.pathname.split("/").at(-2)!)) });
+    if (/\/operational-memory\/revisions\/\d+$/.test(url.pathname)) return operationalHandler ? operationalHandler(route, url)
+      : route.fulfill({ json: { canonicalRoot: detail().canonicalRoot, contextVersion: "project-context",
+        project: { id: "project-one", sourceId: "project-alpha:primary", revision: "project-one-revision" },
+        revision: { version: 1, changeKind: "saved", amendmentReason: null, createdAt: "2026-08-26T12:05:00Z", snapshot: operational().memory.snapshot } } });
     if (url.pathname.endsWith("/operational-contacts") || url.pathname.endsWith("/operational-memory")
       || url.pathname.endsWith("/operational-memory/attachments/upload"))
       return operationalHandler ? operationalHandler(route, url) : route.fulfill({ status: 500, json: { error: "Unexpected operational write" } });
@@ -351,6 +355,89 @@ test("an ownership-change conflict clears the entire protected project workspace
   await expect(workspace(page).getByRole("button", { name: "Reload project workspace", exact: true })).toBeVisible();
   await expect(page.getByText("Bailey Contact", { exact: true })).toHaveCount(0);
   await expect(page.getByText("Photograph the roof.", { exact: true })).toHaveCount(0);
+});
+
+test("project-memory revision snapshots load only when expanded and support a transient retry", async ({ page }) => {
+  let revisionReads = 0;
+  await mock(page, route => route.fulfill({ json: detail() }), undefined, async (route, url) => {
+    if (url.pathname.endsWith("/operational-workspace")) return route.fulfill({ json: operational("active") });
+    if (/\/operational-memory\/revisions\/1$/.test(url.pathname)) {
+      revisionReads += 1;
+      if (revisionReads === 1) return route.fulfill({ status: 503, json: { error: "Revision storage is temporarily unavailable" } });
+      return route.fulfill({ json: { canonicalRoot: detail().canonicalRoot, contextVersion: "project-context",
+        project: { id: "project-one", sourceId: "project-alpha:primary", revision: "project-one-revision" },
+        revision: { version: 1, changeKind: "saved", amendmentReason: null, createdAt: "2026-08-26T12:05:00Z",
+          snapshot: { ...operational().memory.snapshot, plan: "Historical roof plan." } } } });
+    }
+    return route.fulfill({ status: 500, json: { error: "Unexpected operation" } });
+  });
+  await open(page);
+  const operations = workspace(page).getByRole("region", { name: "Operational project details", exact: true });
+  expect(revisionReads).toBe(0);
+  await operations.getByText("Project-memory history", { exact: true }).click();
+  expect(revisionReads).toBe(0);
+  await operations.getByText(/Version 1 · Saved/).click();
+  await expect(operations.getByRole("alert")).toContainText("Revision storage is temporarily unavailable");
+  await operations.getByRole("button", { name: "Retry version 1", exact: true }).click();
+  await expect(operations.getByText("Historical roof plan.", { exact: true })).toBeVisible();
+  expect(revisionReads).toBe(2); await expect(operations.getByText("hidden-staff-id", { exact: true })).toHaveCount(0);
+});
+
+test("a revision context conflict invalidates the protected workspace", async ({ page }) => {
+  await mock(page, route => route.fulfill({ json: detail() }), undefined, async (route, url) => {
+    if (url.pathname.endsWith("/operational-workspace")) return route.fulfill({ json: operational("active") });
+    return route.fulfill({ status: 409, json: { error: "Project ownership changed while reading history." } });
+  });
+  await open(page);
+  const operations = workspace(page).getByRole("region", { name: "Operational project details", exact: true });
+  await operations.getByText("Project-memory history", { exact: true }).click();
+  await operations.getByText(/Version 1 · Saved/).click();
+  await expect(workspace(page).getByRole("button", { name: "Reload project workspace", exact: true })).toBeVisible();
+  await expect(page.getByText("Photograph the roof.", { exact: true })).toHaveCount(0);
+});
+
+test("switching projects clears cached memory revisions before the new exact project is loaded", async ({ page }) => {
+  const revisionReads: string[] = [];
+  await mock(page, (route, url) => route.fulfill({ json: url.pathname.endsWith("/project-two")
+    ? detail("project-two", "Warehouse survey") : detail() }), undefined, async (route, url) => {
+    const projectId = url.pathname.includes("/project-two/") ? "project-two" : "project-one";
+    if (url.pathname.endsWith("/operational-workspace")) return route.fulfill({ json: operational("active", projectId) });
+    if (/\/operational-memory\/revisions\/1$/.test(url.pathname)) {
+      revisionReads.push(projectId);
+      return route.fulfill({ json: { canonicalRoot: detail().canonicalRoot, contextVersion: "project-context",
+        project: { id: projectId, sourceId: "project-alpha:primary", revision: `${projectId}-revision` },
+        revision: { version: 1, changeKind: "saved", amendmentReason: null, createdAt: "2026-08-26T12:05:00Z",
+          snapshot: { ...operational().memory.snapshot, plan: projectId === "project-one" ? "Project one history." : "Project two history." } } } });
+    }
+    return route.fulfill({ status: 500, json: { error: "Unexpected operation" } });
+  });
+  await open(page);
+  let operations = workspace(page).getByRole("region", { name: "Operational project details", exact: true });
+  await operations.getByText("Project-memory history", { exact: true }).click();
+  await operations.getByText(/Version 1 · Saved/).click();
+  await expect(operations.getByText("Project one history.", { exact: true })).toBeVisible();
+  await page.evaluate(path => { history.pushState({}, "", path); dispatchEvent(new PopStateEvent("popstate")); }, projectPath.replace("project-one", "project-two"));
+  await expect(workspace(page).getByRole("heading", { name: "Warehouse survey", exact: true })).toBeVisible();
+  operations = workspace(page).getByRole("region", { name: "Operational project details", exact: true });
+  await expect(operations.getByText("Project one history.", { exact: true })).toHaveCount(0);
+  await operations.getByText("Project-memory history", { exact: true }).click();
+  await operations.getByText(/Version 1 · Saved/).click();
+  await expect(operations.getByText("Project two history.", { exact: true })).toBeVisible();
+  expect(revisionReads).toEqual(["project-one", "project-two"]);
+});
+
+test("project-memory history remains keyboard accessible without mobile overflow", async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 760 });
+  await mock(page, route => route.fulfill({ json: detail() })); await open(page);
+  const operations = workspace(page).getByRole("region", { name: "Operational project details", exact: true });
+  const history = operations.getByText("Project-memory history", { exact: true });
+  await history.focus(); await page.keyboard.press("Enter");
+  const revision = operations.locator("summary").filter({ hasText: /Version 1 · Saved/ }); await revision.focus(); await page.keyboard.press("Enter");
+  await expect(operations.getByRole("region", { name: "Project memory version 1", exact: true })).toBeVisible();
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  expect(overflow).toBeLessThanOrEqual(1);
+  expect(await history.evaluate(element => element.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44);
+  expect(await revision.evaluate(element => element.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44);
 });
 
 test("an assigned exact-root contact beyond the first 25 is selected and saves without paging", async ({ page }) => {

@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const services = vi.hoisted(() => ({
   readProjectOperationalWorkspace: vi.fn(),
+  readProjectMemoryRevision: vi.fn(),
   saveProjectOperationalContacts: vi.fn(),
   saveProjectMemory: vi.fn(),
   uploadProjectMemoryAttachment: vi.fn(),
@@ -14,6 +15,7 @@ const services = vi.hoisted(() => ({
 }));
 vi.mock("../src/worker/project-operational-memory", () => ({
   readProjectOperationalWorkspace: services.readProjectOperationalWorkspace,
+  readProjectMemoryRevision: services.readProjectMemoryRevision,
   saveProjectOperationalContacts: services.saveProjectOperationalContacts,
   saveProjectMemory: services.saveProjectMemory,
 }));
@@ -59,6 +61,9 @@ function fixture(administrator = false) {
 beforeEach(() => {
   vi.clearAllMocks();
   services.readProjectOperationalWorkspace.mockResolvedValue(workspace);
+  services.readProjectMemoryRevision.mockResolvedValue({ canonicalRoot: context.canonicalRoot, contextVersion: context.contextVersion,
+    project: { id: "project-one", sourceId: "project-alpha:primary", revision: "project-revision-one" },
+    revision: { version: 1, changeKind: "saved", amendmentReason: null, createdAt: "2026-08-28T12:00:00Z", snapshot: workspace.memory.snapshot } });
   services.listClientHubCollection.mockResolvedValue({ items: [{ public_id: "contact-one", display_name: "Exact root contact", email: null, phone: null, record_type: "business_contact" }],
     page: { available: true, reason: null, nextCursor: null, hasMore: false, returned: 1, limit: 25 }, canonicalRoot: context.canonicalRoot, contextVersion: context.contextVersion });
   services.saveProjectOperationalContacts.mockResolvedValue({ sourceId: "project-alpha:primary", projectId: "project-one", version: 1, replayed: false });
@@ -147,6 +152,31 @@ describe("project operational routes", () => {
     const { app, verify, env } = fixture(); verify.mockRejectedValueOnce(new HTTPException(409, { message: "Client mapping changed" }));
     const response = await app.request(`${path}/operational-workspace`, {}, env);
     expect(response.status).toBe(409); expect(services.readProjectOperationalWorkspace).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads one exact project-memory revision with context fencing and no actor identifier", async () => {
+    const { app, verify, env } = fixture();
+    const response = await app.request(`${path}/operational-memory/revisions/1?expectedContextVersion=${context.contextVersion}`, {}, env);
+    expect(response.status).toBe(200); expect(response.headers.get("Cache-Control")).toBe("no-store");
+    const body = await response.json(); expect(body).toMatchObject({ revision: { version: 1, changeKind: "saved" } });
+    expect(JSON.stringify(body)).not.toContain(principal.id);
+    expect(services.readProjectMemoryRevision).toHaveBeenCalledWith(env, principal, context, "project-one", 1, context.contextVersion);
+    expect(verify).toHaveBeenCalledWith(env, principal, context);
+  });
+
+  it.each(["0", "01", "-1", "not-a-version"])("rejects invalid revision version %s before reading", async version => {
+    const { app, env } = fixture();
+    expect((await app.request(`${path}/operational-memory/revisions/${version}?expectedContextVersion=${context.contextVersion}`, {}, env)).status).toBe(400);
+    expect(services.readProjectMemoryRevision).not.toHaveBeenCalled();
+  });
+
+  it("requires a context fence and suppresses a revision after post-read context changes", async () => {
+    const first = fixture();
+    expect((await first.app.request(`${path}/operational-memory/revisions/1`, {}, first.env)).status).toBe(400);
+    expect(services.readProjectMemoryRevision).not.toHaveBeenCalled();
+    const raced = fixture(); raced.verify.mockRejectedValueOnce(new HTTPException(409, { message: "Client mapping changed" }));
+    expect((await raced.app.request(`${path}/operational-memory/revisions/1?expectedContextVersion=${context.contextVersion}`, {}, raced.env)).status).toBe(409);
+    expect(services.readProjectMemoryRevision).toHaveBeenCalledTimes(1);
   });
 
   it("binds copy preview and commit to the open destination and reverifies the root context", async () => {

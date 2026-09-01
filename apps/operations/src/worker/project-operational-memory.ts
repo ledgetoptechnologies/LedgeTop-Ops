@@ -63,11 +63,18 @@ export interface ProjectOperationalContact {
 export interface ProjectOperationalWorkspace {
   canonicalRoot: ClientHubCollectionContext["canonicalRoot"]; contextVersion: string;
   project: { id: string; sourceId: string; status: string | null; revision: string };
-  contacts: { version: number; assignments: ProjectOperationalContact[]; revisions: Array<{ version: number; actorId: string; createdAt: string }> };
+  contacts: { version: number; assignments: ProjectOperationalContact[]; revisions: Array<{ version: number; createdAt: string }> };
   memory: { version: number; snapshot: ProjectMemorySnapshot; attachments: Array<{ id: string; name: string;
     contentType: string; size: number; sourceKind: "staff_upload"; versionAdded: number; createdAt: string; downloadPath: string }>;
-    revisions: Array<{ version: number; changeKind: "saved" | "post_completion_amendment"; amendmentReason: string | null; actorId: string; createdAt: string }> };
+    revisions: Array<{ version: number; changeKind: "saved" | "post_completion_amendment"; amendmentReason: string | null; createdAt: string }> };
   capabilities: { canManageContacts: boolean; canManageMemory: boolean };
+}
+export interface ProjectMemoryRevision {
+  canonicalRoot: ClientHubCollectionContext["canonicalRoot"];
+  contextVersion: string;
+  project: { id: string; sourceId: string; revision: string };
+  revision: { version: number; changeKind: "saved" | "post_completion_amendment";
+    amendmentReason: string | null; createdAt: string; snapshot: ProjectMemorySnapshot };
 }
 export interface ProjectOperationalMutationResult {
   sourceId: string; projectId: string; version: number; replayed: boolean;
@@ -230,6 +237,13 @@ export function parseMemory(value: string | null): ProjectMemorySnapshot {
   try { return parse(memorySchema, JSON.parse(value), "Saved project memory is invalid"); }
   catch (error) { if (error instanceof HTTPException) throw new HTTPException(503, { message: "Saved project memory requires administrative review" }); throw error; }
 }
+function parseRevisionMemory(value: unknown): ProjectMemorySnapshot {
+  if (typeof value !== "string" || value.length < 2 || value.length > 131_072
+    || new TextEncoder().encode(value).byteLength > 524_288)
+    throw new HTTPException(503, { message: "Saved project-memory revision requires administrative review" });
+  try { return memorySchema.parse(JSON.parse(value)); }
+  catch { throw new HTTPException(503, { message: "Saved project-memory revision requires administrative review" }); }
+}
 export function assertOverlayRoot(context: ClientHubCollectionContext,
   value: Pick<ContactSetRow, "root_record_kind" | "root_id"> | null | undefined): void {
   if (value && (value.root_record_kind !== rootRecordKind(context) || value.root_id !== context.root.public_id)) ownershipChanged();
@@ -296,7 +310,7 @@ export async function readProjectOperationalWorkspace(env: Environment, principa
       preferredContactMethod: row.preferred_contact_method, instructions: row.instructions, sortOrder: row.sort_order,
       availability: row.contact_name === null ? "unavailable" : "available", contact: row.contact_name === null ? null
         : { id: row.contact_id, displayName: row.contact_name, ...businessContactChannels(row) } })),
-      revisions: first.contactRevisions.map(row => ({ version: row.version, actorId: row.actor_id, createdAt: row.created_at })) },
+      revisions: first.contactRevisions.map(row => ({ version: row.version, createdAt: row.created_at })) },
     memory: { version: first.memory?.version ?? 0, snapshot: parseMemory(first.memory?.snapshot_json ?? null),
       attachments: first.attachments.map(row => { const routeKind = context.root.kind === "organization" ? "organizations" : "standalone";
         return { id: row.id, name: row.display_name, contentType: row.content_type, size: row.size_bytes,
@@ -304,8 +318,54 @@ export async function readProjectOperationalWorkspace(env: Environment, principa
           downloadPath: `/api/client-hub/sources/${encodeURIComponent(context.root.source_id)}/business/${routeKind}/${encodeURIComponent(context.root.public_id)}`
             + `/business-projects/${encodeURIComponent(projectId)}/operational-memory/attachments/${encodeURIComponent(row.id)}/content` }; }),
       revisions: first.memoryRevisions.map(row => ({ version: row.version, changeKind: row.change_kind,
-        amendmentReason: row.amendment_reason, actorId: row.actor_id, createdAt: row.created_at })) },
+        amendmentReason: row.amendment_reason, createdAt: row.created_at })) },
     capabilities: { canManageContacts, canManageMemory },
+  };
+}
+
+/** Reads one immutable historical snapshot after proving the current project,
+ * root, source and staff policy both before and after the bounded D1 read. */
+export async function readProjectMemoryRevision(env: Environment, principal: StaffPrincipal,
+  context: ClientHubCollectionContext, projectId: string, version: number,
+  expectedContextVersion?: string): Promise<ProjectMemoryRevision> {
+  if (!Number.isSafeInteger(version) || version < 1 || version > 2_147_483_647)
+    throw new HTTPException(400, { message: "Project-memory revision version is invalid" });
+  const prepared = await prepareProject(env, principal, context, projectId, undefined, expectedContextVersion);
+  const database = db(env), source = prepared.project.projection_source_id;
+  const read = async () => {
+    const [current, revision] = await Promise.all([
+      database.prepare(`SELECT version,root_record_kind,root_id,updated_at FROM project_operational_memory
+        WHERE projection_source_id=? AND project_id=?`).bind(source, projectId).first<Omit<MemoryRow, "snapshot_json">>(),
+      database.prepare(`SELECT version,change_kind,amendment_reason,snapshot_json,created_at
+        FROM project_operational_memory_revisions WHERE projection_source_id=? AND project_id=? AND version=? LIMIT 1`)
+        .bind(source, projectId, version).first<{ version: number; change_kind: "saved" | "post_completion_amendment";
+          amendment_reason: string | null; snapshot_json: string; created_at: string }>(),
+    ]);
+    assertOverlayRoot(context, current);
+    if (!current || !revision || revision.version > current.version)
+      throw new HTTPException(404, { message: "Project-memory revision is unavailable" });
+    if (!Number.isSafeInteger(revision.version) || revision.version !== version
+      || !["saved", "post_completion_amendment"].includes(revision.change_kind)
+      || (revision.change_kind === "post_completion_amendment") !== (revision.amendment_reason !== null)
+      || (revision.amendment_reason !== null && (typeof revision.amendment_reason !== "string"
+        || revision.amendment_reason.length < 1 || revision.amendment_reason.length > 1000
+        || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(revision.amendment_reason)))
+      || typeof revision.created_at !== "string" || revision.created_at.length > 64)
+      throw new HTTPException(503, { message: "Saved project-memory revision requires administrative review" });
+    return { current, revision, snapshot: parseRevisionMemory(revision.snapshot_json) };
+  };
+  const first = await read();
+  const current = await prepareProject(env, principal, context, projectId, undefined, expectedContextVersion);
+  const second = await read();
+  if (current.policy.proof !== prepared.policy.proof || current.sourceProof !== prepared.sourceProof
+    || JSON.stringify(current.project) !== JSON.stringify(prepared.project)
+    || JSON.stringify(current.root) !== JSON.stringify(prepared.root)
+    || JSON.stringify(second) !== JSON.stringify(first)) return changed();
+  return {
+    canonicalRoot: context.canonicalRoot, contextVersion: context.contextVersion,
+    project: { id: projectId, sourceId: source, revision: prepared.project.last_sync_id },
+    revision: { version: first.revision.version, changeKind: first.revision.change_kind,
+      amendmentReason: first.revision.amendment_reason, createdAt: first.revision.created_at, snapshot: first.snapshot },
   };
 }
 

@@ -42,6 +42,9 @@
 .project-operational-workspace summary { display: flex; align-items: center; cursor: pointer; color: var(--accent); }
 .project-operational-revisions { margin: .35rem 0 0; padding-left: 1.4rem; }
 .project-operational-revisions li { margin: .35rem 0; }
+.project-memory-revision { margin: 0; min-width: 0; }
+.project-memory-revision > summary { padding: .35rem .2rem; overflow-wrap: anywhere; }
+.project-memory-revision-snapshot { margin: .4rem 0 .9rem; }
 @media (max-width: 800px) {
   .project-operational-contact-editor,
   .project-memory-read,

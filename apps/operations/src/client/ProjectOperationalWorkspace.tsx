@@ -33,8 +33,8 @@ interface OperationalWorkspace {
   canonicalRoot: BusinessProjectDetail["canonicalRoot"];
   contextVersion: string;
   project: { id: string; sourceId: string; status: string | null; revision: string };
-  contacts: { version: number; assignments: ContactAssignment[]; revisions: Array<{ version: number; actorId: string; createdAt: string }> };
-  memory: { version: number; snapshot: Memory; attachments: MemoryAttachment[]; revisions: Array<{ version: number; changeKind: "saved" | "post_completion_amendment"; amendmentReason: string | null; actorId: string; createdAt: string }> };
+  contacts: { version: number; assignments: ContactAssignment[]; revisions: Array<{ version: number; createdAt: string }> };
+  memory: { version: number; snapshot: Memory; attachments: MemoryAttachment[]; revisions: Array<{ version: number; changeKind: "saved" | "post_completion_amendment"; amendmentReason: string | null; createdAt: string }> };
   capabilities: { canManageContacts: boolean; canManageMemory: boolean };
   contactOptions: ContactOption[];
   contactPage: { available: boolean; reason: "permission_required" | "workspace_unavailable" | "not_applicable" | null; nextCursor: string | null; hasMore: boolean; returned: number; limit: number };
@@ -43,6 +43,12 @@ interface ContactDraft { assignmentId: string | null; contactId: string; role: C
 interface Attempt { fingerprint: string; key: string }
 interface MutationResult { sourceId: string; projectId: string; version: number; replayed: boolean }
 interface AttachmentMutationResult extends MutationResult { attachment: MemoryAttachment }
+interface MemoryRevisionResult {
+  canonicalRoot: BusinessProjectDetail["canonicalRoot"]; contextVersion: string;
+  project: { id: string; sourceId: string; revision: string };
+  revision: { version: number; changeKind: "saved" | "post_completion_amendment";
+    amendmentReason: string | null; createdAt: string; snapshot: Memory };
+}
 
 const rootKey = (root: BusinessProjectDetail["canonicalRoot"]) => JSON.stringify([root.sourceId, root.rootNamespace, root.kind, root.publicId]);
 const terminal = (status: string | null) => status === "completed" || status === "cancelled";
@@ -114,8 +120,8 @@ function validWorkspace(value: unknown, root: BusinessProjectDetail["canonicalRo
     && ["available", "unavailable"].includes(item.availability)
     && (item.contact === null || (record(item.contact) && typeof item.contact.id === "string" && typeof item.contact.displayName === "string"
       && (item.contact.email === null || typeof item.contact.email === "string") && (item.contact.phone === null || typeof item.contact.phone === "string")));
-  const validRevision = (item: { version: number; actorId: string; createdAt: string }) => record(item) && Number.isSafeInteger(item.version)
-    && typeof item.actorId === "string" && typeof item.createdAt === "string";
+  const validRevision = (item: { version: number; createdAt: string }) => record(item) && Number.isSafeInteger(item.version)
+    && item.version > 0 && typeof item.createdAt === "string";
   const validMemoryRevision = (item: OperationalWorkspace["memory"]["revisions"][number]) => validRevision(item)
     && ["saved", "post_completion_amendment"].includes(item.changeKind)
     && (item.amendmentReason === null || typeof item.amendmentReason === "string");
@@ -145,6 +151,19 @@ function validWorkspace(value: unknown, root: BusinessProjectDetail["canonicalRo
       && typeof option.display_name === "string" && (option.email === null || typeof option.email === "string")
       && (option.phone === null || typeof option.phone === "string"));
 }
+function validMemoryRevision(value: unknown, root: BusinessProjectDetail["canonicalRoot"], projectId: string,
+  contextVersion: string, expectedVersion: number): value is MemoryRevisionResult {
+  if (!record(value) || !record(value.canonicalRoot) || !record(value.project) || !record(value.revision)) return false;
+  const candidate = value as unknown as MemoryRevisionResult;
+  return rootKey(candidate.canonicalRoot) === rootKey(root) && candidate.contextVersion === contextVersion
+    && candidate.project.id === projectId && candidate.project.sourceId === root.sourceId
+    && typeof candidate.project.revision === "string" && candidate.project.revision.length > 0
+    && candidate.revision.version === expectedVersion && ["saved", "post_completion_amendment"].includes(candidate.revision.changeKind)
+    && (candidate.revision.amendmentReason === null || typeof candidate.revision.amendmentReason === "string")
+    && typeof candidate.revision.createdAt === "string" && record(candidate.revision.snapshot)
+    && memorySections.every(([key]) => typeof candidate.revision.snapshot[key] === "string"
+      && candidate.revision.snapshot[key].length <= 12_000);
+}
 
 export function ProjectOperationalWorkspace({ root, projectId, contextVersion, contextSignal, onInvalidated }: {
   root: BusinessProjectDetail["canonicalRoot"]; projectId: string; contextVersion: string;
@@ -164,9 +183,16 @@ export function ProjectOperationalWorkspace({ root, projectId, contextVersion, c
   const contactsAttempt = useRef<Attempt | null>(null), memoryAttempt = useRef<Attempt | null>(null);
   const attachmentAttempt = useRef<Attempt | null>(null), attachmentInput = useRef<HTMLInputElement | null>(null), attachmentPending = useRef<AbortController | null>(null);
   const preserveMemoryDraft = useRef(false);
+  const [memoryRevisionDetails, setMemoryRevisionDetails] = useState<Record<number, MemoryRevisionResult | undefined>>({});
+  const [memoryRevisionBusy, setMemoryRevisionBusy] = useState<Record<number, boolean>>({});
+  const [memoryRevisionErrors, setMemoryRevisionErrors] = useState<Record<number, string>>({});
+  const memoryRevisionPending = useRef(new Map<number, AbortController>());
 
   useEffect(() => {
     active.current = true;
+    for (const revisionController of memoryRevisionPending.current.values()) revisionController.abort();
+    memoryRevisionPending.current.clear();
+    setMemoryRevisionDetails({}); setMemoryRevisionBusy({}); setMemoryRevisionErrors({});
     const controller = new AbortController(), request = ++sequence.current;
     pending.current?.abort(); pending.current = controller;
     const abort = () => controller.abort(); contextSignal.addEventListener("abort", abort);
@@ -187,8 +213,37 @@ export function ProjectOperationalWorkspace({ root, projectId, contextVersion, c
       if (invalidatesProtectedWorkspace(error)) onInvalidated(message, error.status);
       else setState(previous => ({ data: previous.data, busy: false, error: message }));
     });
-    return () => { active.current = false; controller.abort(); attachmentPending.current?.abort(); contextSignal.removeEventListener("abort", abort); };
+    return () => { active.current = false; controller.abort(); attachmentPending.current?.abort();
+      for (const revisionController of memoryRevisionPending.current.values()) revisionController.abort();
+      memoryRevisionPending.current.clear(); contextSignal.removeEventListener("abort", abort); };
   }, [base, contextVersion, revision]);
+
+  const loadMemoryRevision = async (version: number) => {
+    if (contextSignal.aborted || memoryRevisionBusy[version] || memoryRevisionDetails[version]) return;
+    const controller = new AbortController(); memoryRevisionPending.current.get(version)?.abort();
+    memoryRevisionPending.current.set(version, controller);
+    const abort = () => controller.abort(); contextSignal.addEventListener("abort", abort, { once: true });
+    setMemoryRevisionBusy(current => ({ ...current, [version]: true }));
+    setMemoryRevisionErrors(current => ({ ...current, [version]: "" }));
+    try {
+      const query = new URLSearchParams({ expectedContextVersion: contextVersion });
+      const result = await api<unknown>(`${base}/operational-memory/revisions/${version}?${query}`, { signal: controller.signal });
+      if (controller.signal.aborted) return;
+      if (!validMemoryRevision(result, root, projectId, contextVersion, version)) {
+        throw new ApiError("Project ownership or operational context changed. Refresh the project workspace.", 409, {});
+      }
+      setMemoryRevisionDetails(current => ({ ...current, [version]: result }));
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      const message = error instanceof Error ? error.message : "This project-memory revision could not be loaded.";
+      if (invalidatesProtectedWorkspace(error)) onInvalidated(message, error.status);
+      else setMemoryRevisionErrors(current => ({ ...current, [version]: message }));
+    } finally {
+      contextSignal.removeEventListener("abort", abort);
+      if (memoryRevisionPending.current.get(version) === controller) memoryRevisionPending.current.delete(version);
+      if (!controller.signal.aborted) setMemoryRevisionBusy(current => ({ ...current, [version]: false }));
+    }
+  };
 
   const loadMoreContacts = async () => {
     if (optionsBusy || !optionsPage?.hasMore || !optionsPage.nextCursor || contextSignal.aborted) return;
@@ -395,8 +450,17 @@ export function ProjectOperationalWorkspace({ root, projectId, contextVersion, c
       </section>
       {memoryError && <p role="alert" className="project-operational-error">{memoryError}</p>}<p role="status">{memoryStatus}</p>
       {data.memory.revisions.length > 0 && <details><summary>Project-memory history</summary><ol className="project-operational-revisions">{data.memory.revisions.map(item => <li key={item.version}>
-        Version {item.version} · {item.changeKind === "post_completion_amendment" ? "Post-completion amendment" : "Saved"} · {displayDate(item.createdAt)}
-        {item.amendmentReason && <span> — {item.amendmentReason}</span>}</li>)}</ol></details>}
+        <details className="project-memory-revision" onToggle={event => {
+          if (event.currentTarget.open) void loadMemoryRevision(item.version);
+        }}><summary><span>Version {item.version} · {item.changeKind === "post_completion_amendment" ? "Post-completion amendment" : "Saved"} · {displayDate(item.createdAt)}
+          {item.amendmentReason && <span> — {item.amendmentReason}</span>}</span></summary>
+          {memoryRevisionBusy[item.version] && <p role="status">Loading version {item.version}…</p>}
+          {memoryRevisionErrors[item.version] && <div className="project-operational-banner" role="alert"><span>{memoryRevisionErrors[item.version]}</span>
+            <button type="button" className="button-ghost" onClick={() => void loadMemoryRevision(item.version)}>Retry version {item.version}</button></div>}
+          {memoryRevisionDetails[item.version] && <div className="project-memory-read project-memory-revision-snapshot" role="region" aria-label={`Project memory version ${item.version}`}>
+            {memorySections.map(([key, label]) => <section key={key}><h3>{label}</h3><p>{memoryRevisionDetails[item.version]?.revision.snapshot[key] || "Not recorded"}</p></section>)}
+          </div>}
+        </details></li>)}</ol></details>}
     </Card>
     <RecurringProjectCopyForward root={root} projectId={projectId} projectStatus={data.project.status} contextVersion={contextVersion}
       contextSignal={contextSignal} capabilities={data.capabilities} onInvalidated={onInvalidated} onApplied={() => setRevision(value => value + 1)} />

@@ -2,7 +2,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
-import { guardedFence, prepareProject, projectGuard, readProjectOperationalWorkspace, saveProjectMemory, saveProjectOperationalContacts,
+import { guardedFence, prepareProject, projectGuard, readProjectMemoryRevision, readProjectOperationalWorkspace, saveProjectMemory, saveProjectOperationalContacts,
   type ProjectMemorySnapshot } from "../src/worker/project-operational-memory";
 import { cleanupProjectMemoryAttachmentUploads, serveProjectMemoryAttachment, uploadProjectMemoryAttachment }
   from "../src/worker/project-memory-attachments";
@@ -224,6 +224,16 @@ describe("source-qualified operational contacts and project memory", () => {
     expect(workspace.memory).toMatchObject({ version: 2, snapshot: { plan: "Plan revised" } });
     expect(workspace.memory.revisions[0]).toMatchObject({ changeKind: "post_completion_amendment",
       amendmentReason: "Client confirmed the final outcome" });
+    const original = await readProjectMemoryRevision(environment, owner, item.context, item.projectId, 1, item.context.contextVersion);
+    const amended = await readProjectMemoryRevision(environment, owner, item.context, item.projectId, 2, item.context.contextVersion);
+    expect(original.revision).toMatchObject({ version: 1, changeKind: "saved", amendmentReason: null, snapshot: { plan: "Plan" } });
+    expect(amended.revision).toMatchObject({ version: 2, changeKind: "post_completion_amendment",
+      amendmentReason: "Client confirmed the final outcome", snapshot: { plan: "Plan revised" } });
+    expect(JSON.stringify([original, amended])).not.toContain(owner.id);
+    await expect(readProjectMemoryRevision(environment, owner, item.context, "another-project", 1,
+      item.context.contextVersion)).rejects.toMatchObject({ status: 404 });
+    await expect(readProjectMemoryRevision(environment, owner, { ...item.context, contextVersion: "x".repeat(43) }, item.projectId, 1,
+      item.context.contextVersion)).rejects.toMatchObject({ status: 409 });
     const audit = JSON.stringify((await database.prepare("SELECT details_json FROM project_operational_events WHERE project_id=?")
       .bind(item.projectId).all()).results);
     expect(audit).not.toContain("Client confirmed"); expect(audit).not.toContain("Plan revised");

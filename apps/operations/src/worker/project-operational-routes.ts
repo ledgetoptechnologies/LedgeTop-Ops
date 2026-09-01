@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { isBusinessProjectionSource } from "./client-hub-source";
 import { listClientHubCollection, type ClientHubCollectionContext } from "./client-hub-collections";
-import { readProjectOperationalWorkspace, saveProjectMemory, saveProjectOperationalContacts } from "./project-operational-memory";
+import { readProjectMemoryRevision, readProjectOperationalWorkspace, saveProjectMemory, saveProjectOperationalContacts } from "./project-operational-memory";
 import { serveProjectMemoryAttachment, uploadProjectMemoryAttachment } from "./project-memory-attachments";
 import { commitRecurringProjectCopy, previewRecurringProjectCopy } from "./project-recurring-copy-forward";
 import type { Env, StaffPrincipal } from "./types";
@@ -69,6 +69,20 @@ export function registerProjectOperationalRoutes(app: App, resolveContext: Resol
     const context = await resolveContext(c.env, principal, clientKind, c.req.param("publicId"), c.req.param("sourceId"), "business");
     const result = await saveProjectMemory(c.env, principal, context, c.req.param("projectId"),
       await c.req.json().catch(() => undefined));
+    await verifyContext(c.env, principal, context);
+    c.header("Cache-Control", "no-store");
+    return c.json(result);
+  });
+  app.get(`${base}/operational-memory/revisions/:version`, async c => {
+    const clientKind = routeKind(c, "Project-memory history is unavailable for this source"), principal = c.get("principal");
+    const context = await resolveContext(c.env, principal, clientKind, c.req.param("publicId"), c.req.param("sourceId"), "business");
+    const expectedContextVersion = c.req.query("expectedContextVersion");
+    if (expectedContextVersion === undefined)
+      throw new HTTPException(400, { message: "Project-memory history requires the current workspace context" });
+    const rawVersion = c.req.param("version");
+    if (!/^[1-9]\d{0,9}$/.test(rawVersion))
+      throw new HTTPException(400, { message: "Project-memory revision version is invalid" });
+    const result = await readProjectMemoryRevision(c.env, principal, context, c.req.param("projectId"), Number(rawVersion), expectedContextVersion);
     await verifyContext(c.env, principal, context);
     c.header("Cache-Control", "no-store");
     return c.json(result);
