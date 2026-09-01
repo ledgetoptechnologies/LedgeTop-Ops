@@ -198,11 +198,12 @@ function PartyReview({ operation, contextSignal, onCancel, onInvalidated, onSave
   </section>;
 }
 
-function RecordPicker({ kind, excludedSources, contextSignal, onSelect, onInvalidated }: {
+function RecordPicker({ kind, excludedSources, initialQuery, contextSignal, onSelect, onInvalidated }: {
   kind: ClientKind; excludedSources: string[]; onSelect: (client: ClientSummary) => void; onInvalidated: (message: string) => void;
-  contextSignal: AbortSignal;
+  initialQuery: string; contextSignal: AbortSignal;
 }) {
-  const [draft, setDraft] = useState(""), [query, setQuery] = useState("");
+  const suggestedQuery = initialQuery.trim().replace(/\s+/g, " ").slice(0, 200);
+  const [draft, setDraft] = useState(suggestedQuery), [query, setQuery] = useState(suggestedQuery);
   const [rows, setRows] = useState<ClientSummary[]>([]), [next, setNext] = useState<string | null>(null);
   const [sources, setSources] = useState<Array<{ source_id: string; display_name: string }> | null>(null), [source, setSource] = useState("");
   const [busy, setBusy] = useState(false), [error, setError] = useState(""), [loaded, setLoaded] = useState(false);
@@ -283,6 +284,7 @@ function LinkEditor({ anchor, party, contextSignal, onCancel, onInvalidated, onS
   return <section className="business-party-editor" aria-label="Link a business record">
     <h3>{party ? "Add a source record" : "Link another source record"}</h3>
     {!selected ? <RecordPicker kind={kind} excludedSources={party?.members.map(member => member.root.sourceId) || [anchor?.source_id || ""]}
+      initialQuery={party?.displayName || anchor?.display_name || ""}
       contextSignal={contextSignal} onSelect={setSelected} onInvalidated={onInvalidated} /> : <form onSubmit={review}>
       <p>Selected: <strong>{selected.display_name}</strong> · {selected.source_name || selected.source_id}</p>
       <small>{selected.source_id} · Record {selected.public_id}</small>

@@ -119,6 +119,8 @@ async function fixture(page: Page, options: { linked?: number; manage?: boolean;
 async function createPreview(page: Page) {
   await page.goto(sourcePath(roots[0]!));
   await page.getByRole("button", { name: "Link another source record", exact: true }).click();
+  await page.getByRole("searchbox", { name: "Find another business record" }).fill("Acme");
+  await page.getByRole("button", { name: "Search records", exact: true }).click();
   await page.getByRole("button", { name: "Choose Acme technology customer", exact: true }).click();
   await page.getByLabel("Linked customer name", { exact: false }).fill("Acme combined customer");
   await page.getByRole("button", { name: "Preview link", exact: true }).click();
@@ -152,6 +154,24 @@ test("reviewed linking collapses records into one directory identity without mer
   expect(saves).toHaveLength(1); expect(saves[0]!.csrf).toBe("csrf-test");
   expect((saves[0]!.body!.operation as Operation).action).toBe("create");
   expect(state.calls.some(call => /invitation|grant|quote|notifications/.test(call.path))).toBe(false);
+});
+
+test("opening the link picker suggests same-name records from another source without linking automatically", async ({ page }) => {
+  const state = await fixture(page, { rootCount: 2 });
+  await page.goto(sourcePath(roots[0]!));
+  await page.getByRole("button", { name: "Link another source record", exact: true }).click();
+
+  await expect(page.getByRole("searchbox", { name: "Find another business record" })).toHaveValue("Acme aerial customer");
+  await expect(page.getByRole("combobox", { name: "Business source" })).toHaveValue(secondary);
+  await expect(page.getByRole("button", { name: "Preview link", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Review customer link", exact: true })).toHaveCount(0);
+  await expect.poll(() => state.calls.filter(call => call.path === "/api/client-hub" && call.query.get("grouping") === "records")
+    .map(call => ({ q: call.query.get("q"), source: call.query.get("source") })))
+    .toEqual([
+      { q: "Acme aerial customer", source: null },
+      { q: "Acme aerial customer", source: secondary },
+    ]);
+  expect(state.calls.filter(call => call.path === `${apiBase}/preview` || (call.path === apiBase && call.method === "POST"))).toHaveLength(0);
 });
 
 test("source workspaces, party links and directory filters survive refresh and browser history", async ({ page }) => {
@@ -212,6 +232,8 @@ test("add and unlink each require a fresh preview while keeping all source recor
   await expect(page.getByRole("combobox", { name: "Business source" })).toHaveValue(third);
   await expect(page.getByRole("combobox", { name: "Business source" }).locator("option")).toHaveCount(1);
   await expect(page.getByRole("button", { name: "Choose Acme aerial customer" })).toHaveCount(0);
+  await page.getByRole("searchbox", { name: "Find another business record" }).fill("Acme");
+  await page.getByRole("button", { name: "Search records", exact: true }).click();
   await page.getByRole("button", { name: "Choose Acme third record" }).click();
   await page.getByRole("button", { name: "Preview link", exact: true }).click(); await confirm(page);
   const sourceRecordCount = page.getByRole("region", { name: "Linked customer workspace" })
@@ -301,6 +323,8 @@ test("candidate search is server-backed, paged and refuses same-source or alread
       : [], nextCursor: !q && !cursor ? "records-next" : null, capabilities } }); return true;
   } });
   await page.goto(sourcePath(roots[0]!)); await page.getByRole("button", { name: "Link another source record", exact: true }).click();
+  await page.getByRole("searchbox", { name: "Find another business record" }).fill("");
+  await page.getByRole("button", { name: "Search records", exact: true }).click();
   await expect(page.getByText("No records on this page. Continue checking for more.")).toBeVisible();
   await page.getByRole("button", { name: "Load more records" }).click();
   await expect(page.getByText("This source is already represented")).toBeVisible();
@@ -318,6 +342,8 @@ test("a cancelled pending preview cannot resurface after navigating to the direc
     if (call.path === `${apiBase}/preview`) { delayed = route; return true; } return false;
   } });
   await page.goto(sourcePath(roots[0]!)); await page.getByRole("button", { name: "Link another source record", exact: true }).click();
+  await page.getByRole("searchbox", { name: "Find another business record" }).fill("Acme");
+  await page.getByRole("button", { name: "Search records", exact: true }).click();
   await page.getByRole("button", { name: "Choose Acme technology customer" }).click(); await page.getByRole("button", { name: "Preview link" }).click();
   await expect.poll(() => Boolean(delayed)).toBe(true);
   await page.getByRole("button", { name: "Cancel review" }).click(); await page.getByRole("link", { name: "← Client Hub" }).click();
