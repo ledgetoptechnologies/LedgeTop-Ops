@@ -14,6 +14,7 @@ import {
   resolveClientFeedbackTarget, resolveClientFeedbackFileMetadata, type ResolvedFeedbackTarget,
 } from "./feedback-target";
 import { d1ClientPortalRepository } from "./repository";
+import { clientPortalRequestOriginAllowed } from "../origin-policy";
 
 type Variables = { clientSession: ClientPortalSession; clientPrincipal: VerifiedClientPrincipal; clientWorkspace: EffectivePortalWorkspaceContext | null };
 type FeedbackContext = Context<{ Bindings: Env; Variables: Variables }>;
@@ -27,8 +28,7 @@ export async function clientFeedbackSchemaAvailable(env: Pick<Env, "DELIVERY_DB"
   return count === 5;
 }
 function sameOrigin(c: FeedbackContext) {
-  const origin = new URL(c.req.url).origin;
-  if (origin !== c.env.CLIENT_PORTAL_ORIGIN || c.req.header("Origin") !== origin)
+  if (!clientPortalRequestOriginAllowed(c.req.raw,c.env))
     throw new HTTPException(403, { message: "This request is not allowed" });
 }
 async function body(c: FeedbackContext): Promise<unknown> {

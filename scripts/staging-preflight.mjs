@@ -71,6 +71,8 @@ export function validateApp(app, staging, production) {
   if (app === "delivery") {
     if (vars.CLIENT_PORTAL_ENABLED !== "false") errors.push("delivery CLIENT_PORTAL_ENABLED must remain false for release preparation");
     if (vars.CLIENT_PORTAL_ORIGIN !== `https://${STAGING_HOSTS.client}`) errors.push("delivery CLIENT_PORTAL_ORIGIN must match the approved authenticated client staging host");
+    if (vars.CLIENT_PORTAL_ORIGINS !== STAGING_STATIC_VARS.delivery.CLIENT_PORTAL_ORIGINS)
+      errors.push("delivery CLIENT_PORTAL_ORIGINS must contain both approved staging client origins");
     if (vars.PUBLIC_SHARE_ORIGIN !== `https://${STAGING_HOSTS.delivery}` || vars.PUBLIC_BASE_URL !== vars.PUBLIC_SHARE_ORIGIN)
       errors.push("delivery public origins must match the approved anonymous delivery staging host");
     if (vars.CLIENT_ACCESS_TEAM_DOMAIN !== STAGING_STATIC_VARS.delivery.CLIENT_ACCESS_TEAM_DOMAIN) errors.push("delivery CLIENT_ACCESS_TEAM_DOMAIN must match the approved Access team");

@@ -18,6 +18,26 @@ import type { ClientPortalSession, ClientServiceRequestDraftInput } from "../src
 import { effectiveWorkspaceRequestMutationGuardSql, readEffectiveWorkspaceRequestProof } from "../src/worker/client-portal/workspace-v2";
 import type { Env } from "../src/worker/types";
 import { splitD1MigrationStatements } from "./helpers/d1-migrations";
+import {
+  cancelNativeServiceRequest,
+  createNativeServiceRequestDraft,
+  listNativeServiceCatalog,
+  listNativeServiceRequests,
+  submitNativeServiceRequestDraft,
+} from "../src/worker/client-portal/native-request-v2";
+import {
+  abortRequestAttachment,
+  checkpointRequestAttachment,
+  completeRequestAttachment,
+  getAuthorizedRequestAttachmentContext,
+  initializeRequestAttachment,
+  issueNativeRequestAttachmentPartLease,
+  listRequestAttachments,
+} from "../src/worker/client-portal/request-attachments";
+import {
+  nativeRequestMutationGuardSql,
+  resolveNativeRequestAuthority,
+} from "../src/worker/client-portal/native-request-authority";
 
 const sourceId = "project-alpha:primary";
 const secondarySourceId = "project-alpha:secondary";
@@ -35,9 +55,11 @@ const session: ClientPortalSession = {
 };
 const secondarySession: ClientPortalSession = {
   ...session,
-  accountId: "secondary-policy-account",
-  identityId: "secondary-policy-identity",
+  accountId: "",
+  identityId: "",
   workspaceId: "secondary-policy-workspace",
+  nativeSourceId: secondarySourceId,
+  nativePortalIdentityId: "portal-policy-identity",
 };
 
 describe("exact-target service-assignment request policy", { timeout: 60_000 }, () => {
@@ -51,7 +73,7 @@ describe("exact-target service-assignment request policy", { timeout: 60_000 }, 
       compatibilityDate: "2026-08-06",
       modules: true,
       script: "export default {fetch(){return new Response('ok')}}",
-      d1Databases: Object.fromEntries(Array.from({ length: 11 }, (_, index) =>
+      d1Databases: Object.fromEntries(Array.from({ length: 16 }, (_, index) =>
         [`POLICY_DB_${index}`, `service-assignment-policy-${index}`])),
     });
   });
@@ -66,14 +88,35 @@ describe("exact-target service-assignment request policy", { timeout: 60_000 }, 
       if (statements.length) await db.batch(statements.map(sql => db.prepare(sql)));
     }
     await seedPolicyContext();
+    const bucket = {
+      async createMultipartUpload(key: string) {
+        return { key, uploadId: `upload-${crypto.randomUUID()}`, async abort() {}, async uploadPart() {}, async complete() {} };
+      },
+      resumeMultipartUpload(key: string, uploadId: string) {
+        return { key, uploadId, async abort() {}, async uploadPart() {}, async complete() {
+          throw new Error("stale authority must fail before completing R2");
+        } };
+      },
+      async head() { return null; },
+      async get() { return null; },
+      async delete() {},
+    } as unknown as R2Bucket;
     env = {
       DELIVERY_DB: db,
+      DATA_BUCKET: bucket,
       CLIENT_PORTAL_REQUEST_V2_ENABLED: "true",
       CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true",
       CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED: "true",
       CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: "true",
+      CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED: "true",
       PROJECT_ALPHA_SERVICE_ASSIGNMENT_SYNC_ENABLED: "true",
       CLIENT_PORTAL_SERVICE_ASSIGNMENT_POLICY_ENABLED: "true",
+      CLIENT_REQUEST_ATTACHMENTS_ENABLED: "true",
+      CLIENT_REQUEST_ATTACHMENT_SCANNER_SECRET: "s".repeat(32),
+      R2_S3_ENDPOINT: "https://846c924bf17bf4f3dd15c97a4c5d1d51.r2.cloudflarestorage.com",
+      R2_BUCKET_NAME: "client-data",
+      CLIENT_REQUEST_ATTACHMENT_R2_ACCESS_KEY_ID: "attachment-access",
+      CLIENT_REQUEST_ATTACHMENT_R2_SECRET_ACCESS_KEY: "attachment-secret".repeat(4),
     } as Env;
   }, 60_000);
 
@@ -204,9 +247,27 @@ describe("exact-target service-assignment request policy", { timeout: 60_000 }, 
         (workspace_id,generation_id,entity_type,public_id,display_name,source_version,active)
         VALUES (?,'secondary-directory-1','organization','pa-org-policy',
           'Secondary policy client','secondary-directory-v1',1)`).bind(secondaryWorkspaceId),
+      db.prepare(`INSERT INTO portal_v2_directory_generation_contracts
+        (generation_id,workspace_id,schema_version)
+        VALUES ('secondary-directory-1',?,3)`).bind(secondaryWorkspaceId),
       db.prepare(`INSERT INTO portal_v2_directory_checkpoints
         (workspace_id,active_generation_id,source_sequence)
         VALUES (?,'secondary-directory-1',1)`).bind(secondaryWorkspaceId),
+      db.prepare(`INSERT INTO portal_v2_workspace_memberships
+        (id,workspace_id,identity_id,source_type,status,source_version)
+        VALUES ('secondary-policy-membership',?,'portal-policy-identity','project_alpha','active','secondary-member-v1')`)
+        .bind(secondaryWorkspaceId),
+      db.prepare(`INSERT INTO pa_portal_principals
+        (workspace_id,public_id,identity_id,email_hint,display_name,source_version,status)
+        VALUES (?,'secondary-policy-principal','portal-policy-identity','policy@example.test',
+          'Policy client','secondary-member-v1','active')`).bind(secondaryWorkspaceId),
+      db.prepare(`INSERT INTO portal_v2_entitlements
+        (id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,source_type,source_version,status)
+        VALUES ('secondary-workspace-view',?,'portal-policy-identity','workspace.view','allow','workspace',?,
+            'project_alpha','secondary-member-v1','active'),
+          ('secondary-request-root',?,'portal-policy-identity','request.create','allow','organization','pa-org-policy',
+            'project_alpha','secondary-member-v1','active')`)
+        .bind(secondaryWorkspaceId, secondaryWorkspaceId, secondaryWorkspaceId),
       db.prepare(`INSERT INTO pa_service_catalog_generations
         (id,source_id,source_generation,source_sequence,snapshot_hash,page_count,item_count,status,complete)
         VALUES ('secondary-catalog-generation',?,'secondary-catalog-v1',1,?,1,2,'active',1)`)
@@ -244,6 +305,296 @@ describe("exact-target service-assignment request policy", { timeout: 60_000 }, 
         VALUES (?,'secondary-assignment-generation','secondary-assignments-v1',1)`).bind(secondarySourceId),
     ]);
   }
+
+  it("keeps native request ownership, catalog collisions, replay, attachments, history, and cancellation source-qualified", async () => {
+    await seedSecondaryPolicyContext();
+    await db.prepare(`INSERT INTO pa_service_assignment_request_policy_reviews
+      (source_id,revision,review_id,state,reviewed_by_type,reviewed_by_id,review_reference,rationale,reviewed_at)
+      VALUES (?,1,'native-request-policy-review','enabled','staff','test-operator','TEST-NATIVE-REQUEST',
+        'Explicit native request policy test',datetime('now'))`).bind(secondarySourceId).run();
+    const services = await listNativeServiceCatalog(env, secondarySession, null);
+    expect(services.map(item => [item.publicId, item.name])).toEqual([
+      ["root-service", "Secondary colliding service"],
+      ["secondary-only", "Secondary-only service"],
+    ]);
+    const input: ClientServiceRequestDraftInput = {
+      projectId: null, requestType: "service", title: "Secondary source request", details: "Exact source request",
+      location: null, preferredStartAt: null, deliverables: null, siteContactName: null, siteContactEmail: null,
+      siteContactPhone: null, desiredCompletionAt: null, latitude: null, longitude: null, areaGeoJson: null, poiPoints: [],
+      services: [{ publicId: "root-service", sourceVersion: "service-v1", answers: {} }],
+    };
+    const created = await createNativeServiceRequestDraft(env, secondarySession, input, "native-create-key-0001");
+    expect(created).toMatchObject({ kind: "created", draft: { projectId: null, title: input.title } });
+    if (!created || created.kind !== "created") throw new Error("native draft fixture unavailable");
+    expect(await createNativeServiceRequestDraft(env, secondarySession, input, "native-create-key-0001"))
+      .toMatchObject({ kind: "replayed", draft: { id: created.draft.id } });
+    const owner = await db.prepare(`SELECT account_id,created_by_identity_id,catalog_source_id,portal_workspace_id,
+        portal_identity_id FROM client_service_request_drafts WHERE id=?`).bind(created.draft.id)
+      .first<{account_id:string;created_by_identity_id:string;catalog_source_id:string;portal_workspace_id:string;portal_identity_id:string}>();
+    expect(owner).toMatchObject({ catalog_source_id: secondarySourceId, portal_workspace_id: secondarySession.workspaceId,
+      portal_identity_id: secondarySession.nativePortalIdentityId });
+    const binding = await db.prepare(`SELECT workspace_id,source_id,account_id,storage_identity_id,created_at
+      FROM portal_native_request_storage_bindings WHERE workspace_id=?`).bind(secondarySession.workspaceId)
+      .first<{workspace_id:string;source_id:string;account_id:string;storage_identity_id:string;created_at:string}>();
+    expect(binding).not.toBeNull();
+    await db.prepare(`UPDATE portal_native_request_storage_bindings
+      SET state='suspended',updated_at=datetime('now') WHERE workspace_id=?`).bind(secondarySession.workspaceId).run();
+    await db.prepare(`UPDATE portal_native_request_storage_bindings
+      SET state='active',updated_at=datetime('now') WHERE workspace_id=?`).bind(secondarySession.workspaceId).run();
+    await expect(db.prepare(`UPDATE portal_native_request_storage_bindings SET account_id='account-a'
+      WHERE workspace_id=?`).bind(secondarySession.workspaceId).run()).rejects.toThrow(/ownership is immutable/);
+    await expect(db.prepare(`UPDATE portal_native_request_storage_bindings SET created_at=datetime('now','+1 day')
+      WHERE workspace_id=?`).bind(secondarySession.workspaceId).run()).rejects.toThrow(/ownership is immutable/);
+    await expect(db.prepare(`DELETE FROM portal_native_request_storage_bindings WHERE workspace_id=?`)
+      .bind(secondarySession.workspaceId).run()).rejects.toThrow(/cannot be deleted/);
+    await expect(db.prepare(`INSERT OR REPLACE INTO portal_native_request_storage_bindings
+      (workspace_id,source_id,account_id,storage_identity_id,state,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,datetime('now'))`).bind(binding!.workspace_id,binding!.source_id,
+        binding!.account_id,binding!.storage_identity_id,'active',binding!.created_at).run())
+      .rejects.toThrow(/ownership already exists/);
+    await db.prepare(`INSERT INTO client_service_request_attachments
+      (id,draft_id,account_id,created_by_identity_id,client_upload_id,object_key,multipart_upload_id,original_name,
+       declared_size,content_type,status,actual_size,scanner_verdict,verified_sha256,scanned_at,expires_at)
+      VALUES ('native-attachment',?,?,?,?,?,'upload-1','proof.pdf',100,'application/pdf','accepted',100,'clean',?,datetime('now'),datetime('now','+1 day'))`)
+      .bind(created.draft.id, owner!.account_id, owner!.created_by_identity_id, "native-upload-key-0001",
+        "_ltds/quarantine/request-attachments/native-attachment/object", "a".repeat(64)).run();
+    expect((await listRequestAttachments(env, secondarySession, created.draft.id))?.map(row => row.id))
+      .toEqual(["native-attachment"]);
+    expect(await listRequestAttachments(env, session, created.draft.id)).toBeNull();
+    const preRevocationProof = await resolveNativeRequestAuthority(env, secondarySession, null);
+    expect(preRevocationProof).not.toBeNull();
+    await db.prepare(`UPDATE pa_portal_principals SET status='suspended'
+      WHERE workspace_id=? AND identity_id=?`).bind(secondarySession.workspaceId,
+        secondarySession.nativePortalIdentityId).run();
+    const postRevocationGuard = nativeRequestMutationGuardSql(preRevocationProof!);
+    expect(await db.prepare(`SELECT ${postRevocationGuard.sql} ok`).bind(...postRevocationGuard.bindings)
+      .first<number>("ok")).toBe(0);
+    await db.prepare(`UPDATE pa_portal_principals SET status='active'
+      WHERE workspace_id=? AND identity_id=?`).bind(secondarySession.workspaceId,
+        secondarySession.nativePortalIdentityId).run();
+    await db.prepare(`UPDATE portal_v2_entitlements SET status='revoked',revoked_at=datetime('now')
+      WHERE id='secondary-request-root'`).run();
+    expect(await createNativeServiceRequestDraft(env, secondarySession, input, "native-create-key-0002")).toBeNull();
+    expect(await submitNativeServiceRequestDraft(env, secondarySession, created.draft.id, created.draft.version,
+      "native-submit-key-0001")).toBeNull();
+    await db.prepare(`UPDATE portal_v2_entitlements SET status='active',revoked_at=NULL
+      WHERE id='secondary-request-root'`).run();
+    const submitted = await submitNativeServiceRequestDraft(env, secondarySession, created.draft.id, created.draft.version,
+      "native-submit-key-0001");
+    expect(submitted).toMatchObject({ kind: "submitted", request: { title: input.title, status: "submitted" } });
+    if (!submitted || submitted.kind !== "submitted") throw new Error("native request fixture unavailable");
+    expect((await listNativeServiceRequests(env, secondarySession)).map(item => item.id)).toEqual([submitted.request.id]);
+    expect(await cancelNativeServiceRequest(env, secondarySession, submitted.request.id, "native-cancel-key-0001"))
+      .toMatchObject({ kind: "cancelled", request: { status: "cancelled" } });
+    expect(await cancelNativeServiceRequest(env, secondarySession, submitted.request.id, "native-cancel-key-0001"))
+      .toMatchObject({ kind: "replayed", request: { status: "cancelled" } });
+  });
+
+  it("invalidates one attachment authority proof across every native revocation and generation boundary", async () => {
+    await seedSecondaryPolicyContext();
+    const proof = await resolveNativeRequestAuthority(env, secondarySession, null);
+    expect(proof).not.toBeNull();
+    const current = async () => {
+      const guard = nativeRequestMutationGuardSql(proof!);
+      return db.prepare(`SELECT ${guard.sql} ok`).bind(...guard.bindings).first<number>("ok");
+    };
+    expect(await current()).toBe(1);
+
+    await db.prepare("UPDATE pa_portal_principals SET status='suspended' WHERE workspace_id=?")
+      .bind(secondarySession.workspaceId).run();
+    expect(await current(), "principal suspension").toBe(0);
+    await db.prepare("UPDATE pa_portal_principals SET status='active' WHERE workspace_id=?")
+      .bind(secondarySession.workspaceId).run();
+
+    await db.prepare("UPDATE portal_v2_workspace_memberships SET expires_at=datetime('now','-1 minute') WHERE id='secondary-policy-membership'").run();
+    expect(await current(), "membership expiry").toBe(0);
+    await db.prepare("UPDATE portal_v2_workspace_memberships SET expires_at=NULL,status='revoked',revoked_at=datetime('now') WHERE id='secondary-policy-membership'").run();
+    expect(await current(), "membership revocation").toBe(0);
+    await db.prepare("UPDATE portal_v2_workspace_memberships SET status='active',revoked_at=NULL WHERE id='secondary-policy-membership'").run();
+
+    await db.prepare("UPDATE portal_v2_entitlements SET status='revoked',revoked_at=datetime('now') WHERE id='secondary-request-root'").run();
+    expect(await current(), "allow revocation").toBe(0);
+    await db.prepare("UPDATE portal_v2_entitlements SET status='active',revoked_at=NULL WHERE id='secondary-request-root'").run();
+    await db.prepare(`INSERT INTO portal_v2_entitlements
+      (id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,source_type,source_version,status)
+      VALUES ('secondary-request-deny',?,'portal-policy-identity','request.create','deny','organization','pa-org-policy',
+        'operations','deny-v1','active')`).bind(secondarySession.workspaceId).run();
+    expect(await current(), "live deny").toBe(0);
+    await db.prepare("UPDATE portal_v2_entitlements SET status='revoked',revoked_at=datetime('now') WHERE id='secondary-request-deny'").run();
+
+    await db.batch([
+      db.prepare(`INSERT INTO portal_v2_directory_generations
+        (id,workspace_id,source_generation,source_sequence,status,complete,activated_at)
+        VALUES ('secondary-directory-2',?,'secondary-directory-v2',2,'active',1,datetime('now'))`)
+        .bind(secondarySession.workspaceId),
+      db.prepare(`INSERT INTO portal_v2_directory_entities
+        (workspace_id,generation_id,entity_type,public_id,display_name,source_version,active)
+        VALUES (?,'secondary-directory-2','organization','pa-org-policy','Secondary policy client','secondary-directory-v2',1)`)
+        .bind(secondarySession.workspaceId),
+      db.prepare(`INSERT INTO portal_v2_directory_generation_contracts(generation_id,workspace_id,schema_version)
+        VALUES ('secondary-directory-2',?,3)`).bind(secondarySession.workspaceId),
+      db.prepare(`UPDATE portal_v2_directory_checkpoints SET active_generation_id='secondary-directory-2',source_sequence=2
+        WHERE workspace_id=?`).bind(secondarySession.workspaceId),
+    ]);
+    expect(await current(), "directory generation rotation").toBe(0);
+
+    const rotatedProof = await resolveNativeRequestAuthority(env, secondarySession, null);
+    expect(rotatedProof).not.toBeNull();
+    const rotatedGuard = nativeRequestMutationGuardSql(rotatedProof!);
+    await db.prepare("UPDATE pa_portal_source_authorities SET state='suspended',version=version+1 WHERE source_id=?")
+      .bind(secondarySourceId).run();
+    expect(await db.prepare(`SELECT ${rotatedGuard.sql} ok`).bind(...rotatedGuard.bindings).first<number>("ok"),
+      "source authority suspension").toBe(0);
+  });
+
+  it("records and consumes a native part-ticket lease and rejects every stale lifecycle mutation", async () => {
+    await seedSecondaryPolicyContext();
+    await db.prepare(`INSERT INTO pa_service_assignment_request_policy_reviews
+      (source_id,revision,review_id,state,reviewed_by_type,reviewed_by_id,review_reference,rationale,reviewed_at)
+      VALUES (?,1,'native-attachment-policy-review','enabled','staff','test-operator','TEST-NATIVE-ATTACHMENT',
+        'Native attachment authority test',datetime('now'))`).bind(secondarySourceId).run();
+    const input: ClientServiceRequestDraftInput = {
+      projectId: null, requestType: "service", title: "Attachment authority", details: "Native attachment race proof",
+      location: null, preferredStartAt: null, deliverables: null, siteContactName: null, siteContactEmail: null,
+      siteContactPhone: null, desiredCompletionAt: null, latitude: null, longitude: null, areaGeoJson: null, poiPoints: [],
+      services: [{ publicId: "root-service", sourceVersion: "service-v1", answers: {} }],
+    };
+    const created = await createNativeServiceRequestDraft(env, secondarySession, input, "native-attachment-create-0001");
+    expect(created).toMatchObject({ kind: "created" });
+    if (!created || created.kind !== "created") throw new Error("native attachment draft unavailable");
+    const initialized = await initializeRequestAttachment(env, secondarySession, created.draft.id, {
+      clientUploadId: "native-attachment-upload-0001", name: "proof.pdf", contentType: "application/pdf", size: 10,
+    });
+    const authorized = await getAuthorizedRequestAttachmentContext(env, secondarySession, created.draft.id, initialized.row.id);
+    if (!authorized?.nativeProof) throw new Error("native attachment authority unavailable");
+
+    const first = await issueNativeRequestAttachmentPartLease(env, authorized.row, authorized.nativeProof, 1);
+    expect(first).not.toBeNull();
+    expect((await issueNativeRequestAttachmentPartLease(env, authorized.row, authorized.nativeProof, 1))?.nonce)
+      .toBe(first!.nonce);
+    const etag = "a".repeat(32);
+    expect(await checkpointRequestAttachment(env, authorized.row, 1, etag, 10,
+      { proof: authorized.nativeProof, ticketNonce: first!.nonce })).toEqual({ partNumber: 1, etag, size: 10 });
+    expect(await db.prepare(`SELECT consumed_at IS NOT NULL consumed FROM portal_native_request_attachment_part_tickets
+      WHERE attachment_id=? AND part_number=1`).bind(authorized.row.id).first("consumed")).toBe(1);
+    const rotated = await issueNativeRequestAttachmentPartLease(env, authorized.row, authorized.nativeProof, 1);
+    expect(rotated?.nonce).not.toBe(first!.nonce);
+
+    await db.prepare("UPDATE portal_v2_entitlements SET status='revoked',revoked_at=datetime('now') WHERE id='secondary-request-root'").run();
+    await expect(checkpointRequestAttachment(env, authorized.row, 1, etag, 10,
+      { proof: authorized.nativeProof, ticketNonce: rotated!.nonce })).rejects.toMatchObject({ status: 409 });
+    expect(await db.prepare(`SELECT consumed_at FROM portal_native_request_attachment_part_tickets
+      WHERE attachment_id=? AND part_number=1 AND nonce=?`).bind(authorized.row.id, rotated!.nonce).first("consumed_at"))
+      .toBeNull();
+    await expect(completeRequestAttachment(env, authorized.row, [{ partNumber: 1, etag }], authorized.nativeProof))
+      .rejects.toMatchObject({ status: 409 });
+    await expect(abortRequestAttachment(env, authorized.row, authorized.nativeProof)).rejects.toMatchObject({ status: 409 });
+    expect(await db.prepare("SELECT status FROM client_service_request_attachments WHERE id=?")
+      .bind(authorized.row.id).first("status")).toBe("uploading");
+
+    await db.prepare("UPDATE portal_v2_entitlements SET status='active',revoked_at=NULL WHERE id='secondary-request-root'").run();
+    expect(await abortRequestAttachment(env, authorized.row, authorized.nativeProof)).toEqual({ idempotent: false });
+    expect(await db.prepare("SELECT status FROM client_service_request_attachments WHERE id=?")
+      .bind(authorized.row.id).first("status")).toBe("aborted");
+  });
+
+  it("fails closed when native authority changes while multipart completion awaits R2", async () => {
+    await seedSecondaryPolicyContext();
+    await db.prepare(`INSERT INTO pa_service_assignment_request_policy_reviews
+      (source_id,revision,review_id,state,reviewed_by_type,reviewed_by_id,review_reference,rationale,reviewed_at)
+      VALUES (?,1,'native-completion-race-review','enabled','staff','test-operator','TEST-NATIVE-COMPLETION',
+        'Native completion authority race test',datetime('now'))`).bind(secondarySourceId).run();
+    const originalBucket = env.DATA_BUCKET;
+    const pdfPrefix = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0, 0, 0, 0, 0]);
+    const cases = [
+      {
+        name: "principal suspension",
+        revoke: () => db.prepare("UPDATE pa_portal_principals SET status='suspended' WHERE workspace_id=?")
+          .bind(secondarySession.workspaceId).run(),
+        restore: () => db.prepare("UPDATE pa_portal_principals SET status='active' WHERE workspace_id=?")
+          .bind(secondarySession.workspaceId).run(),
+      },
+      {
+        name: "source authority version rotation",
+        revoke: () => db.prepare("UPDATE pa_portal_source_authorities SET version=version+1 WHERE source_id=?")
+          .bind(secondarySourceId).run(),
+        restore: async () => undefined,
+      },
+      {
+        name: "entitlement revocation",
+        revoke: () => db.prepare("UPDATE portal_v2_entitlements SET status='revoked',revoked_at=datetime('now') WHERE id='secondary-request-root'").run(),
+        restore: () => db.prepare("UPDATE portal_v2_entitlements SET status='active',revoked_at=NULL WHERE id='secondary-request-root'").run(),
+      },
+      {
+        name: "directory generation rotation",
+        revoke: () => db.batch([
+          db.prepare(`INSERT INTO portal_v2_directory_generations
+            (id,workspace_id,source_generation,source_sequence,status,complete,activated_at)
+            VALUES ('secondary-completion-directory-2',?,'secondary-completion-v2',2,'active',1,datetime('now'))`)
+            .bind(secondarySession.workspaceId),
+          db.prepare(`INSERT INTO portal_v2_directory_entities
+            (workspace_id,generation_id,entity_type,public_id,display_name,source_version,active)
+            VALUES (?,'secondary-completion-directory-2','organization','pa-org-policy','Secondary policy client','secondary-completion-v2',1)`)
+            .bind(secondarySession.workspaceId),
+          db.prepare(`INSERT INTO portal_v2_directory_generation_contracts(generation_id,workspace_id,schema_version)
+            VALUES ('secondary-completion-directory-2',?,3)`).bind(secondarySession.workspaceId),
+          db.prepare(`UPDATE portal_v2_directory_checkpoints
+            SET active_generation_id='secondary-completion-directory-2',source_sequence=2 WHERE workspace_id=?`)
+            .bind(secondarySession.workspaceId),
+        ]),
+        restore: async () => undefined,
+      },
+    ];
+
+    for (const [index, boundary] of cases.entries()) {
+      env.DATA_BUCKET = originalBucket;
+      const input: ClientServiceRequestDraftInput = {
+        projectId: null, requestType: "service", title: `Completion race ${index}`, details: boundary.name,
+        location: null, preferredStartAt: null, deliverables: null, siteContactName: null, siteContactEmail: null,
+        siteContactPhone: null, desiredCompletionAt: null, latitude: null, longitude: null, areaGeoJson: null, poiPoints: [],
+        services: [{ publicId: "root-service", sourceVersion: "service-v1", answers: {} }],
+      };
+      const created = await createNativeServiceRequestDraft(env, secondarySession, input, `native-completion-create-${index}`);
+      if (!created || created.kind !== "created") throw new Error(`native completion fixture unavailable: ${boundary.name}`);
+      const initialized = await initializeRequestAttachment(env, secondarySession, created.draft.id, {
+        clientUploadId: `native-completion-upload-${index}`, name: `proof-${index}.pdf`, contentType: "application/pdf", size: 10,
+      });
+      const authorized = await getAuthorizedRequestAttachmentContext(env, secondarySession, created.draft.id, initialized.row.id);
+      if (!authorized?.nativeProof) throw new Error(`native completion authority unavailable: ${boundary.name}`);
+      const lease = await issueNativeRequestAttachmentPartLease(env, authorized.row, authorized.nativeProof, 1);
+      const etag = String(index + 1).repeat(32);
+      await checkpointRequestAttachment(env, authorized.row, 1, etag, 10,
+        { proof: authorized.nativeProof, ticketNonce: lease!.nonce });
+
+      let deleted = 0;
+      env.DATA_BUCKET = {
+        resumeMultipartUpload(key: string, uploadId: string) {
+          return { key, uploadId, async abort() {}, async uploadPart() {}, async complete() {
+            if (index !== 0) await boundary.revoke();
+            return { size: 10, etag } as R2Object;
+          } };
+        },
+        async get() {
+          if (index === 0) {
+            await boundary.revoke();
+            throw new Error("probe failed after authority revocation");
+          }
+          return { arrayBuffer: async () => pdfPrefix.buffer } as R2ObjectBody;
+        },
+        async delete() { deleted += 1; },
+      } as unknown as R2Bucket;
+      await expect(completeRequestAttachment(env, authorized.row, [{ partNumber: 1, etag }], authorized.nativeProof),
+        boundary.name).rejects.toMatchObject({ status: 409 });
+      expect(await db.prepare(`SELECT status,completion_claimed_at,completed_at
+        FROM client_service_request_attachments WHERE id=?`).bind(authorized.row.id).first(), boundary.name)
+        .toMatchObject({ status: "uploading", completion_claimed_at: null, completed_at: null });
+      expect(await db.prepare(`SELECT COUNT(*) count FROM client_service_request_attachment_parts WHERE attachment_id=?`)
+        .bind(authorized.row.id).first("count"), boundary.name).toBe(1);
+      expect(deleted, boundary.name).toBe(1);
+      await boundary.restore();
+    }
+    env.DATA_BUCKET = originalBucket;
+  }, 120_000);
 
   it("is default-off and refuses retained facts whenever any receiver prerequisite is off", async () => {
     expect(await readServiceAssignmentPolicy({ ...env,

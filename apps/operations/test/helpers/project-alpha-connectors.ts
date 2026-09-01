@@ -4,8 +4,10 @@ import { splitD1MigrationStatements } from "../../../client/test/helpers/d1-migr
 
 /** Real registry schema, including ownership/revision triggers and deferred FKs. */
 export async function applyConnectorSchema(db: D1Database) {
-  const migration = readFileSync(new URL("../../migrations/0035_project_alpha_connectors.sql", import.meta.url), "utf8");
-  await db.batch(splitD1MigrationStatements(migration).map(sql => db.prepare(sql)));
+  for (const name of ["0035_project_alpha_connectors.sql", "0050_project_alpha_draft_quote_credentials.sql"]) {
+    const migration = readFileSync(new URL(`../../migrations/${name}`, import.meta.url), "utf8");
+    await db.batch(splitD1MigrationStatements(migration).map(sql => db.prepare(sql)));
+  }
 }
 
 export async function registerVisibleTestSource(db: D1Database, sourceId: string, displayName = "Secondary business") {

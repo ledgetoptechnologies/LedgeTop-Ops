@@ -557,7 +557,7 @@ test("catalog refresh preserves the saved service version until the client expli
   catalogChanged = true;
   await page.getByLabel("Service request title").fill("Pinned catalog version updated");
   await expect(page.getByText(/service library changed/i)).toBeVisible();
-  await page.getByRole("button", { name: "Services" }).click();
+  await page.getByRole("navigation", { name: "Service request progress" }).getByRole("button", { name: /Services$/ }).click();
   await expect(page.getByText("This service changed in Project Alpha.")).toBeVisible();
   await expect(page.getByLabel("Preferred resolution")).toHaveValue("standard");
   await expect(page.getByLabel("Delivery format")).toHaveCount(0);
@@ -866,7 +866,8 @@ test("an ambiguous peer administrator response retries the identical operation",
   const peerRow=page.locator(".portal-team-row",{hasText:"peer@example.test"});
   await peerRow.getByRole("button",{name:"Make administrator"}).click();
   await page.getByRole("region",{name:"Review administrator access change"}).getByRole("button",{name:"Add administrator"}).click();
-  const retry=page.getByRole("button",{name:"Retry same administrator change"});await expect(retry).toBeVisible();await retry.click();
+  const retry=page.getByRole("button",{name:"Retry same administrator change"});await expect(retry).toBeVisible();await expect(retry).toBeDisabled();
+  await page.getByRole("button",{name:"Refresh team access"}).click();await expect(retry).toBeEnabled();await retry.click();
   await expect(peerRow).toContainText("Administrator · active");expect(writes).toHaveLength(2);expect(writes[0]!.key).toMatch(/^[A-Za-z0-9-]{16,}$/);
 });
 

@@ -9,6 +9,11 @@ import {
   type EffectivePortalWorkspaceContext,
 } from "./workspace-v2";
 import { readServiceAssignmentPolicy, serviceAssignmentRequestPolicyEnabled } from "./service-assignment-policy";
+import {
+  nativeRequestSchemaReady,
+  nativeServiceRequestsEnabled,
+  resolveNativeRequestAuthority,
+} from "./native-request-authority";
 
 export type RequestReadinessReason =
   | "ready"
@@ -65,6 +70,9 @@ export async function readClientRequestReadiness(
   backendConfigured = true,
 ): Promise<ClientRequestReadiness> {
   const mode = env.CLIENT_PORTAL_REQUEST_V2_ENABLED === "true" ? "catalog" : "legacy";
+  if (session.nativeSourceId) {
+    return readNativeClientRequestReadiness(env, session, projectId, backendConfigured, mode);
+  }
   // Login middleware owns eligibility provisioning. Repeated readiness reads
   // only verify established identities/bridges and must not repair grants.
   const readEnv: Env = { ...env, CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED: "false" };
@@ -178,6 +186,105 @@ export async function readClientRequestReadiness(
   return {
     mode,
     workspaceId: workspace?.workspaceId ?? null,
+    target: { kind: projectId ? "project" : "root", projectId },
+    ...target,
+    root,
+    projectRequestsSupported: commonReason === null,
+    refreshedAt: new Date().toISOString(),
+  };
+}
+
+async function readNativeClientRequestReadiness(
+  env: Env,
+  session: ClientPortalSession,
+  projectId: string | null,
+  backendConfigured: boolean,
+  mode: "catalog" | "legacy",
+): Promise<ClientRequestReadiness> {
+  const schemaReady = nativeServiceRequestsEnabled(env) && await nativeRequestSchemaReady(env);
+  const stableProof = (proof: Awaited<ReturnType<typeof resolveNativeRequestAuthority>>) => proof && ({
+    sourceId: proof.sourceId,
+    workspaceId: proof.workspaceId,
+    identityId: proof.identityId,
+    rootType: proof.rootType,
+    rootPublicId: proof.rootPublicId,
+    projectPublicId: proof.projectPublicId,
+    generationId: proof.generationId,
+    sourceSequence: proof.sourceSequence,
+    targetScopes: proof.targetScopes,
+    allowedEntitlementIds: proof.allowedEntitlementIds,
+    authority: {
+      sourceId: proof.authority.sourceId,
+      revision: proof.authority.revision,
+      version: proof.authority.version,
+      connectorRevision: proof.authority.connectorRevision,
+      connectorVersion: proof.authority.connectorVersion,
+    },
+  });
+  async function snapshot(assignmentWindows?: {
+    root?: { evaluatedAt: string; expiresAt: string };
+    project?: { evaluatedAt: string; expiresAt: string };
+  }) {
+    const rootProof = schemaReady ? await resolveNativeRequestAuthority(env, session, null) : null;
+    const projectProof = schemaReady && projectId ? await resolveNativeRequestAuthority(env, session, projectId) : null;
+    let catalogAvailable = false;
+    if (rootProof && backendConfigured && mode === "catalog") {
+      try {
+        catalogAvailable = await env.DELIVERY_DB.withSession("first-primary").prepare(
+          "SELECT 1 available FROM pa_service_catalog_items WHERE source_id=? AND active=1 LIMIT 1",
+        ).bind(rootProof.sourceId).first<number>("available") === 1;
+      } catch (error) {
+        if (!/no such table:\s*(?:main\.)?pa_service_catalog_items\b|no such column:\s*source_id\b/i.test(
+          error instanceof Error ? error.message : String(error),
+        )) throw error;
+      }
+    }
+    const assignmentPolicy = serviceAssignmentRequestPolicyEnabled(env);
+    const rootAssignment = assignmentPolicy && rootProof && catalogAvailable && backendConfigured && mode === "catalog"
+      ? await readServiceAssignmentPolicy(env, session, null, assignmentWindows?.root) : null;
+    const projectAssignment = assignmentPolicy && projectProof && catalogAvailable && backendConfigured && mode === "catalog" && projectId
+      ? await readServiceAssignmentPolicy(env, session, projectId, assignmentWindows?.project) : null;
+    return {
+      schemaReady, rootProof: stableProof(rootProof), projectProof: stableProof(projectProof), catalogAvailable,
+      assignmentPolicy, rootAssignment, projectAssignment,
+    };
+  }
+  const before = await snapshot();
+  const after = await snapshot({
+    ...(before.rootAssignment?.proof ? { root: {
+      evaluatedAt: before.rootAssignment.proof.evaluatedAt,
+      expiresAt: before.rootAssignment.proof.expiresAt,
+    } } : {}),
+    ...(before.projectAssignment?.proof ? { project: {
+      evaluatedAt: before.projectAssignment.proof.evaluatedAt,
+      expiresAt: before.projectAssignment.proof.expiresAt,
+    } } : {}),
+  });
+  if (JSON.stringify(before) !== JSON.stringify(after)) {
+    throw new HTTPException(409, { message: "Request access changed. Refresh the client workspace." });
+  }
+  const commonReason: RequestReadinessReason | null = !after.schemaReady
+    ? "request_unavailable"
+    : !after.rootProof
+    ? "request_not_permitted"
+    : !backendConfigured || mode !== "catalog" ? "request_unavailable"
+      : !after.catalogAvailable ? "catalog_unavailable" : null;
+  const root: RequestReadinessDecision = {
+    canStartRequest: commonReason === null
+      && (!after.assignmentPolicy || after.rootAssignment?.state === "ready"),
+    reason: commonReason ?? (after.rootAssignment?.state === "no_services_assigned" ? "no_services_assigned"
+      : after.assignmentPolicy && after.rootAssignment?.state !== "ready" ? "service_assignments_unavailable" : "ready"),
+  };
+  const target: RequestReadinessDecision = projectId ? {
+    canStartRequest: commonReason === null && after.projectProof !== null
+      && (!after.assignmentPolicy || after.projectAssignment?.state === "ready"),
+    reason: commonReason ?? (!after.projectProof ? "project_unavailable"
+      : after.projectAssignment?.state === "no_services_assigned" ? "no_services_assigned"
+        : after.assignmentPolicy && after.projectAssignment?.state !== "ready" ? "service_assignments_unavailable" : "ready"),
+  } : root;
+  return {
+    mode,
+    workspaceId: session.workspaceId ?? null,
     target: { kind: projectId ? "project" : "root", projectId },
     ...target,
     root,

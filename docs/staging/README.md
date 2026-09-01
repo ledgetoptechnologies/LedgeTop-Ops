@@ -6,8 +6,8 @@ Staging is separate infrastructure, not a branch version of a production Worker.
 
 Provision through the approved Cloudflare account process and record non-secret identifiers outside Git:
 
-- three staging Workers and five staging-only custom hosts, including a distinct
-  client portal host with a dedicated path-scoped Access app/audience/group and
+- three staging Workers and six staging-only custom hosts, including two distinct
+  client portal hosts with one dedicated path-scoped Access app/audience/group and
   a reviewed public-share Bypass contract;
 - staging delivery and operations D1 databases;
 - staging delivery and incoming R2 buckets with retention/versioning safeguards suitable for test data;
@@ -106,10 +106,12 @@ Only after the unexpected production branch deployment has been resolved and a s
 4. List pending migrations with the explicit `--config apps/<app>/wrangler.staging.json` path and confirm the resolved IDs are staging IDs.
 5. Apply staging migrations one database at a time with that explicit config
    and the barriers in `release-checklist.md`. In particular, do not run a
-   combined all-pending Delivery apply when `0172` or `0179`-`0183` is pending;
+   combined all-pending Delivery apply when `0172` or `0179`-`0186` is pending;
    `0179` requires the repository-generated
    `apps/client/wrangler.staging.expand-0179.json` input, compatible-writer
-   deployment and full old-writer drain before `0180`-`0183`. Generate and
+   deployment and full old-writer drain before `0180`-`0183`; apply `0184`-`0186`
+   only afterward with native capabilities unavailable, followed by Operations
+   `0050`, before the paired final Workers. Generate and
    validate that ignored config with
    `npm run staging:client:expand-0179:generate` and
    `npm run staging:client:expand-0179:check`; do not copy migration SQL.

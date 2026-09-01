@@ -37,6 +37,16 @@ function detailValid(value: Detail): boolean {
   return itemValid(value.feedback) && Array.isArray(value.events) && value.events.every(event => Number.isSafeInteger(event.revision) && statuses.includes(event.status)
     && ["client", "staff"].includes(event.actor) && nullableText(event.note) && typeof event.createdAt === "string");
 }
+function safeClientHubTargetPath(value: string | null): string | null {
+  if (!value || /[\\\u0000-\u001f\u007f]/.test(value)) return null;
+  try {
+    const url = new URL(value, location.origin), match = url.pathname.match(/^\/clients\/sources\/([^/]+)\/business\/(organizations|standalone)\/([^/]+)\/business-projects\/([^/]+)$/);
+    if (url.origin !== location.origin || url.search || url.hash || !match) return null;
+    const [source, root, project] = [match[1], match[3], match[4]].map(part => decodeURIComponent(part!));
+    return /^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/.test(source!) && /^[a-f0-9]{32}$/.test(root!)
+      && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(project!) ? url.pathname : null;
+  } catch { return null; }
+}
 
 export function OperationsFeedback() {
   const [route, setRoute] = useState(readRoute), [draft, setDraft] = useState(route.q);
@@ -123,7 +133,9 @@ export function OperationsFeedback() {
   </section>;
 }
 function FeedbackContent({ item }: { item: StaffClientFeedbackItem }) {
+  const actionPath = item.target.available ? safeClientHubTargetPath(item.target.actionPath) : null;
   return <div className="operations-feedback-content"><div><StatusPill tone={item.status === "done" ? "success" : "neutral"}>{statusLabel(item.status)}</StatusPill></div><p><strong>{item.accountName}</strong>{item.target.projectName ? ` · ${item.target.projectName}` : ""}</p><p>{item.message}</p>
     {item.completionNote && <div><strong>Completion note</strong><p>{item.completionNote}</p></div>}<small>Submitted {new Date(item.createdAt).toLocaleString()}</small>
+    {actionPath && <p><a className="button button-ghost" href={actionPath}>Open original item</a></p>}
     {!item.target.available && <p>The original item is no longer available. This record does not link to replacement files.</p>}</div>;
 }

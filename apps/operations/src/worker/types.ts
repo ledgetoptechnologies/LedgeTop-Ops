@@ -16,6 +16,7 @@ export type Env = Omit<
   | "PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED"
   | "PROJECT_ACCESS_EXPIRY_NOTIFICATIONS_ENABLED"
   | "AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED"
+  | "CLIENT_PORTAL_ORIGINS"
 > & {
   PROJECT_ALPHA_API_KEY?: string;
   /** Deploy-managed connector credential sets; never returned by registry APIs. */
@@ -51,6 +52,8 @@ export type Env = Omit<
   OPERATIONS_SESSION_SECRET: string;
   /** Anonymous public-share origin; never use the authenticated portal origin as an implicit fallback. */
   PUBLIC_SHARE_ORIGIN: string;
+  /** Exact authenticated portal origins allowed to embed newly uploaded Stream media. */
+  CLIENT_PORTAL_ORIGINS?: string;
   DELIVERY_TOKEN_SECRET: string;
   DELIVERY_PREVIOUS_TOKEN_SECRET?: string;
   DELIVERY_ACCESS_CODE_PEPPER: string;

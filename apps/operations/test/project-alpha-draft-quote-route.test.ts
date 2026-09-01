@@ -1,4 +1,5 @@
 import { readFileSync, readdirSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { Miniflare } from "miniflare";
 import { Hono } from "hono";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -7,6 +8,7 @@ import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrati
 import { canonicalProjectAlphaJson, projectAlphaDraftIdempotencyKey, registerProjectAlphaDraftQuoteRoutes, sha256Hex,
   type ProjectAlphaDraftQuotePayload } from "../src/worker/project-alpha-draft-quote";
 import type { Env, StaffPrincipal } from "../src/worker/types";
+import { applyConnectorSchema } from "./helpers/project-alpha-connectors";
 
 // Only staff ACL loading is isolated. Delivery SQL uses the entire production
 // migration chain; the actual primary-reference resolver queries real D1 rows.
@@ -109,6 +111,85 @@ describe("source-bound private quote real-D1 routes", () => {
       workArea: { revision: 0, hash: await sha256Hex(canonicalProjectAlphaJson({ areaGeoJson: null, poiPoints: [] })), squareMeters: null, acres: null },
       attachments: [] };
   }
+  async function nativeFixture(name: string) {
+    const f = await fixture(name, { catalogSource: secondary });
+    const publicId = (suffix: string) => createHash("sha256").update(`${name}:${suffix}`).digest("hex").slice(0,32);
+    const ids = { workspace: `workspace-${name}`, generation: `generation-${name}`,
+      root: publicId("root"), client: publicId("client"), project: publicId("project") };
+    const key = (value: number) => Buffer.alloc(32,value).toString("base64url");
+    const fingerprint = (value: string) => createHash("sha256").update(Buffer.concat([
+      Buffer.from("ed25519\0"), Buffer.from(`${value}=`, "base64url"),
+    ])).digest("hex");
+    const primaryKey = key(1), secondaryKey = key(2);
+    const draftApiKey = "secondary-draft-only-api-key";
+    const draftHmac = "secondary-draft-only-hmac-secret-at-least-32-bytes";
+    const secretFingerprint = (domain: string, value: string) => createHash("sha256").update(`${domain}\0${value}`).digest("hex");
+    const connectorExists = !!await operations.prepare("SELECT 1 FROM pa_connectors WHERE source_id=?").bind(secondary).first();
+    await operations.batch([
+      ...(connectorExists ? [] : [
+      operations.prepare("INSERT INTO pa_connector_signing_keys(fingerprint,source_id,algorithm) VALUES(?,?,'ed25519')")
+        .bind(fingerprint(primaryKey), primary),
+      operations.prepare(`INSERT INTO pa_connectors(source_id,producer_binding_id,snapshot_origin,application_key,snapshot_base_path,
+        profile,display_name,read_visible,created_by) VALUES(?,'primary-binding','https://primary.example.test','ltds','/api/exports','primary_legacy','Primary',1,'fixture')`).bind(primary),
+      operations.prepare(`INSERT INTO pa_connector_revisions(source_id,revision,credential_ref,snapshot_base_path,access_issuer,
+        access_audience,access_subject,current_key_id,current_key_fingerprint,created_by)
+        VALUES(?,1,'PRIMARY','/api/exports','https://access.example.test','audience','subject','primary-key',?,'fixture')`)
+        .bind(primary,fingerprint(primaryKey)),
+      operations.prepare("UPDATE pa_connectors SET state='active',version=2 WHERE source_id=?").bind(primary),
+      operations.prepare("INSERT INTO pa_connector_signing_keys(fingerprint,source_id,algorithm) VALUES(?,?,'ed25519')")
+        .bind(fingerprint(secondaryKey), secondary),
+      operations.prepare(`INSERT INTO pa_connectors(source_id,producer_binding_id,snapshot_origin,application_key,snapshot_base_path,
+        profile,display_name,created_by) VALUES(?,'secondary-binding','https://secondary.example.test','secondary_ops','/api/exports','business_data','Secondary','fixture')`).bind(secondary),
+      operations.prepare(`INSERT INTO pa_connector_draft_quote_credentials
+        (ownership_fingerprint,purpose_fingerprint,source_id,purpose) VALUES(?,?,?,'api_key')`)
+        .bind(secretFingerprint("draft-quote-credential",draftApiKey),secretFingerprint("draft-quote-api-key",draftApiKey),secondary),
+      operations.prepare(`INSERT INTO pa_connector_draft_quote_credentials
+        (ownership_fingerprint,purpose_fingerprint,source_id,purpose) VALUES(?,?,?,'hmac')`)
+        .bind(secretFingerprint("draft-quote-credential",draftHmac),secretFingerprint("draft-quote-hmac",draftHmac),secondary),
+      operations.prepare(`INSERT INTO pa_connector_revisions(source_id,revision,credential_ref,snapshot_base_path,access_issuer,
+        access_audience,access_subject,current_key_id,current_key_fingerprint,created_by,draft_quote_api_key_fingerprint,draft_quote_hmac_fingerprint)
+        VALUES(?,1,'NATIVE','/api/exports','https://access.example.test','audience','subject','secondary-key',?,'fixture',?,?)`)
+        .bind(secondary,fingerprint(secondaryKey),secretFingerprint("draft-quote-api-key",draftApiKey),secretFingerprint("draft-quote-hmac",draftHmac)),
+      operations.prepare("UPDATE pa_connectors SET state='active',read_visible=1,version=2 WHERE source_id=?").bind(secondary),
+      ]),
+      operations.prepare("INSERT INTO pa_organizations(id,name,projection_source_id,active,payload_json) VALUES(?,'Native org',?,1,?)")
+        .bind(`native-org-${name}`,secondary,JSON.stringify({public_id:ids.root})),
+      operations.prepare("INSERT INTO pa_clients(id,name,organization_id,projection_source_id,active,payload_json) VALUES(?,'Native client',?,?,1,?)")
+        .bind(`native-client-${name}`,`native-org-${name}`,secondary,JSON.stringify({public_id:ids.client})),
+      operations.prepare("INSERT INTO pa_projects(id,name,client_id,organization_id,projection_source_id,active,payload_json) VALUES(?,'Native project',?,?,?,1,?)")
+        .bind(`native-project-${name}`,`native-client-${name}`,`native-org-${name}`,secondary,JSON.stringify({public_id:ids.project})),
+    ]);
+    const authorityExists = !!await delivery.prepare("SELECT 1 FROM pa_portal_source_authorities WHERE source_id=?").bind(secondary).first();
+    await delivery.batch([
+      ...(authorityExists ? [] : [
+      delivery.prepare(`INSERT INTO pa_portal_source_authorities(source_id,producer_binding_id,snapshot_origin,snapshot_base_path,
+        application_key,state,active_revision,version,connector_revision,connector_version)
+        VALUES(?,'secondary-binding','https://secondary.example.test','/api/exports','secondary_ops','pending',1,1,1,2)`).bind(secondary),
+      delivery.prepare(`INSERT INTO pa_portal_source_authority_revisions(source_id,revision,credential_ref,access_issuer,access_audience,
+        access_subject,current_key_id,current_key_fingerprint,created_by)
+        VALUES(?,1,'NATIVE','https://access.example.test','audience','subject','portal-key',?,'fixture')`).bind(secondary,"d".repeat(64)),
+      delivery.prepare("UPDATE pa_portal_source_authorities SET state='active',version=2 WHERE source_id=?").bind(secondary),
+      ]),
+      delivery.prepare(`INSERT INTO pa_portal_workspace_sources(workspace_id,projection_source_id,source_workspace_id)
+        VALUES(?,?,?)`).bind(ids.workspace,secondary,ids.workspace),
+      delivery.prepare(`INSERT INTO portal_v2_workspaces(id,root_type,pa_organization_public_id,display_name,status,project_alpha_source_id)
+        VALUES(?,'organization',?,'Native workspace','active',?)`).bind(ids.workspace,ids.root,secondary),
+      delivery.prepare(`INSERT INTO portal_v2_directory_generations(id,workspace_id,source_generation,source_sequence,status,complete)
+        VALUES(?,?,'source-generation',7,'active',1)`).bind(ids.generation,ids.workspace),
+      delivery.prepare("INSERT INTO portal_v2_directory_checkpoints(workspace_id,active_generation_id,source_sequence) VALUES(?,?,7)")
+        .bind(ids.workspace,ids.generation),
+      delivery.prepare(`INSERT INTO portal_v2_directory_entities(workspace_id,generation_id,entity_type,public_id,parent_public_id,display_name,source_version,active)
+        VALUES(?,?,'organization',?,NULL,'Native org','org-v1',1),(?,?,'client',?,?,'Native client','client-v1',1),(?,?,'project',?,?,'Native project','project-v1',1)`)
+        .bind(ids.workspace,ids.generation,ids.root,ids.workspace,ids.generation,ids.client,ids.root,
+          ids.workspace,ids.generation,ids.project,ids.client),
+      delivery.prepare(`UPDATE client_service_requests SET project_id=NULL,portal_workspace_id=?,portal_project_public_id=? WHERE id=?`)
+        .bind(ids.workspace,ids.project,f.requestId),
+    ]);
+    const credentials = { version: 1, sets: { NATIVE: { snapshotApiKey: "secondary-snapshot-only",
+      eventCurrent: { keyId: "secondary-key", algorithm: "ed25519", value: secondaryKey },
+      draftQuote: { apiKey: draftApiKey, hmacSecret: draftHmac } } } };
+    return { f, ids, credentials };
+  }
   async function addAreaRevision(f: Fixture) {
     await delivery.prepare(`INSERT INTO client_service_request_area_revisions
       (id,request_id,revision_number,base_request_updated_at,area_geojson,poi_points_json,reason,change_summary,
@@ -162,8 +243,12 @@ describe("source-bound private quote real-D1 routes", () => {
     // proof, not a mocked 'available:true' result. Full Ops ingestion is tested
     // separately; this suite's migration contract is the shared Delivery DB.
     await operations.batch([
-      ...["pa_clients", "pa_organizations", "pa_projects"].map(table => operations.prepare(`CREATE TABLE ${table}
-        (id TEXT PRIMARY KEY,projection_source_id TEXT NOT NULL,active INTEGER NOT NULL,payload_json TEXT NOT NULL)`)),
+      operations.prepare(`CREATE TABLE pa_clients(id TEXT PRIMARY KEY,name TEXT NOT NULL DEFAULT 'Client',organization_id TEXT,
+        projection_source_id TEXT NOT NULL,active INTEGER NOT NULL,payload_json TEXT NOT NULL)`),
+      operations.prepare(`CREATE TABLE pa_organizations(id TEXT PRIMARY KEY,name TEXT NOT NULL DEFAULT 'Organization',
+        projection_source_id TEXT NOT NULL,active INTEGER NOT NULL,payload_json TEXT NOT NULL)`),
+      operations.prepare(`CREATE TABLE pa_projects(id TEXT PRIMARY KEY,name TEXT NOT NULL DEFAULT 'Project',client_id TEXT,organization_id TEXT,
+        projection_source_id TEXT NOT NULL,active INTEGER NOT NULL,payload_json TEXT NOT NULL)`),
       operations.prepare(`CREATE TABLE audit_events(id INTEGER PRIMARY KEY AUTOINCREMENT,actor_type TEXT,actor_id TEXT,
         actor_email TEXT,actor_display_name TEXT,action TEXT,entity_type TEXT,entity_id TEXT,division_id TEXT,details_json TEXT,client_address_hash TEXT)`),
     ]);
@@ -176,6 +261,14 @@ describe("source-bound private quote real-D1 routes", () => {
       .bind(legacy.requestId, projectAlphaDraftIdempotencyKey(legacy.requestId, 1, 0), await sha256Hex(oldPayload)).run();
     await delivery.batch(splitD1MigrationStatements(readFileSync(new URL("0160_project_alpha_quote_destinations.sql", directory), "utf8"))
       .map(sql => delivery.prepare(sql)));
+    await delivery.batch([
+      delivery.prepare("ALTER TABLE client_service_requests ADD COLUMN portal_workspace_id TEXT"),
+      delivery.prepare("ALTER TABLE client_service_requests ADD COLUMN portal_identity_id TEXT"),
+      delivery.prepare("ALTER TABLE client_service_requests ADD COLUMN portal_project_public_id TEXT"),
+    ]);
+    await delivery.batch(splitD1MigrationStatements(readFileSync(new URL("0162_portal_source_authorities.sql", directory), "utf8"))
+      .map(sql => delivery.prepare(sql)));
+    await applyConnectorSchema(operations);
     environment = { DELIVERY_DB: delivery, OPS_DB: operations, PROJECT_ALPHA_BASE_URL: "https://alpha.example",
       PROJECT_ALPHA_DRAFT_QUOTES_ENABLED: "true", PROJECT_ALPHA_DRAFT_QUOTE_API_KEY: "quote-only-key-original",
       PROJECT_ALPHA_DRAFT_QUOTE_HMAC_SECRET: "original-hmac-secret-32-bytes-long", APPLICATION_KEY: "ltds",
@@ -335,6 +428,107 @@ describe("source-bound private quote real-D1 routes", () => {
     expect(sender).not.toHaveBeenCalled();
     expect(await counts(f)).toEqual({ commands: 0, receipts: 0, audits: 0, logs: 0 });
   }, 30_000);
+
+  it("routes a native request through its exact registered source and ignores synthetic storage identities", async () => {
+    const { f, ids, credentials } = await nativeFixture("native-success");
+    await delivery.prepare(`UPDATE client_accounts SET project_alpha_client_id='synthetic-wrong-client',
+      project_alpha_organization_id='synthetic-wrong-org' WHERE id=?`).bind(f.accountId).run();
+    const override = { PROJECT_ALPHA_CONNECTOR_CREDENTIALS: JSON.stringify(credentials) };
+    const capability = await call(f, override, "GET");
+    expect(capability.status).toBe(200);
+    const capabilityBody = await capability.json() as { capability: { enabled: boolean; reason: string | null } };
+    expect(capabilityBody.capability).toEqual({ enabled: true, reason: null });
+    sender.mockImplementationOnce(async (input, init) => {
+      expect(String(input)).toBe("https://secondary.example.test/api/v2/integrations/secondary_ops/draft-quotes");
+      const headers = new Headers(init?.headers);
+      expect(headers.get("Authorization")).toBe("Bearer secondary-draft-only-api-key");
+      expect(headers.get("X-Portal-Integration-Application-Key")).toBe("secondary_ops");
+      const body = JSON.parse(String(init?.body)) as ProjectAlphaDraftQuotePayload;
+      expect(body.authorization).toEqual({ organizationPublicId: ids.root, clientPublicId: ids.client, projectPublicId: ids.project });
+      expect(JSON.stringify(body)).not.toContain("synthetic-wrong");
+      return Response.json(remoteResult);
+    });
+    const response = await call(f, override);
+    expect(response.status).toBe(201);
+    expect(await response.json()).toMatchObject({ sourceId: secondary, editorUrl: "https://secondary.example.test/quotes/alpha-quote/edit" });
+    expect(await counts(f)).toEqual({ commands: 1, receipts: 1, audits: 1, logs: 1 });
+  }, 30_000);
+
+  it.each(["generation", "project", "client_projection", "credential", "workspace"])(
+    "fails closed before a native send when its %s proof is stale", async change => {
+      const { f, ids, credentials } = await nativeFixture(`native-stale-${change}`);
+      const override: Partial<Env> = { PROJECT_ALPHA_CONNECTOR_CREDENTIALS: JSON.stringify(credentials) };
+      if (change === "generation")
+        await delivery.prepare("UPDATE portal_v2_directory_generations SET complete=0,status='rejected' WHERE id=?").bind(ids.generation).run();
+      else if (change === "project")
+        await operations.prepare(`UPDATE pa_projects SET active=0 WHERE projection_source_id=?
+          AND json_extract(payload_json,'$.public_id')=?`).bind(secondary,ids.project).run();
+      else if (change === "client_projection") {
+        const replacementId = `replacement-client-${ids.client}`;
+        await operations.batch([
+          operations.prepare(`INSERT INTO pa_clients(id,name,organization_id,projection_source_id,active,payload_json)
+            VALUES(?,'Replacement client',(SELECT id FROM pa_organizations WHERE projection_source_id=?
+              AND json_extract(payload_json,'$.public_id')=?),?,1,?)`)
+            .bind(replacementId,secondary,ids.root,secondary,JSON.stringify({public_id:`replacement-${ids.client}`})),
+          operations.prepare(`UPDATE pa_projects SET client_id=? WHERE projection_source_id=?
+            AND json_extract(payload_json,'$.public_id')=?`).bind(replacementId,secondary,ids.project),
+        ]);
+      }
+      else if (change === "workspace")
+        await delivery.prepare("UPDATE portal_v2_workspaces SET status='suspended' WHERE id=?").bind(ids.workspace).run();
+      else {
+        const changed = structuredClone(credentials);
+        changed.sets.NATIVE.draftQuote.apiKey = "rotated-without-enrollment";
+        override.PROJECT_ALPHA_CONNECTOR_CREDENTIALS = JSON.stringify(changed);
+      }
+      try {
+        const response = await call(f, override);
+        expect([409,503]).toContain(response.status);
+        expect(sender).not.toHaveBeenCalled();
+        expect(await counts(f)).toEqual({ commands: 0, receipts: 0, audits: 0, logs: 0 });
+      } finally {
+        if (change === "workspace")
+          await delivery.prepare("UPDATE portal_v2_workspaces SET status='active' WHERE id=?").bind(ids.workspace).run();
+      }
+    }, 30_000);
+
+  it.each(["lineage", "client_relation"])(
+    "never sends when native %s is reassigned during command reservation", async change => {
+      const { f, ids, credentials } = await nativeFixture(`native-race-${change}`);
+      const raced = beforeCommandInsert(delivery, async () => {
+        const replacementPublicId = `replacement-${ids.client}`;
+        if (change === "lineage") {
+          await delivery.batch([
+            delivery.prepare(`INSERT INTO portal_v2_directory_entities(workspace_id,generation_id,entity_type,public_id,parent_public_id,
+              display_name,source_version,active) VALUES(?,?,'client',?,?,'Replacement client','client-v2',1)`)
+              .bind(ids.workspace,ids.generation,replacementPublicId,ids.root),
+            delivery.prepare(`UPDATE portal_v2_directory_entities SET parent_public_id=?
+              WHERE workspace_id=? AND generation_id=? AND entity_type='project' AND public_id=?`)
+              .bind(replacementPublicId,ids.workspace,ids.generation,ids.project),
+          ]);
+        } else {
+          const replacementId = `replacement-client-${ids.client}`;
+          await operations.batch([
+            operations.prepare(`INSERT INTO pa_clients(id,name,organization_id,projection_source_id,active,payload_json)
+              VALUES(?,'Replacement client',(SELECT id FROM pa_organizations WHERE projection_source_id=?
+                AND json_extract(payload_json,'$.public_id')=?),?,1,?)`)
+              .bind(replacementId,secondary,ids.root,secondary,JSON.stringify({public_id:replacementPublicId})),
+            operations.prepare(`UPDATE pa_projects SET client_id=? WHERE projection_source_id=?
+              AND json_extract(payload_json,'$.public_id')=?`).bind(replacementId,secondary,ids.project),
+          ]);
+        }
+      });
+      const response = await call(f, {
+        DELIVERY_DB: raced,
+        PROJECT_ALPHA_CONNECTOR_CREDENTIALS: JSON.stringify(credentials),
+      });
+      expect(response.status).toBe(409);
+      expect(sender).not.toHaveBeenCalled();
+      expect((await counts(f)).receipts).toBe(0);
+      expect((await counts(f)).audits).toBe(0);
+      expect((await counts(f)).logs).toBe(0);
+      expect((await counts(f)).commands).toBe(change === "lineage" ? 0 : 1);
+    }, 30_000);
 
   it("does not resend a saved command after the current payload changes under the same immutable revision key", async () => {
     const f = await fixture("changed-payload");

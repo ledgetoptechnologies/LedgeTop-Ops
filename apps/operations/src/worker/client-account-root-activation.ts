@@ -1,6 +1,7 @@
 import { HTTPException } from "hono/http-exception";
 import { PRIMARY_ALPHA_SOURCE_ID } from "@ltds/shared";
 import type { Env, StaffPrincipal } from "./types";
+import { excludesNativeRequestStorageAccount } from "./legacy-client-account-scope";
 
 export interface ClientAccountRootActivationAccount {
   id: string;
@@ -421,11 +422,13 @@ export async function listClientAccountRootActivation(env: Env): Promise<{
   sources: ClientAccountRootSource[];
 }> {
   const db = deliveryDatabase(env);
+  const storageBindingsPresent = await tablePresent(db, "portal_native_request_storage_bindings");
   const [schemaPresent, accountsResult, sourceResult] = await Promise.all([
     workspaceSchemaPresent(db),
     db.prepare(`SELECT id,display_name,status,project_alpha_client_id,
       project_alpha_organization_id,project_alpha_source_id,updated_at
-      FROM client_accounts WHERE project_alpha_source_id IS NULL OR project_alpha_source_id='project-alpha:primary'
+      FROM client_accounts WHERE (project_alpha_source_id IS NULL OR project_alpha_source_id='project-alpha:primary')
+        AND ${excludesNativeRequestStorageAccount("client_accounts", storageBindingsPresent)}
       ORDER BY lower(display_name),id`).all<AccountRow>(),
     env.OPS_DB.withSession("first-primary").prepare(`${SOURCE_SELECT}
       AND client.active=1
@@ -508,12 +511,15 @@ async function duplicateLegacyRoot(
   db: D1DatabaseSession,
   accountId: string,
   source: ClientAccountRootSource,
+  storageBindingsPresent: boolean,
 ): Promise<boolean> {
   const duplicate = source.organizationId
     ? await db.prepare(`SELECT id FROM client_accounts WHERE id<>? AND project_alpha_source_id='project-alpha:primary'
+        AND ${excludesNativeRequestStorageAccount("client_accounts", storageBindingsPresent)}
         AND (project_alpha_client_id=? OR project_alpha_organization_id=?) LIMIT 1`)
       .bind(accountId, source.clientId, source.organizationId).first("id")
     : await db.prepare(`SELECT id FROM client_accounts WHERE id<>? AND project_alpha_source_id='project-alpha:primary'
+        AND ${excludesNativeRequestStorageAccount("client_accounts", storageBindingsPresent)}
         AND project_alpha_client_id=? LIMIT 1`)
       .bind(accountId, source.clientId).first("id");
   return duplicate !== null;
@@ -528,6 +534,7 @@ function postMigrationProjectionStatements(
   activatedAt: string,
   hasGenerationContract: boolean,
   repairExistingLink: boolean,
+  storageBindingsPresent: boolean,
 ): D1PreparedStatement[] {
   const source = sourceFromRow(sourceRow);
   const { workspaceId, generationId } = projectionIds(account.id);
@@ -547,11 +554,13 @@ function postMigrationProjectionStatements(
   statements.push(repairExistingLink
     ? db.prepare(`UPDATE client_accounts SET updated_at=?
         WHERE id=? AND status='active' AND updated_at=? AND project_alpha_source_id='project-alpha:primary'
+          AND ${excludesNativeRequestStorageAccount("client_accounts", storageBindingsPresent)}
           AND project_alpha_client_id=? AND project_alpha_organization_id IS ?`)
       .bind(activatedAt, account.id, expectedUpdatedAt, source.clientId, source.organizationId)
     : db.prepare(`UPDATE client_accounts SET project_alpha_client_id=?,
         project_alpha_organization_id=?,updated_at=?,project_alpha_source_id='project-alpha:primary'
         WHERE id=? AND status='active' AND updated_at=? AND project_alpha_source_id IS NULL
+          AND ${excludesNativeRequestStorageAccount("client_accounts", storageBindingsPresent)}
           AND project_alpha_client_id IS NULL AND project_alpha_organization_id IS NULL
           AND NOT EXISTS (
             SELECT 1 FROM client_accounts other WHERE other.id<>client_accounts.id AND other.project_alpha_source_id='project-alpha:primary'
@@ -720,10 +729,12 @@ export async function activateClientAccountRoot(
     throw new HTTPException(400, { message: "Expected account version is required" });
 
   const db = deliveryDatabase(env);
+  const storageBindingsPresent = await tablePresent(db, "portal_native_request_storage_bindings");
   const [schemaPresent, account, sourceRow] = await Promise.all([
     workspaceSchemaPresent(db),
     db.prepare(`SELECT id,display_name,status,project_alpha_client_id,
-      project_alpha_organization_id,project_alpha_source_id,updated_at FROM client_accounts WHERE id=?`)
+      project_alpha_organization_id,project_alpha_source_id,updated_at FROM client_accounts WHERE id=?
+        AND ${excludesNativeRequestStorageAccount("client_accounts", storageBindingsPresent)}`)
       .bind(accountId).first<AccountRow>(),
     activeSource(env, input.projectAlphaClientId),
   ]);
@@ -760,7 +771,7 @@ export async function activateClientAccountRoot(
       });
     if (account.updated_at !== input.expectedUpdatedAt)
       throw new HTTPException(409, { message: "Client account changed; refresh before linking" });
-    if (await duplicateLegacyRoot(db, accountId, source))
+    if (await duplicateLegacyRoot(db, accountId, source, storageBindingsPresent))
       throw new HTTPException(409, {
         message: "That Project Alpha client or organization is already assigned to another account",
       });
@@ -784,6 +795,7 @@ export async function activateClientAccountRoot(
         activatedAt,
         hasGenerationContract,
         exactCurrentLink,
+        storageBindingsPresent,
       ));
       if (batchResult[0]?.meta.changes !== 1 || batchResult[1]?.meta.changes !== 1)
         throw new Error("Client account activation did not satisfy its atomic write guards");
@@ -792,7 +804,8 @@ export async function activateClientAccountRoot(
       // constraint/CAS/audit failure stays closed and cannot leave partial rows
       // because D1 batch execution is transactional.
       const replayAccount = await db.prepare(`SELECT id,display_name,status,project_alpha_client_id,
-        project_alpha_organization_id,project_alpha_source_id,updated_at FROM client_accounts WHERE id=?`)
+        project_alpha_organization_id,project_alpha_source_id,updated_at FROM client_accounts WHERE id=?
+          AND ${excludesNativeRequestStorageAccount("client_accounts", storageBindingsPresent)}`)
         .bind(accountId).first<AccountRow>();
       const replayComplete = replayAccount?.project_alpha_source_id === PRIMARY_ALPHA_SOURCE_ID && replayAccount.project_alpha_client_id === source.clientId
         && replayAccount.project_alpha_organization_id === source.organizationId
@@ -814,7 +827,7 @@ export async function activateClientAccountRoot(
   if (account.updated_at !== input.expectedUpdatedAt)
     throw new HTTPException(409, { message: "Client account changed; refresh before linking" });
 
-  if (await duplicateLegacyRoot(db, accountId, source))
+  if (await duplicateLegacyRoot(db, accountId, source, storageBindingsPresent))
     throw new HTTPException(409, { message: "That Project Alpha client or organization is already assigned to another account" });
 
   const activatedAt = new Date().toISOString();
@@ -829,6 +842,7 @@ export async function activateClientAccountRoot(
     db.prepare(`UPDATE client_accounts SET project_alpha_client_id=?,
       project_alpha_organization_id=?,updated_at=?,project_alpha_source_id='project-alpha:primary'
       WHERE id=? AND status='active' AND updated_at=? AND project_alpha_source_id IS NULL
+        AND ${excludesNativeRequestStorageAccount("client_accounts", storageBindingsPresent)}
         AND project_alpha_client_id IS NULL AND project_alpha_organization_id IS NULL
         AND NOT EXISTS (
           SELECT 1 FROM client_accounts other WHERE other.id<>client_accounts.id AND other.project_alpha_source_id='project-alpha:primary'

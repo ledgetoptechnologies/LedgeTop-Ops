@@ -108,10 +108,34 @@ describe("delivery notification source and live ownership", () => {
       (share_id,workspace_id,folder_binding_id,binding_source_version,directory_generation_id,principal_public_id,principal_source_version)
       VALUES(?,?,?,'binding-v1',?,'same-principal','principal-v1')`)
       .run(`share-${name}`, `workspace-${name}`, `binding-${name}`, `generation-${name}`);
-    db.prepare(`INSERT INTO delivery_notifications(id,dedupe_key,share_id,kind,recipient_email,payload_json)
-      VALUES(?,?,?,'share_created',?,?)`).run(`notice-${name}`, `dedupe-${name}`, `share-${name}`, email,
+    db.prepare(`INSERT INTO delivery_share_audience_snapshots
+      (share_id,share_version,workspace_id,folder_binding_id,owner_scope_type,owner_public_id,directory_generation_id,
+       audience_type,audience_public_id,audience_display_name,selected_by_staff_id)
+      VALUES(?,1,?,?,'project','same-project',?,'principal','same-principal','Recipient','integration')`)
+      .run(shareId,`workspace-${name}`,`binding-${name}`,`generation-${name}`);
+    db.prepare(`INSERT INTO delivery_share_recipient_members
+      (share_id,share_version,recipient_principal_public_id,recipient_display_name,recipient_normalized_email)
+      VALUES(?,1,'same-principal','Recipient',?)`).run(shareId,email);
+    db.prepare(`INSERT INTO delivery_notifications
+      (id,dedupe_key,share_id,kind,recipient_email,payload_json,share_version,recipient_authority_kind,recipient_principal_public_id)
+      VALUES(?,?,?,'share_created',?,?,1,'directory_principal','same-principal')`).run(`notice-${name}`, `dedupe-${name}`, `share-${name}`, email,
         JSON.stringify({ projectName: "Project", publicId }));
     return { shareId, publicId, bearer, encrypted };
+  }
+  async function ordinary(name: string, status: "queued" | "failed" = "queued") {
+    const shareId = `ordinary-share-${name}`, publicId = `ordinary-public-${name}`, bearer = `ordinary-bearer-${name}`;
+    const encrypted = await encryptDeliveryToken(bearer, currentTokenSecret, shareId);
+    db.prepare(`INSERT INTO projects(id,client_name,project_name,r2_prefix)
+      VALUES(?,'Client','Ordinary project',?)`).run(`ordinary-project-${name}`,`jobs/ordinary/${name}/`);
+    db.prepare(`INSERT INTO shares(id,project_id,token_hash,r2_prefix,created_by_type,created_by_id,recipient_email,
+      public_id,secret_ciphertext,secret_iv,share_version)
+      VALUES(?,?,?,?,'staff','staff',?,?,?,?,2)`).run(shareId,`ordinary-project-${name}`,`ordinary-hash-${name}`,
+        `jobs/ordinary/${name}/`,email,publicId,encrypted.ciphertext,encrypted.iv);
+    db.prepare(`INSERT INTO delivery_notifications
+      (id,dedupe_key,share_id,kind,recipient_email,payload_json,status,share_version,recipient_authority_kind)
+      VALUES(?,?,?,'share_created',?,?,?,2,'direct_email')`).run(`ordinary-notice-${name}`,`ordinary-dedupe-${name}`,
+        shareId,email,JSON.stringify({projectName:"Ordinary project",publicId}),status);
+    return {shareId,publicId,bearer};
   }
   function portal(name: string, attempted = true) {
     receipt(name, "portal", `grant-${name}`);
@@ -156,6 +180,56 @@ describe("delivery notification source and live ownership", () => {
     expect(vi.mocked(sendNotificationMail).mock.calls[0]?.[1].text)
       .toContain(`https://delivery.example.test/s/${share.publicId}#${share.bearer}`);
     expect(db.prepare("SELECT payload_json FROM delivery_notifications").get()?.payload_json).not.toContain("#");
+  });
+
+  it("suppresses a queued ordinary-share notice after recipient credential rotation", async () => {
+    const share=await ordinary("queued-rotation");
+    const rotated=await encryptDeliveryToken("rotated-bearer",currentTokenSecret,share.shareId);
+    db.prepare(`UPDATE shares SET share_version=3,recipient_email='new-recipient@example.test',
+      public_id='rotated-public',secret_ciphertext=?,secret_iv=? WHERE id=?`)
+      .run(rotated.ciphertext,rotated.iv,share.shareId);
+    expect(await processDeliveryNotifications(env)).toBe(1);
+    expect(sendNotificationMail).not.toHaveBeenCalled();
+    expect(db.prepare("SELECT status,last_error FROM delivery_notifications WHERE id=?").get(`ordinary-notice-queued-rotation`))
+      .toEqual({status:"failed",last_error:"recipient-no-longer-eligible"});
+  });
+
+  it("does not let a previously failed ordinary-share notice deliver a later generation when requeued", async () => {
+    const share=await ordinary("failed-rotation","failed");
+    const rotated=await encryptDeliveryToken("rotated-bearer",currentTokenSecret,share.shareId);
+    db.prepare(`UPDATE shares SET share_version=3,recipient_email='new-recipient@example.test',
+      public_id='rotated-public',secret_ciphertext=?,secret_iv=? WHERE id=?`)
+      .run(rotated.ciphertext,rotated.iv,share.shareId);
+    db.prepare("UPDATE delivery_notifications SET status='queued',next_attempt_at=datetime('now') WHERE id=?")
+      .run(`ordinary-notice-failed-rotation`);
+    expect(await processDeliveryNotifications(env)).toBe(1);
+    expect(sendNotificationMail).not.toHaveBeenCalled();
+    expect(db.prepare("SELECT status,last_error FROM delivery_notifications WHERE id=?").get(`ordinary-notice-failed-rotation`))
+      .toEqual({status:"failed",last_error:"recipient-no-longer-eligible"});
+  });
+
+  it("records provider acceptance after a concurrent recipient rotation without claiming the row was sent",async()=>{
+    const share=await ordinary("accepted-rotation");
+    vi.mocked(sendNotificationMail).mockImplementationOnce(async()=>{
+      const rotated=await encryptDeliveryToken("replacement-bearer",currentTokenSecret,share.shareId);
+      db.exec("BEGIN");
+      try{
+        db.prepare(`UPDATE shares SET share_version=3,recipient_email='replacement@example.test',token_hash='replacement-hash',
+          public_id='replacement-public',secret_ciphertext=?,secret_iv=? WHERE id=? AND share_version=2`)
+          .run(rotated.ciphertext,rotated.iv,share.shareId);
+        db.prepare(`UPDATE delivery_notifications SET status='failed',lease_until=NULL,last_error='share-authorization-rotated'
+          WHERE share_id=? AND status='sending'`).run(share.shareId);
+        db.exec("COMMIT");
+      }catch(error){db.exec("ROLLBACK");throw error;}
+    });
+    expect(await processDeliveryNotifications(env)).toBe(1);
+    expect(sendNotificationMail).toHaveBeenCalledTimes(1);
+    expect(db.prepare("SELECT status,sent_at,last_error FROM delivery_notifications WHERE id=?")
+      .get("ordinary-notice-accepted-rotation")).toEqual({status:"failed",sent_at:null,last_error:"provider-accepted-after-suppression"});
+    expect(db.prepare("SELECT action FROM audit_log ORDER BY id DESC LIMIT 1").get()?.action)
+      .toBe("notification.provider_accepted_after_suppression");
+    expect(()=>db.prepare("UPDATE delivery_notifications SET status='queued',last_error=NULL WHERE id=?")
+      .run("ordinary-notice-accepted-rotation")).toThrow(/provider accepted after notification suppression is terminal/);
   });
 
   it("drains an expand-phase legacy URL when the historical share has no encrypted bearer", async () => {

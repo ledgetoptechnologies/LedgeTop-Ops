@@ -167,6 +167,39 @@ describe('workspace invitation approval: real migrated D1',{concurrent:false,tim
   }
   const r=await submit(f,{type,publicId});expect(r.accessTerms).toBeNull();expect((await stage(r)).result.request.status).toBe('approving');
  });
+ it.each(['organization','department','client'] as const)('issues direct %s invitations only within the exact live capability subset',async(type)=>{
+  const f=await fixture();let publicId=f.root;
+  if(type!=='organization'){
+   publicId=`${type}-${f.id}`;
+   await db.batch([db.prepare(`INSERT INTO portal_v2_directory_entities(workspace_id,generation_id,entity_type,public_id,parent_public_id,display_name,source_version) VALUES(?,?,?,?,?,?,'v1')`).bind(f.id,f.generation,type,publicId,f.root,publicId),
+    db.prepare(`INSERT INTO portal_v2_directory_relations(workspace_id,generation_id,public_id,relation_type,from_type,from_public_id,to_type,to_public_id,source_version) VALUES(?,?,'root-child','contains','organization',?,?,?,'v1')`).bind(f.id,f.generation,f.root,type,publicId)]);
+  }
+  await db.batch([
+   db.prepare(`UPDATE portal_workspace_invitation_policies SET policy='allowed',version=2 WHERE workspace_id=?`).bind(f.id),
+   db.prepare(`UPDATE portal_v2_entitlements SET status='revoked',revoked_at=datetime('now') WHERE workspace_id=? AND identity_id=? AND capability='request.create'`).bind(f.id,f.identity),
+  ]);
+  const before=await count('portal_v2_invitations',f.id);
+  await expect(createWorkspaceInvitation(env,f.principal,f.id,{email:`excess-${type}-${f.id}@example.test`,targetScope:{type,publicId},capabilities:['delivery.view','request.create'],expectedInvitationPolicyVersion:2},crypto.randomUUID()))
+   .rejects.toMatchObject({status:403});
+  expect(await count('portal_v2_invitations',f.id)).toBe(before);
+  const allowed=await createWorkspaceInvitation(env,f.principal,f.id,{email:`allowed-${type}-${f.id}@example.test`,targetScope:{type,publicId},capabilities:['delivery.view'],expectedInvitationPolicyVersion:2},crypto.randomUUID());
+  expect(allowed.outcome).toBe('created');
+  if(allowed.outcome!=='created')throw new Error(JSON.stringify(allowed));
+  expect(allowed.invitation).toMatchObject({scope:{type,publicId},capabilities:['delivery.view','workspace.view']});
+ });
+ it('atomically rejects a broad invitation when its exact capability is revoked after capture',async()=>{
+  const f=await fixture(),publicId=`department-${f.id}`;
+  await db.batch([
+   db.prepare(`INSERT INTO portal_v2_directory_entities(workspace_id,generation_id,entity_type,public_id,parent_public_id,display_name,source_version) VALUES(?,?,'department',?,?,?,'v1')`).bind(f.id,f.generation,publicId,f.root,publicId),
+   db.prepare(`INSERT INTO portal_v2_directory_relations(workspace_id,generation_id,public_id,relation_type,from_type,from_public_id,to_type,to_public_id,source_version) VALUES(?,?,'root-child','contains','organization',?,'department',?,'v1')`).bind(f.id,f.generation,f.root,publicId),
+   db.prepare(`UPDATE portal_workspace_invitation_policies SET policy='allowed',version=2 WHERE workspace_id=?`).bind(f.id),
+  ]);
+  const raced=beforeInvitationBatch(db,()=>db.prepare(`UPDATE portal_v2_entitlements SET status='revoked',revoked_at=datetime('now') WHERE workspace_id=? AND identity_id=? AND capability='delivery.view'`).bind(f.id,f.identity).run().then(()=>undefined));
+  const result=await createWorkspaceInvitation({...env,DELIVERY_DB:raced},f.principal,f.id,{email:`raced-${f.id}@example.test`,targetScope:{type:'department',publicId},capabilities:['delivery.view'],expectedInvitationPolicyVersion:2},crypto.randomUUID());
+  expect(result.outcome).toBe('invalid');
+  expect(await count('portal_v2_invitations',f.id)).toBe(0);
+  expect(await count('portal_v2_membership_audit',f.id)).toBe(0);
+ });
  it('supports standalone-client workspace requests without changing the root namespace',async()=>{
   const f=await fixture(true),r=await submit(f,{type:'workspace',publicId:f.id});expect((await stage(r)).result.request.status).toBe('approving');
  });

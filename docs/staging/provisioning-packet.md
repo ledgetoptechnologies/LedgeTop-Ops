@@ -32,6 +32,7 @@ feature.
 | Ops Sync Worker | `ltds-ops-sync-staging` |
 | Delivery rollback/admin host | `delivery-staging.ledgetopdroneservices.com` |
 | Client portal/public-share host | `client-staging.ledgetopdroneservices.com` |
+| Secondary client portal host | `portal-staging.ledgetoptechnologies.com` |
 | Operations host | `ops-staging.ledgetopdroneservices.com` |
 | Incoming host | `incoming-staging.ledgetopdroneservices.com` |
 | Ops Sync host | `ops-sync-staging.ledgetopdroneservices.com` |
@@ -73,7 +74,8 @@ The three existing staging Access applications and their policy state are record
 `docs/staging/access-created-inventory.md`. Their audiences are distinct from
 production; Access creation did not create DNS records or Worker routes.
 
-The client host, dedicated client portal Access app/audience/group, and public
+The two client portal hosts, shared dedicated client portal Access
+app/audience/group, and public
 Bypass app/policy are not provisioned. Their exact fail-closed contract and
 ordered plan are in `docs/staging/client-portal-rollout.md`; none may reuse the
 existing Delivery Access audience or tester policy.
@@ -113,9 +115,10 @@ Before ignored `apps/*/wrangler.staging.json` files can pass preflight:
 
 - copy the recorded staging Access audiences into `POLICY_AUD`,
   `OPERATIONS_AUD`, and `CF_ACCESS_AUD`;
-- create and record the distinct client portal audience and group, set
-  `CLIENT_ACCESS_AUD`, `CLIENT_ACCESS_TEAM_DOMAIN`, and
-  `CLIENT_PORTAL_ORIGIN`, and keep `CLIENT_PORTAL_ENABLED=false`;
+- create and record the distinct client portal audience and group, assign both
+  approved portal hosts to that single application, set `CLIENT_ACCESS_AUD`,
+  `CLIENT_ACCESS_TEAM_DOMAIN`, `CLIENT_PORTAL_ORIGIN`, and the exact two-entry
+  `CLIENT_PORTAL_ORIGINS`, and keep `CLIENT_PORTAL_ENABLED=false`;
 - record the anonymous delivery origin as `PUBLIC_SHARE_ORIGIN` on both
   Workers and Client `PUBLIC_BASE_URL`; keep Operations `DELIVERY_BASE_URL`
   pointed at the authenticated client portal origin;

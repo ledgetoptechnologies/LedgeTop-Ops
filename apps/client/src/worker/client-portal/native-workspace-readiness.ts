@@ -84,6 +84,8 @@ export async function nativeDirectoryAuthorizationAvailable(env:Pick<Env,'DELIVE
 export function nativeWorkspaceFeatureReadiness(input: {
   directoryAuthorized: boolean;
   deliveryBackendReady: boolean;
+  feedbackBackendReady?: boolean;
+  serviceRequestsReady?: boolean;
 }): NativeWorkspaceFeatureReadiness {
   const unsupported: NativeWorkspaceFeatureStatus = { state: 'not_supported', reason: 'source_not_supported' };
   return {
@@ -93,8 +95,14 @@ export function nativeWorkspaceFeatureReadiness(input: {
     deliveries: input.deliveryBackendReady
       ? { state: 'available', reason: 'resource_authorization_required' }
       : { state: 'temporarily_unavailable', reason: 'backend_unavailable' },
-    serviceRequests: { ...unsupported },
-    feedback: { ...unsupported },
+    serviceRequests: input.serviceRequestsReady
+      ? { state: 'available', reason: 'resource_authorization_required' }
+      : { ...unsupported },
+    feedback: input.feedbackBackendReady && input.directoryAuthorized
+      ? { state: 'available', reason: 'resource_authorization_required' }
+      : input.feedbackBackendReady
+        ? { state: 'not_in_access', reason: 'capability_not_granted' }
+        : { state: 'temporarily_unavailable', reason: 'backend_unavailable' },
     models: { ...unsupported },
     team: { ...unsupported },
     billing: { ...unsupported },

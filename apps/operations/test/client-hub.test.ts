@@ -415,6 +415,10 @@ describe("Client Hub bounded detail collections", () => {
     const body = await detail.json() as Record<string, unknown>;
     expect(body).not.toHaveProperty("accessManagement");
     expect(body).toHaveProperty("businessProjects");
+    expect(body).toHaveProperty("organizationOperationalContactsAvailable", true);
+    expect(body).toHaveProperty("projectManagementAvailable", true);
+    expect(body).toHaveProperty("businessActivityAvailable", true);
+    expect(body).toHaveProperty("auditTimelineAvailable", true);
     expect(body).toHaveProperty("portalIdentities");
     expect(body).toHaveProperty("pages.businessProjects", expect.objectContaining({ available: false, reason: "permission_required" }));
     expect((await app.request(organizationPath + "/collections/businessProjects", {}, env)).status).toBe(403);

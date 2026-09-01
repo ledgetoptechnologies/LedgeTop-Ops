@@ -54,12 +54,23 @@ its `CLIENT_ACCESS_GROUP_API_TOKEN` secret belongs on that internal worker only,
 never on the public client/delivery Worker. It uses a separate client group and
 must not mix staff ACL provisioning with client invitations.
 
-The approved pilot is attached at `client.ledgetopdroneservices.com`. It uses a
-dedicated Client Portal Access application and current-policy API, with an
-email one-time-passcode login and a short-lived pilot allow group. It is not a
-host-wide Allow policy and it does not turn every Project Alpha contact into a
-portal user. A successful Access login still requires a local active
-membership and grant in LTDS.
+The approved client portal uses two presentation domains:
+`client.ledgetopdroneservices.com` and `portal.ledgetoptechnologies.com`. Both
+are destinations on the same `LTDS Client Portal` Access application and use
+the same audience, Worker, D1 database, verified principal, memberships, and
+grants. Do not create domain-specific users or infer ownership, service access,
+or authorization from the request hostname. Cloudflare may issue host-local
+authorization cookies for both destinations; LTDS still resolves every request
+to current server-side authority. The pilot allow policy does not turn every
+Project Alpha contact into a portal user.
+
+Keep `CLIENT_PORTAL_ORIGIN` as the canonical Drone Services origin for existing
+invitation and redirect compatibility. Set `CLIENT_PORTAL_ORIGINS` to the exact
+comma-separated allowlist of both HTTPS origins. The Worker accepts portal
+namespaces and same-origin mutations on either reviewed origin, but
+`PUBLIC_SHARE_ORIGIN` remains the existing Drone Services origin. Existing
+public share paths, IDs, tokens, cookies, and revocation records are not
+rewritten or duplicated by the second-domain rollout.
 
 Public share paths remain outside Access and continue to use their own
 revocable-link controls. The service-request API uses the existing
@@ -67,19 +78,29 @@ revocable-link controls. The service-request API uses the existing
 Keep the client Access audience, group, and provisioning automation separate
 from Operations staff ACL provisioning.
 
-For the separately authorized rollout, the production Client Portal Access app
-must target only `client.ledgetopdroneservices.com/portal`, `/portal/*`,
-`/api/client`, and `/api/client/*`. Use one dedicated human client group and one
-audience for all of those portal destinations. Public delivery stays on
-`delivery.ledgetopdroneservices.com`; define a separately reviewed Bypass
-Everyone application/policy for its public namespaces instead of widening the
-human portal application. Release-critical public path families include `/`,
-`/s/*`, `/client-share/*`, `/api/public/*`, `/health`, and `/assets/*`; they
-remain under the Worker's own routing and authorization controls. Never use a
-host-wide client Allow policy, and verify no
-`Cf-Access-Jwt-Assertion` reaches a public share request. Cloudflare documents
-path matching and specificity in
+For the dual-domain rollout, update the existing production `LTDS Client Portal`
+Access application rather than creating a second application. Its reviewed
+destinations must cover `/portal`, `/portal/*`, `/api/client`, and
+`/api/client/*` on both `client.ledgetopdroneservices.com` and
+`portal.ledgetoptechnologies.com`, with one dedicated human client group and one
+unchanged audience. `/api/internal/*` remains canonical-host-only at the Worker
+boundary and is not a presentation-domain destination. The existing, more
+specific public Bypass applications on the Drone Services hostname continue to
+cover `/s/*`, `/client-share/*`, and `/api/public/*`; do not duplicate them on
+the Technologies hostname. Existing share links therefore keep the same host,
+IDs, credentials, cookies, and revocation state. Verify no
+`Cf-Access-Jwt-Assertion` reaches a canonical public-share request. Cloudflare
+documents path matching and specificity in
 [Application paths](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/).
+
+The staging Access application must rehearse the same two-presentation-domain
+topology with `client-staging.ledgetopdroneservices.com` and
+`portal-staging.ledgetoptechnologies.com` under one staging audience. Record the
+Access application and policy readback, both Custom Domain states, DNS/TLS,
+hard-refresh and domain-switch behavior, and an exact rollback snapshot before
+production mutation. Root requests on either portal origin redirect to that
+same origin's `/portal`; public-root requests still redirect to the canonical
+portal origin.
 
 Configure `PUBLIC_SHARE_ORIGIN` (and the Client Worker's compatibility
 `PUBLIC_BASE_URL`) as the exact public delivery origin. Configure

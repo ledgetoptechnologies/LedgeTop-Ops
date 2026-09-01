@@ -35,7 +35,9 @@ function validFeatureReadiness(value: unknown): value is NativeWorkspaceFeatureR
   const features = value as Partial<NativeWorkspaceFeatureReadiness>;
   return (exactFeature(features.directory, "available", "authorized_capability") || exactFeature(features.directory, "not_in_access", "capability_not_granted")) &&
     (exactFeature(features.deliveries, "available", "resource_authorization_required") || exactFeature(features.deliveries, "temporarily_unavailable", "backend_unavailable")) &&
-    (["serviceRequests", "feedback", "models", "team", "billing"] as const).every(key => exactFeature(features[key], "not_supported", "source_not_supported"));
+    (exactFeature(features.feedback, "available", "resource_authorization_required") || exactFeature(features.feedback, "not_in_access", "capability_not_granted") || exactFeature(features.feedback, "temporarily_unavailable", "backend_unavailable")) &&
+    (exactFeature(features.serviceRequests, "available", "resource_authorization_required") || exactFeature(features.serviceRequests, "not_supported", "source_not_supported")) &&
+    (["models", "team", "billing"] as const).every(key => exactFeature(features[key], "not_supported", "source_not_supported"));
 }
 export function nativeWorkspaceBase(workspaceId: string): string { return `/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}`; }
 export async function loadNativePortalContext(workspace: PortalWorkspace, request: PortalRequest = requestJson, signal?: AbortSignal): Promise<NativePortalContext> {
@@ -44,8 +46,11 @@ export async function loadNativePortalContext(workspace: PortalWorkspace, reques
       value.workspace.sourceId !== workspace.sourceId || !text(value.workspace.displayName, 4000) || !text(value.workspace.rootPublicId, 256) ||
       value.workspace.rootType !== workspace.rootType || value.workspace.rootPublicId !== workspace.rootPublicId || !text(value.contextVersion) ||
       typeof value.capabilities?.directoryRead !== "boolean" || typeof value.capabilities?.deliveryView !== "boolean" ||
+      typeof value.capabilities?.feedback !== "boolean" ||
       !validFeatureReadiness(value.features) || (value.features.directory.state === "available") !== value.capabilities.directoryRead ||
-      (value.features.deliveries.state === "available") !== value.capabilities.deliveryView) throw invalid();
+      (value.features.deliveries.state === "available") !== value.capabilities.deliveryView ||
+      (value.features.serviceRequests.state === "available") !== (value.capabilities.requestV2 === true) ||
+      (value.features.feedback.state === "available") !== value.capabilities.feedback) throw invalid();
   return value;
 }
 function verifyEnvelope(value: NativeEnvelope, context: NativePortalContext): void {

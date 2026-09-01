@@ -21,6 +21,25 @@ const TUS_CHUNK = 50 * 1024 * 1024;
 const PREVIEW_MANIFEST_MAX_BYTES = 64 * 1024;
 const PREVIEW_VARIANT_MAX_BYTES = { thumb: 100 * 1024, poster: 100 * 1024, preview: 512_000 } as const;
 
+export function streamAllowedOriginHosts(env: Pick<Env, "DELIVERY_BASE_URL" | "CLIENT_PORTAL_ORIGINS">): string[] {
+  const raw = env.CLIENT_PORTAL_ORIGINS?.split(",").map(value => value.trim()) ?? [env.DELIVERY_BASE_URL];
+  if (!raw.length || raw.length > 4 || raw.some(value => !value)) throw new Error("stream-allowed-origins-invalid");
+  const origins = raw.map(value => {
+    try {
+      const url = new URL(value);
+      if (url.protocol !== "https:" || url.origin !== value || url.pathname !== "/" || url.search || url.hash || url.username || url.password)
+        throw new Error("stream-allowed-origins-invalid");
+      return url;
+    } catch {
+      throw new Error("stream-allowed-origins-invalid");
+    }
+  });
+  const primary = new URL(env.DELIVERY_BASE_URL).origin;
+  if (!origins.some(url => url.origin === primary) || new Set(origins.map(url => url.origin)).size !== origins.length)
+    throw new Error("stream-allowed-origins-invalid");
+  return origins.map(url => url.hostname);
+}
+
 interface PreviewDerivative {
   key?: unknown;
   mime?: unknown;
@@ -231,7 +250,7 @@ async function beginTusUpload(env: Env, key: string, size: number, etag: string)
       Authorization: `Bearer ${env.STREAM_API_TOKEN}`,
       "Tus-Resumable": TUS_VERSION,
       "Upload-Length": String(size),
-      "Upload-Metadata": `name ${metadata(key.split("/").pop() || "video")},requiresignedurls ${metadata("true")},allowedorigins ${metadata(JSON.stringify(["client.ledgetopdroneservices.com"]))}`,
+      "Upload-Metadata": `name ${metadata(key.split("/").pop() || "video")},requiresignedurls ${metadata("true")},allowedorigins ${metadata(JSON.stringify(streamAllowedOriginHosts(env)))}`,
     },
   });
   const location = response.headers.get("Location"); const uid = response.headers.get("stream-media-id");

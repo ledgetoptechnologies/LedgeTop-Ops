@@ -5,6 +5,15 @@ import type { PortalAreaGeoJson, PortalPoi } from "./portal-api";
 type Point = [number, number];
 type MapStyle = "satellite" | "streets";
 type MapSuggestion = { id: string; label: string; detail: string; coordinates: Point };
+type InteractiveFeatureProperties = { kind?: "poi" | "vertex"; index?: number; selected?: boolean };
+type PointFeature = {
+  type: "Feature";
+  properties: InteractiveFeatureProperties;
+  geometry: { type: "Point"; coordinates: Point };
+};
+type PolygonFeature = { type: "Feature"; properties: Record<string, never>; geometry: PortalAreaGeoJson };
+type AreaFeatureCollection = { type: "FeatureCollection"; features: Array<PointFeature | PolygonFeature> };
+type RenderedInteractiveFeature = mapboxgl.GeoJSONFeature & { properties: InteractiveFeatureProperties };
 
 export function neutralMapLocation([longitude, latitude]: Point): string {
   return `Near ${latitude.toFixed(4)}, ${longitude.toFixed(4)}`;
@@ -14,13 +23,13 @@ function area(vertices: Point[]): PortalAreaGeoJson | null {
   return vertices.length >= 3 ? { type: "Polygon", coordinates: [[...vertices, vertices[0]!]] } : null;
 }
 
-function featureData(pois: PortalPoi[], vertices: Point[], selectedPoiIndex: number | null = null): GeoJSON.FeatureCollection {
+function featureData(pois: PortalPoi[], vertices: Point[], selectedPoiIndex: number | null = null): AreaFeatureCollection {
   const polygon = area(vertices);
   return {
     type: "FeatureCollection",
     features: [
-      ...pois.map((poi, index) => ({ type: "Feature" as const, properties: { kind: "poi", index, selected: index === selectedPoiIndex }, geometry: { type: "Point" as const, coordinates: [poi.longitude, poi.latitude] } })),
-      ...vertices.map((coordinates, index) => ({ type: "Feature" as const, properties: { kind: "vertex", index }, geometry: { type: "Point" as const, coordinates } })),
+      ...pois.map<PointFeature>((poi, index) => ({ type: "Feature", properties: { kind: "poi", index, selected: index === selectedPoiIndex }, geometry: { type: "Point", coordinates: [poi.longitude, poi.latitude] } })),
+      ...vertices.map<PointFeature>((coordinates, index) => ({ type: "Feature", properties: { kind: "vertex", index }, geometry: { type: "Point", coordinates } })),
       ...(polygon ? [{ type: "Feature" as const, properties: {}, geometry: polygon }] : []),
     ],
   };
@@ -118,7 +127,7 @@ export function MapAreaSelector({ value, onChange, token, points, onPoints, loca
     map.on("click", event => {
       if (map.getLayer("request-points")) {
         const rendered = map.queryRenderedFeatures(event.point, { layers: ["request-points"] })[0];
-        const properties = rendered?.properties as { kind?: string; index?: number } | undefined;
+        const properties = (rendered as RenderedInteractiveFeature | undefined)?.properties;
         const index = Number(properties?.index);
         if (properties?.kind === "poi" && Number.isInteger(index)) selectPoi(index);
         if (rendered) return;
@@ -132,7 +141,7 @@ export function MapAreaSelector({ value, onChange, token, points, onPoints, loca
       }
     });
     map.on("mousedown", "request-points", event => {
-      const properties = event.features?.[0]?.properties as { kind?: string; index?: number } | undefined;
+      const properties = (event.features?.[0] as RenderedInteractiveFeature | undefined)?.properties;
       const index = Number(properties?.index);
       if (!properties?.kind || !Number.isInteger(index)) return;
       if (properties.kind === "poi") selectPoi(index);

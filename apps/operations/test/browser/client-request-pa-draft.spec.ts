@@ -26,7 +26,14 @@ const request = {
   updated_at: "2026-08-01T12:00:00.000Z",
 };
 
-test("staff explicitly creates a private Project Alpha draft and opens the PA editor", async ({ page }) => {
+const nativeRequest = {
+  ...request,
+  catalog_source_id: "project-alpha:secondary",
+  portal_workspace_id: "native-workspace-a",
+  portal_project_public_id: "native-project-a",
+};
+
+test("staff explicitly creates a private Project Alpha draft through a source-backed connection and opens its editor", async ({ page }) => {
   let created = false;
   const runtimeErrors: string[] = [];
   page.on("pageerror", error => runtimeErrors.push(error.stack || error.message));
@@ -42,10 +49,10 @@ test("staff explicitly creates a private Project Alpha draft and opens the PA ed
         csrfToken: "csrf-test", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: {},
       } });
     } else if (incoming.method() === "GET" && path === "/api/client-service-requests") {
-      await route.fulfill({ json: { requests: [request] } });
+      await route.fulfill({ json: { requests: [nativeRequest] } });
     } else if (incoming.method() === "GET" && path === "/api/client-service-requests/request-pa-draft") {
       await route.fulfill({ json: {
-        request,
+        request: nativeRequest,
         capabilities: { legacyPaQuoteLinkEnabled: true },
         services: [{
           publicId: "svc-2d-mapping", sourceVersion: "catalog-v3", name: "2D Mapping",
@@ -62,8 +69,8 @@ test("staff explicitly creates a private Project Alpha draft and opens the PA ed
         capability: { enabled: true, reason: null },
         receipt: created ? {
           requestRevision: 3, areaRevision: 0, createdAt: "2026-08-13T12:00:00.000Z",
-          sourceId: "project-alpha:primary", editorUnavailableReason: null,
-          editorUrl: "https://project-alpha.example/quotes/quote-public-a/edit",
+          sourceId: "project-alpha:secondary", editorUnavailableReason: null,
+          editorUrl: "https://secondary-alpha.example/quotes/quote-public-a/edit",
           receiptId: "receipt-public-a",
           draftQuote: { publicId: "quote-public-a", documentNumber: "Q-DRAFT-7", status: "draft", version: 1, editorPath: "/quotes/quote-public-a/edit" },
         } : null,
@@ -74,8 +81,8 @@ test("staff explicitly creates a private Project Alpha draft and opens the PA ed
       created = true;
       await route.fulfill({ status: 201, json: {
         requestRevision: 3, areaRevision: 0, createdAt: "2026-08-13T12:00:00.000Z",
-        sourceId: "project-alpha:primary", editorUnavailableReason: null,
-        editorUrl: "https://project-alpha.example/quotes/quote-public-a/edit",
+        sourceId: "project-alpha:secondary", editorUnavailableReason: null,
+        editorUrl: "https://secondary-alpha.example/quotes/quote-public-a/edit",
         receiptId: "receipt-public-a", idempotentReplay: false,
         draftQuote: { publicId: "quote-public-a", documentNumber: "Q-DRAFT-7", status: "draft", version: 1, editorPath: "/quotes/quote-public-a/edit" },
       } });
@@ -95,7 +102,7 @@ test("staff explicitly creates a private Project Alpha draft and opens the PA ed
   await expect(page.getByText("Private Project Alpha draft Q-DRAFT-7")).toBeVisible();
   await expect(page.getByText(/Project Alpha owns pricing, approval, sending, invoicing, and payment/i)).toBeVisible();
   await expect(page.getByRole("link", { name: "Open draft in Project Alpha" })).toHaveAttribute(
-    "href", "https://project-alpha.example/quotes/quote-public-a/edit",
+    "href", "https://secondary-alpha.example/quotes/quote-public-a/edit",
   );
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   expect(runtimeErrors).toEqual([]);

@@ -920,6 +920,8 @@ export interface NativePortalReadContext {
   rootType: WorkspaceRow["root_type"];
   rootPublicId: string;
   generationId: string;
+  membershipSourceVersion: string;
+  verifiedEmail: string;
   contextVersion: string;
   authority: PortalSourceAuthorityProof;
   /** Internal, current authorization facts. Never serialize this structure. */
@@ -967,7 +969,8 @@ export async function resolveNativePortalWorkspaceReadContext(
         WHERE current_principal.workspace_id=workspace.id AND current_principal.identity_id=person.id
           AND current_principal.status='active' AND current_principal.source_version=membership.source_version
           AND lower(current_principal.email_hint)=lower(person.verified_email)))`)
-    .bind(identity.id, workspaceId,canonicalPrincipalEmail(principal.email)??'').first<WorkspaceRow & { project_alpha_source_id: string; generation_id: string }>();
+    .bind(identity.id, workspaceId,canonicalPrincipalEmail(principal.email)??'').first<WorkspaceRow & { project_alpha_source_id: string; generation_id: string;
+      membership_source_version:string;person_email:string }>();
   if (!workspace) return null;
   const authority = await readPortalSourceAuthorityProof(database, workspace.project_alpha_source_id);
   if (!authority) return null;
@@ -1002,7 +1005,8 @@ export async function resolveNativePortalWorkspaceReadContext(
   return { workspaceId, sourceId: authority.sourceId, identityId: identity.id,
     displayName: workspace.display_name, rootType: workspace.root_type,
     rootPublicId: workspace.pa_organization_public_id ?? workspace.pa_client_public_id!,
-    generationId: workspace.generation_id, authority, workspace, grants: grants.results, denials,projectAccessTermsAvailable:termsReady,
+    generationId: workspace.generation_id,membershipSourceVersion:workspace.membership_source_version,verifiedEmail:workspace.person_email,
+    authority, workspace, grants: grants.results, denials,projectAccessTermsAvailable:termsReady,
     contextVersion: Array.from(digest, value => value.toString(16).padStart(2, "0")).join("") };
 }
 

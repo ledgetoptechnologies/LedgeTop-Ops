@@ -7,6 +7,7 @@ import { auditStatement } from "./request-security";
 import { normalizeCrudKey } from "./r2-crud-validation";
 import { d1TablesPresent } from "./schema-readiness";
 import type { Env, StaffPrincipal } from "./types";
+import { excludesNativeRequestStorageAccount } from "./legacy-client-account-scope";
 import { clientFolderNotificationBatchesAvailable, processClientFolderNotificationBatches, recordClientFolderBatchChange } from "./client-folder-notification-batches";
 
 const MAX_ATTEMPTS = 3;
@@ -118,7 +119,9 @@ async function activeRecipient(env: Env, accountId: string, identityId: string):
     FROM client_accounts a
     JOIN client_identity_links i ON i.account_id=a.id AND i.id=? AND i.revoked_at IS NULL AND i.email IS NOT NULL
     JOIN client_account_members m ON m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL
-    WHERE a.id=? AND a.status='active' AND a.project_alpha_source_id='project-alpha:primary' AND (a.project_alpha_client_id IS NOT NULL OR a.project_alpha_organization_id IS NOT NULL)`).bind(identityId, accountId).first<{ ok: number }>();
+    WHERE a.id=? AND a.status='active' AND a.project_alpha_source_id='project-alpha:primary'
+      AND ${excludesNativeRequestStorageAccount("a")}
+      AND (a.project_alpha_client_id IS NOT NULL OR a.project_alpha_organization_id IS NOT NULL)`).bind(identityId, accountId).first<{ ok: number }>();
   return Boolean(row?.ok);
 }
 
@@ -172,7 +175,8 @@ async function activeRecipients(env: Env, accountId: string, identityIds: string
   const rows = await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT i.id
     FROM client_identity_links i JOIN client_accounts a ON a.id=i.account_id AND a.status='active' AND a.project_alpha_source_id='project-alpha:primary'
     JOIN client_account_members m ON m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL
-    WHERE a.id=? AND i.revoked_at IS NULL AND i.email IS NOT NULL AND i.id IN (${placeholders})`)
+    WHERE a.id=? AND ${excludesNativeRequestStorageAccount("a")}
+      AND i.revoked_at IS NULL AND i.email IS NOT NULL AND i.id IN (${placeholders})`)
     .bind(accountId, ...unique).all<{ id: string }>();
   if (rows.results.length !== unique.length) throw new HTTPException(409, { message: "Every notification recipient must be an active member of this client workspace" });
   return unique;
@@ -202,8 +206,10 @@ export async function findClientFolderGrantTargets(
   const query = input.query.trim();
   if (query.length < 2) return { accounts: [] };
   const ownerColumn = scope.ownerType === "client" ? "project_alpha_client_id" : "project_alpha_organization_id";
-  const accounts = await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT id,display_name
-    FROM client_accounts WHERE status='active' AND project_alpha_source_id='project-alpha:primary' AND ${ownerColumn}=? AND display_name LIKE ? ESCAPE '\\'
+  const accounts = await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT client_accounts.id,display_name
+    FROM client_accounts WHERE status='active' AND project_alpha_source_id='project-alpha:primary'
+      AND ${excludesNativeRequestStorageAccount("client_accounts")}
+      AND ${ownerColumn}=? AND display_name LIKE ? ESCAPE '\\'
     ORDER BY display_name COLLATE NOCASE LIMIT 20`)
     .bind(scope.ownerId, `%${query.replace(/[\\%_]/g, value => `\\${value}`)}%`).all<{ id: string; display_name: string }>();
   const result = [];
@@ -238,7 +244,10 @@ export async function createClientFolderGrant(env: Env, request: Request, princi
     throw new HTTPException(400, { message: "Idempotency-Key must contain 16-128 characters" });
   const prefix = normalizeCrudKey(input.r2Prefix, true);
   const account = await env.DELIVERY_DB.withSession("first-primary").prepare(
-    "SELECT id,project_alpha_client_id,project_alpha_organization_id FROM client_accounts WHERE id=? AND status='active' AND project_alpha_source_id='project-alpha:primary' AND (project_alpha_client_id IS NOT NULL OR project_alpha_organization_id IS NOT NULL)",
+    `SELECT client_accounts.id,project_alpha_client_id,project_alpha_organization_id
+     FROM client_accounts WHERE id=? AND status='active' AND project_alpha_source_id='project-alpha:primary'
+       AND ${excludesNativeRequestStorageAccount("client_accounts")}
+       AND (project_alpha_client_id IS NOT NULL OR project_alpha_organization_id IS NOT NULL)`,
   ).bind(input.accountId).first<ClientAccountMapping>();
   if (!account) throw new HTTPException(404, { message: "Active client workspace not found" });
   const { divisionId } = await authoritativeFolderGrantScope(env, prefix, account);
@@ -332,7 +341,10 @@ export async function revokeClientFolderGrant(env: Env, request: Request, princi
     FROM client_folder_associations WHERE logical_grant_id=? AND account_id=? AND scope_type='client' AND project_id IS NULL AND revoked_at IS NULL`).bind(grantId, accountId).first<GrantRow>();
   if (!row) throw new HTTPException(404, { message: "Active client folder grant not found" });
   const account = await env.DELIVERY_DB.withSession("first-primary").prepare(
-    "SELECT id,project_alpha_client_id,project_alpha_organization_id FROM client_accounts WHERE id=? AND project_alpha_source_id='project-alpha:primary' AND (project_alpha_client_id IS NOT NULL OR project_alpha_organization_id IS NOT NULL)",
+    `SELECT client_accounts.id,project_alpha_client_id,project_alpha_organization_id
+     FROM client_accounts WHERE id=? AND project_alpha_source_id='project-alpha:primary'
+       AND ${excludesNativeRequestStorageAccount("client_accounts")}
+       AND (project_alpha_client_id IS NOT NULL OR project_alpha_organization_id IS NOT NULL)`,
   ).bind(accountId).first<ClientAccountMapping>();
   if (!account) throw new HTTPException(404, { message: "Active client folder grant not found" });
   const { divisionId } = await authoritativeFolderGrantScope(env, row.r2_prefix, account);

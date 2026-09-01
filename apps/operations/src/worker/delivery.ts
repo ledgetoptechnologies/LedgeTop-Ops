@@ -522,11 +522,20 @@ export async function createDeliveryShare(env:Env,request:Request,principal:Staf
       const lifecycle:ShareLifecycleResult["lifecycle"]=mustRotate?"rotated":"updated",tokenHash=mustRotate?await sha256(nextSecret):null;
       const effectiveMapEnabled=input.imageLocationMapEnabled===undefined?active.image_location_map_enabled:Number(input.imageLocationMapEnabled);
       const updateStatement=env.DELIVERY_DB.prepare(`UPDATE shares SET token_hash=COALESCE(?,token_hash),public_id=COALESCE(public_id,?),secret_ciphertext=?,secret_iv=?,password_hash=?,password_salt=?,password_iterations=?,password_algorithm=?,expires_at=?,recipient_email=?,image_location_map_enabled=?,idempotency_key=?,r2_prefix=?,r2_object_key=?,division_id=COALESCE(division_id,?),share_version=share_version+? WHERE id=? AND share_version=? AND revoked_at IS NULL AND EXISTS (SELECT 1 FROM projects WHERE projects.id=shares.project_id AND projects.active=1)`).bind(tokenHash,nextPublicId,encrypted.ciphertext,encrypted.iv,passwordHash,passwordSalt,passwordIterations,passwordAlgorithm,expiresAt,effectiveRecipient,effectiveMapEnabled,idempotencyKey,prefix,objectKey,divisionId,updateSecurity.versionIncrement,active.id,active.share_version);
-      const updated=await env.DELIVERY_DB.batch([updateStatement,...(directoryRecipients&&effectiveDirectoryRecipient&&updateSecurity.versionIncrement?shareAudienceSnapshotStatements(env,active.id,nextShareVersion,effectiveDirectoryRecipient,principal.id,true):[])]);
+      const suppressStaleNotifications=env.DELIVERY_DB.prepare(`UPDATE delivery_notifications
+        SET status='failed',lease_until=NULL,last_error='share-authorization-rotated',updated_at=datetime('now')
+        WHERE share_id=? AND kind IN ('share_created','share_updated') AND status IN ('queued','sending','failed')
+          AND last_error IS NOT 'provider-accepted-after-suppression'
+          AND (share_version IS NULL OR share_version<>?)
+          AND EXISTS(SELECT 1 FROM shares WHERE shares.id=? AND shares.share_version=?)`)
+        .bind(active.id,nextShareVersion,active.id,nextShareVersion);
+      const updated=await env.DELIVERY_DB.batch([updateStatement,
+        ...(directoryRecipients&&effectiveDirectoryRecipient&&updateSecurity.versionIncrement?shareAudienceSnapshotStatements(env,active.id,nextShareVersion,effectiveDirectoryRecipient,principal.id,true):[]),
+        suppressStaleNotifications]);
       if(!updated[0]?.meta.changes){const latest=await activeShareForPrefix(env,prefix,objectKey);if(!latest)throw new HTTPException(409,{message:"This share changed while you were editing it. Reopen the share and try again."});active=latest;continue;}
 
       const notificationShareId=active.id,notificationShareVersion=nextShareVersion,notificationRevision=`${notificationShareVersion}:${idempotencyKey}`;
-      const notifications = effectiveDirectoryRecipient ? effectiveDirectoryRecipient.recipients.map(member=>notificationStatement(env,{shareId:notificationShareId,kind:"share_updated",recipientEmail:member.email,dedupeKey:notificationDedupeKey("share_updated",notificationShareId,`${notificationRevision}:${member.principalPublicId}`),payload:{publicId:nextPublicId,r2Prefix:prefix,expiresAt}})!) : [notificationStatement(env, { shareId: notificationShareId, kind: "share_updated", recipientEmail: effectiveRecipient, dedupeKey: notificationDedupeKey("share_updated", notificationShareId, notificationRevision), payload: { publicId: nextPublicId, r2Prefix: prefix, expiresAt } })].filter((value):value is D1PreparedStatement=>Boolean(value));
+      const notifications = effectiveDirectoryRecipient ? effectiveDirectoryRecipient.recipients.map(member=>notificationStatement(env,{shareId:notificationShareId,shareVersion:notificationShareVersion,recipientPrincipalPublicId:member.principalPublicId,kind:"share_updated",recipientEmail:member.email,dedupeKey:notificationDedupeKey("share_updated",notificationShareId,`${notificationRevision}:${member.principalPublicId}`),payload:{publicId:nextPublicId,r2Prefix:prefix,expiresAt}})!) : [notificationStatement(env, { shareId: notificationShareId, shareVersion: notificationShareVersion, kind: "share_updated", recipientEmail: effectiveRecipient, dedupeKey: notificationDedupeKey("share_updated", notificationShareId, notificationRevision), payload: { publicId: nextPublicId, r2Prefix: prefix, expiresAt } })].filter((value):value is D1PreparedStatement=>Boolean(value));
       await env.DELIVERY_DB.batch([env.DELIVERY_DB.prepare("INSERT INTO audit_log (actor_type,actor_id,action,entity_type,entity_id,details_json) VALUES ('staff',?,?,?,?,?)").bind(principal.id,`share.${lifecycle}`,'share',active.id,JSON.stringify({divisionId,r2Prefix:prefix,securityChanged:mustRotate,accessCodeChanged:securityChanged,recipientChanged,expiresAt,effectiveRecipient,imageLocationMapEnabled:Boolean(effectiveMapEnabled)})), ...notifications]);
       await env.OPS_DB.batch([await auditStatement(env,request,principal,`delivery.share.${lifecycle}`,"share",active.id,divisionId,{r2Prefix:prefix,securityChanged:mustRotate,accessCodeChanged:securityChanged,recipientChanged,expiresAt,imageLocationMapEnabled:Boolean(effectiveMapEnabled)})]);
       return{id:active.id,shareUrl:shareUrl(env,nextPublicId,nextSecret),accessCode:effectiveCodeChange.kind==="set"?effectiveCodeChange.accessCode:null,passwordProtected:Boolean(passwordHash),expiresAt,lifecycle,idempotentReplay:false};
@@ -540,7 +549,7 @@ export async function createDeliveryShare(env:Env,request:Request,principal:Staf
   const selectedRecipient=directoryRecipients?requestedRecipient||null:null;
   if(selectedRecipient)recipientEmail=selectedRecipient.recipients[0]?.email||null;
   const encrypted=await encryptDeliveryToken(secret,env.DELIVERY_TOKEN_SECRET,shareId);
-  const createdNotifications = selectedRecipient?selectedRecipient.recipients.map(member=>notificationStatement(env,{shareId,kind:"share_created",recipientEmail:member.email,dedupeKey:notificationDedupeKey("share_created",shareId,member.principalPublicId),payload:{publicId,clientName,projectName,r2Prefix:prefix,expiresAt}})!):[notificationStatement(env, { shareId, kind: "share_created", recipientEmail, payload: { publicId, clientName, projectName, r2Prefix: prefix, expiresAt } })].filter((value):value is D1PreparedStatement=>Boolean(value));
+  const createdNotifications = selectedRecipient?selectedRecipient.recipients.map(member=>notificationStatement(env,{shareId,shareVersion:2,recipientPrincipalPublicId:member.principalPublicId,kind:"share_created",recipientEmail:member.email,dedupeKey:notificationDedupeKey("share_created",shareId,member.principalPublicId),payload:{publicId,clientName,projectName,r2Prefix:prefix,expiresAt}})!):[notificationStatement(env, { shareId, shareVersion: 2, kind: "share_created", recipientEmail, payload: { publicId, clientName, projectName, r2Prefix: prefix, expiresAt } })].filter((value):value is D1PreparedStatement=>Boolean(value));
   const statements:D1PreparedStatement[]=[];
   if(!project)statements.push(env.DELIVERY_DB.prepare("INSERT INTO projects (id,external_ref,client_name,project_name,r2_prefix,division_id,created_by) VALUES (?,?,?,?,?,?,NULL)").bind(projectId,input.externalRef?.trim()||null,clientName,projectName,prefix,divisionId));
   statements.push(
@@ -625,7 +634,7 @@ export async function createProjectAlphaDeliveryGuestShare(env:Env,input:{
           input.expiresAt,selected.workspaceId,selected.folderBindingId,input.expectedBinding.bindingSourceVersion,
           selected.directoryGenerationId,selected.audiencePublicId,input.audience.sourceVersion,input.label),
       env.DELIVERY_DB.prepare(`INSERT INTO project_alpha_delivery_intent_audit(id,receipt_id,action,actor_id,details_json) VALUES(?,?,'guest.accepted',?,?)`).bind(crypto.randomUUID(),input.receiptId,input.deliveryId,JSON.stringify({reused:true,audienceType:selected.audienceType,audiencePublicId:selected.audiencePublicId})),
-      ...selected.recipients.map(member=>notificationStatement(env,{shareId:active.id,kind:"share_created",recipientEmail:member.email,
+      ...selected.recipients.map(member=>notificationStatement(env,{shareId:active.id,shareVersion:active.share_version,recipientPrincipalPublicId:member.principalPublicId,kind:"share_created",recipientEmail:member.email,
         dedupeKey:notificationDedupeKey("share_created",active.id,`${input.deliveryId}:${member.principalPublicId}`),
         payload:{publicId:active.public_id!,clientName:target.client_name,projectName:target.project_name,r2Prefix:prefix,expiresAt:input.expiresAt}})!),
     ];
@@ -665,7 +674,7 @@ export async function createProjectAlphaDeliveryGuestShare(env:Env,input:{
       selected.folderBindingId,selected.workspaceId,liveBindingSource.results[0]!.source_version,
       selected.directoryGenerationId,selected.audiencePublicId,input.audience.sourceVersion,input.label),
     env.DELIVERY_DB.prepare(`INSERT INTO project_alpha_delivery_intent_audit(id,receipt_id,action,actor_id,details_json) VALUES(?,?,'guest.accepted',?,?)`).bind(crypto.randomUUID(),input.receiptId,input.deliveryId,JSON.stringify({reused:false,audienceType:selected.audienceType,audiencePublicId:selected.audiencePublicId})),
-    ...selected.recipients.map(member=>notificationStatement(env,{shareId,kind:"share_created",recipientEmail:member.email,
+    ...selected.recipients.map(member=>notificationStatement(env,{shareId,shareVersion:2,recipientPrincipalPublicId:member.principalPublicId,kind:"share_created",recipientEmail:member.email,
       dedupeKey:notificationDedupeKey("share_created",shareId,`${input.deliveryId}:${member.principalPublicId}`),payload:{publicId,clientName:target.client_name,projectName:target.project_name,r2Prefix:prefix,expiresAt:input.expiresAt}})!),
   ]);}catch{
     const raced=await replay();if(raced)return raced;

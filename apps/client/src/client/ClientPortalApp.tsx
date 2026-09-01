@@ -32,6 +32,7 @@ import {
   loadPortalServiceCatalogPage,
   loadPortalServiceDraft,
   loadPortalServiceDrafts,
+  loadPortalServiceRequests,
   loadPortalWorkspaceAccess,
   loadPortalWorkspaces,
   loadPortalDelegatedShares,
@@ -240,6 +241,7 @@ function FileBrowser({
   emptyTitle,
   emptyDetail,
   feedback = false,
+  nativeFeedbackWorkspaceId = null,
   projectId = null,
   workspaceId = null,
   loadExactFile,
@@ -256,6 +258,7 @@ function FileBrowser({
   emptyTitle: string;
   emptyDetail: string;
   feedback?: boolean;
+  nativeFeedbackWorkspaceId?: string | null;
   projectId?: string | null;
   workspaceId?: string | null;
 }) {
@@ -500,7 +503,7 @@ function FileBrowser({
       {loadLocations && <ImageLocationMap token={mapToken} locations={locations} scopeLabel={locationScopeLabel} />}
       {linkedFileLoading && <p role="status">Opening linked file…</p>}
       {linkedFileError && <div role="alert"><p>{linkedFileError}</p><button className="button-ghost" onClick={() => setFileRetry(value => value + 1)}>Retry linked file</button></div>}
-      {feedback && !loading && !error && projectId && continuationFolderId && <LeaveFeedback key={continuationFolderId} target={{ kind: "folder", projectId, folderId: continuationFolderId }} label={breadcrumbs.at(-1)?.name || "Current folder"} />}
+      {feedback && !loading && !error && (projectId || nativeFeedbackWorkspaceId) && continuationFolderId && <LeaveFeedback key={continuationFolderId} target={{ kind: "folder", projectId, folderId: continuationFolderId }} label={breadcrumbs.at(-1)?.name || "Current folder"} nativeWorkspaceId={nativeFeedbackWorkspaceId} />}
       {locationError && <p className="portal-message error" role="alert">{locationError}</p>}
       {breadcrumbs.length > 0 && onFolderChange && (
         <nav className="portal-file-breadcrumbs" aria-label="Project file folders">
@@ -550,7 +553,7 @@ function FileBrowser({
               >
                 Download
               </a>
-              {feedback && <LeaveFeedback target={{ kind: "file", projectId, fileId: file.id }} label={file.name} compact />}
+              {feedback && <LeaveFeedback target={{ kind: "file", projectId, fileId: file.id }} label={file.name} compact nativeWorkspaceId={nativeFeedbackWorkspaceId} />}
             </div>
           </article>
         ))}
@@ -593,7 +596,7 @@ function FileBrowser({
                 <button type="button" className="button-ghost button-small" onClick={closePreview} aria-label="Close preview">Close</button>
               </div>
             </header>
-            {feedback && <LeaveFeedback key={preview.file.id} target={{ kind: "file", projectId, fileId: preview.file.id }} label={preview.file.name} />}
+            {feedback && <LeaveFeedback key={preview.file.id} target={{ kind: "file", projectId, fileId: preview.file.id }} label={preview.file.name} nativeWorkspaceId={nativeFeedbackWorkspaceId} />}
             <div className="portal-file-preview-stage">
               {loadExactFile && previewMediaError && <div role="alert"><p>The preview could not be loaded. The file or your access may have changed.</p><button className="button-ghost" onClick={() => setFileRetry(value => value + 1)}>Retry preview</button></div>}
               {preview.file.kind === "image" && <img src={preview.file.previewPath!} alt={preview.file.name} onError={loadExactFile ? () => setPreviewMediaError(true) : undefined} />}
@@ -1337,7 +1340,8 @@ function NewServiceRequestWizard({
         if (ticket.contentLength !== blob.size || ticket.contentType !== contentType) throw new Error("The upload ticket does not match this file part.");
         const etag = await uploadPortalAttachmentPart(ticket, blob, loaded => { if (currentLifetime()) updateAttachment(item.key, { uploadedBytes: priorBytes + loaded }); });
         if (!currentLifetime()) return;
-        const checkpoint = await checkpointPortalAttachmentPart(currentDraft.id, initialized.attachmentId, { partNumber, etag, size: blob.size });
+        const checkpoint = await checkpointPortalAttachmentPart(currentDraft.id, initialized.attachmentId,
+          { partNumber, etag, size: blob.size }, undefined, ticket.ticketNonce);
         if (!currentLifetime()) return;
         completed.set(partNumber, checkpoint);
         updateAttachment(item.key, { completedParts: completed.size, uploadedBytes: priorBytes + blob.size });
@@ -2363,7 +2367,7 @@ function WorkspaceTeamPanel({ invitationEmailDelivery, hierarchyScopedInvitation
   const [reviewed, setReviewed] = useState<PortalWorkspaceInvitationInput | null>(null), [uncertain, setUncertain] = useState(false);
   const [reviewedManager,setReviewedManager]=useState<{member:PortalWorkspaceMember;manager:boolean}|null>(null);
   const lifetime = useRef(0), readController = useRef<AbortController | null>(null), mutationController = useRef<AbortController | null>(null), mutationBusy = useRef(false);
-  const pendingInvite = useRef<{workspaceId: string; input: PortalWorkspaceInvitationInput; key: string; policyMode: "allowed" | "require_approval"} | null>(null);
+  const pendingInvite = useRef<{workspaceId: string; sourceId: string; input: PortalWorkspaceInvitationInput; key: string; policyMode: "allowed" | "require_approval"} | null>(null);
   const pendingManager=useRef<{workspaceId:string;identityId:string;manager:boolean;expectedVersion:number;key:string}|null>(null);
   const clearReview = () => { setReviewed(null); setMessage(""); setError(""); };
   const clearProtectedVisuals = () => { setReady(false); setPolicy(null); setTermsSupported(false); setHierarchy([]); setMembers([]); setInvitations([]); setAccessOptions([]); setSelectedScope(null); setReviewed(null); setReviewedManager(null); setInviteScopes([]); setRequestsSupported(false); setAccessSource(null); setAddressBookAvailable(false); setCanManageAddressBook(false); setAddressContact(null); };
@@ -2390,7 +2394,38 @@ function WorkspaceTeamPanel({ invitationEmailDelivery, hierarchyScopedInvitation
     if (controller.signal.aborted || generation !== lifetime.current) return;
     if (!/^project-alpha:[A-Za-z0-9_-]+$/.test(access.sourceId) || typeof access.sourceName !== "string" || typeof access.workspaceName !== "string" || workspaceMode === "native" && access.sourceId !== expectedSourceId) { clearProtected(); throw new Error("Invitation workspace source could not be verified."); }
     if (!Array.isArray(access.members) || access.members.some(member=>member.managerVersion!==undefined&&(!Number.isSafeInteger(member.managerVersion)||member.managerVersion<0)||member.canChangeManager!==undefined&&typeof member.canChangeManager!=="boolean") || !Array.isArray(access.invitations) || !access.invitationPolicy || !["allowed", "disabled", "require_approval"].includes(access.invitationPolicy.mode) || !Number.isSafeInteger(access.invitationPolicy.version) || typeof access.projectAccessTermsSupported !== "boolean" || typeof access.canManageMembers !== "boolean" || typeof access.invitationRequestsSupported !== "boolean" || access.peerAdminManagement!==undefined&&typeof access.peerAdminManagement!=="boolean" || access.peerAdminManagement===true&&!access.canManageMembers || access.addressBookAvailable !== undefined && typeof access.addressBookAvailable !== "boolean" || access.canManageAddressBook !== undefined && typeof access.canManageAddressBook !== "boolean" || access.canManageAddressBook === true && access.addressBookAvailable !== true || !Array.isArray(access.inviteScopes) || access.inviteScopes.some(scope => !["organization", "department", "client", "project"].includes(scope.type) || typeof scope.publicId !== "string" || typeof scope.displayName !== "string" || typeof scope.projectEndSupported !== "boolean" || !Array.isArray(scope.capabilities) || scope.capabilities.some(capability => !["delivery.view", "request.create"].includes(capability))) || !Array.isArray(access.projectAccessOptions) || access.projectAccessOptions.some(option => typeof option.projectPublicId !== "string" || typeof option.projectEndSupported !== "boolean") || !access.canManageMembers && (access.members.length > 0 || access.invitations.length > 0)) { clearProtected(); throw new Error("Invitation settings could not be verified. Refresh team access before continuing."); }
-    if (!access.canManageMembers) clearMutationAmbiguity();
+    const pendingAdministratorChange = pendingManager.current;
+    if (pendingAdministratorChange) {
+      const currentTarget = access.members.find(member => member.identityId === pendingAdministratorChange.identityId);
+      const expectedState = currentTarget?.managerVersion === pendingAdministratorChange.expectedVersion;
+      const confirmedPostState = currentTarget?.managerVersion === pendingAdministratorChange.expectedVersion + 1
+        && currentTarget.manager === pendingAdministratorChange.manager;
+      const exactManagerAuthorityRemains = pendingAdministratorChange.workspaceId === id
+        && workspaceMode !== "native" && access.canManageMembers && access.peerAdminManagement === true
+        && currentTarget?.status === "active" && currentTarget.canChangeManager === true
+        && (expectedState || confirmedPostState);
+      if (!exactManagerAuthorityRemains) { pendingManager.current = null; setUncertain(false); setReviewedManager(null); }
+    } else if (!access.canManageMembers) { setReviewedManager(null); }
+    const pending = pendingInvite.current;
+    if (pending) {
+      const workspace = workspaces.find(value => value.id === id);
+      const requestedTarget = pending.input.organizationWide
+        ? workspace ? {type: workspace.rootType === "organization" ? "organization" : "client", publicId: workspace.rootPublicId} : null
+        : pending.input.targetScope ?? (pending.input.projectPublicId ? {type: "project", publicId: pending.input.projectPublicId} : null);
+      const currentScope = requestedTarget ? access.inviteScopes.find(scope => scope.type === requestedTarget.type && scope.publicId === requestedTarget.publicId) : null;
+      const exactCapabilitiesRemain = !!currentScope && pending.input.capabilities.every(capability => currentScope.capabilities.includes(capability));
+      const terms = pending.input.accessTerms;
+      const exactTermsRemain = !terms || requestedTarget?.type === "project" && access.projectAccessTermsSupported
+        && (terms.mode !== "project_end" || access.projectAccessOptions.some(option => option.projectPublicId === requestedTarget.publicId && option.projectEndSupported))
+        && (terms.mode !== "specific_date" || !!terms.expiresAt && new Date(terms.expiresAt).valueOf() > Date.now());
+      const currentPathAvailable = access.invitationPolicy.mode === "require_approval" ? access.invitationRequestsSupported : invitationEmailDelivery;
+      const exactAuthorityRemains = pending.workspaceId === id && pending.sourceId === access.sourceId
+        && pending.policyMode === access.invitationPolicy.mode
+        && pending.input.expectedInvitationPolicyVersion === access.invitationPolicy.version
+        && currentPathAvailable && exactCapabilitiesRemain && exactTermsRemain
+        && (workspaceMode !== "native" || access.canManageMembers);
+      if (!exactAuthorityRemains) { pendingInvite.current = null; setUncertain(false); }
+    }
     const entries: PortalWorkspaceEntry[] = access.inviteScopes.filter(scope => scope.capabilities.length > 0).map(scope => ({...scope, parentPublicId: null, sourceVersion: ""}));
     const availableScopes = entries.filter((entry): entry is PortalWorkspaceEntry & { type: PortalHierarchyScopeType } =>
       invitationScopeTypes.has(entry.type) && (entry.type === "project" || hierarchyScopedInvitations));
@@ -2432,7 +2467,7 @@ function WorkspaceTeamPanel({ invitationEmailDelivery, hierarchyScopedInvitation
 
   const invite = async (event: FormEvent) => {
     event.preventDefault();
-    if (!ready || !canManageMembers || policy?.mode === "disabled" || !(policy?.mode === "require_approval" ? requestsSupported : invitationEmailDelivery) || !workspaceId || busy || uncertain || historyLocked || (!organizationWide && !selectedScope)) return;
+    if (!ready || !inviteScopes.some(scope => scope.capabilities.length > 0) || policy?.mode === "disabled" || !(policy?.mode === "require_approval" ? requestsSupported : invitationEmailDelivery) || !workspaceId || busy || uncertain || historyLocked || (!organizationWide && !selectedScope)) return;
     const confirmationRequired = organizationWide || selectedScope?.type === "organization";
     if (confirmationRequired && !wideConfirmed) return;
     const reviewedCapabilities: PortalWorkspaceInvitationInput["capabilities"] = [...(selectedCapabilities.includes("delivery.view") ? ["delivery.view" as const] : []), ...(canRequest && selectedCapabilities.includes("request.create") ? ["request.create" as const] : [])];
@@ -2459,8 +2494,12 @@ function WorkspaceTeamPanel({ invitationEmailDelivery, hierarchyScopedInvitation
     });
   };
   const sendInvitation = async () => {
-    if (mutationBusy.current || historyLocked || !ready || !canManageMembers || !policy || policy.mode === "disabled" || !(policy.mode === "require_approval" ? requestsSupported : invitationEmailDelivery)) return;
-    const operation = pendingInvite.current ?? (reviewed ? {workspaceId, input: reviewed, key: crypto.randomUUID(), policyMode: policy.mode} : null);
+    const pending = pendingInvite.current;
+    if (mutationBusy.current || historyLocked) return;
+    if (pending) {
+      if (!ready || !uncertain || pending.workspaceId !== workspaceId) return;
+    } else if (!ready || !inviteScopes.some(scope => scope.capabilities.length > 0) || !policy || policy.mode === "disabled" || !(policy.mode === "require_approval" ? requestsSupported : invitationEmailDelivery)) return;
+    const operation = pending ?? (reviewed && policy && accessSource ? {workspaceId, sourceId: accessSource, input: reviewed, key: crypto.randomUUID(), policyMode: policy.mode as "allowed" | "require_approval"} : null);
     if (!operation || operation.workspaceId !== workspaceId) return;
     if (operation.input.accessTerms && !termsSupported) return;
     pendingInvite.current = operation; mutationBusy.current = true; readController.current?.abort(); const controller = new AbortController(), generation = lifetime.current; mutationController.current = controller;
@@ -2471,7 +2510,7 @@ function WorkspaceTeamPanel({ invitationEmailDelivery, hierarchyScopedInvitation
       const approval = result.outcome === "approval_requested" || result.outcome === "approval_replayed";
       if (approval !== (operation.policyMode === "require_approval")) throw new Error("The reviewed invitation operation could not be confirmed.");
       if (approval) { const saved = invitationRequestSchema.parse(result.request); const target = operation.input.organizationWide ? {type: "workspace", publicId: operation.workspaceId} : operation.input.targetScope ?? {type: "project", publicId: operation.input.projectPublicId};
-        if (result.deliveryQueued !== false || saved.workspaceId !== operation.workspaceId || saved.sourceId !== accessSource || saved.email.toLowerCase() !== operation.input.email.toLowerCase() || saved.scope.type !== target.type || saved.scope.publicId !== target.publicId || JSON.stringify(saved.capabilities.filter(capability => capability !== "workspace.view").sort()) !== JSON.stringify([...operation.input.capabilities].sort()) || (operation.input.accessTerms ? !saved.accessTerms || saved.accessTerms.kind !== operation.input.accessTerms.kind || saved.accessTerms.mode !== operation.input.accessTerms.mode || saved.accessTerms.expiresAt !== operation.input.accessTerms.expiresAt : saved.accessTerms !== null)) throw new Error("Unconfirmed approval request");
+        if (result.deliveryQueued !== false || saved.workspaceId !== operation.workspaceId || saved.sourceId !== operation.sourceId || saved.email.toLowerCase() !== operation.input.email.toLowerCase() || saved.scope.type !== target.type || saved.scope.publicId !== target.publicId || JSON.stringify(saved.capabilities.filter(capability => capability !== "workspace.view").sort()) !== JSON.stringify([...operation.input.capabilities].sort()) || (operation.input.accessTerms ? !saved.accessTerms || saved.accessTerms.kind !== operation.input.accessTerms.kind || saved.accessTerms.mode !== operation.input.accessTerms.mode || saved.accessTerms.expiresAt !== operation.input.accessTerms.expiresAt : saved.accessTerms !== null)) throw new Error("Unconfirmed approval request");
       } else if (result.outcome !== "created" && result.outcome !== "replayed") throw new Error("Unconfirmed invitation");
       pendingInvite.current = null; setReviewed(null); setEmail(""); setAddressContact(null); setOrganizationWide(false); setWideConfirmed(false); setCanRequest(false); setMessage(approval ? "Approval request recorded. Check its current state below; a request alone does not issue an invitation or grant access." : "Invitation issued. The sign-in link lasts seven days; access follows the reviewed terms."); setHistoryRevision(value => value + 1); await refreshAccess(operation.workspaceId);
     } catch (caught) {
@@ -2479,7 +2518,7 @@ function WorkspaceTeamPanel({ invitationEmailDelivery, hierarchyScopedInvitation
       const status = (caught as RequestError).status;
       if (status && [401, 403, 404, 409].includes(status)) { pendingInvite.current = null; clearProtected(); setError(invitationError(caught)); }
       else if (status && status < 500 && status !== 429) { pendingInvite.current = null; setReviewed(null); setError(invitationError(caught)); }
-      else { setUncertain(true); setError("The invitation result is not confirmed. Retry the same invitation safely before making another change."); }
+      else { setReady(false); setUncertain(true); setError("The invitation result is not confirmed. Refresh team access, then retry the same invitation safely before making another change."); }
     } finally { mutationBusy.current = false; if (!controller.signal.aborted && generation === lifetime.current) setBusy(false); }
   };
   const removeAccess = async (kind: "member" | "invitation", id: string) => {
@@ -2507,7 +2546,7 @@ function WorkspaceTeamPanel({ invitationEmailDelivery, hierarchyScopedInvitation
     }catch(caught){if(controller.signal.aborted||generation!==lifetime.current)return;const status=(caught as RequestError).status;
       if(status&&[401,403,404].includes(status)){pendingManager.current=null;clearProtected();setError(invitationError(caught));}
       else if(status===409){pendingManager.current=null;setReviewedManager(null);setError((caught as RequestError).message||"Team access changed. Refresh before trying again.");await refreshAccess(operation.workspaceId);}
-      else{setUncertain(true);setError("The administrator change is not confirmed. Retry the same change safely before making another team change.");}}
+      else{setReady(false);setUncertain(true);setError("The administrator change is not confirmed. Refresh team access, then retry the same change safely before making another team change.");}}
     finally{mutationBusy.current=false;if(!controller.signal.aborted&&generation===lifetime.current)setBusy(false);}
   };
 
@@ -2524,6 +2563,7 @@ function WorkspaceTeamPanel({ invitationEmailDelivery, hierarchyScopedInvitation
   const secondaryWorkspace = workspaceMode === "native" || accessSource !== null && accessSource !== "project-alpha:primary";
   const rootCapabilities = inviteScopes.find(scope => scope.publicId === currentWorkspace?.rootPublicId && scope.type === (currentWorkspace?.rootType === "organization" ? "organization" : "client"))?.capabilities ?? [];
   const selectedCapabilities = organizationWide ? rootCapabilities : inviteScopes.find(scope => scope.type === selectedScope?.type && scope.publicId === selectedScope?.publicId)?.capabilities ?? [];
+  const canInvite = ready && (workspaceMode !== "native" || canManageMembers) && inviteScopes.some(scope => scope.capabilities.length > 0);
   const workspaceWideLabel = currentWorkspace?.rootType === "organization"
     ? "Give access across this entire organization workspace"
     : "Give access across this entire client workspace";
@@ -2544,11 +2584,11 @@ function WorkspaceTeamPanel({ invitationEmailDelivery, hierarchyScopedInvitation
     {policy?.mode === "disabled" && <p className="portal-info-notice" role="status">Invitations are disabled by this organization's policy. Existing access can still be reviewed.</p>}
     {approvalRequired && !secondaryWorkspace && <p className="portal-info-notice" role="status">Administrator approval is required. Submit the exact recipient, scope, and duration for review. A request does not issue an invitation or grant access.</p>}
     {secondaryApprovalUnavailable && <p className="portal-info-notice" role="status"><strong>Invitations need a source policy change.</strong> This connected Project Alpha workspace requires approval, but approval requests are not supported for secondary sources. Existing members and invitations remain available below; no approval control is shown.</p>}
-    {ready && !canManageMembers && <p className="portal-info-notice" role="status">Workspace member management is not included in your current verified access. No member records or invitation controls are shown.</p>}
+    {ready && !canManageMembers && <p className="portal-info-notice" role="status">Workspace member records are not available in your current verified access. {canInvite ? "Only the scoped access choices authorized below are available." : "No invitation controls are shown."}</p>}
     {error && <p className="portal-form-error" role="alert">{error}</p>}{message && <p role="status">{message}</p>}
-    {uncertain && canManageMembers && <button className="button-primary" disabled={busy || loading || !ready || (pendingManager.current ? !peerAdminManagement : policy?.mode === "disabled" || !!pendingInvite.current?.input.accessTerms && !termsSupported)} onClick={() => pendingManager.current ? void saveManagerChange() : void sendInvitation()}>{pendingManager.current ? "Retry same administrator change" : "Retry same invitation"}</button>}
+    {uncertain && (pendingManager.current ? peerAdminManagement : pendingInvite.current !== null) && <button className="button-primary" disabled={busy || loading || !ready || (pendingManager.current ? !peerAdminManagement : !!pendingInvite.current?.input.accessTerms && !termsSupported)} onClick={() => pendingManager.current ? void saveManagerChange() : void sendInvitation()}>{pendingManager.current ? "Retry same administrator change" : "Retry same invitation"}</button>}
     {ready && currentWorkspace?.rootType === "organization" && addressBookAvailable && canManageAddressBook && accessSource && <PortalAddressBook key={`${workspaceId}:${accessSource}`} workspaceId={workspaceId} sourceId={accessSource} locked={busy || uncertain || historyLocked} onLock={setAddressBookLocked} onContactsChanged={() => setAddressContact(null)} onInvalidated={message => {setAddressContact(null); clearProtected(); setError(message);}} />}
-    {ready && canManageMembers && !secondaryApprovalUnavailable && !uncertain && <form onSubmit={invite} className="portal-team-invite-form">
+    {canInvite && !secondaryApprovalUnavailable && <form onSubmit={invite} className="portal-team-invite-form">
       <h3>Invite a collaborator</h3>
       {!invitationEmailDelivery && <div className="portal-info-notice" role="status"><strong>Invitation email is not active yet.</strong><p>{approvalRequired ? "You can request approval without sending email. Invitation issuance remains subject to current delivery readiness." : "Existing access can be reviewed and revoked, but a new invitation cannot be created until LTDS finishes the email and sign-in rollout."}</p></div>}
       {approvalRequired && !requestsSupported && <p role="status">Invitation requests are unavailable until the database update is ready. No invitation will be issued.</p>}
@@ -2631,7 +2671,11 @@ export function ClientPortalApp({
   const [bootstrapRevision, setBootstrapRevision] = useState(0);
   const mobileNavTrigger = useRef<HTMLButtonElement>(null);
   const mobileNavPanel = useRef<HTMLDivElement>(null);
-  const requestContextKey = gate.status === "ready" && gate.data.resourceMode !== "native" ? `${gate.data.account.id}:${gate.data.selectedWorkspaceId ?? "legacy"}` : null;
+  const requestContextKey = gate.status === "ready"
+    ? gate.data.resourceMode === "native"
+      ? gate.data.capabilities.requestV2 ? `${gate.data.workspace.sourceId}:${gate.data.workspace.id}:${gate.data.contextVersion}` : null
+      : `${gate.data.account.id}:${gate.data.selectedWorkspaceId ?? "legacy"}`
+    : null;
   const requestAvailability = useRequestAvailability(switchingWorkspace ? null : requestContextKey, gate.status === "ready" ? gate.data.selectedWorkspaceId ?? null : null);
   const pastDeliveryLoader = useMemo(
     () => (_folderId: string | null, cursor: string | null, signal: AbortSignal) => loadPortalPastDeliveries(cursor, undefined, signal),
@@ -2672,6 +2716,14 @@ export function ClientPortalApp({
       .catch(() => { if (active) setDrafts([]); });
     return () => { active = false; };
   }, [gate, page]);
+  useEffect(() => {
+    if (gate.status !== "ready" || gate.data.resourceMode !== "native" || !gate.data.capabilities.requestV2) return;
+    const controller = new AbortController();
+    loadPortalServiceRequests(undefined, controller.signal)
+      .then(items => { if (!controller.signal.aborted) setRequests(items); })
+      .catch(() => { if (!controller.signal.aborted) setRequests([]); });
+    return () => controller.abort();
+  }, [gate]);
   useEffect(() => {
     const onPopState = () => {
       const route = parseClientPortalRoute(window.location.pathname);
@@ -2877,13 +2929,69 @@ export function ClientPortalApp({
     }
   };
   const selectedProject = projects.find((project) => project.id === projectId);
+  const renderRequestSurface = (requestProjects: PortalProject[], fixedProjectId?: string): ReactNode => fixedProjectId ? (() => {
+    const project = requestProjects.find(item => item.id === fixedProjectId);
+    if (!project) return <Card title="Project unavailable"><p>This project is no longer in your current workspace access.</p></Card>;
+    const projectRequests = requests.filter(request => request.projectId === fixedProjectId);
+    return <>
+      <Card title="Request additional service" className="portal-request-card"><ServiceRequestForm
+        projects={[project]} projectId={fixedProjectId} onSaved={onSaved} mapboxPublicToken={mapboxPublicToken}
+        requestV2={capabilities.requestV2} attachmentsEnabled={capabilities.requestAttachments}
+        requestAvailability={requestAvailability} requestContextKey={requestContextKey!}
+        requestWorkspaceId={selectedWorkspaceId} /></Card>
+      <Card title="Project request history"><RequestList requests={projectRequests} projects={[project]}
+        onCancel={onCancelRequest} cancellingRequestId={cancellingRequestId}
+        retryingCancellationRequestIds={retryingCancellationRequestIds} /></Card>
+    </>;
+  })() : page === "requests" ? <>
+    <section className="portal-page-heading portal-page-heading-action">
+      <div><span className="eyebrow">Flight & service</span><h1>Service requests</h1>
+        <p>Review request status, scope, estimates, and prior activity.</p></div>
+      {!editing && canBeginRequest(requestAvailability, requestProjects) &&
+        <button className="button-orange" onClick={() => openNewRequest()}>Submit new request</button>}
+    </section>
+    {requestNotice && <p className="portal-message portal-request-notice" role="status">{requestNotice}</p>}
+    {!editing && !canBeginRequest(requestAvailability, requestProjects) && <RequestAvailabilityMessage availability={requestAvailability} />}
+    {!editing && drafts.length > 0 && <Card title="Saved drafts" className="portal-request-drafts-card">
+      <p className="portal-card-intro">Continue an autosaved request in this workspace. Nothing is submitted until you review and confirm it.</p>
+      <div className="portal-request-drafts" role="list">{drafts.map(item => <article key={item.id} role="listitem"><div>
+        <strong>{item.title}</strong><span>{item.serviceNames.length ? item.serviceNames.join(", ") : "Services not selected"}</span>
+        <small>{item.areaAcres != null ? `${item.areaAcres.toLocaleString(undefined, { maximumFractionDigits: 2 })} acres` : "No work area saved"} · Updated {formatDate(item.updatedAt)}</small>
+      </div><button type="button" className="button-ghost" onClick={() => openNewRequest(item.id)}>Continue draft</button></article>)}</div>
+    </Card>}
+    {editing ? <Card className="portal-request-card" title={editing.change ? "Request a change" : "Edit submitted request"}>
+      <ServiceRequestForm key={`${editing.change ? "change" : "edit"}:${editing.request.id}`}
+        projects={requestProjects} initial={editing.change ? undefined : editing.request}
+        changeOf={editing.change ? editing.request : undefined} onSaved={onSaved} onCancel={() => setEditing(null)}
+        mapboxPublicToken={mapboxPublicToken} requestV2={capabilities.requestV2}
+        attachmentsEnabled={capabilities.requestAttachments} />
+    </Card> : <div className="portal-request-summary" aria-label="Request summary">
+      <div><strong>{requests.length}</strong><span>Total requests</span></div>
+      <div><strong>{requests.filter(request => !["completed", "cancelled", "declined"].includes(request.status)).length}</strong><span>Open requests</span></div>
+      <div><strong>{requests.filter(request => request.operationalEstimate?.status === "ready").length}</strong><span>Estimates ready</span></div>
+    </div>}
+    <Card title="Request history"><RequestList requests={requests} projects={requestProjects}
+      onCancel={onCancelRequest} cancellingRequestId={cancellingRequestId}
+      retryingCancellationRequestIds={retryingCancellationRequestIds} /></Card>
+  </> : page === "request-new" ? <>
+    <section className="portal-page-heading portal-page-heading-action"><div><span className="eyebrow">New flight & service request</span>
+      <h1>Define your site and scope</h1><p>Choose the request context, then add services, work area, timing, deliverables, and on-site details LTDS needs to review the work.</p>
+    </div><button className="button-ghost" onClick={() => navigate("requests")}>Back to request history</button></section>
+    <Card title="New request" className="portal-request-card"><ServiceRequestForm
+      key={`new-request:${requestDraftId ?? "blank"}`} projects={requestProjects} onSaved={finishNewRequest}
+      onCancel={() => navigate("requests")} mapboxPublicToken={mapboxPublicToken} requestV2={capabilities.requestV2}
+      attachmentsEnabled={capabilities.requestAttachments} initialDraftId={requestDraftId}
+      requestAvailability={requestAvailability} requestContextKey={requestContextKey!} requestWorkspaceId={selectedWorkspaceId} />
+    </Card>
+  </> : null;
   let content: ReactNode;
 
   if (native)
-    content = <NativeWorkspaceContent key={`${native.workspace.sourceId}:${native.workspace.id}:${native.contextVersion}`} context={native} page={page} projectId={projectId} openProject={openProject}
+    content = <NativeWorkspaceContent key={`${native.workspace.sourceId}:${native.workspace.id}:${native.contextVersion}`} context={native} page={page} projectId={projectId} feedbackId={feedbackId} openProject={openProject}
       onInvalid={caught => { bootstrapController.current?.abort(); const status = (caught as RequestError).status; setGate(status === 409 ? {status: "blocked", title: "Workspace changed", detail: "Your workspace changed. Refresh the portal before continuing."} : status === 404 || status === 410 ? {status: "blocked", title: "Shared item unavailable", detail: "This shared item or its access has changed. Refresh the portal to check your current workspace."} : blockedPortal(caught)); }}
       renderTeam={native.capabilities.workspaceMembershipManagement ? () => <Card title="Team access" className="portal-team-card"><WorkspaceTeamPanel initialWorkspaceId={native.workspace.id} workspaceMode="native" expectedSourceId={native.workspace.sourceId} invitationEmailDelivery={native.capabilities.invitationEmailDelivery} hierarchyScopedInvitations={native.capabilities.hierarchyScopedInvitations} /></Card> : undefined}
-      renderFiles={options => <FileBrowser key={options.folderId ?? "linked-file"} {...options} workspaceId={native.workspace.id} mapToken={null} locationScopeLabel="" emptyTitle="No files shown" emptyDetail={options.folderId ? "This shared folder has no files on this page." : "Open a delivery folder to browse its files."} />} />;
+      renderRequests={renderRequestSurface}
+      renderFiles={options => <FileBrowser key={options.folderId ?? "linked-file"} {...options} feedback={native.capabilities.feedback} nativeFeedbackWorkspaceId={native.workspace.id} workspaceId={native.workspace.id} mapToken={null} locationScopeLabel="" emptyTitle="No files shown" emptyDetail={options.folderId ? "This shared folder has no files on this page." : "Open a delivery folder to browse its files."} />} />;
   else if (page === "project")
     content = selectedProject ? (
       <ProjectWorkspace
@@ -3244,7 +3352,7 @@ export function ClientPortalApp({
           </label>
         )}
         <nav className="client-portal-top-nav" aria-label="Client portal">
-          {navigation.filter(item => (item.page !== "feedback" || capabilities.feedback) && (!native || item.page !== "requests")).map((item) => (
+          {navigation.filter(item => (item.page !== "feedback" || capabilities.feedback) && (item.page !== "requests" || capabilities.requestV2)).map((item) => (
             <a
               key={item.page}
               href={withPortalWorkspace(clientPortalPath(item.page))}
@@ -3274,7 +3382,7 @@ export function ClientPortalApp({
         <div ref={mobileNavPanel} id="portal-mobile-navigation" className="portal-mobile-nav" role="dialog" aria-modal="true" aria-label="Navigation">
           <header><strong>Navigation</strong><button type="button" aria-label="Close navigation" onClick={() => { setMobileNavOpen(false); mobileNavTrigger.current?.focus(); }}>Close</button></header>
           <nav aria-label="Mobile client portal navigation">
-            {[...navigation.filter(item => (item.page !== "feedback" || capabilities.feedback) && (!native || item.page !== "requests")), { page: "account" as const, label: "Account" }].map((item) => <a key={item.page} href={withPortalWorkspace(clientPortalPath(item.page))} aria-current={page === item.page || (item.page === "projects" && page === "project") || (item.page === "requests" && page === "request-new") ? "page" : undefined} onClick={(event) => { event.preventDefault(); navigate(item.page); }}>{item.label}</a>)}
+            {[...navigation.filter(item => (item.page !== "feedback" || capabilities.feedback) && (item.page !== "requests" || capabilities.requestV2)), { page: "account" as const, label: "Account" }].map((item) => <a key={item.page} href={withPortalWorkspace(clientPortalPath(item.page))} aria-current={page === item.page || (item.page === "projects" && page === "project") || (item.page === "requests" && page === "request-new") ? "page" : undefined} onClick={(event) => { event.preventDefault(); navigate(item.page); }}>{item.label}</a>)}
           </nav>
         </div>
       </div>}

@@ -2,7 +2,7 @@
   "rules": [
     {
       "allowed": {
-        "origins": ["https://client-staging.ledgetopdroneservices.com"],
+        "origins": ["https://client-staging.ledgetopdroneservices.com", "https://portal-staging.ledgetoptechnologies.com"],
         "methods": ["PUT"],
         "headers": ["content-type"]
       },

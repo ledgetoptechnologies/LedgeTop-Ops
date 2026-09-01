@@ -3,7 +3,7 @@ export type ClientFeedbackStatus = "new" | "in_progress" | "done";
 
 export type ClientFeedbackTargetInput =
   | { kind: "project"; projectId: string }
-  | { kind: "folder"; projectId: string; folderId: string }
+  | { kind: "folder"; projectId: string | null; folderId: string }
   | { kind: "file"; projectId: string | null; fileId: string };
 
 export interface ClientFeedbackTarget {

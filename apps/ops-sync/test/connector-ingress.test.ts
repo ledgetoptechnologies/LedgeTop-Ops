@@ -71,7 +71,11 @@ describe("authenticated connector business ingress",{timeout:30_000},()=>{
     runtime=new Miniflare({modules:true,script:"export default {fetch(){return new Response('ok')}}",d1Databases:["OPS_DB"]});
     db=await runtime.getD1Database("OPS_DB") as D1Database;
     const path=resolve(import.meta.dirname,"../../operations/migrations");
-    for(const name of (await readdir(path)).filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name.slice(0,4)<="0037").sort()){
+    // This suite imports the current Operations connector writer, so its D1
+    // fixture must use the current Operations schema as well. Pinning the
+    // fixture to the connector's original migration hides later connector
+    // invariants and makes valid registrations fail on missing columns.
+    for(const name of (await readdir(path)).filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort()){
       const statements=unstable_splitSqlQuery((await readFile(resolve(path,name),"utf8")).replace(/\r\n/g,"\n"))
         .map(sql=>sql.trim()).filter(sql=>sql&&!/^PRAGMA\s+foreign_keys\s*=\s*ON\s*;?$/i.test(sql));
       if(statements.length)await db.batch(statements.map(sql=>db.prepare(sql)));

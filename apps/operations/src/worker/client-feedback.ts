@@ -4,22 +4,27 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { FeedbackStoreError, readFeedbackRecord, transitionFeedbackRecord, type FeedbackRecord, type FeedbackWriteGuard } from "../../../client/src/worker/client-portal/feedback-store";
 import { feedbackSourceOwnerSource } from "../../../client/src/worker/client-portal/feedback-target";
+import { readNativeFeedbackRecord,transitionNativeFeedbackRecord,type NativeFeedbackRecord } from "../../../client/src/worker/client-portal/native-feedback-store";
+import { reauthorizeNativeFeedbackRecipient } from "../../../client/src/worker/client-portal/native-feedback-target";
 import { evaluatePermission, isAdministrator, loadGrants, type SqlScope } from "./acl";
 import { base64Url, sha256 } from "./crypto";
 import { d1TablesPresent } from "./schema-readiness";
 import { paProjectFilter } from "./visibility";
+import { isAlphaPublicId,validatedUniquePublicIdExpression } from './client-hub-source';
+import { projectAlphaReadVisibleSql } from './project-alpha-read-visibility';
 import type { Env, GrantRow, StaffPrincipal } from "./types";
 
 type App = Hono<{ Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } }>;
 type StatusFilter = ClientFeedbackStatus | "all" | "open";
 export interface StaffFeedbackPolicy { grants: GrantRow[]; administrator: boolean; proof: string }
-interface Scope { accountName: string; divisionId: string; projectId: string; available: boolean; proof: string; guard: FeedbackWriteGuard }
+interface Scope { accountName: string; divisionId: string|null; projectId: string|null; available: boolean; proof: string; guard: FeedbackWriteGuard; actionPath:string|null }
 interface SourceScope { project_id: string; division_id: string; client_id: string | null; organization_id: string | null; assigned: number; owner_id?: string | null; owner_organization_id?: string | null; root_organization_id?: string | null }
 interface Cursor { v: 1; status: StatusFilter; accountId: string; q: string; policy: string; after: [string,string]; expires: number }
 const idSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/);
 const statusSchema = z.enum(["new", "in_progress", "done", "all", "open"]);
 const actionSchema = z.object({ expectedRevision: z.number().int().min(1).max(2), status: z.enum(["in_progress", "done"]), note: z.string().max(2000).nullable() }).strict();
 const tables = ["client_feedback", "client_feedback_events", "client_feedback_mutations", "client_feedback_notifications", "client_feedback_notification_outbox"];
+const nativeTables=['portal_native_feedback','portal_native_feedback_events','portal_native_feedback_mutations'];
 function missing(): never { throw new HTTPException(404, { message: "Feedback is unavailable" }); }
 function changed(): never { throw new HTTPException(409, { message: "Feedback or access changed. Refresh before trying again." }); }
 export async function requireClientFeedbackReady(env: Env) {
@@ -133,19 +138,104 @@ export async function readStaffFeedbackScope(env: Env, actor: StaffPrincipal, re
   // independently prevents delivery-side reassignment inside the write batch.
   const guard = { sql: `EXISTS(${localSql})`, bindings: [values] };
   return { accountName: local.account_name, divisionId: source.division_id, projectId: source.project_id, available,
-    proof: await sha256(JSON.stringify([local,source,auth.proof])), guard };
+    proof: await sha256(JSON.stringify([local,source,auth.proof])), guard,actionPath:null };
 }
 
-function item(record: FeedbackRecord, scope: Scope): StaffClientFeedbackItem {
+/** Secondary feedback is authorized from the source-owned native workspace and
+ * then independently mapped into the exact same Operations projection source.
+ * Purchased-service assignments are intentionally absent from this decision. */
+export async function readStaffNativeFeedbackScope(env:Env,actor:StaffPrincipal,record:NativeFeedbackRecord,
+  access?:StaffFeedbackPolicy):Promise<Scope|null>{
+  const auth=access??await readStaffFeedbackPolicy(env,actor),target=record.target;
+  if(target.sourceId!==record.context.sourceId||target.workspaceId!==record.context.workspaceId
+    ||target.sourceId==='project-alpha:primary'||!isAlphaPublicId(target.rootPublicId))return null;
+  const owner=target.kind==='project'?{type:'project' as const,publicId:target.projectPublicId}
+    :target.grant?{type:target.grant.ownerType,publicId:target.grant.ownerPublicId}:null;
+  if(!owner||!owner.publicId||!isAlphaPublicId(owner.publicId)
+    ||(owner.type==='project')!==Boolean(target.projectPublicId)
+    ||(target.projectPublicId&&target.projectPublicId!==owner.publicId))return null;
+  // Staff history is durable after submission. Live client authorization is
+  // used only to decide whether the original target can still be opened; it is
+  // never used to erase a source-qualified report or impersonate its author.
+  const recipient=await reauthorizeNativeFeedbackRecipient(env as unknown as import('../../../client/src/worker/types').Env,record);
+  const ops=env.OPS_DB.withSession('first-primary'),rootTable=target.rootType==='organization'?'pa_organizations':'pa_clients',rootAlias='root';
+  const root=await ops.prepare(`SELECT ${rootAlias}.id,${rootAlias}.name FROM ${rootTable} ${rootAlias}
+    WHERE ${rootAlias}.projection_source_id=? AND ${rootAlias}.active=1 AND ${target.rootType==='standalone_client'?`${rootAlias}.organization_id IS NULL AND`:''}
+      ${validatedUniquePublicIdExpression(rootTable,rootAlias)}=? AND ${projectAlphaReadVisibleSql(`${rootAlias}.projection_source_id`)}`)
+    .bind(target.sourceId,target.rootPublicId).first<{id:string;name:string}>();
+  if(!root)return null;
+  const historicalGuard:FeedbackWriteGuard={sql:`EXISTS(SELECT 1 FROM portal_v2_workspaces workspace
+    JOIN pa_portal_workspace_sources source ON source.workspace_id=workspace.id AND source.projection_source_id=workspace.project_alpha_source_id
+    JOIN pa_portal_source_authorities authority ON authority.source_id=workspace.project_alpha_source_id AND authority.state='active'
+    JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=workspace.id
+    JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id
+      AND generation.workspace_id=workspace.id AND generation.status='active' AND generation.complete=1
+    JOIN portal_v2_directory_entities root ON root.workspace_id=workspace.id AND root.generation_id=generation.id
+      AND root.entity_type=workspace.root_type AND root.public_id=COALESCE(workspace.pa_organization_public_id,workspace.pa_client_public_id) AND root.active=1
+    WHERE workspace.id=? AND workspace.project_alpha_source_id=? AND workspace.legacy_account_id IS NULL AND workspace.status='active'
+      AND workspace.root_type=? AND COALESCE(workspace.pa_organization_public_id,workspace.pa_client_public_id)=?)`,
+    bindings:[target.workspaceId,target.sourceId,target.rootType,target.rootPublicId]};
+  const rootKind=target.rootType==='organization'?'organizations':'standalone';
+  if(owner.type!=='project'){
+    const globalContext={};
+    if(!evaluatePermission(auth.grants,actor,'operations.manage',globalContext)
+      ||!evaluatePermission(auth.grants,actor,'delivery.browse',globalContext))return null;
+    const available=Boolean(recipient?.available),actionPath=available
+      ?`/clients/sources/${encodeURIComponent(target.sourceId)}/business/${rootKind}/${encodeURIComponent(target.rootPublicId)}`:null;
+    return {accountName:root.name,divisionId:null,projectId:null,available,
+      proof:await sha256(JSON.stringify([target.sourceId,target.rootType,target.rootPublicId,owner,auth.proof])),
+      guard:historicalGuard,actionPath};
+  }
+  const scope=projectScope(auth.grants),filter=paProjectFilter(scope,actor,auth.administrator,
+    auth.grants.some(row=>row.source==='override'&&row.effect==='allow'&&row.scope==='global'&&row.permission==='operations.view_all'));
+  const assignment=paProjectFilter(scope,actor,false,false);
+  const row=await ops.prepare(`SELECT p.id project_id,d.id division_id,CASE WHEN ${assignment.sql} THEN 1 ELSE 0 END assigned
+    FROM pa_projects p JOIN divisions d ON d.project_alpha_business_unit_id=p.business_unit_id AND d.active=1
+    LEFT JOIN pa_clients owner ON owner.id=p.client_id AND owner.projection_source_id=p.projection_source_id AND owner.active=1
+    WHERE p.projection_source_id=? AND ${validatedUniquePublicIdExpression('pa_projects','p')}=? AND (${filter.sql})
+      AND ${target.rootType==='organization'?`(p.organization_id=? OR (p.organization_id IS NULL AND owner.organization_id=?))`:
+        `p.client_id=? AND owner.id IS NOT NULL AND owner.organization_id IS NULL AND p.organization_id IS NULL`}`)
+    .bind(...assignment.values,target.sourceId,target.projectPublicId,...filter.values,root.id,...(target.rootType==='organization'?[root.id]:[]))
+    .first<{project_id:string;division_id:string;assigned:number}>();
+  const globalContext={},globalHistory=evaluatePermission(auth.grants,actor,'operations.manage',globalContext)
+    &&evaluatePermission(auth.grants,actor,'projects.view',globalContext)
+    &&(target.kind==='project'||evaluatePermission(auth.grants,actor,'delivery.browse',globalContext));
+  if(!row&&!globalHistory)return null;
+  if(row&&!globalHistory){
+    const permissionContext={divisionId:row.division_id,assignedStaffIds:row.assigned?[actor.id]:[]};
+    if(!auth.administrator&&!row.assigned&&!evaluatePermission(auth.grants,actor,'operations.view_all',permissionContext))return null;
+    if(!evaluatePermission(auth.grants,actor,'operations.manage',permissionContext)
+      ||!evaluatePermission(auth.grants,actor,'projects.view',permissionContext)
+      ||(target.kind!=='project'&&!evaluatePermission(auth.grants,actor,'delivery.browse',permissionContext)))return null;
+  }
+  const available=Boolean(row&&recipient?.available),actionPath=available
+    ?`/clients/sources/${encodeURIComponent(target.sourceId)}/business/${rootKind}/${encodeURIComponent(target.rootPublicId)}/business-projects/${encodeURIComponent(row!.project_id)}`:null;
+  return {accountName:root.name,divisionId:row?.division_id??null,projectId:row?.project_id??null,available,
+    proof:await sha256(JSON.stringify([target.sourceId,target.rootType,target.rootPublicId,target.projectPublicId,globalHistory?null:row,auth.proof])),
+    guard:historicalGuard,actionPath};
+}
+
+type AnyFeedbackRecord=FeedbackRecord|NativeFeedbackRecord;
+async function readAnyFeedbackRecord(db:Pick<D1Database,'prepare'>,id:string,nativeReady:boolean):Promise<AnyFeedbackRecord|null>{
+  return id.startsWith('native_')?(nativeReady?readNativeFeedbackRecord(db,id):null):readFeedbackRecord(db,id);
+}
+async function readAnyStaffFeedbackScope(env:Env,actor:StaffPrincipal,record:AnyFeedbackRecord,access?:StaffFeedbackPolicy){
+  return record.id.startsWith('native_')?readStaffNativeFeedbackScope(env,actor,record as NativeFeedbackRecord,access)
+    :readStaffFeedbackScope(env,actor,record as FeedbackRecord,access);
+}
+
+function item(record: AnyFeedbackRecord, scope: Scope): StaffClientFeedbackItem {
+  const projectId=record.id.startsWith('native_')?(record as NativeFeedbackRecord).target.projectPublicId:(record as FeedbackRecord).target.projectId;
   return { id: record.id, status: record.status, revision: record.revision, message: record.message, completionNote: record.completionNote,
     createdAt: record.createdAt, updatedAt: record.updatedAt, completedAt: record.completedAt, accountName: scope.accountName,
     canStart: record.status === "new", canComplete: record.status !== "done",
-    target: { kind: record.target.kind, projectId: record.target.projectId, label: record.target.label, projectName: record.target.projectName,
-      available: scope.available, actionPath: null } };
+    target: { kind: record.target.kind, projectId, label: record.target.label, projectName: record.target.projectName,
+      available: scope.available, actionPath: scope.actionPath } };
 }
 export async function readStaffFeedbackEvents(env: Env, id: string): Promise<ClientFeedbackEvent[]> {
+  const table=id.startsWith('native_')?'portal_native_feedback_events':'client_feedback_events';
   const rows = await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT revision,actor_type actor,status,note,created_at createdAt
-    FROM client_feedback_events WHERE feedback_id=? ORDER BY revision LIMIT 3`).bind(id).all<ClientFeedbackEvent>();
+    FROM ${table} WHERE feedback_id=? ORDER BY revision LIMIT 3`).bind(id).all<ClientFeedbackEvent>();
   return rows.results;
 }
 async function cursorKey(env: Env) {
@@ -181,22 +271,24 @@ export async function listStaffFeedback(env: Env, actor: StaffPrincipal, query: 
   const predicates: string[] = [], values: string[] = [];
   if (status === "open") predicates.push("status IN ('new','in_progress')");
   else if (status !== "all") { predicates.push("status=?"); values.push(status); }
-  if (accountId) { predicates.push("account_id=?"); values.push(accountId); }
   if (cursor) { predicates.push("(created_at,id)>(?,?)"); values.push(...cursor.after); }
-  const rows = await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT id,created_at FROM client_feedback
-    ${predicates.length ? `WHERE ${predicates.join(" AND ")}` : ""} ORDER BY created_at,id LIMIT 51`).bind(...values)
+  const primaryAccount=accountId?'AND account_id=?':'',nativeReady=await d1TablesPresent(env.DELIVERY_DB,nativeTables);
+  const rows = await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT id,created_at FROM (
+      SELECT id,created_at,status FROM client_feedback WHERE 1=1 ${primaryAccount}
+      ${accountId||!nativeReady?'':'UNION ALL SELECT id,created_at,status FROM portal_native_feedback'}
+    ) ${predicates.length ? `WHERE ${predicates.join(" AND ")}` : ""} ORDER BY created_at,id LIMIT 51`).bind(...(accountId?[accountId]:[]),...values)
     .all<{id:string;created_at:string}>();
-  const shown: {record: FeedbackRecord; scope: Scope}[] = []; let examined = 0;
+  const shown: {record: AnyFeedbackRecord; scope: Scope}[] = []; let examined = 0;
   for (const row of rows.results.slice(0,50)) {
     examined++;
-    const record = await readFeedbackRecord(env.DELIVERY_DB.withSession("first-primary"),row.id);
+    const record = await readAnyFeedbackRecord(env.DELIVERY_DB.withSession("first-primary"),row.id,nativeReady);
     if (!record || (status === "open" ? record.status === "done" : status !== "all" && record.status !== status)) continue;
-    const scope = await readStaffFeedbackScope(env,actor,record,access);
+    const scope = await readAnyStaffFeedbackScope(env,actor,record,access);
     if (scope && (!q || [scope.accountName,record.message,record.target.label,record.target.projectName ?? ""].some(value => value.normalize("NFC").toLocaleLowerCase("en-US").includes(q)))) shown.push({record,scope});
     if (shown.length === 25) break;
   }
   if ((await readStaffFeedbackPolicy(env,actor)).proof !== access.proof) changed();
-  for (const result of shown) if ((await readStaffFeedbackScope(env,actor,result.record,access))?.proof !== result.scope.proof) changed();
+  for (const result of shown) if ((await readAnyStaffFeedbackScope(env,actor,result.record,access))?.proof !== result.scope.proof) changed();
   const last = rows.results[examined-1];
   return { items: shown.map(value => item(value.record,value.scope)), nextCursor: last && rows.results.length > examined
     ? await encodeCursor(env,actor,{v:1,status,accountId,q,policy:access.proof,after:[last.created_at,last.id],expires:Date.now()+30*60_000}) : null };
@@ -204,11 +296,12 @@ export async function listStaffFeedback(env: Env, actor: StaffPrincipal, query: 
 export async function getStaffFeedback(env: Env, actor: StaffPrincipal, id: string) {
   if (!idSchema.safeParse(id).success) missing();
   const access = await readStaffFeedbackPolicy(env,actor); await requireClientFeedbackReady(env);
-  const record = await readFeedbackRecord(env.DELIVERY_DB.withSession("first-primary"),id);
-  const scope = record ? await readStaffFeedbackScope(env,actor,record,access) : null;
+  const nativeReady=!id.startsWith('native_')||await d1TablesPresent(env.DELIVERY_DB,nativeTables);
+  const record = await readAnyFeedbackRecord(env.DELIVERY_DB.withSession("first-primary"),id,nativeReady);
+  const scope = record ? await readAnyStaffFeedbackScope(env,actor,record,access) : null;
   if (!record || !scope) missing();
   const history = await readStaffFeedbackEvents(env,id);
-  if ((await readStaffFeedbackPolicy(env,actor)).proof !== access.proof || (await readStaffFeedbackScope(env,actor,record,access))?.proof !== scope.proof) changed();
+  if ((await readStaffFeedbackPolicy(env,actor)).proof !== access.proof || (await readAnyStaffFeedbackScope(env,actor,record,access))?.proof !== scope.proof) changed();
   return { feedback: item(record,scope), events: history };
 }
 export async function transitionStaffFeedback(env: Env, actor: StaffPrincipal, id: string, value: unknown, key: string) {
@@ -216,17 +309,21 @@ export async function transitionStaffFeedback(env: Env, actor: StaffPrincipal, i
   const parsed = actionSchema.safeParse(value);
   if (!parsed.success) throw new HTTPException(400, { message: "Feedback status update is invalid" });
   const access = await readStaffFeedbackPolicy(env,actor); await requireClientFeedbackReady(env);
-  const db = env.DELIVERY_DB.withSession("first-primary"), record = await readFeedbackRecord(db,id);
-  const scope = record ? await readStaffFeedbackScope(env,actor,record,access) : null;
+  const nativeReady=!id.startsWith('native_')||await d1TablesPresent(env.DELIVERY_DB,nativeTables);
+  const db = env.DELIVERY_DB.withSession("first-primary"), record = await readAnyFeedbackRecord(db,id,nativeReady);
+  const scope = record ? await readAnyStaffFeedbackScope(env,actor,record,access) : null;
   if (!record || !scope) missing();
   const assertCurrent = async () => {
-    if ((await readStaffFeedbackPolicy(env,actor)).proof !== access.proof || (await readStaffFeedbackScope(env,actor,record,access))?.proof !== scope.proof) changed();
+    if ((await readStaffFeedbackPolicy(env,actor)).proof !== access.proof || (await readAnyStaffFeedbackScope(env,actor,record,access))?.proof !== scope.proof) changed();
   };
   await assertCurrent();
   try {
-    const result = await transitionFeedbackRecord(db,record,actor.id,parsed.data,key,scope.guard);
-    await assertCurrent();
-    return { feedback: item(result.record,scope), events: await readStaffFeedbackEvents(env,id), replayed: result.replayed, appliedRevision: result.appliedRevision };
+    const result = record.id.startsWith('native_')
+      ? await transitionNativeFeedbackRecord(db,record as NativeFeedbackRecord,actor.id,parsed.data,key,scope.guard)
+      : await transitionFeedbackRecord(db,record as FeedbackRecord,actor.id,parsed.data,key,scope.guard);
+    const finalScope=await readAnyStaffFeedbackScope(env,actor,result.record,access);
+    if(!finalScope||finalScope.proof!==scope.proof)changed();
+    return { feedback: item(result.record,finalScope), events: await readStaffFeedbackEvents(env,id), replayed: result.replayed, appliedRevision: result.appliedRevision };
   } catch (error) {
     if (error instanceof FeedbackStoreError) throw new HTTPException(error.code === "invalid" ? 400 : 409, { message: error.code === "idempotency_conflict" ? "This action key was already used for another change" : "Feedback changed. Refresh before trying again." });
     throw error;

@@ -21,6 +21,10 @@ export interface BusinessProjectDetail {
     created_at: string | null; manager: { id: string; display_name: string | null } | null };
   linkedContact: { id: string; display_name: string | null; email: string | null; phone: string | null; sourceField: "project.client_id" } | null;
   availability: { linkedContact: "available" | "not_projected" | "unavailable"; siteContacts: "not_projected"; billingContacts: "not_projected"; projectMemory: "not_projected" };
+  operationalWorkspaceAvailable?: boolean;
+  businessActivityAvailable?: boolean;
+  auditTimelineAvailable?: boolean;
+  feedbackHistoryAvailable?: boolean;
 }
 
 function displayDate(value: string | null, calendar = false): string {
@@ -116,13 +120,13 @@ function ProjectWorkspace({ route, feedbackEnabled }: { route: BusinessProjectRo
             : "A linked-contact reference was not included in the synchronized project record."}</p>}
         </Card>
       </div>
-      <ProjectOperationalWorkspace key={`operations-${revision}`} root={detail.canonicalRoot} projectId={project.id}
-        contextVersion={detail.contextVersion} contextSignal={pending.current!.signal} onInvalidated={invalidate} />
-      <ClientBusinessActivity key={revision} root={detail.canonicalRoot} projectId={project.id} contextVersion={detail.contextVersion}
-        contextSignal={pending.current!.signal} onInvalidated={invalidate} />
-      <ClientAuditTimeline key={`audit-${revision}`} root={detail.canonicalRoot} projectId={project.id} contextVersion={detail.contextVersion}
-        contextSignal={pending.current!.signal} onInvalidated={invalidate} />
-      {feedbackEnabled && detail.canonicalRoot.sourceId === "project-alpha:primary" && <ProjectFeedbackHistory key={`feedback-${revision}`}
+      {detail.operationalWorkspaceAvailable === true && <ProjectOperationalWorkspace key={`operations-${revision}`} root={detail.canonicalRoot} projectId={project.id}
+        contextVersion={detail.contextVersion} contextSignal={pending.current!.signal} onInvalidated={invalidate} />}
+      {detail.businessActivityAvailable === true && <ClientBusinessActivity key={revision} root={detail.canonicalRoot} projectId={project.id} contextVersion={detail.contextVersion}
+        contextSignal={pending.current!.signal} onInvalidated={invalidate} />}
+      {detail.auditTimelineAvailable === true && <ClientAuditTimeline key={`audit-${revision}`} root={detail.canonicalRoot} projectId={project.id} contextVersion={detail.contextVersion}
+        contextSignal={pending.current!.signal} onInvalidated={invalidate} />}
+      {feedbackEnabled && detail.feedbackHistoryAvailable === true && detail.canonicalRoot.sourceId === "project-alpha:primary" && <ProjectFeedbackHistory key={`feedback-${revision}`}
         root={detail.canonicalRoot} projectId={project.id} contextVersion={detail.contextVersion}
         contextSignal={pending.current!.signal} onInvalidated={invalidate} />}
       <p className="business-project-refreshed">Project records refreshed {displayDate(detail.refreshedAt)}. A record refresh does not indicate project activity.</p>

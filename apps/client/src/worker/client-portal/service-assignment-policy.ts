@@ -17,6 +17,9 @@ export interface ServiceAssignmentPolicyProof {
   reviewRevision: number;
   workspaceId: string;
   localProjectId: string | null;
+  /** Native PA project IDs have no legacy projects row. This is source-owned
+   * context, not a grant, and is rechecked against the active directory. */
+  nativeProject?: boolean;
   subjectType: ServiceAssignmentPolicySubjectType;
   subjectPublicId: string;
   generationId: string;
@@ -40,6 +43,7 @@ interface TargetRow {
   directory_generation_id: string;
   directory_source_sequence: number;
   local_project_id: string | null;
+  native_project?: number;
 }
 
 interface CheckpointRow {
@@ -75,6 +79,41 @@ function unavailableSchema(error: unknown): boolean {
 async function exactTarget(env: Env, session: ClientPortalSession, projectId: string | null): Promise<TargetRow | null> {
   if (!session.workspaceId) return null;
   const db = database(env);
+  if (projectId && session.nativeSourceId) {
+    return db.prepare(`WITH RECURSIVE context AS (
+        SELECT workspace.id workspace_id,workspace.project_alpha_source_id source_id,
+          workspace.root_type,CASE workspace.root_type WHEN 'organization' THEN workspace.pa_organization_public_id
+            ELSE workspace.pa_client_public_id END root_public_id,
+          generation.id generation_id,generation.source_sequence
+        FROM portal_v2_workspaces workspace
+        JOIN pa_portal_workspace_sources owner ON owner.workspace_id=workspace.id
+          AND owner.projection_source_id=workspace.project_alpha_source_id
+        JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=workspace.id
+        JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id
+          AND generation.workspace_id=checkpoint.workspace_id AND generation.source_sequence=checkpoint.source_sequence
+          AND generation.status='active' AND generation.complete=1
+        WHERE workspace.id=? AND workspace.status='active' AND workspace.legacy_account_id IS NULL
+          AND workspace.project_alpha_source_id=? AND ${portalSourceReadableSql("workspace.project_alpha_source_id")}
+      ), lineage(entity_type,public_id,depth) AS (
+        SELECT entity.entity_type,entity.public_id,0 FROM context
+        JOIN portal_v2_directory_entities entity ON entity.workspace_id=context.workspace_id
+          AND entity.generation_id=context.generation_id AND entity.entity_type='project'
+          AND entity.public_id=? AND entity.active=1
+        UNION
+        SELECT parent.entity_type,parent.public_id,lineage.depth+1 FROM lineage JOIN context
+        JOIN portal_v2_directory_relations relation ON relation.workspace_id=context.workspace_id
+          AND relation.generation_id=context.generation_id AND relation.active=1
+          AND relation.to_type=lineage.entity_type AND relation.to_public_id=lineage.public_id
+        JOIN portal_v2_directory_entities parent ON parent.workspace_id=relation.workspace_id
+          AND parent.generation_id=relation.generation_id AND parent.entity_type=relation.from_type
+          AND parent.public_id=relation.from_public_id AND parent.active=1 WHERE lineage.depth<12
+      ) SELECT context.source_id,'project' subject_type,? subject_public_id,
+        context.generation_id directory_generation_id,context.source_sequence directory_source_sequence,
+        NULL local_project_id,1 native_project FROM context WHERE EXISTS(SELECT 1 FROM lineage GROUP BY 1
+          HAVING COUNT(*)<=64 AND MAX(depth)<12 AND MAX(CASE WHEN entity_type=context.root_type
+            AND public_id=context.root_public_id THEN 1 ELSE 0 END)=1)`)
+      .bind(session.workspaceId, session.nativeSourceId, projectId, projectId).first<TargetRow>();
+  }
   if (projectId) {
     return db.prepare(`WITH RECURSIVE context AS (
         SELECT workspace.id workspace_id,workspace.project_alpha_source_id source_id,
@@ -236,12 +275,12 @@ export function serviceAssignmentPolicyCheckpointSql(
               AND MAX(CASE WHEN entity_type=workspace.root_type AND public_id=CASE workspace.root_type
                 WHEN 'organization' THEN workspace.pa_organization_public_id ELSE workspace.pa_client_public_id END THEN 1 ELSE 0 END)=1
           ))
-        ) AND (? IS NULL OR EXISTS(SELECT 1 FROM projects project WHERE project.id=? AND project.active=1
+        ) AND (?=1 OR ? IS NULL OR EXISTS(SELECT 1 FROM projects project WHERE project.id=? AND project.active=1
           AND project.project_alpha_source_id=checkpoint.source_id AND project.project_alpha_project_id=target.public_id)))`,
     bindings: [proof.workspaceId, proof.reviewId, proof.reviewRevision,
       proof.directoryGenerationId, proof.directorySourceSequence,
       proof.subjectType, proof.subjectPublicId, proof.sourceId, proof.generationId, proof.sourceGeneration, proof.sourceSequence,
-      proof.localProjectId, proof.localProjectId],
+      proof.nativeProject === true ? 1 : 0, proof.localProjectId, proof.localProjectId],
   };
 }
 
@@ -254,6 +293,7 @@ export function serializeServiceAssignmentPolicyProof(proof: ServiceAssignmentPo
     reviewRevision: proof.reviewRevision,
     workspaceId: proof.workspaceId,
     localProjectId: proof.localProjectId,
+    ...(proof.nativeProject === true ? { nativeProject: true } : {}),
     subjectType: proof.subjectType,
     subjectPublicId: proof.subjectPublicId,
     generationId: proof.generationId,
@@ -285,7 +325,8 @@ function wellFormedProof(proof: ServiceAssignmentPolicyProof): boolean {
     && Number.isSafeInteger(proof.sourceSequence) && proof.sourceSequence >= 1
     && Number.isSafeInteger(proof.directorySourceSequence) && proof.directorySourceSequence >= 1
     && (proof.subjectType === "project"
-      ? typeof proof.localProjectId === "string" && proof.localProjectId.length >= 1 && proof.localProjectId.length <= 128
+      ? (proof.nativeProject === true ? proof.localProjectId === null
+        : typeof proof.localProjectId === "string" && proof.localProjectId.length >= 1 && proof.localProjectId.length <= 128)
       : (proof.subjectType === "organization" || proof.subjectType === "standalone_client")
         && proof.localProjectId === null)
     && Number.isFinite(evaluatedAt) && Number.isFinite(expiresAt)
@@ -347,6 +388,7 @@ export async function readServiceAssignmentPolicy(
       reviewRevision: checkpoint.review_revision,
       workspaceId: session.workspaceId!,
       localProjectId: target.local_project_id,
+      nativeProject: target.native_project === 1,
       subjectType: target.subject_type,
       subjectPublicId: target.subject_public_id,
       generationId: checkpoint.active_generation_id,

@@ -27,8 +27,12 @@ inventory](goal-remaining-acceptance.md) still applies.
 
 The secondary folder-binding/grant producer and its UI have passed the local
 database and browser gates recorded below. The workflow above still requires
-real producer compatibility and authorized live acceptance. Unsupported secondary finance, service
-requests, feedback, invitations, mail and Viewer operations remain unavailable.
+real producer compatibility and authorized live acceptance. Secondary finance,
+invitations, and Viewer operations remain unavailable. Native service requests
+and feedback now have a separately implemented, default-off exact-source path;
+they remain unavailable until the migration-first and per-source activation
+gates in [native portal requests and feedback](native-portal-requests-feedback.md)
+are satisfied.
 Native files currently use file-type icons, explicit previews and downloads;
 this slice does not yet expose existing thumbnail or photo-map endpoints to a
 secondary workspace. It does not change thumbnail generation. Do not describe

@@ -15,7 +15,7 @@ import { portalHierarchyRelationsEnabled,resolvePortalRelationAuthorizedTargets 
 import { parseProjectAccessTerms,prepareProjectAccessTerms,projectAccessTermsReady,readProjectAccessTerms,readWorkspaceInvitationPolicy,
   type ProjectAccessTermsInput,type ProjectAccessTermsView } from './project-access-terms';
 import {projectAccessAuthorityEvent,projectAccessAuthorityHistoryReady,projectAccessInvitationEvent} from './project-access-authority-history';
-import {captureProjectInvitationDelegation,captureWorkspaceInvitationDelegation} from './project-invitation-delegation';
+import {captureWorkspaceInvitationDelegation} from './project-invitation-delegation';
 import {invitationRequestsReady,submitWorkspaceInvitationRequest,replaySubmittedWorkspaceInvitationRequest,type WorkspaceInvitationRequestView} from './workspace-invitation-requests';
 import {PRIMARY_ALPHA_SOURCE_ID} from '@ltds/shared';
 import {HTTPException} from 'hono/http-exception';
@@ -455,18 +455,13 @@ export async function createWorkspaceInvitation(
   const sourceId=accessTerms?workspaceSource.source_id:null;
   const preparedTerms=accessTerms?await prepareProjectAccessTerms(db(env),{workspaceId,sourceId:sourceId??'',projectPublicId:selectedTarget.publicId},accessTerms,
     {type:'identity',id:actor.id},`invitation-${invitationId}`):null;
-  const delegation=secondary
-    ?await captureWorkspaceInvitationDelegation(env,{workspaceId,target:selectedTarget,identityId:actor.id,
-      issuer:principal.issuer,subject:principal.subject,email:principal.email.trim().toLowerCase()},capabilities,preparedTerms?.view??null)
-    :preparedTerms?await captureProjectInvitationDelegation(env,{workspaceId,projectId:selectedTarget.publicId,identityId:actor.id,
-      issuer:principal.issuer,subject:principal.subject,email:principal.email.trim().toLowerCase()},capabilities,preparedTerms.view):null;
-  if(delegation){
-    for(const capability of new Set<PortalWorkspaceCapability>(['member.manage','workspace.view',...capabilities])){
-      const target=capability==='workspace.view'?{scopeType:'workspace' as const,publicId:workspaceId}:selectedTarget;
-      if(secondary
-        ?!await secondaryTargetAllowed(env,secondary,workspaceId,target,[capability])
-        :!await authorizePortalWorkspaceCapability(env,principal,workspaceId,capability,target))return {outcome:'denied'};
-    }
+  const delegation=await captureWorkspaceInvitationDelegation(env,{workspaceId,target:selectedTarget,identityId:actor.id,
+    issuer:principal.issuer,subject:principal.subject,email:principal.email.trim().toLowerCase()},capabilities,preparedTerms?.view??null);
+  for(const capability of new Set<PortalWorkspaceCapability>(['member.manage','workspace.view',...capabilities])){
+    const target=capability==='workspace.view'?{scopeType:'workspace' as const,publicId:workspaceId}:selectedTarget;
+    if(secondary
+      ?!await secondaryTargetAllowed(env,secondary,workspaceId,target,[capability])
+      :!await authorizePortalWorkspaceCapability(env,principal,workspaceId,capability,target))return {outcome:'denied'};
   }
   const token = randomToken();
   const tokenHash = await digest(token);
@@ -500,12 +495,12 @@ export async function createWorkspaceInvitation(
         VALUES(?,CASE WHEN COALESCE((SELECT version FROM portal_workspace_invitation_policies WHERE workspace_id=?),0)=?
           AND COALESCE((SELECT policy FROM portal_workspace_invitation_policies WHERE workspace_id=?),'allowed')='allowed' THEN 1 ELSE 0 END)`)
         .bind(`issue-policy-${invitationId}`,workspaceId,policy.version,workspaceId)]:[]),
-      ...(delegation?[delegation.fence(invitationId)]:[]),
       ...(selectedContact?[selectedContact.fence(`invitation-contact-${invitationId}`)]:[]),
       ...(preparedTerms?[preparedTerms.statement]:[]),
+      delegation.fence(invitationId),
       database.prepare(`INSERT INTO portal_v2_invitations
         (id,workspace_id,token_hash,invited_email,invited_by_identity_id,expires_at)
-        VALUES (?,?,?,?,?,?)`).bind(invitationId, workspaceId, tokenHash, email, actor.id, expiresAt),
+        SELECT ?,?,?,?,?,? WHERE changes()=1`).bind(invitationId, workspaceId, tokenHash, email, actor.id, expiresAt),
       ...grants.map(capability => database.prepare(`INSERT INTO portal_v2_invitation_entitlements
         (invitation_id,capability,scope_type,scope_public_id${termsReady?',access_terms_id':''}) VALUES (?,?,?,?${termsReady?',?':''})`)
         .bind(invitationId, capability, capability === "workspace.view" ? "workspace" : scopeType, capability === "workspace.view" ? workspaceId : scopePublicId,

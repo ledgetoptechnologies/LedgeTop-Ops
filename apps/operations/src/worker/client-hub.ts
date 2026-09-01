@@ -266,6 +266,10 @@ async function clientHubDetail(env: Env, principal: StaffPrincipal, kind: Client
     pages: Object.fromEntries(collections.map(({ collection, result }) => [collection, result.page])),
     contextVersion: context.contextVersion,
     capabilities: access,
+    organizationOperationalContactsAvailable: workspace.root_namespace === "business" && workspace.kind === "organization",
+    projectManagementAvailable: workspace.root_namespace === "business",
+    businessActivityAvailable: workspace.root_namespace === "business",
+    auditTimelineAvailable: true,
   };
 }
 

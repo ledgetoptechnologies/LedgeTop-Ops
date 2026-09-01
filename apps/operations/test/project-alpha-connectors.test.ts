@@ -11,6 +11,8 @@ const author = "connector-admin";
 const key = (seed: number) => btoa(String.fromCharCode(...new Uint8Array(32).fill(seed))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 const signing = (seed: number, keyId = "current") => ({ keyId, algorithm: "ed25519" as const, value: key(seed) });
 const credential = (seed: number) => ({ snapshotApiKey: `private-api-key-${seed}`, eventCurrent: signing(seed) });
+const draftQuote = { apiKey: "secondary-draft-api-key", hmacSecret: "secondary-draft-hmac-secret-at-least-thirty-two-bytes" };
+const ownerDraftQuote = { apiKey: "owner-draft-api-key", hmacSecret: "owner-draft-hmac-secret-at-least-thirty-two-bytes" };
 const revision = (credentialRef: string) => ({ credentialRef, snapshotBasePath: "/", accessIssuer: "https://access.example.test",
   accessAudience: "business-receiver-audience", accessSubject: "service-token-subject" });
 function input(name: string, credentialRef = "secondary"): RegisterProjectAlphaConnectorInput {
@@ -20,8 +22,13 @@ function input(name: string, credentialRef = "secondary"): RegisterProjectAlphaC
 const primaryInput: RegisterProjectAlphaConnectorInput = { ...input("primary", "primary"), snapshotOrigin: "https://primary.example.test", profile: "primary_legacy" };
 const baseSets = {
   primary: { ...credential(1), eventPrevious: signing(2, "previous") },
-  secondary: credential(3), rotated: { ...credential(4), eventPrevious: signing(3, "previous") },
+  secondary: credential(3), rotated: { ...credential(4), eventPrevious: signing(3, "previous"), draftQuote },
   other: credential(5), third: credential(6), fourth: credential(7), fifth: credential(8), sixth: credential(9),
+  draftOwner: { ...credential(10), draftQuote: ownerDraftQuote },
+  draftRollback: { ...credential(11), draftQuote: ownerDraftQuote },
+  draftRaceA: { ...credential(12), draftQuote: { apiKey: "race-draft-api-key", hmacSecret: "race-draft-hmac-secret-at-least-thirty-two-bytes" } },
+  draftRaceB: { ...credential(13), draftQuote: { apiKey: "race-draft-api-key", hmacSecret: "race-draft-hmac-secret-at-least-thirty-two-bytes" } },
+  draftReuse: { ...credential(14), draftQuote: ownerDraftQuote },
 };
 const preservedTables = ["pa_clients", "staff_users", "integration_event_receipts", "integration_health", "client_hub_directory_state"] as const;
 let runtime: Miniflare;
@@ -60,6 +67,7 @@ beforeAll(async () => {
   ]);
   before = await storedTables();
   await db.batch(splitD1MigrationStatements(readFileSync(new URL("0035_project_alpha_connectors.sql", directory), "utf8")).map(sql => db.prepare(sql)));
+  await db.batch(splitD1MigrationStatements(readFileSync(new URL("0050_project_alpha_draft_quote_credentials.sql", directory), "utf8")).map(sql => db.prepare(sql)));
   after = await storedTables();
   emptyRegistryCount = await db.prepare("SELECT count(*) count FROM pa_connectors").first<number>("count");
   env = { OPS_DB: db, PROJECT_ALPHA_BASE_URL: "https://primary.example.test/", PROJECT_ALPHA_API_KEY: "original-api-key",
@@ -77,6 +85,12 @@ describe("durable authenticated connector registry", () => {
     for (const table of ["pa_connectors", "pa_connector_revisions", "pa_connector_signing_keys", "pa_connector_audit"]) {
       expect(await db.prepare(`PRAGMA quick_check('${table}')`).first("quick_check")).toBe("ok");
     }
+    const revisionColumns = (await db.prepare("PRAGMA table_info(pa_connector_revisions)").all<{ name: string }>()).results.map(column => column.name);
+    expect(revisionColumns).toEqual(expect.arrayContaining(["draft_quote_api_key_fingerprint", "draft_quote_hmac_fingerprint"]));
+    expect(await db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND name='pa_connector_revision_draft_quote_pair'").first("name"))
+      .toBe("pa_connector_revision_draft_quote_pair");
+    expect(await db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='pa_connector_draft_quote_credentials'").first("name"))
+      .toBe("pa_connector_draft_quote_credentials");
   });
 
   it("allows only the absent-primary scalar adapter, never a secondary fallback", async () => {
@@ -178,6 +192,9 @@ describe("durable authenticated connector registry", () => {
     await reviseProjectAlphaConnector(env, id, await currentVersion(id), revision("rotated"), author);
     await expect(assertProjectAlphaConnectorProof(env, old.proof)).rejects.toMatchObject({ code: "changed" });
     expect((await resolveProjectAlphaConnector(env, id, "events")).event).toMatchObject({ current: { value: key(4) }, previous: { value: key(3) } });
+    expect((await resolveProjectAlphaConnector(env, id, "draft_quote")).draftQuote).toEqual({
+      baseUrl: "https://secondary.example.test", applicationKey: "ltds_ops", apiKey: draftQuote.apiKey, hmacSecret: draftQuote.hmacSecret,
+    });
     await expect(registerProjectAlphaConnector(env, input("steal-old", "secondary"), author)).rejects.toMatchObject({ code: "conflict" });
     await expect(registerProjectAlphaConnector(env, input("steal-current", "rotated"), author)).rejects.toMatchObject({ code: "conflict" });
     expect(await db.prepare("SELECT source_id FROM pa_connectors WHERE source_id IN ('project-alpha:steal-old','project-alpha:steal-current')").all()).toMatchObject({ results: [] });
@@ -194,6 +211,52 @@ describe("durable authenticated connector registry", () => {
       .rejects.toMatchObject({ code: "credentials_unavailable" });
     await expect(resolveProjectAlphaConnector({ ...env, PROJECT_ALPHA_CONNECTOR_CREDENTIALS: '{"version":1,"sets":{}}' }, primary, "snapshot"))
       .rejects.toMatchObject({ code: "credentials_unavailable" });
+  });
+
+  it("requires dedicated, revision-pinned draft credentials and never substitutes another connector purpose", async () => {
+    const selected = baseSets.rotated;
+    for (const invalid of [
+      { ...selected, draftQuote: { apiKey: selected.snapshotApiKey, hmacSecret: draftQuote.hmacSecret } },
+      { ...selected, draftQuote: { apiKey: draftQuote.apiKey, hmacSecret: selected.eventCurrent.value } },
+      { ...selected, draftQuote: { apiKey: draftQuote.apiKey, hmacSecret: draftQuote.apiKey } },
+    ]) await expect(resolveProjectAlphaConnector({ ...env,
+      PROJECT_ALPHA_CONNECTOR_CREDENTIALS: JSON.stringify({ version: 1, sets: { ...baseSets, rotated: invalid } }) },
+    "project-alpha:secondary", "draft_quote")).rejects.toMatchObject({ code: "credentials_unavailable" });
+    await expect(resolveProjectAlphaConnector({ ...env, PROJECT_ALPHA_DRAFT_QUOTE_API_KEY: draftQuote.apiKey },
+      "project-alpha:secondary", "draft_quote")).rejects.toMatchObject({ code: "conflict" });
+    const drift = { ...selected, draftQuote: { ...draftQuote, apiKey: "unregistered-rotated-api-key" } };
+    await expect(resolveProjectAlphaConnector({ ...env,
+      PROJECT_ALPHA_CONNECTOR_CREDENTIALS: JSON.stringify({ version: 1, sets: { ...baseSets, rotated: drift } }) },
+    "project-alpha:secondary", "draft_quote")).rejects.toMatchObject({ code: "credentials_unavailable" });
+  });
+
+  it("reserves draft credentials to one source across staggered registration, rotation, and rollback", async () => {
+    const owner = await registered("draft-owner", "draftOwner");
+    await reviseProjectAlphaConnector(env,owner.sourceId,await currentVersion(owner.sourceId),revision("draftRollback"),author);
+    await reviseProjectAlphaConnector(env,owner.sourceId,await currentVersion(owner.sourceId),revision("draftOwner"),author);
+    expect(await db.prepare("SELECT count(*) count FROM pa_connector_draft_quote_credentials WHERE source_id=?")
+      .bind(owner.sourceId).first("count")).toBe(2);
+    await expect(registerProjectAlphaConnector(env,input("draft-staggered-theft","draftReuse"),author))
+      .rejects.toMatchObject({code:"conflict"});
+    expect(await db.prepare("SELECT source_id FROM pa_connectors WHERE source_id='project-alpha:draft-staggered-theft'").first()).toBeNull();
+    await expect(db.prepare("UPDATE pa_connector_draft_quote_credentials SET source_id='project-alpha:other'").run()).rejects.toThrow();
+    await expect(db.prepare("DELETE FROM pa_connector_draft_quote_credentials").run()).rejects.toThrow();
+    await expect(db.prepare(`INSERT OR REPLACE INTO pa_connector_draft_quote_credentials
+      SELECT * FROM pa_connector_draft_quote_credentials LIMIT 1`).run()).rejects.toThrow();
+  });
+
+  it("converges racing cross-source draft credential reservations to one owner", async () => {
+    const left=input("draft-race-left","draftRaceA"),right=input("draft-race-right","draftRaceB");
+    const results=await Promise.allSettled([
+      registerProjectAlphaConnector(env,left,author),registerProjectAlphaConnector(env,right,author),
+    ]);
+    expect(results.filter(result=>result.status==="fulfilled")).toHaveLength(1);
+    expect(results.filter(result=>result.status==="rejected")).toHaveLength(1);
+    const owners=(await db.prepare(`SELECT DISTINCT source_id FROM pa_connector_draft_quote_credentials
+      WHERE source_id IN (?,?)`).bind(left.sourceId,right.sourceId).all<{source_id:string}>()).results;
+    expect(owners).toHaveLength(1);
+    expect(await db.prepare(`SELECT count(*) count FROM pa_connector_draft_quote_credentials
+      WHERE source_id IN (?,?)`).bind(left.sourceId,right.sourceId).first("count")).toBe(2);
   });
 
   it("isolates malformed unrelated credentials while strictly rejecting the selected malformed set", async () => {

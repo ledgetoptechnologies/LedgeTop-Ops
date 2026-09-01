@@ -2,6 +2,19 @@ import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent as 
 import mapboxgl from "mapbox-gl";
 import type { DeliveryLocationCollection, DeliveryLocationPoint } from "@ltds/shared";
 
+type PointGeometry = { type: "Point"; coordinates: [number, number] };
+type ImageLocationProperties = { imageCount: number; assetRef: string };
+type ImageLocationFeature = {
+  type: "Feature";
+  properties: ImageLocationProperties;
+  geometry: PointGeometry;
+};
+type ImageLocationFeatureCollection = {
+  type: "FeatureCollection";
+  features: ImageLocationFeature[];
+};
+type RenderedImageLocationFeature = mapboxgl.GeoJSONFeature & { properties: Partial<ImageLocationProperties> };
+
 export interface ImageLocationMapProps {
   token: string | null;
   locations: DeliveryLocationCollection | null;
@@ -23,11 +36,11 @@ export interface ImageLocationMapAsset {
   downloadUrl?: string;
 }
 
-function mapData(points: DeliveryLocationPoint[]): GeoJSON.FeatureCollection {
+function mapData(points: DeliveryLocationPoint[]): ImageLocationFeatureCollection {
   return { type: "FeatureCollection", features: points.map(point => ({
     type: "Feature" as const,
     properties: { imageCount: point.imageCount, assetRef: point.assetRef || "" },
-    geometry: { type: "Point" as const, coordinates: [point.longitude, point.latitude] },
+    geometry: { type: "Point" as const, coordinates: [point.longitude, point.latitude] as [number, number] },
   })) };
 }
 
@@ -84,7 +97,7 @@ function LocationCanvas({ token, points, expanded, scopeLabel, onPointSelect }: 
       });
       fitPoints(map, points);
       map.on("click", "image-location-points", event => {
-        const assetRef = event.features?.[0]?.properties?.assetRef;
+        const assetRef = (event.features?.[0] as RenderedImageLocationFeature | undefined)?.properties.assetRef;
         if (typeof assetRef === "string" && assetRef) selectRef.current?.(assetRef);
       });
       map.on("mouseenter", "image-location-points", () => { map.getCanvas().style.cursor = "pointer"; });

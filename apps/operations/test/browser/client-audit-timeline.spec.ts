@@ -49,12 +49,14 @@ function clientDetail() {
     root_namespace: "business", pa_public_id: null, detail_path: clientPath, display_name: "Acme Construction", status: "active",
     portal_status: "not_provisioned", account_count: 0, project_count: 0, request_count: 0, contact_count: 0 },
     contacts: [], accounts: [], projects: [], requests: [], deliveryGrants: [], authenticatedDeliveryGrants: [], viewerGrants: [],
+    auditTimelineAvailable: true,
     contextVersion: "client-context", capabilities: { directory: true, requests: false, delivery: false, viewer: false },
     businessParty: null, canManageBusinessParties: false };
 }
 function projectDetail() {
   return { canonicalRoot, client: { display_name: "Acme Construction", detail_path: clientPath }, contextVersion: "project-context", refreshedAt: asOf,
     project: { id: "project-one", name: "Church survey", status: "active", description: null, start_date: null, end_date: null, created_at: null, manager: null },
+    operationalWorkspaceAvailable: true, auditTimelineAvailable: true,
     linkedContact: null, availability: { linkedContact: "not_projected", siteContacts: "not_projected", billingContacts: "not_projected", projectMemory: "not_projected" } };
 }
 function operationalWorkspace() {

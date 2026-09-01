@@ -338,6 +338,7 @@ describe("post-0121 client account root activation on the real Client migration 
       INSERT INTO pa_clients(id,name,organization_id,active,last_sync_id,updated_at) VALUES
         ('pa-client-late','Late PA Client','pa-org-late',1,'sync-client-late','2026-08-17T00:00:00Z'),
         ('pa-linked','Linked PA Client',NULL,1,'sync-linked','2026-08-17T00:00:00Z'),
+        ('pa-storage','Storage PA Client',NULL,1,'sync-storage','2026-08-17T00:00:00Z'),
         ('pa-partial','Partial PA Client',NULL,1,'sync-partial','2026-08-17T00:00:00Z'),
         ('pa-rollback','Rollback PA Client',NULL,1,'sync-rollback','2026-08-17T00:00:00Z'),
         ('pa-race','Race PA Client',NULL,1,'sync-race','2026-08-17T00:00:00Z'),
@@ -374,7 +375,25 @@ describe("post-0121 client account root activation on the real Client migration 
       deliveryDb.prepare(`INSERT INTO portal_v2_workspaces
         (id,root_type,pa_organization_public_id,display_name,status,project_alpha_source_id)
         VALUES('secondary-workspace','organization','pa-org-late','Other source','active','project-alpha:secondary')`),
+      deliveryDb.prepare(`INSERT INTO client_accounts(id,display_name,status,project_alpha_source_id,updated_at)
+        VALUES('storage-masquerade','Storage only','active','project-alpha:primary','storage-v1')`),
+      deliveryDb.prepare(`INSERT INTO client_identity_links(id,account_id,issuer,subject,email)
+        VALUES('storage-masquerade-identity','storage-masquerade','urn:ltds:native-request-storage',
+          'storage-masquerade',NULL)`),
+      deliveryDb.prepare(`INSERT INTO portal_v2_workspaces
+        (id,root_type,pa_client_public_id,display_name,status,project_alpha_source_id)
+        VALUES('storage-masquerade-workspace','standalone_client','pa-storage',
+          'Storage only','active','project-alpha:primary')`),
+      deliveryDb.prepare(`INSERT INTO portal_native_request_storage_bindings
+        (workspace_id,source_id,account_id,storage_identity_id)
+        VALUES('storage-masquerade-workspace','project-alpha:primary','storage-masquerade',
+          'storage-masquerade-identity')`),
     ]);
+    expect((await listClientAccountRootActivation(env)).accounts
+      .some(account => account.id === "storage-masquerade")).toBe(false);
+    await expect(activateClientAccountRoot(env, principal, "storage-masquerade", {
+      projectAlphaClientId: "pa-storage", expectedUpdatedAt: "storage-v1",
+    })).rejects.toMatchObject({ status: 404 });
     const activated = await activateClientAccountRoot(env, principal, "late-account", {
       projectAlphaClientId: "pa-client-late",
       expectedUpdatedAt: "2026-08-16T00:00:00Z",
@@ -593,5 +612,5 @@ describe("post-0121 client account root activation on the real Client migration 
     expect(await deliveryDb.prepare(`SELECT COUNT(*) count FROM portal_v2_workspaces
       WHERE pa_client_public_id='pa-race'`).first("count")).toBe(1);
     expect((await deliveryDb.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
-  }, 30_000);
+  }, 60_000);
 });

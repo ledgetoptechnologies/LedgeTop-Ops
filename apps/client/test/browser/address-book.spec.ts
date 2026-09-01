@@ -107,7 +107,7 @@ test("a late contact search cannot populate another management workspace", async
 });
 
 test("a wrong-source contact response clears the protected Team context", async ({page}) => {
-  await fixture(page, (route, call) => call.path.endsWith("/contacts/search") ? route.fulfill({json: {items: [jane({sourceId: "project-alpha:secondary"})], nextCursor: null, contextVersion}}) : undefined); await open(page); await page.getByRole("button", {name: "Manage address book"}).click(); await expect(page.getByRole("alert")).toContainText("workspace access changed"); await expect(page.getByRole("button", {name: "Review invitation", exact: true})).toBeDisabled(); await expect(page.getByLabel("Email address", {exact: true})).toHaveValue(""); await expect(page.getByText("Jane Electrician", {exact: true})).toHaveCount(0);
+  await fixture(page, (route, call) => call.path.endsWith("/contacts/search") ? route.fulfill({json: {items: [jane({sourceId: "project-alpha:secondary"})], nextCursor: null, contextVersion}}) : undefined); await open(page); await page.getByRole("button", {name: "Manage address book"}).click(); await expect(page.getByRole("alert")).toContainText("workspace access changed"); await expect(page.getByRole("button", {name: "Review invitation", exact: true})).toHaveCount(0); await expect(page.getByLabel("Email address", {exact: true})).toHaveCount(0); await expect(page.getByText("Jane Electrician", {exact: true})).toHaveCount(0);
 });
 
 for (const width of [375, 1280]) test(`address-book management and keyboard picker fit ${width}px`, async ({page}, testInfo) => {

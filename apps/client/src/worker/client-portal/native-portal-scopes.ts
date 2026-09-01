@@ -65,18 +65,48 @@ export const NATIVE_PORTAL_TARGET_SCOPES_SQL=`WITH RECURSIVE
       FROM lineage l JOIN roots r ON r.target_type=l.target_type AND r.target_id=l.target_id
       ORDER BY l.target_type,l.target_id,l.depth,l.entity_type,l.public_id`;
 
+/** Exact pre-relation fallback used only after callers prove the legacy
+ * contract. Invitation writes bind that schema proof into their atomic fence. */
+export const PRE_RELATION_NATIVE_PORTAL_TARGET_SCOPES_SQL=`WITH RECURSIVE
+    requested(target_type,target_id) AS (
+      SELECT DISTINCT json_extract(value,'$.scopeType'),json_extract(value,'$.publicId') FROM json_each(?1)
+    ), current_generation AS (
+      SELECT cp.workspace_id,cp.active_generation_id generation_id FROM portal_v2_directory_checkpoints cp
+      JOIN portal_v2_directory_generations g ON g.id=cp.active_generation_id AND g.workspace_id=cp.workspace_id AND g.status='active' AND g.complete=1
+      WHERE cp.workspace_id=?2 AND cp.active_generation_id=?3
+    ), roots AS (
+      SELECT r.target_type,r.target_id,e.entity_type,e.public_id,e.parent_public_id,e.source_version,
+        substr(e.display_name,1,500) display_name,NULL binding_version
+      FROM requested r JOIN current_generation g
+      JOIN portal_v2_directory_entities e ON e.workspace_id=g.workspace_id AND e.generation_id=g.generation_id AND e.active=1
+        AND e.entity_type=r.target_type AND e.public_id=r.target_id
+    ), lineage(target_type,target_id,entity_type,public_id,parent_public_id,source_version,depth) AS (
+      SELECT target_type,target_id,entity_type,public_id,parent_public_id,source_version,0 FROM roots
+      UNION ALL
+      SELECT l.target_type,l.target_id,p.entity_type,p.public_id,p.parent_public_id,p.source_version,l.depth+1
+      FROM lineage l JOIN current_generation g
+      JOIN portal_v2_directory_entities p ON p.workspace_id=g.workspace_id AND p.generation_id=g.generation_id AND p.active=1
+        AND p.public_id=l.parent_public_id WHERE ?4=0 AND l.parent_public_id IS NOT NULL AND l.depth<8
+        AND (SELECT count(*) FROM portal_v2_directory_entities same_parent WHERE same_parent.workspace_id=g.workspace_id
+          AND same_parent.generation_id=g.generation_id AND same_parent.public_id=l.parent_public_id AND same_parent.active=1)=1
+      LIMIT ?5
+    ) SELECT l.*,r.display_name,r.binding_version,1 retained
+      FROM lineage l JOIN roots r ON r.target_type=l.target_type AND r.target_id=l.target_id
+      ORDER BY l.target_type,l.target_id,l.depth,l.entity_type,l.public_id`;
+
 /** Native-only batching of the existing legacy/relation ancestor contract.
  * Authorization effects are evaluated by workspace-v2's shared pure rules.
  * Bound the recursive working set as well as the response; exhaustion is an
  * explicit capacity error, never an apparently empty authorized directory. */
 export async function readNativeTargetScopes(env:Pick<PortalAuthorizationEnv,'DELIVERY_DB'|'CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED'>,
   context:Pick<NativePortalReadContext,'workspaceId'|'generationId'|'rootType'|'rootPublicId'>,targets:PortalWorkspaceTarget[],
-  options?:{retention:'structural'}):Promise<Map<string,NativeTargetScopes>> {
+  options?:{retention:'structural';preRelationContract?:boolean}):Promise<Map<string,NativeTargetScopes>> {
   if(targets.length>200)throw new HTTPException(503,{message:'Workspace scope capacity exceeded. Contact support.'});
   const result=new Map<string,NativeTargetScopes>();
   if(!targets.length)return result;
   const relations=env.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED==='true',maxRows=targets.length*65;
-  const rows=await env.DELIVERY_DB.withSession('first-primary').prepare(NATIVE_PORTAL_TARGET_SCOPES_SQL)
+  const sql=options?.preRelationContract===true&&!relations?PRE_RELATION_NATIVE_PORTAL_TARGET_SCOPES_SQL:NATIVE_PORTAL_TARGET_SCOPES_SQL;
+  const rows=await env.DELIVERY_DB.withSession('first-primary').prepare(sql)
     .bind(JSON.stringify(targets),context.workspaceId,context.generationId,relations?1:0,maxRows+1)
     .all<NativeTargetScopeRow>();
   if(rows.results.length>maxRows)throw new HTTPException(503,{message:'Workspace scope capacity exceeded. Contact support.'});

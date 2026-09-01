@@ -222,6 +222,31 @@ describe("client portal route authorization context", () => {
     expect(createServiceRequest).toHaveBeenCalledTimes(1);
   });
 
+  it("accepts a same-origin mutation on the reviewed secondary portal domain without accepting mixed-domain requests", async () => {
+    const createServiceRequest = vi.fn(async () => ({ kind: "created" as const, request: serviceRequest }));
+    const app = createClientPortalRouter({ resolvePrincipal: principal, repository: repository({ createServiceRequest }) });
+    const dualDomainEnv = {
+      ...env("true", "https://client.drone.example"),
+      CLIENT_PORTAL_ORIGINS: "https://client.drone.example,https://client.technology.example",
+    };
+    const body = JSON.stringify({ projectId: "project-a", requestType: "flight", title: "Site flight", details: "Capture current site conditions." });
+    const mixed = await app.request("https://client.technology.example/service-requests", {
+      method: "POST",
+      headers: { Origin: "https://client.drone.example", "Content-Type": "application/json", "Idempotency-Key": "request-test-secondary-1" },
+      body,
+    }, dualDomainEnv);
+    expect(mixed.status).toBe(403);
+    expect(createServiceRequest).not.toHaveBeenCalled();
+
+    const created = await app.request("https://client.technology.example/service-requests", {
+      method: "POST",
+      headers: { Origin: "https://client.technology.example", "Content-Type": "application/json", "Idempotency-Key": "request-test-secondary-2" },
+      body,
+    }, dualDomainEnv);
+    expect(created.status).toBe(201);
+    expect(createServiceRequest).toHaveBeenCalledTimes(1);
+  });
+
   it("uses non-enumerating 404s for invalid or unauthorized resource selectors", async () => {
     const repo = repository({ getServiceRequest: vi.fn(async () => null) });
     const app = createClientPortalRouter({ resolvePrincipal: principal, repository: repo });

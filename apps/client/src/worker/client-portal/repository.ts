@@ -1,6 +1,7 @@
 import {
   aggregateDeliveryLocations,
   buildServiceRequestNotificationSnapshot,
+  createCatalogSourceContext,
   PRIMARY_ALPHA_SOURCE_ID,
   PRIMARY_CATALOG_SOURCE,
   type DeliveryLocationCollection,
@@ -33,7 +34,19 @@ import {
   submitServiceRequestDraft,
 } from "./request-v2";
 import { listAuthorizedAuthenticatedDeliveryPrefixes } from "./authenticated-delivery-grants";
-import { listServiceCatalogPageForSource } from "./service-catalog-page";
+import { listServiceCatalogPageForSource, ServiceCatalogPageError } from "./service-catalog-page";
+import {
+  cancelNativeServiceRequest,
+  createNativeServiceRequestDraft,
+  getNativeServiceRequest,
+  getNativeServiceRequestDraft,
+  listNativeServiceCatalog,
+  listNativeServiceRequestDrafts,
+  listNativeServiceRequests,
+  saveNativeServiceRequestDraft,
+  submitNativeServiceRequestDraft,
+} from "./native-request-v2";
+import { resolveNativeRequestAuthority } from "./native-request-authority";
 
 const CLIENT_FILE_PAGE_SIZE = 150;
 const CLIENT_FILE_QUERY_LIMIT = CLIENT_FILE_PAGE_SIZE + 1;
@@ -737,34 +750,46 @@ async function getServiceRequestByIdempotency(
 
 export const d1ClientPortalRepository: ClientPortalRepository = {
   async listServiceCatalog(env, session, input) {
+    if (session.nativeSourceId) return listNativeServiceCatalog(env, session, input?.projectId ?? null);
     return listServiceCatalog(env, session, input?.projectId ?? null);
   },
 
   async listServiceCatalogPage(env, session, input) {
+    if (session.nativeSourceId) {
+      const authority = await resolveNativeRequestAuthority(env, session, input.projectId ?? null);
+      if (!authority) throw new ServiceCatalogPageError(503, "catalog_unavailable");
+      return listServiceCatalogPageForSource(env, createCatalogSourceContext(authority.sourceId), input, session);
+    }
     return listServiceCatalogPageForSource(env, PRIMARY_CATALOG_SOURCE, input, session);
   },
 
   async getServiceRequestDraft(env, session, draftId) {
+    if (session.nativeSourceId) return getNativeServiceRequestDraft(env, session, draftId);
     return getServiceRequestDraft(env, session, draftId);
   },
 
   async listServiceRequestDrafts(env, session) {
+    if (session.nativeSourceId) return listNativeServiceRequestDrafts(env, session);
     return listServiceRequestDrafts(env, session);
   },
 
   async createServiceRequestDraft(env, session, input, mutationKey) {
+    if (session.nativeSourceId) return createNativeServiceRequestDraft(env, session, input, mutationKey);
     return createServiceRequestDraft(env, session, input, mutationKey);
   },
 
   async saveServiceRequestDraft(env, session, draftId, expectedVersion, input, mutationKey) {
+    if (session.nativeSourceId) return saveNativeServiceRequestDraft(env, session, draftId, expectedVersion, input, mutationKey);
     return saveServiceRequestDraft(env, session, draftId, expectedVersion, input, mutationKey);
   },
 
   async submitServiceRequestDraft(env, session, draftId, expectedVersion, mutationKey) {
+    if (session.nativeSourceId) return submitNativeServiceRequestDraft(env, session, draftId, expectedVersion, mutationKey);
     return submitServiceRequestDraft(env, session, draftId, expectedVersion, mutationKey);
   },
 
   async cancelServiceRequest(env, session, requestId, mutationKey) {
+    if (session.nativeSourceId) return cancelNativeServiceRequest(env, session, requestId, mutationKey);
     return cancelServiceRequest(env, session, requestId, mutationKey);
   },
 
@@ -1283,6 +1308,7 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
     env: Env,
     session: ClientPortalSession,
   ): Promise<ClientServiceRequest[]> {
+    if (session.nativeSourceId) return listNativeServiceRequests(env, session);
     const result = await serviceRequestRead(env, (database, sql) => database.prepare(`
       SELECT ${sql.columns}
       FROM client_service_requests r
@@ -1305,6 +1331,7 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
     session: ClientPortalSession,
     requestId: string,
   ): Promise<ClientServiceRequest | null> {
+    if (session.nativeSourceId) return getNativeServiceRequest(env, session, requestId);
     const row = await serviceRequestRead(env, (database, sql) => database.prepare(`
       SELECT ${sql.columns}
       FROM client_service_requests r

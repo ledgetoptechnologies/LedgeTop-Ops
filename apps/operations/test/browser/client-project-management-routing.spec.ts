@@ -17,6 +17,7 @@ function detail(projects: ReturnType<typeof project>[] = []) {
     status: "active", portal_status: "mapping_unavailable", account_count: 0, project_count: projects.length, request_count: 0, contact_count: 0 },
     contextVersion, contacts: [], accounts: [], projects: [], requests: [], deliveryGrants: [], authenticatedDeliveryGrants: [], viewerGrants: [],
     businessProjects: projects, pages: { businessProjects: { available: true, reason: null, hasMore: false, nextCursor: null, limit: 5, returned: projects.length } },
+    projectManagementAvailable: true,
     capabilities: { directory: true, requests: false, delivery: false, viewer: false } };
 }
 function status(overrides: Record<string, unknown> = {}) {

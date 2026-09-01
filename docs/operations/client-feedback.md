@@ -37,6 +37,17 @@ This increment does not implement feedback inside the Viewer, model annotations,
 website-element selectors, video timestamps, attachments, or anonymous public
 links. The Viewer and thumbnail runtimes remain unchanged.
 
+### Native Project Alpha extension
+
+Migration `0184_native_client_feedback.sql` adds the separate native-workspace
+ownership and lifecycle records. It does not reinterpret migration `0155`
+primary feedback or create a legacy account bridge. Native feedback stays
+unavailable until the exact source's current signed feature projection, current
+workspace/principal authority, target readiness, and the external
+`nativePortalFeedback` evidence gate all pass. Primary feedback availability is
+not a fallback. See
+[native portal requests and feedback](native-portal-requests-feedback.md).
+
 ## Authorization invariants
 
 - Client history and notifications are creator-only, not visible to every member
@@ -214,13 +225,17 @@ whole release range and their runbooks before deployment. The outstanding Alpha
 public-ID prerequisite and its publication approval remain separate.
 
 After approval and acceptance, back up the Delivery database and apply its
-ordered additive migrations before enabling compatible Client/Operations code.
+ordered additive migrations, including `0184` before the paired compatible
+Client/Operations code, while the exact native source feature remains
+unavailable.
 Readiness must show unavailable when the feedback schema is absent, while the
 existing application remains usable. Use a designated test account for the
 post-deploy smoke test; do not create client invitations, grants, or email as a
 side effect of testing.
 
-For a code rollback, retain the additive tables and audit history. Do not drop
+For a code rollback, first withdraw the exact native feedback feature, confirm
+signed capability readback, and drain staff transitions and completion leases.
+Retain the additive tables and audit history. Do not drop
 feedback or replay receipts to clear an error, reset sent outbox records, or
 rewrite authorization snapshots. Reconcile pending notices before resuming a
 dispatcher. A successful local run is not evidence that a deployed browser or

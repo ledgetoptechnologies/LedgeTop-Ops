@@ -102,6 +102,7 @@ describe("read-only source-qualified business project detail", () => {
       linkedContact: { id: "client-a", display_name: "Contact A", email: "a@example.test", phone: "+1 (555) 123-4567",
         sourceField: "project.client_id" },
       availability: { linkedContact: "available", siteContacts: "not_projected", billingContacts: "not_projected", projectMemory: "not_projected" },
+      operationalWorkspaceAvailable: true, businessActivityAvailable: true, auditTimelineAvailable: true, feedbackHistoryAvailable: true,
     });
     expect(result.linkedContact).not.toHaveProperty("role");
     expect(JSON.stringify(result)).not.toMatch(/payload_json|billing_status|never-return|secret memory|has_workspace_access|entitlements/);

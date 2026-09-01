@@ -33,6 +33,8 @@ function detail(kind: "organization" | "standalone_client" = "organization") {
       status: "active", portal_status: "not_provisioned", account_count: 0, project_count: 0, request_count: 0, contact_count: 3 },
     contextVersion: "context-one", contacts: [contact("primary-one")], accounts: [], projects: [], requests: [],
     deliveryGrants: [], authenticatedDeliveryGrants: [], viewerGrants: [], capabilities: { directory: true, requests: false, delivery: false, viewer: false },
+    organizationOperationalContactsAvailable: kind === "organization",
+    businessActivityAvailable: true,
     pages: { businessContacts: { available: true, reason: null, nextCursor: null, hasMore: false, returned: 1, limit: 5 } },
   };
 }

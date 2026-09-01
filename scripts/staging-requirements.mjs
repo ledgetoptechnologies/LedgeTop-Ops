@@ -101,8 +101,19 @@ export const STAGING_CLIENT_PORTAL = Object.freeze({
   applicationName: "LTDS Client Portal Staging",
   publicApplicationName: "LTDS Client Public Staging",
   hostname: STAGING_HOSTS.client,
+  secondaryHostname: "portal-staging.ledgetoptechnologies.com",
   publicHostname: STAGING_HOSTS.delivery,
   protectedPaths: Object.freeze(["/portal", "/portal/*", "/api/client", "/api/client/*"]),
+  protectedDestinations: Object.freeze([
+    "client-staging.ledgetopdroneservices.com/portal",
+    "client-staging.ledgetopdroneservices.com/portal/*",
+    "client-staging.ledgetopdroneservices.com/api/client",
+    "client-staging.ledgetopdroneservices.com/api/client/*",
+    "portal-staging.ledgetoptechnologies.com/portal",
+    "portal-staging.ledgetoptechnologies.com/portal/*",
+    "portal-staging.ledgetoptechnologies.com/api/client",
+    "portal-staging.ledgetoptechnologies.com/api/client/*",
+  ]),
   publicPaths: Object.freeze(["/", "/s/*", "/client-share/*", "/api/public/*", "/health", "/assets/*"]),
   groupName: "LTDS Client Portal Staging Testers",
 });
@@ -110,7 +121,10 @@ export const STAGING_CLIENT_PORTAL = Object.freeze({
 export const STAGING_REQUEST_ATTACHMENT_R2_CORS = Object.freeze({
   rules: Object.freeze([Object.freeze({
     allowed: Object.freeze({
-      origins: Object.freeze([`https://${STAGING_HOSTS.client}`]),
+      origins: Object.freeze([
+        `https://${STAGING_HOSTS.client}`,
+        `https://${STAGING_CLIENT_PORTAL.secondaryHostname}`,
+      ]),
       methods: Object.freeze(["PUT"]),
       headers: Object.freeze(["content-type"]),
     }),
@@ -208,6 +222,9 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0181_service_assignment_request_policy_reviews.sql",
     "0182_portal_delivery_notification_source_ready.sql",
     "0183_portal_delivery_notification_direct_source_ready.sql",
+    "0184_native_client_feedback.sql",
+    "0185_native_service_request_ownership.sql",
+    "0186_delivery_notification_authority_provenance.sql",
   ]),
   operations: Object.freeze([
     "0014_staff_acl_controls.sql",
@@ -246,6 +263,7 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0047_project_memory_staff_attachments.sql",
     "0048_business_party_lifecycle.sql",
     "0049_project_alpha_delivery_source_rate_limits.sql",
+    "0050_project_alpha_draft_quote_credentials.sql",
   ]),
 });
 
@@ -256,6 +274,7 @@ export const REQUIRED_DISABLED_FEATURE_FLAGS = Object.freeze({
   delivery: Object.freeze([
     "CLIENT_PORTAL_ENABLED",
     "CLIENT_PORTAL_REQUEST_V2_ENABLED",
+    "CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED",
     "PROJECT_ALPHA_CATALOG_SYNC_ENABLED",
     "PROJECT_ALPHA_PORTAL_SYNC_ENABLED",
     "PROJECT_ALPHA_SERVICE_ASSIGNMENT_SYNC_ENABLED",
@@ -315,6 +334,8 @@ export const REQUIRED_EXTERNAL_GATES = Object.freeze([
   "projectAlphaCatalogProjection",
   "projectAlphaPricingHints",
   "projectAlphaDraftQuotes",
+  "nativePortalRequests",
+  "nativePortalFeedback",
   "requestAttachmentScanner",
   "requestAttachmentR2CorsAndLeastPrivilege",
   "workspaceInvitationEmail",
@@ -348,6 +369,19 @@ export const REQUIRED_EXTERNAL_GATE_PROOFS = Object.freeze({
   projectAlphaDraftQuotes: Object.freeze([
     "fixturePinned", "idempotentReplayVerified", "conflictingReplayDenied",
     "noFinancialSideEffects", "nativeEditorHandoffVerified",
+    "dedicatedConnectorCredentialsVerified", "connectorRevisionFingerprintsMatched",
+    "primaryScalarNotReused",
+  ]),
+  nativePortalRequests: Object.freeze([
+    "exactSourceWorkspaceIdentityProjectVerified", "collidingPublicIdsIsolated",
+    "principalRevisionRaceDenied", "revocationAndReplayVerified",
+    "attachmentsSourceBound", "exactDraftQuoteDestinationVerified",
+    "storageAccountsHiddenFromLegacyAdministration",
+  ]),
+  nativePortalFeedback: Object.freeze([
+    "exactSourceWorkspaceIdentityTargetVerified", "collidingPublicIdsIsolated",
+    "principalRevisionRaceDenied", "revocationAndReplayVerified",
+    "staffQueueSourceBound", "completionDestinationVerified",
   ]),
   requestAttachmentScanner: Object.freeze([
     "scannerVersionPinned", "quarantineDispatchVerified", "objectDigestBound",
@@ -421,6 +455,7 @@ export const FEATURE_FLAG_ACTIVATION_POLICIES = Object.freeze({
   delivery: Object.freeze({
     CLIENT_PORTAL_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaPortalProjection", "projectionParityAndAlerts"]) }),
     CLIENT_PORTAL_REQUEST_V2_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaCatalogProjection", "projectAlphaPortalProjection"]) }),
+    CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaCatalogProjection", "projectAlphaPortalProjection", "nativePortalRequests"]) }),
     PROJECT_ALPHA_CATALOG_SYNC_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaCatalogProjection", "projectionParityAndAlerts"]) }),
     PROJECT_ALPHA_PORTAL_SYNC_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaPortalProjection", "projectionParityAndAlerts"]) }),
     PROJECT_ALPHA_SERVICE_ASSIGNMENT_SYNC_ENABLED: Object.freeze({ prohibitedReason: "Service-assignment synchronization requires an exact-source receiver, complete generation, and reviewed source enrollment" }),
@@ -534,10 +569,12 @@ export const STAGING_STATIC_VARS = Object.freeze({
     PUBLIC_SHARE_ORIGIN: `https://${STAGING_HOSTS.delivery}`,
     CLIENT_PORTAL_ENABLED: "false",
     CLIENT_PORTAL_ORIGIN: `https://${STAGING_HOSTS.client}`,
+    CLIENT_PORTAL_ORIGINS: `https://${STAGING_HOSTS.client},https://${STAGING_CLIENT_PORTAL.secondaryHostname}`,
     CLIENT_ACCESS_TEAM_DOMAIN: "https://ledgetoptechnologies.cloudflareaccess.com",
     R2_S3_ENDPOINT: "https://846c924bf17bf4f3dd15c97a4c5d1d51.r2.cloudflarestorage.com",
     R2_BUCKET_NAME: "client-data-staging",
     CLIENT_PORTAL_REQUEST_V2_ENABLED: "false",
+    CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED: "false",
     PROJECT_ALPHA_CATALOG_SYNC_ENABLED: "false",
     PROJECT_ALPHA_CATALOG_APPLICATION_KEY: "ltds_client_catalog_staging",
     PROJECT_ALPHA_CATALOG_ACCESS_TEAM_DOMAIN: "https://ledgetoptechnologies.cloudflareaccess.com",
@@ -579,6 +616,7 @@ export const STAGING_STATIC_VARS = Object.freeze({
   operations: Object.freeze({
     TEAM_DOMAIN: "https://ledgetoptechnologies.cloudflareaccess.com",
     DELIVERY_BASE_URL: `https://${STAGING_HOSTS.client}`,
+    CLIENT_PORTAL_ORIGINS: `https://${STAGING_HOSTS.client},https://${STAGING_CLIENT_PORTAL.secondaryHostname}`,
     PUBLIC_SHARE_ORIGIN: `https://${STAGING_HOSTS.delivery}`,
     PROJECT_ALPHA_BASE_URL: STAGING_PROJECT_ALPHA_ORIGIN,
     R2_ACCOUNT_ID: STAGING_ACCOUNT_ID,
@@ -631,7 +669,7 @@ export const STAGING_STATIC_VARS = Object.freeze({
 export const STAGING_ALLOWED_VAR_NAMES = Object.freeze({
   delivery: Object.freeze([
     "PUBLIC_BASE_URL", "PUBLIC_SHARE_ORIGIN", "EXPECTED_HOST", "ENVIRONMENT", "TEAM_DOMAIN", "POLICY_AUD",
-    "CLIENT_PORTAL_ENABLED", "CLIENT_PORTAL_REQUEST_V2_ENABLED",
+    "CLIENT_PORTAL_ENABLED", "CLIENT_PORTAL_REQUEST_V2_ENABLED", "CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED",
     "PROJECT_ALPHA_CATALOG_SYNC_ENABLED", "PROJECT_ALPHA_CATALOG_APPLICATION_KEY",
     "PROJECT_ALPHA_CATALOG_ACCESS_TEAM_DOMAIN", "PROJECT_ALPHA_CATALOG_ACCESS_AUD",
     "PROJECT_ALPHA_CATALOG_HMAC_KEY_ID", "PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_KEY_ID",
@@ -651,7 +689,7 @@ export const STAGING_ALLOWED_VAR_NAMES = Object.freeze({
     "CLIENT_PORTAL_ACCESS_ENROLLMENT_READY", "CLIENT_PORTAL_INVITATION_EMAIL_ENABLED",
     "CLIENT_PORTAL_INVITATION_FROM", "CLIENT_PORTAL_INVITATION_FROM_NAME",
     "CLIENT_DELEGATED_SHARES_ENABLED", "CLIENT_DELEGATED_SHARE_KEY_ID",
-    "CLIENT_PORTAL_ORIGIN", "CLIENT_ACCESS_TEAM_DOMAIN", "CLIENT_ACCESS_AUD",
+    "CLIENT_PORTAL_ORIGIN", "CLIENT_PORTAL_ORIGINS", "CLIENT_ACCESS_TEAM_DOMAIN", "CLIENT_ACCESS_AUD",
     "MAPBOX_PUBLIC_TOKEN", "SESSION_KEY_ID", "PREVIOUS_SESSION_KEY_ID",
     "STREAM_CUSTOMER_CODE", "R2_S3_ENDPOINT", "R2_BUCKET_NAME",
     "CLOUD_TRANSFER_DROPBOX_ENABLED", "CLOUD_TRANSFER_GOOGLE_ENABLED",
@@ -661,7 +699,7 @@ export const STAGING_ALLOWED_VAR_NAMES = Object.freeze({
   operations: Object.freeze([
     "PUBLIC_BASE_URL", "EXPECTED_HOST", "DIRECT_DELIVERY_UPLOADS_ENABLED",
     "INCOMING_BASE_URL", "INCOMING_EXPECTED_HOST", "THUMBNAIL_INGEST_EXPECTED_HOST", "THUMBNAIL_RENDERER_EXPECTED_HOST",
-    "ENVIRONMENT", "TEAM_DOMAIN", "OPERATIONS_AUD", "DELIVERY_BASE_URL", "PUBLIC_SHARE_ORIGIN",
+    "ENVIRONMENT", "TEAM_DOMAIN", "OPERATIONS_AUD", "DELIVERY_BASE_URL", "CLIENT_PORTAL_ORIGINS", "PUBLIC_SHARE_ORIGIN",
     "PROJECT_ALPHA_BASE_URL", "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED",
     "PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED", "PROJECT_ALPHA_DELIVERY_GUEST_ENABLED",
     "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED", "CLIENT_PORTAL_HIERARCHY_V2_ENABLED",
@@ -696,6 +734,7 @@ export const STAGING_INVENTORY = Object.freeze({
     routes: [
       { pattern: STAGING_HOSTS.delivery, custom_domain: true },
       { pattern: STAGING_HOSTS.client, custom_domain: true },
+      { pattern: STAGING_CLIENT_PORTAL.secondaryHostname, custom_domain: true },
     ],
     d1_databases: [{ binding: "DELIVERY_DB", database_name: "client-data-staging", database_id: "b6f653ab-9acd-4421-9ad0-207754b59aeb", migrations_dir: "migrations" }],
     r2_buckets: [{ binding: "DATA_BUCKET", bucket_name: "client-data-staging" }],

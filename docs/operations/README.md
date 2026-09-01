@@ -20,6 +20,11 @@ scheduling, Operations `0049`, and the default-off activation boundary. See
 [business-party linking](business-party-linking.md) for Operations `0048` and
 recoverable presentation lifecycle.
 
+See [native portal requests and feedback](native-portal-requests-feedback.md)
+for Client migrations `0184`-`0186`, Operations `0050`, exact-source request and
+feedback authority, storage-only account isolation, dedicated connector
+draft-quote credentials, and the required drain/rollback order.
+
 This runbook records operator-owned controls that are not safely expressible in the application repository.
 
 ## Staging
@@ -83,14 +88,15 @@ failures correctly remain on their local file-type icon.
 - Local tests and dry-run configuration checks do not prove Cloudflare Container
   entitlement, decoder behavior, queue/DLQ existence, R2 event subscriptions,
   cron installation, or production bindings. Verify each in isolated staging.
-- Delivery migrations through `0183` (with reserved ledger gap `0113`), plus
-  Operations migrations through `0049`, are
+- Delivery migrations through `0186` (with reserved ledger gap `0113`), plus
+  Operations migrations through `0050`, are
   additive and remain after a Worker version rollback. Preserve verified D1
   exports and prior Worker version IDs before rollout.
-- Do not apply `0179`-`0183` as one pending batch. Apply `0179` from a reviewed
+- Do not apply `0179`-`0186` as one pending batch. Apply `0179` from a reviewed
   expand-only input, deploy and fully drain the compatible Client writer, then
-  apply `0180`-`0183` in order. Keep service-assignment and delivery-notification
-  flags false until their separate acceptance gates pass.
+  apply `0180`-`0183` in order. Apply `0184`-`0186` migration-first before the
+  paired final Client/Operations Workers, and keep native request/feedback source
+  capabilities unavailable until their exact-source acceptance gates pass.
 - Folder-grant mail is at-least-once. Revocation before the final authorization
   check suppresses mail, but a provider-accepted message cannot be recalled;
   the authenticated portal route still rechecks and denies revoked access.

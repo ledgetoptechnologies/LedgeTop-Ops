@@ -15,6 +15,11 @@ export interface ClientPortalSession {
   principalIssuer?: string;
   principalSubject?: string;
   principalEmail?: string;
+  /** Exact source-owned workspace actor. Present only on the native request
+   * surface; accountId/identityId remain empty until the request writer binds
+   * its non-authoritative storage namespace. */
+  nativeSourceId?: string;
+  nativePortalIdentityId?: string;
   displayName: string;
   role: "manager" | "member";
   canViewBilling: boolean;

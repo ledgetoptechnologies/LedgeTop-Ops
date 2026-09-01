@@ -33,20 +33,23 @@ export function feedbackItemValid(value: unknown): value is ClientFeedbackItem {
     && typeof row.target.available === "boolean" && (row.target.actionPath === null || safeFeedbackTargetPath(row.target.actionPath) !== null)
     && (row.target.projectName === null || typeof row.target.projectName === "string") && (row.target.projectId === null || typeof row.target.projectId === "string");
 }
-export async function loadFeedback(cursor: string | null, signal: AbortSignal): Promise<ClientFeedbackPage> {
-  const result = await requestJson<ClientFeedbackPage>(`/api/client/feedback${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`, { signal });
+function feedbackEndpoint(nativeWorkspaceId: string | null | undefined, suffix = ""): string {
+  return nativeWorkspaceId ? `/api/client/v2/workspaces/${encodeURIComponent(nativeWorkspaceId)}/feedback${suffix}` : `/api/client/feedback${suffix}`;
+}
+export async function loadFeedback(cursor: string | null, signal: AbortSignal, nativeWorkspaceId?: string | null): Promise<ClientFeedbackPage> {
+  const result = await requestJson<ClientFeedbackPage>(`${feedbackEndpoint(nativeWorkspaceId)}${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`, { signal });
   if (!Array.isArray(result.items) || !result.items.every(feedbackItemValid) || !(result.nextCursor === null || typeof result.nextCursor === "string" && result.nextCursor)) throw new Error("Feedback records could not be verified.");
   return result;
 }
-export async function loadFeedbackDetail(id: string, signal: AbortSignal): Promise<ClientFeedbackDetail> {
-  const result = await requestJson<ClientFeedbackDetail>(`/api/client/feedback/${encodeURIComponent(id)}`, { signal });
+export async function loadFeedbackDetail(id: string, signal: AbortSignal, nativeWorkspaceId?: string | null): Promise<ClientFeedbackDetail> {
+  const result = await requestJson<ClientFeedbackDetail>(feedbackEndpoint(nativeWorkspaceId, `/${encodeURIComponent(id)}`), { signal });
   if (!feedbackItemValid(result.feedback) || result.feedback.id !== id || !Array.isArray(result.events)
     || !result.events.every(event => ["new", "in_progress", "done"].includes(event.status) && ["client", "staff"].includes(event.actor)
       && typeof event.createdAt === "string" && (event.note === null || typeof event.note === "string"))) throw new Error("Feedback records could not be verified.");
   return result;
 }
-export async function submitFeedback(target: ClientFeedbackTargetInput, message: string, key: string, signal: AbortSignal): Promise<ClientFeedbackItem> {
-  const result = await requestJson<{ feedback: ClientFeedbackItem }>("/api/client/feedback", {
+export async function submitFeedback(target: ClientFeedbackTargetInput, message: string, key: string, signal: AbortSignal, nativeWorkspaceId?: string | null): Promise<ClientFeedbackItem> {
+  const result = await requestJson<{ feedback: ClientFeedbackItem }>(feedbackEndpoint(nativeWorkspaceId), {
     method: "POST", signal, headers: { "Content-Type": "application/json", "Idempotency-Key": key }, body: JSON.stringify({ target, message }),
   });
   if (!feedbackItemValid(result.feedback)) throw new Error("The feedback submission could not be confirmed. Retry to check the same submission.");

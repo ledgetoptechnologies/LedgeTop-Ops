@@ -1,6 +1,10 @@
 # Future planning proposals
 
-> **Status:** A limited client-portal pilot is now deployed at `client.` with
+> **Status:** A limited client-portal pilot is deployed at the Drone Services
+> client hostname. Repository support for the Technologies client hostname is
+> release-gated behind the same Access application/audience, host admission,
+> and dual-domain acceptance evidence. Existing public share links remain on
+> their current canonical origin during this rollout. The pilot uses
 > Cloudflare Access, explicit LTDS memberships/grants, controlled test data,
 > and request notifications. It is not a general client launch. All expansion
 > items below remain subject to product validation, security review, cost

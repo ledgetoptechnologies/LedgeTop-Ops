@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { validateApp, validateCrossApp, validateFiles, validateRequestAttachmentCors, validateSecretManifest } from "./staging-preflight.mjs";
-import { APP_SOURCE_DIRS, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_ALLOWED_VAR_NAMES, STAGING_HOSTS, STAGING_INVENTORY, STAGING_REQUEST_ATTACHMENT_R2_CORS, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
+import { APP_SOURCE_DIRS, FEATURE_FLAG_ACTIVATION_POLICIES, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_ALLOWED_VAR_NAMES, STAGING_HOSTS, STAGING_INVENTORY, STAGING_REQUEST_ATTACHMENT_R2_CORS, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
 function stagingConfig(app) {
@@ -215,6 +215,36 @@ test("requires every portal-v2 and Operations capability to be explicitly false"
       assert(errors.some((error) => error.includes(flag)), `${app}.${flag}: ${errors.join(" | ")}`);
     }
   }
+});
+
+test("pins the native portal migration-first and default-off release contract", () => {
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-3), [
+    "0184_native_client_feedback.sql",
+    "0185_native_service_request_ownership.sql",
+    "0186_delivery_notification_authority_provenance.sql",
+  ]);
+  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.at(-1), "0050_project_alpha_draft_quote_credentials.sql");
+  assert(REQUIRED_DISABLED_FEATURE_FLAGS.delivery.includes("CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED"));
+  assert.equal(STAGING_STATIC_VARS.delivery.CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED, "false");
+  assert.deepEqual(FEATURE_FLAG_ACTIVATION_POLICIES.delivery.CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED.gates, [
+    "projectAlphaCatalogProjection", "projectAlphaPortalProjection", "nativePortalRequests",
+  ]);
+
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const runbook = fs.readFileSync(path.join(root, "docs", "operations", "native-portal-requests-feedback.md"), "utf8").replace(/\s+/g, " ");
+  for (const invariant of [
+    "never resolved through the primary source as a fallback",
+    "must never appear in legacy account administration",
+    "This document intentionally contains no values",
+    "withdraw the native request and feedback features",
+    "does not exclude storage-only accounts is not a safe rollback target",
+  ]) assert(runbook.includes(invariant), invariant);
+
+  const evidence = JSON.parse(fs.readFileSync(path.join(root, "docs", "staging", "release-evidence.json.example"), "utf8"));
+  assert.deepEqual(evidence.migrations.delivery.expected.slice(-3), REQUIRED_STAGING_MIGRATIONS.delivery.slice(-3));
+  assert.equal(evidence.migrations.operations.expected.at(-1), REQUIRED_STAGING_MIGRATIONS.operations.at(-1));
+  assert.equal(evidence.externalGates.nativePortalRequests.ready, false);
+  assert.equal(evidence.externalGates.nativePortalFeedback.ready, false);
 });
 test("checked-in staging examples exactly match every approved deployment-critical inventory field", () => {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");

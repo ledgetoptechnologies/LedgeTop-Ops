@@ -29,27 +29,42 @@ not become active deployments.
 - staging Access group ID and exact group name;
 - Ops Sync staging service-auth policy and Project Alpha service-token owner;
 - Delivery, Operations, Ops Sync, and self-hosted Viewer staging DNS readiness;
-- `client-staging.ledgetopdroneservices.com`, its dedicated portal Access
-  app/audience/group, and its separately reviewed public Bypass app/policy;
+- `client-staging.ledgetopdroneservices.com` and
+  `portal-staging.ledgetoptechnologies.com`, their one shared dedicated portal
+  Access app/audience/group, and the separately reviewed public Bypass app/policy;
 - reviewed commit SHA and current build-control evidence;
 - D1 export paths and SHA-256 checksums.
 - origin-restricted staging Mapbox public tokens for both Delivery and
   Operations;
 - a non-production Operations triage recipient and exact allowed notification
   sender;
+- each native test source's immutable source ID, connector revision, credential
+  reference name, application key, allowed HTTPS origin, workspace/root/project
+  public IDs, projected principal source version, and signed request/feedback
+  feature version. Record credential fingerprints and secret names only, never
+  `draftQuote.apiKey` or `draftQuote.hmacSecret` values;
 
 `CLIENT_PORTAL_ENABLED` and every feature listed in
 `REQUIRED_DISABLED_FEATURE_FLAGS` must be explicitly `false`;
 `CLIENT_PORTAL_ORIGIN` and Operations `DELIVERY_BASE_URL` must be the client
 staging origin. `PUBLIC_SHARE_ORIGIN` on both Workers and Client
 `PUBLIC_BASE_URL` must be the anonymous delivery staging origin.
+`CLIENT_PORTAL_ORIGINS` must contain exactly the two approved authenticated
+staging origins.
 `CLIENT_ACCESS_AUD`
 must be the new portal app audience, never `POLICY_AUD`, `OPERATIONS_AUD`, or
 `CF_ACCESS_AUD`.
 
+The Client staging Worker and the single staging Client Portal Access
+application must include both reviewed portal hosts:
+`client-staging.ledgetopdroneservices.com` and
+`portal-staging.ledgetoptechnologies.com`. Read back one unchanged audience and
+policy set across both hosts, and prove login, hard refresh, host switching,
+same-origin mutation, mixed-origin denial, and canonical public-link isolation.
+
 The attachment upload CORS artifact is
 `docs/staging/request-attachments-r2-cors.json`. Preflight requires that exact
-policy: only the client staging origin, only `PUT`, only the `content-type`
+policy: only the two reviewed client staging origins, only `PUT`, only the `content-type`
 request header, only `etag` exposed, and a 300-second preflight cache. After
 separate R2 mutation approval, apply it only to `client-data-staging` with
 `wrangler r2 bucket cors set client-data-staging --file docs/staging/request-attachments-r2-cors.json`
@@ -285,7 +300,7 @@ npm.cmd run staging:check
 ```
 
 These are list-only commands. Do **not** run a generic all-pending Delivery
-apply from the combined candidate when `0172` or any of `0179`-`0183` is
+apply from the combined candidate when `0172` or any of `0179`-`0186` is
 pending. Both ranges contain deployment barriers described below. A passing
 preflight proves configuration shape; it does not make a combined migration
 apply safe.
@@ -324,7 +339,7 @@ staging config and exact D1 ID/bindings, and adds the literal Wrangler pattern
 `migrations/0179_service_assignment_policy_proof_v2.sql`; it refuses a stale
 or broadened output and never copies SQL. Record that derived config as the
 immutable expand input, then retain the ordinary staging config as the final
-input containing `0180`-`0183`. Never copy files out of the combined tree ad
+input containing `0180`-`0186`. Never copy files out of the combined tree ad
 hoc, edit the migration ledger, or execute these files as raw SQL.
 
 1. Keep `PROJECT_ALPHA_SERVICE_ASSIGNMENT_SYNC_ENABLED` and
@@ -340,7 +355,11 @@ hoc, edit the migration ledger, or execute these files as raw SQL.
 4. Only after the drain is evidenced may the final input apply
    `0180_service_assignment_policy_v1_contract.sql`,
    `0181_service_assignment_request_policy_reviews.sql`, and notification
-   migrations `0182`/`0183` in order. Then apply Operations through `0049` and
+   migrations `0182`/`0183` in order. With native capabilities still unavailable,
+   apply `0184_native_client_feedback.sql`,
+   `0185_native_service_request_ownership.sql`, and
+   `0186_delivery_notification_authority_provenance.sql` in order. Then apply
+   Operations through `0050_project_alpha_draft_quote_credentials.sql` and
    deploy the paired final applications.
 5. Record `serviceAssignmentV2ExpandApplied`, the compatible writer version,
    `serviceAssignmentOldWritersDrained`,
@@ -349,7 +368,7 @@ hoc, edit the migration ledger, or execute these files as raw SQL.
    return `No migrations to apply` only after the final phase.
 
 If no independently reviewed expand-only migration input exists, stop. The
-presence of all five files in one checkout is not permission to apply them in
+presence of all eight files in one checkout is not permission to apply them in
 one command.
 
 Apply Delivery first because Operations binds the Delivery database. Record
@@ -359,10 +378,11 @@ every migration result. For this milestone, explicitly confirm Delivery
 through `0171_secondary_workspace_membership_management.sql` (`0113` is
 intentionally reserved), apply `0172_project_access_authority_history.sql`
 only at its writer-first barrier, then `0173`-`0179` with `0179` as the final
-expand step. Apply `0180`-`0183` only after the compatible-writer drain above.
+expand step. Apply `0180`-`0183` only after the compatible-writer drain above,
+then apply `0184`-`0186` migration-first before the paired final applications.
 Confirm Operations
 `0014_staff_acl_controls.sql` through
-`0049_project_alpha_delivery_source_rate_limits.sql`. Migration `0100` removes
+`0050_project_alpha_draft_quote_credentials.sql`. Migration `0100` removes
 `share_version` from the delivery-grant parent key so existing share
 rotation/revocation updates cannot be blocked by a portal grant; the grant
 still records the approved version for authorization checks. Reject any
@@ -394,6 +414,25 @@ video-only recovery pass; confirm it reaches `completed` and that repaired rows
 remain pending until the authenticated TrueNAS worker claims them. It must not
 publish those rows to the Cloudflare thumbnail queue. Worker
 rollback does not undo either database.
+
+The native request and feedback release contract is
+[native portal requests and feedback](../operations/native-portal-requests-feedback.md).
+At final upload, `CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED` must remain false and
+every exact Project Alpha source must continue to advertise native request and
+feedback features as unavailable. Do not enable either source feature merely
+because primary request-v2 or primary feedback is available. Before any later
+activation, prove exact source/workspace/identity/project or target authority,
+colliding-ID isolation, current principal source revision, revocation races,
+storage-only account exclusion, and exact outbound destination.
+
+For rollback, first disable `CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED`, withdraw the
+two native source features, confirm signed capability readback, and drain request
+mutations, attachment finalization, quote commands, feedback transitions, and
+completion-notification leases. Retain migrations `0184`-`0186` and `0050`.
+After the first native storage binding or registered draft-quote fingerprint is
+created, do not roll back to code that lacks storage-account exclusion or
+connector-fingerprint enforcement; use the last compatible version or fix
+forward.
 
 Before version upload, verify rather than infer the remaining operator-owned
 media prerequisites: the staging thumbnail queue and DLQ exist, Operations has

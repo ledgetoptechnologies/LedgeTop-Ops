@@ -7,6 +7,10 @@ import { auditStatement } from "./request-security";
 import { parseStoredWorkArea, type StaffRequestArea } from "./request-area-revision";
 import type { Env, StaffPrincipal } from "./types";
 import { provePrimaryBusinessReferences } from "./project-alpha-primary-references";
+import { assertProjectAlphaConnectorProof, ProjectAlphaConnectorError, resolveProjectAlphaConnector,
+  type ProjectAlphaConnectorProof } from "./project-alpha-connectors";
+import { projectAlphaReadVisibleSql } from "./project-alpha-read-visibility";
+import { validatedUniquePublicIdExpression } from "./client-hub-source";
 
 type AppEnv = {
   Bindings: Env;
@@ -39,6 +43,8 @@ interface RequestRow {
   account_source_id: string | null;
   project_source_id: string | null;
   portal_project_id: string | null;
+  portal_workspace_id: string | null;
+  portal_project_public_id: string | null;
   project_authorized: number;
   area_geojson: string | null;
   poi_points_json: string | null;
@@ -385,15 +391,46 @@ interface QuoteDestination {
   destinationFingerprint: string;
 }
 
-async function quoteDestination(env: Env, sourceId: string): Promise<QuoteDestination> {
-  // The public workflow has one configured authority. Never reinterpret its
-  // scalar credentials as another source, even when external IDs collide.
-  if (sourceId !== PRIMARY_ALPHA_SOURCE_ID)
-    throw new ProjectAlphaDraftQuoteError(409, "scope_denied", "This request's source has no configured quote connection");
-  const config = integrationConfiguration(env);
-  if (!config) throw new ProjectAlphaDraftQuoteError(503, "integration_disabled", "Project Alpha draft creation is not available");
-  const target = { sourceId, commandEndpoint: config.url.toString(), applicationKey: config.applicationKey, editorOrigin: config.url.origin };
-  return { ...target, destinationFingerprint: await sha256Hex(canonicalProjectAlphaJson(target)) };
+interface QuoteRuntime {
+  destination: QuoteDestination;
+  apiKey: string;
+  signingSecret: string;
+  connectorProof: ProjectAlphaConnectorProof | null;
+}
+
+async function quoteRuntime(env: Env, sourceId: string): Promise<QuoteRuntime> {
+  if (sourceId === PRIMARY_ALPHA_SOURCE_ID) {
+    // Preserve the established primary scalar integration exactly. Registry
+    // credentials are not allowed to silently take ownership of this route.
+    const config = integrationConfiguration(env);
+    if (!config) throw new ProjectAlphaDraftQuoteError(503, "integration_disabled", "Project Alpha draft creation is not available");
+    const target = { sourceId, commandEndpoint: config.url.toString(), applicationKey: config.applicationKey, editorOrigin: config.url.origin };
+    return { destination: { ...target, destinationFingerprint: await sha256Hex(canonicalProjectAlphaJson(target)) },
+      apiKey: config.apiKey, signingSecret: config.signingSecret, connectorProof: null };
+  }
+  if (env.PROJECT_ALPHA_DRAFT_QUOTES_ENABLED !== "true")
+    throw new ProjectAlphaDraftQuoteError(503, "integration_disabled", "Project Alpha draft creation is not enabled");
+  try {
+    const connector = await resolveProjectAlphaConnector(env, sourceId, "draft_quote");
+    if (!connector.draftQuote)
+      throw new ProjectAlphaDraftQuoteError(503, "integration_disabled", "This request's source has no dedicated draft quote connection");
+    const base = new URL(connector.draftQuote.baseUrl);
+    const endpoint = new URL(commandPath(connector.draftQuote.applicationKey), base);
+    if (endpoint.origin !== base.origin)
+      throw new ProjectAlphaDraftQuoteError(503, "integration_disabled", "The draft quote destination is invalid");
+    const target = { sourceId, commandEndpoint: endpoint.toString(), applicationKey: connector.draftQuote.applicationKey, editorOrigin: endpoint.origin };
+    return { destination: { ...target, destinationFingerprint: await sha256Hex(canonicalProjectAlphaJson(target)) },
+      apiKey: connector.draftQuote.apiKey, signingSecret: connector.draftQuote.hmacSecret, connectorProof: connector.proof };
+  } catch (error) {
+    if (error instanceof ProjectAlphaDraftQuoteError) throw error;
+    if (error instanceof ProjectAlphaConnectorError) {
+      const denied = error.code === "unavailable";
+      const changed = error.code === "changed" || error.code === "conflict";
+      throw new ProjectAlphaDraftQuoteError(denied || changed ? 409 : 503,
+        denied ? "scope_denied" : changed ? "destination_changed" : "integration_disabled", error.message);
+    }
+    throw error;
+  }
 }
 
 async function boundedResponseJson(response: Response, signal: AbortSignal): Promise<unknown> {
@@ -449,12 +486,11 @@ export async function sendProjectAlphaDraftQuoteCommand(
   idempotencyKey: string,
   options: { now?: Date; fetcher?: typeof fetch; sourceId?: string; destination?: QuoteDestination } = {},
 ): Promise<ProjectAlphaDraftQuoteResult> {
-  const configuration = integrationConfiguration(env);
-  if (!configuration)
-    throw new ProjectAlphaDraftQuoteError(503, "integration_disabled", "Project Alpha draft creation is not available");
-  const destination = await quoteDestination(env, options.sourceId ?? PRIMARY_ALPHA_SOURCE_ID);
+  const runtime = await quoteRuntime(env, options.sourceId ?? PRIMARY_ALPHA_SOURCE_ID);
+  const destination = runtime.destination;
   if (options.destination && canonicalProjectAlphaJson(options.destination) !== canonicalProjectAlphaJson(destination))
     throw new ProjectAlphaDraftQuoteError(409, "destination_changed", "The quote destination changed; reconcile the saved command before retrying");
+  if (runtime.connectorProof) await assertProjectAlphaConnectorProof(env, runtime.connectorProof);
   const validatedPayload = parseProjectAlphaDraftQuotePayload(payload);
   if (!validatedPayload)
     throw new ProjectAlphaDraftQuoteError(409, "invalid_response", "The Project Alpha draft command is invalid");
@@ -463,19 +499,21 @@ export async function sendProjectAlphaDraftQuoteCommand(
     throw new ProjectAlphaDraftQuoteError(409, "invalid_response", "The Project Alpha draft command is too large");
   const bodyHash = await sha256Hex(rawBody);
   const timestamp = (options.now ?? new Date()).toISOString();
-  const signatureInput = `${timestamp}\nPOST\n${commandPath(configuration.applicationKey)}\n${idempotencyKey}\n${bodyHash}`;
-  const signature = await hmacHex(configuration.signingSecret, signatureInput);
+  const endpoint = new URL(destination.commandEndpoint);
+  const signatureInput = `${timestamp}\nPOST\n${endpoint.pathname}${endpoint.search}\n${idempotencyKey}\n${bodyHash}`;
+  const signature = await hmacHex(runtime.signingSecret, signatureInput);
   let response: Response, rawResponse: unknown;
   const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), COMMAND_TIMEOUT_MS);
   try {
-    const pending = (options.fetcher ?? globalThis.fetch)(configuration.url.toString(), {
+    if (runtime.connectorProof) await assertProjectAlphaConnectorProof(env, runtime.connectorProof);
+    const pending = (options.fetcher ?? globalThis.fetch)(destination.commandEndpoint, {
       method: "POST",
       headers: {
         Accept: "application/json",
-        Authorization: `Bearer ${configuration.apiKey}`,
+        Authorization: `Bearer ${runtime.apiKey}`,
         "Content-Type": "application/json",
         "Idempotency-Key": idempotencyKey,
-        "X-Portal-Integration-Application-Key": configuration.applicationKey,
+        "X-Portal-Integration-Application-Key": destination.applicationKey,
         "X-Portal-Integration-Body-SHA256": bodyHash,
         "X-Portal-Integration-Signature": `sha256=${signature}`,
         "X-Portal-Integration-Timestamp": timestamp,
@@ -533,6 +571,7 @@ async function requestForDraft(env: Env, requestId: string): Promise<RequestRow 
       account.project_alpha_client_id,account.project_alpha_organization_id,
       account.project_alpha_source_id account_source_id,project.project_alpha_source_id project_source_id,
       project.project_alpha_project_id,r.project_id portal_project_id,
+      r.portal_workspace_id,r.portal_project_public_id,
       CASE WHEN r.project_id IS NULL THEN 1 WHEN project.active=1 AND EXISTS (
         SELECT 1 FROM client_project_grants grant_row
         WHERE grant_row.account_id=r.account_id AND grant_row.project_id=r.project_id
@@ -546,7 +585,7 @@ async function requestForDraft(env: Env, requestId: string): Promise<RequestRow 
         WHERE estimate.request_id=r.id AND estimate.status IN ('draft','ready','accepted','change_requested')
         ORDER BY estimate.version DESC LIMIT 1) scope_text
      FROM client_service_requests r
-     JOIN client_accounts account ON account.id=r.account_id AND account.status='active'
+     LEFT JOIN client_accounts account ON account.id=r.account_id
      LEFT JOIN projects project ON project.id=r.project_id
      LEFT JOIN client_service_request_area_revisions effective ON effective.request_id=r.id
        AND effective.revision_number=(SELECT MAX(candidate.revision_number)
@@ -594,8 +633,149 @@ async function hasUnresolvedOtherCommand(env: Env, row: RequestRow): Promise<boo
     .bind(row.id, row.request_revision, row.area_revision || 0).first();
 }
 
+interface NativeDraftAuthority {
+  sourceId: string;
+  workspaceId: string;
+  rootType: "organization" | "standalone_client";
+  rootPublicId: string;
+  projectPublicId: string;
+  projectSourceVersion: string;
+  generationId: string;
+  sourceSequence: number;
+  portalAuthorityVersion: number;
+  connectorRevision: number;
+  connectorVersion: number;
+  clientPublicId: string;
+  organizationPublicId: string | null;
+  proof: string;
+}
+
+async function resolveNativeDraftAuthority(env: Env, row: RequestRow,
+  connectorProof: ProjectAlphaConnectorProof): Promise<NativeDraftAuthority> {
+  if (row.catalog_source_id === PRIMARY_ALPHA_SOURCE_ID || !row.portal_workspace_id || !row.portal_project_public_id)
+    throw new HTTPException(409, { message: "This request is not linked to a source-owned Project Alpha project" });
+  if (connectorProof.mode !== "registry" || connectorProof.sourceId !== row.catalog_source_id || connectorProof.profile !== "business_data")
+    throw new HTTPException(409, { message: "This request's Project Alpha connection is not current" });
+  const delivery = await database(env).prepare(`WITH RECURSIVE lineage(entity_type,public_id,parent_public_id,depth) AS (
+      SELECT project.entity_type,project.public_id,project.parent_public_id,0
+      FROM portal_v2_directory_entities project
+      JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=project.workspace_id
+        AND checkpoint.active_generation_id=project.generation_id
+      WHERE project.workspace_id=? AND project.entity_type='project' AND project.public_id=? AND project.active=1
+      UNION ALL
+      SELECT parent.entity_type,parent.public_id,parent.parent_public_id,lineage.depth+1
+      FROM lineage JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=?
+      JOIN portal_v2_directory_entities parent ON parent.workspace_id=checkpoint.workspace_id
+        AND parent.generation_id=checkpoint.active_generation_id AND parent.public_id=lineage.parent_public_id AND parent.active=1
+      WHERE lineage.parent_public_id IS NOT NULL AND lineage.depth<16
+        AND (SELECT count(*) FROM portal_v2_directory_entities unique_parent
+          WHERE unique_parent.workspace_id=checkpoint.workspace_id AND unique_parent.generation_id=checkpoint.active_generation_id
+            AND unique_parent.public_id=lineage.parent_public_id AND unique_parent.active=1)=1
+    ) SELECT workspace.root_type,COALESCE(workspace.pa_organization_public_id,workspace.pa_client_public_id) root_public_id,
+      (SELECT public_id FROM lineage WHERE entity_type='client' LIMIT 1) client_public_id,
+      checkpoint.active_generation_id generation_id,checkpoint.source_sequence,
+      authority.version portal_authority_version,authority.connector_revision,authority.connector_version,
+      project.source_version project_source_version
+    FROM portal_v2_workspaces workspace
+    JOIN pa_portal_workspace_sources owner ON owner.workspace_id=workspace.id
+      AND owner.projection_source_id=workspace.project_alpha_source_id
+    JOIN pa_portal_source_authorities authority ON authority.source_id=workspace.project_alpha_source_id AND authority.state='active'
+    JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=workspace.id
+    JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id
+      AND generation.workspace_id=workspace.id AND generation.status='active' AND generation.complete=1
+    JOIN portal_v2_directory_entities root ON root.workspace_id=workspace.id AND root.generation_id=checkpoint.active_generation_id
+      AND root.entity_type=workspace.root_type AND root.public_id=COALESCE(workspace.pa_organization_public_id,workspace.pa_client_public_id) AND root.active=1
+    JOIN portal_v2_directory_entities project ON project.workspace_id=workspace.id AND project.generation_id=checkpoint.active_generation_id
+      AND project.entity_type='project' AND project.public_id=? AND project.active=1
+    WHERE workspace.id=? AND workspace.project_alpha_source_id=? AND workspace.legacy_account_id IS NULL AND workspace.status='active'
+      AND authority.connector_revision=? AND authority.connector_version=?
+      AND (SELECT count(*) FROM lineage WHERE entity_type='client')=1
+      AND EXISTS(SELECT 1 FROM lineage WHERE entity_type=workspace.root_type
+        AND public_id=COALESCE(workspace.pa_organization_public_id,workspace.pa_client_public_id))`)
+    .bind(row.portal_workspace_id,row.portal_project_public_id,row.portal_workspace_id,row.portal_project_public_id,
+      row.portal_workspace_id,row.catalog_source_id,connectorProof.revision,connectorProof.version)
+    .first<{root_type: NativeDraftAuthority["rootType"];root_public_id:string;client_public_id:string;generation_id:string;source_sequence:number;
+      portal_authority_version:number;connector_revision:number;connector_version:number;project_source_version:string}>();
+  if (!delivery) throw new HTTPException(409, { message: "Refresh the Project Alpha portal directory before creating this quote" });
+  const projectId = validatedUniquePublicIdExpression("pa_projects", "project");
+  const clientId = validatedUniquePublicIdExpression("pa_clients", "client");
+  const organizationId = validatedUniquePublicIdExpression("pa_organizations", "organization");
+  const rows = await env.OPS_DB.withSession("first-primary").prepare(`SELECT ${projectId} project_public_id,
+      ${clientId} client_public_id,${organizationId} organization_public_id
+    FROM pa_projects project
+    JOIN pa_clients client ON client.id=project.client_id AND client.projection_source_id=project.projection_source_id AND client.active=1
+    LEFT JOIN pa_organizations organization ON organization.id=COALESCE(project.organization_id,client.organization_id)
+      AND organization.projection_source_id=project.projection_source_id AND organization.active=1
+    WHERE project.projection_source_id=? AND project.active=1 AND ${projectId}=?
+      AND ${clientId}=? AND ${projectAlphaReadVisibleSql("project.projection_source_id")}
+      AND ((?='standalone_client' AND client.organization_id IS NULL AND project.organization_id IS NULL AND ${clientId}=?)
+        OR (?='organization' AND organization.id IS NOT NULL AND client.organization_id=organization.id
+          AND (project.organization_id IS NULL OR project.organization_id=organization.id) AND ${organizationId}=?))
+    LIMIT 2`).bind(row.catalog_source_id,row.portal_project_public_id,delivery.client_public_id,
+      delivery.root_type,delivery.root_public_id,
+      delivery.root_type,delivery.root_public_id).all<{project_public_id:string;client_public_id:string;organization_public_id:string|null}>();
+  if (rows.results.length !== 1)
+    throw new HTTPException(409, { message: "The Project Alpha project does not have one unambiguous active client relationship" });
+  const business = rows.results[0]!;
+  const authority = { sourceId: row.catalog_source_id, workspaceId: row.portal_workspace_id,
+    rootType: delivery.root_type, rootPublicId: delivery.root_public_id, projectPublicId: business.project_public_id,
+    projectSourceVersion: delivery.project_source_version, generationId: delivery.generation_id,
+    sourceSequence: delivery.source_sequence, portalAuthorityVersion: delivery.portal_authority_version,
+    connectorRevision: delivery.connector_revision, connectorVersion: delivery.connector_version,
+    clientPublicId: business.client_public_id, organizationPublicId: business.organization_public_id };
+  return { ...authority, proof: await sha256Hex(canonicalProjectAlphaJson(authority)) };
+}
+
 /** This proof belongs to DELIVERY_DB only, not a cross-database transaction. */
-function currentRequestProof(row: RequestRow): { sql: string; bindings: (string | number | null)[] } {
+function currentRequestProof(row: RequestRow, native?: NativeDraftAuthority): { sql: string; bindings: (string | number | null)[] } {
+  if (row.catalog_source_id !== PRIMARY_ALPHA_SOURCE_ID) {
+    if (!native || native.sourceId !== row.catalog_source_id || native.workspaceId !== row.portal_workspace_id
+      || native.projectPublicId !== row.portal_project_public_id) throw new Error("native-draft-proof-required");
+    return { sql: `WITH RECURSIVE lineage(entity_type,public_id,parent_public_id,depth) AS (
+        SELECT project.entity_type,project.public_id,project.parent_public_id,0
+        FROM portal_v2_directory_entities project
+        JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=project.workspace_id
+          AND checkpoint.active_generation_id=project.generation_id
+        WHERE project.workspace_id=? AND project.entity_type='project' AND project.public_id=? AND project.active=1
+        UNION ALL
+        SELECT parent.entity_type,parent.public_id,parent.parent_public_id,lineage.depth+1
+        FROM lineage JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=?
+        JOIN portal_v2_directory_entities parent ON parent.workspace_id=checkpoint.workspace_id
+          AND parent.generation_id=checkpoint.active_generation_id AND parent.public_id=lineage.parent_public_id AND parent.active=1
+        WHERE lineage.parent_public_id IS NOT NULL AND lineage.depth<16
+          AND (SELECT count(*) FROM portal_v2_directory_entities unique_parent
+            WHERE unique_parent.workspace_id=checkpoint.workspace_id AND unique_parent.generation_id=checkpoint.active_generation_id
+              AND unique_parent.public_id=lineage.parent_public_id AND unique_parent.active=1)=1
+      ) SELECT 1 FROM client_service_requests r
+      JOIN portal_v2_workspaces workspace ON workspace.id=r.portal_workspace_id AND workspace.status='active'
+        AND workspace.legacy_account_id IS NULL AND workspace.project_alpha_source_id=r.catalog_source_id
+      JOIN pa_portal_workspace_sources owner ON owner.workspace_id=workspace.id AND owner.projection_source_id=r.catalog_source_id
+      JOIN pa_portal_source_authorities authority ON authority.source_id=r.catalog_source_id AND authority.state='active'
+        AND authority.version=? AND authority.connector_revision=? AND authority.connector_version=?
+      JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=workspace.id
+        AND checkpoint.active_generation_id=? AND checkpoint.source_sequence=?
+      JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id
+        AND generation.workspace_id=workspace.id AND generation.status='active' AND generation.complete=1
+      JOIN portal_v2_directory_entities project ON project.workspace_id=workspace.id AND project.generation_id=checkpoint.active_generation_id
+        AND project.entity_type='project' AND project.public_id=r.portal_project_public_id AND project.source_version=? AND project.active=1
+      JOIN portal_v2_directory_entities root ON root.workspace_id=workspace.id AND root.generation_id=checkpoint.active_generation_id
+        AND root.entity_type=? AND root.public_id=? AND root.active=1
+      WHERE r.id=? AND r.catalog_source_id=? AND r.portal_workspace_id=? AND r.portal_project_public_id=? AND r.project_id IS NULL
+        AND (SELECT count(*) FROM lineage WHERE entity_type='client')=1
+        AND EXISTS(SELECT 1 FROM lineage WHERE entity_type='client' AND public_id=?)
+        AND EXISTS(SELECT 1 FROM lineage WHERE entity_type=? AND public_id=?)
+        AND r.status IN ('under_review','accepted_pending_pa_linkage') AND r.title=? AND r.details=? AND r.deliverables_text IS ?
+        AND COALESCE((SELECT MAX(revision_number) FROM request_revisions WHERE request_id=r.id),0)=?
+        AND COALESCE((SELECT MAX(revision_number) FROM client_service_request_area_revisions WHERE request_id=r.id),0)=?
+        AND (SELECT estimate.scope_text FROM request_operational_estimates estimate WHERE estimate.request_id=r.id
+          AND estimate.status IN ('draft','ready','accepted','change_requested') ORDER BY estimate.version DESC LIMIT 1) IS ?`,
+      bindings: [native.workspaceId,native.projectPublicId,native.workspaceId,
+        native.portalAuthorityVersion,native.connectorRevision,native.connectorVersion,native.generationId,native.sourceSequence,
+        native.projectSourceVersion,native.rootType,native.rootPublicId,
+        row.id,row.catalog_source_id,row.portal_workspace_id,row.portal_project_public_id,
+        native.clientPublicId,native.rootType,native.rootPublicId,
+        row.title,row.details,row.deliverables_text,row.request_revision,row.area_revision || 0,row.scope_text] };
+  }
   return {
     sql: `SELECT 1 FROM client_service_requests r
       JOIN client_accounts account ON account.id=r.account_id AND account.status='active'
@@ -619,7 +799,8 @@ function currentRequestProof(row: RequestRow): { sql: string; bindings: (string 
 }
 
 async function reserveQuoteCommand(env: Env, row: RequestRow, target: QuoteDestination,
-  payload: string, payloadHash: string, idempotencyKey: string, actorId: string): Promise<QuoteCommandRow> {
+  payload: string, payloadHash: string, idempotencyKey: string, actorId: string,
+  native?: NativeDraftAuthority, connectorProof?: ProjectAlphaConnectorProof | null): Promise<QuoteCommandRow> {
   if (await hasUnresolvedOtherCommand(env, row))
     throw new ProjectAlphaDraftQuoteError(409, "reconciliation_required", reconcileMessage);
   const read = () => database(env).prepare(`SELECT * FROM request_pa_draft_quote_commands
@@ -635,7 +816,8 @@ async function reserveQuoteCommand(env: Env, row: RequestRow, target: QuoteDesti
     return command;
   };
   const existing = await read(); if (existing) return validate(existing);
-  const proof=currentRequestProof(row),id=crypto.randomUUID();
+  if (connectorProof) await assertProjectAlphaConnectorProof(env, connectorProof);
+  const proof=currentRequestProof(row,native),id=crypto.randomUUID();
   try {
     const result=await database(env).prepare(`INSERT INTO request_pa_draft_quote_commands
       (id,request_id,request_revision,area_revision,source_id,command_endpoint,application_key,editor_origin,
@@ -654,34 +836,38 @@ async function reserveQuoteCommand(env: Env, row: RequestRow, target: QuoteDesti
   }
   const saved=await read();
   if(!saved)throw new ProjectAlphaDraftQuoteError(503,"integration_unavailable","The saved quote command could not be verified; nothing was sent");
+  if (connectorProof) await assertProjectAlphaConnectorProof(env, connectorProof);
   return validate(saved);
 }
 
-async function buildPayload(env: Env, row: RequestRow): Promise<ProjectAlphaDraftQuotePayload> {
-  // Only the primary connector is configured. Never send another source's raw
-  // client/project/service IDs to it, including for an empty service selection.
-  if (row.catalog_source_id !== PRIMARY_ALPHA_SOURCE_ID)
-    throw new HTTPException(409, { message: "This request's catalog source has no configured quote connection" });
+async function buildPayload(env: Env, row: RequestRow, native?: NativeDraftAuthority): Promise<ProjectAlphaDraftQuotePayload> {
   if (!OPAQUE_PUBLIC_ID.test(row.id))
     throw new HTTPException(409, { message: "This request has an invalid public identifier" });
-  if (!row.project_alpha_client_id || !OPAQUE_PUBLIC_ID.test(row.project_alpha_client_id))
+  const clientPublicId = native?.clientPublicId ?? row.project_alpha_client_id;
+  const organizationPublicId = native?.organizationPublicId ?? row.project_alpha_organization_id;
+  const projectPublicId = native?.projectPublicId ?? row.project_alpha_project_id;
+  if (!clientPublicId || !OPAQUE_PUBLIC_ID.test(clientPublicId))
     throw new HTTPException(409, { message: "This client request is not linked to an authorized Project Alpha client" });
-  if (
+  if (!native &&
     row.portal_project_id !== null &&
     (row.project_authorized !== 1 || !row.project_alpha_project_id)
   ) throw new HTTPException(409, {
     message: "This request is no longer linked to an authorized Project Alpha project",
   });
-  for (const optionalId of [row.project_alpha_organization_id, row.project_alpha_project_id]) {
+  for (const optionalId of [organizationPublicId, projectPublicId]) {
     if (optionalId !== null && !OPAQUE_PUBLIC_ID.test(optionalId))
       throw new HTTPException(409, { message: "This request has an invalid Project Alpha authorization link" });
   }
-  const provenance = await provePrimaryBusinessReferences(env, { accountId: row.account_id,
-    accountSourceId: row.account_source_id, projectSourceId: row.project_source_id,
-    clientId: row.project_alpha_client_id, organizationId: row.project_alpha_organization_id, projectId: row.project_alpha_project_id });
-  if (!provenance.available) throw new HTTPException(409, { message: provenance.reason === "unsupported_source"
-    ? "unsupported_source: This request's business source has no configured quote connection"
-    : "mapping_unavailable: Refresh the primary Alpha business or portal projection before creating this quote" });
+  if (!native) {
+    if (row.catalog_source_id !== PRIMARY_ALPHA_SOURCE_ID)
+      throw new HTTPException(409, { message: "This request's catalog source has no configured quote connection" });
+    const provenance = await provePrimaryBusinessReferences(env, { accountId: row.account_id,
+      accountSourceId: row.account_source_id, projectSourceId: row.project_source_id,
+      clientId: clientPublicId, organizationId: organizationPublicId, projectId: projectPublicId });
+    if (!provenance.available) throw new HTTPException(409, { message: provenance.reason === "unsupported_source"
+      ? "unsupported_source: This request's business source has no configured quote connection"
+      : "mapping_unavailable: Refresh the primary Alpha business or portal projection before creating this quote" });
+  }
   if (row.request_revision < 1)
     throw new HTTPException(409, { message: "This request has no immutable revision to send to Project Alpha" });
 
@@ -728,9 +914,9 @@ async function buildPayload(env: Env, row: RequestRow): Promise<ProjectAlphaDraf
       deliverablesSummary: row.deliverables_text?.slice(0, 2_000) || null,
     },
     authorization: {
-      organizationPublicId: row.project_alpha_organization_id,
-      clientPublicId: row.project_alpha_client_id,
-      projectPublicId: row.project_alpha_project_id,
+      organizationPublicId,
+      clientPublicId,
+      projectPublicId,
     },
     services: serviceResult.results.map(service => {
       if (!OPAQUE_PUBLIC_ID.test(service.service_public_id) || !SAFE_PUBLIC_ID.test(service.service_source_version))
@@ -773,20 +959,22 @@ export function registerProjectAlphaDraftQuoteRoutes(app: App): void {
     const request = await requestForDraft(c.env, requestId);
     if (!request) throw new HTTPException(404, { message: "Client request not found" });
     c.header("Cache-Control", "no-store");
-    if (request.catalog_source_id !== PRIMARY_ALPHA_SOURCE_ID)
-      return c.json({ capability: { enabled: false, reason: "This request's catalog source has no configured quote connection" }, receipt: null });
     const receipt = await latestReceipt(c.env, requestId);
-    let capability = projectAlphaDraftQuoteCapability(c.env);
+    let capability = request.catalog_source_id === PRIMARY_ALPHA_SOURCE_ID
+      ? projectAlphaDraftQuoteCapability(c.env) : { enabled: c.env.PROJECT_ALPHA_DRAFT_QUOTES_ENABLED === "true", reason: null as string | null };
     if (capability.enabled) {
       try {
-        await buildPayload(c.env, request);
+        const runtime = await quoteRuntime(c.env, request.catalog_source_id);
+        const native = runtime.connectorProof ? await resolveNativeDraftAuthority(c.env, request, runtime.connectorProof) : undefined;
+        await buildPayload(c.env, request, native);
         if (!["under_review", "accepted_pending_pa_linkage"].includes(request.status))
           capability = { enabled: false, reason: "Review or accept the request before creating a Project Alpha draft" };
         else if (await hasUnresolvedOtherCommand(c.env, request))
           capability = { enabled: false, reason: reconcileMessage };
       } catch (error) {
-        if (!(error instanceof HTTPException)) throw error;
-        capability = { enabled: false, reason: error.message };
+        if (error instanceof HTTPException || error instanceof ProjectAlphaDraftQuoteError)
+          capability = { enabled: false, reason: error.message };
+        else throw error;
       }
     }
     c.header("Cache-Control", "no-store");
@@ -799,17 +987,25 @@ export function registerProjectAlphaDraftQuoteRoutes(app: App): void {
   app.post("/api/client-service-requests/:id/pa-draft", async c => {
     const principal = c.get("principal");
     await requireOperationsManage(c.env, principal);
-    const capability = projectAlphaDraftQuoteCapability(c.env);
-    if (!capability.enabled)
-      return c.json({ error: capability.reason, code: "integration_disabled" }, 503);
-
     const requestId = c.req.param("id");
     const request = await requestForDraft(c.env, requestId);
     if (!request) throw new HTTPException(404, { message: "Client request not found" });
+    if (c.env.PROJECT_ALPHA_DRAFT_QUOTES_ENABLED !== "true")
+      return c.json({ error: "Project Alpha draft creation is not enabled", code: "integration_disabled" }, 503);
     if (!["under_review", "accepted_pending_pa_linkage"].includes(request.status))
       throw new HTTPException(409, { message: "Review or accept the request before creating a Project Alpha draft" });
 
-    const payload = await buildPayload(c.env, request);
+    let runtime: QuoteRuntime;
+    let native: NativeDraftAuthority | undefined;
+    try {
+      runtime = await quoteRuntime(c.env, request.catalog_source_id);
+      native = runtime.connectorProof ? await resolveNativeDraftAuthority(c.env, request, runtime.connectorProof) : undefined;
+    } catch (error) {
+      if (error instanceof ProjectAlphaDraftQuoteError)
+        return c.json({ error: error.message, code: error.code }, error.status);
+      throw error;
+    }
+    const payload = await buildPayload(c.env, request, native);
     const rawPayload = canonicalProjectAlphaJson(payload);
     const payloadHash = await sha256Hex(rawPayload);
     const areaRevision = request.area_revision || 0;
@@ -833,15 +1029,22 @@ export function registerProjectAlphaDraftQuoteRoutes(app: App): void {
     let result: ProjectAlphaDraftQuoteResult;
     let command: QuoteCommandRow;
     try {
-      const destination = await quoteDestination(c.env, request.catalog_source_id);
-      command = await reserveQuoteCommand(c.env, request, destination, rawPayload, payloadHash, idempotencyKey, principal.id);
+      const destination = runtime.destination;
+      command = await reserveQuoteCommand(c.env, request, destination, rawPayload, payloadHash, idempotencyKey, principal.id,
+        native, runtime.connectorProof);
       await requireOperationsManage(c.env, principal);
       // Reservation is durable before the first network call. Check the current
       // authority and content again after that await; never dispatch stale data.
       const current = await requestForDraft(c.env, requestId);
+      const currentRuntime = await quoteRuntime(c.env, request.catalog_source_id);
+      if (canonicalProjectAlphaJson(currentRuntime.destination) !== canonicalProjectAlphaJson(destination)
+        || canonicalProjectAlphaJson(currentRuntime.connectorProof) !== canonicalProjectAlphaJson(runtime.connectorProof))
+        throw new ProjectAlphaDraftQuoteError(409, "destination_changed", "The quote destination changed before the saved command could be sent");
+      const currentNative = current && currentRuntime.connectorProof
+        ? await resolveNativeDraftAuthority(c.env, current, currentRuntime.connectorProof) : undefined;
       if (!current || !["under_review", "accepted_pending_pa_linkage"].includes(current.status) ||
-        canonicalProjectAlphaJson(currentRequestProof(current).bindings) !== canonicalProjectAlphaJson(currentRequestProof(request).bindings) ||
-        canonicalProjectAlphaJson(await buildPayload(c.env, current)) !== rawPayload)
+        canonicalProjectAlphaJson(currentRequestProof(current,currentNative).bindings) !== canonicalProjectAlphaJson(currentRequestProof(request,native).bindings) ||
+        canonicalProjectAlphaJson(await buildPayload(c.env, current,currentNative)) !== rawPayload)
         throw new ProjectAlphaDraftQuoteError(409, "scope_denied", "The request changed before the saved quote command could be sent");
       result = await sendProjectAlphaDraftQuoteCommand(c.env, payload, idempotencyKey, {
         sourceId: request.catalog_source_id, destination,
@@ -858,11 +1061,16 @@ export function registerProjectAlphaDraftQuoteRoutes(app: App): void {
     try {
       await requireOperationsManage(c.env, principal);
       const current = await requestForDraft(c.env, requestId);
+      const currentRuntime = await quoteRuntime(c.env, request.catalog_source_id);
+      const currentNative = current && currentRuntime.connectorProof
+        ? await resolveNativeDraftAuthority(c.env, current, currentRuntime.connectorProof) : undefined;
       scopeCurrent = !!current && ["under_review", "accepted_pending_pa_linkage"].includes(current.status) &&
-        canonicalProjectAlphaJson(currentRequestProof(current).bindings) === canonicalProjectAlphaJson(currentRequestProof(request).bindings) &&
-        canonicalProjectAlphaJson(await buildPayload(c.env, current)) === rawPayload;
+        canonicalProjectAlphaJson(currentRuntime.destination) === canonicalProjectAlphaJson(runtime.destination) &&
+        canonicalProjectAlphaJson(currentRuntime.connectorProof) === canonicalProjectAlphaJson(runtime.connectorProof) &&
+        canonicalProjectAlphaJson(currentRequestProof(current,currentNative).bindings) === canonicalProjectAlphaJson(currentRequestProof(request,native).bindings) &&
+        canonicalProjectAlphaJson(await buildPayload(c.env, current,currentNative)) === rawPayload;
     } catch { /* Unverifiable authority is stale, never permission to use a quote. */ }
-    const receiptId = crypto.randomUUID(), proof = currentRequestProof(request);
+    const receiptId = crypto.randomUUID(), proof = currentRequestProof(request,native);
     const details = JSON.stringify({ sourceId: command.source_id, commandId: command.id,
       requestRevision: request.request_revision, areaRevision, payloadHash,
       projectAlphaReceiptId: result.receiptId, projectAlphaDraftPublicId: result.draftQuote.publicId });

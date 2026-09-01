@@ -70,6 +70,28 @@ enrollment additionally needs the known legacy signing configuration available
 to Operations; existing scalar settings alone must not be guessed or copied
 from unrelated credentials.
 
+A source that accepts staff-created draft quotes adds a `draftQuote` object to
+its selected set with `apiKey` and `hmacSecret`. Both values are dedicated to
+`portal.quote-draft.create`: they may not equal the snapshot API key, event or
+portal signing material, either primary draft scalar, or each other. Operations
+stores only domain-separated fingerprints on the immutable connector revision.
+Adding or rotating this purpose therefore requires an audited connector
+revision; changing the secret envelope in place fails closed. Primary quote
+routing remains on its existing scalar configuration and is not implicitly
+migrated to the connector registry.
+
+Operations also reserves both draft-quote credentials permanently to their
+source. Reservations survive rotation, suspension, and retirement, so another
+source cannot claim an older value. A common ownership fingerprint prevents
+moving the same underlying secret between API-key and HMAC purposes, while an
+exact same-source rollback to a prior credential remains valid.
+
+The repository documents only those two field names and their purposes; it does
+not contain example values. See the migration-first activation and rollback
+contract in [native portal requests and feedback](native-portal-requests-feedback.md).
+Migration `0050_project_alpha_draft_quote_credentials.sql` must be present before
+a registered-source draft-quote capability is enabled.
+
 The initial registry is bounded to 32 lifetime producer identities, including
 retired entries. Raising that capacity requires a deliberate migration and query
 review; deleting a producer to reuse its IDs is unsupported.

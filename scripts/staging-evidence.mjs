@@ -242,6 +242,9 @@ export function validateEvidence(evidence, options = {}) {
   const portal = evidence.clientPortal ?? {};
   const deliveryVars = configs.delivery?.vars ?? {};
   if (portal.hostname !== STAGING_CLIENT_PORTAL.hostname) errors.push("client portal hostname must match the approved staging topology");
+  if (portal.secondaryHostname !== STAGING_CLIENT_PORTAL.secondaryHostname) errors.push("client portal secondary hostname must match the approved staging topology");
+  if (!sameSet(portal.origins, [`https://${STAGING_CLIENT_PORTAL.hostname}`, `https://${STAGING_CLIENT_PORTAL.secondaryHostname}`]))
+    errors.push("client portal origins must contain both approved staging presentation domains");
   if (portal.origin !== `https://${STAGING_CLIENT_PORTAL.hostname}` || portal.origin !== deliveryVars.CLIENT_PORTAL_ORIGIN)
     errors.push("client portal origin must match the authenticated Delivery staging origin");
   if (deliveryVars.EXPECTED_HOST !== STAGING_CLIENT_PORTAL.publicHostname)
@@ -257,6 +260,8 @@ export function validateEvidence(evidence, options = {}) {
   if (!populated(portal.groupId) || portal.groupName !== STAGING_CLIENT_PORTAL.groupName) errors.push("client portal needs the dedicated staging client group");
   if (portal.groupId === access.groupId || portal.groupName === access.groupName) errors.push("client portal group must not reuse the staff or Ops Sync group");
   if (!sameSet(portal.protectedPaths, STAGING_CLIENT_PORTAL.protectedPaths)) errors.push("client portal protected paths must exactly match the portal Access contract");
+  if (!sameSet(portal.protectedDestinations, STAGING_CLIENT_PORTAL.protectedDestinations))
+    errors.push("client portal Access destinations must cover both hosts with the exact protected paths");
   const publicAccess = portal.publicAccess ?? {};
   if (publicAccess.applicationName !== STAGING_CLIENT_PORTAL.publicApplicationName || !populated(publicAccess.applicationId) || !populated(publicAccess.policyId)) errors.push("client public paths need a separately identified Access Bypass application and policy");
   if (publicAccess.decision !== "bypass" || publicAccess.include !== "everyone") errors.push("client public path policy must be Bypass Everyone");
@@ -265,7 +270,7 @@ export function validateEvidence(evidence, options = {}) {
   if (!populated(portal.approvalRef)) errors.push("client portal Access setup needs an approval reference");
 
   const portalTests = portal.tests ?? {};
-  for (const gate of ["portalDisabled404", "invalidAudienceDenied", "unprovisionedIdentityDenied", "crossAccountDenied", "staffAclDenied", "publicShareAnonymousReachable", "publicSharePasswordRechecked", "accessHeaderAbsentOnPublicShare"]) {
+  for (const gate of ["portalDisabled404", "invalidAudienceDenied", "unprovisionedIdentityDenied", "crossAccountDenied", "staffAclDenied", "publicShareAnonymousReachable", "publicSharePasswordRechecked", "accessHeaderAbsentOnPublicShare", "secondaryDnsTlsReady", "sameAudienceBothHosts", "primaryHardRefresh", "secondaryHardRefresh", "domainSwitchSso", "secondarySameOriginMutation", "mixedOriginDenied", "canonicalPublicLinkPreserved", "secondaryPublicNamespaceDenied"]) {
     if (portalTests[gate] !== true) errors.push(`client portal test ${gate} must be confirmed true`);
   }
   if (!recentDate(portalTests.observedAt, now) || !populated(portalTests.evidenceRef)) errors.push("client portal end-to-end evidence must be current and referenced");
@@ -290,7 +295,12 @@ export function validateEvidence(evidence, options = {}) {
   if (!populated(deliveryMigration.serviceAssignmentCompatibleWriterVersionId))
     errors.push("delivery staging migration barrier needs the immutable compatible-writer version deployed after 0179");
   if (!populated(deliveryMigration.serviceAssignmentBarrierEvidenceRef))
-    errors.push("delivery staging migration barrier needs referenced 0179/deploy/drain/0180-0183 evidence");
+    errors.push("delivery staging migration barrier needs referenced 0179/deploy/drain/0180-0186 evidence");
+  for (const proof of ["nativePortalMigrationsAppliedBeforeFinalWorkers", "nativePortalCapabilitiesDefaultOffAtDeploy", "nativePortalRollbackDrainReviewed"]) {
+    if (deliveryMigration[proof] !== true) errors.push(`native portal release barrier must prove ${proof}`);
+  }
+  if (!populated(deliveryMigration.nativePortalReleaseEvidenceRef))
+    errors.push("native portal release barrier needs referenced 0184-0186/0050 migration-first and rollback-drain evidence");
   if (migrations.productionUnchanged !== true) errors.push("production migrations must be confirmed unchanged");
 
   const externalGates = evidence.externalGates ?? {};

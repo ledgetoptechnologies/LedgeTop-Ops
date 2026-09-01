@@ -12,6 +12,7 @@ function detail(id = "project-one", name = "Church survey"): BusinessProjectDeta
     project: { id, name, status: "completed", description: "Roof survey and site documentation.\nDeliver annotated inspection photos.", start_date: "2026-08-01", end_date: "2026-08-20",
       created_at: "2026-07-15T12:00:00Z", manager: { id: "manager-one", display_name: "Morgan Manager" } },
     linkedContact: { id: "contact-one", display_name: "Bailey Contact", email: "bailey@example.test", phone: "+1 920 555 0123", sourceField: "project.client_id" },
+    operationalWorkspaceAvailable: true, businessActivityAvailable: true, auditTimelineAvailable: true, feedbackHistoryAvailable: true,
     availability: { linkedContact: "available", siteContacts: "not_projected", billingContacts: "not_projected", projectMemory: "not_projected" } };
 }
 function clientDetail() {
@@ -19,6 +20,7 @@ function clientDetail() {
     pa_public_id: null, detail_path: clientPath, display_name: "Acme Construction", status: "active", portal_status: "mapping_unavailable", account_count: 0, project_count: 0, request_count: 0, contact_count: 0 },
     contacts: [], accounts: [], projects: [], requests: [], deliveryGrants: [], authenticatedDeliveryGrants: [], viewerGrants: [],
     contextVersion: "client-context", businessProjects: [{ ...detail().project, manager_name: "Morgan Manager", manager_user_id: "manager-one", row_key: "business:project-one" }],
+    organizationOperationalContactsAvailable: true, projectManagementAvailable: true,
     pages: { businessProjects: { available: true, reason: null, nextCursor: null, hasMore: false, returned: 1, limit: 5 } },
     portalIdentities: { items: [], page: { available: false, reason: "workspace_unavailable", nextCursor: null, hasMore: false, returned: 0, limit: 5 },
       contextVersion: "client-context", refreshedAt: "2026-08-25T12:00:00Z", capabilities: { canManagePortal: false, canManageEligibilityBlocks: false } },

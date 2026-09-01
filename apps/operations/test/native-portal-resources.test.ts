@@ -17,6 +17,7 @@ import { readNativeAuthenticatedDeliveryPage } from '../../client/src/worker/cli
 import { Hono } from 'hono';
 vi.mock('cloudflare:workers',()=>({WorkflowEntrypoint:class{},WorkerEntrypoint:class{},DurableObject:class{}}));
 import { previewNativeDeliveryGrant,createNativeDeliveryGrant } from '../src/worker/native-delivery-bindings';
+import { getStaffFeedback,transitionStaffFeedback } from '../src/worker/client-feedback';
 import { registerProjectAlphaConnector,setProjectAlphaConnectorState } from '../src/worker/project-alpha-connectors';
 import { createProjectAlphaSourceContext,prepareProjectAlphaSourceRecords } from '../src/worker/project-alpha-source';
 import { encodeRef } from '../src/worker/delivery';
@@ -105,9 +106,13 @@ describe('source-owned native portal resources with real signed projection and l
       await db.batch(splitD1MigrationStatements(readFileSync(new URL(`../../client/migrations/${name}`,import.meta.url),'utf8')).map(sql=>db.prepare(sql)));
     await db.batch(splitD1MigrationStatements(readFileSync(
       new URL('../../client/migrations/0172_project_access_authority_history.sql',import.meta.url),'utf8')).map(sql=>db.prepare(sql)));
+    await db.batch(splitD1MigrationStatements(readFileSync(
+      new URL('../../client/migrations/0184_native_client_feedback.sql',import.meta.url),'utf8')).map(sql=>db.prepare(sql)));
     opsDb=await runtime.getD1Database('OPS_DB') as D1Database;
     for(const name of readdirSync(new URL('../migrations/',import.meta.url)).filter(n=>n.endsWith('.sql')&&n<'0041_').sort())
       await opsDb.batch(splitD1MigrationStatements(readFileSync(new URL(`../migrations/${name}`,import.meta.url),'utf8')).map(sql=>opsDb.prepare(sql)));
+    await opsDb.batch(splitD1MigrationStatements(readFileSync(
+      new URL('../migrations/0050_project_alpha_draft_quote_credentials.sql',import.meta.url),'utf8')).map(sql=>opsDb.prepare(sql)));
     keypair=await generateKeyPair('RS256',{extractable:true});const key=await exportJWK(keypair.publicKey);key.kid='native-test';key.alg='RS256';jwks=createLocalJWKSet({keys:[key]});
     clientToken=await new SignJWT({email,type:'app'}).setProtectedHeader({alg:'RS256',kid:'native-test'}).setIssuer(issuer).setAudience('native-client-aud')
       .setSubject(principal.subject).setIssuedAt().setExpirationTime('1h').sign(keypair.privateKey);
@@ -115,6 +120,7 @@ describe('source-owned native portal resources with real signed projection and l
     env={DELIVERY_DB:db,CLIENT_PORTAL_ENABLED:'true',CLIENT_PORTAL_HIERARCHY_V2_ENABLED:'true',CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED:'true',
       CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED:'true',AUTHENTICATED_DELIVERY_GRANTS_ENABLED:'true',CLIENT_PORTAL_ORIGIN:'https://client.test',
       PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED:'true',
+      PUBLIC_BULK_RATE_LIMITER:{limit:async()=>({success:true})},
       CLIENT_ACCESS_TEAM_DOMAIN:issuer,CLIENT_ACCESS_AUD:'native-client-aud',DELIVERY_SESSION_SECRET:'native-handle-secret-at-least-thirty-two-bytes',
       PROJECT_ALPHA_PORTAL_SYNC_ENABLED:'true',PROJECT_ALPHA_CONNECTOR_CREDENTIALS:JSON.stringify({version:1,sets:Object.fromEntries([a,b].map(f=>[f.name,{portalCurrent:{keyId:f.keyId,value:f.secret}}]))}),
       DATA_BUCKET:{
@@ -124,7 +130,7 @@ describe('source-owned native portal resources with real signed projection and l
           const name=key.split('/')[1],all=bytes(`source-${name}`),body=options?.range?all.slice(options.range.offset,options.range.offset+options.range.length):all;
           return {etag:`etag-${name}`,httpEtag:`"etag-${name}"`,customMetadata:{},body:new ReadableStream({start(c){c.enqueue(body);},cancel(){bodyCancelled=true;}})};},
       } as unknown as R2Bucket,
-    } as Env;
+    } as unknown as Env;
     const publicKey=(seed:number)=>btoa(String.fromCharCode(...new Uint8Array(32).fill(seed))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
     const credentials=JSON.parse(env.PROJECT_ALPHA_CONNECTOR_CREDENTIALS!);
     credentials.sets.primary={snapshotApiKey:'native-primary-snapshot-key',eventCurrent:{keyId:'primary-key',algorithm:'ed25519',value:publicKey(1)}};
@@ -139,7 +145,7 @@ describe('source-owned native portal resources with real signed projection and l
       opsDb.prepare(`INSERT INTO pa_projects(id,name,payload_json,last_sync_id) VALUES('native-location','Folder location','{}','fixture')`),
       opsDb.prepare(`INSERT INTO project_folders(project_id,division_id,r2_prefix,match_method,confirmed_by) VALUES('native-location','native-division','native/','manual',?)`).bind(staff.id),
     ]);
-    for(const permission of ['delivery.browse','projects.view','delivery.share.create','delivery.share.audit','delivery.share.revoke'])
+    for(const permission of ['operations.manage','delivery.browse','projects.view','delivery.share.create','delivery.share.audit','delivery.share.revoke'])
       await opsDb.prepare(`INSERT OR IGNORE INTO role_permissions(role_id,permission_key) VALUES('role-admin',?)`).bind(permission).run();
     const revision={snapshotBasePath:'/',accessIssuer:issuer,accessAudience:'native-producer-aud',accessSubject:'explicit-source-producer'};
     await registerProjectAlphaConnector(opsEnv,{sourceId:'project-alpha:primary',producerBindingId:'native-primary',snapshotOrigin:'https://native-primary.example.test',
@@ -213,7 +219,7 @@ describe('source-owned native portal resources with real signed projection and l
   it('source-qualified context and hierarchy expose read capabilities only and keep colliding projects distinct',async()=>{
     for(const f of [a,b]){
       const response=await request(`${base(f)}/context`),json=await response.json();expect(json).toMatchObject({workspace:{id:f.workspace,sourceId:f.source,resourceMode:'native'},
-        capabilities:{directoryRead:true,deliveryView:true,requestV2:false,feedback:false,viewer:false,viewBilling:false,manageTeam:false}});
+        capabilities:{directoryRead:true,deliveryView:true,requestV2:false,feedback:true,viewer:false,viewBilling:false,manageTeam:false}});
       expect(JSON.stringify(json)).not.toMatch(/legacy_account|bindingId|r2_prefix|identityId|credential/);
       expect(await (await request(`${base(f)}/hierarchy`)).json()).toMatchObject({workspaceId:f.workspace,sourceId:f.source,
         entries:expect.arrayContaining([{type:'project',publicId:projectId,parentPublicId:rootId,parentType:'organization',displayName:`Project ${f.name}`,sourceVersion:'project-v1'}])});
@@ -225,6 +231,129 @@ describe('source-owned native portal resources with real signed projection and l
     const child=await (await request(`${base(b)}/folders/${result.folders![0]!.id}`)).json() as ClientFilePage;
     expect(child.files.map(f=>f.name)).toEqual(['deep.txt']);expect(child.breadcrumbs?.map(x=>x.name)).toEqual(['Project b','child']);
   });
+  it('keeps organization-folder and client-file feedback source-qualified and lets authorized staff resolve and transition it without a project',async()=>{
+    const native=await resolveNativePortalWorkspaceReadContext(env,principal,a.workspace);expect(native).not.toBeNull();
+    const clientId='c'.repeat(32),identityId=(await db.prepare('SELECT id FROM portal_v2_identities WHERE issuer=? AND subject=?')
+      .bind(issuer,principal.subject).first<string>('id'))!,created:string[]=[];
+    await db.prepare(`INSERT INTO portal_v2_directory_entities(workspace_id,generation_id,entity_type,public_id,parent_public_id,display_name,source_version,active)
+      VALUES(?,?,'client',? ,?,'Native client','client-v1',1)`).bind(a.workspace,native!.generationId,clientId,rootId).run();
+    async function grant(ownerType:'organization'|'client',ownerId:string,version:string,prefix:string){
+      const binding=`feedback-${ownerType}-binding`,grantId=`feedback-${ownerType}-grant`,receipt=`feedback-${ownerType}-receipt`;
+      await db.batch([
+        db.prepare(`INSERT INTO portal_v2_folder_bindings(id,workspace_id,owner_scope_type,owner_public_id,r2_prefix,source_type,source_version,status)
+          VALUES(?,?,?,?,?,'project_alpha',?,'active')`).bind(binding,a.workspace,ownerType,ownerId,prefix,version),
+        db.prepare(`INSERT INTO project_alpha_delivery_intent_receipts(receipt_id,delivery_id,request_fingerprint,access_mode,resource_id,project_alpha_source_id)
+          VALUES(?,? ,?,'portal',?,?)`).bind(receipt,`delivery-${ownerType}`,'d'.repeat(64),grantId,a.source),
+        db.prepare(`INSERT INTO project_alpha_delivery_portal_grants(id,receipt_id,workspace_id,folder_binding_id,binding_source_version,
+          audience_type,audience_public_id,audience_source_version,actor_id) VALUES(?,?,?,?,?,'principal','same-person','person-v1','project-alpha-test')`)
+          .bind(grantId,receipt,a.workspace,binding,version),
+      ]);created.push(grantId);return {binding,grantId};
+    }
+    const org=await grant('organization',rootId,'root-v1','feedback/org/');
+    const client=await grant('client',clientId,'client-v1','feedback/client/');
+    await db.prepare(`INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind)
+      VALUES('feedback/client/photo.jpg','feedback-etag',42,'2026-08-31T12:00:00.000Z','image/jpeg','image')`).run();
+    try{
+      const deliveries=await (await request(`${base(a)}/deliveries`)).json() as {items:Array<{id:string;owner:{type:string;publicId:string}}>};
+      const orgFolder=deliveries.items.find(item=>item.owner.type==='organization'&&item.owner.publicId===rootId)!;
+      const clientFolder=deliveries.items.find(item=>item.owner.type==='client'&&item.owner.publicId===clientId)!;
+      expect(orgFolder).toBeTruthy();expect(clientFolder).toBeTruthy();
+      const createFeedback=async(target:unknown,message:string)=>{
+        const response=await request(`${base(a)}/feedback`,{method:'POST',headers:{Origin:'https://client.test','Content-Type':'application/json',
+          'Idempotency-Key':`feedback-${crypto.randomUUID()}`},body:JSON.stringify({target,message})});
+        expect(response.status).toBe(201);return (await response.json() as {feedback:{id:string}}).feedback.id;
+      };
+      const projectFeedback=await createFeedback({kind:'project',projectId},'Please review the project.');
+      const orgFeedback=await createFeedback({kind:'folder',projectId:null,folderId:orgFolder.id},'Please review the organization folder.');
+      const filePage=await (await request(`${base(a)}/folders/${clientFolder.id}`)).json() as ClientFilePage;
+      const clientFeedback=await createFeedback({kind:'file',projectId:null,fileId:filePage.files[0]!.id},'Please review the client file.');
+      for(const [id,ownerType] of [[orgFeedback,'organization'],[clientFeedback,'client']] as const){
+        const row=await db.prepare(`SELECT owner_scope_type ownerType,owner_public_id ownerId,project_public_id projectId
+          FROM portal_native_feedback WHERE id=?`).bind(id).first();
+        expect(row).toMatchObject({ownerType,projectId:null});
+        const detail=await getStaffFeedback(opsEnv,staff,id);
+        expect(detail.feedback.target).toMatchObject({projectId:null,available:true,
+          actionPath:`/clients/sources/${encodeURIComponent(a.source)}/business/organizations/${rootId}`});
+      }
+      const transitioned=await transitionStaffFeedback(opsEnv,staff,orgFeedback,{expectedRevision:1,status:'done',note:'Reviewed.'},`staff-${crypto.randomUUID()}`);
+      expect(transitioned.feedback).toMatchObject({status:'done',target:{projectId:null}});
+
+      // Submitted native feedback is durable staff history. Removing the live
+      // file and exact grant must remove client navigation, not the staff item.
+      await db.prepare("DELETE FROM file_index WHERE r2_key='feedback/client/photo.jpg'").run();
+      await db.prepare(`UPDATE project_alpha_delivery_portal_grants SET status='revoked',grant_version=grant_version+1,
+        revoked_at=datetime('now'),revoke_reason_code='project_alpha_delivery_revoked' WHERE id=?`).bind(client.grantId).run();
+      expect((await getStaffFeedback(opsEnv,staff,clientFeedback)).feedback.target)
+        .toMatchObject({available:false,actionPath:null,projectId:null});
+      expect((await request(`${base(a)}/feedback/${clientFeedback}`)).status).toBe(404);
+      expect((await transitionStaffFeedback(opsEnv,staff,clientFeedback,{expectedRevision:1,status:'in_progress',note:null},
+        `staff-${crypto.randomUUID()}`)).feedback).toMatchObject({status:'in_progress',target:{available:false,actionPath:null}});
+
+      // Suspending the author or deleting the source project likewise makes
+      // navigation unavailable without erasing or reassigning the report.
+      await db.prepare("UPDATE portal_v2_identities SET status='suspended',revoked_at=datetime('now') WHERE id=?").bind(identityId).run();
+      expect((await getStaffFeedback(opsEnv,staff,projectFeedback)).feedback.target)
+        .toMatchObject({available:false,actionPath:null,projectId});
+      expect((await request(`${base(a)}/feedback/${projectFeedback}`)).status).not.toBe(200);
+      await db.prepare("UPDATE portal_v2_identities SET status='active',revoked_at=NULL WHERE id=?").bind(identityId).run();
+      await db.prepare(`UPDATE portal_v2_directory_entities SET active=0 WHERE workspace_id=?
+        AND entity_type='project' AND public_id=?`).bind(a.workspace,projectId).run();
+      expect((await getStaffFeedback(opsEnv,staff,projectFeedback)).feedback.target)
+        .toMatchObject({available:false,actionPath:null,projectId});
+      expect((await transitionStaffFeedback(opsEnv,staff,projectFeedback,{expectedRevision:1,status:'done',note:'Preserved after removal.'},
+        `staff-${crypto.randomUUID()}`)).feedback).toMatchObject({status:'done',target:{available:false,actionPath:null}});
+      await db.prepare(`UPDATE portal_v2_directory_entities SET active=1 WHERE workspace_id=?
+        AND entity_type='project' AND public_id=?`).bind(a.workspace,projectId).run();
+    }finally{
+      await db.prepare("UPDATE portal_v2_identities SET status='active',revoked_at=NULL WHERE issuer=? AND subject=?").bind(issuer,principal.subject).run();
+      await db.prepare(`UPDATE portal_v2_directory_entities SET active=1 WHERE workspace_id=?
+        AND entity_type='project' AND public_id=?`).bind(a.workspace,projectId).run();
+      for(const grantId of created)await db.prepare(`UPDATE project_alpha_delivery_portal_grants SET status='revoked',grant_version=grant_version+1,
+        revoked_at=datetime('now'),revoke_reason_code='project_alpha_delivery_revoked' WHERE id=? AND status='active'`).bind(grantId).run();
+      await db.prepare("DELETE FROM file_index WHERE r2_key='feedback/client/photo.jpg'").run();
+    }
+  },120_000);
+  async function feedbackCreationRace(fault:'authority-rotation'|'principal-suspension'|'principal-version'|'principal-email',relations=false,
+    fixture=a){
+      const before={
+        feedback:Number(await db.prepare('SELECT count(*) n FROM portal_native_feedback').first('n')),
+        events:Number(await db.prepare('SELECT count(*) n FROM portal_native_feedback_events').first('n')),
+        audits:Number(await db.prepare("SELECT count(*) n FROM audit_log WHERE action='client.feedback.created'").first('n')),
+      };
+      let ran=false;
+      const target={...env,...(relations?{CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED:'true'}:{}),DELIVERY_DB:beforeEligibilityBatch(async()=>{
+        ran=true;
+        if(fault==='authority-rotation'){
+          const rotated={...fixture.connector,revision:fixture.connector.revision+1};
+          const staged=await provisionPortalSourceAuthority(env,rotated,{credentialRef:fixture.name,accessIssuer:issuer,
+            accessAudience:'native-producer-aud',accessSubject:'explicit-source-producer'},fixture.version,'staff-test');
+          fixture.connector=rotated;fixture.version=staged.version;await state(fixture,'active');
+        }else if(fault==='principal-suspension'){
+          await db.prepare("UPDATE pa_portal_principals SET status='suspended' WHERE workspace_id=? AND public_id='same-person'").bind(fixture.workspace).run();
+        }else if(fault==='principal-version'){
+          await db.prepare("UPDATE pa_portal_principals SET source_version='person-raced' WHERE workspace_id=? AND public_id='same-person'").bind(fixture.workspace).run();
+        }else{
+          await db.prepare("UPDATE pa_portal_principals SET email_hint='raced@example.test' WHERE workspace_id=? AND public_id='same-person'").bind(fixture.workspace).run();
+        }
+      })};
+      try{
+        const response=await request(`${base(fixture)}/feedback`,{method:'POST',headers:{Origin:'https://client.test','Content-Type':'application/json',
+          'Idempotency-Key':`feedback-race-${crypto.randomUUID()}`},body:JSON.stringify({target:{kind:'project',projectId},message:`Race ${fault}.`})},target);
+        expect(ran).toBe(true);
+        // A completed project is deliberately concealed after its final
+        // source authority disappears; active targets report a stale write.
+        expect(response.status).toBe(fault==='authority-rotation'&&relations?404:409);
+        expect(Number(await db.prepare('SELECT count(*) n FROM portal_native_feedback').first('n'))).toBe(before.feedback);
+        expect(Number(await db.prepare('SELECT count(*) n FROM portal_native_feedback_events').first('n'))).toBe(before.events);
+        expect(Number(await db.prepare("SELECT count(*) n FROM audit_log WHERE action='client.feedback.created'").first('n'))).toBe(before.audits);
+      }finally{
+        if(fault==='principal-suspension')await db.prepare("UPDATE pa_portal_principals SET status='active' WHERE workspace_id=? AND public_id='same-person'").bind(fixture.workspace).run();
+        else if(fault==='principal-version')await db.prepare("UPDATE pa_portal_principals SET source_version='person-v1' WHERE workspace_id=? AND public_id='same-person'").bind(fixture.workspace).run();
+        else if(fault==='principal-email')await db.prepare("UPDATE pa_portal_principals SET email_hint=? WHERE workspace_id=? AND public_id='same-person'").bind(email,fixture.workspace).run();
+      }
+  }
+  it.each(['principal-suspension','principal-version','principal-email'] as const)(
+    'native feedback creation rolls back when %s races resolved authorization',fault=>feedbackCreationRace(fault),120_000);
   it('relation-mode scoped identity denial hides the exact project before hierarchy aggregation',async()=>{
     const native=await resolveNativePortalWorkspaceReadContext(env,principal,a.workspace);expect(native).not.toBeNull();
     await db.batch([
@@ -471,4 +600,14 @@ describe('source-owned native portal resources with real signed projection and l
       .bind(created.grant.grantId).run();
     expect((await (await request(`${base(a)}/hierarchy`,{},relationEnv)).json() as {entries:Array<{publicId:string}>}).entries.some(entry=>entry.publicId===projectId)).toBe(false);
   },120_000);
+  // This source-level rotation deliberately leaves the shared source out of
+  // sync with Operations. Keep it terminal: later tests must not accidentally
+  // depend on authority that this race is specifically proving was revoked.
+  it('native feedback creation rolls back when authority-rotation races resolved authorization',
+    async()=>{
+      // Use the still-active secondary source. The primary source is already
+      // in completed-history state here, where feedback is intentionally
+      // concealed before a write transaction can begin.
+      await feedbackCreationRace('authority-rotation',false,b);
+    },120_000);
 });

@@ -5,7 +5,7 @@ import type { RequestError } from "./bulk-download";
 import { feedbackPath, feedbackStatusLabel, loadFeedback, loadFeedbackDetail, safeFeedbackTargetPath, submitFeedback } from "./feedback-api";
 import "./PortalFeedback.css";
 
-export function LeaveFeedback({ target, label, compact = false }: { target: ClientFeedbackTargetInput; label: string; compact?: boolean }) {
+export function LeaveFeedback({ target, label, compact = false, nativeWorkspaceId = null }: { target: ClientFeedbackTargetInput; label: string; compact?: boolean; nativeWorkspaceId?: string | null }) {
   const [open, setOpen] = useState(false), [message, setMessage] = useState(""), [error, setError] = useState("");
   const [busy, setBusy] = useState(false), [saved, setSaved] = useState<ClientFeedbackItem | null>(null);
   const [invalidated, setInvalidated] = useState(false);
@@ -24,7 +24,7 @@ export function LeaveFeedback({ target, label, compact = false }: { target: Clie
     operation.current = current;
     const controller = new AbortController(); pending.current = controller; setBusy(true); setError("");
     try {
-      const result = await submitFeedback(target, current.message, current.key, controller.signal);
+      const result = await submitFeedback(target, current.message, current.key, controller.signal, nativeWorkspaceId);
       if (controller.signal.aborted || pending.current !== controller) return;
       setSaved(result); setOpen(false); setMessage(""); operation.current = null; trigger.current?.focus();
     } catch (caught) {
@@ -51,7 +51,7 @@ export function LeaveFeedback({ target, label, compact = false }: { target: Clie
   </div>;
 }
 
-export function PortalFeedback({ id }: { id?: string | null }) {
+export function PortalFeedback({ id, nativeWorkspaceId = null }: { id?: string | null; nativeWorkspaceId?: string | null }) {
   const [items, setItems] = useState<ClientFeedbackItem[]>([]), [detail, setDetail] = useState<ClientFeedbackDetail | null>(null);
   const [cursor, setCursor] = useState<string | null>(null), [loading, setLoading] = useState(true), [error, setError] = useState("");
   const pending = useRef<AbortController | null>(null), sequence = useRef(0);
@@ -61,7 +61,7 @@ export function PortalFeedback({ id }: { id?: string | null }) {
     pending.current?.abort(); const controller = new AbortController(), run = ++sequence.current; pending.current = controller;
     setLoading(true); setError(""); retryCursor.current = next;
     try {
-      const result = id ? await loadFeedbackDetail(id, controller.signal) : await loadFeedback(next, controller.signal);
+      const result = id ? await loadFeedbackDetail(id, controller.signal, nativeWorkspaceId) : await loadFeedback(next, controller.signal, nativeWorkspaceId);
       if (controller.signal.aborted || run !== sequence.current) return;
       if ("feedback" in result) setDetail(result);
       else { setItems(current => [...new Map((next ? [...current, ...result.items] : result.items).map(item => [item.id, item])).values()]); setCursor(result.nextCursor); }
@@ -71,7 +71,7 @@ export function PortalFeedback({ id }: { id?: string | null }) {
       setError("Feedback could not be loaded. Your access or the item may have changed.");
     } finally { if (!controller.signal.aborted && run === sequence.current) { pending.current = null; setLoading(false); } }
   }
-  useEffect(() => { setItems([]); setDetail(null); setCursor(null); void load(); return () => { pending.current?.abort(); pending.current = null; sequence.current += 1; }; }, [id]);
+  useEffect(() => { setItems([]); setDetail(null); setCursor(null); void load(); return () => { pending.current?.abort(); pending.current = null; sequence.current += 1; }; }, [id, nativeWorkspaceId]);
   return <div className="portal-feedback-page">
     <header><div><span className="eyebrow">Your feedback</span><h1>{id ? "Feedback details" : "Feedback"}</h1><p>Feedback you submitted in this workspace. Your team decides how best to handle it.</p></div>{id && <a className="button button-ghost" href={feedbackPath()}>All feedback</a>}</header>
     {error && <div className="portal-inline-error" role="alert"><p>{error}</p><button className="button-ghost" onClick={() => void load(retryCursor.current)}>Retry feedback</button></div>}

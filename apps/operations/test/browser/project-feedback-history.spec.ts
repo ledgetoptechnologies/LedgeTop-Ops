@@ -11,6 +11,7 @@ const sourceClientPath=(sourceId:string)=>`/clients/sources/${encodeURIComponent
 function project(sourceId:string=root.sourceId):BusinessProjectDetail{return {canonicalRoot:{...root,sourceId},client:{display_name:"Acme Construction",detail_path:sourceClientPath(sourceId)},
   contextVersion:"project-context",refreshedAt:"2026-08-25T12:00:00.000Z",project:{id:"project-one",name:"Church survey",status:"active",description:null,
     start_date:null,end_date:null,created_at:"2026-08-01T12:00:00.000Z",manager:null},linkedContact:null,
+  feedbackHistoryAvailable:sourceId===root.sourceId,
   availability:{linkedContact:"not_projected",siteContacts:"not_projected",billingContacts:"not_projected",projectMemory:"not_projected"}};}
 function item(index:number){const feedbackId=`feedback-${String(index).padStart(2,"0")}`,done=index%2===0;
   return {feedbackId,createdAt:`2026-08-${String(20-index).padStart(2,"0")}T12:00:00.000Z`,status:done?"done" as const:"new" as const,
@@ -86,7 +87,8 @@ test("refresh keeps keyboard focus while the replacement page is pending",async(
     await new Promise<void>(resolve=>{refreshGate.resolve=resolve;});return route.fulfill({json:page([1].map(item),null)});
   });
   await open(pageObject);await history(pageObject).getByRole("button",{name:"Show feedback history",exact:true}).click();
-  const refresh=history(pageObject).getByRole("button",{name:"Refresh feedback history",exact:true});await refresh.focus();await pageObject.keyboard.press("Enter");
+  const refresh=history(pageObject).getByRole("button",{name:"Refresh feedback history",exact:true});
+  await expect(refresh).toHaveAttribute("aria-disabled","false");await refresh.focus();await pageObject.keyboard.press("Enter");
   await expect(refresh).toBeFocused();await expect(refresh).toHaveAttribute("aria-disabled","true");
   refreshGate.resolve?.();await expect(history(pageObject).getByText("1 feedback record shown",{exact:true})).toBeVisible();
   await expect(refresh).toBeFocused();await expect(refresh).toHaveAttribute("aria-disabled","false");

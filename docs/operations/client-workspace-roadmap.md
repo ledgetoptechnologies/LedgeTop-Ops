@@ -758,8 +758,14 @@ a new whole-monorepo claim. No real customers were linked or granted access.
 - [x] Locally implement and verify registered secondary portal ingress, coordinated
       administration, explicit staff-to-client folder sharing and native resource
       navigation. See [secondary client portal](secondary-client-portal.md) for
-      exact backend/browser evidence, paired upgrade order and unsupported native
-      features. No production activation, migration, mail or deployment included.
+      exact backend/browser evidence and paired upgrade order. No production
+      activation, migration, mail or deployment included.
+- [x] Locally implement and verify exact-source native service requests and
+      feedback, including colliding-ID isolation, mutation-time principal/source
+      revision checks, storage-only account isolation, and exact outbound routing.
+      See [native portal requests and feedback](native-portal-requests-feedback.md).
+      Both remain migration-first and default-off; no production activation,
+      migration, mail or deployment is included.
 - [ ] Implement slice 1 and verify its complete business workflow.
 - [x] Locally verify the implemented recent-first Client Hub and source-record update
       history increment. See [business activity](client-business-activity.md).

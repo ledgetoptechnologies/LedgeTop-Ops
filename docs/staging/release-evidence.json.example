@@ -245,7 +245,12 @@
   },
   "clientPortal": {
     "hostname": "client-staging.ledgetopdroneservices.com",
+    "secondaryHostname": "portal-staging.ledgetoptechnologies.com",
     "origin": "https://client-staging.ledgetopdroneservices.com",
+    "origins": [
+      "https://client-staging.ledgetopdroneservices.com",
+      "https://portal-staging.ledgetoptechnologies.com"
+    ],
     "enabled": false,
     "teamDomain": "https://ledgetoptechnologies.cloudflareaccess.com",
     "applicationName": "LTDS Client Portal Staging",
@@ -258,6 +263,16 @@
       "/portal/*",
       "/api/client",
       "/api/client/*"
+    ],
+    "protectedDestinations": [
+      "client-staging.ledgetopdroneservices.com/portal",
+      "client-staging.ledgetopdroneservices.com/portal/*",
+      "client-staging.ledgetopdroneservices.com/api/client",
+      "client-staging.ledgetopdroneservices.com/api/client/*",
+      "portal-staging.ledgetoptechnologies.com/portal",
+      "portal-staging.ledgetoptechnologies.com/portal/*",
+      "portal-staging.ledgetoptechnologies.com/api/client",
+      "portal-staging.ledgetoptechnologies.com/api/client/*"
     ],
     "publicAccess": {
       "applicationName": "LTDS Client Public Staging",
@@ -278,6 +293,15 @@
       "publicShareAnonymousReachable": false,
       "publicSharePasswordRechecked": false,
       "accessHeaderAbsentOnPublicShare": false,
+      "secondaryDnsTlsReady": false,
+      "sameAudienceBothHosts": false,
+      "primaryHardRefresh": false,
+      "secondaryHardRefresh": false,
+      "domainSwitchSso": false,
+      "secondarySameOriginMutation": false,
+      "mixedOriginDenied": false,
+      "canonicalPublicLinkPreserved": false,
+      "secondaryPublicNamespaceDenied": false,
       "observedAt": "<ISO_8601_TIMESTAMP>",
       "evidenceRef": "<EVIDENCE_REFERENCE>"
     }
@@ -371,7 +395,10 @@
         "0180_service_assignment_policy_v1_contract.sql",
         "0181_service_assignment_request_policy_reviews.sql",
         "0182_portal_delivery_notification_source_ready.sql",
-        "0183_portal_delivery_notification_direct_source_ready.sql"
+        "0183_portal_delivery_notification_direct_source_ready.sql",
+        "0184_native_client_feedback.sql",
+        "0185_native_service_request_ownership.sql",
+        "0186_delivery_notification_authority_provenance.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
@@ -387,6 +414,10 @@
       "serviceAssignmentOldWritersDrained": false,
       "serviceAssignmentContractMigrationsApplied": false,
       "serviceAssignmentBarrierEvidenceRef": "<EVIDENCE_REFERENCE>",
+      "nativePortalMigrationsAppliedBeforeFinalWorkers": false,
+      "nativePortalCapabilitiesDefaultOffAtDeploy": false,
+      "nativePortalRollbackDrainReviewed": false,
+      "nativePortalReleaseEvidenceRef": "<EVIDENCE_REFERENCE>",
       "verifiedAt": "<ISO_8601_TIMESTAMP>",
       "verificationEvidenceRef": "<EVIDENCE_REFERENCE>"
     },
@@ -427,7 +458,8 @@
         "0046_project_alpha_project_management_routes.sql",
         "0047_project_memory_staff_attachments.sql",
         "0048_business_party_lifecycle.sql",
-        "0049_project_alpha_delivery_source_rate_limits.sql"
+        "0049_project_alpha_delivery_source_rate_limits.sql",
+        "0050_project_alpha_draft_quote_credentials.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
@@ -444,7 +476,9 @@
     "projectAlphaPortalProjection": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>", "fixturesPinned": false, "orderedReplayVerified": false, "scopeParityVerified": false, "tombstoneRemovalVerified": false },
     "projectAlphaCatalogProjection": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>", "fixturesPinned": false, "completeGenerationVerified": false, "staleRecoveryVerified": false, "sanitizedFieldsVerified": false },
     "projectAlphaPricingHints": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>", "fixturePinned": false, "safeDegradationVerified": false, "noLocalFallbackVerified": false },
-    "projectAlphaDraftQuotes": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>", "fixturePinned": false, "idempotentReplayVerified": false, "conflictingReplayDenied": false, "noFinancialSideEffects": false, "nativeEditorHandoffVerified": false },
+    "projectAlphaDraftQuotes": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>", "fixturePinned": false, "idempotentReplayVerified": false, "conflictingReplayDenied": false, "noFinancialSideEffects": false, "nativeEditorHandoffVerified": false, "dedicatedConnectorCredentialsVerified": false, "connectorRevisionFingerprintsMatched": false, "primaryScalarNotReused": false },
+    "nativePortalRequests": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>", "exactSourceWorkspaceIdentityProjectVerified": false, "collidingPublicIdsIsolated": false, "principalRevisionRaceDenied": false, "revocationAndReplayVerified": false, "attachmentsSourceBound": false, "exactDraftQuoteDestinationVerified": false, "storageAccountsHiddenFromLegacyAdministration": false },
+    "nativePortalFeedback": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>", "exactSourceWorkspaceIdentityTargetVerified": false, "collidingPublicIdsIsolated": false, "principalRevisionRaceDenied": false, "revocationAndReplayVerified": false, "staffQueueSourceBound": false, "completionDestinationVerified": false },
     "requestAttachmentScanner": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>", "scannerVersionPinned": false, "quarantineDispatchVerified": false, "objectDigestBound": false, "cleanAndMaliciousSamplesVerified": false, "quarantineCleanupVerified": false, "alertOwnershipVerified": false },
     "requestAttachmentR2CorsAndLeastPrivilege": {
       "ready": false,
@@ -573,7 +607,7 @@
     }
   },
   "deployments": {
-    "delivery": { "versionId": "<IMMUTABLE_STAGING_VERSION_ID>", "releaseCommit": "246160114b4ffa9e46e5bb45a87b8ccfb6ef3fed", "configSha256": "<SHA256>", "deployedAt": "<ISO_8601_TIMESTAMP>", "bindingsVerified": false, "healthCheckPassed": false, "hostAdmissionDenied": false, "disabledFeatureFlags": ["CLIENT_PORTAL_ENABLED", "CLIENT_PORTAL_REQUEST_V2_ENABLED", "PROJECT_ALPHA_CATALOG_SYNC_ENABLED", "PROJECT_ALPHA_PORTAL_SYNC_ENABLED", "PROJECT_ALPHA_SERVICE_ASSIGNMENT_SYNC_ENABLED", "CLIENT_PORTAL_SERVICE_ASSIGNMENT_POLICY_ENABLED", "PROJECT_ALPHA_PRICING_HINTS_ENABLED", "CLIENT_REQUEST_ATTACHMENTS_ENABLED", "CLIENT_PORTAL_TEAM_ENABLED", "CLIENT_PORTAL_HIERARCHY_V2_ENABLED", "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED", "CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED", "AUTHENTICATED_DELIVERY_GRANTS_ENABLED", "CLIENT_VIEWER_ENABLED", "CLIENT_VIEWER_SHARES_ENABLED", "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED", "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED", "PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED", "CLIENT_PORTAL_PEER_ADMIN_ENABLED", "CLIENT_PORTAL_ADDRESS_BOOK_ENABLED", "CLIENT_PORTAL_ACCESS_ENROLLMENT_READY", "CLIENT_PORTAL_INVITATION_EMAIL_ENABLED", "CLIENT_DELEGATED_SHARES_ENABLED", "CLOUD_TRANSFER_DROPBOX_ENABLED", "CLOUD_TRANSFER_GOOGLE_ENABLED", "CLOUD_TRANSFER_GOOGLE_PICKER_CLIENT_ENABLED"], "evidenceRef": "<EVIDENCE_REFERENCE>" },
+    "delivery": { "versionId": "<IMMUTABLE_STAGING_VERSION_ID>", "releaseCommit": "246160114b4ffa9e46e5bb45a87b8ccfb6ef3fed", "configSha256": "<SHA256>", "deployedAt": "<ISO_8601_TIMESTAMP>", "bindingsVerified": false, "healthCheckPassed": false, "hostAdmissionDenied": false, "disabledFeatureFlags": ["CLIENT_PORTAL_ENABLED", "CLIENT_PORTAL_REQUEST_V2_ENABLED", "CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED", "PROJECT_ALPHA_CATALOG_SYNC_ENABLED", "PROJECT_ALPHA_PORTAL_SYNC_ENABLED", "PROJECT_ALPHA_SERVICE_ASSIGNMENT_SYNC_ENABLED", "CLIENT_PORTAL_SERVICE_ASSIGNMENT_POLICY_ENABLED", "PROJECT_ALPHA_PRICING_HINTS_ENABLED", "CLIENT_REQUEST_ATTACHMENTS_ENABLED", "CLIENT_PORTAL_TEAM_ENABLED", "CLIENT_PORTAL_HIERARCHY_V2_ENABLED", "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED", "CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED", "AUTHENTICATED_DELIVERY_GRANTS_ENABLED", "CLIENT_VIEWER_ENABLED", "CLIENT_VIEWER_SHARES_ENABLED", "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED", "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED", "PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED", "CLIENT_PORTAL_PEER_ADMIN_ENABLED", "CLIENT_PORTAL_ADDRESS_BOOK_ENABLED", "CLIENT_PORTAL_ACCESS_ENROLLMENT_READY", "CLIENT_PORTAL_INVITATION_EMAIL_ENABLED", "CLIENT_DELEGATED_SHARES_ENABLED", "CLOUD_TRANSFER_DROPBOX_ENABLED", "CLOUD_TRANSFER_GOOGLE_ENABLED", "CLOUD_TRANSFER_GOOGLE_PICKER_CLIENT_ENABLED"], "evidenceRef": "<EVIDENCE_REFERENCE>" },
     "operations": { "versionId": "<IMMUTABLE_STAGING_VERSION_ID>", "releaseCommit": "246160114b4ffa9e46e5bb45a87b8ccfb6ef3fed", "configSha256": "<SHA256>", "deployedAt": "<ISO_8601_TIMESTAMP>", "bindingsVerified": false, "healthCheckPassed": false, "hostAdmissionDenied": false, "disabledFeatureFlags": ["PROJECT_ALPHA_DRAFT_QUOTES_ENABLED", "PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED", "PROJECT_ALPHA_DELIVERY_GUEST_ENABLED", "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED", "CLIENT_PORTAL_HIERARCHY_V2_ENABLED", "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED", "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED", "PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED", "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED", "CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED", "CLIENT_PORTAL_OPERATIONS_MANAGEMENT_ENABLED", "AUTHENTICATED_DELIVERY_GRANTS_ENABLED", "PROJECT_ACCESS_EXPIRY_NOTIFICATIONS_ENABLED", "AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED", "CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED", "VIEWER_INTEGRATION_ENABLED", "VIEWER_PROCESSING_ENABLED", "VIEWER_PUBLIC_SHARES_ENABLED", "CLIENT_VIEWER_SESSION_ISSUER_ENABLED", "CLIENT_VIEWER_SHARES_ENABLED", "DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED", "DIRECT_DELIVERY_UPLOADS_ENABLED", "DROPBOX_IMPORT_ENABLED", "R2_PURGE_ENABLED"], "evidenceRef": "<EVIDENCE_REFERENCE>" },
     "ops-sync": { "versionId": "<IMMUTABLE_STAGING_VERSION_ID>", "releaseCommit": "246160114b4ffa9e46e5bb45a87b8ccfb6ef3fed", "configSha256": "<SHA256>", "deployedAt": "<ISO_8601_TIMESTAMP>", "bindingsVerified": false, "healthCheckPassed": false, "hostAdmissionDenied": false, "disabledFeatureFlags": [], "evidenceRef": "<EVIDENCE_REFERENCE>" }
   },

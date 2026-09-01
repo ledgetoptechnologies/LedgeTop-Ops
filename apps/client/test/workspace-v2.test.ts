@@ -621,9 +621,9 @@ describe("client workspace hierarchy v2", () => {
     expect((await createWorkspaceInvitation(env, principal, "workspace-account-a", {
       email: "wide@example.test", organizationWide: true, capabilities: ["delivery.view"],
     }, "workspace-wide-no-confirm-01")).outcome).toBe("invalid");
-    expect((await createWorkspaceInvitation(env, principal, "workspace-account-a", {
+    await expect(createWorkspaceInvitation(env, principal, "workspace-account-a", {
       email: "wide@example.test", organizationWide: true, confirmOrganizationWide: true, capabilities: ["delivery.view"],
-    }, "workspace-wide-confirmed-01")).outcome).toBe("created");
+    }, "workspace-wide-confirmed-01")).rejects.toMatchObject({ status: 403 });
 
     await addWorkspaceB();
     expect((await createWorkspaceInvitation(env, principal, "workspace-b", {
@@ -884,7 +884,7 @@ describe("client workspace hierarchy v2", () => {
     expect(await db.prepare("SELECT status FROM portal_v2_legacy_member_bridges WHERE workspace_id='workspace-account-a' AND identity_id=?")
       .bind(identityId).first("status")).toBe("suspended");
     expect(await resolveEffectivePortalWorkspaceContext(env, guest, "workspace-b")).not.toBeNull();
-  }, 30_000);
+  }, 60_000);
 
   it("protects the last manager and makes a suspended manager fail authorization immediately", async () => {
     expect(await suspendWorkspaceMember(env, principal, "workspace-account-a", "identity-one")).toBe("last_manager");

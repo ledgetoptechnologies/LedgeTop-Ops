@@ -10,6 +10,7 @@ import type {
 import { z } from "zod";
 import { projectAccessTermsInputSchema } from './project-access-terms';
 import type { Env } from "../types";
+import { clientPortalRequestOriginAllowed, configuredClientPortalOrigins } from "../origin-policy";
 import { serveAuthorizedThumbnail } from "../thumbnails";
 import { d1ClientPortalRepository } from "./repository";
 import { clientFeedbackSchemaAvailable, createClientFeedbackRouter } from "./feedback-routes";
@@ -35,11 +36,12 @@ import {
   canonicalRequestAttachmentEtag,
   checkpointRequestAttachment,
   completeRequestAttachment,
-  getAuthorizedRequestAttachment,
+  getAuthorizedRequestAttachmentContext,
   getSubmittedRequestAttachment,
   initializeRequestAttachment,
   listRequestAttachments,
   listSubmittedRequestAttachments,
+  issueNativeRequestAttachmentPartLease,
   presignRequestAttachmentPart,
   requestAttachmentCheckpoints,
   requestAttachmentPartLength,
@@ -61,7 +63,9 @@ import {
   portalHierarchyV2Enabled,
   portalIdentityAccepted,
   resolveEffectivePortalWorkspaceContext,
+  resolveNativePortalWorkspaceReadContext,
 } from "./workspace-v2";
+import { nativeRequestSchemaReady, nativeServiceRequestsEnabled } from "./native-request-authority";
 import {
   authorizeClientShareDelegation,
   clientDelegatedShareCreationCapability,
@@ -270,7 +274,8 @@ const attachmentInitBody = z.object({
   size: z.number().int().positive(),
 }).strict();
 const attachmentPartTicketBody = z.object({ partNumber: z.number().int().min(1).max(4) }).strict();
-const attachmentCheckpointBody = z.object({ etag: z.string().min(1).max(128), size: z.number().int().positive() }).strict();
+const attachmentCheckpointBody = z.object({ etag: z.string().min(1).max(128), size: z.number().int().positive(),
+  ticketNonce: z.string().min(32).max(128).optional() }).strict();
 const attachmentCompleteBody = z.object({ parts: z.array(z.object({
   partNumber: z.number().int().min(1).max(4), etag: z.string().min(1).max(128),
 }).strict()).min(1).max(4) }).strict();
@@ -309,35 +314,11 @@ const workspaceInvitationBody = z.object({
 const cloudflareClientIdentityProvider: ResolveClientPrincipal =
   resolveCloudflareClientPrincipal;
 
-function configuredPortalOrigin(env: Env): string {
-  if (!env.CLIENT_PORTAL_ORIGIN)
-    throw new HTTPException(503, {
-      message: "Client portal is not configured",
-    });
-  try {
-    const url = new URL(env.CLIENT_PORTAL_ORIGIN);
-    if (
-      url.origin !== env.CLIENT_PORTAL_ORIGIN ||
-      (env.ENVIRONMENT === "production" && url.protocol !== "https:")
-    ) {
-      throw new Error("invalid portal origin");
-    }
-    return url.origin;
-  } catch {
-    throw new HTTPException(503, {
-      message: "Client portal is not configured",
-    });
-  }
-}
-
 function requireSameRequestOrigin(
   request: Request,
-  expectedOrigin: string,
+  env: Env,
 ): void {
-  if (
-    request.headers.get("Origin") !== expectedOrigin ||
-    new URL(request.url).origin !== expectedOrigin
-  ) {
+  if (!clientPortalRequestOriginAllowed(request,env)) {
     throw new HTTPException(403, { message: "This request is not allowed" });
   }
 }
@@ -407,8 +388,10 @@ export function createClientPortalRouter(
   router.use("*", async (c, next) => {
     if (c.env.CLIENT_PORTAL_ENABLED !== "true")
       return c.json({ error: "Not found" }, 404);
-    const portalOrigin = configuredPortalOrigin(c.env);
-    if (new URL(c.req.url).origin !== portalOrigin)
+    const portalOrigins = configuredClientPortalOrigins(c.env);
+    if (!portalOrigins)
+      throw new HTTPException(503, { message: "Client portal is not configured" });
+    if (!portalOrigins.includes(new URL(c.req.url).origin))
       return c.json({ error: "Not found" }, 404);
     // The production adapter is configuration-gated before it looks at any
     // client header. Tests can inject an adapter without needing Cloudflare.
@@ -439,18 +422,44 @@ export function createClientPortalRouter(
         workspace = selectedWorkspace
           ? await resolveEffectivePortalWorkspaceContext(c.env, principal, selectedWorkspace)
           : null;
-        if (!workspace) throw new HTTPException(403, { message: "Select an authorized client workspace" });
-        session = {
-          accountId: workspace.legacyAccountId,
-          identityId: workspace.legacyIdentityId,
-          workspaceId: workspace.workspaceId,
-          principalIssuer: principal.issuer,
-          principalSubject: principal.subject,
-          principalEmail: principal.email,
-          displayName: workspace.displayName,
-          role: workspace.role,
-          canViewBilling: workspace.canViewBilling,
-        };
+        if (workspace) {
+          session = {
+            accountId: workspace.legacyAccountId,
+            identityId: workspace.legacyIdentityId,
+            workspaceId: workspace.workspaceId,
+            principalIssuer: principal.issuer,
+            principalSubject: principal.subject,
+            principalEmail: principal.email,
+            displayName: workspace.displayName,
+            role: workspace.role,
+            canViewBilling: workspace.canViewBilling,
+          };
+        } else {
+          const nativeRequestPath = /^\/(?:request-readiness|service-catalog(?:\/page)?|service-request-drafts|service-requests)(?:\/|$)/
+            .test(c.req.path);
+          const native = selectedWorkspace && nativeRequestPath && nativeServiceRequestsEnabled(c.env)
+            ? await resolveNativePortalWorkspaceReadContext(c.env, principal, selectedWorkspace)
+            : null;
+          if (!native) throw new HTTPException(403, { message: "Select an authorized client workspace" });
+          if (!await nativeRequestSchemaReady(c.env) && !c.req.path.endsWith("/request-readiness"))
+            throw new HTTPException(503, { res: Response.json({
+              error: "Native service requests are temporarily unavailable until storage migration is ready.",
+              code: "request_unavailable",
+            }, { status: 503 }) });
+          session = {
+            accountId: "",
+            identityId: "",
+            workspaceId: native.workspaceId,
+            principalIssuer: principal.issuer,
+            principalSubject: principal.subject,
+            principalEmail: principal.email,
+            nativeSourceId: native.sourceId,
+            nativePortalIdentityId: native.identityId,
+            displayName: native.displayName,
+            role: "member",
+            canViewBilling: false,
+          };
+        }
       }
     }
     if (!session && !(portalHierarchyV2Enabled(c.env) && (workspaceV2Request || c.req.path.endsWith("/session"))))
@@ -541,7 +550,7 @@ export function createClientPortalRouter(
   });
   router.patch("/viewer/preferences", async c => {
     if (c.env.CLIENT_VIEWER_ENABLED !== "true") throw new HTTPException(404, { message: "Not found" });
-    requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
+    requireSameRequestOrigin(c.req.raw, c.env);
     const workspace = selectedWorkspace(c);
     const value = z.object({ displayUnits: z.enum(["imperial", "metric"]) }).strict()
       .safeParse(await c.req.json().catch(() => null));
@@ -595,7 +604,7 @@ export function createClientPortalRouter(
 
   router.post("/v2/workspaces/:workspaceId/activate", async (c) => {
     if (!portalHierarchyV2Enabled(c.env)) throw new HTTPException(404, { message: "Not found" });
-    requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
+    requireSameRequestOrigin(c.req.raw, c.env);
     const workspaceId = opaqueId.safeParse(c.req.param("workspaceId"));
     if (!workspaceId.success) throw new HTTPException(404, { message: "Workspace not found" });
     const workspace = (await listPortalWorkspaces(c.env, c.get("clientPrincipal")))
@@ -642,7 +651,7 @@ export function createClientPortalRouter(
 
   router.post("/v2/workspaces/:workspaceId/delegated-shares", async (c) => {
     if (!portalHierarchyV2Enabled(c.env)) throw new HTTPException(404, { message: "Not found" });
-    requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
+    requireSameRequestOrigin(c.req.raw, c.env);
     const workspaceId = opaqueId.safeParse(c.req.param("workspaceId"));
     const key = idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
     const input = delegatedShareCreateBody.safeParse(await readBoundedJson(c.req.raw, 4096));
@@ -704,7 +713,7 @@ export function createClientPortalRouter(
 
   router.delete("/v2/workspaces/:workspaceId/delegated-shares/:shareId", async (c) => {
     if (!portalHierarchyV2Enabled(c.env)) throw new HTTPException(404, { message: "Not found" });
-    requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
+    requireSameRequestOrigin(c.req.raw, c.env);
     const workspaceId = opaqueId.safeParse(c.req.param("workspaceId"));
     const shareId = opaqueId.safeParse(c.req.param("shareId"));
     const key = idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
@@ -728,7 +737,7 @@ export function createClientPortalRouter(
 
   router.post("/v2/workspaces/:workspaceId/invitations", async (c) => {
     if (!workspaceMembershipManagementEnabled(c.env)) throw new HTTPException(404, { message: "Not found" });
-    requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
+    requireSameRequestOrigin(c.req.raw, c.env);
     const workspaceId = opaqueId.safeParse(c.req.param("workspaceId"));
     const key = idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
     const input = workspaceInvitationBody.safeParse(await readBoundedJson(c.req.raw, 4096));
@@ -747,7 +756,7 @@ export function createClientPortalRouter(
   });
 
   router.post('/v2/workspaces/:workspaceId/address-book/contacts/search',async(c)=>{
-    if(!await workspaceAddressBookAvailable(c.env))throw new HTTPException(404,{message:'Not found'});requireSameRequestOrigin(c.req.raw,configuredPortalOrigin(c.env));
+    if(!await workspaceAddressBookAvailable(c.env))throw new HTTPException(404,{message:'Not found'});requireSameRequestOrigin(c.req.raw,c.env);
     const workspaceId=opaqueId.safeParse(c.req.param('workspaceId')),body=addressContactSearch.safeParse(await readBoundedJson(c.req.raw,8192));
     if(!workspaceId.success||!body.success)throw new HTTPException(400,{message:'address_book_query_invalid'});
     return c.json(await listWorkspaceAddressContacts(c.env,c.get('clientPrincipal'),workspaceId.data,{q:body.data.q,cursor:body.data.cursor??undefined}));
@@ -759,21 +768,21 @@ export function createClientPortalRouter(
     return c.json(await readWorkspaceAddressContact(c.env,c.get('clientPrincipal'),workspaceId.data,contactId.data));
   });
   router.post('/v2/workspaces/:workspaceId/address-book/contacts',async(c)=>{
-    if(!await workspaceAddressBookAvailable(c.env))throw new HTTPException(404,{message:'Not found'});requireSameRequestOrigin(c.req.raw,configuredPortalOrigin(c.env));
+    if(!await workspaceAddressBookAvailable(c.env))throw new HTTPException(404,{message:'Not found'});requireSameRequestOrigin(c.req.raw,c.env);
     const workspaceId=opaqueId.safeParse(c.req.param('workspaceId')),key=idempotencyKey.safeParse(c.req.header('Idempotency-Key')),
       body=addressContactFields.safeParse(await readBoundedJson(c.req.raw,4096));
     if(!workspaceId.success||!key.success||!body.success)throw new HTTPException(400,{message:'address_contact_invalid'});
     const result=await createWorkspaceAddressContact(c.env,c.get('clientPrincipal'),workspaceId.data,body.data,key.data);return c.json(result,result.replayed?200:201);
   });
   router.patch('/v2/workspaces/:workspaceId/address-book/contacts/:contactId',async(c)=>{
-    if(!await workspaceAddressBookAvailable(c.env))throw new HTTPException(404,{message:'Not found'});requireSameRequestOrigin(c.req.raw,configuredPortalOrigin(c.env));
+    if(!await workspaceAddressBookAvailable(c.env))throw new HTTPException(404,{message:'Not found'});requireSameRequestOrigin(c.req.raw,c.env);
     const workspaceId=opaqueId.safeParse(c.req.param('workspaceId')),contactId=opaqueId.safeParse(c.req.param('contactId')),
       key=idempotencyKey.safeParse(c.req.header('Idempotency-Key')),body=addressContactUpdate.safeParse(await readBoundedJson(c.req.raw,4096));
     if(!workspaceId.success||!contactId.success||!key.success||!body.success)throw new HTTPException(400,{message:'address_contact_invalid'});
     return c.json(await updateWorkspaceAddressContact(c.env,c.get('clientPrincipal'),workspaceId.data,contactId.data,body.data,key.data));
   });
   router.delete('/v2/workspaces/:workspaceId/address-book/contacts/:contactId',async(c)=>{
-    if(!await workspaceAddressBookAvailable(c.env))throw new HTTPException(404,{message:'Not found'});requireSameRequestOrigin(c.req.raw,configuredPortalOrigin(c.env));
+    if(!await workspaceAddressBookAvailable(c.env))throw new HTTPException(404,{message:'Not found'});requireSameRequestOrigin(c.req.raw,c.env);
     const workspaceId=opaqueId.safeParse(c.req.param('workspaceId')),contactId=opaqueId.safeParse(c.req.param('contactId')),
       key=idempotencyKey.safeParse(c.req.header('Idempotency-Key')),body=addressContactDelete.safeParse(await readBoundedJson(c.req.raw,1024));
     if(!workspaceId.success||!contactId.success||!key.success||!body.success)throw new HTTPException(400,{message:'address_contact_invalid'});
@@ -787,7 +796,7 @@ export function createClientPortalRouter(
   });
   router.post('/v2/workspaces/:workspaceId/invitation-requests/:requestId/cancel',async(c)=>{
     if(!workspaceMembershipManagementEnabled(c.env))throw new HTTPException(404,{message:'Not found'});
-    requireSameRequestOrigin(c.req.raw,configuredPortalOrigin(c.env));
+    requireSameRequestOrigin(c.req.raw,c.env);
     const workspaceId=opaqueId.safeParse(c.req.param('workspaceId')),requestId=opaqueId.safeParse(c.req.param('requestId')),
       key=idempotencyKey.safeParse(c.req.header('Idempotency-Key')),
       body=z.object({expectedVersion:z.number().int().positive()}).strict().safeParse(await readBoundedJson(c.req.raw,1024));
@@ -797,7 +806,7 @@ export function createClientPortalRouter(
 
   router.delete("/v2/workspaces/:workspaceId/invitations/:invitationId", async (c) => {
     if (!workspaceMembershipManagementEnabled(c.env)) throw new HTTPException(404, { message: "Not found" });
-    requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
+    requireSameRequestOrigin(c.req.raw, c.env);
     const workspaceId = opaqueId.safeParse(c.req.param("workspaceId"));
     const invitationId = opaqueId.safeParse(c.req.param("invitationId"));
     if (!workspaceId.success || !invitationId.success || !(await revokeWorkspaceInvitation(c.env, c.get("clientPrincipal"), workspaceId.data, invitationId.data)))
@@ -807,7 +816,7 @@ export function createClientPortalRouter(
 
   router.delete("/v2/workspaces/:workspaceId/members/:identityId", async (c) => {
     if (!workspaceMembershipManagementEnabled(c.env)) throw new HTTPException(404, { message: "Not found" });
-    requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
+    requireSameRequestOrigin(c.req.raw, c.env);
     const workspaceId = opaqueId.safeParse(c.req.param("workspaceId"));
     const identityId = opaqueId.safeParse(c.req.param("identityId"));
     if (!workspaceId.success || !identityId.success) throw new HTTPException(404, { message: "Member not found" });
@@ -820,7 +829,7 @@ export function createClientPortalRouter(
 
   router.put("/v2/workspaces/:workspaceId/members/:identityId/manager", async (c) => {
     if (!workspacePeerAdminEnabled(c.env)) throw new HTTPException(404, { message: "Not found" });
-    requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
+    requireSameRequestOrigin(c.req.raw, c.env);
     const workspaceId=opaqueId.safeParse(c.req.param("workspaceId")),identityId=opaqueId.safeParse(c.req.param("identityId"));
     const key=idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
     const body=z.object({manager:z.boolean(),expectedVersion:z.number().int().min(0).max(Number.MAX_SAFE_INTEGER)}).strict()
@@ -839,7 +848,7 @@ export function createClientPortalRouter(
 
   router.post("/v2/invitations/accept", async (c) => {
     if (!workspaceMembershipManagementEnabled(c.env)) throw new HTTPException(404, { message: "Not found" });
-    requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
+    requireSameRequestOrigin(c.req.raw, c.env);
     const input = workspaceInvitationAcceptanceBody.safeParse(await readBoundedJson(c.req.raw, 1024));
     if (!input.success) throw new HTTPException(400, { message: "Invitation is invalid" });
     const outcome = await acceptPortalWorkspaceInvitation(c.env, c.get("clientPrincipal"), input.data.token);
@@ -869,7 +878,7 @@ export function createClientPortalRouter(
   });
 
   router.patch("/notifications/:notificationId", async (c) => {
-    requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
+    requireSameRequestOrigin(c.req.raw, c.env);
     const notificationId = opaqueId.safeParse(c.req.param("notificationId"));
     const value = notificationActionBody.safeParse(await readBoundedJson(c.req.raw));
     if (!notificationId.success || !value.success)
@@ -1072,7 +1081,7 @@ export function createClientPortalRouter(
   router.post("/projects/:projectId/models/:associationId/shares", async c => {
     if (c.env.CLIENT_VIEWER_ENABLED !== "true" || c.env.CLIENT_VIEWER_SHARES_ENABLED !== "true" || !c.env.VIEWER_SESSION_ISSUER)
       throw new HTTPException(404, { message: "Not found" });
-    requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
+    requireSameRequestOrigin(c.req.raw, c.env);
     const projectId = opaqueId.safeParse(c.req.param("projectId"));
     const associationId = viewerAssociationId.safeParse(c.req.param("associationId"));
     const key = idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
@@ -1099,7 +1108,7 @@ export function createClientPortalRouter(
   router.delete("/projects/:projectId/models/:associationId/shares/:shareId", async c => {
     if (c.env.CLIENT_VIEWER_ENABLED !== "true" || c.env.CLIENT_VIEWER_SHARES_ENABLED !== "true" || !c.env.VIEWER_SESSION_ISSUER)
       throw new HTTPException(404, { message: "Not found" });
-    requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
+    requireSameRequestOrigin(c.req.raw, c.env);
     const projectId = opaqueId.safeParse(c.req.param("projectId"));
     const associationId = viewerAssociationId.safeParse(c.req.param("associationId"));
     const shareId = opaqueId.safeParse(c.req.param("shareId"));
@@ -1118,7 +1127,7 @@ export function createClientPortalRouter(
   router.post("/projects/:projectId/models/:associationId/session", async (c) => {
     if (c.env.CLIENT_VIEWER_ENABLED !== "true" || !c.env.VIEWER_SESSION_ISSUER)
       throw new HTTPException(404, { message: "Not found" });
-    requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
+    requireSameRequestOrigin(c.req.raw, c.env);
     const projectId = opaqueId.safeParse(c.req.param("projectId"));
     const associationId = viewerAssociationId.safeParse(c.req.param("associationId"));
     const key = idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
@@ -1465,8 +1474,7 @@ export function createClientPortalRouter(
   });
 
   router.post("/service-request-drafts", async (c) => {
-    const portalOrigin = configuredPortalOrigin(c.env);
-    requireSameRequestOrigin(c.req.raw, portalOrigin);
+    requireSameRequestOrigin(c.req.raw, c.env);
     const key = idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
     const parsed = serviceRequestDraftBody.safeParse(await readBoundedJson(c.req.raw, MAX_SERVICE_REQUEST_DRAFT_BYTES));
     if (!key.success || !parsed.success)
@@ -1527,7 +1535,7 @@ export function createClientPortalRouter(
   });
 
   router.post("/service-request-drafts/:draftId/attachments", async (c) => {
-    requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
+    requireSameRequestOrigin(c.req.raw, c.env);
     const draftId = opaqueId.safeParse(c.req.param("draftId"));
     const input = attachmentInitBody.safeParse(await readBoundedJson(c.req.raw));
     if (!draftId.success) throw new HTTPException(404, { message: "Service request draft not found" });
@@ -1546,7 +1554,8 @@ export function createClientPortalRouter(
     const draftId = opaqueId.safeParse(c.req.param("draftId"));
     const attachmentId = opaqueId.safeParse(c.req.param("attachmentId"));
     if (!draftId.success || !attachmentId.success) throw new HTTPException(404, { message: "Attachment not found" });
-    const row = await getAuthorizedRequestAttachment(c.env, c.get("clientSession"), draftId.data, attachmentId.data);
+    const authorized = await getAuthorizedRequestAttachmentContext(c.env, c.get("clientSession"), draftId.data, attachmentId.data);
+    const row = authorized?.row;
     if (!row) throw new HTTPException(404, { message: "Attachment not found" });
     return c.json({ attachmentId: row.id, name: row.original_name, contentType: row.content_type,
       size: row.declared_size, status: row.status, partSize: REQUEST_ATTACHMENT_PART_BYTES,
@@ -1554,66 +1563,79 @@ export function createClientPortalRouter(
   });
 
   router.post("/service-request-drafts/:draftId/attachments/:attachmentId/part-ticket", async (c) => {
-    requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
+    requireSameRequestOrigin(c.req.raw, c.env);
     const draftId = opaqueId.safeParse(c.req.param("draftId"));
     const attachmentId = opaqueId.safeParse(c.req.param("attachmentId"));
     const input = attachmentPartTicketBody.safeParse(await readBoundedJson(c.req.raw));
     if (!draftId.success || !attachmentId.success) throw new HTTPException(404, { message: "Attachment not found" });
     if (!input.success) throw new HTTPException(400, { message: "The attachment part is invalid" });
-    const row = await getAuthorizedRequestAttachment(c.env, c.get("clientSession"), draftId.data, attachmentId.data);
+    const authorized = await getAuthorizedRequestAttachmentContext(c.env, c.get("clientSession"), draftId.data, attachmentId.data);
+    const row = authorized?.row;
     if (!row) throw new HTTPException(404, { message: "Attachment not found" });
     if (Date.parse(row.expires_at) <= Date.now()) throw new HTTPException(410, { message: "The attachment upload expired" });
     if (row.status !== "uploading" || row.multipart_upload_id.startsWith("pending:")) throw new HTTPException(409, { message: "The attachment is not accepting parts" });
     const contentLength = requestAttachmentPartLength(row.declared_size, input.data.partNumber);
+    const lease = authorized?.nativeProof
+      ? await issueNativeRequestAttachmentPartLease(c.env, row, authorized.nativeProof, input.data.partNumber)
+      : null;
+    if (authorized?.nativeProof && !lease)
+      throw new HTTPException(409, { message: "Attachment access changed before the upload ticket was issued" });
     const ticket = await presignRequestAttachmentPart({ env: c.env, key: row.object_key, uploadId: row.multipart_upload_id,
-      partNumber: input.data.partNumber, contentLength, contentType: row.content_type });
+      partNumber: input.data.partNumber, contentLength, contentType: row.content_type,
+      ...(lease ? { now: new Date(lease.issuedAt) } : {}) });
     return c.json({ ...ticket, method: "PUT", partNumber: input.data.partNumber, contentLength,
-      headers: { "Content-Type": row.content_type }, contentType: row.content_type });
+      headers: { "Content-Type": row.content_type }, contentType: row.content_type,
+      ...(lease ? { ticketNonce: lease.nonce } : {}) });
   });
 
   router.put("/service-request-drafts/:draftId/attachments/:attachmentId/parts/:partNumber", async (c) => {
-    requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
+    requireSameRequestOrigin(c.req.raw, c.env);
     const draftId = opaqueId.safeParse(c.req.param("draftId"));
     const attachmentId = opaqueId.safeParse(c.req.param("attachmentId"));
     const partNumber = z.coerce.number().int().min(1).max(4).safeParse(c.req.param("partNumber"));
     const input = attachmentCheckpointBody.safeParse(await readBoundedJson(c.req.raw));
     if (!draftId.success || !attachmentId.success) throw new HTTPException(404, { message: "Attachment not found" });
     if (!partNumber.success || !input.success) throw new HTTPException(400, { message: "The attachment checkpoint is invalid" });
-    const row = await getAuthorizedRequestAttachment(c.env, c.get("clientSession"), draftId.data, attachmentId.data);
+    const authorized = await getAuthorizedRequestAttachmentContext(c.env, c.get("clientSession"), draftId.data, attachmentId.data);
+    const row = authorized?.row;
     if (!row) throw new HTTPException(404, { message: "Attachment not found" });
     if (Date.parse(row.expires_at) <= Date.now()) throw new HTTPException(410, { message: "The attachment upload expired" });
-    return c.json(await checkpointRequestAttachment(c.env, row, partNumber.data, input.data.etag, input.data.size));
+    if (authorized?.nativeProof && !input.data.ticketNonce)
+      throw new HTTPException(400, { message: "The native attachment ticket nonce is required" });
+    return c.json(await checkpointRequestAttachment(c.env, row, partNumber.data, input.data.etag, input.data.size,
+      authorized?.nativeProof ? { proof: authorized.nativeProof, ticketNonce: input.data.ticketNonce! } : undefined));
   });
 
   router.post("/service-request-drafts/:draftId/attachments/:attachmentId/complete", async (c) => {
-    requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
+    requireSameRequestOrigin(c.req.raw, c.env);
     const draftId = opaqueId.safeParse(c.req.param("draftId"));
     const attachmentId = opaqueId.safeParse(c.req.param("attachmentId"));
     const input = attachmentCompleteBody.safeParse(await readBoundedJson(c.req.raw));
     if (!draftId.success || !attachmentId.success) throw new HTTPException(404, { message: "Attachment not found" });
     if (!input.success) throw new HTTPException(400, { message: "The attachment completion request is invalid" });
-    const row = await getAuthorizedRequestAttachment(c.env, c.get("clientSession"), draftId.data, attachmentId.data);
+    const authorized = await getAuthorizedRequestAttachmentContext(c.env, c.get("clientSession"), draftId.data, attachmentId.data);
+    const row = authorized?.row;
     if (!row) throw new HTTPException(404, { message: "Attachment not found" });
     if (Date.parse(row.expires_at) <= Date.now()) throw new HTTPException(410, { message: "The attachment upload expired" });
     const parts = input.data.parts.map(part => ({ partNumber: part.partNumber, etag: canonicalRequestAttachmentEtag(part.etag) }))
       .map(part => { if (!part.etag) throw new HTTPException(400, { message: "The attachment ETag is invalid" }); return { partNumber: part.partNumber, etag: part.etag }; })
       .sort((left, right) => left.partNumber - right.partNumber);
-    return c.json(await completeRequestAttachment(c.env, row, parts));
+    return c.json(await completeRequestAttachment(c.env, row, parts, authorized?.nativeProof ?? undefined));
   });
 
   router.delete("/service-request-drafts/:draftId/attachments/:attachmentId", async (c) => {
-    requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
+    requireSameRequestOrigin(c.req.raw, c.env);
     const draftId = opaqueId.safeParse(c.req.param("draftId"));
     const attachmentId = opaqueId.safeParse(c.req.param("attachmentId"));
     if (!draftId.success || !attachmentId.success) throw new HTTPException(404, { message: "Attachment not found" });
-    const row = await getAuthorizedRequestAttachment(c.env, c.get("clientSession"), draftId.data, attachmentId.data);
+    const authorized = await getAuthorizedRequestAttachmentContext(c.env, c.get("clientSession"), draftId.data, attachmentId.data);
+    const row = authorized?.row;
     if (!row) throw new HTTPException(404, { message: "Attachment not found" });
-    return c.json({ ok: true, status: "aborted", ...await abortRequestAttachment(c.env, row) });
+    return c.json({ ok: true, status: "aborted", ...await abortRequestAttachment(c.env, row, authorized?.nativeProof ?? undefined) });
   });
 
   router.put("/service-request-drafts/:draftId", async (c) => {
-    const portalOrigin = configuredPortalOrigin(c.env);
-    requireSameRequestOrigin(c.req.raw, portalOrigin);
+    requireSameRequestOrigin(c.req.raw, c.env);
     const draftId = opaqueId.safeParse(c.req.param("draftId"));
     const key = idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
     const version = draftVersionHeader.safeParse(c.req.header("If-Match"));
@@ -1707,8 +1729,7 @@ export function createClientPortalRouter(
   });
 
   router.post("/service-request-drafts/:draftId/submit", async (c) => {
-    const portalOrigin = configuredPortalOrigin(c.env);
-    requireSameRequestOrigin(c.req.raw, portalOrigin);
+    requireSameRequestOrigin(c.req.raw, c.env);
     const draftId = opaqueId.safeParse(c.req.param("draftId"));
     const key = idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
     const version = draftVersionHeader.safeParse(c.req.header("If-Match"));
@@ -1763,8 +1784,7 @@ export function createClientPortalRouter(
     if (c.env.CLIENT_PORTAL_TEAM_ENABLED !== "true")
       throw new HTTPException(404, { message: "Not found" });
     await requireLegacyTeamManagement(c);
-    const portalOrigin = configuredPortalOrigin(c.env);
-    requireSameRequestOrigin(c.req.raw, portalOrigin);
+    requireSameRequestOrigin(c.req.raw, c.env);
     const limiter = c.env.PUBLIC_BULK_RATE_LIMITER;
     if (!limiter || typeof limiter.limit !== "function")
       throw new HTTPException(503, {
@@ -1798,8 +1818,7 @@ export function createClientPortalRouter(
     if (c.env.CLIENT_PORTAL_TEAM_ENABLED !== "true")
       throw new HTTPException(404, { message: "Not found" });
     await requireLegacyTeamManagement(c);
-    const portalOrigin = configuredPortalOrigin(c.env);
-    requireSameRequestOrigin(c.req.raw, portalOrigin);
+    requireSameRequestOrigin(c.req.raw, c.env);
     const identityId = opaqueId.safeParse(c.req.param("identityId"));
     if (!identityId.success)
       throw new HTTPException(404, { message: "Team member not found" });
@@ -1817,8 +1836,7 @@ export function createClientPortalRouter(
     if (c.env.CLIENT_PORTAL_TEAM_ENABLED !== "true")
       throw new HTTPException(404, { message: "Not found" });
     await requireLegacyTeamManagement(c);
-    const portalOrigin = configuredPortalOrigin(c.env);
-    requireSameRequestOrigin(c.req.raw, portalOrigin);
+    requireSameRequestOrigin(c.req.raw, c.env);
     const invitationId = opaqueId.safeParse(c.req.param("invitationId"));
     if (!invitationId.success)
       throw new HTTPException(404, { message: "Invitation not found" });
@@ -1833,8 +1851,7 @@ export function createClientPortalRouter(
   });
 
   router.post("/service-requests", async (c) => {
-    const portalOrigin = configuredPortalOrigin(c.env);
-    requireSameRequestOrigin(c.req.raw, portalOrigin);
+    requireSameRequestOrigin(c.req.raw, c.env);
     const limiter = c.env.PUBLIC_BULK_RATE_LIMITER;
     if (!limiter || typeof limiter.limit !== "function") {
       throw new HTTPException(503, {
@@ -1910,8 +1927,7 @@ export function createClientPortalRouter(
   });
 
   router.patch("/service-requests/:requestId", async (c) => {
-    const portalOrigin = configuredPortalOrigin(c.env);
-    requireSameRequestOrigin(c.req.raw, portalOrigin);
+    requireSameRequestOrigin(c.req.raw, c.env);
     const requestId = opaqueId.safeParse(c.req.param("requestId"));
     const parsedKey = idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
     const expectedUpdatedAt = z
@@ -1967,8 +1983,7 @@ export function createClientPortalRouter(
   });
 
   router.post("/service-requests/:requestId/cancel", async (c) => {
-    const portalOrigin = configuredPortalOrigin(c.env);
-    requireSameRequestOrigin(c.req.raw, portalOrigin);
+    requireSameRequestOrigin(c.req.raw, c.env);
     const requestId = opaqueId.safeParse(c.req.param("requestId"));
     const parsedKey = idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
     if (!requestId.success)
@@ -2005,8 +2020,7 @@ export function createClientPortalRouter(
   });
 
   router.post("/service-requests/:requestId/change-request", async (c) => {
-    const portalOrigin = configuredPortalOrigin(c.env);
-    requireSameRequestOrigin(c.req.raw, portalOrigin);
+    requireSameRequestOrigin(c.req.raw, c.env);
     const parentId = opaqueId.safeParse(c.req.param("requestId"));
     const parsedKey = idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
     if (!parentId.success)
@@ -2063,8 +2077,7 @@ export function createClientPortalRouter(
   });
 
   router.post("/service-requests/:requestId/estimate-response", async (c) => {
-    const portalOrigin = configuredPortalOrigin(c.env);
-    requireSameRequestOrigin(c.req.raw, portalOrigin);
+    requireSameRequestOrigin(c.req.raw, c.env);
     const requestId = opaqueId.safeParse(c.req.param("requestId"));
     const parsedKey = idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
     if (!requestId.success)

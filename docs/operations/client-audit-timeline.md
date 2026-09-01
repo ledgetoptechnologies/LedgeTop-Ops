@@ -140,9 +140,10 @@ so including them could leak skipped-only pages or strand authorized older
 events. Every collected candidate is re-read through the existing staff
 feedback policy and exact current record scope before release; an unexpected
 revoked, reassigned or unauthorized row fails with a refresh-required conflict
-rather than being exposed or skipped. Native/local feedback remains `not_collected`, and secondary-source
-feedback remains `unsupported_source` until its own authoritative routing
-exists. Cursor v8 binds the feedback schema and policy proofs, the event-row
+rather than being exposed or skipped. Native/local feedback remains
+`not_collected` in this timeline adapter even though the separately default-off
+native feedback workflow now has authoritative routing; timeline collection
+requires its own bounded source-qualified adapter. Cursor v8 binds the feedback schema and policy proofs, the event-row
 high-water mark, and a bounded adapter seek position so project-feedback
 pagination cannot cross a policy, schema, or snapshot boundary. Ordinary authenticated
 preview/download events are not inferred from page loads and are not yet

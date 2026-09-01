@@ -9,6 +9,8 @@ export interface ProjectAlphaConnectorEnvironment {
   PROJECT_ALPHA_CONNECTOR_CREDENTIALS?: string;
   PROJECT_ALPHA_BASE_URL?: string;
   PROJECT_ALPHA_API_KEY?: string;
+  PROJECT_ALPHA_DRAFT_QUOTE_API_KEY?: string;
+  PROJECT_ALPHA_DRAFT_QUOTE_HMAC_SECRET?: string;
   APPLICATION_KEY?: string;
   TEAM_DOMAIN?: string;
   CF_ACCESS_AUD?: string;
@@ -44,6 +46,9 @@ export interface ResolvedProjectAlphaConnector {
   readonly snapshot: { baseUrl: string; apiKey: string; applicationKey: string } | null;
   readonly event: { applicationKey: string; accessIssuer: string; accessAudience: string; accessSubject: string | null;
     current: ConnectorSigningKey; previous: ConnectorSigningKey | null } | null;
+  /** Outbound draft creation has its own credential pair. Snapshot, event and
+   * portal credentials are deliberately not valid substitutes. */
+  readonly draftQuote: { baseUrl: string; applicationKey: string; apiKey: string; hmacSecret: string } | null;
 }
 export interface ProjectAlphaConnectorSummary {
   sourceId: string; producerBindingId: string; snapshotOrigin: string; snapshotBasePath: string;
@@ -70,9 +75,10 @@ const MAX_CREDENTIAL_REFERENCES = MAX_CONNECTORS * 2;
 const safeId = z.string().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/);
 const scalar = (max: number) => z.string().min(1).max(max).regex(/^[^\u0000-\u001f\u007f]+$/);
 const signingSchema = z.object({ keyId: safeId, algorithm: z.enum(["ed25519", "hmac-sha256"]), value: scalar(8192) }).strict();
+const draftQuoteSchema = z.object({ apiKey: scalar(8192), hmacSecret: scalar(8192).refine(value => value.length >= 32) }).strict();
 // Portal keys are validated only by the separately enabled portal purpose.
 const credentialSchema = z.object({ snapshotApiKey: scalar(8192), eventCurrent: signingSchema, eventPrevious: signingSchema.optional(),
-  portalCurrent: z.unknown().optional(), portalPrevious: z.unknown().optional() }).strict();
+  portalCurrent: z.unknown().optional(), portalPrevious: z.unknown().optional(), draftQuote: draftQuoteSchema.optional() }).strict();
 const credentialsSchema = z.object({ version: z.literal(1), sets: z.record(z.string().regex(/^[A-Za-z0-9_-]{1,64}$/), z.unknown()) }).strict();
 type KeyInput = z.infer<typeof signingSchema>;
 const revisionSchema = z.object({ credentialRef: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/), snapshotBasePath: scalar(1024),
@@ -90,6 +96,7 @@ interface RevisionRow {
   source_id: string; revision: number; credential_ref: string; snapshot_base_path: string;
   access_issuer: string; access_audience: string; access_subject: string;
   current_key_id: string; current_key_fingerprint: string; previous_key_id: string | null; previous_key_fingerprint: string | null;
+  draft_quote_api_key_fingerprint: string | null; draft_quote_hmac_fingerprint: string | null;
 }
 function database(env: ProjectAlphaConnectorEnvironment): RegistryDatabase { return env.OPS_DB.withSession("first-primary"); }
 function sourceId(value: unknown): string {
@@ -149,6 +156,15 @@ async function signingKey(value: KeyInput, legacy = false): Promise<ConnectorSig
   const fingerprint = [...new Uint8Array(await crypto.subtle.digest("SHA-256", combined))].map(byte => byte.toString(16).padStart(2, "0")).join("");
   return Object.freeze({ ...value, fingerprint });
 }
+async function credentialFingerprint(domain: string, value: string): Promise<string> {
+  return [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${domain}\0${value}`)))]
+    .map(byte => byte.toString(16).padStart(2, "0")).join("");
+}
+interface DraftQuoteCredentialReservation {
+  purpose: "api_key" | "hmac";
+  purposeFingerprint: string;
+  ownershipFingerprint: string;
+}
 async function legacyKeys(env: ProjectAlphaConnectorEnvironment): Promise<ConnectorSigningKey[]> {
   const inputs: KeyInput[] = [];
   if (env.PROJECT_ALPHA_WEBHOOK_ED25519_PUBLIC_KEY) inputs.push({ keyId: "legacy-current", algorithm: "ed25519", value: env.PROJECT_ALPHA_WEBHOOK_ED25519_PUBLIC_KEY });
@@ -170,7 +186,32 @@ async function configuredKeys(env: ProjectAlphaConnectorEnvironment, ref: string
   if (previous && (current.keyId === previous.keyId || current.fingerprint === previous.fingerprint)) return fail("credentials_unavailable", "Connector rotation keys must be distinct");
   if (profile === "business_data" && (current.algorithm !== "ed25519" || (previous && previous.algorithm !== "ed25519")))
     return fail("credentials_unavailable", "Business connectors require Ed25519 signing keys");
-  return { set, current, previous };
+  if (set.draftQuote) {
+    const reserved = new Set<string>([set.snapshotApiKey, set.eventCurrent.value, ...(set.eventPrevious ? [set.eventPrevious.value] : [])]);
+    for (const portal of [set.portalCurrent, set.portalPrevious]) {
+      if (portal && typeof portal === "object" && !Array.isArray(portal)) {
+        const value = (portal as Record<string, unknown>).value;
+        if (typeof value === "string") reserved.add(value);
+      }
+    }
+    if (set.draftQuote.apiKey === set.draftQuote.hmacSecret || reserved.has(set.draftQuote.apiKey) || reserved.has(set.draftQuote.hmacSecret))
+      return fail("credentials_unavailable", "Draft quote credentials must be dedicated to that purpose");
+    if ([env.PROJECT_ALPHA_API_KEY, env.PROJECT_ALPHA_WEBHOOK_HMAC_SECRET,
+      env.PROJECT_ALPHA_DRAFT_QUOTE_API_KEY, env.PROJECT_ALPHA_DRAFT_QUOTE_HMAC_SECRET]
+      .some(value => typeof value === "string" && (value === set.draftQuote!.apiKey || value === set.draftQuote!.hmacSecret)))
+      return fail("conflict", "A draft quote credential belongs to the primary connection");
+  }
+  const draftQuoteFingerprints = set.draftQuote ? {
+    apiKey: await credentialFingerprint("draft-quote-api-key", set.draftQuote.apiKey),
+    hmac: await credentialFingerprint("draft-quote-hmac", set.draftQuote.hmacSecret),
+  } : null;
+  const draftQuoteReservations: DraftQuoteCredentialReservation[] = set.draftQuote && draftQuoteFingerprints ? [
+    { purpose: "api_key", purposeFingerprint: draftQuoteFingerprints.apiKey,
+      ownershipFingerprint: await credentialFingerprint("draft-quote-credential", set.draftQuote.apiKey) },
+    { purpose: "hmac", purposeFingerprint: draftQuoteFingerprints.hmac,
+      ownershipFingerprint: await credentialFingerprint("draft-quote-credential", set.draftQuote.hmacSecret) },
+  ] : [];
+  return { set, current, previous, draftQuoteFingerprints, draftQuoteReservations };
 }
 async function pinPrimaryEnrollment(env: ProjectAlphaConnectorEnvironment, value: RegisterProjectAlphaConnectorInput,
   current: ConnectorSigningKey, previous: ConnectorSigningKey | null): Promise<void> {
@@ -259,6 +300,9 @@ async function verifiedConfiguration(env: ProjectAlphaConnectorEnvironment, row:
   if (keys.current.keyId !== revision.current_key_id || keys.current.fingerprint !== revision.current_key_fingerprint
     || (keys.previous?.keyId ?? null) !== revision.previous_key_id || (keys.previous?.fingerprint ?? null) !== revision.previous_key_fingerprint)
     return fail("credentials_unavailable", "Connector signing configuration does not match its enrolled revision");
+  if ((keys.draftQuoteFingerprints?.apiKey ?? null) !== revision.draft_quote_api_key_fingerprint
+    || (keys.draftQuoteFingerprints?.hmac ?? null) !== revision.draft_quote_hmac_fingerprint)
+    return fail("credentials_unavailable", "Connector draft quote configuration does not match its enrolled revision");
   if (row.source_id !== PRIMARY_ALPHA_SOURCE_ID) {
     // Enrolled primary uses its exact revision, not an obsolete scalar verifier.
     // Secondary must still reject keys currently configured for scalar primary.
@@ -272,7 +316,7 @@ async function verifiedConfiguration(env: ProjectAlphaConnectorEnvironment, row:
 /** A source hint selects configuration only. Ingress MUST verify its Access
  * subject and payload signature before using this configuration's write proof. */
 export async function resolveProjectAlphaConnector(env: ProjectAlphaConnectorEnvironment, requestedSource: string,
-  purpose: "snapshot" | "events"): Promise<ResolvedProjectAlphaConnector> {
+  purpose: "snapshot" | "events" | "draft_quote"): Promise<ResolvedProjectAlphaConnector> {
   const id = sourceId(requestedSource), db = database(env), row = await read(db, id);
   if (!row) {
     if (id !== PRIMARY_ALPHA_SOURCE_ID) return fail("unavailable", "Connector is not registered");
@@ -289,7 +333,7 @@ export async function resolveProjectAlphaConnector(env: ProjectAlphaConnectorEnv
     // The legacy event receiver intentionally keeps its existing dual verifier:
     // current/previous Ed25519 AND optional HMAC are not a new registry profile.
     await assertProjectAlphaConnectorProof(env, legacyProof);
-    return { source: createProjectAlphaSourceContext(id), proof: legacyProof, snapshot, event: null };
+    return { source: createProjectAlphaSourceContext(id), proof: legacyProof, snapshot, event: null, draftQuote: null };
   }
   const currentProof = proof(row);
   await assertProjectAlphaConnectorProof(env, currentProof);
@@ -299,7 +343,11 @@ export async function resolveProjectAlphaConnector(env: ProjectAlphaConnectorEnv
     snapshot: { baseUrl: `${row.snapshot_origin}${row.snapshot_base_path === "/" ? "" : row.snapshot_base_path}`,
       apiKey: config.set.snapshotApiKey, applicationKey: row.application_key },
     event: { applicationKey: row.application_key, accessIssuer: config.revision.access_issuer, accessAudience: config.revision.access_audience,
-      accessSubject: config.revision.access_subject, current: config.current, previous: config.previous } };
+      accessSubject: config.revision.access_subject, current: config.current, previous: config.previous },
+    draftQuote: purpose === "draft_quote" && config.set.draftQuote ? {
+      baseUrl: row.snapshot_origin, applicationKey: row.application_key,
+      apiKey: config.set.draftQuote.apiKey, hmacSecret: config.set.draftQuote.hmacSecret,
+    } : null };
 }
 
 async function keyReservations(env: ProjectAlphaConnectorEnvironment, id: string, current: ConnectorSigningKey, previous: ConnectorSigningKey | null) {
@@ -324,11 +372,23 @@ function reservationStatements(db: RegistryDatabase, rows: { key: ConnectorSigni
   return statements;
 }
 function revisionStatement(db: RegistryDatabase, id: string, revision: number, value: ProjectAlphaConnectorRevisionInput,
-  current: ConnectorSigningKey, previous: ConnectorSigningKey | null, actorId: string) {
+  current: ConnectorSigningKey, previous: ConnectorSigningKey | null, actorId: string,
+  draftQuoteFingerprints: { apiKey: string; hmac: string } | null) {
   return db.prepare(`INSERT INTO pa_connector_revisions(source_id,revision,credential_ref,snapshot_base_path,
-    access_issuer,access_audience,access_subject,current_key_id,current_key_fingerprint,previous_key_id,previous_key_fingerprint,created_by)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).bind(id, revision, value.credentialRef, value.snapshotBasePath, value.accessIssuer, value.accessAudience,
-      value.accessSubject, current.keyId, current.fingerprint, previous?.keyId ?? null, previous?.fingerprint ?? null, actorId);
+    access_issuer,access_audience,access_subject,current_key_id,current_key_fingerprint,previous_key_id,previous_key_fingerprint,created_by,
+    draft_quote_api_key_fingerprint,draft_quote_hmac_fingerprint)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(id, revision, value.credentialRef, value.snapshotBasePath, value.accessIssuer, value.accessAudience,
+      value.accessSubject, current.keyId, current.fingerprint, previous?.keyId ?? null, previous?.fingerprint ?? null, actorId,
+      draftQuoteFingerprints?.apiKey ?? null,draftQuoteFingerprints?.hmac ?? null);
+}
+function draftQuoteReservationStatements(db: RegistryDatabase, owner: string,
+  rows: DraftQuoteCredentialReservation[]): D1PreparedStatement[] {
+  return rows.map(row => db.prepare(`INSERT INTO pa_connector_draft_quote_credentials
+      (ownership_fingerprint,purpose_fingerprint,source_id,purpose)
+    SELECT ?,?,?,? WHERE NOT EXISTS(SELECT 1 FROM pa_connector_draft_quote_credentials
+      WHERE ownership_fingerprint=? AND purpose_fingerprint=? AND source_id=? AND purpose=?)`)
+    .bind(row.ownershipFingerprint,row.purposeFingerprint,owner,row.purpose,
+      row.ownershipFingerprint,row.purposeFingerprint,owner,row.purpose));
 }
 function auditStatement(db: RegistryDatabase, id: string, actorId: string, action: string, version: number, details: object) {
   return db.prepare("INSERT INTO pa_connector_audit(id,source_id,actor_id,action,version,details_json) VALUES(?,?,?,?,?,?)")
@@ -341,7 +401,7 @@ function mutationFence(db: RegistryDatabase, id: string, expectedVersion: number
 function writeError(error: unknown): never {
   if (error instanceof ProjectAlphaConnectorError) throw error;
   const message = error instanceof Error ? error.message : "";
-  if (/(?:UNIQUE|CHECK|FOREIGN KEY) constraint failed|connector (?:registration|ownership|revision|signing)|pa_connector_active_revision_guard/i.test(message))
+  if (/(?:UNIQUE|CHECK|FOREIGN KEY) constraint failed|connector (?:registration|ownership|revision|signing|draft quote)|pa_connector_active_revision_guard/i.test(message))
     return fail("conflict", "Connector configuration conflicts with its current ownership or version");
   return fail("unavailable", "Connector configuration could not be saved");
 }
@@ -360,10 +420,11 @@ export async function registerProjectAlphaConnector(env: ProjectAlphaConnectorEn
   try {
     await db.batch([
       ...await keyReservations(env, id, keys.current, keys.previous),
+      ...draftQuoteReservationStatements(db,id,keys.draftQuoteReservations),
       db.prepare(`INSERT INTO pa_connectors(source_id,producer_binding_id,snapshot_origin,snapshot_base_path,application_key,
         profile,display_name,read_visible,created_by) VALUES(?,?,?,?,?,?,?,?,?)`)
         .bind(id, value.producerBindingId, snapshotOrigin, revision.snapshotBasePath, value.applicationKey, value.profile, value.displayName, id === PRIMARY_ALPHA_SOURCE_ID ? 1 : 0, author),
-      revisionStatement(db, id, 1, revision, keys.current, keys.previous, author),
+      revisionStatement(db, id, 1, revision, keys.current, keys.previous, author, keys.draftQuoteFingerprints),
       auditStatement(db, id, author, "registered", 1, { state: "pending", profile: value.profile, revision: 1 }),
     ]);
   } catch (error) { writeError(error); }
@@ -380,7 +441,8 @@ export async function reviseProjectAlphaConnector(env: ProjectAlphaConnectorEnvi
     await db.batch([
       ...(administrationFence ? [administrationFence] : []),
       mutationFence(db, id, expectedVersion), ...await keyReservations(env, id, keys.current, keys.previous),
-      revisionStatement(db, id, revision, value, keys.current, keys.previous, author),
+      ...draftQuoteReservationStatements(db,id,keys.draftQuoteReservations),
+      revisionStatement(db, id, revision, value, keys.current, keys.previous, author, keys.draftQuoteFingerprints),
       db.prepare("UPDATE pa_connectors SET active_revision=?,version=version+1,updated_at=datetime('now') WHERE source_id=? AND version=?")
         .bind(revision, id, expectedVersion),
       auditStatement(db, id, author, "revised", expectedVersion + 1, { revision }),

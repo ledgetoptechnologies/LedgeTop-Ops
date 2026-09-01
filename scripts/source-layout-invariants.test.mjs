@@ -97,11 +97,17 @@ test("the client source directory retains the deployed delivery service identity
 });
 
 test("the deployed Client Worker keeps reviewed resources, hosts, and portal asset routing", () => {
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "2121844f816f22db34b313416fa42e5850a9d5aa9dc1276fbc0b53de45a004bb");
+  // The digest intentionally moved with the reviewed exact two-host portal
+  // allowlist. Keep the field assertions below so a future config change
+  // cannot hide behind a digest refresh.
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "5f4c420d7da3d13a0fc96b4318501ba2825bf784be4074331d1ee806326ceb7b");
   const config = readJson("apps/client/wrangler.jsonc");
   assert.equal(config.name, "ltds-clients");
   assert.equal(config.main, "src/worker/index.ts");
-  assert.deepEqual(config.routes, [{ pattern: "client.ledgetopdroneservices.com", custom_domain: true }]);
+  assert.deepEqual(config.routes, [
+    { pattern: "client.ledgetopdroneservices.com", custom_domain: true },
+    { pattern: "portal.ledgetoptechnologies.com", custom_domain: true },
+  ]);
   assert.equal(config.workers_dev, false);
   assert.equal(config.preview_urls, false);
   assert.deepEqual(config.triggers, { crons: ["*/5 * * * *", "15 * * * *"] });
@@ -115,6 +121,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.equal(config.vars.PUBLIC_SHARE_ORIGIN, "https://client.ledgetopdroneservices.com");
   assert.equal(config.vars.EXPECTED_HOST, "client.ledgetopdroneservices.com");
   assert.equal(config.vars.CLIENT_PORTAL_ORIGIN, "https://client.ledgetopdroneservices.com");
+  assert.equal(config.vars.CLIENT_PORTAL_ORIGINS, "https://client.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com");
   assert.equal(config.vars.CLIENT_PORTAL_ENABLED, "true");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_HMAC_KEY_ID, "");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_KEY_ID, "");
@@ -122,6 +129,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.equal(config.vars.PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_KEY_ID, "");
   assert.equal(config.vars.CLIENT_PORTAL_TEAM_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_REQUEST_V2_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED, "false");
   assert.equal(config.vars.CLIENT_REQUEST_ATTACHMENTS_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_HIERARCHY_V2_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED, "false");
@@ -178,10 +186,11 @@ test("public route, host-namespace guard, health, and isolated cookie contracts 
   assert(worker.includes('const COOKIE_NAME = "__Host-ltds_delivery";'));
   assert(worker.includes('service: "ltds-delivery"'));
   assert(worker.includes("requestHostAllowed(c.req.url,c.env)"));
-  assert(originPolicy.includes('if (namespace === "public") return request.origin === publicOrigin;'));
-  assert(originPolicy.includes('if (namespace === "portal") return request.origin === portalOrigin;'));
+  assert(originPolicy.includes('if (namespace === "public") return publicOrigin !== null && request.origin === publicOrigin;'));
+  assert(originPolicy.includes('if (namespace === "internal") return primaryPortalOrigin !== null && request.origin === primaryPortalOrigin;'));
+  assert(originPolicy.includes('if (namespace === "portal") return portalOrigins.includes(request.origin);'));
   assert(originPolicy.includes('if (namespace === "shared" || namespace === "assets")'));
-  assert(originPolicy.includes('return request.origin === publicOrigin || request.origin === portalOrigin;'));
+  assert(originPolicy.includes('return (publicOrigin !== null && request.origin === publicOrigin) || portalOrigins.includes(request.origin);'));
   assert.equal(worker.match(/12 \* 60 \* 60 \* 1000/g)?.length, 1);
   assert.equal(lifecycle.match(/12 \* 60 \* 60 \* 1000/g)?.length, 1);
   assert(security.includes('`__Host-ltds_delivery=${encodeURIComponent(value)}; Path=/; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Lax`'));

@@ -42,6 +42,10 @@ interface ClientDetailResponse {
   businessProjects?: BusinessProject[];
   businessParty?: BusinessPartyReference | null;
   canManageBusinessParties?: boolean;
+  organizationOperationalContactsAvailable?: boolean;
+  projectManagementAvailable?: boolean;
+  businessActivityAvailable?: boolean;
+  auditTimelineAvailable?: boolean;
 }
 interface BusinessProject extends CollectionItem { id: string; name: string; status: string | null; start_date: string | null; end_date: string | null; manager_name: string | null; created_at: string | null }
 interface ProjectManagementResult {
@@ -333,9 +337,10 @@ function ContactList({ contacts }: { contacts: ClientContact[] }) {
   })}</div>;
 }
 
-function BusinessProjects({ initial, page, client, contextVersion, contextSignal, onInvalidated, onWorkspaceRefresh }: {
+function BusinessProjects({ initial, page, client, contextVersion, contextSignal, onInvalidated, onWorkspaceRefresh, projectManagementAvailable }: {
   initial: BusinessProject[]; page?: ClientCollectionPage; client: ClientSummary; contextVersion?: string;
   contextSignal: AbortSignal; onInvalidated: (message: string) => void; onWorkspaceRefresh: () => void;
+  projectManagementAvailable?: boolean;
 }) {
   const readFilter = () => {
     const value = new URLSearchParams(location.search).get("business_status");
@@ -392,8 +397,8 @@ function BusinessProjects({ initial, page, client, contextVersion, contextSignal
   const calendarDate = (value: string | null) => value && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : value ? date(value) : "Not set";
   return <Card title="Business projects">
     <p>Projects recorded for this client in Project Alpha. This list does not grant portal or delivery access.</p>
-    <ProjectManagementRouting client={client} contextVersion={contextVersion} contextSignal={contextSignal}
-      onInvalidated={onInvalidated} onWorkspaceRefresh={onWorkspaceRefresh} />
+    {projectManagementAvailable === true && <ProjectManagementRouting client={client} contextVersion={contextVersion} contextSignal={contextSignal}
+      onInvalidated={onInvalidated} onWorkspaceRefresh={onWorkspaceRefresh} />}
     {page?.available !== false && <label className="client-hub-business-filter">Project status<select value={filter} onChange={event => selectFilter(event.target.value)}>
       <option value="all">All projects</option><option value="current">Current projects</option><option value="completed">Completed</option><option value="cancelled">Cancelled</option>
     </select></label>}
@@ -466,7 +471,7 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess }: { route
           {items => <ContactList contacts={items} />}
         </ClientCollection>
       </Card>
-      {data.client.source_id && data.client.root_namespace === "business" && data.client.kind === "organization" && data.contextVersion &&
+      {data.organizationOperationalContactsAvailable === true && data.client.source_id && data.client.root_namespace === "business" && data.client.kind === "organization" && data.contextVersion &&
         <OrganizationOperationalContacts root={{ sourceId: data.client.source_id, rootNamespace: "business", kind: "organization", publicId: data.client.public_id }}
           contextVersion={data.contextVersion} contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} />}
       <span id="client-portal-access" className="client-hub-anchor" aria-hidden="true" />
@@ -493,11 +498,12 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess }: { route
         {items => <div className="simple-rows">{items.map(account => <div key={collectionKey("accounts", account)}><div><strong>{account.display_name}</strong><small>Explicit account record</small>{canReviewFeedback && <a href={`/operations/feedback?accountId=${encodeURIComponent(account.id)}`}>View client feedback</a>}</div><StatusPill tone={tone(account.status)}>{account.status}</StatusPill></div>)}</div>}
       </ClientCollection></Card>
       <span id="client-business-projects" className="client-hub-anchor" aria-hidden="true" />
-      {data.businessProjects && <BusinessProjects {...collectionProps} initial={data.businessProjects} page={data.pages?.businessProjects} onWorkspaceRefresh={refresh} />}
-      {data.client.root_namespace === "business" && data.client.source_id && data.contextVersion && <ClientBusinessActivity
+      {data.businessProjects && <BusinessProjects {...collectionProps} initial={data.businessProjects} page={data.pages?.businessProjects}
+        onWorkspaceRefresh={refresh} projectManagementAvailable={data.projectManagementAvailable} />}
+      {data.businessActivityAvailable === true && data.client.root_namespace === "business" && data.client.source_id && data.contextVersion && <ClientBusinessActivity
         root={{ sourceId: data.client.source_id, rootNamespace: "business", kind: data.client.kind, publicId: data.client.public_id }}
         contextVersion={data.contextVersion} contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} />}
-      {data.client.source_id && data.client.root_namespace && data.contextVersion && <div id="client-audit" className="client-hub-audit-panel"><ClientAuditTimeline
+      {data.auditTimelineAvailable === true && data.client.source_id && data.client.root_namespace && data.contextVersion && <div id="client-audit" className="client-hub-audit-panel"><ClientAuditTimeline
         root={{ sourceId: data.client.source_id, rootNamespace: data.client.root_namespace, kind: data.client.kind, publicId: data.client.public_id }}
         contextVersion={data.contextVersion} contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} /></div>}
       <Card title="Shared projects"><ClientCollection {...collectionProps} collection="projects" label="Shared projects" initial={data.projects} page={data.pages?.projects}

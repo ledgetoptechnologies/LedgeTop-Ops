@@ -131,6 +131,10 @@ import {
   processClientFolderGrantNotifications,
   revokeClientFolderGrant,
 } from "./client-folder-grants";
+import {
+  excludesNativeRequestStorageAccount,
+  listLegacyClientAccountsForAdministration,
+} from "./legacy-client-account-scope";
 import { registerJobBriefRoutes } from "./job-brief";
 import { registerSopRoutes } from "./sop";
 import { registerClientRequestAttachmentRoutes } from "./client-request-attachments";
@@ -943,12 +947,7 @@ app.get("/api/projects/:id", async (c) => {
 });
 app.get("/api/client-portal/accounts", async (c) => {
   await requireGlobal(c.env, c.get("principal"), "operations.manage");
-  const rows = await c.env.DELIVERY_DB.withSession("first-primary")
-    .prepare(
-      `SELECT a.id,a.display_name,a.status,a.project_alpha_client_id,a.project_alpha_organization_id,COUNT(DISTINCT g.project_id) project_count FROM client_accounts a LEFT JOIN client_project_grants g ON g.account_id=a.id AND g.revoked_at IS NULL GROUP BY a.id ORDER BY a.display_name`,
-    )
-    .all();
-  return c.json({ accounts: rows.results });
+  return c.json({ accounts: await listLegacyClientAccountsForAdministration(c.env) });
 });
 app.get("/api/admin/client-account-activation", async (c) => {
   await requireGlobal(c.env, c.get("principal"), "operations.manage");
@@ -1250,7 +1249,10 @@ app.post("/api/client-portal/projects", async (c) => {
       .first<any>(),
     account = await c.env.DELIVERY_DB.withSession("first-primary")
       .prepare(
-        "SELECT id,project_alpha_client_id,project_alpha_organization_id FROM client_accounts WHERE id=? AND status='active' AND project_alpha_source_id='project-alpha:primary'",
+        `SELECT client_accounts.id,project_alpha_client_id,project_alpha_organization_id
+         FROM client_accounts WHERE id=? AND status='active'
+           AND project_alpha_source_id='project-alpha:primary'
+           AND ${excludesNativeRequestStorageAccount("client_accounts")}`,
       )
       .bind(value.accountId)
       .first<any>();
@@ -1353,7 +1355,12 @@ app.post("/api/projects/:id/folder", async (c) => {
     db = c.env.DELIVERY_DB.withSession("first-primary"),
     links = await db
       .prepare(
-        "SELECT g.account_id,p.id project_id FROM projects p JOIN client_project_grants g ON g.project_id=p.id AND g.revoked_at IS NULL JOIN client_accounts a ON a.id=g.account_id AND a.project_alpha_source_id='project-alpha:primary' WHERE p.project_alpha_source_id='project-alpha:primary' AND p.project_alpha_project_id=? AND (? IS NULL OR g.account_id=?)",
+        `SELECT g.account_id,p.id project_id FROM projects p
+         JOIN client_project_grants g ON g.project_id=p.id AND g.revoked_at IS NULL
+         JOIN client_accounts a ON a.id=g.account_id AND a.project_alpha_source_id='project-alpha:primary'
+           AND ${excludesNativeRequestStorageAccount("a")}
+         WHERE p.project_alpha_source_id='project-alpha:primary' AND p.project_alpha_project_id=?
+           AND (? IS NULL OR g.account_id=?)`,
       )
       .bind(c.req.param("id"), value.accountId || null, value.accountId || null)
       .all<{ account_id: string; project_id: string }>();

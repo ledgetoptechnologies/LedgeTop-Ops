@@ -9,14 +9,16 @@ ignored staging configuration must end with `CLIENT_PORTAL_ENABLED=false`.
 - Existing Worker: `ltds-delivery-staging`; do not create or rename a Worker.
 - Anonymous public-share host and canonical public origin:
   `delivery-staging.ledgetopdroneservices.com`.
-- Authenticated client portal host:
-  `client-staging.ledgetopdroneservices.com`.
+- Authenticated client portal hosts:
+  `client-staging.ledgetopdroneservices.com` and
+  `portal-staging.ledgetoptechnologies.com`.
 - Dedicated Access app: `LTDS Client Portal Staging`, with a new app ID and
   audience that are not any Delivery, Operations, or Ops Sync value.
 - Dedicated group: `LTDS Client Portal Staging Testers`; never use the staff,
   Operations, Ops Sync, or production client group.
 - Portal app destinations: `/portal`, `/portal/*`, `/api/client`, and
-  `/api/client/*` on the client test host.
+  `/api/client/*` on both client test hosts, using the same application,
+  audience, and policy set.
 - Public app: `LTDS Client Public Staging`, with the anonymous delivery hostname
   as its root destination and a Bypass Everyone policy. The portal host retains
   the dedicated portal Allow policy. The release-critical public
@@ -44,9 +46,10 @@ and warns that Bypass disables Access enforcement in
    staging deployment, and temporary portal activation. Production remains out
    of scope.
 4. Create the dedicated client group, portal path app, and public Bypass app
-   before publishing either hostname. Re-list their IDs, destinations, policies,
-   group membership, and audience. Keep the client group invitation-owned and
-   separate from staff ACL automation.
+   before publishing either hostname. Assign both portal hosts to the one portal
+   app; do not create a second audience or policy stack. Re-list their IDs,
+   destinations, policies, group membership, and audience. Keep the client group
+   invitation-owned and separate from staff ACL automation.
 5. Put the single new human audience only in the ignored staging config. Set
    the exact authenticated client origin/team domain. Treat Client
    `EXPECTED_HOST`, Client and Operations `PUBLIC_SHARE_ORIGIN`, Client
@@ -63,7 +66,7 @@ and warns that Bypass disables Access enforcement in
    filename sets in `REQUIRED_STAGING_MIGRATIONS`, including
    `0177_domain_neutral_delivery_notifications.sql` and
    `0178_domain_neutral_delivery_notification_contract.sql`, plus the later
-   `0179`-`0183` assignment/notification sequence. Migration `0113` is
+   `0179`-`0186` assignment/notification/native-portal sequence. Migration `0113` is
    intentionally reserved and absent. The
    release evidence validator compares the complete filename sets; do not
    shorten them to a range or infer success from a local migration run.
@@ -92,8 +95,9 @@ and warns that Bypass disables Access enforcement in
 5. With service-assignment sync and policy still false, upload the compatible
    Client writer after `0179`, shift all Client traffic to that version, and
    drain every old draft/submission writer. Record the immutable version and
-   drain proof. Only then apply `0180`-`0183` from the final input and Operations
-   through `0049`. The combined candidate is not an expand-only input; do not
+   drain proof. Only then apply `0180`-`0183` from the final input. Keep native
+   capabilities unavailable while applying Client `0184`-`0186`, then apply
+   Operations through `0050`. The combined candidate is not an expand-only input; do not
    run one all-pending apply or execute raw migration SQL.
 6. Upload a final version with the portal false and inspect routes, bindings, vars,
    and secret names. Deploy only that reviewed version after deployment

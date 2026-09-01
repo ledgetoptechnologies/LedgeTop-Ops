@@ -3,6 +3,11 @@ import { PRIMARY_ALPHA_SOURCE_ID } from "@ltds/shared";
 import type { Env } from "../types";
 import { constantTimeEqual } from "../security";
 import type { ClientPortalSession } from "./types";
+import {
+  nativeRequestMutationGuardSql,
+  resolveNativeRequestAuthority,
+  type NativeRequestAuthorityProof,
+} from "./native-request-authority";
 
 export const REQUEST_ATTACHMENT_MAX_FILES = 10;
 export const REQUEST_ATTACHMENT_MAX_FILE_BYTES = 25 * 1024 * 1024;
@@ -176,14 +181,80 @@ const draftAccessSql = `
     ))
   )`;
 
-export async function getAuthorizedRequestAttachment(env: Env, session: ClientPortalSession, draftId: string, attachmentId: string): Promise<RequestAttachmentRow | null> {
-  return database(env).prepare(`SELECT attachment.* FROM client_service_request_attachments attachment
+async function nativeDraftOwner(env: Env, session: ClientPortalSession, draftId: string): Promise<{
+  accountId: string; storageIdentityId: string; sourceId: string; proof: NativeRequestAuthorityProof;
+} | null> {
+  if (!session.nativeSourceId || !session.nativePortalIdentityId || !session.workspaceId) return null;
+  const row = await database(env).prepare(`SELECT draft.account_id,draft.created_by_identity_id,
+      draft.portal_project_public_id,draft.catalog_source_id
+    FROM client_service_request_drafts draft
+    JOIN portal_native_request_storage_bindings binding ON binding.workspace_id=draft.portal_workspace_id
+      AND binding.source_id=draft.catalog_source_id AND binding.account_id=draft.account_id
+      AND binding.storage_identity_id=draft.created_by_identity_id AND binding.state='active'
+    WHERE draft.id=? AND draft.state='draft' AND draft.portal_workspace_id=?
+      AND draft.portal_identity_id=? AND draft.catalog_source_id=?`)
+    .bind(draftId, session.workspaceId, session.nativePortalIdentityId, session.nativeSourceId)
+    .first<{ account_id: string; created_by_identity_id: string; portal_project_public_id: string | null; catalog_source_id: string }>();
+  if (!row) return null;
+  const proof = await resolveNativeRequestAuthority(env, session, row.portal_project_public_id);
+  return proof?.sourceId === row.catalog_source_id
+    ? { accountId: row.account_id, storageIdentityId: row.created_by_identity_id, sourceId: row.catalog_source_id, proof }
+    : null;
+}
+
+export interface AuthorizedRequestAttachment {
+  row: RequestAttachmentRow;
+  nativeProof: NativeRequestAuthorityProof | null;
+}
+
+export interface NativeRequestAttachmentPartLease {
+  nonce: string;
+  issuedAt: string;
+  expiresAt: string;
+}
+
+async function nativeRequestOwner(env: Env, session: ClientPortalSession, requestId: string): Promise<{
+  accountId: string; sourceId: string;
+} | null> {
+  if (!session.nativeSourceId || !session.nativePortalIdentityId || !session.workspaceId) return null;
+  const row = await database(env).prepare(`SELECT request.account_id,request.portal_project_public_id,request.catalog_source_id
+    FROM client_service_requests request
+    JOIN portal_native_request_storage_bindings binding ON binding.workspace_id=request.portal_workspace_id
+      AND binding.source_id=request.catalog_source_id AND binding.account_id=request.account_id AND binding.state='active'
+    WHERE request.id=? AND request.portal_workspace_id=? AND request.portal_identity_id=? AND request.catalog_source_id=?`)
+    .bind(requestId, session.workspaceId, session.nativePortalIdentityId, session.nativeSourceId)
+    .first<{ account_id: string; portal_project_public_id: string | null; catalog_source_id: string }>();
+  if (!row) return null;
+  const proof = await resolveNativeRequestAuthority(env, session, row.portal_project_public_id);
+  return proof?.sourceId === row.catalog_source_id ? { accountId: row.account_id, sourceId: row.catalog_source_id } : null;
+}
+
+export async function getAuthorizedRequestAttachmentContext(env: Env, session: ClientPortalSession, draftId: string, attachmentId: string): Promise<AuthorizedRequestAttachment | null> {
+  if (session.nativeSourceId) {
+    const owner = await nativeDraftOwner(env, session, draftId);
+    const row = owner ? await database(env).prepare(`SELECT * FROM client_service_request_attachments
+      WHERE id=? AND draft_id=? AND account_id=?`).bind(attachmentId, draftId, owner.accountId).first<RequestAttachmentRow>() : null;
+    return row && owner ? { row, nativeProof: owner.proof } : null;
+  }
+  const row = await database(env).prepare(`SELECT attachment.* FROM client_service_request_attachments attachment
     JOIN client_service_request_drafts d ON d.id=attachment.draft_id ${draftAccessSql}
     AND attachment.id=? AND attachment.account_id=a.id`)
     .bind(session.accountId, session.identityId, draftId, attachmentId).first<RequestAttachmentRow>();
+  return row ? { row, nativeProof: null } : null;
+}
+
+export async function getAuthorizedRequestAttachment(env: Env, session: ClientPortalSession, draftId: string, attachmentId: string): Promise<RequestAttachmentRow | null> {
+  return (await getAuthorizedRequestAttachmentContext(env, session, draftId, attachmentId))?.row ?? null;
 }
 
 export async function listRequestAttachments(env: Env, session: ClientPortalSession, draftId: string): Promise<RequestAttachmentRow[] | null> {
+  if (session.nativeSourceId) {
+    const owner = await nativeDraftOwner(env, session, draftId);
+    if (!owner) return null;
+    return (await database(env).prepare(`SELECT * FROM client_service_request_attachments
+      WHERE draft_id=? AND account_id=? AND status<>'aborted' ORDER BY created_at,id`)
+      .bind(draftId, owner.accountId).all<RequestAttachmentRow>()).results;
+  }
   const allowed = await database(env).prepare(`SELECT d.id FROM client_service_request_drafts d ${draftAccessSql}`)
     .bind(session.accountId, session.identityId, draftId).first<{ id: string }>();
   if (!allowed) return null;
@@ -211,6 +282,13 @@ const submittedRequestAccessSql = `
   )`;
 
 export async function listSubmittedRequestAttachments(env: Env, session: ClientPortalSession, requestId: string): Promise<RequestAttachmentRow[] | null> {
+  if (session.nativeSourceId) {
+    const owner = await nativeRequestOwner(env, session, requestId);
+    if (!owner) return null;
+    return (await database(env).prepare(`SELECT * FROM client_service_request_attachments
+      WHERE submitted_request_id=? AND account_id=? AND status='accepted' ORDER BY created_at,id`)
+      .bind(requestId, owner.accountId).all<RequestAttachmentRow>()).results;
+  }
   const allowed = await database(env).prepare(`SELECT request.id FROM client_service_requests request ${submittedRequestAccessSql}`)
     .bind(session.accountId, session.identityId, requestId).first<{ id: string }>();
   if (!allowed) return null;
@@ -220,6 +298,12 @@ export async function listSubmittedRequestAttachments(env: Env, session: ClientP
 }
 
 export async function getSubmittedRequestAttachment(env: Env, session: ClientPortalSession, requestId: string, attachmentId: string): Promise<RequestAttachmentRow | null> {
+  if (session.nativeSourceId) {
+    const owner = await nativeRequestOwner(env, session, requestId);
+    return owner ? database(env).prepare(`SELECT * FROM client_service_request_attachments
+      WHERE id=? AND submitted_request_id=? AND account_id=? AND status='accepted'`)
+      .bind(attachmentId, requestId, owner.accountId).first<RequestAttachmentRow>() : null;
+  }
   return database(env).prepare(`SELECT attachment.* FROM client_service_request_attachments attachment
     JOIN client_service_requests request ON request.id=attachment.submitted_request_id ${submittedRequestAccessSql}
     AND attachment.id=? AND attachment.status='accepted' AND attachment.account_id=a.id`)
@@ -231,6 +315,7 @@ export async function initializeRequestAttachment(env: Env, session: ClientPorta
 }): Promise<{ row: RequestAttachmentRow; resumed: boolean }> {
   signerConfiguration(env);
   const file = validateRequestAttachment(input.name, input.contentType, input.size);
+  if (session.nativeSourceId) return initializeNativeRequestAttachment(env, session, draftId, input, file);
   const existing = await database(env).prepare(`SELECT attachment.* FROM client_service_request_attachments attachment
     JOIN client_service_request_drafts d ON d.id=attachment.draft_id ${draftAccessSql}
     AND attachment.client_upload_id=? AND attachment.account_id=a.id`)
@@ -280,17 +365,176 @@ export async function initializeRequestAttachment(env: Env, session: ClientPorta
   return { row, resumed: false };
 }
 
+async function initializeNativeRequestAttachment(
+  env: Env,
+  session: ClientPortalSession,
+  draftId: string,
+  input: { clientUploadId: string; name: string; contentType: string; size: number },
+  file: { name: string; contentType: string },
+): Promise<{ row: RequestAttachmentRow; resumed: boolean }> {
+  const owner = await nativeDraftOwner(env, session, draftId);
+  if (!owner) throw new HTTPException(404, { message: "Service request draft not found" });
+  const existing = await database(env).prepare(`SELECT * FROM client_service_request_attachments
+    WHERE draft_id=? AND account_id=? AND client_upload_id=?`)
+    .bind(draftId, owner.accountId, input.clientUploadId).first<RequestAttachmentRow>();
+  if (existing) {
+    if (existing.original_name !== file.name || existing.content_type !== file.contentType || existing.declared_size !== input.size)
+      throw new HTTPException(409, { message: "This upload ID belongs to a different attachment" });
+    return { row: existing, resumed: true };
+  }
+  const id = crypto.randomUUID();
+  const key = `_ltds/quarantine/request-attachments/${id}/object`;
+  const pendingUploadId = `pending:${crypto.randomUUID()}`;
+  const authorityGuard = nativeRequestMutationGuardSql(owner.proof);
+  const inserted = await database(env).prepare(`INSERT INTO client_service_request_attachments
+    (id,draft_id,account_id,created_by_identity_id,client_upload_id,object_key,multipart_upload_id,
+     original_name,declared_size,content_type,status,expires_at)
+    SELECT ?,draft.id,draft.account_id,draft.created_by_identity_id,?,?,?,?,?,?,'uploading',datetime('now','+24 hours')
+    FROM client_service_request_drafts draft
+    JOIN portal_native_request_storage_bindings binding ON binding.workspace_id=draft.portal_workspace_id
+      AND binding.source_id=draft.catalog_source_id AND binding.account_id=draft.account_id
+      AND binding.storage_identity_id=draft.created_by_identity_id AND binding.state='active'
+    WHERE draft.id=? AND draft.state='draft' AND draft.portal_workspace_id=? AND draft.portal_identity_id=?
+      AND draft.catalog_source_id=?
+      AND ${authorityGuard.sql}
+      AND (SELECT COUNT(*) FROM client_service_request_attachments current
+        WHERE current.draft_id=draft.id AND current.status NOT IN ('rejected','aborted','expired'))<?
+      AND COALESCE((SELECT SUM(current.declared_size) FROM client_service_request_attachments current
+        WHERE current.draft_id=draft.id AND current.status NOT IN ('rejected','aborted','expired')),0)+?<=?`)
+    .bind(id, input.clientUploadId, key, pendingUploadId, file.name, input.size, file.contentType,
+      draftId, session.workspaceId, session.nativePortalIdentityId, owner.sourceId,
+      ...authorityGuard.bindings,
+      REQUEST_ATTACHMENT_MAX_FILES, input.size, REQUEST_ATTACHMENT_MAX_TOTAL_BYTES).run();
+  if (inserted.meta.changes !== 1)
+    throw new HTTPException(413, { message: "A request can include at most 10 attachments and 100 MiB total" });
+  let multipart: R2MultipartUpload | undefined;
+  try {
+    multipart = await env.DATA_BUCKET.createMultipartUpload(key, {
+      httpMetadata: { contentType: file.contentType }, customMetadata: { attachmentId: id },
+    });
+    const claimed = await database(env).prepare(`UPDATE client_service_request_attachments
+      SET multipart_upload_id=?,updated_at=datetime('now')
+      WHERE id=? AND multipart_upload_id=? AND status='uploading' AND ${authorityGuard.sql}`)
+      .bind(multipart.uploadId, id, pendingUploadId, ...authorityGuard.bindings).run();
+    if (claimed.meta.changes !== 1) { await multipart.abort(); throw new Error("Attachment upload initialization lost its claim"); }
+  } catch (error) {
+    if (multipart) { try { await multipart.abort(); } catch { /* cleanup retry handles it */ } }
+    await database(env).prepare("DELETE FROM client_service_request_attachments WHERE id=? AND status='uploading'").bind(id).run();
+    throw error;
+  }
+  const row = await getAuthorizedRequestAttachment(env, session, draftId, id);
+  if (!row) throw new Error("Initialized attachment could not be reloaded");
+  return { row, resumed: false };
+}
+
 export async function requestAttachmentCheckpoints(env: Env, attachmentId: string): Promise<RequestAttachmentPart[]> {
   const rows = await database(env).prepare("SELECT part_number,etag,size FROM client_service_request_attachment_parts WHERE attachment_id=? ORDER BY part_number")
     .bind(attachmentId).all<{ part_number: number; etag: string; size: number }>();
   return rows.results.map(row => ({ partNumber: row.part_number, etag: row.etag, size: row.size }));
 }
 
-export async function checkpointRequestAttachment(env: Env, row: RequestAttachmentRow, partNumber: number, rawEtag: unknown, size: number): Promise<RequestAttachmentPart> {
+export async function issueNativeRequestAttachmentPartLease(
+  env: Env,
+  row: RequestAttachmentRow,
+  proof: NativeRequestAuthorityProof,
+  partNumber: number,
+  now = new Date(),
+): Promise<NativeRequestAttachmentPartLease | null> {
+  const guard = nativeRequestMutationGuardSql(proof);
+  const reused = await database(env).prepare(`UPDATE portal_native_request_attachment_part_tickets
+    SET last_issued_at=?
+    WHERE attachment_id=? AND part_number=? AND workspace_id=? AND identity_id=? AND source_id=?
+      AND consumed_at IS NULL AND datetime(expires_at)>datetime(?)
+      AND EXISTS(SELECT 1 FROM client_service_request_attachments attachment
+        JOIN client_service_request_drafts draft ON draft.id=attachment.draft_id
+        WHERE attachment.id=portal_native_request_attachment_part_tickets.attachment_id
+          AND attachment.id=? AND attachment.status='uploading' AND attachment.submitted_request_id IS NULL
+          AND draft.state='draft' AND draft.portal_workspace_id=? AND draft.portal_identity_id=?
+          AND draft.catalog_source_id=?)
+      AND ${guard.sql}
+    RETURNING nonce,issued_at issuedAt,expires_at expiresAt`)
+    .bind(now.toISOString(), row.id, partNumber, proof.workspaceId, proof.identityId, proof.sourceId,
+      now.toISOString(), row.id, proof.workspaceId, proof.identityId, proof.sourceId, ...guard.bindings)
+    .first<NativeRequestAttachmentPartLease>();
+  if (reused) return reused;
+
+  const nonce = crypto.randomUUID();
+  const issuedAt = now.toISOString();
+  const expiresAt = new Date(now.getTime() + REQUEST_ATTACHMENT_TICKET_SECONDS * 1000).toISOString();
+  return database(env).prepare(`INSERT INTO portal_native_request_attachment_part_tickets
+      (attachment_id,part_number,nonce,workspace_id,identity_id,source_id,issued_at,expires_at,last_issued_at)
+    SELECT attachment.id,?,?,?,?,?,?,?,? FROM client_service_request_attachments attachment
+    JOIN client_service_request_drafts draft ON draft.id=attachment.draft_id
+    WHERE attachment.id=? AND attachment.status='uploading' AND attachment.submitted_request_id IS NULL
+      AND draft.state='draft' AND draft.portal_workspace_id=? AND draft.portal_identity_id=?
+      AND draft.catalog_source_id=? AND ${guard.sql}
+    ON CONFLICT(attachment_id,part_number) DO UPDATE SET
+      nonce=excluded.nonce,workspace_id=excluded.workspace_id,identity_id=excluded.identity_id,
+      source_id=excluded.source_id,issued_at=excluded.issued_at,expires_at=excluded.expires_at,
+      consumed_at=NULL,last_issued_at=excluded.last_issued_at
+    WHERE portal_native_request_attachment_part_tickets.consumed_at IS NOT NULL
+      OR datetime(portal_native_request_attachment_part_tickets.expires_at)<=datetime(?)
+    RETURNING nonce,issued_at issuedAt,expires_at expiresAt`)
+    .bind(partNumber, nonce, proof.workspaceId, proof.identityId, proof.sourceId, issuedAt, expiresAt, issuedAt,
+      row.id, proof.workspaceId, proof.identityId, proof.sourceId, ...guard.bindings, issuedAt)
+    .first<NativeRequestAttachmentPartLease>();
+}
+
+export async function checkpointRequestAttachment(
+  env: Env,
+  row: RequestAttachmentRow,
+  partNumber: number,
+  rawEtag: unknown,
+  size: number,
+  native?: { proof: NativeRequestAuthorityProof; ticketNonce: string },
+): Promise<RequestAttachmentPart> {
   if (row.status !== "uploading") throw new HTTPException(409, { message: "The attachment is not accepting parts" });
   const etag = canonicalRequestAttachmentEtag(rawEtag);
   const expectedSize = requestAttachmentPartLength(row.declared_size, partNumber);
   if (!etag || size !== expectedSize) throw new HTTPException(400, { message: "The attachment checkpoint is invalid" });
+  if (native) {
+    const guard = nativeRequestMutationGuardSql(native.proof);
+    const db = database(env);
+    const results = await db.batch([
+      db.prepare(`INSERT INTO client_service_request_attachment_parts(attachment_id,part_number,etag,size)
+        SELECT attachment.id,?,?,? FROM client_service_request_attachments attachment
+        JOIN client_service_request_drafts draft ON draft.id=attachment.draft_id
+        JOIN portal_native_request_attachment_part_tickets ticket ON ticket.attachment_id=attachment.id
+          AND ticket.part_number=? AND ticket.nonce=? AND ticket.workspace_id=? AND ticket.identity_id=?
+          AND ticket.source_id=? AND datetime(ticket.expires_at)>datetime('now')
+          AND (ticket.consumed_at IS NULL OR EXISTS(SELECT 1 FROM client_service_request_attachment_parts saved
+            WHERE saved.attachment_id=attachment.id AND saved.part_number=? AND saved.etag=? AND saved.size=?))
+        WHERE attachment.id=? AND attachment.status='uploading' AND attachment.submitted_request_id IS NULL
+          AND draft.state='draft' AND draft.portal_workspace_id=? AND draft.portal_identity_id=?
+          AND draft.catalog_source_id=? AND ${guard.sql}
+        ON CONFLICT(attachment_id,part_number) DO UPDATE SET
+          etag=excluded.etag,size=excluded.size,updated_at=datetime('now')
+        WHERE client_service_request_attachment_parts.etag=excluded.etag
+          AND client_service_request_attachment_parts.size=excluded.size`)
+        .bind(partNumber, etag, size, partNumber, native.ticketNonce, native.proof.workspaceId,
+          native.proof.identityId, native.proof.sourceId, partNumber, etag, size, row.id,
+          native.proof.workspaceId, native.proof.identityId, native.proof.sourceId, ...guard.bindings),
+      db.prepare(`UPDATE portal_native_request_attachment_part_tickets SET consumed_at=COALESCE(consumed_at,datetime('now'))
+        WHERE attachment_id=? AND part_number=? AND nonce=? AND workspace_id=? AND identity_id=? AND source_id=?
+          AND datetime(expires_at)>datetime('now') AND EXISTS(
+            SELECT 1 FROM client_service_request_attachments attachment
+            JOIN client_service_request_drafts draft ON draft.id=attachment.draft_id
+            JOIN client_service_request_attachment_parts saved ON saved.attachment_id=attachment.id
+              AND saved.part_number=? AND saved.etag=? AND saved.size=?
+            WHERE attachment.id=? AND attachment.status='uploading' AND attachment.submitted_request_id IS NULL
+              AND draft.state='draft' AND draft.portal_workspace_id=? AND draft.portal_identity_id=?
+              AND draft.catalog_source_id=? AND ${guard.sql})`)
+        .bind(row.id, partNumber, native.ticketNonce, native.proof.workspaceId, native.proof.identityId,
+          native.proof.sourceId, partNumber, etag, size, row.id, native.proof.workspaceId,
+          native.proof.identityId, native.proof.sourceId, ...guard.bindings),
+    ]);
+    if (!results[0]?.meta.changes)
+      throw new HTTPException(409, { message: "The attachment ticket expired or access changed. Request a new part ticket." });
+    const saved = await db.prepare(`SELECT part_number partNumber,etag,size FROM client_service_request_attachment_parts
+      WHERE attachment_id=? AND part_number=?`).bind(row.id, partNumber).first<RequestAttachmentPart>();
+    if (!saved) throw new HTTPException(409, { message: "The attachment checkpoint could not be recorded" });
+    return saved;
+  }
   await database(env).prepare(`INSERT INTO client_service_request_attachment_parts(attachment_id,part_number,etag,size)
     VALUES (?,?,?,?) ON CONFLICT(attachment_id,part_number) DO UPDATE SET etag=excluded.etag,size=excluded.size,updated_at=datetime('now')`)
     .bind(row.id, partNumber, etag, size).run();
@@ -309,12 +553,52 @@ async function deleteRemovedAttachmentObject(env: Env, row: Pick<RequestAttachme
   }
 }
 
-export async function abortRequestAttachment(env: Env, row: RequestAttachmentRow): Promise<{ idempotent: boolean }> {
+export async function abortRequestAttachment(
+  env: Env,
+  row: RequestAttachmentRow,
+  nativeProof?: NativeRequestAuthorityProof,
+): Promise<{ idempotent: boolean }> {
   if (row.submitted_request_id !== null)
     throw new HTTPException(409, { message: "Submitted request attachments are immutable" });
   if (row.status === "aborted") {
     await deleteRemovedAttachmentObject(env, row);
     return { idempotent: true };
+  }
+  const db = database(env);
+  if (nativeProof) {
+    const guard = nativeRequestMutationGuardSql(nativeProof);
+    const result = await db.prepare(`UPDATE client_service_request_attachments
+      SET status='aborted',updated_at=datetime('now')
+      WHERE id=? AND submitted_request_id IS NULL
+        AND status IN ('uploading','quarantined','scanning','accepted','rejected','expired')
+        AND EXISTS (SELECT 1 FROM client_service_request_drafts draft
+          WHERE draft.id=client_service_request_attachments.draft_id AND draft.state='draft'
+            AND draft.portal_workspace_id=? AND draft.portal_identity_id=? AND draft.catalog_source_id=?)
+        AND ${guard.sql}`)
+      .bind(row.id, nativeProof.workspaceId, nativeProof.identityId, nativeProof.sourceId, ...guard.bindings).run();
+    if (result.meta.changes !== 1) {
+      const current = await db.prepare(`SELECT attachment.status,attachment.submitted_request_id,draft.state draft_state
+        FROM client_service_request_attachments attachment JOIN client_service_request_drafts draft ON draft.id=attachment.draft_id
+        WHERE attachment.id=?`).bind(row.id).first<{
+          status: RequestAttachmentRow["status"];
+          submitted_request_id: string | null;
+          draft_state: string;
+        }>();
+      if (current?.status !== "aborted" || current.submitted_request_id !== null)
+        throw new HTTPException(409, { message: current?.draft_state === "submitted"
+          ? "The request was submitted before this attachment could be removed"
+          : "The attachment changed or access expired before it could be removed" });
+    }
+    if (row.status === "uploading" && !row.multipart_upload_id.startsWith("pending:")) {
+      try { await env.DATA_BUCKET.resumeMultipartUpload(row.object_key, row.multipart_upload_id).abort(); }
+      catch (error) {
+        console.error(JSON.stringify({ event: "client-request-attachment.abort-failed", attachmentId: row.id, message: error instanceof Error ? error.message : "unknown" }));
+        throw new HTTPException(503, { message: "The attachment was removed from the draft, but multipart cleanup is pending. Retry removal." });
+      }
+    }
+    await db.prepare("DELETE FROM client_service_request_attachment_parts WHERE attachment_id=?").bind(row.id).run();
+    await deleteRemovedAttachmentObject(env, row);
+    return { idempotent: result.meta.changes !== 1 };
   }
   if (row.status === "uploading" && !row.multipart_upload_id.startsWith("pending:")) {
     try { await env.DATA_BUCKET.resumeMultipartUpload(row.object_key, row.multipart_upload_id).abort(); }
@@ -323,7 +607,6 @@ export async function abortRequestAttachment(env: Env, row: RequestAttachmentRow
       throw new HTTPException(503, { message: "The attachment could not be removed yet. Please retry." });
     }
   }
-  const db = database(env);
   const result = await db.prepare(`UPDATE client_service_request_attachments
     SET status='aborted',updated_at=datetime('now')
     WHERE id=? AND submitted_request_id IS NULL
@@ -366,7 +649,12 @@ function validMagic(contentType: string, bytes: Uint8Array): boolean {
   return false;
 }
 
-export async function completeRequestAttachment(env: Env, row: RequestAttachmentRow, requested: Array<{ partNumber: number; etag: string }>): Promise<{ status: RequestAttachmentRow["status"]; idempotent: boolean }> {
+export async function completeRequestAttachment(
+  env: Env,
+  row: RequestAttachmentRow,
+  requested: Array<{ partNumber: number; etag: string }>,
+  nativeProof?: NativeRequestAuthorityProof,
+): Promise<{ status: RequestAttachmentRow["status"]; idempotent: boolean }> {
   if (["quarantined", "scanning", "accepted"].includes(row.status)) return { status: row.status, idempotent: true };
   if (row.status !== "uploading" || row.multipart_upload_id.startsWith("pending:")) throw new HTTPException(409, { message: "The attachment is not awaiting completion" });
   const saved = await requestAttachmentCheckpoints(env, row.id);
@@ -375,30 +663,120 @@ export async function completeRequestAttachment(env: Env, row: RequestAttachment
   const count = Math.ceil(row.declared_size / REQUEST_ATTACHMENT_PART_BYTES);
   if (saved.length !== count || saved.some((part, index) => part.partNumber !== index + 1 || part.size !== requestAttachmentPartLength(row.declared_size, part.partNumber)))
     throw new HTTPException(409, { message: "All attachment parts must be uploaded before completion" });
-  const claim = await database(env).prepare("UPDATE client_service_request_attachments SET completion_claimed_at=datetime('now'),updated_at=datetime('now') WHERE id=? AND status='uploading' AND completion_claimed_at IS NULL RETURNING id")
-    .bind(row.id).first<{ id: string }>();
-  if (!claim) throw new HTTPException(409, { message: "Attachment completion is already in progress" });
-  let object: R2Object;
+  const guard = nativeProof ? nativeRequestMutationGuardSql(nativeProof) : null;
+  const completionClaim = crypto.randomUUID();
+  const claim = await database(env).prepare(`UPDATE client_service_request_attachments
+    SET completion_claimed_at=?,updated_at=datetime('now')
+    WHERE id=? AND status='uploading' AND completion_claimed_at IS NULL
+      ${guard ? `AND EXISTS(SELECT 1 FROM client_service_request_drafts draft
+        WHERE draft.id=client_service_request_attachments.draft_id AND draft.state='draft'
+          AND draft.portal_workspace_id=? AND draft.portal_identity_id=? AND draft.catalog_source_id=?)
+        AND ${guard.sql}` : ""}
+    RETURNING id`)
+    .bind(completionClaim, row.id, ...(nativeProof ? [nativeProof.workspaceId, nativeProof.identityId, nativeProof.sourceId] : []),
+      ...(guard?.bindings ?? [])).first<{ id: string }>();
+  if (!claim) throw new HTTPException(409, { message: nativeProof
+    ? "Attachment access changed before completion"
+    : "Attachment completion is already in progress" });
+  const nativeCompletionMutation = async (
+    setSql: string,
+    bindings: unknown[],
+  ): Promise<boolean> => {
+    if (!nativeProof || !guard) return false;
+    const result = await database(env).prepare(`UPDATE client_service_request_attachments
+      SET ${setSql},updated_at=datetime('now')
+      WHERE id=? AND status='uploading' AND completion_claimed_at=?
+        AND EXISTS(SELECT 1 FROM client_service_request_drafts draft
+          WHERE draft.id=client_service_request_attachments.draft_id AND draft.state='draft'
+            AND draft.portal_workspace_id=? AND draft.portal_identity_id=? AND draft.catalog_source_id=?)
+        AND ${guard.sql}`)
+      .bind(...bindings, row.id, completionClaim, nativeProof.workspaceId, nativeProof.identityId,
+        nativeProof.sourceId, ...guard.bindings).run();
+    return result.meta.changes === 1;
+  };
+  const releaseNativeClaimAfterAuthorityLoss = async (): Promise<void> => {
+    if (!nativeProof) return;
+    await database(env).prepare(`UPDATE client_service_request_attachments
+      SET completion_claimed_at=NULL,updated_at=datetime('now')
+      WHERE id=? AND status='uploading' AND completion_claimed_at=?
+        AND EXISTS(SELECT 1 FROM client_service_request_drafts draft
+          WHERE draft.id=client_service_request_attachments.draft_id
+            AND draft.portal_workspace_id=? AND draft.portal_identity_id=? AND draft.catalog_source_id=?)`)
+      .bind(row.id, completionClaim, nativeProof.workspaceId, nativeProof.identityId, nativeProof.sourceId).run();
+  };
+  const failClosedAfterAuthorityLoss = async (deleteObject: boolean): Promise<never> => {
+    if (deleteObject) {
+      try { await env.DATA_BUCKET.delete(row.object_key); }
+      catch (error) {
+        console.error(JSON.stringify({
+          event: "client-request-attachment.revoked-completion-cleanup-failed",
+          attachmentId: row.id,
+          message: error instanceof Error ? error.message : "unknown",
+        }));
+      }
+    }
+    await releaseNativeClaimAfterAuthorityLoss();
+    throw new HTTPException(409, { message: "Attachment access changed during completion" });
+  };
+  const releaseClaimAfterIoFailure = async (error: unknown, objectMayExist: boolean): Promise<never> => {
+    if (nativeProof) {
+      if (!(await nativeCompletionMutation("completion_claimed_at=NULL", [])))
+        await failClosedAfterAuthorityLoss(objectMayExist);
+    } else {
+      await database(env).prepare("UPDATE client_service_request_attachments SET completion_claimed_at=NULL,updated_at=datetime('now') WHERE id=? AND status='uploading' AND completion_claimed_at=?")
+        .bind(row.id, completionClaim).run();
+    }
+    throw error;
+  };
+
+  let object: R2Object | null = null;
   try {
     object = await env.DATA_BUCKET.resumeMultipartUpload(row.object_key, row.multipart_upload_id).complete(requested);
   } catch (error) {
-    const completed = await env.DATA_BUCKET.head(row.object_key);
+    let completed: R2Object | null = null;
+    try { completed = await env.DATA_BUCKET.head(row.object_key); }
+    catch (headError) { await releaseClaimAfterIoFailure(headError, true); }
     if (completed?.size === row.declared_size) object = completed;
-    else {
-      await database(env).prepare("UPDATE client_service_request_attachments SET completion_claimed_at=NULL,updated_at=datetime('now') WHERE id=? AND status='uploading'").bind(row.id).run();
-      throw error;
+    else await releaseClaimAfterIoFailure(error, false);
+  }
+  if (!object) {
+    await releaseClaimAfterIoFailure(new Error("Multipart completion returned no object"), true);
+    throw new Error("unreachable");
+  }
+  const completedObject = object;
+  let probeBytes: Uint8Array | null = null;
+  try {
+    const probe = completedObject.size === row.declared_size
+      ? await env.DATA_BUCKET.get(row.object_key, { range: { offset: 0, length: Math.min(32, completedObject.size) } })
+      : null;
+    probeBytes = probe ? new Uint8Array(await probe.arrayBuffer()) : null;
+  } catch (error) {
+    await releaseClaimAfterIoFailure(error, true);
+  }
+  if (!probeBytes || !validMagic(row.content_type, probeBytes)) {
+    const reason = completedObject.size !== row.declared_size ? "size_mismatch" : "content_signature_mismatch";
+    if (nativeProof) {
+      if (!(await nativeCompletionMutation(
+        "status='rejected',rejection_reason=?,actual_size=?,completed_at=datetime('now'),completion_claimed_at=NULL",
+        [reason, completedObject.size],
+      ))) await failClosedAfterAuthorityLoss(true);
+    } else {
+      await database(env).prepare("UPDATE client_service_request_attachments SET status='rejected',rejection_reason=?,actual_size=?,completed_at=datetime('now'),completion_claimed_at=NULL,updated_at=datetime('now') WHERE id=? AND status='uploading' AND completion_claimed_at=?")
+        .bind(reason, completedObject.size, row.id, completionClaim).run();
     }
-  }
-  const probe = object.size === row.declared_size ? await env.DATA_BUCKET.get(row.object_key, { range: { offset: 0, length: Math.min(32, object.size) } }) : null;
-  if (!probe || !validMagic(row.content_type, new Uint8Array(await probe.arrayBuffer()))) {
     await env.DATA_BUCKET.delete(row.object_key);
-    await database(env).prepare("UPDATE client_service_request_attachments SET status='rejected',rejection_reason=?,actual_size=?,completed_at=datetime('now'),updated_at=datetime('now') WHERE id=? AND status='uploading'")
-      .bind(object.size !== row.declared_size ? "size_mismatch" : "content_signature_mismatch", object.size, row.id).run();
     await database(env).prepare("DELETE FROM client_service_request_attachment_parts WHERE attachment_id=?").bind(row.id).run();
-    throw new HTTPException(object.size !== row.declared_size ? 422 : 415, { message: "The uploaded attachment did not match its declared file type and size" });
+    throw new HTTPException(completedObject.size !== row.declared_size ? 422 : 415, { message: "The uploaded attachment did not match its declared file type and size" });
   }
-  await database(env).prepare("UPDATE client_service_request_attachments SET status='quarantined',actual_size=?,etag=?,completed_at=datetime('now'),updated_at=datetime('now') WHERE id=? AND status='uploading'")
-    .bind(object.size, object.etag, row.id).run();
+  if (nativeProof) {
+    if (!(await nativeCompletionMutation(
+      "status='quarantined',actual_size=?,etag=?,completed_at=datetime('now'),completion_claimed_at=NULL",
+      [completedObject.size, completedObject.etag],
+    ))) await failClosedAfterAuthorityLoss(true);
+  } else {
+    await database(env).prepare("UPDATE client_service_request_attachments SET status='quarantined',actual_size=?,etag=?,completed_at=datetime('now'),completion_claimed_at=NULL,updated_at=datetime('now') WHERE id=? AND status='uploading' AND completion_claimed_at=?")
+      .bind(completedObject.size, completedObject.etag, row.id, completionClaim).run();
+  }
   await database(env).prepare("DELETE FROM client_service_request_attachment_parts WHERE attachment_id=?").bind(row.id).run();
   return { status: "quarantined", idempotent: false };
 }

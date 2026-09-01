@@ -97,12 +97,13 @@ changing writes or access:
 2. Specify the registered capabilities for each Alpha source, retaining primary
    staff authority. Implement authenticated secondary portal/catalog and
    outbound routing before claiming a unified multi-source client portal.
-   A bounded next slice can implement secondary native projection and read-only
-   resource navigation for an independently authorized existing global identity,
-   without deciding crew-note rights or activating a production source. Preserve
-   separate workspaces and keep unsupported requests, finance, feedback, mail
-   and Viewer paths unavailable. Test colliding producer IDs, stale contexts and
-   source-local revocation; do not merely remove primary-only predicates.
+   The bounded secondary native projection, read-only resource navigation,
+   exact-source requests, and exact-source feedback slices are now implemented
+   locally and default-off. Preserve separate workspaces and keep finance, mail,
+   and Viewer paths unavailable. Release requests and feedback only through
+   their migration-first per-source gates. Continue to test colliding producer
+   IDs, stale contexts and source-local revocation; do not merely remove
+   primary-only predicates.
 3. Implement named collaborators and peer-admin controls with explicit ceilings,
    the authoritative project-end date, unknown-date/reopening behavior and
    ordinary-history separation. Add reusable contacts and scoped audit together

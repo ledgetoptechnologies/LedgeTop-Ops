@@ -9,7 +9,7 @@ const workspaces = [
 function workspace(id: string) { return workspaces.find(item => item.id === id)!; }
 function envelope(id = "workspace-b") { return {workspaceId: id, sourceId: workspace(id).sourceId, contextVersion: `context-${id}`}; }
 function features() { return {directory: {state: "available", reason: "authorized_capability"}, deliveries: {state: "available", reason: "resource_authorization_required"},
-  serviceRequests: {state: "not_supported", reason: "source_not_supported"}, feedback: {state: "not_supported", reason: "source_not_supported"},
+  serviceRequests: {state: "not_supported", reason: "source_not_supported"}, feedback: {state: "temporarily_unavailable", reason: "backend_unavailable"},
   models: {state: "not_supported", reason: "source_not_supported"}, team: {state: "not_supported", reason: "source_not_supported"},
   billing: {state: "not_supported", reason: "source_not_supported"}}; }
 function context(id = "workspace-b") { return {workspace: workspace(id), contextVersion: `context-${id}`, features: features(), capabilities: {directoryRead: true, deliveryView: true, requestV2: false, requestAttachments: false, feedback: false, manageTeam: false, workspaceMembershipManagement: false, delegatedShares: false, viewer: false, viewerShares: false, viewBilling: false}}; }
@@ -229,6 +229,66 @@ test("Back reauthorizes an earlier native workspace before its exact file reques
   await expect(page).toHaveURL(/workspace=workspace-b&file=file-workspace-b$/); expect(calls.some(call => call.path.includes("/folders/"))).toBe(false);
 });
 
+test("native feedback submits only through the selected secondary workspace endpoint", async ({page}) => {
+  const calls = await mock(page, (route, call) => {
+    if (call.path.endsWith("workspace-b/context")) return route.fulfill({json: {...context(),
+      features: {...features(), feedback: {state: "available", reason: "resource_authorization_required"}},
+      capabilities: {...context().capabilities, feedback: true}}});
+    if (call.path === "/api/client/v2/workspaces/workspace-b/feedback" && call.method === "POST") return route.fulfill({json: {feedback: {
+      id: "native_feedback-test", status: "new", revision: 1, message: "Please verify this boundary.", completionNote: null,
+      completedAt: null, createdAt: date, updatedAt: date, target: {kind: "project", projectId: "project-shared",
+        label: "Coastal seawall construction documentation", projectName: "Coastal seawall construction documentation", available: true,
+        actionPath: "/portal/projects/project-shared?workspace=workspace-b"},
+    }}});
+    return undefined;
+  });
+  await page.goto("/portal?workspace=workspace-b");
+  await page.getByRole("button", {name: "Leave Feedback"}).click();
+  await page.getByLabel("Your feedback").fill("Please verify this boundary.");
+  await page.getByRole("button", {name: "Send feedback"}).click();
+  await expect(page.getByRole("status")).toContainText("Feedback sent");
+  expect(calls.some(call => call.method === "POST" && call.path === "/api/client/v2/workspaces/workspace-b/feedback")).toBe(true);
+  expect(calls.some(call => call.path === "/api/client/feedback")).toBe(false);
+});
+
+for (const width of [375, 1280]) test(`native service requests expose the shared list and new-request workflow at ${width}px`, async ({page}) => {
+  await page.setViewportSize({width, height: 900});
+  const calls = await mock(page, (route, call) => {
+    if (call.path === "/api/client/v2/workspaces/workspace-b/context") {
+      const value = context("workspace-b");
+      return route.fulfill({json: {...value,
+        features: {...value.features, serviceRequests: {state: "available", reason: "resource_authorization_required"}},
+        capabilities: {...value.capabilities, requestV2: true, requestAttachments: false}}});
+    }
+    if (call.path === "/api/client/service-requests") return route.fulfill({json: {requests: [{
+      id: "native-request-1", projectId: "project-shared", requestType: "service", title: "Coastal progress mapping",
+      details: "Capture the current work area.", location: null, preferredStartAt: null, serviceCategory: "Mapping",
+      deliverables: null, siteContactName: null, siteContactEmail: null, siteContactPhone: null,
+      desiredCompletionAt: null, latitude: null, longitude: null, areaGeoJson: null, poiPoints: [],
+      acceptedQuote: null, operationalEstimate: null, status: "submitted", createdAt: date, updatedAt: date,
+    }]}});
+    if (call.path === "/api/client/service-request-drafts") return route.fulfill({json: {drafts: []}});
+    if (call.path === "/api/client/request-readiness") return route.fulfill({json: {
+      mode: "catalog", workspaceId: "workspace-b", target: {kind: "root", projectId: null},
+      canStartRequest: true, reason: "ready", root: {canStartRequest: true, reason: "ready"},
+      projectRequestsSupported: true, refreshedAt: date,
+    }});
+  });
+  await page.goto("/portal/requests?workspace=workspace-b");
+  await expect(page.getByRole("heading", {name: "Service requests"})).toBeVisible();
+  await expect(page.getByText("Coastal progress mapping", {exact: true})).toBeVisible();
+  await page.getByRole("button", {name: "Submit new request"}).click();
+  await expect(page).toHaveURL(/\/portal\/requests\/new\?workspace=workspace-b/);
+  await expect(page.getByRole("heading", {name: "Define your site and scope"})).toBeVisible();
+  await page.goto("/portal/projects/project-shared?tab=requests&workspace=workspace-b");
+  await expect(page.getByRole("heading", {name: "Request additional service"})).toBeVisible();
+  await expect(page.getByRole("heading", {name: "Project request history"})).toBeVisible();
+  await expect(page.getByText("Coastal progress mapping", {exact: true})).toBeVisible();
+  await expect(page.getByRole("heading", {name: "Feature unavailable"})).toHaveCount(0);
+  expect(calls.filter(call => call.path.startsWith("/api/client/service-") || call.path === "/api/client/request-readiness")
+    .every(call => call.workspace === "workspace-b")).toBe(true);
+});
+
 for (const path of ["/portal/requests", "/portal/requests/new", "/portal/feedback", "/portal/account", "/portal/projects/project-shared?tab=models", "/portal/projects/project-shared?tab=requests"]) test(`native unsupported feature ${path} is explicit without legacy or Viewer probes`, async ({page}) => {
   const calls = await mock(page); await page.goto(`${path}${path.includes("?") ? "&" : "?"}workspace=workspace-b`);
   await expect(page.getByRole("heading", {name: "Workspace features"})).toBeVisible();
@@ -345,7 +405,7 @@ test("member authority loss clears ambiguous retries and every protected team co
   await page.getByRole("button", {name: "Review invitation"}).click(); await page.getByRole("button", {name: "Send invitation"}).click();
   await expect(page.getByRole("button", {name: "Retry same invitation"})).toBeVisible();
   await page.getByRole("button", {name: "Refresh team access"}).click();
-  await expect(page.getByText("Workspace member management is not included in your current verified access.", {exact: false})).toBeVisible();
+  await expect(page.getByText("Workspace member records are not available in your current verified access.", {exact: false})).toBeVisible();
   await expect(page.getByRole("button", {name: "Retry same invitation"})).toHaveCount(0);
   await expect(page.getByRole("heading", {name: /Invite a collaborator|People|Invitations/})).toHaveCount(0);
   await expect(page.getByText("local@example.test", {exact: true})).toHaveCount(0);
@@ -379,7 +439,7 @@ test("transient access refresh preserves the exact ambiguous invitation retry", 
   await expect(page.getByRole("heading", {name: "Invite a collaborator"})).toHaveCount(0);
   await expect(page.getByRole("heading", {name: /People|Invitations/})).toHaveCount(0);
   await page.getByRole("button", {name: "Refresh team access"}).click(); await expect(retry).toBeEnabled();
-  await expect(page.getByRole("heading", {name: "Invite a collaborator"})).toHaveCount(0);
+  await expect(page.getByRole("heading", {name: "Invite a collaborator"})).toBeVisible();
   await expect(page.getByRole("heading", {name: /People|Invitations/})).toHaveCount(0);
   await expect(page.locator(".portal-team-row")).toHaveCount(0);
   await retry.click(); await expect(page.getByText("Invitation issued.", {exact: false})).toBeVisible();
@@ -419,7 +479,7 @@ test("secondary member management fails closed and retries without exposing reco
   await expect(page.getByRole("alert")).toContainText("Temporary membership failure");
   await expect(page.getByRole("heading", {name: "People"})).toHaveCount(0);
   available = true; await page.getByRole("button", {name: "Refresh team access"}).click();
-  await expect(page.getByText("Workspace member management is not included in your current verified access.", {exact: false})).toBeVisible();
+  await expect(page.getByText("Workspace member records are not available in your current verified access.", {exact: false})).toBeVisible();
   await expect(page.getByRole("heading", {name: "Invite a collaborator"})).toHaveCount(0);
   await expect(page.getByRole("heading", {name: "People"})).toHaveCount(0);
 });

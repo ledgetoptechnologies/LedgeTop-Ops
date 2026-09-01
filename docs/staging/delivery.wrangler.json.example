@@ -9,7 +9,8 @@
   "preview_urls": false,
   "routes": [
     { "pattern": "delivery-staging.ledgetopdroneservices.com", "custom_domain": true },
-    { "pattern": "client-staging.ledgetopdroneservices.com", "custom_domain": true }
+    { "pattern": "client-staging.ledgetopdroneservices.com", "custom_domain": true },
+    { "pattern": "portal-staging.ledgetoptechnologies.com", "custom_domain": true }
   ],
   "limits": { "cpu_ms": 300000, "subrequests": 25000 },
   "triggers": { "crons": ["*/5 * * * *", "15 * * * *"] },
@@ -23,6 +24,7 @@
     "POLICY_AUD": "f6942c97e306d81d206c94746dc731413d5e59461b35d9b213f13fdf96b62835",
     "CLIENT_PORTAL_ENABLED": "false",
     "CLIENT_PORTAL_REQUEST_V2_ENABLED": "false",
+    "CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED": "false",
     "PROJECT_ALPHA_CATALOG_SYNC_ENABLED": "false",
     "PROJECT_ALPHA_CATALOG_APPLICATION_KEY": "ltds_client_catalog_staging",
     "PROJECT_ALPHA_CATALOG_ACCESS_TEAM_DOMAIN": "https://ledgetoptechnologies.cloudflareaccess.com",
@@ -62,6 +64,7 @@
     "CLIENT_DELEGATED_SHARES_ENABLED": "false",
     "CLIENT_DELEGATED_SHARE_KEY_ID": "staging-v1",
     "CLIENT_PORTAL_ORIGIN": "https://client-staging.ledgetopdroneservices.com",
+    "CLIENT_PORTAL_ORIGINS": "https://client-staging.ledgetopdroneservices.com,https://portal-staging.ledgetoptechnologies.com",
     "CLIENT_ACCESS_TEAM_DOMAIN": "https://ledgetoptechnologies.cloudflareaccess.com",
     "CLIENT_ACCESS_AUD": "<DEDICATED_CLIENT_PORTAL_STAGING_ACCESS_AUD>",
     "MAPBOX_PUBLIC_TOKEN": "<CLIENT_STAGING_RESTRICTED_MAPBOX_PUBLIC_TOKEN>",

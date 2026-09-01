@@ -229,14 +229,16 @@ export async function loadPortalBootstrap(
       ...context, resourceMode: "native", workspaces, selectedWorkspaceId: selected.id,
       capabilities: {
         directoryRead: context.capabilities.directoryRead, deliveryView: context.capabilities.deliveryView,
-        workspaceHierarchyV2: true, manageTeam: false, viewBilling: false, requestV2: false, requestAttachments: false,
+        workspaceHierarchyV2: true, manageTeam: false, viewBilling: false,
+        requestV2: context.capabilities.requestV2 === true,
+        requestAttachments: context.capabilities.requestAttachments === true,
         // These three flags only expose the global invitation surface. The
         // selected workspace's /access response remains the authority for
         // whether the signed-in identity may see or change any member data.
         workspaceMembershipManagement: session.capabilities?.workspaceMembershipManagement === true,
         hierarchyScopedInvitations: session.capabilities?.hierarchyScopedInvitations === true,
         invitationEmailDelivery: session.capabilities?.invitationEmailDelivery === true,
-        delegatedShares: false, viewer: false, viewerShares: false, feedback: false,
+        delegatedShares: false, viewer: false, viewerShares: false, feedback: context.capabilities.feedback === true,
       },
     };
   }
@@ -617,6 +619,8 @@ export interface PortalRequestAttachmentUpload extends PortalRequestAttachment {
 export interface PortalRequestAttachmentTicket {
   url: string; expiresAt: string; method: "PUT"; partNumber: number;
   contentLength: number; contentType: string; headers: Record<string, string>;
+  /** Present for native workspaces; consumed exactly once by the checkpoint. */
+  ticketNonce?: string;
 }
 
 export async function loadPortalNotifications(
@@ -816,8 +820,12 @@ export function uploadPortalAttachmentPart(ticket: PortalRequestAttachmentTicket
   });
 }
 
-export async function checkpointPortalAttachmentPart(draftId: string, attachmentId: string, part: PortalRequestAttachmentPart, request: PortalRequest = requestJson): Promise<PortalRequestAttachmentPart> {
-  return request<PortalRequestAttachmentPart>(`${attachmentPath(draftId, attachmentId)}/parts/${part.partNumber}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ etag: part.etag, size: part.size }) });
+export async function checkpointPortalAttachmentPart(draftId: string, attachmentId: string, part: PortalRequestAttachmentPart,
+  request: PortalRequest = requestJson, ticketNonce?: string): Promise<PortalRequestAttachmentPart> {
+  return request<PortalRequestAttachmentPart>(`${attachmentPath(draftId, attachmentId)}/parts/${part.partNumber}`, {
+    method: "PUT", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ etag: part.etag, size: part.size, ...(ticketNonce ? { ticketNonce } : {}) }),
+  });
 }
 
 export async function completePortalRequestAttachment(draftId: string, attachmentId: string, parts: PortalRequestAttachmentPart[], request: PortalRequest = requestJson): Promise<{ status: PortalRequestAttachmentStatus }> {
@@ -870,6 +878,14 @@ export async function cancelPortalServiceRequest(
     throw new Error("The cancellation response could not be verified. Retry cancellation to safely confirm the request state.");
   }
   return response.request;
+}
+
+export async function loadPortalServiceRequests(
+  request: PortalRequest = requestJson,
+  signal?: AbortSignal,
+): Promise<PortalServiceRequest[]> {
+  const response = await request<{ requests: PortalServiceRequest[] }>("/api/client/service-requests", { signal });
+  return Array.isArray(response.requests) ? response.requests : [];
 }
 
 export async function createPortalChangeRequest(

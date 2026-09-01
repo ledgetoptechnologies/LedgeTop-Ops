@@ -24,6 +24,10 @@ export interface ClientHubBusinessProjectDetail {
     linkedContact: "available" | "not_projected" | "unavailable";
     siteContacts: "not_projected"; billingContacts: "not_projected"; projectMemory: "not_projected";
   };
+  operationalWorkspaceAvailable: boolean;
+  businessActivityAvailable: boolean;
+  auditTimelineAvailable: boolean;
+  feedbackHistoryAvailable: boolean;
 }
 interface DetailRow {
   id: string; name: string; status: string | null; start_date: string | null; end_date: string | null;
@@ -111,5 +115,9 @@ export async function readClientHubBusinessProjectDetail(env: Env, principal: St
     linkedContact,
     availability: { linkedContact: linkedContact ? "available" : row.client_id ? "unavailable" : "not_projected",
       siteContacts: "not_projected", billingContacts: "not_projected", projectMemory: "not_projected" },
+    operationalWorkspaceAvailable: true,
+    businessActivityAvailable: true,
+    auditTimelineAvailable: true,
+    feedbackHistoryAvailable: context.canonicalRoot.sourceId === "project-alpha:primary",
   };
 }

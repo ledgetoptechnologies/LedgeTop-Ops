@@ -21,6 +21,7 @@
     "TEAM_DOMAIN": "https://ledgetoptechnologies.cloudflareaccess.com",
     "OPERATIONS_AUD": "e5e2026896677c6fbaa0c7eb9b795e326516c15a3191dfba3c2ad43da4728671",
     "DELIVERY_BASE_URL": "https://client-staging.ledgetopdroneservices.com",
+    "CLIENT_PORTAL_ORIGINS": "https://client-staging.ledgetopdroneservices.com,https://portal-staging.ledgetoptechnologies.com",
     "PUBLIC_SHARE_ORIGIN": "https://delivery-staging.ledgetopdroneservices.com",
     "PROJECT_ALPHA_BASE_URL": "https://project-alpha-staging.ledgetopdroneservices.com",
     "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED": "false",

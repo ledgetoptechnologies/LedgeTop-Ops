@@ -20,7 +20,18 @@ import { publicShareOrigin } from "./origins";
 export type NotificationKind = "share_created" | "share_updated" | "share_revoked" | "first_access" | "expiring_72h";
 export interface NotificationPayload { publicId?: string | null; shareUrl?: string; clientName?: string; projectName?: string; r2Prefix?: string; expiresAt?: string | null; }
 export type StoredNotificationPayload = Omit<NotificationPayload, "shareUrl">;
-interface NotificationRow { id: string; share_id: string; kind: NotificationKind; recipient_email: string; payload_json: string; attempts: number; }
+type NotificationRecipientAuthority = "direct_email" | "directory_principal";
+interface NotificationRow {
+  id: string;
+  share_id: string;
+  kind: NotificationKind;
+  recipient_email: string;
+  payload_json: string;
+  attempts: number;
+  share_version: number | null;
+  recipient_authority_kind: NotificationRecipientAuthority | null;
+  recipient_principal_public_id: string | null;
+}
 const MAX_ATTEMPTS = 3;
 type DirectPortalNotificationRow={id:string;event_type:"granted"|"revoked";principal_public_id:string;
   principal_source_version:string;attempt_count:number;r2_prefix:string;
@@ -69,11 +80,28 @@ export function normalizeRecipientEmail(value: unknown): string | null {
 
 export function notificationDedupeKey(kind: NotificationKind, shareId: string, discriminator = ""): string { return `${kind}:${shareId}${discriminator ? `:${discriminator}` : ""}`; }
 
-export function notificationStatement(env: Env, input: { shareId: string; kind: NotificationKind; recipientEmail: string | null; payload: StoredNotificationPayload; dedupeKey?: string }): D1PreparedStatement | null {
+export function notificationStatement(env: Env, input: {
+  shareId: string;
+  kind: NotificationKind;
+  recipientEmail: string | null;
+  payload: StoredNotificationPayload;
+  dedupeKey?: string;
+  shareVersion?: number | null;
+  recipientPrincipalPublicId?: string | null;
+}): D1PreparedStatement | null {
   if (!input.recipientEmail) return null;
+  const bearerBearing = input.kind === "share_created" || input.kind === "share_updated";
+  if (bearerBearing && (!Number.isInteger(input.shareVersion) || Number(input.shareVersion) < 1))
+    throw new Error("Bearer-bearing delivery notifications require an immutable share version");
+  const recipientAuthorityKind: NotificationRecipientAuthority | null = bearerBearing
+    ? (input.recipientPrincipalPublicId ? "directory_principal" : "direct_email")
+    : null;
   return env.DELIVERY_DB.prepare(`INSERT OR IGNORE INTO delivery_notifications
-    (id,dedupe_key,share_id,kind,recipient_email,payload_json) VALUES (?,?,?,?,?,?)`)
-    .bind(crypto.randomUUID(), input.dedupeKey || notificationDedupeKey(input.kind, input.shareId), input.shareId, input.kind, input.recipientEmail, JSON.stringify(input.payload));
+    (id,dedupe_key,share_id,kind,recipient_email,payload_json,share_version,recipient_authority_kind,recipient_principal_public_id)
+    VALUES (?,?,?,?,?,?,?,?,?)`)
+    .bind(crypto.randomUUID(), input.dedupeKey || notificationDedupeKey(input.kind, input.shareId), input.shareId, input.kind,
+      input.recipientEmail, JSON.stringify(input.payload), bearerBearing ? input.shareVersion : null,
+      recipientAuthorityKind, recipientAuthorityKind === "directory_principal" ? input.recipientPrincipalPublicId : null);
 }
 
 function storedPayload(raw: string): { payload: StoredNotificationPayload; legacyShareUrl: string | null } {
@@ -103,8 +131,21 @@ function compatibleLegacyShareUrl(env: Env, value: string | null, publicId: stri
 async function materializeNotificationPayload(env: Env, row: NotificationRow): Promise<NotificationPayload> {
   const stored = storedPayload(row.payload_json), payload = stored.payload;
   if (row.kind !== "share_created" && row.kind !== "share_updated") return payload;
+  if (!row.share_version || !row.recipient_authority_kind)
+    throw new HTTPException(409, { message: "Delivery notification authority is unavailable" });
+  if (row.recipient_authority_kind === "directory_principal" && !row.recipient_principal_public_id)
+    throw new HTTPException(409, { message: "Delivery notification recipient authority is unavailable" });
   const share = await env.DELIVERY_DB.prepare(`SELECT id,public_id,secret_ciphertext,secret_iv,revoked_at,expires_at
-    FROM shares WHERE id=?`).bind(row.share_id).first<{
+    FROM shares WHERE id=? AND share_version=? AND (
+      (?='direct_email' AND lower(recipient_email)=lower(?)) OR
+      (?='directory_principal' AND EXISTS(
+        SELECT 1 FROM delivery_share_recipient_members member
+        WHERE member.share_id=shares.id AND member.share_version=shares.share_version
+          AND member.recipient_principal_public_id=?
+          AND lower(member.recipient_normalized_email)=lower(?)
+      ))
+    )`).bind(row.share_id,row.share_version,row.recipient_authority_kind,row.recipient_email,
+      row.recipient_authority_kind,row.recipient_principal_public_id,row.recipient_email).first<{
       id:string; public_id:string|null; secret_ciphertext:string|null; secret_iv:string|null;
       revoked_at:string|null; expires_at:string|null;
     }>();
@@ -141,7 +182,9 @@ export function renderNotification(kind: NotificationKind, payload: Notification
 
 async function auditNotification(env: Env, action: string, row: NotificationRow, detail: Record<string, unknown>): Promise<void> {
   await env.DELIVERY_DB.prepare(`INSERT INTO audit_log(actor_type,actor_id,action,entity_type,entity_id,details_json) VALUES('system','notifications',?,'share',?,?)`)
-    .bind(action, row.share_id, JSON.stringify({ notificationId: row.id, kind: row.kind, ...detail })).run();
+    .bind(action, row.share_id, JSON.stringify({ notificationId: row.id, kind: row.kind,
+      shareVersion: row.share_version, recipientAuthorityKind: row.recipient_authority_kind,
+      recipientPrincipalPublicId: row.recipient_principal_public_id, ...detail })).run();
 }
 
 export async function enqueueExpiringNotifications(env: Env): Promise<number> {
@@ -176,7 +219,8 @@ export async function enqueueExpiringNotifications(env: Env): Promise<number> {
 export async function processDeliveryNotifications(env: Env): Promise<number> {
   let processed = 0;
   for (; processed < 25; processed += 1) {
-    const row = await env.DELIVERY_DB.prepare(`SELECT id,share_id,kind,recipient_email,payload_json,attempts FROM delivery_notifications
+    const row = await env.DELIVERY_DB.prepare(`SELECT id,share_id,kind,recipient_email,payload_json,attempts,
+        share_version,recipient_authority_kind,recipient_principal_public_id FROM delivery_notifications
       WHERE ((status='queued' AND datetime(next_attempt_at)<=datetime('now')) OR (status='sending' AND datetime(lease_until)<=datetime('now'))) AND attempts < ?
       ORDER BY created_at LIMIT 1`).bind(MAX_ATTEMPTS).first<NotificationRow>();
     if (!row) break;
@@ -230,8 +274,23 @@ export async function processDeliveryNotifications(env: Env): Promise<number> {
       }
       const rendered = renderNotification(row.kind, await materializeNotificationPayload(env, row));
       await sendNotificationMail(env, { to: row.recipient_email, fromName: "LTDS Client Delivery", subject: rendered.subject, text: rendered.text, html: rendered.html, messageIdKey: row.id });
-      await env.DELIVERY_DB.prepare("UPDATE delivery_notifications SET status='sent',sent_at=datetime('now'),lease_until=NULL,updated_at=datetime('now') WHERE id=? AND status='sending'").bind(row.id).run();
-      await auditNotification(env, "notification.sent", row, { attempt });
+      const sent=await env.DELIVERY_DB.prepare("UPDATE delivery_notifications SET status='sent',sent_at=datetime('now'),lease_until=NULL,updated_at=datetime('now') WHERE id=? AND status='sending'").bind(row.id).run();
+      if(sent.meta.changes===1){
+        await auditNotification(env, "notification.sent", row, { attempt });
+      }else{
+        // The provider accepted this exact, previously-authorized generation,
+        // but a concurrent recipient rotation terminally suppressed its local
+        // row before the acknowledgement returned. The bearer in that message
+        // belongs to the old generation and is no longer usable. Preserve the
+        // provider outcome without falsely changing the delivery state to sent
+        // or making the row retryable.
+        const accepted=await env.DELIVERY_DB.prepare(`UPDATE delivery_notifications
+          SET last_error='provider-accepted-after-suppression',lease_until=NULL,updated_at=datetime('now')
+          WHERE id=? AND status='failed' AND last_error IN ('share-authorization-rotated','recipient-no-longer-eligible')`)
+          .bind(row.id).run();
+        if(accepted.meta.changes===1)
+          await auditNotification(env,"notification.provider_accepted_after_suppression",row,{attempt});
+      }
     } catch (error) {
       if(error instanceof HTTPException){
         // The legacy delivery_notifications lifecycle has no `suppressed`

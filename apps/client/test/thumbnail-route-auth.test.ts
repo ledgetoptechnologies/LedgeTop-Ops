@@ -47,7 +47,7 @@ async function fixture(status: "pending" | "failed" | "ready" = "ready", options
   const secret = "s".repeat(48);
   const env: any = { ENVIRONMENT: "development", EXPECTED_HOST: "client.example", DELIVERY_DB: database, DATA_BUCKET: bucket, PUBLIC_THUMBNAIL_RATE_LIMITER: limiter, DELIVERY_SESSION_SECRET: secret, SESSION_KEY_ID: "v1", AUDIT_IP_SECRET: "a".repeat(48) };
   const cookie = (await createSessionCookie(secret, "v1", share.id, options.cookieVersion ?? share.share_version, Date.now() + 60_000)).split(";")[0]!;
-  const ctx: ExecutionContext = { waitUntil() {}, passThroughOnException() {}, exports: {} as Cloudflare.Exports, props: undefined, tracing: undefined as never };
+  const ctx: ExecutionContext = { waitUntil() {}, passThroughOnException() {}, abort() {}, exports: {} as Cloudflare.Exports, props: undefined, tracing: undefined as never };
   const path = `/api/public/shares/${share.public_id}/items/${encodeURIComponent(encodeItemRef(fixtureRelative))}/thumbnail`;
   return { env, cookie, ctx, path, reads, sourceKey: fixtureSourceKey };
 }
@@ -225,7 +225,7 @@ describe("thumbnail route authorization", () => {
       AUDIT_IP_SECRET: "a".repeat(48),
     };
     const cookie = (await createSessionCookie(secret, "v1", share.id, share.share_version, Date.now() + 60_000)).split(";")[0]!;
-    const ctx: ExecutionContext = { waitUntil() {}, passThroughOnException() {}, exports: {} as Cloudflare.Exports, props: undefined, tracing: undefined as never };
+    const ctx: ExecutionContext = { waitUntil() {}, passThroughOnException() {}, abort() {}, exports: {} as Cloudflare.Exports, props: undefined, tracing: undefined as never };
     const response = await worker.fetch(new Request(
       `https://client.example/api/public/shares/${share.public_id}/manifest`,
       { headers: { Cookie: cookie } },

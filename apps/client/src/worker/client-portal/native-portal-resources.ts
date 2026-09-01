@@ -1,6 +1,6 @@
 import { Hono, type Context } from 'hono';
 import { HTTPException } from 'hono/http-exception';
-import { isMovedSourceMarker } from '@ltds/shared';
+import { isMovedSourceMarker,type ClientFeedbackDetail,type ClientFeedbackEvent,type ClientFeedbackItem } from '@ltds/shared';
 import type { Env } from '../types';
 import type { ClientPortalFile, VerifiedClientPrincipal, ClientFilePage } from './types';
 import { isHiddenKey, kindForKey, normalizeRoot, parseRange, safeFileName, validateRelativePath } from '../files';
@@ -10,6 +10,13 @@ import { readNativeAuthenticatedDeliveryGrants, readNativeAuthenticatedDeliveryP
 import { encodeNativePortalHandle, decodeNativePortalHandle, type NativePortalHandle } from './native-portal-handles';
 import { readNativeTargetScopes } from './native-portal-scopes';
 import { nativeDirectoryAuthorizationAvailable, nativeWorkspaceFeatureReadiness } from './native-workspace-readiness';
+import { createNativeFeedbackRecord,nativeFeedbackSchemaAvailable,readNativeFeedbackRecord,type NativeFeedbackRecord } from './native-feedback-store';
+import { nativeFeedbackActionPath,nativeFeedbackTargetInputSchema,reauthorizeNativeFeedbackRecipient,resolveNativeFeedbackTarget,type ResolvedNativeFeedbackTarget } from './native-feedback-target';
+import { feedbackFingerprint,FeedbackStoreError } from './feedback-store';
+import { nativeRequestSchemaReady, nativeServiceRequestsEnabled } from './native-request-authority';
+import { requestAttachmentsAvailable } from './request-attachments';
+import { z } from 'zod';
+import { clientPortalRequestOriginAllowed } from '../origin-policy';
 
 type Bindings = {Bindings:Env;Variables:{clientPrincipal:VerifiedClientPrincipal}};
 type Ctx = Context<Bindings>;
@@ -22,6 +29,30 @@ const invalid = ():never => {throw new HTTPException(400,{message:'Invalid deliv
 const clean = (value:string,max=500) => value.replace(/[\u0000-\u001f\u007f]/g,'').slice(0,max);
 function envelope(context:NativePortalReadContext) {return {workspaceId:context.workspaceId,sourceId:context.sourceId,contextVersion:context.contextVersion};}
 function database(env:Env){return env.DELIVERY_DB.withSession('first-primary');}
+async function boundedJson(c:Ctx):Promise<unknown>{
+  const reader=c.req.raw.body?.getReader();if(!reader)throw new HTTPException(400,{message:'A JSON body is required'});
+  const chunks:Uint8Array[]=[];let size=0;
+  try{for(;;){const next=await reader.read();if(next.done)break;size+=next.value.byteLength;if(size>32_768){await reader.cancel();throw new HTTPException(413,{message:'Feedback is too large'});}chunks.push(next.value);}}
+  finally{reader.releaseLock();}
+  const bytes=new Uint8Array(size);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.length;}
+  try{return JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));}catch{throw new HTTPException(400,{message:'Feedback JSON is invalid'});}
+}
+function sameOrigin(c:Ctx){if(!clientPortalRequestOriginAllowed(c.req.raw,c.env))
+  throw new HTTPException(403,{message:'This request is not allowed'});}
+async function nativeFeedbackItem(env:Env,row:NativeFeedbackRecord,resolved:ResolvedNativeFeedbackTarget):Promise<ClientFeedbackItem>{return {
+  id:row.id,status:row.status,revision:row.revision,message:row.message,completionNote:row.completionNote,createdAt:row.createdAt,
+  updatedAt:row.updatedAt,completedAt:row.completedAt,target:{kind:row.target.kind,projectId:row.target.projectPublicId,label:row.target.label,
+    projectName:row.target.projectName,available:resolved.available,actionPath:await nativeFeedbackActionPath(env,resolved)}};}
+async function nativeFeedbackDetail(env:Env,row:NativeFeedbackRecord,resolved:ResolvedNativeFeedbackTarget):Promise<ClientFeedbackDetail>{
+  const events=await database(env).prepare(`SELECT revision,actor_type actor,status,note,created_at createdAt FROM portal_native_feedback_events
+    WHERE feedback_id=? ORDER BY revision LIMIT 4`).bind(row.id).all<ClientFeedbackEvent>();
+  if(events.results.length>3)throw new HTTPException(503,{message:'Feedback history is unavailable'});
+  return {feedback:await nativeFeedbackItem(env,row,resolved),events:events.results};
+}
+function feedbackCursor(value:string|undefined):{at:string;id:string}|null{if(!value)return null;try{if(value.length>1024||!/^[A-Za-z0-9_-]+$/.test(value))throw new Error();
+  const decoded=JSON.parse(atob(value.replace(/-/g,'+').replace(/_/g,'/')));return z.object({at:z.string().max(40),id:z.string().regex(/^native_[A-Za-z0-9-]+$/)}).strict().parse(decoded);
+}catch{throw new HTTPException(409,{message:'Feedback page changed. Refresh this workspace.'});}}
+function encodeFeedbackCursor(row:{created_at:string;id:string}){return btoa(JSON.stringify({at:row.created_at,id:row.id})).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
 function canonicalPrefix(prefix:string):string {
   if(prefix.length>1024||normalizeRoot(prefix)!==prefix||isHiddenKey(prefix)||/[\u0000-\u001f\u007f]/.test(prefix))return unavailable();
   return prefix;
@@ -92,12 +123,54 @@ export function createNativePortalWorkspaceRouter():Hono<Bindings> {
     // Capability means this read surface is ready, not a promise of files.
     // Listing every grant just to render the shell was unbounded N+1 work.
     const deliveryView=await nativeDeliveryResourcesReady(c.env);
-    const features=nativeWorkspaceFeatureReadiness({directoryAuthorized:directoryRead,deliveryBackendReady:deliveryView});
+    const feedback=await nativeFeedbackSchemaAvailable(c.env);
+    const serviceRequests=nativeServiceRequestsEnabled(c.env)&&await nativeRequestSchemaReady(c.env);
+    const requestAttachments=serviceRequests&&requestAttachmentsAvailable(c.env);
+    const features=nativeWorkspaceFeatureReadiness({directoryAuthorized:directoryRead,deliveryBackendReady:deliveryView,
+      feedbackBackendReady:feedback,serviceRequestsReady:serviceRequests});
     await recheck(c,context);
     return c.json({workspace:{id:context.workspaceId,sourceId:context.sourceId,displayName:clean(context.displayName),rootType:context.rootType,
       rootPublicId:context.rootPublicId,resourceMode:'native' as const},contextVersion:context.contextVersion,features,capabilities:{directoryRead,deliveryView,
-      requestV2:false,requestAttachments:false,feedback:false,manageTeam:false,workspaceMembershipManagement:false,delegatedShares:false,
+      requestV2:serviceRequests,requestAttachments,feedback:feedback&&directoryRead,manageTeam:false,workspaceMembershipManagement:false,delegatedShares:false,
       viewer:false,viewerShares:false,viewBilling:false}});
+  });
+  router.post('/:workspaceId/feedback',async c=>{
+    sameOrigin(c);if(!await nativeFeedbackSchemaAvailable(c.env))throw new HTTPException(503,{message:'Client feedback is not available'});
+    const parsed=z.object({target:nativeFeedbackTargetInputSchema,message:z.string().trim().min(1).max(5000)}).strict().safeParse(await boundedJson(c));
+    const key=z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/).safeParse(c.req.header('Idempotency-Key'));
+    if(!parsed.success||!key.success)throw new HTTPException(400,{message:'Feedback is invalid'});
+    const principal=c.get('clientPrincipal'),limiter=c.env.PUBLIC_BULK_RATE_LIMITER;
+    if(!limiter?.limit)throw new HTTPException(503,{message:'Feedback submission is unavailable'});
+    if(!(await limiter.limit({key:`feedback:${await feedbackFingerprint([principal.issuer,principal.subject])}`})).success)
+      throw new HTTPException(429,{message:'Please wait before submitting more feedback'});
+    const context=await contextFor(c),resolved=await resolveNativeFeedbackTarget(c.env,principal,context,parsed.data.target);
+    try{
+      const saved=await createNativeFeedbackRecord(database(c.env),resolved,parsed.data.message,key.data);
+      const current=await reauthorizeNativeFeedbackRecipient(c.env,saved.record);if(!current)throw new HTTPException(404,{message:'Feedback not found'});
+      await recheck(c,context);return c.json({...await nativeFeedbackDetail(c.env,saved.record,current),replayed:saved.replayed},saved.replayed?200:201);
+    }catch(error){if(error instanceof FeedbackStoreError)throw new HTTPException(error.code==='invalid'?400:409,{message:error.code==='idempotency_conflict'
+      ?'This submission key was already used for different feedback':'Feedback changed. Refresh and try again.'});throw error;}
+  });
+  router.get('/:workspaceId/feedback',async c=>{
+    if(!await nativeFeedbackSchemaAvailable(c.env))throw new HTTPException(503,{message:'Client feedback is not available'});
+    const context=await contextFor(c),principal=c.get('clientPrincipal'),cursor=feedbackCursor(c.req.query('cursor'));
+    const rows=await database(c.env).prepare(`SELECT id,created_at FROM portal_native_feedback WHERE source_id=? AND workspace_id=?
+      AND creator_identity_id=? AND principal_issuer=? AND principal_subject=?
+      AND (? IS NULL OR created_at<? OR (created_at=? AND id<?)) ORDER BY created_at DESC,id DESC LIMIT 6`)
+      .bind(context.sourceId,context.workspaceId,context.identityId,principal.issuer,principal.subject,cursor?.at??null,cursor?.at??null,cursor?.at??null,cursor?.id??null)
+      .all<{id:string;created_at:string}>();
+    const examined=rows.results.slice(0,5),items:ClientFeedbackItem[]=[];
+    for(const entry of examined){const record=await readNativeFeedbackRecord(database(c.env),entry.id);if(!record)continue;
+      const resolved=await reauthorizeNativeFeedbackRecipient(c.env,record);if(resolved)items.push(await nativeFeedbackItem(c.env,record,resolved));}
+    await recheck(c,context);return c.json({items,nextCursor:rows.results.length>5?encodeFeedbackCursor(examined.at(-1)!):null});
+  });
+  router.get('/:workspaceId/feedback/:id',async c=>{
+    if(!await nativeFeedbackSchemaAvailable(c.env))throw new HTTPException(503,{message:'Client feedback is not available'});
+    const context=await contextFor(c),id=c.req.param('id');if(!/^native_[A-Za-z0-9-]+$/.test(id))throw new HTTPException(404,{message:'Feedback not found'});
+    const record=await readNativeFeedbackRecord(database(c.env),id),resolved=record?await reauthorizeNativeFeedbackRecipient(c.env,record):null;
+    if(!record||!resolved||record.context.sourceId!==context.sourceId||record.context.workspaceId!==context.workspaceId||record.context.identityId!==context.identityId)
+      throw new HTTPException(404,{message:'Feedback not found'});
+    await recheck(c,context);return c.json(await nativeFeedbackDetail(c.env,record,resolved));
   });
   router.get('/:workspaceId/hierarchy',async(c,next)=>{
     // Primary must retain its established response and authorization path.

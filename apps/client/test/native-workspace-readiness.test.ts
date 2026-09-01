@@ -21,12 +21,12 @@ function grant(effect:'allow'|'deny',scope_type:'workspace'|'project',scope_publ
 }
 
 describe('native workspace feature readiness', () => {
-  it('reports only current operational surfaces and never fabricates secondary write capabilities', () => {
-    expect(nativeWorkspaceFeatureReadiness({ directoryAuthorized: true, deliveryBackendReady: true })).toEqual({
+  it('reports feedback only when its schema and independent directory authorization are both ready', () => {
+    expect(nativeWorkspaceFeatureReadiness({ directoryAuthorized: true, deliveryBackendReady: true,feedbackBackendReady:true })).toEqual({
       directory: { state: 'available', reason: 'authorized_capability' },
       deliveries: { state: 'available', reason: 'resource_authorization_required' },
       serviceRequests: { state: 'not_supported', reason: 'source_not_supported' },
-      feedback: { state: 'not_supported', reason: 'source_not_supported' },
+      feedback: { state: 'available', reason: 'resource_authorization_required' },
       models: { state: 'not_supported', reason: 'source_not_supported' },
       team: { state: 'not_supported', reason: 'source_not_supported' },
       billing: { state: 'not_supported', reason: 'source_not_supported' },
@@ -37,7 +37,20 @@ describe('native workspace feature readiness', () => {
     const readiness = nativeWorkspaceFeatureReadiness({ directoryAuthorized: false, deliveryBackendReady: false });
     expect(readiness.directory).toEqual({ state: 'not_in_access', reason: 'capability_not_granted' });
     expect(readiness.deliveries).toEqual({ state: 'temporarily_unavailable', reason: 'backend_unavailable' });
+    expect(readiness.feedback).toEqual({ state: 'temporarily_unavailable', reason: 'backend_unavailable' });
     expect(readiness.serviceRequests.state).toBe('not_supported');
+  });
+
+  it('does not turn feedback storage or a service assignment into workspace access',()=>{
+    expect(nativeWorkspaceFeatureReadiness({directoryAuthorized:false,deliveryBackendReady:true,feedbackBackendReady:true}).feedback)
+      .toEqual({state:'not_in_access',reason:'capability_not_granted'});
+  });
+
+  it('advertises native service requests only after their independent backend contract is ready',()=>{
+    expect(nativeWorkspaceFeatureReadiness({directoryAuthorized:true,deliveryBackendReady:true,serviceRequestsReady:false}).serviceRequests)
+      .toEqual({state:'not_supported',reason:'source_not_supported'});
+    expect(nativeWorkspaceFeatureReadiness({directoryAuthorized:true,deliveryBackendReady:true,serviceRequestsReady:true}).serviceRequests)
+      .toEqual({state:'available',reason:'resource_authorization_required'});
   });
 
   it('does not claim directory access when a workspace deny overrides an allow', () => {

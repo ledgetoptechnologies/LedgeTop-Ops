@@ -46,8 +46,10 @@ accept an earlier asynchronous response or silently move a draft.
 does not disable otherwise-authorized requests. Missing legacy rate-limit
 configuration, missing catalog/draft backend support, no published catalog, and
 unavailable compatibility access each have an explicit unavailable state.
-An unsupported native workspace without a current legacy bridge remains denied;
-opening the form does not manufacture a bridge or grant.
+A native workspace remains denied unless its separate native-request flag,
+signed source capability, exact workspace/principal authority, catalog source,
+and target readiness all pass. Opening the form does not manufacture a legacy
+bridge, fall back to primary, or grant access.
 
 The readiness helper is read-only. Existing login middleware retains ownership
 of configured identity-eligibility provisioning; do not describe that entire
@@ -134,6 +136,15 @@ record in the same batch. No migration is required because the deployed schema
 already includes the `cancelled` state and `status_changed` action.
 
 ## Acceptance and release boundaries
+
+Native Project Alpha workspaces use the separate default-off contract in
+[native portal requests and feedback](native-portal-requests-feedback.md).
+Migration `0185_native_service_request_ownership.sql` must precede both paired
+Workers, and `CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED` remains false until exact
+source/workspace/identity/project authority, colliding IDs, principal-revision
+races, attachment ownership, cancellation/replay, storage-account exclusion,
+and exact quote destination are live-proven. Assignment remains narrowing only
+and never grants request authority. There is no secondary-to-primary fallback.
 
 Verify real migrated-D1 permission intersections, deny precedence, missing
 configuration, catalog races, current project-list/detail agreement, stale

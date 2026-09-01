@@ -30,6 +30,7 @@ import {
   revokeClientFolderGrant,
 } from "../src/worker/client-folder-grants";
 import { d1ClientPortalRepository } from "../../client/src/worker/client-portal/repository";
+import { listLegacyClientAccountsForAdministration } from "../src/worker/legacy-client-account-scope";
 
 const principal = { id: "initial-beau-koltz", email: "admin@example.test", displayName: "Admin", accessSubject: "access-admin", projectAlphaUserId: "3" };
 const request = new Request("https://ops.example.test/api/client-portal/accounts/account-a/folder-grants", { method: "POST" });
@@ -133,6 +134,38 @@ describe("direct authenticated client folder grants", () => {
     expect(targets.accounts.map(account => account.id)).toEqual(["account-a"]);
     expect(await db.prepare("SELECT count(*) count FROM client_folder_associations WHERE account_id='secondary-account'").first("count")).toBe(0);
     expect(mocks.sendNotificationMail).not.toHaveBeenCalled();
+  });
+
+  it("never exposes or grants a storage-only native request account through legacy folder APIs", async () => {
+    await db.batch([
+      db.prepare(`INSERT INTO client_accounts(project_alpha_source_id,id,display_name,status,
+        project_alpha_client_id,project_alpha_organization_id)
+        VALUES ('project-alpha:primary','storage-masquerade','Storage only','active',
+          'pa-client-storage','pa-org-storage')`),
+      db.prepare(`INSERT INTO client_identity_links(id,account_id,issuer,subject,email)
+        VALUES('storage-masquerade-identity','storage-masquerade','urn:ltds:native-request-storage',
+          'storage-masquerade',NULL)`),
+      db.prepare(`INSERT INTO portal_v2_workspaces(id,root_type,pa_organization_public_id,display_name,status,
+        project_alpha_source_id) VALUES('storage-masquerade-workspace','organization','pa-org-storage',
+          'Storage only','active','project-alpha:primary')`),
+      db.prepare(`INSERT INTO portal_native_request_storage_bindings
+        (workspace_id,source_id,account_id,storage_identity_id)
+        VALUES('storage-masquerade-workspace','project-alpha:primary','storage-masquerade',
+          'storage-masquerade-identity')`),
+    ]);
+    folderAssociations = [{ division_id: "division-a", r2_prefix: "Jobs/Clients/Storage/",
+      project_alpha_client_id: "pa-client-storage", project_alpha_organization_id: "pa-org-storage" }];
+    await expect(createClientFolderGrant(env, request, principal, {
+      accountId: "storage-masquerade", divisionId: "division-a", r2Prefix: "Jobs/Clients/Storage/",
+    }, "storage-account-grant-0001")).rejects.toMatchObject({ status: 404 });
+    const targets = await findClientFolderGrantTargets(env, principal, {
+      divisionId: "division-a", r2Prefix: "Jobs/Clients/Storage/", query: "Storage",
+    });
+    expect(targets.accounts).toEqual([]);
+    expect((await listLegacyClientAccountsForAdministration(env) as Array<{ id: string }>)
+      .map(account => account.id)).not.toContain("storage-masquerade");
+    expect(await db.prepare(`SELECT count(*) count FROM client_folder_associations
+      WHERE account_id='storage-masquerade'`).first("count")).toBe(0);
   });
 
   it("creates only a client-scoped grant and suppresses mail when revoked during the grace window", async () => {

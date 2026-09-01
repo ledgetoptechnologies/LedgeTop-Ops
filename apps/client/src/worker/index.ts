@@ -30,7 +30,7 @@ import { createClientDelegatedPublicRouter } from "./client-delegated-public";
 import { handleProjectAlphaCatalogRequest } from "./project-alpha-catalog";
 import { projectAlphaPricingHintProvider } from "./client-portal/project-alpha-pricing-hint";
 import { processInvitationEmailBatch } from "./client-portal/invitation-email";
-import { requestHostAllowed, requireClientPortalOrigin, requirePublicShareOrigin } from "./origin-policy";
+import { clientPortalEntryOrigin, requestHostAllowed, requirePublicShareOrigin } from "./origin-policy";
 import {
   classifyPublicShareLifecycle,
   logPublicShareOutcome,
@@ -903,7 +903,7 @@ app.on(["GET", "HEAD"], "/assets/*", c => {
   if (/%(?:2e|2f|5c)/i.test(path)) throw new HTTPException(404, { message: "Asset not found" });
   return c.env.ASSETS.fetch(c.req.raw);
 });
-app.get("/", c => c.redirect(new URL("/portal", requireClientPortalOrigin(c.env)).toString(), 302));
+app.get("/", c => c.redirect(new URL("/portal", clientPortalEntryOrigin(c.req.url, c.env)).toString(), 302));
 
 app.notFound(c => c.json({ error: "Not found" }, 404));
 app.onError((error, c) => {

@@ -19,7 +19,10 @@ export interface Env {
   EXPECTED_HOST: string;
   CLIENT_PORTAL_ENABLED?: string;
   CLIENT_PORTAL_ORIGIN?: string;
+  CLIENT_PORTAL_ORIGINS?: string;
   CLIENT_PORTAL_REQUEST_V2_ENABLED?: string;
+  /** Source-qualified requests from native PA workspaces. Independent and default-off. */
+  CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED?: string;
   /** Server-only Project Alpha catalog projection. Default-off and never browser writable. */
   PROJECT_ALPHA_CATALOG_SYNC_ENABLED?: string;
   PROJECT_ALPHA_CATALOG_APPLICATION_KEY?: string;

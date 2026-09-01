@@ -89,6 +89,21 @@ test("uncertain request retries exactly the original body and key", async ({page
   await expect(historyRegion(page)).toContainText("Pending approval"); expect(posts(calls)).toHaveLength(2); expect(posts(calls)[1]?.body).toEqual(posts(calls)[0]?.body); expect(posts(calls)[1]?.key).toBe(posts(calls)[0]?.key);
 });
 
+test("an ambiguous approval request is discarded when its exact delegated capability is removed", async ({page}) => {
+  let accessReads = 0, writes = 0;
+  const calls = await fixture(page, (route, call) => {
+    if (call.path.endsWith("/access") && ++accessReads > 1) return route.fulfill({json: access("workspace-a", {inviteScopes: [{type: "project", publicId: "project-workspace-a", displayName: "North seawall construction documentation", capabilities: ["request.create"], projectEndSupported: true}]})});
+    if (call.path.endsWith("/invitations") && ++writes === 1) return route.fulfill({status: 503, json: {error: "Uncertain save"}});
+    return undefined;
+  });
+  await open(page); await review(page); await page.getByRole("button", {name: "Request approval", exact: true}).click();
+  await expect(page.getByRole("button", {name: "Retry same invitation"})).toBeVisible();
+  await page.getByRole("button", {name: "Refresh team access"}).click();
+  await expect(page.getByRole("button", {name: "Retry same invitation"})).toHaveCount(0);
+  await expect(page.getByRole("button", {name: "Review approval request", exact: true})).toBeEnabled();
+  expect(posts(calls)).toHaveLength(1);
+});
+
 test("raced policy rejects the reviewed request without issuing or silently retrying", async ({page}) => {
   const calls = await fixture(page, (route, call) => call.path.endsWith("/invitations") ? route.fulfill({status: 409, json: {error: "invitation_policy_changed"}}) : undefined);
   await open(page); await review(page); await page.getByRole("button", {name: "Request approval", exact: true}).click();
