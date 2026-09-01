@@ -11,6 +11,13 @@ their presentation through explicit source-qualified business-party links, but
 must not merge producer records by name, email, or other inferred similarity.
 The 3D Viewer is outside this work while Hermes is changing it.
 
+The dated production admission, migration, and provisioning checkpoint is
+recorded in
+[client-portal-production-evidence-2026-09-01.md](client-portal-production-evidence-2026-09-01.md).
+It verifies the shared two-domain Access boundary and preserved public links,
+but also records that no portal workspace or membership was provisioned at that
+checkpoint. Treat that state as partially deployed, not live accepted.
+
 ## Evidence states
 
 - **Verified locally**: implementation and focused automated evidence exist on
