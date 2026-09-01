@@ -12,6 +12,8 @@
     "cf-typegen:check": "node ../../scripts/wrangler-typegen.mjs --strict-vars=false --check"
   },
   "dependencies": {
+    "@ltds/shared": "file:../../packages/shared",
+    "hono": "^4.12.34",
     "jose": "^6.2.3",
     "zod": "^4.1.11"
   },

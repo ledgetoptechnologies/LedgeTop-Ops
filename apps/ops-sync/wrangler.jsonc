@@ -6,6 +6,11 @@
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": false,
   "preview_urls": false,
+  "alias": {
+    "@ltds/shared": "./node_modules/@ltds/shared/src/index.ts",
+    "hono/http-exception": "./node_modules/hono/dist/http-exception.js",
+    "zod": "./node_modules/zod/index.js"
+  },
   "routes": [
     {
       "pattern": "ops-sync.ledgetopdroneservices.com",
