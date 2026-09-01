@@ -30,8 +30,8 @@ BEGIN
   SET project_alpha_source_id=(SELECT receipt.project_alpha_source_id
     FROM project_alpha_delivery_intent_receipts receipt WHERE receipt.receipt_id=NEW.receipt_id)
   WHERE id=NEW.id;
-  SELECT CASE WHEN (SELECT project_alpha_source_id FROM project_alpha_delivery_portal_notification_outbox WHERE id=NEW.id) IS NULL
-    THEN RAISE(ABORT,'delivery-notification-source-unavailable') END;
+  SELECT RAISE(ABORT,'delivery-notification-source-unavailable')
+  WHERE (SELECT project_alpha_source_id FROM project_alpha_delivery_portal_notification_outbox WHERE id=NEW.id) IS NULL;
 END;
 
 CREATE TRIGGER project_alpha_delivery_notification_source_immutable
