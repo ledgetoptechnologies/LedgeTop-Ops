@@ -13,6 +13,14 @@ function features() { return {directory: {state: "available", reason: "authorize
   models: {state: "not_supported", reason: "source_not_supported"}, team: {state: "not_supported", reason: "source_not_supported"},
   billing: {state: "not_supported", reason: "source_not_supported"}}; }
 function context(id = "workspace-b") { return {workspace: workspace(id), contextVersion: `context-${id}`, features: features(), capabilities: {directoryRead: true, deliveryView: true, requestV2: false, requestAttachments: false, feedback: false, manageTeam: false, workspaceMembershipManagement: false, delegatedShares: false, viewer: false, viewerShares: false, viewBilling: false}}; }
+function requestContext(id = "workspace-b", feedback = false) { const value = context(id); return {...value,
+  features: {...value.features, serviceRequests: {state: "available", reason: "resource_authorization_required"}, ...(feedback ? {feedback: {state: "available", reason: "resource_authorization_required"}} : {})},
+  capabilities: {...value.capabilities, requestV2: true, requestAttachments: false, feedback},
+}; }
+function notification(id: string, title: string, workspaceId = "workspace-b", readAt: string | null = null) { return {
+  id, eventType: "request_status_changed", title, body: `${title} details`, actionPath: `/portal/requests?workspace=${workspaceId}`,
+  readAt, createdAt: date,
+}; }
 function hierarchy(id = "workspace-b") { return {...envelope(id), page: {nextCursor: null}, entries: [
   {type: "organization", publicId: "org-shared", parentType: null, parentPublicId: null, displayName: workspace(id).displayName, sourceVersion: "1"},
   {type: "department", publicId: "department-one", parentType: "organization", parentPublicId: "org-shared", displayName: "Engineering and field survey services", sourceVersion: "1"},
@@ -287,6 +295,87 @@ for (const width of [375, 1280]) test(`native service requests expose the shared
   await expect(page.getByRole("heading", {name: "Feature unavailable"})).toHaveCount(0);
   expect(calls.filter(call => call.path.startsWith("/api/client/service-") || call.path === "/api/client/request-readiness")
     .every(call => call.workspace === "workspace-b")).toBe(true);
+});
+
+test("native notification bell uses the exact workspace and supports read and dismiss without probing feedback notices", async ({page}) => {
+  const notices = [notification("notice-new", "Coastal request accepted", "workspace-c"), notification("notice-second", "Coastal request reviewed")];
+  const mutations: Array<{id: string; action: string; workspace?: string}> = [];
+  const calls = await mock(page, (route, call) => {
+    if (call.path === "/api/client/v2/workspaces/workspace-b/context") return route.fulfill({json: requestContext("workspace-b", true)});
+    if (call.path === "/api/client/notifications" && call.method === "GET") return route.fulfill({json: {
+      notifications: notices, unreadCount: notices.filter(item => !item.readAt).length, cursor: null,
+    }});
+    const match = call.path.match(/^\/api\/client\/notifications\/([^/]+)$/);
+    if (match && call.method === "PATCH") {
+      const action = (route.request().postDataJSON() as {action: "read" | "dismiss"}).action;
+      mutations.push({id: match[1]!, action, workspace: call.workspace});
+      const item = notices.find(value => value.id === match[1]);
+      if (item && action === "read") item.readAt = date;
+      if (item && action === "dismiss") notices.splice(notices.indexOf(item), 1);
+      return route.fulfill({json: {success: true}});
+    }
+    return undefined;
+  });
+  await page.goto("/portal?workspace=workspace-b");
+  const bell = page.locator(".portal-notification-bell");
+  await expect(bell).toHaveAccessibleName(/Notifications, 2 unread request updates/); await bell.click();
+  const panel = page.getByRole("region", {name: "Notifications"});
+  await expect(panel.getByRole("region", {name: "Request updates"})).toBeVisible();
+  const first = panel.locator("article", {hasText: "Coastal request accepted"});
+  const second = panel.locator("article", {hasText: "Coastal request reviewed"});
+  await expect(first.getByRole("link", {name: "Coastal request accepted"})).toHaveAttribute("href", "/portal/requests?workspace=workspace-b");
+  await first.getByRole("button", {name: "Mark read"}).click();
+  await expect(bell).toHaveAccessibleName(/1 unread request update/);
+  await second.getByRole("button", {name: "Dismiss"}).click();
+  await expect(second).toHaveCount(0);
+  await first.getByRole("link", {name: "Coastal request accepted"}).click();
+  await expect(page).toHaveURL(/\/portal\/requests\?workspace=workspace-b$/);
+  expect(mutations).toEqual([
+    {id: "notice-new", action: "read", workspace: "workspace-b"},
+    {id: "notice-second", action: "dismiss", workspace: "workspace-b"},
+    {id: "notice-new", action: "read", workspace: "workspace-b"},
+  ]);
+  expect(calls.filter(call => call.path === "/api/client/notifications").every(call => call.workspace === "workspace-b")).toBe(true);
+  expect(calls.some(call => call.path.includes("feedback-notifications"))).toBe(false);
+});
+
+test("switching native sources aborts stale notifications and resets the bell to the selected workspace", async ({page}) => {
+  let release!: () => void; const wait = new Promise<void>(resolve => { release = resolve; });
+  const calls = await mock(page, (route, call) => {
+    if (/\/api\/client\/v2\/workspaces\/workspace-[bc]\/context$/.test(call.path)) {
+      const id = call.path.includes("workspace-b") ? "workspace-b" : "workspace-c";
+      return route.fulfill({json: requestContext(id)});
+    }
+    if (call.path === "/api/client/notifications" && call.method === "GET") {
+      if (call.workspace === "workspace-b") return wait.then(() => late(route, {notifications: [notification("coastal-stale", "Coastal stale update")], unreadCount: 1, cursor: null}));
+      if (call.workspace === "workspace-c") return route.fulfill({json: {notifications: [notification("mountain-current", "Mountain current update", "workspace-c")], unreadCount: 1, cursor: null}});
+    }
+    return undefined;
+  });
+  await page.goto("/portal?workspace=workspace-b");
+  await expect.poll(() => calls.some(call => call.path === "/api/client/notifications" && call.workspace === "workspace-b")).toBe(true);
+  await page.getByRole("combobox", {name: "Client workspace"}).selectOption("workspace-c");
+  const bell = page.getByRole("button", {name: /Notifications, 1 unread request update/}); await expect(bell).toBeVisible(); await bell.click();
+  await expect(page.getByText("Mountain current update", {exact: true})).toBeVisible(); release();
+  await expect(page.getByText("Coastal stale update", {exact: true})).toHaveCount(0);
+  expect(calls.some(call => call.path === "/api/client/notifications" && call.workspace === "workspace-c")).toBe(true);
+});
+
+for (const width of [390, 1280]) test(`native notification bell is accessible and contained at ${width}px`, async ({page}) => {
+  await page.setViewportSize({width, height: 800});
+  await mock(page, (route, call) => {
+    if (call.path === "/api/client/v2/workspaces/workspace-b/context") return route.fulfill({json: requestContext()});
+    if (call.path === "/api/client/notifications") return route.fulfill({json: {notifications: [notification("notice-responsive", "Responsive native update")], unreadCount: 1, cursor: null}});
+    return undefined;
+  });
+  await page.goto("/portal?workspace=workspace-b");
+  const bell = page.getByRole("button", {name: /Notifications, 1 unread request update/});
+  await expect(bell).toBeVisible(); await bell.click();
+  const panel = page.getByRole("region", {name: "Notifications"}); await expect(panel).toBeVisible();
+  const box = await panel.boundingBox(); expect(box && box.x >= 0 && box.x + box.width <= width).toBeTruthy();
+  await expect(panel.getByText("Responsive native update", {exact: true})).toBeVisible();
+  await page.keyboard.press("Escape"); await expect(panel).toHaveCount(0); await expect(bell).toBeFocused();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
 });
 
 for (const path of ["/portal/requests", "/portal/requests/new", "/portal/feedback", "/portal/account", "/portal/projects/project-shared?tab=models", "/portal/projects/project-shared?tab=requests"]) test(`native unsupported feature ${path} is explicit without legacy or Viewer probes`, async ({page}) => {

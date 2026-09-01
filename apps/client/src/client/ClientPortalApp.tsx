@@ -3372,7 +3372,9 @@ export function ClientPortalApp({
             </a>
           ))}
         </nav>
-        {!switchingWorkspace && !native && <PortalNotifications key={requestContextKey} feedbackEnabled={capabilities.feedback} />}
+        {!switchingWorkspace && (!native || capabilities.requestV2) &&
+          <PortalNotifications key={requestContextKey} feedbackEnabled={!native && capabilities.feedback}
+            nativeWorkspaceId={native?.workspace.id ?? null} />}
         <button ref={mobileNavTrigger} className="portal-nav-trigger" type="button" aria-label="Open navigation" aria-expanded={mobileNavOpen} aria-controls="portal-mobile-navigation" onClick={() => setMobileNavOpen(true)}><span className="nav-hamburger" aria-hidden="true"><i /><i /><i /></span></button>
         <AccountMenu className="portal-account-menu" displayName={shellDisplayName}
           avatar={shellDisplayName.slice(0, 2).toUpperCase()} accountHref={withPortalWorkspace(clientPortalPath("account"))}

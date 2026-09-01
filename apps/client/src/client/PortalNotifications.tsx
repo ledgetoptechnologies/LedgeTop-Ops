@@ -7,7 +7,14 @@ type FeedbackNotification = Omit<PortalNotification, "eventType"> & {feedbackId:
 type Notice = PortalNotification | FeedbackNotification;
 type Group = {items: Notice[]; cursor: string | null; error: string; loading: boolean; unread?: number};
 const empty = (): Group => ({items: [], cursor: null, error: "", loading: true});
-export function PortalNotifications({feedbackEnabled}: {feedbackEnabled: boolean}) {
+function exactActionPath(value: string | null, workspaceId: string | null): string | null {
+  const safe = safeFeedbackTargetPath(value);
+  if (!safe || !workspaceId) return safe;
+  const url = new URL(safe, location.origin);
+  url.searchParams.set("workspace", workspaceId);
+  return `${url.pathname}${url.search}${url.hash}`;
+}
+export function PortalNotifications({feedbackEnabled, nativeWorkspaceId = null}: {feedbackEnabled: boolean; nativeWorkspaceId?: string | null}) {
   const [open, setOpen] = useState(false), [requests, setRequests] = useState<Group>(empty), [feedback, setFeedback] = useState<Group>(empty);
   const root = useRef<HTMLDivElement>(null), generation = useRef(0), controllers = useRef(new Map<string, AbortController>());
   const [busy, setBusy] = useState<string[]>([]);
@@ -64,20 +71,22 @@ export function PortalNotifications({feedbackEnabled}: {feedbackEnabled: boolean
     } finally { if (!controller.signal.aborted && controllers.current.get(key) === controller) {controllers.current.delete(key); setBusy(value => value.filter(id => id !== key));} }
   }
   const feedbackUnread = feedbackEnabled && feedback.items.some(row => !row.readAt), unread = requests.unread || 0;
-  const group = (kind: "requests" | "feedback", state: Group) => <section aria-label={kind === "requests" ? "Request and delivery updates" : "Feedback updates"}>
-    {feedbackEnabled && <h3>{kind === "requests" ? "Requests and deliveries" : "Feedback updates"}</h3>}
+  const requestLabel = nativeWorkspaceId ? "Request updates" : "Request and delivery updates";
+  const group = (kind: "requests" | "feedback", state: Group) => <section aria-label={kind === "requests" ? requestLabel : "Feedback updates"}>
+    {feedbackEnabled && <h3>{kind === "requests" ? (nativeWorkspaceId ? "Requests" : "Requests and deliveries") : "Feedback updates"}</h3>}
     {state.loading && <p role="status">Loading notifications…</p>}{state.error && <div role="alert"><p>{state.error}</p><button className="button-ghost button-small" onClick={() => void load(kind, retryCursors.current[kind] ?? null)}>Retry notifications</button></div>}
     {!state.loading && !state.error && !state.items.length && <p className="portal-notification-empty">{state.cursor ? "Continue to check more updates." : "You’re all caught up."}</p>}
-    <div className="portal-notification-list">{state.items.map(item => <article key={item.id} className={item.readAt ? "" : "is-unread"}>
-      {item.actionPath ? <a href={item.actionPath} onClick={event => {
+    <div className="portal-notification-list">{state.items.map(item => { const actionPath = exactActionPath(item.actionPath, nativeWorkspaceId); return <article key={item.id} className={item.readAt ? "" : "is-unread"}>
+      {actionPath ? <a href={actionPath} onClick={event => {
         if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
         event.preventDefault(); const run = generation.current;
-        void mutate(kind, item, "read").then(() => { if (generation.current === run) window.location.assign(item.actionPath!); });
+        void mutate(kind, item, "read").then(() => { if (generation.current === run) window.location.assign(actionPath); });
       }}><strong>{item.title}</strong></a> : <strong>{item.title}</strong>}<p>{item.body}</p><small>{new Date(item.createdAt).toLocaleString()}</small>
       <div>{!item.readAt && <button className="button-ghost button-small" disabled={busy.includes(`${kind}:${item.id}`)} onClick={() => void mutate(kind, item, "read")}>Mark read</button>}<button className="button-ghost button-small" disabled={busy.includes(`${kind}:${item.id}`)} onClick={() => void mutate(kind, item, "dismiss")}>Dismiss</button></div>
-    </article>)}</div>{state.cursor && <button className="button-ghost button-small" disabled={state.loading} onClick={() => void load(kind, state.cursor)}>Load more {kind === "feedback" ? "feedback updates" : "updates"}</button>}
+    </article>; })}</div>{state.cursor && <button className="button-ghost button-small" disabled={state.loading} onClick={() => void load(kind, state.cursor)}>Load more {kind === "feedback" ? "feedback updates" : "updates"}</button>}
   </section>;
-  return <div className="portal-notification-center" ref={root}><button className="portal-notification-bell" aria-label={`Notifications${unread ? `, ${unread} unread request and delivery updates` : ""}${feedbackUnread ? ", unread feedback updates" : ""}`} aria-expanded={open} aria-controls="portal-notification-panel" onClick={() => setOpen(value => !value)}><span aria-hidden="true">🔔</span>{unread > 0 && <span className="portal-notification-count">{unread > 99 ? "99+" : unread}</span>}{feedbackUnread && <span className="portal-feedback-unread" aria-hidden="true">•</span>}</button>
+  const unreadLabel = nativeWorkspaceId ? `${unread} unread request update${unread === 1 ? "" : "s"}` : `${unread} unread request and delivery updates`;
+  return <div className="portal-notification-center" ref={root}><button className="portal-notification-bell" aria-label={`Notifications${unread ? `, ${unreadLabel}` : ""}${feedbackUnread ? ", unread feedback updates" : ""}`} aria-expanded={open} aria-controls="portal-notification-panel" onClick={() => setOpen(value => !value)}><span aria-hidden="true">🔔</span>{unread > 0 && <span className="portal-notification-count">{unread > 99 ? "99+" : unread}</span>}{feedbackUnread && <span className="portal-feedback-unread" aria-hidden="true">•</span>}</button>
     {open && <section id="portal-notification-panel" className="portal-notification-panel" aria-label="Notifications"><header><strong>Notifications</strong><button className="button-ghost button-small" onClick={() => setOpen(false)} aria-label="Close notifications">Close</button></header>{group("requests", requests)}{feedbackEnabled && group("feedback", feedback)}</section>}
   </div>;
 }
