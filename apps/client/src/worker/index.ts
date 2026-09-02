@@ -30,7 +30,7 @@ import { createClientDelegatedPublicRouter } from "./client-delegated-public";
 import { handleProjectAlphaCatalogRequest } from "./project-alpha-catalog";
 import { projectAlphaPricingHintProvider } from "./client-portal/project-alpha-pricing-hint";
 import { processInvitationEmailBatch } from "./client-portal/invitation-email";
-import { clientPortalEntryOrigin, configuredPublicRequestOrigins, legacyClientRedirectLocation, requestHostAllowed, requirePublicShareOrigin } from "./origin-policy";
+import { clientPortalEntryOrigin, configuredPublicRequestOrigins, legacyClientRedirectLocation, malformedPortalLaunchRedirect, requestHostAllowed, requirePublicShareOrigin } from "./origin-policy";
 import {
   classifyPublicShareLifecycle,
   logPublicShareOutcome,
@@ -134,6 +134,10 @@ app.use("*", (c, next) => framePolicyForPath(c.req.path, c.req.method).xFrameOpt
   : lockedSecurityHeaders(c, next));
 
 app.use("*", async (c, next) => {
+  const malformedLaunch = (c.req.method === "GET" || c.req.method === "HEAD")
+    ? malformedPortalLaunchRedirect(c.req.url, c.env)
+    : null;
+  if (malformedLaunch) return c.redirect(malformedLaunch, 308);
   const legacyRedirect = (c.req.method === "GET" || c.req.method === "HEAD")
     ? legacyClientRedirectLocation(c.req.url, c.env)
     : null;

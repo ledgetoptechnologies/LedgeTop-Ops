@@ -3037,7 +3037,7 @@ export function ClientPortalApp({
       <>
         <section className="portal-welcome">
           <span className="eyebrow">Client portal</span>
-          <h1>Welcome, {account!.displayName}</h1>
+          <h1>Hello, {account!.displayName}</h1>
           <p>
             Project progress, files, and service requests—all in one secure
             workspace.

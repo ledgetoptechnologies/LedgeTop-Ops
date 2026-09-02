@@ -117,6 +117,23 @@ export function clientPortalEntryOrigin(requestUrl: string, env: OriginEnv): str
   }
 }
 
+/** Recover a browser launched from an Access or bookmark URL that accidentally
+ * contains the path wildcard as a literal character. Wildcards belong only in
+ * the Access destination definition; the browser entry point is `/portal`.
+ */
+export function malformedPortalLaunchRedirect(requestUrl: string, env: OriginEnv): string | null {
+  if (!deployed(env)) return null;
+  const origins = configuredClientPortalOrigins(env);
+  const legacy = configuredLegacyClientOrigins(env);
+  if (!origins || !legacy) return null;
+  let request: URL;
+  try { request = new URL(requestUrl); } catch { return null; }
+  if (![...origins, ...legacy].includes(request.origin) || request.pathname !== "/portal*") return null;
+  request.pathname = "/portal";
+  request.searchParams.delete("__cf_access_message");
+  return request.toString();
+}
+
 /** Redirects non-secret browser entry routes from an explicitly configured
  * legacy host. Public share routes are handed off in the browser only while
  * their fragment is still present; fragment-less legacy sessions stay put.

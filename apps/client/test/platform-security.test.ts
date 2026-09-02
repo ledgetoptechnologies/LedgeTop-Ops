@@ -5,7 +5,7 @@ import { createSessionCookie, presignR2Get, verifyRotatingSessionCookie, verifyS
 import { hashAccessCode } from "../../operations/src/worker/crypto";
 import { verifyAccessCode } from "../src/worker/security";
 import deliveryWorker, { cloudTransferResumeOrigin, ensurePublicId, framePolicyForPath, markUnavailableFolder, requestHostAllowed, requireSameOrigin, serveAppShell, sourceUrlForItem, streamItem } from "../src/worker/index";
-import { legacyClientRedirectLocation } from "../src/worker/origin-policy";
+import { legacyClientRedirectLocation, malformedPortalLaunchRedirect } from "../src/worker/origin-policy";
 import type { ShareRow } from "../src/worker/types";
 
 describe("deployed host admission",()=>{
@@ -77,6 +77,16 @@ describe("deployed host admission",()=>{
       "https://client.drone.example,",
     ]) expect(requestHostAllowed("https://portal.drone.example/portal",{...env,LEGACY_CLIENT_ORIGINS})).toBe(false);
   });
+  it("normalizes a literal Access wildcard without changing the selected portal host",()=>{
+    const env={ENVIRONMENT:"production",EXPECTED_HOST:"portal.drone.example",PUBLIC_BASE_URL:"https://portal.drone.example",
+      PUBLIC_SHARE_ORIGIN:"https://portal.drone.example",CLIENT_PORTAL_ORIGIN:"https://portal.drone.example",
+      CLIENT_PORTAL_ORIGINS:"https://portal.drone.example,https://portal.technology.example",
+      LEGACY_CLIENT_ORIGINS:"https://client.drone.example"} as const;
+    expect(malformedPortalLaunchRedirect("https://portal.technology.example/portal*?__cf_access_message=logged_out&draft=one",env))
+      .toBe("https://portal.technology.example/portal?draft=one");
+    expect(malformedPortalLaunchRedirect("https://portal.drone.example/portal/projects",env)).toBeNull();
+    expect(malformedPortalLaunchRedirect("https://evil.example/portal*",env)).toBeNull();
+  });
   it("allows same-origin public mutations on canonical and legacy hosts but rejects cross-origin requests",()=>{
     const env={ENVIRONMENT:"production",EXPECTED_HOST:"portal.drone.example",PUBLIC_BASE_URL:"https://portal.drone.example",
       PUBLIC_SHARE_ORIGIN:"https://portal.drone.example",CLIENT_PORTAL_ORIGIN:"https://portal.drone.example",
@@ -137,6 +147,7 @@ describe("delivery app shell",()=>{
   it("does not let an asset-shaped path cross into another host namespace",async()=>{const env:any={ENVIRONMENT:"production",EXPECTED_HOST:"delivery.example",PUBLIC_BASE_URL:"https://delivery.example",PUBLIC_SHARE_ORIGIN:"https://delivery.example",CLIENT_PORTAL_ORIGIN:"https://client.example",ASSETS:{fetch:vi.fn(async()=>new Response("asset"))}};const context={waitUntil(){},passThroughOnException(){}} as unknown as ExecutionContext;expect((await deliveryWorker.fetch(new Request("https://delivery.example/portal"),env,context)).status).toBe(404);expect((await deliveryWorker.fetch(new Request("https://delivery.example/api/internal/project-alpha/portal-v2"),env,context)).status).toBe(404);const encoded=await deliveryWorker.fetch(new Request("https://delivery.example/assets/%2e%2e%2fapi%2fclient%2fme"),env,context);expect(encoded.status).toBe(404);expect(env.ASSETS.fetch).not.toHaveBeenCalled();});
   it("redirects the public root to the configured authenticated portal origin",async()=>{const env:any={ENVIRONMENT:"production",EXPECTED_HOST:"delivery.example",PUBLIC_BASE_URL:"https://delivery.example",PUBLIC_SHARE_ORIGIN:"https://delivery.example",CLIENT_PORTAL_ORIGIN:"https://client.example"};const response=await deliveryWorker.fetch(new Request("https://delivery.example/"),env,{waitUntil(){},passThroughOnException(){}} as unknown as ExecutionContext);expect(response.status).toBe(302);expect(response.headers.get("Location")).toBe("https://client.example/portal");});
   it("keeps the secondary portal root on its own authenticated hostname",async()=>{const env:any={ENVIRONMENT:"production",EXPECTED_HOST:"client.drone.example",PUBLIC_BASE_URL:"https://client.drone.example",PUBLIC_SHARE_ORIGIN:"https://client.drone.example",CLIENT_PORTAL_ORIGIN:"https://client.drone.example",CLIENT_PORTAL_ORIGINS:"https://client.drone.example,https://client.technology.example"};const response=await deliveryWorker.fetch(new Request("https://client.technology.example/"),env,{waitUntil(){},passThroughOnException(){}} as unknown as ExecutionContext);expect(response.status).toBe(302);expect(response.headers.get("Location")).toBe("https://client.technology.example/portal");});
+  it("recovers a literal Access wildcard launch URL on the same portal domain",async()=>{const env:any={ENVIRONMENT:"production",EXPECTED_HOST:"portal.drone.example",PUBLIC_BASE_URL:"https://portal.drone.example",PUBLIC_SHARE_ORIGIN:"https://portal.drone.example",CLIENT_PORTAL_ORIGIN:"https://portal.drone.example",CLIENT_PORTAL_ORIGINS:"https://portal.drone.example,https://portal.technology.example",LEGACY_CLIENT_ORIGINS:"https://client.drone.example"};const response=await deliveryWorker.fetch(new Request("https://portal.technology.example/portal*?__cf_access_message=logged_out&draft=one"),env,{waitUntil(){},passThroughOnException(){}} as unknown as ExecutionContext);expect(response.status).toBe(308);expect(response.headers.get("Location")).toBe("https://portal.technology.example/portal?draft=one");});
 });
 
 describe("inline PDF routing",()=>{
