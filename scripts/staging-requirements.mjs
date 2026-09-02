@@ -227,6 +227,8 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0185_native_service_request_ownership.sql",
     "0186_delivery_notification_authority_provenance.sql",
     "0187_authenticated_content_audit.sql",
+    "0188_native_feedback_completion_notices.sql",
+    "0189_primary_staff_folder_bindings.sql",
   ]),
   operations: Object.freeze([
     "0014_staff_acl_controls.sql",
@@ -266,6 +268,7 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0048_business_party_lifecycle.sql",
     "0049_project_alpha_delivery_source_rate_limits.sql",
     "0050_project_alpha_draft_quote_credentials.sql",
+    "0051_client_hub_internal_notes.sql",
   ]),
 });
 
@@ -580,6 +583,7 @@ export const STAGING_STATIC_VARS = Object.freeze({
     R2_BUCKET_NAME: "client-data-staging",
     CLIENT_PORTAL_REQUEST_V2_ENABLED: "false",
     CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED: "false",
+    CLIENT_PORTAL_NATIVE_FEEDBACK_SOURCE_IDS: "",
     PROJECT_ALPHA_CATALOG_SYNC_ENABLED: "false",
     PROJECT_ALPHA_CATALOG_APPLICATION_KEY: "ltds_client_catalog_staging",
     PROJECT_ALPHA_CATALOG_ACCESS_TEAM_DOMAIN: "https://ledgetoptechnologies.cloudflareaccess.com",
@@ -675,6 +679,7 @@ export const STAGING_ALLOWED_VAR_NAMES = Object.freeze({
   delivery: Object.freeze([
     "PUBLIC_BASE_URL", "PUBLIC_SHARE_ORIGIN", "EXPECTED_HOST", "ENVIRONMENT", "TEAM_DOMAIN", "POLICY_AUD",
     "CLIENT_PORTAL_ENABLED", "CLIENT_PORTAL_CONTENT_AUDIT_ENABLED", "CLIENT_PORTAL_REQUEST_V2_ENABLED", "CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED",
+    "CLIENT_PORTAL_NATIVE_FEEDBACK_SOURCE_IDS",
     "PROJECT_ALPHA_CATALOG_SYNC_ENABLED", "PROJECT_ALPHA_CATALOG_APPLICATION_KEY",
     "PROJECT_ALPHA_CATALOG_ACCESS_TEAM_DOMAIN", "PROJECT_ALPHA_CATALOG_ACCESS_AUD",
     "PROJECT_ALPHA_CATALOG_HMAC_KEY_ID", "PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_KEY_ID",

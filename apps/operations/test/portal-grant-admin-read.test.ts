@@ -11,7 +11,7 @@ vi.mock("../src/worker/acl", async importOriginal => ({
 }));
 
 import { listAuthenticatedDeliveryGrants, revokeAuthenticatedDeliveryGrant, searchAuthenticatedDeliveryGrantAudiences } from "../src/worker/authenticated-delivery-grants";
-import { createPortalIdentityDenial, listPortalIdentityDenials, searchPortalDenyScopes } from "../src/worker/client-portal-deny-policies";
+import { createPortalIdentityDenial, listPortalIdentityDenials, revokePortalIdentityDenial, searchPortalDenyScopes } from "../src/worker/client-portal-deny-policies";
 import type { Env, StaffPrincipal } from "../src/worker/types";
 
 const executable = (sql: string) => sql.replace(/^\s*--.*$/gm, "")
@@ -46,7 +46,7 @@ describe("bounded staff grant and denial reads", () => {
         scope_type TEXT NOT NULL,scope_public_id TEXT NOT NULL,entitlement_version INTEGER NOT NULL DEFAULT 1,status TEXT NOT NULL DEFAULT 'active',
         valid_from TEXT NOT NULL DEFAULT (datetime('now')),expires_at TEXT,revoked_at TEXT);
       CREATE TABLE portal_v2_folder_bindings(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,owner_scope_type TEXT NOT NULL,owner_public_id TEXT NOT NULL,
-        r2_prefix TEXT NOT NULL,source_version TEXT,status TEXT NOT NULL DEFAULT 'active',revoked_at TEXT,updated_at TEXT DEFAULT (datetime('now')),
+        r2_prefix TEXT NOT NULL,source_type TEXT NOT NULL DEFAULT 'project_alpha',source_version TEXT,status TEXT NOT NULL DEFAULT 'active',revoked_at TEXT,updated_at TEXT DEFAULT (datetime('now')),
         UNIQUE(id,workspace_id));
       CREATE TABLE pa_portal_principals(workspace_id TEXT NOT NULL,public_id TEXT NOT NULL,identity_id TEXT,email_hint TEXT,display_name TEXT NOT NULL,
         source_version TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'active',PRIMARY KEY(workspace_id,public_id),UNIQUE(workspace_id,identity_id));
@@ -204,6 +204,24 @@ describe("bounded staff grant and denial reads", () => {
     expect(active.results).toHaveLength(1);
     const survivor = active.results[0]!.identity_id === "identity-b" ? "identity-c" : "identity-b";
     expect(survivor).toMatch(/^identity-[bc]$/);
+  });
+
+  it("keeps workspace pause replay-safe with immutable create and revoke audit", async () => {
+    const input = { identityId: "identity-a", workspaceId: "workspace-a", scopeType: "workspace" as const,
+      scopePublicId: "workspace-a", reasonCode: "operator_workspace_pause" };
+    const created = await createPortalIdentityDenial(env, principal, input, "workspace-pause-a-0001");
+    const replay = await createPortalIdentityDenial(env, principal, input, "workspace-pause-a-0001");
+    expect(replay).toMatchObject({ replayed: true, denial: { id: created.denial.id, workspaceId: "workspace-a",
+      identityId: "identity-a", scopeType: "workspace", scopePublicId: "workspace-a" } });
+    expect(await db.prepare("SELECT count(*) count FROM portal_v2_identity_denial_audit WHERE denial_id=? AND action='denial.created'")
+      .bind(created.denial.id).first("count")).toBe(1);
+    const restored = await revokePortalIdentityDenial(env, principal, created.denial.id, created.denial.updatedAt,
+      "operator_workspace_restore", "workspace-restore-a-0001");
+    expect(restored.denial.status).toBe("revoked");
+    expect(await db.prepare("SELECT count(*) count FROM portal_v2_identity_denial_audit WHERE denial_id=? AND action='denial.revoked'")
+      .bind(created.denial.id).first("count")).toBe(1);
+    await expect(db.prepare("DELETE FROM portal_v2_identity_denial_audit WHERE denial_id=?").bind(created.denial.id).run())
+      .rejects.toThrow(/immutable/i);
   });
 
   it("keeps both management reads default-off", async () => {

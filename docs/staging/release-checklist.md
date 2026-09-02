@@ -132,6 +132,14 @@ migration hashes. Set `RELEASE_CONTRACT_FINALIZED=true` only after independent
 comparison with those repositories. The verifier intentionally fails while any
 release-candidate placeholder remains.
 
+The current candidate inventory extends through Client `0189` and Operations
+`0051`, but the release-maintenance working state is not itself an immutable
+runtime candidate. Keep the existing `RELEASE_CANDIDATES.operations` pin and
+`RELEASE_CONTRACT_FINALIZED=false` until a clean, reviewed, pushed commit
+contains those migrations and the matching application bytes. Then update the
+single runtime pin and every generated evidence reference together; never pin
+the current `HEAD` while required migration files remain uncommitted.
+
 The Viewer evidence is separate from the three Wrangler deployments. Record its
 exact image/commit, a SHA-256 of the non-secret `viewer.env` shape, secret names
 only, mode `0600`, health/readiness, the exact matching
@@ -378,10 +386,14 @@ hoc, edit the migration ledger, or execute these files as raw SQL.
    apply `0184_native_client_feedback.sql`,
    `0185_native_service_request_ownership.sql`, and
    `0186_delivery_notification_authority_provenance.sql`, followed by
-   `0187_authenticated_content_audit.sql`, in order. Verify the 0187 collection
-   state is still unset and its retention-delete gate is closed. Then apply
-   Operations through `0050_project_alpha_draft_quote_credentials.sql` and
-   deploy the paired final applications.
+   `0187_authenticated_content_audit.sql`,
+   `0188_native_feedback_completion_notices.sql`, and
+   `0189_primary_staff_folder_bindings.sql`, in order. Verify the 0187 collection
+   state is still unset and its retention-delete gate is closed. Before the
+   Operations upload, prove the 0189 unreceipted-active-binding query returns
+   zero. Then apply Operations through
+   `0051_client_hub_internal_notes.sql` and deploy the paired final
+   applications with every portal capability still default-off.
 5. Record `serviceAssignmentV2ExpandApplied`, the compatible writer version,
    `serviceAssignmentOldWritersDrained`,
    `serviceAssignmentContractMigrationsApplied`, and the barrier evidence
@@ -400,10 +412,10 @@ through `0171_secondary_workspace_membership_management.sql` (`0113` is
 intentionally reserved), apply `0172_project_access_authority_history.sql`
 only at its writer-first barrier, then `0173`-`0179` with `0179` as the final
 expand step. Apply `0180`-`0183` only after the compatible-writer drain above,
-then apply `0184`-`0187` migration-first before the paired final applications.
+then apply `0184`-`0189` migration-first before the paired final applications.
 Confirm Operations
 `0014_staff_acl_controls.sql` through
-`0050_project_alpha_draft_quote_credentials.sql`. Migration `0100` removes
+`0051_client_hub_internal_notes.sql`. Migration `0100` removes
 `share_version` from the delivery-grant parent key so existing share
 rotation/revocation updates cannot be blocked by a portal grant; the grant
 still records the approved version for authorization checks. Reject any
@@ -449,7 +461,8 @@ storage-only account exclusion, and exact outbound destination.
 For rollback, first disable `CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED`, withdraw the
 two native source features, confirm signed capability readback, and drain request
 mutations, attachment finalization, quote commands, feedback transitions, and
-completion-notification leases. Retain migrations `0184`-`0187` and `0050`.
+completion-notification leases. Retain migrations `0184`-`0189` and Operations
+`0050`/`0051`.
 After the first native storage binding or registered draft-quote fingerprint is
 created, do not roll back to code that lacks storage-account exclusion or
 connector-fingerprint enforcement; use the last compatible version or fix

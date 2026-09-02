@@ -2,6 +2,7 @@ import { HTTPException } from "hono/http-exception";
 import { sha256 } from "./crypto";
 import { isAdministrator } from "./acl";
 import { eligibilityBlockManagementEnabled, portalOperationsManagementEnabled } from "./client-identity-eligibility";
+import { portalDenyPolicyManagementEnabled } from "./client-portal-deny-policies";
 import { readClientHubBusinessProjectPolicy } from "./client-hub-project-policy";
 import { businessContactChannels, businessContactChannelsSql } from "./client-business-contact";
 import type { ClientHubRoot } from "./client-hub-directory";
@@ -91,7 +92,8 @@ export async function createClientHubCollectionContext(env: Env, principal: Staf
   const contextVersion = await sha256(JSON.stringify([canonicalRoot, principal.id, access, visibility.read_revision, root.source_name,
     root.pa_public_id, root.mapping_status, root.status, root.workspace_id, root.legacy_account_id,
     root.portal_status, proof?.results ?? [], accountProof.results, await isAdministrator(env, principal),
-    eligibilityBlockManagementEnabled(env), portalOperationsManagementEnabled(env), businessProjectPolicy.proof]));
+    eligibilityBlockManagementEnabled(env), portalOperationsManagementEnabled(env), portalDenyPolicyManagementEnabled(env),
+    businessProjectPolicy.proof]));
   return { root, access, canonicalRoot, contextVersion };
 }
 

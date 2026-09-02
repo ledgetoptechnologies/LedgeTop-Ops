@@ -33,6 +33,7 @@ async function fixture() {
   await sql(db, createTable("0125_project_alpha_portal_projection.sql", "pa_portal_principals"));
   await sql(db, createTable("0145_portal_identity_eligibility.sql", "portal_v2_identity_eligibility_bindings"));
   await sql(db, createTable("0145_portal_identity_eligibility.sql", "portal_v2_identity_eligibility_blocks"));
+  await sql(db, createTable("0136_portal_v2_identity_denials.sql", "portal_v2_identity_denials"));
   await sql(db, createTable("0123_portal_v2_membership_management.sql", "portal_v2_invitation_email_outbox"));
   // Supporting indexes already shipped with these production tables.
   await sql(db, `CREATE INDEX eligibility_principal ON portal_v2_identity_eligibility_bindings(workspace_id,principal_public_id,identity_id);
@@ -93,12 +94,12 @@ describe("bounded portal identity reads", () => {
     const disabled = await listPortalIdentityPage({ ...env, CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: "false",
       CLIENT_PORTAL_OPERATIONS_MANAGEMENT_ENABLED: "false" }, actor, clientScope("workspace-one"));
     expect(disabled.items).toHaveLength(1);
-    expect(disabled.capabilities).toEqual({ canManagePortal: false, canManageEligibilityBlocks: false,
+    expect(disabled.capabilities).toEqual({ canManagePortal: false, canManageEligibilityBlocks: false, canManageWorkspaceAccess: false,
       canReviewIdentityDetails: true });
     expect(disabled.items[0]!.actions.canCreateEmailBlock).toBe(false);
     acl.isAdministrator.mockResolvedValue(false);
     expect((await listPortalIdentityPage(env, actor, clientScope("workspace-one"))).capabilities)
-      .toEqual({ canManagePortal: false, canManageEligibilityBlocks: false, canReviewIdentityDetails: true });
+      .toEqual({ canManagePortal: false, canManageEligibilityBlocks: false, canManageWorkspaceAccess: false, canReviewIdentityDetails: true });
     acl.sqlScope.mockResolvedValue({ global: false, deniedGlobal: false });
     await expect(listPortalIdentityPage(env, actor, globalScope)).rejects.toMatchObject({ status: 403 });
   }, 30_000);
@@ -117,7 +118,7 @@ describe("bounded portal identity reads", () => {
       binding_status: "linked", has_workspace_access: 1,
       invitation: null,
       actions: { canRetryInvitation: false, canCreateEmailBlock: false, canReviewEligibilityBlocks: false } });
-    expect(secondary.capabilities).toEqual({ canManagePortal: false, canManageEligibilityBlocks: false,
+    expect(secondary.capabilities).toEqual({ canManagePortal: false, canManageEligibilityBlocks: false, canManageWorkspaceAccess: false,
       canReviewIdentityDetails: false });
     expect(await db.prepare("SELECT count(*) n FROM portal_v2_identities").first("n")).toBe(1);
     expect(await db.prepare("SELECT count(*) n FROM portal_v2_workspace_memberships").first("n")).toBe(2);
@@ -143,6 +144,24 @@ describe("bounded portal identity reads", () => {
     expect((await listPortalIdentityPage(env, actor, scope)).items[0]!.has_workspace_access).toBe(1);
     expect(await db.prepare("SELECT count(*) n FROM portal_v2_workspace_memberships").first("n")).toBe(1);
     expect(await db.prepare("SELECT count(*) n FROM portal_v2_entitlements").first("n")).toBe(0);
+  }, 30_000);
+
+  it("reports an exact workspace denial without leaking it into another workspace", async () => {
+    const { db, env } = await fixture();
+    await link(db, "identity-one", "workspace-one");
+    await link(db, "identity-one", "workspace-two");
+    const before = await listPortalIdentityPage(env, actor, clientScope("workspace-one"));
+    await db.prepare(`INSERT INTO portal_v2_identity_denials
+      (id,identity_id,workspace_id,scope_type,scope_public_id,reason_code,created_by_actor_type,created_by_actor_id)
+      VALUES('workspace-denial-one','identity-one','workspace-one','workspace','workspace-one','operator_workspace_pause','staff','operator-one')`).run();
+    const paused = await listPortalIdentityPage(env, actor, clientScope("workspace-one"));
+    expect(paused.items[0]).toMatchObject({ has_workspace_access: 0, workspaceAccessSuspended: true,
+      workspaceDenialCount: 1, removableWorkspaceDenialId: "workspace-denial-one",
+      actions: { canSuspendWorkspaceAccess: false, canReactivateWorkspaceAccess: true } });
+    expect(paused.items[0]!.principalContextVersion).not.toBe(before.items[0]!.principalContextVersion);
+    const other = await listPortalIdentityPage(env, actor, clientScope("workspace-two"));
+    expect(other.items[0]).toMatchObject({ has_workspace_access: 1, workspaceAccessSuspended: false,
+      workspaceDenialCount: 0 });
   }, 30_000);
 
   it("pages over 500 principals and searches unloaded names literally before the limit", async () => {

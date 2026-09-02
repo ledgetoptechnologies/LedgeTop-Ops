@@ -416,32 +416,60 @@ gap, stale-draft, leakage, and Access-denial tests pass. Project Alpha keeps the
 service-token client ID/secret; LTDS receives only the Access assertion and
 signed request. See `docs/project-alpha.md` for the exact producer envelope.
 
-The portal hierarchy projection uses a third path-specific Access service
+The portal hierarchy projection uses a path-specific Access service
 application targeting only
-`client.ledgetopdroneservices.com/api/internal/project-alpha/portal-v2`. This
-legacy machine endpoint remains active until Project Alpha retries and
-tombstones have been migrated deliberately.
-Configure its exact issuer/audience as
+`portal.ledgetopdroneservices.com/api/internal/project-alpha/*`. Give that
+application a Service Auth policy containing the existing Project Alpha
+service token used by Ops Sync. This reuses the deployed machine identity; it
+does not reuse the Ops Sync Access application or audience, and it does not
+broaden human portal access. Configure the portal application's exact
+issuer/audience as
 `PROJECT_ALPHA_PORTAL_ACCESS_TEAM_DOMAIN` and
 `PROJECT_ALPHA_PORTAL_ACCESS_AUD`, and agree on the bounded
 `PROJECT_ALPHA_PORTAL_APPLICATION_KEY`. Add a unique receiver secret:
 
 ```powershell
 npx.cmd wrangler secret put PROJECT_ALPHA_PORTAL_HMAC_SECRET --name ltds-clients
-npx.cmd wrangler secret put PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_SECRET --name ltds-clients
 ```
 
 Set `PROJECT_ALPHA_PORTAL_HMAC_KEY_ID` to the sender's current key ID. Use the
 distinct `PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_KEY_ID`/previous-secret pair only
-for a bounded rotation overlap, then remove both after pending delivery drains.
+for a bounded rotation overlap; do not create the previous secret during first
+activation. Remove both previous values only after pending delivery drains.
 
-Keep `PROJECT_ALPHA_PORTAL_SYNC_ENABLED=false` until additive migration 0125
-and snapshot/activation/replay/gap/tombstone/Access-denial tests pass in
-isolated staging. Opening this inbox does not enable portal-v2 client reads;
-keep `CLIENT_PORTAL_HIERARCHY_V2_ENABLED=false` through shadow parity and the
+Project Alpha keeps this behind its single **External operations** connection.
+For the LTDS deployment, set its server-only
+`EXTERNAL_OPS_CLIENT_PORTAL_BASE_URL` to
+`https://portal.ledgetopdroneservices.com`, and configure the same key ID and
+HMAC secret through `PORTAL_INTEGRATION_HMAC_SECRETS_JSON` (or the supported
+`EXTERNAL_OPS_CLIENT_PORTAL_SIGNING_KEY_ID` and
+`EXTERNAL_OPS_CLIENT_PORTAL_SIGNING_SECRET` compatibility variables). The
+administrator does not create a second visible integration profile.
+
+The legacy `client.ledgetopdroneservices.com` hostname remains a compatibility
+redirect for public share and portal links. Do not use that redirect as the
+machine projection route: the canonical service application and audience are
+bound to the `portal.*` endpoint above. The Client Worker rejects every
+`/api/internal/*` request on a configured legacy origin even if an edge policy
+is accidentally broadened; legacy public-share and same-origin session routes
+remain admitted.
+
+Keep `PROJECT_ALPHA_PORTAL_SYNC_ENABLED=false` until additive migrations 0125
+and 0129 and snapshot/activation/replay/gap/tombstone/Access-denial tests pass
+in isolated staging. Because Project Alpha emits strict schema v3,
+`CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED=true` is an ingestion prerequisite
+before the first producer delivery, not merely a later read feature. Opening
+the inbox still does not enable client hierarchy reads: keep
+`CLIENT_PORTAL_HIERARCHY_V2_ENABLED=false` through shadow parity and the
 separate authorization cutover. Never reuse the catalog Access application,
-service token, application key, audience, or HMAC secret. Project Alpha keeps
-the service-token credentials; LTDS stores only the receiver configuration.
+application key, audience, or HMAC secret. The existing Project Alpha Ops Sync
+service-token identity may be included in the portal-specific Service Auth
+policy, but the Access application and audience remain distinct. Project Alpha
+keeps the token credentials; LTDS stores only the receiver configuration.
+
+Follow the exact preflight, ingest-only activation, read cutover, and drain-first
+rollback in
+[`docs/operations/project-alpha-portal-activation.md`](operations/project-alpha-portal-activation.md).
 
 Keep `CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED=false` until the invitation
 email outbox has a transactional sender/scrubber, Access enrollment is proven,

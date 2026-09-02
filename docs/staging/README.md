@@ -109,9 +109,10 @@ Only after the unexpected production branch deployment has been resolved and a s
    combined all-pending Delivery apply when `0172` or `0179`-`0186` is pending;
    `0179` requires the repository-generated
    `apps/client/wrangler.staging.expand-0179.json` input, compatible-writer
-   deployment and full old-writer drain before `0180`-`0183`; apply `0184`-`0186`
-   only afterward with native capabilities unavailable, followed by Operations
-   `0050`, before the paired final Workers. Generate and
+   deployment and full old-writer drain before `0180`-`0183`; apply
+   `0184`-`0189` only afterward with native capabilities unavailable and the
+   separate `0187` content-audit and `0189` primary-binding barriers satisfied,
+   followed by Operations `0050` and `0051`, before the paired final Workers. Generate and
    validate that ignored config with
    `npm run staging:client:expand-0179:generate` and
    `npm run staging:client:expand-0179:check`; do not copy migration SQL.

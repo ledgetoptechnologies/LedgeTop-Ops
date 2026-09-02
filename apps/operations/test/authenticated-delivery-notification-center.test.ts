@@ -16,7 +16,7 @@ import type {Env,StaffPrincipal} from "../src/worker/types";
 const staff:StaffPrincipal={id:"staff-notify",email:"staff-notify@example.test",displayName:"Notify Staff",accessSubject:"staff-subject",projectAlphaUserId:null};
 let runtime:Miniflare,delivery:D1Database,ops:D1Database,env:Env;
 const ids={workspace:"workspace-notify",organization:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",project:"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",generation:"generation-notify",
-  binding:"binding-notify",identity:"identity-notify",principal:"principal-notify",grant:"grant-notify",logical:"logical-notify",batch:"batch-notify"};
+  snapshot:"snapshot-notify",binding:"binding-notify",identity:"identity-notify",principal:"principal-notify",grant:"grant-notify",logical:"logical-notify",batch:"batch-notify"};
 const prefix="Jobs/Clients/Notify/Project/";
 
 async function migrate(db:D1Database,directory:URL){
@@ -36,20 +36,35 @@ beforeAll(async()=>{
   await ops.batch([
     ops.prepare("INSERT INTO staff_users(id,email,display_name,access_subject) VALUES(?,?,?,?)").bind(staff.id,staff.email,staff.displayName,staff.accessSubject),
     ops.prepare("INSERT INTO divisions(id,name,code) VALUES('division-notify','Notify','notify')"),
-    ops.prepare("INSERT INTO pa_clients(id,name,payload_json,last_sync_id,projection_source_id) VALUES('client-notify','Client','{}','sync','project-alpha:primary')"),
-    ops.prepare("INSERT INTO pa_projects(id,client_id,name,payload_json,last_sync_id,projection_source_id) VALUES('project-internal','client-notify','Project',?,'sync','project-alpha:primary')").bind(JSON.stringify({public_id:ids.project})),
-    ops.prepare("INSERT INTO project_folders(project_id,division_id,r2_prefix,match_method,confirmed_by) VALUES('project-internal','division-notify',?,'manual',?)").bind(prefix,staff.id),
+    ops.prepare("INSERT INTO pa_organizations(id,name,payload_json,last_sync_id,projection_source_id) VALUES(?,'Organization',?,'sync','project-alpha:primary')").bind(ids.organization,JSON.stringify({public_id:ids.organization})),
+    ops.prepare("INSERT INTO pa_clients(id,name,organization_id,payload_json,last_sync_id,projection_source_id) VALUES('client-notify','Client',?,'{}','sync','project-alpha:primary')").bind(ids.organization),
+    ops.prepare("INSERT INTO pa_projects(id,client_id,organization_id,name,payload_json,last_sync_id,projection_source_id) VALUES(?,'client-notify',?,'Project',?,'sync','project-alpha:primary')").bind(ids.project,ids.organization,JSON.stringify({public_id:ids.project})),
+    ops.prepare("INSERT INTO project_folders(project_id,division_id,r2_prefix,match_method,confirmed_by) VALUES(?,'division-notify',?,'manual',?)").bind(ids.project,prefix,staff.id),
   ]);
   for(const key of ["delivery.share.audit","delivery.share.create","delivery.share.revoke"])await permission(key);
   await delivery.batch([
     delivery.prepare("INSERT INTO portal_v2_identities(id,issuer,subject,verified_email) VALUES(?,'https://access.test','subject','client@example.test')").bind(ids.identity),
     delivery.prepare("INSERT INTO portal_v2_workspaces(id,root_type,pa_organization_public_id,display_name,status,project_alpha_source_id) VALUES(?,'organization',?,'Notify Workspace','active','project-alpha:primary')").bind(ids.workspace,ids.organization),
+    delivery.prepare(`INSERT INTO pa_portal_projection_generations
+      (id,workspace_id,source_generation,source_sequence,snapshot_hash,page_count,record_count,workspace_root_type,
+       workspace_root_public_id,workspace_display_name,workspace_source_version,workspace_active,status,complete,projection_source_id)
+      VALUES(?,?,?,1,?,1,2,'organization',?,'Notify Workspace','workspace-v1',1,'active',1,'project-alpha:primary')`)
+      .bind(ids.snapshot,ids.workspace,ids.generation,"a".repeat(64),ids.organization),
     delivery.prepare("INSERT INTO portal_v2_workspace_memberships(id,workspace_id,identity_id,source_type,status) VALUES('membership-notify',?,?,'operations','active')").bind(ids.workspace,ids.identity),
     delivery.prepare("INSERT INTO portal_v2_directory_generations(id,workspace_id,source_generation,source_sequence,status,complete) VALUES(?,?,?,1,'active',1)").bind(ids.generation,ids.workspace,ids.generation),
     delivery.prepare("INSERT INTO portal_v2_directory_entities(workspace_id,generation_id,entity_type,public_id,display_name,source_version) VALUES(?,?,'organization',?,'Organization','v1')").bind(ids.workspace,ids.generation,ids.organization),
     delivery.prepare("INSERT INTO portal_v2_directory_entities(workspace_id,generation_id,entity_type,public_id,parent_public_id,display_name,source_version) VALUES(?,?,'project',?,?,'Project','v1')").bind(ids.workspace,ids.generation,ids.project,ids.organization),
     delivery.prepare("INSERT INTO portal_v2_directory_checkpoints(workspace_id,active_generation_id,source_sequence) VALUES(?,?,1)").bind(ids.workspace,ids.generation),
+    delivery.prepare(`INSERT INTO pa_portal_projection_checkpoints(workspace_id,source_generation,source_sequence,snapshot_generation_id)
+      VALUES(?,?,1,?)`).bind(ids.workspace,ids.generation,ids.snapshot),
     delivery.prepare("INSERT INTO portal_v2_folder_bindings(id,workspace_id,owner_scope_type,owner_public_id,r2_prefix,source_type,source_version) VALUES(?,?,'project',?,?,'operations','v1')").bind(ids.binding,ids.workspace,ids.project,prefix),
+    delivery.prepare(`INSERT INTO portal_primary_staff_bindings
+      (binding_id,workspace_id,source_id,root_type,root_public_id,owner_scope_type,owner_public_id,project_public_id,
+       directory_generation_id,snapshot_generation_id,source_sequence,root_source_version,project_source_version,r2_prefix,
+       ops_project_id,ops_context_version,created_by_staff_id,reason_code,state)
+      VALUES(?,?,'project-alpha:primary','organization',?,'project',?,?,?, ?,1,'v1','v1',?,
+       ?,?,?, 'migration_0189_legacy_compat','active')`)
+      .bind(ids.binding,ids.workspace,ids.organization,ids.project,ids.project,ids.generation,ids.snapshot,prefix,ids.project,"0".repeat(64),staff.id),
     delivery.prepare("INSERT INTO pa_portal_principals(workspace_id,public_id,identity_id,email_hint,display_name,source_version,status) VALUES(?,?,?,'client@example.test','Client Person','pv1','active')").bind(ids.workspace,ids.principal,ids.identity),
     delivery.prepare("INSERT INTO portal_v2_entitlements(id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,source_type,status) VALUES('entitlement-notify',?,?,'delivery.view','allow','project',?,'operations','active')").bind(ids.workspace,ids.identity,ids.project),
     delivery.prepare("INSERT INTO portal_v2_authenticated_delivery_grants(id,logical_grant_id,grant_version,workspace_id,folder_binding_id,binding_source_version,audience_type,audience_public_id,audience_source_version,reason_code,created_by_staff_id) VALUES(?,?,1,?,?,'v1','principal',?,'pv1','test',?)").bind(ids.grant,ids.logical,ids.workspace,ids.binding,ids.principal,staff.id),

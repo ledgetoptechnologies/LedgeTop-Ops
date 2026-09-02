@@ -100,7 +100,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   // The digest intentionally moved with the reviewed canonical portal hosts
   // and explicit legacy compatibility origin. Keep the field assertions so a future config change
   // cannot hide behind a digest refresh.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "969ee629c946efd45059dd925046f23ddc2228f83cb498af8ab978c5a49809be");
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "659aa73182988037fcf992238139972960cba83830a95ea60cee9d42c12e40b6");
   const config = readJson("apps/client/wrangler.jsonc");
   assert.equal(config.name, "ltds-clients");
   assert.equal(config.main, "src/worker/index.ts");
@@ -129,7 +129,10 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.equal(config.vars.CLIENT_PORTAL_CONTENT_AUDIT_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_HMAC_KEY_ID, "");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_KEY_ID, "");
-  assert.equal(config.vars.PROJECT_ALPHA_PORTAL_HMAC_KEY_ID, "");
+  assert.equal(config.vars.PROJECT_ALPHA_PORTAL_APPLICATION_KEY, "ltds_ops");
+  assert.equal(config.vars.PROJECT_ALPHA_PORTAL_ACCESS_TEAM_DOMAIN, "https://ledgetoptechnologies.cloudflareaccess.com");
+  assert.equal(config.vars.PROJECT_ALPHA_PORTAL_ACCESS_AUD, "a722211a2c137a892d5a07e3bf1e1f3f49475f75efd83e12adade21a42e75068");
+  assert.equal(config.vars.PROJECT_ALPHA_PORTAL_HMAC_KEY_ID, "portal-v1");
   assert.equal(config.vars.PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_KEY_ID, "");
   assert.equal(config.vars.CLIENT_PORTAL_TEAM_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_REQUEST_V2_ENABLED, "false");
@@ -198,7 +201,7 @@ test("public route, host-namespace guard, health, and isolated cookie contracts 
   assert(worker.includes('service: "ltds-delivery"'));
   assert(worker.includes("requestHostAllowed(c.req.url,c.env)"));
   assert(originPolicy.includes('if (namespace === "public") return publicRequestOrigins.includes(request.origin);'));
-  assert(originPolicy.includes('if (namespace === "internal") return primaryPortalOrigin !== null && (request.origin === primaryPortalOrigin || legacyOrigins.includes(request.origin));'));
+  assert(originPolicy.includes('if (namespace === "internal") return primaryPortalOrigin !== null && request.origin === primaryPortalOrigin;'));
   assert(originPolicy.includes('if (namespace === "portal") return portalOrigins.includes(request.origin) || legacyOrigins.includes(request.origin);'));
   assert(originPolicy.includes('if (namespace === "shared" || namespace === "assets")'));
   assert(originPolicy.includes('return (publicOrigin !== null && request.origin === publicOrigin) || portalOrigins.includes(request.origin) || legacyOrigins.includes(request.origin);'));

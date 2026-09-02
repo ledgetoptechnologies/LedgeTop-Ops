@@ -218,13 +218,15 @@ test("requires every portal-v2 and Operations capability to be explicitly false"
 });
 
 test("pins the native portal migration-first and default-off release contract", () => {
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-4), [
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-6), [
     "0184_native_client_feedback.sql",
     "0185_native_service_request_ownership.sql",
     "0186_delivery_notification_authority_provenance.sql",
     "0187_authenticated_content_audit.sql",
+    "0188_native_feedback_completion_notices.sql",
+    "0189_primary_staff_folder_bindings.sql",
   ]);
-  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.at(-1), "0050_project_alpha_draft_quote_credentials.sql");
+  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.at(-1), "0051_client_hub_internal_notes.sql");
   assert(REQUIRED_DISABLED_FEATURE_FLAGS.delivery.includes("CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED"));
   assert(REQUIRED_DISABLED_FEATURE_FLAGS.delivery.includes("CLIENT_PORTAL_CONTENT_AUDIT_ENABLED"));
   assert.equal(STAGING_STATIC_VARS.delivery.CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED, "false");
@@ -239,7 +241,7 @@ test("pins the native portal migration-first and default-off release contract", 
     "never resolved through the primary source as a fallback",
     "must never appear in legacy account administration",
     "This document intentionally contains no values",
-    "withdraw the native request and feedback features",
+    "CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED=false` and clear",
     "does not exclude storage-only accounts is not a safe rollback target",
   ]) assert(runbook.includes(invariant), invariant);
 

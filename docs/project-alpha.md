@@ -122,8 +122,11 @@ has `geometryRequirement: "required"` and no validated Mapbox polygon is stored.
 
 ## Portal hierarchy and entitlement projection (implemented, disabled)
 
-LTDS accepts the separate portal-v2 projection only at
-`POST /api/internal/project-alpha/portal-v2`. The receiver hard-404s before
+LTDS accepts the portal-v2 projection only at
+`POST https://portal.ledgetopdroneservices.com/api/internal/project-alpha/portal-v2`.
+The endpoint is part of Project Alpha's single administrator-facing External
+operations connection, while retaining a path-scoped service-auth audience and
+signing key internally. The receiver hard-404s before
 reading the request body or D1 unless `PROJECT_ALPHA_PORTAL_SYNC_ENABLED` is
 exactly `true` and all five dedicated configuration values are present:
 
@@ -141,11 +144,16 @@ An optional, distinct `PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_KEY_ID` plus
 window as catalog delivery. Supplying only half the pair, reusing the current
 ID, or sending any unconfigured key ID fails closed.
 
-This flag only opens the server-to-server inbox. It does not enable client
+The path-scoped Access application may reuse the existing Project Alpha service
+token identity from Ops Sync, but it has its own audience and grants access only
+to `portal.ledgetopdroneservices.com/api/internal/project-alpha/*`. The sender
+uses `EXTERNAL_OPS_CLIENT_PORTAL_BASE_URL` to select this canonical host. This
+flag only opens the server-to-server inbox. It does not enable client
 hierarchy reads; `CLIENT_PORTAL_HIERARCHY_V2_ENABLED` remains an independent,
 default-off authorization cutover. Use a separate Access service application,
-service token, application key, audience, and HMAC secret from catalog, pricing,
-draft-quote, Operations projection, and browser credentials.
+application key, audience, and HMAC secret from catalog, pricing, draft-quote,
+Operations projection, and browser credentials. Reusing the established
+Project Alpha service-token identity does not authorize any browser session.
 
 Requests are JSON up to 256 KiB. The Access assertion must have the configured
 exact issuer and audience. Headers use the same neutral projection set as the
@@ -174,9 +182,13 @@ The exact positive snapshot-page, snapshot-activation, and event envelopes plus
 strict negative specimens are the versioned compatibility corpus in
 [`packages/shared/fixtures/project-alpha-portal-v2.json`](../packages/shared/fixtures/project-alpha-portal-v2.json).
 Both repositories must run the unchanged specimens through their wire parsers.
-The independently gated schema-v3 relation/lifecycle corpus is
+The separately gated schema-v3 relation/lifecycle corpus is
 [`packages/shared/fixtures/project-alpha-portal-relations-v3.json`](../packages/shared/fixtures/project-alpha-portal-relations-v3.json);
-it must not be published while the LTDS relation flag is false.
+it must not be published while the LTDS relation flag is false. The current
+Project Alpha producer emits schema v3, so production ingress requires
+`CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED=true` before its first delivery.
+This parser/storage gate can be enabled while
+`CLIENT_PORTAL_HIERARCHY_V2_ENABLED=false`; client hierarchy reads remain off.
 The activation is a distinct delivery: it repeats the generation, sequence,
 snapshot hash, page count, and total record count, and it contains no resource
 arrays or other fields.
@@ -221,9 +233,9 @@ idempotent. Applying it alone grants no access and enables no endpoint.
 ### Portal hierarchy relation contract delta (implemented, disabled)
 
 The single `parentPublicId` is retained only as a canonical display parent.
-Before `CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED` can be enabled, PA must
-publish the following additional versioned records in every complete portal
-snapshot and equivalent ordered upsert/tombstone events:
+When `CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED` is enabled, PA must publish the
+following additional versioned records in every complete portal snapshot and
+equivalent ordered upsert/tombstone events:
 
 ```json
 {
@@ -275,8 +287,9 @@ Contract constraints are exact:
   grant. Client-created invitees remain LTDS-local scoped guests;
 - activation must stage entities, edges, lifecycle, principals, and
   entitlements as one generation and advance one checkpoint only after all
-  counts and references validate. Until PA producer fixtures and receiver
-  ingestion prove this delta in staging, keep the relation flag false.
+  counts and references validate. The relation flag must remain false until PA
+  producer fixtures and receiver ingestion prove this delta in staging, but it
+  must be true before an enabled schema-v3 producer sends its first delivery.
 
 Migration `0129_portal_hierarchy_relations.sql` is additive and idempotent; it
 does not enable projection ingestion or runtime relation authorization. The
@@ -293,6 +306,10 @@ activation rules are in
 [`packages/shared/fixtures/project-alpha-portal-relations-v3.json`](../packages/shared/fixtures/project-alpha-portal-relations-v3.json).
 Project Alpha must consume both the unchanged v2 corpus and this separately
 gated v3 corpus before either producer is enabled.
+
+The operator sequence, expected preflight outcomes, independent read cutover,
+and drain-first rollback are normative in
+[`docs/operations/project-alpha-portal-activation.md`](operations/project-alpha-portal-activation.md).
 
 ## Non-binding pricing preview (implemented, disabled)
 

@@ -8,9 +8,17 @@ See [Staff Client Hub audit timeline](client-audit-timeline.md) for the bounded,
 source-qualified event federation, per-adapter authorization and coverage,
 cursor/redaction contract, and online-retention boundary.
 
+See [Client Hub internal notes](client-hub-internal-notes.md) for the
+Operations-only, exact-source/root memory ledger, explicit write permission,
+idempotent optimistic mutations, and immutable soft-delete audit trail.
+
 See [Project Alpha service-assignment receiver foundation](project-alpha-service-assignment-receiver.md)
 for the default-off DELIVERY_DB ingress, explicit source/workspace admission,
 tenant-containment fences, and the later coordinated enrollment boundary.
+
+See [Project Alpha portal activation](project-alpha-portal-activation.md) for the
+canonical machine endpoint, Access and secret presence checks, schema-v3
+ingest-only sequence, independent client-read cutover, and drain-first rollback.
 
 See [service-assignment request policy](client-service-assignment-request-policy.md)
 for the mandatory `0179` expand, compatible-writer drain, and `0180`-`0181`
@@ -89,7 +97,7 @@ failures correctly remain on their local file-type icon.
   entitlement, decoder behavior, queue/DLQ existence, R2 event subscriptions,
   cron installation, or production bindings. Verify each in isolated staging.
 - Delivery migrations through `0186` (with reserved ledger gap `0113`), plus
-  Operations migrations through `0050`, are
+  Operations migrations through `0051`, are
   additive and remain after a Worker version rollback. Preserve verified D1
   exports and prior Worker version IDs before rollout.
 - Do not apply `0179`-`0186` as one pending batch. Apply `0179` from a reviewed

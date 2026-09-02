@@ -12,12 +12,15 @@ function identity(id: string, name: string, overrides: Partial<PortalIdentitySum
     row_key: `workspace-one:${id}`, contact_key: `principal:workspace-one:${id}`, status: "active", identity_id: `identity-${id}`,
     has_workspace_access: 1, blocked: 0, binding_status: "linked", principalContextVersion: `principal-context-${id}`,
     hasExplicitAccess: true, accessLoaded: false, invitation: null, effectiveEmailBlockCount: 0, effectiveSubjectBlock: false,
-    removableEmailBlockId: null, actions: { canRetryInvitation: false, canCreateEmailBlock: true, canReviewEligibilityBlocks: true }, ...overrides };
+    removableEmailBlockId: null, workspaceAccessSuspended: false, workspaceDenialCount: 0,
+    removableWorkspaceDenialId: null, removableWorkspaceDenialUpdatedAt: null,
+    actions: { canRetryInvitation: false, canCreateEmailBlock: true, canReviewEligibilityBlocks: true,
+      canSuspendWorkspaceAccess: true, canReactivateWorkspaceAccess: false }, ...overrides };
 }
 function identityPage(items: PortalIdentitySummary[] = [identity("alice", "Alice Client"), identity("bob", "Bob Client", { identity_id: null, binding_status: "unlinked", has_workspace_access: 0 }),
   identity("carol", "Carol Client"), identity("dana", "Dana Client"), identity("evan", "Evan Client")], more = true): PortalIdentityPage {
   return { items, page: metadata(more, "identity-page-2", 5, items.length), contextVersion: rootContext, refreshedAt: "2026-08-25T12:00:00Z",
-    capabilities: { canManagePortal: true, canManageEligibilityBlocks: true } };
+    capabilities: { canManagePortal: true, canManageEligibilityBlocks: true, canManageWorkspaceAccess: true } };
 }
 function detail(portalIdentities = identityPage()) {
   return { client: { workspace_id: "workspace-one", public_id: "42", kind: "organization", route_kind: "organizations",
@@ -177,6 +180,48 @@ test("global email blocks require confirmation and uncertain retry reuses the ex
   expect(mutations[0]!.key).toBeTruthy(); expect(mutations[1]!.key).toBe(mutations[0]!.key);
 });
 
+test("workspace access pause and restore stay scoped, version-fenced and idempotent", async ({ page }) => {
+  let paused = false, first: Route | undefined;
+  const state = await mock(page, async (route, url) => {
+    if (url.pathname.endsWith("/workspace-access/suspend")) {
+      const payload = route.request().postDataJSON();
+      expect(payload).toEqual({ expectedContextVersion: rootContext, expectedPrincipalContext: "principal-context-alice",
+        reasonCode: "operator_workspace_pause" });
+      expect(JSON.stringify(payload)).not.toContain("email");
+      if (!first) { first = route; return; }
+      paused = true;
+      return route.fulfill({ status: 201, json: { outcome: "workspace_access_suspended", replayed: false } });
+    }
+    if (url.pathname.endsWith("/workspace-access/reactivate")) {
+      expect(route.request().postDataJSON()).toEqual({ expectedContextVersion: rootContext,
+        expectedPrincipalContext: "principal-context-alice", reasonCode: "operator_workspace_restore",
+        denialId: "workspace-denial-one", expectedUpdatedAt: "2026-09-02 12:00:00" });
+      paused = false;
+      return route.fulfill({ json: { outcome: "workspace_access_reactivated", replayed: false } });
+    }
+    return route.fulfill({ status: 404 });
+  }, () => detail(identityPage([identity("alice", "Alice Client", paused ? {
+    has_workspace_access: 0, workspaceAccessSuspended: true, workspaceDenialCount: 1,
+    removableWorkspaceDenialId: "workspace-denial-one", removableWorkspaceDenialUpdatedAt: "2026-09-02 12:00:00",
+    actions: { canRetryInvitation: false, canCreateEmailBlock: true, canReviewEligibilityBlocks: true,
+      canSuspendWorkspaceAccess: false, canReactivateWorkspaceAccess: true },
+  } : {})], false)));
+  await open(page);
+  page.on("dialog", dialog => dialog.accept());
+  await person(page).getByRole("button", { name: "Pause access to this workspace", exact: true }).click();
+  await expect.poll(() => Boolean(first)).toBe(true);
+  await first!.fulfill({ status: 503, json: { error: "Outcome could not be confirmed" } });
+  await person(page).getByRole("button", { name: "Retry action", exact: true }).click();
+  await expect(person(page).getByText("Access paused for this workspace", { exact: true })).toBeVisible();
+  const suspendRequests = state.requests.filter(request => request.url.pathname.endsWith("/workspace-access/suspend"));
+  expect(suspendRequests).toHaveLength(2);
+  expect(suspendRequests[0]!.key).toBeTruthy();
+  expect(suspendRequests[1]!.key).toBe(suspendRequests[0]!.key);
+  await person(page).getByRole("button", { name: "Restore access to this workspace", exact: true }).click();
+  await expect.poll(() => state.requests.some(request => request.url.pathname.endsWith("/workspace-access/reactivate"))).toBe(true);
+  await expect(person(page).getByText("Portal membership active", { exact: true })).toBeVisible();
+});
+
 test("block actions come from exact server descriptors rather than partial or expired history", async ({ page }) => {
   let revoked = "";
   const summary = identity("alice", "Alice Client", { blocked: 1, effectiveEmailBlockCount: 2, effectiveSubjectBlock: true,
@@ -240,7 +285,7 @@ test("read-only capabilities never expose mutations and unlinked access is not m
   const initial = identityPage([identity("bob", "Bob Client", { identity_id: null, binding_status: "unlinked", has_workspace_access: 0,
     invitation: { id: "expired-invite", status: "expired", email_status: "failed" },
     actions: { canCreateEmailBlock: false, canRetryInvitation: false, canReviewEligibilityBlocks: false } })], false);
-  initial.capabilities = { canManagePortal: false, canManageEligibilityBlocks: false };
+  initial.capabilities = { canManagePortal: false, canManageEligibilityBlocks: false, canManageWorkspaceAccess: false };
   const state = await mock(page, route => route.fulfill({ json: { ...nested("bob"), page: { ...metadata(), available: false, reason: "identity_unlinked" } } }), () => detail(initial));
   await open(page);
   await expect(panel(page).getByRole("button", { name: /Block portal|Remove sign-in|Retry invitation/ })).toHaveCount(0);

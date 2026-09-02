@@ -332,9 +332,9 @@ describe('real D1 native staff folder binding and exact principal delegation',{t
     expect(await delivery.prepare('SELECT count(*) n FROM portal_native_staff_bindings WHERE workspace_id=?').bind(f.operation.workspaceId).first('n')).toBe(0);
   });
   it('requires the current PA membership version and verified email binding',async()=>{
-    const f=await fixture();await delivery.prepare(`UPDATE portal_v2_workspace_memberships SET source_version='stale-version' WHERE identity_id=?`).bind(f.identity).run();
+    const f=await fixture();await delivery.prepare(`UPDATE pa_portal_principals SET source_version='stale-version' WHERE identity_id=?`).bind(f.identity).run();
     await expect(previewNativeDeliveryGrant(env,principal,f.operation)).rejects.toMatchObject({status:404});
-    await delivery.prepare(`UPDATE portal_v2_workspace_memberships SET source_version='person-v1' WHERE identity_id=?`).bind(f.identity).run();
+    await delivery.prepare(`UPDATE pa_portal_principals SET source_version='person-v1' WHERE identity_id=?`).bind(f.identity).run();
     await delivery.prepare(`UPDATE portal_v2_identities SET verified_email='changed@example.test' WHERE id=?`).bind(f.identity).run();
     await expect(previewNativeDeliveryGrant(env,principal,f.operation)).rejects.toMatchObject({status:404});
   });
@@ -478,11 +478,11 @@ describe('real D1 native staff folder binding and exact principal delegation',{t
   it('fails unavailable on real absent migration and rejects unsafe route bodies/CSRF',async()=>{
     const empty=await runtime.getD1Database('EMPTY_DB') as D1Database;expect(await nativeDeliveryBindingsReady({...env,DELIVERY_DB:empty})).toBe(false);
     const app=new Hono<{Bindings:Env;Variables:{principal:StaffPrincipal;administrator:boolean}}>();app.use('*',async(c,next)=>{c.set('principal',principal);c.set('administrator',true);await next();});registerNativeDeliveryBindingRoutes(app);
-    const f=await fixture(),path='/api/delivery/native-grants/preview';
+    const f=await fixture(),path='/api/delivery/native-grants/preview',absolutePath=`${env.PUBLIC_BASE_URL}${path}`;
     expect((await app.request(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(f.operation)},env)).status).toBe(403);
     const headers={'Content-Type':'application/json',Origin:env.PUBLIC_BASE_URL,'X-CSRF-Token':await csrfToken(env,principal)};
-    expect((await app.request(path,{method:'POST',headers,body:'x'.repeat(8193)},env)).status).toBe(413);
-    const response=await app.request(path,{method:'POST',headers,body:JSON.stringify(f.operation)},env);expect(response.status).toBe(200);expect(response.headers.get('cache-control')).toBe('no-store');
+    expect((await app.request(absolutePath,{method:'POST',headers,body:'x'.repeat(8193)},env)).status).toBe(413);
+    const response=await app.request(absolutePath,{method:'POST',headers,body:JSON.stringify(f.operation)},env);expect(response.status).toBe(200);expect(response.headers.get('cache-control')).toBe('no-store');
     expect(await response.json()).toMatchObject({preview:{operation:f.operation}});
   });
 });

@@ -332,7 +332,7 @@ export function validateEvidence(evidence, options = {}) {
     if (deliveryMigration[proof] !== true) errors.push(`native portal release barrier must prove ${proof}`);
   }
   if (!populated(deliveryMigration.nativePortalReleaseEvidenceRef))
-    errors.push("native portal release barrier needs referenced 0184-0186/0050 migration-first and rollback-drain evidence");
+    errors.push("native portal release barrier needs referenced 0184-0189/0051 migration-first and rollback-drain evidence");
   for (const proof of ["authenticatedContentMigrationAppliedBeforeFinalWorkers", "authenticatedContentCollectionNotStarted", "authenticatedContentRetentionGateClosed", "authenticatedContentSecretProvisioned", "authenticatedContentDefaultOffAtDeploy"]) {
     if (deliveryMigration[proof] !== true) errors.push(`authenticated content audit release barrier must prove ${proof}`);
   }

@@ -166,7 +166,9 @@ export function requestHostAllowed(requestUrl: string, env: OriginEnv): boolean 
   if (!legacyOrigins) return false;
   if (namespace === "public") return publicRequestOrigins.includes(request.origin);
   const primaryPortalOrigin = configuredClientPortalOrigin(env);
-  if (namespace === "internal") return primaryPortalOrigin !== null && (request.origin === primaryPortalOrigin || legacyOrigins.includes(request.origin));
+  // Machine ingress is canonical-only. Legacy origins remain available to the
+  // browser/public namespaces above and below, but never to /api/internal/*.
+  if (namespace === "internal") return primaryPortalOrigin !== null && request.origin === primaryPortalOrigin;
   const portalOrigins = configuredClientPortalOrigins(env);
   if (!portalOrigins) return false;
   if (namespace === "portal") return portalOrigins.includes(request.origin) || legacyOrigins.includes(request.origin);

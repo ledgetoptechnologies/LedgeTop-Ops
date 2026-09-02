@@ -14,6 +14,7 @@ import { ClientAuditTimeline } from "./ClientAuditTimeline";
 import { ClientInvitationPolicy } from "./ClientInvitationPolicy";
 import { ClientPortalBootstrap } from "./ClientPortalBootstrap";
 import { OrganizationOperationalContacts } from "./OrganizationOperationalContacts";
+import { ClientInternalNotes } from "./ClientInternalNotes";
 import type { InvitationAdministrationAccess } from "./invitation-administration-api";
 
 interface CollectionItem { row_key?: string }
@@ -43,6 +44,7 @@ interface ClientDetailResponse {
   businessProjects?: BusinessProject[];
   businessParty?: BusinessPartyReference | null;
   canManageBusinessParties?: boolean;
+  internalNotesAvailable?: boolean;
   organizationOperationalContactsAvailable?: boolean;
   projectManagementAvailable?: boolean;
   businessActivityAvailable?: boolean;
@@ -465,6 +467,9 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess }: { route
       contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} onRefresh={refresh} />
     <p className="client-hub-inventory-note">{data.businessProjects ? "Business projects are separate from the work shared with this client and their portal access." : "These sections show work shared with this client. Full business project history is separate."}</p>
     <div className="dashboard-grid client-hub-detail-grid" key={revision}>
+      {data.internalNotesAvailable === true && data.client.source_id && data.client.root_namespace && data.contextVersion && <ClientInternalNotes
+        root={{ sourceId: data.client.source_id, rootNamespace: data.client.root_namespace, kind: data.client.kind, publicId: data.client.public_id }}
+        contextVersion={data.contextVersion} contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} />}
       <span id="client-business-contacts" className="client-hub-anchor" aria-hidden="true" />
       <Card title="Business contacts">
         <ClientCollection {...collectionProps} collection="businessContacts" label="Business contacts" initial={data.contacts.filter(contact => contact.record_type === "business_contact")} page={data.pages?.businessContacts}

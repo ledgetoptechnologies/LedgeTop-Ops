@@ -13,6 +13,10 @@ import { listClientHubBusinessProjects, BUSINESS_PROJECT_FILTERS, type BusinessP
 import { readClientHubBusinessProjectDetail } from "./client-hub-business-project-detail";
 import { listClientHubProjectFeedbackHistory } from "./client-hub-project-feedback-history";
 import { isPortalIdentityCollection, listPortalIdentityCollection, listPortalIdentityPage, portalIdentityQuery } from "./client-portal-identity-read";
+import { registerClientInternalNoteRoutes } from "./client-internal-note-routes";
+import { readBoundedJson } from "./bounded-json";
+import { reactivateClientPortalWorkspaceAccess, suspendClientPortalWorkspaceAccess,
+  type WorkspaceAccessMutationInput, type WorkspaceAccessReactivationInput } from "./client-portal-workspace-access";
 import { externalAccessQuery, listClientExternalAccess } from "./client-external-access";
 import { listClientServiceAssignments, serviceAssignmentQuery } from "./client-service-assignments";
 import type { Env, StaffPrincipal } from "./types";
@@ -266,6 +270,7 @@ async function clientHubDetail(env: Env, principal: StaffPrincipal, kind: Client
     pages: Object.fromEntries(collections.map(({ collection, result }) => [collection, result.page])),
     contextVersion: context.contextVersion,
     capabilities: access,
+    internalNotesAvailable: true,
     organizationOperationalContactsAvailable: workspace.root_namespace === "business" && workspace.kind === "organization",
     projectManagementAvailable: workspace.root_namespace === "business",
     businessActivityAvailable: workspace.root_namespace === "business",
@@ -273,7 +278,24 @@ async function clientHubDetail(env: Env, principal: StaffPrincipal, kind: Client
   };
 }
 
+function workspaceAccessMutationInput(value: unknown, reactivate: false): WorkspaceAccessMutationInput;
+function workspaceAccessMutationInput(value: unknown, reactivate: true): WorkspaceAccessReactivationInput;
+function workspaceAccessMutationInput(value: unknown, reactivate: boolean): WorkspaceAccessMutationInput | WorkspaceAccessReactivationInput {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new HTTPException(400, { message: "Portal workspace access request is invalid" });
+  const input = value as Record<string, unknown>;
+  const allowed = new Set(["expectedContextVersion", "expectedPrincipalContext", "reasonCode",
+    ...(reactivate ? ["denialId", "expectedUpdatedAt"] : [])]);
+  if (Object.keys(input).some(key => !allowed.has(key))
+    || typeof input.expectedContextVersion !== "string" || typeof input.expectedPrincipalContext !== "string"
+    || typeof input.reasonCode !== "string" || (reactivate
+      && (typeof input.denialId !== "string" || typeof input.expectedUpdatedAt !== "string")))
+    throw new HTTPException(400, { message: "Portal workspace access request is invalid" });
+  return input as unknown as WorkspaceAccessMutationInput | WorkspaceAccessReactivationInput;
+}
+
 export function registerClientHubRoutes(app: App): void {
+  registerClientInternalNoteRoutes(app, resolveDetailContext, verifyContext);
   registerProjectOperationalRoutes(app, resolveDetailContext, verifyContext);
   registerOrganizationOperationalContactRoutes(app, resolveDetailContext, verifyContext);
   app.get("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/project-management", async c => {
@@ -378,6 +400,32 @@ export function registerClientHubRoutes(app: App): void {
     const context = await resolveDetailContext(c.env, principal, kind, c.req.param("publicId"), c.req.param("sourceId"), c.req.param("rootNamespace"));
     const result = await listPortalIdentityPage(c.env, principal, { kind: "client", context }, portalIdentityQuery(new URL(c.req.url).searchParams));
     await verifyContext(c.env, principal, context);
+    return c.json(result);
+  });
+  app.post("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/identities/:principalId/workspace-access/suspend", async c => {
+    const kind = routeKind(c.req.param("kind"));
+    if (!kind) throw new HTTPException(404, { message: "Client not found" });
+    const principal = c.get("principal");
+    const context = await resolveDetailContext(c.env, principal, kind, c.req.param("publicId"),
+      c.req.param("sourceId"), c.req.param("rootNamespace"));
+    const result = await suspendClientPortalWorkspaceAccess(c.env, principal, context,
+      c.req.param("principalId"), workspaceAccessMutationInput(await readBoundedJson(c.req.raw, 16_384, "Workspace access request"), false),
+      c.req.header("Idempotency-Key") || "");
+    await verifyContext(c.env, principal, context);
+    c.header("Cache-Control", "no-store");
+    return c.json(result, result.replayed ? 200 : 201);
+  });
+  app.post("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/identities/:principalId/workspace-access/reactivate", async c => {
+    const kind = routeKind(c.req.param("kind"));
+    if (!kind) throw new HTTPException(404, { message: "Client not found" });
+    const principal = c.get("principal");
+    const context = await resolveDetailContext(c.env, principal, kind, c.req.param("publicId"),
+      c.req.param("sourceId"), c.req.param("rootNamespace"));
+    const result = await reactivateClientPortalWorkspaceAccess(c.env, principal, context,
+      c.req.param("principalId"), workspaceAccessMutationInput(await readBoundedJson(c.req.raw, 16_384, "Workspace access request"), true),
+      c.req.header("Idempotency-Key") || "");
+    await verifyContext(c.env, principal, context);
+    c.header("Cache-Control", "no-store");
     return c.json(result);
   });
   app.get("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/external-access", async c => {

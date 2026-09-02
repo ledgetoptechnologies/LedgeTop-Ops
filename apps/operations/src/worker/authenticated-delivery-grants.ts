@@ -833,8 +833,7 @@ export async function revokeAuthenticatedDeliveryGrant(env: Env, principal: Staf
   if (!current) throw new HTTPException(409, { message: "Grant changed; refresh and try again" });
   const context = await bindingContext(env, current.folder_binding_id);
   await requirePermission(env, principal, "delivery.share.revoke", { divisionId: context.divisionId }, true);
-  let results:D1Result[];
-  try{results = await db.batch([
+  try{await db.batch([
     db.prepare(`UPDATE portal_v2_authenticated_delivery_grants SET status='revoked',revoked_at=datetime('now'),
       revoked_by_staff_id=?,revoke_reason_code=?,updated_at=datetime('now')
       WHERE id=? AND grant_version=? AND status='active' AND revoked_at IS NULL`)
@@ -864,8 +863,14 @@ export async function revokeAuthenticatedDeliveryGrant(env: Env, principal: Staf
     if(status!=='active')throw new HTTPException(409,{message:'Grant changed; refresh and try again'});
     throw new HTTPException(503,{message:'Grant revocation could not be recorded',cause});
   }
-  if (results[0]?.meta.changes !== 1) throw new HTTPException(409, { message: "Grant changed; refresh and try again" });
-  return { grant: (await grantView(db, current.id))!, replayed: false };
+  // D1's batch-level change count is not a reliable compare-and-swap signal
+  // once the immutable audit triggers also write. The guarded update creates
+  // this actor/idempotency receipt only when it wins, so verify that durable
+  // receipt before reporting success.
+  const committed = await replay(env, principal, idempotencyKey, "grant.revoke", fingerprint);
+  if (!committed || committed.status !== "revoked")
+    throw new HTTPException(409, { message: "Grant changed; refresh and try again" });
+  return { grant: committed, replayed: false };
 }
 
 export async function restoreAuthenticatedDeliveryGrant(env: Env, principal: StaffPrincipal,

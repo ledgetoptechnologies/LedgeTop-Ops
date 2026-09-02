@@ -1,6 +1,7 @@
 import { HTTPException } from "hono/http-exception";
 import { isAdministrator, sqlScope } from "./acl";
 import { eligibilityBlockManagementEnabled, portalOperationsManagementEnabled } from "./client-identity-eligibility";
+import { portalDenyPolicyManagementEnabled } from "./client-portal-deny-policies";
 import type { ClientHubCollectionContext } from "./client-hub-collections";
 import { sha256 } from "./crypto";
 import type { Env, StaffPrincipal } from "./types";
@@ -15,6 +16,7 @@ export interface PortalIdentityPageMetadata {
 export interface PortalIdentityCapabilities {
   canManagePortal: boolean;
   canManageEligibilityBlocks: boolean;
+  canManageWorkspaceAccess: boolean;
   canReviewIdentityDetails: boolean;
 }
 export interface PortalIdentitySummary {
@@ -23,9 +25,12 @@ export interface PortalIdentitySummary {
   contact_key: string; row_key: string; principalContextVersion: string;
   has_workspace_access: number; blocked: number; hasExplicitAccess: boolean; accessLoaded: false;
   effectiveEmailBlockCount: number; effectiveSubjectBlock: boolean; removableEmailBlockId: string | null;
+  workspaceAccessSuspended: boolean; workspaceDenialCount: number;
+  removableWorkspaceDenialId: string | null; removableWorkspaceDenialUpdatedAt: string | null;
   invitation: null | { id: string; status: string; expires_at: string; email_status: string | null;
     attempts: number | null; last_error_code: string | null };
-  actions: { canRetryInvitation: boolean; canCreateEmailBlock: boolean; canReviewEligibilityBlocks: boolean };
+  actions: { canRetryInvitation: boolean; canCreateEmailBlock: boolean; canReviewEligibilityBlocks: boolean;
+    canSuspendWorkspaceAccess: boolean; canReactivateWorkspaceAccess: boolean };
 }
 export interface PortalIdentityPage {
   items: PortalIdentitySummary[]; page: PortalIdentityPageMetadata; contextVersion: string;
@@ -55,6 +60,7 @@ interface Fact extends Record<string, unknown> {
   workspace_id: string; public_id: string; display_name: string; email_hint: string; status: string;
   workspace_name: string; identity_id: string | null; candidate_count: number; membership_active: number;
   blocked: number; email_block_count: number; subject_block: number; email_block_id: string | null;
+  workspace_denial_count: number; workspace_denial_id: string | null; workspace_denial_updated_at: string | null;
   has_rules: number; invitation_id: string | null; invitation_status: string | null; invitation_expires_at: string | null;
   email_status: string | null; attempts: number | null; last_error_code: string | null; invitation_retryable: number;
 }
@@ -108,6 +114,20 @@ function factsCte(principalPredicate: string): string { return `WITH principal_k
       AND block.match_type='email' AND ${normalized("block.normalized_email")}=${normalized("pa.email_hint")}) email_block_id,
     EXISTS(SELECT 1 FROM portal_v2_identity_eligibility_blocks block WHERE ${activeBlock}
       AND block.match_type='issuer_subject' AND block.issuer=identity.issuer AND block.subject=identity.subject) subject_block,
+    (SELECT count(*) FROM portal_v2_identity_denials denial WHERE denial.identity_id=pa.identity_id
+      AND denial.workspace_id=pa.workspace_id AND denial.scope_type='workspace' AND denial.scope_public_id=pa.workspace_id
+      AND denial.status='active' AND denial.revoked_at IS NULL AND datetime(denial.valid_from)<=datetime('now')
+      AND (denial.expires_at IS NULL OR datetime(denial.expires_at)>datetime('now'))) workspace_denial_count,
+    (SELECT denial.id FROM portal_v2_identity_denials denial WHERE denial.identity_id=pa.identity_id
+      AND denial.workspace_id=pa.workspace_id AND denial.scope_type='workspace' AND denial.scope_public_id=pa.workspace_id
+      AND denial.status='active' AND denial.revoked_at IS NULL AND datetime(denial.valid_from)<=datetime('now')
+      AND (denial.expires_at IS NULL OR datetime(denial.expires_at)>datetime('now'))
+      ORDER BY denial.created_at DESC,denial.id DESC LIMIT 1) workspace_denial_id,
+    (SELECT denial.updated_at FROM portal_v2_identity_denials denial WHERE denial.identity_id=pa.identity_id
+      AND denial.workspace_id=pa.workspace_id AND denial.scope_type='workspace' AND denial.scope_public_id=pa.workspace_id
+      AND denial.status='active' AND denial.revoked_at IS NULL AND datetime(denial.valid_from)<=datetime('now')
+      AND (denial.expires_at IS NULL OR datetime(denial.expires_at)>datetime('now'))
+      ORDER BY denial.created_at DESC,denial.id DESC LIMIT 1) workspace_denial_updated_at,
     EXISTS(SELECT 1 FROM portal_v2_entitlements entitlement WHERE entitlement.workspace_id=pa.workspace_id
       AND entitlement.identity_id=pa.identity_id) has_rules,
     (SELECT invitation.id FROM portal_v2_invitations invitation WHERE invitation.workspace_id=pa.workspace_id
@@ -165,6 +185,7 @@ async function policy(env: Env, actor: StaffPrincipal, scope: PortalIdentityScop
   const primaryClientScope = scope.kind === "global" || scope.context.root.source_id === "project-alpha:primary";
   const capabilities = { canManagePortal: primaryClientScope && administrator && portalOperationsManagementEnabled(env),
     canManageEligibilityBlocks: primaryClientScope && administrator && eligibilityBlockManagementEnabled(env),
+    canManageWorkspaceAccess: primaryClientScope && administrator && portalDenyPolicyManagementEnabled(env),
     canReviewIdentityDetails: primaryClientScope };
   const hash = await sha256(JSON.stringify([actor.id, access.global, access.deniedGlobal, administrator, capabilities,
     scope.kind === "global" ? "global" : [scope.context.canonicalRoot, scope.context.root.workspace_id, scope.context.contextVersion]]));
@@ -186,17 +207,48 @@ async function summary(fact: Fact, current: Policy): Promise<PortalIdentitySumma
     display_name: fact.display_name, email_hint: email, status: fact.status,
     identity_id: linked ? fact.identity_id : null, binding_status: linked ? "linked" : fact.candidate_count > 1 ? "conflict" : "unlinked",
     contact_key: `principal:${fact.workspace_id}:${fact.public_id}`, row_key: JSON.stringify([fact.workspace_id, fact.public_id]),
-    principalContextVersion, has_workspace_access: fact.blocked ? 0 : fact.membership_active, blocked: fact.blocked,
+    principalContextVersion, has_workspace_access: fact.blocked || fact.workspace_denial_count ? 0 : fact.membership_active, blocked: fact.blocked,
     hasExplicitAccess: Boolean(fact.has_rules), accessLoaded: false,
     effectiveEmailBlockCount: fact.email_block_count, effectiveSubjectBlock: Boolean(fact.subject_block),
     removableEmailBlockId: current.capabilities.canManageEligibilityBlocks && fact.email_block_count === 1 ? fact.email_block_id : null,
+    workspaceAccessSuspended: fact.workspace_denial_count > 0, workspaceDenialCount: fact.workspace_denial_count,
+    removableWorkspaceDenialId: current.capabilities.canManageWorkspaceAccess && fact.workspace_denial_count === 1 ? fact.workspace_denial_id : null,
+    removableWorkspaceDenialUpdatedAt: current.capabilities.canManageWorkspaceAccess && fact.workspace_denial_count === 1 ? fact.workspace_denial_updated_at : null,
     invitation: current.capabilities.canReviewIdentityDetails && fact.invitation_id ? { id: fact.invitation_id, status: fact.invitation_status!, expires_at: fact.invitation_expires_at!,
       email_status: fact.email_status, attempts: fact.attempts, last_error_code: fact.last_error_code } : null,
     actions: { canRetryInvitation: current.capabilities.canManagePortal && Boolean(fact.invitation_retryable),
       canCreateEmailBlock: current.capabilities.canManageEligibilityBlocks && fact.email_block_count === 0
         && email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email),
-      canReviewEligibilityBlocks: current.capabilities.canReviewIdentityDetails },
+      canReviewEligibilityBlocks: current.capabilities.canReviewIdentityDetails,
+      canSuspendWorkspaceAccess: current.capabilities.canManageWorkspaceAccess && linked && Boolean(fact.membership_active)
+        && fact.workspace_denial_count === 0,
+      canReactivateWorkspaceAccess: current.capabilities.canManageWorkspaceAccess && fact.workspace_denial_count === 1 },
   };
+}
+
+/** Resolve one exact projected principal for a Client Hub mutation. This is a
+ * live source/principal fence; callers must still use the workspace-scoped
+ * denial authority for the write and recheck the Client Hub context after it. */
+export async function requirePortalIdentityMutationTarget(env: Env, actor: StaffPrincipal,
+  context: ClientHubCollectionContext, publicId: string, expectedContextVersion: string,
+  expectedPrincipalContext: string): Promise<PortalIdentitySummary> {
+  checkId(publicId);
+  if (!context.root.workspace_id || context.root.source_id !== "project-alpha:primary")
+    throw new HTTPException(404, { message: "Portal workspace access is unavailable for this client" });
+  if (context.contextVersion !== expectedContextVersion)
+    throw new HTTPException(409, { message: "Client mapping or permissions changed. Refresh the client workspace to continue" });
+  if (!/^[A-Za-z0-9_-]{43}$/.test(expectedPrincipalContext))
+    invalid("A current principal context is required");
+  const current = await policy(env, actor, { kind: "client", context });
+  if (!current.capabilities.canManageWorkspaceAccess)
+    throw new HTTPException(404, { message: "Portal workspace access management is unavailable" });
+  const fact = (await factsForKeys(env, [{ workspaceId: context.root.workspace_id, publicId }]))[0];
+  if (!fact) throw new HTTPException(404, { message: "Portal principal not found in this client workspace" });
+  const target = await summary(fact, current);
+  if (target.principalContextVersion !== expectedPrincipalContext) changed();
+  if (!target.identity_id || target.binding_status !== "linked")
+    throw new HTTPException(409, { message: "This client does not have one verified portal login" });
+  return target;
 }
 
 async function factsForKeys(env: Env, keys: PrincipalKey[]): Promise<Fact[]> {

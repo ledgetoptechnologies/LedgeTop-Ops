@@ -466,6 +466,12 @@ export async function revokePortalIdentityDenial(env: Env, principal: StaffPrinc
       SELECT ?,?,'denial.revoke',?,?,? WHERE changes()=1`).bind(principal.id, idempotencyKey, fingerprint, denialId,
       JSON.stringify({ reasonCode })),
   ]);
-  if (results[0]?.meta.changes !== 1) throw new HTTPException(409, { message: "Denial changed; refresh and try again" });
-  return { denial: (await denialView(db, denialId))!, replayed: false };
+  // D1's reported update count is not a stable compare-and-swap signal when
+  // the immutable audit trigger also writes. The mutation receipt is inserted
+  // only when SQLite's statement-local changes() observes the guarded update;
+  // read that durable receipt back before deciding the transition lost a race.
+  const committed = await replay(db, principal.id, idempotencyKey, "denial.revoke", fingerprint);
+  if (!committed || committed.status !== "revoked")
+    throw new HTTPException(409, { message: "Denial changed; refresh and try again" });
+  return { denial: committed, replayed: false };
 }

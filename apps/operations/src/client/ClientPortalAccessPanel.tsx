@@ -18,19 +18,23 @@ export interface PortalInvitation extends PortalRecord {
   email_status: string | null; attempts?: number | null; last_error_code?: string | null;
 }
 export interface PortalIdentitySummary extends PortalRecord {
-  workspace_id: string; public_id: string; display_name: string; email_hint: string;
+  workspace_id: string; workspace_name?: string; public_id: string; display_name: string; email_hint: string;
   status: string; identity_id: string | null; has_workspace_access: number; blocked: number;
   binding_status: string; principalContextVersion: string;
   hasExplicitAccess: boolean; accessLoaded: false; invitation: PortalInvitation | null;
   effectiveEmailBlockCount: number; effectiveSubjectBlock: boolean; removableEmailBlockId: string | null;
-  actions: { canRetryInvitation: boolean; canCreateEmailBlock: boolean; canReviewEligibilityBlocks: boolean };
+  workspaceAccessSuspended?: boolean; workspaceDenialCount?: number;
+  removableWorkspaceDenialId?: string | null; removableWorkspaceDenialUpdatedAt?: string | null;
+  actions: { canRetryInvitation: boolean; canCreateEmailBlock: boolean; canReviewEligibilityBlocks: boolean;
+    canSuspendWorkspaceAccess?: boolean; canReactivateWorkspaceAccess?: boolean };
 }
 interface PortalPage<T> {
   items: T[]; page: PortalPageMetadata; contextVersion: string; refreshedAt: string;
   principalContextVersion?: string;
 }
 export interface PortalIdentityPage extends PortalPage<PortalIdentitySummary> {
-  capabilities: { canManagePortal: boolean; canManageEligibilityBlocks: boolean; canReviewIdentityDetails?: boolean };
+  capabilities: { canManagePortal: boolean; canManageEligibilityBlocks: boolean; canManageWorkspaceAccess?: boolean;
+    canReviewIdentityDetails?: boolean };
 }
 interface AccessRule extends PortalRecord {
   id: string; capability: string; effect: "allow" | "deny"; scope_type: string; scope_public_id: string;
@@ -43,7 +47,8 @@ interface EligibilityBlock extends PortalRecord {
   effective_now: boolean; global_scope: true; canRevoke: boolean;
 }
 type IdentityQuery = { q: string; link: "all" | "linked" | "unlinked" | "conflict"; blocked: "all" | "yes" | "no"; principalStatus: "active" | "suspended" | "revoked" | "all" };
-type Mutation = { identity: PortalIdentitySummary; action: "block" | "unblock" | "retry"; blockId?: string };
+type Mutation = { identity: PortalIdentitySummary;
+  action: "block" | "unblock" | "retry" | "workspace_suspend" | "workspace_reactivate"; blockId?: string };
 
 function readQuery(): IdentityQuery {
   const query = new URLSearchParams(location.search), link = query.get("login_link"), blocked = query.get("login_blocked"), status = query.get("login_status");
@@ -63,6 +68,7 @@ function date(value: string | null | undefined) {
 }
 function badge(identity: PortalIdentitySummary): { text: string; tone: "danger" | "success" | "warning" | "neutral" } {
   if (identity.blocked) return { text: "Sign-in blocked", tone: "danger" };
+  if (identity.workspaceAccessSuspended) return { text: "Access paused for this workspace", tone: "warning" };
   if (identity.binding_status === "conflict") return { text: "Login link needs review", tone: "warning" };
   if (identity.identity_id && identity.has_workspace_access) return { text: "Portal membership active", tone: "success" };
   return identity.identity_id ? { text: "Login linked · no portal membership", tone: "neutral" } : { text: "Login not linked", tone: "neutral" };
@@ -172,6 +178,9 @@ function IdentityRow({ identity, basePath, contextVersion, contextSignal, capabi
   const props = { identity, contextVersion, contextSignal, onInvalidated };
   const canBlock = capabilities.canManageEligibilityBlocks && identity.actions.canCreateEmailBlock;
   const canUnblock = capabilities.canManageEligibilityBlocks && Boolean(identity.removableEmailBlockId);
+  const canSuspendWorkspace = capabilities.canManageWorkspaceAccess && identity.actions.canSuspendWorkspaceAccess;
+  const canReactivateWorkspace = capabilities.canManageWorkspaceAccess && identity.actions.canReactivateWorkspaceAccess
+    && identity.removableWorkspaceDenialId && identity.removableWorkspaceDenialUpdatedAt;
   return <article className="portal-access-person" aria-label={`Portal login for ${identity.display_name}`}>
     <header><div><h3>{identity.display_name}</h3><p>{identity.email_hint || "Email not available"}</p>
       {identity.status !== "active" && <small>Login record status: {identity.status}</small>}</div><StatusPill tone={status.tone}>{status.text}</StatusPill></header>
@@ -205,6 +214,11 @@ function IdentityRow({ identity, basePath, contextVersion, contextSignal, capabi
     </div>}
     <div className="portal-access-tools">
       {capabilities.canManagePortal && identity.actions.canRetryInvitation && <button type="button" className="button-ghost" disabled={busy} onClick={() => mutate({ identity, action: "retry" })}>Retry invitation delivery</button>}
+      {canSuspendWorkspace && <button type="button" className="button-danger" disabled={busy}
+        onClick={() => mutate({ identity, action: "workspace_suspend" })}>Pause access to this workspace</button>}
+      {canReactivateWorkspace && <button type="button" className="button-ghost" disabled={busy}
+        onClick={() => mutate({ identity, action: "workspace_reactivate", blockId: identity.removableWorkspaceDenialId! })}>Restore access to this workspace</button>}
+      {(identity.workspaceDenialCount || 0) > 1 && <small>Multiple workspace restrictions apply. Review the access audit before restoring access.</small>}
       {canBlock && <button type="button" className="button-danger" disabled={busy} onClick={() => mutate({ identity, action: "block" })}>Block portal sign-in</button>}
       {canUnblock && <button type="button" className="button-ghost" disabled={busy} onClick={() => mutate({ identity, action: "unblock", blockId: identity.removableEmailBlockId! })}>Remove sign-in block</button>}
       {identity.effectiveEmailBlockCount > 1 && identity.actions.canReviewEligibilityBlocks && <small>Multiple email blocks apply. Review Sign-in blocks before removing a block.</small>}
@@ -249,10 +263,15 @@ export function ClientPortalAccessPanel({ initialPage, basePath, contextVersion,
     if (claimed.current || contextSignal.aborted) return;
     const { identity, action, blockId } = mutation;
     if (action === "retry" ? !capabilities.canManagePortal || !identity.actions.canRetryInvitation
-      : !capabilities.canManageEligibilityBlocks || (action === "block" && !identity.actions.canCreateEmailBlock) || (action === "unblock" && !blockId)) return;
+      : action === "workspace_suspend" ? !capabilities.canManageWorkspaceAccess || !identity.actions.canSuspendWorkspaceAccess
+        : action === "workspace_reactivate" ? !capabilities.canManageWorkspaceAccess || !identity.actions.canReactivateWorkspaceAccess
+          || !blockId || !identity.removableWorkspaceDenialUpdatedAt
+          : !capabilities.canManageEligibilityBlocks || (action === "block" && !identity.actions.canCreateEmailBlock) || (action === "unblock" && !blockId)) return;
     if (action !== "retry" && !confirm(action === "block"
       ? `Block portal sign-in for ${identity.email_hint} across ALL client workspaces? Existing project and file permissions are not deleted.`
-      : `Remove this GLOBAL email sign-in block for ${identity.email_hint}? This affects all client workspaces. Other blocks, memberships, and content permissions still apply.`)) return;
+      : action === "unblock" ? `Remove this GLOBAL email sign-in block for ${identity.email_hint}? This affects all client workspaces. Other blocks, memberships, and content permissions still apply.`
+        : action === "workspace_suspend" ? `Pause portal access for ${identity.display_name} in ${identity.workspace_name || "this client workspace"}? Their Project Alpha membership is preserved and other client workspaces are not affected.`
+          : `Restore portal access for ${identity.display_name} in ${identity.workspace_name || "this client workspace"}? Other restrictions and content permissions still apply.`)) return;
     claimed.current = true; setBusy(true);
     const key = identityKey(identity), operation = JSON.stringify([key, identity.principalContextVersion, action, blockId || ""]);
     const idempotencyKey = attempts.current.get(operation) || crypto.randomUUID(); attempts.current.set(operation, idempotencyKey);
@@ -260,14 +279,24 @@ export function ClientPortalAccessPanel({ initialPage, basePath, contextVersion,
     setMutationFeedback(value => ({ ...value, [key]: { message: "Saving…", error: false } }));
     try {
       const url = action === "retry" ? `/api/team/clients/${encodeURIComponent(identity.workspace_id)}/${encodeURIComponent(identity.public_id)}/invitation/retry`
-        : action === "block" ? "/api/team/clients/eligibility-blocks" : `/api/team/clients/eligibility-blocks/${encodeURIComponent(blockId!)}/revoke`;
+        : action === "block" ? "/api/team/clients/eligibility-blocks"
+          : action === "unblock" ? `/api/team/clients/eligibility-blocks/${encodeURIComponent(blockId!)}/revoke`
+            : `${basePath}/identities/${encodeURIComponent(identity.public_id)}/workspace-access/${action === "workspace_suspend" ? "suspend" : "reactivate"}`;
       const result = await api<{ outcome?: string }>(url, { method: "POST", headers: { "Idempotency-Key": idempotencyKey }, signal: abort.signal,
         ...(action === "retry" ? {} : { body: JSON.stringify(action === "block"
-          ? { matchType: "email", email: identity.email_hint, reasonCode: "operator_opt_out", expiresAt: null } : { reasonCode: "operator_opt_in" }) }) });
+          ? { matchType: "email", email: identity.email_hint, reasonCode: "operator_opt_out", expiresAt: null }
+          : action === "unblock" ? { reasonCode: "operator_opt_in" }
+            : action === "workspace_suspend" ? { expectedContextVersion: contextVersion,
+              expectedPrincipalContext: identity.principalContextVersion, reasonCode: "operator_workspace_pause" }
+              : { expectedContextVersion: contextVersion, expectedPrincipalContext: identity.principalContextVersion,
+                reasonCode: "operator_workspace_restore", denialId: blockId,
+                expectedUpdatedAt: identity.removableWorkspaceDenialUpdatedAt }) }) });
       if (!active.current || abort.signal.aborted || contextSignal.aborted) return;
       attempts.current.delete(operation);
       const message = action === "block" ? `Global sign-in block saved for ${identity.email_hint}.`
         : action === "unblock" ? `Global email block removed for ${identity.email_hint}. Other access rules still apply.`
+          : action === "workspace_suspend" ? `Portal access paused for ${identity.display_name} in this client workspace.`
+            : action === "workspace_reactivate" ? `Portal access restored for ${identity.display_name} in this client workspace. Other access rules still apply.`
           : result.outcome === "queued" ? `Invitation delivery queued for ${identity.email_hint}.`
             : result.outcome === "already_queued" ? "Invitation delivery is already queued."
               : "This invitation cannot be retried. Refreshing its current status.";

@@ -411,7 +411,9 @@
         "0184_native_client_feedback.sql",
         "0185_native_service_request_ownership.sql",
         "0186_delivery_notification_authority_provenance.sql",
-        "0187_authenticated_content_audit.sql"
+        "0187_authenticated_content_audit.sql",
+        "0188_native_feedback_completion_notices.sql",
+        "0189_primary_staff_folder_bindings.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
@@ -478,7 +480,8 @@
         "0047_project_memory_staff_attachments.sql",
         "0048_business_party_lifecycle.sql",
         "0049_project_alpha_delivery_source_rate_limits.sql",
-        "0050_project_alpha_draft_quote_credentials.sql"
+        "0050_project_alpha_draft_quote_credentials.sql",
+        "0051_client_hub_internal_notes.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
