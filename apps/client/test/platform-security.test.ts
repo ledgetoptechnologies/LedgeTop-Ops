@@ -84,6 +84,8 @@ describe("deployed host admission",()=>{
       LEGACY_CLIENT_ORIGINS:"https://client.drone.example"} as const;
     expect(malformedPortalLaunchRedirect("https://portal.technology.example/portal*?__cf_access_message=logged_out&draft=one",env))
       .toBe("https://portal.technology.example/portal?draft=one");
+    expect(malformedPortalLaunchRedirect("https://portal.technology.example/portal%2A?__cf_access_message=logged_out",env))
+      .toBe("https://portal.technology.example/portal");
     expect(malformedPortalLaunchRedirect("https://portal.drone.example/portal/projects",env)).toBeNull();
     expect(malformedPortalLaunchRedirect("https://evil.example/portal*",env)).toBeNull();
   });

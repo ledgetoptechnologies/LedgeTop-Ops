@@ -128,7 +128,8 @@ export function malformedPortalLaunchRedirect(requestUrl: string, env: OriginEnv
   if (!origins || !legacy) return null;
   let request: URL;
   try { request = new URL(requestUrl); } catch { return null; }
-  if (![...origins, ...legacy].includes(request.origin) || request.pathname !== "/portal*") return null;
+  const pathname = request.pathname.toLocaleLowerCase("en-US");
+  if (![...origins, ...legacy].includes(request.origin) || (pathname !== "/portal*" && pathname !== "/portal%2a")) return null;
   request.pathname = "/portal";
   request.searchParams.delete("__cf_access_message");
   return request.toString();
