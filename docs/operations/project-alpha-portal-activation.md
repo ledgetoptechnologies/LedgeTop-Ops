@@ -40,6 +40,20 @@ a bounded rotation overlap. Neither half is configured by itself, the previous
 ID differs from the current ID, and no previous pair is created for an initial
 activation.
 
+The checked-in production configuration is the receiver-only state: portal
+sync and schema-v3 relation ingestion are true, while client hierarchy reads,
+automatic identity eligibility, content grants, requests, notifications,
+membership management, invitations, and delegated sharing remain false.
+`npm run deploy` is the only supported production release command. Its
+repository-owned wrapper executes `deploy:preflight` first and refuses to deploy
+unless the remote Worker secret inventory contains the current HMAC secret. A
+direct Wrangler invocation bypasses this gate and is not an approved release
+path. Cloudflare does not expose secret values for readback, so the Worker independently rejects
+a missing, short, oversized, control-character-containing, or whitespace-padded
+value with HTTP 503 `portal-receiver-misconfigured` and a redacted structured
+reason before Access verification, body reads, or D1 access. Do not enable the
+producer after that response; correct the secret and redeploy.
+
 ## Runtime gates
 
 | Gate | Activation role | Required base-projection state |
@@ -96,12 +110,18 @@ never save secret values or complete authentication headers.
    without reading it. If rotation is planned, confirm both previous values are
    present and internally paired; otherwise confirm both are absent. Confirm the
    two service-assignment flags remain false.
-7. Confirm the initial receiver version has all projection configuration
-   present while all three portal gates are false:
-   `PROJECT_ALPHA_PORTAL_SYNC_ENABLED=false`,
-   `CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED=false`, and
-   `CLIENT_PORTAL_HIERARCHY_V2_ENABLED=false`.
-8. Probe the false state without sensitive logging:
+   From `apps/client`, run `npm run deploy:preflight`. It calls
+   `wrangler secret list --format json`, validates only secret names, and prints
+   no secret values. A missing current secret, an orphaned previous secret, or
+   any adjacent client-authority/workflow flag that is not exactly false fails
+   the preflight.
+7. Confirm the receiver-only version has all projection configuration present
+   with `PROJECT_ALPHA_PORTAL_SYNC_ENABLED=true`,
+   `CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED=true`, and
+   `CLIENT_PORTAL_HIERARCHY_V2_ENABLED=false`. Confirm every adjacent flag
+   enumerated by the preflight remains false.
+8. Before activating this version, probe the currently deployed false state
+   without sensitive logging:
    - missing or invalid Service Token at the canonical endpoint is denied by
      Access and never reaches the Worker;
    - a valid Service Token at the canonical endpoint receives Worker 404 because
@@ -117,11 +137,11 @@ never save secret values or complete authentication headers.
 Each numbered state is a separately reviewed Worker version. Do not edit live
 variables in place and do not enable the Project Alpha producer before step 4.
 
-1. Preserve the preflight version and evidence. Prepare an ingest-only version
-   with `PROJECT_ALPHA_PORTAL_SYNC_ENABLED=true`,
-   `CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED=true`, and
-   `CLIENT_PORTAL_HIERARCHY_V2_ENABLED=false`. Keep both service-assignment flags
-   false. Confirm its diff contains no unrelated configuration change.
+1. Preserve the preflight version and evidence. Run `npm run deploy:preflight` against
+   the reviewed ingest-only configuration. It must confirm the remote current
+   secret name exists, both ingest flags are true, and all adjacent authority
+   and workflow flags remain false. Confirm the release diff contains no
+   unrelated configuration change.
 2. Activate that version on `ltds-clients` and read it back. Repeat the legacy
    internal 404 and legacy public-share/session checks before sending a valid
    projection.

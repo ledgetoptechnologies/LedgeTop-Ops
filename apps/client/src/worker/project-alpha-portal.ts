@@ -1281,25 +1281,45 @@ function statusForError(error: unknown): number {
   return 500;
 }
 
-function projectionConfigurationReady(env: Env): boolean {
-  if (env.PROJECT_ALPHA_PORTAL_SYNC_ENABLED !== "true") return false;
-  if (!env.PROJECT_ALPHA_PORTAL_APPLICATION_KEY || !SAFE_ID.test(env.PROJECT_ALPHA_PORTAL_APPLICATION_KEY)) return false;
-  if (!env.PROJECT_ALPHA_PORTAL_HMAC_KEY_ID || !SAFE_ID.test(env.PROJECT_ALPHA_PORTAL_HMAC_KEY_ID)) return false;
-  if (!env.PROJECT_ALPHA_PORTAL_HMAC_SECRET || env.PROJECT_ALPHA_PORTAL_HMAC_SECRET.length < 32) return false;
+export type PortalProjectionConfigurationIssue =
+  | "application_key_invalid"
+  | "access_audience_invalid"
+  | "access_issuer_invalid"
+  | "current_key_id_invalid"
+  | "current_secret_invalid"
+  | "previous_key_pair_invalid";
+
+function validPortalSecret(value: string | undefined): value is string {
+  if (typeof value !== "string" || value !== value.trim() || /[\u0000-\u001f\u007f]/.test(value)) return false;
+  const bytes = new TextEncoder().encode(value).byteLength;
+  return bytes >= 32 && bytes <= 8192;
+}
+
+export function portalProjectionConfigurationIssue(env: Env): PortalProjectionConfigurationIssue | null {
+  if (!env.PROJECT_ALPHA_PORTAL_APPLICATION_KEY || !SAFE_ID.test(env.PROJECT_ALPHA_PORTAL_APPLICATION_KEY)) return "application_key_invalid";
+  if (!env.PROJECT_ALPHA_PORTAL_HMAC_KEY_ID || !SAFE_ID.test(env.PROJECT_ALPHA_PORTAL_HMAC_KEY_ID)) return "current_key_id_invalid";
+  if (!validPortalSecret(env.PROJECT_ALPHA_PORTAL_HMAC_SECRET)) return "current_secret_invalid";
   const previousId = env.PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_KEY_ID;
   const previousSecret = env.PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_SECRET;
-  if ((previousId || previousSecret) && (!previousId || !SAFE_ID.test(previousId) || previousId === env.PROJECT_ALPHA_PORTAL_HMAC_KEY_ID || !previousSecret || previousSecret.length < 32)) return false;
-  if (!env.PROJECT_ALPHA_PORTAL_ACCESS_AUD || env.PROJECT_ALPHA_PORTAL_ACCESS_AUD.length > 512) return false;
+  if ((previousId || previousSecret) && (!previousId || !SAFE_ID.test(previousId) || previousId === env.PROJECT_ALPHA_PORTAL_HMAC_KEY_ID
+    || !validPortalSecret(previousSecret) || previousSecret === env.PROJECT_ALPHA_PORTAL_HMAC_SECRET)) return "previous_key_pair_invalid";
+  if (!env.PROJECT_ALPHA_PORTAL_ACCESS_AUD || env.PROJECT_ALPHA_PORTAL_ACCESS_AUD.length > 512) return "access_audience_invalid";
   try {
     const team = new URL(env.PROJECT_ALPHA_PORTAL_ACCESS_TEAM_DOMAIN ?? "");
-    return team.protocol === "https:" && team.pathname === "/" && !team.username && !team.password && !team.search && !team.hash;
+    return team.protocol === "https:" && team.pathname === "/" && !team.username && !team.password && !team.search && !team.hash
+      ? null : "access_issuer_invalid";
   } catch {
-    return false;
+    return "access_issuer_invalid";
   }
 }
 
 export async function handleProjectAlphaPortalProjectionRequest(request: Request, env: Env, accessVerifier: AccessVerifier = verifyPortalProjectionAccessAssertion): Promise<Response> {
-  if (!projectionConfigurationReady(env)) return json(404, { error: "not-found" });
+  if (env.PROJECT_ALPHA_PORTAL_SYNC_ENABLED !== "true") return json(404, { error: "not-found" });
+  const configurationIssue = portalProjectionConfigurationIssue(env);
+  if (configurationIssue) {
+    console.error(JSON.stringify({ event: "project_alpha_portal_receiver_misconfigured", reason: configurationIssue }));
+    return json(503, { error: "portal-receiver-misconfigured", reason: configurationIssue });
+  }
   try {
     if (request.method !== "POST") return json(404, { error: "not-found" });
     if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) return json(415, { error: "content-type-required" });

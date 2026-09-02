@@ -11,6 +11,14 @@ const read = (relative) => fs.readFileSync(path.join(root, relative), "utf8");
 const readJson = (relative) => JSON.parse(read(relative));
 const normalizedSha256 = (relative) => crypto.createHash("sha256").update(read(relative).replace(/\r\n/g, "\n")).digest("hex");
 
+function filesUnder(relativeDirectory, predicate = () => true) {
+  return fs.readdirSync(path.join(root, relativeDirectory), { withFileTypes: true }).flatMap((entry) => {
+    const relative = path.join(relativeDirectory, entry.name);
+    if (entry.isDirectory()) return filesUnder(relative, predicate);
+    return predicate(relative) ? [relative] : [];
+  });
+}
+
 const projectAlphaCompatibilityFixtures = [
   "packages/shared/fixtures/project-alpha-portal-v2.json",
   "packages/shared/fixtures/project-alpha-portal-relations-v3.json",
@@ -96,11 +104,32 @@ test("the client source directory retains the deployed delivery service identity
   assert(!read("package.json").includes("apps/delivery"));
 });
 
+test("production Worker releases use repository-owned deploy wrappers", () => {
+  const setup = read("docs/cloudflare-setup.md");
+  assert(setup.includes("| Deploy command | `npm run deploy` | `npm run deploy` | `npm run deploy` |"));
+
+  const clientPackage = readJson("apps/client/package.json");
+  assert.equal(clientPackage.scripts["deploy:preflight"], "node scripts/project-alpha-portal-receiver-preflight.mjs");
+  assert.equal(clientPackage.scripts.deploy, "npm run deploy:preflight && vite build && wrangler deploy");
+
+  const productionDocs = filesUnder(
+    "docs",
+    (relative) => relative.endsWith(".md") && !relative.startsWith(path.join("docs", "staging")),
+  );
+  for (const relative of productionDocs) {
+    assert.doesNotMatch(
+      read(relative),
+      /(?:npx\s+)?wrangler(?:\.cmd)?\s+deploy/i,
+      `${relative} must route production deployment through the repository-owned npm run deploy wrapper`,
+    );
+  }
+});
+
 test("the deployed Client Worker keeps reviewed resources, hosts, and portal asset routing", () => {
   // The digest intentionally moved with the reviewed canonical portal hosts
   // and explicit legacy compatibility origin. Keep the field assertions so a future config change
   // cannot hide behind a digest refresh.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "659aa73182988037fcf992238139972960cba83830a95ea60cee9d42c12e40b6");
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "088b418d0bc3e140c42a9412f23c661e69f1be0d8d362c32de83f3b919f97e29");
   const config = readJson("apps/client/wrangler.jsonc");
   assert.equal(config.name, "ltds-clients");
   assert.equal(config.main, "src/worker/index.ts");
@@ -142,13 +171,13 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.equal(config.vars.CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED, "false");
   assert.equal(config.vars.AUTHENTICATED_DELIVERY_GRANTS_ENABLED, "false");
   assert.equal(config.vars.CLIENT_VIEWER_ENABLED, "false");
-  assert.equal(config.vars.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED, "true");
   assert.equal(config.vars.CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_INVITATION_EMAIL_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_ACCESS_ENROLLMENT_READY, "false");
   assert.equal(config.vars.CLIENT_DELEGATED_SHARES_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_SYNC_ENABLED, "false");
-  assert.equal(config.vars.PROJECT_ALPHA_PORTAL_SYNC_ENABLED, "false");
+  assert.equal(config.vars.PROJECT_ALPHA_PORTAL_SYNC_ENABLED, "true");
   assert.equal(config.vars.PROJECT_ALPHA_SERVICE_ASSIGNMENT_SYNC_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_SERVICE_ASSIGNMENT_POLICY_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED, "false");

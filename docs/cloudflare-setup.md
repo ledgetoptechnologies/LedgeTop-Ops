@@ -18,7 +18,7 @@ Configure the Git repository `ledgetoptechnologies/LTDS-Ops` three times:
 | Production branch | `main` | `main` | `main` |
 | Root directory | `/apps/operations` | `/apps/client` | `/apps/ops-sync` |
 | Build command | `npm run build` | `npm run build` | `npm run build` |
-| Deploy command | `npx wrangler deploy` | `npx wrangler deploy` | `npm run deploy` |
+| Deploy command | `npm run deploy` | `npm run deploy` | `npm run deploy` |
 | Version command | `npx wrangler versions upload` | `npx wrangler versions upload` | `npx wrangler versions upload` |
 
 ### Source-layout transition guard
@@ -124,9 +124,9 @@ The production trigger for all three integrations must be `main` only, after
 review and required checks. Until isolated staging Workers and hostnames exist,
 disable non-production branch builds. If non-production builds are retained for
 artifact validation, their command must stop at `wrangler versions upload` to a
-separately named non-production Worker: never run `wrangler deploy` for a
-non-production branch, and never attach its version to a production route or
-custom domain.
+separately named non-production Worker: never invoke a production package
+deploy command for a non-production branch, and never attach its version to a
+production route or custom domain.
 
 Changing Worker Builds settings is a Cloudflare dashboard mutation and requires
 explicit operator approval. Before changing anything, record the production
@@ -454,12 +454,19 @@ bound to the `portal.*` endpoint above. The Client Worker rejects every
 is accidentally broadened; legacy public-share and same-origin session routes
 remain admitted.
 
-Keep `PROJECT_ALPHA_PORTAL_SYNC_ENABLED=false` until additive migrations 0125
-and 0129 and snapshot/activation/replay/gap/tombstone/Access-denial tests pass
-in isolated staging. Because Project Alpha emits strict schema v3,
-`CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED=true` is an ingestion prerequisite
-before the first producer delivery, not merely a later read feature. Opening
-the inbox still does not enable client hierarchy reads: keep
+The reviewed receiver-only production configuration sets
+`PROJECT_ALPHA_PORTAL_SYNC_ENABLED=true` and
+`CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED=true` only after additive migrations
+0125 and 0129 and the snapshot/activation/replay/gap/tombstone/Access-denial
+tests pass. From `apps/client`, `npm run deploy` is the only supported production
+release command. Its repository-owned wrapper runs the remote-secret preflight
+first and refuses the deploy if `PROJECT_ALPHA_PORTAL_HMAC_SECRET` is not
+installed by name. Do not replace the Worker Builds deploy command with a
+direct Wrangler invocation, which would bypass this gate. Because Cloudflare
+does not expose secret values, an enabled Worker with a malformed value returns
+HTTP 503 `portal-receiver-misconfigured`
+and logs only a redacted reason. Opening the inbox still does not enable client
+hierarchy reads: keep
 `CLIENT_PORTAL_HIERARCHY_V2_ENABLED=false` through shadow parity and the
 separate authorization cutover. Never reuse the catalog Access application,
 application key, audience, or HMAC secret. The existing Project Alpha Ops Sync

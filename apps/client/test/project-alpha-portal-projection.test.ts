@@ -1,5 +1,5 @@
 import { Miniflare } from "miniflare";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import hierarchyMigration from "../migrations/0121_client_workspace_hierarchy_v2.sql?raw";
 import projectionMigration from "../migrations/0125_project_alpha_portal_projection.sql?raw";
 import eligibilityMigration from "../migrations/0145_portal_identity_eligibility.sql?raw";
@@ -161,20 +161,28 @@ describe("Project Alpha portal hierarchy projection", () => {
     expect(await authorizePortalWorkspaceCapability(env, principal, workspace.publicId, "delivery.view", { scopeType: "project", publicId: project.publicId })).toBe(false);
   });
 
-  it("hard-404s before Access, body reads, or D1 when independently disabled or incomplete", async () => {
+  it("hard-404s while disabled and clearly rejects an enabled but malformed receiver before Access, body reads, or D1", async () => {
     let accessCalls = 0;
     const request = () => new Request("https://client.test/api/internal/project-alpha/portal-v2", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
     const disabled = await handleProjectAlphaPortalProjectionRequest(request(), { PROJECT_ALPHA_PORTAL_SYNC_ENABLED: "false" } as Env, async () => { accessCalls += 1; });
     expect(disabled.status).toBe(404);
     expect(accessCalls).toBe(0);
-    const incomplete = await handleProjectAlphaPortalProjectionRequest(request(), { PROJECT_ALPHA_PORTAL_SYNC_ENABLED: "true" } as Env, async () => { accessCalls += 1; });
-    expect(incomplete.status).toBe(404);
-    const shortSecret = await handleProjectAlphaPortalProjectionRequest(request(), {
-      ...env, PROJECT_ALPHA_PORTAL_HMAC_SECRET: "too-short",
-    }, async () => { accessCalls += 1; });
-    expect(shortSecret.status).toBe(404);
-    expect(accessCalls).toBe(0);
-    expect(env.CLIENT_PORTAL_HIERARCHY_V2_ENABLED).toBe("true");
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const incomplete = await handleProjectAlphaPortalProjectionRequest(request(), { PROJECT_ALPHA_PORTAL_SYNC_ENABLED: "true" } as Env, async () => { accessCalls += 1; });
+      expect(incomplete.status).toBe(503);
+      expect(await incomplete.json()).toEqual({ error: "portal-receiver-misconfigured", reason: "application_key_invalid" });
+      for (const malformed of ["too-short", ` ${"s".repeat(32)}`, `${"s".repeat(31)}\n`]) {
+        const response = await handleProjectAlphaPortalProjectionRequest(request(), {
+          ...env, PROJECT_ALPHA_PORTAL_HMAC_SECRET: malformed,
+        }, async () => { accessCalls += 1; });
+        expect(response.status).toBe(503);
+        expect(await response.json()).toEqual({ error: "portal-receiver-misconfigured", reason: "current_secret_invalid" });
+      }
+      expect(error).toHaveBeenCalledWith(expect.stringContaining('"event":"project_alpha_portal_receiver_misconfigured"'));
+      expect(accessCalls).toBe(0);
+      expect(env.CLIENT_PORTAL_HIERARCHY_V2_ENABLED).toBe("true");
+    } finally { error.mockRestore(); }
   });
 
   it("requires Access, fresh exact-body HMAC and opaque public ids", async () => {
@@ -192,7 +200,9 @@ describe("Project Alpha portal hierarchy projection", () => {
     const previousSecret = "portal-previous-secret-at-least-thirty-two-bytes";
     env.PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_KEY_ID = previousKeyId;
     const payload = envelope("event", "portal-rotation-13", 13, { event: { resource: "workspace", action: "tombstone", publicId: workspace.publicId, sourceVersion: "org-v2" } });
-    expect((await deliver(payload, { keyId: previousKeyId, secret: previousSecret })).status).toBe(404);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    expect((await deliver(payload, { keyId: previousKeyId, secret: previousSecret })).status).toBe(503);
+    error.mockRestore();
     env.PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_SECRET = previousSecret;
     expect((await deliver(payload, { keyId: previousKeyId, secret: previousSecret })).status).toBe(200);
     expect((await deliver({ ...payload, deliveryId: "portal-rotation-unknown" }, { keyId: "portal-test-unknown" })).status).toBe(401);
