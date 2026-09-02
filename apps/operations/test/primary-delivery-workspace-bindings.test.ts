@@ -3,7 +3,7 @@ import { Miniflare } from "miniflare";
 import { afterAll,beforeAll,describe,expect,it,vi } from "vitest";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import {
-  createPrimaryWorkspaceBinding,primaryWorkspaceBindingsReady,revokePrimaryWorkspaceBinding,
+  compareAndSwapProjectFolderAssociation,createPrimaryWorkspaceBinding,primaryWorkspaceBindingsReady,revokePrimaryWorkspaceBinding,
   searchPrimaryWorkspaceBindingTargets,suspendPrimaryWorkspaceBindingsForFolderReassignment,
 } from "../src/worker/primary-delivery-workspace-bindings";
 import { searchAuthenticatedDeliveryGrantAudiences } from "../src/worker/authenticated-delivery-grants";
@@ -201,6 +201,25 @@ describe("primary signed workspace folder binding",{timeout:60_000,concurrent:fa
     ]);
     const client={issuer,subject:"reassignment-subject",email:"client@example.test"};
     expect(await listAuthorizedAuthenticatedDeliveryPrefixes(env as any,client,workspace)).toContain(folder);
+    const secondarySource="project-alpha:secondary-preserved",secondaryWorkspace="secondary-preserved-workspace",
+      secondaryBinding="secondary-preserved-binding";
+    await delivery.batch([
+      delivery.prepare(`INSERT INTO pa_portal_source_authorities(source_id,producer_binding_id,snapshot_origin,snapshot_base_path,
+        application_key,state,active_revision,version,connector_revision,connector_version)
+        VALUES(?,'secondary-producer','https://secondary.example.test','/','ltds_ops','active',1,1,1,1)`).bind(secondarySource),
+      delivery.prepare(`INSERT INTO pa_portal_workspace_sources(workspace_id,projection_source_id,source_workspace_id)
+        VALUES(?,?,?)`).bind(secondaryWorkspace,secondarySource,"secondary-external"),
+      delivery.prepare(`INSERT INTO portal_v2_workspaces(id,root_type,pa_organization_public_id,display_name,status,project_alpha_source_id)
+        VALUES(?,'organization',?,'Secondary preserved','active',?)`).bind(secondaryWorkspace,organizationPublic,secondarySource),
+      delivery.prepare(`INSERT INTO portal_v2_folder_bindings
+        (id,workspace_id,owner_scope_type,owner_public_id,r2_prefix,source_type,source_version,status)
+        VALUES(?,?,'project',?,'Jobs/Clients/Acme/Survey/Native/','operations','native-v1','active')`)
+        .bind(secondaryBinding,secondaryWorkspace,projectPublic),
+      delivery.prepare(`INSERT INTO portal_native_staff_bindings
+        (binding_id,source_id,workspace_id,project_id,project_public_id,r2_prefix,division_id)
+        VALUES(?,?,?,?,?,'Jobs/Clients/Acme/Survey/Native/','division-one')`)
+        .bind(secondaryBinding,secondarySource,secondaryWorkspace,"native-project",projectPublic),
+    ]);
     const before=await delivery.prepare("SELECT * FROM shares WHERE id='public-share'").first();
     const result=await suspendPrimaryWorkspaceBindingsForFolderReassignment(env,staff,{
       opsProjectId:projectPublic,previousPrefix:"Jobs/Clients/Acme/Survey/",nextPrefix:"Jobs/Clients/Acme/Moved/",
@@ -214,6 +233,7 @@ describe("primary signed workspace folder binding",{timeout:60_000,concurrent:fa
     expect(await delivery.prepare("SELECT action FROM portal_primary_staff_binding_audit WHERE binding_id=? AND binding_version=2")
       .bind(bindingId).first("action")).toBe("binding.suspended");
     expect(await delivery.prepare("SELECT * FROM shares WHERE id='public-share'").first()).toEqual(before);
+    expect(await delivery.prepare("SELECT status FROM portal_v2_folder_bindings WHERE id=?").bind(secondaryBinding).first("status")).toBe("active");
     await ops.prepare("UPDATE project_folders SET r2_prefix='Jobs/Clients/Acme/Moved/' WHERE project_id=?").bind(projectPublic).run();
     expect(await listAuthorizedAuthenticatedDeliveryPrefixes(env as any,client,workspace)).toEqual(new Set());
     // Retrying the deny phase is idempotent and cannot revive the old route.
@@ -221,6 +241,17 @@ describe("primary signed workspace folder binding",{timeout:60_000,concurrent:fa
       opsProjectId:projectPublic,previousPrefix:"Jobs/Clients/Acme/Survey/",nextPrefix:"Jobs/Clients/Acme/Moved/",
       previousDivisionId:"division-one",nextDivisionId:"division-one",
     })).bindingIds).toEqual([]);
+  });
+
+  it("rejects a stale no-op compare-and-swap after a concurrent folder move",async()=>{
+    const captured={divisionId:"division-one",r2Prefix:"Jobs/Clients/Acme/Survey/"};
+    await ops.prepare("UPDATE project_folders SET r2_prefix='Jobs/Clients/Acme/Concurrent/' WHERE project_id=?")
+      .bind(projectPublic).run();
+    await expect(compareAndSwapProjectFolderAssociation(env,{
+      projectId:projectPublic,previous:captured,next:captured,confirmedBy:staff.id,
+    })).rejects.toMatchObject({status:409});
+    expect(await ops.prepare("SELECT r2_prefix FROM project_folders WHERE project_id=?").bind(projectPublic).first("r2_prefix"))
+      .toBe("Jobs/Clients/Acme/Concurrent/");
   });
 });
 
@@ -256,6 +287,12 @@ it("migration 0189 backfills a coherent populated primary Operations binding",{t
         (id,workspace_id,owner_scope_type,owner_public_id,r2_prefix,source_type,source_version,status)
         VALUES('upgrade-binding','upgrade-workspace','project',?,'Jobs/Upgrade/','operations','project-v7','active')`).bind(projectPublic),
     ]);
+    await expect(suspendPrimaryWorkspaceBindingsForFolderReassignment({
+      ...env,DELIVERY_DB:database,
+    },staff,{opsProjectId:"upgrade-project",previousPrefix:"Jobs/Upgrade/",nextPrefix:"Jobs/Moved/",
+      previousDivisionId:"division-one",nextDivisionId:"division-one"})).rejects.toMatchObject({status:503});
+    expect(await database.prepare("SELECT status,r2_prefix FROM portal_v2_folder_bindings WHERE id='upgrade-binding'").first())
+      .toEqual({status:"active",r2_prefix:"Jobs/Upgrade/"});
     const migration=readFileSync(new URL("../../client/migrations/0189_primary_staff_folder_bindings.sql",import.meta.url),"utf8");
     await database.batch(splitD1MigrationStatements(migration).map(sql=>database.prepare(sql)));
     expect(await database.prepare(`SELECT workspace_id,source_id,owner_scope_type,owner_public_id,project_public_id,

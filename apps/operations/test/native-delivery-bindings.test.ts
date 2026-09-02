@@ -98,11 +98,9 @@ describe('real D1 native staff folder binding and exact principal delegation',{t
   beforeAll(async()=>{
     runtime=new Miniflare({modules:true,compatibilityDate:'2026-07-22',script:"export default {fetch(){return new Response('native-producer')}}",d1Databases:['OPS_DB','DELIVERY_DB','EMPTY_DB']});
     ops=await runtime.getD1Database('OPS_DB') as D1Database;delivery=await runtime.getD1Database('DELIVERY_DB') as D1Database;
-    for(const [db,path,cap] of [[ops,new URL('../migrations/',import.meta.url),'0040'],[delivery,new URL('../../client/migrations/',import.meta.url),'0165']] as const)
+    for(const [db,path,cap] of [[ops,new URL('../migrations/',import.meta.url),'0040'],[delivery,new URL('../../client/migrations/',import.meta.url),'0189']] as const)
       for(const name of readdirSync(path).filter(n=>/^\d{4}_.*\.sql$/.test(n)&&n.slice(0,4)<=cap).sort())
         await db.batch(splitD1MigrationStatements(readFileSync(new URL(name,path),'utf8')).map(sql=>db.prepare(sql)));
-    await delivery.batch(splitD1MigrationStatements(readFileSync(
-      new URL('../../client/migrations/0172_project_access_authority_history.sql',import.meta.url),'utf8')).map(sql=>delivery.prepare(sql)));
     const primaryCredential={snapshotApiKey:'primary-snapshot-key',eventCurrent:{keyId:'primary-key',algorithm:'ed25519',value:key(1)}},
       secondaryCredential={snapshotApiKey:'secondary-snapshot-key',eventCurrent:{keyId:'secondary-key',algorithm:'ed25519',value:key(2)},
         portalCurrent:{keyId:'portal-key',value:'secondary-portal-secret-at-least-thirty-two-bytes'}};
@@ -180,6 +178,9 @@ describe('real D1 native staff folder binding and exact principal delegation',{t
       .bind(f.identity).first<{subject:string;verified_email:string}>();
     const client={issuer,subject:identity!.subject,email:identity!.verified_email};
     const context=await resolveNativePortalWorkspaceReadContext(env,client,f.operation.workspaceId);expect(context).not.toBeNull();
+    expect(await delivery.prepare(`SELECT count(*) n FROM portal_primary_staff_bindings
+      WHERE binding_id=(SELECT folder_binding_id FROM portal_v2_authenticated_delivery_grants WHERE id=?)`)
+      .bind(created.grant.id).first<number>('n')).toBe(0);
     const grants=await readNativeAuthenticatedDeliveryGrants(env,client,context!);expect(grants.map(g=>g.grant_id)).toEqual([created.grant.id]);
     expect(await readNativeAuthenticatedDeliveryGrants(env,{...client,subject:'different-subject'},context!)).toEqual([]);
     await revokeNativeDeliveryGrant(env,principal,created.grant.id,{folderRef:f.operation.folderRef,expectedVersion:1,reasonCode:'revoke'},'roundtrip-revoke-key');

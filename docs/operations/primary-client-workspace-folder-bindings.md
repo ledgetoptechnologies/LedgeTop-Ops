@@ -60,6 +60,8 @@ Client reads also require the matching `portal_primary_staff_bindings` receipt t
 
 Changing a project's division or folder prefix is a deny-first operation. Before either the Delivery association or `OPS_DB.project_folders` is changed, Operations suspends every overlapping Operations-owned Client Workspace receipt and folder route in one Delivery D1 transaction and records immutable binding plus delivery audit rows. Existing bearer/public links are a separate authority model and are not revoked by this transition.
 
+This primary-source receipt policy does not apply to independently authorized secondary/native Project Alpha workspaces. Their `portal_native_staff_bindings` and publication receipts remain active when an unrelated primary project folder moves, even if a storage prefix overlaps. The Operations folder write is compare-and-swap fenced against the exact division and prefix reviewed before the deny phase, so a delayed no-op request cannot overwrite a newer reassignment.
+
 The Delivery and Operations databases cannot commit atomically together. If either later write fails, old authenticated Client Workspace access remains suspended and the endpoint returns a retryable `503`; retry the same folder association to finish the move. Suspended bindings are never silently reactivated or retargeted. After the new association is confirmed, staff explicitly reviews and links the new Client Workspace target, then creates any intended grants. This makes an interrupted reassignment recoverable without briefly preserving stale client authority.
 
 ## Verification

@@ -200,6 +200,7 @@ import {
   type AuthenticatedGrantAudienceType,
 } from "./authenticated-delivery-grants";
 import {
+  compareAndSwapProjectFolderAssociation,
   createPrimaryWorkspaceBinding,
   primaryWorkspaceBindingInputSchema,
   primaryWorkspaceBindingRevokeSchema,
@@ -1399,11 +1400,9 @@ app.post("/api/projects/:id/folder", async (c) => {
         ? "Select one client account for this project"
         : "Link this Project Alpha project to a client account first",
     });
-  if (associationChanged) {
-    await requirePermission(c.env, principal, "delivery.share.create", { divisionId: value.divisionId }, true);
-    if (previous)
-      await requirePermission(c.env, principal, "delivery.share.revoke", { divisionId: previous.division_id }, true);
-  }
+  await requirePermission(c.env, principal, "delivery.share.create", { divisionId: value.divisionId }, true);
+  if (previous)
+    await requirePermission(c.env, principal, "delivery.share.revoke", { divisionId: previous.division_id }, true);
   const link = links.results[0]!,
     associationId = crypto.randomUUID();
   const suspended = associationChanged
@@ -1413,6 +1412,13 @@ app.post("/api/projects/:id/folder", async (c) => {
     })
     : {bindingIds:[]};
   try{
+    await compareAndSwapProjectFolderAssociation(c.env,{
+      projectId:c.req.param("id"),
+      previous:previous?{divisionId:previous.division_id,r2Prefix:previous.r2_prefix}:null,
+      next:{divisionId:value.divisionId,r2Prefix:normalized},confirmedBy:principal.id,
+    });
+    await (await auditStatement(c.env,c.req.raw,principal,"project.folder.confirmed","project",c.req.param("id"),value.divisionId,
+      {r2Prefix:normalized,accountId:link.account_id,suspendedWorkspaceBindingIds:suspended.bindingIds})).run();
     await db.batch([
       db.prepare(
         "UPDATE client_folder_associations SET revoked_at=datetime('now') WHERE scope_type='project' AND account_id=? AND project_id=? AND revoked_at IS NULL",
@@ -1425,15 +1431,8 @@ app.post("/api/projects/:id/folder", async (c) => {
       ).bind(principal.id,link.project_id,JSON.stringify({accountId:link.account_id,r2Prefix:normalized,
         projectAlphaProjectId:c.req.param("id"),suspendedWorkspaceBindingIds:suspended.bindingIds})),
     ]);
-    await c.env.OPS_DB.batch([
-      c.env.OPS_DB.prepare(
-        `INSERT INTO project_folders (project_id,division_id,r2_prefix,match_method,confirmed_by) VALUES (?,?,?,'manual',?) ON CONFLICT(project_id) DO UPDATE SET division_id=excluded.division_id,r2_prefix=excluded.r2_prefix,match_method='manual',confirmed_by=excluded.confirmed_by,confirmed_at=datetime('now')`,
-      ).bind(c.req.param("id"), value.divisionId, normalized, principal.id),
-      await auditStatement(c.env,c.req.raw,principal,"project.folder.confirmed","project",c.req.param("id"),value.divisionId,
-        {r2Prefix:normalized,accountId:link.account_id,suspendedWorkspaceBindingIds:suspended.bindingIds}),
-    ]);
   }catch(error){
-    if(suspended.bindingIds.length)throw new HTTPException(503,{message:
+    if(associationChanged||suspended.bindingIds.length)throw new HTTPException(503,{message:
       "The previous Client Workspace access was suspended safely, but the folder move did not finish. Retry the folder association before sharing it again.",cause:error});
     throw error;
   }

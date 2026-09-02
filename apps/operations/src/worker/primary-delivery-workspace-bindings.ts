@@ -51,6 +51,12 @@ export interface PrimaryWorkspaceFolderReassignment {
   previousDivisionId:string|null;
   nextDivisionId:string;
 }
+export interface ProjectFolderAssociationCas {
+  projectId:string;
+  previous:{divisionId:string;r2Prefix:string}|null;
+  next:{divisionId:string;r2Prefix:string};
+  confirmedBy:string;
+}
 
 function db(env:Env):D1Database {
   const value=env.DELIVERY_DB as D1Database&{withSession?:(consistency:"first-primary")=>D1Database};
@@ -81,18 +87,21 @@ function ancestors(prefix:string):string[]{const parts=prefix.slice(0,-1).split(
 export async function suspendPrimaryWorkspaceBindingsForFolderReassignment(
   env:Env,principal:StaffPrincipal,input:PrimaryWorkspaceFolderReassignment,
 ):Promise<{bindingIds:string[]}> {
-  const database=db(env);
-  if(!await tables(database,["portal_primary_staff_bindings","portal_primary_staff_binding_audit","portal_v2_folder_bindings","audit_log"]))
-    return {bindingIds:[]};
+  await ready(env);const database=db(env);
+  if(!await tables(database,["portal_v2_folder_bindings","portal_v2_workspaces","audit_log"]))
+    fail(503,"Client Workspace folder reassignment is awaiting a database update");
   const affected=[input.previousPrefix,input.nextPrefix].filter((value):value is string=>!!value).map(normalizePrefix);
   const rows=await database.prepare(`SELECT binding.id binding_id,receipt.version receipt_version
     FROM portal_v2_folder_bindings binding
-    LEFT JOIN portal_primary_staff_bindings receipt ON receipt.binding_id=binding.id
+    JOIN portal_v2_workspaces workspace ON workspace.id=binding.workspace_id
+      AND workspace.project_alpha_source_id='project-alpha:primary' AND workspace.status='active'
+    JOIN portal_primary_staff_bindings receipt ON receipt.binding_id=binding.id
+      AND receipt.workspace_id=binding.workspace_id AND receipt.source_id='project-alpha:primary' AND receipt.state='active'
     WHERE binding.source_type='operations' AND binding.status='active' AND binding.revoked_at IS NULL
       AND EXISTS(SELECT 1 FROM json_each(?) affected
         WHERE substr(rtrim(binding.r2_prefix,'/')||'/',1,length(affected.value))=affected.value
            OR substr(affected.value,1,length(rtrim(binding.r2_prefix,'/')||'/'))=rtrim(binding.r2_prefix,'/')||'/')
-    ORDER BY binding.id LIMIT 26`).bind(JSON.stringify([...new Set(affected)])).all<{binding_id:string;receipt_version:number|null}>();
+    ORDER BY binding.id LIMIT 26`).bind(JSON.stringify([...new Set(affected)])).all<{binding_id:string;receipt_version:number}>();
   if(rows.results.length>25)fail(409,"Too many Client Workspace links overlap this folder reassignment; unlink them before moving the project folder");
   if(!rows.results.length)return {bindingIds:[]};
   const details=JSON.stringify({reasonCode:"operations_folder_reassigned",opsProjectId:input.opsProjectId,
@@ -100,15 +109,13 @@ export async function suspendPrimaryWorkspaceBindingsForFolderReassignment(
     previousDivisionId:input.previousDivisionId,nextDivisionId:input.nextDivisionId});
   const statements:D1PreparedStatement[]=[];
   for(const row of rows.results){
-    if(row.receipt_version!==null){
-      const next=Number(row.receipt_version)+1;
-      statements.push(
-        database.prepare(`UPDATE portal_primary_staff_bindings SET state='suspended',version=?,updated_at=datetime('now')
-          WHERE binding_id=? AND state='active' AND version=?`).bind(next,row.binding_id,row.receipt_version),
-        database.prepare(`INSERT INTO portal_primary_staff_binding_audit(id,binding_id,binding_version,action,actor_staff_id,details_json)
-          VALUES(?,?,?,'binding.suspended',?,?)`).bind(crypto.randomUUID(),row.binding_id,next,principal.id,details),
-      );
-    }
+    const next=Number(row.receipt_version)+1;
+    statements.push(
+      database.prepare(`UPDATE portal_primary_staff_bindings SET state='suspended',version=?,updated_at=datetime('now')
+        WHERE binding_id=? AND state='active' AND version=?`).bind(next,row.binding_id,row.receipt_version),
+      database.prepare(`INSERT INTO portal_primary_staff_binding_audit(id,binding_id,binding_version,action,actor_staff_id,details_json)
+        VALUES(?,?,?,'binding.suspended',?,?)`).bind(crypto.randomUUID(),row.binding_id,next,principal.id,details),
+    );
     statements.push(
       database.prepare(`UPDATE portal_v2_folder_bindings SET status='suspended',updated_at=datetime('now')
         WHERE id=? AND status='active' AND revoked_at IS NULL`).bind(row.binding_id),
@@ -119,6 +126,21 @@ export async function suspendPrimaryWorkspaceBindingsForFolderReassignment(
   }
   await database.batch(statements);
   return {bindingIds:rows.results.map(row=>row.binding_id)};
+}
+
+/** Compare-and-swap the Operations ownership coordinate captured before the
+ * Delivery deny phase. A delayed no-op request cannot overwrite a newer move. */
+export async function compareAndSwapProjectFolderAssociation(env:Env,input:ProjectFolderAssociationCas):Promise<void>{
+  const database=env.OPS_DB.withSession("first-primary");
+  const changed=input.previous
+    ? await database.prepare(`UPDATE project_folders SET division_id=?,r2_prefix=?,match_method='manual',confirmed_by=?,confirmed_at=datetime('now')
+        WHERE project_id=? AND division_id=? AND r2_prefix=?`)
+      .bind(input.next.divisionId,normalizePrefix(input.next.r2Prefix),input.confirmedBy,input.projectId,
+        input.previous.divisionId,input.previous.r2Prefix).run()
+    : await database.prepare(`INSERT INTO project_folders(project_id,division_id,r2_prefix,match_method,confirmed_by)
+        SELECT ?,?,?, 'manual',? WHERE NOT EXISTS(SELECT 1 FROM project_folders WHERE project_id=?)`)
+      .bind(input.projectId,input.next.divisionId,normalizePrefix(input.next.r2Prefix),input.confirmedBy,input.projectId).run();
+  if(Number(changed.meta.changes)!==1)fail(409,"Project folder association changed; refresh and try again");
 }
 
 async function opsFolderProof(env:Env,principal:StaffPrincipal|null,folderKey:string):Promise<OpsFolderProof>{
@@ -318,7 +340,9 @@ export async function requireActivePrimaryWorkspaceBindingReceipt(env:Env,bindin
   await ready(env);
   const receipt=await db(env).prepare(`SELECT receipt.*,binding.source_version,binding.status binding_status,binding.revoked_at
     FROM portal_primary_staff_bindings receipt JOIN portal_v2_folder_bindings binding ON binding.id=receipt.binding_id
-    WHERE receipt.binding_id=?`).bind(bindingId).first<any>();
+    JOIN portal_v2_workspaces workspace ON workspace.id=binding.workspace_id
+      AND workspace.project_alpha_source_id='project-alpha:primary' AND workspace.status='active'
+    WHERE receipt.binding_id=? AND receipt.source_id='project-alpha:primary'`).bind(bindingId).first<any>();
   if(!receipt)fail(409,"This legacy primary folder binding has no migration 0189 authority receipt. Relink the folder before managing Client Workspace access");
   if(receipt.state!=="active"||receipt.binding_status!=="active"||receipt.revoked_at!==null)
     fail(409,"The primary Client Workspace folder link is not active");

@@ -39,7 +39,9 @@ describe("authenticated delivery grant live authorization", () => {
         scope_type TEXT NOT NULL,scope_public_id TEXT NOT NULL,entitlement_version INTEGER NOT NULL DEFAULT 1,status TEXT NOT NULL DEFAULT 'active',
         valid_from TEXT NOT NULL DEFAULT (datetime('now')),expires_at TEXT,revoked_at TEXT);
       CREATE TABLE portal_v2_folder_bindings(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,owner_scope_type TEXT NOT NULL,owner_public_id TEXT NOT NULL,
-        r2_prefix TEXT NOT NULL,source_version TEXT,status TEXT NOT NULL DEFAULT 'active',revoked_at TEXT,UNIQUE(id,workspace_id),FOREIGN KEY(workspace_id) REFERENCES portal_v2_workspaces(id));
+        r2_prefix TEXT NOT NULL,source_type TEXT NOT NULL DEFAULT 'project_alpha',source_version TEXT,status TEXT NOT NULL DEFAULT 'active',revoked_at TEXT,
+        UNIQUE(id,workspace_id),FOREIGN KEY(workspace_id) REFERENCES portal_v2_workspaces(id));
+      CREATE TABLE portal_primary_staff_bindings(binding_id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,r2_prefix TEXT NOT NULL,state TEXT NOT NULL);
       CREATE TABLE pa_portal_principals(workspace_id TEXT NOT NULL,public_id TEXT NOT NULL,identity_id TEXT,email_hint TEXT,display_name TEXT NOT NULL,
         source_version TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'active',PRIMARY KEY(workspace_id,public_id),UNIQUE(workspace_id,identity_id),FOREIGN KEY(workspace_id) REFERENCES portal_v2_workspaces(id),FOREIGN KEY(identity_id) REFERENCES portal_v2_identities(id));
       CREATE TABLE portal_v2_identity_eligibility_bindings(identity_id TEXT NOT NULL,workspace_id TEXT NOT NULL,
@@ -101,6 +103,16 @@ describe("authenticated delivery grant live authorization", () => {
     } finally {
       await db.prepare("UPDATE portal_v2_workspaces SET project_alpha_source_id='project-alpha:primary' WHERE id='workspace-a'").run();
     }
+  });
+
+  it("fails a primary Operations binding closed without an active 0189 receipt",async()=>{
+    await db.prepare("UPDATE portal_v2_folder_bindings SET source_type='operations' WHERE id='binding-a'").run();
+    expect(await authorizeAuthenticatedDeliveryGrant(env,principal,"workspace-a","binding-a")).toBe(false);
+    expect(await listAuthorizedAuthenticatedDeliveryPrefixes(env,principal,"workspace-a")).toEqual(new Set());
+    await db.prepare(`INSERT INTO portal_primary_staff_bindings(binding_id,workspace_id,r2_prefix,state)
+      VALUES('binding-a','workspace-a','clients/a/','active')`).run();
+    expect(await authorizeAuthenticatedDeliveryGrant(env,principal,"workspace-a","binding-a")).toBe(true);
+    await db.prepare("UPDATE portal_v2_folder_bindings SET source_type='project_alpha' WHERE id='binding-a'").run();
   });
 
   it("fails closed immediately for revoke, source drift, identity denial, and hierarchy move", async () => {
