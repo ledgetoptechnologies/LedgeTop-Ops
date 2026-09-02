@@ -90,7 +90,7 @@ acceptance.
   `0051_client_hub_internal_notes.sql`.
 - Remote Wrangler migration readback reported no pending Client migrations
   against the current main migration directory, which now ends at
-  `0190_portal_grant_expiry_authority.sql`.
+  `0190_portal_contact_assignments_v4.sql`.
 - In the live signed-in Operations Client Hub, internal notes loaded for both an
   organization root and a standalone-client root. The panel clearly stated that
   notes are staff-only and are neither shown in the client portal nor
