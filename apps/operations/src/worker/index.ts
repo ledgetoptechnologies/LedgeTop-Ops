@@ -199,6 +199,13 @@ import {
   searchAuthenticatedDeliveryGrantAudiences,
   type AuthenticatedGrantAudienceType,
 } from "./authenticated-delivery-grants";
+import {
+  createPrimaryWorkspaceBinding,
+  primaryWorkspaceBindingInputSchema,
+  primaryWorkspaceBindingRevokeSchema,
+  revokePrimaryWorkspaceBinding,
+  searchPrimaryWorkspaceBindingTargets,
+} from "./primary-delivery-workspace-bindings";
 import { projectAccessTermsInputSchema } from '../../../client/src/worker/client-portal/project-access-terms';
 import {
   parseStoredWorkArea,
@@ -1145,6 +1152,21 @@ app.get("/api/delivery/authenticated-grants/audiences", async (c) => c.json(
     (c.req.query("audienceType")||undefined) as AuthenticatedGrantAudienceType|undefined,
   ),
 ));
+app.get("/api/delivery/authenticated-grants/binding-targets", async c => {
+  const folderRef=c.req.query("folderRef")||"",q=c.req.query("q")||"";
+  if(!/^[A-Za-z0-9_-]{2,1400}$/.test(folderRef))throw new HTTPException(400,{message:"Folder reference is invalid"});
+  const folderKey=await authorizeItem(c.env,c.get("principal"),folderRef);
+  return c.json(await searchPrimaryWorkspaceBindingTargets(c.env,c.get("principal"),folderKey,q));
+});
+app.post("/api/delivery/authenticated-grants/bindings",async c=>{
+  const input=await body(c,primaryWorkspaceBindingInputSchema),folderKey=await authorizeItem(c.env,c.get("principal"),input.folderRef);
+  const result=await createPrimaryWorkspaceBinding(c.env,c.get("principal"),folderKey,input,c.req.header("Idempotency-Key")||"");
+  return c.json(result,result.replayed?200:201);
+});
+app.post("/api/delivery/authenticated-grants/bindings/:bindingId/revoke",async c=>{
+  const input=await body(c,primaryWorkspaceBindingRevokeSchema),folderKey=await authorizeItem(c.env,c.get("principal"),input.folderRef);
+  return c.json(await revokePrimaryWorkspaceBinding(c.env,c.get("principal"),c.req.param("bindingId"),folderKey,input,c.req.header("Idempotency-Key")||""));
+});
 app.get("/api/delivery/authenticated-grants", async (c) => {
   const folderRef = c.req.query("folderRef") || "";
   if (!/^[A-Za-z0-9_-]{2,1400}$/.test(folderRef))

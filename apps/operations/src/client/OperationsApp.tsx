@@ -4803,6 +4803,68 @@ function AuthenticatedDeliveryNoticePolicyEditor({ physicalGrantId, audienceLabe
   </fieldset>;
 }
 
+type PrimaryWorkspaceBindingTarget = {
+  workspaceId:string;workspaceLabel:string;rootType:"organization"|"standalone_client";rootPublicId:string;
+  rootLabel:string;ownerScopeType:"organization"|"client"|"project";ownerPublicId:string;ownerName:string;
+  projectPublicId:string|null;projectName:string|null;sourceId:"project-alpha:primary";contextVersion:string;
+};
+function PrimaryWorkspaceBindingSetup({folder,onLinked}:{folder:{id:string};onLinked:()=>void}){
+  const [query,setQuery]=useState(""),[targets,setTargets]=useState<PrimaryWorkspaceBindingTarget[]>([]);
+  const [selected,setSelected]=useState<PrimaryWorkspaceBindingTarget|null>(null),[reviewing,setReviewing]=useState(false);
+  const [loading,setLoading]=useState(false),[busy,setBusy]=useState(false),[uncertain,setUncertain]=useState(false);
+  const [error,setError]=useState(""),[status,setStatus]=useState("");
+  const searchController=useRef<AbortController|null>(null),pending=useRef<{key:string;body:string;target:PrimaryWorkspaceBindingTarget}|null>(null);
+  const valid=(value:unknown):value is PrimaryWorkspaceBindingTarget=>{
+    if(!value||typeof value!=="object")return false;const row=value as Record<string,unknown>;
+    return typeof row.workspaceId==="string"&&typeof row.workspaceLabel==="string"&&["organization","standalone_client"].includes(String(row.rootType))
+      &&typeof row.rootPublicId==="string"&&typeof row.rootLabel==="string"&&["organization","client","project"].includes(String(row.ownerScopeType))
+      &&typeof row.ownerPublicId==="string"&&typeof row.ownerName==="string"
+      &&(row.projectPublicId===null||typeof row.projectPublicId==="string")&&(row.projectName===null||typeof row.projectName==="string")
+      &&row.sourceId==="project-alpha:primary"&&typeof row.contextVersion==="string"&&/^[a-f0-9]{64}$/.test(row.contextVersion);
+  };
+  const search=useCallback((value:string)=>{
+    searchController.current?.abort();const controller=new AbortController();searchController.current=controller;
+    setLoading(true);setError("");setStatus("");
+    api<{targets:unknown[]}>(`/api/delivery/authenticated-grants/binding-targets?folderRef=${encodeURIComponent(folder.id)}&q=${encodeURIComponent(value.trim())}`,{signal:controller.signal})
+      .then(response=>{if(controller.signal.aborted)return;if(!Array.isArray(response.targets))throw new ApiError("Projected workspace choices could not be verified.",409,{});
+        const verified=response.targets.filter(valid);if(verified.length!==response.targets.length)throw new ApiError("Projected workspace choices could not be verified.",409,{});
+        setTargets(verified);setStatus(verified.length?"Select the exact projected workspace below.":"No signed primary Project Alpha workspace contains this folder's project or client root yet. Project Alpha must publish and activate that workspace before it can be linked.");})
+      .catch(caught=>{if((caught as Error).name!=="AbortError")setError((caught as Error).message||"Projected workspaces could not be loaded.");})
+      .finally(()=>{if(!controller.signal.aborted)setLoading(false);});
+  },[folder.id]);
+  useEffect(()=>{const timer=window.setTimeout(()=>search(query),query.trim()?250:0);return()=>{window.clearTimeout(timer);searchController.current?.abort();};},[query,search]);
+  const submit=async(operation=pending.current)=>{
+    if(!operation||busy)return;setBusy(true);setError("");setStatus("");
+    try{
+      const response=await api<{binding:{bindingId:string;workspaceId:string;state:string};replayed:boolean}>("/api/delivery/authenticated-grants/bindings",{method:"POST",headers:{"Idempotency-Key":operation.key},body:operation.body});
+      if(!response?.binding||response.binding.workspaceId!==operation.target.workspaceId||response.binding.state!=="active")throw new ApiError("The workspace link outcome could not be verified.",409,{});
+      pending.current=null;setUncertain(false);setStatus("Folder linked to the selected Client Workspace. No client access was granted.");onLinked();
+    }catch(caught){
+      if(caught instanceof ApiError&&caught.status<500&&caught.status!==429){pending.current=null;setUncertain(false);setError(caught.message);}
+      else{setUncertain(true);setError("The workspace link outcome is not confirmed. Retry the same operation safely; do not select another workspace.");}
+    }finally{setBusy(false);}
+  };
+  const confirmLink=()=>{if(!selected||busy)return;const operation={key:crypto.randomUUID(),target:selected,body:JSON.stringify({folderRef:folder.id,workspaceId:selected.workspaceId,reasonCode:"client_workspace_link",expectedContextVersion:selected.contextVersion})};pending.current=operation;void submit(operation);};
+  return <section className="primary-workspace-binding-setup" aria-label="Link folder to a Client Workspace">
+    <h4>Link this folder to a Client Workspace</h4>
+    <p>This folder has no authenticated workspace link. Choose the exact workspace projected and signed by the primary Project Alpha connection. Linking is routing metadata only: it does not create a login, membership, grant, or public link.</p>
+    <label htmlFor="primary-workspace-binding-search">Projected workspace or project</label>
+    <input id="primary-workspace-binding-search" type="search" value={query} disabled={busy||uncertain} autoComplete="off"
+      placeholder="Search the projected workspace, client, or project" onChange={event=>{setQuery(event.target.value);setSelected(null);setReviewing(false);setTargets([]);setStatus("");setError("");}} />
+    {loading&&<small role="status">Checking signed Project Alpha workspaces…</small>}
+    {targets.length>0&&<div className="client-workspace-typeahead" role="listbox" aria-label="Projected Client Workspaces">{targets.map(item=><button
+      type="button" role="option" aria-selected={selected?.workspaceId===item.workspaceId} key={item.workspaceId} disabled={busy||uncertain}
+      onClick={()=>{setSelected(item);setReviewing(false);setError("");setStatus("");}}><strong>{item.workspaceLabel}</strong><small>{item.rootLabel} · {item.projectName??`${item.ownerName} root`} · primary signed projection</small></button>)}</div>}
+    {selected&&!reviewing&&<><small className="selected-audience-note">Selected: {selected.workspaceLabel}. Folder owner: {selected.projectName??selected.ownerName}. This selection cannot widen access.</small><button
+      type="button" className="button-orange button-small" disabled={busy||uncertain} onClick={()=>setReviewing(true)}>Review workspace link</button></>}
+    {selected&&reviewing&&<section className="primary-authenticated-grant-review" role="region" aria-label="Review Client Workspace folder link"><h4>Confirm folder link</h4><dl>
+      <div><dt>Workspace</dt><dd>{selected.workspaceLabel}</dd></div><div><dt>Client root</dt><dd>{selected.rootLabel}</dd></div><div><dt>Folder owner</dt><dd>{selected.projectName??selected.ownerName}</dd></div><div><dt>Access created</dt><dd>None</dd></div>
+    </dl><p>Recipients remain unavailable until this link is saved and an exact verified person or explicit dynamic group grant is reviewed separately.</p><div className="actions"><button type="button" className="button-orange" disabled={busy||uncertain} onClick={confirmLink}>{busy?"Linking…":"Link folder to workspace"}</button><button type="button" className="button-ghost" disabled={busy||uncertain} onClick={()=>setReviewing(false)}>Cancel review</button></div></section>}
+    {status&&<small role="status">{status}</small>}{error&&<small className="error" role="alert">{error}</small>}
+    {uncertain&&pending.current&&<button type="button" className="button-orange button-small" disabled={busy} onClick={()=>void submit()}>Retry same folder link</button>}
+  </section>;
+}
+
 function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, onBusyChange }: { folder: { id: string }; canRevoke: boolean; onBusyChange?: (busy: boolean) => void }) {
   type Context = { folderBindingId: string; sourceId: string; projectName: string | null; accessTermsSupported: boolean; projectEndSupported: boolean };
   type Input = {folderBindingId: string; audienceType: AuthenticatedGrantAudienceType; audiencePublicId: string; reasonCode: string; expiresAt: string | null; accessTerms?: PrimaryGrantTerms};
@@ -4840,7 +4902,7 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, onBusyChang
       clearContext(); pending.current = null; setUncertain(false);
       setPortalSetupNeeded(caught.status === 404);
       setError(caught.status === 404
-        ? "This folder is not linked to a Client Portal workspace yet. Sync its Project Alpha workspace and membership, then refresh; no workspace or access will be created automatically."
+        ? "This folder is not linked to a Client Portal workspace yet. Select its exact signed Project Alpha workspace below. Linking grants no access; verified membership is required before recipients can be granted access."
         : caught.message);
       return;
     }
@@ -5011,6 +5073,7 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, onBusyChang
         {preview && <section className="primary-authenticated-grant-review" aria-label="Review authenticated portal access"><h4 ref={reviewTitle} tabIndex={-1}>Confirm authenticated access</h4><dl>{[["Workspace", preview.workspaceLabel], ["Project", preview.projectName ?? "No project-specific access terms"], ["Recipient", preview.audienceLabel], ["Target type", selected?.type === "principal" ? "Individual" : selected?.type === "department" ? "Department" : "Organization"], ["Recipient rule", selected?.type === "principal" ? "This exact verified person only" : "Current authorized members; membership is rechecked"], ["Recipient preview", selected?.type === "principal" ? `${preview.recipientCount} exact verified person` : preview.recipientCount > 0 ? `${preview.recipientPreview?.truncated ? "At least " : "Up to "}${preview.recipientCount} currently eligible people; final membership is checked when opened` : "Dynamic membership; final recipients are checked when opened"], ["Access terms", termsLabel(preview.accessTerms)], ["Access ends", preview.effectiveAccessExpiresAt ? date(preview.effectiveAccessExpiresAt) : preview.accessTerms?.mode === "project_end" ? "Awaiting verified project completion, then 7 days" : "When revoked"]].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>{preview.accessTerms?.mode === "project_end" && <p>Reopening does not renew expired access.</p>}<p>Confirm this recipient and scope. This grants only the reviewed folder access; it never widens an individual to their organization and creates no public link.</p><div className="actions"><button type="button" className="button-orange" disabled={disabled} onClick={create}>{restoreTarget ? "Restore authenticated access" : "Grant authenticated access"}</button><button type="button" className="button-ghost" disabled={busy || uncertain} onClick={() => setPreview(null)}>Cancel review</button></div></section>}
       </>}
       {error && <small className="error" role="alert">{error}{portalSetupNeeded && <> <a href="/clients#client-portal-setup">Open Client Hub portal setup</a> to review the exact client account, workspace, and verified membership.</>}</small>}
+      {portalSetupNeeded&&<PrimaryWorkspaceBindingSetup folder={folder} onLinked={()=>{setPortalSetupNeeded(false);setError("");void load();}}/>}
       {message && <small role="status">{message}</small>}
       {uncertain && pending.current && <button type="button" className="button-orange" disabled={busy || loading || !context || pending.current.action === "revoke" && !canRevoke} onClick={() => void execute(pending.current!)}>Retry same access operation</button>}
       {grants.length > 0 && <div className="authenticated-grant-list" aria-label="Authenticated portal grant history">

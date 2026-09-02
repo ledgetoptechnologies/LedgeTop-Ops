@@ -69,6 +69,51 @@ test("an unavailable workspace rollout points administrators to safe Client Hub 
   expect(calls.some(call => call.path.startsWith("/api/delivery/authenticated-grants") || call.path.startsWith("/api/delivery/native-grants"))).toBe(false);
 });
 
+test("an unbound folder can be linked only to its exact signed primary workspace without creating access or a public link", async ({page}) => {
+  let bound = false;
+  const calls = await mockPrimary(page, (route, call) => {
+    if (call.path === "/api/delivery/authenticated-grants" && call.method === "GET") {
+      return bound
+        ? route.fulfill({json: {...primaryContext, grants: []}})
+        : route.fulfill({status: 404, json: {error: "Folder is not linked"}});
+    }
+    if (call.path === "/api/delivery/authenticated-grants/binding-targets" && call.method === "GET") return route.fulfill({json: {targets: [{
+      workspaceId: "workspace-acme", workspaceLabel: "Acme Client Workspace", rootType: "organization", rootPublicId: "org-acme",
+      rootLabel: "Acme Organization", ownerScopeType: "project", ownerPublicId: "project-hilly", ownerName: "Hilly Haven",
+      projectPublicId: "project-hilly", projectName: "Hilly Haven", sourceId: "project-alpha:primary", contextVersion: "b".repeat(64),
+    }]}});
+    if (call.path === "/api/delivery/authenticated-grants/bindings" && call.method === "POST") {
+      bound = true;
+      return route.fulfill({status: 201, json: {binding: {bindingId: "binding-acme", workspaceId: "workspace-acme", state: "active"}, replayed: false}});
+    }
+    return undefined;
+  });
+
+  await page.goto("/delivery");
+  await page.getByRole("button", {name: "Actions for Acme"}).click();
+  await page.getByRole("menuitem", {name: "Share", exact: true}).click();
+  await expect(page.getByRole("tab", {name: "Public link"})).toHaveAttribute("aria-selected", "true");
+  expect(calls.some(call => call.path.includes("authenticated-grants/binding"))).toBe(false);
+
+  await page.getByRole("tab", {name: "Client Workspace"}).click();
+  await expect(page.getByRole("region", {name: "Link folder to a Client Workspace"})).toBeVisible();
+  await expect(page.getByText("Linking grants no access", {exact: false})).toBeVisible();
+  await expect(page.getByRole("option", {name: /Acme Client Workspace/})).toBeVisible();
+  await page.getByRole("option", {name: /Acme Client Workspace/}).click();
+  await page.getByRole("button", {name: "Review workspace link"}).click();
+  const review = page.getByRole("region", {name: "Review Client Workspace folder link"});
+  await expect(review).toContainText("Access created");
+  await expect(review).toContainText("None");
+  await page.getByRole("button", {name: "Link folder to workspace"}).click();
+  await expect(page.getByRole("button", {name: "Refresh authenticated access"})).toBeEnabled();
+
+  const bind = calls.find(call => call.path === "/api/delivery/authenticated-grants/bindings" && call.method === "POST");
+  expect(bind?.body).toEqual({folderRef: "folder-acme", workspaceId: "workspace-acme", reasonCode: "client_workspace_link", expectedContextVersion: "b".repeat(64)});
+  expect(bind?.key).toBeTruthy();
+  expect(calls.some(call => call.path === "/api/delivery/shares" && call.method === "POST")).toBe(false);
+  expect(calls.some(call => call.path === "/api/delivery/authenticated-grants" && call.method === "POST")).toBe(false);
+});
+
 test("an administrator without revoke permission can review primary grants but has no forbidden revoke action", async ({page}) => {
   const calls = await mockPrimary(page, (route, call) => {
     // Session permission keys omit a permission when a global explicit deny applies.
