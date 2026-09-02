@@ -14,3 +14,18 @@ export async function d1TablesPresent(
   ).bind(...tableNames).first<{ count: number }>();
   return Number(row?.count || 0) === tableNames.length;
 }
+
+/**
+ * Checks an additive column without assuming that every focused test fixture
+ * or interrupted legacy install has reached the migration that introduced it.
+ */
+export async function d1ColumnPresent(
+  database: D1Database,
+  tableName: string,
+  columnName: string,
+): Promise<boolean> {
+  const row = await database.withSession("first-primary").prepare(
+    "SELECT 1 present FROM pragma_table_info(?) WHERE name=? LIMIT 1",
+  ).bind(tableName, columnName).first("present");
+  return row !== null;
+}

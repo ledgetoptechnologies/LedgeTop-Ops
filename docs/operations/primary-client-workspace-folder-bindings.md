@@ -54,6 +54,14 @@ WHERE binding.source_type='operations' AND binding.status='active' AND binding.r
 
 The result must be empty before enabling authenticated grant mutations. Runtime revalidation suspends a receipt and folder route if Operations ownership or the signed projection changes. Delivery D1 triggers serialize grant insertion with binding revocation: whichever operation wins makes the other fail, so the pre-revoke grant count is never the only fence.
 
+Client reads also require the matching `portal_primary_staff_bindings` receipt to remain active. An Operations-owned folder route without migration `0189`, without a receipt, or with a suspended receipt is therefore denied even when older routing and grant rows still exist.
+
+## Project-folder reassignment
+
+Changing a project's division or folder prefix is a deny-first operation. Before either the Delivery association or `OPS_DB.project_folders` is changed, Operations suspends every overlapping Operations-owned Client Workspace receipt and folder route in one Delivery D1 transaction and records immutable binding plus delivery audit rows. Existing bearer/public links are a separate authority model and are not revoked by this transition.
+
+The Delivery and Operations databases cannot commit atomically together. If either later write fails, old authenticated Client Workspace access remains suspended and the endpoint returns a retryable `503`; retry the same folder association to finish the move. Suspended bindings are never silently reactivated or retargeted. After the new association is confirmed, staff explicitly reviews and links the new Client Workspace target, then creates any intended grants. This makes an interrupted reassignment recoverable without briefly preserving stale client authority.
+
 ## Verification
 
-Focused D1 tests cover project folders, source-owned client roots, wrong-root/unsigned targets, stale review contexts, runtime suspension, both grant/revoke transaction orders, non-authorizing writes, and replay/revoke fencing. Browser coverage preserves Public link as the default, verifies keyboard selection and review focus, and proves that linking a workspace creates neither a public share nor an authenticated grant.
+Focused D1 tests cover project folders, source-owned client roots, wrong-root/unsigned targets, stale review contexts, runtime suspension, both grant/revoke transaction orders, non-authorizing writes, replay/revoke fencing, populated pre-0189 backfill, and grant → folder reassignment → immediate old-client denial across the cross-D1 failure boundary. Browser coverage preserves Public link as the default, verifies keyboard selection and review focus, and proves that linking a workspace creates neither a public share nor an authenticated grant.

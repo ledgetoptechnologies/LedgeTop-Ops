@@ -4,9 +4,10 @@ import { afterAll,beforeAll,describe,expect,it,vi } from "vitest";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import {
   createPrimaryWorkspaceBinding,primaryWorkspaceBindingsReady,revokePrimaryWorkspaceBinding,
-  searchPrimaryWorkspaceBindingTargets,
+  searchPrimaryWorkspaceBindingTargets,suspendPrimaryWorkspaceBindingsForFolderReassignment,
 } from "../src/worker/primary-delivery-workspace-bindings";
 import { searchAuthenticatedDeliveryGrantAudiences } from "../src/worker/authenticated-delivery-grants";
+import { listAuthorizedAuthenticatedDeliveryPrefixes } from "../../client/src/worker/client-portal/authenticated-delivery-grants";
 import type { Env,StaffPrincipal } from "../src/worker/types";
 vi.mock("cloudflare:workers",()=>({WorkflowEntrypoint:class{},WorkerEntrypoint:class{},DurableObject:class{}}));
 
@@ -36,6 +37,15 @@ async function signedWorkspace(){
     delivery.prepare(`INSERT INTO portal_v2_directory_entities
       (workspace_id,generation_id,entity_type,public_id,parent_public_id,display_name,source_version,active)
       VALUES(?,?,'project',?,?,'Acme Survey','project-v1',1)`).bind(workspace,directory,projectPublic,organizationPublic),
+    delivery.prepare(`INSERT INTO portal_v2_directory_generation_contracts(generation_id,workspace_id,schema_version)
+      VALUES(?,?,3)`).bind(directory,workspace),
+    delivery.prepare(`INSERT INTO portal_v2_directory_relations
+      (workspace_id,generation_id,public_id,relation_type,from_type,from_public_id,to_type,to_public_id,source_version,active)
+      VALUES(?,?,'project-parent','contains','organization',?,'project',?,'relation-v1',1)`)
+      .bind(workspace,directory,organizationPublic,projectPublic),
+    delivery.prepare(`INSERT INTO portal_v2_project_lifecycle
+      (workspace_id,generation_id,project_public_id,lifecycle_status,completed_at,source_version)
+      VALUES(?,?,?,'active',NULL,'lifecycle-v1')`).bind(workspace,directory,projectPublic),
     delivery.prepare(`INSERT INTO portal_v2_directory_checkpoints(workspace_id,active_generation_id,source_sequence) VALUES(?,?,1)`).bind(workspace,directory),
     delivery.prepare(`INSERT INTO pa_portal_projection_checkpoints(workspace_id,source_generation,source_sequence,snapshot_generation_id)
       VALUES(?,'source-one',1,?)`).bind(workspace,snapshot),
@@ -50,7 +60,8 @@ describe("primary signed workspace folder binding",{timeout:60_000,concurrent:fa
     ops=await runtime.getD1Database("OPS") as D1Database;delivery=await runtime.getD1Database("DELIVERY") as D1Database;
     await migrate(ops,new URL("../migrations/",import.meta.url),"0050");
     await migrate(delivery,new URL("../../client/migrations/",import.meta.url),"0189");
-    env={OPS_DB:ops,DELIVERY_DB:delivery,CLIENT_PORTAL_HIERARCHY_V2_ENABLED:"true",AUTHENTICATED_DELIVERY_GRANTS_ENABLED:"true"} as Env;
+    env={OPS_DB:ops,DELIVERY_DB:delivery,CLIENT_PORTAL_HIERARCHY_V2_ENABLED:"true",CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED:"true",
+      AUTHENTICATED_DELIVERY_GRANTS_ENABLED:"true"} as Env;
     await ops.batch([
       ops.prepare(`INSERT INTO staff_users(id,email,display_name,access_subject,status) VALUES(?,?,?,?,'active')`).bind(staff.id,staff.email,staff.displayName,staff.accessSubject),
       ops.prepare(`INSERT INTO divisions(id,name,code,active) VALUES('division-one','Division one','ONE',1)`),
@@ -146,4 +157,119 @@ describe("primary signed workspace folder binding",{timeout:60_000,concurrent:fa
     expect(await delivery.prepare("SELECT status FROM portal_v2_folder_bindings WHERE id=?")
       .bind(projectBindingId).first<string>("status")).toBe("suspended");
   });
+
+  it("denies an old client before folder reassignment and preserves public links",async()=>{
+    const folder="Jobs/Clients/Acme/Survey/Other/",targets=await searchPrimaryWorkspaceBindingTargets(env,staff,folder,"");
+    const created=await createPrimaryWorkspaceBinding(env,staff,folder,{
+      folderRef:"unused-reassignment-ref",workspaceId:workspace,reasonCode:"reassignment_fixture",
+      expectedContextVersion:targets.targets[0]!.contextVersion,
+    },"primary-reassignment-binding-create");
+    if(!created.binding)throw new Error("Expected a reassignment fixture binding");
+    const bindingId=created.binding.bindingId,sourceVersion=await delivery.prepare("SELECT source_version FROM portal_v2_folder_bindings WHERE id=?")
+      .bind(bindingId).first<string>("source_version");
+    await delivery.batch([
+      delivery.prepare(`INSERT INTO portal_v2_identities(id,issuer,subject,verified_email,status)
+        VALUES('reassignment-identity',?,'reassignment-subject','client@example.test','active')`).bind(issuer),
+      delivery.prepare(`INSERT INTO portal_v2_workspace_memberships(id,workspace_id,identity_id,source_type,source_version,status)
+        VALUES('reassignment-membership',?,'reassignment-identity','project_alpha','person-v1','active')`).bind(workspace),
+      delivery.prepare(`INSERT INTO pa_portal_principals
+        (workspace_id,public_id,identity_id,email_hint,display_name,source_version,status)
+        VALUES(?,'reassignment-person','reassignment-identity','client@example.test','Client','person-v1','active')`).bind(workspace),
+      delivery.prepare(`INSERT INTO portal_project_access_terms
+        (id,workspace_id,source_id,project_public_id,kind,mode,created_by_actor_type,created_by_actor_id)
+        VALUES('reassignment-terms',?,'project-alpha:primary',?,'customer','until_revoked','staff',?)`).bind(workspace,projectPublic,staff.id),
+      delivery.prepare(`INSERT INTO portal_v2_entitlements
+        (id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,source_type,source_version,access_terms_id,status)
+        VALUES('reassignment-entitlement',?,'reassignment-identity','delivery.view','allow','project',?,'operations',
+          'reassignment-entitlement-v1','reassignment-terms','active')`).bind(workspace,projectPublic),
+      delivery.prepare(`INSERT INTO portal_v2_entitlements
+        (id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,source_type,source_version,status)
+        VALUES('reassignment-workspace-view',?,'reassignment-identity','workspace.view','allow','workspace',?,'project_alpha','workspace-v1','active'),
+          ('reassignment-directory-read',?,'reassignment-identity','directory.read','allow','workspace',?,'project_alpha','directory-v1','active')`)
+        .bind(workspace,workspace,workspace,workspace),
+      delivery.prepare(`INSERT INTO portal_v2_authenticated_delivery_grants
+        (id,logical_grant_id,grant_version,workspace_id,folder_binding_id,binding_source_version,audience_type,
+         audience_public_id,audience_source_version,reason_code,created_by_staff_id,access_terms_id)
+        VALUES('reassignment-grant','reassignment-grant',1,?,?,?,'principal','reassignment-person','person-v1',
+          'reassignment_test',?,'reassignment-terms')`).bind(workspace,bindingId,sourceVersion,staff.id),
+      delivery.prepare(`INSERT INTO portal_v2_authenticated_delivery_grant_recipients
+        (grant_id,workspace_id,principal_public_id,identity_id,principal_source_version)
+        VALUES('reassignment-grant',?,'reassignment-person','reassignment-identity','person-v1')`).bind(workspace),
+      delivery.prepare("INSERT INTO projects(id,client_name,project_name,r2_prefix) VALUES('public-project','Client','Public','Public/Prefix/')"),
+      delivery.prepare(`INSERT INTO shares(id,project_id,token_hash,label,created_by_type,created_by_id)
+        VALUES('public-share','public-project','public-token-hash','Preserved','staff',?)`).bind(staff.id),
+    ]);
+    const client={issuer,subject:"reassignment-subject",email:"client@example.test"};
+    expect(await listAuthorizedAuthenticatedDeliveryPrefixes(env as any,client,workspace)).toContain(folder);
+    const before=await delivery.prepare("SELECT * FROM shares WHERE id='public-share'").first();
+    const result=await suspendPrimaryWorkspaceBindingsForFolderReassignment(env,staff,{
+      opsProjectId:projectPublic,previousPrefix:"Jobs/Clients/Acme/Survey/",nextPrefix:"Jobs/Clients/Acme/Moved/",
+      previousDivisionId:"division-one",nextDivisionId:"division-one",
+    });
+    expect(result.bindingIds).toContain(bindingId);
+    // This is the secure crash boundary: old reads are denied even if the
+    // subsequent OPS_DB write has not happened yet.
+    expect(await listAuthorizedAuthenticatedDeliveryPrefixes(env as any,client,workspace)).toEqual(new Set());
+    expect(await delivery.prepare("SELECT state FROM portal_primary_staff_bindings WHERE binding_id=?").bind(bindingId).first("state")).toBe("suspended");
+    expect(await delivery.prepare("SELECT action FROM portal_primary_staff_binding_audit WHERE binding_id=? AND binding_version=2")
+      .bind(bindingId).first("action")).toBe("binding.suspended");
+    expect(await delivery.prepare("SELECT * FROM shares WHERE id='public-share'").first()).toEqual(before);
+    await ops.prepare("UPDATE project_folders SET r2_prefix='Jobs/Clients/Acme/Moved/' WHERE project_id=?").bind(projectPublic).run();
+    expect(await listAuthorizedAuthenticatedDeliveryPrefixes(env as any,client,workspace)).toEqual(new Set());
+    // Retrying the deny phase is idempotent and cannot revive the old route.
+    expect((await suspendPrimaryWorkspaceBindingsForFolderReassignment(env,staff,{
+      opsProjectId:projectPublic,previousPrefix:"Jobs/Clients/Acme/Survey/",nextPrefix:"Jobs/Clients/Acme/Moved/",
+      previousDivisionId:"division-one",nextDivisionId:"division-one",
+    })).bindingIds).toEqual([]);
+  });
+});
+
+it("migration 0189 backfills a coherent populated primary Operations binding",{timeout:180_000},async()=>{
+  const upgrade=new Miniflare({modules:true,compatibilityDate:"2026-07-22",script:"export default {fetch(){return new Response('ok')}}",d1Databases:["DELIVERY_UPGRADE"]});
+  try{
+    const database=await upgrade.getD1Database("DELIVERY_UPGRADE") as D1Database;
+    await migrate(database,new URL("../../client/migrations/",import.meta.url),"0188");
+    await database.batch([
+      database.prepare(`INSERT INTO portal_v2_workspaces(id,root_type,pa_organization_public_id,display_name,status,project_alpha_source_id)
+        VALUES('upgrade-workspace','organization',?,'Upgrade Workspace','active','project-alpha:primary')`).bind(organizationPublic),
+      database.prepare(`INSERT INTO pa_portal_projection_generations
+        (id,workspace_id,source_generation,source_sequence,snapshot_hash,page_count,record_count,workspace_root_type,
+         workspace_root_public_id,workspace_display_name,workspace_source_version,workspace_active,status,complete,projection_source_id)
+        VALUES('upgrade-snapshot','upgrade-workspace','upgrade-source',7,?,1,2,'organization',?,'Upgrade Workspace','workspace-v7',1,'active',1,'project-alpha:primary')`)
+        .bind("c".repeat(64),organizationPublic),
+      database.prepare(`INSERT INTO portal_v2_directory_generations(id,workspace_id,source_generation,source_sequence,status,complete)
+        VALUES('upgrade-directory','upgrade-workspace','upgrade-source',7,'active',1)`),
+      database.prepare(`INSERT INTO portal_v2_directory_entities
+        (workspace_id,generation_id,entity_type,public_id,parent_public_id,display_name,source_version,active)
+        VALUES('upgrade-workspace','upgrade-directory','organization',?,NULL,'Upgrade Org','org-v7',1)`).bind(organizationPublic),
+      database.prepare(`INSERT INTO portal_v2_directory_entities
+        (workspace_id,generation_id,entity_type,public_id,parent_public_id,display_name,source_version,active)
+        VALUES('upgrade-workspace','upgrade-directory','project',?,?,'Upgrade Project','project-v7',1)`).bind(projectPublic,organizationPublic),
+      database.prepare(`INSERT INTO portal_v2_directory_checkpoints(workspace_id,active_generation_id,source_sequence)
+        VALUES('upgrade-workspace','upgrade-directory',7)`),
+      database.prepare(`INSERT INTO pa_portal_projection_checkpoints(workspace_id,source_generation,source_sequence,snapshot_generation_id)
+        VALUES('upgrade-workspace','upgrade-source',7,'upgrade-snapshot')`),
+      database.prepare(`INSERT INTO pa_portal_projection_receipts
+        (projection_source_id,delivery_id,workspace_id,delivery_kind,payload_hash,source_sequence,status)
+        VALUES('project-alpha:primary','upgrade-delivery','upgrade-workspace','snapshot_activate',?,7,'completed')`).bind("d".repeat(64)),
+      database.prepare(`INSERT INTO portal_v2_folder_bindings
+        (id,workspace_id,owner_scope_type,owner_public_id,r2_prefix,source_type,source_version,status)
+        VALUES('upgrade-binding','upgrade-workspace','project',?,'Jobs/Upgrade/','operations','project-v7','active')`).bind(projectPublic),
+    ]);
+    const migration=readFileSync(new URL("../../client/migrations/0189_primary_staff_folder_bindings.sql",import.meta.url),"utf8");
+    await database.batch(splitD1MigrationStatements(migration).map(sql=>database.prepare(sql)));
+    expect(await database.prepare(`SELECT workspace_id,source_id,owner_scope_type,owner_public_id,project_public_id,
+      directory_generation_id,snapshot_generation_id,source_sequence,root_source_version,project_source_version,
+      reason_code,state,created_by_staff_id FROM portal_primary_staff_bindings WHERE binding_id='upgrade-binding'`).first()).toEqual({
+      workspace_id:"upgrade-workspace",source_id:"project-alpha:primary",owner_scope_type:"project",owner_public_id:projectPublic,
+      project_public_id:projectPublic,directory_generation_id:"upgrade-directory",snapshot_generation_id:"upgrade-snapshot",
+      source_sequence:7,root_source_version:"org-v7",project_source_version:"project-v7",
+      reason_code:"migration_0189_legacy_compat",state:"active",created_by_staff_id:"migration:0189",
+    });
+    expect(await database.prepare(`SELECT count(*) n FROM portal_v2_folder_bindings binding
+      JOIN portal_v2_workspaces workspace ON workspace.id=binding.workspace_id
+      LEFT JOIN portal_primary_staff_bindings receipt ON receipt.binding_id=binding.id AND receipt.state='active'
+      WHERE binding.source_type='operations' AND binding.status='active' AND binding.revoked_at IS NULL
+        AND workspace.project_alpha_source_id='project-alpha:primary' AND receipt.binding_id IS NULL`).first<number>("n")).toBe(0);
+  }finally{await upgrade.dispose();}
 });

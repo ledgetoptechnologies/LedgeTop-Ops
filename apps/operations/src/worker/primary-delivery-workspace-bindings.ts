@@ -44,6 +44,13 @@ export interface PrimaryWorkspaceBindingView extends PrimaryWorkspaceBindingTarg
   bindingId:string;folderPrefix:string;version:number;state:"active"|"suspended"|"revoked";
   createdAt:string;updatedAt:string;
 }
+export interface PrimaryWorkspaceFolderReassignment {
+  opsProjectId:string;
+  previousPrefix:string|null;
+  nextPrefix:string;
+  previousDivisionId:string|null;
+  nextDivisionId:string;
+}
 
 function db(env:Env):D1Database {
   const value=env.DELIVERY_DB as D1Database&{withSession?:(consistency:"first-primary")=>D1Database};
@@ -66,6 +73,53 @@ export async function primaryWorkspaceBindingsReady(env:Env):Promise<boolean>{
 }
 async function ready(env:Env):Promise<void>{if(!await primaryWorkspaceBindingsReady(env))fail(503,"Client Workspace folder linking is awaiting a database update");}
 function ancestors(prefix:string):string[]{const parts=prefix.slice(0,-1).split("/");return parts.map((_,index)=>parts.slice(0,index+1).join("/")+"/");}
+
+/** Suspend every Operations-owned authenticated folder route whose ownership
+ * proof can change when a project-folder association moves. Delivery D1 is
+ * fenced first so a failure in the later OPS_DB write leaves old client reads
+ * denied. Public-share rows are intentionally outside this transaction. */
+export async function suspendPrimaryWorkspaceBindingsForFolderReassignment(
+  env:Env,principal:StaffPrincipal,input:PrimaryWorkspaceFolderReassignment,
+):Promise<{bindingIds:string[]}> {
+  const database=db(env);
+  if(!await tables(database,["portal_primary_staff_bindings","portal_primary_staff_binding_audit","portal_v2_folder_bindings","audit_log"]))
+    return {bindingIds:[]};
+  const affected=[input.previousPrefix,input.nextPrefix].filter((value):value is string=>!!value).map(normalizePrefix);
+  const rows=await database.prepare(`SELECT binding.id binding_id,receipt.version receipt_version
+    FROM portal_v2_folder_bindings binding
+    LEFT JOIN portal_primary_staff_bindings receipt ON receipt.binding_id=binding.id
+    WHERE binding.source_type='operations' AND binding.status='active' AND binding.revoked_at IS NULL
+      AND EXISTS(SELECT 1 FROM json_each(?) affected
+        WHERE substr(rtrim(binding.r2_prefix,'/')||'/',1,length(affected.value))=affected.value
+           OR substr(affected.value,1,length(rtrim(binding.r2_prefix,'/')||'/'))=rtrim(binding.r2_prefix,'/')||'/')
+    ORDER BY binding.id LIMIT 26`).bind(JSON.stringify([...new Set(affected)])).all<{binding_id:string;receipt_version:number|null}>();
+  if(rows.results.length>25)fail(409,"Too many Client Workspace links overlap this folder reassignment; unlink them before moving the project folder");
+  if(!rows.results.length)return {bindingIds:[]};
+  const details=JSON.stringify({reasonCode:"operations_folder_reassigned",opsProjectId:input.opsProjectId,
+    previousPrefix:input.previousPrefix?normalizePrefix(input.previousPrefix):null,nextPrefix:normalizePrefix(input.nextPrefix),
+    previousDivisionId:input.previousDivisionId,nextDivisionId:input.nextDivisionId});
+  const statements:D1PreparedStatement[]=[];
+  for(const row of rows.results){
+    if(row.receipt_version!==null){
+      const next=Number(row.receipt_version)+1;
+      statements.push(
+        database.prepare(`UPDATE portal_primary_staff_bindings SET state='suspended',version=?,updated_at=datetime('now')
+          WHERE binding_id=? AND state='active' AND version=?`).bind(next,row.binding_id,row.receipt_version),
+        database.prepare(`INSERT INTO portal_primary_staff_binding_audit(id,binding_id,binding_version,action,actor_staff_id,details_json)
+          VALUES(?,?,?,'binding.suspended',?,?)`).bind(crypto.randomUUID(),row.binding_id,next,principal.id,details),
+      );
+    }
+    statements.push(
+      database.prepare(`UPDATE portal_v2_folder_bindings SET status='suspended',updated_at=datetime('now')
+        WHERE id=? AND status='active' AND revoked_at IS NULL`).bind(row.binding_id),
+      database.prepare(`INSERT INTO audit_log(actor_type,actor_id,action,entity_type,entity_id,details_json)
+        VALUES('staff',?,'client.workspace.binding.suspended_for_folder_reassignment','folder_binding',?,?)`)
+        .bind(principal.id,row.binding_id,details),
+    );
+  }
+  await database.batch(statements);
+  return {bindingIds:rows.results.map(row=>row.binding_id)};
+}
 
 async function opsFolderProof(env:Env,principal:StaffPrincipal|null,folderKey:string):Promise<OpsFolderProof>{
   const prefix=normalizePrefix(folderKey),rows=await env.OPS_DB.withSession("first-primary").prepare(`WITH matching AS(
@@ -321,10 +375,11 @@ export async function createPrimaryWorkspaceBinding(env:Env,principal:StaffPrinc
       AND workspace.project_alpha_source_id='project-alpha:primary' LIMIT 2`)
     .bind(owner.folderPrefix,owner.folderPrefix.slice(0,-1)).all<{id:string}>();
   if(existing.results.length)fail(409,"This folder is already linked to a Client Workspace");
-  const bindingId=crypto.randomUUID(),auditId=crypto.randomUUID(),sourceVersion=await digest({
-    sourceId:PRIMARY,workspaceId:projection.workspaceId,directoryGenerationId:projection.directoryGenerationId,
-    sourceSequence:projection.sourceSequence,rootSourceVersion:projection.rootSourceVersion,projectSourceVersion:projection.projectSourceVersion,
-  });
+  // The client authorizer joins the binding owner to the active signed
+  // directory entity by this version. The receipt/context hash carries the
+  // broader generation proof; source_version must remain the owner's signed
+  // entity version rather than an unrelated digest.
+  const bindingId=crypto.randomUUID(),auditId=crypto.randomUUID(),sourceVersion=projection.ownerSourceVersion;
   await db(env).batch([
     db(env).prepare(`INSERT INTO portal_v2_folder_bindings
       (id,workspace_id,owner_scope_type,owner_public_id,r2_prefix,source_type,source_version)

@@ -5,7 +5,7 @@ type Env = PortalAuthorizationEnv & Pick<ClientEnv, "AUTHENTICATED_DELIVERY_GRAN
 import type { VerifiedClientPrincipal } from "./types";
 import { authorizePortalWorkspaceCapability,authorizePrimaryPortalTargetBatch, portalHierarchyV2Enabled, nativePortalScopesAllowed, type NativePortalReadContext } from "./workspace-v2";
 import { readNativeTargetScopes } from './native-portal-scopes';
-import { d1TablesPresent } from '../schema-readiness';
+import { d1ColumnPresent, d1TablesPresent } from '../schema-readiness';
 import { HTTPException } from 'hono/http-exception';
 import { projectAccessTermsReady, projectAccessTermsSql } from './project-access-terms';
 import { projectAccessReadColumns, projectAccessRowAllows, type ProjectAccessReadRow } from './project-access-read';
@@ -49,6 +49,17 @@ async function candidates(
       AND map.projection_source_id=workspace.project_alpha_source_id)` : primaryWorkspaceAccount('workspace');
   const sourceBindings = native ? [native.sourceId] : [];
   const termsReady=native?.projectAccessTermsAvailable??await projectAccessTermsReady(env.DELIVERY_DB);
+  const [primaryReceiptReady,bindingSourceTypeReady]=await Promise.all([
+    d1TablesPresent(env.DELIVERY_DB,["portal_primary_staff_bindings"]),
+    d1ColumnPresent(env.DELIVERY_DB,"portal_v2_folder_bindings","source_type"),
+  ]);
+  // Operations-owned bindings are authority-bearing only while their immutable
+  // primary staff receipt remains active. If migration 0189 is absent, fail
+  // those bindings closed instead of treating old routing metadata as access.
+  const primaryReceiptSql=!bindingSourceTypeReady?`1=1`:primaryReceiptReady?`(binding.source_type<>'operations' OR EXISTS(
+    SELECT 1 FROM portal_primary_staff_bindings receipt WHERE receipt.binding_id=binding.id
+      AND receipt.workspace_id=binding.workspace_id AND receipt.r2_prefix=binding.r2_prefix AND receipt.state='active'))`
+    :`binding.source_type<>'operations'`;
   const rows = await portalDb(env).prepare(`SELECT DISTINCT 'staff' source,binding.id folder_binding_id,binding.r2_prefix,
       grant_record.id grant_id,grant_record.grant_version,binding.source_version binding_source_version,
       binding.owner_scope_type,binding.owner_public_id,grant_record.audience_type,
@@ -75,6 +86,7 @@ async function candidates(
       AND principal_record.identity_id=recipient.identity_id AND principal_record.status='active'
       AND principal_record.source_version=recipient.principal_source_version
     WHERE identity.issuer=? AND identity.subject=? AND identity.status='active' AND identity.revoked_at IS NULL
+      AND ${primaryReceiptSql}
       AND EXISTS(SELECT 1 FROM portal_v2_workspaces workspace WHERE workspace.id=membership.workspace_id
         AND workspace.status='active' AND ${workspaceSource})
       AND (grant_record.audience_type<>'principal' OR principal_record.public_id IS NOT NULL)
@@ -345,6 +357,14 @@ export async function listAuthorizedAuthenticatedDeliveryPrefixes(
       if(await audienceLiveAndContained(env,workspaceId,row)&&!await integrationDenied(env,principal,workspaceId,row))prefixes.add(row.r2_prefix);
     return prefixes;
   }
+  const [primaryReceiptReady,bindingSourceTypeReady]=await Promise.all([
+    d1TablesPresent(env.DELIVERY_DB,["portal_primary_staff_bindings"]),
+    d1ColumnPresent(env.DELIVERY_DB,"portal_v2_folder_bindings","source_type"),
+  ]);
+  const primaryReceiptSql=!bindingSourceTypeReady?`1=1`:primaryReceiptReady?`(binding.source_type<>'operations' OR EXISTS(
+    SELECT 1 FROM portal_primary_staff_bindings receipt WHERE receipt.binding_id=binding.id
+      AND receipt.workspace_id=binding.workspace_id AND receipt.r2_prefix=binding.r2_prefix AND receipt.state='active'))`
+    :`binding.source_type<>'operations'`;
   // Resolve every folder binding in one bounded authorization query. Calling
   // the single-binding resolver in a loop repeated identity, membership,
   // hierarchy, entitlement and denial reads up to 100 times on each listing.
@@ -387,6 +407,7 @@ export async function listAuthorizedAuthenticatedDeliveryPrefixes(
         AND principal_record.identity_id=recipient.identity_id AND principal_record.status='active'
         AND principal_record.source_version=recipient.principal_source_version
       WHERE identity.issuer=? AND identity.subject=? AND identity.status='active' AND identity.revoked_at IS NULL
+        AND ${primaryReceiptSql}
         AND (grant_record.audience_type<>'principal' OR principal_record.public_id IS NOT NULL)
     ), lineage(grant_id,entity_type,public_id,parent_public_id,source_version,depth) AS (
       SELECT grant_id,entity_type,public_id,parent_public_id,source_version,0 FROM base
