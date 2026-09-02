@@ -215,6 +215,35 @@ test("restoring a primary legacy grant requires a fresh classified review and pr
   }); await openPrimary(page); await expect(page.getByText("Existing access rules — unclassified", {exact: true})).toBeVisible(); await page.getByRole("button", {name: "Restore as new version"}).click(); await expect(page.getByRole("combobox", {name: "Recipient role"})).toHaveValue(""); expect(calls.some(call => call.path.endsWith("/restore"))).toBe(false); await page.getByRole("combobox", {name: "Recipient role"}).selectOption("customer"); await page.getByRole("button", {name: "Review authenticated access"}).click(); await page.getByRole("button", {name: "Restore authenticated access"}).click(); await expect(page.getByRole("status").filter({hasText: "restored as a new version"})).toBeVisible(); expect(calls.find(call => call.path.endsWith("/restore"))?.body).toMatchObject({expectedVersion: 1, expectedContextVersion: "a".repeat(64), accessTerms: {kind: "customer", mode: "until_revoked", expiresAt: null}});
 });
 
+test("editing a historical project restore returns to a visible creation audience mode", async ({page}) => {
+  const project = primaryGrant({audience: {type: "project", publicId: "project-hilly"}, audienceLabel: "Hilly Haven", status: "revoked"});
+  const calls = await mockPrimary(page, (route, call) => {
+    if (call.path === "/api/delivery/authenticated-grants" && call.method === "GET") return route.fulfill({json: {...primaryContext, grants: [project]}});
+    if (call.path.endsWith("/authenticated-grants/audiences")) {
+      const url = new URL(route.request().url());
+      expect(url.searchParams.get("audienceType")).toBe("principal");
+      return route.fulfill({json: {folderBindingId: "binding-acme", workspaceId: "workspace-acme", workspaceLabel: "Acme Workspace", scopeTypeFilter: "principal",
+        audiences: [{type: "principal", publicId: "principal-craig", displayName: "Craig Director", email: "craig@example.test"}]}});
+    }
+    return undefined;
+  });
+  await openPrimary(page);
+  await expect(page.getByLabel("Authenticated portal grant history")).toContainText("Acme Workspace · Project · revoked · version 1");
+  await page.getByRole("button", {name: "Restore as new version"}).click();
+  const projectSearch = page.getByRole("combobox", {name: "Search projects"});
+  await expect(projectSearch).toHaveValue("Hilly Haven");
+  await projectSearch.fill("Craig");
+  await expect(page.getByRole("button", {name: "Individual", exact: true})).toHaveAttribute("aria-pressed", "true");
+  const individualSearch = page.getByRole("combobox", {name: "Search individuals"});
+  await expect(page.getByRole("option", {name: /Craig Director/})).toBeVisible();
+  await individualSearch.press("ArrowDown"); await page.keyboard.press("Enter");
+  await page.getByRole("combobox", {name: "Recipient role"}).selectOption("customer");
+  await page.getByRole("button", {name: "Review authenticated access"}).click();
+  await expect(page.getByRole("button", {name: "Grant authenticated access", exact: true})).toBeVisible();
+  await expect(page.getByRole("button", {name: "Restore authenticated access"})).toHaveCount(0);
+  expect(calls.filter(call => call.path.endsWith("/authenticated-grants/audiences"))).toHaveLength(1);
+});
+
 for (const status of [403, 409]) test(`primary preview ${status} clears old grant context before refresh`, async ({page}) => {
   await mockPrimary(page, (route, call) => {
     if (call.path === "/api/delivery/authenticated-grants" && call.method === "GET") return route.fulfill({json: {...primaryContext, grants: [primaryGrant()]}});
@@ -311,6 +340,92 @@ test("creates a distinct authenticated Client Portal grant with keyboard typeahe
   await expect(page.getByRole("button", { name: "Revoke" })).toBeVisible();
 });
 
+test("client audiences can be searched, reviewed, granted, revoked, and restored with the correct label", async ({page}) => {
+  const clientAudience = {type: "client" as const, publicId: "client-acme"};
+  let grants: ReturnType<typeof primaryGrant>[] = [];
+  const calls = await mockPrimary(page, (route, call) => {
+    if (call.path === "/api/delivery/authenticated-grants" && call.method === "GET") {
+      return route.fulfill({json: {...primaryContext, grants}});
+    }
+    if (call.path.endsWith("/authenticated-grants/audiences")) {
+      const url = new URL(route.request().url());
+      expect(url.searchParams.get("audienceType")).toBe("client");
+      return route.fulfill({json: {
+        folderBindingId: "binding-acme", workspaceId: "workspace-acme", workspaceLabel: "Acme Workspace", scopeTypeFilter: "client",
+        audiences: [
+          {type: "organization", publicId: "org-acme", displayName: "Acme Organization"},
+          {...clientAudience, displayName: "Acme Client"},
+        ],
+      }});
+    }
+    if (call.path.endsWith("/authenticated-grants/preview")) {
+      return route.fulfill({json: {...primaryPreview(call.body), audienceLabel: "Acme Client"}});
+    }
+    if (call.path === "/api/delivery/authenticated-grants" && call.method === "POST") {
+      const grant = primaryGrant({audience: clientAudience, audienceLabel: "Acme Client", accessTerms: call.body.accessTerms ?? null});
+      grants = [grant];
+      return route.fulfill({status: 201, json: {grant, replayed: false}});
+    }
+    if (call.path.endsWith("/grant-logical/revoke")) {
+      const grant = primaryGrant({...grants[0], audience: clientAudience, audienceLabel: "Acme Client", status: "revoked"});
+      grants = [grant];
+      return route.fulfill({json: {grant, replayed: false}});
+    }
+    if (call.path.endsWith("/grant-logical/restore")) {
+      const grant = primaryGrant({id: "grant-v2", version: 2, audience: clientAudience, audienceLabel: "Acme Client", accessTerms: call.body.accessTerms ?? null});
+      grants = [grant];
+      return route.fulfill({status: 201, json: {grant, replayed: false}});
+    }
+    return undefined;
+  });
+
+  await openPrimary(page);
+  await expect(page.getByRole("button", {name: "Client", exact: true})).toBeVisible();
+  await expect(page.getByRole("button", {name: "Project", exact: true})).toHaveCount(0);
+  await page.getByRole("button", {name: "Client", exact: true}).click();
+  const search = page.getByRole("combobox", {name: "Search clients"});
+  await search.fill("Acme");
+  await expect(page.getByRole("option", {name: /Acme Client/})).toBeVisible();
+  await expect(page.getByRole("option", {name: /Acme Organization/})).toHaveCount(0);
+  await search.press("ArrowDown");
+  await page.keyboard.press("Enter");
+  await expect(page.getByText(/All currently authorized members of this client/i)).toBeVisible();
+  await page.getByRole("combobox", {name: "Recipient role"}).selectOption("customer");
+  await page.getByRole("button", {name: "Review authenticated access"}).click();
+  let review = page.getByRole("region", {name: "Review authenticated portal access"});
+  await expect(review.locator("dt", {hasText: "Target type"}).locator("..").locator("dd")).toHaveText("Client");
+  await expect(review).toContainText("Acme Client");
+  await page.getByRole("button", {name: "Grant authenticated access", exact: true}).click();
+  await expect(page.getByRole("status").filter({hasText: "Authenticated portal access granted"})).toBeVisible();
+  await expect(page.getByLabel("Authenticated portal grant history")).toContainText("Acme Workspace · Client · active · version 1");
+
+  const created = calls.find(call => call.path === "/api/delivery/authenticated-grants" && call.method === "POST");
+  expect(created?.body).toMatchObject({audienceType: "client", audiencePublicId: "client-acme",
+    accessTerms: {kind: "customer", mode: "until_revoked", expiresAt: null}});
+
+  page.once("dialog", async dialog => {
+    expect(dialog.message()).toContain("Revoke authenticated portal access for Acme Client?");
+    await dialog.accept();
+  });
+  await page.getByRole("button", {name: "Revoke", exact: true}).click();
+  await expect(page.getByRole("status").filter({hasText: "Authenticated portal access revoked"})).toBeVisible();
+  await expect(page.getByLabel("Authenticated portal grant history")).toContainText("Acme Workspace · Client · revoked · version 1");
+  expect(calls.find(call => call.path.endsWith("/grant-logical/revoke"))?.body).toEqual({expectedVersion: 1, reasonCode: "client_delivery_access"});
+
+  await page.getByRole("button", {name: "Restore as new version"}).click();
+  await expect(page.getByRole("button", {name: "Client", exact: true})).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("combobox", {name: "Search clients"})).toHaveValue("Acme Client");
+  await page.getByRole("combobox", {name: "Recipient role"}).selectOption("customer");
+  await page.getByRole("button", {name: "Review authenticated access"}).click();
+  review = page.getByRole("region", {name: "Review authenticated portal access"});
+  await expect(review.locator("dt", {hasText: "Target type"}).locator("..").locator("dd")).toHaveText("Client");
+  await page.getByRole("button", {name: "Restore authenticated access"}).click();
+  await expect(page.getByRole("status").filter({hasText: "restored as a new version"})).toBeVisible();
+  await expect(page.getByLabel("Authenticated portal grant history")).toContainText("Acme Workspace · Client · active · version 2");
+  expect(calls.find(call => call.path.endsWith("/grant-logical/restore"))?.body).toMatchObject({expectedVersion: 1,
+    expectedContextVersion: "a".repeat(64), accessTerms: {kind: "customer", mode: "until_revoked", expiresAt: null}});
+});
+
 test("workspace targeting keeps an individual exact and makes broader scopes an explicit choice", async ({page}) => {
   const calls = await mockPrimary(page, (route, call) => {
     if (call.path.endsWith("/authenticated-grants/audiences")) {
@@ -332,6 +447,7 @@ test("workspace targeting keeps an individual exact and makes broader scopes an 
   await expect(page.getByRole("button", {name: "Individual", exact: true})).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByRole("button", {name: "Department", exact: true})).toBeVisible();
   await expect(page.getByRole("button", {name: "Organization", exact: true})).toBeVisible();
+  await expect(page.getByRole("button", {name: "Client", exact: true})).toBeVisible();
   const input = page.getByRole("combobox", {name: "Search individuals"});
   await input.fill("Craig");
   await expect(page.getByRole("option", {name: /Craig Director/})).toBeVisible();

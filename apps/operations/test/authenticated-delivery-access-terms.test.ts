@@ -50,6 +50,29 @@ async function fixture(group=false){
     person:{issuer,subject:identity,email:`${identity}@example.test`}};
 }
 type Fixture=Awaited<ReturnType<typeof fixture>>;
+async function groupAudienceHierarchy(f:Fixture){
+  const clientPublic=pub(f.n+2000),departmentPublic=pub(f.n+3000);
+  await delivery.batch([
+    delivery.prepare(`INSERT INTO portal_v2_directory_entities(workspace_id,generation_id,entity_type,public_id,parent_public_id,display_name,source_version)
+      VALUES(?,?,'client',?,?,?,'client-v1')`).bind(f.workspace,f.generation,clientPublic,f.rootPublic,`Client ${f.n}`),
+    delivery.prepare(`INSERT INTO portal_v2_directory_entities(workspace_id,generation_id,entity_type,public_id,parent_public_id,display_name,source_version)
+      VALUES(?,?,'department',?,?,?,'department-v1')`).bind(f.workspace,f.generation,departmentPublic,f.rootPublic,`Department ${f.n}`),
+    delivery.prepare(`INSERT INTO portal_v2_directory_generation_contracts(generation_id,workspace_id,schema_version) VALUES(?,?,3)`)
+      .bind(f.generation,f.workspace),
+    delivery.prepare(`INSERT INTO portal_v2_project_lifecycle(workspace_id,generation_id,project_public_id,lifecycle_status,source_version)
+      VALUES(?,?,?,'active','lifecycle-v1')`).bind(f.workspace,f.generation,f.projectPublic),
+    delivery.prepare(`INSERT INTO portal_v2_directory_relations(workspace_id,generation_id,public_id,relation_type,from_type,from_public_id,to_type,to_public_id,source_version)
+      VALUES(?,?,'organization-client','contains','organization',?,'client',?,'organization-client-v1')`).bind(f.workspace,f.generation,f.rootPublic,clientPublic),
+    delivery.prepare(`INSERT INTO portal_v2_directory_relations(workspace_id,generation_id,public_id,relation_type,from_type,from_public_id,to_type,to_public_id,source_version)
+      VALUES(?,?,'organization-department','contains','organization',?,'department',?,'organization-department-v1')`).bind(f.workspace,f.generation,f.rootPublic,departmentPublic),
+    delivery.prepare(`INSERT INTO portal_v2_directory_relations(workspace_id,generation_id,public_id,relation_type,from_type,from_public_id,to_type,to_public_id,source_version)
+      VALUES(?,?,'client-project','contains','client',?,'project',?,'client-project-v1')`).bind(f.workspace,f.generation,clientPublic,f.projectPublic),
+    delivery.prepare(`INSERT INTO portal_v2_directory_relations(workspace_id,generation_id,public_id,relation_type,from_type,from_public_id,to_type,to_public_id,source_version)
+      VALUES(?,?,'department-project','contains','department',?,'project',?,'department-project-v1')`).bind(f.workspace,f.generation,departmentPublic,f.projectPublic),
+  ]);
+  return {target:{...env,CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED:'true'} as Env,
+    client:{publicId:clientPublic,label:`Client ${f.n}`},department:{publicId:departmentPublic,label:`Department ${f.n}`}};
+}
 async function reviewed(f:Fixture,target=env,operation=f.operation){return {...operation,expectedContextVersion:(await previewAuthenticatedDeliveryGrant(target,staff,operation)).contextVersion};}
 async function create(f:Fixture,target=env){return createAuthenticatedDeliveryGrant(target,staff,await reviewed(f,target),`primary-create-key-${f.n}`);}
 async function lifecycle(f:Fixture,completed:string|null=null){
@@ -145,6 +168,44 @@ describe('primary staff project access terms and real customer history',{timeout
     expect(created.grant).toMatchObject({audience:{type:'organization',publicId:f.rootPublic},recipientCount:0});
     expect(await delivery.prepare('SELECT count(*) n FROM portal_v2_authenticated_delivery_grant_recipients WHERE grant_id=?')
       .bind(created.grant.id).first<number>('n')).toBe(0);
+  });
+  it.each(['client','department'] as const)('previews, creates, revokes and restores an ancestry-bounded %s grant',async audienceType=>{
+    const f=await fixture(),hierarchy=await groupAudienceHierarchy(f),audience=hierarchy[audienceType];
+    const operation={...f.operation,audienceType,audiencePublicId:audience.publicId};
+    const preview=await previewAuthenticatedDeliveryGrant(hierarchy.target,staff,operation);
+    expect(preview).toMatchObject({operation,audienceLabel:audience.label,dynamicAudience:true,recipientCount:0,
+      recipientPreview:{mode:'dynamic',currentAuthorizedCount:null,truncated:false}});
+
+    const created=await createAuthenticatedDeliveryGrant(hierarchy.target,staff,{...operation,expectedContextVersion:preview.contextVersion},
+      `group-create-${audienceType}-${f.n}`);
+    expect(created).toMatchObject({replayed:false,grant:{version:1,status:'active',audience:{type:audienceType,publicId:audience.publicId},recipientCount:0}});
+
+    const revoked=await revokeAuthenticatedDeliveryGrant(hierarchy.target,staff,created.grant.grantId,1,'group_revoke',`group-revoke-${audienceType}-${f.n}`);
+    expect(revoked).toMatchObject({replayed:false,grant:{version:1,status:'revoked',audience:{type:audienceType,publicId:audience.publicId}}});
+
+    const restoreOperation={...operation,reasonCode:'group_restore'},restorePreview=await previewAuthenticatedDeliveryGrant(hierarchy.target,staff,restoreOperation);
+    const restored=await restoreAuthenticatedDeliveryGrant(hierarchy.target,staff,created.grant.grantId,1,'group_restore',null,
+      `group-restore-${audienceType}-${f.n}`,{accessTerms:restoreOperation.accessTerms,expectedContextVersion:restorePreview.contextVersion});
+    expect(restored).toMatchObject({replayed:false,grant:{version:2,status:'active',audience:{type:audienceType,publicId:audience.publicId},recipientCount:0}});
+  });
+  it.each(['client','department'] as const)('rejects a %s audience from another workspace without writing a grant',async audienceType=>{
+    const local=await fixture(),foreign=await fixture(),foreignHierarchy=await groupAudienceHierarchy(foreign),foreignAudience=foreignHierarchy[audienceType];
+    const operation={...local.operation,audienceType,audiencePublicId:foreignAudience.publicId};
+    await expect(previewAuthenticatedDeliveryGrant(env,staff,operation)).rejects.toMatchObject({status:404});
+    await expect(createAuthenticatedDeliveryGrant(env,staff,operation,`foreign-${audienceType}-${local.n}-${foreign.n}`)).rejects.toMatchObject({status:404});
+    expect(await delivery.prepare('SELECT count(*) n FROM portal_v2_authenticated_delivery_grants WHERE workspace_id=?')
+      .bind(local.workspace).first<number>('n')).toBe(0);
+  });
+  it.each(['client','department'] as const)('rejects a same-workspace %s outside the folder ancestry without writing a grant',async audienceType=>{
+    const f=await fixture(),hierarchy=await groupAudienceHierarchy(f),siblingPublic=pub(f.n+(audienceType==='client'?4000:5000));
+    await delivery.prepare(`INSERT INTO portal_v2_directory_entities(workspace_id,generation_id,entity_type,public_id,parent_public_id,display_name,source_version)
+      VALUES(?,?,?,?,?,'Sibling audience','sibling-v1')`).bind(f.workspace,f.generation,audienceType,siblingPublic,f.rootPublic).run();
+    const operation={...f.operation,audienceType,audiencePublicId:siblingPublic};
+    expect(hierarchy[audienceType].publicId).not.toBe(siblingPublic);
+    await expect(previewAuthenticatedDeliveryGrant(env,staff,operation)).rejects.toMatchObject({status:404});
+    await expect(createAuthenticatedDeliveryGrant(env,staff,operation,`sibling-${audienceType}-${f.n}`)).rejects.toMatchObject({status:404});
+    expect(await delivery.prepare('SELECT count(*) n FROM portal_v2_authenticated_delivery_grants WHERE workspace_id=?')
+      .bind(f.workspace).first<number>('n')).toBe(0);
   });
   it('uses the shared explicit-date policy without a primary-only one-year ceiling',async()=>{
     const f=await fixture(),expiresAt=new Date(Date.now()+730*86400_000).toISOString();

@@ -4672,6 +4672,14 @@ function ClientWorkspaceGrant({ prefix }: { prefix: string }) {
 }
 
 type AuthenticatedGrantAudienceType = "organization" | "department" | "client" | "project" | "principal";
+const AUTHENTICATED_GRANT_AUDIENCE_LABEL: Record<AuthenticatedGrantAudienceType, string> = {
+  principal: "Individual",
+  department: "Department",
+  organization: "Organization",
+  client: "Client",
+  project: "Project",
+};
+const PRIMARY_AUTHENTICATED_GRANT_AUDIENCE_TYPES = ["principal", "department", "organization", "client"] as const;
 type PrimaryGrantTerms = { kind: "customer" | "collaborator"; mode: "specific_date" | "project_end" | "until_revoked"; expiresAt: string | null };
 type AuthenticatedGrantAudience = {
   type: AuthenticatedGrantAudienceType;
@@ -4887,7 +4895,7 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, onBusyChang
   const [query, setQuery] = useState("");
   const [options, setOptions] = useState<AuthenticatedGrantAudience[]>([]);
   const [selected, setSelected] = useState<AuthenticatedGrantAudience | null>(null);
-  const [targetType, setTargetType] = useState<"principal" | "department" | "organization">("principal");
+  const [targetType, setTargetType] = useState<AuthenticatedGrantAudienceType>("principal");
   const [searchStatus, setSearchStatus] = useState("");
   const [reasonCode, setReasonCode] = useState("client_delivery_access");
   const [expiresAt, setExpiresAt] = useState("");
@@ -4907,7 +4915,7 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, onBusyChang
   const validGrant = (value: AuthenticatedGrant) => !!value && text(value.id) && text(value.grantId) && Number.isSafeInteger(value.version) && value.version > 0 && !!value.audience && ["organization", "department", "client", "project", "principal"].includes(value.audience.type) && text(value.audience.publicId) && ["active", "revoked", "expired"].includes(value.status) && validTerms(value.accessTerms) && (value.effectiveAccessExpiresAt === null || dateValue(value.effectiveAccessExpiresAt));
   const invalidResponse = () => new ApiError("The access response could not be verified. Refresh authenticated access before continuing.", 409, {});
   const abortReads = useCallback(() => { readController.current?.abort(); searchController.current?.abort(); previewController.current?.abort(); }, []);
-  const clearContext = useCallback(() => { epoch.current++; abortReads(); setContext(null); setFolderBindingId(""); setGrants([]); setSelected(null); setQuery(""); setOptions([]); setSearchStatus(""); setPreview(null); setRestoreTarget(null); setLoading(false); setBusy(false); }, [abortReads]);
+  const clearContext = useCallback(() => { epoch.current++; abortReads(); setContext(null); setFolderBindingId(""); setGrants([]); setTargetType("principal"); setSelected(null); setQuery(""); setOptions([]); setSearchStatus(""); setPreview(null); setRestoreTarget(null); setLoading(false); setBusy(false); }, [abortReads]);
   const handleError = useCallback((caught: unknown) => {
     if (caught instanceof ApiError && [401, 403, 404, 409].includes(caught.status)) {
       clearContext(); pending.current = null; setUncertain(false);
@@ -5001,7 +5009,7 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, onBusyChang
       const value = await api<{grant: AuthenticatedGrant & {folderBindingId: string}; replayed: boolean}>(operation.path, {method: "POST", headers: {"Idempotency-Key": operation.key}, body: operation.body, signal: controller.signal});
       if (controller.signal.aborted || !alive.current || generation !== epoch.current) return;
       if (!validGrant(value.grant) || value.grant.folderBindingId !== folderBindingId || value.grant.audience.type !== operation.audience.type || value.grant.audience.publicId !== operation.audience.publicId || value.grant.version !== operation.version || value.grant.status !== (operation.action === "revoke" ? "revoked" : "active") || operation.grantId && value.grant.grantId !== operation.grantId || operation.action !== "revoke" && !sameTerms(value.grant.accessTerms, operation.terms) || typeof value.replayed !== "boolean") throw invalidResponse();
-      pending.current = null; setPreview(null); setRestoreTarget(null); setSelected(null); setQuery(""); resetTerms();
+      pending.current = null; setPreview(null); setRestoreTarget(null); setTargetType("principal"); setSelected(null); setQuery(""); resetTerms();
       setMessage(operation.action === "create" ? "Authenticated portal access granted. It does not create a public link." : operation.action === "revoke" ? "Authenticated portal access revoked." : "Authenticated portal access restored as a new version with the reviewed terms.");
       await load();
     } catch (caught) { if (controller.signal.aborted || !alive.current || generation !== epoch.current) return; if (caught instanceof ApiError && caught.status < 500 && caught.status !== 429) { pending.current = null; setPreview(null); handleError(caught); } else { setUncertain(true); setError("The access result is not confirmed. Retry the same operation safely; do not create another grant."); } }
@@ -5016,7 +5024,7 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, onBusyChang
   };
   const mutate = (grant: AuthenticatedGrant, action: "revoke" | "restore") => {
     if (busy || uncertain || loading || !context || action === "revoke" && !canRevoke) return;
-    if (action === "restore") { clearReview(); resetTerms(); setRestoreTarget(grant); setSelected({...grant.audience, displayName: grant.audienceLabel}); setQuery(grant.audienceLabel); setOptions([]); return; }
+    if (action === "restore") { clearReview(); resetTerms(); setTargetType(grant.audience.type); setRestoreTarget(grant); setSelected({...grant.audience, displayName: grant.audienceLabel}); setQuery(grant.audienceLabel); setOptions([]); return; }
     const reason = reasonCode.trim(); if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/.test(reason)) { setError("Enter a valid reason code before revoking access."); return; }
     if (!confirm(`Revoke authenticated portal access for ${grant.audienceLabel}? Files and other grants will not change.`)) return;
     void execute({path: `/api/delivery/authenticated-grants/${encodeURIComponent(grant.grantId)}/revoke`, body: JSON.stringify({expectedVersion: grant.version, reasonCode: reason}), key: crypto.randomUUID(), action, context, audience: grant.audience, terms: grant.accessTerms, version: grant.version, grantId: grant.grantId});
@@ -5038,7 +5046,7 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, onBusyChang
         {restoreTarget && <p role="status">Reviewing a new version for {restoreTarget.audienceLabel}. Existing grant terms are not silently reused.</p>}
         <fieldset className="workspace-audience-types">
           <legend>Share with</legend>
-          {([ ["principal", "Individual"], ["department", "Department"], ["organization", "Organization"] ] as const).map(([value, label]) => <button
+          {PRIMARY_AUTHENTICATED_GRANT_AUDIENCE_TYPES.map(value => <button
             key={value}
             type="button"
             className={targetType === value ? "active" : "button-ghost"}
@@ -5048,14 +5056,14 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, onBusyChang
               clearReview(); resetTerms(); setTargetType(value); setSelected(null); setRestoreTarget(null);
               setQuery(""); setOptions([]); setSearchStatus("");
             }}
-          >{label}</button>)}
+          >{AUTHENTICATED_GRANT_AUDIENCE_LABEL[value]}</button>)}
         </fieldset>
         <label htmlFor="authenticated-grant-audience">Search {targetType === "principal" ? "individuals" : `${targetType}s`}</label>
         <input id="authenticated-grant-audience" type="search" role="combobox" aria-autocomplete="list"
           aria-expanded={options.length > 0} aria-controls="authenticated-grant-options" autoComplete="off"
           placeholder={targetType === "principal" ? "Type a client name or email" : `Type a ${targetType} name`} value={query} disabled={disabled}
           onKeyDown={focusFirstTypeaheadOption}
-          onChange={event => { clearReview(); resetTerms(); setQuery(event.target.value); setSelected(null); setRestoreTarget(null); setSearchStatus(""); }} />
+          onChange={event => { clearReview(); resetTerms(); if (targetType === "project") setTargetType("principal"); setQuery(event.target.value); setSelected(null); setRestoreTarget(null); setSearchStatus(""); }} />
         {options.length > 0 && <div id="authenticated-grant-options" className="client-workspace-typeahead" role="listbox">
           {options.map(option => <button type="button" role="option" aria-selected={selected?.publicId === option.publicId}
             key={`${option.type}:${option.publicId}`}
@@ -5081,7 +5089,7 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, onBusyChang
         {project && accessMode === "project_end" && <p>Access ends seven days after the first verified project completion. Reopening does not renew expired access.</p>}
         {project && accessKind === "collaborator" && accessMode === "until_revoked" && <p>Access will not end automatically when the project completes. It remains until revoked.</p>}
         {!preview && <button type="button" className="button-orange button-small" disabled={disabled || !selected || !reasonCode || project && (!context.accessTermsSupported || !accessKind || !accessMode)} onClick={() => void review()}>Review authenticated access</button>}
-        {preview && <section className="primary-authenticated-grant-review" aria-label="Review authenticated portal access"><h4 ref={reviewTitle} tabIndex={-1}>Confirm authenticated access</h4><dl>{[["Workspace", preview.workspaceLabel], ["Project", preview.projectName ?? "No project-specific access terms"], ["Recipient", preview.audienceLabel], ["Target type", selected?.type === "principal" ? "Individual" : selected?.type === "department" ? "Department" : "Organization"], ["Recipient rule", selected?.type === "principal" ? "This exact verified person only" : "Current authorized members; membership is rechecked"], ["Recipient preview", selected?.type === "principal" ? `${preview.recipientCount} exact verified person` : preview.recipientCount > 0 ? `${preview.recipientPreview?.truncated ? "At least " : "Up to "}${preview.recipientCount} currently eligible people; final membership is checked when opened` : "Dynamic membership; final recipients are checked when opened"], ["Access terms", termsLabel(preview.accessTerms)], ["Access ends", preview.effectiveAccessExpiresAt ? date(preview.effectiveAccessExpiresAt) : preview.accessTerms?.mode === "project_end" ? "Awaiting verified project completion, then 7 days" : "When revoked"]].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>{preview.accessTerms?.mode === "project_end" && <p>Reopening does not renew expired access.</p>}<p>Confirm this recipient and scope. This grants only the reviewed folder access; it never widens an individual to their organization and creates no public link.</p><div className="actions"><button type="button" className="button-orange" disabled={disabled} onClick={create}>{restoreTarget ? "Restore authenticated access" : "Grant authenticated access"}</button><button type="button" className="button-ghost" disabled={busy || uncertain} onClick={() => setPreview(null)}>Cancel review</button></div></section>}
+        {preview && <section className="primary-authenticated-grant-review" aria-label="Review authenticated portal access"><h4 ref={reviewTitle} tabIndex={-1}>Confirm authenticated access</h4><dl>{[["Workspace", preview.workspaceLabel], ["Project", preview.projectName ?? "No project-specific access terms"], ["Recipient", preview.audienceLabel], ["Target type", selected ? AUTHENTICATED_GRANT_AUDIENCE_LABEL[selected.type] : "Unknown"], ["Recipient rule", selected?.type === "principal" ? "This exact verified person only" : "Current authorized members; membership is rechecked"], ["Recipient preview", selected?.type === "principal" ? `${preview.recipientCount} exact verified person` : preview.recipientCount > 0 ? `${preview.recipientPreview?.truncated ? "At least " : "Up to "}${preview.recipientCount} currently eligible people; final membership is checked when opened` : "Dynamic membership; final recipients are checked when opened"], ["Access terms", termsLabel(preview.accessTerms)], ["Access ends", preview.effectiveAccessExpiresAt ? date(preview.effectiveAccessExpiresAt) : preview.accessTerms?.mode === "project_end" ? "Awaiting verified project completion, then 7 days" : "When revoked"]].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>{preview.accessTerms?.mode === "project_end" && <p>Reopening does not renew expired access.</p>}<p>Confirm this recipient and scope. This grants only the reviewed folder access; it never widens an individual to their organization and creates no public link.</p><div className="actions"><button type="button" className="button-orange" disabled={disabled} onClick={create}>{restoreTarget ? "Restore authenticated access" : "Grant authenticated access"}</button><button type="button" className="button-ghost" disabled={busy || uncertain} onClick={() => setPreview(null)}>Cancel review</button></div></section>}
       </>}
       {error && <small className="error" role="alert">{error}{portalSetupNeeded && <> <a href="/clients#client-portal-setup">Open Client Hub portal setup</a> to review the exact client account, workspace, and verified membership.</>}</small>}
       {portalSetupNeeded&&<PrimaryWorkspaceBindingSetup folder={folder} onLinked={()=>{setPortalSetupNeeded(false);setError("");void load();}}/>}
@@ -5091,7 +5099,7 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, onBusyChang
         {grants.map(grant => {
           const latest = latestVersions.get(grant.grantId) === grant.version;
           return <section key={grant.id} className="authenticated-grant-row">
-            <span><strong>{grant.audienceLabel}</strong><small>{grant.workspaceLabel} · {grant.audience.type} · {grant.status} · version {grant.version}</small>
+            <span><strong>{grant.audienceLabel}</strong><small>{grant.workspaceLabel} · {AUTHENTICATED_GRANT_AUDIENCE_LABEL[grant.audience.type]} · {grant.status} · version {grant.version}</small>
               <small>{termsLabel(grant.accessTerms)}</small><small>{grant.dynamicAudience ? "Dynamic current authorized members" : `${grant.recipientCount} exact verified person`} · {grant.effectiveAccessExpiresAt ? `expires ${date(grant.effectiveAccessExpiresAt)}` : grant.accessTerms?.mode === "project_end" ? "awaiting verified project completion, then 7 days" : grant.expiresAt ? `expires ${date(grant.expiresAt)}` : "no fixed expiry"}</small></span>
             {latest && grant.status === "active" && canRevoke && <button type="button" className="button-danger button-small" disabled={disabled} onClick={() => void mutate(grant, "revoke")}>Revoke</button>}
             {latest && grant.status !== "active" && <button type="button" className="button-ghost button-small" disabled={disabled} onClick={() => void mutate(grant, "restore")}>Restore as new version</button>}
