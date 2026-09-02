@@ -102,8 +102,9 @@ Configure `PUBLIC_SHARE_ORIGIN` (and the Client Worker's compatibility
 `CLIENT_PORTAL_ORIGIN` on Client and `DELIVERY_BASE_URL` on Operations as the
 exact authenticated portal origin. The Worker rejects a public namespace on
 the portal host, a portal namespace on the public host, unknown Worker-first
-paths, and malformed origins. `/portal` and `/portal/*` must remain
-Worker-first. Session cookies remain host-local (`__Host-` or path-scoped
+paths, and malformed origins. The `/portal*` Worker-first prefix covers both
+normal portal routes and recovery from a literal Access wildcard, so neither can
+fall through to the SPA shell. Session cookies remain host-local (`__Host-` or path-scoped
 `__Secure-` cookies with no `Domain` attribute), so no cookie is shared merely
 because both hosts use the same Worker or Access audience.
 

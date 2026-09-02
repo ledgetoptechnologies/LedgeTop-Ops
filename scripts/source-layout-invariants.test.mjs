@@ -100,7 +100,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   // The digest intentionally moved with the reviewed canonical portal hosts
   // and explicit legacy compatibility origin. Keep the field assertions so a future config change
   // cannot hide behind a digest refresh.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "f4ae1944a8b594f943c6f90f6d95f8c0538a3a230c1261e91e1e80efd099e921");
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "969ee629c946efd45059dd925046f23ddc2228f83cb498af8ab978c5a49809be");
   const config = readJson("apps/client/wrangler.jsonc");
   assert.equal(config.name, "ltds-clients");
   assert.equal(config.main, "src/worker/index.ts");
@@ -116,7 +116,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
     binding: "ASSETS",
     directory: "./dist/client",
     not_found_handling: "single-page-application",
-    run_worker_first: ["/", "/api/*", "/s/*", "/client-share/*", "/portal", "/portal/*", "/assets/*", "/health"],
+    run_worker_first: ["/", "/api/*", "/s/*", "/client-share/*", "/portal*", "/assets/*", "/health"],
   });
   assert.equal(config.vars.PUBLIC_BASE_URL, "https://portal.ledgetopdroneservices.com");
   assert.equal(config.vars.PUBLIC_SHARE_ORIGIN, "https://portal.ledgetopdroneservices.com");

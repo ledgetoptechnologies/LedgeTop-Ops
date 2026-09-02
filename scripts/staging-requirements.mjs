@@ -754,7 +754,7 @@ export const STAGING_INVENTORY = Object.freeze({
     queues: [],
     crons: ["*/5 * * * *", "15 * * * *"],
     limits: { cpu_ms: 300000, subrequests: 25000 },
-    assets: { binding: "ASSETS", directory: "./dist/client", not_found_handling: "single-page-application", run_worker_first: ["/", "/api/*", "/s/*", "/client-share/*", "/portal", "/portal/*", "/assets/*", "/health"] },
+    assets: { binding: "ASSETS", directory: "./dist/client", not_found_handling: "single-page-application", run_worker_first: ["/", "/api/*", "/s/*", "/client-share/*", "/portal*", "/assets/*", "/health"] },
     observability: { enabled: true, head_sampling_rate: 1 },
     stream: { binding: "STREAM" },
     ratelimits: [
