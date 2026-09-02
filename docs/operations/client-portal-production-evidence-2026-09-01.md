@@ -79,6 +79,37 @@ claim that the complete client-portal goal is live accepted.
   request, password/expiry/revocation still apply, and the equivalent public
   namespace remains unavailable on `portal.ledgetoptechnologies.com`.
 
+## 2026-09-02 migration and Client Hub follow-up
+
+This follow-up narrows two uncertainties from the September 1 checkpoint. It
+does not activate Project Alpha portal projection or establish signed-in portal
+acceptance.
+
+- Remote Wrangler migration readback reported no pending Operations migrations
+  against the current main migration directory, which now ends at
+  `0051_client_hub_internal_notes.sql`.
+- Remote Wrangler migration readback reported no pending Client migrations
+  against the current main migration directory, which now ends at
+  `0190_portal_grant_expiry_authority.sql`.
+- In the live signed-in Operations Client Hub, internal notes loaded for both an
+  organization root and a standalone-client root. The panel clearly stated that
+  notes are staff-only and are neither shown in the client portal nor
+  synchronized to Project Alpha. No browser warnings or errors were observed.
+- At a 375-pixel viewport, the internal-notes region and both actions remained
+  within the viewport with no horizontal overflow. The viewport override was
+  reset after the check.
+- Live Client Hub search reduced the 22-record directory to the single expected
+  organization while typing, without submitting the Search button, and emitted
+  no browser warning or error.
+- The focused migrated-D1 notes test passed create, update, audited soft-delete,
+  immutable history, idempotent replay, and exact source/root isolation. No
+  synthetic note was written to production during this read-only acceptance.
+
+These observations establish migration parity and read-only usability for this
+Client Hub slice. They do not replace a deliberate production mutation test for
+note create/edit/delete, and they do not change the portal-projection blockers
+below.
+
 ## Next safe activation sequence
 
 1. Provision the reviewed connector credential envelope independently to every
