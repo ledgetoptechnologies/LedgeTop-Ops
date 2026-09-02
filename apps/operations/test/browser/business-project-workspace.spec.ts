@@ -97,7 +97,7 @@ test("project role metadata is a separate responsive read-only card", async ({ p
   value.projectAlphaContactRoles = { state: "populated", reason: null, nextCursor: null, hasMore: false, returned: 1, limit: 5,
     canonicalRoot: value.canonicalRoot, contextVersion: value.contextVersion, items: [{ contactDisplayName: "Bailey Billing",
       clientDisplayName: "Bailey Contact", scopeType: "project", scopeDisplayName: "Church survey", role: "billing_contact",
-      primary: true, primaryBilling: true, sendProjectInvoices: true, canViewInvoiceLinks: true, sourceVersion: "project-role-v1" }] };
+      primary: true, primaryBilling: true, sendProjectInvoices: true, canViewInvoiceLinks: true }] };
   await page.setViewportSize({ width: 375, height: 900 });
   await mock(page, route => route.fulfill({ json: value }));
   await open(page);

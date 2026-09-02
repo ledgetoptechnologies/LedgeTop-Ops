@@ -195,8 +195,8 @@ The organization/standalone workspace and an exact business-project workspace
 show a separately titled **Project Alpha contact roles** card. It is not merged
 with business contacts, portal logins, organization operational contacts, or
 project operational contacts. Returned fields are limited to contact, client,
-and scope display names; the role token; primary/billing booleans; and source
-version. Email, phone, identity subjects, memberships, entitlements,
+and scope display names, the role token, and primary/billing booleans.
+Source versions, email, phone, identity subjects, memberships, entitlements,
 invitations, notification recipients, internal public IDs, and mutation actions
 are deliberately absent.
 

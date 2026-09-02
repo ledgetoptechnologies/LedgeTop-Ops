@@ -89,11 +89,11 @@ describe("default-off Project Alpha contact-role adapter", () => {
     const result = await listProjectAlphaContactRoles(env, context(), { limit: 10 });
     expect(result).toMatchObject({ state: "populated", returned: 2, hasMore: false, items: [
       { contactDisplayName: "Steve Contact", clientDisplayName: "Steve Client", scopeType: "client", scopeDisplayName: "Steve Client",
-        role: "head_coach", primary: false, primaryBilling: false, sendProjectInvoices: false, canViewInvoiceLinks: false, sourceVersion: "assignment-v2" },
+        role: "head_coach", primary: false, primaryBilling: false, sendProjectInvoices: false, canViewInvoiceLinks: false },
       { contactDisplayName: "Craig Contact", clientDisplayName: "Craig Client", scopeType: "department", scopeDisplayName: "Athletics",
-        role: "athletic_director", primary: true, primaryBilling: false, sendProjectInvoices: false, canViewInvoiceLinks: false, sourceVersion: "assignment-v1" },
+        role: "athletic_director", primary: true, primaryBilling: false, sendProjectInvoices: false, canViewInvoiceLinks: false },
     ] });
-    expect(JSON.stringify(result)).not.toMatch(/email|phone|identity|membership|entitlement|invitation|notification|public_id|contact-one|assignment-one/i);
+    expect(JSON.stringify(result)).not.toMatch(/email|phone|identity|membership|entitlement|invitation|notification|public_id|sourceVersion|contact-one|assignment-one/i);
   });
 
   it("isolates selected source/workspace/generation, filters tombstones, and binds bounded pages to context and scope", async () => {

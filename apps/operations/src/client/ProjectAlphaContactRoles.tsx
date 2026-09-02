@@ -10,7 +10,7 @@ export interface ProjectAlphaContactRoleItem {
   contactDisplayName: string; clientDisplayName: string;
   scopeType: "organization" | "standalone_client" | "department" | "client" | "project";
   scopeDisplayName: string; role: string; primary: boolean; primaryBilling: boolean;
-  sendProjectInvoices: boolean; canViewInvoiceLinks: boolean; sourceVersion: string;
+  sendProjectInvoices: boolean; canViewInvoiceLinks: boolean;
 }
 export interface ProjectAlphaContactRolePage {
   state: "unavailable" | "not_published" | "verified_empty" | "populated";
@@ -37,7 +37,7 @@ export function isProjectAlphaContactRolePage(value: unknown, root: ProjectAlpha
     || (page.state !== "populated" && (page.items.length > 0 || page.hasMore))) return false;
   return page.items.every(item => item && safeText(item.contactDisplayName, 240) && safeText(item.clientDisplayName, 240)
     && ["organization", "standalone_client", "department", "client", "project"].includes(item.scopeType)
-    && safeText(item.scopeDisplayName, 240) && safeText(item.role, 50) && safeText(item.sourceVersion, 512)
+    && safeText(item.scopeDisplayName, 240) && safeText(item.role, 50)
     && [item.primary, item.primaryBilling, item.sendProjectInvoices, item.canViewInvoiceLinks].every(flag => typeof flag === "boolean"));
 }
 
@@ -89,15 +89,15 @@ export function ProjectAlphaContactRoles({ initial, basePath, root, contextVersi
   return <Card title="Project Alpha contact roles"><section className="pa-contact-roles" aria-label="Project Alpha contact roles" aria-busy={busy}>
     <p>Read-only role metadata from the selected Project Alpha snapshot. These roles do not grant portal or Operations access.</p>
     {message && <p className="pa-contact-roles-state">{message}</p>}
-    {items.length > 0 && <ul>{items.map((item, index) => <li key={JSON.stringify([item.scopeType, item.scopeDisplayName, item.role, item.contactDisplayName, item.sourceVersion, index])}>
+    {items.length > 0 && <ul>{items.map((item, index) => <li key={JSON.stringify([item.scopeType, item.scopeDisplayName, item.role, item.contactDisplayName, index])}>
       <div><strong>{item.contactDisplayName}</strong><small>{label(item.role)} · {label(item.scopeType)}: {item.scopeDisplayName}</small>
-        <small>Client: {item.clientDisplayName} · Source version: {item.sourceVersion}</small></div>
+        <small>Client: {item.clientDisplayName}</small></div>
       <div className="pa-contact-role-flags">
         {item.primary && <span>Primary contact</span>}{item.primaryBilling && <span>Primary billing</span>}
         {item.sendProjectInvoices && <span>Receives project invoices</span>}{item.canViewInvoiceLinks && <span>Can view invoice links</span>}
       </div>
     </li>)}</ul>}
-    {items.length > 0 && <p role="status">{items.length} role assignments shown{busy ? " · Loading…" : ""}</p>}
+    {items.length > 0 && <p role="status">{items.length} role assignment{items.length === 1 ? "" : "s"} shown{busy ? " · Loading…" : ""}</p>}
     {error && <p role="alert">{error}</p>}
     {(page?.hasMore || error) && <button type="button" className="button-ghost" aria-disabled={busy}
       onClick={() => { if (!busy && cursor) void load(cursor); }}>{busy ? "Loading contact roles…" : error ? "Retry contact roles" : "Load more contact roles"}</button>}

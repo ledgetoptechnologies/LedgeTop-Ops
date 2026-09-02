@@ -51,8 +51,24 @@ function detail(revision = 1) {
 function reply(collection: Collection, items = [item(collection, 2)], more = false, contextVersion = "context-1") {
   return { items, page: metadata(collection, more), canonicalRoot, contextVersion };
 }
+function contactRole(name: string, role = "project_contact") {
+  return { contactDisplayName: name, clientDisplayName: "Craig Client", scopeType: "department", scopeDisplayName: "Athletics",
+    role, primary: false, primaryBilling: false, sendProjectInvoices: false, canViewInvoiceLinks: false };
+}
+function contactRolePage(items: ReturnType<typeof contactRole>[], more = false, cursor: string | null = null, contextVersion = "context-1") {
+  return { state: items.length ? "populated" : "verified_empty", reason: null, items, nextCursor: more ? cursor : null,
+    hasMore: more, returned: items.length, limit: 5, canonicalRoot, contextVersion };
+}
+function detailWithContactRoles(items = [contactRole("Craig Contact")], more = false) {
+  const response = detail() as ReturnType<typeof detail> & { projectAlphaContactRolesAvailable: boolean; projectAlphaContactRoles: unknown };
+  response.projectAlphaContactRolesAvailable = true;
+  response.projectAlphaContactRoles = contactRolePage(items, more, more ? "roles-page-2" : null);
+  return response;
+}
 type Handler = (route: Route, collection: Collection, url: URL) => Promise<unknown>;
-async function mock(page: Page, collectionHandler: Handler, detailFactory: (count: number) => unknown = () => detail()) {
+type ContactRoleHandler = (route: Route, url: URL) => Promise<unknown>;
+async function mock(page: Page, collectionHandler: Handler, detailFactory: (count: number) => unknown = () => detail(),
+  contactRoleHandler?: ContactRoleHandler) {
   const requests: URL[] = [];
   let detailCalls = 0;
   await page.route("**/api/**", async route => {
@@ -63,6 +79,7 @@ async function mock(page: Page, collectionHandler: Handler, detailFactory: (coun
       csrfToken: "csrf-test", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: {},
     } });
     if (url.pathname.includes("/collections/")) return collectionHandler(route, url.pathname.split("/").at(-1) as Collection, url);
+    if (url.pathname.endsWith("/project-alpha-contact-roles") && contactRoleHandler) return contactRoleHandler(route, url);
     if (url.pathname.startsWith("/api/client-hub/") && !url.pathname.includes("/collections/")) return route.fulfill({ json: detailFactory(++detailCalls) });
     if (url.pathname === "/api/team/clients/eligibility-blocks") return route.fulfill({ status: 201, json: { id: "new-block" } });
     return route.fulfill({ status: 404, json: { error: "Not found" } });
@@ -78,16 +95,13 @@ async function open(page: Page, path = canonicalPath) {
 async function lateFulfill(route: Route, json: unknown) { await route.fulfill({ json }).catch(() => undefined); }
 
 test("Project Alpha contact roles stay separate, informational and responsive", async ({ page }) => {
-  const response = detail() as ReturnType<typeof detail> & { projectAlphaContactRolesAvailable: boolean; projectAlphaContactRoles: unknown };
-  response.projectAlphaContactRolesAvailable = true;
-  response.projectAlphaContactRoles = { state: "populated", reason: null, nextCursor: null, hasMore: false, returned: 2, limit: 5,
-    canonicalRoot, contextVersion: "context-1", items: [
+  const response = detailWithContactRoles([
       { contactDisplayName: "Craig Contact", clientDisplayName: "Craig Client", scopeType: "department", scopeDisplayName: "Athletics",
-        role: "athletic_director", primary: true, primaryBilling: false, sendProjectInvoices: false, canViewInvoiceLinks: false, sourceVersion: "assignment-v1" },
+        role: "athletic_director", primary: true, primaryBilling: false, sendProjectInvoices: false, canViewInvoiceLinks: false },
       { contactDisplayName: "Billing Contact With A Long Display Name", clientDisplayName: "Regional Facilities Department",
         scopeType: "organization", scopeDisplayName: "Acme Construction Services Regional Organization", role: "billing_contact",
-        primary: false, primaryBilling: true, sendProjectInvoices: true, canViewInvoiceLinks: true, sourceVersion: "assignment-v2" },
-    ] };
+        primary: false, primaryBilling: true, sendProjectInvoices: true, canViewInvoiceLinks: true },
+    ]);
   await mock(page, (route, collection) => route.fulfill({ json: reply(collection) }), () => response);
   await page.setViewportSize({ width: 375, height: 900 });
   await open(page);
@@ -95,10 +109,75 @@ test("Project Alpha contact roles stay separate, informational and responsive", 
   await expect(roles).toContainText("These roles do not grant portal or Operations access.");
   await expect(roles).toContainText("Craig Contact");
   await expect(roles).toContainText("Primary billing");
+  await expect(roles).not.toContainText("Source version");
   await expect(roles.getByRole("button")).toHaveCount(0);
   await expect(page.getByRole("region", { name: "Business contacts", exact: true })).toContainText("Business Bailey");
   await expect(page.getByRole("heading", { name: "Portal logins", exact: true })).toBeVisible();
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+});
+
+test("contact-role continuation preserves rows across transient and malformed failures and retries the same cursor", async ({ page }) => {
+  let attempts = 0;
+  const calls: URL[] = [];
+  await mock(page, (route, collection) => route.fulfill({ json: reply(collection) }), () => detailWithContactRoles([
+    contactRole("Craig Contact", "athletic_director")], true), async (route, url) => {
+      calls.push(url); attempts += 1;
+      if (attempts === 1) return route.fulfill({ status: 503, json: { error: "Contact roles temporarily unavailable" } });
+      if (attempts === 2) return route.fulfill({ json: contactRolePage([contactRole("Unverified Contact")], true, "roles-page-2") });
+      return route.fulfill({ json: contactRolePage([contactRole("Steve Contact", "head_coach")]) });
+    });
+  await open(page);
+  const roles = page.getByRole("region", { name: "Project Alpha contact roles", exact: true });
+  await roles.getByRole("button", { name: "Load more contact roles", exact: true }).click();
+  await expect(roles.getByRole("alert")).toContainText("Contact roles temporarily unavailable");
+  await expect(roles).toContainText("Craig Contact");
+  await roles.getByRole("button", { name: "Retry contact roles", exact: true }).click();
+  await expect(roles.getByRole("alert")).toContainText("could not be verified");
+  await expect(roles).not.toContainText("Unverified Contact");
+  await roles.getByRole("button", { name: "Retry contact roles", exact: true }).click();
+  await expect(roles).toContainText("Steve Contact");
+  await expect(roles.getByRole("status")).toHaveText("2 role assignments shown");
+  await expect(roles.getByRole("button")).toHaveCount(0);
+  expect(calls.map(url => [url.searchParams.get("cursor"), url.searchParams.get("limit"), url.searchParams.get("expectedContextVersion")]))
+    .toEqual(Array.from({ length: 3 }, () => ["roles-page-2", "25", "context-1"]));
+});
+
+for (const status of [401, 403, 404, 409]) {
+  test(`contact-role continuation ${status} invalidates the complete client workspace`, async ({ page }) => {
+    await mock(page, (route, collection) => route.fulfill({ json: reply(collection) }),
+      () => detailWithContactRoles([contactRole("Protected Contact")], true),
+      route => route.fulfill({ status, json: { error: "Contact-role authority changed" } }));
+    await open(page);
+    const roles = page.getByRole("region", { name: "Project Alpha contact roles", exact: true });
+    await roles.getByRole("button", { name: "Load more contact roles", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Refresh client workspace", exact: true })).toBeVisible();
+    await expect(page.locator(".client-hub-detail-grid")).toHaveCount(0);
+    await expect(page.getByText("Protected Contact", { exact: true })).toHaveCount(0);
+  });
+}
+
+test("client navigation aborts a pending contact-role page and fences its late response", async ({ page }) => {
+  let pending: Route | undefined;
+  await mock(page, (route, collection) => route.fulfill({ json: reply(collection) }), count => {
+    if (count === 1) return detailWithContactRoles([contactRole("Previous Contact")], true);
+    const response = detail(2) as ReturnType<typeof detail> & { projectAlphaContactRolesAvailable: boolean; projectAlphaContactRoles: unknown };
+    response.client.public_id = "43"; response.client.detail_path = canonicalPath.replace("/42", "/43");
+    response.projectAlphaContactRolesAvailable = true;
+    response.projectAlphaContactRoles = { ...contactRolePage([contactRole("Current Contact")], false, null, "context-2"),
+      canonicalRoot: { ...canonicalRoot, publicId: "43" } };
+    return response;
+  }, async route => { pending = route; });
+  await open(page);
+  await page.getByRole("region", { name: "Project Alpha contact roles", exact: true })
+    .getByRole("button", { name: "Load more contact roles", exact: true }).click();
+  await expect.poll(() => Boolean(pending)).toBe(true);
+  await page.evaluate(path => { history.pushState({}, "", path); dispatchEvent(new PopStateEvent("popstate")); }, canonicalPath.replace("/42", "/43"));
+  await expect(page.getByRole("heading", { name: "Acme refreshed" })).toBeVisible();
+  const current = page.getByRole("region", { name: "Project Alpha contact roles", exact: true });
+  await expect(current).toContainText("Current Contact");
+  await lateFulfill(pending!, contactRolePage([contactRole("Stale Contact")]));
+  await expect(current).not.toContainText("Stale Contact");
+  await expect(current.getByRole("status")).toHaveText("1 role assignment shown");
 });
 
 test("detail pages each non-identity collection independently using the canonical response root", async ({ page }) => {

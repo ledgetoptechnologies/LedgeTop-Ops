@@ -866,7 +866,7 @@ describe("Client Hub", () => {
     expect(first.status).toBe(200);
     const firstBody = await first.json() as { nextCursor: string; items: Array<Record<string, unknown>>; contextVersion: string };
     expect(firstBody.items).toHaveLength(1);
-    expect(JSON.stringify(firstBody)).not.toMatch(/email|identity|membership|entitlement|invite|notification|contact-one|assignment-one/i);
+    expect(JSON.stringify(firstBody)).not.toMatch(/email|identity|membership|entitlement|invite|notification|sourceVersion|contact-one|assignment-one/i);
     const second = await app.request(`${organizationPath}/project-alpha-contact-roles?limit=1&cursor=${encodeURIComponent(firstBody.nextCursor)}`, {}, env);
     expect(second.status).toBe(200);
     await expect(second.json()).resolves.toMatchObject({ state: "populated", returned: 1, hasMore: false });

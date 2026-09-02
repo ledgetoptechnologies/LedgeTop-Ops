@@ -18,7 +18,6 @@ export interface ProjectAlphaContactRoleItem {
   primaryBilling: boolean;
   sendProjectInvoices: boolean;
   canViewInvoiceLinks: boolean;
-  sourceVersion: string;
 }
 
 export interface ProjectAlphaContactRolePage {
@@ -37,7 +36,7 @@ interface SelectionRow { generation_id: string; schema_version: number | null }
 interface RoleRow {
   contact_display_name: string; client_display_name: string; scope_type: ProjectAlphaContactRoleScope;
   scope_display_name: string; role: string; primary_contact: number; primary_billing: number;
-  send_project_invoices: number; can_view_invoice_links: number; source_version: string;
+  send_project_invoices: number; can_view_invoice_links: number;
 }
 interface Cursor { v: 1; context: string; scope: string; offset: number }
 
@@ -143,7 +142,7 @@ export async function listProjectAlphaContactRoles(env: Env, context: ClientHubC
       contact.display_name contact_display_name,client.display_name client_display_name,
       assignment.scope_type,scope.display_name scope_display_name,assignment.role,
       assignment.primary_contact,assignment.primary_billing,assignment.send_project_invoices,
-      assignment.can_view_invoice_links,assignment.source_version
+      assignment.can_view_invoice_links
     FROM portal_v2_contact_assignments assignment
     JOIN portal_v2_directory_entities contact ON contact.workspace_id=assignment.workspace_id
       AND contact.generation_id=assignment.generation_id AND contact.entity_type='contact'
@@ -164,8 +163,7 @@ export async function listProjectAlphaContactRoles(env: Env, context: ClientHubC
     items: pageRows.map(row => ({ contactDisplayName: row.contact_display_name, clientDisplayName: row.client_display_name,
       scopeType: row.scope_type, scopeDisplayName: row.scope_display_name, role: row.role,
       primary: row.primary_contact === 1, primaryBilling: row.primary_billing === 1,
-      sendProjectInvoices: row.send_project_invoices === 1, canViewInvoiceLinks: row.can_view_invoice_links === 1,
-      sourceVersion: row.source_version })),
+      sendProjectInvoices: row.send_project_invoices === 1, canViewInvoiceLinks: row.can_view_invoice_links === 1 })),
     nextCursor: hasMore ? encode({ v: 1, context: context.contextVersion, scope: scopeProof, offset: offset + limit }) : null,
     hasMore, returned: pageRows.length, limit, canonicalRoot: context.canonicalRoot, contextVersion: context.contextVersion,
   };
