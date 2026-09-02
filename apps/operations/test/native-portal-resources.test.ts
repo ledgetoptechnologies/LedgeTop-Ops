@@ -110,6 +110,8 @@ describe('source-owned native portal resources with real signed projection and l
       new URL('../../client/migrations/0184_native_client_feedback.sql',import.meta.url),'utf8')).map(sql=>db.prepare(sql)));
     await db.batch(splitD1MigrationStatements(readFileSync(
       new URL('../../client/migrations/0187_authenticated_content_audit.sql',import.meta.url),'utf8')).map(sql=>db.prepare(sql)));
+    await db.batch(splitD1MigrationStatements(readFileSync(
+      new URL('../../client/migrations/0188_native_feedback_completion_notices.sql',import.meta.url),'utf8')).map(sql=>db.prepare(sql)));
     opsDb=await runtime.getD1Database('OPS_DB') as D1Database;
     for(const name of readdirSync(new URL('../migrations/',import.meta.url)).filter(n=>n.endsWith('.sql')&&n<'0041_').sort())
       await opsDb.batch(splitD1MigrationStatements(readFileSync(new URL(`../migrations/${name}`,import.meta.url),'utf8')).map(sql=>opsDb.prepare(sql)));
@@ -121,6 +123,7 @@ describe('source-owned native portal resources with real signed projection and l
     a=fixture('a');b=fixture('b');
     env={DELIVERY_DB:db,CLIENT_PORTAL_ENABLED:'true',CLIENT_PORTAL_HIERARCHY_V2_ENABLED:'true',CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED:'true',
       CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED:'true',AUTHENTICATED_DELIVERY_GRANTS_ENABLED:'true',CLIENT_PORTAL_ORIGIN:'https://client.test',
+      CLIENT_PORTAL_NATIVE_FEEDBACK_SOURCE_IDS:`${a.source},${b.source}`,
       PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED:'true',
       PUBLIC_BULK_RATE_LIMITER:{limit:async()=>({success:true})},
       CLIENT_ACCESS_TEAM_DOMAIN:issuer,CLIENT_ACCESS_AUD:'native-client-aud',DELIVERY_SESSION_SECRET:'native-handle-secret-at-least-thirty-two-bytes',
@@ -233,6 +236,14 @@ describe('source-owned native portal resources with real signed projection and l
     const child=await (await request(`${base(b)}/folders/${result.folders![0]!.id}`)).json() as ClientFilePage;
     expect(child.files.map(f=>f.name)).toEqual(['deep.txt']);expect(child.breadcrumbs?.map(x=>x.name)).toEqual(['Project b','child']);
   });
+  it('native feedback is unavailable unless the exact source is in the bounded deploy allowlist',async()=>{
+    const onlyA={...env,CLIENT_PORTAL_NATIVE_FEEDBACK_SOURCE_IDS:a.source};
+    expect(await (await request(`${base(a)}/context`,{},onlyA)).json()).toMatchObject({capabilities:{feedback:true}});
+    expect(await (await request(`${base(b)}/context`,{},onlyA)).json()).toMatchObject({capabilities:{feedback:false}});
+    expect((await request(`${base(b)}/feedback`,{},onlyA)).status).toBe(404);
+    const malformed={...env,CLIENT_PORTAL_NATIVE_FEEDBACK_SOURCE_IDS:`${a.source},${a.source}`};
+    expect(await (await request(`${base(a)}/context`,{},malformed)).json()).toMatchObject({capabilities:{feedback:false}});
+  });
   it('keeps organization-folder and client-file feedback source-qualified and lets authorized staff resolve and transition it without a project',async()=>{
     const native=await resolveNativePortalWorkspaceReadContext(env,principal,a.workspace);expect(native).not.toBeNull();
     const clientId='c'.repeat(32),identityId=(await db.prepare('SELECT id FROM portal_v2_identities WHERE issuer=? AND subject=?')
@@ -279,6 +290,22 @@ describe('source-owned native portal resources with real signed projection and l
       }
       const transitioned=await transitionStaffFeedback(opsEnv,staff,orgFeedback,{expectedRevision:1,status:'done',note:'Reviewed.'},`staff-${crypto.randomUUID()}`);
       expect(transitioned.feedback).toMatchObject({status:'done',target:{projectId:null}});
+      const inboxResponse=await request(`${base(a)}/feedback-notifications`);expect(inboxResponse.status).toBe(200);
+      const inbox=await inboxResponse.json() as {notifications:Array<{id:string;feedbackId:string;readAt:string|null;actionPath:string}>};
+      const notice=inbox.notifications.find(item=>item.feedbackId===orgFeedback);expect(notice).toMatchObject({readAt:null,
+        actionPath:`/portal/feedback/${encodeURIComponent(orgFeedback)}?workspace=${encodeURIComponent(a.workspace)}`});
+      expect((await request(`${base(b)}/feedback-notifications/${notice!.id}`,{method:'PATCH',headers:{Origin:'https://client.test','Content-Type':'application/json'},
+        body:JSON.stringify({action:'read'})})).status).toBe(404);
+      const marked=await request(`${base(a)}/feedback-notifications/${notice!.id}`,{method:'PATCH',headers:{Origin:'https://client.test','Content-Type':'application/json'},
+        body:JSON.stringify({action:'read'})});expect(marked.status).toBe(200);
+      expect((await db.prepare('SELECT read_at FROM portal_native_feedback_notifications WHERE id=?').bind(notice!.id).first<string>('read_at'))).toBeTruthy();
+      await db.prepare(`UPDATE project_alpha_delivery_portal_grants SET status='revoked',grant_version=grant_version+1,
+        revoked_at=datetime('now'),revoke_reason_code='project_alpha_delivery_revoked' WHERE id=?`).bind(org.grantId).run();
+      const afterGrantRevoke=await (await request(`${base(a)}/feedback-notifications`)).json() as {notifications:Array<{id:string}>};
+      expect(afterGrantRevoke.notifications.some(item=>item.id===notice!.id)).toBe(false);
+      expect((await request(`${base(a)}/feedback-notifications/${notice!.id}`,{method:'PATCH',headers:{Origin:'https://client.test','Content-Type':'application/json'},
+        body:JSON.stringify({action:'dismiss'})})).status).toBe(404);
+      expect(await db.prepare('SELECT dismissed_at FROM portal_native_feedback_notifications WHERE id=?').bind(notice!.id).first<string>('dismissed_at')).toBeNull();
 
       // Submitted native feedback is durable staff history. Removing the live
       // file and exact grant must remove client navigation, not the staff item.

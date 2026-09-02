@@ -6,6 +6,7 @@ import { FeedbackStoreError, readFeedbackRecord, transitionFeedbackRecord, type 
 import { feedbackSourceOwnerSource } from "../../../client/src/worker/client-portal/feedback-target";
 import { readNativeFeedbackRecord,transitionNativeFeedbackRecord,type NativeFeedbackRecord } from "../../../client/src/worker/client-portal/native-feedback-store";
 import { reauthorizeNativeFeedbackRecipient } from "../../../client/src/worker/client-portal/native-feedback-target";
+import { nativeFeedbackNotificationsSchemaAvailable } from "../../../client/src/worker/client-portal/native-feedback-authority";
 import { evaluatePermission, isAdministrator, loadGrants, type SqlScope } from "./acl";
 import { base64Url, sha256 } from "./crypto";
 import { d1TablesPresent } from "./schema-readiness";
@@ -24,7 +25,10 @@ const idSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/);
 const statusSchema = z.enum(["new", "in_progress", "done", "all", "open"]);
 const actionSchema = z.object({ expectedRevision: z.number().int().min(1).max(2), status: z.enum(["in_progress", "done"]), note: z.string().max(2000).nullable() }).strict();
 const tables = ["client_feedback", "client_feedback_events", "client_feedback_mutations", "client_feedback_notifications", "client_feedback_notification_outbox"];
-const nativeTables=['portal_native_feedback','portal_native_feedback_events','portal_native_feedback_mutations'];
+const nativeTables=['portal_native_feedback','portal_native_feedback_events','portal_native_feedback_mutations',
+  'portal_native_feedback_notifications'];
+async function nativeFeedbackReady(env:Env):Promise<boolean>{return await d1TablesPresent(env.DELIVERY_DB,nativeTables)
+  && await nativeFeedbackNotificationsSchemaAvailable(env);}
 function missing(): never { throw new HTTPException(404, { message: "Feedback is unavailable" }); }
 function changed(): never { throw new HTTPException(409, { message: "Feedback or access changed. Refresh before trying again." }); }
 export async function requireClientFeedbackReady(env: Env) {
@@ -272,7 +276,7 @@ export async function listStaffFeedback(env: Env, actor: StaffPrincipal, query: 
   if (status === "open") predicates.push("status IN ('new','in_progress')");
   else if (status !== "all") { predicates.push("status=?"); values.push(status); }
   if (cursor) { predicates.push("(created_at,id)>(?,?)"); values.push(...cursor.after); }
-  const primaryAccount=accountId?'AND account_id=?':'',nativeReady=await d1TablesPresent(env.DELIVERY_DB,nativeTables);
+  const primaryAccount=accountId?'AND account_id=?':'',nativeReady=await nativeFeedbackReady(env);
   const rows = await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT id,created_at FROM (
       SELECT id,created_at,status FROM client_feedback WHERE 1=1 ${primaryAccount}
       ${accountId||!nativeReady?'':'UNION ALL SELECT id,created_at,status FROM portal_native_feedback'}
@@ -296,7 +300,7 @@ export async function listStaffFeedback(env: Env, actor: StaffPrincipal, query: 
 export async function getStaffFeedback(env: Env, actor: StaffPrincipal, id: string) {
   if (!idSchema.safeParse(id).success) missing();
   const access = await readStaffFeedbackPolicy(env,actor); await requireClientFeedbackReady(env);
-  const nativeReady=!id.startsWith('native_')||await d1TablesPresent(env.DELIVERY_DB,nativeTables);
+  const nativeReady=!id.startsWith('native_')||await nativeFeedbackReady(env);
   const record = await readAnyFeedbackRecord(env.DELIVERY_DB.withSession("first-primary"),id,nativeReady);
   const scope = record ? await readAnyStaffFeedbackScope(env,actor,record,access) : null;
   if (!record || !scope) missing();
@@ -309,7 +313,7 @@ export async function transitionStaffFeedback(env: Env, actor: StaffPrincipal, i
   const parsed = actionSchema.safeParse(value);
   if (!parsed.success) throw new HTTPException(400, { message: "Feedback status update is invalid" });
   const access = await readStaffFeedbackPolicy(env,actor); await requireClientFeedbackReady(env);
-  const nativeReady=!id.startsWith('native_')||await d1TablesPresent(env.DELIVERY_DB,nativeTables);
+  const nativeReady=!id.startsWith('native_')||await nativeFeedbackReady(env);
   const db = env.DELIVERY_DB.withSession("first-primary"), record = await readAnyFeedbackRecord(db,id,nativeReady);
   const scope = record ? await readAnyStaffFeedbackScope(env,actor,record,access) : null;
   if (!record || !scope) missing();

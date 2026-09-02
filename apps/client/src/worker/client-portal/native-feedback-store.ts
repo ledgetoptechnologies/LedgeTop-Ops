@@ -43,7 +43,8 @@ function record(row:Row):NativeFeedbackRecord{const target=nativeFeedbackTargetS
   completionNote:row.completion_note,completedAt:row.completed_at,createdAt:row.created_at,updatedAt:row.updated_at};}
 export async function nativeFeedbackSchemaAvailable(env:{DELIVERY_DB:D1Database}):Promise<boolean>{
   const count=await env.DELIVERY_DB.prepare(`SELECT count(*) count FROM sqlite_master WHERE type='table' AND name IN
-    ('portal_native_feedback','portal_native_feedback_events','portal_native_feedback_mutations')`).first<number>('count');return count===3;
+    ('portal_native_feedback','portal_native_feedback_events','portal_native_feedback_mutations',
+      'portal_native_feedback_notifications')`).first<number>('count');return count===4;
 }
 export async function readNativeFeedbackRecord(db:Pick<D1Database,'prepare'>,id:string):Promise<NativeFeedbackRecord|null>{
   const row=await db.prepare('SELECT * FROM portal_native_feedback WHERE id=?').bind(id).first<Row>();return row?record(row):null;
@@ -89,7 +90,9 @@ export async function transitionNativeFeedbackRecord(db:Database,feedback:Native
     const value=await readNativeFeedbackRecord(db,feedback.id);if(!value)throw new FeedbackStoreError('changed');return {record:value,appliedRevision:saved.result_revision,replayed:true};};
   const existing=await receipt();if(existing)return replay(existing);
   if(feedback.revision!==input.expectedRevision||!canTransitionClientFeedback(feedback.status,input.status))throw new FeedbackStoreError('changed');await current(db,guard);
-  const next=input.expectedRevision+1;
+  const next=input.expectedRevision+1,notificationId=crypto.randomUUID();
+  const transitionReceipt=`EXISTS(SELECT 1 FROM portal_native_feedback_mutations
+    WHERE actor_staff_id=? AND mutation_key=? AND fingerprint=?)`;
   try{const result=await db.batch([
     db.prepare(`UPDATE portal_native_feedback SET status=?,revision=revision+1,completion_note=?,
       completed_at=CASE WHEN ?='done' THEN strftime('%Y-%m-%dT%H:%M:%fZ','now') ELSE NULL END,
@@ -103,6 +106,11 @@ export async function transitionNativeFeedbackRecord(db:Database,feedback:Native
     db.prepare(`INSERT INTO audit_log(actor_type,actor_id,action,entity_type,entity_id,details_json)
       SELECT 'staff',?,'client.feedback.status_changed','portal_native_feedback',?,? WHERE changes()=1`)
       .bind(actorId,feedback.id,JSON.stringify({sourceId:feedback.context.sourceId,workspaceId:feedback.context.workspaceId,revision:next,status:input.status})),
+    ...(input.status==='done'?[db.prepare(`INSERT INTO portal_native_feedback_notifications(
+      id,feedback_id,feedback_revision,source_id,workspace_id,recipient_identity_id,principal_issuer,principal_subject)
+      SELECT ?,id,revision,source_id,workspace_id,creator_identity_id,principal_issuer,principal_subject
+      FROM portal_native_feedback WHERE id=? AND revision=? AND status='done' AND ${transitionReceipt}`)
+      .bind(notificationId,feedback.id,next,actorId,key,fingerprint)]:[]),
   ]);if(Number(result[0]?.meta.changes)!==1)throw new FeedbackStoreError('changed');}
   catch(error){const raced=await receipt();if(raced)return replay(raced);throw error;}
   const saved=await readNativeFeedbackRecord(db,feedback.id);if(!saved)throw new FeedbackStoreError('changed');return {record:saved,appliedRevision:next,replayed:false};

@@ -27,6 +27,11 @@ export interface Env {
   CLIENT_PORTAL_REQUEST_V2_ENABLED?: string;
   /** Source-qualified requests from native PA workspaces. Independent and default-off. */
   CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED?: string;
+  /**
+   * Bounded comma-separated exact Project Alpha source IDs allowed to expose
+   * native feedback. Default empty; malformed configuration fails closed.
+   */
+  CLIENT_PORTAL_NATIVE_FEEDBACK_SOURCE_IDS?: string;
   /** Server-only Project Alpha catalog projection. Default-off and never browser writable. */
   PROJECT_ALPHA_CATALOG_SYNC_ENABLED?: string;
   PROJECT_ALPHA_CATALOG_APPLICATION_KEY?: string;

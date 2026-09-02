@@ -14,8 +14,11 @@ function exactActionPath(value: string | null, workspaceId: string | null): stri
   url.searchParams.set("workspace", workspaceId);
   return `${url.pathname}${url.search}${url.hash}`;
 }
-export function PortalNotifications({feedbackEnabled, nativeWorkspaceId = null}: {feedbackEnabled: boolean; nativeWorkspaceId?: string | null}) {
-  const [open, setOpen] = useState(false), [requests, setRequests] = useState<Group>(empty), [feedback, setFeedback] = useState<Group>(empty);
+export function PortalNotifications({feedbackEnabled, requestsEnabled = true, nativeWorkspaceId = null}: {
+  feedbackEnabled: boolean; requestsEnabled?: boolean; nativeWorkspaceId?: string | null;
+}) {
+  const [open, setOpen] = useState(false), [requests, setRequests] = useState<Group>(() => requestsEnabled ? empty() : {...empty(), loading: false});
+  const [feedback, setFeedback] = useState<Group>(() => feedbackEnabled ? empty() : {...empty(), loading: false});
   const root = useRef<HTMLDivElement>(null), generation = useRef(0), controllers = useRef(new Map<string, AbortController>());
   const [busy, setBusy] = useState<string[]>([]);
   const retryCursors = useRef<Record<string, string | null>>({});
@@ -29,7 +32,9 @@ export function PortalNotifications({feedbackEnabled, nativeWorkspaceId = null}:
     const controller = new AbortController(), run = generation.current; controllers.current.set(key, controller); retryCursors.current[kind] = cursor;
     const setter = kind === "requests" ? setRequests : setFeedback; setter(value => ({...value, loading: true, error: ""}));
     try {
-      const base = kind === "requests" ? "/api/client/notifications" : "/api/client/feedback-notifications";
+      const base = kind === "requests" ? "/api/client/notifications" : nativeWorkspaceId
+        ? `/api/client/v2/workspaces/${encodeURIComponent(nativeWorkspaceId)}/feedback-notifications`
+        : "/api/client/feedback-notifications";
       const page = await requestJson<PortalNotificationPage & {nextCursor: string | null}>(`${base}${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`, {signal: controller.signal});
       if (controller.signal.aborted || run !== generation.current) return;
       const next = kind === "requests" ? page.cursor : page.nextCursor;
@@ -43,9 +48,10 @@ export function PortalNotifications({feedbackEnabled, nativeWorkspaceId = null}:
     } finally { if (controllers.current.get(key) === controller) controllers.current.delete(key); }
   }
   useEffect(() => {
-    void load("requests"); if (feedbackEnabled) void load("feedback");
+    if (requestsEnabled) void load("requests"); else setRequests({...empty(), loading: false});
+    if (feedbackEnabled) void load("feedback"); else setFeedback({...empty(), loading: false});
     return () => { generation.current++; for (const controller of controllers.current.values()) controller.abort(); controllers.current.clear(); };
-  }, [feedbackEnabled]);
+  }, [feedbackEnabled, requestsEnabled, nativeWorkspaceId]);
   useEffect(() => {
     if (!open) return;
     const close = (event: MouseEvent | KeyboardEvent) => {
@@ -60,7 +66,10 @@ export function PortalNotifications({feedbackEnabled, nativeWorkspaceId = null}:
     const controller = new AbortController(), run = generation.current; controllers.current.set(key, controller); setBusy(value => [...value, key]);
     const setter = kind === "requests" ? setRequests : setFeedback;
     try {
-      await requestJson(`${kind === "requests" ? "/api/client/notifications" : "/api/client/feedback-notifications"}/${encodeURIComponent(item.id)}`, {method: "PATCH", signal: controller.signal, headers: {"Content-Type": "application/json"}, body: JSON.stringify({action})});
+      const base = kind === "requests" ? "/api/client/notifications" : nativeWorkspaceId
+        ? `/api/client/v2/workspaces/${encodeURIComponent(nativeWorkspaceId)}/feedback-notifications`
+        : "/api/client/feedback-notifications";
+      await requestJson(`${base}/${encodeURIComponent(item.id)}`, {method: "PATCH", signal: controller.signal, headers: {"Content-Type": "application/json"}, body: JSON.stringify({action})});
       if (controller.signal.aborted || run !== generation.current) return;
       confirmed.current.set(key, action);
       setter(value => ({...value, error: "", items: action === "dismiss" ? value.items.filter(row => row.id !== item.id) : value.items.map(row => row.id === item.id ? {...row, readAt: new Date().toISOString()} : row), unread: value.unread === undefined ? undefined : Math.max(0, value.unread - (item.readAt ? 0 : 1))}));
@@ -70,10 +79,10 @@ export function PortalNotifications({feedbackEnabled, nativeWorkspaceId = null}:
       setter(value => ({...value, error: "The notification update could not be confirmed. Try the action again."}));
     } finally { if (!controller.signal.aborted && controllers.current.get(key) === controller) {controllers.current.delete(key); setBusy(value => value.filter(id => id !== key));} }
   }
-  const feedbackUnread = feedbackEnabled && feedback.items.some(row => !row.readAt), unread = requests.unread || 0;
+  const feedbackUnread = feedbackEnabled && feedback.items.some(row => !row.readAt), unread = requestsEnabled ? requests.unread || 0 : 0;
   const requestLabel = nativeWorkspaceId ? "Request updates" : "Request and delivery updates";
   const group = (kind: "requests" | "feedback", state: Group) => <section aria-label={kind === "requests" ? requestLabel : "Feedback updates"}>
-    {feedbackEnabled && <h3>{kind === "requests" ? (nativeWorkspaceId ? "Requests" : "Requests and deliveries") : "Feedback updates"}</h3>}
+    {(feedbackEnabled && requestsEnabled) && <h3>{kind === "requests" ? (nativeWorkspaceId ? "Requests" : "Requests and deliveries") : "Feedback updates"}</h3>}
     {state.loading && <p role="status">Loading notifications…</p>}{state.error && <div role="alert"><p>{state.error}</p><button className="button-ghost button-small" onClick={() => void load(kind, retryCursors.current[kind] ?? null)}>Retry notifications</button></div>}
     {!state.loading && !state.error && !state.items.length && <p className="portal-notification-empty">{state.cursor ? "Continue to check more updates." : "You’re all caught up."}</p>}
     <div className="portal-notification-list">{state.items.map(item => { const actionPath = exactActionPath(item.actionPath, nativeWorkspaceId); return <article key={item.id} className={item.readAt ? "" : "is-unread"}>
@@ -87,6 +96,6 @@ export function PortalNotifications({feedbackEnabled, nativeWorkspaceId = null}:
   </section>;
   const unreadLabel = nativeWorkspaceId ? `${unread} unread request update${unread === 1 ? "" : "s"}` : `${unread} unread request and delivery updates`;
   return <div className="portal-notification-center" ref={root}><button className="portal-notification-bell" aria-label={`Notifications${unread ? `, ${unreadLabel}` : ""}${feedbackUnread ? ", unread feedback updates" : ""}`} aria-expanded={open} aria-controls="portal-notification-panel" onClick={() => setOpen(value => !value)}><span aria-hidden="true">🔔</span>{unread > 0 && <span className="portal-notification-count">{unread > 99 ? "99+" : unread}</span>}{feedbackUnread && <span className="portal-feedback-unread" aria-hidden="true">•</span>}</button>
-    {open && <section id="portal-notification-panel" className="portal-notification-panel" aria-label="Notifications"><header><strong>Notifications</strong><button className="button-ghost button-small" onClick={() => setOpen(false)} aria-label="Close notifications">Close</button></header>{group("requests", requests)}{feedbackEnabled && group("feedback", feedback)}</section>}
+    {open && <section id="portal-notification-panel" className="portal-notification-panel" aria-label="Notifications"><header><strong>Notifications</strong><button className="button-ghost button-small" onClick={() => setOpen(false)} aria-label="Close notifications">Close</button></header>{requestsEnabled && group("requests", requests)}{feedbackEnabled && group("feedback", feedback)}</section>}
   </div>;
 }

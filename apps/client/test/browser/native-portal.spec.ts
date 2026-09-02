@@ -21,6 +21,10 @@ function notification(id: string, title: string, workspaceId = "workspace-b", re
   id, eventType: "request_status_changed", title, body: `${title} details`, actionPath: `/portal/requests?workspace=${workspaceId}`,
   readAt, createdAt: date,
 }; }
+function feedbackNotification(id: string, feedbackId: string, title: string, readAt: string | null = null) { return {
+  id, feedbackId, title, body: `${title} details`, actionPath: `/portal/feedback/${feedbackId}`,
+  readAt, createdAt: date,
+}; }
 function hierarchy(id = "workspace-b") { return {...envelope(id), page: {nextCursor: null}, entries: [
   {type: "organization", publicId: "org-shared", parentType: null, parentPublicId: null, displayName: workspace(id).displayName, sourceVersion: "1"},
   {type: "department", publicId: "department-one", parentType: "organization", parentPublicId: "org-shared", displayName: "Engineering and field survey services", sourceVersion: "1"},
@@ -297,46 +301,88 @@ for (const width of [375, 1280]) test(`native service requests expose the shared
     .every(call => call.workspace === "workspace-b")).toBe(true);
 });
 
-test("native notification bell uses the exact workspace and supports read and dismiss without probing feedback notices", async ({page}) => {
+test("native notification bell keeps request and feedback updates in the exact workspace", async ({page}) => {
   const notices = [notification("notice-new", "Coastal request accepted", "workspace-c"), notification("notice-second", "Coastal request reviewed")];
-  const mutations: Array<{id: string; action: string; workspace?: string}> = [];
+  const feedbackNotices = [feedbackNotification("feedback-notice", "native_feedback-one", "Coastal feedback completed")];
+  const mutations: Array<{kind: "request" | "feedback"; id: string; action: string; workspace?: string}> = [];
   const calls = await mock(page, (route, call) => {
     if (call.path === "/api/client/v2/workspaces/workspace-b/context") return route.fulfill({json: requestContext("workspace-b", true)});
     if (call.path === "/api/client/notifications" && call.method === "GET") return route.fulfill({json: {
       notifications: notices, unreadCount: notices.filter(item => !item.readAt).length, cursor: null,
     }});
+    if (call.path === "/api/client/v2/workspaces/workspace-b/feedback-notifications" && call.method === "GET") return route.fulfill({json: {
+      notifications: feedbackNotices, nextCursor: null,
+    }});
     const match = call.path.match(/^\/api\/client\/notifications\/([^/]+)$/);
     if (match && call.method === "PATCH") {
       const action = (route.request().postDataJSON() as {action: "read" | "dismiss"}).action;
-      mutations.push({id: match[1]!, action, workspace: call.workspace});
+      mutations.push({kind: "request", id: match[1]!, action, workspace: call.workspace});
       const item = notices.find(value => value.id === match[1]);
       if (item && action === "read") item.readAt = date;
       if (item && action === "dismiss") notices.splice(notices.indexOf(item), 1);
+      return route.fulfill({json: {success: true}});
+    }
+    const feedbackMatch = call.path.match(/^\/api\/client\/v2\/workspaces\/workspace-b\/feedback-notifications\/([^/]+)$/);
+    if (feedbackMatch && call.method === "PATCH") {
+      const action = (route.request().postDataJSON() as {action: "read" | "dismiss"}).action;
+      mutations.push({kind: "feedback", id: feedbackMatch[1]!, action, workspace: call.workspace});
+      const item = feedbackNotices.find(value => value.id === feedbackMatch[1]);
+      if (item && action === "read") item.readAt = date;
+      if (item && action === "dismiss") feedbackNotices.splice(feedbackNotices.indexOf(item), 1);
       return route.fulfill({json: {success: true}});
     }
     return undefined;
   });
   await page.goto("/portal?workspace=workspace-b");
   const bell = page.locator(".portal-notification-bell");
-  await expect(bell).toHaveAccessibleName(/Notifications, 2 unread request updates/); await bell.click();
+  await expect(bell).toHaveAccessibleName(/Notifications, 2 unread request updates, unread feedback updates/); await bell.click();
   const panel = page.getByRole("region", {name: "Notifications"});
   await expect(panel.getByRole("region", {name: "Request updates"})).toBeVisible();
+  await expect(panel.getByRole("region", {name: "Feedback updates"})).toBeVisible();
   const first = panel.locator("article", {hasText: "Coastal request accepted"});
   const second = panel.locator("article", {hasText: "Coastal request reviewed"});
+  const feedbackItem = panel.locator("article", {hasText: "Coastal feedback completed"});
   await expect(first.getByRole("link", {name: "Coastal request accepted"})).toHaveAttribute("href", "/portal/requests?workspace=workspace-b");
+  await expect(feedbackItem.getByRole("link", {name: "Coastal feedback completed"})).toHaveAttribute("href", "/portal/feedback/native_feedback-one?workspace=workspace-b");
   await first.getByRole("button", {name: "Mark read"}).click();
   await expect(bell).toHaveAccessibleName(/1 unread request update/);
+  await feedbackItem.getByRole("button", {name: "Dismiss"}).click();
+  await expect(feedbackItem).toHaveCount(0);
   await second.getByRole("button", {name: "Dismiss"}).click();
   await expect(second).toHaveCount(0);
   await first.getByRole("link", {name: "Coastal request accepted"}).click();
   await expect(page).toHaveURL(/\/portal\/requests\?workspace=workspace-b$/);
   expect(mutations).toEqual([
-    {id: "notice-new", action: "read", workspace: "workspace-b"},
-    {id: "notice-second", action: "dismiss", workspace: "workspace-b"},
-    {id: "notice-new", action: "read", workspace: "workspace-b"},
+    {kind: "request", id: "notice-new", action: "read", workspace: "workspace-b"},
+    {kind: "feedback", id: "feedback-notice", action: "dismiss", workspace: undefined},
+    {kind: "request", id: "notice-second", action: "dismiss", workspace: "workspace-b"},
+    {kind: "request", id: "notice-new", action: "read", workspace: "workspace-b"},
   ]);
   expect(calls.filter(call => call.path === "/api/client/notifications").every(call => call.workspace === "workspace-b")).toBe(true);
-  expect(calls.some(call => call.path.includes("feedback-notifications"))).toBe(false);
+  expect(calls.filter(call => call.path.includes("feedback-notifications")).every(call => call.path.startsWith("/api/client/v2/workspaces/workspace-b/") && call.workspace === undefined)).toBe(true);
+  expect(calls.some(call => call.path === "/api/client/feedback-notifications")).toBe(false);
+});
+
+test("native feedback-only workspaces show the bell without probing request notifications", async ({page}) => {
+  const calls = await mock(page, (route, call) => {
+    if (call.path === "/api/client/v2/workspaces/workspace-b/context") {
+      const value = context("workspace-b"); return route.fulfill({json: {...value,
+        features: {...value.features, feedback: {state: "available", reason: "resource_authorization_required"}},
+        capabilities: {...value.capabilities, feedback: true},
+      }});
+    }
+    if (call.path === "/api/client/v2/workspaces/workspace-b/feedback-notifications") return route.fulfill({json: {
+      notifications: [feedbackNotification("feedback-only-notice", "native_feedback-only", "Feedback-only update")], nextCursor: null,
+    }});
+    return undefined;
+  });
+  await page.goto("/portal?workspace=workspace-b");
+  const bell = page.getByRole("button", {name: /Notifications, unread feedback updates/}); await expect(bell).toBeVisible(); await bell.click();
+  const panel = page.getByRole("region", {name: "Notifications"});
+  await expect(panel.getByRole("region", {name: "Feedback updates"})).toContainText("Feedback-only update");
+  await expect(panel.getByRole("region", {name: "Request updates"})).toHaveCount(0);
+  expect(calls.some(call => call.path === "/api/client/notifications")).toBe(false);
+  expect(calls.some(call => call.path === "/api/client/feedback-notifications")).toBe(false);
 });
 
 test("switching native sources aborts stale notifications and resets the bell to the selected workspace", async ({page}) => {

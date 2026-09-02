@@ -53,14 +53,21 @@ describe("native secondary-source feedback persistence", { timeout: 30_000 }, ()
       INSERT INTO portal_v2_workspaces VALUES('workspace-secondary','active');
       INSERT INTO portal_v2_workspaces VALUES('workspace-other','active');
       INSERT INTO feedback_authority_gate VALUES('exact-publication','active');`);
-    const migration = readFileSync(new URL("../migrations/0184_native_client_feedback.sql", import.meta.url), "utf8")
-      .replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "").replace(/^\s*--.*$/gm, "").replace(/\s*\n\s*/g, " ");
-    await db.exec(migration);
+    for (const name of ["0184_native_client_feedback.sql","0188_native_feedback_completion_notices.sql"]) {
+      const migration = readFileSync(new URL(`../migrations/${name}`, import.meta.url), "utf8")
+        .replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "").replace(/^\s*--.*$/gm, "").replace(/\s*\n\s*/g, " ");
+      await db.exec(migration);
+    }
+    await db.exec(`CREATE TABLE native_feedback_test_failure(kind TEXT PRIMARY KEY);
+      CREATE TRIGGER native_feedback_notice_test_failure BEFORE INSERT ON portal_native_feedback_notifications
+      WHEN EXISTS(SELECT 1 FROM native_feedback_test_failure WHERE kind='notice')
+      BEGIN SELECT RAISE(ABORT,'injected native feedback notice failure'); END;`.replace(/\s*\n\s*/g," "));
   });
   afterAll(async () => runtime?.dispose());
   beforeEach(async () => {
     await db.prepare("UPDATE portal_v2_workspaces SET status='active'").run();
     await db.prepare("UPDATE feedback_authority_gate SET state='active'").run();
+    await db.prepare("DELETE FROM native_feedback_test_failure").run();
   });
 
   it("stores a source-qualified immutable target without modifying the primary schema", async () => {
@@ -90,6 +97,84 @@ describe("native secondary-source feedback persistence", { timeout: 30_000 }, ()
       { expectedRevision: 1, status: "done", note: "Handled" }, operation(), authorization().guard)).rejects.toMatchObject({ code: "changed" });
     expect(await db.prepare("SELECT count(*) n FROM portal_native_feedback_events WHERE feedback_id=?").bind(created.record.id).first("n")).toBe(1);
     expect(await db.prepare("SELECT status,revision FROM portal_native_feedback WHERE id=?").bind(created.record.id).first()).toEqual({ status: "new", revision: 1 });
+  });
+
+  it("creates one exact-source creator notice only when feedback reaches Done", async () => {
+    const created = await createNativeFeedbackRecord(db, authorization(), "Please close this item.", operation());
+    const working = await transitionNativeFeedbackRecord(db,created.record,"staff-a",
+      { expectedRevision: 1,status: "in_progress",note: null },operation(),authorization().guard);
+    expect(await db.prepare("SELECT count(*) n FROM portal_native_feedback_notifications WHERE feedback_id=?")
+      .bind(created.record.id).first("n")).toBe(0);
+    const done = await transitionNativeFeedbackRecord(db,working.record,"staff-a",
+      { expectedRevision: 2,status: "done",note: "Completed" },operation(),authorization().guard);
+    expect(done.record).toMatchObject({ status: "done",revision: 3 });
+    expect(await db.prepare(`SELECT source_id sourceId,workspace_id workspaceId,recipient_identity_id recipientIdentityId,
+      principal_issuer principalIssuer,principal_subject principalSubject,feedback_revision feedbackRevision
+      FROM portal_native_feedback_notifications WHERE feedback_id=?`).bind(created.record.id).first()).toEqual({
+      sourceId: "project-alpha:secondary",workspaceId: "workspace-secondary",recipientIdentityId: "identity-secondary",
+      principalIssuer: "https://issuer.test",principalSubject: "person-secondary",feedbackRevision: 3,
+    });
+    await db.prepare("UPDATE portal_native_feedback_notifications SET read_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE feedback_id=?")
+      .bind(created.record.id).run();
+    await expect(db.prepare("UPDATE portal_native_feedback_notifications SET source_id='project-alpha:other' WHERE feedback_id=?")
+      .bind(created.record.id).run()).rejects.toThrow("native feedback notification identity is immutable");
+    const plan=await db.prepare(`EXPLAIN QUERY PLAN SELECT id FROM portal_native_feedback_notifications
+      WHERE source_id=? AND workspace_id=? AND recipient_identity_id=? AND principal_issuer=? AND principal_subject=? AND dismissed_at IS NULL
+      ORDER BY created_at DESC,id DESC LIMIT 26`).bind("project-alpha:secondary","workspace-secondary","identity-secondary","https://issuer.test","person-secondary").all();
+    expect(JSON.stringify(plan.results)).toContain("portal_native_feedback_notification_inbox");
+  });
+
+  it("replays and races a Done transition without duplicating its durable notice", async () => {
+    const created = await createNativeFeedbackRecord(db,authorization(),"Acknowledge this item.",operation());
+    const mutationKey=operation(),input={ expectedRevision: 1,status: "done" as const,note: null };
+    const first=await transitionNativeFeedbackRecord(db,created.record,"staff-a",input,mutationKey,authorization().guard);
+    expect(await transitionNativeFeedbackRecord(db,first.record,"staff-a",input,mutationKey,authorization().guard))
+      .toMatchObject({ replayed: true,appliedRevision: 2 });
+    expect(await db.prepare("SELECT count(*) n FROM portal_native_feedback_notifications WHERE feedback_id=?")
+      .bind(created.record.id).first("n")).toBe(1);
+
+    const competing=await createNativeFeedbackRecord(db,authorization(),"Race this item.",operation());
+    const results=await Promise.allSettled([
+      transitionNativeFeedbackRecord(db,competing.record,"staff-a",input,operation(),authorization().guard),
+      transitionNativeFeedbackRecord(db,competing.record,"staff-b",input,operation(),authorization().guard),
+    ]);
+    expect(results.filter(result=>result.status==="fulfilled")).toHaveLength(1);
+    expect(await db.prepare("SELECT count(*) n FROM portal_native_feedback_notifications WHERE feedback_id=?")
+      .bind(competing.record.id).first("n")).toBe(1);
+  });
+
+  it("rolls the transition, event, receipt, and notice back when notice persistence fails", async () => {
+    const created=await createNativeFeedbackRecord(db,authorization(),"Rollback this item.",operation()),mutationKey=operation();
+    await db.prepare("INSERT INTO native_feedback_test_failure VALUES('notice')").run();
+    await expect(transitionNativeFeedbackRecord(db,created.record,"staff-a",
+      { expectedRevision: 1,status: "done",note: null },mutationKey,authorization().guard))
+      .rejects.toThrow("injected native feedback notice failure");
+    expect(await db.prepare("SELECT status,revision FROM portal_native_feedback WHERE id=?").bind(created.record.id).first())
+      .toEqual({ status: "new",revision: 1 });
+    expect(await db.prepare("SELECT count(*) n FROM portal_native_feedback_events WHERE feedback_id=?")
+      .bind(created.record.id).first("n")).toBe(1);
+    expect(await db.prepare("SELECT count(*) n FROM portal_native_feedback_mutations WHERE mutation_key=?")
+      .bind(mutationKey).first("n")).toBe(0);
+    expect(await db.prepare("SELECT count(*) n FROM portal_native_feedback_notifications WHERE feedback_id=?")
+      .bind(created.record.id).first("n")).toBe(0);
+  });
+
+  it("rejects notices whose source, workspace, creator, principal, or revision differs from the completed feedback", async () => {
+    await db.prepare("INSERT INTO portal_v2_identities VALUES('other-identity')").run();
+    const created=await createNativeFeedbackRecord(db,authorization(),"Exact coordinates only.",operation());
+    const done=await transitionNativeFeedbackRecord(db,created.record,"staff-a",
+      { expectedRevision: 1,status: "done",note: null },operation(),authorization().guard);
+    await db.prepare("DELETE FROM portal_native_feedback_notifications WHERE feedback_id=?").bind(created.record.id).run();
+    const base=[crypto.randomUUID(),created.record.id,done.record.revision,"project-alpha:secondary","workspace-secondary",
+      "identity-secondary","https://issuer.test","person-secondary"] as (string|number)[];
+    for (const [position,value] of [[2,3],[3,"project-alpha:other"],[4,"workspace-other"],[5,"other-identity"],
+      [6,"https://other.test"],[7,"other-person"]] as [number,string|number][]) {
+      const row=[...base];row[position]=value;
+      await expect(db.prepare(`INSERT INTO portal_native_feedback_notifications(
+        id,feedback_id,feedback_revision,source_id,workspace_id,recipient_identity_id,principal_issuer,principal_subject)
+        VALUES(?,?,?,?,?,?,?,?)`).bind(...row).run()).rejects.toThrow();
+    }
+    await db.prepare("DELETE FROM portal_v2_identities WHERE id='other-identity'").run();
   });
 
   it.each([

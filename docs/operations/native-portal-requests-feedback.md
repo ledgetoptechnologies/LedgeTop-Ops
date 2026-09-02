@@ -52,14 +52,17 @@ before either final Worker is deployed:
 2. With native request and feedback capabilities still unavailable, apply
    `0184_native_client_feedback.sql`, then
    `0185_native_service_request_ownership.sql`, then
-   `0186_delivery_notification_authority_provenance.sql`.
+   `0186_delivery_notification_authority_provenance.sql`, then
+   `0187_authenticated_content_audit.sql`, then
+   `0188_native_feedback_completion_notices.sql`.
 3. Apply Operations migration
    `0050_project_alpha_draft_quote_credentials.sql`. It records only
    domain-separated credential fingerprints on connector revisions; it stores
    no credential values.
 4. Deploy the paired Client and Operations versions. Confirm
-   `CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED=false`, and confirm every Project Alpha
-   source still advertises native request and feedback capability as unavailable.
+   `CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED=false` and
+   `CLIENT_PORTAL_NATIVE_FEEDBACK_SOURCE_IDS` is empty, and confirm every Project
+   Alpha source still advertises native request and feedback capability as unavailable.
 5. Verify legacy primary requests, account administration, folder grants, staff
    request inbox, and feedback queue before any capability test.
 
@@ -82,13 +85,18 @@ the release evidence proves:
 - the staff inbox keeps the source; and
 - quote creation reaches only the exact connector revision and destination.
 
-Native feedback has no broad environment switch. It becomes visible only when
-the exact source's signed, current feature projection reports feedback available
-and schema/readiness checks pass. Keep that source feature unavailable until the
+Project Alpha does not yet publish a separately signed feedback capability.
+Until it does, `CLIENT_PORTAL_NATIVE_FEEDBACK_SOURCE_IDS` is the deploy-managed,
+default-empty stopgap. It accepts at most 32 unique, syntactically valid exact
+secondary source IDs, rejects `project-alpha:primary`, and fails closed for the
+entire list when malformed, duplicated, or oversized. A listed source still receives no capability unless its current
+workspace/principal authority, directory access, feedback schema, and migration
+`0188` completion-notice contract all pass. Enable one exact source only after
 release evidence proves colliding-target isolation, principal-revision races,
 revocation/replay, source-qualified staff triage, and the exact completion
-destination. Enabling primary feedback is not permission to advertise native
-feedback for another source.
+destination. Listing one source never enables another, and primary feedback is
+not a fallback. Native completion notices are in-app only; native completion
+email remains pending and must not be claimed or inferred from the legacy outbox.
 
 ## Connector credential shape
 
@@ -112,14 +120,15 @@ secondary connector credential.
 ## Drain, rollback, and recovery
 
 To stop native traffic, first set
-`CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED=false` and withdraw the native request
-and feedback features from each exact Project Alpha source. Wait for the signed
-projection and capability readback, then drain in-flight request mutations,
+`CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED=false` and clear
+`CLIENT_PORTAL_NATIVE_FEEDBACK_SOURCE_IDS`. Wait for capability readback, then
+drain in-flight request mutations,
 attachment finalization, staff transitions, quote commands, feedback updates,
-and completion-notification leases. Record queue/outbox state before changing a
-Worker version.
+and native completion-notification writes. Separately drain and record any
+primary feedback email leases/outbox state before changing a Worker version;
+native completion notices have no email outbox.
 
-Keep migrations `0184`-`0186` and `0050` in place. Do not drop tables, remove
+Keep migrations `0184`-`0188` and `0050` in place. Do not drop tables, remove
 ownership columns, delete storage bindings, reset receipts, or move a row to a
 different source. After the first native storage binding exists, an Operations
 build that does not exclude storage-only accounts is not a safe rollback target.

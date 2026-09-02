@@ -41,11 +41,15 @@ links. The Viewer and thumbnail runtimes remain unchanged.
 
 Migration `0184_native_client_feedback.sql` adds the separate native-workspace
 ownership and lifecycle records. It does not reinterpret migration `0155`
-primary feedback or create a legacy account bridge. Native feedback stays
-unavailable until the exact source's current signed feature projection, current
-workspace/principal authority, target readiness, and the external
-`nativePortalFeedback` evidence gate all pass. Primary feedback availability is
-not a fallback. See
+primary feedback or create a legacy account bridge. Migration
+`0188_native_feedback_completion_notices.sql` adds creator-only in-app
+completion notices without adding an email outbox. Native feedback stays
+unavailable until the exact source is present in the default-empty,
+deploy-managed `CLIENT_PORTAL_NATIVE_FEEDBACK_SOURCE_IDS` stopgap and its
+current workspace/principal authority, target readiness, and schema checks all
+pass. This allowlist is not a grant and will be replaced by independently
+signed source capability evidence. Primary feedback availability is not a
+fallback. See
 [native portal requests and feedback](native-portal-requests-feedback.md).
 
 ## Authorization invariants
@@ -131,6 +135,12 @@ delivery by an external provider.
   authenticated portal gate; it is not a content-access grant.
 - Client list/create/detail routes live under `/api/client/feedback`; private
   completion notices use `/api/client/feedback-notifications`.
+- Native list/create/detail routes remain exact-workspace v2 routes. Native
+  completion notices use
+  `/api/client/v2/workspaces/:workspaceId/feedback-notifications[/:id]`, join the
+  completed submission on its exact source/workspace/creator/principal tuple,
+  and reauthorize the original recipient live before list or mutation. They do
+  not send email; native feedback email remains pending.
 - Exact file metadata can resolve a deep link without scanning the first page of
   a folder. It is authorized like the underlying file and does not return bytes.
   Missing feedback-routing mappings do not block an otherwise authorized file
@@ -226,15 +236,15 @@ public-ID prerequisite and its publication approval remain separate.
 
 After approval and acceptance, back up the Delivery database and apply its
 ordered additive migrations, including `0184` before the paired compatible
-Client/Operations code, while the exact native source feature remains
-unavailable.
+Client/Operations code and `0188` before native feedback is enabled, while
+`CLIENT_PORTAL_NATIVE_FEEDBACK_SOURCE_IDS` remains empty.
 Readiness must show unavailable when the feedback schema is absent, while the
 existing application remains usable. Use a designated test account for the
 post-deploy smoke test; do not create client invitations, grants, or email as a
 side effect of testing.
 
-For a code rollback, first withdraw the exact native feedback feature, confirm
-signed capability readback, and drain staff transitions and completion leases.
+For a code rollback, first clear `CLIENT_PORTAL_NATIVE_FEEDBACK_SOURCE_IDS`,
+confirm capability readback, and drain staff transitions and completion leases.
 Retain the additive tables and audit history. Do not drop
 feedback or replay receipts to clear an error, reset sent outbox records, or
 rewrite authorization snapshots. Reconcile pending notices before resuming a

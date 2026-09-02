@@ -18,6 +18,7 @@ import { requestAttachmentsAvailable } from './request-attachments';
 import { z } from 'zod';
 import { clientPortalRequestOriginAllowed } from '../origin-policy';
 import { appendAuthenticatedContentStart,authenticatedContentAuditRequired } from './authenticated-content-audit';
+import { nativeFeedbackEnabledForContext,nativeFeedbackNotificationsSchemaAvailable } from './native-feedback-authority';
 
 type Bindings = {Bindings:Env;Variables:{clientPrincipal:VerifiedClientPrincipal}};
 type Ctx = Context<Bindings>;
@@ -55,6 +56,10 @@ function feedbackCursor(value:string|undefined):{at:string;id:string}|null{if(!v
   const decoded=JSON.parse(atob(value.replace(/-/g,'+').replace(/_/g,'/')));return z.object({at:z.string().max(40),id:z.string().regex(/^native_[A-Za-z0-9-]+$/)}).strict().parse(decoded);
 }catch{throw new HTTPException(409,{message:'Feedback page changed. Refresh this workspace.'});}}
 function encodeFeedbackCursor(row:{created_at:string;id:string}){return btoa(JSON.stringify({at:row.created_at,id:row.id})).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
+function notificationCursor(value:string|undefined):{at:string;id:string}|null{if(!value)return null;try{if(value.length>1024||!/^[A-Za-z0-9_-]+$/.test(value))throw new Error();
+  const decoded=JSON.parse(atob(value.replace(/-/g,'+').replace(/_/g,'/')));return z.object({at:z.string().max(40),id:z.string().uuid()}).strict().parse(decoded);
+}catch{throw new HTTPException(409,{message:'Notification page changed. Refresh this workspace.'});}}
+function encodeNotificationCursor(row:{created_at:string;id:string}){return btoa(JSON.stringify({at:row.created_at,id:row.id})).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
 function canonicalPrefix(prefix:string):string {
   if(prefix.length>1024||normalizeRoot(prefix)!==prefix||isHiddenKey(prefix)||/[\u0000-\u001f\u007f]/.test(prefix))return unavailable();
   return prefix;
@@ -83,6 +88,16 @@ async function contextFor(c:Ctx):Promise<NativePortalReadContext> {
 async function recheck(c:Ctx,context:NativePortalReadContext):Promise<void> {
   const current=await resolveNativePortalWorkspaceReadContext(c.env,c.get('clientPrincipal'),context.workspaceId);
   if(!current||current.contextVersion!==context.contextVersion)return changed();
+}
+async function nativeFeedbackReady(c:Ctx,context:NativePortalReadContext):Promise<boolean>{
+  return nativeFeedbackEnabledForContext(c.env,context)
+    && await nativeFeedbackSchemaAvailable(c.env)
+    && await nativeFeedbackNotificationsSchemaAvailable(c.env);
+}
+async function requireNativeFeedback(c:Ctx,context:NativePortalReadContext):Promise<void>{
+  if(!nativeFeedbackEnabledForContext(c.env,context))throw new HTTPException(404,{message:'Feedback is not available'});
+  if(!await nativeFeedbackSchemaAvailable(c.env)||!await nativeFeedbackNotificationsSchemaAvailable(c.env))
+    throw new HTTPException(503,{message:'Client feedback is not available'});
 }
 async function decode(c:Ctx,context:NativePortalReadContext,raw:string,kind:NativePortalHandle['kind']):Promise<NativePortalHandle> {
   const handle=await decodeNativePortalHandle(c.env,raw);
@@ -125,7 +140,7 @@ export function createNativePortalWorkspaceRouter():Hono<Bindings> {
     // Capability means this read surface is ready, not a promise of files.
     // Listing every grant just to render the shell was unbounded N+1 work.
     const deliveryView=await nativeDeliveryResourcesReady(c.env);
-    const feedback=await nativeFeedbackSchemaAvailable(c.env);
+    const feedback=await nativeFeedbackReady(c,context);
     const serviceRequests=nativeServiceRequestsEnabled(c.env)&&await nativeRequestSchemaReady(c.env);
     const requestAttachments=serviceRequests&&requestAttachmentsAvailable(c.env);
     const features=nativeWorkspaceFeatureReadiness({directoryAuthorized:directoryRead,deliveryBackendReady:deliveryView,
@@ -137,7 +152,7 @@ export function createNativePortalWorkspaceRouter():Hono<Bindings> {
       viewer:false,viewerShares:false,viewBilling:false}});
   });
   router.post('/:workspaceId/feedback',async c=>{
-    sameOrigin(c);if(!await nativeFeedbackSchemaAvailable(c.env))throw new HTTPException(503,{message:'Client feedback is not available'});
+    sameOrigin(c);const context=await contextFor(c);await requireNativeFeedback(c,context);
     const parsed=z.object({target:nativeFeedbackTargetInputSchema,message:z.string().trim().min(1).max(5000)}).strict().safeParse(await boundedJson(c));
     const key=z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/).safeParse(c.req.header('Idempotency-Key'));
     if(!parsed.success||!key.success)throw new HTTPException(400,{message:'Feedback is invalid'});
@@ -145,7 +160,7 @@ export function createNativePortalWorkspaceRouter():Hono<Bindings> {
     if(!limiter?.limit)throw new HTTPException(503,{message:'Feedback submission is unavailable'});
     if(!(await limiter.limit({key:`feedback:${await feedbackFingerprint([principal.issuer,principal.subject])}`})).success)
       throw new HTTPException(429,{message:'Please wait before submitting more feedback'});
-    const context=await contextFor(c),resolved=await resolveNativeFeedbackTarget(c.env,principal,context,parsed.data.target);
+    const resolved=await resolveNativeFeedbackTarget(c.env,principal,context,parsed.data.target);
     try{
       const saved=await createNativeFeedbackRecord(database(c.env),resolved,parsed.data.message,key.data);
       const current=await reauthorizeNativeFeedbackRecipient(c.env,saved.record);if(!current)throw new HTTPException(404,{message:'Feedback not found'});
@@ -154,8 +169,8 @@ export function createNativePortalWorkspaceRouter():Hono<Bindings> {
       ?'This submission key was already used for different feedback':'Feedback changed. Refresh and try again.'});throw error;}
   });
   router.get('/:workspaceId/feedback',async c=>{
-    if(!await nativeFeedbackSchemaAvailable(c.env))throw new HTTPException(503,{message:'Client feedback is not available'});
-    const context=await contextFor(c),principal=c.get('clientPrincipal'),cursor=feedbackCursor(c.req.query('cursor'));
+    const context=await contextFor(c);await requireNativeFeedback(c,context);
+    const principal=c.get('clientPrincipal'),cursor=feedbackCursor(c.req.query('cursor'));
     const rows=await database(c.env).prepare(`SELECT id,created_at FROM portal_native_feedback WHERE source_id=? AND workspace_id=?
       AND creator_identity_id=? AND principal_issuer=? AND principal_subject=?
       AND (? IS NULL OR created_at<? OR (created_at=? AND id<?)) ORDER BY created_at DESC,id DESC LIMIT 6`)
@@ -167,12 +182,83 @@ export function createNativePortalWorkspaceRouter():Hono<Bindings> {
     await recheck(c,context);return c.json({items,nextCursor:rows.results.length>5?encodeFeedbackCursor(examined.at(-1)!):null});
   });
   router.get('/:workspaceId/feedback/:id',async c=>{
-    if(!await nativeFeedbackSchemaAvailable(c.env))throw new HTTPException(503,{message:'Client feedback is not available'});
-    const context=await contextFor(c),id=c.req.param('id');if(!/^native_[A-Za-z0-9-]+$/.test(id))throw new HTTPException(404,{message:'Feedback not found'});
+    const context=await contextFor(c);await requireNativeFeedback(c,context);
+    const id=c.req.param('id');if(!/^native_[A-Za-z0-9-]+$/.test(id))throw new HTTPException(404,{message:'Feedback not found'});
     const record=await readNativeFeedbackRecord(database(c.env),id),resolved=record?await reauthorizeNativeFeedbackRecipient(c.env,record):null;
     if(!record||!resolved||record.context.sourceId!==context.sourceId||record.context.workspaceId!==context.workspaceId||record.context.identityId!==context.identityId)
       throw new HTTPException(404,{message:'Feedback not found'});
     await recheck(c,context);return c.json(await nativeFeedbackDetail(c.env,record,resolved));
+  });
+  router.get('/:workspaceId/feedback-notifications',async c=>{
+    const context=await contextFor(c);await requireNativeFeedback(c,context);
+    const principal=c.get('clientPrincipal'),cursor=notificationCursor(c.req.query('cursor'));
+    const rows=await database(c.env).prepare(`SELECT notice.id,notice.feedback_id,notice.feedback_revision,notice.read_at,notice.created_at
+      FROM portal_native_feedback_notifications notice
+      JOIN portal_native_feedback feedback ON feedback.id=notice.feedback_id
+        AND feedback.revision=notice.feedback_revision AND feedback.status='done'
+        AND feedback.source_id=notice.source_id AND feedback.workspace_id=notice.workspace_id
+        AND feedback.creator_identity_id=notice.recipient_identity_id
+        AND feedback.principal_issuer=notice.principal_issuer AND feedback.principal_subject=notice.principal_subject
+      WHERE notice.source_id=? AND notice.workspace_id=? AND notice.recipient_identity_id=?
+        AND notice.principal_issuer=? AND notice.principal_subject=? AND notice.dismissed_at IS NULL
+        AND (? IS NULL OR notice.created_at<? OR (notice.created_at=? AND notice.id<?))
+      ORDER BY notice.created_at DESC,notice.id DESC LIMIT 6`)
+      .bind(context.sourceId,context.workspaceId,context.identityId,principal.issuer,principal.subject,
+        cursor?.at??null,cursor?.at??null,cursor?.at??null,cursor?.id??null)
+      .all<{id:string;feedback_id:string;feedback_revision:number;read_at:string|null;created_at:string}>();
+    const examined=rows.results.slice(0,5),notifications=[];
+    for(const row of examined){
+      const record=await readNativeFeedbackRecord(database(c.env),row.feedback_id);
+      if(!record||record.revision!==row.feedback_revision)continue;
+      const resolved=await reauthorizeNativeFeedbackRecipient(c.env,record);
+      if(!resolved||resolved.context.sourceId!==context.sourceId||resolved.context.workspaceId!==context.workspaceId
+        ||resolved.context.identityId!==context.identityId||resolved.context.issuer!==principal.issuer||resolved.context.subject!==principal.subject)continue;
+      notifications.push({id:row.id,feedbackId:record.id,title:'Feedback completed',body:record.completionNote??'Your feedback has been handled.',
+        actionPath:`/portal/feedback/${encodeURIComponent(record.id)}?workspace=${encodeURIComponent(context.workspaceId)}`,
+        readAt:row.read_at,createdAt:row.created_at});
+    }
+    await recheck(c,context);
+    return c.json({notifications,nextCursor:rows.results.length>5?encodeNotificationCursor(examined.at(-1)!):null});
+  });
+  router.patch('/:workspaceId/feedback-notifications/:id',async c=>{
+    sameOrigin(c);const context=await contextFor(c);await requireNativeFeedback(c,context);
+    const id=z.string().uuid().safeParse(c.req.param('id')),
+      action=z.object({action:z.enum(['read','dismiss'])}).strict().safeParse(await boundedJson(c));
+    if(!id.success||!action.success)throw new HTTPException(400,{message:'Notification update is invalid'});
+    const principal=c.get('clientPrincipal');
+    const row=await database(c.env).prepare(`SELECT notice.feedback_id,notice.feedback_revision
+      FROM portal_native_feedback_notifications notice
+      JOIN portal_native_feedback feedback ON feedback.id=notice.feedback_id
+        AND feedback.revision=notice.feedback_revision AND feedback.status='done'
+        AND feedback.source_id=notice.source_id AND feedback.workspace_id=notice.workspace_id
+        AND feedback.creator_identity_id=notice.recipient_identity_id
+        AND feedback.principal_issuer=notice.principal_issuer AND feedback.principal_subject=notice.principal_subject
+      WHERE notice.id=? AND notice.source_id=? AND notice.workspace_id=? AND notice.recipient_identity_id=?
+        AND notice.principal_issuer=? AND notice.principal_subject=? AND notice.dismissed_at IS NULL`)
+      .bind(id.data,context.sourceId,context.workspaceId,context.identityId,principal.issuer,principal.subject)
+      .first<{feedback_id:string;feedback_revision:number}>();
+    const record=row?await readNativeFeedbackRecord(database(c.env),row.feedback_id):null;
+    const resolved=record&&record.revision===row!.feedback_revision?await reauthorizeNativeFeedbackRecipient(c.env,record):null;
+    if(!record||!resolved||resolved.context.sourceId!==context.sourceId||resolved.context.workspaceId!==context.workspaceId
+      ||resolved.context.identityId!==context.identityId||resolved.context.issuer!==principal.issuer||resolved.context.subject!==principal.subject)
+      throw new HTTPException(404,{message:'Notification not found'});
+    await recheck(c,context);
+    const result=await database(c.env).prepare(`UPDATE portal_native_feedback_notifications AS notice
+      SET read_at=COALESCE(read_at,strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        dismissed_at=CASE WHEN ?='dismiss' THEN COALESCE(dismissed_at,strftime('%Y-%m-%dT%H:%M:%fZ','now')) ELSE dismissed_at END
+      WHERE notice.id=? AND notice.feedback_id=? AND notice.feedback_revision=?
+        AND notice.source_id=? AND notice.workspace_id=? AND notice.recipient_identity_id=?
+        AND notice.principal_issuer=? AND notice.principal_subject=? AND notice.dismissed_at IS NULL
+        AND EXISTS(SELECT 1 FROM portal_native_feedback feedback WHERE feedback.id=notice.feedback_id
+          AND feedback.revision=notice.feedback_revision AND feedback.status='done'
+          AND feedback.source_id=notice.source_id AND feedback.workspace_id=notice.workspace_id
+          AND feedback.creator_identity_id=notice.recipient_identity_id
+          AND feedback.principal_issuer=notice.principal_issuer AND feedback.principal_subject=notice.principal_subject
+          AND (${resolved.guard.sql}))`)
+      .bind(action.data.action,id.data,record.id,record.revision,context.sourceId,context.workspaceId,context.identityId,
+        principal.issuer,principal.subject,...resolved.guard.bindings).run();
+    if(Number(result.meta.changes)!==1)throw new HTTPException(409,{message:'Notification access changed'});
+    return c.json({success:true});
   });
   router.get('/:workspaceId/hierarchy',async(c,next)=>{
     // Primary must retain its established response and authorization path.
