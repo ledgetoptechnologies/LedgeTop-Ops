@@ -2,9 +2,12 @@ import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import hierarchyMigration from "../migrations/0121_client_workspace_hierarchy_v2.sql?raw";
 import projectionMigration from "../migrations/0125_project_alpha_portal_projection.sql?raw";
+import relationMigration from "../migrations/0129_portal_hierarchy_relations.sql?raw";
 import eligibilityMigration from "../migrations/0145_portal_identity_eligibility.sql?raw";
 import bridgeMigration from "../migrations/0132_portal_v2_legacy_member_bridges.sql?raw";
 import sourceMigration from "../migrations/0158_portal_source_ownership.sql?raw";
+import contactAssignmentMigration from "../migrations/0190_portal_contact_assignments_v4.sql?raw";
+import wireContractClaimMigration from "../migrations/0191_portal_projection_wire_contract_claim.sql?raw";
 import { splitD1MigrationStatements } from "./helpers/d1-migrations";
 import { authorizePortalWorkspaceCapability } from "../src/worker/client-portal/workspace-v2";
 import type { VerifiedClientPrincipal } from "../src/worker/client-portal/types";
@@ -79,10 +82,13 @@ describe("Project Alpha portal hierarchy projection", () => {
     `.replace(/\s*\n\s*/g, " "));
     await applyMigration(db, hierarchyMigration);
     await applyMigration(db, projectionMigration);
+    await applyMigration(db, relationMigration);
     await applyMigration(db, eligibilityMigration);
     await db.exec("ALTER TABLE client_account_members ADD COLUMN can_view_billing INTEGER DEFAULT 0; ALTER TABLE client_member_project_grants ADD COLUMN granted_by_identity_id TEXT;");
     await applyMigration(db, bridgeMigration);
     await applyMigration(db, sourceMigration);
+    await applyMigration(db, contactAssignmentMigration);
+    await applyMigration(db, wireContractClaimMigration);
     await db.prepare("PRAGMA foreign_keys=ON").run();
     env = {
       DELIVERY_DB: db,
@@ -240,6 +246,49 @@ describe("Project Alpha portal hierarchy projection", () => {
     return await db.prepare("SELECT workspace_id FROM pa_portal_workspace_sources WHERE projection_source_id=? AND source_workspace_id=?")
       .bind(sourceId, workspace.publicId).first<string>("workspace_id") as string;
   }
+
+  it("claims schema v2 with relations disabled and rejects a v3 page after the flag is enabled", async () => {
+    const source = "project-alpha:v2-flag-transition";
+    const firstPage = {
+      ...structuredClone(portalFixture.valid.snapshotPage),
+      deliveryId: "v2-flag-transition-page-1",
+      sourceGeneration: "v2-flag-transition-generation",
+      sourceSequence: 20,
+      snapshotHash: "9".repeat(64),
+      pageNumber: 1,
+      pageCount: 2,
+    } as Record<string, unknown>;
+    const relationsOff = { ...env, CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED: "false" } as Env;
+    expect(await applyFrom(source, firstPage, relationsOff)).toBe("completed");
+
+    const generation = await db.prepare(`SELECT generation.id,generation.wire_schema_version
+      FROM pa_portal_projection_generations generation
+      JOIN pa_portal_workspace_sources source ON source.workspace_id=generation.workspace_id
+      WHERE source.projection_source_id=? AND generation.source_generation=?`)
+      .bind(source, firstPage.sourceGeneration).first<{ id: string; wire_schema_version: number }>();
+    expect(generation?.wire_schema_version).toBe(2);
+    expect(await db.prepare("SELECT schema_version FROM pa_portal_projection_generation_contracts WHERE generation_id=?")
+      .bind(generation!.id).first("schema_version")).toBe(2);
+
+    const secondPage = {
+      ...firstPage,
+      schemaVersion: 3,
+      deliveryId: "v2-flag-transition-page-2",
+      pageNumber: 2,
+      entities: [],
+      principals: [],
+      entitlements: [],
+      relations: [],
+      projectLifecycles: [],
+    };
+    const relationsOn = { ...env, CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED: "true" } as Env;
+    const parsedSecondPage = parsePortalProjectionDelivery(secondPage, applicationKey, true);
+    await expect(applyPortalProjectionDelivery(relationsOn, parsedSecondPage,
+      await bodyHash(JSON.stringify(secondPage)), createCatalogSourceContext(source)))
+      .rejects.toThrow("portal-generation-contract-conflict");
+    expect(await db.prepare("SELECT count(*) count FROM pa_portal_projection_pages WHERE generation_id=?")
+      .bind(generation!.id).first("count")).toBe(1);
+  });
 
   it("isolates equal workspace, root, principal, entitlement and delivery IDs by producer while retaining primary URLs and raw hashes", async () => {
     const primaryState = () => db.prepare(`SELECT workspace.status,checkpoint.source_generation,checkpoint.source_sequence,

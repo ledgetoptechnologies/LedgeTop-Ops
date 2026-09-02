@@ -6,6 +6,8 @@ import relationMigration from "../migrations/0129_portal_hierarchy_relations.sql
 import eligibilityMigration from "../migrations/0145_portal_identity_eligibility.sql?raw";
 import bridgeMigration from "../migrations/0132_portal_v2_legacy_member_bridges.sql?raw";
 import sourceMigration from "../migrations/0158_portal_source_ownership.sql?raw";
+import contactAssignmentMigration from "../migrations/0190_portal_contact_assignments_v4.sql?raw";
+import wireContractClaimMigration from "../migrations/0191_portal_projection_wire_contract_claim.sql?raw";
 import { splitD1MigrationStatements } from "./helpers/d1-migrations";
 import { authorizePortalWorkspaceCapability } from "../src/worker/client-portal/workspace-v2";
 import type { VerifiedClientPrincipal } from "../src/worker/client-portal/types";
@@ -102,6 +104,7 @@ describe("Project Alpha relation/lifecycle projection receiver", () => {
     await migrate(db, hierarchyMigration); await migrate(db, projectionMigration); await migrate(db, relationMigration); await migrate(db, eligibilityMigration);
     await db.exec("ALTER TABLE client_account_members ADD COLUMN can_view_billing INTEGER DEFAULT 0; ALTER TABLE client_member_project_grants ADD COLUMN granted_by_identity_id TEXT;");
     await migrate(db, bridgeMigration); await migrate(db, sourceMigration);
+    await migrate(db, contactAssignmentMigration); await migrate(db, wireContractClaimMigration);
     env = { DELIVERY_DB: db, PROJECT_ALPHA_PORTAL_SYNC_ENABLED: "true", PROJECT_ALPHA_PORTAL_APPLICATION_KEY: applicationKey, PROJECT_ALPHA_PORTAL_HMAC_KEY_ID: keyId, PROJECT_ALPHA_PORTAL_HMAC_SECRET: secret, PROJECT_ALPHA_PORTAL_ACCESS_TEAM_DOMAIN: "https://access.example.test", PROJECT_ALPHA_PORTAL_ACCESS_AUD: "portal-aud", CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true", CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED: "true" } as Env;
   }, 30_000);
   afterAll(async () => mf.dispose());
@@ -249,6 +252,9 @@ describe("Project Alpha relation/lifecycle projection receiver", () => {
       expect((await deliver(activePage, upgradeEnv)).status).toBe(200);
       expect((await deliver(activeActivate, upgradeEnv)).status).toBe(200);
 
+      await migrate(upgradeDb, relationMigration);
+      await migrate(upgradeDb, relationMigration);
+
       const stagingPage = structuredClone(portalV2Fixture.valid.snapshotPage) as Record<string, unknown>;
       Object.assign(stagingPage, {
         deliveryId: "portal-v2-staging-page",
@@ -257,15 +263,22 @@ describe("Project Alpha relation/lifecycle projection receiver", () => {
         snapshotHash: "c".repeat(64),
       });
       expect((await deliver(stagingPage, upgradeEnv)).status).toBe(200);
+      const stagingGeneration = await upgradeDb.prepare(`SELECT id FROM pa_portal_projection_generations
+        WHERE workspace_id=? AND source_generation=?`).bind(String(stagingPage.workspaceId), String(stagingPage.sourceGeneration)).first<string>("id");
+      expect(stagingGeneration).toBeTruthy();
+      expect(await upgradeDb.prepare("SELECT COUNT(*) count FROM pa_portal_projection_generation_contracts WHERE generation_id=?")
+        .bind(stagingGeneration).first("count")).toBe(0);
 
-      await migrate(upgradeDb, relationMigration);
-      await migrate(upgradeDb, relationMigration);
+      await migrate(upgradeDb, contactAssignmentMigration);
+      await migrate(upgradeDb, wireContractClaimMigration);
       expect(await upgradeDb.prepare(`SELECT COUNT(*) count FROM portal_v2_directory_generations generation
         JOIN portal_v2_directory_generation_contracts contract ON contract.generation_id=generation.id AND contract.workspace_id=generation.workspace_id
         WHERE contract.schema_version=2`).first("count")).toBe(1);
       expect(await upgradeDb.prepare(`SELECT COUNT(*) count FROM pa_portal_projection_generations generation
         JOIN pa_portal_projection_generation_contracts contract ON contract.generation_id=generation.id
         WHERE contract.schema_version=2`).first("count")).toBe(2);
+      expect(await upgradeDb.prepare("SELECT wire_schema_version FROM pa_portal_projection_generations WHERE id=?")
+        .bind(stagingGeneration).first("wire_schema_version")).toBe(2);
 
       const mixedSchemaPage = { ...stagingPage, schemaVersion: 3, deliveryId: "portal-v3-mixed-staging", relations: [], projectLifecycles: [] };
       expect((await deliver(mixedSchemaPage, { ...upgradeEnv, CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED: "true" })).status).toBe(409);

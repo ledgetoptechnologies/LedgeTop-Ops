@@ -7,6 +7,7 @@ import bridgeMigration from "../migrations/0132_portal_v2_legacy_member_bridges.
 import eligibilityMigration from "../migrations/0145_portal_identity_eligibility.sql?raw";
 import sourceMigration from "../migrations/0158_portal_source_ownership.sql?raw";
 import contactAssignmentMigration from "../migrations/0190_portal_contact_assignments_v4.sql?raw";
+import wireContractClaimMigration from "../migrations/0191_portal_projection_wire_contract_claim.sql?raw";
 import relationFixture from "../../../packages/shared/fixtures/project-alpha-portal-relations-v3.json";
 import { handleProjectAlphaPortalProjectionRequest, parsePortalProjectionDelivery } from "../src/worker/project-alpha-portal";
 import { splitD1MigrationStatements } from "./helpers/d1-migrations";
@@ -79,6 +80,28 @@ describe("Project Alpha schema v4 informational contact assignments", () => {
     await migrate(db, bridgeMigration);
     await migrate(db, sourceMigration);
     await migrate(db, contactAssignmentMigration);
+    await db.batch([
+      db.prepare("INSERT INTO pa_portal_workspace_sources(workspace_id,projection_source_id,source_workspace_id) VALUES ('wire-backfill-v3','project-alpha:primary','wire-backfill-v3')"),
+      db.prepare("INSERT INTO pa_portal_workspace_sources(workspace_id,projection_source_id,source_workspace_id) VALUES ('wire-backfill-v4','project-alpha:primary','wire-backfill-v4')"),
+    ]);
+    await db.batch([
+      db.prepare(`INSERT INTO pa_portal_projection_generations
+        (id,workspace_id,source_generation,source_sequence,snapshot_hash,page_count,record_count,workspace_root_type,
+         workspace_root_public_id,workspace_display_name,workspace_source_version,workspace_active,status,projection_source_id)
+        VALUES ('wire-backfill-generation-v3','wire-backfill-v3','wire-backfill-source-v3',1,?,1,1,'standalone_client',
+          'wire-backfill-client-v3','Backfill v3','v1',1,'staging','project-alpha:primary')`).bind("1".repeat(64)),
+      db.prepare(`INSERT INTO pa_portal_projection_generations
+        (id,workspace_id,source_generation,source_sequence,snapshot_hash,page_count,record_count,workspace_root_type,
+         workspace_root_public_id,workspace_display_name,workspace_source_version,workspace_active,status,projection_source_id)
+        VALUES ('wire-backfill-generation-v4','wire-backfill-v4','wire-backfill-source-v4',1,?,1,1,'standalone_client',
+          'wire-backfill-client-v4','Backfill v4','v1',1,'staging','project-alpha:primary')`).bind("2".repeat(64)),
+    ]);
+    await db.batch([
+      db.prepare("INSERT INTO pa_portal_projection_generation_contracts(generation_id,schema_version) VALUES ('wire-backfill-generation-v3',3)"),
+      db.prepare("INSERT INTO pa_portal_projection_generation_contracts(generation_id,schema_version) VALUES ('wire-backfill-generation-v4',3)"),
+      db.prepare("INSERT INTO pa_portal_projection_contact_assignment_contracts(generation_id,schema_version) VALUES ('wire-backfill-generation-v4',4)"),
+    ]);
+    await migrate(db, wireContractClaimMigration);
     env = { DELIVERY_DB: db, PROJECT_ALPHA_PORTAL_SYNC_ENABLED: "true", PROJECT_ALPHA_PORTAL_APPLICATION_KEY: applicationKey, PROJECT_ALPHA_PORTAL_HMAC_KEY_ID: keyId, PROJECT_ALPHA_PORTAL_HMAC_SECRET: secret, PROJECT_ALPHA_PORTAL_ACCESS_TEAM_DOMAIN: "https://access.example.test", PROJECT_ALPHA_PORTAL_ACCESS_AUD: "portal-aud", CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true", CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED: "true" } as Env;
   }, 30_000);
 
@@ -98,6 +121,29 @@ describe("Project Alpha schema v4 informational contact assignments", () => {
       body,
     }), env, async () => undefined);
   }
+
+  it("backfills one authoritative wire contract from the compatibility markers", async () => {
+    const rows = await db.prepare(`SELECT id,wire_schema_version FROM pa_portal_projection_generations
+      WHERE id IN ('wire-backfill-generation-v3','wire-backfill-generation-v4') ORDER BY id`).all();
+    expect(rows.results).toEqual([
+      { id: "wire-backfill-generation-v3", wire_schema_version: 3 },
+      { id: "wire-backfill-generation-v4", wire_schema_version: 4 },
+    ]);
+    await expect(db.prepare(`UPDATE pa_portal_projection_generations SET wire_schema_version=3
+      WHERE id='wire-backfill-generation-v4'`).run()).rejects.toThrow("portal projection wire contract is immutable");
+    await expect(db.prepare(`UPDATE pa_portal_projection_generation_contracts SET schema_version=2
+      WHERE generation_id='wire-backfill-generation-v4'`).run()).rejects.toThrow("portal projection base contract is immutable");
+    await expect(db.prepare(`DELETE FROM pa_portal_projection_generation_contracts
+      WHERE generation_id='wire-backfill-generation-v4'`).run()).rejects.toThrow("portal projection base contract is immutable");
+    await expect(db.prepare(`UPDATE pa_portal_projection_contact_assignment_contracts SET schema_version=3
+      WHERE generation_id='wire-backfill-generation-v4'`).run()).rejects.toThrow("portal projection contact contract is immutable");
+    await expect(db.prepare(`DELETE FROM pa_portal_projection_contact_assignment_contracts
+      WHERE generation_id='wire-backfill-generation-v4'`).run()).rejects.toThrow("portal projection contact contract is immutable");
+
+    await db.prepare("DELETE FROM pa_portal_projection_generations WHERE id='wire-backfill-generation-v4'").run();
+    expect(await db.prepare("SELECT count(*) count FROM pa_portal_projection_generation_contracts WHERE generation_id='wire-backfill-generation-v4'").first("count")).toBe(0);
+    expect(await db.prepare("SELECT count(*) count FROM pa_portal_projection_contact_assignment_contracts WHERE generation_id='wire-backfill-generation-v4'").first("count")).toBe(0);
+  });
 
   it("preserves v2/v3 and strictly validates v4 without accepting recipient email data", () => {
     expect(parsePortalProjectionDelivery(relationFixture.valid.snapshotPage, applicationKey, true).schemaVersion).toBe(3);
@@ -145,7 +191,9 @@ describe("Project Alpha schema v4 informational contact assignments", () => {
     const mixedGeneration = await db.prepare("SELECT id FROM pa_portal_projection_generations WHERE workspace_id=? AND source_generation='concurrent-mixed'").bind(workspace.publicId).first<string>("id");
     expect(await db.prepare("SELECT count(*) count FROM pa_portal_projection_pages WHERE generation_id=?").bind(mixedGeneration).first("count")).toBe(1);
     const markerCount = await db.prepare("SELECT count(*) count FROM pa_portal_projection_contact_assignment_contracts WHERE generation_id=?").bind(mixedGeneration).first<number>("count");
-    expect(markerCount).toBe(mixed[1]!.status === 200 ? 1 : 0);
+    const winningWireSchema = mixed[1]!.status === 200 ? 4 : 3;
+    expect(await db.prepare("SELECT wire_schema_version FROM pa_portal_projection_generations WHERE id=?").bind(mixedGeneration).first("wire_schema_version")).toBe(winningWireSchema);
+    expect(markerCount).toBe(winningWireSchema === 4 ? 1 : 0);
 
     const retry = firstPage(4, "concurrent-same-v4", "concurrent-v4-retry", 13);
     const sameSchema = await Promise.all([deliver(retry), deliver(retry)]);
@@ -153,6 +201,7 @@ describe("Project Alpha schema v4 informational contact assignments", () => {
     expect(sameSchemaResults.map(result => result.status), JSON.stringify(sameSchemaResults)).toEqual([200, 200]);
     const retryGeneration = await db.prepare("SELECT id FROM pa_portal_projection_generations WHERE workspace_id=? AND source_generation='concurrent-same-v4'").bind(workspace.publicId).first<string>("id");
     expect(await db.prepare("SELECT count(*) count FROM pa_portal_projection_pages WHERE generation_id=?").bind(retryGeneration).first("count")).toBe(1);
+    expect(await db.prepare("SELECT wire_schema_version FROM pa_portal_projection_generations WHERE id=?").bind(retryGeneration).first("wire_schema_version")).toBe(4);
   });
 
   it("rejects activation envelopes that do not exactly match the staged extension contract", async () => {

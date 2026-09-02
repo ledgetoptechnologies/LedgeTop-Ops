@@ -174,6 +174,7 @@ interface ProjectionGenerationRow {
   workspace_source_version: string;
   workspace_active: number;
   status: "staging" | "active" | "superseded" | "rejected";
+  wire_schema_version: 2 | 3 | 4 | null;
 }
 
 function json(status: number, body: Record<string, unknown>): Response {
@@ -229,6 +230,11 @@ async function contactAssignmentContractTablesPresent(db: PortalAuthorityDatabas
     AND name IN ('pa_portal_projection_contact_assignment_contracts','portal_v2_contact_assignment_contracts',
       'pa_portal_projection_contact_assignments','portal_v2_contact_assignments')`).first<number>("count");
   return count === 4;
+}
+
+async function wireContractClaimPresent(db: PortalAuthorityDatabase): Promise<boolean> {
+  return (await db.prepare(`SELECT COUNT(*) count FROM pragma_table_info('pa_portal_projection_generations')
+    WHERE name='wire_schema_version'`).first<number>("count")) === 1;
 }
 
 async function activeDirectoryContract(db: PortalAuthorityDatabase, workspaceId: string): Promise<{ schemaVersion: 2 | 3 | 4; tablePresent: boolean }> {
@@ -498,6 +504,7 @@ async function existingReceipt(db: PortalAuthorityDatabase, source: PortalWorksp
 
 async function stageSnapshotPage(env: Env, delivery: SnapshotPageDelivery, payloadHash: string, source: PortalWorkspaceSource, db: PortalAuthorityDatabase): Promise<"completed" | "ignored"> {
   const contactAssignmentTablesAvailable = await contactAssignmentContractTablesPresent(db);
+  const wireContractClaimAvailable = await wireContractClaimPresent(db);
   if (delivery.schemaVersion === 4 && !contactAssignmentTablesAvailable)
     throw new Error("portal-contact-assignment-contract-migration-missing");
   const checkpoint = await db.prepare("SELECT source_generation,source_sequence,snapshot_generation_id FROM pa_portal_projection_checkpoints WHERE workspace_id=?").bind(delivery.workspaceId).first<ProjectionCheckpoint>();
@@ -516,27 +523,36 @@ async function stageSnapshotPage(env: Env, delivery: SnapshotPageDelivery, paylo
     generation = await db.prepare("SELECT * FROM pa_portal_projection_generations WHERE workspace_id=? AND source_generation=?").bind(delivery.workspaceId, delivery.sourceGeneration).first<ProjectionGenerationRow>();
   }
   if (!generation || generation.status !== "staging" || generation.source_sequence !== delivery.sourceSequence || generation.snapshot_hash !== delivery.snapshotHash || generation.page_count !== delivery.pageCount || generation.record_count !== delivery.recordCount || generation.workspace_root_type !== delivery.workspace.rootType || generation.workspace_root_public_id !== delivery.workspace.rootPublicId || generation.workspace_display_name !== delivery.workspace.displayName || generation.workspace_source_version !== delivery.workspace.sourceVersion || generation.workspace_active !== (delivery.workspace.active ? 1 : 0)) throw new Error("portal-generation-conflict");
-  if (env.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED === "true") {
+  // Schema v2 remains accepted when relation projection is disabled, but it
+  // must still claim the generation. Otherwise a flag change between pages
+  // could let a later v3 page claim and mix contracts in the same snapshot.
+  const relationsEnabled = env.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED === "true";
+  if (relationsEnabled && !wireContractClaimAvailable)
+    throw new Error("portal-wire-contract-migration-missing");
+  if ((delivery.schemaVersion === 2 && wireContractClaimAvailable) || relationsEnabled) {
     const baseSchemaVersion = delivery.schemaVersion === 4 ? 3 : delivery.schemaVersion;
-    let contract = await db.prepare("SELECT schema_version FROM pa_portal_projection_generation_contracts WHERE generation_id=?").bind(generation.id).first<number>("schema_version");
-    let extension = contactAssignmentTablesAvailable
+    const [claimResult] = await db.batch<{ wire_schema_version: number }>([
+      db.prepare(`UPDATE pa_portal_projection_generations
+        SET wire_schema_version=COALESCE(wire_schema_version,?)
+        WHERE id=? AND (wire_schema_version IS NULL OR wire_schema_version=?)
+        RETURNING wire_schema_version`).bind(delivery.schemaVersion, generation.id, delivery.schemaVersion),
+    ]);
+    if (claimResult?.results[0]?.wire_schema_version !== delivery.schemaVersion)
+      throw new Error("portal-generation-contract-conflict");
+    await db.batch([
+      db.prepare(`INSERT INTO pa_portal_projection_generation_contracts(generation_id,schema_version)
+        SELECT ?,? WHERE NOT EXISTS (
+          SELECT 1 FROM pa_portal_projection_generation_contracts WHERE generation_id=?
+        )`).bind(generation.id, baseSchemaVersion, generation.id),
+      ...(delivery.schemaVersion === 4 ? [db.prepare(`INSERT INTO pa_portal_projection_contact_assignment_contracts(generation_id,schema_version)
+        SELECT ?,4 WHERE NOT EXISTS (
+          SELECT 1 FROM pa_portal_projection_contact_assignment_contracts WHERE generation_id=?
+        )`).bind(generation.id, generation.id)] : []),
+    ]);
+    const contract = await db.prepare("SELECT schema_version FROM pa_portal_projection_generation_contracts WHERE generation_id=?").bind(generation.id).first<number>("schema_version");
+    const extension = contactAssignmentTablesAvailable
       ? await db.prepare("SELECT schema_version FROM pa_portal_projection_contact_assignment_contracts WHERE generation_id=?").bind(generation.id).first<number>("schema_version")
       : null;
-    if (contract === null && extension === null) {
-      try {
-        await db.batch([
-          db.prepare("INSERT INTO pa_portal_projection_generation_contracts(generation_id,schema_version) VALUES (?,?)").bind(generation.id, baseSchemaVersion),
-          ...(delivery.schemaVersion === 4 ? [db.prepare("INSERT INTO pa_portal_projection_contact_assignment_contracts(generation_id,schema_version) VALUES (?,4)").bind(generation.id)] : []),
-        ]);
-      } catch {
-        // A concurrent first page may have claimed the contract. Reread below
-        // and accept only the exact same wire schema; mixed claims fail closed.
-      }
-      contract = await db.prepare("SELECT schema_version FROM pa_portal_projection_generation_contracts WHERE generation_id=?").bind(generation.id).first<number>("schema_version");
-      extension = contactAssignmentTablesAvailable
-        ? await db.prepare("SELECT schema_version FROM pa_portal_projection_contact_assignment_contracts WHERE generation_id=?").bind(generation.id).first<number>("schema_version")
-        : null;
-    }
     const extensionMatches = delivery.schemaVersion === 4 ? extension === 4 : extension === null;
     if (contract !== baseSchemaVersion || !extensionMatches) throw new Error("portal-generation-contract-conflict");
   }
@@ -1217,7 +1233,10 @@ async function processDelivery(env: Env, delivery: PortalProjectionDelivery, pay
     if (delivery.kind === "snapshot.activate") return await activateSnapshot(env, delivery, payloadHash, source, db);
     return await applyEvent(env, delivery, payloadHash, source, db);
   } catch (error) {
-    const raced = await existingReceipt(db, source, delivery.deliveryId, payloadHash);
+    // A losing idempotent writer may be using a session whose bookmark
+    // predates the winning request. Start a fresh primary session before
+    // deciding whether the failed write was already committed by its peer.
+    const raced = await existingReceipt(database(env), source, delivery.deliveryId, payloadHash);
     if (raced) return raced;
     if (error instanceof Error && error.message.includes("pa_portal_projection_write_guard")) throw new Error("portal-write-conflict");
     throw error;
