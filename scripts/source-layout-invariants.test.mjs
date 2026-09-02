@@ -100,7 +100,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   // The digest intentionally moved with the reviewed exact two-host portal
   // allowlist. Keep the field assertions below so a future config change
   // cannot hide behind a digest refresh.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "5997e8fa2f6ec1e5d03498921e0c550dbcdc7e0b0bab5605011df2c5e4af6032");
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "c79a9bbd96f903512608323f588202f70442c9dd85f18c967522739c885e663e");
   const config = readJson("apps/client/wrangler.jsonc");
   assert.equal(config.name, "ltds-clients");
   assert.equal(config.main, "src/worker/index.ts");
