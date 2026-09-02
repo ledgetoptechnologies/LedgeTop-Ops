@@ -183,6 +183,50 @@ Their authority and remaining decisions are recorded in
 [the project-memory design](project-memory-design.md). The existing directory
 release prerequisites below still apply; this follow-on is not deployed.
 
+### Project Alpha contact roles (default-off read adapter)
+
+`CLIENT_HUB_PA_CONTACT_ASSIGNMENTS_ENABLED` controls an additive, read-only
+Client Hub adapter for the schema-v4 contact-assignment extension. It is checked
+in as `false`. Enabling it does not enable hierarchy authorization, membership
+management, invitations, notifications, delivery grants, or any Project Alpha
+write. The adapter must not be used as an access decision.
+
+The organization/standalone workspace and an exact business-project workspace
+show a separately titled **Project Alpha contact roles** card. It is not merged
+with business contacts, portal logins, organization operational contacts, or
+project operational contacts. Returned fields are limited to contact, client,
+and scope display names; the role token; primary/billing booleans; and source
+version. Email, phone, identity subjects, memberships, entitlements,
+invitations, notification recipients, internal public IDs, and mutation actions
+are deliberately absent.
+
+Reads require the canonical source-qualified business root, global
+`team.view`, an exact verified workspace mapping, and the checkpoint-selected
+complete active generation. Project pages additionally require the existing
+`projects.view` policy and exact current root ownership, and recheck both the
+project and its exported identifier after the cross-D1 role read. Only active
+assignments whose contact, client, and scope endpoints are active in that same
+workspace/generation are displayed. A secondary source can never borrow the
+primary source's workspace or assignment generation.
+
+The card distinguishes four states:
+
+- **unavailable**: no exact verified workspace or project mapping is available;
+- **not published**: the selected complete generation lacks the immutable v4
+  extension marker;
+- **verified empty**: v4 was published and contains no active assignments for
+  this exact root/project scope;
+- **populated**: one or more active role assignments were returned.
+
+Initial pages contain at most five rows. Continuations default to 25 and are
+capped at 100, with a maximum bounded offset of 10,000. The cursor contains no
+contact, assignment, or project identifier; it is bound to the current Client
+Hub context and a hash of the exact root/project scope. Any source, selected
+generation, workspace, permission, or project-ownership change requires a full
+workspace refresh. Before rollout, confirm migration 0190 is applied, schema-v4
+generations are observed in shadow, all four UI states are exercised, and keep
+the flag false until the separately approved read-only activation.
+
 ### Secondary portal visibility (local follow-on, not deployed)
 
 An exact secondary business root may now display its source-owned native portal

@@ -25,6 +25,7 @@ import { readBusinessPartyForRoot } from "./business-parties";
 import { registerProjectOperationalRoutes } from "./project-operational-routes";
 import { registerOrganizationOperationalContactRoutes } from "./organization-operational-contact-routes";
 import { readClientHubProjectManagementAction } from "./project-alpha-project-management";
+import { exactBusinessProjectPublicId, listProjectAlphaContactRoles, projectAlphaContactRolesEnabled } from "./project-alpha-contact-roles";
 
 type AppEnv = {
   Bindings: Env;
@@ -235,13 +236,15 @@ export async function verifyClientHubDetailContext(env: Env, principal: StaffPri
 async function clientHubDetail(env: Env, principal: StaffPrincipal, kind: ClientKind, publicId: string, sourceId?: string, rootNamespace?: string) {
   const context = await resolveDetailContext(env, principal, kind, publicId, sourceId, rootNamespace);
   const workspace = context.root, access = context.access;
-  const [portalIdentities, externalAccess, serviceAssignments, collections] = await Promise.all([
+  const contactRolesAvailable = projectAlphaContactRolesEnabled(env) && workspace.root_namespace === "business";
+  const [portalIdentities, externalAccess, serviceAssignments, collections, projectAlphaContactRoles] = await Promise.all([
     listPortalIdentityPage(env, principal, { kind: "client", context }, { limit: 5 }),
     listClientExternalAccess(env, context, { limit: 5 }),
     listClientServiceAssignments(env, principal, context, { initial: true, limit: 5 }),
     Promise.all(DETAIL_COLLECTIONS.map(async collection => ({ collection,
       result: collection === "businessProjects" ? await listClientHubBusinessProjects(env, principal, context, { initial: true, limit: 5 })
         : await listClientHubCollection(env, context, collection, { initial: true, limit: 5 }) }))),
+    contactRolesAvailable ? listProjectAlphaContactRoles(env, context, { initial: true, limit: 5 }) : Promise.resolve(undefined),
   ]);
   const items = (collection: typeof DETAIL_COLLECTIONS[number]) => collections.find(page => page.collection === collection)!.result.items;
   await verifyContext(env, principal, context);
@@ -272,6 +275,8 @@ async function clientHubDetail(env: Env, principal: StaffPrincipal, kind: Client
     capabilities: access,
     internalNotesAvailable: true,
     organizationOperationalContactsAvailable: workspace.root_namespace === "business" && workspace.kind === "organization",
+    projectAlphaContactRolesAvailable: contactRolesAvailable,
+    projectAlphaContactRoles,
     projectManagementAvailable: workspace.root_namespace === "business",
     businessActivityAvailable: workspace.root_namespace === "business",
     auditTimelineAvailable: true,
@@ -354,9 +359,62 @@ export function registerClientHubRoutes(app: App): void {
     if (!kind) throw new HTTPException(404, { message: "Client not found" });
     const principal = c.get("principal");
     const context = await resolveDetailContext(c.env, principal, kind, c.req.param("publicId"), c.req.param("sourceId"), c.req.param("rootNamespace"));
-    const result = await readClientHubBusinessProjectDetail(c.env, principal, context, c.req.param("projectId"),
+    const projectId = c.req.param("projectId");
+    const result = await readClientHubBusinessProjectDetail(c.env, principal, context, projectId,
       { expectedContextVersion: c.req.query("expectedContextVersion") });
+    const contactRolesAvailable = projectAlphaContactRolesEnabled(c.env);
+    let projectAlphaContactRoles;
+    if (contactRolesAvailable) {
+      const projectPublicId = await exactBusinessProjectPublicId(c.env, context, projectId);
+      projectAlphaContactRoles = await listProjectAlphaContactRoles(c.env, context,
+        { initial: true, limit: 5, project: true, projectPublicId });
+      await readClientHubBusinessProjectDetail(c.env, principal, context, projectId,
+        { expectedContextVersion: context.contextVersion });
+      const currentProjectPublicId = await exactBusinessProjectPublicId(c.env, context, projectId);
+      if (currentProjectPublicId !== projectPublicId)
+        throw new HTTPException(409, { message: "Project ownership or contact-role scope changed. Refresh to continue" });
+    }
     await verifyContext(c.env, principal, context);
+    c.header("Cache-Control", "no-store");
+    return c.json({ ...result, projectAlphaContactRolesAvailable: contactRolesAvailable, projectAlphaContactRoles });
+  });
+  app.get("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/project-alpha-contact-roles", async c => {
+    if (!projectAlphaContactRolesEnabled(c.env))
+      throw new HTTPException(404, { message: "Project Alpha contact roles are not enabled" });
+    const kind = routeKind(c.req.param("kind"));
+    if (!kind) throw new HTTPException(404, { message: "Client not found" });
+    const principal = c.get("principal");
+    const context = await resolveDetailContext(c.env, principal, kind, c.req.param("publicId"),
+      c.req.param("sourceId"), c.req.param("rootNamespace"));
+    const rawLimit = c.req.query("limit");
+    const result = await listProjectAlphaContactRoles(c.env, context, { cursor: c.req.query("cursor"),
+      limit: rawLimit === undefined ? undefined : /^\d+$/.test(rawLimit) ? Number(rawLimit) : Number.NaN });
+    await verifyContext(c.env, principal, context);
+    c.header("Cache-Control", "no-store");
+    return c.json(result);
+  });
+  app.get("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/business-projects/:projectId/project-alpha-contact-roles", async c => {
+    if (!projectAlphaContactRolesEnabled(c.env))
+      throw new HTTPException(404, { message: "Project Alpha contact roles are not enabled" });
+    if (c.req.param("rootNamespace") !== "business" || !isBusinessProjectionSource(c.req.param("sourceId")))
+      throw new HTTPException(404, { message: "Business project contact roles are unavailable for this source" });
+    const kind = routeKind(c.req.param("kind"));
+    if (!kind) throw new HTTPException(404, { message: "Client not found" });
+    const principal = c.get("principal"), projectId = c.req.param("projectId");
+    const context = await resolveDetailContext(c.env, principal, kind, c.req.param("publicId"),
+      c.req.param("sourceId"), "business");
+    await readClientHubBusinessProjectDetail(c.env, principal, context, projectId,
+      { expectedContextVersion: c.req.query("expectedContextVersion") });
+    const projectPublicId = await exactBusinessProjectPublicId(c.env, context, projectId), rawLimit = c.req.query("limit");
+    const result = await listProjectAlphaContactRoles(c.env, context, { project: true, projectPublicId,
+      cursor: c.req.query("cursor"), limit: rawLimit === undefined ? undefined : /^\d+$/.test(rawLimit) ? Number(rawLimit) : Number.NaN });
+    await readClientHubBusinessProjectDetail(c.env, principal, context, projectId,
+      { expectedContextVersion: context.contextVersion });
+    const currentProjectPublicId = await exactBusinessProjectPublicId(c.env, context, projectId);
+    if (currentProjectPublicId !== projectPublicId)
+      throw new HTTPException(409, { message: "Project ownership or contact-role scope changed. Refresh to continue" });
+    await verifyContext(c.env, principal, context);
+    c.header("Cache-Control", "no-store");
     return c.json(result);
   });
   app.get("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/business-projects/:projectId/timeline", async c => {

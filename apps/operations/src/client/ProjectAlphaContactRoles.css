@@ -1,0 +1,17 @@
+.pa-contact-roles { display: grid; gap: .85rem; min-width: 0; overflow-wrap: anywhere; }
+.pa-contact-roles > p { margin: 0; }
+.pa-contact-roles > p:first-child, .pa-contact-roles small { color: var(--muted); }
+.pa-contact-roles-state { padding: .8rem; border: 1px solid var(--line); border-radius: .6rem; }
+.pa-contact-roles ul { display: grid; gap: .75rem; list-style: none; margin: 0; padding: 0; }
+.pa-contact-roles li { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: .75rem;
+  padding: .8rem 0; border-bottom: 1px solid var(--line); min-width: 0; }
+.pa-contact-roles li > div:first-child { display: grid; gap: .3rem; min-width: 0; }
+.pa-contact-role-flags { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .35rem; max-width: 22rem; }
+.pa-contact-role-flags span { padding: .25rem .5rem; border: 1px solid var(--line); border-radius: 999px; font-size: .75rem; }
+.pa-contact-roles button { min-height: 44px; max-width: 100%; white-space: normal; justify-self: start; }
+.pa-contact-roles button[aria-disabled="true"] { opacity: .6; cursor: default; }
+@media (max-width: 640px) {
+  .pa-contact-roles li { grid-template-columns: minmax(0, 1fr); }
+  .pa-contact-role-flags { justify-content: flex-start; max-width: none; }
+  .pa-contact-roles button { justify-self: stretch; }
+}

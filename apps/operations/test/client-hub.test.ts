@@ -160,7 +160,12 @@ async function fixture() {
       source_sequence INTEGER,status TEXT,complete INTEGER);
     CREATE TABLE portal_v2_directory_checkpoints(workspace_id TEXT PRIMARY KEY,active_generation_id TEXT,source_sequence INTEGER);
     CREATE TABLE portal_v2_directory_entities(workspace_id TEXT,generation_id TEXT,entity_type TEXT,public_id TEXT,
-      parent_public_id TEXT,active INTEGER,source_version TEXT);
+      parent_public_id TEXT,display_name TEXT,active INTEGER,source_version TEXT);
+    CREATE TABLE portal_v2_contact_assignment_contracts(workspace_id TEXT,generation_id TEXT,schema_version INTEGER,
+      PRIMARY KEY(workspace_id,generation_id));
+    CREATE TABLE portal_v2_contact_assignments(workspace_id TEXT,generation_id TEXT,public_id TEXT,contact_public_id TEXT,
+      client_public_id TEXT,scope_type TEXT,scope_public_id TEXT,role TEXT,primary_contact INTEGER,primary_billing INTEGER,
+      send_project_invoices INTEGER,can_view_invoice_links INTEGER,source_version TEXT,active INTEGER);
     CREATE TABLE pa_portal_workspace_sources(workspace_id TEXT PRIMARY KEY,projection_source_id TEXT,source_workspace_id TEXT);
     CREATE TABLE pa_portal_source_authorities(source_id TEXT PRIMARY KEY,state TEXT,active_revision INTEGER,version INTEGER,
       connector_revision INTEGER,connector_version INTEGER);
@@ -184,7 +189,7 @@ async function fixture() {
     INSERT INTO portal_v2_workspaces(id,root_type,pa_organization_public_id,pa_client_public_id,display_name,status,legacy_account_id) VALUES('workspace-org','organization','${organizationUuid}',NULL,'Organization One','active','account-org');
     INSERT INTO portal_v2_directory_generations VALUES('generation-org','workspace-org','native-1',1,'active',1);
     INSERT INTO portal_v2_directory_checkpoints VALUES('workspace-org','generation-org',1);
-    INSERT INTO portal_v2_directory_entities VALUES('workspace-org','generation-org','organization','${organizationUuid}',NULL,1,'native-version');
+    INSERT INTO portal_v2_directory_entities VALUES('workspace-org','generation-org','organization','${organizationUuid}',NULL,'Organization One',1,'native-version');
     INSERT INTO projects VALUES('project-one','Project One','Standalone One','clients/standalone/project-one/',1,'pa-project-one','project-alpha:primary');
     INSERT INTO client_project_grants VALUES('account-standalone','project-one',1,datetime('now'),NULL);
     INSERT INTO client_service_requests VALUES('request-one','account-standalone','project-one','service','Oldest request','submitted','2026-01-01','2026-01-01');
@@ -829,5 +834,75 @@ describe("Client Hub", () => {
     await expect(response.json()).resolves.toMatchObject({ client: { root_namespace: "business", public_id: "pa-org",
       pa_public_id: organizationUuid, detail_path: "/clients/sources/project-alpha%3Aprimary/business/organizations/pa-org" },
       accounts: [{ id: "account-org" }] });
+  });
+
+  it("keeps the contact-role API default-off, source-qualified and read-only when explicitly enabled", async () => {
+    const { app, env, ops, delivery } = await fixture();
+    expect((await app.request(`${organizationPath}/project-alpha-contact-roles`, {}, env)).status).toBe(404);
+    (env as Env).CLIENT_HUB_PA_CONTACT_ASSIGNMENTS_ENABLED = "true";
+    await delivery.batch([
+      delivery.prepare("INSERT INTO portal_v2_contact_assignment_contracts VALUES('workspace-org','generation-org',4)"),
+      delivery.prepare(`INSERT INTO portal_v2_directory_entities VALUES
+        ('workspace-org','generation-org','department','dept-one',?,'Athletics',1,'dept-v1'),
+        ('workspace-org','generation-org','client','client-one',?,'Craig Client',1,'client-v1'),
+        ('workspace-org','generation-org','contact','contact-one','client-one','Craig Contact',1,'contact-v1'),
+        ('workspace-org','generation-org','contact','contact-two','client-one','Second Contact',1,'contact-v1')`)
+        .bind(organizationUuid, organizationUuid),
+      delivery.prepare(`INSERT INTO portal_v2_contact_assignments VALUES
+        ('workspace-org','generation-org','assignment-one','contact-one','client-one','department','dept-one','athletic_director',1,0,0,0,'assignment-v1',1),
+        ('workspace-org','generation-org','assignment-two','contact-two','client-one','department','dept-one','assistant',0,0,0,0,'assignment-v2',1)`),
+    ]);
+    for (const action of ["INSERT", "UPDATE", "DELETE"])
+      await delivery.prepare(`CREATE TRIGGER api_roles_readonly_${action} BEFORE ${action} ON portal_v2_contact_assignments
+        BEGIN SELECT RAISE(ABORT,'contact-role API wrote authority data'); END`).run();
+    const detail = await app.request(organizationPath, {}, env);
+    expect(detail.status).toBe(200);
+    await expect(detail.json()).resolves.toMatchObject({ projectAlphaContactRolesAvailable: true,
+      projectAlphaContactRoles: { state: "populated", returned: 2, items: [
+        expect.objectContaining({ contactDisplayName: "Second Contact", scopeType: "department", role: "assistant" }),
+        expect.objectContaining({ contactDisplayName: "Craig Contact", scopeType: "department", role: "athletic_director" }),
+      ] } });
+    const first = await app.request(`${organizationPath}/project-alpha-contact-roles?limit=1`, {}, env);
+    expect(first.status).toBe(200);
+    const firstBody = await first.json() as { nextCursor: string; items: Array<Record<string, unknown>>; contextVersion: string };
+    expect(firstBody.items).toHaveLength(1);
+    expect(JSON.stringify(firstBody)).not.toMatch(/email|identity|membership|entitlement|invite|notification|contact-one|assignment-one/i);
+    const second = await app.request(`${organizationPath}/project-alpha-contact-roles?limit=1&cursor=${encodeURIComponent(firstBody.nextCursor)}`, {}, env);
+    expect(second.status).toBe(200);
+    await expect(second.json()).resolves.toMatchObject({ state: "populated", returned: 1, hasMore: false });
+    await registerVisibleTestSource(ops, "project-alpha:secondary", "Second company");
+    const wrongSource = await app.request(organizationPath.replace("project-alpha%3Aprimary", "project-alpha%3Asecondary")
+      + "/project-alpha-contact-roles", {}, env);
+    expect(wrongSource.status).toBe(404);
+  });
+
+  it("hydrates exact project roles behind the existing project-view policy without adding mutation authority", async () => {
+    const { app, env, ops, delivery } = await fixture();
+    (env as Env).CLIENT_HUB_PA_CONTACT_ASSIGNMENTS_ENABLED = "true";
+    acl.hasPermission.mockImplementation(async (_env: unknown, _principal: unknown, permission: string) =>
+      ["delivery.share.audit", "viewer.view", "projects.view"].includes(permission));
+    const projectUuid = "d".repeat(32);
+    await ops.batch([
+      ops.prepare("UPDATE pa_clients SET payload_json=? WHERE id='pa-child-login'").bind(JSON.stringify({ public_id: "e".repeat(32) })),
+      ops.prepare(`INSERT INTO pa_projects(id,name,status,client_id,organization_id,active,payload_json)
+        VALUES('project-role','Roof project','active','pa-child-login','pa-org',1,?)`).bind(JSON.stringify({ public_id: projectUuid })),
+    ]);
+    await delivery.batch([
+      delivery.prepare("INSERT INTO portal_v2_contact_assignment_contracts VALUES('workspace-org','generation-org',4)"),
+      delivery.prepare(`INSERT INTO portal_v2_directory_entities VALUES
+        ('workspace-org','generation-org','client','client-one',?,'Craig Client',1,'client-v1'),
+        ('workspace-org','generation-org','contact','contact-one','client-one','Craig Contact',1,'contact-v1'),
+        ('workspace-org','generation-org','project',?, 'client-one','Roof project',1,'project-v1')`).bind(organizationUuid, projectUuid),
+      delivery.prepare(`INSERT INTO portal_v2_contact_assignments VALUES
+        ('workspace-org','generation-org','assignment-project','contact-one','client-one','project',?,'billing_contact',1,1,1,1,'assignment-v3',1)`).bind(projectUuid),
+    ]);
+    const response = await app.request(`${organizationPath}/business-projects/project-role`, {}, env);
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ project: { id: "project-role" },
+      projectAlphaContactRolesAvailable: true, projectAlphaContactRoles: { state: "populated", returned: 1,
+        items: [expect.objectContaining({ contactDisplayName: "Craig Contact", scopeType: "project", role: "billing_contact",
+          primary: true, primaryBilling: true })] } });
+    acl.hasPermission.mockResolvedValue(false);
+    expect((await app.request(`${organizationPath}/business-projects/project-role/project-alpha-contact-roles`, {}, env)).status).toBe(403);
   });
 });

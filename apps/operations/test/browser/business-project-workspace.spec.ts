@@ -91,6 +91,26 @@ async function open(page: Page, suffix = "") {
   await expect(workspace(page).getByRole("heading", { name: "Church survey", exact: true })).toBeVisible();
 }
 
+test("project role metadata is a separate responsive read-only card", async ({ page }) => {
+  const value = detail();
+  value.projectAlphaContactRolesAvailable = true;
+  value.projectAlphaContactRoles = { state: "populated", reason: null, nextCursor: null, hasMore: false, returned: 1, limit: 5,
+    canonicalRoot: value.canonicalRoot, contextVersion: value.contextVersion, items: [{ contactDisplayName: "Bailey Billing",
+      clientDisplayName: "Bailey Contact", scopeType: "project", scopeDisplayName: "Church survey", role: "billing_contact",
+      primary: true, primaryBilling: true, sendProjectInvoices: true, canViewInvoiceLinks: true, sourceVersion: "project-role-v1" }] };
+  await page.setViewportSize({ width: 375, height: 900 });
+  await mock(page, route => route.fulfill({ json: value }));
+  await open(page);
+  const roles = workspace(page).getByRole("region", { name: "Project Alpha contact roles", exact: true });
+  await expect(roles).toContainText("Bailey Billing");
+  await expect(roles).toContainText("billing contact");
+  await expect(roles).toContainText("These roles do not grant portal or Operations access.");
+  await expect(roles.getByRole("button")).toHaveCount(0);
+  await expect(workspace(page).getByRole("heading", { name: "Project Alpha linked contact", exact: true })).toBeVisible();
+  await expect(workspace(page).getByRole("heading", { name: "Operational contacts", exact: true })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+});
+
 test("business project links open a scoped workspace and preserve client filters through breadcrumbs, Back and refresh", async ({ page }) => {
   test.slow();
   const requests = await mock(page, route => route.fulfill({ json: detail() }));

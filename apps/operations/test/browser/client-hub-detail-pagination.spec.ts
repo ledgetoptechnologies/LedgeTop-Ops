@@ -77,6 +77,30 @@ async function open(page: Page, path = canonicalPath) {
 }
 async function lateFulfill(route: Route, json: unknown) { await route.fulfill({ json }).catch(() => undefined); }
 
+test("Project Alpha contact roles stay separate, informational and responsive", async ({ page }) => {
+  const response = detail() as ReturnType<typeof detail> & { projectAlphaContactRolesAvailable: boolean; projectAlphaContactRoles: unknown };
+  response.projectAlphaContactRolesAvailable = true;
+  response.projectAlphaContactRoles = { state: "populated", reason: null, nextCursor: null, hasMore: false, returned: 2, limit: 5,
+    canonicalRoot, contextVersion: "context-1", items: [
+      { contactDisplayName: "Craig Contact", clientDisplayName: "Craig Client", scopeType: "department", scopeDisplayName: "Athletics",
+        role: "athletic_director", primary: true, primaryBilling: false, sendProjectInvoices: false, canViewInvoiceLinks: false, sourceVersion: "assignment-v1" },
+      { contactDisplayName: "Billing Contact With A Long Display Name", clientDisplayName: "Regional Facilities Department",
+        scopeType: "organization", scopeDisplayName: "Acme Construction Services Regional Organization", role: "billing_contact",
+        primary: false, primaryBilling: true, sendProjectInvoices: true, canViewInvoiceLinks: true, sourceVersion: "assignment-v2" },
+    ] };
+  await mock(page, (route, collection) => route.fulfill({ json: reply(collection) }), () => response);
+  await page.setViewportSize({ width: 375, height: 900 });
+  await open(page);
+  const roles = page.getByRole("region", { name: "Project Alpha contact roles", exact: true });
+  await expect(roles).toContainText("These roles do not grant portal or Operations access.");
+  await expect(roles).toContainText("Craig Contact");
+  await expect(roles).toContainText("Primary billing");
+  await expect(roles.getByRole("button")).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "Business contacts", exact: true })).toContainText("Business Bailey");
+  await expect(page.getByRole("heading", { name: "Portal logins", exact: true })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+});
+
 test("detail pages each non-identity collection independently using the canonical response root", async ({ page }) => {
   const errors: string[] = [];
   page.on("pageerror", error => errors.push(error.message));

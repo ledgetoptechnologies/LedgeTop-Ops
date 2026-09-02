@@ -18,6 +18,7 @@ export type Env = Omit<
   | "AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED"
   | "CLIENT_PORTAL_ORIGINS"
   | "OPERATIONS_ORIGINS"
+  | "CLIENT_HUB_PA_CONTACT_ASSIGNMENTS_ENABLED"
 > & {
   PROJECT_ALPHA_API_KEY?: string;
   /** Deploy-managed connector credential sets; never returned by registry APIs. */
@@ -40,6 +41,8 @@ export type Env = Omit<
   CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED?: string;
   /** Repairs only exact-linked primary legacy workspaces after a successful PA sync. */
   CLIENT_PORTAL_PRIMARY_WORKSPACE_RECONCILIATION_ENABLED?: string;
+  /** Default-off, read-only Client Hub display of selected schema-v4 Project Alpha contact roles. */
+  CLIENT_HUB_PA_CONTACT_ASSIGNMENTS_ENABLED?: string;
   /** Enables staff public-share recipient lookup from the PA portal projection. */
   DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED?: string;
   /** Defense-in-depth gate for the private Client -> Operations share signer RPC. */

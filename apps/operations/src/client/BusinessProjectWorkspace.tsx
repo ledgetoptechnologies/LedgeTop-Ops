@@ -11,6 +11,7 @@ import { ProjectOperationalWorkspace } from "./ProjectOperationalWorkspace";
 import { clientDirectoryReturnPath } from "./ClientDirectory";
 import { businessProjectClientPath, clientWorkspaceFilters, readBusinessProjectRoute, type BusinessProjectRoute } from "./business-project-route";
 import "./BusinessProjectWorkspace.css";
+import { isProjectAlphaContactRolePage, ProjectAlphaContactRoles, type ProjectAlphaContactRolePage } from "./ProjectAlphaContactRoles";
 
 export interface BusinessProjectDetail {
   canonicalRoot: { sourceId: string; rootNamespace: "business" | "portal" | "account"; kind: "organization" | "standalone_client"; publicId: string };
@@ -25,6 +26,8 @@ export interface BusinessProjectDetail {
   businessActivityAvailable?: boolean;
   auditTimelineAvailable?: boolean;
   feedbackHistoryAvailable?: boolean;
+  projectAlphaContactRolesAvailable?: boolean;
+  projectAlphaContactRoles?: ProjectAlphaContactRolePage;
 }
 
 function displayDate(value: string | null, calendar = false): string {
@@ -47,6 +50,8 @@ function matchesRoute(detail: unknown, route: BusinessProjectRoute): detail is B
     && [availability.siteContacts, availability.billingContacts, availability.projectMemory].every(value => value === "not_projected")
     && (contact === null ? availability.linkedContact !== "available" : record(contact) && contact.sourceField === "project.client_id"
       && typeof contact.id === "string" && [contact.display_name, contact.email, contact.phone].every(nullableText))
+    && (!(detail.projectAlphaContactRolesAvailable === true) || isProjectAlphaContactRolePage(detail.projectAlphaContactRoles,
+      root as BusinessProjectDetail["canonicalRoot"], detail.contextVersion))
     && project.id === route.projectId && root.sourceId === route.sourceId && root.rootNamespace === route.rootNamespace
     && root.publicId === route.publicId && root.kind === (route.kind === "organizations" ? "organization" : "standalone_client");
 }
@@ -120,6 +125,9 @@ function ProjectWorkspace({ route, feedbackEnabled }: { route: BusinessProjectRo
             : "A linked-contact reference was not included in the synchronized project record."}</p>}
         </Card>
       </div>
+      {detail.projectAlphaContactRolesAvailable === true && detail.projectAlphaContactRoles && <ProjectAlphaContactRoles
+        initial={detail.projectAlphaContactRoles} basePath={requestPath} root={detail.canonicalRoot}
+        contextVersion={detail.contextVersion} contextSignal={pending.current!.signal} onInvalidated={invalidate} />}
       {detail.operationalWorkspaceAvailable === true && <ProjectOperationalWorkspace key={`operations-${revision}`} root={detail.canonicalRoot} projectId={project.id}
         contextVersion={detail.contextVersion} contextSignal={pending.current!.signal} onInvalidated={invalidate} />}
       {detail.businessActivityAvailable === true && <ClientBusinessActivity key={revision} root={detail.canonicalRoot} projectId={project.id} contextVersion={detail.contextVersion}

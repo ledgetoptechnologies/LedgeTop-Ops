@@ -16,6 +16,7 @@ import { ClientPortalBootstrap } from "./ClientPortalBootstrap";
 import { OrganizationOperationalContacts } from "./OrganizationOperationalContacts";
 import { ClientInternalNotes } from "./ClientInternalNotes";
 import type { InvitationAdministrationAccess } from "./invitation-administration-api";
+import { ProjectAlphaContactRoles, type ProjectAlphaContactRolePage } from "./ProjectAlphaContactRoles";
 
 interface CollectionItem { row_key?: string }
 interface ClientContact extends CollectionItem {
@@ -49,6 +50,8 @@ interface ClientDetailResponse {
   projectManagementAvailable?: boolean;
   businessActivityAvailable?: boolean;
   auditTimelineAvailable?: boolean;
+  projectAlphaContactRolesAvailable?: boolean;
+  projectAlphaContactRoles?: ProjectAlphaContactRolePage;
 }
 interface BusinessProject extends CollectionItem { id: string; name: string; status: string | null; start_date: string | null; end_date: string | null; manager_name: string | null; created_at: string | null }
 interface ProjectManagementResult {
@@ -477,6 +480,11 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess }: { route
           {items => <ContactList contacts={items} />}
         </ClientCollection>
       </Card>
+      {data.projectAlphaContactRolesAvailable === true && data.projectAlphaContactRoles && portalBasePath
+        && data.client.source_id && data.client.root_namespace === "business" && data.contextVersion &&
+        <ProjectAlphaContactRoles initial={data.projectAlphaContactRoles} basePath={portalBasePath}
+          root={{ sourceId: data.client.source_id, rootNamespace: "business", kind: data.client.kind, publicId: data.client.public_id }}
+          contextVersion={data.contextVersion} contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} />}
       {data.organizationOperationalContactsAvailable === true && data.client.source_id && data.client.root_namespace === "business" && data.client.kind === "organization" && data.contextVersion &&
         <OrganizationOperationalContacts root={{ sourceId: data.client.source_id, rootNamespace: "business", kind: "organization", publicId: data.client.public_id }}
           contextVersion={data.contextVersion} contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} />}
