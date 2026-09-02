@@ -1,7 +1,6 @@
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { requirePermission } from "./acl";
-import { authenticatedDeliveryGrantsEnabled } from "./authenticated-delivery-grants";
 import { normalizePrefix, resolveDivisionAssociation } from "./delivery";
 import { projectAlphaReadVisibleSql } from "./project-alpha-read-visibility";
 import type { Env, StaffPrincipal } from "./types";
@@ -60,7 +59,7 @@ async function tables(database:D1Database,names:string[]):Promise<boolean>{
     .bind(JSON.stringify(names)).first<number>("n")===names.length;
 }
 export async function primaryWorkspaceBindingsReady(env:Env):Promise<boolean>{
-  return authenticatedDeliveryGrantsEnabled(env)&&await tables(db(env),[
+  return env.CLIENT_PORTAL_HIERARCHY_V2_ENABLED==="true"&&env.AUTHENTICATED_DELIVERY_GRANTS_ENABLED==="true"&&await tables(db(env),[
     "portal_primary_staff_bindings","portal_primary_staff_binding_mutations","portal_primary_staff_binding_audit",
     "portal_primary_staff_binding_write_fences","pa_portal_projection_checkpoints","pa_portal_workspace_sources",
   ]);
@@ -68,7 +67,7 @@ export async function primaryWorkspaceBindingsReady(env:Env):Promise<boolean>{
 async function ready(env:Env):Promise<void>{if(!await primaryWorkspaceBindingsReady(env))fail(503,"Client Workspace folder linking is awaiting a database update");}
 function ancestors(prefix:string):string[]{const parts=prefix.slice(0,-1).split("/");return parts.map((_,index)=>parts.slice(0,index+1).join("/")+"/");}
 
-async function opsFolderProof(env:Env,principal:StaffPrincipal,folderKey:string):Promise<OpsFolderProof>{
+async function opsFolderProof(env:Env,principal:StaffPrincipal|null,folderKey:string):Promise<OpsFolderProof>{
   const prefix=normalizePrefix(folderKey),rows=await env.OPS_DB.withSession("first-primary").prepare(`WITH matching AS(
       SELECT folder.*,length(rtrim(folder.r2_prefix,'/')||'/') prefix_length
       FROM project_folders folder WHERE rtrim(folder.r2_prefix,'/')||'/' IN(SELECT value FROM json_each(?))
@@ -104,7 +103,7 @@ async function opsFolderProof(env:Env,principal:StaffPrincipal,folderKey:string)
     if(row.division_active!==1||row.source_visible!==1)fail(404,"This folder is not linked to one active primary Project Alpha project");
     const candidates=[{division_id:row.division_id,r2_prefix:row.r2_prefix}],divisionId=resolveDivisionAssociation(prefix,candidates);
     if(!divisionId||divisionId!==row.division_id)fail(409,"Folder ownership is ambiguous");
-    const exactDivisionId=divisionId as string;await requirePermission(env,principal,"delivery.share.create",{divisionId:exactDivisionId},true);
+    const exactDivisionId=divisionId as string;if(principal)await requirePermission(env,principal,"delivery.share.create",{divisionId:exactDivisionId},true);
     return {folderPrefix:prefix,ownerScopeType:"project",ownerPublicId:row.project_public_id,ownerName:row.project_name,
       projectId:row.project_id,projectPublicId:row.project_public_id,projectName:row.project_name,divisionId:exactDivisionId,
       rootType:row.root_type,rootPublicId:row.root_public_id,rootName:row.root_name,
@@ -139,7 +138,7 @@ async function opsFolderProof(env:Env,principal:StaffPrincipal,folderKey:string)
   if(descendants.results.length>50)fail(409,"This folder contains too many project mappings to establish one client root safely");
   const roots=new Set(descendants.results.map(row=>`${row.root_type}:${row.root_public_id}`)),divisions=new Set(descendants.results.map(row=>row.division_id));
   if(roots.size!==1||divisions.size!==1||descendants.results.some(row=>row.division_active!==1||row.source_visible!==1))fail(409,"This folder spans more than one client root or division");
-  const first=descendants.results[0]!,divisionId=first.division_id;await requirePermission(env,principal,"delivery.share.create",{divisionId},true);
+  const first=descendants.results[0]!,divisionId=first.division_id;if(principal)await requirePermission(env,principal,"delivery.share.create",{divisionId},true);
   return {folderPrefix:prefix,ownerScopeType:first.root_type==="organization"?"organization":"client",ownerPublicId:first.root_public_id,ownerName:first.root_name,
     projectId:null,projectPublicId:null,projectName:null,divisionId,rootType:first.root_type,rootPublicId:first.root_public_id,rootName:first.root_name,
     projectUpdatedAt:"root",projectSyncId:"root",folderConfirmedAt:first.confirmed_at,folderConfirmedBy:first.confirmed_by,
@@ -255,6 +254,50 @@ async function readBinding(env:Env,bindingId:string):Promise<PrimaryWorkspaceBin
       AND project.generation_id=checkpoint.active_generation_id AND project.entity_type='project' AND project.public_id=receipt.project_public_id
     WHERE receipt.binding_id=?`).bind(bindingId).first<any>();
   return row?bindingView(row):null;
+}
+
+/** Fail closed before any primary Operations-source grant context is used.
+ * The signed Delivery projection and the independent Operations ownership
+ * proof are re-read. A changed proof suspends the receipt and folder route so
+ * a later grant insert cannot race against stale authority. */
+export async function requireActivePrimaryWorkspaceBindingReceipt(env:Env,bindingId:string,folderKey:string):Promise<void>{
+  await ready(env);
+  const receipt=await db(env).prepare(`SELECT receipt.*,binding.source_version,binding.status binding_status,binding.revoked_at
+    FROM portal_primary_staff_bindings receipt JOIN portal_v2_folder_bindings binding ON binding.id=receipt.binding_id
+    WHERE receipt.binding_id=?`).bind(bindingId).first<any>();
+  if(!receipt)fail(409,"This legacy primary folder binding has no migration 0189 authority receipt. Relink the folder before managing Client Workspace access");
+  if(receipt.state!=="active"||receipt.binding_status!=="active"||receipt.revoked_at!==null)
+    fail(409,"The primary Client Workspace folder link is not active");
+  let currentOwner:OpsFolderProof|null=null,currentProjection:ProjectionProof|null=null,currentVersion="";
+  try{
+    currentOwner=await opsFolderProof(env,null,folderKey);
+    currentProjection=await projectionProof(env,currentOwner,receipt.workspace_id);
+    currentVersion=await contextVersion(currentOwner,currentProjection);
+  }catch{currentOwner=null;currentProjection=null;}
+  const structural=!!currentOwner&&!!currentProjection
+    &&currentOwner.folderPrefix===normalizePrefix(receipt.r2_prefix)
+    &&currentOwner.ownerScopeType===receipt.owner_scope_type&&currentOwner.ownerPublicId===receipt.owner_public_id
+    &&currentOwner.rootType===receipt.root_type&&currentOwner.rootPublicId===receipt.root_public_id
+    &&currentOwner.projectPublicId===receipt.project_public_id
+    &&currentProjection.workspaceId===receipt.workspace_id
+    &&currentProjection.directoryGenerationId===receipt.directory_generation_id
+    &&currentProjection.snapshotGenerationId===receipt.snapshot_generation_id
+    &&currentProjection.sourceSequence===receipt.source_sequence
+    &&currentProjection.rootSourceVersion===receipt.root_source_version
+    &&currentProjection.projectSourceVersion===receipt.project_source_version;
+  const compatible=receipt.reason_code==="migration_0189_legacy_compat"?structural:structural&&currentVersion===receipt.ops_context_version;
+  if(compatible)return;
+  const next=Number(receipt.version)+1;
+  try{await db(env).batch([
+    db(env).prepare(`UPDATE portal_primary_staff_bindings SET state='suspended',version=?,updated_at=datetime('now')
+      WHERE binding_id=? AND state='active' AND version=?`).bind(next,bindingId,receipt.version),
+    db(env).prepare(`UPDATE portal_v2_folder_bindings SET status='suspended',updated_at=datetime('now')
+      WHERE id=? AND status='active' AND revoked_at IS NULL`).bind(bindingId),
+    db(env).prepare(`INSERT INTO portal_primary_staff_binding_audit(id,binding_id,binding_version,action,actor_staff_id,details_json)
+      VALUES(?,?,?,'binding.suspended','system:context-revalidation',?)`).bind(crypto.randomUUID(),bindingId,next,
+        JSON.stringify({reasonCode:"authority_context_changed"})),
+  ]);}catch{/* A concurrent request may already have suspended this receipt. */}
+  fail(409,"The primary folder or signed Project Alpha context changed. The Client Workspace link was suspended; review and relink it before managing access");
 }
 function key(value:string):string{if(!IDEMPOTENCY.test(value))fail(400,"Idempotency-Key is invalid");return value;}
 async function replay(env:Env,principal:StaffPrincipal,idempotencyKey:string,action:string,fingerprint:string){

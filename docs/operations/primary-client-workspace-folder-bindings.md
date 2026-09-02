@@ -37,6 +37,23 @@ The same idempotency key and request body are reused after an uncertain response
 
 Project Alpha remains the producer of workspace roots, directory identities, memberships, departments, entitlements, and signed projection checkpoints. Operations can bind only after that producer has published and activated a coherent primary projection. An empty target list is an actionable synchronization state; it is not permission to synthesize a workspace from client records or email addresses.
 
+## Migration and compatibility gate
+
+Client migration `0189_primary_staff_folder_bindings.sql` is mandatory before the Operations build containing these routes is enabled. The migration creates the receipt, mutation, audit, and D1 transaction-fence triggers. It also backfills only coherent pre-0189 primary Operations bindings whose active folder route, signed primary source, directory generation, projection generation, root, and owner all agree. Those rows are marked with the explicit `migration_0189_legacy_compat` reason and are structurally revalidated on every privileged grant context.
+
+An older binding that cannot be proven is deliberately left without a receipt. Operations returns an actionable conflict requiring staff to relink it; it does not silently trust or synthesize authority. Before release, query for active primary Operations bindings without an active receipt and resolve every result:
+
+```sql
+SELECT binding.id, binding.workspace_id, binding.r2_prefix
+FROM portal_v2_folder_bindings binding
+JOIN portal_v2_workspaces workspace ON workspace.id=binding.workspace_id
+LEFT JOIN portal_primary_staff_bindings receipt ON receipt.binding_id=binding.id AND receipt.state='active'
+WHERE binding.source_type='operations' AND binding.status='active' AND binding.revoked_at IS NULL
+  AND workspace.project_alpha_source_id='project-alpha:primary' AND receipt.binding_id IS NULL;
+```
+
+The result must be empty before enabling authenticated grant mutations. Runtime revalidation suspends a receipt and folder route if Operations ownership or the signed projection changes. Delivery D1 triggers serialize grant insertion with binding revocation: whichever operation wins makes the other fail, so the pre-revoke grant count is never the only fence.
+
 ## Verification
 
-Focused D1 tests cover project folders, source-owned client roots, wrong-root/unsigned targets, stale review contexts, non-authorizing writes, and replay/revoke fencing. Browser coverage preserves Public link as the default and proves that linking a workspace creates neither a public share nor an authenticated grant.
+Focused D1 tests cover project folders, source-owned client roots, wrong-root/unsigned targets, stale review contexts, runtime suspension, both grant/revoke transaction orders, non-authorizing writes, and replay/revoke fencing. Browser coverage preserves Public link as the default, verifies keyboard selection and review focus, and proves that linking a workspace creates neither a public share nor an authenticated grant.

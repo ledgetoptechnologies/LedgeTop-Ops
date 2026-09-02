@@ -84,7 +84,12 @@ test("an unbound folder can be linked only to its exact signed primary workspace
     }]}});
     if (call.path === "/api/delivery/authenticated-grants/bindings" && call.method === "POST") {
       bound = true;
-      return route.fulfill({status: 201, json: {binding: {bindingId: "binding-acme", workspaceId: "workspace-acme", state: "active"}, replayed: false}});
+      return route.fulfill({status: 201, json: {binding: {
+        bindingId: "binding-acme", workspaceId: "workspace-acme", workspaceLabel: "Acme Client Workspace", state: "active", version: 1,
+        rootType: "organization", rootPublicId: "org-acme", rootLabel: "Acme Organization", ownerScopeType: "project",
+        ownerPublicId: "project-hilly", ownerName: "Hilly Haven", projectPublicId: "project-hilly", projectName: "Hilly Haven",
+        sourceId: "project-alpha:primary", contextVersion: "b".repeat(64), folderPrefix: "Jobs/Clients/Acme/",
+      }, replayed: false}});
     }
     return undefined;
   });
@@ -98,10 +103,14 @@ test("an unbound folder can be linked only to its exact signed primary workspace
   await page.getByRole("tab", {name: "Client Workspace"}).click();
   await expect(page.getByRole("region", {name: "Link folder to a Client Workspace"})).toBeVisible();
   await expect(page.getByText("Linking grants no access", {exact: false})).toBeVisible();
+  const workspaceSearch = page.getByRole("combobox", {name: "Projected workspace or project"});
   await expect(page.getByRole("option", {name: /Acme Client Workspace/})).toBeVisible();
-  await page.getByRole("option", {name: /Acme Client Workspace/}).click();
+  await workspaceSearch.press("ArrowDown");
+  await expect(page.getByRole("option", {name: /Acme Client Workspace/})).toBeFocused();
+  await page.keyboard.press("Enter");
   await page.getByRole("button", {name: "Review workspace link"}).click();
   const review = page.getByRole("region", {name: "Review Client Workspace folder link"});
+  await expect(page.getByRole("heading", {name: "Confirm folder link"})).toBeFocused();
   await expect(review).toContainText("Access created");
   await expect(review).toContainText("None");
   await page.getByRole("button", {name: "Link folder to workspace"}).click();

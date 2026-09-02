@@ -12,6 +12,7 @@ import { projectAccessAuthorityHistoryReady,projectAccessGrantEvent } from '../.
 import { NATIVE_PORTAL_TARGET_SCOPES_SQL,readNativeTargetScopes } from '../../../client/src/worker/client-portal/native-portal-scopes';
 import { authorizePortalWorkspaceCapability } from '../../../client/src/worker/client-portal/workspace-v2';
 import {requireProjectAccessAuthorityMutations} from './project-access-mutation-gate';
+import {requireActivePrimaryWorkspaceBindingReceipt} from './primary-delivery-workspace-bindings';
 
 const OPAQUE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const IDEMPOTENCY = /^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/;
@@ -130,7 +131,7 @@ function normalizedExpiry(value: string | null | undefined): string | null {
 
 async function bindingContext(env: Env, bindingId: string): Promise<BindingContext> {
   if (!OPAQUE.test(bindingId)) throw new HTTPException(404, { message: "Folder binding not found" });
-  const row = await deliveryDb(env).prepare(`SELECT binding.id,binding.workspace_id,binding.owner_scope_type,
+  const row = await deliveryDb(env).prepare(`SELECT binding.id,binding.workspace_id,binding.owner_scope_type,binding.source_type,
       binding.owner_public_id,binding.r2_prefix,binding.source_version,checkpoint.active_generation_id,
       workspace.display_name workspace_label,workspace.root_type,COALESCE(workspace.pa_organization_public_id,workspace.pa_client_public_id) root_public_id,owner.display_name owner_name
     FROM portal_v2_folder_bindings binding
@@ -149,10 +150,11 @@ async function bindingContext(env: Env, bindingId: string): Promise<BindingConte
       AND binding.source_version IS NOT NULL`).bind(bindingId).first<{
       id: string; workspace_id: string; owner_scope_type: BindingContext["ownerType"];
       owner_public_id: string; r2_prefix: string; source_version: string; active_generation_id: string;
-      workspace_label:string;root_type:BindingContext['rootType'];root_public_id:string;owner_name:string;
+      workspace_label:string;root_type:BindingContext['rootType'];root_public_id:string;owner_name:string;source_type:string;
     }>();
   if (!row) throw new HTTPException(404, { message: "Folder binding not found" });
   const prefix = normalizePrefix(row.r2_prefix);
+  if(row.source_type==='operations')await requireActivePrimaryWorkspaceBindingReceipt(env,row.id,prefix);
   const candidates = await env.OPS_DB.withSession("first-primary").prepare(`SELECT project_folders.division_id,project_folders.r2_prefix
     FROM project_folders JOIN pa_projects ON pa_projects.id=project_folders.project_id AND pa_projects.active=1 AND pa_projects.projection_source_id='project-alpha:primary'
     WHERE substr(?,1,length(project_folders.r2_prefix))=project_folders.r2_prefix

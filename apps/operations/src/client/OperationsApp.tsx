@@ -4814,6 +4814,7 @@ function PrimaryWorkspaceBindingSetup({folder,onLinked}:{folder:{id:string};onLi
   const [loading,setLoading]=useState(false),[busy,setBusy]=useState(false),[uncertain,setUncertain]=useState(false);
   const [error,setError]=useState(""),[status,setStatus]=useState("");
   const searchController=useRef<AbortController|null>(null),pending=useRef<{key:string;body:string;target:PrimaryWorkspaceBindingTarget}|null>(null);
+  const reviewTitle=useRef<HTMLHeadingElement|null>(null);
   const valid=(value:unknown):value is PrimaryWorkspaceBindingTarget=>{
     if(!value||typeof value!=="object")return false;const row=value as Record<string,unknown>;
     return typeof row.workspaceId==="string"&&typeof row.workspaceLabel==="string"&&["organization","standalone_client"].includes(String(row.rootType))
@@ -4822,6 +4823,7 @@ function PrimaryWorkspaceBindingSetup({folder,onLinked}:{folder:{id:string};onLi
       &&(row.projectPublicId===null||typeof row.projectPublicId==="string")&&(row.projectName===null||typeof row.projectName==="string")
       &&row.sourceId==="project-alpha:primary"&&typeof row.contextVersion==="string"&&/^[a-f0-9]{64}$/.test(row.contextVersion);
   };
+  useEffect(()=>{if(reviewing)reviewTitle.current?.focus();},[reviewing]);
   const search=useCallback((value:string)=>{
     searchController.current?.abort();const controller=new AbortController();searchController.current=controller;
     setLoading(true);setError("");setStatus("");
@@ -4836,8 +4838,14 @@ function PrimaryWorkspaceBindingSetup({folder,onLinked}:{folder:{id:string};onLi
   const submit=async(operation=pending.current)=>{
     if(!operation||busy)return;setBusy(true);setError("");setStatus("");
     try{
-      const response=await api<{binding:{bindingId:string;workspaceId:string;state:string};replayed:boolean}>("/api/delivery/authenticated-grants/bindings",{method:"POST",headers:{"Idempotency-Key":operation.key},body:operation.body});
-      if(!response?.binding||response.binding.workspaceId!==operation.target.workspaceId||response.binding.state!=="active")throw new ApiError("The workspace link outcome could not be verified.",409,{});
+      const response=await api<{binding:PrimaryWorkspaceBindingTarget&{bindingId:string;folderPrefix:string;version:number;state:string};replayed:boolean}>("/api/delivery/authenticated-grants/bindings",{method:"POST",headers:{"Idempotency-Key":operation.key},body:operation.body});
+      const binding=response?.binding;
+      if(!binding||typeof binding.bindingId!=="string"||!binding.bindingId||binding.workspaceId!==operation.target.workspaceId
+        ||binding.state!=="active"||binding.version!==1||binding.sourceId!=="project-alpha:primary"
+        ||binding.rootType!==operation.target.rootType||binding.rootPublicId!==operation.target.rootPublicId
+        ||binding.ownerScopeType!==operation.target.ownerScopeType||binding.ownerPublicId!==operation.target.ownerPublicId
+        ||binding.projectPublicId!==operation.target.projectPublicId||binding.contextVersion!==operation.target.contextVersion
+        ||typeof binding.folderPrefix!=="string"||typeof response.replayed!=="boolean")throw new ApiError("The workspace link outcome could not be verified.",409,{});
       pending.current=null;setUncertain(false);setStatus("Folder linked to the selected Client Workspace. No client access was granted.");onLinked();
     }catch(caught){
       if(caught instanceof ApiError&&caught.status<500&&caught.status!==429){pending.current=null;setUncertain(false);setError(caught.message);}
@@ -4849,15 +4857,18 @@ function PrimaryWorkspaceBindingSetup({folder,onLinked}:{folder:{id:string};onLi
     <h4>Link this folder to a Client Workspace</h4>
     <p>This folder has no authenticated workspace link. Choose the exact workspace projected and signed by the primary Project Alpha connection. Linking is routing metadata only: it does not create a login, membership, grant, or public link.</p>
     <label htmlFor="primary-workspace-binding-search">Projected workspace or project</label>
-    <input id="primary-workspace-binding-search" type="search" value={query} disabled={busy||uncertain} autoComplete="off"
-      placeholder="Search the projected workspace, client, or project" onChange={event=>{setQuery(event.target.value);setSelected(null);setReviewing(false);setTargets([]);setStatus("");setError("");}} />
+    <input id="primary-workspace-binding-search" type="search" role="combobox" aria-autocomplete="list" aria-expanded={targets.length>0}
+      aria-controls="primary-workspace-binding-options" value={query} disabled={busy||uncertain} autoComplete="off"
+      placeholder="Search the projected workspace, client, or project" onKeyDown={focusFirstTypeaheadOption}
+      onChange={event=>{setQuery(event.target.value);setSelected(null);setReviewing(false);setTargets([]);setStatus("");setError("");}} />
     {loading&&<small role="status">Checking signed Project Alpha workspaces…</small>}
-    {targets.length>0&&<div className="client-workspace-typeahead" role="listbox" aria-label="Projected Client Workspaces">{targets.map(item=><button
+    {targets.length>0&&<div id="primary-workspace-binding-options" className="client-workspace-typeahead" role="listbox" aria-label="Projected Client Workspaces">{targets.map(item=><button
       type="button" role="option" aria-selected={selected?.workspaceId===item.workspaceId} key={item.workspaceId} disabled={busy||uncertain}
+      onKeyDown={event=>moveTypeaheadOption(event,"primary-workspace-binding-search")}
       onClick={()=>{setSelected(item);setReviewing(false);setError("");setStatus("");}}><strong>{item.workspaceLabel}</strong><small>{item.rootLabel} · {item.projectName??`${item.ownerName} root`} · primary signed projection</small></button>)}</div>}
     {selected&&!reviewing&&<><small className="selected-audience-note">Selected: {selected.workspaceLabel}. Folder owner: {selected.projectName??selected.ownerName}. This selection cannot widen access.</small><button
       type="button" className="button-orange button-small" disabled={busy||uncertain} onClick={()=>setReviewing(true)}>Review workspace link</button></>}
-    {selected&&reviewing&&<section className="primary-authenticated-grant-review" role="region" aria-label="Review Client Workspace folder link"><h4>Confirm folder link</h4><dl>
+    {selected&&reviewing&&<section className="primary-authenticated-grant-review" role="region" aria-label="Review Client Workspace folder link"><h4 ref={reviewTitle} tabIndex={-1}>Confirm folder link</h4><dl>
       <div><dt>Workspace</dt><dd>{selected.workspaceLabel}</dd></div><div><dt>Client root</dt><dd>{selected.rootLabel}</dd></div><div><dt>Folder owner</dt><dd>{selected.projectName??selected.ownerName}</dd></div><div><dt>Access created</dt><dd>None</dd></div>
     </dl><p>Recipients remain unavailable until this link is saved and an exact verified person or explicit dynamic group grant is reviewed separately.</p><div className="actions"><button type="button" className="button-orange" disabled={busy||uncertain} onClick={confirmLink}>{busy?"Linking…":"Link folder to workspace"}</button><button type="button" className="button-ghost" disabled={busy||uncertain} onClick={()=>setReviewing(false)}>Cancel review</button></div></section>}
     {status&&<small role="status">{status}</small>}{error&&<small className="error" role="alert">{error}</small>}

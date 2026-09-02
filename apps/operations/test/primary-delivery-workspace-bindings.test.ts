@@ -13,6 +13,7 @@ vi.mock("cloudflare:workers",()=>({WorkflowEntrypoint:class{},WorkerEntrypoint:c
 const staff:StaffPrincipal={id:"primary-binding-staff",email:"staff@example.test",displayName:"Staff",accessSubject:"staff-subject",projectAlphaUserId:null};
 const organizationPublic="1".repeat(32),projectPublic="2".repeat(32),workspace="primary-workspace-one",issuer="https://clients.example.test";
 let runtime:Miniflare,ops:D1Database,delivery:D1Database,env:Env;
+let projectBindingId="",projectBindingSourceVersion="";
 async function migrate(database:D1Database,path:URL,cap:string){
   for(const name of readdirSync(path).filter(value=>/^\d{4}_.*\.sql$/.test(value)&&value.slice(0,4)<=cap).sort())
     await database.batch(splitD1MigrationStatements(readFileSync(new URL(name,path),"utf8")).map(sql=>database.prepare(sql)));
@@ -76,6 +77,9 @@ describe("primary signed workspace folder binding",{timeout:60_000,concurrent:fa
     const second=await createPrimaryWorkspaceBinding(env,staff,"Jobs/Clients/Acme/Survey/Deliverables/",input,"primary-binding-create-one");
     expect(first.replayed).toBe(false);expect(second).toEqual({...first,replayed:true});
     expect(first.binding).not.toBeNull();if(!first.binding)throw new Error("Expected an active primary folder binding");
+    projectBindingId=first.binding.bindingId;
+    projectBindingSourceVersion=(await delivery.prepare("SELECT source_version FROM portal_v2_folder_bindings WHERE id=?")
+      .bind(projectBindingId).first<string>("source_version"))!;
     expect(await delivery.prepare("SELECT count(*) n FROM portal_v2_authenticated_delivery_grants").first<number>("n")).toBe(0);
     expect(await delivery.prepare("SELECT count(*) n FROM portal_v2_workspace_memberships").first<number>("n")).toBe(0);
     const audiences=await searchAuthenticatedDeliveryGrantAudiences(env,staff,first.binding.bindingId,"Acme","organization");
@@ -112,5 +116,34 @@ describe("primary signed workspace folder binding",{timeout:60_000,concurrent:fa
     },"primary-stale-context-key")).rejects.toMatchObject({status:409});
     expect(await delivery.prepare("SELECT count(*) n FROM portal_primary_staff_binding_mutations WHERE idempotency_key IN (?,?)")
       .bind("primary-wrong-root-key","primary-stale-context-key").first<number>("n")).toBe(0);
+  });
+
+  it("serializes grant insertion against binding revocation in either transaction order",async()=>{
+    const insert=(id:string)=>delivery.prepare(`INSERT INTO portal_v2_authenticated_delivery_grants
+      (id,logical_grant_id,grant_version,workspace_id,folder_binding_id,binding_source_version,audience_type,
+       audience_public_id,audience_source_version,reason_code,created_by_staff_id)
+      VALUES(?,?,1,?,?,?,'organization',?,'org-v1','race_test',?)`)
+      .bind(id,`${id}-logical`,workspace,projectBindingId,projectBindingSourceVersion,organizationPublic,staff.id);
+    await expect(delivery.batch([
+      insert("grant-race-first"),
+      delivery.prepare("UPDATE portal_v2_folder_bindings SET status='revoked',revoked_at=datetime('now') WHERE id=?").bind(projectBindingId),
+    ])).rejects.toThrow(/primary-staff-binding-active-grants/);
+    await expect(delivery.batch([
+      delivery.prepare("UPDATE portal_v2_folder_bindings SET status='revoked',revoked_at=datetime('now') WHERE id=?").bind(projectBindingId),
+      insert("revoke-race-first"),
+    ])).rejects.toThrow(/primary-staff-binding-required/);
+    expect(await delivery.prepare("SELECT count(*) n FROM portal_v2_authenticated_delivery_grants WHERE id IN (?,?)")
+      .bind("grant-race-first","revoke-race-first").first<number>("n")).toBe(0);
+    expect(await delivery.prepare("SELECT status FROM portal_v2_folder_bindings WHERE id=?").bind(projectBindingId).first<string>("status")).toBe("active");
+  });
+
+  it("suspends a receipt before audience search can rely on changed Operations authority",async()=>{
+    await ops.prepare("UPDATE pa_projects SET updated_at=datetime('now','+1 minute') WHERE id=?").bind(projectPublic).run();
+    await expect(searchAuthenticatedDeliveryGrantAudiences(env,staff,projectBindingId,"Acme","organization"))
+      .rejects.toMatchObject({status:409});
+    expect(await delivery.prepare("SELECT state FROM portal_primary_staff_bindings WHERE binding_id=?")
+      .bind(projectBindingId).first<string>("state")).toBe("suspended");
+    expect(await delivery.prepare("SELECT status FROM portal_v2_folder_bindings WHERE id=?")
+      .bind(projectBindingId).first<string>("status")).toBe("suspended");
   });
 });

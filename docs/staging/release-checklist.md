@@ -55,6 +55,15 @@ staging origins.
 must be the new portal app audience, never `POLICY_AUD`, `OPERATIONS_AUD`, or
 `CF_ACCESS_AUD`.
 
+Client migration `0189_primary_staff_folder_bindings.sql` must be applied and
+verified before deploying the Operations build that exposes primary Client
+Workspace folder linking. Keep authenticated-grant mutations disabled until
+the active-primary-Operations-binding-without-active-receipt query in
+`docs/operations/primary-client-workspace-folder-bindings.md` returns zero.
+Record the migration hash, the zero-row readback, one coherent legacy backfill
+or an explicit staff relink, stale-context suspension, and both grant-versus-
+revoke transaction order tests in the release evidence.
+
 The Client staging Worker and the single staging Client Portal Access
 application must include both reviewed portal hosts:
 `client-staging.ledgetopdroneservices.com` and

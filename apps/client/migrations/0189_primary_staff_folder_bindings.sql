@@ -63,6 +63,47 @@ CREATE TABLE portal_primary_staff_binding_write_fences (
 CREATE INDEX idx_portal_primary_staff_binding_state
   ON portal_primary_staff_bindings(state,workspace_id,updated_at DESC);
 
+-- Upgrade coherent pre-0189 primary Operations bindings in place. They remain
+-- usable, but runtime revalidation treats this explicit compatibility reason
+-- as a structural receipt and rechecks the current Operations owner/root on
+-- every privileged read or write. Bindings that cannot be proven from one
+-- active signed projection are intentionally left unreceipted and fail closed
+-- until staff relinks them through the reviewed workflow.
+INSERT INTO portal_primary_staff_bindings(
+  binding_id,workspace_id,source_id,root_type,root_public_id,owner_scope_type,owner_public_id,project_public_id,
+  directory_generation_id,snapshot_generation_id,source_sequence,root_source_version,project_source_version,
+  r2_prefix,ops_project_id,ops_context_version,created_by_staff_id,reason_code,state
+)
+SELECT binding.id,workspace.id,'project-alpha:primary',workspace.root_type,
+  COALESCE(workspace.pa_organization_public_id,workspace.pa_client_public_id),binding.owner_scope_type,binding.owner_public_id,
+  CASE WHEN binding.owner_scope_type='project' THEN binding.owner_public_id END,
+  directory_generation.id,projection_generation.id,projection_checkpoint.source_sequence,root_entity.source_version,
+  CASE WHEN binding.owner_scope_type='project' THEN owner_entity.source_version END,binding.r2_prefix,
+  CASE WHEN binding.owner_scope_type='project' THEN 'legacy:'||binding.owner_public_id END,
+  '0000000000000000000000000000000000000000000000000000000000000000',
+  'migration:0189','migration_0189_legacy_compat','active'
+FROM portal_v2_folder_bindings binding
+JOIN portal_v2_workspaces workspace ON workspace.id=binding.workspace_id
+JOIN pa_portal_workspace_sources source ON source.workspace_id=workspace.id
+  AND source.projection_source_id=workspace.project_alpha_source_id
+JOIN portal_v2_directory_checkpoints directory_checkpoint ON directory_checkpoint.workspace_id=workspace.id
+JOIN portal_v2_directory_generations directory_generation ON directory_generation.id=directory_checkpoint.active_generation_id
+  AND directory_generation.workspace_id=workspace.id AND directory_generation.status='active' AND directory_generation.complete=1
+JOIN pa_portal_projection_checkpoints projection_checkpoint ON projection_checkpoint.workspace_id=workspace.id
+  AND projection_checkpoint.source_sequence=directory_checkpoint.source_sequence
+JOIN pa_portal_projection_generations projection_generation ON projection_generation.id=projection_checkpoint.snapshot_generation_id
+  AND projection_generation.workspace_id=workspace.id AND projection_generation.projection_source_id=workspace.project_alpha_source_id
+  AND projection_generation.status='active' AND projection_generation.complete=1
+JOIN portal_v2_directory_entities root_entity ON root_entity.workspace_id=workspace.id
+  AND root_entity.generation_id=directory_generation.id AND root_entity.entity_type=workspace.root_type
+  AND root_entity.public_id=COALESCE(workspace.pa_organization_public_id,workspace.pa_client_public_id) AND root_entity.active=1
+JOIN portal_v2_directory_entities owner_entity ON owner_entity.workspace_id=workspace.id
+  AND owner_entity.generation_id=directory_generation.id AND owner_entity.entity_type=binding.owner_scope_type
+  AND owner_entity.public_id=binding.owner_public_id AND owner_entity.active=1
+WHERE binding.source_type='operations' AND binding.source_version IS NOT NULL
+  AND binding.status='active' AND binding.revoked_at IS NULL
+  AND workspace.project_alpha_source_id='project-alpha:primary' AND workspace.status='active';
+
 -- The transaction must still point at the exact signed projection generation,
 -- root, project and source versions selected during review.  This trigger is
 -- the Delivery-D1 transaction fence; the Operations proof is rechecked after
@@ -100,7 +141,8 @@ WHEN NEW.state<>'active'
      AND binding.owner_scope_type=NEW.owner_scope_type AND binding.owner_public_id=NEW.owner_public_id
      AND binding.r2_prefix=NEW.r2_prefix AND binding.source_type='operations'
      AND binding.source_version IS NOT NULL AND binding.status='active' AND binding.revoked_at IS NULL
-     AND workspace.project_alpha_source_id=NEW.source_id AND workspace.legacy_account_id IS NULL AND workspace.status='active'
+     AND workspace.project_alpha_source_id=NEW.source_id
+     AND (workspace.legacy_account_id IS NULL OR NEW.reason_code='migration_0189_legacy_compat') AND workspace.status='active'
      AND workspace.root_type=NEW.root_type
      AND COALESCE(workspace.pa_organization_public_id,workspace.pa_client_public_id)=NEW.root_public_id
      AND directory_generation.id=NEW.directory_generation_id
@@ -149,6 +191,33 @@ BEFORE INSERT ON portal_v2_folder_bindings
 WHEN EXISTS(SELECT 1 FROM portal_primary_staff_bindings receipt
   WHERE receipt.binding_id=NEW.id OR (receipt.workspace_id=NEW.workspace_id AND receipt.r2_prefix=NEW.r2_prefix))
 BEGIN SELECT RAISE(ABORT,'primary-staff-folder-immutable'); END;
+
+-- Grant creation and binding revocation are serialized by Delivery D1. A
+-- grant cannot be inserted after a receipt stops being active, and a binding
+-- cannot be revoked after an active grant wins the race.
+CREATE TRIGGER portal_primary_staff_grant_insert_guard
+BEFORE INSERT ON portal_v2_authenticated_delivery_grants
+WHEN EXISTS(
+  SELECT 1 FROM portal_v2_folder_bindings binding JOIN portal_v2_workspaces workspace ON workspace.id=binding.workspace_id
+  WHERE binding.id=NEW.folder_binding_id AND binding.source_type='operations'
+    AND workspace.project_alpha_source_id='project-alpha:primary'
+) AND NOT EXISTS(
+  SELECT 1 FROM portal_primary_staff_bindings receipt
+  JOIN portal_v2_folder_bindings binding ON binding.id=receipt.binding_id
+  WHERE receipt.binding_id=NEW.folder_binding_id AND receipt.workspace_id=NEW.workspace_id
+    AND receipt.state='active' AND binding.status='active' AND binding.revoked_at IS NULL
+    AND binding.source_version=NEW.binding_source_version
+)
+BEGIN SELECT RAISE(ABORT,'primary-staff-binding-required'); END;
+
+CREATE TRIGGER portal_primary_staff_folder_revoke_grant_guard
+BEFORE UPDATE OF status,revoked_at ON portal_v2_folder_bindings
+WHEN EXISTS(SELECT 1 FROM portal_primary_staff_bindings receipt WHERE receipt.binding_id=OLD.id)
+ AND OLD.status='active' AND NEW.status='revoked'
+ AND EXISTS(SELECT 1 FROM portal_v2_authenticated_delivery_grants grant_record
+   WHERE grant_record.folder_binding_id=OLD.id AND grant_record.status='active' AND grant_record.revoked_at IS NULL
+     AND (grant_record.expires_at IS NULL OR datetime(grant_record.expires_at)>datetime('now')))
+BEGIN SELECT RAISE(ABORT,'primary-staff-binding-active-grants'); END;
 
 CREATE TRIGGER portal_primary_staff_binding_mutation_insert_guard
 BEFORE INSERT ON portal_primary_staff_binding_mutations
