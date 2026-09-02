@@ -2,7 +2,7 @@ import { HTTPException } from "hono/http-exception";
 import type { Env } from "./types";
 
 type OriginEnv = Pick<Env,
-  "ENVIRONMENT" | "EXPECTED_HOST" | "PUBLIC_BASE_URL" | "PUBLIC_SHARE_ORIGIN" | "CLIENT_PORTAL_ORIGIN" | "CLIENT_PORTAL_ORIGINS"
+  "ENVIRONMENT" | "EXPECTED_HOST" | "PUBLIC_BASE_URL" | "PUBLIC_SHARE_ORIGIN" | "CLIENT_PORTAL_ORIGIN" | "CLIENT_PORTAL_ORIGINS" | "LEGACY_CLIENT_ORIGINS"
 >;
 
 type RequestNamespace = "public" | "portal" | "internal" | "shared" | "assets" | "unknown";
@@ -63,12 +63,34 @@ export function configuredClientPortalOrigins(env: OriginEnv): string[] | null {
   return exact;
 }
 
+export function configuredLegacyClientOrigins(env: OriginEnv): string[] | null {
+  if (!env.LEGACY_CLIENT_ORIGINS) return [];
+  const values = env.LEGACY_CLIENT_ORIGINS.split(",").map(value => value.trim());
+  if (!values.length || values.length > 4 || values.some(value => !value)) return null;
+  const origins = values.map(value => exactOrigin(value, deployed(env))?.origin ?? null);
+  if (origins.some(value => value === null)) return null;
+  const exact = origins as string[];
+  const primary = configuredClientPortalOrigin(env);
+  const canonical = configuredClientPortalOrigins(env);
+  if (!primary || new Set(exact).size !== exact.length || exact.includes(primary) || (canonical !== null && exact.some(value => canonical.includes(value)))) return null;
+  return exact;
+}
+
+export function configuredPublicRequestOrigins(env: OriginEnv): string[] | null {
+  const publicOrigin = configuredPublicShareOrigin(env);
+  const portalOrigins = configuredClientPortalOrigins(env) ?? [];
+  const legacyOrigins = configuredLegacyClientOrigins(env);
+  if (!publicOrigin || !legacyOrigins) return null;
+  return [...new Set([publicOrigin, ...portalOrigins, ...legacyOrigins])];
+}
+
 export function clientPortalRequestOriginAllowed(request: Request, env: OriginEnv): boolean {
   const origins = configuredClientPortalOrigins(env);
-  if (!origins) return false;
+  const legacy = configuredLegacyClientOrigins(env);
+  if (!origins || !legacy) return false;
   let requestOrigin: string;
   try { requestOrigin = new URL(request.url).origin; } catch { return false; }
-  return request.headers.get("Origin") === requestOrigin && origins.includes(requestOrigin);
+  return request.headers.get("Origin") === requestOrigin && [...origins, ...legacy].includes(requestOrigin);
 }
 
 export function requirePublicShareOrigin(env: OriginEnv): string {
@@ -95,19 +117,42 @@ export function clientPortalEntryOrigin(requestUrl: string, env: OriginEnv): str
   }
 }
 
+/** Redirects non-secret browser entry routes from an explicitly configured
+ * legacy host. Public share routes are handed off in the browser only while
+ * their fragment is still present; fragment-less legacy sessions stay put.
+ */
+export function legacyClientRedirectLocation(requestUrl: string, env: OriginEnv): string | null {
+  if (!deployed(env)) return null;
+  const legacy = configuredLegacyClientOrigins(env);
+  if (!legacy) return null;
+  let request: URL;
+  try { request = new URL(requestUrl); } catch { return null; }
+  if (!legacy.includes(request.origin)) return null;
+  const namespace = requestNamespace(request.pathname);
+  if (request.pathname === "/health" || request.pathname.startsWith("/api/") || namespace === "public" || namespace === "assets" || namespace === "unknown") return null;
+  const targetOrigin = configuredClientPortalOrigin(env);
+  if (!targetOrigin) return null;
+  const target = new URL(request.pathname === "/" ? "/portal" : `${request.pathname}${request.search}`, targetOrigin);
+  return target.toString();
+}
+
 export function requestHostAllowed(requestUrl: string, env: OriginEnv): boolean {
   if (!deployed(env)) return true;
   let request: URL;
   try { request = new URL(requestUrl); } catch { return false; }
   const namespace = requestNamespace(request.pathname);
   const publicOrigin = configuredPublicShareOrigin(env);
-  if (namespace === "public") return publicOrigin !== null && request.origin === publicOrigin;
+  const publicRequestOrigins = configuredPublicRequestOrigins(env);
+  if (!publicRequestOrigins) return false;
+  const legacyOrigins = configuredLegacyClientOrigins(env);
+  if (!legacyOrigins) return false;
+  if (namespace === "public") return publicRequestOrigins.includes(request.origin);
   const primaryPortalOrigin = configuredClientPortalOrigin(env);
-  if (namespace === "internal") return primaryPortalOrigin !== null && request.origin === primaryPortalOrigin;
+  if (namespace === "internal") return primaryPortalOrigin !== null && (request.origin === primaryPortalOrigin || legacyOrigins.includes(request.origin));
   const portalOrigins = configuredClientPortalOrigins(env);
   if (!portalOrigins) return false;
-  if (namespace === "portal") return portalOrigins.includes(request.origin);
+  if (namespace === "portal") return portalOrigins.includes(request.origin) || legacyOrigins.includes(request.origin);
   if (namespace === "shared" || namespace === "assets")
-    return (publicOrigin !== null && request.origin === publicOrigin) || portalOrigins.includes(request.origin);
+    return (publicOrigin !== null && request.origin === publicOrigin) || portalOrigins.includes(request.origin) || legacyOrigins.includes(request.origin);
   return false;
 }

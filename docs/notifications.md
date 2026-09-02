@@ -181,7 +181,7 @@ independently of email delivery, allowing the bell to remain the fallback when
 mail is disabled or temporarily fails. Public-share delivery notifications
 remain unchanged and use none of these tables or routes.
 `DELIVERY_BASE_URL` on Operations must be the authenticated client portal
-origin (production `client.ledgetopdroneservices.com`, or its isolated staging
+origin (production `portal.ledgetopdroneservices.com`, or its isolated staging
 equivalent), not the delivery rollback/admin host.
 
 Client portal request and team events use the Delivery D1 outbox introduced by

@@ -4,7 +4,8 @@ import { decodeItemRef, encodeItemRef, indexedImmediateChildVisibility, isHidden
 import { createSessionCookie, presignR2Get, verifyRotatingSessionCookie, verifySessionCookie } from "../src/worker/security";
 import { hashAccessCode } from "../../operations/src/worker/crypto";
 import { verifyAccessCode } from "../src/worker/security";
-import deliveryWorker, { ensurePublicId, framePolicyForPath, markUnavailableFolder, requestHostAllowed, serveAppShell, sourceUrlForItem, streamItem } from "../src/worker/index";
+import deliveryWorker, { cloudTransferResumeOrigin, ensurePublicId, framePolicyForPath, markUnavailableFolder, requestHostAllowed, requireSameOrigin, serveAppShell, sourceUrlForItem, streamItem } from "../src/worker/index";
+import { legacyClientRedirectLocation } from "../src/worker/origin-policy";
 import type { ShareRow } from "../src/worker/types";
 
 describe("deployed host admission",()=>{
@@ -13,7 +14,7 @@ describe("deployed host admission",()=>{
       PUBLIC_SHARE_ORIGIN:"https://delivery.example",CLIENT_PORTAL_ORIGIN:"https://client.example"} as const;
     for(const path of ["/s/public","/client-share/public","/api/public/shares/public/manifest"]){
       expect(requestHostAllowed(`https://delivery.example${path}`,base)).toBe(true);
-      expect(requestHostAllowed(`https://client.example${path}`,base)).toBe(false);
+      expect(requestHostAllowed(`https://client.example${path}`,base)).toBe(true);
     }
     for(const path of ["/portal","/portal/projects","/api/client/me"]){
       expect(requestHostAllowed(`https://client.example${path}`,base)).toBe(true);
@@ -47,6 +48,56 @@ describe("deployed host admission",()=>{
     expect(requestHostAllowed("https://client.example/s/public",env)).toBe(true);
     expect(requestHostAllowed("https://client.example/portal",env)).toBe(true);
   });
+  it.each(["production","staging"] as const)("makes portal hosts canonical while retaining an explicit legacy compatibility origin in %s",ENVIRONMENT=>{
+    const env={ENVIRONMENT,EXPECTED_HOST:"portal.drone.example",PUBLIC_BASE_URL:"https://portal.drone.example",
+      PUBLIC_SHARE_ORIGIN:"https://portal.drone.example",CLIENT_PORTAL_ORIGIN:"https://portal.drone.example",
+      CLIENT_PORTAL_ORIGINS:"https://portal.drone.example,https://portal.technology.example",
+      LEGACY_CLIENT_ORIGINS:"https://client.drone.example"} as const;
+    for(const path of ["/s/existing-link","/api/public/shares/existing-link/manifest","/portal/projects","/api/client/me","/assets/client.js"]){
+      expect(requestHostAllowed(`https://client.drone.example${path}`,env)).toBe(true);
+    }
+    expect(requestHostAllowed("https://client.drone.example/api/internal/project-alpha/portal-v2",env)).toBe(true);
+    expect(requestHostAllowed("https://portal.technology.example/api/internal/project-alpha/portal-v2",env)).toBe(false);
+    expect(legacyClientRedirectLocation("https://client.drone.example/s/existing-link?folder=edited",env)).toBeNull();
+    expect(legacyClientRedirectLocation("https://client.drone.example/portal/projects",env))
+      .toBe("https://portal.drone.example/portal/projects");
+    expect(legacyClientRedirectLocation("https://client.drone.example/",env))
+      .toBe("https://portal.drone.example/portal");
+    expect(legacyClientRedirectLocation("https://client.drone.example/api/client/me",env)).toBeNull();
+    expect(legacyClientRedirectLocation("https://client.drone.example/assets/client.js",env)).toBeNull();
+  });
+  it("fails closed when legacy origins overlap, duplicate, or use insecure URLs",()=>{
+    const env={ENVIRONMENT:"production",EXPECTED_HOST:"portal.drone.example",PUBLIC_BASE_URL:"https://portal.drone.example",
+      PUBLIC_SHARE_ORIGIN:"https://portal.drone.example",CLIENT_PORTAL_ORIGIN:"https://portal.drone.example",
+      CLIENT_PORTAL_ORIGINS:"https://portal.drone.example,https://portal.technology.example"} as const;
+    for(const LEGACY_CLIENT_ORIGINS of [
+      "https://portal.drone.example",
+      "https://client.drone.example,https://client.drone.example",
+      "http://client.drone.example",
+      "https://client.drone.example,",
+    ]) expect(requestHostAllowed("https://portal.drone.example/portal",{...env,LEGACY_CLIENT_ORIGINS})).toBe(false);
+  });
+  it("allows same-origin public mutations on canonical and legacy hosts but rejects cross-origin requests",()=>{
+    const env={ENVIRONMENT:"production",EXPECTED_HOST:"portal.drone.example",PUBLIC_BASE_URL:"https://portal.drone.example",
+      PUBLIC_SHARE_ORIGIN:"https://portal.drone.example",CLIENT_PORTAL_ORIGIN:"https://portal.drone.example",
+      CLIENT_PORTAL_ORIGINS:"https://portal.drone.example,https://portal.technology.example",
+      LEGACY_CLIENT_ORIGINS:"https://client.drone.example"} as any;
+    for(const origin of ["https://portal.drone.example","https://portal.technology.example","https://client.drone.example"]){
+      expect(()=>requireSameOrigin(new Request(`${origin}/api/public/shares/public/session`,{method:"POST",headers:{Origin:origin}}),env)).not.toThrow();
+    }
+    expect(()=>requireSameOrigin(new Request("https://client.drone.example/api/public/shares/public/session",{method:"POST",headers:{Origin:"https://portal.drone.example"}}),env)).toThrow();
+    expect(()=>requireSameOrigin(new Request("https://wrong.example/api/public/shares/public/session",{method:"POST",headers:{Origin:"https://wrong.example"}}),env)).toThrow();
+  });
+  it("returns OAuth completion to a validated initiating host and safely falls back for old or forged state",()=>{
+    const env={ENVIRONMENT:"production",EXPECTED_HOST:"portal.drone.example",PUBLIC_BASE_URL:"https://portal.drone.example",
+      PUBLIC_SHARE_ORIGIN:"https://portal.drone.example",CLIENT_PORTAL_ORIGIN:"https://portal.drone.example",
+      CLIENT_PORTAL_ORIGINS:"https://portal.drone.example,https://portal.technology.example",
+      LEGACY_CLIENT_ORIGINS:"https://client.drone.example"} as any;
+    expect(cloudTransferResumeOrigin(env,"https://client.drone.example")).toBe("https://client.drone.example");
+    expect(cloudTransferResumeOrigin(env,"https://portal.technology.example")).toBe("https://portal.technology.example");
+    expect(cloudTransferResumeOrigin(env,undefined)).toBe("https://portal.drone.example");
+    expect(cloudTransferResumeOrigin(env,"https://evil.example")).toBe("https://portal.drone.example");
+  });
   it.each(["production","staging"] as const)("admits both reviewed portal domains without moving existing public links in %s",ENVIRONMENT=>{
     const env={ENVIRONMENT,EXPECTED_HOST:"client.drone.example",PUBLIC_BASE_URL:"https://client.drone.example",
       PUBLIC_SHARE_ORIGIN:"https://client.drone.example",CLIENT_PORTAL_ORIGIN:"https://client.drone.example",
@@ -58,7 +109,7 @@ describe("deployed host admission",()=>{
     expect(requestHostAllowed("https://client.technology.example/api/internal/project-alpha/portal-v2",env)).toBe(false);
     expect(requestHostAllowed("https://client.technology.example/assets/client.js",env)).toBe(true);
     expect(requestHostAllowed("https://client.drone.example/s/existing-link",env)).toBe(true);
-    expect(requestHostAllowed("https://client.technology.example/s/existing-link",env)).toBe(false);
+    expect(requestHostAllowed("https://client.technology.example/s/existing-link",env)).toBe(true);
   });
   it("fails closed on malformed, duplicate, insecure, or incomplete portal origin lists",()=>{
     const env={ENVIRONMENT:"production",EXPECTED_HOST:"client.drone.example",PUBLIC_BASE_URL:"https://client.drone.example",
@@ -83,7 +134,7 @@ describe("delivery app shell",()=>{
   it("preserves the public share path when requesting the SPA fallback",async()=>{let requestedPath="";const response=await serveAppShell(new Request("https://delivery.ledgetopdroneservices.com/s/public-id"),{fetch:async input=>{requestedPath=new URL(typeof input==="string"?input:input instanceof URL?input:input.url).pathname;return new Response("app shell",{status:200});}});expect(requestedPath).toBe("/s/public-id");expect(response.status).toBe(200);expect(response.headers.get("Location")).toBeNull();});
   it("runs the authenticated portal path through the Worker before the SPA fallback",async()=>{let requestedPath="";const env:any={ENVIRONMENT:"production",EXPECTED_HOST:"delivery.example",PUBLIC_BASE_URL:"https://delivery.example",PUBLIC_SHARE_ORIGIN:"https://delivery.example",CLIENT_PORTAL_ORIGIN:"https://client.example",ASSETS:{fetch:async(input:RequestInfo|URL)=>{requestedPath=new URL(typeof input==="string"?input:input instanceof URL?input:input.url).pathname;return new Response("portal shell");}}};const response=await deliveryWorker.fetch(new Request("https://client.example/portal/projects"),env,{waitUntil(){},passThroughOnException(){}} as unknown as ExecutionContext);expect(response.status).toBe(200);expect(await response.text()).toBe("portal shell");expect(requestedPath).toBe("/portal/projects");});
   it.each(["delivery.example","client.example"])("serves reviewed static assets through host admission on %s",async host=>{let requestedPath="";const env:any={ENVIRONMENT:"production",EXPECTED_HOST:"delivery.example",PUBLIC_BASE_URL:"https://delivery.example",PUBLIC_SHARE_ORIGIN:"https://delivery.example",CLIENT_PORTAL_ORIGIN:"https://client.example",ASSETS:{fetch:async(input:RequestInfo|URL)=>{requestedPath=new URL(typeof input==="string"?input:input instanceof URL?input:input.url).pathname;return new Response("asset");}}};const response=await deliveryWorker.fetch(new Request(`https://${host}/assets/client.js`),env,{waitUntil(){},passThroughOnException(){}} as unknown as ExecutionContext);expect(response.status).toBe(200);expect(await response.text()).toBe("asset");expect(requestedPath).toBe("/assets/client.js");});
-  it("does not let an asset-shaped path cross into another host namespace",async()=>{const env:any={ENVIRONMENT:"production",EXPECTED_HOST:"delivery.example",PUBLIC_BASE_URL:"https://delivery.example",PUBLIC_SHARE_ORIGIN:"https://delivery.example",CLIENT_PORTAL_ORIGIN:"https://client.example",ASSETS:{fetch:vi.fn(async()=>new Response("asset"))}};const context={waitUntil(){},passThroughOnException(){}} as unknown as ExecutionContext;expect((await deliveryWorker.fetch(new Request("https://delivery.example/portal"),env,context)).status).toBe(404);expect((await deliveryWorker.fetch(new Request("https://client.example/s/public"),env,context)).status).toBe(404);const encoded=await deliveryWorker.fetch(new Request("https://delivery.example/assets/%2e%2e%2fapi%2fclient%2fme"),env,context);expect(encoded.status).toBe(404);expect(env.ASSETS.fetch).not.toHaveBeenCalled();});
+  it("does not let an asset-shaped path cross into another host namespace",async()=>{const env:any={ENVIRONMENT:"production",EXPECTED_HOST:"delivery.example",PUBLIC_BASE_URL:"https://delivery.example",PUBLIC_SHARE_ORIGIN:"https://delivery.example",CLIENT_PORTAL_ORIGIN:"https://client.example",ASSETS:{fetch:vi.fn(async()=>new Response("asset"))}};const context={waitUntil(){},passThroughOnException(){}} as unknown as ExecutionContext;expect((await deliveryWorker.fetch(new Request("https://delivery.example/portal"),env,context)).status).toBe(404);expect((await deliveryWorker.fetch(new Request("https://delivery.example/api/internal/project-alpha/portal-v2"),env,context)).status).toBe(404);const encoded=await deliveryWorker.fetch(new Request("https://delivery.example/assets/%2e%2e%2fapi%2fclient%2fme"),env,context);expect(encoded.status).toBe(404);expect(env.ASSETS.fetch).not.toHaveBeenCalled();});
   it("redirects the public root to the configured authenticated portal origin",async()=>{const env:any={ENVIRONMENT:"production",EXPECTED_HOST:"delivery.example",PUBLIC_BASE_URL:"https://delivery.example",PUBLIC_SHARE_ORIGIN:"https://delivery.example",CLIENT_PORTAL_ORIGIN:"https://client.example"};const response=await deliveryWorker.fetch(new Request("https://delivery.example/"),env,{waitUntil(){},passThroughOnException(){}} as unknown as ExecutionContext);expect(response.status).toBe(302);expect(response.headers.get("Location")).toBe("https://client.example/portal");});
   it("keeps the secondary portal root on its own authenticated hostname",async()=>{const env:any={ENVIRONMENT:"production",EXPECTED_HOST:"client.drone.example",PUBLIC_BASE_URL:"https://client.drone.example",PUBLIC_SHARE_ORIGIN:"https://client.drone.example",CLIENT_PORTAL_ORIGIN:"https://client.drone.example",CLIENT_PORTAL_ORIGINS:"https://client.drone.example,https://client.technology.example"};const response=await deliveryWorker.fetch(new Request("https://client.technology.example/"),env,{waitUntil(){},passThroughOnException(){}} as unknown as ExecutionContext);expect(response.status).toBe(302);expect(response.headers.get("Location")).toBe("https://client.technology.example/portal");});
 });

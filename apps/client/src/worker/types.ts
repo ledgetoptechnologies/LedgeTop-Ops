@@ -20,6 +20,8 @@ export interface Env {
   CLIENT_PORTAL_ENABLED?: string;
   CLIENT_PORTAL_ORIGIN?: string;
   CLIENT_PORTAL_ORIGINS?: string;
+  /** Legacy delivery/portal origins retained only for compatible reads and canonical redirects. */
+  LEGACY_CLIENT_ORIGINS?: string;
   /** Immutable, privacy-bounded authenticated content-start audit producer. Default-off. */
   CLIENT_PORTAL_CONTENT_AUDIT_ENABLED?: string;
   /** Dedicated HMAC key for content/version fingerprints; never reused for IP or sessions. */
@@ -113,6 +115,7 @@ export interface Env {
    */
   CLIENT_ACCESS_TEAM_DOMAIN?: string;
   CLIENT_ACCESS_AUD?: string;
+  CLIENT_ACCESS_AUDS?: string;
   MAPBOX_PUBLIC_TOKEN?: string;
   ENVIRONMENT: string;
   SESSION_KEY_ID: string;

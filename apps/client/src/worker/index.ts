@@ -30,7 +30,7 @@ import { createClientDelegatedPublicRouter } from "./client-delegated-public";
 import { handleProjectAlphaCatalogRequest } from "./project-alpha-catalog";
 import { projectAlphaPricingHintProvider } from "./client-portal/project-alpha-pricing-hint";
 import { processInvitationEmailBatch } from "./client-portal/invitation-email";
-import { clientPortalEntryOrigin, requestHostAllowed, requirePublicShareOrigin } from "./origin-policy";
+import { clientPortalEntryOrigin, configuredPublicRequestOrigins, legacyClientRedirectLocation, requestHostAllowed, requirePublicShareOrigin } from "./origin-policy";
 import {
   classifyPublicShareLifecycle,
   logPublicShareOutcome,
@@ -60,7 +60,17 @@ function cloudProviderEnabled(env:Env,provider:CloudProvider):boolean{
  if(!env.CLOUD_TRANSFER_TOKEN_SECRET||!env.CLOUD_TRANSFER_WORKFLOW)return false;
  return provider==="dropbox"?env.CLOUD_TRANSFER_DROPBOX_ENABLED==="true"&&Boolean(env.DROPBOX_CLIENT_ID&&env.DROPBOX_CLIENT_SECRET):env.CLOUD_TRANSFER_GOOGLE_ENABLED==="true"&&env.CLOUD_TRANSFER_GOOGLE_PICKER_CLIENT_ENABLED==="true"&&Boolean(env.GOOGLE_CLIENT_ID&&env.GOOGLE_CLIENT_SECRET&&env.GOOGLE_PICKER_API_KEY&&env.GOOGLE_CLOUD_PROJECT_NUMBER);
 }
-function requireSameOrigin(request:Request,env:Env):void{const origin=request.headers.get("Origin");if(!origin||origin!==requirePublicShareOrigin(env))throw new HTTPException(403,{message:"This request is not allowed"});}
+export function requireSameOrigin(request:Request,env:Env):void{
+  let requestOrigin:string;
+  try{requestOrigin=new URL(request.url).origin;}catch{throw new HTTPException(403,{message:"This request is not allowed"});}
+  const allowed=configuredPublicRequestOrigins(env);
+  if(!allowed||request.headers.get("Origin")!==requestOrigin||!allowed.includes(requestOrigin))
+    throw new HTTPException(403,{message:"This request is not allowed"});
+}
+export function cloudTransferResumeOrigin(env:Env,candidate:unknown):string{
+  const allowed=configuredPublicRequestOrigins(env);
+  return typeof candidate==="string"&&allowed?.includes(candidate)?candidate:requirePublicShareOrigin(env);
+}
 function cloudRedirectUri(env:Env,provider:CloudProvider):string{return`${requirePublicShareOrigin(env)}/api/public/cloud-transfers/oauth/${provider}/callback`;}
 function cloudStatus(value:string):string{return value==="partial"?"failed":value;}
 function providerPublicName(provider:CloudProvider):"dropbox"|"google-drive"{return provider==="google"?"google-drive":"dropbox";}
@@ -124,6 +134,10 @@ app.use("*", (c, next) => framePolicyForPath(c.req.path, c.req.method).xFrameOpt
   : lockedSecurityHeaders(c, next));
 
 app.use("*", async (c, next) => {
+  const legacyRedirect = (c.req.method === "GET" || c.req.method === "HEAD")
+    ? legacyClientRedirectLocation(c.req.url, c.env)
+    : null;
+  if (legacyRedirect) return c.redirect(legacyRedirect, 308);
   if (!requestHostAllowed(c.req.url,c.env)) return c.json({ error: "Not found" }, 404);
   await next();
   c.header("Permissions-Policy", "camera=(), microphone=(), geolocation=(self)");
@@ -786,7 +800,7 @@ app.post("/api/public/shares/:publicId/cloud-transfers/oauth/:provider/start",as
  const windowStart=Math.floor(Date.now()/3600000);const quota=await primaryDb(c.env).prepare(`INSERT INTO cloud_transfer_quota(share_id,window_start,created_count,total_bytes) VALUES(?,?,1,0)
   ON CONFLICT(share_id,window_start) DO UPDATE SET created_count=created_count+1,updated_at=datetime('now') WHERE created_count<3`).bind(share.id,windowStart).run();
  if(!quota.meta.changes){c.header("Retry-After",String(bulkQuotaRetryAfterSeconds()));throw new HTTPException(429,{message:"This delivery has reached its hourly cloud-copy limit."});}
- const pkce=await createPkce(),state=createOAuthState(),stateHash=await sha256(state);const env=cloudEnv(c.env);const encrypted=await encryptCloudSecret({verifier:pkce.verifier,callbackNonce:body.callbackNonce},env.CLOUD_TRANSFER_TOKEN_SECRET,`oauth-state:${stateHash}:${provider}`);
+ const pkce=await createPkce(),state=createOAuthState(),stateHash=await sha256(state);const env=cloudEnv(c.env),requestOrigin=new URL(c.req.url).origin;const encrypted=await encryptCloudSecret({verifier:pkce.verifier,callbackNonce:body.callbackNonce,requestOrigin},env.CLOUD_TRANSFER_TOKEN_SECRET,`oauth-state:${stateHash}:${provider}`);
  const destination=provider==="google"?{folderId:typeof body.destination==="string"&&body.destination?body.destination:"root",callbackNonce:body.callbackNonce}:{path:typeof body.destination==="string"&&body.destination?body.destination:"/LTDS Delivery",callbackNonce:body.callbackNonce};
  await primaryDb(c.env).prepare(`INSERT INTO cloud_oauth_states(state_hash,provider,share_id,share_version,selection_json,destination_json,conflict_mode,pkce_ciphertext,pkce_iv,key_id,expires_at)
   VALUES(?,?,?,?,?,?,?,?,?,?,datetime('now','+10 minutes'))`).bind(stateHash,provider,share.id,share.share_version,JSON.stringify(selection),JSON.stringify(destination),conflictMode,encrypted.ciphertext,encrypted.iv,env.CLOUD_TRANSFER_KEY_ID||"v1").run();
@@ -799,7 +813,7 @@ app.get("/api/public/cloud-transfers/oauth/:provider/callback",async c=>{
  const provider=cloudProvider(c.req.param("provider")),state=c.req.query("state")||"",code=c.req.query("code")||"";if(!state||!code)throw new HTTPException(400,{message:"Cloud authorization was not completed"});
  const stateHash=await sha256(state),nowIso=new Date().toISOString();const row=await primaryDb(c.env).prepare(`SELECT * FROM cloud_oauth_states WHERE state_hash=? AND provider=? AND consumed_at IS NULL AND datetime(expires_at)>datetime(?)`).bind(stateHash,provider,nowIso).first<any>();
  if(!row)throw new HTTPException(400,{message:"Cloud authorization expired"});const consumed=await primaryDb(c.env).prepare("UPDATE cloud_oauth_states SET consumed_at=datetime('now') WHERE state_hash=? AND consumed_at IS NULL").bind(stateHash).run();if(!consumed.meta.changes)throw new HTTPException(400,{message:"Cloud authorization was already used"});
- const env=cloudEnv(c.env);const secret=await decryptCloudSecret<{verifier:string;callbackNonce:string}>(row.pkce_ciphertext,row.pkce_iv,env.CLOUD_TRANSFER_TOKEN_SECRET,`oauth-state:${stateHash}:${provider}`);
+ const env=cloudEnv(c.env);const secret=await decryptCloudSecret<{verifier:string;callbackNonce:string;requestOrigin?:string}>(row.pkce_ciphertext,row.pkce_iv,env.CLOUD_TRANSFER_TOKEN_SECRET,`oauth-state:${stateHash}:${provider}`);
  const share=await primaryDb(c.env).prepare(activeShareSql("s.id=? AND s.share_version=?")).bind(row.share_id,row.share_version).first<ShareRow>();if(!share||!share.public_id)throw new HTTPException(404,{message:"This delivery is no longer available"});
  requireFolderShareFeature(share);
  const redirectUri=cloudRedirectUri(c.env,provider);const token=provider==="dropbox"?await exchangeDropboxCode({clientId:c.env.DROPBOX_CLIENT_ID!,clientSecret:c.env.DROPBOX_CLIENT_SECRET!,redirectUri,code,verifier:secret.verifier}):await exchangeGoogleCode({clientId:c.env.GOOGLE_CLIENT_ID!,clientSecret:c.env.GOOGLE_CLIENT_SECRET!,redirectUri,code,verifier:secret.verifier});
@@ -810,7 +824,7 @@ app.get("/api/public/cloud-transfers/oauth/:provider/callback",async c=>{
   primaryDb(c.env).prepare(`INSERT INTO cloud_transfer_jobs(id,share_id,share_version,authorization_id,provider,selection_json,destination_json,conflict_mode,status,expires_at) VALUES(?,?,?,?,?,?,?,?, 'queued',?)`).bind(jobId,share.id,share.share_version,authorizationId,provider,row.selection_json,destination,row.conflict_mode,expiresAt),
  ]);
  if(!pendingGoogle){try{await c.env.CLOUD_TRANSFER_WORKFLOW.create({id:jobId,params:{jobId}});}catch(error){console.error(JSON.stringify({event:"cloud-transfer.workflow-create-failed",jobId,provider,error:error instanceof Error?error.message:String(error)}));await primaryDb(c.env).prepare("UPDATE cloud_transfer_jobs SET status='failed',error_code='transfer-failed',error_message=?,updated_at=datetime('now') WHERE id=?").bind(friendlyCloudFailure("transfer-failed").message,jobId).run();}}
- const url=new URL(`/s/${encodeURIComponent(share.public_id)}`,requirePublicShareOrigin(c.env));url.searchParams.set("cloudTransferNonce",secret.callbackNonce);url.searchParams.set("cloudTransferProvider",providerPublicName(provider));
+ const url=new URL(`/s/${encodeURIComponent(share.public_id)}`,cloudTransferResumeOrigin(c.env,secret.requestOrigin));url.searchParams.set("cloudTransferNonce",secret.callbackNonce);url.searchParams.set("cloudTransferProvider",providerPublicName(provider));
  if(pendingGoogle)url.searchParams.set("cloudTransferAuthorization",authorizationId);else url.searchParams.set("cloudTransferJob",jobId);
  return c.redirect(url.toString(),302);
 });

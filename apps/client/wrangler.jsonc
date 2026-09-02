@@ -12,6 +12,10 @@
       "custom_domain": true
     },
     {
+      "pattern": "portal.ledgetopdroneservices.com",
+      "custom_domain": true
+    },
+    {
       "pattern": "portal.ledgetoptechnologies.com",
       "custom_domain": true
     }
@@ -30,9 +34,9 @@
     "run_worker_first": ["/", "/api/*", "/s/*", "/client-share/*", "/portal", "/portal/*", "/assets/*", "/health"]
   },
   "vars": {
-    "PUBLIC_BASE_URL": "https://client.ledgetopdroneservices.com",
-    "PUBLIC_SHARE_ORIGIN": "https://client.ledgetopdroneservices.com",
-    "EXPECTED_HOST": "client.ledgetopdroneservices.com",
+    "PUBLIC_BASE_URL": "https://portal.ledgetopdroneservices.com",
+    "PUBLIC_SHARE_ORIGIN": "https://portal.ledgetopdroneservices.com",
+    "EXPECTED_HOST": "portal.ledgetopdroneservices.com",
     "ENVIRONMENT": "production",
     "CLIENT_PORTAL_ENABLED": "true",
     "CLIENT_PORTAL_CONTENT_AUDIT_ENABLED": "false",
@@ -71,10 +75,12 @@
     "CLIENT_PORTAL_INVITATION_FROM_NAME": "LTDS Client Portal",
     "CLIENT_DELEGATED_SHARES_ENABLED": "false",
     "CLIENT_DELEGATED_SHARE_KEY_ID": "v1",
-    "CLIENT_PORTAL_ORIGIN": "https://client.ledgetopdroneservices.com",
-    "CLIENT_PORTAL_ORIGINS": "https://client.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com",
+    "CLIENT_PORTAL_ORIGIN": "https://portal.ledgetopdroneservices.com",
+    "CLIENT_PORTAL_ORIGINS": "https://portal.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com",
+    "LEGACY_CLIENT_ORIGINS": "https://client.ledgetopdroneservices.com",
     "CLIENT_ACCESS_TEAM_DOMAIN": "https://ledgetoptechnologies.cloudflareaccess.com",
     "CLIENT_ACCESS_AUD": "0fa9c4453634e4c74d4522e2d44407a49701320b06d8f21d8a58efa21e5f947f",
+    "CLIENT_ACCESS_AUDS": "0fa9c4453634e4c74d4522e2d44407a49701320b06d8f21d8a58efa21e5f947f,3bc9637846ccf4e1343b969cc8f14ed2cb0628956293463cf164c4080fa47e57",
     "TEAM_DOMAIN": "https://ledgetoptechnologies.cloudflareaccess.com",
     "POLICY_AUD": "3b287fcd289bcb39813051b2d98d2dbffa04c1bcf1904a5a7c8d2de52394ee23",
     "SESSION_KEY_ID": "v1",

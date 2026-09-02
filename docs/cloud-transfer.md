@@ -27,7 +27,7 @@ required configuration exists. Missing configuration fails closed.
 3. Enable `files.content.write` and `files.metadata.read`. Metadata read is required
    for exact **skip existing** checks, including in App Folder mode.
 4. Register:
-   `https://delivery.ledgetopdroneservices.com/api/public/cloud-transfers/oauth/dropbox/callback`
+   `https://portal.ledgetopdroneservices.com/api/public/cloud-transfers/oauth/dropbox/callback`
 5. Set `DROPBOX_CLIENT_ID` and store `DROPBOX_CLIENT_SECRET` as a Worker secret.
 6. Leave implicit grant disabled. LTDS uses authorization code, PKCE, state,
    short-lived access tokens, and offline refresh tokens.
@@ -41,8 +41,9 @@ and resume without restarting a healthy session.
 ## Staff Dropbox import (Operations Worker)
 
 The Operations Worker also supports importing files **from** Dropbox into R2.
-This is a separate OAuth flow on `ops.ledgetopdroneservices.com` and uses its
-own secrets:
+This is a separate OAuth flow that staff may start from either reviewed
+Operations domain. It uses the canonical `ops.ledgetopdroneservices.com`
+callback and its own secrets:
 
 1. Use the same Dropbox API application (or a separate one with Full Dropbox).
 2. Register an additional callback:
@@ -76,9 +77,9 @@ this is product scope, not an operational configuration step.
 1. Enable Google Drive API and Google Picker API in an LTDS-owned project.
 2. Configure the consent screen and create a Web application OAuth client.
 3. Request only `https://www.googleapis.com/auth/drive.file`.
-4. Register origin `https://delivery.ledgetopdroneservices.com`.
+4. Register origin `https://portal.ledgetopdroneservices.com`.
 5. Register:
-   `https://delivery.ledgetopdroneservices.com/api/public/cloud-transfers/oauth/google/callback`
+   `https://portal.ledgetopdroneservices.com/api/public/cloud-transfers/oauth/google/callback`
 6. Set `GOOGLE_CLIENT_ID`, `GOOGLE_PICKER_API_KEY`, and
    `GOOGLE_CLOUD_PROJECT_NUMBER`; store `GOOGLE_CLIENT_SECRET` as a Worker secret.
 7. Restrict the Picker key by the production HTTPS origin and Picker API.

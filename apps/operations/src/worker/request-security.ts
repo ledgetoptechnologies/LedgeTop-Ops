@@ -1,12 +1,14 @@
 import { HTTPException } from "hono/http-exception";
 import { hmac, timingSafeEqual } from "./crypto";
+import { requestHostAllowed } from "./host-admission";
 import type { Env, StaffPrincipal } from "./types";
 
 const WINDOW_MS = 12 * 60 * 60 * 1000;
 export async function csrfToken(env: Env, principal: StaffPrincipal, bucket = Math.floor(Date.now() / WINDOW_MS)): Promise<string> { return hmac(env.OPERATIONS_SESSION_SECRET, `csrf:${principal.accessSubject}:${bucket}`); }
 
 export async function requireMutationSecurity(request: Request, env: Env, principal: StaffPrincipal): Promise<void> {
-  const expectedOrigin = new URL(env.PUBLIC_BASE_URL).origin;
+  if (!requestHostAllowed(request.url, env)) throw new HTTPException(403, { message: "Request origin was rejected" });
+  const expectedOrigin = new URL(request.url).origin;
   if (request.headers.get("Origin") !== expectedOrigin) throw new HTTPException(403, { message: "Request origin was rejected" });
   const supplied = request.headers.get("X-CSRF-Token") || ""; const current = Math.floor(Date.now() / WINDOW_MS);
   const valid = timingSafeEqual(supplied, await csrfToken(env, principal, current)) || timingSafeEqual(supplied, await csrfToken(env, principal, current - 1));

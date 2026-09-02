@@ -17,6 +17,7 @@ export type Env = Omit<
   | "PROJECT_ACCESS_EXPIRY_NOTIFICATIONS_ENABLED"
   | "AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED"
   | "CLIENT_PORTAL_ORIGINS"
+  | "OPERATIONS_ORIGINS"
 > & {
   PROJECT_ALPHA_API_KEY?: string;
   /** Deploy-managed connector credential sets; never returned by registry APIs. */
@@ -54,6 +55,8 @@ export type Env = Omit<
   PUBLIC_SHARE_ORIGIN: string;
   /** Exact authenticated portal origins allowed to embed newly uploaded Stream media. */
   CLIENT_PORTAL_ORIGINS?: string;
+  /** Exact staff-facing origins served by the same Operations deployment. */
+  OPERATIONS_ORIGINS?: string;
   DELIVERY_TOKEN_SECRET: string;
   DELIVERY_PREVIOUS_TOKEN_SECRET?: string;
   DELIVERY_ACCESS_CODE_PEPPER: string;

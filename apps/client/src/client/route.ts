@@ -1,5 +1,25 @@
 export type DeliveryNamespace = "staff" | "client-delegated";
 
+const legacyPublicHostRedirects: Readonly<Record<string, string>> = {
+  "client.ledgetopdroneservices.com": "https://portal.ledgetopdroneservices.com",
+};
+
+/** Moves a first-use fragment-bearing legacy link to the canonical host before
+ * the private fragment is consumed. A fragment-less refresh stays on the
+ * legacy host so its host-bound delivery session cookie remains valid.
+ */
+export function handoffLegacyPublicShare(
+  location: Pick<Location, "hostname" | "pathname" | "search" | "hash">,
+  navigate: (url: string) => void,
+): boolean {
+  const canonicalOrigin = legacyPublicHostRedirects[location.hostname.toLowerCase()];
+  if (!canonicalOrigin || !location.hash) return false;
+  const segments = location.pathname.split("/").filter(Boolean);
+  if (segments.length !== 2 || (segments[0] !== "s" && segments[0] !== "client-share")) return false;
+  navigate(new URL(`${location.pathname}${location.search}${location.hash}`, canonicalOrigin).toString());
+  return true;
+}
+
 export function parseDeliveryRoute(
   pathname: string,
   hash: string,

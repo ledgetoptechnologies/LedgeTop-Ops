@@ -5,7 +5,7 @@ import type { VerifiedClientPrincipal } from "./types";
 /** Values required by the dedicated, human Client Portal Access application. */
 export interface ClientAccessConfiguration {
   issuer: string;
-  audience: string;
+  audiences: string[];
 }
 
 export class ClientAccessConfigurationError extends Error {
@@ -20,8 +20,9 @@ function validEmail(value: unknown): value is string {
   return nonEmptyString(value, 320) && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 }
 
-function includesExpectedAudience(audience: JWTPayload["aud"], expected: string): boolean {
-  return audience === expected || (Array.isArray(audience) && audience.includes(expected));
+function includesExpectedAudience(audience: JWTPayload["aud"], expected: readonly string[]): boolean {
+  const presented = Array.isArray(audience) ? audience : typeof audience === "string" ? [audience] : [];
+  return presented.some(value => expected.includes(value));
 }
 
 /**
@@ -48,16 +49,20 @@ function accessAuthorizationCookie(cookieHeader: string | null): string | null {
  * lookup. The client application gets a distinct audience and issuer so an
  * Operations or service assertion can never be replayed at this boundary.
  */
-export function clientAccessConfiguration(env: Pick<Env, "CLIENT_ACCESS_TEAM_DOMAIN" | "CLIENT_ACCESS_AUD">): ClientAccessConfiguration {
+export function clientAccessConfiguration(env: Pick<Env, "CLIENT_ACCESS_TEAM_DOMAIN" | "CLIENT_ACCESS_AUD" | "CLIENT_ACCESS_AUDS">): ClientAccessConfiguration {
   const issuer = env.CLIENT_ACCESS_TEAM_DOMAIN?.replace(/\/$/, "") ?? "";
-  const audience = env.CLIENT_ACCESS_AUD?.trim() ?? "";
+  const primaryAudience = env.CLIENT_ACCESS_AUD?.trim() ?? "";
+  const audiences = (env.CLIENT_ACCESS_AUDS ?? primaryAudience).split(",").map(value => value.trim());
   try {
     const url = new URL(issuer);
-    if (url.protocol !== "https:" || (url.pathname !== "" && url.pathname !== "/") || url.search || url.hash || !nonEmptyString(audience)) throw new Error("invalid");
+    if (url.protocol !== "https:" || (url.pathname !== "" && url.pathname !== "/") || url.search || url.hash
+      || !nonEmptyString(primaryAudience) || audiences.length < 1 || audiences.length > 4
+      || audiences.some(value => !nonEmptyString(value)) || new Set(audiences).size !== audiences.length
+      || !audiences.includes(primaryAudience)) throw new Error("invalid");
   } catch {
     throw new ClientAccessConfigurationError();
   }
-  return { issuer, audience };
+  return { issuer, audiences };
 }
 
 /**
@@ -68,7 +73,7 @@ export function clientAccessConfiguration(env: Pick<Env, "CLIENT_ACCESS_TEAM_DOM
  * Authorization remains the issuer+subject local grant.
  */
 export function verifiedClientPrincipalFromAccessPayload(payload: JWTPayload, configuration: ClientAccessConfiguration): VerifiedClientPrincipal | null {
-  if (payload.iss !== configuration.issuer || !includesExpectedAudience(payload.aud, configuration.audience)) return null;
+  if (payload.iss !== configuration.issuer || !includesExpectedAudience(payload.aud, configuration.audiences)) return null;
   if (payload.type !== "app" || !nonEmptyString(payload.sub) || !validEmail(payload.email)) return null;
   // jwtVerify validates a supplied exp, but the portal never accepts a token
   // without one. This prevents a provider/configuration mistake from creating
@@ -80,7 +85,7 @@ export function verifiedClientPrincipalFromAccessPayload(payload: JWTPayload, co
 /** Safe diagnostic category only; no value from a token is logged. */
 function principalMappingRejection(payload: JWTPayload, configuration: ClientAccessConfiguration): string | null {
   if (payload.iss !== configuration.issuer) return "issuer";
-  if (!includesExpectedAudience(payload.aud, configuration.audience)) return "audience";
+  if (!includesExpectedAudience(payload.aud, configuration.audiences)) return "audience";
   if (payload.type !== "app") return "type";
   if (!nonEmptyString(payload.sub)) return "subject";
   if (!validEmail(payload.email)) return "email";
@@ -104,7 +109,7 @@ export async function resolveCloudflareClientPrincipal(
     const verified = await jwtVerify(
       assertion,
       getKey ?? createRemoteJWKSet(new URL(`${configuration.issuer}/cdn-cgi/access/certs`)),
-      { issuer: configuration.issuer, audience: configuration.audience, algorithms: ["RS256"], requiredClaims: ["iss", "aud", "sub", "exp"] },
+      { issuer: configuration.issuer, audience: configuration.audiences, algorithms: ["RS256"], requiredClaims: ["iss", "aud", "sub", "exp"] },
     );
     const principal = verifiedClientPrincipalFromAccessPayload(verified.payload, configuration);
     const rejection = principalMappingRejection(verified.payload, configuration);

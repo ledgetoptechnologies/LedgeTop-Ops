@@ -2,11 +2,11 @@ import { describe, expect, it } from "vitest";
 import { streamAllowedOriginHosts } from "../src/worker/file-events";
 
 describe("Cloudflare Stream portal origins", () => {
-  it("keeps the canonical portal and adds the reviewed secondary presentation host", () => {
+  it("keeps both canonical portals and the legacy compatibility host", () => {
     expect(streamAllowedOriginHosts({
-      DELIVERY_BASE_URL: "https://client.ledgetopdroneservices.com",
-      CLIENT_PORTAL_ORIGINS: "https://client.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com",
-    })).toEqual(["client.ledgetopdroneservices.com", "portal.ledgetoptechnologies.com"]);
+      DELIVERY_BASE_URL: "https://portal.ledgetopdroneservices.com",
+      CLIENT_PORTAL_ORIGINS: "https://portal.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com,https://client.ledgetopdroneservices.com",
+    })).toEqual(["portal.ledgetopdroneservices.com", "portal.ledgetoptechnologies.com", "client.ledgetopdroneservices.com"]);
   });
 
   it("keeps single-origin deployments compatible", () => {

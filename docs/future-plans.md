@@ -1,5 +1,12 @@
 # Future planning proposals
 
+> **Superseded hostname note (September 2026):** The hostname proposal below
+> predates the approved `portal.*` rollout. The current contract is canonical
+> `portal.ledgetopdroneservices.com`, alternate
+> `portal.ledgetoptechnologies.com`, legacy-link compatibility on
+> `client.ledgetopdroneservices.com`, and Operations on both exact `ops.*`
+> domains. See `docs/cloudflare-setup.md` for the deploy and rollback procedure.
+
 > **Status:** A limited client-portal pilot is deployed at the Drone Services
 > client hostname. Repository support for the Technologies client hostname is
 > release-gated behind the same Access application/audience, host admission,

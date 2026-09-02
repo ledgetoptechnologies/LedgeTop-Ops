@@ -2,8 +2,10 @@
 
 ## Current pilot status
 
-The client pilot is available at `client.ledgetopdroneservices.com` behind a
-dedicated Cloudflare Access application. It is invitation/grant controlled:
+The client pilot is available canonically at `portal.ledgetopdroneservices.com`
+and at `portal.ledgetoptechnologies.com` behind dedicated Cloudflare Access
+applications. `client.ledgetopdroneservices.com` remains a compatibility host
+for existing links and sessions. The portal is invitation/grant controlled:
 Access email authentication is only the front door, while LTDS still enforces
 local client, project, delivery, and request permissions. The pilot includes
 service-request submission, Operations triage, and durable notifications.
@@ -28,8 +30,8 @@ The cross-feature, conversation-level acceptance record is the
 
 LTDS Ops is the operating and client-delivery platform for Ledge Top Drone Services. It contains three independently deployed Cloudflare Workers in one repository:
 
-- `ltds-ops` at `ops.ledgetopdroneservices.com` — private staff operations, projects, tasks, airspace awareness, ACL, delivery administration, and Dropbox import.
-- `ltds-delivery` at `delivery.ledgetopdroneservices.com` — Access-protected, grant-controlled client file browsing, same-origin media activation, downloads, and cloud transfers to Dropbox or Google Drive.
+- `ltds-ops` at `ops.ledgetopdroneservices.com` and `ops.ledgetoptechnologies.com` — private staff operations, projects, tasks, airspace awareness, ACL, delivery administration, and Dropbox import.
+- `ltds-delivery` at `portal.ledgetopdroneservices.com`, `portal.ledgetoptechnologies.com`, and the legacy `client.ledgetopdroneservices.com` compatibility host — Access-protected client workspaces plus grant-controlled public delivery, same-origin media activation, downloads, and cloud transfers to Dropbox or Google Drive.
 
 - `ltds-ops-sync` at `ops-sync.ledgetopdroneservices.com` receives signed Project Alpha entitlement webhooks and reconciles the Cloudflare Access group.
 

@@ -1,7 +1,26 @@
 import { describe, expect, it, vi } from "vitest";
-import { consumeDeliveryRoute, deliveryBrowsePath, openDeliveryRoute, parseDeliveryBrowseState, parseDeliveryRoute } from "../src/client/route";
+import { consumeDeliveryRoute, deliveryBrowsePath, handoffLegacyPublicShare, openDeliveryRoute, parseDeliveryBrowseState, parseDeliveryRoute } from "../src/client/route";
 
 describe("delivery client routing", () => {
+  it.each(["/s/public-id", "/client-share/public-id"])("hands a fragment-bearing legacy %s link to the canonical portal before consuming it", pathname => {
+    const navigate = vi.fn();
+    expect(handoffLegacyPublicShare({
+      hostname: "client.ledgetopdroneservices.com",
+      pathname,
+      search: "?folder=edited",
+      hash: "#private-fragment-secret",
+    }, navigate)).toBe(true);
+    expect(navigate).toHaveBeenCalledWith(`https://portal.ledgetopdroneservices.com${pathname}?folder=edited#private-fragment-secret`);
+  });
+
+  it("keeps fragment-less legacy sessions and unrelated hosts or paths in place", () => {
+    const navigate = vi.fn();
+    expect(handoffLegacyPublicShare({ hostname: "client.ledgetopdroneservices.com", pathname: "/s/public-id", search: "", hash: "" }, navigate)).toBe(false);
+    expect(handoffLegacyPublicShare({ hostname: "client.ledgetopdroneservices.com", pathname: "/portal", search: "", hash: "#section" }, navigate)).toBe(false);
+    expect(handoffLegacyPublicShare({ hostname: "portal.ledgetopdroneservices.com", pathname: "/s/public-id", search: "", hash: "#secret" }, navigate)).toBe(false);
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
   it("treats the public root as an informational landing page", () => {
     expect(parseDeliveryRoute("/", "")).toEqual({ publicId: "", secret: "" });
   });

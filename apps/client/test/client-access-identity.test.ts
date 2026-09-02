@@ -4,10 +4,11 @@ import { clientAccessConfiguration, resolveCloudflareClientPrincipal, verifiedCl
 import { clientAccessSyncSecretManifest, processClientAccessSyncBatch, type ClientAccessSyncCommand, type ClientAccessSyncOutbox } from "../src/worker/client-portal/access-sync";
 import type { Env } from "../src/worker/types";
 
-const configuration = { issuer: "https://team.cloudflareaccess.com", audience: "client-portal-aud" };
+const primaryAudience = "client-portal-aud";
+const configuration = { issuer: "https://team.cloudflareaccess.com", audiences: [primaryAudience] };
 const accessEnv = {
   CLIENT_ACCESS_TEAM_DOMAIN: configuration.issuer,
-  CLIENT_ACCESS_AUD: configuration.audience,
+  CLIENT_ACCESS_AUD: primaryAudience,
 } as Env;
 
 let accessPrivateKey: CryptoKey;
@@ -29,7 +30,7 @@ beforeAll(async () => {
 function accessPayload(overrides: Partial<JWTPayload> = {}): JWTPayload {
   return {
     iss: configuration.issuer,
-    aud: configuration.audience,
+    aud: primaryAudience,
     type: "app",
     sub: "access-subject",
     email: "Client@Example.com",
@@ -58,30 +59,41 @@ function cookieAccessRequest(assertion: string): Request {
 
 describe("Client Portal Cloudflare Access identity boundary", () => {
   it("requires a dedicated HTTPS issuer and audience", () => {
-    expect(clientAccessConfiguration({ CLIENT_ACCESS_TEAM_DOMAIN: configuration.issuer, CLIENT_ACCESS_AUD: configuration.audience } as Env)).toEqual(configuration);
-    expect(() => clientAccessConfiguration({ CLIENT_ACCESS_TEAM_DOMAIN: "http://team.example", CLIENT_ACCESS_AUD: configuration.audience } as Env)).toThrow("client-access-configuration-invalid");
+    expect(clientAccessConfiguration({ CLIENT_ACCESS_TEAM_DOMAIN: configuration.issuer, CLIENT_ACCESS_AUD: primaryAudience } as Env)).toEqual(configuration);
+    expect(clientAccessConfiguration({ CLIENT_ACCESS_TEAM_DOMAIN: configuration.issuer, CLIENT_ACCESS_AUD: primaryAudience, CLIENT_ACCESS_AUDS: "client-portal-aud,canonical-client-portal-aud" } as Env)).toEqual({ issuer: configuration.issuer, audiences: ["client-portal-aud", "canonical-client-portal-aud"] });
+    expect(() => clientAccessConfiguration({ CLIENT_ACCESS_TEAM_DOMAIN: "http://team.example", CLIENT_ACCESS_AUD: primaryAudience } as Env)).toThrow("client-access-configuration-invalid");
     expect(() => clientAccessConfiguration({ CLIENT_ACCESS_TEAM_DOMAIN: configuration.issuer, CLIENT_ACCESS_AUD: "" } as Env)).toThrow("client-access-configuration-invalid");
+    expect(() => clientAccessConfiguration({ CLIENT_ACCESS_TEAM_DOMAIN: configuration.issuer, CLIENT_ACCESS_AUD: primaryAudience, CLIENT_ACCESS_AUDS: "canonical-client-portal-aud" } as Env)).toThrow("client-access-configuration-invalid");
   });
 
   it("maps only a verified human Access application assertion", () => {
     expect(verifiedClientPrincipalFromAccessPayload({
-      iss: configuration.issuer, aud: configuration.audience, type: "app", sub: "access-subject", email: "Client@Example.com", exp: 2_000_000_000,
+      iss: configuration.issuer, aud: primaryAudience, type: "app", sub: "access-subject", email: "Client@Example.com", exp: 2_000_000_000,
     }, configuration)).toEqual({ issuer: configuration.issuer, subject: "access-subject", email: "client@example.com" });
     expect(verifiedClientPrincipalFromAccessPayload({
-      iss: configuration.issuer, aud: ["another-access-application", configuration.audience], type: "app", sub: "access-subject", email: "Client@Example.com", exp: 2_000_000_000,
+      iss: configuration.issuer, aud: ["another-access-application", primaryAudience], type: "app", sub: "access-subject", email: "Client@Example.com", exp: 2_000_000_000,
     }, configuration)).toEqual({ issuer: configuration.issuer, subject: "access-subject", email: "client@example.com" });
 
     for (const payload of [
-      { iss: configuration.issuer, aud: configuration.audience, type: "org", sub: "access-subject", email: "client@example.com", exp: 2_000_000_000 },
+      { iss: configuration.issuer, aud: primaryAudience, type: "org", sub: "access-subject", email: "client@example.com", exp: 2_000_000_000 },
       { iss: configuration.issuer, aud: "staff-aud", type: "app", sub: "access-subject", email: "client@example.com", exp: 2_000_000_000 },
-      { iss: configuration.issuer, aud: configuration.audience, type: "app", sub: "", email: "client@example.com", exp: 2_000_000_000 },
-      { iss: configuration.issuer, aud: configuration.audience, type: "app", sub: "access-subject", email: "not-an-email", exp: 2_000_000_000 },
+      { iss: configuration.issuer, aud: primaryAudience, type: "app", sub: "", email: "client@example.com", exp: 2_000_000_000 },
+      { iss: configuration.issuer, aud: primaryAudience, type: "app", sub: "access-subject", email: "not-an-email", exp: 2_000_000_000 },
     ]) expect(verifiedClientPrincipalFromAccessPayload(payload, configuration)).toBeNull();
   });
 
   it("accepts a real RS256 Access application token without an email_verified claim", async () => {
     const principal = await resolveCloudflareClientPrincipal(accessRequest(await signAccessToken()), accessEnv, localJwks);
     expect(principal).toEqual({ issuer: configuration.issuer, subject: "access-subject", email: "client@example.com" });
+  });
+
+  it("accepts the canonical portal's separately scoped Access audience", async () => {
+    const canonicalAudience = "canonical-client-portal-aud";
+    const env = { ...accessEnv, CLIENT_ACCESS_AUDS: `${primaryAudience},${canonicalAudience}` } as Env;
+    const token = await signAccessToken(accessPayload({ aud: canonicalAudience }));
+    await expect(resolveCloudflareClientPrincipal(accessRequest(token), env, localJwks)).resolves.toEqual({
+      issuer: configuration.issuer, subject: "access-subject", email: "client@example.com",
+    });
   });
 
   it("uses the signed Access authorization cookie only when the injected header is absent", async () => {

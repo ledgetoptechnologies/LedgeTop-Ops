@@ -19,13 +19,13 @@ LTDS Worker.
 Cloudflare Access
       |
       v
-ops.ledgetopdroneservices.com
+ops.ledgetopdroneservices.com / ops.ledgetoptechnologies.com
       |-- OPS_DB: staff, ACL, projects, operations, tasks, FAA, audit
       |-- DELIVERY_DB: grants, notification/thumbnail jobs, file index
       |-- private R2: staff browsing, originals, private brief attachments
       `-- file-event/thumbnail Queues, private Container rendering, Stream management
 
-delivery.ledgetopdroneservices.com
+portal.ledgetopdroneservices.com / portal.ledgetoptechnologies.com
       |-- DELIVERY_DB only
       |-- private R2, authorization-confined original/thumbnail serving
       |-- public-share and authenticated client-workspace sessions
@@ -122,7 +122,7 @@ bearer URL, or credential to the browser.
 New URLs have the form:
 
 ```text
-https://delivery.ledgetopdroneservices.com/s/<public-id>#<32-byte-secret>
+https://portal.ledgetopdroneservices.com/s/<public-id>#<32-byte-secret>
 ```
 
 The fragment is never transmitted in an HTTP request. The browser posts it once, receives a signed `__Host-ltds_delivery` `HttpOnly; Secure; SameSite=Lax; Path=/` cookie, and removes the fragment from browser history. D1 stores only SHA-256 of the secret. Legacy `/s/<secret>` links are upgraded on redemption and remain compatible.

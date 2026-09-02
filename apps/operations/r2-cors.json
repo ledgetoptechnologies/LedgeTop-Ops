@@ -2,7 +2,16 @@
   "rules": [
     {
       "allowed": {
-        "origins": ["https://ops.ledgetopdroneservices.com"],
+        "origins": ["https://portal.ledgetopdroneservices.com", "https://portal.ledgetoptechnologies.com", "https://client.ledgetopdroneservices.com"],
+        "methods": ["PUT"],
+        "headers": ["content-type"]
+      },
+      "exposeHeaders": ["etag"],
+      "maxAgeSeconds": 300
+    },
+    {
+      "allowed": {
+        "origins": ["https://ops.ledgetopdroneservices.com", "https://ops.ledgetoptechnologies.com"],
         "methods": ["PUT"],
         "headers": ["content-type"]
       },

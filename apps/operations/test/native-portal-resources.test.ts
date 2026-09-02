@@ -423,7 +423,11 @@ describe('source-owned native portal resources with real signed projection and l
         const value=target[key as keyof D1Database];return typeof value==='function'?value.bind(target):value;}});
       const context=await resolveNativePortalWorkspaceReadContext(env,principal,a.workspace);expect(context).not.toBeNull();
       const page=await readNativeAuthenticatedDeliveryPage({...env,DELIVERY_DB:proxy},principal,context!,'a-page-099');
-      expect(page.grants).toHaveLength(1);expect(queries).toBeLessThanOrEqual(6);
+      expect(page.grants).toHaveLength(1);
+      // The page remains constant-query: six delivery/authority reads plus
+      // two fixed schema fences for the primary binding receipt table and its
+      // source_type column. The budget must not grow with scanned bindings.
+      expect(queries).toBeLessThanOrEqual(8);
     }finally{await db.prepare('DELETE FROM portal_v2_folder_bindings WHERE workspace_id=? AND id IN(SELECT value FROM json_each(?))').bind(a.workspace,JSON.stringify(ids)).run();}
   },120_000);
   it('legacy parent IDs cannot borrow ancestry from another entity type with the same public ID',async()=>{

@@ -8,6 +8,7 @@
   "preview_urls": false,
   "routes": [
     { "pattern": "ops.ledgetopdroneservices.com", "custom_domain": true },
+    { "pattern": "ops.ledgetoptechnologies.com", "custom_domain": true },
     { "pattern": "incoming.ledgetopdroneservices.com", "custom_domain": true }
   ],
   "assets": {
@@ -19,15 +20,16 @@
   "vars": {
     "PUBLIC_BASE_URL": "https://ops.ledgetopdroneservices.com",
     "EXPECTED_HOST": "ops.ledgetopdroneservices.com",
+    "OPERATIONS_ORIGINS": "https://ops.ledgetopdroneservices.com,https://ops.ledgetoptechnologies.com",
     "DIRECT_DELIVERY_UPLOADS_ENABLED": "true",
     "INCOMING_BASE_URL": "https://incoming.ledgetopdroneservices.com",
     "INCOMING_EXPECTED_HOST": "incoming.ledgetopdroneservices.com",
     "ENVIRONMENT": "production",
     "TEAM_DOMAIN": "https://ledgetoptechnologies.cloudflareaccess.com",
     "OPERATIONS_AUD": "d09e298c864b9c8f4491b4b42a4dbe2ecbf558b5868d18258443740e56032407",
-    "DELIVERY_BASE_URL": "https://client.ledgetopdroneservices.com",
-    "CLIENT_PORTAL_ORIGINS": "https://client.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com",
-    "PUBLIC_SHARE_ORIGIN": "https://client.ledgetopdroneservices.com",
+    "DELIVERY_BASE_URL": "https://portal.ledgetopdroneservices.com",
+    "CLIENT_PORTAL_ORIGINS": "https://portal.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com,https://client.ledgetopdroneservices.com",
+    "PUBLIC_SHARE_ORIGIN": "https://portal.ledgetopdroneservices.com",
     "PROJECT_ALPHA_BASE_URL": "https://project-alpha.ledgetopdroneservices.com",
     "LEGACY_CLIENT_REQUEST_PA_QUOTE_LINK_ENABLED": "false",
     "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED": "false",

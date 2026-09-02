@@ -97,15 +97,16 @@ test("the client source directory retains the deployed delivery service identity
 });
 
 test("the deployed Client Worker keeps reviewed resources, hosts, and portal asset routing", () => {
-  // The digest intentionally moved with the reviewed exact two-host portal
-  // allowlist. Keep the field assertions below so a future config change
+  // The digest intentionally moved with the reviewed canonical portal hosts
+  // and explicit legacy compatibility origin. Keep the field assertions so a future config change
   // cannot hide behind a digest refresh.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "c79a9bbd96f903512608323f588202f70442c9dd85f18c967522739c885e663e");
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "f4ae1944a8b594f943c6f90f6d95f8c0538a3a230c1261e91e1e80efd099e921");
   const config = readJson("apps/client/wrangler.jsonc");
   assert.equal(config.name, "ltds-clients");
   assert.equal(config.main, "src/worker/index.ts");
   assert.deepEqual(config.routes, [
     { pattern: "client.ledgetopdroneservices.com", custom_domain: true },
+    { pattern: "portal.ledgetopdroneservices.com", custom_domain: true },
     { pattern: "portal.ledgetoptechnologies.com", custom_domain: true },
   ]);
   assert.equal(config.workers_dev, false);
@@ -117,11 +118,13 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
     not_found_handling: "single-page-application",
     run_worker_first: ["/", "/api/*", "/s/*", "/client-share/*", "/portal", "/portal/*", "/assets/*", "/health"],
   });
-  assert.equal(config.vars.PUBLIC_BASE_URL, "https://client.ledgetopdroneservices.com");
-  assert.equal(config.vars.PUBLIC_SHARE_ORIGIN, "https://client.ledgetopdroneservices.com");
-  assert.equal(config.vars.EXPECTED_HOST, "client.ledgetopdroneservices.com");
-  assert.equal(config.vars.CLIENT_PORTAL_ORIGIN, "https://client.ledgetopdroneservices.com");
-  assert.equal(config.vars.CLIENT_PORTAL_ORIGINS, "https://client.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com");
+  assert.equal(config.vars.PUBLIC_BASE_URL, "https://portal.ledgetopdroneservices.com");
+  assert.equal(config.vars.PUBLIC_SHARE_ORIGIN, "https://portal.ledgetopdroneservices.com");
+  assert.equal(config.vars.EXPECTED_HOST, "portal.ledgetopdroneservices.com");
+  assert.equal(config.vars.CLIENT_PORTAL_ORIGIN, "https://portal.ledgetopdroneservices.com");
+  assert.equal(config.vars.CLIENT_PORTAL_ORIGINS, "https://portal.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com");
+  assert.equal(config.vars.LEGACY_CLIENT_ORIGINS, "https://client.ledgetopdroneservices.com");
+  assert.equal(config.vars.CLIENT_ACCESS_AUDS, `${config.vars.CLIENT_ACCESS_AUD},3bc9637846ccf4e1343b969cc8f14ed2cb0628956293463cf164c4080fa47e57`);
   assert.equal(config.vars.CLIENT_PORTAL_ENABLED, "true");
   assert.equal(config.vars.CLIENT_PORTAL_CONTENT_AUDIT_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_HMAC_KEY_ID, "");
@@ -149,6 +152,13 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.equal(config.vars.PROJECT_ALPHA_PRICING_HINTS_ENABLED, "false");
   assert.equal(config.vars.R2_BUCKET_NAME, "client-data");
   assert.deepEqual(config.r2_buckets, [{ binding: "DATA_BUCKET", bucket_name: "client-data" }]);
+  const clientCors = readJson("apps/client/r2-request-attachments-cors.json");
+  const operationsCors = readJson("apps/operations/r2-cors.json");
+  assert.deepEqual(clientCors, operationsCors, "both deploy paths must preserve the complete shared-bucket CORS policy");
+  assert.deepEqual(clientCors.rules.map(rule => rule.allowed.origins), [
+    ["https://portal.ledgetopdroneservices.com", "https://portal.ledgetoptechnologies.com", "https://client.ledgetopdroneservices.com"],
+    ["https://ops.ledgetopdroneservices.com", "https://ops.ledgetoptechnologies.com"],
+  ]);
   assert.deepEqual(config.d1_databases, [{
     binding: "DELIVERY_DB",
     database_name: "client-data",
@@ -187,11 +197,11 @@ test("public route, host-namespace guard, health, and isolated cookie contracts 
   assert(worker.includes('const COOKIE_NAME = "__Host-ltds_delivery";'));
   assert(worker.includes('service: "ltds-delivery"'));
   assert(worker.includes("requestHostAllowed(c.req.url,c.env)"));
-  assert(originPolicy.includes('if (namespace === "public") return publicOrigin !== null && request.origin === publicOrigin;'));
-  assert(originPolicy.includes('if (namespace === "internal") return primaryPortalOrigin !== null && request.origin === primaryPortalOrigin;'));
-  assert(originPolicy.includes('if (namespace === "portal") return portalOrigins.includes(request.origin);'));
+  assert(originPolicy.includes('if (namespace === "public") return publicRequestOrigins.includes(request.origin);'));
+  assert(originPolicy.includes('if (namespace === "internal") return primaryPortalOrigin !== null && (request.origin === primaryPortalOrigin || legacyOrigins.includes(request.origin));'));
+  assert(originPolicy.includes('if (namespace === "portal") return portalOrigins.includes(request.origin) || legacyOrigins.includes(request.origin);'));
   assert(originPolicy.includes('if (namespace === "shared" || namespace === "assets")'));
-  assert(originPolicy.includes('return (publicOrigin !== null && request.origin === publicOrigin) || portalOrigins.includes(request.origin);'));
+  assert(originPolicy.includes('return (publicOrigin !== null && request.origin === publicOrigin) || portalOrigins.includes(request.origin) || legacyOrigins.includes(request.origin);'));
   assert.equal(worker.match(/12 \* 60 \* 60 \* 1000/g)?.length, 1);
   assert.equal(lifecycle.match(/12 \* 60 \* 60 \* 1000/g)?.length, 1);
   assert(security.includes('`__Host-ltds_delivery=${encodeURIComponent(value)}; Path=/; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Lax`'));

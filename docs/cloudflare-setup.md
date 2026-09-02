@@ -30,9 +30,9 @@ required by the source-layout refactor. It must not rename `ltds-delivery` or
 change its routes, custom domains, Access applications, variables, secrets, D1,
 R2, Queue, Workflow, Images, Stream, or rate-limit bindings.
 
-Do not attach `client.ledgetopdroneservices.com` or remove `delivery.` as part
-of the source-layout change. The later client-host-aware release uses the
-ordered clean cutover and rollback in [future planning](future-plans.md#ordered-hostname-cutover).
+The source-layout move is complete. Current domain changes remain a separate,
+reversible configuration step: keep the legacy client hostname attached until
+fragment-bearing links and host-local public-share sessions have drained.
 
 ### Client portal authentication and pilot boundary
 
@@ -54,23 +54,22 @@ its `CLIENT_ACCESS_GROUP_API_TOKEN` secret belongs on that internal worker only,
 never on the public client/delivery Worker. It uses a separate client group and
 must not mix staff ACL provisioning with client invitations.
 
-The approved client portal uses two presentation domains:
-`client.ledgetopdroneservices.com` and `portal.ledgetoptechnologies.com`. Both
-are destinations on the same `LTDS Client Portal` Access application and use
-the same audience, Worker, D1 database, verified principal, memberships, and
-grants. Do not create domain-specific users or infer ownership, service access,
-or authorization from the request hostname. Cloudflare may issue host-local
-authorization cookies for both destinations; LTDS still resolves every request
-to current server-side authority. The pilot allow policy does not turn every
-Project Alpha contact into a portal user.
+The client portal uses `portal.ledgetopdroneservices.com` as its canonical
+origin and `portal.ledgetoptechnologies.com` as an alternate presentation
+origin. `client.ledgetopdroneservices.com` is legacy compatibility only. The
+three hosts use the same Worker, D1 database, verified principal, memberships,
+and grants. Cloudflare's per-application destination limit requires the
+canonical Drone Services portal paths to use a second, narrowly scoped Access
+application. `CLIENT_ACCESS_AUDS` lists both reviewed client audiences while
+`CLIENT_ACCESS_AUD` retains the original audience for compatibility. Never
+infer ownership or authorization from the request hostname.
 
-Keep `CLIENT_PORTAL_ORIGIN` as the canonical Drone Services origin for existing
-invitation and redirect compatibility. Set `CLIENT_PORTAL_ORIGINS` to the exact
-comma-separated allowlist of both HTTPS origins. The Worker accepts portal
-namespaces and same-origin mutations on either reviewed origin, but
-`PUBLIC_SHARE_ORIGIN` remains the existing Drone Services origin. Existing
-public share paths, IDs, tokens, cookies, and revocation records are not
-rewritten or duplicated by the second-domain rollout.
+Keep `CLIENT_PORTAL_ORIGIN`, `PUBLIC_SHARE_ORIGIN`, and `PUBLIC_BASE_URL` set to
+`https://portal.ledgetopdroneservices.com`. Set `CLIENT_PORTAL_ORIGINS` to the
+two `portal.*` origins and `LEGACY_CLIENT_ORIGINS` to the old `client.*` origin.
+Fresh fragment-bearing legacy links hand off in the browser before the secret
+is consumed. Fragmentless legacy sessions stay on the legacy host because the
+`__Host-ltds_delivery` cookie cannot be transferred across hosts.
 
 Public share paths remain outside Access and continue to use their own
 revocable-link controls. The service-request API uses the existing
@@ -78,19 +77,15 @@ revocable-link controls. The service-request API uses the existing
 Keep the client Access audience, group, and provisioning automation separate
 from Operations staff ACL provisioning.
 
-For the dual-domain rollout, update the existing production `LTDS Client Portal`
-Access application rather than creating a second application. Its reviewed
-destinations must cover `/portal`, `/portal/*`, `/api/client`, and
-`/api/client/*` on both `client.ledgetopdroneservices.com` and
-`portal.ledgetoptechnologies.com`, with one dedicated human client group and one
-unchanged audience. `/api/internal/*` remains canonical-host-only at the Worker
-boundary and is not a presentation-domain destination. The existing, more
-specific public Bypass applications on the Drone Services hostname continue to
-cover `/s/*`, `/client-share/*`, and `/api/public/*`; do not duplicate them on
-the Technologies hostname. Existing share links therefore keep the same host,
-IDs, credentials, cookies, and revocation state. Verify no
-`Cf-Access-Jwt-Assertion` reaches a canonical public-share request. Cloudflare
-documents path matching and specificity in
+For the dual-domain rollout, retain the original Access application and
+audience for the legacy and Technologies portal paths. Use a second application
+only for `/portal*` and `/api/client*` on the canonical Drone Services portal,
+copying the same current eligibility rule. Public Bypass applications cover
+only the explicit `/s/*`, `/client-share/*`, `/api/public/shares/*`,
+`/api/public/cloud-transfers/*`, and asset paths. `/api/internal/*` stays on the
+legacy compatibility host during the Project Alpha transition and remains
+independently signed. Existing IDs, credentials, cookies, and revocation state
+are not rewritten. Cloudflare documents path matching and specificity in
 [Application paths](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/).
 
 The staging Access application must rehearse the same two-presentation-domain
@@ -112,11 +107,9 @@ Worker-first. Session cookies remain host-local (`__Host-` or path-scoped
 `__Secure-` cookies with no `Domain` attribute), so no cookie is shared merely
 because both hosts use the same Worker or Access audience.
 
-The repository does not authorize the DNS, custom-domain, Access, or live
-variable change. Keep the checked-in same-host production values as a
-compatibility state until the separately approved rollout attaches both hosts,
-updates both Workers' origins together, applies the reviewed D1 migration, and
-passes anonymous-share plus authenticated-portal acceptance tests.
+Apply Access protection before attaching each Worker custom domain. Preserve an
+exported rollback snapshot and read back Access destinations, policies, R2
+CORS, custom-domain state, and both old-link paths after deployment.
 
 The pilot must retain an exported rollback configuration. Before expanding
 beyond the pilot, prove authenticated portal access, unprovisioned denial,
@@ -161,9 +154,9 @@ Delivery access codes use a shared HMAC pepper. Generate one cryptographically r
 
 ## 2. Operations hostname and Access
 
-1. Attach `ops.ledgetopdroneservices.com` to Worker `ltds-ops`.
+1. Attach `ops.ledgetopdroneservices.com` and `ops.ledgetoptechnologies.com` to Worker `ltds-ops`.
 2. Create a Cloudflare Access self-hosted application named **LTDS Operations**.
-3. Set its only production destination to `ops.ledgetopdroneservices.com/*`.
+3. Set both exact Operations hosts as destinations on the same production Access application and retain its audience and policies.
 4. Under **Access controls > Policies > Rule groups**, create the dedicated automation-owned **LTDS Ops Users** rule group. Create an Allow policy whose Include rule references that group, and keep the protected Owner in the group.
 5. Keep One-time PIN enabled, or select the intended identity provider. Enable instant authentication when only one provider is available.
 6. Optionally enable Cloudflare One Client authentication for enrolled WARP devices. WARP reduces prompts but does not bypass LTDS ACL.
@@ -396,7 +389,9 @@ The current Project Alpha contract is HMAC-only, so production explicitly sets `
 
 The sanitized Service Library projection uses another dedicated Access service
 application targeting only
-`client.ledgetopdroneservices.com/api/internal/project-alpha/catalog-v2`.
+`client.ledgetopdroneservices.com/api/internal/project-alpha/catalog-v2`. This
+legacy machine endpoint remains active during the portal hostname transition;
+do not infer the browser portal origin from it.
 Copy its issuer and audience to
 `PROJECT_ALPHA_CATALOG_ACCESS_TEAM_DOMAIN` and
 `PROJECT_ALPHA_CATALOG_ACCESS_AUD` on `ltds-clients`. Configure the same bounded
@@ -422,7 +417,9 @@ signed request. See `docs/project-alpha.md` for the exact producer envelope.
 
 The portal hierarchy projection uses a third path-specific Access service
 application targeting only
-`client.ledgetopdroneservices.com/api/internal/project-alpha/portal-v2`.
+`client.ledgetopdroneservices.com/api/internal/project-alpha/portal-v2`. This
+legacy machine endpoint remains active until Project Alpha retries and
+tombstones have been migrated deliberately.
 Configure its exact issuer/audience as
 `PROJECT_ALPHA_PORTAL_ACCESS_TEAM_DOMAIN` and
 `PROJECT_ALPHA_PORTAL_ACCESS_AUD`, and agree on the bounded
@@ -517,7 +514,7 @@ Create separate staging Workers for all three services, D1 databases, R2 buckets
 
 ## 7. Incoming requests
 
-Create the private `ltds-incoming` bucket. Route `incoming.ledgetopdroneservices.com` to `ltds-ops`, but keep Cloudflare Access limited to `ops.ledgetopdroneservices.com/*`. Create a Turnstile widget restricted to the Incoming hostname, set `TURNSTILE_SITE_KEY`, and provision on Operations:
+Create the private `ltds-incoming` bucket. Route `incoming.ledgetopdroneservices.com` to `ltds-ops`, but keep human Cloudflare Access limited to the two exact `ops.*` hosts. Create a Turnstile widget restricted to the Incoming hostname, set `TURNSTILE_SITE_KEY`, and provision on Operations:
 
 ```powershell
 Set-Location apps/operations
