@@ -17,6 +17,9 @@ describe('per-grant project terms on current authorization reads',{timeout:60_00
     db=await runtime.getD1Database('DELIVERY_DB') as D1Database;
     for(const name of readdirSync(new URL('../migrations/',import.meta.url)).filter(n=>n.endsWith('.sql')&&n<'0173_').sort())
       await db.batch(splitD1MigrationStatements(readFileSync(new URL(`../migrations/${name}`,import.meta.url),'utf8')).map(sql=>db.prepare(sql)));
+    await db.prepare(`CREATE TABLE portal_primary_staff_bindings(
+      binding_id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,r2_prefix TEXT NOT NULL,state TEXT NOT NULL
+    )`).run();
     expect(await projectAccessAuthorityHistoryReady(db)).toBe(true);
     await db.prepare(`INSERT INTO portal_v2_identities(id,issuer,subject,verified_email,status) VALUES('terms-person',?,?,?,'active')`).bind(principal.issuer,principal.subject,principal.email).run();
     env={DELIVERY_DB:db,CLIENT_PORTAL_HIERARCHY_V2_ENABLED:'true',CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED:'true',AUTHENTICATED_DELIVERY_GRANTS_ENABLED:'true'};
@@ -43,6 +46,8 @@ describe('per-grant project terms on current authorization reads',{timeout:60_00
         VALUES('project-alpha:primary',?,?,'snapshot_activate',?,1,'completed')`).bind(`${id}-receipt`,id,'a'.repeat(64)),
       db.prepare(`INSERT INTO portal_v2_folder_bindings(id,workspace_id,owner_scope_type,owner_public_id,r2_prefix,source_type,source_version)
         VALUES(?,?,'project','same-project',?,'operations','v1')`).bind(binding,id,`${id}/`),
+      db.prepare(`INSERT INTO portal_primary_staff_bindings(binding_id,workspace_id,r2_prefix,state)
+        VALUES(?,?,?,'active')`).bind(binding,id,`${id}/`),
     ]);
     return {id,generation,binding,root};
   }

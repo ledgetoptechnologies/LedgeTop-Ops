@@ -111,6 +111,9 @@ describe("Project Alpha to authenticated Client delivery cross-repository contra
     await migrate(db, eligibilityMigration);
     await migrate(db, deliveryIntentMigration);
     await db.batch(splitD1MigrationStatements(sourceOwnershipMigration).map(sql => db.prepare(sql)));
+    await db.prepare(`CREATE TABLE portal_primary_staff_bindings(
+      binding_id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,r2_prefix TEXT NOT NULL,state TEXT NOT NULL
+    )`).run();
     await db.prepare("PRAGMA foreign_keys=ON").run();
 
     await db.prepare(`INSERT INTO client_accounts(id,display_name,status,project_alpha_organization_id)
@@ -212,6 +215,8 @@ describe("Project Alpha to authenticated Client delivery cross-repository contra
         VALUES('folder-association','project','project-local','account-acme','clients/acme/north/','staff-owner')`),
       db.prepare(`INSERT INTO portal_v2_folder_bindings(id,workspace_id,owner_scope_type,owner_public_id,r2_prefix,source_type,source_version,status)
         VALUES('folder-binding',?,'project',?,'clients/acme/north/','operations','project-v1','active')`).bind(workspaceId, projectPublicId),
+      db.prepare(`INSERT INTO portal_primary_staff_bindings(binding_id,workspace_id,r2_prefix,state)
+        VALUES('folder-binding',?,'clients/acme/north/','active')`).bind(workspaceId),
       db.prepare(`INSERT INTO portal_v2_authenticated_delivery_grants
         (id,logical_grant_id,grant_version,workspace_id,folder_binding_id,binding_source_version,audience_type,audience_public_id,
           audience_source_version,reason_code,created_by_staff_id)
