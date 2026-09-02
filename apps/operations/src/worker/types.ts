@@ -38,6 +38,8 @@ export type Env = Omit<
   PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED?: string;
   PROJECT_ALPHA_DELIVERY_GUEST_ENABLED?: string;
   CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED?: string;
+  /** Repairs only exact-linked primary legacy workspaces after a successful PA sync. */
+  CLIENT_PORTAL_PRIMARY_WORKSPACE_RECONCILIATION_ENABLED?: string;
   /** Enables staff public-share recipient lookup from the PA portal projection. */
   DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED?: string;
   /** Defense-in-depth gate for the private Client -> Operations share signer RPC. */

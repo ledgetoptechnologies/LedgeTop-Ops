@@ -307,6 +307,32 @@ activation rules are in
 Project Alpha must consume both the unchanged v2 corpus and this separately
 gated v3 corpus before either producer is enabled.
 
+### Schema-v4 contact-assignment receiver (prepared, producer disabled)
+
+Client migration `0190_portal_contact_assignments_v4.sql` prepares a strict,
+receiver-first extension for scope-specific Project Alpha contact roles. Wire
+schema v4 retains the complete schema-v3 hierarchy, relation and lifecycle
+contract and adds an exact `contactAssignments` array. The receiver stores the
+existing authority contract as schema v3 and records v4 support in separate
+staging and selected-generation marker tables. This is intentionally additive:
+existing lifecycle views, approval triggers and authorization predicates are
+not rebuilt or widened.
+
+Contact assignments are informational metadata. They contain opaque contact,
+client and scope public IDs; a normalized role token; primary and project-only
+billing flags; a source version; and active state. They contain no email,
+identity, membership, entitlement, grant or notification-recipient field. The
+receiver requires every endpoint in the same workspace and generation, accepts
+the workspace root as the client endpoint for a standalone client, and applies
+snapshot activation, ordered events and tombstones atomically. A contact role
+must never be interpreted as portal or billing authority by a read adapter.
+
+Project Alpha does not emit schema v4 yet. Before enabling a future producer,
+rebase its work onto the latest Project Alpha `main`, preserve the current
+onboarding, approval, project, contract and document behavior, publish matching
+fixtures, and complete a separate read-adapter and authorization review. Until
+then, v2/v3 remain the active producer contracts and the v4 tables are dormant.
+
 The operator sequence, expected preflight outcomes, independent read cutover,
 and drain-first rollback are normative in
 [`docs/operations/project-alpha-portal-activation.md`](operations/project-alpha-portal-activation.md).

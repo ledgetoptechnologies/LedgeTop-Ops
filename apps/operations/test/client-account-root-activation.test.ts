@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   activateClientAccountRoot,
   listClientAccountRootActivation,
+  reconcilePrimaryClientPortalWorkspaces,
 } from "../src/worker/client-account-root-activation";
 import type { Env, StaffPrincipal } from "../src/worker/types";
 import { authorizePortalWorkspaceCapability } from "../../client/src/worker/client-portal/workspace-v2";
@@ -348,6 +349,75 @@ describe("post-0121 client account root activation on the real Client migration 
   }, 30_000);
 
   afterEach(async () => miniflare.dispose());
+
+  it("reconciles only exact-linked primary accounts with active verified members", async () => {
+    await opsDb.prepare(`INSERT INTO pa_clients(id,name,organization_id,active,last_sync_id,updated_at)
+      VALUES ('pa-inactive-account','Inactive account source',NULL,1,'sync-inactive-account','2026-08-17T00:00:00Z')`).run();
+    await deliveryDb.batch([
+      deliveryDb.prepare(`INSERT INTO client_accounts
+        (id,display_name,status,project_alpha_client_id,project_alpha_source_id,updated_at)
+        VALUES ('auto-account','Automatic','active','pa-linked','project-alpha:primary','auto-v1')`),
+      deliveryDb.prepare(`INSERT INTO client_identity_links(id,account_id,issuer,subject,email)
+        VALUES ('auto-identity','auto-account','https://issuer.test','auto-subject','auto@example.test')`),
+      deliveryDb.prepare(`INSERT INTO client_account_members(account_id,identity_id,role)
+        VALUES ('auto-account','auto-identity','member')`),
+      deliveryDb.prepare(`INSERT INTO client_accounts
+        (id,display_name,status,project_alpha_client_id,project_alpha_source_id,updated_at)
+        VALUES ('no-member-account','No member','active','pa-storage','project-alpha:primary','no-member-v1')`),
+      deliveryDb.prepare(`INSERT INTO client_accounts
+        (id,display_name,status,project_alpha_client_id,project_alpha_source_id,updated_at)
+        VALUES ('manual-account','Manual review','active','pa-partial','project-alpha:primary','manual-v1')`),
+      deliveryDb.prepare(`INSERT INTO client_identity_links(id,account_id,issuer,subject,email)
+        VALUES ('manual-identity','manual-account','https://issuer.test','manual-subject','manual@example.test')`),
+      deliveryDb.prepare(`INSERT INTO client_account_members(account_id,identity_id,role)
+        VALUES ('manual-account','manual-identity','member')`),
+      deliveryDb.prepare(`INSERT INTO portal_v2_workspaces
+        (id,root_type,pa_client_public_id,legacy_account_id,display_name,status)
+        VALUES ('workspace-manual-account','standalone_client','wrong-root','manual-account','Manual review','active')`),
+      deliveryDb.prepare(`INSERT INTO client_accounts
+        (id,display_name,status,project_alpha_client_id,project_alpha_source_id,updated_at)
+        VALUES ('inactive-account','Inactive','suspended','pa-inactive-account','project-alpha:primary','inactive-v1')`),
+    ]);
+    env.CLIENT_PORTAL_PRIMARY_WORKSPACE_RECONCILIATION_ENABLED = "true";
+    const invitationsBefore = await deliveryDb.prepare("SELECT COUNT(*) count FROM portal_v2_invitations").first("count");
+
+    const result = await reconcilePrimaryClientPortalWorkspaces(env);
+    expect(result).toMatchObject({
+      enabled: true,
+      projected: 1,
+      unchanged: 0,
+      skippedAmbiguous: 0,
+      skippedNoMember: 1,
+      skippedInactive: 1,
+      skippedManualReview: 1,
+      truncated: false,
+    });
+    expect(result.skippedUnlinked).toBeGreaterThanOrEqual(1);
+    expect(await deliveryDb.prepare(`SELECT COUNT(*) count FROM portal_v2_workspaces
+      WHERE legacy_account_id='auto-account'`).first("count")).toBe(1);
+    expect(await deliveryDb.prepare(`SELECT actor_type,actor_id,action FROM audit_log
+      WHERE entity_id='auto-account' ORDER BY id DESC LIMIT 1`).first()).toEqual({
+      actor_type: "system",
+      actor_id: "project-alpha-primary-workspace-reconciler",
+      action: "client.account.project_alpha_projection_reconciled",
+    });
+    expect(await deliveryDb.prepare("SELECT COUNT(*) count FROM portal_v2_invitations").first("count"))
+      .toBe(invitationsBefore);
+
+    const replay = await reconcilePrimaryClientPortalWorkspaces(env);
+    expect(replay.projected).toBe(0);
+    expect(replay.skippedAlreadyProjected).toBeGreaterThanOrEqual(1);
+    expect(await deliveryDb.prepare(`SELECT COUNT(*) count FROM audit_log
+      WHERE entity_id='auto-account'`).first("count")).toBe(1);
+
+    env.CLIENT_PORTAL_PRIMARY_WORKSPACE_RECONCILIATION_ENABLED = "false";
+    expect(await reconcilePrimaryClientPortalWorkspaces(env)).toEqual({
+      enabled: false, scanned: 0, eligible: 0, projected: 0, unchanged: 0,
+      skippedUnlinked: 0, skippedAmbiguous: 0, skippedNoMember: 0,
+      skippedInactive: 0, skippedManualReview: 0, skippedAlreadyProjected: 0,
+      conflicts: 0, truncated: false,
+    });
+  }, 60_000);
 
   it("creates, repairs, replays, rejects conflicts, rolls back, and remains race-safe", async () => {
     await seedSecondaryActivationSources(opsDb);

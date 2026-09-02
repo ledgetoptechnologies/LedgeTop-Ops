@@ -1,10 +1,12 @@
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+import { PRIMARY_ALPHA_SOURCE_ID } from "@ltds/shared";
 import { sqlScope } from "./acl";
 import { rebuildOperationAirspaceMatches } from "./airspace";
 import { auditStatement } from "./request-security";
 import { syncRegisteredProjectAlpha } from "./project-alpha";
+import { reconcilePrimaryClientPortalWorkspaces } from "./client-account-root-activation";
 import { getProjectAlphaSnapshotRecoveryStatus } from "./project-alpha-snapshot-recovery";
 import {
   listProjectAlphaConnectors, ProjectAlphaConnectorError, registerProjectAlphaConnector,
@@ -165,7 +167,14 @@ export function registerProjectAlphaConnectorAdminRoutes(app: App): void {
     await c.env.OPS_DB.batch([await auditStatement(c.env, c.req.raw, c.get("principal"), "integration.sync_requested", "integration", sourceId, null, { sourceId })]);
     const result = await syncRegisteredProjectAlpha(c.env, sourceId);
     if (result.changedCollections.some(name => name === "operations" || name === "service_locations")) await rebuildOperationAirspaceMatches(c.env);
-    return c.json({ sourceId, ...result });
+    const clientPortalReconciliation = sourceId === PRIMARY_ALPHA_SOURCE_ID && result.status === "success"
+      ? await reconcilePrimaryClientPortalWorkspaces(c.env)
+      : undefined;
+    if (clientPortalReconciliation) console.log(JSON.stringify({
+      event: "client_portal.primary_workspace_reconciliation",
+      ...clientPortalReconciliation,
+    }));
+    return c.json({ sourceId, ...result, ...(clientPortalReconciliation ? { clientPortalReconciliation } : {}) });
   });
   app.put(`${ROOT}/:sourceId/project-management`, async c => {
     const value = await json(c.req.raw, z.object({

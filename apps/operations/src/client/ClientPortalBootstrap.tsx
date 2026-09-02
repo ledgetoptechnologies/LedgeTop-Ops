@@ -134,13 +134,13 @@ export function ClientPortalBootstrap({ onChanged }: { onChanged?: () => void })
   const blocked = eligible.filter(item => item.activeMemberCount === 0);
   const manualReview = state?.accounts.filter(item => item.activationState === "manual_review").length ?? 0;
 
-  return <Card title="Client portal setup">
-    <section id="client-portal-setup" className="client-portal-bootstrap" aria-label="Client portal setup">
+  return <Card title="Portal workspace coverage">
+    <section id="client-portal-setup" className="client-portal-bootstrap" aria-label="Portal workspace coverage">
       <div className="client-portal-bootstrap-intro">
-        <div><p>Set up an existing verified client account as a Project Alpha-backed portal workspace.</p>
-          <small>Signing in never creates access. Setup projects only existing verified members and explicit grants; access can be revoked afterward in the client workspace.</small></div>
+        <div><p>Project Alpha-backed client accounts are reconciled automatically after a successful sync.</p>
+          <small>Workspace creation never grants access by itself. Only existing verified members and explicit grants are projected, and access can still be revoked from the client workspace.</small></div>
         <button type="button" className="button-ghost" aria-expanded={opened} aria-controls="client-portal-bootstrap-workflow"
-          onClick={() => setOpened(value => !value)}>{opened ? "Close setup" : "Set up client portal"}</button>
+          onClick={() => setOpened(value => !value)}>{opened ? "Close exceptions" : "Review legacy exceptions"}</button>
       </div>
       {opened && <div id="client-portal-bootstrap-workflow" className="client-portal-bootstrap-workflow" aria-busy={loading || busy}>
         {loading && !state && <p role="status">Checking portal setup readiness…</p>}
@@ -191,8 +191,8 @@ export function ClientPortalBootstrap({ onChanged }: { onChanged?: () => void })
               </div>}
           </div> : <EmptyState title="No client account is ready for setup" detail={manualReview
             ? `${manualReview} account${manualReview === 1 ? " needs" : "s need"} manual projection review before setup.`
-            : projected ? "All active client portal accounts are already projected." : "Create and verify a client account membership before setting up its Project Alpha workspace."} />}
-          {!!blocked.length && <p className="client-portal-bootstrap-warning">{blocked.length} active account{blocked.length === 1 ? " has" : "s have"} no verified active member and cannot produce a usable pilot workspace yet.</p>}
+            : projected ? "All exact-linked active client portal accounts are already projected." : "Automatic reconciliation is waiting for an exact Project Alpha link and a verified client membership."} />}
+          {!!blocked.length && <p className="client-portal-bootstrap-warning">{blocked.length} active account{blocked.length === 1 ? " has" : "s have"} no verified active member and cannot produce a usable portal workspace yet.</p>}
           {!!projected && <p className="client-portal-bootstrap-footnote">{projected} client portal workspace{projected === 1 ? " is" : "s are"} already projected.</p>}
         </>}
         {message && <p className="client-portal-bootstrap-success" role="status">{message}</p>}

@@ -41,11 +41,12 @@ test("Client Hub stages one exact Project Alpha portal root without treating aut
   });
 
   await page.goto("/clients");
-  await expect(page.getByRole("heading", { name: "Client portal setup" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Portal workspace coverage" })).toBeVisible();
   expect(reads).toBe(0);
-  await page.getByRole("button", { name: "Set up client portal" }).click();
+  await expect(page.getByText("Project Alpha-backed client accounts are reconciled automatically after a successful sync.")).toBeVisible();
+  await page.getByRole("button", { name: "Review legacy exceptions" }).click();
   await expect(page.getByText("1. Eligibility")).toBeVisible();
-  await expect(page.getByText("Signing in never creates access.")).toBeVisible();
+  await expect(page.getByText("Workspace creation never grants access by itself.")).toBeVisible();
   await expect(page.getByLabel("Existing client portal account")).toHaveValue(account.id);
   await page.getByLabel("Project Alpha workspace root").selectOption({ label: "Greenwood Project Management LLC — St. Joseph project contact" });
   await expect(page.getByText("2 verified active members · 1 manager.")).toBeVisible();
@@ -65,7 +66,7 @@ test("Client Hub blocks empty membership and indistinguishable Project Alpha nam
   await fixture(page, route => route.fulfill({ json: { workspaceMigrationApplied: true,
     accounts: [{ ...account, activeMemberCount: 0, activeManagerCount: 0 }], sources: [source, duplicate] } }));
   await page.goto("/clients");
-  await page.getByRole("button", { name: "Set up client portal" }).click();
+  await page.getByRole("button", { name: "Review legacy exceptions" }).click();
   await expect(page.getByText("Member needed")).toBeVisible();
   await expect(page.getByText(/no verified active member/i)).toBeVisible();
   const sourceSelect = page.getByLabel("Project Alpha workspace root");
@@ -77,6 +78,6 @@ test("Client Hub does not expose the administrator bootstrap to a non-administra
   let requested = false;
   await fixture(page, route => { requested = true; return route.fulfill({ status: 403, json: { error: "Administrator access required" } }); }, false);
   await page.goto("/clients");
-  await expect(page.getByRole("heading", { name: "Client portal setup" })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Portal workspace coverage" })).toHaveCount(0);
   expect(requested).toBe(false);
 });

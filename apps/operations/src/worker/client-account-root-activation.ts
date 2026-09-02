@@ -51,6 +51,30 @@ interface SourceRow {
 
 type ProjectionState = "missing" | "partial_or_conflicting" | "complete";
 
+const PRIMARY_RECONCILIATION_LIMIT = 25;
+const PRIMARY_RECONCILIATION_ACTOR_ID = "project-alpha-primary-workspace-reconciler";
+
+interface ActivationActor {
+  type: "staff" | "system";
+  id: string;
+}
+
+export interface PrimaryClientPortalReconciliationResult {
+  enabled: boolean;
+  scanned: number;
+  eligible: number;
+  projected: number;
+  unchanged: number;
+  skippedUnlinked: number;
+  skippedAmbiguous: number;
+  skippedNoMember: number;
+  skippedInactive: number;
+  skippedManualReview: number;
+  skippedAlreadyProjected: number;
+  conflicts: number;
+  truncated: boolean;
+}
+
 function deliveryDatabase(env: Env): D1DatabaseSession {
   return env.DELIVERY_DB.withSession("first-primary");
 }
@@ -552,7 +576,7 @@ async function duplicateLegacyRoot(
 
 function postMigrationProjectionStatements(
   db: D1DatabaseSession,
-  principal: StaffPrincipal,
+  actor: ActivationActor,
   account: AccountRow,
   sourceRow: SourceRow,
   expectedUpdatedAt: string,
@@ -599,12 +623,14 @@ function postMigrationProjectionStatements(
   statements.push(db.prepare(`INSERT INTO audit_log
       (actor_type,actor_id,action,entity_type,entity_id,details_json)
     SELECT CASE WHEN updated_at=? AND project_alpha_source_id='project-alpha:primary' AND project_alpha_client_id=?
-        AND project_alpha_organization_id IS ? THEN 'staff' ELSE NULL END,
+        AND project_alpha_organization_id IS ? THEN ? ELSE NULL END,
       ?,?,?,?,?
     FROM client_accounts WHERE id=?`)
-    .bind(activatedAt, source.clientId, source.organizationId, principal.id,
+    .bind(activatedAt, source.clientId, source.organizationId, actor.type, actor.id,
       repairExistingLink
-        ? "client.account.project_alpha_projection_repaired"
+        ? actor.type === "system"
+          ? "client.account.project_alpha_projection_reconciled"
+          : "client.account.project_alpha_projection_repaired"
         : "client.account.project_alpha_root_linked",
       "client_account", account.id, details, account.id));
   statements.push(db.prepare(`INSERT INTO portal_v2_identities
@@ -731,9 +757,9 @@ function postMigrationProjectionStatements(
  * links the legacy account. After 0121 it atomically creates the exact legacy
  * workspace projection as well; partial/conflicting projections stay blocked.
  */
-export async function activateClientAccountRoot(
+async function activateClientAccountRootAs(
   env: Env,
-  principal: StaffPrincipal,
+  actor: ActivationActor,
   accountId: string,
   input: { projectAlphaClientId: string; expectedUpdatedAt: string },
 ): Promise<{
@@ -813,7 +839,7 @@ export async function activateClientAccountRoot(
     try {
       const batchResult = await db.batch(postMigrationProjectionStatements(
         db,
-        principal,
+        actor,
         account,
         currentSourceRow,
         input.expectedUpdatedAt,
@@ -876,15 +902,101 @@ export async function activateClientAccountRoot(
       .bind(source.clientId, source.organizationId, activatedAt, accountId,
         input.expectedUpdatedAt, source.clientId, source.organizationId, source.organizationId),
     db.prepare(`INSERT INTO audit_log(actor_type,actor_id,action,entity_type,entity_id,details_json)
-      SELECT 'staff',?,'client.account.project_alpha_root_linked','client_account',?,?
+      SELECT ?,?,'client.account.project_alpha_root_linked','client_account',?,?
       FROM client_accounts WHERE id=? AND updated_at=? AND project_alpha_source_id='project-alpha:primary'
         AND project_alpha_client_id=?
         AND project_alpha_organization_id IS ?`)
-      .bind(principal.id, accountId, details, accountId, activatedAt,
+      .bind(actor.type, actor.id, accountId, details, accountId, activatedAt,
         source.clientId, source.organizationId),
   ]);
   if (result[0]?.meta.changes !== 1 || result[1]?.meta.changes !== 1)
     throw new HTTPException(409, { message: "Client account changed or the Project Alpha root is no longer unique" });
 
   return activationResult(accountId, source, false);
+}
+
+export async function activateClientAccountRoot(
+  env: Env,
+  principal: StaffPrincipal,
+  accountId: string,
+  input: { projectAlphaClientId: string; expectedUpdatedAt: string },
+) {
+  return activateClientAccountRootAs(env, { type: "staff", id: principal.id }, accountId, input);
+}
+
+function emptyReconciliation(enabled: boolean): PrimaryClientPortalReconciliationResult {
+  return {
+    enabled, scanned: 0, eligible: 0, projected: 0, unchanged: 0,
+    skippedUnlinked: 0, skippedAmbiguous: 0, skippedNoMember: 0,
+    skippedInactive: 0, skippedManualReview: 0, skippedAlreadyProjected: 0,
+    conflicts: 0, truncated: false,
+  };
+}
+
+/**
+ * Repairs only already source-qualified primary accounts. This deliberately
+ * never matches an account by name or email, creates an invitation, or turns a
+ * business contact into a portal principal. Every projection still passes the
+ * same optimistic source reread, uniqueness checks, transactional audit and
+ * complete-postcondition guard as an administrator-triggered activation.
+ */
+export async function reconcilePrimaryClientPortalWorkspaces(
+  env: Env,
+): Promise<PrimaryClientPortalReconciliationResult> {
+  if (env.CLIENT_PORTAL_PRIMARY_WORKSPACE_RECONCILIATION_ENABLED !== "true")
+    return emptyReconciliation(false);
+  const result = emptyReconciliation(true);
+  const state = await listClientAccountRootActivation(env);
+  if (!state.workspaceMigrationApplied) return result;
+
+  const clientRoots = new Map<string, number>();
+  const organizationRoots = new Map<string, number>();
+  for (const account of state.accounts) {
+    if (account.projectAlphaClientId)
+      clientRoots.set(account.projectAlphaClientId,
+        (clientRoots.get(account.projectAlphaClientId) ?? 0) + 1);
+    if (account.projectAlphaOrganizationId)
+      organizationRoots.set(account.projectAlphaOrganizationId,
+        (organizationRoots.get(account.projectAlphaOrganizationId) ?? 0) + 1);
+  }
+  const sourceIds = new Set(state.sources.map(source => source.clientId));
+  const candidates: typeof state.accounts = [];
+  for (const account of state.accounts) {
+    result.scanned += 1;
+    if (account.status !== "active") { result.skippedInactive += 1; continue; }
+    if (!account.projectAlphaClientId || !sourceIds.has(account.projectAlphaClientId)) {
+      result.skippedUnlinked += 1; continue;
+    }
+    const clientAmbiguous = (clientRoots.get(account.projectAlphaClientId) ?? 0) !== 1;
+    const organizationAmbiguous = account.projectAlphaOrganizationId !== null
+      && (organizationRoots.get(account.projectAlphaOrganizationId) ?? 0) !== 1;
+    if (clientAmbiguous || organizationAmbiguous) {
+      result.skippedAmbiguous += 1; continue;
+    }
+    if (account.activationState === "manual_review") { result.skippedManualReview += 1; continue; }
+    if (account.activeMemberCount < 1) { result.skippedNoMember += 1; continue; }
+    if (account.activationState === "projected") { result.skippedAlreadyProjected += 1; continue; }
+    if (account.activationState !== "projection_missing") { result.skippedUnlinked += 1; continue; }
+    candidates.push(account);
+  }
+  result.eligible = candidates.length;
+  const bounded = candidates.slice(0, PRIMARY_RECONCILIATION_LIMIT);
+  result.truncated = candidates.length > bounded.length;
+  for (const account of bounded) {
+    try {
+      const activation = await activateClientAccountRootAs(env,
+        { type: "system", id: PRIMARY_RECONCILIATION_ACTOR_ID }, account.id,
+        { projectAlphaClientId: account.projectAlphaClientId!, expectedUpdatedAt: account.updatedAt });
+      if (activation.unchanged) result.unchanged += 1;
+      else result.projected += 1;
+    } catch (error) {
+      // Expected races and changed source/account versions are safe skips. The
+      // detailed error remains in the durable account/projection state; logs
+      // and API responses intentionally expose aggregate counts only.
+      if (error instanceof HTTPException && (error.status === 404 || error.status === 409))
+        result.conflicts += 1;
+      else throw error;
+    }
+  }
+  return result;
 }

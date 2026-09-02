@@ -173,6 +173,7 @@ import {
 import {
   activateClientAccountRoot,
   listClientAccountRootActivation,
+  reconcilePrimaryClientPortalWorkspaces,
 } from "./client-account-root-activation";
 import { requestAreaKml, requestAreaKmlFilename } from "./request-area-kml";
 import {
@@ -962,6 +963,12 @@ app.get("/api/client-portal/accounts", async (c) => {
 app.get("/api/admin/client-account-activation", async (c) => {
   await requireGlobal(c.env, c.get("principal"), "operations.manage");
   return c.json(await listClientAccountRootActivation(c.env));
+});
+app.post("/api/admin/client-account-activation/reconcile", async (c) => {
+  await requireGlobal(c.env, c.get("principal"), "operations.manage");
+  const result = await reconcilePrimaryClientPortalWorkspaces(c.env);
+  console.log(JSON.stringify({ event: "client_portal.primary_workspace_reconciliation", ...result }));
+  return c.json(result);
 });
 app.post("/api/admin/client-account-activation/:accountId", async (c) => {
   const principal = c.get("principal");
@@ -3048,6 +3055,13 @@ app.post("/api/admin/integrations/project-alpha/sync", async (c) => {
   const principal = c.get("principal");
   await requireGlobal(c.env, principal, "integrations.manage");
   const result = await syncProjectAlpha(c.env);
+  const clientPortalReconciliation = result.status === "success"
+    ? await reconcilePrimaryClientPortalWorkspaces(c.env)
+    : undefined;
+  if (clientPortalReconciliation) console.log(JSON.stringify({
+      event: "client_portal.primary_workspace_reconciliation",
+      ...clientPortalReconciliation,
+    }));
   if (
     result.changedCollections.some(
       (collection) =>
@@ -3067,7 +3081,7 @@ app.post("/api/admin/integrations/project-alpha/sync", async (c) => {
       result,
     ),
   ]);
-  return c.json(result);
+  return c.json(clientPortalReconciliation ? { ...result, clientPortalReconciliation } : result);
 });
 
 app.notFound((c) => c.json({ error: "Not found" }, 404));
@@ -3112,6 +3126,24 @@ const CLIENT_REQUEST_NOTIFICATION_CRON = "*/5 * * * *";
 const CLIENT_HUB_INDEX_CRON = "2-57/5 * * * *";
 const PROJECT_ALPHA_RECOVERY_CRON = "17 * * * *";
 const NATIVE_DELIVERY_NOTIFICATION_CRON = "4-59/15 * * * *";
+
+export async function runScheduledPrimaryProjectAlphaSync(env: Env) {
+  const result = await syncProjectAlpha(env);
+  if (result.status === "success") {
+    const clientPortalReconciliation = await reconcilePrimaryClientPortalWorkspaces(env);
+    console.log(JSON.stringify({
+      event: "client_portal.primary_workspace_reconciliation",
+      ...clientPortalReconciliation,
+    }));
+  }
+  if (
+    result.changedCollections.some(
+      (collection) => collection === "operations" || collection === "service_locations",
+    )
+  )
+    await rebuildOperationAirspaceMatches(env);
+  return result;
+}
 
 async function scheduled(
   event: ScheduledController,
@@ -3203,18 +3235,7 @@ async function scheduled(
   // Keep the former daily syncs on the same trigger. They run at 08:15 and
   // 08:30 UTC, preserving their order while using one account-level trigger.
   if (hour === 8 && minute === 15)
-    ctx.waitUntil(
-      (async () => {
-        const result = await syncProjectAlpha(env);
-        if (
-          result.changedCollections.some(
-            (collection) =>
-              collection === "operations" || collection === "service_locations",
-          )
-        )
-          await rebuildOperationAirspaceMatches(env);
-      })(),
-    );
+    ctx.waitUntil(runScheduledPrimaryProjectAlphaSync(env));
   if (hour === 8 && minute === 30) ctx.waitUntil(reconcileFileIndex(env));
   if (hour === 8 && minute === 45) ctx.waitUntil(runRetention(env));
   if (r2PurgeEnabled(env)) ctx.waitUntil(purgeTrash(env));

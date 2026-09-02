@@ -7,6 +7,9 @@ const mocks = vi.hoisted(() => ({
   requireMutationSecurity: vi.fn(),
   listActivation: vi.fn(),
   activateRoot: vi.fn(),
+  reconcilePrimary: vi.fn(),
+  syncProjectAlpha: vi.fn(),
+  auditStatement: vi.fn(),
 }));
 
 vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {}, DurableObject: class {} }));
@@ -19,10 +22,16 @@ vi.mock("../src/worker/acl", async importOriginal => ({
 vi.mock("../src/worker/request-security", async importOriginal => ({
   ...await importOriginal<typeof import("../src/worker/request-security")>(),
   requireMutationSecurity: mocks.requireMutationSecurity,
+  auditStatement: mocks.auditStatement,
+}));
+vi.mock("../src/worker/project-alpha", async importOriginal => ({
+  ...await importOriginal<typeof import("../src/worker/project-alpha")>(),
+  syncProjectAlpha: mocks.syncProjectAlpha,
 }));
 vi.mock("../src/worker/client-account-root-activation", () => ({
   listClientAccountRootActivation: mocks.listActivation,
   activateClientAccountRoot: mocks.activateRoot,
+  reconcilePrimaryClientPortalWorkspaces: mocks.reconcilePrimary,
 }));
 
 import worker from "../src/worker/index";
@@ -39,6 +48,7 @@ const env = {
   ENVIRONMENT: "development",
   EXPECTED_HOST: "ops.example",
   INCOMING_EXPECTED_HOST: "incoming.example",
+  OPS_DB: { batch: vi.fn() },
 };
 
 describe("client account root activation routes", () => {
@@ -51,6 +61,15 @@ describe("client account root activation routes", () => {
     mocks.requireMutationSecurity.mockReset().mockResolvedValue(undefined);
     mocks.listActivation.mockReset().mockResolvedValue({ workspaceMigrationApplied: false, accounts: [], sources: [] });
     mocks.activateRoot.mockReset().mockResolvedValue({ accountId: "account-a", unchanged: false });
+    mocks.reconcilePrimary.mockReset().mockResolvedValue({
+      enabled: true, scanned: 3, eligible: 1, projected: 1, unchanged: 0,
+      skippedUnlinked: 1, skippedAmbiguous: 0, skippedNoMember: 1,
+      skippedInactive: 0, skippedManualReview: 0, skippedAlreadyProjected: 0,
+      conflicts: 0, truncated: false,
+    });
+    mocks.syncProjectAlpha.mockReset().mockResolvedValue({ status: "success", records: 2, changedCollections: [] });
+    mocks.auditStatement.mockReset().mockResolvedValue({});
+    vi.mocked(env.OPS_DB.batch).mockReset().mockResolvedValue([]);
   });
 
   it("requires an administrator and global operations.manage for both preflight and activation", async () => {
@@ -94,6 +113,28 @@ describe("client account root activation routes", () => {
     );
   });
 
+  it("exposes reconciliation only as an explicit protected administrator recovery action", async () => {
+    const response = await worker.fetch(new Request(
+      "https://ops.example/api/admin/client-account-activation/reconcile",
+      { method: "POST", headers: { Origin: "https://ops.example" } },
+    ), env as never, executionCtx);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ enabled: true, scanned: 3, projected: 1 });
+    expect(mocks.requireMutationSecurity).toHaveBeenCalledOnce();
+    expect(mocks.reconcilePrimary).toHaveBeenCalledOnce();
+    expect(mocks.activateRoot).not.toHaveBeenCalled();
+
+    mocks.sqlScope.mockResolvedValue({
+      global: false, deniedGlobal: false, divisions: [], deniedDivisions: [], assigned: false, own: false,
+    });
+    const denied = await worker.fetch(new Request(
+      "https://ops.example/api/admin/client-account-activation/reconcile",
+      { method: "POST", headers: { Origin: "https://ops.example" } },
+    ), env as never, executionCtx);
+    expect(denied.status).toBe(403);
+    expect(mocks.reconcilePrimary).toHaveBeenCalledOnce();
+  });
+
   it("does not invoke activation when same-origin/CSRF validation fails", async () => {
     mocks.requireMutationSecurity.mockRejectedValue(new Error("csrf denied"));
     const response = await worker.fetch(new Request(
@@ -103,5 +144,27 @@ describe("client account root activation routes", () => {
     ), env as never, executionCtx);
     expect(response.status).toBe(500);
     expect(mocks.activateRoot).not.toHaveBeenCalled();
+  });
+
+  it("reconciles only after a successful primary manual sync and preserves a disabled response", async () => {
+    mocks.syncProjectAlpha.mockResolvedValueOnce({ status: "disabled", records: 0, changedCollections: [] });
+    const disabled = await worker.fetch(new Request(
+      "https://ops.example/api/admin/integrations/project-alpha/sync",
+      { method: "POST", headers: { Origin: "https://ops.example" } },
+    ), env as never, executionCtx);
+    expect(disabled.status).toBe(200);
+    expect(await disabled.json()).toEqual({ status: "disabled", records: 0, changedCollections: [] });
+    expect(mocks.reconcilePrimary).not.toHaveBeenCalled();
+
+    const success = await worker.fetch(new Request(
+      "https://ops.example/api/admin/integrations/project-alpha/sync",
+      { method: "POST", headers: { Origin: "https://ops.example" } },
+    ), env as never, executionCtx);
+    expect(success.status).toBe(200);
+    expect(await success.json()).toMatchObject({
+      status: "success",
+      clientPortalReconciliation: { enabled: true, projected: 1 },
+    });
+    expect(mocks.reconcilePrimary).toHaveBeenCalledOnce();
   });
 });

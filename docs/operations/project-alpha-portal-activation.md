@@ -54,6 +54,14 @@ The base hierarchy rollout does not activate service assignments, invitation or
 membership management, automated identity eligibility, deny-policy management,
 or any other client feature gate.
 
+Migration `0190_portal_contact_assignments_v4.sql` is a dormant, receiver-first
+schema extension. It leaves the v2/v3 authority tables and lifecycle triggers
+unchanged and adds separate v4 marker and contact-assignment tables. Applying
+the migration does not authorize Project Alpha to emit schema v4 and does not
+enable a contact-role read adapter. A v4 producer requires its own reviewed
+activation plan and matching fixtures after rebasing onto the latest Project
+Alpha `main`.
+
 ## Preflight: no writes
 
 Stop at the first failed check. Save redacted command output with timestamps;
@@ -69,7 +77,9 @@ never save secret values or complete authentication headers.
    `apps/client`. It must report no pending migrations for the reviewed artifact,
    including `0121_client_workspace_hierarchy_v2.sql`,
    `0125_project_alpha_portal_projection.sql`, and
-   `0129_portal_hierarchy_relations.sql`. Do not activate against a partially
+   `0129_portal_hierarchy_relations.sql`. If the deployed receiver contains the
+   dormant v4 extension, also confirm
+   `0190_portal_contact_assignments_v4.sql` is applied. Do not activate against a partially
    migrated database and do not roll migrations back.
 4. Read back Worker custom domains/routes. Confirm the canonical
    `portal.ledgetopdroneservices.com` custom domain reaches `ltds-clients`, the
