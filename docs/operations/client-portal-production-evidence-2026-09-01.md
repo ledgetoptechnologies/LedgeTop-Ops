@@ -110,6 +110,24 @@ Client Hub slice. They do not replace a deliberate production mutation test for
 note create/edit/delete, and they do not change the portal-projection blockers
 below.
 
+### Windows full-suite transport limitation
+
+The post-`0191` monolithic Client suite on Windows did not produce a clean
+package-level result. Two unrelated concurrent Miniflare tests failed at the
+loopback transport with `fetch failed`; a repeated projection-file run exposed
+the underlying cause as `connect EADDRINUSE 127.0.0.1:49202`. At that point the
+host had 2,043 loopback sockets in `TIME_WAIT` inside Windows' 16,384-port
+dynamic range. This is a test-runtime transport limit, not a D1 assertion or
+portal state failure.
+
+The exact portal staging race passed 10/10 in fresh isolated processes, the
+invitation publication race passed 4/4, and both exact cases passed together
+2/2. The focused portal projection group also passed 34/34 after the wire
+contract fix. Do not add automatic retries around these mutations: a transport
+failure is commit-ambiguous and a retry could hide an actual safety defect. A
+Linux CI run, or bounded Windows Miniflare partitions with socket recovery
+between them, remains required for an authoritative complete-package gate.
+
 ## Next safe activation sequence
 
 1. Provision the reviewed connector credential envelope independently to every
