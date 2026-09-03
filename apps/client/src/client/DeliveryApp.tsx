@@ -617,7 +617,7 @@ export function DeliveryApp({ namespace = "staff", initialRoute: consumedRoute }
       {bulkProgress && <BulkProgress progress={bulkProgress} />}
       {bulkDownloads.length > 1 && <section className="bulk-download-parts" aria-label="Prepared download parts">
         <strong>{bulkDownloads.length} resumable ZIP parts prepared</strong>
-        <p>Your browser was asked to download every part. If it blocked multiple downloads, use the links below. Each part can be resumed from the browser downloads screen for 24 hours.</p>
+        <p>Your browser was asked to download every part. If it blocked multiple downloads, use the links below. Each part can be resumed from the browser downloads screen for seven days, or until the delivery link expires or is revoked.</p>
         <div>{bulkDownloads.map(download => <a key={download.part} className="button button-ghost button-small" href={download.downloadUrl} download>Download part {download.part} of {download.partCount}{typeof download.size === "number" ? ` · ${formatBytes(download.size)}` : ""}</a>)}</div>
       </section>}
       {renderStart > 0 && <div className="public-delivery-pagination"><button type="button" className="button-ghost" onClick={() => setRenderStart(current => Math.max(0, current - DELIVERY_RENDER_STEP))}>Show earlier items</button></div>}

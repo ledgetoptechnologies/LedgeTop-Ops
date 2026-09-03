@@ -148,6 +148,7 @@ test("oversized Download all keeps every resumable archive part visible when aut
   await expect(fallback.getByRole("link", { name: /Download part 1 of 2/ })).toHaveAttribute("href", "/downloads/part-01.zip");
   await expect(fallback.getByRole("link", { name: /Download part 2 of 2/ })).toHaveAttribute("href", "/downloads/part-02.zip");
   await expect(fallback).toContainText("browser downloads screen");
+  await expect(fallback).toContainText("seven days");
 });
 
 test("single-file Download is discoverable by hover and keyboard without exposing storage URLs", async ({ page }) => {

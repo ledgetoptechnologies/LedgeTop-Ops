@@ -8,6 +8,8 @@ import { listDownloadableObjects, type DownloadTombstone } from "./downloadable-
 export { classifyWorkflowFailure } from "./bulk-download-errors";
 
 export const MAX_ARCHIVE_SOURCE_BYTES = 100 * 1024 * 1024 * 1024;
+export const BULK_DOWNLOAD_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+export const BULK_DOWNLOAD_RETENTION_DURATION = "7 days";
 const CRC_CHUNK = 8 * 1024 * 1024;
 const CRC_PROGRESS_CHECKPOINT = 64 * 1024 * 1024;
 const CRC_FILE_CHECKPOINT = 25;
@@ -276,7 +278,7 @@ export class BulkDownloadWorkflow extends WorkflowEntrypoint<Env> {
                 (id,share_id,share_version,request_json,status,manifest_key,archive_key,expires_at,parent_job_id,part_index,part_count,file_count,total_bytes)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
                 childId, job.share_id, job.share_version, "{}", "queued", manifestKey, archiveKey,
-                new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), job.id, partNumber, partitions.length,
+                new Date(Date.now() + BULK_DOWNLOAD_RETENTION_MS).toISOString(), job.id, partNumber, partitions.length,
                 part.sources.length, part.sources.reduce((total, source) => total + source.size, 0),
               ).run();
               try { await this.env.BULK_DOWNLOAD_WORKFLOW.create({ id: childId, params: { jobId: childId, prepared: true } }); }
@@ -382,11 +384,11 @@ export class BulkDownloadWorkflow extends WorkflowEntrypoint<Env> {
       }
       await step.do("complete-multipart-upload", { retries: { limit: 3, delay: "10 seconds", backoff: "exponential" } }, async () => { const uploadRef = this.env.DATA_BUCKET.resumeMultipartUpload(job.archive_key, upload.uploadId); await uploadRef.complete(parts); return { archiveSize: layout.archiveSize }; });
       await step.do("mark-ready", async () => {
-        const result = await db(this.env).prepare("UPDATE bulk_download_jobs SET status='ready',processed_files=file_count,processed_bytes=total_bytes,multipart_upload_id=NULL,expires_at=datetime('now','+24 hours'),updated_at=datetime('now') WHERE id=? AND status IN ('queued','running')").bind(job.id).run();
+        const result = await db(this.env).prepare("UPDATE bulk_download_jobs SET status='ready',processed_files=file_count,processed_bytes=total_bytes,multipart_upload_id=NULL,expires_at=datetime('now','+7 days'),updated_at=datetime('now') WHERE id=? AND status IN ('queued','running')").bind(job.id).run();
         if (!result.meta.changes) throw new Error("job-no-longer-active");
         return { status: "ready" };
       });
-      await step.sleep("temporary-download-retention", "24 hours");
+      await step.sleep("temporary-download-retention", BULK_DOWNLOAD_RETENTION_DURATION);
       await step.do("expire-temporary-download", async () => {
         await this.env.DATA_BUCKET.delete([job.archive_key, job.manifest_key]);
         await db(this.env).prepare("UPDATE bulk_download_jobs SET status='expired',updated_at=datetime('now') WHERE id=? AND status='ready'").bind(job.id).run();

@@ -13,6 +13,7 @@ import { handleProjectAlphaServiceAssignmentsRequest, handleRegisteredProjectAlp
 import { friendlyBulkFailure } from "./bulk-download-errors";
 import type { Env, ShareRow } from "./types";
 export { BulkDownloadWorkflow } from "./workflow";
+import { BULK_DOWNLOAD_RETENTION_MS } from "./workflow";
 export { CloudTransferWorkflow } from "./cloud-transfer/workflow";
 import { cleanupCloudTransfers } from "./cloud-transfer/cleanup";
 import { decryptCloudSecret, decryptWithRotation, encryptCloudSecret, readGrantedSource } from "./cloud-transfer/grants";
@@ -801,7 +802,7 @@ async function expireReadyBulkJob(c: any, job: any): Promise<void> {
 
 app.post("/api/public/shares/:publicId/bulk-download", async c => {
   const share = c.get("share") as ShareRow;requireFolderShareFeature(share); const request = validateBulkRequest(await c.req.json().catch(() => ({}))); await consumeBulkQuota(c, share);
-  const jobId = randomSecret(16); const encodedShare = encodeURIComponent(share.public_id!); const manifestKey = `_ltds/tmp-downloads/${share.public_id}/${jobId}/manifest.json`; const archiveKey = `_ltds/tmp-downloads/${share.public_id}/${jobId}/archive.zip`; const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+  const jobId = randomSecret(16); const encodedShare = encodeURIComponent(share.public_id!); const manifestKey = `_ltds/tmp-downloads/${share.public_id}/${jobId}/manifest.json`; const archiveKey = `_ltds/tmp-downloads/${share.public_id}/${jobId}/archive.zip`; const expiresAt = new Date(Date.now() + BULK_DOWNLOAD_RETENTION_MS).toISOString();
   await primaryDb(c.env).prepare("INSERT INTO bulk_download_jobs (id,share_id,share_version,request_json,status,manifest_key,archive_key,expires_at) VALUES (?,?,?,?,?,?,?,?)").bind(jobId, share.id, share.share_version, JSON.stringify(request), "queued", manifestKey, archiveKey, expiresAt).run();
   try { await c.env.BULK_DOWNLOAD_WORKFLOW.create({ id: jobId, params: { jobId } }); }
   catch (error) {

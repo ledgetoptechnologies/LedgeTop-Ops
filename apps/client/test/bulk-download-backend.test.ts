@@ -16,6 +16,8 @@ import { encodeItemRef } from "../src/worker/files";
 import { BULK_DOWNLOAD_RESUME_COOKIE, createBulkDownloadResumeCookie, createSessionCookie } from "../src/worker/security";
 import {
   assemblyProgressBytes,
+  BULK_DOWNLOAD_RETENTION_DURATION,
+  BULK_DOWNLOAD_RETENTION_MS,
   classifyWorkflowFailure,
   crcProgressBytes,
   estimateBulkPreparation,
@@ -587,6 +589,11 @@ describe("bulk-download CRC source reads", () => {
 });
 
 describe("bulk-download failures and cleanup", () => {
+  it("retains prepared archives long enough for slow resumable downloads", () => {
+    expect(BULK_DOWNLOAD_RETENTION_MS).toBe(7 * 24 * 60 * 60 * 1000);
+    expect(BULK_DOWNLOAD_RETENTION_DURATION).toBe("7 days");
+  });
+
   it("extends resumable authorization through archive retention without passing share expiry", () => {
     const now = Date.parse("2026-07-27T12:00:00.000Z");
     const job = { expires_at: "2026-07-28T12:00:00.000Z" };

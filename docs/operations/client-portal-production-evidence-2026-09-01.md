@@ -362,3 +362,8 @@ restoring, or otherwise changing client authority.
   joined delegated-access gate. Client type checking and production build also
   passed. This does not change the outstanding live portal-authority blockers
   documented above.
+- Follow-up slow-client hardening extended prepared archive retention and its
+  exact-path resume credential from 24 hours to seven days, still bounded by
+  an earlier delivery-link expiration or immediate revocation. Forty-three
+  focused archive tests, 26 desktop/mobile public-delivery browser cases,
+  Client type checking, and the production build passed.
