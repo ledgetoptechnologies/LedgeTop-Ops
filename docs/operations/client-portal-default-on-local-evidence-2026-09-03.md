@@ -113,7 +113,11 @@ for the newly-active-deny insertion race. Earlier cases correctly invalidated
 the workspace, directory, and legacy folder projection via `0195`, while setup
 restored only memberships/entitlements. Restoring those three fixture records
 made the full feedback file pass 25/25 on Linux in 14.37 seconds. Production
-authorization was unchanged. A complete Client rerun remains required.
+authorization was unchanged; a complete Client rerun was required afterward.
+That corrected, frozen Client rerun has now completed successfully on Linux:
+990/990 Vitest tests and 9/9 deployment-preflight tests, exit 0. The runtime
+candidate is checkpointed locally as `137b286`; only evidence documentation
+changed after its frozen test snapshot. Nothing has been pushed or deployed.
 The native-resource full file subsequently passed 38/38 in 580.46 seconds.
 Operations' Linux gate passed all 1,857 executed tests, but one further file
 could not collect because the isolated archive omitted its `apps/ops-sync`
@@ -125,6 +129,13 @@ With the sync service included, the previously uncollected ordering file passed
 full-gate harness retains all application source but installs only the required
 lockfile-owned Client, Operations, and ops-sync dependency trees. Neither
 harness failure is counted as an application pass or failure.
+
+The final corrected frozen Operations gate subsequently passed all 1,859 tests
+across 180 files, exit 0, with structured report `success=true` and zero failed
+or pending tests. Final Client covered 84 files and passed 990/990, plus 9/9
+preflight tests. All disposable test containers and source archives were removed;
+only local result reports remain. Project Alpha's exact-commit frontend tests
+also passed 29/29 on Node 24.20.0. These are local results, not live acceptance.
 
 The new explicit release-profile helper, actual preflight runner with injected
 secret names, rollout tests, and source-layout checks passed 31/31 together.
