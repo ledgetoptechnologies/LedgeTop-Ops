@@ -18,6 +18,12 @@ It verifies the shared two-domain Access boundary and preserved public links,
 but also records that no portal workspace or membership was provisioned at that
 checkpoint. Treat that state as partially deployed, not live accepted.
 
+The [September 3 Access consolidation evidence](client-portal-access-evidence-2026-09-03.md)
+supersedes that checkpoint's hostname-to-application mapping: both portal
+domains now share the original application, while the legacy client domain has
+its own application. Private-path redirects and public fake-link shells were
+verified, but authenticated J7 workflows remain unverified.
+
 The ordered activation dependencies, rollback rules, bounded local test
 partitions, and joined workflow matrix are maintained in the
 [client portal rollout manifest](client-portal-rollout-manifest.md). That

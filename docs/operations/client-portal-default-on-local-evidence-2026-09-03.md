@@ -169,3 +169,124 @@ build configuration; that configuration must also be checked before pushing.
 
 The full phased acceptance matrix remains in
 [the rollout manifest](client-portal-rollout-manifest.md).
+
+## Subsequent live readiness readback — September 3
+
+The user-specified temporary Cloudflare token restored authorized API access.
+The earlier `7403` failure no longer blocks readback. No database migration,
+Worker deployment, feature activation, or provisioning was performed in this
+readiness pass.
+
+- Client's latest applied migration is `0194_client_delegated_share_expiry.sql`;
+  `0195` remains pending. Operations has
+  `0052_project_operational_reassignment_recovery.sql` applied.
+- Both databases returned zero rows from `PRAGMA foreign_key_check`. Readback
+  reported zero rows written.
+- Client has **zero** portal-v2 workspaces, workspace memberships, directory
+  generations, and directory checkpoints. This proves that the missing
+  workspace indicators are not merely a stale Client Hub display.
+- Both Workers retain false hierarchy, automatic-eligibility, and identity-deny
+  flags. Operations deny-management is false; Client's optional deny-management
+  flag is absent. Client invitation email remains false.
+- The dedicated Worker secret-list API confirms that
+  `PROJECT_ALPHA_PORTAL_HMAC_SECRET` is absent from `ltds-clients`.
+  Only secret names/types were inspected, never secret values. The ordinary
+  Operations connection does not establish portal-signing readiness.
+- Client deployment `7885663d-ff10-4b8e-8f2a-1ef824474ef4` serves version
+  `1580d13d-d857-419d-8913-77c3edae40f0` at 100%; Operations deployment
+  `85e5416d-8b40-4e03-9d21-199ecbce2c0c` serves version
+  `2c08b903-d732-4bc9-8a96-fdea3997053d` at 100%.
+- Fresh remote fetches still show the prepared Ops branch two commits ahead,
+  zero behind main `fcb7d61`, and Alpha six ahead, zero behind main `11fca5ff`.
+  No release was pushed during this pass.
+
+Next: verify the primary Alpha producer's deployment-managed portal key and
+runtime configuration, pair its signing secret with the receiver without
+repurposing directory-sync credentials, then follow the recovery/migration and
+coordinated release gates. Cloudflare account access alone does not grant access
+to the Project Alpha deployment environment. Do not activate eligibility or
+claim automatic provisioning until a signed generation is received and the
+joined enrollment/revocation checks pass.
+
+The separately completed Access application consolidation is recorded in
+[the September 3 Access evidence](client-portal-access-evidence-2026-09-03.md).
+
+## Privacy-safe producer configuration follow-up
+
+The user declined administrator login/client-record access. No Project Alpha
+production data or configuration was accessed in this follow-up; LTT remains
+untouched. Local Alpha changes align the non-secret receiver override between
+web and cron, including the scheduled-job environment allowlist. Regression
+coverage verifies that cron can use encrypted stored credentials without
+receiving the raw signing-secret environment map.
+
+A standalone environment-only diagnostic is packaged for both containers.
+It does not bootstrap the application, query the database, or print values.
+The companion `docs/admin/portal-private-readiness.md` includes a presence-only
+check for existing images. Neither check establishes live signing readiness.
+
+Local Windows PHP 8.2 full PHPUnit run completed with exit 0: 767 tests,
+6,207 assertions, 91 skipped, no failures. Final focused provisioning,
+administration-wiring, and diagnostic tests passed: 44 tests, 266 assertions.
+The full run began before the final cron allowlist/test-assertion edits; those
+edits were covered by the final focused run. Docker verification was unavailable
+because local Docker configuration/engine access was denied. These results are
+not a production deployment or authenticated portal proof. Changes remain local.
+
+## Isolated ZIP maintenance candidate
+
+The user reported slow preparation of a 4,809-file, approximately 30 GB public
+delivery. ZIP performance work was isolated from this portal release:
+`codex/bulk-zip-performance`, commit `14d5fed`, directly on main `fcb7d61`.
+Its eleven changed files contain only ZIP generation, progress display, cleanup,
+regressions, and a runbook; no configuration, migration, credential, or portal
+eligibility changes. The main-based worktree is clean.
+
+Fresh pinned dependencies on that isolated branch passed TypeScript, 69 focused
+ZIP/backend/client/concurrency tests, the production build, and two mocked
+desktop/mobile browser tests. This is stronger than the earlier integration
+branch result, but remains local evidence. Publication is held for the explicit
+maintenance-release decision because the normal portal receiver preflight still
+requires the absent signing secret. No running job was cancelled and no source
+objects or public-link authority were changed.
+
+### Maintenance release decision and final state
+
+The user subsequently authorized the limited ZIP-only maintenance release.
+It is now published on main: runtime commit `14d5fed`, evidence commit
+`fc183d0`. Worker version `bf225051-1e8e-49ae-9e4c-4457a2107494` was deployed
+at 100% on September 3 at 19:47:38 UTC. All bindings matched the captured
+pre-release settings exactly; both portal health endpoints returned HTTP 200.
+No migrations, signing secrets, Access policies, or feature flags changed.
+The original large Workflow remained running on its original version and was
+not cancelled. This supersedes the candidate's publication hold above only;
+it does not supersede any portal readiness or live-acceptance gate.
+
+The explicitly approved direct maintenance deployment did not weaken the
+normal portal preflight. Its missing receiver signing secret still blocks
+the coordinated portal activation. Do not infer that the prepared portal
+commits were published because the ZIP maintenance code is now on main.
+
+Before reconciling this prepared branch, account for the equivalent ZIP patch
+already on main; do not duplicate or undo it. Preserve concurrent Alpha
+onboarding/document work and the user's restriction on production client-data
+access. The next external dependency remains primary Alpha producer signing
+readiness, which can be checked by its administrator without providing login
+credentials or client records. Environment presence checks alone do not prove
+stored credentials, matched signing keys, or successful signed delivery.
+
+## Final Alpha configuration verification
+
+The final web/cron configuration and privacy-safe diagnostic were committed
+locally as `443f9b31` on `codex/portal-default-on`. A fresh full Windows PHP 8.2
+run over that final source state passed with exit 0: 767 tests, 6,210 assertions,
+91 skipped, no failures, in 3m54s. This supersedes the earlier full-run timing
+caveat for the final cron allowlist edits. `bash -n cron/entrypoint.sh` passed.
+Running the standalone diagnostic locally emitted only fixed booleans/statuses;
+that local environment report is not production configuration evidence.
+
+No Alpha push, image publication, production migration, secret change, or client
+data access occurred. Generated `.phpunit.cache/test-results` was excluded from
+the commit. The remaining release gates still require the primary producer's
+private configuration verification, receiver signing configuration, migration
+and rollout checks, and live authenticated acceptance.

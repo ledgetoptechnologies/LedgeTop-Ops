@@ -58,9 +58,9 @@ The client portal uses `portal.ledgetopdroneservices.com` as its canonical
 origin and `portal.ledgetoptechnologies.com` as an alternate presentation
 origin. `client.ledgetopdroneservices.com` is legacy compatibility only. The
 three hosts use the same Worker, D1 database, verified principal, memberships,
-and grants. Cloudflare's per-application destination limit requires the
-canonical Drone Services portal paths to use a second, narrowly scoped Access
-application. `CLIENT_ACCESS_AUDS` lists both reviewed client audiences while
+and grants. Both `portal.*` hosts use the original Client Portal Access
+application; the legacy `client.*` paths use a separate, narrowly scoped
+Legacy Client Domain application. `CLIENT_ACCESS_AUDS` lists both reviewed client audiences while
 `CLIENT_ACCESS_AUD` retains the original audience for compatibility. Never
 infer ownership or authorization from the request hostname.
 
@@ -78,13 +78,20 @@ Keep the client Access audience, group, and provisioning automation separate
 from Operations staff ACL provisioning.
 
 For the dual-domain rollout, retain the original Access application and
-audience for the legacy and Technologies portal paths. Use a second application
-only for `/portal*` and `/api/client*` on the canonical Drone Services portal,
-copying the same current eligibility rule. Public Bypass applications cover
+audience for `/portal*` and `/api/client*` on both portal domains. Keep the
+second application and its existing audience only for those two paths on the
+legacy client domain. Both audiences remain accepted; do not remove the legacy
+audience merely because new links use the portal hostname. The September 3
+consolidation preserved the policy rules on both applications; see the
+[dated Access evidence and rollback precautions](operations/client-portal-access-evidence-2026-09-03.md).
+Public Bypass applications cover
 only the explicit `/s/*`, `/client-share/*`, `/api/public/shares/*`,
-`/api/public/cloud-transfers/*`, and asset paths. `/api/internal/*` stays on the
-legacy compatibility host during the Project Alpha transition and remains
-independently signed. Existing IDs, credentials, cookies, and revocation state
+`/api/public/cloud-transfers/*`, and asset paths. The canonical
+`portal.ledgetopdroneservices.com/api/internal/project-alpha/*` service-auth
+application remains separate and independently signed; legacy internal
+projection routes reject requests. Follow the
+[Project Alpha activation runbook](operations/project-alpha-portal-activation.md)
+for this machine boundary. Existing IDs, credentials, cookies, and revocation state
 are not rewritten. Cloudflare documents path matching and specificity in
 [Application paths](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/).
 
