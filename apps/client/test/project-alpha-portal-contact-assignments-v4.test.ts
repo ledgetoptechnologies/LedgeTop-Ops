@@ -149,6 +149,8 @@ describe("Project Alpha schema v4 informational contact assignments", () => {
         primary_billing: 1,
         send_project_invoices: 0,
       });
+    await expect(db.prepare(`UPDATE pa_portal_projection_contact_assignments SET primary_contact=1
+      WHERE generation_id='wire-backfill-generation-v4' AND public_id='wire-legacy-assignment'`).run()).rejects.toThrow();
     await expect(db.prepare(`UPDATE pa_portal_projection_generations SET wire_schema_version=3
       WHERE id='wire-backfill-generation-v4'`).run()).rejects.toThrow("portal projection wire contract is immutable");
     await expect(db.prepare(`UPDATE pa_portal_projection_generation_contracts SET schema_version=2
@@ -202,6 +204,7 @@ describe("Project Alpha schema v4 informational contact assignments", () => {
       ORDER BY name`).all<{ name: string; sql: string }>();
     expect(tableDefinitions.results).toHaveLength(2);
     for (const table of tableDefinitions.results) {
+      expect(table.sql).toContain("scope_type<>'project' OR primary_contact=0");
       expect(table.sql).toContain("scope_type='project' OR (primary_billing=0 AND send_project_invoices=0 AND can_view_invoice_links=0)");
       expect(table.sql).not.toContain("primary_billing=0 OR send_project_invoices=1");
     }
@@ -227,11 +230,26 @@ describe("Project Alpha schema v4 informational contact assignments", () => {
        primary_contact,primary_billing,send_project_invoices,can_view_invoice_links,source_version,active)
       VALUES(?,? ,?,?,'organization',?,'billing_contact',0,1,0,0,'invalid',1)`)
       .bind(stagedGeneration, "pa-invalid-staged-non-project-billing", "pa-contact-manager", "pa-client-manager", "pa-org-contacts").run()).rejects.toThrow();
+    await expect(db.prepare(`INSERT INTO pa_portal_projection_contact_assignments
+      (generation_id,public_id,contact_public_id,client_public_id,scope_type,scope_public_id,role,
+       primary_contact,primary_billing,send_project_invoices,can_view_invoice_links,source_version,active)
+      VALUES(?,?,?,?,'project',?,'project_contact',1,0,0,0,'invalid',1)`)
+      .bind(stagedGeneration, "pa-invalid-staged-project-primary", "pa-contact-manager", "pa-client-manager", "pa-project-north").run()).rejects.toThrow();
+    await expect(db.prepare(`UPDATE pa_portal_projection_contact_assignments SET primary_contact=1
+      WHERE generation_id=? AND public_id=?`).bind(stagedGeneration, projectAssignment.publicId).run()).rejects.toThrow();
     await expect(db.prepare(`INSERT INTO portal_v2_contact_assignments
       (workspace_id,generation_id,public_id,contact_public_id,client_public_id,scope_type,scope_public_id,role,
        primary_contact,primary_billing,send_project_invoices,can_view_invoice_links,source_version,active)
       VALUES(?,?,?, ?,?,'client',?,'billing_contact',0,0,1,0,'invalid',1)`)
       .bind(page.workspaceId, selectedGeneration, "pa-invalid-selected-non-project-invoices", "pa-contact-manager", "pa-client-manager", "pa-client-manager").run()).rejects.toThrow();
+    await expect(db.prepare(`INSERT INTO portal_v2_contact_assignments
+      (workspace_id,generation_id,public_id,contact_public_id,client_public_id,scope_type,scope_public_id,role,
+       primary_contact,primary_billing,send_project_invoices,can_view_invoice_links,source_version,active)
+      VALUES(?,?,?,?,?,'project',?,'project_contact',1,0,0,0,'invalid',1)`)
+      .bind(page.workspaceId, selectedGeneration, "pa-invalid-selected-project-primary", "pa-contact-manager", "pa-client-manager", "pa-project-north").run()).rejects.toThrow();
+    await expect(db.prepare(`UPDATE portal_v2_contact_assignments SET primary_contact=1
+      WHERE workspace_id=? AND generation_id=? AND public_id=?`)
+      .bind(page.workspaceId, selectedGeneration, projectAssignment.publicId).run()).rejects.toThrow();
 
     expect((await deliver(contactAssignmentFixture.valid.roleUpdateEvent)).status).toBe(200);
     expect(await db.prepare(`SELECT role,primary_billing,send_project_invoices FROM portal_v2_contact_assignments assignment

@@ -24,6 +24,7 @@ CREATE TABLE pa_portal_projection_contact_assignments_v2 (
   active INTEGER NOT NULL CHECK (active IN (0,1)),
   PRIMARY KEY (generation_id,public_id),
   UNIQUE (generation_id,scope_type,scope_public_id,contact_public_id),
+  CHECK (scope_type<>'project' OR primary_contact=0),
   CHECK (scope_type='project' OR (primary_billing=0 AND send_project_invoices=0 AND can_view_invoice_links=0)),
   FOREIGN KEY (generation_id) REFERENCES pa_portal_projection_generations(id) ON DELETE CASCADE
 );
@@ -79,6 +80,7 @@ CREATE TABLE portal_v2_contact_assignments_v2 (
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   PRIMARY KEY (workspace_id,generation_id,public_id),
   UNIQUE (workspace_id,generation_id,scope_type,scope_public_id,contact_public_id),
+  CHECK (scope_type<>'project' OR primary_contact=0),
   CHECK (scope_type='project' OR (primary_billing=0 AND send_project_invoices=0 AND can_view_invoice_links=0)),
   FOREIGN KEY (generation_id,workspace_id)
     REFERENCES portal_v2_directory_generations(id,workspace_id) ON DELETE CASCADE
