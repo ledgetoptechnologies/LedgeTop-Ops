@@ -25,13 +25,15 @@ v2 contract. The exact reviewed LTDS compatibility source is
 `b1ee064d8e9a78ff1fbc43c671bff4c2c58d4c38`; this is the exact reviewed LTDS
 implementation commit supplied with this handoff; do not substitute a branch tip
 or another checkout. Treat that commit's repository-relative
-`docs/client-portal-v2-architecture.md`, `docs/project-alpha.md`, and the five
+`docs/client-portal-v2-architecture.md`, `docs/project-alpha.md`, and the six
 fixture files below as normative. Verify these SHA-256 values before editing:
 
 - `packages/shared/fixtures/project-alpha-portal-v2.json`:
   `808185cb582476f7e64f5a2c1f8c9c283d1bb5c4db1550227b19ff82887301bd`
 - `packages/shared/fixtures/project-alpha-portal-relations-v3.json`:
   `87508874a56c76eb768e1b2a87fe77dec28b58fb06802c45d85c640685890a28`
+- `packages/shared/fixtures/project-alpha-portal-contact-assignments-v4.json`:
+  `c545eebf02cec56013ede3ebe0dcc1c7c11947dc8e5592905c3a9d36ffda434b`
 - `packages/shared/fixtures/project-alpha-catalog-v2.json`:
   `9626ee5147ac9cd2198e6bca58eee9bb464c2105861c679a16745e1d9bf022fe`
 - `packages/shared/fixtures/project-alpha-pricing-hint-v1.json`:
@@ -169,6 +171,12 @@ Implement this as additive, default-off, independently gated capabilities:
      byte-for-byte and every positive/negative specimen is exercised in PA
      contract tests, a full snapshot is accepted in staging, and the LTDS
      relation flag is separately approved.
+     Do not publish schema-v4 contact assignments until
+     `packages/shared/fixtures/project-alpha-portal-contact-assignments-v4.json`
+     is copied byte-for-byte and every positive and negative specimen is
+     exercised in PA producer contract tests. In particular,
+     `primaryBilling=true` does not imply `sendProjectInvoices=true`; all three
+     billing flags remain valid only for project-scoped assignments.
 
 3. **Sanitized Service Library projection**
    - Add an immutable public ID and opaque immutable source version that changes

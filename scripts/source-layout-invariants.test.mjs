@@ -22,6 +22,7 @@ function filesUnder(relativeDirectory, predicate = () => true) {
 const projectAlphaCompatibilityFixtures = [
   "packages/shared/fixtures/project-alpha-portal-v2.json",
   "packages/shared/fixtures/project-alpha-portal-relations-v3.json",
+  "packages/shared/fixtures/project-alpha-portal-contact-assignments-v4.json",
   "packages/shared/fixtures/project-alpha-catalog-v2.json",
   "packages/shared/fixtures/project-alpha-pricing-hint-v1.json",
   "packages/shared/fixtures/project-alpha-draft-quote-v1.json",
@@ -268,6 +269,11 @@ test("the Project Alpha handoff stays pinned to the reviewed compatibility corpu
       `${fixtureName} digest in the Project Alpha handoff is stale`,
     );
   }
+  const contactAssignmentFixture = "packages/shared/fixtures/project-alpha-portal-contact-assignments-v4.json";
+  assert.match(read(".gitattributes"), /^packages\/shared\/fixtures\/project-alpha-portal-contact-assignments-v4\.json text eol=lf$/m);
+  const fixtureBytes = fs.readFileSync(path.join(root, contactAssignmentFixture));
+  assert.equal(fixtureBytes.includes(13), false);
+  assert.equal(crypto.createHash("sha256").update(fixtureBytes).digest("hex"), "c545eebf02cec56013ede3ebe0dcc1c7c11947dc8e5592905c3a9d36ffda434b");
 });
 
 test("the neutral Project Alpha wire contract stays byte-pinned across every route", () => {

@@ -366,7 +366,8 @@ function parseContactAssignment(value: unknown): ContactAssignmentResource {
   if (!CONTACT_ASSIGNMENT_ROLE.test(role)) throw new Error("portal-contact-assignment-role-invalid");
   if (value.scopeType !== "project" && (value.primaryBilling || value.sendProjectInvoices || value.canViewInvoiceLinks))
     throw new Error("portal-contact-assignment-billing-scope-invalid");
-  if (value.primaryBilling && !value.sendProjectInvoices) throw new Error("portal-contact-assignment-billing-invalid");
+  if (value.scopeType === "project" && value.primary)
+    throw new Error("portal-contact-assignment-primary-scope-invalid");
   return {
     publicId: publicId(value.publicId), contactPublicId: publicId(value.contactPublicId), clientPublicId: publicId(value.clientPublicId),
     scopeType: value.scopeType as ContactAssignmentScopeType, scopePublicId: publicId(value.scopePublicId), role,
@@ -1089,6 +1090,22 @@ async function applyEvent(env: Env, delivery: EventDelivery, payloadHash: string
       if (!relation) throw new Error("portal-event-target-invalid");
       relation.active = false;
       relation.sourceVersion = event.sourceVersion;
+      const root = `${current.workspace.rootType}:${current.workspace.rootPublicId}`;
+      const target = `${relation.to.type}:${relation.to.publicId}`;
+      const parents = new Map<string, string[]>();
+      for (const candidate of current.relations) {
+        if (!candidate.active) continue;
+        const child = `${candidate.to.type}:${candidate.to.publicId}`;
+        parents.set(child, [...(parents.get(child) ?? []), `${candidate.from.type}:${candidate.from.publicId}`]);
+      }
+      const reachesRoot = (node: string, path: Set<string>): boolean => {
+        if (node === root) return true;
+        if (path.has(node) || path.size >= 12) return false;
+        const nextPath = new Set(path); nextPath.add(node);
+        return (parents.get(node) ?? []).some(parent => reachesRoot(parent, nextPath));
+      };
+      if (!reachesRoot(target, new Set()))
+        closure = closeRelationStateForTombstone(current, relation.to.publicId, event.sourceVersion);
     } else {
       const assignment = current.contactAssignments.find(candidate => candidate.publicId === event.publicId);
       if (!assignment) throw new Error("portal-event-target-invalid");

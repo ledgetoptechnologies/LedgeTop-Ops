@@ -8,6 +8,7 @@ import bridgeMigration from "../migrations/0132_portal_v2_legacy_member_bridges.
 import sourceMigration from "../migrations/0158_portal_source_ownership.sql?raw";
 import contactAssignmentMigration from "../migrations/0190_portal_contact_assignments_v4.sql?raw";
 import wireContractClaimMigration from "../migrations/0191_portal_projection_wire_contract_claim.sql?raw";
+import billingIndependenceMigration from "../migrations/0192_contact_assignment_billing_independence.sql?raw";
 import { splitD1MigrationStatements } from "./helpers/d1-migrations";
 import { authorizePortalWorkspaceCapability } from "../src/worker/client-portal/workspace-v2";
 import type { VerifiedClientPrincipal } from "../src/worker/client-portal/types";
@@ -89,6 +90,7 @@ describe("Project Alpha portal hierarchy projection", () => {
     await applyMigration(db, sourceMigration);
     await applyMigration(db, contactAssignmentMigration);
     await applyMigration(db, wireContractClaimMigration);
+    await applyMigration(db, billingIndependenceMigration);
     await db.prepare("PRAGMA foreign_keys=ON").run();
     env = {
       DELIVERY_DB: db,

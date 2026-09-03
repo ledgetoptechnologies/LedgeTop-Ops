@@ -8,7 +8,9 @@ import eligibilityMigration from "../migrations/0145_portal_identity_eligibility
 import sourceMigration from "../migrations/0158_portal_source_ownership.sql?raw";
 import contactAssignmentMigration from "../migrations/0190_portal_contact_assignments_v4.sql?raw";
 import wireContractClaimMigration from "../migrations/0191_portal_projection_wire_contract_claim.sql?raw";
+import billingIndependenceMigration from "../migrations/0192_contact_assignment_billing_independence.sql?raw";
 import relationFixture from "../../../packages/shared/fixtures/project-alpha-portal-relations-v3.json";
+import contactAssignmentFixture from "../../../packages/shared/fixtures/project-alpha-portal-contact-assignments-v4.json";
 import { handleProjectAlphaPortalProjectionRequest, parsePortalProjectionDelivery } from "../src/worker/project-alpha-portal";
 import { splitD1MigrationStatements } from "./helpers/d1-migrations";
 import type { Env } from "../src/worker/types";
@@ -16,24 +18,24 @@ import type { Env } from "../src/worker/types";
 const applicationKey = "field_operations_portal";
 const secret = "contact-assignment-test-secret-at-least-thirty-two-bytes";
 const keyId = "contact-assignment-v4-test";
-const workspace = { publicId: "pa-workspace-contacts", rootType: "organization", rootPublicId: "pa-org-contacts", displayName: "Contact Roles Inc", sourceVersion: "workspace-v1", active: true } as const;
+const workspace = { publicId: "pa-workspace-contacts-local", rootType: "organization", rootPublicId: "pa-org-contacts-local", displayName: "Contact Roles Inc", sourceVersion: "workspace-v1", active: true } as const;
 const entities = [
-  { type: "organization", publicId: "pa-org-contacts", parentPublicId: null, displayName: "Contact Roles Inc", sourceVersion: "org-v1", active: true, primaryContact: false },
-  { type: "department", publicId: "pa-dept-field", parentPublicId: "pa-org-contacts", displayName: "Field", sourceVersion: "dept-v1", active: true, primaryContact: false },
-  { type: "client", publicId: "pa-client-alex", parentPublicId: "pa-org-contacts", displayName: "Alex", sourceVersion: "client-v1", active: true, primaryContact: false },
+  { type: "organization", publicId: "pa-org-contacts-local", parentPublicId: null, displayName: "Contact Roles Inc", sourceVersion: "org-v1", active: true, primaryContact: false },
+  { type: "department", publicId: "pa-dept-field", parentPublicId: "pa-org-contacts-local", displayName: "Field", sourceVersion: "dept-v1", active: true, primaryContact: false },
+  { type: "client", publicId: "pa-client-alex", parentPublicId: "pa-org-contacts-local", displayName: "Alex", sourceVersion: "client-v1", active: true, primaryContact: false },
   { type: "project", publicId: "pa-project-north", parentPublicId: "pa-dept-field", displayName: "North", sourceVersion: "project-v1", active: true, primaryContact: false },
   { type: "contact", publicId: "pa-contact-alex", parentPublicId: "pa-dept-field", displayName: "Alex", sourceVersion: "contact-v1", active: true, primaryContact: true },
 ] as const;
 const relations = [
-  { publicId: "relation-org-dept", relationType: "contains", from: { type: "organization", publicId: "pa-org-contacts" }, to: { type: "department", publicId: "pa-dept-field" }, sourceVersion: "r-v1", active: true },
-  { publicId: "relation-org-client", relationType: "contains", from: { type: "organization", publicId: "pa-org-contacts" }, to: { type: "client", publicId: "pa-client-alex" }, sourceVersion: "r-v1", active: true },
+  { publicId: "relation-org-dept", relationType: "contains", from: { type: "organization", publicId: "pa-org-contacts-local" }, to: { type: "department", publicId: "pa-dept-field" }, sourceVersion: "r-v1", active: true },
+  { publicId: "relation-org-client", relationType: "contains", from: { type: "organization", publicId: "pa-org-contacts-local" }, to: { type: "client", publicId: "pa-client-alex" }, sourceVersion: "r-v1", active: true },
   { publicId: "relation-dept-project", relationType: "contains", from: { type: "department", publicId: "pa-dept-field" }, to: { type: "project", publicId: "pa-project-north" }, sourceVersion: "r-v1", active: true },
   { publicId: "relation-client-project", relationType: "contains", from: { type: "client", publicId: "pa-client-alex" }, to: { type: "project", publicId: "pa-project-north" }, sourceVersion: "r-v1", active: true },
   { publicId: "relation-dept-contact", relationType: "contact_assignment", from: { type: "department", publicId: "pa-dept-field" }, to: { type: "contact", publicId: "pa-contact-alex" }, sourceVersion: "r-v1", active: true },
 ] as const;
 const assignments = [
   { publicId: "assignment-department-alex", contactPublicId: "pa-contact-alex", clientPublicId: "pa-client-alex", scopeType: "department", scopePublicId: "pa-dept-field", role: "athletic_director", primary: true, primaryBilling: false, sendProjectInvoices: false, canViewInvoiceLinks: false, sourceVersion: "assignment-v1", active: true },
-  { publicId: "assignment-project-alex", contactPublicId: "pa-contact-alex", clientPublicId: "pa-client-alex", scopeType: "project", scopePublicId: "pa-project-north", role: "billing_contact", primary: false, primaryBilling: true, sendProjectInvoices: true, canViewInvoiceLinks: true, sourceVersion: "assignment-v1", active: true },
+  { publicId: "assignment-project-alex", contactPublicId: "pa-contact-alex", clientPublicId: "pa-client-alex", scopeType: "project", scopePublicId: "pa-project-north", role: "billing_contact", primary: false, primaryBilling: true, sendProjectInvoices: false, canViewInvoiceLinks: true, sourceVersion: "assignment-v1", active: true },
 ] as const;
 
 function envelope(kind: string, deliveryId: string, sourceSequence: number, extra: Record<string, unknown>) {
@@ -102,6 +104,12 @@ describe("Project Alpha schema v4 informational contact assignments", () => {
       db.prepare("INSERT INTO pa_portal_projection_contact_assignment_contracts(generation_id,schema_version) VALUES ('wire-backfill-generation-v4',4)"),
     ]);
     await migrate(db, wireContractClaimMigration);
+    await db.prepare(`INSERT INTO pa_portal_projection_contact_assignments
+      (generation_id,public_id,contact_public_id,client_public_id,scope_type,scope_public_id,role,
+       primary_contact,primary_billing,send_project_invoices,can_view_invoice_links,source_version,active)
+      VALUES('wire-backfill-generation-v4','wire-legacy-assignment','wire-contact','wire-client','project','wire-project',
+        'billing_contact',0,1,1,1,'legacy-v1',1)`).run();
+    await migrate(db, billingIndependenceMigration);
     env = { DELIVERY_DB: db, PROJECT_ALPHA_PORTAL_SYNC_ENABLED: "true", PROJECT_ALPHA_PORTAL_APPLICATION_KEY: applicationKey, PROJECT_ALPHA_PORTAL_HMAC_KEY_ID: keyId, PROJECT_ALPHA_PORTAL_HMAC_SECRET: secret, PROJECT_ALPHA_PORTAL_ACCESS_TEAM_DOMAIN: "https://access.example.test", PROJECT_ALPHA_PORTAL_ACCESS_AUD: "portal-aud", CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true", CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED: "true" } as Env;
   }, 30_000);
 
@@ -129,6 +137,18 @@ describe("Project Alpha schema v4 informational contact assignments", () => {
       { id: "wire-backfill-generation-v3", wire_schema_version: 3 },
       { id: "wire-backfill-generation-v4", wire_schema_version: 4 },
     ]);
+    expect(await db.prepare(`SELECT primary_billing,send_project_invoices FROM pa_portal_projection_contact_assignments
+      WHERE generation_id='wire-backfill-generation-v4' AND public_id='wire-legacy-assignment'`).first()).toEqual({
+        primary_billing: 1,
+        send_project_invoices: 1,
+      });
+    await db.prepare(`UPDATE pa_portal_projection_contact_assignments SET send_project_invoices=0
+      WHERE generation_id='wire-backfill-generation-v4' AND public_id='wire-legacy-assignment'`).run();
+    expect(await db.prepare(`SELECT primary_billing,send_project_invoices FROM pa_portal_projection_contact_assignments
+      WHERE generation_id='wire-backfill-generation-v4' AND public_id='wire-legacy-assignment'`).first()).toEqual({
+        primary_billing: 1,
+        send_project_invoices: 0,
+      });
     await expect(db.prepare(`UPDATE pa_portal_projection_generations SET wire_schema_version=3
       WHERE id='wire-backfill-generation-v4'`).run()).rejects.toThrow("portal projection wire contract is immutable");
     await expect(db.prepare(`UPDATE pa_portal_projection_generation_contracts SET schema_version=2
@@ -149,11 +169,111 @@ describe("Project Alpha schema v4 informational contact assignments", () => {
     expect(parsePortalProjectionDelivery(relationFixture.valid.snapshotPage, applicationKey, true).schemaVersion).toBe(3);
     const page = envelope("snapshot.page", "contact-page-parser", 1, { snapshotHash: "a".repeat(64), pageNumber: 1, pageCount: 1, recordCount: 13, workspace, entities, principals: [], entitlements: [], relations, projectLifecycles: [{ projectPublicId: "pa-project-north", status: "active", completedAt: null, sourceVersion: "project-v1" }], contactAssignments: assignments });
     expect(() => parsePortalProjectionDelivery(page, applicationKey)).toThrow("portal-envelope-invalid");
-    expect(parsePortalProjectionDelivery(page, applicationKey, true).schemaVersion).toBe(4);
+    const parsedPage = parsePortalProjectionDelivery(page, applicationKey, true);
+    expect(parsedPage.schemaVersion).toBe(4);
+    if (parsedPage.kind !== "snapshot.page") throw new Error("fixture-shape");
+    expect(parsedPage.contactAssignments[1]).toMatchObject({ primaryBilling: true, sendProjectInvoices: false });
     const withEmail = { ...page, contactAssignments: [{ ...assignments[0], email: "private@example.test" }, assignments[1]] };
     expect(() => parsePortalProjectionDelivery(withEmail, applicationKey, true)).toThrow("portal-contact-assignment-fields-invalid");
     const wrongBillingScope = { ...page, contactAssignments: [{ ...assignments[0], sendProjectInvoices: true }, assignments[1]] };
     expect(() => parsePortalProjectionDelivery(wrongBillingScope, applicationKey, true)).toThrow("portal-contact-assignment-billing-scope-invalid");
+  });
+
+  it("pins and activates the complete shared v4 contract without treating primary billing as invoice delivery", async () => {
+    expect(contactAssignmentFixture).toMatchObject({
+      contract: "ltds-project-alpha-portal-contact-assignments-v4",
+      schemaVersion: 4,
+      endpoint: "/api/internal/project-alpha/portal-v2",
+      expectedSnapshotHash: "fa787865c479b1cbdfaba7361d9dd15e8fa9f7d9ffcdad25fa232e1004f71cfa",
+    });
+    expect(contactAssignmentFixture.valid.snapshotPage.applicationKey).toBe(applicationKey);
+    for (const delivery of Object.values(contactAssignmentFixture.valid))
+      expect(parsePortalProjectionDelivery(delivery, applicationKey, true)).toBeTruthy();
+    const v4Disabled = contactAssignmentFixture.invalid.find(specimen => specimen.name === "v4-disabled")!;
+    const projectPrimaryInvalid = contactAssignmentFixture.invalid.find(specimen => specimen.name === "project-primary-invalid")!;
+    const departmentBillingInvalid = contactAssignmentFixture.invalid.find(specimen => specimen.name === "billing-flags-on-department")!;
+    const missingContactEndpoint = contactAssignmentFixture.invalid.find(specimen => specimen.name === "missing-contact-endpoint")!;
+    expect(() => parsePortalProjectionDelivery(v4Disabled.delivery, applicationKey, false)).toThrow("portal-envelope-invalid");
+    expect(() => parsePortalProjectionDelivery(projectPrimaryInvalid.delivery, applicationKey, true)).toThrow("portal-contact-assignment-primary-scope-invalid");
+    expect(() => parsePortalProjectionDelivery(departmentBillingInvalid.delivery, applicationKey, true)).toThrow("portal-contact-assignment-billing-scope-invalid");
+    expect(parsePortalProjectionDelivery(missingContactEndpoint.delivery, applicationKey, true)).toBeTruthy();
+    const tableDefinitions = await db.prepare(`SELECT name,sql FROM sqlite_master
+      WHERE type='table' AND name IN ('pa_portal_projection_contact_assignments','portal_v2_contact_assignments')
+      ORDER BY name`).all<{ name: string; sql: string }>();
+    expect(tableDefinitions.results).toHaveLength(2);
+    for (const table of tableDefinitions.results) {
+      expect(table.sql).toContain("scope_type='project' OR (primary_billing=0 AND send_project_invoices=0 AND can_view_invoice_links=0)");
+      expect(table.sql).not.toContain("primary_billing=0 OR send_project_invoices=1");
+    }
+
+    const page = contactAssignmentFixture.valid.snapshotPage;
+    const projectAssignment = page.contactAssignments[0]!;
+    expect((await deliver(page)).status).toBe(200);
+    expect((await deliver(contactAssignmentFixture.valid.snapshotActivate)).status).toBe(200);
+    const selectedGeneration = await db.prepare("SELECT active_generation_id FROM portal_v2_directory_checkpoints WHERE workspace_id=?")
+      .bind(page.workspaceId).first<string>("active_generation_id");
+    const stagedGeneration = await db.prepare("SELECT id FROM pa_portal_projection_generations WHERE workspace_id=? AND source_generation=?")
+      .bind(page.workspaceId, page.sourceGeneration).first<string>("id");
+    expect(await db.prepare(`SELECT primary_billing,send_project_invoices,can_view_invoice_links
+      FROM portal_v2_contact_assignments WHERE workspace_id=? AND generation_id=? AND public_id=?`)
+      .bind(page.workspaceId, selectedGeneration, projectAssignment.publicId).first()).toEqual({
+        primary_billing: 1,
+        send_project_invoices: 0,
+        can_view_invoice_links: 1,
+      });
+
+    await expect(db.prepare(`INSERT INTO pa_portal_projection_contact_assignments
+      (generation_id,public_id,contact_public_id,client_public_id,scope_type,scope_public_id,role,
+       primary_contact,primary_billing,send_project_invoices,can_view_invoice_links,source_version,active)
+      VALUES(?,? ,?,?,'organization',?,'billing_contact',0,1,0,0,'invalid',1)`)
+      .bind(stagedGeneration, "pa-invalid-staged-non-project-billing", "pa-contact-manager", "pa-client-manager", "pa-org-contacts").run()).rejects.toThrow();
+    await expect(db.prepare(`INSERT INTO portal_v2_contact_assignments
+      (workspace_id,generation_id,public_id,contact_public_id,client_public_id,scope_type,scope_public_id,role,
+       primary_contact,primary_billing,send_project_invoices,can_view_invoice_links,source_version,active)
+      VALUES(?,?,?, ?,?,'client',?,'billing_contact',0,0,1,0,'invalid',1)`)
+      .bind(page.workspaceId, selectedGeneration, "pa-invalid-selected-non-project-invoices", "pa-contact-manager", "pa-client-manager", "pa-client-manager").run()).rejects.toThrow();
+
+    expect((await deliver(contactAssignmentFixture.valid.roleUpdateEvent)).status).toBe(200);
+    expect(await db.prepare(`SELECT role,primary_billing,send_project_invoices FROM portal_v2_contact_assignments assignment
+      JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=assignment.workspace_id
+        AND checkpoint.active_generation_id=assignment.generation_id
+      WHERE assignment.workspace_id=? AND assignment.public_id=?`)
+      .bind(page.workspaceId, projectAssignment.publicId).first()).toEqual({
+        role: "project_liaison",
+        primary_billing: 1,
+        send_project_invoices: 0,
+      });
+    expect((await deliver(contactAssignmentFixture.valid.assignmentTombstone)).status).toBe(200);
+    expect(await db.prepare(`SELECT assignment.active FROM portal_v2_contact_assignments assignment
+      JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=assignment.workspace_id
+        AND checkpoint.active_generation_id=assignment.generation_id
+      WHERE assignment.workspace_id=? AND assignment.public_id=?`)
+      .bind(page.workspaceId, projectAssignment.publicId).first("active")).toBe(0);
+    const relationTombstoneResponse = await deliver(contactAssignmentFixture.valid.relationTombstone);
+    expect(relationTombstoneResponse.status, await relationTombstoneResponse.clone().text()).toBe(200);
+    expect((await deliver(contactAssignmentFixture.valid.contactTombstone)).status).toBe(200);
+    expect(await db.prepare(`SELECT entity.active FROM portal_v2_directory_entities entity
+      JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=entity.workspace_id
+        AND checkpoint.active_generation_id=entity.generation_id
+      WHERE entity.workspace_id=? AND entity.public_id='pa-contact-manager'`)
+      .bind(page.workspaceId).first("active")).toBe(0);
+
+    const missingEndpoint = {
+      ...missingContactEndpoint.delivery,
+      deliveryId: "contact-assignment-missing-endpoint-page-receiver",
+      sourceGeneration: "contact-assignment-missing-endpoint-generation",
+    };
+    expect((await deliver(missingEndpoint)).status).toBe(200);
+    const invalidActivation = {
+      schemaVersion: 4, applicationKey, deliveryId: "contact-assignment-missing-endpoint-activate",
+      occurredAt: missingEndpoint.occurredAt, sourceGeneration: missingEndpoint.sourceGeneration,
+      sourceSequence: missingEndpoint.sourceSequence, workspaceId: missingEndpoint.workspaceId,
+      kind: "snapshot.activate", snapshotHash: missingEndpoint.snapshotHash,
+      pageCount: missingEndpoint.pageCount, recordCount: missingEndpoint.recordCount,
+    };
+    const invalidActivationResponse = await deliver(invalidActivation);
+    expect(invalidActivationResponse.status, await invalidActivationResponse.clone().text()).toBe(422);
+    expect(await invalidActivationResponse.json()).toMatchObject({ error: "portal-root-invalid" });
   });
 
   it("rejects v3/v4 contract mixing in either direction within a multipage generation", async () => {
@@ -232,8 +352,12 @@ describe("Project Alpha schema v4 informational contact assignments", () => {
   it("stages then atomically selects distinct per-scope roles without creating authority", async () => {
     const page = envelope("snapshot.page", "contact-page", 1, { snapshotHash: "a".repeat(64), pageNumber: 1, pageCount: 1, recordCount: 13, workspace, entities, principals: [], entitlements: [], relations, projectLifecycles: [{ projectPublicId: "pa-project-north", status: "active", completedAt: null, sourceVersion: "project-v1" }], contactAssignments: assignments });
     expect((await deliver(page)).status).toBe(200);
-    expect(await db.prepare("SELECT count(*) count FROM pa_portal_projection_contact_assignments").first("count")).toBe(2);
-    expect(await db.prepare("SELECT count(*) count FROM portal_v2_contact_assignments").first("count")).toBe(0);
+    expect(await db.prepare(`SELECT count(*) count FROM pa_portal_projection_contact_assignments assignment
+      JOIN pa_portal_projection_generations generation ON generation.id=assignment.generation_id
+      WHERE generation.workspace_id=? AND generation.source_generation=?`)
+      .bind(workspace.publicId, page.sourceGeneration).first("count")).toBe(2);
+    expect(await db.prepare("SELECT count(*) count FROM portal_v2_contact_assignments WHERE workspace_id=?")
+      .bind(workspace.publicId).first("count")).toBe(0);
     const activate = envelope("snapshot.activate", "contact-activate", 1, { snapshotHash: "a".repeat(64), pageCount: 1, recordCount: 13 });
     const activationResponse = await deliver(activate);
     expect(activationResponse.status, await activationResponse.text()).toBe(200);
@@ -241,7 +365,7 @@ describe("Project Alpha schema v4 informational contact assignments", () => {
       FROM portal_v2_contact_assignments WHERE workspace_id=? ORDER BY scope_type`).bind(workspace.publicId).all();
     expect(rows.results).toEqual([
       { scope_type: "department", role: "athletic_director", primary_contact: 1, primary_billing: 0, send_project_invoices: 0, can_view_invoice_links: 0 },
-      { scope_type: "project", role: "billing_contact", primary_contact: 0, primary_billing: 1, send_project_invoices: 1, can_view_invoice_links: 1 },
+      { scope_type: "project", role: "billing_contact", primary_contact: 0, primary_billing: 1, send_project_invoices: 0, can_view_invoice_links: 1 },
     ]);
     expect(await db.prepare("SELECT count(*) count FROM portal_v2_workspace_memberships").first("count")).toBe(0);
     expect(await db.prepare("SELECT count(*) count FROM portal_v2_entitlements").first("count")).toBe(0);
@@ -287,7 +411,7 @@ describe("Project Alpha schema v4 informational contact assignments", () => {
   });
 
   it("applies ordered assignment updates and tombstones in the selected generation only", async () => {
-    const update = envelope("event", "contact-update", 2, { event: { resource: "contact_assignment", action: "upsert", contactAssignment: { ...assignments[1], role: "project_contact", primary: true, primaryBilling: false, sourceVersion: "assignment-v2" } } });
+    const update = envelope("event", "contact-update", 2, { event: { resource: "contact_assignment", action: "upsert", contactAssignment: { ...assignments[1], role: "project_contact", primary: false, primaryBilling: false, sourceVersion: "assignment-v2" } } });
     const updateResponse = await deliver(update);
     expect(updateResponse.status, await updateResponse.text()).toBe(200);
     expect(await db.prepare(`SELECT role FROM portal_v2_contact_assignments assignment

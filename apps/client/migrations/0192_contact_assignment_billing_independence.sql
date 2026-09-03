@@ -1,38 +1,11 @@
 PRAGMA foreign_keys = ON;
 
--- Schema v4 is an additive informational extension of the existing v3
--- hierarchy contract. Keep the critical v2/v3 contract tables untouched and
--- record v4 capability in separate markers, so older lifecycle views and
--- authorization predicates continue to see their exact v3 base contract.
-CREATE TABLE pa_portal_projection_contact_assignment_contracts (
-  generation_id TEXT PRIMARY KEY,
-  schema_version INTEGER NOT NULL DEFAULT 4 CHECK (schema_version=4),
-  FOREIGN KEY (generation_id) REFERENCES pa_portal_projection_generations(id) ON DELETE CASCADE
-);
+-- Migration 0190 originally encoded primary_billing => send_project_invoices,
+-- but Project Alpha models those as independent project-scoped responsibilities.
+-- Rebuild both leaf tables so already-migrated databases receive the corrected
+-- domain rule while preserving every row and all schema/endpoint fences.
 
-CREATE TABLE portal_v2_contact_assignment_contracts (
-  workspace_id TEXT NOT NULL,
-  generation_id TEXT NOT NULL,
-  schema_version INTEGER NOT NULL DEFAULT 4 CHECK (schema_version=4),
-  PRIMARY KEY (workspace_id,generation_id),
-  FOREIGN KEY (generation_id,workspace_id)
-    REFERENCES portal_v2_directory_generations(id,workspace_id) ON DELETE CASCADE
-);
-
--- Once any page has been staged, absence/presence of this marker is the
--- generation's immutable wire contract. This also closes the concurrent
--- v3-first/v4-second reservation race.
-CREATE TRIGGER pa_portal_projection_contact_assignment_contract_after_page
-BEFORE INSERT ON pa_portal_projection_contact_assignment_contracts
-WHEN EXISTS (
-  SELECT 1 FROM pa_portal_projection_pages page
-  WHERE page.generation_id=NEW.generation_id
-)
-BEGIN SELECT RAISE(ABORT,'portal projection generation wire contract is immutable'); END;
-
--- Signed snapshot staging. There are intentionally no email/name/manual
--- recipient fields in this contract. A role is metadata, never authority.
-CREATE TABLE pa_portal_projection_contact_assignments (
+CREATE TABLE pa_portal_projection_contact_assignments_v2 (
   generation_id TEXT NOT NULL,
   public_id TEXT NOT NULL,
   contact_public_id TEXT NOT NULL,
@@ -55,6 +28,16 @@ CREATE TABLE pa_portal_projection_contact_assignments (
   FOREIGN KEY (generation_id) REFERENCES pa_portal_projection_generations(id) ON DELETE CASCADE
 );
 
+INSERT INTO pa_portal_projection_contact_assignments_v2
+  (generation_id,public_id,contact_public_id,client_public_id,scope_type,scope_public_id,role,
+   primary_contact,primary_billing,send_project_invoices,can_view_invoice_links,source_version,active)
+SELECT generation_id,public_id,contact_public_id,client_public_id,scope_type,scope_public_id,role,
+  primary_contact,primary_billing,send_project_invoices,can_view_invoice_links,source_version,active
+FROM pa_portal_projection_contact_assignments;
+
+DROP TABLE pa_portal_projection_contact_assignments;
+ALTER TABLE pa_portal_projection_contact_assignments_v2 RENAME TO pa_portal_projection_contact_assignments;
+
 CREATE TRIGGER pa_portal_projection_contact_assignment_contract_insert
 BEFORE INSERT ON pa_portal_projection_contact_assignments
 WHEN NOT EXISTS (
@@ -75,9 +58,7 @@ WHEN NEW.generation_id IS NOT OLD.generation_id OR NOT EXISTS (
 )
 BEGIN SELECT RAISE(ABORT,'portal v4 staged contact assignment requires schema v4'); END;
 
--- Selected-generation storage remains unused by client read paths until a
--- later, explicitly enabled adapter is released.
-CREATE TABLE portal_v2_contact_assignments (
+CREATE TABLE portal_v2_contact_assignments_v2 (
   workspace_id TEXT NOT NULL,
   generation_id TEXT NOT NULL,
   public_id TEXT NOT NULL,
@@ -102,6 +83,16 @@ CREATE TABLE portal_v2_contact_assignments (
   FOREIGN KEY (generation_id,workspace_id)
     REFERENCES portal_v2_directory_generations(id,workspace_id) ON DELETE CASCADE
 );
+
+INSERT INTO portal_v2_contact_assignments_v2
+  (workspace_id,generation_id,public_id,contact_public_id,client_public_id,scope_type,scope_public_id,role,
+   primary_contact,primary_billing,send_project_invoices,can_view_invoice_links,source_version,active,created_at)
+SELECT workspace_id,generation_id,public_id,contact_public_id,client_public_id,scope_type,scope_public_id,role,
+  primary_contact,primary_billing,send_project_invoices,can_view_invoice_links,source_version,active,created_at
+FROM portal_v2_contact_assignments;
+
+DROP TABLE portal_v2_contact_assignments;
+ALTER TABLE portal_v2_contact_assignments_v2 RENAME TO portal_v2_contact_assignments;
 
 CREATE INDEX idx_portal_v2_contact_assignments_scope
   ON portal_v2_contact_assignments(workspace_id,generation_id,scope_type,scope_public_id,active);
@@ -144,7 +135,6 @@ WHEN NOT EXISTS (
     AND entity.public_id=NEW.scope_public_id AND (NEW.active=0 OR entity.active=1)
 )
 BEGIN SELECT RAISE(ABORT,'portal v4 contact assignment endpoints must exist in generation'); END;
-
 CREATE TRIGGER portal_v2_contact_assignment_endpoints_update
 BEFORE UPDATE ON portal_v2_contact_assignments
 WHEN NOT EXISTS (

@@ -4,3 +4,4 @@ packages/shared/test-fixtures/viewer-processing-route-responses-v1.json text eol
 *.sh text eol=lf
 apps/client/migrations/*.sql text eol=lf
 apps/operations/migrations/*.sql text eol=lf
+packages/shared/fixtures/project-alpha-portal-contact-assignments-v4.json text eol=lf
