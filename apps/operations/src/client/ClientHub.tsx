@@ -145,6 +145,9 @@ function syncDate(value: string | null): string {
   const parsed = utcDate(value);
   return Number.isNaN(parsed.valueOf()) ? "Unavailable" : parsed.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
 }
+function syncStatusLabel(value: string): string {
+  return value.replaceAll("_", " ").replace(/^./, first => first.toLocaleUpperCase());
+}
 
 function object(value: unknown): value is Record<string, unknown> { return Boolean(value && typeof value === "object" && !Array.isArray(value)); }
 function safeHttpsExternal(href: unknown): string | null {
@@ -244,7 +247,7 @@ function ProjectManagementRouting({ client, contextVersion, contextSignal, onInv
       <div className="client-project-management-summary"><div><strong>Project creation</strong><p>{result.availability.explanation}</p></div>
         {externalHref && result.action && <a className="button button-orange" href={externalHref} target="_blank" rel="noopener noreferrer">{result.action.label}<span className="visually-hidden"> (opens in a new tab)</span></a>}</div>
       {externalHref && <p>Complete the project in {result.source.displayName}. It will appear here after Project Alpha synchronizes.</p>}
-      <dl><dt>Synchronization</dt><dd>{result.sync.status}</dd><dt>Last attempt</dt><dd>{syncDate(result.sync.lastAttemptAt)}</dd><dt>Last success</dt><dd>{syncDate(result.sync.lastSuccessAt)}</dd></dl>
+      <dl><dt>Synchronization</dt><dd>{syncStatusLabel(result.sync.status)}</dd><dt>Last attempt</dt><dd>{syncDate(result.sync.lastAttemptAt)}</dd><dt>Last success</dt><dd>{syncDate(result.sync.lastSuccessAt)}</dd></dl>
       <p>{result.sync.explanation}</p>
       <div className="client-project-management-actions">
         <button type="button" className="button-ghost" disabled={state.syncBusy} onClick={() => void load(result.sync.refresh.href, true)}>{result.sync.refresh.label}</button>
@@ -570,11 +573,11 @@ export function ClientHub({ mapToken, permissions, feedbackEnabled=false, invita
   if (route && "invalid" in route) return <Card><EmptyState title="Client workspace unavailable" detail="This client link is invalid." /><a href={clientDirectoryReturnPath()}>Back to Client Hub</a></Card>;
   if (route) return canViewDirectory ? <ClientWorkspace key={JSON.stringify([route.sourceId || "", route.rootNamespace || "", route.kind, route.publicId])} route={route} canReviewFeedback={feedbackEnabled} invitationAccess={invitationAccess} /> : <Card><EmptyState title="Client unavailable" detail="Client-directory access is required." /></Card>;
   return <>
-    {canReview && <section className="client-hub-queue"><ClientRequestWorkflow mapToken={mapToken} basePath="/clients/requests" pendingOnly /></section>}
+    {canReview && <section className="client-hub-queue"><ClientRequestWorkflow mapToken={mapToken} basePath="/clients/requests" pendingOnly hideWhenEmpty={canViewDirectory} /></section>}
     {canViewDirectory && <section>
       <div className="client-hub-section-heading"><div><h2>Clients</h2><p>Organizations and standalone clients with their contacts, access, and shared work.</p></div></div>
-      {canReview && canManagePortalSetup && <ClientPortalBootstrap />}
       <ClientDirectory />
+      {canReview && canManagePortalSetup && <ClientPortalBootstrap />}
     </section>}
   </>;
 }

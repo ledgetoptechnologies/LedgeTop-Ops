@@ -14,7 +14,12 @@ function client(id: string, name: string, kind: "organization" | "standalone_cli
     request_count: 1, contact_count: 2 };
 }
 type DirectoryHandler = (route: Route, url: URL) => Promise<unknown>;
-async function mock(page: Page, directory: DirectoryHandler, permissions = ["team.view", "operations.manage"]) {
+const submittedRequest = {
+  id: "request-one", title: "First request", account_name: "Acme", project_name: null,
+  request_type: "service", details: "Please review the site.", status: "submitted", created_at: "2026-08-01T12:00:00Z",
+};
+async function mock(page: Page, directory: DirectoryHandler, permissions = ["team.view", "operations.manage"],
+  serviceRequests: Array<Record<string, unknown>> = [submittedRequest]) {
   const requested: URL[] = [];
   await page.route("**/api/**", async route => {
     const url = new URL(route.request().url());
@@ -24,10 +29,7 @@ async function mock(page: Page, directory: DirectoryHandler, permissions = ["tea
         profileType: "Employee", isAdministrator: false, permissions, divisions: [] },
       csrfToken: "csrf-test", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: {},
     } });
-    if (url.pathname === "/api/client-service-requests") return route.fulfill({ json: { requests: [{
-      id: "request-one", title: "First request", account_name: "Acme", project_name: null,
-      request_type: "service", details: "Please review the site.", status: "submitted", created_at: "2026-08-01T12:00:00Z",
-    }] } });
+    if (url.pathname === "/api/client-service-requests") return route.fulfill({ json: { requests: serviceRequests } });
     if (url.pathname === "/api/client-hub") return directory(route, url);
     if (/^\/api\/client-hub\/(sources|organizations|standalone)\//.test(url.pathname)) {
       const parts = url.pathname.split("/").filter(Boolean);
@@ -45,6 +47,16 @@ async function mock(page: Page, directory: DirectoryHandler, permissions = ["tea
   });
   return requested;
 }
+
+test("empty pending review stays out of the way when the client directory is available", async ({ page }) => {
+  await mock(page, route => route.fulfill({ json: { clients: [client("org-a", "Acme")], nextCursor: null, capabilities } }),
+    ["team.view", "operations.manage"], []);
+  await page.goto("/clients");
+  await expect(page.getByRole("heading", { name: "Pending review" })).toHaveCount(0);
+  await expect(page.locator(".client-hub-queue")).toHaveCSS("display", "none");
+  await expect(page.getByRole("region", { name: "Client directory" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Open Acme client workspace" })).toBeVisible();
+});
 
 test("matching business IDs from two producers retain source labels, contacts and project navigation without borrowing portal access", async ({ page }, testInfo) => {
   const errors: string[] = [], reads: URL[] = [];

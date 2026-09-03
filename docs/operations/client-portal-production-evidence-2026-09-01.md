@@ -398,3 +398,56 @@ provision a secret, or alter an existing public link or client grant.
   Therefore the exact live Access application, destination, audience, and
   policy readback remains unverified. No audience mapping or Access policy was
   changed by this checkpoint.
+
+## 2026-09-03 portal-readiness and reassignment-recovery release
+
+This checkpoint publishes an identifier-free portal workflow preflight and a
+guarded administrator recovery path for Project Alpha project reassignment. It
+does not enroll a source, enable a portal workflow, provision a credential,
+send mail, create a membership, or change a client grant.
+
+- Operations migration `0052_project_operational_reassignment_recovery.sql`
+  was the only pending production migration. It executed 70 statements
+  successfully. A subsequent remote migration-list readback reported no pending
+  migration, every required recovery/archive table and immutable guard trigger
+  was present, and `PRAGMA foreign_key_check` returned no rows.
+- Commit `37438fc384a3b54aea873a34377580136883213f` was fast-forwarded to
+  `main`. Cloudflare automatically deployed Operations Worker version
+  `28d68f6e-d50c-4bd9-bad3-3f500dbd4d4b` at 100 percent traffic after the
+  migration completed.
+- The recovery contract requires current global administration plus both
+  source and destination management authority, typed confirmation, a current
+  context/version fence, and an immutable idempotent receipt. Reset archives
+  old operational-memory revisions and attachment metadata/audit provenance;
+  transfer retains memory history. Both modes retain R2 bytes and never move
+  portal identities, access, billing, invitations, notifications, or grants.
+- The portal preflight checks native feedback, requests and attachments,
+  delegated signing, and project-access expiry notices without returning source
+  IDs, identities, recipients, paths, record counts, origins, or secret values.
+  Unknown Client runtime state remains `unverified`; missing Operations
+  dependencies remain `blocked`. The preflight cannot activate a rollout flag.
+- Focused Operations evidence before release included 42 reassignment/recovery
+  tests, 61 portal-readiness and portal-contact-search tests, 178 responsive
+  browser tests, type checking, and a production build. A broader Windows unit
+  run was stopped after more than 25 minutes; its only observed failures were
+  two `native-portal-resources.test.ts` cases reproduced unchanged on the exact
+  pre-release `origin/main` baseline. This is not claimed as a complete clean
+  package run.
+- Read-only post-deploy checks rendered Client Hub successfully on both
+  Operations domains with no browser warnings or errors. The primary business
+  record synchronization reported healthy. The Administration page rendered
+  the new readiness panel and correctly reported Client feedback, requests, and
+  attachments as unverified while disabled Operations companion paths remained
+  blocked.
+- Both portal hostnames redirected anonymous `/portal` navigation to their
+  Cloudflare Access login surfaces. This proves edge admission only; the
+  browser session used for this checkpoint was not signed in to the portal, so
+  no client workspace, cross-tenant, logout, expiry, or active-revocation case
+  is claimed.
+
+Client production has no pending migration through `0194`. The currently
+deployed Client secret-name inventory still does not show the dedicated
+Project Alpha connector/signing secret described by the rollout manifest. Do
+not reuse the legacy read-only Project Alpha API key or infer readiness from the
+healthy business synchronization path. Default-off portal mutations remain off
+until their exact paired dependency and live-acceptance window is approved.

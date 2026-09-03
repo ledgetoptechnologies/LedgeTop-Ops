@@ -217,12 +217,13 @@ export function RecurringProjectCopyForward({ root, projectId, projectStatus, co
 
   if (!eligible) return <Card title="Copy from a previous project"><EmptyState title="Copy-forward unavailable"
     detail="This project is not open. Copy-forward is available only while the destination is not started, active, or overdue." /></Card>;
+  if (!busy && page && !page.hasMore && !projects.length) return <Card title="Copy from a previous project"><EmptyState title="No previous project to copy"
+    detail="This is the first available project for this client. Copy-forward will appear after another project exists." /></Card>;
   return <Card title="Copy from a previous project"><section className="recurring-project-copy" aria-label="Copy from a previous project" aria-busy={Boolean(busy)}>
     <p>Reuse selected operational contacts and project memory from another project for this exact client. This does not create a project or copy portal access, files, billing, invitations, or notifications.</p>
     <label>Previous project<select value={sourceId} onChange={event => { clearPreview(); setSourceId(event.target.value); }} disabled={Boolean(busy)}>
       <option value="">Choose a previous project</option>{projects.map(project => <option key={project.id} value={project.id}>{project.name} · {project.status?.replaceAll("_", " ") || "status not recorded"}</option>)}</select></label>
     {busy === "projects" && !projects.length && <p role="status">Loading previous projects…</p>}
-    {!busy && page && !projects.length && <p className="muted">No other projects are available for this client.</p>}
     {page?.hasMore && <button type="button" className="button-ghost" disabled={Boolean(busy)} onClick={() => void loadProjects(true)}>{busy === "projects" ? "Loading projects…" : "Load more previous projects"}</button>}
     <div className="recurring-project-copy-options">
       <fieldset><legend>Operational contacts</legend>{contactRoles.map(([role, label]) => <label key={role}><input type="checkbox" checked={selectedRoles.includes(role)}

@@ -98,6 +98,21 @@ test("unavailable and malformed project-management actions fail closed without l
   expect(calls.filter(call => call.method !== "GET")).toHaveLength(0);
 });
 
+test("an unenrolled exact-source connector is not presented as an unknown synchronization failure", async ({ page }) => {
+  await fixture(page, route => route.fulfill({ json: status({
+    source: { sourceId, displayName: "Business B", state: "unregistered" },
+    availability: { available: false, reason: "source_not_registered", explanation: "This Project Alpha source is not registered for project management." },
+    action: null,
+    sync: { ...status().sync, status: "not_configured", lastAttemptAt: null, lastSuccessAt: null,
+      explanation: "No exact-source project-management connector is enrolled for Business B. Existing business records may still come from the primary Project Alpha synchronization." },
+  }) }));
+  await page.goto(path);
+  const region = businessProjectsCard(page);
+  await expect(region).toContainText("Not configured");
+  await expect(region).toContainText("Existing business records may still come from the primary Project Alpha synchronization.");
+  await expect(region).not.toContainText("No successful Business B synchronization has been recorded yet.");
+});
+
 test("a changed exact root invalidates the full workspace and portal roots never request a business project action", async ({ page }) => {
   await fixture(page, route => route.fulfill({ json: status({ canonicalRoot: { ...root, publicId: "another-client" } }) }));
   await page.goto(path);

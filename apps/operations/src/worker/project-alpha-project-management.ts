@@ -254,15 +254,16 @@ export async function readClientHubProjectManagementAction(env: Env, principal: 
       connector.version connector_version,route.version route_version,route.active_revision route_revision,
       revision.enabled,revision.reviewed_url_template,mapping.external_id,
       health.status sync_status,health.last_attempt_at,health.last_success_at
-      FROM pa_projection_record_ids mapping
-      LEFT JOIN pa_connectors connector ON connector.source_id=mapping.projection_source_id
+      FROM pa_connectors connector
+      LEFT JOIN pa_projection_record_ids mapping ON mapping.projection_source_id=connector.source_id
+        AND mapping.record_kind=? AND mapping.local_id=?
       LEFT JOIN pa_connector_project_management_routes route ON route.source_id=connector.source_id
       LEFT JOIN pa_connector_project_management_route_revisions revision
         ON revision.source_id=route.source_id AND revision.revision=route.active_revision
       LEFT JOIN integration_health health ON health.integration='project-alpha'
         AND health.projection_source_id=connector.source_id
-      WHERE mapping.projection_source_id=? AND mapping.record_kind=? AND mapping.local_id=?
-      ORDER BY mapping.external_id LIMIT 2`).bind(root.source_id, kind, root.public_id).all<ActionRow>()
+      WHERE connector.source_id=?
+      ORDER BY mapping.external_id LIMIT 2`).bind(kind, root.public_id, root.source_id).all<ActionRow>()
       .then(result => result.results.length === 1 ? result.results[0]! : null);
   }
   const sourceName = row?.display_name ?? root.source_name ?? "Project Alpha";
@@ -294,7 +295,7 @@ export async function readClientHubProjectManagementAction(env: Env, principal: 
     sqlScope(env, principal, "integrations.manage"), isAdministrator(env, principal),
   ]);
   const canSync = Boolean(row?.source_id && row.state === "active" && administrator && scope.global && !scope.deniedGlobal);
-  const syncStatus = normalizedSync(row?.sync_status ?? null);
+  const syncStatus = row?.source_id ? normalizedSync(row.sync_status) : "not_configured";
   return {
     canonicalRoot: context.canonicalRoot,
     contextVersion: context.contextVersion,
@@ -305,7 +306,8 @@ export async function readClientHubProjectManagementAction(env: Env, principal: 
       status: syncStatus,
       lastAttemptAt: safeTimestamp(row?.last_attempt_at ?? null),
       lastSuccessAt: safeTimestamp(row?.last_success_at ?? null),
-      explanation: syncStatus === "healthy" ? `The latest ${sourceName} synchronization completed successfully.`
+      explanation: syncStatus === "not_configured" ? `No exact-source project-management connector is enrolled for ${sourceName}. Existing business records may still come from the primary Project Alpha synchronization.`
+        : syncStatus === "healthy" ? `The latest ${sourceName} synchronization completed successfully.`
         : syncStatus === "error" ? `${sourceName} synchronization needs attention. Creating a project in Project Alpha does not create a local Operations project.`
         : syncStatus === "disabled" ? `${sourceName} synchronization is disabled.`
         : `No successful ${sourceName} synchronization has been recorded yet.`,

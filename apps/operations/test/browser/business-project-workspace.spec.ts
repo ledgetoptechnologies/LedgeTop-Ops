@@ -701,6 +701,21 @@ test("recurring project copy previews explicit selections and retries commit wit
   for (const item of writes) expect(JSON.stringify(item.body)).not.toMatch(/portal|grant|billing|invitation|notification|attachment/i);
 });
 
+test("recurring copy renders a non-actionable empty state when no previous project exists", async ({ page }) => {
+  const destination = { ...detail().project, status: "active", row_key: "destination" };
+  await mock(page, route => { const value = detail(); value.project.status = "active"; return route.fulfill({ json: value }); },
+    ["team.view", "projects.view", "project.contacts.manage", "project.memory.manage"],
+    (route, url) => url.pathname.endsWith("/operational-workspace")
+      ? route.fulfill({ json: operational("active", "project-one") })
+      : route.fulfill({ status: 500, json: { error: "Unexpected operational request" } }), [destination]);
+  await open(page);
+  const copyCard = workspace(page).locator(".ltds-card").filter({ has: page.getByRole("heading", { name: "Copy from a previous project", exact: true }) });
+  await expect(copyCard.getByText("No previous project to copy", { exact: true })).toBeVisible();
+  await expect(copyCard.getByRole("combobox")).toHaveCount(0);
+  await expect(copyCard.getByRole("checkbox")).toHaveCount(0);
+  await expect(copyCard.getByRole("button", { name: "Preview copy", exact: true })).toHaveCount(0);
+});
+
 test("recurring copy clears protected project data when preview authorization or context changes", async ({ page }) => {
   const projects = [{ ...detail().project, status: "active", row_key: "destination" },
     { ...detail("project-zero", "Previous project").project, row_key: "source" }];

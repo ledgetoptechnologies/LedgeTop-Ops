@@ -173,10 +173,12 @@ export function ClientRequestWorkflow({
   mapToken,
   basePath = "/operations/client-requests",
   pendingOnly: forcePendingOnly = false,
+  hideWhenEmpty = false,
 }: {
   mapToken: string | null;
   basePath?: string;
   pendingOnly?: boolean;
+  hideWhenEmpty?: boolean;
 }) {
   const selectedRequestId = () => {
     const parts = location.pathname.split("/").filter(Boolean);
@@ -247,6 +249,7 @@ export function ClientRequestWorkflow({
         </button>
       </Card>
     );
+  if (hideWhenEmpty && !visible?.length) return null;
   return (
     <>
       <div className="notice managed-notice">

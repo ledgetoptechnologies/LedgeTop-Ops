@@ -27,8 +27,8 @@ async function activityRequest(id: string, query = "", namespace = "business") {
 async function timelineRequest(id: string, query = "", namespace = "business") {
   return worker.fetch(new Request(`https://ops.example/api/client-hub/sources/${encodeURIComponent(sourceId)}/${namespace}/standalone/${encodeURIComponent(id)}/timeline${query}`), env, execution);
 }
-async function projectManagementRequest(id: string, query = "", namespace = "business") {
-  return worker.fetch(new Request(`https://ops.example/api/client-hub/sources/${encodeURIComponent(sourceId)}/${namespace}/standalone/${encodeURIComponent(id)}/project-management${query}`), env, execution);
+async function projectManagementRequest(id: string, query = "", namespace = "business", source = sourceId) {
+  return worker.fetch(new Request(`https://ops.example/api/client-hub/sources/${encodeURIComponent(source)}/${namespace}/standalone/${encodeURIComponent(id)}/project-management${query}`), env, execution);
 }
 async function activityClient(times = ["2025-04-01T12:00:00.000Z", "2025-04-02T12:00:00.000Z"]) {
   const externalId = `activity-http-${crypto.randomUUID()}`;
@@ -182,6 +182,42 @@ describe("Client Hub source visibility errors through the Operations entrypoint"
     expect(await db.prepare("SELECT count(*) count FROM pa_connector_project_management_route_audit WHERE source_id=?").bind(sourceId).first<number>("count")).toBe(before.audit);
     const stale=await projectManagementRequest(client.id,"?expectedContextVersion=stale-context");expect(stale.status).toBe(409);
     expect(await stale.json()).toEqual({error:"Client context changed. Refresh the workspace to continue"});
+  }, 30_000);
+
+  it("retains only the exact source synchronization health when its project-management route is not configured", async () => {
+    const exactSource = `project-alpha:unconfigured-${crypto.randomUUID()}`;
+    await registerVisibleTestSource(db, exactSource, "Unconfigured source");
+    await db.prepare("UPDATE pa_connectors SET state='active',version=version+1 WHERE source_id=?").bind(exactSource).run();
+    const externalId = `unconfigured-http-${crypto.randomUUID()}`;
+    const mapping = await prepareProjectAlphaSourceRecords(db, createProjectAlphaSourceContext(exactSource), [{ kind: "client", externalId }]);
+    const id = mapping.get("client", externalId), name = "Unconfigured secondary client";
+    await db.batch([
+      db.prepare("INSERT INTO pa_clients(id,name,organization_id,active,payload_json,last_sync_id,projection_source_id) VALUES(?,?,NULL,1,'{}','fixture',?)")
+        .bind(id, name, exactSource),
+      db.prepare(`INSERT INTO client_hub_roots(source_id,root_namespace,kind,public_id,display_name,sort_name,status)
+        VALUES(?,'business','standalone_client',?,?,?,'active')`).bind(exactSource, id, name, name.toLowerCase()),
+      db.prepare(`INSERT INTO integration_health(integration,status,last_attempt_at,last_success_at,projection_source_id)
+        VALUES('project-alpha','healthy','2026-08-28 12:00:00','2026-08-28 11:59:00','project-alpha:primary')
+        ON CONFLICT(projection_source_id,integration) DO UPDATE SET status=excluded.status,
+          last_attempt_at=excluded.last_attempt_at,last_success_at=excluded.last_success_at`),
+      db.prepare(`INSERT INTO integration_health(integration,status,last_attempt_at,last_success_at,projection_source_id)
+        VALUES('project-alpha','error','2026-08-29 12:00:00',NULL,?)
+        ON CONFLICT(projection_source_id,integration) DO UPDATE SET status=excluded.status,
+          last_attempt_at=excluded.last_attempt_at,last_success_at=excluded.last_success_at`).bind(exactSource),
+    ]);
+    const response = await projectManagementRequest(id, "", "business", exactSource);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Cache-Control")).toContain("no-store");
+    const body = await response.json() as Record<string, any>;
+    expect(body).toMatchObject({
+      canonicalRoot: { sourceId: exactSource, rootNamespace: "business", kind: "standalone_client", publicId: id },
+      source: { sourceId: exactSource, displayName: "Unconfigured source", state: "active" },
+      availability: { available: false, reason: "route_not_configured" },
+      action: null,
+      sync: { status: "error", lastAttemptAt: "2026-08-29T12:00:00.000Z", lastSuccessAt: null },
+    });
+    expect(body.sync.explanation).toContain("Unconfigured source synchronization needs attention");
+    expect(JSON.stringify(body)).not.toContain("2026-08-28T12:00:00.000Z");
   }, 30_000);
 
   it("fails the Project Alpha action closed when the exact source or reviewed route is inactive", async () => {
