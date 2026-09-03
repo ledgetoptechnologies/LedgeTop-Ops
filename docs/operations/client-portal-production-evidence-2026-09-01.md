@@ -175,6 +175,13 @@ Project Alpha onboarding, approval, project, contract, or document workflow.
   adapter browser coverage passed 16 desktop/mobile cases, including bounded
   pagination, malformed pages, authorization invalidation, cancellation, and
   late-response fencing.
+- The fixture-driven J2 joined receiver test
+  `joined-portal-metadata-authority.test.ts` passed against the full local Client
+  migration chain through `0192`. One signed schema-v4 hierarchy/contact
+  generation and one exact-source service-assignment generation were activated,
+  tombstoned, and root-revoked while membership, authenticated delivery grant,
+  service-request, delivery-notification, and portal-notification authority
+  tables remained empty throughout.
 - The post-`0192` monolithic Windows Client run passed 924 of 926 tests. The two
   failures were isolated Miniflare loopback `EADDRINUSE` transport collisions;
   both exact cases passed in isolated and paired reruns. Linux CI or bounded
@@ -184,3 +191,29 @@ Project Alpha contact assignments remain a default-off, informational read
 surface. They do not authorize portal access, delivery, requests, billing, or
 notifications. This checkpoint therefore improves safe receiver compatibility
 without changing any client's effective access.
+
+### Signed-in dual-domain read-only follow-up
+
+A signed-in pilot session was inspected without creating or changing any
+workspace, membership, grant, request, client, or Project Alpha record.
+
+- `https://portal.ledgetopdroneservices.com/portal` and
+  `https://portal.ledgetoptechnologies.com/portal` rendered the same pilot
+  workspace and navigation without console warnings or errors.
+- Both home pages rendered the personalized heading
+  **Hello, LTDS Client Portal Pilot** rather than a generic greeting.
+- Direct navigation to `/portal/projects` and a hard refresh preserved the
+  project route and the same visible project on both domains.
+- At a 375-by-812 viewport, the Technologies portal rendered its mobile
+  navigation dialog, Home/Projects/Deliveries/Feedback/Account links, and
+  personalized home cards without horizontal document overflow. The viewport
+  override was reset after the check.
+- The signed-in Operations Client Hub still rendered the canonical navigation,
+  dynamic search result, portal-workspace coverage, and exact Project Alpha
+  source label without a console error during this observation.
+
+This is partial J7 evidence only. It does not prove initial Access sign-in,
+logout, session expiry, unauthorized or unprovisioned denial, cross-tenant
+denial, revocation during an active read, or the post-change Access
+application/audience/policy readback. Those cases remain required before J7 is
+live accepted.
