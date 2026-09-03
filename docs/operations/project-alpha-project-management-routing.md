@@ -68,6 +68,22 @@ Pending, suspended, retired, hidden, unregistered, unmapped, disabled, or
 concurrently changed sources fail closed. Reading the action does not write a
 project, audit event, notification, grant, or synchronization job.
 
+### Original primary synchronization compatibility
+
+The original `project-alpha:primary` synchronization predates the connector
+registry. While its deployment-owned HTTPS endpoint, application key, and
+read credential remain configured, Client Hub may show that exact source's
+immutable record mapping and synchronization health even when the registry is
+still empty. This compatibility path is primary-only and read-only: it does
+not create a connector, route, credential, workspace, membership, or grant.
+An authorized administrator may request the existing primary synchronization
+through its legacy same-origin endpoint.
+
+Project creation remains unavailable until an administrator deliberately
+enrolls the primary connector and reviews a project-management URL. Secondary
+sources never inherit this compatibility behavior or the primary source's
+health, mapping, synchronization action, or destination.
+
 ## Operator workflow
 
 1. Activate and expose the exact source connector.

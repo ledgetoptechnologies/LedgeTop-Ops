@@ -1,5 +1,6 @@
 import { HTTPException } from "hono/http-exception";
 import { createCatalogSourceContext, PRIMARY_CATALOG_SOURCE, type CatalogSourceContext } from "@ltds/shared";
+import { portalAutomaticEligibilityEnabled } from "./portal-automatic-eligibility";
 import type { Env } from "./types";
 
 const SEARCH_LIMIT = 12;
@@ -127,7 +128,7 @@ export async function resolveProjectAlphaDeliveryPrincipal(env:Env,prefix:string
   const validated = createCatalogSourceContext(source?.sourceId);
   const publicId=publicIdValue.trim();if(!publicId||publicId.length>128)throw new HTTPException(400,{message:"Recipient selection is invalid"});
   const context=await bindingContext(env,prefix,validated);
-  const candidates=principalCandidatesSql(context,publicId,sourceVersion,env.CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED==="true");
+  const candidates=principalCandidatesSql(context,publicId,sourceVersion,portalAutomaticEligibilityEnabled(env));
   const eligible=(await env.DELIVERY_DB.withSession("first-primary").prepare(candidates.sql).bind(...candidates.bindings)
     .all<{display_name:string;identity_id:string;issuer:string;subject:string;verified_email:string}>()).results;
   if(eligible.length!==1)throw new HTTPException(409,{message:"Delivery recipient is not uniquely eligible"});
@@ -174,7 +175,7 @@ export async function resolveProjectAlphaDeliveryPrincipalProof(env:Env,prefix:s
   sourceVersion:string,bindingSourceVersion:string,source:CatalogSourceContext=PRIMARY_CATALOG_SOURCE) {
   const validated=createCatalogSourceContext(source?.sourceId),publicId=publicIdValue.trim();
   if(!publicId||publicId.length>128)throw new HTTPException(400,{message:"Recipient selection is invalid"});
-  const context=await bindingContext(env,prefix,validated),allowUnclaimed=env.CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED==='true';
+  const context=await bindingContext(env,prefix,validated),allowUnclaimed=portalAutomaticEligibilityEnabled(env);
   const candidates=principalCandidatesSql(context,publicId,sourceVersion,allowUnclaimed);
   const rows=(await env.DELIVERY_DB.withSession('first-primary').prepare(candidates.sql).bind(...candidates.bindings)
     .all<{display_name:string;identity_id:string;issuer:string;subject:string;verified_email:string}>()).results;

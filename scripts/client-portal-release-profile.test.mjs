@@ -1,0 +1,66 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import test from "node:test";
+import { eligibilityFlags, validatePortalReleaseProfile } from "./client-portal-release-profile.mjs";
+
+const client = JSON.parse(fs.readFileSync(new URL("../apps/client/wrangler.jsonc", import.meta.url), "utf8"));
+const operations = JSON.parse(fs.readFileSync(new URL("../apps/operations/wrangler.jsonc", import.meta.url), "utf8"));
+const receiver = { schemaVersion: 1, profile: "receiver-only" };
+const activation = { schemaVersion: 1, profile: "default-on-eligibility" };
+function configs(profile) {
+  const pair = [structuredClone(client), structuredClone(operations)];
+  for (const config of pair) for (const flag of eligibilityFlags) config.vars[flag] = profile === activation ? "true" : "false";
+  return pair;
+}
+
+test("committed release intent is valid for both checked-in configurations", () => {
+  const declaration = JSON.parse(fs.readFileSync(new URL("./client-portal-release-profile.json", import.meta.url), "utf8"));
+  assert.deepEqual(validatePortalReleaseProfile(declaration, client, operations), []);
+});
+
+test("missing, malformed, unknown, and extra-field profiles never infer activation", () => {
+  const pair = configs(activation);
+  for (const declaration of [undefined, null, [], "default-on-eligibility", {}, { profile: activation.profile },
+    { ...activation, schemaVersion: "1" }, { ...activation, profile: "DEFAULT-ON-ELIGIBILITY" },
+    { ...activation, profile: "eligibility-paused" }, { ...activation, bypass: true }]) {
+    assert.ok(validatePortalReleaseProfile(declaration, ...pair).length);
+  }
+});
+
+for (const declaration of [receiver, activation]) {
+  test(`${declaration.profile} requires a complete exact bundle on each Worker`, () => {
+    assert.deepEqual(validatePortalReleaseProfile(declaration, ...configs(declaration)), []);
+    for (const index of [0, 1]) for (const flag of eligibilityFlags) {
+      for (const value of [undefined, null, true, false, "TRUE", " true ", declaration === activation ? "false" : "true"]) {
+        const pair = configs(declaration);
+        pair[index].vars[flag] = value;
+        const optionalAbsent = declaration === receiver && index === 0 && flag === "CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED" && value === undefined;
+        assert.equal(validatePortalReleaseProfile(declaration, ...pair).length === 0, optionalAbsent, `${index} ${flag} ${value}`);
+      }
+    }
+    for (const index of [0, 1]) {
+      const pair = configs(declaration);
+      pair[index].vars = null;
+      assert.ok(validatePortalReleaseProfile(declaration, ...pair).length);
+    }
+  });
+
+  test(`${declaration.profile} keeps invitation, delivery and expiry mail disabled`, () => {
+    for (const [index, flag] of [[0, "CLIENT_PORTAL_INVITATION_EMAIL_ENABLED"], [1, "AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED"], [1, "PROJECT_ACCESS_EXPIRY_NOTIFICATIONS_ENABLED"]]) {
+      for (const value of [undefined, "true", false]) {
+        const pair = configs(declaration);
+        pair[index].vars[flag] = value;
+        assert.ok(validatePortalReleaseProfile(declaration, ...pair).some(error => error.includes(flag)));
+      }
+    }
+  });
+}
+
+test("one Worker cannot declare activation while the other remains receiver-only", () => {
+  const enabled = configs(activation);
+  const disabled = configs(receiver);
+  for (const declaration of [receiver, activation]) {
+    assert.ok(validatePortalReleaseProfile(declaration, enabled[0], disabled[1]).length);
+    assert.ok(validatePortalReleaseProfile(declaration, disabled[0], enabled[1]).length);
+  }
+});

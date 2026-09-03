@@ -44,7 +44,9 @@ The checked-in production configuration is the receiver-only state: portal
 sync and schema-v3 relation ingestion are true, while client hierarchy reads,
 automatic identity eligibility, content grants, requests, notifications,
 membership management, invitations, and delegated sharing remain false.
-`npm run deploy` is the only supported production release command. Its
+The committed `scripts/client-portal-release-profile.json` explicitly selects
+`receiver-only`. It is a versioned release-intent declaration, not activation
+approval or production evidence. `npm run deploy` is the only supported production release command. Its
 repository-owned wrapper executes `deploy:preflight` first and refuses to deploy
 unless the remote Worker secret inventory contains the current HMAC secret. A
 direct Wrangler invocation bypasses this gate and is not an approved release
@@ -113,8 +115,9 @@ never save secret values or complete authentication headers.
    From `apps/client`, run `npm run deploy:preflight`. It calls
    `wrangler secret list --format json`, validates only secret names, and prints
    no secret values. A missing current secret, an orphaned previous secret, or
-   any adjacent client-authority/workflow flag that is not exactly false fails
-   the preflight.
+   any disallowed adjacent client-authority/workflow flag fails the preflight.
+   The fixed committed profile and both local Worker configurations are validated
+   before inventory access; deployed configuration still requires separate readback.
 7. Confirm the receiver-only version has all projection configuration present
    with `PROJECT_ALPHA_PORTAL_SYNC_ENABLED=true`,
    `CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED=true`, and
@@ -168,11 +171,52 @@ variables in place and do not enable the Project Alpha producer before step 4.
    Validate parity, staleness alerts, workspace containment, deny precedence,
    completed-project lifecycle behavior, and the selected pilot's explicit LTDS
    identity binding and membership.
-8. Only after a separate authorization review, activate a new version with
-   `CLIENT_PORTAL_HIERARCHY_V2_ENABLED=true` for the approved pilot. Do not infer
-   membership from a projected contact, email match, primary-contact marker, or
-   Project Alpha entitlement alone. Expand only through separately approved
-   versions with recorded denial and rollback tests.
+8. This receiver-only window does not authorize client eligibility. For the
+   current default-on requirement, follow R2 in the rollout manifest and the
+   explicit release-profile transition below; the former hierarchy-only,
+   individually enrolled pilot step is superseded. Contact metadata or an
+   unverified email match alone must never create authority.
+
+## Default-on eligibility release profile
+
+Only after R0/R1 and joined eligibility/revocation verification, prepare a
+separately reviewed commit selecting `default-on-eligibility` in
+`scripts/client-portal-release-profile.json` (`schemaVersion: 1`). Set these four
+flags exactly `true` in **both** Client and Operations configurations:
+
+- `CLIENT_PORTAL_HIERARCHY_V2_ENABLED`
+- `CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED`
+- `CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED`
+- `CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED`
+
+The receiver-only profile requires those flags exactly `false`; only Client's
+existing omitted deny-management flag may remain absent. Missing or unknown
+profiles, extra profile fields, partial bundles, and mixed local Worker states
+fail closed. No environment variable or inferred flag combination selects a
+profile. The original receiver-only validator remains strict independently.
+
+Both profiles preserve receiver ingress, relation ingestion, Access/HMAC and
+rotation checks and all unrelated Client false-flag constraints. Invitation
+email remains false, as do Operations authenticated-delivery and project-access
+expiry notifications. Default-on provisioning and historical backfill send no
+invitation or announcement mail; eligibility grants no unshared delivery folder.
+No Viewer setting changes belong in this transition.
+
+The committed declaration and exact commit/artifact identify intended state,
+not remote readiness. Separately verify migrations, recovery baseline, joined
+tests, production authorization, and exact deployed versions/flags. Deploy and
+read back Operations deny-management readiness before activating Client
+eligibility. Run `npm run deploy` for the Client release; never bypass the
+preflight with direct Wrangler. Record live first-login, backfill, revocation,
+both-host session and preserved-public-link evidence separately.
+
+No reconciliation-paused profile is implemented. The recorded receiver-only
+version is an emergency access-disable rollback, not a promise of continued
+hierarchy/deny-management reads. A normal pause retaining those reads requires
+a separately reviewed exact configuration and gate change. In either case,
+retain identities, workspace and denial records, preserve administrator opt-outs,
+keep mail disabled, and preserve receiver compatibility for queued revocations;
+never delete workspaces or denial state to simulate rollback.
 
 ## Drain-first rollback
 

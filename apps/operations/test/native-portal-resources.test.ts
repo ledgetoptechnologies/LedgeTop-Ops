@@ -112,6 +112,10 @@ describe('source-owned native portal resources with real signed projection and l
       new URL('../../client/migrations/0187_authenticated_content_audit.sql',import.meta.url),'utf8')).map(sql=>db.prepare(sql)));
     await db.batch(splitD1MigrationStatements(readFileSync(
       new URL('../../client/migrations/0188_native_feedback_completion_notices.sql',import.meta.url),'utf8')).map(sql=>db.prepare(sql)));
+    // Relation-mode snapshots require the current immutable wire claim and
+    // its additive contact-contract table, even when the payload is schema v3.
+    for(const name of ['0190_portal_contact_assignments_v4.sql','0191_portal_projection_wire_contract_claim.sql'])
+      await db.batch(splitD1MigrationStatements(readFileSync(new URL(`../../client/migrations/${name}`,import.meta.url),'utf8')).map(sql=>db.prepare(sql)));
     opsDb=await runtime.getD1Database('OPS_DB') as D1Database;
     for(const name of readdirSync(new URL('../migrations/',import.meta.url)).filter(n=>n.endsWith('.sql')&&n<'0041_').sort())
       await opsDb.batch(splitD1MigrationStatements(readFileSync(new URL(`../migrations/${name}`,import.meta.url),'utf8')).map(sql=>opsDb.prepare(sql)));
@@ -122,7 +126,8 @@ describe('source-owned native portal resources with real signed projection and l
       .setSubject(principal.subject).setIssuedAt().setExpirationTime('1h').sign(keypair.privateKey);
     a=fixture('a');b=fixture('b');
     env={DELIVERY_DB:db,CLIENT_PORTAL_ENABLED:'true',CLIENT_PORTAL_HIERARCHY_V2_ENABLED:'true',CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED:'true',
-      CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED:'true',AUTHENTICATED_DELIVERY_GRANTS_ENABLED:'true',CLIENT_PORTAL_ORIGIN:'https://client.test',
+      CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED:'true',CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED:'true',
+      AUTHENTICATED_DELIVERY_GRANTS_ENABLED:'true',CLIENT_PORTAL_ORIGIN:'https://client.test',
       CLIENT_PORTAL_NATIVE_FEEDBACK_SOURCE_IDS:`${a.source},${b.source}`,
       PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED:'true',
       PUBLIC_BULK_RATE_LIMITER:{limit:async()=>({success:true})},
@@ -575,9 +580,11 @@ describe('source-owned native portal resources with real signed projection and l
     expect(await db.prepare('SELECT count(*) n FROM portal_v2_identities WHERE issuer=? AND subject=?').bind(issuer,person.subject).first('n')).toBe(0);
     expect(await db.prepare('SELECT count(*) n FROM portal_v2_workspace_memberships WHERE workspace_id=?').bind(f.workspace).first('n')).toBe(0);
   });
-  it('the existing eligibility feature flag remains required for a secondary-only first login',async()=>{
-    const {f,person,token}=await eligibilityCase('disabled');
-    expect((await request('/session',{}, {...env,CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED:'false'},token)).status).toBe(403);
+  it.each(['CLIENT_PORTAL_HIERARCHY_V2_ENABLED','CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED',
+    'CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED','CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED'] as const)(
+    'the coordinated eligibility flag %s remains required for a secondary-only first login',async missing=>{
+    const {f,person,token}=await eligibilityCase(`disabled-${missing.toLowerCase()}`);
+    expect((await request('/session',{}, {...env,[missing]:'false'},token)).status).toBe(403);
     expect(await db.prepare('SELECT count(*) n FROM portal_v2_identities WHERE issuer=? AND subject=?').bind(issuer,person.subject).first('n')).toBe(0);
     expect(await db.prepare('SELECT count(*) n FROM portal_v2_workspace_memberships WHERE workspace_id=?').bind(f.workspace).first('n')).toBe(0);
   });
@@ -615,7 +622,8 @@ describe('source-owned native portal resources with real signed projection and l
       relations:[{publicId:'history-owner',relationType:'contains',from:{type:'organization',publicId:rootId},to:{type:'project',publicId:projectId},sourceVersion:'relation-v1',active:true}],
       projectLifecycles:[{projectPublicId:projectId,status:'completed',completedAt,sourceVersion:'lifecycle-completed'}]};
     const relationEnv={...env,CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED:'true'};
-    expect((await signed(a,snapshot,relationEnv)).status).toBe(200);
+    const snapshotResponse=await signed(a,snapshot,relationEnv);
+    expect(snapshotResponse.status,await snapshotResponse.clone().text()).toBe(200);
     expect((await signed(a,{schemaVersion:3,applicationKey:app,deliveryId:'customer-history-activate',occurredAt:snapshot.occurredAt,
       sourceGeneration:snapshot.sourceGeneration,sourceSequence:100,workspaceId:'same-workspace',kind:'snapshot.activate',snapshotHash:snapshot.snapshotHash,
       pageCount:1,recordCount:8},relationEnv)).status).toBe(200);

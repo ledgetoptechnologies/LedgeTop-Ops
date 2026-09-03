@@ -124,6 +124,8 @@ describe("Project Alpha to authenticated Client delivery cross-repository contra
       CLIENT_PORTAL_ENABLED: "true",
       CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true",
       CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED: "true",
+      CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: "true",
+      CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED: "true",
       AUTHENTICATED_DELIVERY_GRANTS_ENABLED: "true",
       CLIENT_PORTAL_ORIGIN: origin,
       CLIENT_ACCESS_TEAM_DOMAIN: principal.issuer,

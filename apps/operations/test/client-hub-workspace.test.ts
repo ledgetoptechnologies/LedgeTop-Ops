@@ -56,6 +56,26 @@ describe("explicit Client Hub workspace provenance", () => {
     expect(await resolveClientHubWorkspace(env, { ...lookup, pa_public_id: null })).toEqual({ status: "missing", workspace: null });
   });
 
+  it("links automatically provisioned organization and standalone roots without creating legacy accounts", async () => {
+    await workspace("automatic-organization", publicId);
+    const clientPublicId = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    await db.batch([
+      db.prepare("INSERT INTO portal_v2_workspaces VALUES('automatic-client','standalone_client','Standalone client','active',NULL,NULL,?,'project-alpha:primary')").bind(clientPublicId),
+      db.prepare("INSERT INTO portal_v2_directory_generations VALUES('client-generation','automatic-client','signed-client-generation',1,'active',1)"),
+      db.prepare("INSERT INTO portal_v2_directory_checkpoints VALUES('automatic-client','client-generation',1)"),
+      db.prepare("INSERT INTO portal_v2_directory_entities VALUES('automatic-client','client-generation','standalone_client',?,NULL,1,'client-version')").bind(clientPublicId),
+    ]);
+    const resolutions = await resolveClientHubWorkspaces(env, [lookup,
+      { ...lookup, key: "202", kind: "standalone_client", business_id: "202", pa_public_id: clientPublicId },
+    ]);
+    expect(resolutions.get("101")).toMatchObject({ status: "mapped", workspace: { id: "automatic-organization", legacy_account_id: null } });
+    expect(resolutions.get("202")).toMatchObject({ status: "mapped", workspace: { id: "automatic-client", legacy_account_id: null } });
+    expect(await db.prepare("SELECT COUNT(*) count FROM client_accounts").first("count")).toBe(0);
+    await db.prepare("UPDATE portal_v2_workspaces SET status='suspended' WHERE id='automatic-client'").run();
+    expect(await resolveClientHubWorkspace(env, { ...lookup, kind: "standalone_client", business_id: "202", pa_public_id: clientPublicId }))
+      .toMatchObject({ status: "mapped", workspace: { id: "automatic-client", status: "suspended" } });
+  });
+
   it("never borrows a secondary Delivery account's same-ID legacy bridge for the primary business root", async () => {
     await workspace("secondary", "101", true);
     await db.prepare("UPDATE client_accounts SET project_alpha_source_id='project-alpha:secondary' WHERE id='account-secondary'").run();

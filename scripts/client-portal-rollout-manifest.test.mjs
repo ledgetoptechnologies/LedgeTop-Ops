@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { eligibilityFlags, validatePortalReleaseProfile } from "./client-portal-release-profile.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const read = (relative) => fs.readFileSync(path.join(root, relative), "utf8");
@@ -17,6 +18,8 @@ function configuredValue(config, name) {
 }
 
 test("portal rollout foundations and dormant gates match the reviewed manifest", () => {
+  const declaration = JSON.parse(read("scripts/client-portal-release-profile.json"));
+  assert.deepEqual(validatePortalReleaseProfile(declaration, JSON.parse(clientConfig), JSON.parse(operationsConfig)), []);
   const enabledFoundations = [
     [clientConfig, "CLIENT_PORTAL_ENABLED"],
     [clientConfig, "PROJECT_ALPHA_PORTAL_SYNC_ENABLED"],
@@ -32,6 +35,7 @@ test("portal rollout foundations and dormant gates match the reviewed manifest",
     "CLIENT_PORTAL_HIERARCHY_V2_ENABLED",
     "CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED",
     "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED",
+    "CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED",
     "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED",
     "PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED",
     "AUTHENTICATED_DELIVERY_GRANTS_ENABLED",
@@ -52,6 +56,7 @@ test("portal rollout foundations and dormant gates match the reviewed manifest",
     "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED",
     "PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED",
     "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED",
+    "CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED",
     "CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED",
     "AUTHENTICATED_DELIVERY_GRANTS_ENABLED",
     "AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED",
@@ -62,7 +67,9 @@ test("portal rollout foundations and dormant gates match the reviewed manifest",
 
   for (const [config, names] of [[clientConfig, dormantClientFlags], [operationsConfig, dormantOperationsFlags]]) {
     for (const name of names) {
-      assert.notEqual(configuredValue(config, name), "true", `${name} was activated outside a recorded rollout window`);
+      if (!eligibilityFlags.includes(name)) {
+        assert.notEqual(configuredValue(config, name), "true", `${name} was activated outside a recorded rollout window`);
+      }
       assert.match(manifest, new RegExp(`\\b${name}\\b`), `${name} is not represented in the rollout manifest`);
     }
   }
@@ -73,11 +80,16 @@ test("rollout manifest is pinned to the current receiver migration boundary", ()
     "apps/client/migrations/0190_portal_contact_assignments_v4.sql",
     "apps/client/migrations/0191_portal_projection_wire_contract_claim.sql",
     "apps/client/migrations/0192_contact_assignment_billing_independence.sql",
+    "apps/client/migrations/0193_bulk_download_parts.sql",
+    "apps/client/migrations/0194_client_delegated_share_expiry.sql",
+    "apps/client/migrations/0195_legacy_workspace_authority_lifecycle.sql",
     "apps/operations/migrations/0051_client_hub_internal_notes.sql",
+    "apps/operations/migrations/0052_project_operational_reassignment_recovery.sql",
   ]) assert.equal(exists(migration), true, `missing rollout migration ${migration}`);
 
-  assert.match(manifest, /Client migrations through `0192`/);
-  assert.match(manifest, /Operations through `0051`/);
+  assert.match(manifest, /Client migrations through `0195`/);
+  assert.match(manifest, /Operations through `0052`/);
+  assert.match(manifest, /Project Alpha `0083`/);
 });
 
 test("rollout manifest keeps every joined workflow and reversible window explicit", () => {

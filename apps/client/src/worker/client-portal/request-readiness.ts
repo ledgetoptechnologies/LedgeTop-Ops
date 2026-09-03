@@ -213,13 +213,9 @@ async function readNativeClientRequestReadiness(
     sourceSequence: proof.sourceSequence,
     targetScopes: proof.targetScopes,
     allowedEntitlementIds: proof.allowedEntitlementIds,
-    authority: {
-      sourceId: proof.authority.sourceId,
-      revision: proof.authority.revision,
-      version: proof.authority.version,
-      connectorRevision: proof.authority.connectorRevision,
-      connectorVersion: proof.authority.connectorVersion,
-    },
+    // Internal comparison only: primary key reservations and registered-source
+    // revisions both participate in the same before/after freshness proof.
+    authority: proof.authority,
   });
   async function snapshot(assignmentWindows?: {
     root?: { evaluatedAt: string; expiresAt: string };

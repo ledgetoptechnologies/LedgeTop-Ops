@@ -16,7 +16,8 @@ async function fixture(): Promise<{ db: D1Database; env: Env }> {
   await db.exec(`
     CREATE TABLE portal_v2_identities(id TEXT PRIMARY KEY,issuer TEXT,subject TEXT,verified_email TEXT,
       status TEXT,revoked_at TEXT,UNIQUE(issuer,subject));
-    CREATE TABLE client_accounts(id TEXT PRIMARY KEY,status TEXT,display_name TEXT,project_alpha_source_id TEXT);
+    CREATE TABLE client_accounts(id TEXT PRIMARY KEY,status TEXT,display_name TEXT,project_alpha_source_id TEXT,
+      project_alpha_client_id TEXT,project_alpha_organization_id TEXT);
     CREATE TABLE client_identity_links(id TEXT PRIMARY KEY,account_id TEXT,issuer TEXT,subject TEXT,email TEXT,revoked_at TEXT,
       UNIQUE(issuer,subject),UNIQUE(id,account_id));
     CREATE TABLE client_account_members(account_id TEXT,identity_id TEXT,role TEXT,can_view_billing INTEGER,revoked_at TEXT,
@@ -32,8 +33,9 @@ async function fixture(): Promise<{ db: D1Database; env: Env }> {
       source_version TEXT,revoked_at TEXT,expires_at TEXT,updated_at TEXT DEFAULT (datetime('now')),PRIMARY KEY(workspace_id,identity_id));
     CREATE TABLE portal_v2_identity_denials(identity_id TEXT,scope_type TEXT,status TEXT,revoked_at TEXT,
       valid_from TEXT,expires_at TEXT);
-    CREATE TABLE portal_v2_directory_checkpoints(workspace_id TEXT,active_generation_id TEXT);
-    CREATE TABLE portal_v2_directory_generations(id TEXT,workspace_id TEXT,status TEXT,complete INTEGER);
+    CREATE TABLE portal_v2_directory_checkpoints(workspace_id TEXT,active_generation_id TEXT,source_sequence INTEGER);
+    CREATE TABLE portal_v2_directory_generations(id TEXT,workspace_id TEXT,status TEXT,complete INTEGER,
+      source_generation TEXT,source_sequence INTEGER);
     CREATE TABLE portal_v2_directory_entities(workspace_id TEXT,generation_id TEXT,entity_type TEXT,public_id TEXT,
       parent_public_id TEXT,active INTEGER);
     CREATE TABLE portal_v2_entitlements(workspace_id TEXT,identity_id TEXT,capability TEXT,effect TEXT,status TEXT,
@@ -47,7 +49,8 @@ async function fixture(): Promise<{ db: D1Database; env: Env }> {
   await db.exec(migration);
   return { db, env: { DELIVERY_DB: db, CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true",
     CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED: "true",
-    CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: "true" } as Env };
+    CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: "true",
+    CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED: "true" } as Env };
 }
 
 afterEach(async () => Promise.all(active.splice(0).map(instance => instance.dispose())));
@@ -57,7 +60,7 @@ describe("Project Alpha portal identity eligibility", () => {
     const { db, env } = await fixture();
     // Deliberately inconsistent fixture: runtime must reject even before the
     // full migration's immutable ownership/bridge constraints are consulted.
-    await db.prepare("INSERT INTO client_accounts VALUES('account-one','active','Client','project-alpha:primary')").run();
+    await db.prepare("INSERT INTO client_accounts(id,status,display_name,project_alpha_source_id) VALUES('account-one','active','Client','project-alpha:primary')").run();
     await db.prepare(`INSERT INTO portal_v2_workspaces
       (id,root_type,pa_organization_public_id,display_name,status,legacy_account_id,project_alpha_source_id)
       VALUES('workspace-secondary','organization','org-one','Secondary','active','account-one','project-alpha:secondary')`).run();
@@ -73,7 +76,7 @@ describe("Project Alpha portal identity eligibility", () => {
 
   it("binds an exact active portal principal on first login without granting any workspace", async () => {
     const { db, env } = await fixture();
-    await db.prepare("INSERT INTO client_accounts VALUES('account-one','active','Client','project-alpha:primary')").run();
+    await db.prepare("INSERT INTO client_accounts(id,status,display_name,project_alpha_source_id) VALUES('account-one','active','Client','project-alpha:primary')").run();
     await db.prepare(`INSERT INTO portal_v2_workspaces(id,root_type,pa_organization_public_id,pa_client_public_id,display_name,status,legacy_account_id) VALUES
       ('workspace-one','organization','org-one',NULL,'Client Workspace','active','account-one')`).run();
     await db.prepare(`INSERT INTO pa_portal_principals VALUES
@@ -126,7 +129,7 @@ describe("Project Alpha portal identity eligibility", () => {
 
   it("does not treat unrelated or invalid email records as portal principals", async () => {
     const { db, env } = await fixture();
-    await db.prepare("INSERT INTO client_accounts VALUES('account-one','active','Client','project-alpha:primary')").run();
+    await db.prepare("INSERT INTO client_accounts(id,status,display_name,project_alpha_source_id) VALUES('account-one','active','Client','project-alpha:primary')").run();
     await db.prepare(`INSERT INTO portal_v2_workspaces(id,root_type,pa_organization_public_id,pa_client_public_id,display_name,status,legacy_account_id) VALUES
       ('workspace-one','organization','org-one',NULL,'Client Workspace','active','account-one')`).run();
     await db.prepare(`INSERT INTO pa_portal_principals VALUES
@@ -140,9 +143,30 @@ describe("Project Alpha portal identity eligibility", () => {
     expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_identities").first("count")).toBe(0);
   });
 
+  it.each([
+    "CLIENT_PORTAL_HIERARCHY_V2_ENABLED",
+    "CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED",
+    "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED",
+    "CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED",
+  ] as const)("does not bind when the coordinated activation flag %s is absent", async missing => {
+    const { db, env } = await fixture();
+    await db.prepare("INSERT INTO client_accounts(id,status,display_name,project_alpha_source_id) VALUES('account-one','active','Client','project-alpha:primary')").run();
+    await db.prepare(`INSERT INTO portal_v2_workspaces(id,root_type,pa_organization_public_id,pa_client_public_id,display_name,status,legacy_account_id) VALUES
+      ('workspace-one','organization','org-one',NULL,'Client Workspace','active','account-one')`).run();
+    await db.prepare(`INSERT INTO pa_portal_principals VALUES
+      ('workspace-one','principal-one',NULL,'client@example.test','Client','source-v1','active')`).run();
+    const partial = { ...env, [missing]: undefined };
+    await expect(listPortalWorkspaces(partial, {
+      issuer: "https://access.example.test", subject: "subject-one", email: "client@example.test",
+    })).resolves.toEqual([]);
+    expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_identities").first("count")).toBe(0);
+    expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_identity_eligibility_bindings").first("count")).toBe(0);
+    expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_workspace_memberships").first("count")).toBe(0);
+  });
+
   it("applies exact subject and email eligibility blocks before identity creation", async () => {
     const { db, env } = await fixture();
-    await db.prepare("INSERT INTO client_accounts VALUES('account-one','active','Client','project-alpha:primary')").run();
+    await db.prepare("INSERT INTO client_accounts(id,status,display_name,project_alpha_source_id) VALUES('account-one','active','Client','project-alpha:primary')").run();
     await db.prepare(`INSERT INTO portal_v2_workspaces(id,root_type,pa_organization_public_id,pa_client_public_id,display_name,status,legacy_account_id) VALUES
       ('workspace-one','organization','org-one',NULL,'Client Workspace','active','account-one')`).run();
     await db.prepare(`INSERT INTO pa_portal_principals VALUES

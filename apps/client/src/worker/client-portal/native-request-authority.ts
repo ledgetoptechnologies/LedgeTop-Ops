@@ -1,4 +1,4 @@
-import { portalSourceAuthorityGuard, type PortalSourceAuthorityProof } from "../project-alpha-portal-authority";
+import { portalProjectionSourceGuard, type PortalProjectionWriteProof } from "../project-alpha-portal-authority";
 import { sha256 } from "../security";
 import type { Env } from "../types";
 import type { ClientPortalSession, VerifiedClientPrincipal } from "./types";
@@ -30,7 +30,7 @@ export interface NativeRequestAuthorityProof {
   sourceSequence: number;
   targetScopes: string[];
   allowedEntitlementIds: string[];
-  authority: PortalSourceAuthorityProof;
+  authority: PortalProjectionWriteProof;
   denylistEnabled: boolean;
   evaluatedAt: string;
   expiresAt: string;
@@ -177,7 +177,7 @@ export function nativeRequestMutationGuardSql(proof: NativeRequestAuthorityProof
   sql: string;
   bindings: unknown[];
 } {
-  const authority = portalSourceAuthorityGuard(proof.authority);
+  const authority = portalProjectionSourceGuard(proof.authority);
   const scopes = JSON.stringify(proof.targetScopes);
   const allowed = JSON.stringify(proof.allowedEntitlementIds);
   const targetSql = proof.projectPublicId === null ? "1=1" : `EXISTS(

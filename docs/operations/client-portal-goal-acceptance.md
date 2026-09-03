@@ -40,6 +40,32 @@ fork, or reimplement those workflows in Operations or Client.
 
 ## Identity, services, and Client Hub
 
+### Default-on provisioning requirement (reconfirmed September 3, 2026)
+
+The current unpublished implementation and exact local test results are in
+[the September 3 local evidence record](client-portal-default-on-local-evidence-2026-09-03.md).
+That record does not replace the production acceptance checkpoint.
+
+Creating an eligible client in Project Alpha must automatically provision its
+portal access through the existing signed connection, without an invitation or
+announcement email. An organization owns one workspace; a standalone client
+owns its own workspace. Organization contacts are scoped principals in that
+workspace, not duplicate organization workspaces. Missing, invalid, or ambiguous
+email addresses require review. Department and individual delivery boundaries
+remain explicit; workspace eligibility never grants arbitrary folder access.
+
+Existing clients must be reconciled automatically in bounded, idempotent
+background batches. An administrator's person/root revocation must survive
+every subsequent sync, reconciliation, and sign-in. Source-qualified records
+from separate Project Alpha instances must never merge by email or name.
+
+Current rollout gates are the historical producer backfill, primary signed
+native workspace enrollment/listing/resource routing, and regression coverage
+for legacy client reparenting and member revocation. These are not yet live
+accepted. Keep coordinated automatic-eligibility flags disabled until the
+joined producer/consumer proof and revocation gates pass. A successful business
+directory sync or a green isolated membership test is not sufficient evidence.
+
 | Requirement | Current evidence | State | Remaining acceptance |
 | --- | --- | --- | --- |
 | Source-qualified unified client grouping | `0036_business_parties.sql`, `business-parties.ts`, Client Hub business-party UI and tests | Verified locally | Publish and exercise a same-customer link across two configured Project Alpha sources without changing either producer record. |

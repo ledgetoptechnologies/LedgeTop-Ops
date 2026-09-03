@@ -4,6 +4,7 @@ import type { Context } from "hono";
 import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey } from "jose";
 import type { Env } from "./types";
 import { createCatalogSourceContext, PRIMARY_ALPHA_SOURCE_ID, PRIMARY_CATALOG_SOURCE, type CatalogSourceContext } from "@ltds/shared";
+import { portalAutomaticEligibilityEnabled } from "./portal-automatic-eligibility";
 import { createProjectAlphaDeliveryGuestShare, revokeProjectAlphaDeliveryGuestShare } from "./delivery";
 import { projectAlphaDeliveryPrincipalGuard, resolveProjectAlphaDeliveryPrincipal } from "./share-recipients";
 import { nativeDeliveryNotificationsReady, stagePortalDeliveryNotificationStatements } from "./portal-delivery-notification-batches";
@@ -366,7 +367,7 @@ export async function applyProjectAlphaDeliveryIntent(env: Env, payload: unknown
   const receiptId=crypto.randomUUID(),grantId=exact?.id??crypto.randomUUID(),outboxId=crypto.randomUUID();
   const staging=await nativeDeliveryNotificationsReady(env);
   const recipientGuard=projectAlphaDeliveryPrincipalGuard({audience:recipient,principalSourceVersion:audience.source_version,
-    bindingSourceVersion:binding.source_version,prefix:binding.r2_prefix,allowUnclaimed:env.CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED==="true",source});
+    bindingSourceVersion:binding.source_version,prefix:binding.r2_prefix,allowUnclaimed:portalAutomaticEligibilityEnabled(env),source});
   const guards=[`(${recipientGuard.sql})`,`(SELECT COUNT(*) FROM project_alpha_delivery_portal_grants grant_record WHERE ${grantScope})=?`];
   const guardBindings:(string|number|null)[]=[...recipientGuard.bindings,...grantScopeBindings,active.results.length];
   for(const row of active.results){

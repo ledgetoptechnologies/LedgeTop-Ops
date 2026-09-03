@@ -33,7 +33,9 @@ describe("source-pinned PA delivery recipient and transaction guard", () => {
   beforeEach(() => {
     db = new DatabaseSync(":memory:");
     for (const sql of migrations) { db.exec("BEGIN"); db.exec(sql); db.exec("COMMIT"); }
-    env = { DELIVERY_DB: asD1(db), CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED: "true" } as Env;
+    env = { DELIVERY_DB: asD1(db), CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true",
+      CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED: "true", CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: "true",
+      CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED: "true" } as Env;
     seed("primary", PRIMARY_CATALOG_SOURCE.sourceId);
     seed("secondary", secondary.sourceId);
   });
@@ -141,8 +143,10 @@ describe("source-pinned PA delivery recipient and transaction guard", () => {
   it("shares unclaimed policy and blocks without authorizing by the saved snapshot", async () => {
     const selected = await resolveProjectAlphaDeliveryPrincipal(env, prefix, principalId, version);
     expect(permits(guard(selected, PRIMARY_CATALOG_SOURCE, prefix, false))).toBe(0);
-    await expect(resolveProjectAlphaDeliveryPrincipal({ ...env, CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED: "false" }, prefix, principalId, version))
-      .rejects.toMatchObject({ status: 409 });
+    for (const missing of ["CLIENT_PORTAL_HIERARCHY_V2_ENABLED", "CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED",
+      "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED", "CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED"] as const)
+      await expect(resolveProjectAlphaDeliveryPrincipal({ ...env, [missing]: "false" }, prefix, principalId, version))
+        .rejects.toMatchObject({ status: 409 });
     db.exec(`INSERT INTO portal_v2_identity_eligibility_blocks
       (id,match_type,normalized_email,reason_code,created_by_actor_type,created_by_actor_id)
       VALUES('block','email','primary@example.test','test','system','test')`);

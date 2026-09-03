@@ -66,7 +66,8 @@ describe("delivery notification source and live ownership", () => {
       DELIVERY_TOKEN_SECRET: currentTokenSecret,
       DELIVERY_PREVIOUS_TOKEN_SECRET: previousTokenSecret,
       CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED: "true",
-      CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true", AUTHENTICATED_DELIVERY_GRANTS_ENABLED: "true" } as Env;
+      CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true", CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: "true",
+      CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED: "true", AUTHENTICATED_DELIVERY_GRANTS_ENABLED: "true" } as Env;
     for (const name of ["primary", "secondary"]) {
       const source = `project-alpha:${name}`, workspace = `workspace-${name}`, generation = `generation-${name}`;
       db.prepare("INSERT INTO pa_portal_workspace_sources(workspace_id,projection_source_id,source_workspace_id) VALUES(?,?,?)")

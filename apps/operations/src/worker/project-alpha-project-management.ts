@@ -234,6 +234,13 @@ function safeTimestamp(value: string | null): string | null {
 function normalizedSync(value: string | null): "healthy" | "error" | "disabled" | "unknown" {
   return value === "healthy" || value === "error" || value === "disabled" ? value : "unknown";
 }
+function legacyPrimaryConfigured(env: Pick<Env, "PROJECT_ALPHA_BASE_URL" | "PROJECT_ALPHA_API_KEY" | "APPLICATION_KEY">): boolean {
+  if (!env.PROJECT_ALPHA_BASE_URL || !env.PROJECT_ALPHA_API_KEY?.trim() || !env.APPLICATION_KEY?.trim()) return false;
+  try {
+    const url = new URL(env.PROJECT_ALPHA_BASE_URL);
+    return url.protocol === "https:" && !url.username && !url.password && !url.search && !url.hash;
+  } catch { return false; }
+}
 function explanation(reason: ProjectManagementAvailabilityReason, sourceName: string): string {
   if (reason === "available") return `Create the authoritative project in ${sourceName}. Operations will show it after Project Alpha synchronization completes.`;
   if (reason === "source_inactive") return `${sourceName} is not active. Project creation is unavailable until an administrator restores the source connection.`;
@@ -265,6 +272,21 @@ export async function readClientHubProjectManagementAction(env: Env, principal: 
       WHERE connector.source_id=?
       ORDER BY mapping.external_id LIMIT 2`).bind(kind, root.public_id, root.source_id).all<ActionRow>()
       .then(result => result.results.length === 1 ? result.results[0]! : null);
+    // The original primary connection predates the source registry. Preserve
+    // that exact, deployment-owned synchronization as a read-only compatibility
+    // source until an administrator deliberately enrolls the primary connector.
+    // This never synthesizes a secondary source, route, credential, or grant.
+    if (!row && root.source_id === "project-alpha:primary" && legacyPrimaryConfigured(env)) {
+      row = await database(env).prepare(`SELECT ? source_id,? display_name,'active' state,1 read_visible,
+        0 connector_version,NULL route_version,NULL route_revision,NULL enabled,NULL reviewed_url_template,
+        mapping.external_id,health.status sync_status,health.last_attempt_at,health.last_success_at
+        FROM pa_projection_record_ids mapping
+        LEFT JOIN integration_health health ON health.integration='project-alpha'
+          AND health.projection_source_id=mapping.projection_source_id
+        WHERE mapping.projection_source_id='project-alpha:primary' AND mapping.record_kind=? AND mapping.local_id=?
+        ORDER BY mapping.external_id LIMIT 2`).bind(root.source_id, root.source_name ?? "Project Alpha", kind, root.public_id)
+        .all<ActionRow>().then(result => result.results.length === 1 ? result.results[0]! : null);
+    }
   }
   const sourceName = row?.display_name ?? root.source_name ?? "Project Alpha";
   let reason: ProjectManagementAvailabilityReason = root.root_namespace !== "business" || !isBusinessProjectionSource(root.source_id)
@@ -294,6 +316,7 @@ export async function readClientHubProjectManagementAction(env: Env, principal: 
   const [scope, administrator] = await Promise.all([
     sqlScope(env, principal, "integrations.manage"), isAdministrator(env, principal),
   ]);
+  const legacyPrimary = Boolean(row?.source_id === "project-alpha:primary" && row.connector_version === 0);
   const canSync = Boolean(row?.source_id && row.state === "active" && administrator && scope.global && !scope.deniedGlobal);
   const syncStatus = row?.source_id ? normalizedSync(row.sync_status) : "not_configured";
   return {
@@ -312,7 +335,9 @@ export async function readClientHubProjectManagementAction(env: Env, principal: 
         : syncStatus === "disabled" ? `${sourceName} synchronization is disabled.`
         : `No successful ${sourceName} synchronization has been recorded yet.`,
       refresh: { label: "Refresh synchronization status", href: refreshHref, method: "GET" as const },
-      requestSync: canSync ? { label: "Sync source now", href: `/api/admin/integrations/project-alpha/connectors/${encodeURIComponent(root.source_id)}/sync`, method: "POST" as const } : null,
+      requestSync: canSync ? { label: "Sync source now", href: legacyPrimary
+        ? "/api/admin/integrations/project-alpha/sync"
+        : `/api/admin/integrations/project-alpha/connectors/${encodeURIComponent(root.source_id)}/sync`, method: "POST" as const } : null,
     },
   };
 }

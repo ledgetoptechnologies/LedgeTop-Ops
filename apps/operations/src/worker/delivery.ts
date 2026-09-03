@@ -1,5 +1,6 @@
 import { HTTPException } from "hono/http-exception";
 import { createCatalogSourceContext, PRIMARY_ALPHA_SOURCE_ID, PRIMARY_CATALOG_SOURCE, isMovedSourceMarker, thumbnailFallbackKindForFile, type CatalogSourceContext, type DeliveryItem } from "@ltds/shared";
+import { portalAutomaticEligibilityEnabled } from "./portal-automatic-eligibility";
 import { accessCodeMatches, encryptDeliveryToken, hashAccessCode, randomToken, sha256 } from "./crypto";
 import { requirePermission, sqlScope } from "./acl";
 import { auditStatement } from "./request-security";
@@ -593,7 +594,7 @@ export async function createProjectAlphaDeliveryGuestShare(env:Env,input:{
   if(!selected.recipients.length)throw new HTTPException(409,{message:"Delivery audience has no eligible recipients"});
   const guard=projectAlphaDeliveryPrincipalGuard({audience:selected,principalSourceVersion:input.audience.sourceVersion,
     bindingSourceVersion:input.expectedBinding.bindingSourceVersion,prefix,
-    allowUnclaimed:env.CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED==="true",source});
+    allowUnclaimed:portalAutomaticEligibilityEnabled(env),source});
   const projectGuard=`EXISTS(SELECT 1 FROM projects WHERE id=? AND active=1 AND r2_prefix=?
     AND (project_alpha_source_id=? OR (?='project-alpha:primary' AND project_alpha_source_id IS NULL)))`;
   const projectGuardValues=[target.id,prefix,source.sourceId,source.sourceId];

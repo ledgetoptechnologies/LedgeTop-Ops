@@ -56,7 +56,7 @@ configuration unless a dated evidence record explicitly says otherwise:
 
 | Capability | Client flags | Operations flags | Required schema/dependency |
 | --- | --- | --- | --- |
-| Portal hierarchy and eligibility | `CLIENT_PORTAL_HIERARCHY_V2_ENABLED`, `CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED`, `CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED` | Matching hierarchy, eligibility, and deny flags | Signed exact-source projection; explicit reviewed workspace; deny state; Client through `0192` |
+| Portal hierarchy and eligibility | `CLIENT_PORTAL_HIERARCHY_V2_ENABLED`, `CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED`, `CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED`, `CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED` | Matching hierarchy, eligibility, and deny flags | Signed exact-source projection; automatic producer provisioning/backfill; deny state; Client through `0192` plus current lifecycle-fence migration |
 | Service and contact metadata | `PROJECT_ALPHA_SERVICE_ASSIGNMENT_SYNC_ENABLED`, `CLIENT_PORTAL_SERVICE_ASSIGNMENT_POLICY_ENABLED` | `CLIENT_HUB_PA_CONTACT_ASSIGNMENTS_ENABLED` | Project Alpha producer approved; Client `0168`, `0174`, `0179`–`0181`, `0190`–`0192`; complete selected generation |
 | Membership management | `CLIENT_PORTAL_TEAM_ENABLED`, `CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED`, `CLIENT_PORTAL_ACCESS_ENROLLMENT_READY`, `CLIENT_PORTAL_PEER_ADMIN_ENABLED`, `CLIENT_PORTAL_ADDRESS_BOOK_ENABLED`, `CLIENT_PORTAL_INVITATION_EMAIL_ENABLED` | Matching management and deny-policy flags | Client `0164`–`0176`; Operations `0041`; SMTP only for the email window |
 | Authority mutation and audit | `PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED`, `CLIENT_PORTAL_CONTENT_AUDIT_ENABLED` | `PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED` | Client `0172` and `0187`; frozen/drained old writers; dedicated audit HMAC secret |
@@ -89,7 +89,10 @@ emergency operation, not the ordinary rollback for additive migrations.
 2. Apply Project Alpha producer migrations only after the Project Alpha branch
    has been approved and rebased on current main. Preserve onboarding,
    approvals, projects, contracts, and documents.
-3. Confirm Client migrations through `0192` and Operations through `0051`.
+3. For the current default-on release, confirm Client migrations through `0195`
+   and Operations through `0052`, plus Project Alpha `0083`. The populated
+   `0195` upgrade must prove stale bootstrap authority is invalidated while
+   signed native successors and public-link records are preserved.
 4. Provision the exact connector envelope and portal HMAC/service credentials
    independently. Do not reuse a read-only Project Alpha API key.
 5. Prove signed snapshot, checkpoint selection, recovery, tombstone, replay, and
@@ -100,10 +103,38 @@ acknowledged; retain receiver tables and the producer outbox.
 
 ### R2 — Read-only hierarchy and eligibility
 
-Enable the exact hierarchy reader first. Admit one reviewed pilot source and
-explicitly create one workspace and membership. Enable automatic eligibility
-only after unique-email, duplicate-email, invalid-email, unclassified,
-administrator-revoked, archived, and restored cases pass together.
+Verify the exact hierarchy reader and automatic producer flow in an isolated
+fixture first: create an organization client and a standalone client in Project
+Alpha, receive their signed workspaces, and bind their verified first logins
+without manually creating workspace memberships. Repeat for existing clients
+through bounded historical reconciliation. Prove primary and secondary sources
+independently, including primary-native resource routing and legacy compatibility.
+
+Activate the four coordinated eligibility/deny flags only after unique-email,
+duplicate-email, invalid-email, unclassified, administrator-revoked, reparented,
+archived, and restored cases pass together. Once the connection is activated,
+all eligible clients are default-on; there is no per-client pilot enrollment
+requirement. Administrator opt-outs persist. Provisioning/backfill must not send
+invitation or announcement emails, and portal eligibility does not grant access
+to unshared folders.
+
+The repository-owned deployment gate reads the fixed, committed
+`scripts/client-portal-release-profile.json`. Its current `receiver-only`
+profile leaves production flags untouched. A later reviewed activation commit
+must explicitly select `default-on-eligibility` with `schemaVersion: 1` and
+set the four flags above exactly true in both Worker configurations. The gate
+rejects partial/mixed bundles and keeps invitation, authenticated-delivery, and
+project-access-expiry mail disabled. It retains all receiver secret, ingress,
+and unrelated Client capability checks. Root Node tests enforce the same
+profile rather than silently removing dormant-flag checks.
+
+This verifies local release intent only: migrations, approved artifact, remote
+versions/flags and Operations deny-management readiness require separate
+readback before Client activation. See the explicit profile procedure in
+[the activation runbook](project-alpha-portal-activation.md). No paused profile
+exists; a normal reconciliation pause retaining deny/recovery reads needs a
+separate reviewed gate/configuration change. The recorded receiver-only version
+provides an emergency access-disable rollback, not those retained reads.
 
 Rollback: disable new reconciliation, retain identities and denial state, and
 keep revocation/recovery reads available. Do not delete a workspace to simulate

@@ -261,11 +261,21 @@ export function createNativePortalWorkspaceRouter():Hono<Bindings> {
     return c.json({success:true});
   });
   router.get('/:workspaceId/hierarchy',async(c,next)=>{
-    // Primary must retain its established response and authorization path.
+    // Explicit legacy wrappers retain their established response/authorization;
+    // signed primary workspaces without an account use the native adapter.
     if(!await nativePortalSourceSchemaAvailable(c.env))return next();
-    const source=await database(c.env).prepare('SELECT project_alpha_source_id FROM portal_v2_workspaces WHERE id=?')
-      .bind(c.req.param('workspaceId')).first<string>('project_alpha_source_id');
-    if(source==='project-alpha:primary')return next();
+    const workspace=await database(c.env).prepare(`SELECT workspace.project_alpha_source_id,workspace.legacy_account_id,
+      EXISTS(SELECT 1 FROM portal_v2_directory_checkpoints checkpoint
+        JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id
+          AND generation.workspace_id=checkpoint.workspace_id AND generation.status='active' AND generation.complete=1
+        WHERE checkpoint.workspace_id=workspace.id) native_projection
+      FROM portal_v2_workspaces workspace WHERE workspace.id=?`)
+      .bind(c.req.param('workspaceId')).first<{project_alpha_source_id:string;legacy_account_id:string|null;native_projection:number}>();
+    if(workspace?.project_alpha_source_id==='project-alpha:primary'&&workspace.legacy_account_id!==null)return next();
+    // Historical primary hierarchy rows may have neither a legacy bridge nor
+    // an activated signed directory. They belong to the mounted compatibility
+    // route; only a complete native projection is claimed here.
+    if(workspace?.project_alpha_source_id==='project-alpha:primary'&&!workspace.native_projection)return next();
     const context=await contextFor(c),query=(c.req.query('q')??'').trim();
     if(query.length>100)return invalid();
     const cursor=c.req.query('cursor');

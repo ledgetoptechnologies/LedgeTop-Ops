@@ -56,7 +56,10 @@ describe("client-delegated public share foundation", () => {
     });
     db = await miniflare.getD1Database("DELIVERY_DB") as unknown as D1Database;
     await applySql(db, `
-      CREATE TABLE client_accounts(id TEXT PRIMARY KEY,project_alpha_source_id TEXT);
+      CREATE TABLE client_accounts(id TEXT PRIMARY KEY,project_alpha_source_id TEXT,status TEXT,
+        project_alpha_client_id TEXT,project_alpha_organization_id TEXT);
+      CREATE TABLE client_identity_links(id TEXT PRIMARY KEY,account_id TEXT,revoked_at TEXT);
+      CREATE TABLE client_account_members(account_id TEXT,identity_id TEXT,revoked_at TEXT);
       CREATE TABLE portal_v2_identities(
         id TEXT PRIMARY KEY,issuer TEXT NOT NULL,subject TEXT NOT NULL,verified_email TEXT,
         status TEXT NOT NULL,revoked_at TEXT,UNIQUE(issuer,subject));
@@ -68,13 +71,14 @@ describe("client-delegated public share foundation", () => {
         source_type TEXT NOT NULL,status TEXT NOT NULL,expires_at TEXT,revoked_at TEXT,
         UNIQUE(workspace_id,identity_id));
       CREATE TABLE portal_v2_directory_generations(
-        id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,status TEXT NOT NULL,complete INTEGER NOT NULL);
+        id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,status TEXT NOT NULL,complete INTEGER NOT NULL,
+        source_generation TEXT,source_sequence INTEGER);
       CREATE TABLE portal_v2_directory_entities(
         workspace_id TEXT NOT NULL,generation_id TEXT NOT NULL,entity_type TEXT NOT NULL,
         public_id TEXT NOT NULL,parent_public_id TEXT,active INTEGER NOT NULL,
         PRIMARY KEY(workspace_id,generation_id,entity_type,public_id));
       CREATE TABLE portal_v2_directory_checkpoints(
-        workspace_id TEXT PRIMARY KEY,active_generation_id TEXT NOT NULL);
+        workspace_id TEXT PRIMARY KEY,active_generation_id TEXT NOT NULL,source_sequence INTEGER);
       CREATE TABLE portal_v2_entitlements(
         id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,identity_id TEXT NOT NULL,
         capability TEXT NOT NULL,effect TEXT NOT NULL,scope_type TEXT NOT NULL,
