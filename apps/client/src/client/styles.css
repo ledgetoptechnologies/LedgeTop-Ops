@@ -250,6 +250,9 @@
 .download-all-control { display: grid; justify-items: center; gap: .1rem; min-width: 10rem; }
 .download-all-control small { color: currentColor; font-size: .68rem; font-weight: 650; opacity: .85; white-space: nowrap; }
 .bulk-error { margin: 0; padding: .7rem 1rem; color: #a72d39; background: #fff4f4; border-bottom: 1px solid #f0c8c8; }
+.bulk-download-parts { margin: 0; padding: .85rem 1rem; background: #fff8ef; border-bottom: 1px solid #edcfaa; }
+.bulk-download-parts p { margin: .35rem 0 .7rem; color: var(--muted); font-size: .86rem; }
+.bulk-download-parts > div { display: flex; flex-wrap: wrap; gap: .5rem; }
 .folder-loading { padding: .55rem 1rem; border-bottom: 1px solid #f2d7c7; background: #fff7f1; color: #8b3d17; font-size: .8rem; font-weight: 760; }
 
 .item-select {

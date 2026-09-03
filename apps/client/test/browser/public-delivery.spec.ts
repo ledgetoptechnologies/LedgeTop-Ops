@@ -130,6 +130,26 @@ test("Download all follows the authoritative folder and returns to root scope", 
   expect(requests[1]).toEqual({ all: true });
 });
 
+test("oversized Download all keeps every resumable archive part visible when automatic downloads are blocked", async ({ page }) => {
+  await mockShare(page);
+  await page.route("**/api/public/shares/public/bulk-download", route => route.fulfill({ json: {
+    status: "ready",
+    partCount: 2,
+    downloads: [
+      { part: 1, partCount: 2, size: 1024, downloadUrl: "/downloads/part-01.zip" },
+      { part: 2, partCount: 2, size: 2048, downloadUrl: "/downloads/part-02.zip" },
+    ],
+  } }));
+  await page.route("**/downloads/part-*.zip", route => route.fulfill({ status: 200, body: "zip", headers: { "Content-Type": "application/zip" } }));
+  await page.goto("/s/public?view=grid");
+  await page.getByRole("button", { name: /Download all/ }).click();
+  const fallback = page.getByRole("region", { name: "Prepared download parts" });
+  await expect(fallback).toContainText("2 resumable ZIP parts prepared");
+  await expect(fallback.getByRole("link", { name: /Download part 1 of 2/ })).toHaveAttribute("href", "/downloads/part-01.zip");
+  await expect(fallback.getByRole("link", { name: /Download part 2 of 2/ })).toHaveAttribute("href", "/downloads/part-02.zip");
+  await expect(fallback).toContainText("browser downloads screen");
+});
+
 test("single-file Download is discoverable by hover and keyboard without exposing storage URLs", async ({ page }) => {
   await mockShare(page); await page.goto("/s/public?view=grid");
   const card = page.locator(".item-card").filter({ hasText: "Root photo.jpg" });

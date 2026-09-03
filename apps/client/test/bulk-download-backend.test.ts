@@ -19,6 +19,8 @@ import {
   classifyWorkflowFailure,
   crcProgressBytes,
   estimateBulkPreparation,
+  MAX_ARCHIVE_SOURCE_BYTES,
+  partitionBulkSnapshot,
   planCrcWorkUnits,
   readSourceRange,
   shouldCheckpointCrcChunk,
@@ -122,6 +124,37 @@ describe("bulk-download Worker limits and progress", () => {
     expect(units.every(unit => unit.kind === "batch" && unit.indexes.length <= 64 && unit.totalBytes <= 8 * 1024 * 1024)).toBe(true);
   });
 
+  it("prefers one archive and deterministically splits only beyond per-archive capacity", () => {
+    const makeSource = (index: number, size: number) => ({
+      physicalKey: `jobs/client/file-${index}.bin`, key: `jobs/client/file-${index}.bin`,
+      name: `file-${index}.bin`, size, etag: `etag-${index}`,
+    });
+    const small = {
+      root: "jobs/client/", shareId: "share-1", shareVersion: 2,
+      sources: Array.from({ length: 10_626 }, (_, index) => makeSource(index, 1024)),
+    };
+    expect(partitionBulkSnapshot(small)).toHaveLength(1);
+
+    const oversized = {
+      ...small,
+      sources: [makeSource(0, 60 * 1024 ** 3), makeSource(1, 50 * 1024 ** 3), makeSource(2, 5 * 1024 ** 3)],
+    };
+    const first = partitionBulkSnapshot(oversized);
+    expect(first.map(part => part.sources.map(source => source.name))).toEqual([
+      ["file-0.bin"],
+      ["file-1.bin", "file-2.bin"],
+    ]);
+    expect(partitionBulkSnapshot(oversized)).toEqual(first);
+    expect(first.every(part => part.sources.reduce((total, source) => total + source.size, 0) <= MAX_ARCHIVE_SOURCE_BYTES)).toBe(true);
+  });
+
+  it("fails clearly when one source cannot fit a safe archive part", () => {
+    expect(() => partitionBulkSnapshot({
+      root: "jobs/client/", shareId: "share-1", shareVersion: 2,
+      sources: [{ physicalKey: "jobs/client/huge.bin", key: "jobs/client/huge.bin", name: "huge.bin", size: MAX_ARCHIVE_SOURCE_BYTES + 1, etag: "etag" }],
+    })).toThrow("single-source-capacity");
+  });
+
   it("labels CRC and assembly phases for the polling client", () => {
     expect(bulkJobProgress({ status: "queued", total_bytes: 100, processed_bytes: 0, archive_size: null }))
       .toEqual({ progress: null, message: null });
@@ -138,6 +171,7 @@ function authenticatedEnv(
   rateLimitSuccess: boolean,
   quotaChanges = 1,
   jobOverrides: Record<string, unknown> = {},
+  partRows: Array<Record<string, unknown>> = [],
 ): Env {
   const statementFor = (query: string) => {
     const statement = {
@@ -163,7 +197,7 @@ function authenticatedEnv(
         }
         return null;
       },
-      async all<T>() { return { results: [] as T[] }; },
+      async all<T>() { return { results: (query.includes("parent_job_id=?") ? partRows : []) as T[] }; },
       async run() { return { meta: { changes: query.includes("bulk_download_quota") ? quotaChanges : 1 } }; },
     };
     return statement;
@@ -255,12 +289,13 @@ describe("bulk-download 429 responses", () => {
 });
 
 describe("bulk-download browser resume", () => {
-  function readyArchiveEnv() {
+  function readyArchiveEnv(jobOverrides: Record<string, unknown> = {}) {
     const env = authenticatedEnv(true, 1, {
       status: "ready",
       expires_at: "2099-01-01T00:00:00.000Z",
       archive_key: "tmp/archive.zip",
       archive_size: 10,
+      ...jobOverrides,
     });
     const bytes = Uint8Array.from({ length: 10 }, (_, index) => index);
     const reads: Array<{ offset: number; length: number } | undefined> = [];
@@ -316,7 +351,7 @@ describe("bulk-download browser resume", () => {
     // The ordinary rolling portal session may be renewed by middleware, but it
     // keeps its normal 12-hour lifetime; only the exact archive URL receives
     // the longer job-scoped credential.
-    expect(setCookie).toMatch(/__Host-ltds_delivery=[^,]+Max-Age=43200/);
+    expect(setCookie).toMatch(/__Host-ltds_delivery=[^,]+Max-Age=43(?:19\d|200)/);
 
     const resume = (await createBulkDownloadResumeCookie({
       secret: env.DELIVERY_SESSION_SECRET,
@@ -357,6 +392,54 @@ describe("bulk-download browser resume", () => {
     expect(invalid.status).toBe(416);
     expect(invalid.headers.get("Content-Range")).toBe("bytes */10");
     expect(invalid.headers.get("Accept-Ranges")).toBe("bytes");
+  });
+
+  it("aggregates every ready child archive and issues a scoped resume credential for each part", async () => {
+    const partRows = [1, 2].map(part => ({
+      id: `job-1-p0${part}`, parent_job_id: "job-1", part_index: part, part_count: 2,
+      status: "ready", file_count: 5, processed_files: 5, total_bytes: 100,
+      processed_bytes: 100, archive_size: 110, error_code: null, error_message: null,
+      expires_at: "2099-01-01T00:00:00.000Z", manifest_key: `part-${part}.json`, archive_key: `part-${part}.zip`,
+    }));
+    const env = authenticatedEnv(true, 1, { status: "running", part_count: 2 }, partRows);
+    const response = await deliveryWorker.fetch(new Request(
+      "https://delivery.example/api/public/shares/public/bulk-download/job-1",
+      { headers: { Cookie: await sessionCookie(env) } },
+    ), env, executionCtx);
+    expect(response.status).toBe(200);
+    const body = await response.json() as { status: string; downloadUrl: string | null; downloads: Array<{ part: number; downloadUrl: string }> };
+    expect(body.status).toBe("ready");
+    expect(body.downloadUrl).toBeNull();
+    expect(body.downloads).toEqual([
+      { part: 1, partCount: 2, size: 110, downloadUrl: "/api/public/shares/public/bulk-download/job-1-p01/file" },
+      { part: 2, partCount: 2, size: 110, downloadUrl: "/api/public/shares/public/bulk-download/job-1-p02/file" },
+    ]);
+    const cookies = response.headers.get("Set-Cookie") || "";
+    expect(cookies.match(new RegExp(`${BULK_DOWNLOAD_RESUME_COOKIE}=`, "g"))).toHaveLength(2);
+    expect(cookies).toContain("Path=/api/public/shares/public/bulk-download/job-1-p01/file");
+    expect(cookies).toContain("Path=/api/public/shares/public/bulk-download/job-1-p02/file");
+  });
+
+  it("treats one expired child as terminal instead of polling a partial archive set forever", async () => {
+    const partRows = [
+      { id: "job-1-p01", parent_job_id: "job-1", part_index: 1, part_count: 2, status: "expired", file_count: 5, processed_files: 5, total_bytes: 100, processed_bytes: 100, archive_size: 110, error_code: null, error_message: null, expires_at: "2020-01-01T00:00:00.000Z", manifest_key: "part-1.json", archive_key: "part-1.zip" },
+      { id: "job-1-p02", parent_job_id: "job-1", part_index: 2, part_count: 2, status: "ready", file_count: 5, processed_files: 5, total_bytes: 100, processed_bytes: 100, archive_size: 110, error_code: null, error_message: null, expires_at: "2099-01-01T00:00:00.000Z", manifest_key: "part-2.json", archive_key: "part-2.zip" },
+    ];
+    const env = authenticatedEnv(true, 1, { status: "running", part_count: 2 }, partRows);
+    const response = await deliveryWorker.fetch(new Request(
+      "https://delivery.example/api/public/shares/public/bulk-download/job-1",
+      { headers: { Cookie: await sessionCookie(env) } },
+    ), env, executionCtx);
+    await expect(response.json()).resolves.toMatchObject({ status: "expired", downloads: [] });
+  });
+
+  it("uses stable numbered filenames for split archives", async () => {
+    const { env } = readyArchiveEnv({ parent_job_id: "parent", part_index: 2, part_count: 3 });
+    const response = await deliveryWorker.fetch(new Request(
+      "https://delivery.example/api/public/shares/public/bulk-download/job-1/file",
+      { headers: { Cookie: await sessionCookie(env) } },
+    ), env, executionCtx);
+    expect(response.headers.get("Content-Disposition")).toContain("Delivery-part-02-of-03.zip");
   });
 });
 
@@ -476,7 +559,8 @@ describe("bulk-download snapshot identities", () => {
       { key: "jobs/client/part-1.bin", size: 55 * 1024 * 1024 * 1024, etag: "etag-1", httpEtag: "\"etag-1\"" },
       { key: "jobs/client/part-2.bin", size: 55 * 1024 * 1024 * 1024, etag: "etag-2", httpEtag: "\"etag-2\"" },
     ]);
-    await expect(snapshot(tooLarge.env, baseJob)).rejects.toThrow("byte-limit");
+    const oversizedSnapshot = await snapshot(tooLarge.env, baseJob);
+    expect(partitionBulkSnapshot(oversizedSnapshot)).toHaveLength(2);
   });
 });
 

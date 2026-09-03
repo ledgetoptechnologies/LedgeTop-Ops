@@ -8,6 +8,8 @@ export type RequestError = Error & { status?: number; body?: RequestErrorBody; r
 
 export interface BulkDownloadResponse {
   downloadUrl?: string;
+  downloads?: Array<{ part: number; partCount: number; size?: number | null; downloadUrl: string }>;
+  partCount?: number;
   ticket?: string;
   downloadTicket?: string;
   statusUrl?: string;
@@ -132,7 +134,7 @@ export async function pollBulkDownload(
     options.onProgress?.(response);
     const terminalError = terminalBulkError(response);
     if (terminalError) throw terminalError;
-    if (response.downloadUrl || response.ticket || response.downloadTicket || response.status === "ready" || response.status === "complete") return response;
+    if (response.downloadUrl || response.downloads?.length || response.ticket || response.downloadTicket || response.status === "ready" || response.status === "complete") return response;
   }
 
   throw new Error("The download is still being prepared. Please try again in a few minutes.");

@@ -718,14 +718,21 @@ failed job, multipart cleanup, the 24-hour archive expiry, the three-per-hour
 exact quota, one copy/move job with an injected retry, and one Dropbox import
 job before production rollout.
 
-Bulk ZIPs have no descendant file-count cutoff. The production policy supports
-one ZIP containing up to 100 GiB of source data, subject to measured manifest,
-Workflow-step, multipart, and per-step subrequest capacity. Small source files
+Bulk ZIPs have no descendant file-count cutoff or total-delivery size cutoff.
+The service prefers one ZIP. When a selection exceeds the safe 100 GiB
+per-archive source boundary, or one Workflow cannot safely prepare it, the
+sorted immutable snapshot is deterministically divided into independently
+resumable ZIP parts. Small source files
 are grouped into bounded 8 MiB/64-object CRC work units, and only the
 `ltds-bulk-download` Workflow is configured for 25,000 steps. A 10,626-file,
-34.3 GiB WebODM delivery remains one archive under that policy. The prepared
-R2 object is retained for 24 hours and the download route serves stable ETag,
-HEAD, and byte-range responses so browser download managers can resume it.
+34.3 GiB WebODM delivery remains one archive under that policy. Each prepared
+R2 object is retained for 24 hours and each download route serves a stable
+ETag, HEAD, and byte-range responses so browser download managers can resume
+individual parts. The client asks the browser to start every part and always
+keeps explicit part links visible because browsers may require the user to
+allow multiple automatic downloads. A source object larger than the safe
+per-archive boundary remains available as an individual resumable download;
+it is not copied into an unsafe ZIP.
 Do not enable these production limits on a Free-plan account; reduce the
 application limits or upgrade first.
 

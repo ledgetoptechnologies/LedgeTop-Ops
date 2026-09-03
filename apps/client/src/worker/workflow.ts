@@ -7,7 +7,7 @@ import { isMovedSourceMarker } from "@ltds/shared";
 import { listDownloadableObjects, type DownloadTombstone } from "./downloadable-files";
 export { classifyWorkflowFailure } from "./bulk-download-errors";
 
-const MAX_BYTES = 100 * 1024 * 1024 * 1024;
+export const MAX_ARCHIVE_SOURCE_BYTES = 100 * 1024 * 1024 * 1024;
 const CRC_CHUNK = 8 * 1024 * 1024;
 const CRC_PROGRESS_CHECKPOINT = 64 * 1024 * 1024;
 const CRC_FILE_CHECKPOINT = 25;
@@ -23,7 +23,7 @@ const MANIFEST_MAX_BYTES = 16 * 1024 * 1024;
 // retention sleep, and retention expiry.
 const SUCCESS_FIXED_STEPS = 7;
 
-interface JobRow { id: string; share_id: string; share_version: number; request_json: string; manifest_key: string; archive_key: string; }
+interface JobRow { id: string; share_id: string; share_version: number; request_json: string; manifest_key: string; archive_key: string; parent_job_id?: string | null; part_index?: number | null; part_count?: number; }
 interface Requested { all?: boolean; items?: string[]; }
 interface Source extends ZipManifestEntry { physicalKey: string; etag: string; }
 interface Snapshot { root: string; shareId: string; shareVersion: number; sources: Array<Omit<Source, "crc32">>; }
@@ -128,6 +128,50 @@ export function assertBulkPreparationCapacity(snapshotValue: Snapshot): BulkPrep
   return estimate;
 }
 
+function capacityFailure(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return ["manifest-capacity", "multipart-part-limit", "workflow-step-capacity", "subrequest-capacity"].includes(message);
+}
+
+/**
+ * Preserve the source sort order and prefer one archive. Only split when the
+ * per-archive byte or execution-capacity boundary requires it. Recursive
+ * bisection is deterministic and guarantees that every emitted part can run
+ * in an independent Workflow instance.
+ */
+export function partitionBulkSnapshot(snapshotValue: Snapshot): Snapshot[] {
+  const byteGroups: Array<Array<Omit<Source, "crc32">>> = [];
+  let current: Array<Omit<Source, "crc32">> = [];
+  let currentBytes = 0;
+  for (const source of snapshotValue.sources) {
+    if (source.size > MAX_ARCHIVE_SOURCE_BYTES) throw new Error("single-source-capacity");
+    if (current.length && currentBytes + source.size > MAX_ARCHIVE_SOURCE_BYTES) {
+      byteGroups.push(current);
+      current = [];
+      currentBytes = 0;
+    }
+    current.push(source);
+    currentBytes += source.size;
+  }
+  if (current.length) byteGroups.push(current);
+
+  const result: Snapshot[] = [];
+  const fit = (sources: Array<Omit<Source, "crc32">>): void => {
+    const candidate = { ...snapshotValue, sources };
+    try {
+      assertBulkPreparationCapacity(candidate);
+      result.push(candidate);
+    } catch (error) {
+      if (!capacityFailure(error) || sources.length === 1) throw error;
+      const middle = Math.ceil(sources.length / 2);
+      fit(sources.slice(0, middle));
+      fit(sources.slice(middle));
+    }
+  };
+  for (const sources of byteGroups) fit(sources);
+  return result;
+}
+
 function db(env: Env): ReturnType<D1Database["withSession"]> { return env.DELIVERY_DB.withSession("first-primary"); }
 async function readJson<T>(env: Env, key: string): Promise<T> {
   const object = await env.DATA_BUCKET.get(key); if (!object) throw new Error("workflow-manifest-missing");
@@ -205,19 +249,69 @@ export async function snapshot(env: Env, job: JobRow): Promise<Snapshot> {
   }
   const aliases = await loadAliases(env, aliasKeys);
   const sources = physicalKeys.map(key => ({ physicalKey: key, key, name: displayPath(key, root, aliases), size: files.get(key)!.size, etag: files.get(key)!.etag }));
-  const totalBytes = sources.reduce((total, source) => total + source.size, 0); if (totalBytes > MAX_BYTES) throw new Error("byte-limit");
-  const result = { root, shareId: share.id, shareVersion: share.share_version, sources };
-  assertBulkPreparationCapacity(result);
-  return result;
+  return { root, shareId: share.id, shareVersion: share.share_version, sources };
 }
 
 export class BulkDownloadWorkflow extends WorkflowEntrypoint<Env> {
-  async run(event: Readonly<WorkflowEvent<{ jobId: string }>>, step: WorkflowStep): Promise<void> {
-    const jobId = event.payload.jobId; const job = await db(this.env).prepare("SELECT id,share_id,share_version,request_json,manifest_key,archive_key FROM bulk_download_jobs WHERE id=?").bind(jobId).first<JobRow>();
+  async run(event: Readonly<WorkflowEvent<{ jobId: string; prepared?: boolean }>>, step: WorkflowStep): Promise<void> {
+    const jobId = event.payload.jobId; const job = await db(this.env).prepare("SELECT id,share_id,share_version,request_json,manifest_key,archive_key,parent_job_id,part_index,part_count FROM bulk_download_jobs WHERE id=?").bind(jobId).first<JobRow>();
     if (!job) throw new Error("job-not-found");
     try {
-      await step.do("snapshot-selection", { retries: { limit: 3, delay: "5 seconds", backoff: "exponential" } }, async () => { const value = await snapshot(this.env, job); await this.env.DATA_BUCKET.put(job.manifest_key, JSON.stringify(value)); const totalBytes = value.sources.reduce((total, source) => total + source.size, 0); await db(this.env).prepare("UPDATE bulk_download_jobs SET status='running',file_count=?,total_bytes=?,updated_at=datetime('now') WHERE id=?").bind(value.sources.length, totalBytes, job.id).run(); return { count: value.sources.length, totalBytes, root: value.root }; });
+      if (!event.payload.prepared) {
+        await step.do("snapshot-selection", { retries: { limit: 3, delay: "5 seconds", backoff: "exponential" } }, async () => { const value = await snapshot(this.env, job); await this.env.DATA_BUCKET.put(job.manifest_key, JSON.stringify(value)); const totalBytes = value.sources.reduce((total, source) => total + source.size, 0); await db(this.env).prepare("UPDATE bulk_download_jobs SET status='running',file_count=?,total_bytes=?,updated_at=datetime('now') WHERE id=?").bind(value.sources.length, totalBytes, job.id).run(); return { count: value.sources.length, totalBytes, root: value.root }; });
+        const completeSnapshot = await readJson<Snapshot>(this.env, job.manifest_key);
+        const partitions = partitionBulkSnapshot(completeSnapshot);
+        if (partitions.length > 1) {
+          const width = Math.max(2, String(partitions.length).length);
+          for (let index = 0; index < partitions.length; index += 1) {
+            const partNumber = index + 1;
+            const suffix = String(partNumber).padStart(width, "0");
+            const childId = `${job.id}-p${suffix}`;
+            const manifestKey = `_ltds/tmp-downloads/${completeSnapshot.shareId}/${job.id}/part-${suffix}.json`;
+            const archiveKey = `_ltds/tmp-downloads/${completeSnapshot.shareId}/${job.id}/part-${suffix}.zip`;
+            const part = partitions[index]!;
+            await step.do(`spawn-part-${suffix}`, { retries: { limit: 5, delay: "10 seconds", backoff: "exponential" } }, async () => {
+              await this.env.DATA_BUCKET.put(manifestKey, JSON.stringify(part));
+              await db(this.env).prepare(`INSERT OR IGNORE INTO bulk_download_jobs
+                (id,share_id,share_version,request_json,status,manifest_key,archive_key,expires_at,parent_job_id,part_index,part_count,file_count,total_bytes)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+                childId, job.share_id, job.share_version, "{}", "queued", manifestKey, archiveKey,
+                new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), job.id, partNumber, partitions.length,
+                part.sources.length, part.sources.reduce((total, source) => total + source.size, 0),
+              ).run();
+              try { await this.env.BULK_DOWNLOAD_WORKFLOW.create({ id: childId, params: { jobId: childId, prepared: true } }); }
+              catch (error) {
+                // A Workflow step can be retried after create() succeeded but
+                // before its result was checkpointed. Verify the deterministic
+                // instance instead of depending on provider error text.
+                try {
+                  const existing = await this.env.BULK_DOWNLOAD_WORKFLOW.get(childId);
+                  const status = await existing.status();
+                  if (status.status === "unknown") throw error;
+                } catch {
+                  throw error;
+                }
+              }
+              return { childId, partNumber };
+            });
+          }
+          await step.do("mark-split-download-running", async () => {
+            await db(this.env).prepare("UPDATE bulk_download_jobs SET part_count=?,archive_size=NULL,updated_at=datetime('now') WHERE id=?").bind(partitions.length, job.id).run();
+            await this.env.DATA_BUCKET.delete(job.manifest_key);
+            return { partCount: partitions.length };
+          });
+          return;
+        }
+      }
       const snap = await readJson<Snapshot>(this.env, job.manifest_key);
+      assertBulkPreparationCapacity(snap);
+      if (event.payload.prepared) {
+        const totalBytes = snap.sources.reduce((total, source) => total + source.size, 0);
+        await step.do("mark-prepared-part-running", async () => {
+          await db(this.env).prepare("UPDATE bulk_download_jobs SET status='running',file_count=?,total_bytes=?,updated_at=datetime('now') WHERE id=?").bind(snap.sources.length, totalBytes, job.id).run();
+          return { count: snap.sources.length, totalBytes };
+        });
+      }
       const prepared: Source[] = new Array(snap.sources.length);
       const totalSourceBytes = snap.sources.reduce((total, source) => total + source.size, 0);
       let completedCrcBytes = 0;

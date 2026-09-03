@@ -113,6 +113,7 @@ export function DeliveryApp({ namespace = "staff", initialRoute: consumedRoute }
   const mediaRequests = useRef(new Set<AbortController>());
   const [bulkError, setBulkError] = useState("");
   const [bulkProgress, setBulkProgress] = useState<{ status: string; percent: number | null; message?: string } | null>(null);
+  const [bulkDownloads, setBulkDownloads] = useState<Array<{ part: number; partCount: number; size?: number | null; downloadUrl: string }>>([]);
   const [cloudTransferScope, setCloudTransferScope] = useState<CloudTransferScope | null>(null);
   const cloudProviders = useMemo<CloudTransferProvider[]>(() => {
     const capabilities = manifest?.capabilities?.cloudTransfer;
@@ -520,7 +521,7 @@ export function DeliveryApp({ namespace = "staff", initialRoute: consumedRoute }
   async function downloadBulk(all = false) {
     if (bulkRequestActive.current || (!all && selectedItems.size === 0)) return;
     bulkRequestActive.current = true;
-    setBulkBusy(true); setBulkError(""); setBulkProgress({ status: "Preparing download", percent: null });
+    setBulkBusy(true); setBulkError(""); setBulkDownloads([]); setBulkProgress({ status: "Preparing download", percent: null });
     try {
       let body = await protectedJson<BulkDownloadResponse>(`${apiBase(publicId)}/bulk-download`, {
         method: "POST",
@@ -536,14 +537,23 @@ export function DeliveryApp({ namespace = "staff", initialRoute: consumedRoute }
         } });
       }
       const ticket = body.ticket || body.downloadTicket;
-      const downloadUrl = body.downloadUrl || (ticket ? `${apiBase(publicId)}/bulk-download/${encodeURIComponent(ticket)}` : "");
-      if (!downloadUrl) throw new Error("The download could not be prepared.");
-      const anchor = document.createElement("a");
-      anchor.href = downloadUrl;
-      anchor.rel = "noreferrer";
+      const ticketUrl = ticket ? `${apiBase(publicId)}/bulk-download/${encodeURIComponent(ticket)}` : "";
+      const downloads = body.downloads?.length
+        ? body.downloads
+        : (body.downloadUrl || ticketUrl) ? [{ part: 1, partCount: 1, downloadUrl: body.downloadUrl || ticketUrl }] : [];
+      if (!downloads.length) throw new Error("The download could not be prepared.");
       const safeName = (manifest?.share.projectName || "delivery").replace(/[^a-z0-9-_]+/gi, "-").replace(/^-+|-+$/g, "") || "delivery";
-      anchor.download = `${safeName}.zip`;
-      document.body.appendChild(anchor); anchor.click(); anchor.remove();
+      setBulkDownloads(downloads);
+      downloads.forEach((download, index) => {
+        const anchor = document.createElement("a");
+        anchor.href = download.downloadUrl;
+        anchor.rel = "noreferrer";
+        anchor.download = downloads.length === 1 ? `${safeName}.zip` : `${safeName}-part-${String(download.part).padStart(2, "0")}-of-${String(download.partCount).padStart(2, "0")}.zip`;
+        document.body.appendChild(anchor);
+        // Browsers can require the user to permit multiple automatic files.
+        // Keep the same resumable links visible below even after clicking.
+        window.setTimeout(() => { anchor.click(); anchor.remove(); }, index * 150);
+      });
     } catch (caught) {
       setBulkError(caught instanceof Error ? caught.message : "The download could not be prepared.");
       setBulkProgress({ status: "Download failed", percent: null });
@@ -605,6 +615,11 @@ export function DeliveryApp({ namespace = "staff", initialRoute: consumedRoute }
       {navigationError && <p className="bulk-error" role="alert">{navigationError}</p>}
       {bulkError && <p className="bulk-error" role="alert">{bulkError}</p>}
       {bulkProgress && <BulkProgress progress={bulkProgress} />}
+      {bulkDownloads.length > 1 && <section className="bulk-download-parts" aria-label="Prepared download parts">
+        <strong>{bulkDownloads.length} resumable ZIP parts prepared</strong>
+        <p>Your browser was asked to download every part. If it blocked multiple downloads, use the links below. Each part can be resumed from the browser downloads screen for 24 hours.</p>
+        <div>{bulkDownloads.map(download => <a key={download.part} className="button button-ghost button-small" href={download.downloadUrl} download>Download part {download.part} of {download.partCount}{typeof download.size === "number" ? ` · ${formatBytes(download.size)}` : ""}</a>)}</div>
+      </section>}
       {renderStart > 0 && <div className="public-delivery-pagination"><button type="button" className="button-ghost" onClick={() => setRenderStart(current => Math.max(0, current - DELIVERY_RENDER_STEP))}>Show earlier items</button></div>}
       {manifest.items.length === 0 ? <EmptyState title="This folder is empty" detail="New synced files will appear here automatically." /> : view === "grid" ?
         <div className="item-grid">{renderedItems.map(item => <ItemCard key={item.id} item={item} selectionMode={selectionMode} selected={selectedItems.has(item.id)} onToggle={toggleSelected} onFolder={openFolder} onPreview={openPreview} />)}</div> :

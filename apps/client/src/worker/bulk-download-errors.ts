@@ -4,7 +4,8 @@ const BULK_FAILURES: Record<string, BulkFailure> = {
   "share-revoked": { code: "share-revoked", message: "This delivery is no longer available." },
   "empty-selection": { code: "empty-selection", message: "No downloadable files were found." },
   "file-limit": { code: "file-limit", message: "This earlier download hit a retired file-count limit. Start the download again." },
-  "byte-limit": { code: "byte-limit", message: "This download is larger than 100 GiB. Choose a smaller selection." },
+  "byte-limit": { code: "byte-limit", message: "This earlier download hit a retired total-size limit. Start the download again." },
+  "single-source-capacity": { code: "single-source-capacity", message: "One file is too large to package safely. Download that file individually." },
   "source-changed": { code: "source-changed", message: "One or more files changed while the archive was being built. Please create a new download." },
   "archive-too-large": { code: "archive-too-large", message: "This selection is too large to prepare as one download." },
   "preparation-capacity": { code: "preparation-capacity", message: "This selection exceeded the archive preparation capacity. Choose a smaller selection and try again." },
@@ -17,7 +18,7 @@ export function friendlyBulkFailure(code: string | null | undefined): BulkFailur
 }
 
 export function classifyWorkflowFailure(rawError: string): BulkFailure {
-  if (["share-revoked", "empty-selection", "file-limit", "byte-limit"].includes(rawError)) return friendlyBulkFailure(rawError);
+  if (["share-revoked", "empty-selection", "file-limit", "byte-limit", "single-source-capacity"].includes(rawError)) return friendlyBulkFailure(rawError);
   if (rawError === "multipart-part-limit") return friendlyBulkFailure("archive-too-large");
   if (
     rawError === "manifest-capacity"

@@ -726,7 +726,13 @@ function validateBulkRequest(value: unknown): { all?: boolean; items?: string[] 
 
 async function getBulkJob(c: any, jobId: string): Promise<any> {
   const share = c.get("share") as ShareRow;
-  return primaryDb(c.env).prepare("SELECT id,status,file_count,processed_files,total_bytes,processed_bytes,archive_size,error_code,error_message,expires_at,manifest_key,archive_key FROM bulk_download_jobs WHERE id=? AND share_id=? AND share_version=?").bind(jobId, share.id, share.share_version).first<any>();
+  return primaryDb(c.env).prepare("SELECT id,status,file_count,processed_files,total_bytes,processed_bytes,archive_size,error_code,error_message,expires_at,manifest_key,archive_key,parent_job_id,part_index,part_count FROM bulk_download_jobs WHERE id=? AND share_id=? AND share_version=?").bind(jobId, share.id, share.share_version).first<any>();
+}
+
+async function getBulkParts(c: any, parentJobId: string): Promise<any[]> {
+  const share = c.get("share") as ShareRow;
+  return (await primaryDb(c.env).prepare("SELECT id,status,file_count,processed_files,total_bytes,processed_bytes,archive_size,error_code,error_message,expires_at,manifest_key,archive_key,parent_job_id,part_index,part_count FROM bulk_download_jobs WHERE parent_job_id=? AND share_id=? AND share_version=? ORDER BY part_index ASC")
+    .bind(parentJobId, share.id, share.share_version).all<any>()).results;
 }
 
 async function streamArchive(c: any, job: any): Promise<Response> {
@@ -736,7 +742,10 @@ async function streamArchive(c: any, job: any): Promise<Response> {
   let range: { offset: number; length: number } | undefined;
   try { range = parseRange(!ifRange || matchesEtag(ifRange, head.httpEtag) ? rangeHeader : undefined, head.size); }
   catch (error) { if (error instanceof HTTPException && error.status === 416) return new Response(null, { status: 416, headers: { "Content-Range": `bytes */${head.size}`, "Accept-Ranges": "bytes" } }); throw error; }
-  const normalized = `${share.project_name || share.client_name || "delivery"}.zip`.normalize("NFC");
+  const partSuffix = job.parent_job_id && job.part_count > 1
+    ? `-part-${String(job.part_index).padStart(Math.max(2, String(job.part_count).length), "0")}-of-${String(job.part_count).padStart(Math.max(2, String(job.part_count).length), "0")}`
+    : "";
+  const normalized = `${share.project_name || share.client_name || "delivery"}${partSuffix}.zip`.normalize("NFC");
   const ascii = normalized.replace(/[^\x20-\x7e]/g, "_").replace(/[\0-\x1f\x7f"\\]/g, "_").slice(0, 180) || "delivery.zip";
   const headers = new Headers();
   headers.set("Content-Type", "application/zip");
@@ -809,14 +818,41 @@ app.get("/api/public/shares/:publicId/bulk-download/:jobId", async c => {
   const job = await getBulkJob(c, c.req.param("jobId")); if (!job) throw new HTTPException(404, { message: "Download job not found" });
   await expireReadyBulkJob(c, job);
   const share = c.get("share") as ShareRow;
+  let parts: any[] = [];
+  if (!job.parent_job_id && job.part_count > 1) {
+    parts = await getBulkParts(c, job.id);
+    for (const part of parts) await expireReadyBulkJob(c, part);
+    const completeSet = parts.length === job.part_count;
+    const failed = parts.find(part => part.status === "failed");
+    const allReady = completeSet && parts.every(part => part.status === "ready");
+    const anyExpired = parts.some(part => part.status === "expired");
+    job.status = failed ? "failed" : anyExpired ? "expired" : allReady ? "ready" : "running";
+    job.file_count = parts.reduce((total, part) => total + (part.file_count || 0), 0);
+    job.processed_files = parts.reduce((total, part) => total + (part.processed_files || 0), 0);
+    job.total_bytes = parts.reduce((total, part) => total + (part.total_bytes || 0), 0);
+    job.processed_bytes = parts.reduce((total, part) => total + (part.processed_bytes || 0), 0);
+    job.archive_size = allReady ? parts.reduce((total, part) => total + (part.archive_size || 0), 0) : null;
+    job.error_code = failed?.error_code || null;
+    job.error_message = failed?.error_message || null;
+    if (parts.length) job.expires_at = parts.reduce((earliest, part) => Date.parse(part.expires_at) < Date.parse(earliest) ? part.expires_at : earliest, parts[0]!.expires_at);
+  }
   const failure = job.error_code ? friendlyBulkFailure(job.error_code) : null;
   const progress = bulkJobProgress(job);
   const encodedShare = encodeURIComponent(share.public_id!);
-  const response: Record<string, unknown> = { jobId: job.id, status: job.status, fileCount: job.file_count, processedFiles: job.processed_files, totalBytes: job.total_bytes, processedBytes: job.processed_bytes, archiveSize: job.archive_size, expiresAt: job.expires_at, error: failure, downloadUrl: null, ...progress };
+  const response: Record<string, unknown> = { jobId: job.id, status: job.status, fileCount: job.file_count, processedFiles: job.processed_files, totalBytes: job.total_bytes, processedBytes: job.processed_bytes, archiveSize: job.archive_size, expiresAt: job.expires_at, error: failure, downloadUrl: null, partCount: job.part_count || 1, downloads: [], ...progress };
   if (job.status === "ready") {
-    response.downloadUrl = `/api/public/shares/${encodedShare}/bulk-download/${job.id}/file`;
-    const resumeExpiresAt = bulkDownloadResumeExpiresAt(job, share);
-    if (resumeExpiresAt) {
+    const readyParts = parts.length ? parts : [job];
+    const downloads = readyParts.map(part => ({
+      part: part.part_index || 1,
+      partCount: part.part_count || 1,
+      size: part.archive_size,
+      downloadUrl: `/api/public/shares/${encodedShare}/bulk-download/${part.id}/file`,
+    }));
+    response.downloads = downloads;
+    if (downloads.length === 1) response.downloadUrl = downloads[0]!.downloadUrl;
+    for (const part of readyParts) {
+      const resumeExpiresAt = bulkDownloadResumeExpiresAt(part, share);
+      if (!resumeExpiresAt) continue;
       // The browser download manager can issue Range requests for the entire
       // prepared-archive retention window. D1 share/version/revocation checks
       // still run on every resumed request.
@@ -826,7 +862,7 @@ app.get("/api/public/shares/:publicId/bulk-download/:jobId", async c => {
         shareId: share.id,
         shareVersion: share.share_version,
         publicId: share.public_id!,
-        jobId: job.id,
+        jobId: part.id,
         expiresAt: resumeExpiresAt,
       }), { append: true });
     }

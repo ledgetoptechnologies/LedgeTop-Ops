@@ -72,6 +72,16 @@ describe("public bulk-download polling", () => {
     ]);
   });
 
+  it("returns every prepared archive part instead of stopping on the first one", async () => {
+    const downloads = [
+      { part: 1, partCount: 2, size: 100, downloadUrl: "/part-01.zip" },
+      { part: 2, partCount: 2, size: 80, downloadUrl: "/part-02.zip" },
+    ];
+    const harness = pollingHarness([{ status: "ready", partCount: 2, downloads }]);
+    await expect(pollBulkDownload({ status: "queued" }, "/status", harness.options)).resolves.toMatchObject({ downloads });
+    expect(harness.requestStatus).toHaveBeenCalledTimes(1);
+  });
+
   it("honors Retry-After for a transient 429 and then resumes polling", async () => {
     const limited = Object.assign(new Error("Too many requests"), { status: 429, retryAfterMs: 7_000 });
     const harness = pollingHarness([limited, { status: "ready", ticket: "ticket" }]);
