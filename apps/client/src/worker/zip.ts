@@ -25,7 +25,7 @@ function concat(...parts: Uint8Array[]): Uint8Array {
 }
 export function crc32(bytes: Uint8Array, previous = 0xffffffff): number {
   let crc = previous;
-  for (const byte of bytes) crc = (crc >>> 8) ^ CRC_TABLE[(crc ^ byte) & 0xff]!;
+  for (let index = 0; index < bytes.length; index += 1) crc = (crc >>> 8) ^ CRC_TABLE[(crc ^ bytes[index]!) & 0xff]!;
   return crc >>> 0;
 }
 function truncateUtf8(value: string, maximumBytes: number): string {
@@ -150,7 +150,18 @@ export function buildZipLayout(entries: ZipManifestEntry[]): ZipArchiveLayout {
 
 export async function readZipPart(bucket: ZipRangeBucket, layout: ZipArchiveLayout, start: number, length: number): Promise<Uint8Array> {
   const end = Math.min(layout.archiveSize, start + length); const output = new Uint8Array(Math.max(0, end - start));
-  for (const segment of layout.segments) {
+  // Segments are ordered and non-overlapping. Seek to this part rather than
+  // rescanning every file/header for each multipart upload in large archives.
+  let low = 0; let high = layout.segments.length;
+  while (low < high) {
+    const middle = low + Math.floor((high - low) / 2);
+    const segment = layout.segments[middle]!;
+    if (segment.offset + segment.length <= start) low = middle + 1;
+    else high = middle;
+  }
+  for (let index = low; index < layout.segments.length; index += 1) {
+    const segment = layout.segments[index]!;
+    if (segment.offset >= end) break;
     const overlapStart = Math.max(start, segment.offset); const overlapEnd = Math.min(end, segment.offset + segment.length); if (overlapEnd <= overlapStart) continue;
     const targetOffset = overlapStart - start; const sourceOffset = overlapStart - segment.offset; const size = overlapEnd - overlapStart;
     if (segment.kind === "bytes") output.set(segment.bytes!.subarray(sourceOffset, sourceOffset + size), targetOffset);

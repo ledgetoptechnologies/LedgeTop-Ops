@@ -11,6 +11,14 @@ async function bytes(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
 }
 
 describe("streaming ZIP writer", () => {
+  it("keeps standard CRC-32 values and incremental chunks identical", () => {
+    const input = new TextEncoder().encode("123456789");
+    expect((crc32(input) ^ 0xffffffff) >>> 0).toBe(0xcbf43926);
+    expect(crc32(new Uint8Array())).toBe(0xffffffff);
+    for (let split = 0; split <= input.length; split += 1) {
+      expect(crc32(input.subarray(split), crc32(input.subarray(0, split)))).toBe(crc32(input));
+    }
+  });
   it("writes a valid stored archive with nested names", async () => {
     const result = await bytes(streamZip([{ name: "edited/photo.txt", size: 5, open: async () => new Blob(["hello"]).stream() }]));
     const text = new TextDecoder().decode(result);
@@ -74,6 +82,41 @@ describe("streaming ZIP writer", () => {
     const bucket = { async get(_key: string, options?: unknown) { reads.push(options); return null; } };
     await expect(readZipPart(bucket, layout, layout.entries[0]!.local.length, 5)).rejects.toThrow("changed or disappeared");
     expect(reads).toEqual([{ range: { offset: 0, length: 5 }, onlyIf: { etagMatches: "source-etag" } }]);
+  });
+
+  it("seeks through empty files and reconstructs identical bytes across part boundaries", async () => {
+    const entries = Array.from({ length: 75 }, (_, index) => ({
+      key: `file-${index}`, name: `folder/file-${index}`, size: index % 4 === 0 ? 0 : 13 + index, crc32: index, etag: `etag-${index}`,
+    }));
+    const layout = buildZipLayout(entries);
+    const bucket = { async get(key: string, options?: { range: { offset: number; length: number }; onlyIf?: { etagMatches: string } }) {
+      const index = Number(key.slice(5));
+      expect(options?.onlyIf?.etagMatches).toBe(`etag-${index}`);
+      const range = options!.range;
+      return { async arrayBuffer() { return new Uint8Array(range.length).fill(index).buffer; } };
+    } };
+    const entire = await readZipPart(bucket, layout, 0, layout.archiveSize);
+    const reconstructed = new Uint8Array(layout.archiveSize);
+    for (let start = 0; start < layout.archiveSize; start += 113) {
+      reconstructed.set(await readZipPart(bucket, layout, start, 113), start);
+    }
+    expect(reconstructed).toEqual(entire);
+    expect(await readZipPart(bucket, layout, layout.archiveSize, 113)).toHaveLength(0);
+  });
+
+  it("only inspects a logarithmic prefix when seeking a late archive part", async () => {
+    const layout = buildZipLayout(Array.from({ length: 5_000 }, (_, index) => ({
+      key: `file-${index}`, name: `file-${index}`, size: 1, crc32: 0,
+    })));
+    let segmentReads = 0;
+    layout.segments = new Proxy(layout.segments, { get(target, property, receiver) {
+      if (typeof property === "string" && /^\d+$/.test(property)) segmentReads += 1;
+      return Reflect.get(target, property, receiver);
+    } });
+    const bucket = { async get() { throw new Error("Trailer must not read source files"); } };
+    const trailer = await readZipPart(bucket, layout, layout.archiveSize - 22, 22);
+    expect(new DataView(trailer.buffer).getUint32(0, true)).toBe(0x06054b50);
+    expect(segmentReads).toBeLessThan(25);
   });
 
   it("assigns deterministic, case-insensitively unique names after sanitizing and truncating", () => {

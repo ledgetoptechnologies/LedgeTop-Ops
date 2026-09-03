@@ -654,6 +654,7 @@ describe("bulk-download failures and cleanup", () => {
             objects: [
               { key: "tmp/orphan/archive.zip", uploaded: new Date("2026-07-25T00:00:00Z") },
               { key: "tmp/active/archive.zip", uploaded: new Date("2026-07-25T00:00:00Z") },
+              { key: "tmp/active/manifest.json.final.json", uploaded: new Date("2026-07-25T00:00:00Z") },
             ],
             truncated: false,
           };
@@ -664,7 +665,7 @@ describe("bulk-download failures and cleanup", () => {
     await cleanupTemporaryZips(env, now);
     expect(aborted).toEqual([{ key: "tmp/job/archive.zip", uploadId: "upload-1" }]);
     expect(deleted).toEqual([
-      ["tmp/job/manifest.json", "tmp/job/archive.zip"],
+      ["tmp/job/manifest.json", "tmp/job/archive.zip", "tmp/job/manifest.json.final.json"],
       ["tmp/orphan/archive.zip"],
     ]);
     const expireUpdateIndex = queries.findIndex(record => record.query.includes("SET status='expired'"));

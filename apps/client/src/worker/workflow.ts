@@ -15,6 +15,8 @@ const CRC_PROGRESS_CHECKPOINT = 64 * 1024 * 1024;
 const CRC_FILE_CHECKPOINT = 25;
 const CRC_BATCH_MAX_FILES = 64;
 const ZIP_PART = 16 * 1024 * 1024;
+export const CRC_CONCURRENCY = 4;
+export const UPLOAD_CONCURRENCY = 2;
 const CRC_PROGRESS_WEIGHT = 0.5;
 const WORKFLOW_STEP_LIMIT = 25_000;
 const WORKFLOW_STEP_RESERVE = 100;
@@ -34,6 +36,33 @@ type Tombstone = DownloadTombstone;
 type CrcWorkUnit =
   | { kind: "batch"; indexes: number[]; totalBytes: number }
   | { kind: "chunk"; sourceIndex: number; start: number; length: number };
+
+export function finalBulkManifestKey(snapshotKey: string): string { return `${snapshotKey}.final.json`; }
+
+/** Drain every sibling before propagating failure: cleanup must not race an upload. */
+export async function drainParallel<T>(tasks: ReadonlyArray<() => Promise<T>>): Promise<T[]> {
+  const results = await Promise.all(tasks.map(async task => {
+    try { return { ok: true as const, value: await task() }; }
+    catch (error) { return { ok: false as const, error }; }
+  }));
+  return results.map(result => { if (!result.ok) throw result.error; return result.value; });
+}
+
+/** Stable consecutive windows preserve original step IDs and same-file CRC dependencies. */
+export function planCrcWindows(units: readonly CrcWorkUnit[]): number[][] {
+  const windows: number[][] = [];
+  let current: number[] = [];
+  const chunkSources = new Set<number>();
+  units.forEach((unit, index) => {
+    if (current.length >= CRC_CONCURRENCY || (unit.kind === "chunk" && chunkSources.has(unit.sourceIndex))) {
+      windows.push(current); current = []; chunkSources.clear();
+    }
+    current.push(index);
+    if (unit.kind === "chunk") chunkSources.add(unit.sourceIndex);
+  });
+  if (current.length) windows.push(current);
+  return windows;
+}
 
 export interface BulkPreparationEstimate {
   archiveSize: number;
@@ -95,7 +124,29 @@ export function planCrcWorkUnits(sources: readonly Pick<Source, "size">[]): CrcW
 export function estimateBulkPreparation(sources: readonly Pick<Source, "name" | "size">[]): BulkPreparationEstimate {
   const archiveSize = estimateZipArchiveSize(sources);
   const uploadParts = Math.ceil(archiveSize / ZIP_PART);
-  const crcSteps = planCrcWorkUnits(sources).length;
+  const crcUnits = planCrcWorkUnits(sources);
+  const crcSteps = crcUnits.length;
+  // Count the exact checkpoints the execution loop emits, not every CRC window:
+  // a large single file has one window per chunk but checkpoints only every 64 MiB.
+  let crcProgressSteps = 0;
+  let completedBytes = 0;
+  let completedFiles = 0;
+  for (const window of planCrcWindows(crcUnits)) {
+    const previousBytes = completedBytes;
+    const previousFiles = completedFiles;
+    for (const unitIndex of window) {
+      const unit = crcUnits[unitIndex]!;
+      if (unit.kind === "batch") {
+        completedBytes += unit.totalBytes;
+        completedFiles = unit.indexes.at(-1)! + 1;
+      } else {
+        completedBytes += unit.length;
+        if (unit.start + unit.length === sources[unit.sourceIndex]!.size) completedFiles = unit.sourceIndex + 1;
+      }
+    }
+    if (shouldCheckpointCrcChunk(previousBytes, completedBytes) || shouldCheckpointCrcFile(previousFiles, completedFiles, sources.length)) crcProgressSteps += 1;
+  }
+  const progressSteps = crcProgressSteps + Math.ceil(uploadParts / UPLOAD_CONCURRENCY);
   const partSourceReads = new Uint32Array(uploadParts);
   const archiveNames = uniqueZipEntryNames(sources.map(source => source.name));
   let offset = 0;
@@ -114,7 +165,7 @@ export function estimateBulkPreparation(sources: readonly Pick<Source, "name" | 
     archiveSize,
     crcSteps,
     uploadParts,
-    workflowSteps: SUCCESS_FIXED_STEPS + crcSteps + uploadParts,
+    workflowSteps: SUCCESS_FIXED_STEPS + crcSteps + uploadParts + progressSteps,
     maximumUploadPartSourceReads: partSourceReads.length ? Math.max(...partSourceReads) : 0,
   };
 }
@@ -299,7 +350,8 @@ export class BulkDownloadWorkflow extends WorkflowEntrypoint<Env> {
           }
           await step.do("mark-split-download-running", async () => {
             await db(this.env).prepare("UPDATE bulk_download_jobs SET part_count=?,archive_size=NULL,updated_at=datetime('now') WHERE id=?").bind(partitions.length, job.id).run();
-            await this.env.DATA_BUCKET.delete(job.manifest_key);
+            // Retain the immutable parent snapshot until normal expiry so a
+            // replay of the fan-out can still reconstruct its child identities.
             return { partCount: partitions.length };
           });
           return;
@@ -320,67 +372,88 @@ export class BulkDownloadWorkflow extends WorkflowEntrypoint<Env> {
       let completedFiles = 0;
       const crcStates = new Array<number>(snap.sources.length).fill(0xffffffff);
       const workUnits = planCrcWorkUnits(snap.sources);
-      for (let unitIndex = 0; unitIndex < workUnits.length; unitIndex += 1) {
-        const unit = workUnits[unitIndex]!;
+      for (const window of planCrcWindows(workUnits)) {
         const previousBytes = completedCrcBytes;
         const previousFiles = completedFiles;
-        if (unit.kind === "batch") {
-          const result = await step.do(`crc-batch-${unitIndex}`, { retries: { limit: 3, delay: "5 seconds", backoff: "exponential" } }, async () => {
-            const entries: Array<{ sourceIndex: number; crc32: number }> = [];
-            for (const sourceIndex of unit.indexes) {
-              const source = snap.sources[sourceIndex]!;
-              const bytes = source.size ? await readSourceRange(this.env.DATA_BUCKET, source, 0, source.size) : new Uint8Array();
-              entries.push({ sourceIndex, crc32: (crc32(bytes) ^ 0xffffffff) >>> 0 });
-            }
-            const nextBytes = previousBytes + unit.totalBytes;
-            const nextFiles = unit.indexes.at(-1)! + 1;
-            if (shouldCheckpointCrcChunk(previousBytes, nextBytes) || shouldCheckpointCrcFile(previousFiles, nextFiles, snap.sources.length)) {
-              await db(this.env).prepare("UPDATE bulk_download_jobs SET processed_files=?,processed_bytes=?,updated_at=datetime('now') WHERE id=? AND status='running'")
-                .bind(nextFiles, crcProgressBytes(totalSourceBytes, nextBytes), job.id).run();
-            }
-            return { entries, bytes: unit.totalBytes, completedFiles: nextFiles };
-          });
-          for (const entry of result.entries) prepared[entry.sourceIndex] = { ...snap.sources[entry.sourceIndex]!, crc32: entry.crc32 };
-          completedCrcBytes += result.bytes;
-          completedFiles = result.completedFiles;
-          continue;
-        }
-        const source = snap.sources[unit.sourceIndex]!;
-        const priorCrc = crcStates[unit.sourceIndex]!;
-        const result = await step.do(`crc-${unit.sourceIndex}-${unit.start}`, { retries: { limit: 3, delay: "5 seconds", backoff: "exponential" } }, async () => {
-          const bytes = await readSourceRange(this.env.DATA_BUCKET, source, unit.start, unit.length);
-          const sourceComplete = unit.start + bytes.length === source.size;
-          const nextBytes = previousBytes + bytes.length;
-          const nextFiles = sourceComplete ? unit.sourceIndex + 1 : previousFiles;
-          if (shouldCheckpointCrcChunk(previousBytes, nextBytes) || shouldCheckpointCrcFile(previousFiles, nextFiles, snap.sources.length)) {
-            await db(this.env).prepare("UPDATE bulk_download_jobs SET processed_files=?,processed_bytes=?,updated_at=datetime('now') WHERE id=? AND status='running'")
-              .bind(nextFiles, crcProgressBytes(totalSourceBytes, nextBytes), job.id).run();
+        const results = await drainParallel(window.map(unitIndex => async () => {
+          const unit = workUnits[unitIndex]!;
+          if (unit.kind === "batch") {
+            const result = await step.do(`crc-batch-${unitIndex}`, { retries: { limit: 3, delay: "5 seconds", backoff: "exponential" } }, async () => {
+              const entries: Array<{ sourceIndex: number; crc32: number }> = [];
+              for (const sourceIndex of unit.indexes) {
+                const source = snap.sources[sourceIndex]!;
+                const bytes = source.size ? await readSourceRange(this.env.DATA_BUCKET, source, 0, source.size) : new Uint8Array();
+                entries.push({ sourceIndex, crc32: (crc32(bytes) ^ 0xffffffff) >>> 0 });
+              }
+              const nextFiles = unit.indexes.at(-1)! + 1;
+              return { entries, bytes: unit.totalBytes, completedFiles: nextFiles };
+            });
+            return { kind: "batch" as const, result };
           }
-          return { crc: crc32(bytes, priorCrc), bytes: bytes.length, sourceComplete, completedFiles: nextFiles };
-        });
-        crcStates[unit.sourceIndex] = result.crc;
-        completedCrcBytes += result.bytes;
-        completedFiles = result.completedFiles;
-        if (result.sourceComplete) prepared[unit.sourceIndex] = { ...source, crc32: (result.crc ^ 0xffffffff) >>> 0 };
+          const source = snap.sources[unit.sourceIndex]!;
+          const priorCrc = crcStates[unit.sourceIndex]!;
+          const result = await step.do(`crc-${unit.sourceIndex}-${unit.start}`, { retries: { limit: 3, delay: "5 seconds", backoff: "exponential" } }, async () => {
+            const bytes = await readSourceRange(this.env.DATA_BUCKET, source, unit.start, unit.length);
+            const sourceComplete = unit.start + bytes.length === source.size;
+            const nextFiles = sourceComplete ? unit.sourceIndex + 1 : previousFiles;
+            return { crc: crc32(bytes, priorCrc), bytes: bytes.length, sourceComplete, completedFiles: nextFiles };
+          });
+          return { kind: "chunk" as const, sourceIndex: unit.sourceIndex, result };
+        }));
+        // Reconstruct state only from durable results, in original source order.
+        for (const completed of results) {
+          completedCrcBytes += completed.result.bytes;
+          if (completed.kind === "batch") {
+            for (const entry of completed.result.entries) prepared[entry.sourceIndex] = { ...snap.sources[entry.sourceIndex]!, crc32: entry.crc32 };
+            completedFiles = completed.result.completedFiles;
+          } else {
+            crcStates[completed.sourceIndex] = completed.result.crc;
+            if (completed.result.sourceComplete) {
+              prepared[completed.sourceIndex] = { ...snap.sources[completed.sourceIndex]!, crc32: (completed.result.crc ^ 0xffffffff) >>> 0 };
+              completedFiles = completed.sourceIndex + 1;
+            }
+          }
+        }
+        if (shouldCheckpointCrcChunk(previousBytes, completedCrcBytes) || shouldCheckpointCrcFile(previousFiles, completedFiles, snap.sources.length)) {
+          await step.do(`crc-progress-${window.at(-1)!}`, async () => {
+            await db(this.env).prepare("UPDATE bulk_download_jobs SET processed_files=MAX(processed_files,?),processed_bytes=MAX(processed_bytes,?),updated_at=datetime('now') WHERE id=? AND status='running'")
+              .bind(completedFiles, crcProgressBytes(totalSourceBytes, completedCrcBytes), job.id).run();
+            return { completedFiles, completedBytes: completedCrcBytes };
+          });
+        }
       }
       await step.do("write-final-manifest", async () => {
         const result: FinalManifest = { root: snap.root, entries: prepared, fileCount: prepared.length, totalBytes: prepared.reduce((total, source) => total + source.size, 0) };
-        await this.env.DATA_BUCKET.put(job.manifest_key, JSON.stringify(result));
+        await this.env.DATA_BUCKET.put(finalBulkManifestKey(job.manifest_key), JSON.stringify(result));
         // Do not persist a potentially multi-megabyte manifest as Workflow step
         // state. R2 is the durable source of truth for the assembly phase.
         return { fileCount: result.fileCount, totalBytes: result.totalBytes };
       });
-      const finalManifest = await readJson<FinalManifest>(this.env, job.manifest_key);
+      const finalManifest = await readJson<FinalManifest>(this.env, finalBulkManifestKey(job.manifest_key));
       const layout = buildZipLayout(finalManifest.entries);
       const upload = await step.do("create-multipart-upload", async () => { const result = await this.env.DATA_BUCKET.createMultipartUpload(job.archive_key, { httpMetadata: { contentType: "application/zip", contentDisposition: "attachment" } }); await db(this.env).prepare("UPDATE bulk_download_jobs SET multipart_upload_id=?,archive_size=?,updated_at=datetime('now') WHERE id=?").bind(result.uploadId, layout.archiveSize, job.id).run(); return { uploadId: result.uploadId, archiveSize: layout.archiveSize }; });
       const parts: Array<{ partNumber: number; etag: string }> = [];
       const partCount = Math.ceil(layout.archiveSize / ZIP_PART); if (partCount > 10_000) throw new Error("multipart-part-limit");
-      for (let partNumber = 1; partNumber <= partCount; partNumber += 1) {
-        const start = (partNumber - 1) * ZIP_PART; const length = Math.min(ZIP_PART, layout.archiveSize - start);
-        const part = await step.do(`upload-${partNumber}`, { retries: { limit: 4, delay: "10 seconds", backoff: "exponential" } }, async () => {
-          const bytes = await readZipPart(this.env.DATA_BUCKET, layout, start, length); const uploadRef = this.env.DATA_BUCKET.resumeMultipartUpload(job.archive_key, upload.uploadId); const result = await uploadRef.uploadPart(partNumber, bytes); await db(this.env).prepare("UPDATE bulk_download_jobs SET processed_bytes=?,updated_at=datetime('now') WHERE id=?").bind(assemblyProgressBytes(finalManifest.totalBytes, layout.archiveSize, start + length), job.id).run(); return { partNumber: result.partNumber, etag: result.etag };
+      for (let firstPart = 1; firstPart <= partCount; firstPart += UPLOAD_CONCURRENCY) {
+        const window = Array.from({ length: Math.min(UPLOAD_CONCURRENCY, partCount - firstPart + 1) }, (_, index) => firstPart + index);
+        const uploaded = await drainParallel(window.map(partNumber => async () => {
+          const start = (partNumber - 1) * ZIP_PART;
+          const length = Math.min(ZIP_PART, layout.archiveSize - start);
+          return step.do(`upload-${partNumber}`, { retries: { limit: 4, delay: "10 seconds", backoff: "exponential" } }, async () => {
+            const bytes = await readZipPart(this.env.DATA_BUCKET, layout, start, length);
+            const uploadRef = this.env.DATA_BUCKET.resumeMultipartUpload(job.archive_key, upload.uploadId);
+            const result = await uploadRef.uploadPart(partNumber, bytes);
+            return { partNumber: result.partNumber, etag: result.etag };
+          });
+        }));
+        parts.push(...uploaded);
+        const lastPart = window.at(-1)!;
+        await step.do(`upload-progress-${lastPart}`, async () => {
+          const uploadedBytes = Math.min(layout.archiveSize, lastPart * ZIP_PART);
+          await db(this.env).prepare("UPDATE bulk_download_jobs SET processed_bytes=MAX(processed_bytes,?),updated_at=datetime('now') WHERE id=? AND status='running'")
+            .bind(assemblyProgressBytes(finalManifest.totalBytes, layout.archiveSize, uploadedBytes), job.id).run();
+          return { uploadedBytes };
         });
-        parts.push(part);
       }
       await step.do("complete-multipart-upload", { retries: { limit: 3, delay: "10 seconds", backoff: "exponential" } }, async () => { const uploadRef = this.env.DATA_BUCKET.resumeMultipartUpload(job.archive_key, upload.uploadId); await uploadRef.complete(parts); return { archiveSize: layout.archiveSize }; });
       await step.do("mark-ready", async () => {
@@ -390,7 +463,7 @@ export class BulkDownloadWorkflow extends WorkflowEntrypoint<Env> {
       });
       await step.sleep("temporary-download-retention", BULK_DOWNLOAD_RETENTION_DURATION);
       await step.do("expire-temporary-download", async () => {
-        await this.env.DATA_BUCKET.delete([job.archive_key, job.manifest_key]);
+        await this.env.DATA_BUCKET.delete([job.archive_key, job.manifest_key, finalBulkManifestKey(job.manifest_key)]);
         await db(this.env).prepare("UPDATE bulk_download_jobs SET status='expired',updated_at=datetime('now') WHERE id=? AND status='ready'").bind(job.id).run();
         return { status: "expired" };
       });
@@ -408,7 +481,7 @@ export class BulkDownloadWorkflow extends WorkflowEntrypoint<Env> {
         if (current?.multipart_upload_id) {
           try { await this.env.DATA_BUCKET.resumeMultipartUpload(job.archive_key, current.multipart_upload_id).abort(); } catch { /* already completed or absent */ }
         }
-        await this.env.DATA_BUCKET.delete([job.archive_key, job.manifest_key]);
+        await this.env.DATA_BUCKET.delete([job.archive_key, job.manifest_key, finalBulkManifestKey(job.manifest_key)]);
         return { cleaned: true };
       });
       await step.do("mark-failed", async () => { await db(this.env).prepare("UPDATE bulk_download_jobs SET status='failed',error_code=?,error_message=?,updated_at=datetime('now') WHERE id=? AND status IN ('queued','running')").bind(failure.code, failure.message, job.id).run(); return { status: "failed" }; });

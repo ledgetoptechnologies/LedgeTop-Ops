@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  bulkDownloadProgress,
   parseRetryAfter,
   pollBulkDownload,
   requestJson,
@@ -33,6 +34,42 @@ function pollingHarness(
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("bulk-download preparation display", () => {
+  it("distinguishes the queue from file checks", () => {
+    expect(bulkDownloadProgress({ status: "queued", progress: 0 })).toMatchObject({ status: "Download queued", percent: null });
+    expect(bulkDownloadProgress({ status: "running", archiveSize: null, processedFiles: 17, fileCount: 4809, progress: 20 })).toMatchObject({
+      status: "Checking files 17 of 4,809", percent: 20,
+      message: "20% prepared · Verifying files before building the ZIP. Large files can take longer.",
+    });
+  });
+
+  it("uses archive layout availability, not completed file count, to identify assembly", () => {
+    expect(bulkDownloadProgress({ status: "running", archiveSize: null, processedFiles: 10, fileCount: 10, progress: 50 }).status).toBe("Checking files 10 of 10");
+    expect(bulkDownloadProgress({ status: "running", archiveSize: 100, processedFiles: 10, fileCount: 10, progress: 50 })).toMatchObject({ status: "Building ZIP", percent: 50 });
+  });
+
+  it("does not infer a stage from progress when stage metadata is absent", () => {
+    expect(bulkDownloadProgress({ status: "running", progress: 70 }).status).toBe("Preparing download");
+    expect(bulkDownloadProgress({ status: "running", message: "Checking files" }).status).toBe("Checking files");
+    expect(bulkDownloadProgress({ status: "running", message: "Building ZIP" }).status).toBe("Building ZIP");
+  });
+
+  it("handles unknown totals and invalid progress without invalid percentages", () => {
+    expect(bulkDownloadProgress({ status: "running", archiveSize: null, totalBytes: 0, processedBytes: 0 })).toMatchObject({ status: "Checking files", percent: null });
+    expect(bulkDownloadProgress({ status: "running", progress: NaN }).percent).toBeNull();
+    expect(bulkDownloadProgress({ status: "running", progress: -4 }).percent).toBe(0);
+    expect(bulkDownloadProgress({ status: "running", processedBytes: 100, totalBytes: 100 }).percent).toBe(99);
+  });
+
+  it("marks only ready results as fully prepared and distinguishes terminal failures", () => {
+    expect(bulkDownloadProgress({ status: "ready", progress: 70 })).toMatchObject({ status: "Download ready", percent: 100 });
+    expect(bulkDownloadProgress({ status: "complete" }).percent).toBe(100);
+    for (const status of ["failed", "expired", "cancelled"] as const) {
+      expect(bulkDownloadProgress({ status, progress: 70 })).toMatchObject({ status: `Download ${status}`, percent: null });
+    }
+  });
 });
 
 describe("public bulk-download polling", () => {

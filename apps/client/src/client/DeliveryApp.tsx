@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BRAND, type DeliveryItem, type DeliveryLocationCollection, type DeliveryManifest } from "@ltds/shared";
 import { Brand, EmptyState, Loading } from "@ltds/ui";
 import {
+  bulkDownloadProgress,
   pollBulkDownload,
   requestJson,
   type BulkDownloadResponse,
@@ -529,11 +530,10 @@ export function DeliveryApp({ namespace = "staff", initialRoute: consumedRoute }
         body: JSON.stringify(all ? (manifest?.folder.id ? { items: [manifest.folder.id] } : { all: true }) : { items: [...selectedItems] }),
       });
       const statusUrl = body.statusUrl || body.progressUrl;
+      setBulkProgress(bulkDownloadProgress(body));
       if (!body.downloadUrl && statusUrl) {
         body = await pollBulkDownload(body, statusUrl, { onProgress: status => {
-          const calculated = status.totalBytes && typeof status.processedBytes === "number" ? Math.min(100, Math.round(status.processedBytes / status.totalBytes * 100)) : null;
-          const percent = typeof status.progress === "number" ? status.progress : typeof status.percent === "number" ? status.percent : calculated;
-          setBulkProgress({ status: status.message || (status.status === "ready" || status.status === "complete" ? "Download ready" : "Building ZIP"), percent });
+          setBulkProgress(bulkDownloadProgress(status));
         } });
       }
       const ticket = body.ticket || body.downloadTicket;
@@ -542,6 +542,7 @@ export function DeliveryApp({ namespace = "staff", initialRoute: consumedRoute }
         ? body.downloads
         : (body.downloadUrl || ticketUrl) ? [{ part: 1, partCount: 1, downloadUrl: body.downloadUrl || ticketUrl }] : [];
       if (!downloads.length) throw new Error("The download could not be prepared.");
+      setBulkProgress(bulkDownloadProgress({ ...body, status: "ready" }));
       const safeName = (manifest?.share.projectName || "delivery").replace(/[^a-z0-9-_]+/gi, "-").replace(/^-+|-+$/g, "") || "delivery";
       setBulkDownloads(downloads);
       downloads.forEach((download, index) => {
