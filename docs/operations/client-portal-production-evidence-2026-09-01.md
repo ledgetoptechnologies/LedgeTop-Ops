@@ -182,6 +182,14 @@ Project Alpha onboarding, approval, project, contract, or document workflow.
   tombstoned, and root-revoked while membership, authenticated delivery grant,
   service-request, delivery-notification, and portal-notification authority
   tables remained empty throughout.
+- The fixture-driven J1 joined Operations test
+  `joined-business-party-isolation.test.ts` passed with two Project Alpha
+  organizations that deliberately shared both display name and contact email.
+  Source-qualified pages and cursors remained independent; a reviewed
+  business-party link changed presentation only; source loss, archive, restore,
+  unlink, and relink followed the reviewed lifecycle; and the two portal
+  identities, workspaces, memberships, entitlements, and immutable source-ID
+  mappings remained unchanged and distinct.
 - The post-`0192` monolithic Windows Client run passed 924 of 926 tests. The two
   failures were isolated Miniflare loopback `EADDRINUSE` transport collisions;
   both exact cases passed in isolated and paired reruns. Linux CI or bounded
@@ -211,6 +219,10 @@ workspace, membership, grant, request, client, or Project Alpha record.
 - The signed-in Operations Client Hub still rendered the canonical navigation,
   dynamic search result, portal-workspace coverage, and exact Project Alpha
   source label without a console error during this observation.
+- `https://ops.ledgetoptechnologies.com/clients?q=Delsman` rendered the same
+  signed-in Client Hub result as the Drone Services Operations host. A hard
+  refresh preserved both the `/clients` route and the `Delsman` query/value,
+  and the page emitted no console warning or error.
 
 This is partial J7 evidence only. It does not prove initial Access sign-in,
 logout, session expiry, unauthorized or unprovisioned denial, cross-tenant
