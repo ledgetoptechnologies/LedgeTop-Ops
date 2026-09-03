@@ -78,10 +78,13 @@ export function configuredLegacyClientOrigins(env: OriginEnv): string[] | null {
 
 export function configuredPublicRequestOrigins(env: OriginEnv): string[] | null {
   const publicOrigin = configuredPublicShareOrigin(env);
-  const portalOrigins = configuredClientPortalOrigins(env) ?? [];
+  // Public bearer links have one canonical namespace. Additional authenticated
+  // portal presentation hosts must never become alternate public-share hosts
+  // merely because they serve /portal and /api/client. Explicit legacy origins
+  // remain compatible so existing client.* links can hand off without breaking.
   const legacyOrigins = configuredLegacyClientOrigins(env);
   if (!publicOrigin || !legacyOrigins) return null;
-  return [...new Set([publicOrigin, ...portalOrigins, ...legacyOrigins])];
+  return [...new Set([publicOrigin, ...legacyOrigins])];
 }
 
 export function clientPortalRequestOriginAllowed(request: Request, env: OriginEnv): boolean {

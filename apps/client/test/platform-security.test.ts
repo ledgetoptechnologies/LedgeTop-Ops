@@ -14,7 +14,7 @@ describe("deployed host admission",()=>{
       PUBLIC_SHARE_ORIGIN:"https://delivery.example",CLIENT_PORTAL_ORIGIN:"https://client.example"} as const;
     for(const path of ["/s/public","/client-share/public","/api/public/shares/public/manifest"]){
       expect(requestHostAllowed(`https://delivery.example${path}`,base)).toBe(true);
-      expect(requestHostAllowed(`https://client.example${path}`,base)).toBe(true);
+      expect(requestHostAllowed(`https://client.example${path}`,base)).toBe(false);
     }
     for(const path of ["/portal","/portal/projects","/api/client/me"]){
       expect(requestHostAllowed(`https://client.example${path}`,base)).toBe(true);
@@ -92,14 +92,15 @@ describe("deployed host admission",()=>{
     expect(malformedPortalLaunchRedirect("https://portal.drone.example/portal/projects",env)).toBeNull();
     expect(malformedPortalLaunchRedirect("https://evil.example/portal*",env)).toBeNull();
   });
-  it("allows same-origin public mutations on canonical and legacy hosts but rejects cross-origin requests",()=>{
+  it("allows public mutations only on the canonical and explicit legacy hosts",()=>{
     const env={ENVIRONMENT:"production",EXPECTED_HOST:"portal.drone.example",PUBLIC_BASE_URL:"https://portal.drone.example",
       PUBLIC_SHARE_ORIGIN:"https://portal.drone.example",CLIENT_PORTAL_ORIGIN:"https://portal.drone.example",
       CLIENT_PORTAL_ORIGINS:"https://portal.drone.example,https://portal.technology.example",
       LEGACY_CLIENT_ORIGINS:"https://client.drone.example"} as any;
-    for(const origin of ["https://portal.drone.example","https://portal.technology.example","https://client.drone.example"]){
+    for(const origin of ["https://portal.drone.example","https://client.drone.example"]){
       expect(()=>requireSameOrigin(new Request(`${origin}/api/public/shares/public/session`,{method:"POST",headers:{Origin:origin}}),env)).not.toThrow();
     }
+    expect(()=>requireSameOrigin(new Request("https://portal.technology.example/api/public/shares/public/session",{method:"POST",headers:{Origin:"https://portal.technology.example"}}),env)).toThrow();
     expect(()=>requireSameOrigin(new Request("https://client.drone.example/api/public/shares/public/session",{method:"POST",headers:{Origin:"https://portal.drone.example"}}),env)).toThrow();
     expect(()=>requireSameOrigin(new Request("https://wrong.example/api/public/shares/public/session",{method:"POST",headers:{Origin:"https://wrong.example"}}),env)).toThrow();
   });
@@ -109,11 +110,11 @@ describe("deployed host admission",()=>{
       CLIENT_PORTAL_ORIGINS:"https://portal.drone.example,https://portal.technology.example",
       LEGACY_CLIENT_ORIGINS:"https://client.drone.example"} as any;
     expect(cloudTransferResumeOrigin(env,"https://client.drone.example")).toBe("https://client.drone.example");
-    expect(cloudTransferResumeOrigin(env,"https://portal.technology.example")).toBe("https://portal.technology.example");
+    expect(cloudTransferResumeOrigin(env,"https://portal.technology.example")).toBe("https://portal.drone.example");
     expect(cloudTransferResumeOrigin(env,undefined)).toBe("https://portal.drone.example");
     expect(cloudTransferResumeOrigin(env,"https://evil.example")).toBe("https://portal.drone.example");
   });
-  it.each(["production","staging"] as const)("admits both reviewed portal domains without moving existing public links in %s",ENVIRONMENT=>{
+  it.each(["production","staging"] as const)("admits both reviewed portal domains while keeping public links canonical in %s",ENVIRONMENT=>{
     const env={ENVIRONMENT,EXPECTED_HOST:"client.drone.example",PUBLIC_BASE_URL:"https://client.drone.example",
       PUBLIC_SHARE_ORIGIN:"https://client.drone.example",CLIENT_PORTAL_ORIGIN:"https://client.drone.example",
       CLIENT_PORTAL_ORIGINS:"https://client.drone.example,https://client.technology.example"} as const;
@@ -124,7 +125,8 @@ describe("deployed host admission",()=>{
     expect(requestHostAllowed("https://client.technology.example/api/internal/project-alpha/portal-v2",env)).toBe(false);
     expect(requestHostAllowed("https://client.technology.example/assets/client.js",env)).toBe(true);
     expect(requestHostAllowed("https://client.drone.example/s/existing-link",env)).toBe(true);
-    expect(requestHostAllowed("https://client.technology.example/s/existing-link",env)).toBe(true);
+    expect(requestHostAllowed("https://client.technology.example/s/existing-link",env)).toBe(false);
+    expect(requestHostAllowed("https://client.technology.example/api/public/shares/existing-link/manifest",env)).toBe(false);
   });
   it("fails closed on malformed, duplicate, insecure, or incomplete portal origin lists",()=>{
     const env={ENVIRONMENT:"production",EXPECTED_HOST:"client.drone.example",PUBLIC_BASE_URL:"https://client.drone.example",
