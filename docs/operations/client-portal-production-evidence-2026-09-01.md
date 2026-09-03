@@ -190,6 +190,13 @@ Project Alpha onboarding, approval, project, contract, or document workflow.
   unlink, and relink followed the reviewed lifecycle; and the two portal
   identities, workspaces, memberships, entitlements, and immutable source-ID
   mappings remained unchanged and distinct.
+- The fixture-driven J3 joined Operations test
+  `joined-operational-memory-copy-forward.test.ts` passed against the canonical
+  local migration chain. Organization and project contacts, terminal versioned
+  memory, historical reads, and explicitly selected recurring content copied
+  forward; attachments, billing, project status, access authority, invitations,
+  and notifications did not. A destination reassignment between preview and
+  commit failed closed, and stale terminal amendments were rejected.
 - The post-`0192` monolithic Windows Client run passed 924 of 926 tests. The two
   failures were isolated Miniflare loopback `EADDRINUSE` transport collisions;
   both exact cases passed in isolated and paired reruns. Linux CI or bounded

@@ -200,6 +200,13 @@ feedback/requests. Build once, then run the corresponding Playwright partitions
 at 375 and 1280 pixels with one worker. Preserve traces/screenshots for failures
 and reviewed states.
 
+The currently implemented joined partitions can be run with
+`npm run test:portal:joined`, or individually as
+`npm run test:portal:joined -- j1`, `npm run test:portal:joined -- j2`, and
+`npm run test:portal:joined -- j3`.
+The runner starts a fresh single-worker Vitest process for each group; add later
+J4–J7 executable partitions only when their joined fixtures exist.
+
 Run the full packages in Linux CI before release. The known Windows loopback
 exhaustion can produce Miniflare `EADDRINUSE`; it is not permission to omit the
 Linux gate or to retry application mutations automatically.

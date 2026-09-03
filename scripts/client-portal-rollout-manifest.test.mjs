@@ -92,3 +92,9 @@ test("rollout manifest keeps every joined workflow and reversible window explici
   assert.match(manifest, /Public links remain a separate bearer-link product/);
   assert.match(manifest, /The 3D Viewer is outside this manifest/);
 });
+
+test("the bounded joined runner is wired into the root package", () => {
+  const packageJson = JSON.parse(read("package.json"));
+  assert.equal(packageJson.scripts["test:portal:joined"], "node scripts/client-portal-joined-acceptance.mjs");
+  assert.equal(exists("scripts/client-portal-joined-acceptance.mjs"), true);
+});
