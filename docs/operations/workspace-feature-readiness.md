@@ -32,11 +32,41 @@ Feature states have bounded meanings:
 - `not_supported`: this native Project Alpha source does not implement that
   portal surface.
 
-Service requests, feedback, 3D models, member management and billing remain
-`not_supported` for a secondary native source. The client must not probe legacy,
-primary-source or Viewer APIs to make them appear available. Existing authorized
-request or feedback history is preserved when new creation is unavailable; this
-readiness response does not mutate or revoke it.
+Service requests and feedback are supported for an exact reviewed native source,
+but remain default-off. Requests require the two native request rollout gates,
+the hierarchy contract, migration 0185's source-qualified ownership guard and a
+current `request.create` entitlement. Attachments additionally require their
+separate rollout gate and storage/scanner contract. Feedback requires an exact
+source in the bounded deployment allowlist, the migration 0184 authority ledger,
+the migration 0188 completion-notice contract and current target authorization.
+If any prerequisite is absent, the server reports `temporarily_unavailable` or
+`not_supported` and never falls back to a legacy or primary-source authority.
+
+3D models, member management and billing remain `not_supported` for a secondary
+native source. Existing authorized request or feedback history is preserved when
+new creation is unavailable; this readiness response does not mutate or revoke it.
+
+Operations Administration also exposes an identifier-free, read-only portal
+workflow preflight. It consolidates native feedback, native requests and
+attachments, delegated public-share signing, and project-access expiry notices.
+Its reason codes are bounded; it returns no source IDs, client identities,
+recipients, storage paths, secrets or record counts, and it cannot activate a
+rollout flag.
+
+Expiry notices report ready only when both the notice rollout and project-access
+authority mutation gates are enabled, SMTP is configured, and every authority,
+direct-recipient, companion-recipient and authority-history dependency exists in
+the Delivery and Operations databases. Delegated signing remains unverified until
+the Client runtime is checked and is blocked when the Operations signer flag,
+token secret, access-code pepper, public origin or required schema is unavailable.
+The response exposes only bounded boolean checks and reason codes, never secret or
+origin values.
+
+Client Hub advertises whether live portal-contact matching is available and, when
+available, its minimum normalized query length (currently three characters). A
+missing portal search table or required column disables only portal-contact
+matching; business-contact and project search remain available. Other database
+failures remain errors rather than being presented as a reduced capability.
 
 Readiness is only a navigation and explanation aid. Every directory entity,
 delivery folder, file metadata response, preview and download keeps its current
@@ -53,5 +83,7 @@ target-specific authorization and source/workspace/context envelope checks.
 - `apps/client/test/browser/native-portal.spec.ts` verifies the visible meaning,
   fail-closed capability/readiness consistency, no optimistic protected probes,
   responsive layout and no legacy or Viewer requests.
+- `apps/operations/test/portal-workflow-readiness.test.ts` verifies the
+  fail-closed, redacted cross-application preflight.
 
 No schema migration or Viewer change is part of this increment.

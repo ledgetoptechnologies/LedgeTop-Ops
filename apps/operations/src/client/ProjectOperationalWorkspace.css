@@ -56,3 +56,4 @@
   .project-memory-attachment-list article a { width: 100%; }
   .project-operational-actions > * { width: 100%; }
 }
+.project-operational-recovery{display:grid;gap:1rem}.project-operational-recovery fieldset{display:grid;gap:.75rem;border:1px solid var(--border);border-radius:.75rem;padding:1rem}.project-operational-recovery label{display:grid;gap:.45rem}.project-operational-recovery fieldset label{grid-template-columns:auto 1fr;align-items:center}.project-operational-recovery textarea,.project-operational-recovery input[type="text"],.project-operational-recovery-preview input{box-sizing:border-box;width:100%;min-height:44px}.project-operational-recovery-preview{display:grid;gap:.75rem;padding:1rem;border:1px solid var(--border);border-radius:.75rem}@media(max-width:640px){.project-operational-recovery .project-operational-actions{display:grid;grid-template-columns:1fr}.project-operational-recovery button{min-height:44px;width:100%}}

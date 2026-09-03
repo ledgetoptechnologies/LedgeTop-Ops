@@ -12,8 +12,13 @@ const services = vi.hoisted(() => ({
   listClientHubCollection: vi.fn(),
   previewRecurringProjectCopy: vi.fn(),
   commitRecurringProjectCopy: vi.fn(),
+  previewProjectOperationalRecovery: vi.fn(),
+  commitProjectOperationalRecovery: vi.fn(),
+  canRecoverProjectOperational: vi.fn(),
 }));
 vi.mock("../src/worker/project-operational-memory", () => ({
+  PROJECT_OPERATIONAL_RECOVERY_REQUIRED: "project_operational_recovery_required",
+  ProjectOperationalRecoveryRequired: class extends HTTPException { constructor() { super(409, { message: "Recovery required" }); } },
   readProjectOperationalWorkspace: services.readProjectOperationalWorkspace,
   readProjectMemoryRevision: services.readProjectMemoryRevision,
   saveProjectOperationalContacts: services.saveProjectOperationalContacts,
@@ -31,8 +36,14 @@ vi.mock("../src/worker/project-recurring-copy-forward", () => ({
   previewRecurringProjectCopy: services.previewRecurringProjectCopy,
   commitRecurringProjectCopy: services.commitRecurringProjectCopy,
 }));
+vi.mock("../src/worker/project-operational-recovery", () => ({
+  canRecoverProjectOperational: services.canRecoverProjectOperational,
+  previewProjectOperationalRecovery: services.previewProjectOperationalRecovery,
+  commitProjectOperationalRecovery: services.commitProjectOperationalRecovery,
+}));
 
 import { registerProjectOperationalRoutes } from "../src/worker/project-operational-routes";
+import { ProjectOperationalRecoveryRequired } from "../src/worker/project-operational-memory";
 import type { ClientHubCollectionContext } from "../src/worker/client-hub-collections";
 import type { Env, StaffPrincipal } from "../src/worker/types";
 
@@ -61,6 +72,7 @@ function fixture(administrator = false) {
 beforeEach(() => {
   vi.clearAllMocks();
   services.readProjectOperationalWorkspace.mockResolvedValue(workspace);
+  services.canRecoverProjectOperational.mockResolvedValue(true);
   services.readProjectMemoryRevision.mockResolvedValue({ canonicalRoot: context.canonicalRoot, contextVersion: context.contextVersion,
     project: { id: "project-one", sourceId: "project-alpha:primary", revision: "project-revision-one" },
     revision: { version: 1, changeKind: "saved", amendmentReason: null, createdAt: "2026-08-28T12:00:00Z", snapshot: workspace.memory.snapshot } });
@@ -83,6 +95,13 @@ beforeEach(() => {
     destination: { projectId: "project-one", projectRevision: "destination-revision", contactsVersion: 0, memoryVersion: 0,
       contactsVersionAfter: 1, memoryVersionAfter: 1 }, selection: { contactRoles: ["project_contact"], memorySections: ["plan"], conflictPolicy: "keep_destination" },
     changes: { contactsChanged: true, memoryChanged: true, copiedContacts: 1, copiedMemorySections: ["plan"], contactConflicts: 0, memoryConflicts: [] } });
+  services.previewProjectOperationalRecovery.mockResolvedValue({ fingerprint: "a".repeat(64), action: "reset", sourceId: "project-alpha:primary",
+    project: { id: "project-one", revision: "project-revision-one" }, currentRoot: { kind: "organization", id: "org-one" },
+    previousRoot: { kind: "organization", id: "org-old" }, changes: { contactsCleared: 1, memoryTransferred: false, memoryReset: true, attachmentsExcluded: 2 } });
+  services.commitProjectOperationalRecovery.mockResolvedValue({ fingerprint: "a".repeat(64), action: "reset", replayed: false,
+    sourceId: "project-alpha:primary", project: { id: "project-one", revision: "project-revision-one" }, currentRoot: { kind: "organization", id: "org-one" },
+    previousRoot: { kind: "organization", id: "org-old" }, changes: { contactsCleared: 1, memoryTransferred: false, memoryReset: true, attachmentsExcluded: 2 },
+    recoverySequence: 1, contactsVersionAfter: 2, memoryVersionAfter: 2 });
 });
 
 describe("project operational routes", () => {
@@ -209,6 +228,48 @@ describe("project operational routes", () => {
       body: JSON.stringify({ destinationProjectId: "project-one" }) }, env);
     expect(response.status).toBe(409);
     expect(action === "preview" ? services.previewRecurringProjectCopy : services.commitRecurringProjectCopy).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([[false, false], [true, true]])("returns a typed recovery state with canRecover=%s", async (administrator, expected) => {
+    const item = fixture(administrator); services.readProjectOperationalWorkspace.mockRejectedValueOnce(new ProjectOperationalRecoveryRequired());
+    const response = await item.app.request(`${path}/operational-workspace`, {}, item.env);
+    expect(response.status).toBe(409); expect(response.headers.get("Cache-Control")).toBe("no-store");
+    await expect(response.json()).resolves.toMatchObject({ code: "project_operational_recovery_required", canRecover: expected });
+    expect(services.listClientHubCollection).not.toHaveBeenCalled();
+  });
+
+  it("does not advertise recovery when an administrator lacks either effective manage permission", async () => {
+    const item = fixture(true); services.readProjectOperationalWorkspace.mockRejectedValueOnce(new ProjectOperationalRecoveryRequired());
+    services.canRecoverProjectOperational.mockResolvedValueOnce(false);
+    const response = await item.app.request(`${path}/operational-workspace`, {}, item.env);
+    await expect(response.json()).resolves.toMatchObject({ code: "project_operational_recovery_required", canRecover: false });
+  });
+
+  it("keeps recovery preview and commit administrator-only and re-verifies current context", async () => {
+    const body = { expectedContextVersion: context.contextVersion, action: "reset", reason: "Project moved to the correct client" };
+    const denied = fixture(false);
+    expect((await denied.app.request(`${path}/operational-recovery/preview`, { method: "POST",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }, denied.env)).status).toBe(403);
+    expect(denied.resolve).not.toHaveBeenCalled(); expect(services.previewProjectOperationalRecovery).not.toHaveBeenCalled();
+    const allowed = fixture(true);
+    const previewResponse = await allowed.app.request(`${path}/operational-recovery/preview`, { method: "POST",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }, allowed.env);
+    expect(previewResponse.status).toBe(200); expect(previewResponse.headers.get("Cache-Control")).toBe("no-store");
+    expect(services.previewProjectOperationalRecovery).toHaveBeenCalledWith(allowed.env, principal, context, "project-one", body);
+    const commit = { ...body, previewFingerprint: "a".repeat(64), idempotencyKey: "recovery_operation_1234", confirmation: "RESET PROJECT MEMORY" };
+    expect((await allowed.app.request(`${path}/operational-recovery/commit`, { method: "POST",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify(commit) }, allowed.env)).status).toBe(200);
+    expect(services.commitProjectOperationalRecovery).toHaveBeenCalledWith(allowed.env, principal, context, "project-one", commit);
+    expect(allowed.verify).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["preview", "commit"])("suppresses a recovery %s response after the root changes", async action => {
+    const item = fixture(true); item.verify.mockRejectedValueOnce(new HTTPException(409, { message: "Client mapping changed" }));
+    const response = await item.app.request(`${path}/operational-recovery/${action}`, { method: "POST",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify({ expectedContextVersion: context.contextVersion,
+        action: "reset", reason: "Correct owner", ...(action === "commit" ? { previewFingerprint: "a".repeat(64),
+          idempotencyKey: "recovery_operation_1234", confirmation: "RESET PROJECT MEMORY" } : {}) }) }, item.env);
+    expect(response.status).toBe(409);
   });
 
   it.each([

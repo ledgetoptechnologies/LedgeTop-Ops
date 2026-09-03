@@ -37,6 +37,13 @@ async function fixture(page: Page, data: Directory, handler?: Handler, manage = 
       csrfToken: "csrf-fixture", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: {},
     } });
     if (path === "/api/admin/audit") return route.fulfill({ json: { events: [] } });
+    if (path === "/api/admin/portal-workflow-readiness") return route.fulfill({ json: { ready: false, workflows: {
+      nativeFeedback: { state: "unverified", reasons: ["client_runtime_unverified"] },
+      serviceRequests: { state: "unverified", reasons: ["client_runtime_unverified"] },
+      requestAttachments: { state: "unverified", reasons: ["client_runtime_unverified"] },
+      delegatedSharing: { state: "blocked", reasons: ["client_runtime_unverified", "operations_feature_disabled"] },
+      expiryNotices: { state: "blocked", reasons: ["operations_feature_disabled"] },
+    } } });
     if (!path.startsWith(endpoint)) return route.fulfill({ status: 404, json: { error: "Unsupported fixture endpoint" } });
     const body = request.postData() ? request.postDataJSON() as Record<string, unknown> : null;
     requests.push({ path, method: request.method(), body, csrf: request.headers()["x-csrf-token"] });

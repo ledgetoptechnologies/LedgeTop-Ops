@@ -6,6 +6,7 @@ import { guardedFence, prepareProject, projectGuard, readProjectMemoryRevision, 
   type ProjectMemorySnapshot } from "../src/worker/project-operational-memory";
 import { cleanupProjectMemoryAttachmentUploads, serveProjectMemoryAttachment, uploadProjectMemoryAttachment }
   from "../src/worker/project-memory-attachments";
+import { commitProjectOperationalRecovery, previewProjectOperationalRecovery } from "../src/worker/project-operational-recovery";
 import type { ClientHubCollectionContext } from "../src/worker/client-hub-collections";
 import type { Env, StaffPrincipal } from "../src/worker/types";
 
@@ -138,6 +139,8 @@ beforeAll(async () => {
     .map(sql => database.prepare(sql)));
   await database.batch(splitD1MigrationStatements(readFileSync(new URL("0047_project_memory_staff_attachments.sql", directory), "utf8"))
     .map(sql => database.prepare(sql)));
+  await database.batch(splitD1MigrationStatements(readFileSync(new URL("0052_project_operational_reassignment_recovery.sql", directory), "utf8"))
+    .map(sql => database.prepare(sql)));
   afterMigration = await stableAuthority();
 }, 120_000);
 afterAll(async () => { await runtime?.dispose(); });
@@ -262,6 +265,75 @@ describe("source-qualified operational contacts and project memory", () => {
     expect(JSON.stringify(await database.prepare("SELECT snapshot_json FROM project_operational_memory WHERE project_id=?")
       .bind(original.projectId).first())).toContain("Old owner secret memory");
   }, TEST_TIMEOUT_MS);
+
+  it.each(["reset", "transfer"] as const)("recovers reassigned overlays with an audited %s and idempotent retry", async action => {
+    const original = await fixture(), replacement = await fixture();
+    await saveProjectOperationalContacts(environment, owner, original.context, original.projectId, {
+      expectedContextVersion: original.context.contextVersion, expectedVersion: 0, idempotencyKey: operationKey(),
+      assignments: [{ contactId: original.contactId, role: "project_contact", instructions: "Old client contact" }],
+    });
+    await saveProjectMemory(environment, owner, original.context, original.projectId, { expectedContextVersion: original.context.contextVersion,
+      expectedVersion: 0, idempotencyKey: operationKey(), memory: { ...memory(), observations: "Keep only on transfer" } });
+    const attachment = await uploadProjectMemoryAttachment(environment, owner, original.context, original.projectId,
+      uploadRequest(original, 1, operationKey(), jpeg(), "old-owner-field-note.jpg"));
+    const objectKey = await database.prepare("SELECT object_key FROM project_memory_attachments WHERE id=?")
+      .bind(attachment.attachment.id).first<string>("object_key");
+    expect(objectKey).toBeTruthy();
+    await database.prepare("UPDATE pa_projects SET organization_id=?,last_sync_id='recovery-reassigned' WHERE id=?")
+      .bind(replacement.context.root.public_id, original.projectId).run();
+    const reassigned = { ...replacement.context, contextVersion: `${action === "reset" ? "s" : "t"}`.repeat(43) };
+    const reason = `Approved ${action} after verified client reassignment`;
+    const prepared = await previewProjectOperationalRecovery(environment, owner, reassigned, original.projectId,
+      { expectedContextVersion: reassigned.contextVersion, action, reason });
+    expect(prepared.changes).toMatchObject({ contactsCleared: 1, memoryReset: action === "reset",
+      memoryTransferred: action === "transfer", attachmentsExcluded: 1 });
+    const command = { expectedContextVersion: reassigned.contextVersion, action, reason, previewFingerprint: prepared.fingerprint,
+      idempotencyKey: `recovery_${action}_${crypto.randomUUID()}`,
+      confirmation: action === "reset" ? "RESET PROJECT MEMORY" as const : "TRANSFER PROJECT MEMORY" as const };
+    const applied = await commitProjectOperationalRecovery(environment, owner, reassigned, original.projectId, command);
+    expect(applied.replayed).toBe(false);
+    const replayed = await commitProjectOperationalRecovery(environment, owner, reassigned, original.projectId, command);
+    expect(replayed).toMatchObject({ replayed: true, fingerprint: prepared.fingerprint, recoverySequence: 1 });
+    if (action === "reset") {
+      await database.prepare(`INSERT INTO staff_permission_overrides(id,staff_id,permission_key,effect,scope,division_id,scope_key,created_by)
+        VALUES(?,?,?,'deny','global',NULL,'global',?)`).bind(crypto.randomUUID(), owner.id, "project.memory.manage", owner.id).run();
+      await expect(commitProjectOperationalRecovery(environment, owner, reassigned, original.projectId, command))
+        .rejects.toMatchObject({ status: 403 });
+      await database.prepare("DELETE FROM staff_permission_overrides WHERE staff_id=? AND permission_key='project.memory.manage' AND effect='deny'")
+        .bind(owner.id).run();
+    }
+    const workspace = await readProjectOperationalWorkspace(environment, owner, reassigned, original.projectId);
+    expect(workspace.contacts.assignments).toEqual([]); expect(workspace.contacts.revisions.map(item => item.version)).toEqual([2]);
+    expect(workspace.memory.snapshot.observations).toBe(action === "transfer" ? "Keep only on transfer" : "");
+    // This is intentionally the same broad source/project lookup used by a
+    // pre-0052 Worker. Old-owner metadata must be absent even after rollback.
+    expect(await database.prepare(`SELECT count(*) count FROM project_memory_attachments
+      WHERE projection_source_id=? AND project_id=?`).bind(source, original.projectId).first("count")).toBe(0);
+    expect(await database.prepare(`SELECT display_name,content_type,size_bytes,object_key FROM project_memory_attachment_archive
+      WHERE id=?`).bind(attachment.attachment.id).first()).toMatchObject({ display_name: "old-owner-field-note.jpg",
+      content_type: "image/jpeg", size_bytes: jpeg().length, object_key: objectKey });
+    expect(await database.prepare(`SELECT count(*) count FROM project_memory_attachment_event_archive
+      WHERE attachment_id=?`).bind(attachment.attachment.id).first("count")).toBe(1);
+    expect(await database.prepare(`SELECT count(*) count FROM project_memory_attachment_mutation_archive
+      WHERE attachment_id=?`).bind(attachment.attachment.id).first("count")).toBe(1);
+    expect(bucket.objects.has(objectKey!)).toBe(true);
+    await expect(database.prepare("DELETE FROM project_memory_attachment_archive WHERE id=?")
+      .bind(attachment.attachment.id).run()).rejects.toThrow(/immutable/);
+    if (action === "reset") {
+      await expect(readProjectMemoryRevision(environment, owner, reassigned, original.projectId, 1,
+        reassigned.contextVersion)).rejects.toMatchObject({ status: 404 });
+      expect(await database.prepare(`SELECT count(*) count FROM project_operational_memory_revisions
+        WHERE project_id=? AND version=1`).bind(original.projectId).first("count")).toBe(0);
+      const archived = await database.prepare(`SELECT snapshot_json FROM project_operational_memory_revision_archive
+        WHERE project_id=? AND version=1`).bind(original.projectId).first<string>("snapshot_json");
+      expect(archived).toContain("Keep only on transfer");
+      await expect(database.prepare(`DELETE FROM project_operational_memory_revision_archive
+        WHERE project_id=?`).bind(original.projectId).run()).rejects.toThrow(/immutable/);
+    }
+    else expect((await readProjectMemoryRevision(environment, owner, reassigned, original.projectId, 1,
+      reassigned.contextVersion)).revision.snapshot.observations).toBe("Keep only on transfer");
+    await expect(database.prepare("UPDATE project_operational_recovery_receipts SET reason='tampered'").run()).rejects.toThrow(/immutable/);
+  }, 60_000);
 
   it("rejects mismatched actor fields under a prepared service fence and excludes arbitrary source status from audit", async () => {
     const item = await fixture(), sensitiveStatus = `client-secret@example.test-${"x".repeat(1500)}`;

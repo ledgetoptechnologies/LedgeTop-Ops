@@ -265,7 +265,8 @@ export async function uploadProjectMemoryAttachment(env: Environment, principal:
   assertOverlayRoot(context, memory);
   if ((memory?.version ?? 0) !== input.expectedVersion) changed();
   const usage = await db.prepare(`SELECT count(*) count,COALESCE(sum(size_bytes),0) bytes FROM project_memory_attachments
-    WHERE projection_source_id=? AND project_id=?`).bind(source, projectId).first<{ count: number; bytes: number }>();
+    WHERE projection_source_id=? AND project_id=? AND root_record_kind=? AND root_id=?`)
+    .bind(source, projectId, rootRecordKind(context), context.root.public_id).first<{ count: number; bytes: number }>();
   if (!usage || usage.count >= MAX_PROJECT_ATTACHMENTS || usage.bytes + bytes.byteLength > MAX_PROJECT_ATTACHMENT_BYTES)
     throw new HTTPException(409, { message: "This project has reached its private attachment quota" });
 

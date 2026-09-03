@@ -51,6 +51,7 @@ interface ContactAssignmentRow {
   instructions: string; sort_order: number; contact_name: string | null; email: string | null; phone: string | null;
 }
 interface MemoryRow { version: number; root_record_kind: "organization" | "client"; root_id: string; snapshot_json: string; updated_at: string }
+interface RecoveryVisibility { contacts_visible_from_version: number; memory_visible_from_version: number }
 interface ReceiptRow {
   operation_kind: "contacts_save" | "memory_save"; request_fingerprint: string; projection_source_id: string;
   project_id: string; result_version: number; result_json: string;
@@ -84,7 +85,12 @@ export const emptyMemory = (): ProjectMemorySnapshot => Object.fromEntries(PROJE
 const db = (env: Environment): Database => env.OPS_DB.withSession("first-primary");
 const unavailable = (): never => { throw new HTTPException(404, { message: "Business project is unavailable" }); };
 const changed = (): never => { throw new HTTPException(409, { message: "Project ownership, permissions, or operational records changed. Refresh before continuing." }); };
-const ownershipChanged = (): never => { throw new HTTPException(409, { message: "Project ownership changed. Stored operational details require an audited administrator reset or transfer before they can be used." }); };
+export const PROJECT_OPERATIONAL_RECOVERY_REQUIRED = "project_operational_recovery_required";
+export class ProjectOperationalRecoveryRequired extends HTTPException {
+  readonly code = PROJECT_OPERATIONAL_RECOVERY_REQUIRED;
+  constructor() { super(409, { message: "Project ownership changed. Stored operational details require an audited administrator reset or transfer before they can be used." }); }
+}
+const ownershipChanged = (): never => { throw new ProjectOperationalRecoveryRequired(); };
 const normalize = (value: string): string => value.normalize("NFC").trim();
 async function fingerprint(value: unknown): Promise<string> {
   return [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(value))))]
@@ -259,10 +265,15 @@ export async function readProjectOperationalWorkspace(env: Environment, principa
       WHERE projection_source_id=? AND project_id=?`).bind(source, projectId).first<ContactSetRow>(),
     database.prepare(`SELECT version,root_record_kind,root_id,updated_at FROM project_operational_memory
       WHERE projection_source_id=? AND project_id=?`).bind(source, projectId).first<Omit<MemoryRow, "snapshot_json">>(),
+    database.prepare(`SELECT contacts_visible_from_version,memory_visible_from_version
+      FROM project_operational_recovery_receipts WHERE projection_source_id=? AND project_id=?
+      ORDER BY recovery_sequence DESC LIMIT 1`).bind(source, projectId).first<RecoveryVisibility>(),
   ]);
   const firstMetadata = await metadata();
   assertOverlayRoot(context, firstMetadata[0]); assertOverlayRoot(context, firstMetadata[1]);
-  const read = async () => {
+  const read = async (visibility: RecoveryVisibility | null) => {
+    const contactsFrom = visibility?.contacts_visible_from_version ?? 1;
+    const memoryFrom = visibility?.memory_visible_from_version ?? 1;
     const [rows, memory, contactRevisions, memoryRevisions, attachments] = await Promise.all([
       database.prepare(`SELECT assignment.id,assignment.contact_id,assignment.role,assignment.preferred_contact_method,
           assignment.instructions,assignment.sort_order,contact.name contact_name,${businessContactChannelsSql("contact.payload_json")}
@@ -274,28 +285,27 @@ export async function readProjectOperationalWorkspace(env: Environment, principa
       database.prepare(`SELECT version,root_record_kind,root_id,snapshot_json,updated_at FROM project_operational_memory WHERE projection_source_id=? AND project_id=?`)
         .bind(source, projectId).first<MemoryRow>(),
       database.prepare(`SELECT version,actor_id,created_at FROM project_operational_contact_revisions
-        WHERE projection_source_id=? AND project_id=? ORDER BY version DESC LIMIT 50`).bind(source, projectId)
+        WHERE projection_source_id=? AND project_id=? AND version>=? ORDER BY version DESC LIMIT 50`).bind(source, projectId, contactsFrom)
         .all<{ version: number; actor_id: string; created_at: string }>(),
       database.prepare(`SELECT version,change_kind,amendment_reason,actor_id,created_at FROM project_operational_memory_revisions
-        WHERE projection_source_id=? AND project_id=? ORDER BY version DESC LIMIT 50`).bind(source, projectId)
+        WHERE projection_source_id=? AND project_id=? AND version>=? ORDER BY version DESC LIMIT 50`).bind(source, projectId, memoryFrom)
         .all<{ version: number; change_kind: "saved" | "post_completion_amendment"; amendment_reason: string | null; actor_id: string; created_at: string }>(),
       database.prepare(`SELECT id,root_record_kind,root_id,display_name,content_type,size_bytes,source_kind,version_added,created_at
-        FROM project_memory_attachments WHERE projection_source_id=? AND project_id=?
-        ORDER BY created_at DESC,id DESC LIMIT 101`).bind(source, projectId)
+        FROM project_memory_attachments WHERE projection_source_id=? AND project_id=? AND root_record_kind=? AND root_id=?
+        ORDER BY created_at DESC,id DESC LIMIT 101`).bind(source, projectId, rootRecordKind(context), context.root.public_id)
         .all<{ id: string; root_record_kind: "organization" | "client"; root_id: string; display_name: string;
           content_type: string; size_bytes: number; source_kind: "staff_upload";
           version_added: number; created_at: string }>(),
     ]);
     if (attachments.results.length > 100 || attachments.results.reduce((sum, item) => sum + item.size_bytes, 0) > 512 * 1024 * 1024)
       throw new HTTPException(503, { message: "Project-memory attachments require administrative review" });
-    for (const attachment of attachments.results) assertOverlayRoot(context, attachment);
     return { rows: rows.results, memory, contactRevisions: contactRevisions.results, memoryRevisions: memoryRevisions.results,
       attachments: attachments.results };
   };
-  const first = await read(), current = await prepareProject(env, principal, context, projectId);
+  const first = await read(firstMetadata[2] ?? null), current = await prepareProject(env, principal, context, projectId);
   const secondMetadata = await metadata();
   assertOverlayRoot(context, secondMetadata[0]); assertOverlayRoot(context, secondMetadata[1]);
-  const second = await read();
+  const second = await read(secondMetadata[2] ?? null);
   if (current.policy.proof !== prepared.policy.proof || current.sourceProof !== prepared.sourceProof
     || JSON.stringify(current.project) !== JSON.stringify(prepared.project)
     || JSON.stringify(current.root) !== JSON.stringify(prepared.root)
@@ -333,16 +343,19 @@ export async function readProjectMemoryRevision(env: Environment, principal: Sta
   const prepared = await prepareProject(env, principal, context, projectId, undefined, expectedContextVersion);
   const database = db(env), source = prepared.project.projection_source_id;
   const read = async () => {
-    const [current, revision] = await Promise.all([
+    const [current, revision, visibility] = await Promise.all([
       database.prepare(`SELECT version,root_record_kind,root_id,updated_at FROM project_operational_memory
         WHERE projection_source_id=? AND project_id=?`).bind(source, projectId).first<Omit<MemoryRow, "snapshot_json">>(),
       database.prepare(`SELECT version,change_kind,amendment_reason,snapshot_json,created_at
         FROM project_operational_memory_revisions WHERE projection_source_id=? AND project_id=? AND version=? LIMIT 1`)
         .bind(source, projectId, version).first<{ version: number; change_kind: "saved" | "post_completion_amendment";
           amendment_reason: string | null; snapshot_json: string; created_at: string }>(),
+      database.prepare(`SELECT memory_visible_from_version FROM project_operational_recovery_receipts
+        WHERE projection_source_id=? AND project_id=? ORDER BY recovery_sequence DESC LIMIT 1`)
+        .bind(source, projectId).first<number>("memory_visible_from_version"),
     ]);
     assertOverlayRoot(context, current);
-    if (!current || !revision || revision.version > current.version)
+    if (!current || !revision || revision.version > current.version || revision.version < (visibility ?? 1))
       throw new HTTPException(404, { message: "Project-memory revision is unavailable" });
     if (!Number.isSafeInteger(revision.version) || revision.version !== version
       || !["saved", "post_completion_amendment"].includes(revision.change_kind)
@@ -352,7 +365,7 @@ export async function readProjectMemoryRevision(env: Environment, principal: Sta
         || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(revision.amendment_reason)))
       || typeof revision.created_at !== "string" || revision.created_at.length > 64)
       throw new HTTPException(503, { message: "Saved project-memory revision requires administrative review" });
-    return { current, revision, snapshot: parseRevisionMemory(revision.snapshot_json) };
+    return { current, revision, visibility, snapshot: parseRevisionMemory(revision.snapshot_json) };
   };
   const first = await read();
   const current = await prepareProject(env, principal, context, projectId, undefined, expectedContextVersion);

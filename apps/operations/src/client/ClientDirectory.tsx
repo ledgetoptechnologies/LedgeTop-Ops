@@ -40,7 +40,7 @@ interface DirectoryResponse {
   indexUpdatedAt?: string | null;
   activityAsOf?: string;
   activityCoverage?: "project_alpha_business_records";
-  searchCapabilities?: { businessContacts: boolean; portalContacts: boolean };
+  searchCapabilities?: { businessContacts: boolean; portalContacts: boolean; portalContactMinimumQueryLength?: number };
   capabilities: ClientHubCapabilities;
 }
 interface DirectoryQuery { q: string; kind: ClientKind | "all"; source: string; sort: "recent" | "name" }
@@ -155,7 +155,8 @@ export function ClientDirectory() {
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [indexUpdatedAt, setIndexUpdatedAt] = useState<string | null>(null);
   const [activityAsOf, setActivityAsOf] = useState<string | null>(null);
-  const [searchCapabilities, setSearchCapabilities] = useState({ businessContacts: true, portalContacts: false });
+  const [searchCapabilities, setSearchCapabilities] = useState({ businessContacts: true, portalContacts: false,
+    portalContactMinimumQueryLength: 3 });
   const [loaded, setLoaded] = useState(false);
   const [loading, setLoading] = useState<"initial" | "more" | null>("initial");
   const [error, setError] = useState("");
@@ -191,8 +192,11 @@ export function ClientDirectory() {
       setSources(result.sources || []);
       setIndexUpdatedAt(refreshedTime(result.indexUpdatedAt));
       setActivityAsOf(result.activityAsOf ?? null);
+      const portalMinimum = result.searchCapabilities?.portalContactMinimumQueryLength;
       setSearchCapabilities({ businessContacts: result.searchCapabilities?.businessContacts ?? true,
-        portalContacts: result.searchCapabilities?.portalContacts === true });
+        portalContacts: result.searchCapabilities?.portalContacts === true,
+        portalContactMinimumQueryLength: Number.isSafeInteger(portalMinimum) && portalMinimum! >= 1 && portalMinimum! <= 200
+          ? portalMinimum! : 3 });
       setLoaded(true);
       failedCursor.current = null;
     } catch (caught) {
@@ -266,7 +270,9 @@ export function ClientDirectory() {
         </div>
         <small id="client-directory-search-help">
           Results update as you type. Search client names{searchCapabilities.businessContacts ? ", business contacts (name, email, phone)," : ""} and permitted project names.
-          {searchCapabilities.portalContacts ? " Portal contact records are also searchable." : " Portal-only contact and login search is not available."}
+          {searchCapabilities.portalContacts
+            ? ` Portal contact records are searched after ${searchCapabilities.portalContactMinimumQueryLength} characters.`
+            : " Portal-only contact and login search is not available."}
         </small>
       </form>
       <div className="client-directory-selectors">{(sources.length > 0 || query.source) && <label className="client-directory-source" htmlFor="client-directory-source">

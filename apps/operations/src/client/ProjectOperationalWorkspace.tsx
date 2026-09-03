@@ -41,6 +41,12 @@ interface OperationalWorkspace {
 }
 interface ContactDraft { assignmentId: string | null; contactId: string; role: ContactRole; preferredContactMethod: ContactMethod; instructions: string; unavailable: boolean }
 interface Attempt { fingerprint: string; key: string }
+type RecoveryAction = "reset" | "transfer";
+interface RecoveryPreview { fingerprint: string; action: RecoveryAction; sourceId: string;
+  project: { id: string; revision: string }; currentRoot: { kind: "organization" | "client"; id: string };
+  changes: { contactsCleared: number; memoryTransferred: boolean; memoryReset: boolean; attachmentsExcluded: number } }
+interface RecoveryResult extends RecoveryPreview { replayed: boolean; recoverySequence: number;
+  contactsVersionAfter: number; memoryVersionAfter: number }
 interface MutationResult { sourceId: string; projectId: string; version: number; replayed: boolean }
 interface AttachmentMutationResult extends MutationResult { attachment: MemoryAttachment }
 interface MemoryRevisionResult {
@@ -109,6 +115,19 @@ const idempotency = (attempt: MutableRefObject<Attempt | null>, payload: unknown
   const key = crypto.randomUUID(); attempt.current = { fingerprint, key }; return key;
 };
 const record = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+const validRecoveryPreview = (value: unknown, action: RecoveryAction, root: BusinessProjectDetail["canonicalRoot"], projectId: string): value is RecoveryPreview => record(value)
+  && typeof value.fingerprint === "string" && /^[0-9a-f]{64}$/.test(value.fingerprint) && value.action === action
+  && value.sourceId === root.sourceId && record(value.project) && value.project.id === projectId && typeof value.project.revision === "string"
+  && record(value.currentRoot) && value.currentRoot.kind === (root.kind === "organization" ? "organization" : "client")
+  && value.currentRoot.id === root.publicId
+  && record(value.changes) && Number.isSafeInteger(value.changes.contactsCleared) && Number(value.changes.contactsCleared) >= 0
+  && Number.isSafeInteger(value.changes.attachmentsExcluded) && Number(value.changes.attachmentsExcluded) >= 0
+  && typeof value.changes.memoryTransferred === "boolean" && typeof value.changes.memoryReset === "boolean";
+const validRecoveryResult = (value: unknown, action: RecoveryAction, root: BusinessProjectDetail["canonicalRoot"], projectId: string): value is RecoveryResult =>
+  validRecoveryPreview(value, action, root, projectId) && record(value) && typeof value.replayed === "boolean"
+  && Number.isSafeInteger(value.recoverySequence) && Number(value.recoverySequence) > 0
+  && Number.isSafeInteger(value.contactsVersionAfter) && Number(value.contactsVersionAfter) >= 0
+  && Number.isSafeInteger(value.memoryVersionAfter) && Number(value.memoryVersionAfter) >= 0;
 function validWorkspace(value: unknown, root: BusinessProjectDetail["canonicalRoot"], projectId: string, contextVersion: string,
   previousCursor?: string): value is OperationalWorkspace {
   if (!record(value) || !record(value.canonicalRoot) || !record(value.project) || !record(value.contacts)
@@ -172,6 +191,11 @@ export function ProjectOperationalWorkspace({ root, projectId, contextVersion, c
   const kind = root.kind === "organization" ? "organizations" : "standalone";
   const base = `/api/client-hub/sources/${encodeURIComponent(root.sourceId)}/business/${kind}/${encodeURIComponent(root.publicId)}/business-projects/${encodeURIComponent(projectId)}`;
   const [state, setState] = useState<{ data: OperationalWorkspace | null; busy: boolean; error: string }>({ data: null, busy: true, error: "" });
+  const [recoveryRequired, setRecoveryRequired] = useState(false), [canRecover, setCanRecover] = useState(false);
+  const [recoveryAction, setRecoveryAction] = useState<RecoveryAction>("reset");
+  const [recoveryReason, setRecoveryReason] = useState(""), [recoveryConfirmation, setRecoveryConfirmation] = useState("");
+  const [recoveryPreview, setRecoveryPreview] = useState<RecoveryPreview | null>(null), [recoveryBusy, setRecoveryBusy] = useState(false);
+  const [recoveryError, setRecoveryError] = useState(""), recoveryAttempt = useRef<Attempt | null>(null);
   const [revision, setRevision] = useState(0), [contactsEditing, setContactsEditing] = useState(false), [memoryEditing, setMemoryEditing] = useState(false);
   const [contactsDraft, setContactsDraft] = useState<ContactDraft[]>([]), [memoryDraft, setMemoryDraft] = useState<Memory>(emptyMemory);
   const [amendmentReason, setAmendmentReason] = useState(""), [contactsError, setContactsError] = useState(""), [memoryError, setMemoryError] = useState("");
@@ -202,6 +226,7 @@ export function ProjectOperationalWorkspace({ root, projectId, contextVersion, c
       if (!active.current || controller.signal.aborted || request !== sequence.current) return;
       if (!validWorkspace(result, root, projectId, contextVersion)) throw new ApiError("Project ownership or operational context changed. Refresh the project workspace.", 409, {});
       const safeResult = { ...result, memory: { ...result.memory, attachments: result.memory.attachments.map(browserAttachment) } };
+      setRecoveryRequired(false); setCanRecover(false); setRecoveryPreview(null); setRecoveryError(""); recoveryAttempt.current = null;
       setState({ data: safeResult, busy: false, error: "" }); setOptions(assignedContactOptions(safeResult)); setOptionsPage(safeResult.contactPage);
       setContactsDraft(result.contacts.assignments.map(item => ({ assignmentId: item.id, contactId: item.contact?.id ?? "", role: item.role,
         preferredContactMethod: item.preferredContactMethod, instructions: item.instructions, unavailable: item.availability !== "available" })));
@@ -210,7 +235,9 @@ export function ProjectOperationalWorkspace({ root, projectId, contextVersion, c
     }).catch(error => {
       if (!active.current || controller.signal.aborted || request !== sequence.current) return;
       const message = error instanceof Error ? error.message : "Operational project details could not be loaded.";
-      if (invalidatesProtectedWorkspace(error)) onInvalidated(message, error.status);
+      if (error instanceof ApiError && error.status === 409 && error.payload.code === "project_operational_recovery_required") {
+        setRecoveryRequired(true); setCanRecover(error.payload.canRecover === true); setState({ data: null, busy: false, error: "" });
+      } else if (invalidatesProtectedWorkspace(error)) onInvalidated(message, error.status);
       else setState(previous => ({ data: previous.data, busy: false, error: message }));
     });
     return () => { active.current = false; controller.abort(); attachmentPending.current?.abort();
@@ -373,7 +400,64 @@ export function ProjectOperationalWorkspace({ root, projectId, contextVersion, c
   };
 
   const data = state.data;
+  const expectedRecoveryConfirmation = recoveryAction === "reset" ? "RESET PROJECT MEMORY" : "TRANSFER PROJECT MEMORY";
+  const prepareRecovery = async () => {
+    const reason = recoveryReason.trim();
+    if (reason.length < 3) { setRecoveryError("Enter a reason of at least 3 characters for the audit receipt."); return; }
+    setRecoveryBusy(true); setRecoveryError(""); setRecoveryPreview(null); recoveryAttempt.current = null;
+    try {
+      const result = await api<unknown>(`${base}/operational-recovery/preview`, { method: "POST",
+        body: JSON.stringify({ expectedContextVersion: contextVersion, action: recoveryAction, reason }) });
+      if (!validRecoveryPreview(result, recoveryAction, root, projectId)) throw new Error("The recovery preview could not be verified.");
+      setRecoveryPreview(result); setRecoveryConfirmation("");
+    } catch (error) { setRecoveryError(error instanceof Error ? error.message : "Recovery could not be previewed."); }
+    finally { setRecoveryBusy(false); }
+  };
+  const commitRecovery = async () => {
+    if (!recoveryPreview || recoveryConfirmation !== expectedRecoveryConfirmation) {
+      setRecoveryError(`Type ${expectedRecoveryConfirmation} exactly to continue.`); return;
+    }
+    const payload = { expectedContextVersion: contextVersion, action: recoveryAction, reason: recoveryReason.trim(),
+      previewFingerprint: recoveryPreview.fingerprint, confirmation: recoveryConfirmation };
+    const key = idempotency(recoveryAttempt, payload); setRecoveryBusy(true); setRecoveryError("");
+    try {
+      const result = await api<unknown>(`${base}/operational-recovery/commit`, { method: "POST",
+        body: JSON.stringify({ ...payload, idempotencyKey: key }) });
+      if (!validRecoveryResult(result, recoveryAction, root, projectId) || result.fingerprint !== recoveryPreview.fingerprint)
+        throw new Error("The recovery result could not be verified. Retry with the same confirmation.");
+      recoveryAttempt.current = null; setRecoveryRequired(false); setRecoveryPreview(null); setRevision(value => value + 1);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Recovery could not be completed.";
+      if (error instanceof ApiError && error.status === 409) { setRecoveryPreview(null); recoveryAttempt.current = null; }
+      setRecoveryError(message);
+    } finally { setRecoveryBusy(false); }
+  };
   if (!data && state.busy) return <Card title="Operational project details"><p role="status">Loading operational contacts and project memory…</p></Card>;
+  if (!data && recoveryRequired && !canRecover) return <section className="project-operational-workspace" aria-label="Operational project details"><Card title="Operational details awaiting review"><div className="project-operational-recovery">
+    <p role="alert">This project moved to a different client. Stored operational details remain protected.</p>
+    <p>Contact an Operations administrator to review the reassignment. No contacts, memory, or historical attachments are visible until recovery is completed.</p>
+  </div></Card></section>;
+  if (!data && recoveryRequired) return <section className="project-operational-workspace" aria-label="Operational project details"><Card title="Recover reassigned project details"><div className="project-operational-recovery">
+    <p role="alert">This project moved to a different client. An administrator must deliberately reset or transfer its operational memory.</p>
+    <p>Both choices clear old project/site contacts. Historical attachments stay preserved under the previous owner and are not copied. This action never changes access, billing, notifications, identities, grants, or Project Alpha data.</p>
+    <fieldset disabled={recoveryBusy}><legend>Recovery action</legend>
+      <label><input type="radio" name="project-recovery-action" checked={recoveryAction === "reset"} onChange={() => { setRecoveryAction("reset"); setRecoveryPreview(null); recoveryAttempt.current = null; }} /> Reset memory for the new client</label>
+      <label><input type="radio" name="project-recovery-action" checked={recoveryAction === "transfer"} onChange={() => { setRecoveryAction("transfer"); setRecoveryPreview(null); recoveryAttempt.current = null; }} /> Transfer structured memory only</label>
+    </fieldset>
+    <label>Required audit reason<textarea value={recoveryReason} minLength={3} maxLength={1000} rows={3} disabled={recoveryBusy}
+      onChange={event => { setRecoveryReason(event.target.value); setRecoveryPreview(null); recoveryAttempt.current = null; }} /></label>
+    {!recoveryPreview ? <button type="button" className="button-orange" disabled={recoveryBusy} onClick={() => void prepareRecovery()}>{recoveryBusy ? "Preparing preview…" : "Preview recovery"}</button> : <div className="project-operational-recovery-preview">
+      <h3>Review before applying</h3><ul><li>{recoveryPreview.changes.contactsCleared} operational contact assignment(s) will be cleared.</li>
+        <li>{recoveryAction === "reset" ? "Structured memory will restart empty; prior snapshots stay hidden from this owner." : "Structured memory and its history will transfer to this owner."}</li>
+        <li>{recoveryPreview.changes.attachmentsExcluded} historical attachment(s) remain preserved and excluded.</li></ul>
+      <label>Type <strong>{expectedRecoveryConfirmation}</strong> to confirm<input value={recoveryConfirmation} autoComplete="off" disabled={recoveryBusy}
+        onChange={event => setRecoveryConfirmation(event.target.value)} /></label>
+      <div className="project-operational-actions"><button type="button" className="button-orange" disabled={recoveryBusy || recoveryConfirmation !== expectedRecoveryConfirmation}
+        onClick={() => void commitRecovery()}>{recoveryBusy ? "Applying recovery…" : "Apply recovery"}</button>
+        <button type="button" className="button-ghost" disabled={recoveryBusy} onClick={() => { setRecoveryPreview(null); recoveryAttempt.current = null; }}>Change recovery</button></div>
+    </div>}
+    {recoveryError && <p role="alert" className="project-operational-error">{recoveryError}</p>}
+  </div></Card></section>;
   if (!data) return <Card title="Operational project details"><div role="alert"><EmptyState title="Operational details unavailable" detail={state.error || "Operational details could not be loaded."} /></div>
     <button type="button" className="button-ghost" onClick={() => setRevision(value => value + 1)}>Retry operational details</button></Card>;
   return <section className="project-operational-workspace" aria-label="Operational project details" aria-busy={state.busy || Boolean(saving)}>

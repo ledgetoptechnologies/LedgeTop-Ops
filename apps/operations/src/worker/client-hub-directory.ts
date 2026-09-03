@@ -50,8 +50,32 @@ export interface ClientHubDirectoryState {
 }
 export interface ClientHubDirectoryQuery { q?: string; kind?: string; source?: string; cursor?: string; limit?: number; grouping?: string; sort?: string }
 type Position = [string, string, ClientHubSource, ClientHubRootNamespace, ClientHubKind, string];
-interface Cursor { v: 5; revision: number; activityRevision: number; asOf: string; sort: "recent" | "name";
-  visibility: number; source: ClientHubSource | null; q: string; kind: ClientHubKind | null; grouping: "customers" | "records"; policy: string; after: Position }
+interface Cursor { v: 6; revision: number; activityRevision: number; asOf: string; sort: "recent" | "name";
+  visibility: number; portalProof: string; source: ClientHubSource | null; q: string; kind: ClientHubKind | null;
+  grouping: "customers" | "records"; policy: string; after: Position }
+
+interface PortalContactRootProof {
+  sourceId: ClientHubSource;
+  workspaceId: string;
+  rootType: ClientHubKind;
+  rootPublicId: string;
+  legacyRoot: boolean;
+}
+interface PortalContactProof { enabled: boolean; fingerprint: string; roots: PortalContactRootProof[] }
+const EMPTY_PORTAL_PROOF = "0".repeat(43);
+const MAX_PORTAL_CONTACT_MATCHES = 1000;
+export const PORTAL_CONTACT_MINIMUM_QUERY_LENGTH = 3;
+const PORTAL_CONTACT_SCHEMA = {
+  portal_v2_workspaces: ["id", "root_type", "pa_organization_public_id", "pa_client_public_id", "project_alpha_source_id", "status"],
+  pa_portal_workspace_sources: ["workspace_id", "projection_source_id"],
+  portal_v2_directory_checkpoints: ["workspace_id", "active_generation_id", "source_sequence"],
+  portal_v2_directory_generations: ["id", "workspace_id", "source_generation", "source_sequence", "status", "complete"],
+  portal_v2_directory_entities: ["workspace_id", "generation_id", "entity_type", "parent_public_id", "active", "public_id"],
+  pa_portal_principals: ["workspace_id", "public_id", "identity_id", "email_hint", "display_name", "source_version", "status", "updated_at"],
+  portal_v2_identities: ["id", "verified_email", "status", "revoked_at", "updated_at"],
+  portal_v2_workspace_memberships: ["workspace_id", "identity_id", "status", "revoked_at", "expires_at", "updated_at"],
+  pa_portal_source_authorities: ["source_id", "state", "version"],
+} as const;
 
 function canonicalTime(value: unknown): value is string {
   if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) return false;
@@ -123,12 +147,13 @@ function decodeCursor(value: string): Cursor {
     const parsed: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
     if (!parsed || typeof parsed !== "object") throw new Error();
     const cursor = parsed as Partial<Cursor>;
-    if (cursor.v !== 5 || !["customers", "records"].includes(cursor.grouping ?? "") || !Number.isSafeInteger(cursor.revision) || cursor.revision! < 0 ||
+    if (cursor.v !== 6 || !["customers", "records"].includes(cursor.grouping ?? "") || !Number.isSafeInteger(cursor.revision) || cursor.revision! < 0 ||
       !Number.isSafeInteger(cursor.activityRevision) || cursor.activityRevision! < 0 || !canonicalTime(cursor.asOf) || Date.parse(cursor.asOf) > Date.now() ||
       !["recent", "name"].includes(cursor.sort ?? "") ||
       !Number.isSafeInteger(cursor.visibility) || cursor.visibility! < 1 ||
       (cursor.source !== null && (typeof cursor.source !== "string" || !isClientHubSource(cursor.source))) ||
-      typeof cursor.q !== "string" || typeof cursor.policy !== "string" ||
+      typeof cursor.q !== "string" || typeof cursor.policy !== "string" || typeof cursor.portalProof !== "string"
+      || !/^[A-Za-z0-9_-]{43}$/.test(cursor.portalProof) ||
       (cursor.kind !== null && (typeof cursor.kind !== "string" || !isClientHubKind(cursor.kind))) ||
       !Array.isArray(cursor.after) || cursor.after.length !== 6 ||
       !cursor.after.every(item => typeof item === "string" && item.length <= 512) ||
@@ -136,6 +161,92 @@ function decodeCursor(value: string): Cursor {
       !isClientHubSource(cursor.after[2]) || !isClientHubRootNamespace(cursor.after[3]) || !isClientHubKind(cursor.after[4])) throw new Error();
     return cursor as Cursor;
   } catch { throw new HTTPException(400, { message: "Client directory cursor is invalid" }); }
+}
+
+async function portalContactSchemaReady(database: Pick<D1Database, "prepare" | "batch">): Promise<boolean> {
+  const tables = Object.keys(PORTAL_CONTACT_SCHEMA) as Array<keyof typeof PORTAL_CONTACT_SCHEMA>;
+  const results = await database.batch<{ name: string }>(tables.map(table => database.prepare(`PRAGMA table_info('${table}')`)));
+  return tables.every((table, index) => {
+    const present = new Set(results[index]?.results.flatMap(row => typeof row.name === "string" ? [row.name] : []) ?? []);
+    return PORTAL_CONTACT_SCHEMA[table].every(column => present.has(column));
+  });
+}
+function portalProofTimestamp(value: unknown): value is string {
+  if (typeof value !== "string" || value.length > 40) return false;
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,3})?$/.test(value)
+    ? `${value.replace(" ", "T")}Z` : value;
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(normalized)
+    && Number.isFinite(Date.parse(normalized));
+}
+
+/** Resolve search matches from current portal authority before Operations
+ * pagination. The caller receives only exact source/workspace/root keys;
+ * principal and identity facts never cross this boundary. */
+async function portalContactProof(env: Env, q: string): Promise<PortalContactProof> {
+  if (!env.DELIVERY_DB) return { enabled: false, fingerprint: EMPTY_PORTAL_PROOF, roots: [] };
+  const database = env.DELIVERY_DB.withSession("first-primary");
+  if (!(await portalContactSchemaReady(database)))
+    return { enabled: false, fingerprint: EMPTY_PORTAL_PROOF, roots: [] };
+  if (q.length < PORTAL_CONTACT_MINIMUM_QUERY_LENGTH)
+    return { enabled: true, fingerprint: EMPTY_PORTAL_PROOF, roots: [] };
+  const rows = (await database.prepare(`SELECT
+      workspace.project_alpha_source_id source_id,workspace.id workspace_id,workspace.root_type,
+      CASE workspace.root_type WHEN 'organization' THEN workspace.pa_organization_public_id ELSE workspace.pa_client_public_id END root_public_id,
+      CASE WHEN generation.source_generation='legacy-backfill' THEN 1 ELSE 0 END legacy_root,
+      principal.public_id principal_public_id,checkpoint.active_generation_id,checkpoint.source_sequence,
+      principal.source_version,principal.updated_at principal_updated_at,identity.updated_at identity_updated_at,
+      membership.updated_at membership_updated_at,COALESCE(authority.version,0) authority_version
+      FROM pa_portal_principals principal
+      JOIN portal_v2_workspaces workspace ON workspace.id=principal.workspace_id AND workspace.status='active'
+      JOIN pa_portal_workspace_sources owner ON owner.workspace_id=workspace.id
+        AND owner.projection_source_id=workspace.project_alpha_source_id
+      JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=workspace.id
+      JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id
+        AND generation.workspace_id=workspace.id AND generation.source_sequence=checkpoint.source_sequence
+        AND generation.status='active' AND generation.complete=1
+      JOIN portal_v2_directory_entities root_entity ON root_entity.workspace_id=workspace.id AND root_entity.generation_id=generation.id
+        AND root_entity.entity_type=workspace.root_type AND root_entity.parent_public_id IS NULL AND root_entity.active=1
+        AND root_entity.public_id=CASE workspace.root_type WHEN 'organization' THEN workspace.pa_organization_public_id ELSE workspace.pa_client_public_id END
+      JOIN portal_v2_identities identity ON identity.id=principal.identity_id AND identity.status='active' AND identity.revoked_at IS NULL
+      JOIN portal_v2_workspace_memberships membership ON membership.workspace_id=workspace.id
+        AND membership.identity_id=identity.id AND membership.status='active' AND membership.revoked_at IS NULL
+        AND (membership.expires_at IS NULL OR membership.expires_at>datetime('now'))
+      LEFT JOIN pa_portal_source_authorities authority ON authority.source_id=workspace.project_alpha_source_id
+      WHERE principal.status='active' AND (workspace.project_alpha_source_id='project-alpha:primary' OR authority.state='active')
+        AND (instr(lower(principal.display_name),?)>0 OR instr(lower(principal.email_hint),?)>0
+          OR instr(lower(COALESCE(identity.verified_email,'')),?)>0)
+      ORDER BY workspace.project_alpha_source_id,workspace.id,principal.public_id LIMIT ?`)
+    .bind(q, q, q, MAX_PORTAL_CONTACT_MATCHES + 1).all<Record<string, unknown>>()).results;
+  if (rows.length > MAX_PORTAL_CONTACT_MATCHES)
+    throw new HTTPException(413, { message: "Too many portal contacts match. Refine the client search." });
+  const facts = rows.map(row => {
+      const sourceId = row.source_id, workspaceId = row.workspace_id, rootType = row.root_type,
+        rootPublicId = row.root_public_id, principalPublicId = row.principal_public_id,
+        generationId = row.active_generation_id, sourceVersion = row.source_version,
+        principalUpdatedAt = row.principal_updated_at, identityUpdatedAt = row.identity_updated_at,
+        membershipUpdatedAt = row.membership_updated_at;
+      if (typeof sourceId !== "string" || !isBusinessProjectionSource(sourceId)
+        || typeof workspaceId !== "string" || !workspaceId || workspaceId.length > 512
+        || typeof rootType !== "string" || !isClientHubKind(rootType)
+        || typeof rootPublicId !== "string" || !rootPublicId || rootPublicId.length > 512
+        || typeof principalPublicId !== "string" || !principalPublicId || principalPublicId.length > 512
+        || typeof generationId !== "string" || !generationId || generationId.length > 512
+        || typeof sourceVersion !== "string" || !sourceVersion || sourceVersion.length > 512
+        || !portalProofTimestamp(principalUpdatedAt) || !portalProofTimestamp(identityUpdatedAt)
+        || !portalProofTimestamp(membershipUpdatedAt)
+        || !Number.isSafeInteger(Number(row.source_sequence)) || Number(row.source_sequence) <= 0
+        || !Number.isSafeInteger(Number(row.authority_version)) || Number(row.authority_version) < 0
+        || ![0, 1].includes(Number(row.legacy_root))) unavailable();
+      return { sourceId, workspaceId, rootType, rootPublicId, legacyRoot: Number(row.legacy_root) === 1,
+        principalPublicId, generationId, sourceSequence: Number(row.source_sequence), sourceVersion,
+        principalUpdatedAt, identityUpdatedAt, membershipUpdatedAt, authorityVersion: Number(row.authority_version) };
+  });
+  const roots = new Map<string, PortalContactRootProof>();
+  for (const { principalPublicId: _principalPublicId, generationId: _generationId, sourceSequence: _sourceSequence,
+    sourceVersion: _sourceVersion, principalUpdatedAt: _principalUpdatedAt, identityUpdatedAt: _identityUpdatedAt,
+    membershipUpdatedAt: _membershipUpdatedAt, authorityVersion: _authorityVersion, ...root } of facts)
+    roots.set(JSON.stringify([root.sourceId, root.workspaceId, root.rootType, root.rootPublicId, root.legacyRoot]), root);
+  return { enabled: true, fingerprint: await sha256(JSON.stringify(facts)), roots: [...roots.values()] };
 }
 
 /** Match the existing /api/projects permission and assignment policy. Search
@@ -167,6 +278,7 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
   if ((options.q?.length ?? 0) > 200 || /[\0-\x1f\x7f]/.test(options.q ?? ""))
     throw new HTTPException(400, { message: "Client directory search is invalid" });
   const q = normalizeClientHubText(options.q ?? "");
+  const portal = await portalContactProof(env, q);
   const grouping = options.grouping ?? "customers";
   if (grouping !== "customers" && grouping !== "records")
     throw new HTTPException(400, { message: "Client directory grouping is invalid" });
@@ -176,7 +288,8 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
   const cursor = options.cursor === undefined ? null : decodeCursor(options.cursor);
   const asOf = cursor?.asOf ?? new Date().toISOString();
   const { filter, policy } = await projectSearchAccess(env, principal);
-  if (cursor && (cursor.q !== q || cursor.kind !== (kind ?? null) || cursor.source !== (source ?? null) || cursor.grouping !== grouping || cursor.sort !== sort || cursor.policy !== policy))
+  if (cursor && (cursor.q !== q || cursor.kind !== (kind ?? null) || cursor.source !== (source ?? null) || cursor.grouping !== grouping
+    || cursor.sort !== sort || cursor.policy !== policy || cursor.portalProof !== portal.fingerprint))
     throw new HTTPException(400, { message: "Client directory cursor does not match this search" });
   const clauses = [visibleRoot, visibleSource, liveBusinessRoot], values: unknown[] = [];
   if (kind) { clauses.push("root.kind=?"); values.push(kind); }
@@ -185,12 +298,13 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
     const phone = /^[\d\s()+.\-]+$/.test(q) ? normalizeClientHubPhone(q) : "";
     // D1 limits LIKE/GLOB patterns to 50 bytes. Literal instr supports the full
     // 200-character search contract without wildcard interpretation.
+    const portalRoots = JSON.stringify(portal.roots);
     clauses.push(`(instr(root.sort_name,?)>0 OR instr(party.sort_name,?)>0 OR EXISTS (
       SELECT 1 FROM client_hub_search_values search WHERE search.source_id=root.source_id
         AND search.root_namespace=root.root_namespace AND search.kind=root.kind AND search.root_public_id=root.public_id
-        AND (instr(search.normalized_value,?)>0${phone.length >= 3 ? " OR (search.field='phone' AND instr(search.normalized_value,?)>0)" : ""})
-        AND search.root_namespace='business' AND (
-          (search.record_type='pa_client' AND search.project_id IS NULL AND EXISTS (
+        AND ((search.root_namespace='business'
+          AND (instr(search.normalized_value,?)>0${phone.length >= 3 ? " OR (search.field='phone' AND instr(search.normalized_value,?)>0)" : ""})
+          AND ((search.record_type='pa_client' AND search.project_id IS NULL AND EXISTS (
             SELECT 1 FROM pa_clients contact WHERE contact.id=search.record_id AND contact.projection_source_id=root.source_id AND contact.active=1 AND
               ((root.kind='organization' AND contact.organization_id=root.public_id) OR
                (root.kind='standalone_client' AND contact.id=root.public_id AND contact.organization_id IS NULL))))
@@ -199,13 +313,19 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
             WHERE p.id=search.project_id AND p.projection_source_id=root.source_id AND ${filter.sql} AND
               ((root.kind='organization' AND COALESCE(p.organization_id,owner.organization_id)=root.public_id) OR
                (root.kind='standalone_client' AND p.client_id=root.public_id AND owner.id IS NOT NULL
-                 AND COALESCE(p.organization_id,owner.organization_id) IS NULL)))))))`);
-    // Portal-principal search additionally needs a live cross-database ownership
-    // proof before pagination. Until that contract exists the API explicitly
-    // reports portalContacts=false rather than searching stale principal rows.
+                 AND COALESCE(p.organization_id,owner.organization_id) IS NULL))))))
+        OR (search.record_type='portal_principal' AND EXISTS (
+          SELECT 1 FROM json_each(?) proof WHERE
+            json_extract(proof.value,'$.sourceId')=root.source_id
+            AND json_extract(proof.value,'$.workspaceId')=root.workspace_id
+            AND json_extract(proof.value,'$.rootType')=root.kind
+            AND (json_extract(proof.value,'$.rootPublicId')=${currentMapping}
+              OR (json_extract(proof.value,'$.legacyRoot')=1 AND root.source_id='project-alpha:primary'
+                AND root.legacy_account_id IS NOT NULL AND json_extract(proof.value,'$.rootPublicId')=root.public_id)))))))`);
     values.push(q, q, q);
     if (phone.length >= 3) values.push(phone);
     values.push(...filter.values);
+    values.push(portalRoots);
   }
   // Match and authorize individual records first, then collapse the matching
   // records into customers before LIMIT/cursor application. Browser-only
@@ -278,16 +398,17 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
   // Permissions are read before the SQL batch. Recheck them and the effective
   // source/ownership epoch before releasing names or permission-scoped recency.
   // No claim of a cross-request snapshot: a changed context requires a reload.
-  const [currentScope, currentProjectAccess, currentState] = await Promise.all([
+  const [currentScope, currentProjectAccess, currentState, currentPortal] = await Promise.all([
     sqlScope(env, principal, "team.view"), projectSearchAccess(env, principal),
     env.OPS_DB.withSession("first-primary").prepare(`SELECT revision,
       (SELECT revision FROM client_business_activity_state WHERE singleton=1) activity_revision,
       (SELECT read_revision FROM pa_connector_directory_state WHERE id='directory') source_read_revision
-      FROM client_hub_directory_state WHERE id='directory'`).first<Snapshot>(),
+      FROM client_hub_directory_state WHERE id='directory'`).first<Snapshot>(), portalContactProof(env, q),
   ]);
   if (!currentScope.global || currentScope.deniedGlobal)
     throw new HTTPException(403, { message: "Global team.view permission required" });
   if (currentState?.source_read_revision !== state.source_read_revision) sourcesChanged();
+  if (currentPortal.fingerprint !== portal.fingerprint) changed();
   if (currentProjectAccess.policy !== policy || currentState?.revision !== state.revision || currentState?.activity_revision !== state.activity_revision) changed();
   const roots = results[1]!.results.filter((row): row is LiveRoot => "root_namespace" in row);
   const page = roots.slice(0, limit);
@@ -308,8 +429,9 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
     activityCoverage: "project_alpha_business_records" as const,
     sort,
     sources,
-    searchCapabilities: { businessContacts: true, portalContacts: false },
-    nextCursor: roots.length > limit && last ? encodeCursor({ v: 5, revision: state.revision, activityRevision: state.activity_revision!, asOf, sort, visibility: state.source_read_revision!,
+    searchCapabilities: { businessContacts: true, portalContacts: portal.enabled,
+      ...(portal.enabled ? { portalContactMinimumQueryLength: PORTAL_CONTACT_MINIMUM_QUERY_LENGTH } : {}) },
+    nextCursor: roots.length > limit && last ? encodeCursor({ v: 6, revision: state.revision, activityRevision: state.activity_revision!, asOf, sort, visibility: state.source_read_revision!, portalProof: portal.fingerprint,
       source: source ?? null, q, kind: kind ?? null, grouping, policy,
       after: [last.live_activity_at ?? "", last.display_sort_name, last.source_id, last.root_namespace, last.kind, last.public_id] }) : null,
   };

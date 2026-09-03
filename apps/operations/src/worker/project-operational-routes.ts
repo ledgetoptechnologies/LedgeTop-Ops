@@ -2,9 +2,10 @@ import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { isBusinessProjectionSource } from "./client-hub-source";
 import { listClientHubCollection, type ClientHubCollectionContext } from "./client-hub-collections";
-import { readProjectMemoryRevision, readProjectOperationalWorkspace, saveProjectMemory, saveProjectOperationalContacts } from "./project-operational-memory";
+import { PROJECT_OPERATIONAL_RECOVERY_REQUIRED, ProjectOperationalRecoveryRequired, readProjectMemoryRevision, readProjectOperationalWorkspace, saveProjectMemory, saveProjectOperationalContacts } from "./project-operational-memory";
 import { serveProjectMemoryAttachment, uploadProjectMemoryAttachment } from "./project-memory-attachments";
 import { commitRecurringProjectCopy, previewRecurringProjectCopy } from "./project-recurring-copy-forward";
+import { canRecoverProjectOperational, commitProjectOperationalRecovery, previewProjectOperationalRecovery } from "./project-operational-recovery";
 import type { Env, StaffPrincipal } from "./types";
 
 type AppEnv = { Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } };
@@ -44,10 +45,18 @@ export function registerProjectOperationalRoutes(app: App, resolveContext: Resol
     if (expectedContextVersion !== undefined && expectedContextVersion !== context.contextVersion)
       throw new HTTPException(409, { message: "Project ownership or permissions changed. Refresh the project workspace to continue" });
     const cursor = c.req.query("contactCursor");
-    const [workspace, contacts] = await Promise.all([
-      readProjectOperationalWorkspace(c.env, principal, context, c.req.param("projectId")),
-      listClientHubCollection(c.env, context, "businessContacts", { limit: 25, ...(cursor ? { cursor } : {}) }),
-    ]);
+    let workspace;
+    try { workspace = await readProjectOperationalWorkspace(c.env, principal, context, c.req.param("projectId")); }
+    catch (error) {
+      if (error instanceof ProjectOperationalRecoveryRequired) {
+        c.header("Cache-Control", "no-store");
+        const canRecover = c.get("administrator")
+          ? await canRecoverProjectOperational(c.env, principal, context, c.req.param("projectId")) : false;
+        return c.json({ error: error.message, code: PROJECT_OPERATIONAL_RECOVERY_REQUIRED, canRecover }, 409);
+      }
+      throw error;
+    }
+    const contacts = await listClientHubCollection(c.env, context, "businessContacts", { limit: 25, ...(cursor ? { cursor } : {}) });
     await verifyContext(c.env, principal, context);
     c.header("Cache-Control", "no-store");
     return c.json({ ...workspace, capabilities: {
@@ -118,6 +127,26 @@ export function registerProjectOperationalRoutes(app: App, resolveContext: Resol
     const context = await resolveContext(c.env, principal, clientKind, c.req.param("publicId"), c.req.param("sourceId"), "business");
     const body = destinationBoundBody(await c.req.json().catch(() => undefined), c.req.param("projectId"));
     const result = await commitRecurringProjectCopy(c.env, principal, context, body);
+    await verifyContext(c.env, principal, context);
+    c.header("Cache-Control", "no-store");
+    return c.json(result);
+  });
+  app.post(`${base}/operational-recovery/preview`, async c => {
+    if (!c.get("administrator")) throw new HTTPException(403, { message: "Administrator access required" });
+    const clientKind = routeKind(c, "Project operational recovery is unavailable for this source"), principal = c.get("principal");
+    const context = await resolveContext(c.env, principal, clientKind, c.req.param("publicId"), c.req.param("sourceId"), "business");
+    const result = await previewProjectOperationalRecovery(c.env, principal, context, c.req.param("projectId"),
+      await c.req.json().catch(() => undefined));
+    await verifyContext(c.env, principal, context);
+    c.header("Cache-Control", "no-store");
+    return c.json(result);
+  });
+  app.post(`${base}/operational-recovery/commit`, async c => {
+    if (!c.get("administrator")) throw new HTTPException(403, { message: "Administrator access required" });
+    const clientKind = routeKind(c, "Project operational recovery is unavailable for this source"), principal = c.get("principal");
+    const context = await resolveContext(c.env, principal, clientKind, c.req.param("publicId"), c.req.param("sourceId"), "business");
+    const result = await commitProjectOperationalRecovery(c.env, principal, context, c.req.param("projectId"),
+      await c.req.json().catch(() => undefined));
     await verifyContext(c.env, principal, context);
     c.header("Cache-Control", "no-store");
     return c.json(result);

@@ -286,6 +286,15 @@ test("search scope and verified legacy portal connections are represented honest
   await expect(page.getByRole("link", { name: "Open Portal-only client client workspace" }).getByText("Portal workspace · business link pending")).toBeVisible();
 });
 
+test("portal-contact search explains its advertised minimum query length", async ({ page }) => {
+  await mock(page, route => route.fulfill({ json: { clients: [], capabilities,
+    searchCapabilities: { businessContacts: true, portalContacts: true, portalContactMinimumQueryLength: 3 }, nextCursor: null } }));
+  await page.goto("/clients");
+  const help = page.locator("#client-directory-search-help");
+  await expect(help).toContainText("Portal contact records are searched after 3 characters.");
+  await expect(help).not.toContainText("Portal-only contact and login search is not available.");
+});
+
 test("ambiguous legacy links surface the server conflict instead of guessing a namespace", async ({ page }) => {
   const requested = await mock(page, route => route.fulfill({ json: { clients: [], capabilities } }));
   await page.route(/\/api\/client-hub\/organizations\/ambiguous(?:\?|$)/, route => route.fulfill({ status: 409,

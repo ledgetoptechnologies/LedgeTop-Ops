@@ -200,6 +200,7 @@ import {
   type AuthenticatedGrantAudienceType,
 } from "./authenticated-delivery-grants";
 import { authenticatedDeliveryPilotReadiness } from "./authenticated-delivery-pilot-readiness";
+import { portalWorkflowReadiness } from "./portal-workflow-readiness";
 import {
   compareAndSwapProjectFolderAssociation,
   createPrimaryWorkspaceBinding,
@@ -3047,6 +3048,11 @@ app.get("/api/admin/audit", async (c) => {
     entity: c.req.query("entity"), division: c.req.query("division"), result: c.req.query("result"),
     from: c.req.query("from"), to: c.req.query("to"), cursor: c.req.query("cursor"), limit: c.req.query("limit"),
   }));
+});
+app.get("/api/admin/portal-workflow-readiness", async (c) => {
+  await requireGlobal(c.env, c.get("principal"), "integrations.manage");
+  c.header("Cache-Control", "no-store");
+  return c.json(await portalWorkflowReadiness(c.env));
 });
 registerProjectAlphaConnectorAdminRoutes(app);
 app.post("/api/admin/integrations/project-alpha/sync", async (c) => {

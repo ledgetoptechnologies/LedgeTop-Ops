@@ -111,6 +111,42 @@ test("project role metadata is a separate responsive read-only card", async ({ p
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
 
+test("reassigned project shows a responsive contact-admin state to non-administrators", async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 900 });
+  await mock(page, route => route.fulfill({ json: detail() }), undefined,
+    route => route.fulfill({ status: 409, json: { error: "Project ownership changed.",
+      code: "project_operational_recovery_required", canRecover: false } }));
+  await open(page);
+  const operations = workspace(page).getByRole("region", { name: "Operational project details", exact: true });
+  await expect(operations.getByRole("heading", { name: "Operational details awaiting review" })).toBeVisible();
+  await expect(operations).toContainText("Contact an Operations administrator");
+  await expect(operations.getByRole("button", { name: /recovery/i })).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+});
+
+test("administrator recovery requires preview and rejects an unverified commit response", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await mock(page, async (route, url) => {
+    if (url.pathname.endsWith("/operational-recovery/preview")) return route.fulfill({ json: { fingerprint: "a".repeat(64), action: "reset",
+      sourceId: "project-alpha:primary", project: { id: "project-one", revision: "project-one-revision" },
+      currentRoot: { kind: "organization", id: "42" }, previousRoot: { kind: "organization", id: "41" },
+      changes: { contactsCleared: 1, memoryTransferred: false, memoryReset: true, attachmentsExcluded: 2 } } });
+    if (url.pathname.endsWith("/operational-recovery/commit")) return route.fulfill({ json: { fingerprint: "a".repeat(64), replayed: false } });
+    return route.fulfill({ json: detail() });
+  }, undefined, route => route.fulfill({ status: 409, json: { error: "Project ownership changed.",
+    code: "project_operational_recovery_required", canRecover: true } }));
+  await open(page);
+  const operations = workspace(page).getByRole("region", { name: "Operational project details", exact: true });
+  await operations.getByLabel("Required audit reason").fill("Verified client reassignment");
+  await operations.getByRole("button", { name: "Preview recovery" }).click();
+  await expect(operations).toContainText("2 historical attachment(s) remain preserved and excluded");
+  await operations.getByLabel(/Type RESET PROJECT MEMORY/).fill("RESET PROJECT MEMORY");
+  await operations.getByRole("button", { name: "Apply recovery" }).click();
+  await expect(operations.getByText(/recovery result could not be verified/i)).toBeVisible();
+  await expect(operations.getByRole("heading", { name: "Review before applying" })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+});
+
 test("business project links open a scoped workspace and preserve client filters through breadcrumbs, Back and refresh", async ({ page }) => {
   test.slow();
   const requests = await mock(page, route => route.fulfill({ json: detail() }));
