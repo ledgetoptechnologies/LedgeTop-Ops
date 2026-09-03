@@ -713,7 +713,16 @@ failed job, multipart cleanup, the 24-hour archive expiry, the three-per-hour
 exact quota, one copy/move job with an injected retry, and one Dropbox import
 job before production rollout.
 
-The 20 GB ZIP limit and 10,000-object R2 CRUD limit require the Workers Paid Workflow step allowance. Do not enable those production limits on a Free-plan account; reduce the application limits or upgrade first.
+Bulk ZIPs have no descendant file-count cutoff. The production policy supports
+one ZIP containing up to 100 GiB of source data, subject to measured manifest,
+Workflow-step, multipart, and per-step subrequest capacity. Small source files
+are grouped into bounded 8 MiB/64-object CRC work units, and only the
+`ltds-bulk-download` Workflow is configured for 25,000 steps. A 10,626-file,
+34.3 GiB WebODM delivery remains one archive under that policy. The prepared
+R2 object is retained for 24 hours and the download route serves stable ETag,
+HEAD, and byte-range responses so browser download managers can resume it.
+Do not enable these production limits on a Free-plan account; reduce the
+application limits or upgrade first.
 
 ## 10. Email alerts
 

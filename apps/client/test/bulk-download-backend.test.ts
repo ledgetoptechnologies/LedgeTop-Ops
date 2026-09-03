@@ -5,6 +5,7 @@ vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {} }));
 
 import deliveryWorker, {
   bulkQuotaRetryAfterSeconds,
+  bulkDownloadResumeExpiresAt,
   bulkJobProgress,
   classifyPublicRateLimit,
   cleanupTemporaryZips,
@@ -12,11 +13,13 @@ import deliveryWorker, {
   readyBulkJobIsExpired,
 } from "../src/worker/index";
 import { encodeItemRef } from "../src/worker/files";
-import { createSessionCookie } from "../src/worker/security";
+import { BULK_DOWNLOAD_RESUME_COOKIE, createBulkDownloadResumeCookie, createSessionCookie } from "../src/worker/security";
 import {
   assemblyProgressBytes,
   classifyWorkflowFailure,
   crcProgressBytes,
+  estimateBulkPreparation,
+  planCrcWorkUnits,
   readSourceRange,
   shouldCheckpointCrcChunk,
   shouldCheckpointCrcFile,
@@ -68,8 +71,13 @@ describe("bulk-download Worker limits and progress", () => {
   it("configures the maximum supported Workflow CPU allowance", () => {
     const config = JSON.parse(deliveryWranglerConfig) as {
       limits?: { cpu_ms?: number; subrequests?: number };
+      workflows?: Array<{ binding?: string; limits?: { steps?: number } }>;
     };
     expect(config.limits).toEqual({ cpu_ms: 300_000, subrequests: 25_000 });
+    expect(config.workflows?.find(workflow => workflow.binding === "BULK_DOWNLOAD_WORKFLOW")?.limits)
+      .toEqual({ steps: 25_000 });
+    expect(config.workflows?.find(workflow => workflow.binding === "CLOUD_TRANSFER_WORKFLOW")?.limits)
+      .toBeUndefined();
   });
 
   it("reports monotonic two-phase progress without moving backwards", () => {
@@ -88,10 +96,30 @@ describe("bulk-download Worker limits and progress", () => {
     expect(shouldCheckpointCrcChunk(0, 8 * mib)).toBe(false);
     expect(shouldCheckpointCrcChunk(56 * mib, 64 * mib)).toBe(true);
     expect(shouldCheckpointCrcChunk(64 * mib, 72 * mib)).toBe(false);
-    expect(shouldCheckpointCrcFile(24, 2_000)).toBe(false);
-    expect(shouldCheckpointCrcFile(25, 2_000)).toBe(true);
-    expect(shouldCheckpointCrcFile(1_999, 2_000)).toBe(false);
-    expect(shouldCheckpointCrcFile(2_000, 2_000)).toBe(true);
+    expect(shouldCheckpointCrcFile(0, 24, 2_000)).toBe(false);
+    expect(shouldCheckpointCrcFile(24, 25, 2_000)).toBe(true);
+    expect(shouldCheckpointCrcFile(1_975, 1_999, 2_000)).toBe(false);
+    expect(shouldCheckpointCrcFile(1_999, 2_000, 2_000)).toBe(true);
+  });
+
+  it("keeps a 10,626-file, 34.3 GiB delivery within one Workflow ZIP", () => {
+    const fileCount = 10_626;
+    const totalBytes = Math.floor(34.3 * 1024 ** 3);
+    const baseSize = Math.floor(totalBytes / fileCount);
+    const sources = Array.from({ length: fileCount }, (_, index) => ({
+      name: `photos/DJI_${String(index).padStart(5, "0")}.jpg`,
+      size: baseSize + (index < totalBytes % fileCount ? 1 : 0),
+    }));
+    const estimate = estimateBulkPreparation(sources);
+    expect(estimate.archiveSize).toBeGreaterThan(totalBytes);
+    expect(estimate.workflowSteps).toBeLessThan(24_900);
+    expect(estimate.uploadParts).toBeLessThan(10_000);
+  });
+
+  it("batches many small files by bytes and object count instead of rejecting their count", () => {
+    const units = planCrcWorkUnits(Array.from({ length: 10_626 }, () => ({ size: 1 })));
+    expect(units).toHaveLength(Math.ceil(10_626 / 64));
+    expect(units.every(unit => unit.kind === "batch" && unit.indexes.length <= 64 && unit.totalBytes <= 8 * 1024 * 1024)).toBe(true);
   });
 
   it("labels CRC and assembly phases for the polling client", () => {
@@ -226,6 +254,112 @@ describe("bulk-download 429 responses", () => {
   });
 });
 
+describe("bulk-download browser resume", () => {
+  function readyArchiveEnv() {
+    const env = authenticatedEnv(true, 1, {
+      status: "ready",
+      expires_at: "2099-01-01T00:00:00.000Z",
+      archive_key: "tmp/archive.zip",
+      archive_size: 10,
+    });
+    const bytes = Uint8Array.from({ length: 10 }, (_, index) => index);
+    const reads: Array<{ offset: number; length: number } | undefined> = [];
+    env.DATA_BUCKET = {
+      async head(key: string) {
+        return key === "tmp/archive.zip"
+          ? { size: bytes.length, etag: "archive-etag", httpEtag: '"archive-etag"' }
+          : null;
+      },
+      async get(key: string, options?: { range?: { offset: number; length: number } }) {
+        if (key !== "tmp/archive.zip") return null;
+        reads.push(options?.range);
+        const range = options?.range;
+        const body = range ? bytes.slice(range.offset, range.offset + range.length) : bytes;
+        return { body };
+      },
+      async delete() {},
+    } as unknown as R2Bucket;
+    return { env, reads };
+  }
+
+  it("serves stable metadata and byte ranges for browser-managed resume", async () => {
+    const { env, reads } = readyArchiveEnv();
+    const cookie = await sessionCookie(env);
+    const url = "https://delivery.example/api/public/shares/public/bulk-download/job-1/file";
+
+    const head = await deliveryWorker.fetch(new Request(url, { method: "HEAD", headers: { Cookie: cookie } }), env, executionCtx);
+    expect(head.status).toBe(200);
+    expect(head.headers.get("Accept-Ranges")).toBe("bytes");
+    expect(head.headers.get("Content-Length")).toBe("10");
+    expect(head.headers.get("ETag")).toBe('"archive-etag"');
+
+    const partial = await deliveryWorker.fetch(new Request(url, {
+      headers: { Cookie: cookie, Range: "bytes=3-6", "If-Range": '"archive-etag"' },
+    }), env, executionCtx);
+    expect(partial.status).toBe(206);
+    expect(partial.headers.get("Content-Range")).toBe("bytes 3-6/10");
+    expect(partial.headers.get("Content-Length")).toBe("4");
+    expect(new Uint8Array(await partial.arrayBuffer())).toEqual(Uint8Array.from([3, 4, 5, 6]));
+    expect(reads.at(-1)).toEqual({ offset: 3, length: 4 });
+  });
+
+  it("issues a job-scoped resume cookie and accepts it without widening the delivery session", async () => {
+    const { env } = readyArchiveEnv();
+    const statusUrl = "https://delivery.example/api/public/shares/public/bulk-download/job-1";
+    const status = await deliveryWorker.fetch(new Request(statusUrl, { headers: { Cookie: await sessionCookie(env) } }), env, executionCtx);
+    expect(status.status).toBe(200);
+    const setCookie = status.headers.get("Set-Cookie") || "";
+    expect(setCookie).toContain(`${BULK_DOWNLOAD_RESUME_COOKIE}=`);
+    expect(setCookie).toContain("Path=/api/public/shares/public/bulk-download/job-1/file");
+    expect(setCookie).toContain("HttpOnly");
+    expect(setCookie).toContain("Secure");
+    // The ordinary rolling portal session may be renewed by middleware, but it
+    // keeps its normal 12-hour lifetime; only the exact archive URL receives
+    // the longer job-scoped credential.
+    expect(setCookie).toMatch(/__Host-ltds_delivery=[^,]+Max-Age=43200/);
+
+    const resume = (await createBulkDownloadResumeCookie({
+      secret: env.DELIVERY_SESSION_SECRET,
+      keyId: env.SESSION_KEY_ID,
+      shareId: share.id,
+      shareVersion: share.share_version,
+      publicId: "public",
+      jobId: "job-1",
+      expiresAt: Date.now() + 60_000,
+    })).split(";")[0]!;
+    const fileUrl = `${statusUrl}/file`;
+    const resumed = await deliveryWorker.fetch(new Request(fileUrl, { headers: { Cookie: resume, Range: "bytes=7-9" } }), env, executionCtx);
+    expect(resumed.status).toBe(206);
+    expect(new Uint8Array(await resumed.arrayBuffer())).toEqual(Uint8Array.from([7, 8, 9]));
+
+    const wrongJob = await deliveryWorker.fetch(new Request(
+      "https://delivery.example/api/public/shares/public/bulk-download/job-2/file",
+      { headers: { Cookie: resume, Range: "bytes=7-9" } },
+    ), env, executionCtx);
+    expect(wrongJob.status).toBe(401);
+  });
+
+  it("returns the whole stable archive for stale If-Range and 416 outside its bounds", async () => {
+    const { env, reads } = readyArchiveEnv();
+    const cookie = await sessionCookie(env);
+    const url = "https://delivery.example/api/public/shares/public/bulk-download/job-1/file";
+
+    const stale = await deliveryWorker.fetch(new Request(url, {
+      headers: { Cookie: cookie, Range: "bytes=3-6", "If-Range": '"older-etag"' },
+    }), env, executionCtx);
+    expect(stale.status).toBe(200);
+    expect(stale.headers.get("Content-Length")).toBe("10");
+    expect(reads.at(-1)).toBeUndefined();
+
+    const invalid = await deliveryWorker.fetch(new Request(url, {
+      headers: { Cookie: cookie, Range: "bytes=10-20" },
+    }), env, executionCtx);
+    expect(invalid.status).toBe(416);
+    expect(invalid.headers.get("Content-Range")).toBe("bytes */10");
+    expect(invalid.headers.get("Accept-Ranges")).toBe("bytes");
+  });
+});
+
 describe("bulk-download snapshot identities", () => {
   function snapshotEnv(
     requestedKey: string,
@@ -313,7 +447,7 @@ describe("bulk-download snapshot identities", () => {
     expect(result.sources[0]?.name).toBe("Finals/Hero.jpg");
   });
 
-  it("rejects empty, over-file-limit, and over-byte-limit selections", async () => {
+  it("rejects empty and over-byte-limit selections without imposing a descendant file-count cap", async () => {
     const baseJob = {
       id: "job-1",
       share_id: share.id,
@@ -325,13 +459,18 @@ describe("bulk-download snapshot identities", () => {
     const empty = snapshotEnv("", null);
     await expect(snapshot(empty.env, baseJob)).rejects.toThrow("empty-selection");
 
-    const tooMany = snapshotEnv("", null, Array.from({ length: 2_001 }, (_, index) => ({
+    const manyFiles = snapshotEnv("", null, Array.from({ length: 10_626 }, (_, index) => ({
       key: `jobs/client/file-${index}.bin`,
       size: 1,
       etag: `etag-${index}`,
       httpEtag: `"etag-${index}"`,
     })));
-    await expect(snapshot(tooMany.env, baseJob)).rejects.toThrow("file-limit");
+    await expect(snapshot(manyFiles.env, baseJob)).resolves.toMatchObject({
+      sources: expect.arrayContaining([
+        expect.objectContaining({ physicalKey: "jobs/client/file-0.bin" }),
+        expect.objectContaining({ physicalKey: "jobs/client/file-10625.bin" }),
+      ]),
+    });
 
     const tooLarge = snapshotEnv("", null, [
       { key: "jobs/client/part-1.bin", size: 55 * 1024 * 1024 * 1024, etag: "etag-1", httpEtag: "\"etag-1\"" },
@@ -364,6 +503,15 @@ describe("bulk-download CRC source reads", () => {
 });
 
 describe("bulk-download failures and cleanup", () => {
+  it("extends resumable authorization through archive retention without passing share expiry", () => {
+    const now = Date.parse("2026-07-27T12:00:00.000Z");
+    const job = { expires_at: "2026-07-28T12:00:00.000Z" };
+    expect(bulkDownloadResumeExpiresAt(job, { expires_at: null }, now)).toBe(Date.parse(job.expires_at));
+    expect(bulkDownloadResumeExpiresAt(job, { expires_at: "2026-07-27T18:00:00.000Z" }, now))
+      .toBe(Date.parse("2026-07-27T18:00:00.000Z"));
+    expect(bulkDownloadResumeExpiresAt({ expires_at: "2026-07-27T11:59:59.000Z" }, { expires_at: null }, now)).toBeNull();
+  });
+
   it("treats the ready-state retention timestamp as an exact signing boundary", () => {
     expect(readyBulkJobIsExpired({ status: "ready", expires_at: "2026-07-27T12:00:00.000Z" }, Date.parse("2026-07-27T12:00:00.000Z"))).toBe(true);
     expect(readyBulkJobIsExpired({ status: "ready", expires_at: "2026-07-27T12:00:00.001Z" }, Date.parse("2026-07-27T12:00:00.000Z"))).toBe(false);

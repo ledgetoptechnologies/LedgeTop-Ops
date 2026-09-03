@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildZipLayout, crc32, readZipPart, streamZip } from "../src/worker/zip";
+import { buildZipLayout, crc32, estimateZipArchiveSize, readZipPart, streamZip, uniqueZipEntryNames } from "../src/worker/zip";
 import { normalizedSourceFilename, preparedKey } from "../src/worker/artifacts";
 
 async function bytes(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
@@ -74,6 +74,47 @@ describe("streaming ZIP writer", () => {
     const bucket = { async get(_key: string, options?: unknown) { reads.push(options); return null; } };
     await expect(readZipPart(bucket, layout, layout.entries[0]!.local.length, 5)).rejects.toThrow("changed or disappeared");
     expect(reads).toEqual([{ range: { offset: 0, length: 5 }, onlyIf: { etagMatches: "source-etag" } }]);
+  });
+
+  it("assigns deterministic, case-insensitively unique names after sanitizing and truncating", () => {
+    const veryLong = `${"😀".repeat(100)}.jpg`;
+    const names = uniqueZipEntryNames([
+      "folder/a:b.jpg",
+      "folder/a?b.jpg",
+      "Photo.JPG",
+      "photo.jpg",
+      veryLong,
+      veryLong,
+    ]);
+
+    expect(names.slice(0, 4)).toEqual([
+      "folder/a_b.jpg",
+      "folder/a_b.jpg~2",
+      "Photo.JPG",
+      "photo.jpg~2",
+    ]);
+    expect(new Set(names.map(name => name.toLocaleLowerCase("en-US"))).size).toBe(names.length);
+    expect(names.every(name => new TextEncoder().encode(name).length <= 240)).toBe(true);
+    expect(names[5]).toMatch(/~2$/);
+    expect(names.every(name => !name.includes("\uFFFD"))).toBe(true);
+  });
+
+  it("uses the same unique names and exact byte count in estimation and ZIP layout", () => {
+    const entries = [
+      { key: "one", name: "same:name.jpg", size: 5, crc32: 1 },
+      { key: "two", name: "same?name.jpg", size: 7, crc32: 2 },
+      { key: "three", name: "日本語/写真.jpg", size: 11, crc32: 3 },
+    ];
+    const layout = buildZipLayout(entries);
+    expect(estimateZipArchiveSize(entries)).toBe(layout.archiveSize);
+
+    const decoder = new TextDecoder();
+    const names = layout.entries.map(entry => {
+      const view = new DataView(entry.local.buffer, entry.local.byteOffset, entry.local.byteLength);
+      const nameLength = view.getUint16(26, true);
+      return decoder.decode(entry.local.subarray(30, 30 + nameLength));
+    });
+    expect(names).toEqual(uniqueZipEntryNames(entries.map(entry => entry.name)));
   });
 });
 

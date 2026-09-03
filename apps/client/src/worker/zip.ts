@@ -28,9 +28,50 @@ export function crc32(bytes: Uint8Array, previous = 0xffffffff): number {
   for (const byte of bytes) crc = (crc >>> 8) ^ CRC_TABLE[(crc ^ byte) & 0xff]!;
   return crc >>> 0;
 }
+function truncateUtf8(value: string, maximumBytes: number): string {
+  let result = "";
+  for (const character of value) {
+    if (encoder.encode(result + character).length > maximumBytes) break;
+    result += character;
+  }
+  return result;
+}
+
+function safeZipName(name: string): string {
+  return (name.normalize("NFC").replace(/[\0\x00-\x1f\x7f\\:*?"<>|]/g, "_") || "file");
+}
+
+export function uniqueZipEntryNames(names: readonly string[]): string[] {
+  const used = new Set<string>();
+  return names.map(value => {
+    const base = truncateUtf8(safeZipName(value), 240) || "file";
+    let candidate = base;
+    for (let copy = 2; used.has(candidate.toLocaleLowerCase("en-US")); copy += 1) {
+      const suffix = `~${copy}`;
+      candidate = `${truncateUtf8(base, 240 - encoder.encode(suffix).length)}${suffix}`;
+    }
+    used.add(candidate.toLocaleLowerCase("en-US"));
+    return candidate;
+  });
+}
+
 function nameBytes(name: string): Uint8Array {
-  const clean = name.replace(/[\0\x00-\x1f\x7f\\:*?"<>|]/g, "_") || "file";
-  return encoder.encode(clean).slice(0, 240);
+  return encoder.encode(name);
+}
+
+/** Exact byte size of the uncompressed ZIP64 layout emitted by buildZipLayout. */
+export function estimateZipArchiveSize(entries: readonly Pick<ZipManifestEntry, "name" | "size">[]): number {
+  let size = 98; // ZIP64 end record, locator, and classic end record.
+  const names = uniqueZipEntryNames(entries.map(entry => entry.name));
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index]!;
+    if (!Number.isSafeInteger(entry.size) || entry.size < 0) throw new Error("ZIP entry size is invalid");
+    const nameLength = nameBytes(names[index]!).length;
+    // Local header + ZIP64 extra (50), central header + ZIP64 extra (74), and both names.
+    size += entry.size + 124 + (nameLength * 2);
+    if (!Number.isSafeInteger(size)) throw new Error("ZIP archive size is invalid");
+  }
+  return size;
 }
 function zip64Extra(size: number, offset?: number): Uint8Array {
   const values = offset === undefined ? [size, size] : [size, size, offset];
@@ -41,13 +82,15 @@ function zip64Extra(size: number, offset?: number): Uint8Array {
 // just to decide whether a 32-bit offset or size will overflow and remains
 // readable by ZIP64-capable clients for small archives.
 export function streamZip(sources: ZipSource[]): ReadableStream<Uint8Array> {
+  const names = uniqueZipEntryNames(sources.map(source => source.name));
   return new ReadableStream<Uint8Array>({
     async start(controller) {
       const central: Uint8Array[] = []; let offset = 0; let entryCount = 0;
       try {
-        for (const source of sources) {
+        for (let sourceIndex = 0; sourceIndex < sources.length; sourceIndex += 1) {
+          const source = sources[sourceIndex]!;
           if (!Number.isSafeInteger(source.size) || source.size < 0) throw new Error("ZIP entry size is invalid");
-          const name = nameBytes(source.name); const extra = zip64Extra(source.size);
+          const name = nameBytes(names[sourceIndex]!); const extra = zip64Extra(source.size);
           const localOffset = offset;
           const local = concat(u32(0x04034b50), u16(45), u16(0x0808), u16(0), u16(0), u16(0), u32(0), u32(0xffffffff), u32(0xffffffff), u16(name.length), u16(extra.length), name, extra);
           controller.enqueue(local); offset += local.length;
@@ -84,14 +127,17 @@ export interface ZipRangeBucket { get(key: string, options?: { range: { offset: 
 
 export function buildZipLayout(entries: ZipManifestEntry[]): ZipArchiveLayout {
   const layoutEntries: ZipArchiveLayout["entries"] = []; const segments: ZipArchiveLayout["segments"] = []; let offset = 0;
-  for (const entry of entries) {
-    const name = nameBytes(entry.name); const extra = zip64Extra(entry.size); const local = concat(u32(0x04034b50), u16(45), u16(0x0800), u16(0), u16(0), u16(0), u32(entry.crc32), u32(0xffffffff), u32(0xffffffff), u16(name.length), u16(extra.length), name, extra);
+  const names = uniqueZipEntryNames(entries.map(entry => entry.name));
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index]!;
+    const name = nameBytes(names[index]!); const extra = zip64Extra(entry.size); const local = concat(u32(0x04034b50), u16(45), u16(0x0800), u16(0), u16(0), u16(0), u32(entry.crc32), u32(0xffffffff), u32(0xffffffff), u16(name.length), u16(extra.length), name, extra);
     const localOffset = offset; layoutEntries.push({ ...entry, localOffset, local }); segments.push({ kind: "bytes", offset, length: local.length, bytes: local }); offset += local.length;
     segments.push({ kind: "object", offset, length: entry.size, key: entry.key, etag: entry.etag }); offset += entry.size;
   }
   const centralOffset = offset; const central: Uint8Array[] = [];
-  for (const entry of layoutEntries) {
-    const name = nameBytes(entry.name); const extra = zip64Extra(entry.size, entry.localOffset);
+  for (let index = 0; index < layoutEntries.length; index += 1) {
+    const entry = layoutEntries[index]!;
+    const name = nameBytes(names[index]!); const extra = zip64Extra(entry.size, entry.localOffset);
     central.push(concat(u32(0x02014b50), u16(45), u16(45), u16(0x0800), u16(0), u16(0), u16(0), u32(entry.crc32), u32(0xffffffff), u32(0xffffffff), u16(name.length), u16(extra.length), u16(0), u16(0), u16(0), u32(0), u32(0xffffffff), name, extra));
   }
   const centralBytes = concat(...central); segments.push({ kind: "bytes", offset, length: centralBytes.length, bytes: centralBytes }); offset += centralBytes.length;

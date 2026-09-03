@@ -106,7 +106,7 @@
   ],
   "stream": { "binding": "STREAM" },
   "workflows": [
-    { "name": "ltds-bulk-download-staging", "binding": "BULK_DOWNLOAD_WORKFLOW", "class_name": "BulkDownloadWorkflow" },
+    { "name": "ltds-bulk-download-staging", "binding": "BULK_DOWNLOAD_WORKFLOW", "class_name": "BulkDownloadWorkflow", "limits": { "steps": 25000 } },
     { "name": "ltds-cloud-transfer-staging", "binding": "CLOUD_TRANSFER_WORKFLOW", "class_name": "CloudTransferWorkflow" }
   ]
 }

@@ -130,7 +130,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   // The digest intentionally moved with the reviewed canonical portal hosts
   // and explicit legacy compatibility origin. Keep the field assertions so a future config change
   // cannot hide behind a digest refresh.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "088b418d0bc3e140c42a9412f23c661e69f1be0d8d362c32de83f3b919f97e29");
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "432d9c334d0518ed9af08e6b8bdc51cbe4e105a8747c05c66672715715e194e0");
   const config = readJson("apps/client/wrangler.jsonc");
   assert.equal(config.name, "ltds-clients");
   assert.equal(config.main, "src/worker/index.ts");
@@ -142,6 +142,8 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.equal(config.workers_dev, false);
   assert.equal(config.preview_urls, false);
   assert.deepEqual(config.triggers, { crons: ["*/5 * * * *", "15 * * * *"] });
+  assert.deepEqual(config.workflows.find(workflow => workflow.binding === "BULK_DOWNLOAD_WORKFLOW")?.limits, { steps: 25_000 });
+  assert.equal(config.workflows.find(workflow => workflow.binding === "CLOUD_TRANSFER_WORKFLOW")?.limits, undefined);
   assert.deepEqual(config.assets, {
     binding: "ASSETS",
     directory: "./dist/client",
@@ -213,7 +215,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.equal(config.images, undefined);
   assert.deepEqual(config.stream, { binding: "STREAM" });
   assert.deepEqual(config.workflows, [
-    { name: "ltds-bulk-download", binding: "BULK_DOWNLOAD_WORKFLOW", class_name: "BulkDownloadWorkflow" },
+    { name: "ltds-bulk-download", binding: "BULK_DOWNLOAD_WORKFLOW", class_name: "BulkDownloadWorkflow", limits: { steps: 25_000 } },
     { name: "ltds-cloud-transfer", binding: "CLOUD_TRANSFER_WORKFLOW", class_name: "CloudTransferWorkflow" },
   ]);
   assert.deepEqual(config.ratelimits.map((item) => [item.name, item.namespace_id, item.simple.limit]), expectedRateLimits);

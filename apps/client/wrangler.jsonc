@@ -170,7 +170,10 @@
     {
       "name": "ltds-bulk-download",
       "binding": "BULK_DOWNLOAD_WORKFLOW",
-      "class_name": "BulkDownloadWorkflow"
+      "class_name": "BulkDownloadWorkflow",
+      "limits": {
+        "steps": 25000
+      }
     },
     {
       "name": "ltds-cloud-transfer",

@@ -87,6 +87,68 @@ export async function verifyRotatingSessionCookie(
   throw new HTTPException(401, { message: "Delivery session expired", cause: { code: "DELIVERY_SESSION_EXPIRED" } });
 }
 
+export const BULK_DOWNLOAD_RESUME_COOKIE = "__Secure-ltds_bulk_download";
+
+function bulkDownloadResumePayload(
+  keyId: string,
+  shareId: string,
+  shareVersion: number,
+  jobId: string,
+  expiresAt: number,
+): string {
+  return `bulk-download:v1:${keyId}:${shareId}:${shareVersion}:${jobId}:${expiresAt}`;
+}
+
+export async function createBulkDownloadResumeCookie(input: {
+  secret: string;
+  keyId: string;
+  shareId: string;
+  shareVersion: number;
+  publicId: string;
+  jobId: string;
+  expiresAt: number;
+  now?: number;
+}): Promise<string> {
+  const now = input.now ?? Date.now();
+  if (!/^[A-Za-z0-9_-]+$/.test(input.publicId) || !/^[A-Za-z0-9_-]+$/.test(input.jobId)) throw new Error("Invalid bulk-download resume scope");
+  const signature = await hmac(input.secret, bulkDownloadResumePayload(input.keyId, input.shareId, input.shareVersion, input.jobId, input.expiresAt));
+  const value = `${input.keyId}.${input.shareId}.${input.shareVersion}.${input.jobId}.${input.expiresAt}.${signature}`;
+  const maxAge = Math.max(0, Math.floor((input.expiresAt - now) / 1000));
+  const path = `/api/public/shares/${input.publicId}/bulk-download/${input.jobId}/file`;
+  return `${BULK_DOWNLOAD_RESUME_COOKIE}=${encodeURIComponent(value)}; Path=${path}; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Lax`;
+}
+
+async function verifyBulkDownloadResumeCookie(
+  secret: string,
+  expectedKeyId: string,
+  value: string | null,
+  now = Date.now(),
+): Promise<{ shareId: string; shareVersion: number; jobId: string; expiresAt: number }> {
+  if (!value) throw new HTTPException(401, { message: "Delivery session required", cause: { code: "DELIVERY_SESSION_REQUIRED" } });
+  const [keyId, shareId, versionRaw, jobId, expiresRaw, signature] = value.split(".");
+  const shareVersion = Number(versionRaw), expiresAt = Number(expiresRaw);
+  if (!keyId || keyId !== expectedKeyId || !shareId || !jobId || !signature
+    || !Number.isSafeInteger(shareVersion) || shareVersion < 1
+    || !Number.isSafeInteger(expiresAt) || expiresAt <= now) {
+    throw new HTTPException(401, { message: "Download resume authorization expired", cause: { code: "BULK_DOWNLOAD_RESUME_EXPIRED" } });
+  }
+  const expected = await hmac(secret, bulkDownloadResumePayload(keyId, shareId, shareVersion, jobId, expiresAt));
+  if (!constantTimeEqual(expected, signature)) throw new HTTPException(401, { message: "Invalid download resume authorization", cause: { code: "BULK_DOWNLOAD_RESUME_INVALID" } });
+  return { shareId, shareVersion, jobId, expiresAt };
+}
+
+export async function verifyRotatingBulkDownloadResumeCookie(
+  value: string | null,
+  current: { keyId: string; secret: string },
+  previous?: { keyId: string; secret: string } | null,
+  now = Date.now(),
+): Promise<{ shareId: string; shareVersion: number; jobId: string; expiresAt: number }> {
+  const keyId = value?.split(".", 1)[0];
+  if (keyId === current.keyId) return verifyBulkDownloadResumeCookie(current.secret, current.keyId, value, now);
+  if (previous?.keyId && previous.secret && keyId === previous.keyId) return verifyBulkDownloadResumeCookie(previous.secret, previous.keyId, value, now);
+  throw new HTTPException(401, { message: "Download resume authorization expired", cause: { code: "BULK_DOWNLOAD_RESUME_EXPIRED" } });
+}
+
 function hex(bytes: Uint8Array): string {
   return Array.from(bytes, value => value.toString(16).padStart(2, "0")).join("");
 }

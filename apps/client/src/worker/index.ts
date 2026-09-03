@@ -3,7 +3,7 @@ import { HTTPException } from "hono/http-exception";
 import { secureHeaders } from "hono/secure-headers";
 import { isMovedSourceMarker, type DeliveryItem, type DeliveryManifest } from "@ltds/shared";
 import { decodeItemRef, encodeItemRef, indexedImmediateChildVisibility, isHiddenKey, keyWithinRoot, kindForKey, mimeForKey, normalizeRoot, parseRange, prefixHasBrowsableEntry, safeFileName, streamPlayerUrl } from "./files";
-import { createSessionCookie, hmac, parseCookie, randomSecret, sha256, verifyAccessCode, verifyRotatingSessionCookie } from "./security";
+import { BULK_DOWNLOAD_RESUME_COOKIE, createBulkDownloadResumeCookie, createSessionCookie, hmac, parseCookie, randomSecret, sha256, verifyAccessCode, verifyRotatingBulkDownloadResumeCookie, verifyRotatingSessionCookie } from "./security";
 import { matchesEtag } from "./prepared-images";
 import { serveAuthorizedThumbnail, thumbnailFieldsForObject, type ThumbnailJobRow } from "./thumbnails";
 import { recordFirstAccessNotification } from "./notifications";
@@ -438,13 +438,28 @@ app.use("/api/public/shares/:publicId/*", async (c, next) => {
   // The signed cookie is only a transport credential. D1 remains the first
   // primary authorization source for every protected public request.
   const sessionCookie=parseCookie(c.req.header("Cookie"), COOKIE_NAME);
-  const session = await verifyRotatingSessionCookie(
-    sessionCookie,
-    { keyId: c.env.SESSION_KEY_ID, secret: c.env.DELIVERY_SESSION_SECRET },
-    c.env.PREVIOUS_SESSION_KEY_ID && c.env.DELIVERY_PREVIOUS_SESSION_SECRET
+  const signingKeys = {
+    current: { keyId: c.env.SESSION_KEY_ID, secret: c.env.DELIVERY_SESSION_SECRET },
+    previous: c.env.PREVIOUS_SESSION_KEY_ID && c.env.DELIVERY_PREVIOUS_SESSION_SECRET
       ? { keyId: c.env.PREVIOUS_SESSION_KEY_ID, secret: c.env.DELIVERY_PREVIOUS_SESSION_SECRET }
       : null,
-  );
+  };
+  let usedBulkResume = false;
+  let session: { shareId: string; shareVersion: number; expiresAt: number };
+  try {
+    session = await verifyRotatingSessionCookie(sessionCookie, signingKeys.current, signingKeys.previous);
+  } catch (sessionError) {
+    const resumePath = /^\/api\/public\/shares\/[^/]+\/bulk-download\/([^/]+)\/file$/.exec(c.req.path);
+    if ((c.req.method !== "GET" && c.req.method !== "HEAD") || !resumePath) throw sessionError;
+    const resumed = await verifyRotatingBulkDownloadResumeCookie(
+      parseCookie(c.req.header("Cookie"), BULK_DOWNLOAD_RESUME_COOKIE),
+      signingKeys.current,
+      signingKeys.previous,
+    );
+    if (resumed.jobId !== resumePath[1]) throw new HTTPException(401, { message: "Invalid download resume authorization", cause: { code: "BULK_DOWNLOAD_RESUME_INVALID" } });
+    session = resumed;
+    usedBulkResume = true;
+  }
   const share=await lifecycleShareQuery(c.env,lifecycleShareSql("s.id=? AND s.public_id=?"),[session.shareId,c.req.param("publicId")]);
   if(!share){
     const existing=await lifecycleShareQuery(c.env,lifecycleShareSql("s.id=?"),[session.shareId]);
@@ -461,8 +476,8 @@ app.use("/api/public/shares/:publicId/*", async (c, next) => {
   await next();
   const timing=c.res.headers.get("Server-Timing");
   c.header("Server-Timing",`${timing?`${timing}, `:""}auth;dur=${Math.max(0,authDuration)}`);
-  if(shouldRenewPublicShareSession({sessionExpiresAt:session.expiresAt,cookieKeyId:sessionCookie?.split(".",1)[0]||null,currentKeyId:c.env.SESSION_KEY_ID})){
-    c.header("Set-Cookie",await createSessionCookie(c.env.DELIVERY_SESSION_SECRET,c.env.SESSION_KEY_ID,share.id,share.share_version,publicShareSessionExpiresAt(share.expires_at)));
+  if(!usedBulkResume&&shouldRenewPublicShareSession({sessionExpiresAt:session.expiresAt,cookieKeyId:sessionCookie?.split(".",1)[0]||null,currentKeyId:c.env.SESSION_KEY_ID})){
+    c.header("Set-Cookie",await createSessionCookie(c.env.DELIVERY_SESSION_SECRET,c.env.SESSION_KEY_ID,share.id,share.share_version,publicShareSessionExpiresAt(share.expires_at)),{append:true});
   }
 });
 
@@ -742,6 +757,19 @@ export function readyBulkJobIsExpired(job: { status: string; expires_at: string 
   return job.status === "ready" && Number.isFinite(expiresAt) && expiresAt <= now;
 }
 
+export function bulkDownloadResumeExpiresAt(
+  job: { expires_at: string },
+  share: Pick<ShareRow, "expires_at">,
+  now = Date.now(),
+): number | null {
+  const jobExpiry = Date.parse(job.expires_at);
+  if (!Number.isFinite(jobExpiry) || jobExpiry <= now) return null;
+  const shareExpiry = share.expires_at ? Date.parse(share.expires_at) : Number.POSITIVE_INFINITY;
+  if (!Number.isFinite(shareExpiry) && share.expires_at) return null;
+  const expiresAt = Math.min(jobExpiry, shareExpiry);
+  return expiresAt > now ? expiresAt : null;
+}
+
 export function bulkJobProgress(job: {
   status: string;
   total_bytes: number | null;
@@ -785,7 +813,24 @@ app.get("/api/public/shares/:publicId/bulk-download/:jobId", async c => {
   const progress = bulkJobProgress(job);
   const encodedShare = encodeURIComponent(share.public_id!);
   const response: Record<string, unknown> = { jobId: job.id, status: job.status, fileCount: job.file_count, processedFiles: job.processed_files, totalBytes: job.total_bytes, processedBytes: job.processed_bytes, archiveSize: job.archive_size, expiresAt: job.expires_at, error: failure, downloadUrl: null, ...progress };
-  if (job.status === "ready") response.downloadUrl = `/api/public/shares/${encodedShare}/bulk-download/${job.id}/file`;
+  if (job.status === "ready") {
+    response.downloadUrl = `/api/public/shares/${encodedShare}/bulk-download/${job.id}/file`;
+    const resumeExpiresAt = bulkDownloadResumeExpiresAt(job, share);
+    if (resumeExpiresAt) {
+      // The browser download manager can issue Range requests for the entire
+      // prepared-archive retention window. D1 share/version/revocation checks
+      // still run on every resumed request.
+      c.header("Set-Cookie", await createBulkDownloadResumeCookie({
+        secret: c.env.DELIVERY_SESSION_SECRET,
+        keyId: c.env.SESSION_KEY_ID,
+        shareId: share.id,
+        shareVersion: share.share_version,
+        publicId: share.public_id!,
+        jobId: job.id,
+        expiresAt: resumeExpiresAt,
+      }), { append: true });
+    }
+  }
   return c.json(response);
 });
 
