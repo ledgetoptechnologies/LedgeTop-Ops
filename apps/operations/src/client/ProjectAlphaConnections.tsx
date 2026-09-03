@@ -194,8 +194,13 @@ export function ProjectAlphaConnections() {
       </div>}
       {data?.legacyPrimary && <section className="alpha-connection">
         <h3>Primary connection</h3>
-        <p>Using the existing deployment configuration. Signed events and daily reconciliation remain enabled when configured.</p>
-        {data.connectors.some(row => row.sourceId === PRIMARY && row.state === "pending") && <p className="notice">A replacement enrollment is staged for review. It does not interrupt this primary connection until activation.</p>}
+        <p><strong>Business record sync</strong> · Using the existing deployment configuration. Signed events and daily reconciliation remain enabled when configured.</p>
+        {(() => {
+          const enrollment = data.connectors.find(row => row.sourceId === PRIMARY);
+          if (!enrollment) return <p className="notice"><strong>Authenticated portal connector</strong> · Not enrolled. The healthy business sync does not by itself provision client workspaces or portal access.</p>;
+          if (enrollment.state === "pending") return <p className="notice"><strong>Authenticated portal connector</strong> · Staged for review. It does not interrupt the business sync or grant portal access until activation.</p>;
+          return <p><strong>Authenticated portal connector</strong> · {enrollment.state === "active" ? "Enrolled" : enrollment.state}. Client workspaces and access remain independently authorized.</p>;
+        })()}
         <SyncHealth health={data.health.find(row => row.sourceId === PRIMARY)} />
         <button type="button" disabled={controlsBusy} onClick={() => void submit(`/${encodeURIComponent(PRIMARY)}/sync`, "POST", {}, "Primary synchronization finished.")}>Sync primary now</button>
       </section>}

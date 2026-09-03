@@ -108,6 +108,24 @@ test("initial loading and read failure offer an explicit retry without fabricate
   await expect(page.locator(".alpha-connections")).toContainText("Sync: Not yet run");
 });
 
+test("legacy business health never implies that authenticated portal enrollment exists", async ({ page }) => {
+  const data = { ...directory([]), legacyPrimary: true };
+  data.health.push({ sourceId: primary, status: "healthy", lastAttemptAt: "2026-09-02T20:27:05Z",
+    lastSuccessAt: "2026-09-02T20:27:09Z", lastErrorCode: null });
+  await fixture(page, data);
+  await page.goto("/administration");
+  const card = page.locator(".alpha-connection").filter({ has: page.getByRole("heading", { name: "Primary connection", exact: true }) });
+  await expect(card).toContainText("Business record sync");
+  await expect(card).toContainText("Sync: healthy");
+  await expect(card).toContainText("Authenticated portal connector · Not enrolled");
+  await expect(card).toContainText("does not by itself provision client workspaces or portal access");
+
+  data.connectors.push(connector(primary, "pending"));
+  await page.getByRole("button", { name: "Refresh connection status" }).click();
+  await expect(card).toContainText("Authenticated portal connector · Staged for review");
+  await expect(card).not.toContainText("Authenticated portal connector · Enrolled");
+});
+
 test("project management config is exact-source, reviewed, versioned and never creates a local project", async ({ page }) => {
   const data: Directory = { ...directory([connector(primary), connector()]), projectManagement: [] };
   const requests = await fixture(page, data, async (route, path) => {
@@ -257,7 +275,8 @@ test("pending primary enrollment preserves legacy synchronization and submits re
   const card = page.getByRole("region", { name: "Registered company connection" });
   await expect(card).toContainText("pending");
   await expect(card).toContainText("existing deployment connection remains active");
-  await expect(page.getByText("A replacement enrollment is staged for review.", { exact: false })).toBeVisible();
+  const legacyCard = page.locator(".alpha-connection").filter({ has: page.getByRole("heading", { name: "Primary connection", exact: true }) });
+  await expect(legacyCard).toContainText("Authenticated portal connector · Staged for review");
   await expect(card.getByRole("button", { name: "Sync now", exact: true })).toBeDisabled();
   await expect(card.getByRole("button", { name: /Hide business records|Show business records/ })).toHaveCount(0);
 });
