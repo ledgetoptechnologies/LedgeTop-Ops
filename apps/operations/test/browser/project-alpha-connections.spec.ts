@@ -108,7 +108,7 @@ test("initial loading and read failure offer an explicit retry without fabricate
   await expect(page.locator(".alpha-connections")).toContainText("Sync: Not yet run");
 });
 
-test("legacy business health never implies that authenticated portal enrollment exists", async ({ page }) => {
+test("legacy business health never implies that exact-source portal enrollment exists", async ({ page }) => {
   const data = { ...directory([]), legacyPrimary: true };
   data.health.push({ sourceId: primary, status: "healthy", lastAttemptAt: "2026-09-02T20:27:05Z",
     lastSuccessAt: "2026-09-02T20:27:09Z", lastErrorCode: null });
@@ -117,13 +117,14 @@ test("legacy business health never implies that authenticated portal enrollment 
   const card = page.locator(".alpha-connection").filter({ has: page.getByRole("heading", { name: "Primary connection", exact: true }) });
   await expect(card).toContainText("Business record sync");
   await expect(card).toContainText("Sync: healthy");
-  await expect(card).toContainText("Authenticated portal connector · Not enrolled");
-  await expect(card).toContainText("does not by itself provision client workspaces or portal access");
+  await expect(card).toContainText("Exact-source connector upgrade · Not enrolled");
+  await expect(card).toContainText("separately configured portal producer remain unchanged");
+  await expect(card).toContainText("sync health alone is not portal-access authority");
 
   data.connectors.push(connector(primary, "pending"));
   await page.getByRole("button", { name: "Refresh connection status" }).click();
-  await expect(card).toContainText("Authenticated portal connector · Staged for review");
-  await expect(card).not.toContainText("Authenticated portal connector · Enrolled");
+  await expect(card).toContainText("Exact-source connector upgrade · Staged for review");
+  await expect(card).not.toContainText("Exact-source connector upgrade · Enrolled");
 });
 
 test("project management config is exact-source, reviewed, versioned and never creates a local project", async ({ page }) => {
@@ -276,7 +277,7 @@ test("pending primary enrollment preserves legacy synchronization and submits re
   await expect(card).toContainText("pending");
   await expect(card).toContainText("existing deployment connection remains active");
   const legacyCard = page.locator(".alpha-connection").filter({ has: page.getByRole("heading", { name: "Primary connection", exact: true }) });
-  await expect(legacyCard).toContainText("Authenticated portal connector · Staged for review");
+  await expect(legacyCard).toContainText("Exact-source connector upgrade · Staged for review");
   await expect(card.getByRole("button", { name: "Sync now", exact: true })).toBeDisabled();
   await expect(card.getByRole("button", { name: /Hide business records|Show business records/ })).toHaveCount(0);
 });

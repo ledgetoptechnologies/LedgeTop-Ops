@@ -257,3 +257,43 @@ logout, session expiry, unauthorized or unprovisioned denial, cross-tenant
 denial, revocation during an active read, or the post-change Access
 application/audience/policy readback. Those cases remain required before J7 is
 live accepted.
+
+## 2026-09-02 connection-authority clarification
+
+This checkpoint separates the healthy legacy business-record synchronization
+from authenticated portal enrollment. It did not create a connector, provision
+a secret, activate a portal capability, or change a client's effective access.
+
+- A signed-in, read-only Operations check showed that the existing primary
+  Project Alpha business synchronization remained healthy, with a current
+  successful attempt. No exact-source connector card was present.
+- A read-only Wrangler secret-name inventory found the legacy
+  `PROJECT_ALPHA_API_KEY`, but did not find
+  `PROJECT_ALPHA_CONNECTOR_CREDENTIALS` on Operations or Client. The Client
+  deployment also did not list the dedicated Project Alpha portal HMAC secret.
+  No secret values were read.
+- The Administration UI at commit
+  `b0ca65bab1f548bae23a2503d21c6e70d7e3563b` now labels these as separate
+  states: **Business record sync** and **Authenticated portal connector**. A
+  healthy legacy sync can therefore no longer be mistaken for enrolled portal
+  authority.
+- The production build, source-layout invariants, and all 54 focused Project
+  Alpha connection browser cases passed across desktop and mobile before the
+  commit was pushed to `main`.
+- Post-push Wrangler readback showed Operations version
+  `9fde901f-c06e-4359-a527-3c8abcd451db` and Client version
+  `b6952c1b-157d-4bd9-8578-5a5ba68bfc44` each serving 100% of traffic. The
+  readback listed only secret names and bindings; no secret value was read.
+- Project Alpha `main` already contains the unified portal producer and service
+  assignment lifecycle from PR #165, followed by the newer contract-scope
+  persistence fix in PR #166. The older
+  `codex/unified-client-portal-connection` branch must not be merged: its tree
+  would regress the newer contract workflow. A separate local descendant adds
+  the later schema-v4 contact-assignment producer, but remains unpublished and
+  is not required to prove the existing primary producer contract.
+
+The next safe action is a coordinated credential-provisioning and disabled
+preflight window against the producer already on Project Alpha `main`. Secondary
+exact-source enrollment still requires its reviewed connector envelope.
+Reusing the legacy read-only synchronization API key as event, portal,
+connector, or draft-quote authority remains prohibited.

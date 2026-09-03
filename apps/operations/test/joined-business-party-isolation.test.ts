@@ -96,7 +96,7 @@ describe("J1 joined reviewed-link isolation", () => {
     expect((await listClientHubRoots(env, staff, { grouping: "records", q: sameEmail })).clients).toHaveLength(2);
     const first = await listClientHubRoots(env, staff, { grouping: "records", limit: 1 });
     const second = await listClientHubRoots(env, staff, { grouping: "records", limit: 1, cursor: first.nextCursor! });
-    expect([first.clients[0], second.clients[0]].map(row => [row.source_id, row.public_id])).toEqual([[primary, "external-a"], [secondary, "org-b"]]);
+    expect([first.clients[0]!, second.clients[0]!].map(row => [row.source_id, row.public_id])).toEqual([[primary, "external-a"], [secondary, "org-b"]]);
     await expect(listClientHubRoots(env, staff, { grouping: "customers", limit: 1, cursor: first.nextCursor! }))
       .rejects.toMatchObject({ status: 400 });
 

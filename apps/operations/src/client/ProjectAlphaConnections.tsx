@@ -197,9 +197,9 @@ export function ProjectAlphaConnections() {
         <p><strong>Business record sync</strong> · Using the existing deployment configuration. Signed events and daily reconciliation remain enabled when configured.</p>
         {(() => {
           const enrollment = data.connectors.find(row => row.sourceId === PRIMARY);
-          if (!enrollment) return <p className="notice"><strong>Authenticated portal connector</strong> · Not enrolled. The healthy business sync does not by itself provision client workspaces or portal access.</p>;
-          if (enrollment.state === "pending") return <p className="notice"><strong>Authenticated portal connector</strong> · Staged for review. It does not interrupt the business sync or grant portal access until activation.</p>;
-          return <p><strong>Authenticated portal connector</strong> · {enrollment.state === "active" ? "Enrolled" : enrollment.state}. Client workspaces and access remain independently authorized.</p>;
+          if (!enrollment) return <p className="notice"><strong>Exact-source connector upgrade</strong> · Not enrolled. The primary business sync and its separately configured portal producer remain unchanged; sync health alone is not portal-access authority.</p>;
+          if (enrollment.state === "pending") return <p className="notice"><strong>Exact-source connector upgrade</strong> · Staged for review. It does not interrupt the existing business sync or replace the primary portal producer until activation.</p>;
+          return <p><strong>Exact-source connector upgrade</strong> · {enrollment.state === "active" ? "Enrolled" : enrollment.state}. Client workspaces and access remain independently authorized.</p>;
         })()}
         <SyncHealth health={data.health.find(row => row.sourceId === PRIMARY)} />
         <button type="button" disabled={controlsBusy} onClick={() => void submit(`/${encodeURIComponent(PRIMARY)}/sync`, "POST", {}, "Primary synchronization finished.")}>Sync primary now</button>
