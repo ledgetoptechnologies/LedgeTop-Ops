@@ -20,7 +20,46 @@ export interface BulkDownloadResponse {
   message?: string;
   processedBytes?: number;
   totalBytes?: number;
+  fileCount?: number;
+  processedFiles?: number;
+  archiveSize?: number | null;
   error?: { code?: string; message?: string } | null;
+}
+
+export interface BulkProgressView {
+  status: string;
+  percent: number | null;
+  message?: string;
+}
+
+export function bulkDownloadProgress(response: BulkDownloadResponse): BulkProgressView {
+  if (response.status === "ready" || response.status === "complete") {
+    return { status: "Download ready", percent: 100, message: "ZIP preparation complete. Your browser will start the download." };
+  }
+  if (response.status === "queued") {
+    return { status: "Download queued", percent: null, message: "Waiting to prepare your ZIP on the server." };
+  }
+  if (response.status === "failed" || response.status === "expired" || response.status === "cancelled") {
+    return { status: `Download ${response.status}`, percent: null, message: response.error?.message || response.message || undefined };
+  }
+
+  const calculated = response.totalBytes && typeof response.processedBytes === "number"
+    ? response.processedBytes / response.totalBytes * 100 : null;
+  const value = typeof response.progress === "number" ? response.progress : typeof response.percent === "number" ? response.percent : calculated;
+  // These bytes measure weighted preparation work, not bytes downloaded.
+  const percent = value !== null && Number.isFinite(value) ? Math.min(99, Math.max(0, Math.round(value))) : null;
+  const active = response.status === "running" || response.status === "processing";
+  const checking = active && (response.archiveSize === null || (response.archiveSize === undefined && response.message === "Checking files"));
+  const building = active && (typeof response.archiveSize === "number" || response.message === "Building ZIP");
+  const hasCounts = Number.isInteger(response.fileCount) && response.fileCount! > 0 && Number.isInteger(response.processedFiles) && response.processedFiles! >= 0;
+  const status = checking
+    ? hasCounts ? `Checking files ${Math.min(response.processedFiles!, response.fileCount!).toLocaleString("en-US")} of ${response.fileCount!.toLocaleString("en-US")}` : "Checking files"
+    : building ? "Building ZIP" : "Preparing download";
+  const detail = checking
+    ? "Verifying files before building the ZIP. Large files can take longer."
+    : building ? "Assembling the ZIP on the server. The download starts when it is ready."
+      : "Preparing your ZIP on the server. Large downloads can take several minutes.";
+  return { status, percent, message: `${percent === null ? "" : `${percent}% prepared · `}${detail}` };
 }
 
 const CLIENT_WORKSPACE_STORAGE_KEY = "ltds.client.workspace.v2";

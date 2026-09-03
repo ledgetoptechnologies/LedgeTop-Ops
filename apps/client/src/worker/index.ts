@@ -797,7 +797,7 @@ async function expireReadyBulkJob(c: any, job: any): Promise<void> {
   if (!readyBulkJobIsExpired(job)) return;
   await primaryDb(c.env).prepare("UPDATE bulk_download_jobs SET status='expired',updated_at=datetime('now') WHERE id=? AND status='ready' AND datetime(expires_at)<=datetime('now')").bind(job.id).run();
   job.status = "expired";
-  c.executionCtx.waitUntil(c.env.DATA_BUCKET.delete([job.archive_key, job.manifest_key]));
+  c.executionCtx.waitUntil(c.env.DATA_BUCKET.delete([job.archive_key, job.manifest_key, `${job.manifest_key}.final.json`]));
 }
 
 app.post("/api/public/shares/:publicId/bulk-download", async c => {
@@ -962,11 +962,11 @@ export async function cleanupTemporaryZips(env: Env, now = Date.now()): Promise<
       console.error(JSON.stringify({ event: "bulk-download.cleanup-abort-failed", archiveKey: job.archive_key, error: error instanceof Error ? error.message : String(error) }));
     }
   }
-  const artifactKeys = [...new Set(expiredJobs.results.flatMap(job => [job.manifest_key, job.archive_key]).filter(Boolean))];
+  const artifactKeys = [...new Set(expiredJobs.results.flatMap(job => [job.manifest_key, job.archive_key, `${job.manifest_key}.final.json`]).filter(Boolean))];
   for (let offset = 0; offset < artifactKeys.length; offset += 1000) await env.DATA_BUCKET.delete(artifactKeys.slice(offset, offset + 1000));
   const activeJobs = await primaryDb(env).prepare("SELECT manifest_key,archive_key FROM bulk_download_jobs WHERE status IN ('queued','running','ready') AND datetime(expires_at)>datetime(?)")
     .bind(nowIso).all<{ manifest_key: string; archive_key: string }>();
-  const protectedKeys = new Set(activeJobs.results.flatMap(job => [job.manifest_key, job.archive_key]).filter(Boolean));
+  const protectedKeys = new Set(activeJobs.results.flatMap(job => [job.manifest_key, job.archive_key, `${job.manifest_key}.final.json`]).filter(Boolean));
   const cutoff = now - 24 * 60 * 60 * 1000;
   let cursor: string | undefined;
   do {
