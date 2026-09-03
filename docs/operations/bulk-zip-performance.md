@@ -62,3 +62,27 @@ parent replay without duplicate child creation. TypeScript and production
 build passed. The progress browser fixture passed on desktop Edge and mobile
 Edge with no horizontal overflow at queued/checking/building/ready stages.
 These are local results; no large production throughput acceptance is claimed.
+
+## September 3 maintenance deployment
+
+The user explicitly approved a ZIP-only maintenance exception to the normal
+portal release gate. The existing missing portal-signing configuration remains
+a blocker for portal activation, not a change included in this release. The
+preflight itself was not weakened. After the checks above and a successful
+Wrangler dry run, commit `14d5fed` was deployed with `--keep-vars` at
+19:47:38 UTC. No migrations, Access policies, secrets, or feature flags changed.
+
+- Worker version: `bf225051-1e8e-49ae-9e4c-4457a2107494` (100%).
+- Deployment: `fc37535f-5b03-4255-8a14-47218242b18f`.
+- Prior rollback version: `1580d13d-d857-419d-8913-77c3edae40f0`.
+- All Worker bindings matched the captured pre-deployment settings exactly.
+- Both portal hosts returned HTTP 200 from `/health`; a synthetic public-share
+  shell returned 200. This does not assert authorization for a real client link.
+- The existing large Workflow remained running on its original version
+  `a0b1d09e-0d60-4198-a310-961c38b7d41d`; it was not cancelled or migrated.
+
+Use a newly created job for production performance acceptance. A new release
+does not accelerate an already-running old-version job. No TrueNAS update is
+needed for this Cloudflare-only change. The normal connected build may still
+stop at the unchanged portal gate; the explicit manual maintenance deployment
+above is the verified live release.
