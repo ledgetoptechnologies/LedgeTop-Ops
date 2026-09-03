@@ -40,6 +40,13 @@ const groups = [
     app: "client",
     files: ["test/joined-feedback-service-requests.test.ts"],
   },
+  {
+    id: "j7",
+    label: "dual-domain daily use and authority boundaries",
+    app: "client",
+    files: ["test/joined-dual-domain-daily-use.test.ts"],
+    browserConfig: "playwright.j7.config.ts",
+  },
 ];
 
 const selected = process.argv.slice(2).filter(argument => argument !== "--list");
@@ -71,6 +78,20 @@ for (const group of requested) {
     process.exit(1);
   }
   if (result.status !== 0) process.exit(result.status ?? 1);
+  if (group.browserConfig) {
+    const playwright = path.join(appRoot, "node_modules", "@playwright", "test", "cli.js");
+    const browser = spawnSync(process.execPath, [playwright, "test", "--config", group.browserConfig], {
+      cwd: appRoot,
+      encoding: "utf8",
+      stdio: "inherit",
+      windowsHide: true,
+    });
+    if (browser.error) {
+      console.error(browser.error.message);
+      process.exit(1);
+    }
+    if (browser.status !== 0) process.exit(browser.status ?? 1);
+  }
 }
 
 console.log(`\nJoined portal acceptance passed: ${requested.map(group => group.id).join(", ")}`);

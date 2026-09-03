@@ -203,10 +203,16 @@ and reviewed states.
 The currently implemented joined partitions can be run with
 `npm run test:portal:joined`, or individually as
 `npm run test:portal:joined -- j1` through
-`npm run test:portal:joined -- j6`.
-The runner starts a fresh single-worker Vitest process for each group; add later
-J7 executable coverage only when its protected dual-domain session fixture
-exists. J7 still requires the separate authorized live Access exercise.
+`npm run test:portal:joined -- j7`.
+The runner starts a fresh single-worker Vitest process for each group. J7 also
+runs a four-project Edge matrix against local aliases for both portal hosts at
+1280 and 375 pixels. It covers direct links, refresh and browser history,
+keyboard logout, session expiry, unauthorized and cross-tenant denial,
+revocation during an active read, overflow, exact-origin mutations, and the
+canonical public-share boundary. This fixture does not prove Cloudflare Access
+configuration, initial identity-provider sign-in, real cookie expiry, or
+post-change Access policy readback; those still require the separate authorized
+live Access exercise.
 
 Run the full packages in Linux CI before release. The known Windows loopback
 exhaustion can produce Miniflare `EADDRINUSE`; it is not permission to omit the
