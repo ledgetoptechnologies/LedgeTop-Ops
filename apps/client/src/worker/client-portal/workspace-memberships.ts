@@ -245,7 +245,7 @@ function secondaryFreshFence(database:D1Database,context:SecondaryManagerContext
 }
 
 function unlimitedWorkspaceCapabilitySql(capability: "workspace.view" | "member.manage", termsReady: boolean,
-  principalsReady=false,identityDenialsEnabled=false,workspaceReference="?",identityReference="?"): string {
+  principalsReady=false,identityDenialsEnabled=false,workspaceReference="?",identityReference="?",includeCapacity=true): string {
   return `EXISTS(SELECT 1 FROM portal_v2_workspace_memberships effective_membership
     JOIN portal_v2_identities effective_identity ON effective_identity.id=effective_membership.identity_id
       AND effective_identity.status='active' AND effective_identity.revoked_at IS NULL
@@ -290,7 +290,7 @@ function unlimitedWorkspaceCapabilitySql(capability: "workspace.view" | "member.
             AND (capacity_deny.expires_at IS NULL OR datetime(capacity_deny.expires_at)>datetime('now'))
             AND (capacity_deny.scope_type='global' OR capacity_deny.workspace_id=effective_membership.workspace_id)
           ORDER BY capacity_deny.id LIMIT 1 OFFSET 200))`:''}
-      AND NOT EXISTS(SELECT 1 FROM (SELECT capacity_entitlement.id FROM portal_v2_entitlements capacity_entitlement
+      ${includeCapacity?`AND NOT EXISTS(SELECT 1 FROM (SELECT capacity_entitlement.id FROM portal_v2_entitlements capacity_entitlement
         WHERE capacity_entitlement.workspace_id=effective_membership.workspace_id
           AND capacity_entitlement.identity_id=effective_membership.identity_id
           AND capacity_entitlement.capability='${capability}'
@@ -298,7 +298,7 @@ function unlimitedWorkspaceCapabilitySql(capability: "workspace.view" | "member.
           AND datetime(capacity_entitlement.valid_from)<=datetime('now')
           AND (capacity_entitlement.expires_at IS NULL OR datetime(capacity_entitlement.expires_at)>datetime('now'))
           AND ${projectAccessCapacitySql('capacity_entitlement',termsReady)}
-        ORDER BY capacity_entitlement.entitlement_version DESC,capacity_entitlement.id LIMIT 1 OFFSET 200))
+        ORDER BY capacity_entitlement.entitlement_version DESC,capacity_entitlement.id LIMIT 1 OFFSET 200))`:''}
       AND NOT EXISTS(SELECT 1 FROM portal_v2_entitlements effective_deny
         WHERE effective_deny.workspace_id=effective_allow.workspace_id
           AND effective_deny.identity_id=effective_allow.identity_id
@@ -311,10 +311,54 @@ function unlimitedWorkspaceCapabilitySql(capability: "workspace.view" | "member.
 
 async function hasUnlimitedWorkspaceAuthority(database: D1Database, workspaceId: string, identityId: string, termsReady: boolean,
   principalsReady:boolean,identityDenialsEnabled:boolean): Promise<boolean> {
-  const row=await database.prepare(`SELECT (${unlimitedWorkspaceCapabilitySql("workspace.view",termsReady,principalsReady,identityDenialsEnabled)}
-    AND ${unlimitedWorkspaceCapabilitySql("member.manage",termsReady,principalsReady,identityDenialsEnabled)}) authorized`)
-    .bind(workspaceId,identityId,workspaceId,identityId).first<number>('authorized');
+  return policyPredicatesAuthorized(database,[
+    ...workspaceCapabilityPredicates(workspaceId,identityId,'workspace.view',termsReady,principalsReady,identityDenialsEnabled),
+    ...workspaceCapabilityPredicates(workspaceId,identityId,'member.manage',termsReady,principalsReady,identityDenialsEnabled),
+  ]);
+}
+
+function workspaceCapabilityCapacitySql(capability:'workspace.view'|'member.manage',termsReady:boolean,
+  workspaceReference='?',identityReference='?'):string{
+  return `NOT EXISTS(SELECT 1 FROM (SELECT capacity_entitlement.id FROM portal_v2_entitlements capacity_entitlement
+    WHERE capacity_entitlement.workspace_id=${workspaceReference}
+      AND capacity_entitlement.identity_id=${identityReference}
+      AND capacity_entitlement.capability='${capability}'
+      AND capacity_entitlement.status='active' AND capacity_entitlement.revoked_at IS NULL
+      AND datetime(capacity_entitlement.valid_from)<=datetime('now')
+      AND (capacity_entitlement.expires_at IS NULL OR datetime(capacity_entitlement.expires_at)>datetime('now'))
+      AND ${projectAccessCapacitySql('capacity_entitlement',termsReady)}
+    ORDER BY capacity_entitlement.entitlement_version DESC,capacity_entitlement.id LIMIT 1 OFFSET 200))`;
+}
+
+type PolicyPredicate={sql:string;values:unknown[]};
+
+function workspaceCapabilityPredicates(workspaceId:string,identityId:string,capability:'workspace.view'|'member.manage',
+  termsReady:boolean,principalsReady:boolean,identityDenialsEnabled:boolean):PolicyPredicate[]{
+  if(!principalsReady)return [{
+    sql:unlimitedWorkspaceCapabilitySql(capability,termsReady,false,identityDenialsEnabled),values:[workspaceId,identityId],
+  }];
+  return [
+    {sql:unlimitedWorkspaceCapabilitySql(capability,termsReady,true,identityDenialsEnabled,'?','?',false),values:[workspaceId,identityId]},
+    {sql:workspaceCapabilityCapacitySql(capability,termsReady),values:[workspaceId,identityId]},
+  ];
+}
+
+function policyPredicateRowsSql(parts:PolicyPredicate[]):string{
+  return `VALUES ${parts.map(part=>`(CASE WHEN (${part.sql}) THEN 1 ELSE 0 END)`).join(',')}`;
+}
+
+async function policyPredicatesAuthorized(database:D1Database,parts:PolicyPredicate[]):Promise<boolean>{
+  const row=await database.prepare(`WITH policy_predicates(authorized) AS (${policyPredicateRowsSql(parts)})
+    SELECT MIN(authorized) authorized FROM policy_predicates`)
+    .bind(...parts.flatMap(part=>part.values)).first<number>('authorized');
   return row===1;
+}
+
+async function hasUnlimitedWorkspaceCapability(database:D1Database,workspaceId:string,identityId:string,
+  capability:'workspace.view'|'member.manage',termsReady:boolean,principalsReady:boolean,
+  identityDenialsEnabled:boolean):Promise<boolean>{
+  return policyPredicatesAuthorized(database,workspaceCapabilityPredicates(
+    workspaceId,identityId,capability,termsReady,principalsReady,identityDenialsEnabled));
 }
 
 async function actorIdentity(env: Env, principal: VerifiedClientPrincipal): Promise<Identity | null> {
@@ -661,30 +705,85 @@ async function portalPrincipalsReady(database:D1Database):Promise<boolean>{
 type PeerAdminTargetState={status:string;source:string;expiresAt:string|null;manager:boolean;localManager:boolean;managerVersion:number;eligible:boolean};
 async function peerAdminTargetState(database:D1Database,workspaceId:string,identityId:string,termsReady:boolean,
   principalsReady:boolean,identityDenialsEnabled:boolean):Promise<PeerAdminTargetState|null>{
+  if(!principalsReady){
+    const legacy=await database.prepare(`SELECT membership.status,membership.source_type,membership.expires_at,
+      COALESCE((SELECT MAX(versioned.entitlement_version) FROM portal_v2_entitlements versioned
+        WHERE versioned.workspace_id=membership.workspace_id AND versioned.identity_id=membership.identity_id
+          AND versioned.capability='member.manage' AND versioned.effect='allow'
+          AND versioned.scope_type='workspace' AND versioned.scope_public_id=membership.workspace_id),0) manager_version,
+      ${unlimitedWorkspaceCapabilitySql('member.manage',termsReady,false,identityDenialsEnabled)} manager,
+      EXISTS(SELECT 1 FROM portal_v2_entitlements local_manager WHERE local_manager.workspace_id=membership.workspace_id
+        AND local_manager.identity_id=membership.identity_id AND local_manager.capability='member.manage'
+        AND local_manager.effect='allow' AND local_manager.scope_type='workspace'
+        AND local_manager.scope_public_id=membership.workspace_id AND local_manager.source_type='operations'
+        AND local_manager.status='active' AND local_manager.revoked_at IS NULL
+        AND datetime(local_manager.valid_from)<=datetime('now') AND local_manager.expires_at IS NULL
+        ${termsReady?'AND local_manager.access_terms_id IS NULL':''}) local_manager,
+      ${unlimitedWorkspaceCapabilitySql('workspace.view',termsReady,false,identityDenialsEnabled)} eligible
+      FROM portal_v2_workspaces workspace
+      JOIN portal_v2_workspace_memberships membership ON membership.workspace_id=workspace.id
+      JOIN portal_v2_identities identity ON identity.id=membership.identity_id
+      WHERE workspace.id=? AND workspace.status='active' AND workspace.root_type='organization'
+        AND workspace.project_alpha_source_id=? AND membership.identity_id=?
+        AND identity.status='active' AND identity.revoked_at IS NULL`)
+      .bind(workspaceId,identityId,workspaceId,identityId,workspaceId,PRIMARY_ALPHA_SOURCE_ID,identityId)
+      .first<{status:string;source_type:string;expires_at:string|null;manager_version:number;manager:number;local_manager:number;eligible:number}>();
+    return legacy?{status:legacy.status,source:legacy.source_type,expiresAt:legacy.expires_at,manager:legacy.manager===1,
+      localManager:legacy.local_manager===1,managerVersion:legacy.manager_version,eligible:legacy.eligible===1}:null;
+  }
   const row=await database.prepare(`SELECT membership.status,membership.source_type,membership.expires_at,
     COALESCE((SELECT MAX(versioned.entitlement_version) FROM portal_v2_entitlements versioned
       WHERE versioned.workspace_id=membership.workspace_id AND versioned.identity_id=membership.identity_id
         AND versioned.capability='member.manage' AND versioned.effect='allow'
         AND versioned.scope_type='workspace' AND versioned.scope_public_id=membership.workspace_id),0) manager_version,
-    ${unlimitedWorkspaceCapabilitySql('member.manage',termsReady,principalsReady,identityDenialsEnabled)} manager,
     EXISTS(SELECT 1 FROM portal_v2_entitlements local_manager WHERE local_manager.workspace_id=membership.workspace_id
       AND local_manager.identity_id=membership.identity_id AND local_manager.capability='member.manage'
       AND local_manager.effect='allow' AND local_manager.scope_type='workspace'
       AND local_manager.scope_public_id=membership.workspace_id AND local_manager.source_type='operations'
       AND local_manager.status='active' AND local_manager.revoked_at IS NULL
       AND datetime(local_manager.valid_from)<=datetime('now') AND local_manager.expires_at IS NULL
-      ${termsReady?'AND local_manager.access_terms_id IS NULL':''}) local_manager,
-    ${unlimitedWorkspaceCapabilitySql('workspace.view',termsReady,principalsReady,identityDenialsEnabled)} eligible
+      ${termsReady?'AND local_manager.access_terms_id IS NULL':''}) local_manager
     FROM portal_v2_workspaces workspace
     JOIN portal_v2_workspace_memberships membership ON membership.workspace_id=workspace.id
     JOIN portal_v2_identities identity ON identity.id=membership.identity_id
     WHERE workspace.id=? AND workspace.status='active' AND workspace.root_type='organization'
       AND workspace.project_alpha_source_id=? AND membership.identity_id=?
       AND identity.status='active' AND identity.revoked_at IS NULL`)
-    .bind(workspaceId,identityId,workspaceId,identityId,workspaceId,PRIMARY_ALPHA_SOURCE_ID,identityId)
-    .first<{status:string;source_type:string;expires_at:string|null;manager_version:number;manager:number;local_manager:number;eligible:number}>();
-  return row?{status:row.status,source:row.source_type,expiresAt:row.expires_at,manager:row.manager===1,
-    localManager:row.local_manager===1,managerVersion:row.manager_version,eligible:row.eligible===1}:null;
+    .bind(workspaceId,PRIMARY_ALPHA_SOURCE_ID,identityId)
+    .first<{status:string;source_type:string;expires_at:string|null;manager_version:number;local_manager:number}>();
+  if(!row)return null;
+  // Keep these checks in separate statements. With the current principal and
+  // project-term schema, embedding both policy trees in the state query exceeds
+  // SQLite's expression-depth limit before any row can be evaluated.
+  const [manager,eligible]=await Promise.all([
+    hasUnlimitedWorkspaceCapability(database,workspaceId,identityId,'member.manage',termsReady,principalsReady,identityDenialsEnabled),
+    hasUnlimitedWorkspaceCapability(database,workspaceId,identityId,'workspace.view',termsReady,principalsReady,identityDenialsEnabled),
+  ]);
+  return {status:row.status,source:row.source_type,expiresAt:row.expires_at,manager,
+    localManager:row.local_manager===1,managerVersion:row.manager_version,eligible};
+}
+
+async function otherUnlimitedManager(database:D1Database,workspaceId:string,identityId:string,termsReady:boolean,
+  principalsReady:boolean,identityDenialsEnabled:boolean):Promise<string|null>{
+  // Bound exact-policy rechecks by plausible manager grants, not by every
+  // active workspace member. Large workspaces commonly have hundreds of
+  // ordinary viewers, none of whom should consume an authority-policy read.
+  const rows=await database.prepare(`SELECT DISTINCT membership.identity_id FROM portal_v2_workspace_memberships membership
+    JOIN portal_v2_identities identity ON identity.id=membership.identity_id AND identity.status='active' AND identity.revoked_at IS NULL
+    JOIN portal_v2_entitlements manager_allow ON manager_allow.workspace_id=membership.workspace_id
+      AND manager_allow.identity_id=membership.identity_id AND manager_allow.capability='member.manage'
+      AND manager_allow.effect='allow' AND manager_allow.scope_type='workspace'
+      AND manager_allow.scope_public_id=membership.workspace_id
+      AND manager_allow.status='active' AND manager_allow.revoked_at IS NULL
+      AND datetime(manager_allow.valid_from)<=datetime('now') AND manager_allow.expires_at IS NULL
+      ${termsReady?'AND manager_allow.access_terms_id IS NULL':''}
+    WHERE membership.workspace_id=? AND membership.identity_id<>? AND membership.status='active'
+      AND membership.revoked_at IS NULL AND membership.expires_at IS NULL
+    ORDER BY membership.identity_id LIMIT 201`).bind(workspaceId,identityId).all<{identity_id:string}>();
+  if(rows.results.length>200)return null;
+  for(const candidate of rows.results)if(await hasUnlimitedWorkspaceAuthority(
+    database,workspaceId,candidate.identity_id,termsReady,principalsReady,identityDenialsEnabled))return candidate.identity_id;
+  return null;
 }
 
 export type PeerAdminChangeResult=
@@ -723,9 +822,15 @@ export async function changeWorkspacePeerAdministrator(env:AddressBookAccessEnv,
     ||!await authorizePortalWorkspaceCapability(env,principal,workspaceId,'member.manage',{scopeType:'workspace',publicId:workspaceId})
     ||!await hasUnlimitedWorkspaceAuthority(database,workspaceId,actor.id,termsReady,principalsReady,identityDenialsEnabled))return {outcome:'denied'};
 
+  // Current-schema principal validation makes the historical correlated
+  // last-manager expression too deep. Select one exact replacement only for
+  // that schema; legacy schemas retain their original single atomic fence.
+  const replacementManagerId=input.manager||!principalsReady?null:
+    await otherUnlimitedManager(database,workspaceId,identityId,termsReady,principalsReady,identityDenialsEnabled);
+  if(!input.manager&&principalsReady&&!replacementManagerId)return {outcome:'last_manager'};
   const guard:Array<{sql:string;values:unknown[]}>=[];
-  guard.push({sql:unlimitedWorkspaceCapabilitySql('workspace.view',termsReady,principalsReady,identityDenialsEnabled),values:[workspaceId,actor.id]});
-  guard.push({sql:unlimitedWorkspaceCapabilitySql('member.manage',termsReady,principalsReady,identityDenialsEnabled),values:[workspaceId,actor.id]});
+  guard.push(...workspaceCapabilityPredicates(workspaceId,actor.id,'workspace.view',termsReady,principalsReady,identityDenialsEnabled));
+  guard.push(...workspaceCapabilityPredicates(workspaceId,actor.id,'member.manage',termsReady,principalsReady,identityDenialsEnabled));
   guard.push({sql:`EXISTS(SELECT 1 FROM portal_v2_workspaces guarded_workspace
     JOIN portal_v2_workspace_memberships guarded_member ON guarded_member.workspace_id=guarded_workspace.id
     JOIN portal_v2_identities guarded_identity ON guarded_identity.id=guarded_member.identity_id
@@ -733,8 +838,8 @@ export async function changeWorkspacePeerAdministrator(env:AddressBookAccessEnv,
       AND guarded_workspace.project_alpha_source_id=? AND guarded_member.identity_id=?
       AND guarded_member.source_type<>'project_alpha' AND guarded_member.status='active'
       AND guarded_member.revoked_at IS NULL AND guarded_member.expires_at IS NULL
-      AND guarded_identity.status='active' AND guarded_identity.revoked_at IS NULL
-      AND ${unlimitedWorkspaceCapabilitySql('workspace.view',termsReady,principalsReady,identityDenialsEnabled)})`,values:[workspaceId,PRIMARY_ALPHA_SOURCE_ID,identityId,workspaceId,identityId]});
+      AND guarded_identity.status='active' AND guarded_identity.revoked_at IS NULL)`,values:[workspaceId,PRIMARY_ALPHA_SOURCE_ID,identityId]});
+  guard.push(...workspaceCapabilityPredicates(workspaceId,identityId,'workspace.view',termsReady,principalsReady,identityDenialsEnabled));
   guard.push({sql:`COALESCE((SELECT MAX(versioned.entitlement_version) FROM portal_v2_entitlements versioned
     WHERE versioned.workspace_id=? AND versioned.identity_id=? AND versioned.capability='member.manage'
       AND versioned.effect='allow' AND versioned.scope_type='workspace' AND versioned.scope_public_id=?),0)=?`,
@@ -753,20 +858,34 @@ export async function changeWorkspacePeerAdministrator(env:AddressBookAccessEnv,
       AND manager_deny.revoked_at IS NULL AND datetime(manager_deny.valid_from)<=datetime('now')
       AND (manager_deny.expires_at IS NULL OR datetime(manager_deny.expires_at)>datetime('now')))`,values:[workspaceId,identityId,workspaceId]});
   }else{
-    guard.push({sql:unlimitedWorkspaceCapabilitySql('member.manage',termsReady,principalsReady,identityDenialsEnabled),values:[workspaceId,identityId]});
+    guard.push(...workspaceCapabilityPredicates(workspaceId,identityId,'member.manage',termsReady,principalsReady,identityDenialsEnabled));
     guard.push({sql:`EXISTS(SELECT 1 FROM portal_v2_entitlements local_manager WHERE local_manager.workspace_id=?
       AND local_manager.identity_id=? AND local_manager.capability='member.manage' AND local_manager.effect='allow'
       AND local_manager.scope_type='workspace' AND local_manager.scope_public_id=? AND local_manager.source_type='operations'
       AND local_manager.status='active' AND local_manager.revoked_at IS NULL AND local_manager.expires_at IS NULL
       ${termsReady?'AND local_manager.access_terms_id IS NULL':''})`,values:[workspaceId,identityId,workspaceId]});
-    guard.push({sql:`EXISTS(SELECT 1 FROM portal_v2_workspace_memberships other_member
+    if(principalsReady){
+      guard.push({sql:`EXISTS(SELECT 1 FROM portal_v2_workspace_memberships other_member
+        JOIN portal_v2_identities other_identity ON other_identity.id=other_member.identity_id
+          AND other_identity.status='active' AND other_identity.revoked_at IS NULL
+        WHERE other_member.workspace_id=? AND other_member.identity_id=? AND other_member.status='active'
+          AND other_member.revoked_at IS NULL AND other_member.expires_at IS NULL)`,values:[workspaceId,replacementManagerId]});
+      guard.push(...workspaceCapabilityPredicates(workspaceId,replacementManagerId!,'workspace.view',termsReady,true,identityDenialsEnabled));
+      guard.push(...workspaceCapabilityPredicates(workspaceId,replacementManagerId!,'member.manage',termsReady,true,identityDenialsEnabled));
+    }else guard.push({sql:`EXISTS(SELECT 1 FROM portal_v2_workspace_memberships other_member
       WHERE other_member.workspace_id=? AND other_member.identity_id<>?
-        AND ${unlimitedWorkspaceCapabilitySql('workspace.view',termsReady,principalsReady,identityDenialsEnabled,'other_member.workspace_id','other_member.identity_id')}
-        AND ${unlimitedWorkspaceCapabilitySql('member.manage',termsReady,principalsReady,identityDenialsEnabled,'other_member.workspace_id','other_member.identity_id')})`,values:[workspaceId,identityId]});
+        AND ${unlimitedWorkspaceCapabilitySql('workspace.view',termsReady,false,identityDenialsEnabled,'other_member.workspace_id','other_member.identity_id')}
+        AND ${unlimitedWorkspaceCapabilitySql('member.manage',termsReady,false,identityDenialsEnabled,'other_member.workspace_id','other_member.identity_id')})`,
+      values:[workspaceId,identityId]});
   }
-  const nextVersion=input.expectedVersion+1,entitlementId=crypto.randomUUID(),fenceId=crypto.randomUUID(),auditId=crypto.randomUUID();
+  const nextVersion=input.expectedVersion+1,entitlementId=crypto.randomUUID(),auditId=crypto.randomUUID();
+  // Keep every policy expression in an independent VALUES row. This
+  // avoids SQLite's expression-depth ceiling without multiplying D1 batch
+  // statements; MIN still makes the single transaction fence fail closed.
   const statements:D1PreparedStatement[]=[database.prepare(`INSERT INTO portal_workspace_peer_admin_fences(id,write_guard)
-    VALUES(?,CASE WHEN ${guard.map(part=>`(${part.sql})`).join(' AND ')} THEN 1 ELSE 0 END)`).bind(fenceId,...guard.flatMap(part=>part.values))];
+    WITH policy_predicates(authorized) AS (${policyPredicateRowsSql(guard)})
+    SELECT ?,MIN(authorized) FROM policy_predicates`)
+    .bind(...guard.flatMap(part=>part.values),crypto.randomUUID())];
   if(!input.manager)statements.push(database.prepare(`UPDATE portal_v2_entitlements SET status='revoked',revoked_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
     WHERE workspace_id=? AND identity_id=? AND capability='member.manage' AND effect='allow' AND scope_type='workspace'
       AND scope_public_id=? AND source_type='operations' AND status='active' AND revoked_at IS NULL`)

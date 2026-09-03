@@ -197,6 +197,27 @@ Project Alpha onboarding, approval, project, contract, or document workflow.
   forward; attachments, billing, project status, access authority, invitations,
   and notifications did not. A destination reassignment between preview and
   commit failed closed, and stale terminal amendments were rejected.
+- The fixture-driven J4 joined Client test
+  `joined-membership-delegated-access.test.ts` passed against the current full
+  migration chain. Named invitation/acceptance, manager recovery, independent
+  delegated-link revocation, project-term completion and expiry, notices, and
+  audit isolation remained fail closed. It exposed and now regresses a
+  current-schema SQLite expression-depth failure in peer-admin changes; the
+  repaired authorization snapshot and atomic fence retain exact principal,
+  capacity, deny, CAS, last-manager, and concurrency checks.
+- The fixture-driven J5 joined Operations test
+  `joined-native-delivery-notifications.test.ts` passed for primary and signed
+  secondary sources. It covered exact folder binding, reviewed grant preview
+  and publication, portal read, five-minute coalescing, Send Now/Cancel,
+  revocation, same-email recipient isolation, leased-binding invalidation,
+  lost and legacy receipt denial, unchanged public links, and foreign keys.
+- The fixture-driven J6 joined Client test
+  `joined-feedback-service-requests.test.ts` passed four cases spanning native
+  project/folder/file feedback, completion notice, service catalog and
+  assignment filtering, drafts, attachments, review/estimate, immutable exact
+  Project Alpha quote handoff, notification, cancellation, and replay. It
+  rechecked authority after page load and covered collisions, revocation,
+  destination rotation, scan cancellation, and feedback/request independence.
 - The post-`0192` monolithic Windows Client run passed 924 of 926 tests. The two
   failures were isolated Miniflare loopback `EADDRINUSE` transport collisions;
   both exact cases passed in isolated and paired reruns. Linux CI or bounded

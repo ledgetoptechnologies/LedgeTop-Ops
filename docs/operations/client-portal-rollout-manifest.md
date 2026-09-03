@@ -202,10 +202,11 @@ and reviewed states.
 
 The currently implemented joined partitions can be run with
 `npm run test:portal:joined`, or individually as
-`npm run test:portal:joined -- j1`, `npm run test:portal:joined -- j2`, and
-`npm run test:portal:joined -- j3`.
+`npm run test:portal:joined -- j1` through
+`npm run test:portal:joined -- j6`.
 The runner starts a fresh single-worker Vitest process for each group; add later
-J4–J7 executable partitions only when their joined fixtures exist.
+J7 executable coverage only when its protected dual-domain session fixture
+exists. J7 still requires the separate authorized live Access exercise.
 
 Run the full packages in Linux CI before release. The known Windows loopback
 exhaustion can produce Miniflare `EADDRINUSE`; it is not permission to omit the

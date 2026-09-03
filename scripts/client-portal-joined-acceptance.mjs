@@ -22,6 +22,24 @@ const groups = [
     app: "operations",
     files: ["test/joined-operational-memory-copy-forward.test.ts"],
   },
+  {
+    id: "j4",
+    label: "membership and delegated access remain independently revocable",
+    app: "client",
+    files: ["test/joined-membership-delegated-access.test.ts"],
+  },
+  {
+    id: "j5",
+    label: "native delivery and notifications fail closed",
+    app: "operations",
+    files: ["test/joined-native-delivery-notifications.test.ts"],
+  },
+  {
+    id: "j6",
+    label: "feedback and service requests remain independently authorized",
+    app: "client",
+    files: ["test/joined-feedback-service-requests.test.ts"],
+  },
 ];
 
 const selected = process.argv.slice(2).filter(argument => argument !== "--list");

@@ -13,6 +13,9 @@ test("joined portal runner lists the implemented acceptance partitions", () => {
   assert.match(result.stdout, /^j1\toperations\ttwo-source identity and Client Hub isolation$/m);
   assert.match(result.stdout, /^j2\tclient\tProject Alpha metadata remains non-authorizing$/m);
   assert.match(result.stdout, /^j3\toperations\toperational memory copy-forward remains selective$/m);
+  assert.match(result.stdout, /^j4\tclient\tmembership and delegated access remain independently revocable$/m);
+  assert.match(result.stdout, /^j5\toperations\tnative delivery and notifications fail closed$/m);
+  assert.match(result.stdout, /^j6\tclient\tfeedback and service requests remain independently authorized$/m);
 });
 
 test("joined portal runner rejects unknown or duplicate groups before starting Vitest", () => {
