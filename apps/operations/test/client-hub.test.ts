@@ -313,7 +313,9 @@ describe("Client Hub bounded detail collections", () => {
         VALUES('workspace-secondary','organization',?,NULL,'Secondary portal','active',NULL,'project-alpha:secondary')`).bind(organizationUuid),
       delivery.prepare("INSERT INTO portal_v2_directory_generations VALUES('generation-secondary','workspace-secondary','native-secondary',2,'active',1)"),
       delivery.prepare("INSERT INTO portal_v2_directory_checkpoints VALUES('workspace-secondary','generation-secondary',2)"),
-      delivery.prepare("INSERT INTO portal_v2_directory_entities VALUES('workspace-secondary','generation-secondary','organization',?,NULL,1,'secondary-version')").bind(organizationUuid),
+      delivery.prepare(`INSERT INTO portal_v2_directory_entities
+        (workspace_id,generation_id,entity_type,public_id,parent_public_id,display_name,active,source_version)
+        VALUES('workspace-secondary','generation-secondary','organization',?,NULL,'Secondary portal',1,'secondary-version')`).bind(organizationUuid),
       delivery.prepare("INSERT INTO pa_portal_workspace_sources VALUES('workspace-secondary','project-alpha:secondary','source-workspace-secondary')"),
       delivery.prepare("INSERT INTO pa_portal_source_authorities VALUES('project-alpha:secondary','active',1,1,1,1)"),
       delivery.prepare("INSERT INTO pa_portal_source_authority_revisions VALUES('project-alpha:secondary',1)"),

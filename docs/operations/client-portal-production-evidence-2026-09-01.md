@@ -297,3 +297,68 @@ preflight window against the producer already on Project Alpha `main`. Secondary
 exact-source enrollment still requires its reviewed connector envelope.
 Reusing the legacy read-only synchronization API key as event, portal,
 connector, or draft-quote authority remains prohibited.
+
+## 2026-09-02 resumable delivery and joined-gate checkpoint
+
+This checkpoint changed prepared public-delivery archives and added local
+acceptance evidence. It did not enable a portal authority flag, provision a
+client identity, or alter an existing public-link token.
+
+- D1 Time Travel bookmark
+  `000010f2-00000004-000050db-6098b1dd4ce7d331060f02816570ed6d`
+  was captured before Client migration `0193_bulk_download_parts.sql`.
+- The first remote `0193` attempt failed closed with SQLite `incomplete input`
+  and was not recorded in the migration ledger. Its trigger guards were
+  rewritten into the D1-supported `SELECT RAISE(...) WHERE ...` form, a fresh
+  local migration replay through `0193` passed, and the corrected remote
+  migration then executed eight commands successfully. Remote readback
+  reported no migrations pending.
+- Commit `236c6b93e659f70687ecd318f88f8ef469a54919` is the exact `main`
+  release. Client Worker version
+  `5dc3452e-18c4-4b32-9675-349fd0b0723d` and Operations Worker version
+  `546d50b5-2092-45d8-9b52-f8ccde475e59` each served 100% of traffic in the
+  post-push Wrangler readback.
+- Prepared public deliveries now prefer one archive, deterministically create
+  independently resumable parts only when one archive cannot fit the bounded
+  execution capacity, and retain explicit part links when a browser blocks
+  multiple automatic downloads. Every part retains exact-path authorization,
+  stable ETag, HEAD, byte-range/206 and 416 behavior for 24 hours or until the
+  share expires. Fifty focused archive tests and 26 desktop/mobile public
+  delivery browser tests passed.
+- Joined local acceptance J1 through J6 passed sequentially in isolated
+  processes against this exact release. J7 passed eight Worker tests and 16
+  desktop/mobile browser cases for local dual-domain daily use. These results
+  strengthen local integration evidence but do not replace the outstanding
+  live Access sign-in, logout, true session-expiry, unprovisioned/cross-tenant
+  denial, active-revocation, or Access policy/audience readback cases.
+- A read-only view of deployed Client version 201 confirmed the intended
+  ingest-only boundary: `PROJECT_ALPHA_PORTAL_SYNC_ENABLED=true` and
+  `CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED=true`, while hierarchy-v2,
+  automatic eligibility, deny management, team/membership mutation,
+  authenticated delivery, requests, notifications, content audit, service
+  assignment policy, and delegated shares remained false. The configured
+  portal HMAC key ID was present, but Cloudflare did not list the required
+  `PROJECT_ALPHA_PORTAL_HMAC_SECRET` binding. No secret value was read. Portal
+  ingestion therefore remains unproven and must fail preflight until a
+  dedicated matching producer/receiver secret is provisioned.
+
+## 2026-09-03 delegated-access expiry checkpoint
+
+This checkpoint materialized elapsed delegated-share state without granting,
+restoring, or otherwise changing client authority.
+
+- D1 Time Travel bookmark
+  `000010f2-0000015e-000050db-ef73a9b812006fc4afc69f1652a01327`
+  was captured immediately before Client migration
+  `0194_client_delegated_share_expiry.sql`.
+- The remote migration executed six commands successfully. A second migration
+  ledger readback reported no migrations pending.
+- Expiry reconciliation is bounded to 50 shares and 50 delegations per hourly
+  pass, is workspace-scoped and idempotent, and records deterministic immutable
+  `client_share.expired` and `delegation.expired` events. Failed and revoked
+  shares remain terminal; active and suspended delegations can expire.
+- Focused delegated-access verification passed 18 tests across expiry races,
+  repeated runs, bounds, workspace isolation, membership preservation, and the
+  joined delegated-access gate. Client type checking and production build also
+  passed. This does not change the outstanding live portal-authority blockers
+  documented above.

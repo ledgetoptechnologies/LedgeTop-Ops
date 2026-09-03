@@ -30,6 +30,7 @@ import { createClientDelegatedPublicRouter } from "./client-delegated-public";
 import { handleProjectAlphaCatalogRequest } from "./project-alpha-catalog";
 import { projectAlphaPricingHintProvider } from "./client-portal/project-alpha-pricing-hint";
 import { processInvitationEmailBatch } from "./client-portal/invitation-email";
+import { reconcileExpiredClientDelegatedShares } from "./client-portal/delegated-shares";
 import { clientPortalEntryOrigin, configuredPublicRequestOrigins, legacyClientRedirectLocation, malformedPortalLaunchRedirect, requestHostAllowed, requirePublicShareOrigin } from "./origin-policy";
 import {
   classifyPublicShareLifecycle,
@@ -1035,6 +1036,10 @@ export default { fetch: app.fetch, scheduled: (event, env, ctx) => {
   if (event.cron === "15 * * * *") tasks.push(
     cleanupTemporaryZips(env),
     cleanupExpiredRequestAttachments(env),
+    reconcileExpiredClientDelegatedShares(env).then(result => {
+      if (result.sharesExpired || result.delegationsExpired || result.sharesAtLimit || result.delegationsAtLimit)
+        console.log(JSON.stringify({ event: "client-delegated-share.expiry-reconciled", ...result }));
+    }),
     env.CLOUD_TRANSFER_TOKEN_SECRET
       ? cleanupCloudTransfers(cloudEnv(env), { dropbox: createCloudProviderAdapter("dropbox", cloudEnv(env)), google: createCloudProviderAdapter("google", cloudEnv(env)) })
       : Promise.resolve(),

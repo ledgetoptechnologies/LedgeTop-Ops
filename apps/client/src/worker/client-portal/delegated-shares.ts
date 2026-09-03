@@ -107,6 +107,107 @@ function delegatedShareDb(env: Pick<Env, "DELIVERY_DB">): D1Database {
   return candidate.withSession?.("first-primary") ?? candidate;
 }
 
+export function effectiveClientDelegatedShareStatus(
+  status: ClientDelegatedShareSummary["status"],
+  expiresAt: string,
+  now = Date.now(),
+): ClientDelegatedShareSummary["status"] {
+  if (status === "failed" || status === "revoked" || status === "expired") return status;
+  const expiry = Date.parse(expiresAt);
+  return Number.isFinite(expiry) && expiry <= now ? "expired" : status;
+}
+
+export interface ClientDelegatedShareExpiryResult {
+  sharesExpired: number;
+  delegationsExpired: number;
+  sharesAtLimit: boolean;
+  delegationsAtLimit: boolean;
+}
+
+/**
+ * Materialize elapsed delegated-share state for operator/client readback and
+ * immutable audit history. Runtime authorization already checks expires_at on
+ * every request, so this maintenance path can only remove authority; it never
+ * creates or restores a membership, entitlement, delegation, or share.
+ *
+ * Each update and its deterministic event insert are committed in the same D1
+ * batch. A concurrent explicit revoke wins when it commits first; when expiry
+ * wins first, the existing revoke guard observes the terminal expired state.
+ */
+export async function reconcileExpiredClientDelegatedShares(
+  env: Pick<Env, "DELIVERY_DB">,
+  options: { now?: number; limitPerType?: number } = {},
+): Promise<ClientDelegatedShareExpiryResult> {
+  const now = options.now ?? Date.now();
+  const requestedLimit = options.limitPerType ?? 50;
+  const limit = Number.isSafeInteger(requestedLimit)
+    ? Math.max(1, Math.min(50, requestedLimit))
+    : 50;
+  const nowIso = new Date(now).toISOString();
+  const database = delegatedShareDb(env);
+  const shares = await database.prepare(`SELECT id,workspace_id FROM client_delegated_shares
+    WHERE status IN ('pending_signer','active') AND revoked_at IS NULL
+      AND datetime(expires_at)<=datetime(?)
+    ORDER BY expires_at,id LIMIT ?`).bind(nowIso, limit)
+    .all<{ id: string; workspace_id: string }>();
+  let sharesExpired = 0;
+  if (shares.results.length) {
+    const statements = shares.results.flatMap(row => [
+      database.prepare(`UPDATE client_delegated_shares
+        SET status='expired',share_version=share_version+1,updated_at=datetime(?)
+        WHERE id=? AND workspace_id=?
+          AND status IN ('pending_signer','active') AND revoked_at IS NULL
+          AND datetime(expires_at)<=datetime(?)`)
+        .bind(nowIso, row.id, row.workspace_id, nowIso),
+      database.prepare(`INSERT OR IGNORE INTO client_delegated_share_events
+        (id,workspace_id,delegation_id,share_id,actor_type,actor_id,event_type,details_json)
+        SELECT 'client-share-expired:'||share.id,share.workspace_id,share.delegation_id,share.id,
+          'system','client-portal-expiry','client_share.expired',
+          json_object('reason','expires_at','expiresAt',share.expires_at)
+        FROM client_delegated_shares share
+        WHERE share.id=? AND share.workspace_id=? AND share.status='expired'
+          AND share.revoked_at IS NULL AND datetime(share.expires_at)<=datetime(?)`)
+        .bind(row.id, row.workspace_id, nowIso),
+    ]);
+    const results = await database.batch(statements);
+    sharesExpired = results.reduce((count, result, index) =>
+      index % 2 === 0 ? count + (result.meta.changes ?? 0) : count, 0);
+  }
+
+  const delegations = await database.prepare(`SELECT id,workspace_id FROM client_share_delegations
+    WHERE status IN ('active','suspended') AND revoked_at IS NULL AND datetime(expires_at)<=datetime(?)
+    ORDER BY expires_at,id LIMIT ?`).bind(nowIso, limit)
+    .all<{ id: string; workspace_id: string }>();
+  let delegationsExpired = 0;
+  if (delegations.results.length) {
+    const statements = delegations.results.flatMap(row => [
+      database.prepare(`UPDATE client_share_delegations
+        SET status='expired',delegation_version=delegation_version+1,updated_at=datetime(?)
+        WHERE id=? AND workspace_id=? AND status IN ('active','suspended') AND revoked_at IS NULL
+          AND datetime(expires_at)<=datetime(?)`)
+        .bind(nowIso, row.id, row.workspace_id, nowIso),
+      database.prepare(`INSERT OR IGNORE INTO client_delegated_share_events
+        (id,workspace_id,delegation_id,actor_type,actor_id,event_type,details_json)
+        SELECT 'client-delegation-expired:'||delegation.id,delegation.workspace_id,delegation.id,
+          'system','client-portal-expiry','delegation.expired',
+          json_object('reason','expires_at','expiresAt',delegation.expires_at)
+        FROM client_share_delegations delegation
+        WHERE delegation.id=? AND delegation.workspace_id=? AND delegation.status='expired'
+          AND delegation.revoked_at IS NULL AND datetime(delegation.expires_at)<=datetime(?)`)
+        .bind(row.id, row.workspace_id, nowIso),
+    ]);
+    const results = await database.batch(statements);
+    delegationsExpired = results.reduce((count, result, index) =>
+      index % 2 === 0 ? count + (result.meta.changes ?? 0) : count, 0);
+  }
+  return {
+    sharesExpired,
+    delegationsExpired,
+    sharesAtLimit: shares.results.length === limit,
+    delegationsAtLimit: delegations.results.length === limit,
+  };
+}
+
 function opaqueId(value: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9_-]{15,127}$/.test(value);
 }
@@ -456,7 +557,7 @@ export async function listClientDelegatedShares(
     publicId: row.public_id,
     path: `${CLIENT_DELEGATED_SHARE_PATH_PREFIX}${encodeURIComponent(row.public_id)}`,
     label: row.label,
-    status: row.status,
+    status: effectiveClientDelegatedShareStatus(row.status, row.expires_at),
     expiresAt: row.expires_at,
     revokedAt: row.revoked_at,
     createdAt: row.created_at,
