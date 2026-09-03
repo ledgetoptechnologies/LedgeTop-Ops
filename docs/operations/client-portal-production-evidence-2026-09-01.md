@@ -140,3 +140,47 @@ between them, remains required for an authoritative complete-package gate.
    revocation during reads.
 5. Enable later capabilities one closed dependency window at a time, retaining
    the false flag and rollback evidence for every window.
+
+The exact dependency and rollback order is now maintained in
+[client-portal-rollout-manifest.md](client-portal-rollout-manifest.md). This
+production record remains the only place to add observed live results.
+
+## 2026-09-02 receiver release checkpoint
+
+This checkpoint records receiver readiness only. It did not enable a dormant
+portal capability, create a membership, send a notification, or modify a
+Project Alpha onboarding, approval, project, contract, or document workflow.
+
+- LTDS commit `55452115549ed8a1872f94791176bd3ceb06d0bf` was fast-forwarded to
+  `main` after its focused type, build, unit, browser, migration, wire-contract,
+  and source-layout gates passed.
+- Client Worker version `dcbca970-7510-44d5-9ec6-f53b4e9dcf76` and Operations
+  Worker version `847030a1-a9b9-4497-a15b-de28e41a2a82` each reached 100%
+  traffic.
+- Client migrations `0191_portal_projection_wire_contract_claim.sql` and
+  `0192_contact_assignment_billing_independence.sql` were applied after a D1
+  Time Travel bookmark was captured. A subsequent migration list was empty and
+  `PRAGMA foreign_key_check` returned no rows.
+- The canonical schema-v4 fixture has exact-file SHA-256
+  `C545EEBF02CEC56013EDE3EBE0DCC1C7C11947DC8E5592905C3A9D36FFDA434B`,
+  snapshot hash `fa787865c479b1cbdfaba7361d9dd15e8fa9f7d9ffcdad25fa232e1004f71cfa`,
+  and pinned LF line endings.
+- The composed Project Alpha producer remains unpublished on
+  `codex/portal-auto-onboarding`. It is a strict descendant of Project Alpha
+  main `11fca5ff` and preserves the newer onboarding, approval, project,
+  contract, and document work. Its full composed gate passed 750 tests with
+  6,100 assertions and 91 expected skips. Publication still requires the
+  protected feature-branch and pull-request workflow.
+- Client schema-v4 receiver coverage passed 35 focused tests. Operations contact
+  adapter browser coverage passed 16 desktop/mobile cases, including bounded
+  pagination, malformed pages, authorization invalidation, cancellation, and
+  late-response fencing.
+- The post-`0192` monolithic Windows Client run passed 924 of 926 tests. The two
+  failures were isolated Miniflare loopback `EADDRINUSE` transport collisions;
+  both exact cases passed in isolated and paired reruns. Linux CI or bounded
+  fresh-process partitions remain the authoritative complete-package gate.
+
+Project Alpha contact assignments remain a default-off, informational read
+surface. They do not authorize portal access, delivery, requests, billing, or
+notifications. This checkpoint therefore improves safe receiver compatibility
+without changing any client's effective access.

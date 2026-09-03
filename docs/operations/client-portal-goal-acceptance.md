@@ -18,6 +18,17 @@ It verifies the shared two-domain Access boundary and preserved public links,
 but also records that no portal workspace or membership was provisioned at that
 checkpoint. Treat that state as partially deployed, not live accepted.
 
+The ordered activation dependencies, rollback rules, bounded local test
+partitions, and joined workflow matrix are maintained in the
+[client portal rollout manifest](client-portal-rollout-manifest.md). That
+manifest is an execution checklist, not permission to enable a feature or
+mutate production.
+
+Project Alpha's current onboarding, approval, project, contract, and document
+workflows are authoritative. Portal integration changes must compose on top of
+them through the single External Operations profile; they must not replace,
+fork, or reimplement those workflows in Operations or Client.
+
 ## Evidence states
 
 - **Verified locally**: implementation and focused automated evidence exist on
@@ -86,3 +97,24 @@ Before marking the overall goal complete:
    unavailable on the secondary portal namespace.
 6. Update this checklist with direct evidence. Missing or merely compatible
    behavior is not completion.
+
+## Joined local acceptance matrix
+
+Run these groups in separate processes on Windows. The authoritative complete
+package gate remains Linux CI because a monolithic Windows Miniflare run can
+exhaust loopback ports. A passing isolated retry is evidence for the isolated
+case only; never add an automatic retry around a commit-ambiguous mutation.
+
+| Group | Joined workflow | Required assertions before live rollout |
+| --- | --- | --- |
+| J1 — Identity and Client Hub | Seed one customer in two exact Project Alpha sources, link the records only through a reviewed business-party presentation link, then search, paginate, open both workspaces, unlink, archive, and restore. | Source records, cursors, workspaces, identities, grants, inactive states, and tombstones remain independent even when names or email addresses match. |
+| J2 — Eligibility, services, and contact metadata | Reconcile eligible, review-required, revoked, and archived clients; consume one signed generation containing hierarchy, explicit services, and schema-v4 organization/department/project contact assignments; then tombstone an assignment and revoke the root. | Service and contact metadata never create identity, membership, delivery, request, billing, or notification authority. Every consumer follows the exact source, workspace, generation, and revocation. |
+| J3 — Contacts and project memory | Open Client Hub project detail; edit organization and project operational contacts; version terminal project memory; inspect history; upload, range-read, and clean up a private staff attachment; preview and commit selected copy-forward data into an already-created Project Alpha destination. | Empty values never replace useful destination data. Attachments, access, billing, invitations, status, and notification state never copy. Destination reassignment and stale edits fail closed. |
+| J4 — Membership and delegated access | Invite and accept a named member, exercise manager recovery, create and revoke a delegated bearer link, apply customer and collaborator project terms, latch completion-plus-seven expiry, emit notices, and inspect the audit timeline. | Membership and bearer links remain independently revocable; expiry of one project does not affect customer history or another project; reopening does not silently renew expired access; last-manager and concurrent-denial rules hold. |
+| J5 — Native delivery and notifications | Bind one staff folder to an exact workspace/root, preview and publish a grant, read it in the portal, coalesce R2 changes for five minutes, Send Now/Cancel, and revoke. Repeat for one signed secondary source. | A lost receipt, leased-batch binding change, same-email person/group collision, or unreceipted legacy binding fails closed. Existing canonical public links stay outside portal authority and keep working. |
+| J6 — Feedback and service requests | Submit authorized project/folder/file feedback through completion and client notice; then run catalog, assignment filter, draft, attachment, submit, review, estimate, exact Project Alpha quote handoff, notification, cancellation, and replay. | Assignment or authority changes between page load and submit are rechecked. Source/root/project collisions, scan/cancel races, destination rotation, revocation, and feedback/request independence are covered. |
+| J7 — Dual-domain daily use | On both portal domains, exercise sign-in, greeting/workspace selection, direct links, refresh, Back/Forward, logout, session expiry, unauthorized and unprovisioned denial, cross-tenant denial, and revocation during active reads. Run core flows at 375 and 1280 pixels with keyboard/focus checks. | Both hosts use the same Access application, audience, and policy, but hostname never grants application authority. The canonical public namespace remains separate. No horizontal overflow, stale data restoration, or hidden focus trap is accepted. |
+
+The exact migration, flag, test-file, dependency, and rollback mapping for J1–J7
+is in the rollout manifest. Production evidence belongs only in the dated
+production-evidence record; do not mark a row live accepted from fixtures.

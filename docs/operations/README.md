@@ -20,6 +20,12 @@ See [Project Alpha portal activation](project-alpha-portal-activation.md) for th
 canonical machine endpoint, Access and secret presence checks, schema-v3
 ingest-only sequence, independent client-read cutover, and drain-first rollback.
 
+See [Client portal rollout manifest](client-portal-rollout-manifest.md) for the
+joined acceptance matrix, current default-off capability families, ordered
+activation windows, rollback requirements, and dual-domain live evidence gate.
+It explicitly preserves Project Alpha onboarding, approval, project, contract,
+and document authority.
+
 See [service-assignment request policy](client-service-assignment-request-policy.md)
 for the mandatory `0179` expand, compatible-writer drain, and `0180`-`0181`
 contract/review sequence. See [delivery intent source ownership](delivery-intent-source-ownership.md)
