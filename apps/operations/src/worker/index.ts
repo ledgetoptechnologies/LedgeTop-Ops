@@ -191,7 +191,6 @@ import {
 } from "./client-identity-eligibility";
 import { isPortalIdentityCollection, listPortalIdentityCollection, listPortalIdentityPage, portalIdentityQuery } from "./client-portal-identity-read";
 import {
-  authenticatedDeliveryGrantsEnabled,
   createAuthenticatedDeliveryGrant,
   previewAuthenticatedDeliveryGrant,
   listAuthenticatedDeliveryGrants,
@@ -200,6 +199,7 @@ import {
   searchAuthenticatedDeliveryGrantAudiences,
   type AuthenticatedGrantAudienceType,
 } from "./authenticated-delivery-grants";
+import { authenticatedDeliveryPilotReadiness } from "./authenticated-delivery-pilot-readiness";
 import {
   compareAndSwapProjectFolderAssociation,
   createPrimaryWorkspaceBinding,
@@ -772,9 +772,7 @@ app.get("/api/session", async (c) => {
       portalIdentityDenials: {
         enabled: portalDenyPolicyManagementEnabled(c.env),
       },
-      authenticatedDeliveryGrants: {
-        enabled: authenticatedDeliveryGrantsEnabled(c.env),
-      },
+      authenticatedDeliveryGrants: await authenticatedDeliveryPilotReadiness(c.env),
       viewerProcessing: {
         enabled: viewerProcessingEnabled(c.env),
       },

@@ -55,17 +55,17 @@ test("nonadministrators retain ordinary sharing without probing authenticated gr
 
 test("an unavailable workspace rollout points administrators to safe Client Hub setup without probing grants", async ({page}) => {
   const calls = await mockPrimary(page, (route, call) => {
-    if (call.path === "/api/session") return route.fulfill({json: {user, csrfToken: "csrf-workspace-unavailable", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: {deliveryJobsRoot: {enabled: true}}}});
+    if (call.path === "/api/session") return route.fulfill({json: {user, csrfToken: "csrf-workspace-unavailable", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: {deliveryJobsRoot: {enabled: true}, authenticatedDeliveryGrants: {enabled: false, pilotReady: false, reasons: ["unreceipted_bindings"], checks: {bindings: {unreceiptedActiveCount: 2}}}}}});
     return undefined;
   });
   await page.goto("/delivery");
   await page.getByRole("button", {name: "Actions for Acme"}).click();
   await page.getByRole("menuitem", {name: "Share", exact: true}).click();
-  await page.getByRole("tab", {name: "Client Workspace"}).click();
-  const status = page.getByRole("status").filter({hasText: "not available for this deployment"});
+  const workspaceTab = page.getByRole("tab", {name: "Client Workspace"});
+  await expect(workspaceTab).toBeDisabled();
+  const status = page.getByRole("status").filter({hasText: "2 existing folder links require migration review"});
   await expect(status).toBeVisible();
   await expect(status.getByRole("link", {name: "Open Client Hub portal setup"})).toHaveAttribute("href", "/clients#client-portal-setup");
-  await expect(status).toContainText("will not grant access without an existing verified membership and explicit permissions");
   expect(calls.some(call => call.path.startsWith("/api/delivery/authenticated-grants") || call.path.startsWith("/api/delivery/native-grants"))).toBe(false);
 });
 

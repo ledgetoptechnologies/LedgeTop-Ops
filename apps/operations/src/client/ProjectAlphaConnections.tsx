@@ -15,6 +15,9 @@ type PortalAuthority = { sourceId: string; state: Connector["state"]; version: n
 type PortalStatus = { available: boolean; authorities: PortalAuthority[];
   recovery: { version: number; sourceId: string; action: string; startedAt: string } | null };
 type ProjectManagementRoute = { sourceId: string; version: number; revision: number; enabled: boolean; reviewedUrlTemplate: string | null };
+type PrimaryPreflight = { ready: boolean; sourceId: typeof PRIMARY; profile: "primary_legacy";
+  expected: { snapshotOrigin: string | null; snapshotBasePath: string | null; applicationKey: string | null };
+  reasons: Array<{ code: string; message: string }> };
 type Directory = { connectors: Connector[]; health: Health[]; legacyPrimary: boolean; recovery?: Recovery[] | null; portal?: PortalStatus;
   projectManagement?: ProjectManagementRoute[] };
 const PRIMARY = "project-alpha:primary";
@@ -119,7 +122,11 @@ export function ProjectAlphaConnections() {
   const live = useRef(true);
   const mutation = useRef<AbortController | null>(null);
   const [revisionToken, setRevisionToken] = useState(0);
-  useEffect(() => { live.current = true; return () => { live.current = false; mutation.current?.abort(); }; }, []);
+  const [registrationSourceId, setRegistrationSourceId] = useState("");
+  const [primaryPreflight, setPrimaryPreflight] = useState<PrimaryPreflight | null>(null);
+  const [preflightBusy, setPreflightBusy] = useState(false);
+  const preflightAttempt = useRef(0);
+  useEffect(() => { live.current = true; return () => { live.current = false; preflightAttempt.current += 1; mutation.current?.abort(); }; }, []);
   useEffect(() => {
     const controller = new AbortController();
     setLoading(true);
@@ -171,12 +178,28 @@ export function ProjectAlphaConnections() {
     event.preventDefault();
     if (busy) return;
     const form = new FormData(event.currentTarget), sourceId = field(form, "sourceId");
+    if (sourceId === PRIMARY && !primaryPreflight?.ready) return;
     if (!window.confirm(sourceId === PRIMARY
       ? "Stage enrollment for the existing primary connection? It must match the deployed producer and signing keys. The current deployment connection keeps synchronizing until you activate this reviewed enrollment."
       : "Register this business-data source? It starts pending and hidden, without staff or client access.")) return;
     void submit("", "POST", { sourceId, producerBindingId: field(form, "producerBindingId"), displayName: field(form, "displayName"),
       snapshotOrigin: field(form, "snapshotOrigin"), applicationKey: field(form, "applicationKey"), profile: sourceId === PRIMARY ? "primary_legacy" : "business_data",
       revision: revision(form, field(form, "snapshotBasePath")) }, "Connection registered. Review its identity before activation.");
+  }
+  async function checkPrimary(formElement: HTMLFormElement) {
+    if (busy || preflightBusy) return;
+    const form = new FormData(formElement), sourceId = field(form, "sourceId");
+    if (sourceId !== PRIMARY) return;
+    const body = { sourceId, producerBindingId: field(form, "producerBindingId"), displayName: field(form, "displayName"),
+      snapshotOrigin: field(form, "snapshotOrigin"), applicationKey: field(form, "applicationKey"), profile: "primary_legacy",
+      revision: revision(form, field(form, "snapshotBasePath")) };
+    const attempt = ++preflightAttempt.current;
+    setPreflightBusy(true); setPrimaryPreflight(null); setError("");
+    try {
+      const response = await api<{ preflight: PrimaryPreflight }>(`${ENDPOINT}/primary-preflight`, { method: "POST", body: JSON.stringify(body) });
+      if (live.current && preflightAttempt.current === attempt) setPrimaryPreflight(response.preflight);
+    } catch (caught) { if (live.current && preflightAttempt.current === attempt) setError(caught instanceof Error ? caught.message : "Primary readiness could not be checked."); }
+    finally { if (live.current && preflightAttempt.current === attempt) setPreflightBusy(false); }
   }
   return <Card title="Project Alpha connections">
     <div className="alpha-connections">
@@ -260,14 +283,25 @@ export function ProjectAlphaConnections() {
       </section>)}
       {data && <details><summary>Register a source</summary>
         <p>Enroll and activate the existing primary before activating additional sources. Registration alone never enables synchronization or client access.</p>
-        <form className="alpha-connection-form" onSubmit={register}>
-          <label>Source ID<input name="sourceId" required pattern="project-alpha:[a-z0-9][a-z0-9_-]*" maxLength={78} placeholder="project-alpha:service-name" /></label>
+        <form className="alpha-connection-form" onSubmit={register} onInput={() => {
+          preflightAttempt.current += 1; setPreflightBusy(false); setPrimaryPreflight(null);
+        }}>
+          <label>Source ID<input name="sourceId" required pattern="project-alpha:[a-z0-9][a-z0-9_-]*" maxLength={78} placeholder="project-alpha:service-name"
+            onChange={event => setRegistrationSourceId(event.target.value.trim())} /></label>
           <label>Connection label<input name="displayName" required maxLength={160} /></label>
           <label>Immutable producer ID<input name="producerBindingId" required pattern="[A-Za-z0-9_-]+" maxLength={128} /></label>
           <label>Snapshot origin<input name="snapshotOrigin" type="url" required maxLength={2048} placeholder="https://alpha.example.com" /></label>
           <label>Base path<input name="snapshotBasePath" required defaultValue="/" maxLength={1024} /></label>
           <label>Application key<input name="applicationKey" required maxLength={64} /></label>
-          <CredentialFields /><button type="submit" disabled={controlsBusy}>Register pending connection</button>
+          <CredentialFields />
+          {registrationSourceId === PRIMARY && <>
+            <button type="button" disabled={controlsBusy || preflightBusy} onClick={event => void checkPrimary(event.currentTarget.form!)}>{preflightBusy ? "Checking primary readiness…" : "Check primary readiness"}</button>
+            {primaryPreflight && <div className="notice" role="status">
+              <p><strong>{primaryPreflight.ready ? "Ready to stage" : "Primary enrollment blocked"}</strong></p>
+              {primaryPreflight.reasons.map(reason => <p key={reason.code}><code>{reason.code}</code> · {reason.message}</p>)}
+            </div>}
+          </>}
+          <button type="submit" disabled={controlsBusy || (registrationSourceId === PRIMARY && !primaryPreflight?.ready)}>Register pending connection</button>
         </form>
       </details>}
     </div>

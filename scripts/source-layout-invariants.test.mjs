@@ -375,3 +375,17 @@ test("the TrueNAS thumbnail runbooks retain the production edge and lease contra
   assert(!runbook.includes("`.github/workflows/deploy-workers.yml` auto-deploys"));
   assert(flatSetup.includes("Explicitly block or Access-protect the ingest prefix there, but allow the exact renderer prefix"));
 });
+
+test("authenticated delivery controls are session-gated by the read-only pilot preflight", () => {
+  const session = read("apps/operations/src/worker/index.ts");
+  const readiness = read("apps/operations/src/worker/authenticated-delivery-pilot-readiness.ts");
+  const ui = read("apps/operations/src/client/OperationsApp.tsx");
+  assert(session.includes("authenticatedDeliveryGrants: await authenticatedDeliveryPilotReadiness(c.env)"));
+  assert(!session.includes("authenticatedDeliveryGrants: {\n        enabled: authenticatedDeliveryGrantsEnabled(c.env)"));
+  for (const prerequisite of [
+    "projectAccessAuthorityMutationsEnabled", "portal_primary_staff_bindings", "pa_portal_projection_checkpoints",
+    "unreceipted_bindings", "primary_projection_unavailable", "readiness_check_unavailable",
+  ]) assert(readiness.includes(prerequisite), `${prerequisite} is missing from authenticated delivery readiness`);
+  assert(ui.includes("disabled={busy || !authenticatedGrantsEnabled}"));
+  assert(ui.includes("existing folder link${unreceiptedCount === 1 ? \"\" : \"s\"} require migration review"));
+});

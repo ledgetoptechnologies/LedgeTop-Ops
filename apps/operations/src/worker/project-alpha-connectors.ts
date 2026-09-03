@@ -62,6 +62,19 @@ export interface RegisterProjectAlphaConnectorInput {
   sourceId: string; producerBindingId: string; snapshotOrigin: string; applicationKey: string;
   profile: ProjectAlphaConnectorProfile; displayName: string; revision: ProjectAlphaConnectorRevisionInput;
 }
+export type PrimaryConnectorPreflightReasonCode =
+  | "primary_already_registered"
+  | "primary_snapshot_configuration_missing"
+  | "connector_credentials_unavailable"
+  | "primary_destination_mismatch"
+  | "primary_signing_identity_unattested";
+export interface PrimaryConnectorPreflight {
+  ready: boolean;
+  sourceId: typeof PRIMARY_ALPHA_SOURCE_ID;
+  profile: "primary_legacy";
+  expected: { snapshotOrigin: string | null; snapshotBasePath: string | null; applicationKey: string | null };
+  reasons: Array<{ code: PrimaryConnectorPreflightReasonCode; message: string }>;
+}
 export class ProjectAlphaConnectorError extends Error {
   constructor(readonly code: "invalid" | "unavailable" | "conflict" | "credentials_unavailable" | "capacity" | "changed", message: string) {
     super(message); this.name = "ProjectAlphaConnectorError";
@@ -234,6 +247,53 @@ async function pinPrimaryEnrollment(env: ProjectAlphaConnectorEnvironment, value
   if (!known.size || [current, ...(previous ? [previous] : [])]
     .some(key => known.get(key.fingerprint) !== key.algorithm))
     fail("credentials_unavailable", "Primary enrollment requires its already configured signing identity");
+}
+
+/** Read-only readiness proof for a proposed primary enrollment. It evaluates
+ * deploy-managed secrets internally but returns only bounded reason codes and
+ * the non-secret destination already configured for the scalar adapter. */
+export async function preflightPrimaryProjectAlphaConnector(env: ProjectAlphaConnectorEnvironment,
+  input: RegisterProjectAlphaConnectorInput): Promise<PrimaryConnectorPreflight> {
+  let expected: PrimaryConnectorPreflight["expected"] = { snapshotOrigin: null, snapshotBasePath: null, applicationKey: null };
+  try {
+    if (env.PROJECT_ALPHA_BASE_URL) {
+      const url = new URL(env.PROJECT_ALPHA_BASE_URL);
+      if (url.protocol === "https:" && !url.username && !url.password && !url.search && !url.hash) expected = {
+        snapshotOrigin: url.origin,
+        snapshotBasePath: url.pathname.replace(/\/+$/, "") || "/",
+        applicationKey: env.APPLICATION_KEY?.trim().toLowerCase() || null,
+      };
+    }
+  } catch { /* A bounded reason below represents malformed deployment state. */ }
+  const result = (reasons: PrimaryConnectorPreflight["reasons"]): PrimaryConnectorPreflight => ({
+    ready: reasons.length === 0, sourceId: PRIMARY_ALPHA_SOURCE_ID, profile: "primary_legacy", expected, reasons,
+  });
+  const parsed = registrationSchema.safeParse(input);
+  if (!parsed.success || parsed.data.sourceId !== PRIMARY_ALPHA_SOURCE_ID || parsed.data.profile !== "primary_legacy")
+    return result([{ code: "primary_destination_mismatch", message: "Enter the exact primary source and authority profile." }]);
+  const value = parsed.data;
+  let revision: ProjectAlphaConnectorRevisionInput, snapshotOrigin: string;
+  try { revision = parseRevision(value.revision); snapshotOrigin = origin(value.snapshotOrigin); }
+  catch { return result([{ code: "primary_destination_mismatch", message: "The proposed primary connection metadata is invalid." }]); }
+  if (await read(database(env), PRIMARY_ALPHA_SOURCE_ID)) return result([{
+    code: "primary_already_registered", message: "The primary exact-source connection is already registered.",
+  }]);
+  if (!expected.snapshotOrigin || !expected.snapshotBasePath || !expected.applicationKey || !env.PROJECT_ALPHA_API_KEY?.trim())
+    return result([{ code: "primary_snapshot_configuration_missing", message: "The existing primary snapshot configuration is incomplete." }]);
+  let keys: Awaited<ReturnType<typeof configuredKeys>>;
+  try { keys = await configuredKeys(env, revision.credentialRef, value.profile); }
+  catch {
+    return result([{ code: "connector_credentials_unavailable", message: "The selected deploy-managed credential reference is unavailable or invalid." }]);
+  }
+  try { await pinPrimaryEnrollment(env, { ...value, snapshotOrigin, revision }, keys.current, keys.previous); }
+  catch (error) {
+    if (error instanceof ProjectAlphaConnectorError && error.code === "conflict") return result([{
+      code: "primary_destination_mismatch", message: "The proposed destination does not match the existing primary connection.",
+    }]);
+    return result([{ code: "primary_signing_identity_unattested", message: "The selected signing identity has not been attested for the existing primary producer.",
+    }]);
+  }
+  return result([]);
 }
 function summary(row: ConnectorRow): ProjectAlphaConnectorSummary {
   return { sourceId: row.source_id, producerBindingId: row.producer_binding_id, snapshotOrigin: row.snapshot_origin,

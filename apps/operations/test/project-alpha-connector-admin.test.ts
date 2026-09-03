@@ -90,6 +90,7 @@ describe("Project Alpha connector administration HTTP boundary",{timeout:60_000,
     mocks.authenticateStaff.mockRejectedValue(new HTTPException(401,{message:"Authentication required"}));
     const before=await rows("pa_connector_audit");
     expect((await send(ROOT)).status).toBe(401);expect((await send(ROOT,"POST",input())).status).toBe(401);
+    expect((await send(`${ROOT}/primary-preflight`,"POST",input())).status).toBe(401);
     expect(await rows("pa_connector_audit")).toBe(before);
   });
   it("requires administrator membership in addition to a global integrations grant",async()=>{
@@ -98,6 +99,7 @@ describe("Project Alpha connector administration HTTP boundary",{timeout:60_000,
       db.prepare("INSERT INTO staff_permission_overrides(id,staff_id,permission_key,effect,scope,scope_key,created_by) VALUES('registry-allow',?,'integrations.manage','allow','global','global',?)").bind(principal.id,principal.id),
     ]);
     expect((await send(ROOT)).status).toBe(403);expect((await send(ROOT,"POST",input())).status).toBe(403);
+    expect((await send(`${ROOT}/primary-preflight`,"POST",input())).status).toBe(403);
   });
   it("does not promote a division-scoped integrations grant into global registry authority",async()=>{
     await db.batch([
@@ -109,7 +111,7 @@ describe("Project Alpha connector administration HTTP boundary",{timeout:60_000,
   it("honors a global deny on every registry read and action",async()=>{
     await db.prepare("INSERT INTO staff_permission_overrides(id,staff_id,permission_key,effect,scope,scope_key,created_by) VALUES('registry-deny',?,'integrations.manage','deny','global','global',?)").bind(principal.id,principal.id).run();
     const before=await rows("pa_connector_audit");
-    for(const [path,method,body] of [[ROOT,"GET",undefined],[ROOT,"POST",input()],[`${ROOT}/project-alpha:primary`,"PATCH",{expectedVersion:2,state:"suspended"}],
+    for(const [path,method,body] of [[ROOT,"GET",undefined],[ROOT,"POST",input()],[`${ROOT}/primary-preflight`,"POST",input()],[`${ROOT}/project-alpha:primary`,"PATCH",{expectedVersion:2,state:"suspended"}],
       [`${ROOT}/project-alpha:primary/revisions`,"POST",{expectedVersion:2,revision}],[`${ROOT}/project-alpha:primary/sync`,"POST",{}],
       [`${ROOT}/project-alpha:secondary/portal`,"POST",{expectedVersion:1,expectedPortalVersion:null,action:"configure"}],
       [`${ROOT}/recover-portal-update`,"POST",{expectedVersion:1}]] as const){
@@ -151,6 +153,16 @@ describe("Project Alpha connector administration HTTP boundary",{timeout:60_000,
     const text=await response.text();expect(text).toContain("project-alpha:primary");
     for(const privateValue of ["private-primary-snapshot-key","private-secondary-snapshot-key",publicKey(1),"credentialRef","accessSubject","current_key_fingerprint"])
       expect(text).not.toContain(privateValue);
+  });
+  it("preflights primary enrollment read-only and returns only bounded readiness metadata",async()=>{
+    const before=await Promise.all([rows("pa_connectors"),rows("pa_connector_revisions"),rows("pa_connector_audit")]);
+    const response=await send(`${ROOT}/primary-preflight`,"POST",{sourceId:"project-alpha:primary",producerBindingId:"primary-producer",
+      snapshotOrigin:"https://primary.example.test",applicationKey:"ltds_ops",profile:"primary_legacy",displayName:"Primary",
+      revision:{...revision,credentialRef:"primary"}});
+    expect(response.status).toBe(200);expect(response.headers.get("Cache-Control")).toContain("no-store");
+    const text=await response.text();expect(JSON.parse(text).preflight).toMatchObject({ready:false,reasons:[{code:"primary_already_registered"}]});
+    for(const privateValue of ["private-primary-snapshot-key",publicKey(1),"credentialRef","accessSubject"])expect(text).not.toContain(privateValue);
+    expect(await Promise.all([rows("pa_connectors"),rows("pa_connector_revisions"),rows("pa_connector_audit")])).toEqual(before);
   });
   it("configures only a reviewed HTTPS project-management route with optimistic idempotent revisions",async()=>{
     const path=`${ROOT}/${encodeURIComponent("project-alpha:primary")}/project-management`;

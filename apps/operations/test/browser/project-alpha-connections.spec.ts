@@ -255,6 +255,10 @@ test("Sync now addresses exactly the selected source and disables competing acti
 test("pending primary enrollment preserves legacy synchronization and submits references, never credentials", async ({ page }) => {
   const data = { ...directory([]), legacyPrimary: true };
   const requests = await fixture(page, data, async (route, path) => {
+    if (route.request().method() === "POST" && path === `${endpoint}/primary-preflight`) {
+      await route.fulfill({ json: { preflight: { ready: true, sourceId: primary, profile: "primary_legacy", reasons: [],
+        expected: { snapshotOrigin: "https://registered.example.test", snapshotBasePath: "/api/exports", applicationKey: "external_operations" } } } }); return true;
+    }
     if (route.request().method() !== "POST" || path !== endpoint) return false;
     data.connectors.push({ ...connector(primary, "pending"), displayName: "Registered company", version: 1 });
     await route.fulfill({ json: { connector: data.connectors[0] } }); return true;
@@ -264,10 +268,19 @@ test("pending primary enrollment preserves legacy synchronization and submits re
   await expect(form.locator('input[type="password"]')).toHaveCount(0);
   await expect(form.getByLabel(/API token|API secret|Signing key|Private key|Password/i)).toHaveCount(0);
   await expect(form.getByLabel("Credential reference")).toHaveAttribute("placeholder", "Deployed secret reference, not the secret");
+  await expect(form.getByRole("button", { name: "Register pending connection" })).toBeDisabled();
+  await form.getByRole("button", { name: "Check primary readiness" }).click();
+  await expect(form.getByRole("status")).toContainText("Ready to stage");
+  await expect(form.getByRole("button", { name: "Register pending connection" })).toBeEnabled();
+  await form.getByLabel("Connection label").fill("Changed company");
+  await expect(form.getByRole("button", { name: "Register pending connection" })).toBeDisabled();
+  await form.getByLabel("Connection label").fill("Registered company");
+  await form.getByRole("button", { name: "Check primary readiness" }).click();
+  await expect(form.getByRole("status")).toContainText("Ready to stage");
   await confirmation(page, () => form.getByRole("button", { name: "Register pending connection" }).click(), /current deployment connection keeps synchronizing until you activate/, false);
-  expect(requests.filter(row => row.method === "POST")).toHaveLength(0);
+  expect(requests.filter(row => row.method === "POST" && row.path === endpoint)).toHaveLength(0);
   await confirmation(page, () => form.getByRole("button", { name: "Register pending connection" }).click(), /must match the deployed producer and signing keys/, true);
-  const request = requests.find(row => row.method === "POST")!;
+  const request = requests.find(row => row.method === "POST" && row.path === endpoint)!;
   expect(request.csrf).toBe("csrf-fixture");
   expect(request.body).toEqual({ sourceId: primary, producerBindingId: "producer-registered", displayName: "Registered company",
     snapshotOrigin: "https://registered.example.test", applicationKey: "external_operations", profile: "primary_legacy",
@@ -280,6 +293,25 @@ test("pending primary enrollment preserves legacy synchronization and submits re
   await expect(legacyCard).toContainText("Exact-source connector upgrade · Staged for review");
   await expect(card.getByRole("button", { name: "Sync now", exact: true })).toBeDisabled();
   await expect(card.getByRole("button", { name: /Hide business records|Show business records/ })).toHaveCount(0);
+});
+
+test("primary registration stays blocked with a clear bounded readiness reason", async ({ page }) => {
+  const requests = await fixture(page, { ...directory([]), legacyPrimary: true }, async (route, path) => {
+    if (route.request().method() !== "POST" || path !== `${endpoint}/primary-preflight`) return false;
+    await route.fulfill({ json: { preflight: { ready: false, sourceId: primary, profile: "primary_legacy",
+      expected: { snapshotOrigin: "https://primary.example.test", snapshotBasePath: "/", applicationKey: "external_operations" },
+      reasons: [{ code: "connector_credentials_unavailable", message: "The selected deploy-managed credential reference is unavailable or invalid." }] } } });
+    return true;
+  });
+  await page.goto("/administration");
+  const form = await fillRegistration(page, primary);
+  const register = form.getByRole("button", { name: "Register pending connection" });
+  await expect(register).toBeDisabled();
+  await form.getByRole("button", { name: "Check primary readiness" }).click();
+  await expect(form.getByRole("status")).toContainText("Primary enrollment blocked");
+  await expect(form.getByRole("status")).toContainText("connector_credentials_unavailable");
+  await expect(register).toBeDisabled();
+  expect(requests.filter(row => row.method === "POST" && row.path === endpoint)).toHaveLength(0);
 });
 
 test("revision confirmation preserves immutable destination and uses the chosen source", async ({ page }) => {

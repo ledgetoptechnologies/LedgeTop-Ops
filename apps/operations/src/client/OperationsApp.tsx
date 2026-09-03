@@ -80,9 +80,19 @@ interface Session {
     delegatedShareProvisioning?: { enabled: boolean };
     clientWorkspaceManagerRecovery?: { enabled: boolean };
     portalIdentityDenials?: { enabled: boolean };
-    authenticatedDeliveryGrants?: { enabled: boolean };
+    authenticatedDeliveryGrants?: AuthenticatedDeliveryCapability;
     clientFeedback?: { enabled: boolean };
   };
+}
+type AuthenticatedDeliveryReadinessReason =
+  | "hierarchy_disabled" | "grants_disabled" | "authority_mutations_disabled" | "schema_unavailable"
+  | "primary_projection_unavailable" | "unreceipted_bindings" | "notifications_disabled"
+  | "notification_schema_unavailable" | "readiness_check_unavailable";
+interface AuthenticatedDeliveryCapability {
+  enabled: boolean;
+  pilotReady?: boolean;
+  reasons?: AuthenticatedDeliveryReadinessReason[];
+  checks?: { bindings?: { unreceiptedActiveCount: number | null } };
 }
 interface ActiveDeliveryShare {
   id: string;
@@ -1682,7 +1692,7 @@ function Delivery({ session }: { session: Session }) {
           folder={preview.shareFolder}
           canRevoke={allowed(session.user, "delivery.share.revoke")}
           canProvisionDelegated={session.capabilities?.delegatedShareProvisioning?.enabled === true && session.user.isAdministrator && allowed(session.user, "delivery.share.create")}
-          authenticatedGrantsEnabled={session.capabilities?.authenticatedDeliveryGrants?.enabled === true}
+          authenticatedGrantCapability={session.capabilities?.authenticatedDeliveryGrants}
           canManageAuthenticatedGrants={session.user.isAdministrator && allowed(session.user, "delivery.share.create")}
           close={() => setPreview(null)}
           directoryRecipientsEnabled={session.capabilities?.shareDirectoryRecipients?.enabled === true}
@@ -2621,7 +2631,7 @@ function DeliveryWorkspace({ session }: { session: Session }) {
           folder={preview.shareFolder}
           canRevoke={allowed(session.user, "delivery.share.revoke")}
           canProvisionDelegated={session.capabilities?.delegatedShareProvisioning?.enabled === true && session.user.isAdministrator && allowed(session.user, "delivery.share.create")}
-          authenticatedGrantsEnabled={session.capabilities?.authenticatedDeliveryGrants?.enabled === true}
+          authenticatedGrantCapability={session.capabilities?.authenticatedDeliveryGrants}
           canManageAuthenticatedGrants={session.user.isAdministrator && allowed(session.user, "delivery.share.create")}
           close={() => setPreview(null)}
           directoryRecipientsEnabled={session.capabilities?.shareDirectoryRecipients?.enabled === true}
@@ -3604,7 +3614,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
           folder={preview.shareTarget}
           canRevoke={allowed(session.user, "delivery.share.revoke")}
           canProvisionDelegated={session.capabilities?.delegatedShareProvisioning?.enabled === true && session.user.isAdministrator && allowed(session.user, "delivery.share.create")}
-          authenticatedGrantsEnabled={session.capabilities?.authenticatedDeliveryGrants?.enabled === true}
+          authenticatedGrantCapability={session.capabilities?.authenticatedDeliveryGrants}
           canManageAuthenticatedGrants={session.user.isAdministrator && allowed(session.user, "delivery.share.create")}
           directoryRecipientsEnabled={session.capabilities?.shareDirectoryRecipients?.enabled === true}
           close={() => setPreview(null)}
@@ -5115,7 +5125,7 @@ function ShareDialog({
   canRevoke,
   canProvisionDelegated,
   directoryRecipientsEnabled,
-  authenticatedGrantsEnabled,
+  authenticatedGrantCapability,
   canManageAuthenticatedGrants,
   close,
   changed,
@@ -5124,11 +5134,23 @@ function ShareDialog({
   canRevoke: boolean;
   canProvisionDelegated: boolean;
   directoryRecipientsEnabled: boolean;
-  authenticatedGrantsEnabled: boolean;
+  authenticatedGrantCapability?: AuthenticatedDeliveryCapability;
   canManageAuthenticatedGrants: boolean;
   close: () => void;
   changed: () => void;
 }) {
+  const authenticatedGrantsEnabled = authenticatedGrantCapability?.enabled === true;
+  const readinessReasons = authenticatedGrantCapability?.reasons ?? [];
+  const unreceiptedCount = authenticatedGrantCapability?.checks?.bindings?.unreceiptedActiveCount;
+  const authenticatedGrantReadinessMessage = readinessReasons.includes("unreceipted_bindings")
+    ? `${unreceiptedCount && unreceiptedCount > 100 ? "More than 100" : unreceiptedCount ?? "Some"} existing folder link${unreceiptedCount === 1 ? "" : "s"} require migration review before Client Workspace sharing can be enabled.`
+    : readinessReasons.includes("primary_projection_unavailable")
+      ? "Client Workspace sharing is waiting for a current signed Project Alpha workspace projection."
+      : readinessReasons.includes("schema_unavailable") || readinessReasons.includes("readiness_check_unavailable")
+        ? "Client Workspace sharing is waiting for database readiness checks to complete."
+        : readinessReasons.includes("authority_mutations_disabled")
+          ? "Client Workspace sharing is paused while access-mutation safety checks are completed."
+          : "Client Workspace sharing is not enabled for this deployment.";
   const fileTarget = folder.kind !== "folder" && !folder.prefix;
   const targetLabel = fileTarget ? "file" : "folder";
   const targetPrefix = folder.prefix || String(folder.physicalKey || "").slice(0, String(folder.physicalKey || "").lastIndexOf("/") + 1);
@@ -5335,9 +5357,11 @@ function ShareDialog({
             aria-selected={shareMode === "workspace"}
             className={shareMode === "workspace" ? "active" : "button-ghost"}
             onClick={() => setShareMode("workspace")}
-            disabled={busy}
+            disabled={busy || !authenticatedGrantsEnabled}
+            title={!authenticatedGrantsEnabled ? authenticatedGrantReadinessMessage : undefined}
           >Client Workspace</button>
         </div>}
+        {!fileTarget && !authenticatedGrantsEnabled && <div className="notice" role="status">{authenticatedGrantReadinessMessage} <a href="/clients#client-portal-setup">Open Client Hub portal setup</a> to check readiness.</div>}
         {!fileTarget && shareMode === "workspace" ? (
           <section className="share-mode-panel" role="tabpanel" aria-label="Client Workspace sharing">
             <header>
@@ -5348,7 +5372,7 @@ function ShareDialog({
               ? canManageAuthenticatedGrants
                 ? <AuthenticatedDeliveryGrantPanel folder={folder} canRevoke={canRevoke} embedded />
                 : <div className="notice" role="status">Administrator access is required to manage Client Workspace grants. Existing public-link sharing remains available.</div>
-              : <div className="notice" role="status">Client Workspace sharing is not available for this deployment yet. The folder must be linked to a synced Project Alpha workspace before recipients can be granted access. <a href="/clients#client-portal-setup">Open Client Hub portal setup</a> to check readiness; setup will not grant access without an existing verified membership and explicit permissions.</div>}
+              : <div className="notice" role="status">{authenticatedGrantReadinessMessage} <a href="/clients#client-portal-setup">Open Client Hub portal setup</a> to check readiness.</div>}
             {canProvisionDelegated && <details className="workspace-sharing-advanced">
               <summary>Advanced client-created link policy</summary>
               <ClientDelegatedFolderProvisioning folder={folder} />

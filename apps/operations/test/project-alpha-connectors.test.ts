@@ -3,7 +3,7 @@ import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import { assertProjectAlphaConnectorProof, connectorFenceStatement, listProjectAlphaConnectors,
-  registerProjectAlphaConnector, resolveProjectAlphaConnector, reviseProjectAlphaConnector, setProjectAlphaConnectorState,
+  preflightPrimaryProjectAlphaConnector, registerProjectAlphaConnector, resolveProjectAlphaConnector, reviseProjectAlphaConnector, setProjectAlphaConnectorState,
   type ProjectAlphaConnectorEnvironment, type RegisterProjectAlphaConnectorInput } from "../src/worker/project-alpha-connectors";
 
 const primary = "project-alpha:primary";
@@ -99,6 +99,28 @@ describe("durable authenticated connector registry", () => {
     await expect(registerProjectAlphaConnector(operationsOnly, primaryInput, author))
       .rejects.toMatchObject({ code: "credentials_unavailable" });
     expect(await listProjectAlphaConnectors(env)).toEqual([]);
+  });
+
+  it("preflights primary enrollment without persisting or returning sensitive identity fields", async () => {
+    const beforeCounts = await Promise.all(["pa_connectors", "pa_connector_revisions", "pa_connector_signing_keys", "pa_connector_audit"]
+      .map(table => db.prepare(`SELECT count(*) count FROM ${table}`).first<number>("count")));
+    const ready = await preflightPrimaryProjectAlphaConnector(env, primaryInput);
+    expect(ready).toEqual({ ready: true, sourceId: primary, profile: "primary_legacy", reasons: [], expected: {
+      snapshotOrigin: "https://primary.example.test", snapshotBasePath: "/", applicationKey: "ltds_ops",
+    } });
+    const serialized = JSON.stringify(ready);
+    for (const privateValue of ["original-api-key", key(1), "credentialRef", "service-token-subject"])
+      expect(serialized).not.toContain(privateValue);
+    expect(await Promise.all(["pa_connectors", "pa_connector_revisions", "pa_connector_signing_keys", "pa_connector_audit"]
+      .map(table => db.prepare(`SELECT count(*) count FROM ${table}`).first<number>("count")))).toEqual(beforeCounts);
+  });
+
+  it("returns bounded fail-closed preflight reasons for absent credentials and unattested signing identity", async () => {
+    await expect(preflightPrimaryProjectAlphaConnector({ ...env, PROJECT_ALPHA_CONNECTOR_CREDENTIALS: undefined }, primaryInput))
+      .resolves.toMatchObject({ ready: false, reasons: [{ code: "connector_credentials_unavailable" }] });
+    await expect(preflightPrimaryProjectAlphaConnector({ ...env, PROJECT_ALPHA_WEBHOOK_ED25519_PUBLIC_KEY: undefined,
+      PROJECT_ALPHA_WEBHOOK_ED25519_PREVIOUS_PUBLIC_KEY: undefined, PROJECT_ALPHA_WEBHOOK_HMAC_SECRET: undefined }, primaryInput))
+      .resolves.toMatchObject({ ready: false, reasons: [{ code: "primary_signing_identity_unattested" }] });
   });
 
   it("allows only the primary scalar adapter when enrollment is absent, never a secondary fallback", async () => {

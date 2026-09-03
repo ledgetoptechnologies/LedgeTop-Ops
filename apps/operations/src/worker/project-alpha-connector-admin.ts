@@ -9,7 +9,7 @@ import { syncRegisteredProjectAlpha } from "./project-alpha";
 import { reconcilePrimaryClientPortalWorkspaces } from "./client-account-root-activation";
 import { getProjectAlphaSnapshotRecoveryStatus } from "./project-alpha-snapshot-recovery";
 import {
-  listProjectAlphaConnectors, ProjectAlphaConnectorError, registerProjectAlphaConnector,
+  listProjectAlphaConnectors, preflightPrimaryProjectAlphaConnector, ProjectAlphaConnectorError, registerProjectAlphaConnector,
 } from "./project-alpha-connectors";
 import { PortalSourceAuthorityError } from "../../../client/src/worker/project-alpha-portal-authority";
 import {
@@ -137,6 +137,8 @@ export function registerProjectAlphaConnectorAdminRoutes(app: App): void {
   });
   app.post(ROOT, async c => c.json({ connector: await registerProjectAlphaConnector(c.env,
     await json(c.req.raw, registration), c.get("principal").id) }, 201));
+  app.post(`${ROOT}/primary-preflight`, async c => c.json({ preflight: await preflightPrimaryProjectAlphaConnector(c.env,
+    await json(c.req.raw, registration)) }));
   app.post(`${ROOT}/:sourceId/revisions`, async c => {
     const value = await json(c.req.raw, z.object({ expectedVersion: z.number().int().positive(), revision }).strict());
     return c.json({ connector: await reviseCoordinatedProjectAlphaConnector(c.env, c.req.param("sourceId"), value.expectedVersion, value.revision, c.get("principal").id) });

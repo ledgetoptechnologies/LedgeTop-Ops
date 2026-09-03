@@ -367,3 +367,34 @@ restoring, or otherwise changing client authority.
   an earlier delivery-link expiration or immediate revocation. Forty-three
   focused archive tests, 26 desktop/mobile public-delivery browser cases,
   Client type checking, and the production build passed.
+
+## 2026-09-03 Operations readiness checkpoint
+
+This checkpoint adds read-only deployment preflights. It does not register a
+Project Alpha source, write authority state, enable a portal feature flag,
+provision a secret, or alter an existing public link or client grant.
+
+- Primary exact-source enrollment now remains disabled until an authenticated
+  administrator runs a server-side preflight against the existing scalar
+  destination, deploy-managed connector envelope, and attested signing
+  identity. The response contains only the configured non-secret destination
+  plus bounded reason codes; edits invalidate the result, and registration
+  repeats the authoritative validation.
+- The Operations session now advertises Client Workspace sharing only after a
+  read-only fail-closed check confirms the hierarchy/grant/mutation flags,
+  required tables and views, a coherent active signed primary projection, and
+  zero unreceipted migration-0189 Operations bindings. Notification readiness
+  remains a separate pilot-completeness signal. Counts are capped at 101 and
+  the response contains no workspace IDs, paths, identities, or secrets.
+- Combined verification passed 52 focused Worker tests, 104 desktop/mobile
+  browser cases, 11 source-layout invariants, Operations type checking, and the
+  production build. An attempted full Windows suite later exhausted a
+  Miniflare loopback port in unrelated native-resource tests, matching the
+  repository's documented Windows limitation; Linux CI remains the
+  authoritative full-package gate.
+- The configured Wrangler OAuth session could list account and zone metadata,
+  but had no zone-level Access authorization. The temporary seven-day token in
+  the authorized local handoff file returned Cloudflare `Invalid API Token`.
+  Therefore the exact live Access application, destination, audience, and
+  policy readback remains unverified. No audience mapping or Access policy was
+  changed by this checkpoint.
