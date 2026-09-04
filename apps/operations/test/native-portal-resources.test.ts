@@ -4,7 +4,7 @@ import { afterAll,beforeAll,describe,expect,it,vi } from 'vitest';
 import { createLocalJWKSet,exportJWK,generateKeyPair,SignJWT,type JWTVerifyGetKey } from 'jose';
 import { splitD1MigrationStatements } from '../../client/test/helpers/d1-migrations';
 import { provisionPortalSourceAuthority,setPortalSourceAuthorityState,type PortalAuthorityConnectorIdentity } from '../../client/src/worker/project-alpha-portal-authority';
-import { handleRegisteredProjectAlphaPortalRequest,portalSourceProjectionPath,verifyRegisteredPortalAccess } from '../../client/src/worker/project-alpha-portal-ingress';
+import { ingestOpsSyncPortalProjection } from '../../client/src/worker/ops-sync-portal-entrypoint';
 import { createClientPortalRouter } from '../../client/src/worker/client-portal/routes';
 import { resolveCloudflareClientPrincipal } from '../../client/src/worker/client-portal/access-identity';
 import { resolveEffectivePortalWorkspaceContext,resolveNativePortalWorkspaceReadContext } from '../../client/src/worker/client-portal/workspace-v2';
@@ -28,7 +28,6 @@ const principal={issuer,subject:'one-global-person',email};
 const rootId='a'.repeat(32),projectId='b'.repeat(32);
 const staff:StaffPrincipal={id:'staff-test',email:'staff@example.test',displayName:'Authorized staff',accessSubject:'verified-staff',projectAlphaUserId:null};
 const bytes=(s:string)=>new TextEncoder().encode(s);
-async function hash(s:string){return [...new Uint8Array(await crypto.subtle.digest('SHA-256',bytes(s)))].map(b=>b.toString(16).padStart(2,'0')).join('');}
 type Fixture={source:string;name:string;secret:string;keyId:string;connector:PortalAuthorityConnectorIdentity;workspace:string;binding:string;grant:string;version:number};
 describe('source-owned native portal resources with real signed projection and login',{timeout:60_000},()=>{
   let runtime:Miniflare,db:D1Database,opsDb:D1Database,opsEnv:OperationsEnv,env:Env,keypair:Awaited<ReturnType<typeof generateKeyPair>>,jwks:JWTVerifyGetKey,clientToken:string;
@@ -47,17 +46,9 @@ describe('source-owned native portal resources with real signed projection and l
     entitlements:['workspace.view','directory.read','delivery.view'].map((capability,i)=>({publicId:`same-intent-${i}`,principalPublicId:'same-person',capability,
       effect:'allow',scopeType:'workspace',scopePublicId:'same-workspace',sourceVersion:'intent-v1',active:true,validFrom:'2026-08-01T00:00:00.000Z',expiresAt:null}))};}
   async function signed(f:Fixture,payload:{deliveryId:string}&Record<string,unknown>,target=env){
-    const body=JSON.stringify(payload),timestamp=new Date().toISOString(),path=portalSourceProjectionPath(f.source);
-    const key=await crypto.subtle.importKey('raw',bytes(f.secret),{name:'HMAC',hash:'SHA-256'},false,['sign']);
-    const digest=await crypto.subtle.sign('HMAC',key,bytes(`${timestamp}\nPOST\n${path}\n${f.keyId}\n${payload.deliveryId}\n${body}`));
-    const signature=[...new Uint8Array(digest)].map(n=>n.toString(16).padStart(2,'0')).join('');
-    const token=await new SignJWT({}).setProtectedHeader({alg:'RS256',kid:'native-test'}).setIssuer(issuer).setAudience('native-producer-aud')
-      .setSubject('explicit-source-producer').setIssuedAt().setExpirationTime('5m').sign(keypair.privateKey);
-    return handleRegisteredProjectAlphaPortalRequest(new Request(`https://client.test${path}`,{method:'POST',body,headers:{'Content-Type':'application/json',
-      'Cf-Access-Jwt-Assertion':token,'X-Portal-Integration-Application-Key':app,'X-Portal-Integration-Timestamp':timestamp,
-      'X-Portal-Integration-Body-SHA256':await hash(body),'X-Portal-Integration-Key-Id':f.keyId,
-      'X-Portal-Integration-Delivery-Id':payload.deliveryId,'X-Portal-Integration-Signature':`sha256=${signature}`}}),target,f.source,
-      (request,authority)=>verifyRegisteredPortalAccess(request,authority,jwks));
+    const result=await ingestOpsSyncPortalProjection(target,{protocolVersion:1,sourceId:f.source,applicationKey:app,
+      deliveryId:payload.deliveryId,projectionKind:'portal',body:JSON.stringify(payload)});
+    return new Response(JSON.stringify(result),{status:result.ok?200:result.retryable?503:422});
   }
   function router(){return createClientPortalRouter({repository:d1ClientPortalRepository,
     resolvePrincipal:(request,environment)=>resolveCloudflareClientPrincipal(request,environment,jwks)});}

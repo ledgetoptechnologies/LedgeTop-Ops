@@ -24,5 +24,8 @@
   "d1_databases": [
     { "binding": "OPS_DB", "database_name": "ltds-ops-staging", "database_id": "78b34173-b168-4e3d-9832-bb9d245cc6b8", "migrations_dir": "../operations/migrations" },
     { "binding": "DELIVERY_DB", "database_name": "client-data-staging", "database_id": "b6f653ab-9acd-4421-9ad0-207754b59aeb", "migrations_dir": "../client/migrations" }
+  ],
+  "services": [
+    { "binding": "CLIENT_PORTAL_PROJECTION_INGRESS", "service": "ltds-delivery-staging", "entrypoint": "OpsSyncPortalProjectionIngress" }
   ]
 }

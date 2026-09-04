@@ -78,13 +78,10 @@ export function validateApp(app, staging, production) {
     if (vars.CLIENT_ACCESS_TEAM_DOMAIN !== STAGING_STATIC_VARS.delivery.CLIENT_ACCESS_TEAM_DOMAIN) errors.push("delivery CLIENT_ACCESS_TEAM_DOMAIN must match the approved Access team");
     if (!/^[a-f0-9]{64}$/i.test(vars.CLIENT_ACCESS_AUD ?? "")) errors.push("delivery CLIENT_ACCESS_AUD must be the dedicated client portal Access audience");
     if (Object.values(STAGING_ACCESS_AUDS).includes(vars.CLIENT_ACCESS_AUD)) errors.push("delivery CLIENT_ACCESS_AUD must not reuse another staging Access audience");
-    const integrationAudiences = [vars.PROJECT_ALPHA_CATALOG_ACCESS_AUD, vars.PROJECT_ALPHA_PORTAL_ACCESS_AUD];
-    for (const [index, audience] of integrationAudiences.entries()) {
-      const label = index === 0 ? "PROJECT_ALPHA_CATALOG_ACCESS_AUD" : "PROJECT_ALPHA_PORTAL_ACCESS_AUD";
-      if (!/^[a-f0-9]{64}$/i.test(audience ?? "")) errors.push(`delivery ${label} must be a dedicated 64-character Access audience`);
-    }
-    if (new Set([vars.CLIENT_ACCESS_AUD, ...integrationAudiences, ...Object.values(STAGING_ACCESS_AUDS)]).size !== 3 + Object.values(STAGING_ACCESS_AUDS).length) {
-      errors.push("delivery client, catalog, portal, and staff Access audiences must all be distinct");
+    const integrationAudiences = [vars.PROJECT_ALPHA_CATALOG_ACCESS_AUD];
+    if (!/^[a-f0-9]{64}$/i.test(integrationAudiences[0] ?? "")) errors.push("delivery PROJECT_ALPHA_CATALOG_ACCESS_AUD must be a dedicated 64-character Access audience");
+    if (new Set([vars.CLIENT_ACCESS_AUD, ...integrationAudiences, ...Object.values(STAGING_ACCESS_AUDS)]).size !== 2 + Object.values(STAGING_ACCESS_AUDS).length) {
+      errors.push("delivery client, catalog, and staff Access audiences must all be distinct");
     }
     complete(vars.MAPBOX_PUBLIC_TOKEN, "delivery vars.MAPBOX_PUBLIC_TOKEN", errors);
     if (!email(vars.CLIENT_PORTAL_INVITATION_FROM)) errors.push("delivery CLIENT_PORTAL_INVITATION_FROM must be a valid staging sender");
@@ -189,6 +186,13 @@ export function validateCrossApp(configs) {
   const viewerSessionIssuer = (configs.delivery.services ?? []).find((service) => service.binding === "VIEWER_SESSION_ISSUER");
   if (viewerSessionIssuer?.service !== configs.operations.name || viewerSessionIssuer?.entrypoint !== "ViewerSessionIssuer") {
     errors.push("delivery Viewer session issuer must target the Operations staging Worker and named issuer entrypoint");
+  }
+  const portalIngress = (configs["ops-sync"].services ?? []).find((service) => service.binding === "CLIENT_PORTAL_PROJECTION_INGRESS");
+  if (portalIngress?.service !== configs.delivery.name || portalIngress?.entrypoint !== "OpsSyncPortalProjectionIngress") {
+    errors.push("ops-sync portal projection ingress must target the Client staging Worker and private named entrypoint");
+  }
+  if (configs.delivery.vars?.PROJECT_ALPHA_PORTAL_APPLICATION_KEY !== configs["ops-sync"].vars?.APPLICATION_KEY) {
+    errors.push("Client and Ops Sync must share the reviewed Project Alpha staging application key");
   }
   return errors;
 }

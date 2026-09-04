@@ -4,18 +4,28 @@ This is local implementation evidence, **not a deployment or live acceptance
 record**. The existing production links and Viewer were not changed by these
 checks. The broader client-platform goal remains incomplete.
 
-Project Alpha's reviewed backfill is checkpointed locally as `17e20c55` on
-`codex/portal-default-on`, including the prior contact-assignment/activation
-changes. A fresh fetch confirmed it contains current `origin/main`; it has not
-been pushed. Operations' prepared base is `fcb7d61`, also current with main at
-the time of this check. Uncommitted receiver changes are not a release identity.
+September 4 reconciliation pins the reviewed Operations runtime boundary at
+`ab4d83fac9f0775228398cc38f5e28c573e25399` and Project Alpha at
+`67cfe73a9a2c4507524a017cd8996aab5598c534`. The Operations boundary is already
+contained by the remote prepared branch; later branch commits are CI/test
+portability and release-packet maintenance and are intentionally excluded from
+the runtime identity. Project Alpha's prepared branch is also present remotely
+at its exact pin and is ten commits ahead of `origin/main`. A local PHPUnit
+result cache is modified in that Project Alpha worktree; it is generated test
+state, not part of either reviewed source pin.
 
-A subsequent fetch on September 3 reconfirmed Operations has no divergence from
-`origin/main` at `fcb7d61`. Project Alpha is six prepared commits ahead and zero
-behind `origin/main` at `11fca5ff` (contract scope persistence/rendering). Its
-working tree is clean. The six commits include activation readiness, contact
-assignment schema-v4 and transition/fixture fixes, and historical provisioning;
-the release is not solely the final backfill commit.
+This reconciliation updates release-contract inputs only. It does not finalize
+the contract, deploy either repository, apply a migration, change a feature
+flag, or provide live acceptance evidence.
+
+The September 4 invariant/staging contract run passed 78 of 78 tests. It verifies
+Client migrations through `0195`, Operations through `0052`, Project Alpha
+through `0083` with source SHA-256 pins, the Ops Sync
+`CLIENT_PORTAL_PROJECTION_INGRESS` binding, the shared `ltds_ops_staging`
+application key, absence of direct Client portal Access/HMAC requirements,
+`PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED=false`, and
+`BULK_DOWNLOAD_WORKFLOW.limits.steps=25000`. The checked-in contract remains
+explicitly unfinalized (`RELEASE_CONTRACT_FINALIZED=false`).
 
 ## Contract
 
@@ -74,7 +84,7 @@ passed 758 tests with 6,146 assertions and 91 environment skips. All 83 migratio
 files passed the repository validator; this is not proof of executing `0083`
 against MySQL.
 
-The exact final Project Alpha commit `17e20c55` subsequently passed its complete
+The then-current Project Alpha checkpoint `17e20c55` subsequently passed its complete
 suite: 759 tests, 6,166 assertions, 90 environment skips, exit 0. The disposable
 network-disabled container used PHP 8.5.10 and PHPUnit 10.5.63 with a git archive
 and a copied existing vendor tree. Five PHP 8.5 deprecations were reported
@@ -116,8 +126,9 @@ made the full feedback file pass 25/25 on Linux in 14.37 seconds. Production
 authorization was unchanged; a complete Client rerun was required afterward.
 That corrected, frozen Client rerun has now completed successfully on Linux:
 990/990 Vitest tests and 9/9 deployment-preflight tests, exit 0. The runtime
-candidate is checkpointed locally as `137b286`; only evidence documentation
-changed after its frozen test snapshot. Nothing has been pushed or deployed.
+candidate was checkpointed locally as `137b286`; that runtime identity is
+superseded by the reviewed `ab4d83f` boundary above. Nothing was deployed by
+those checks.
 The native-resource full file subsequently passed 38/38 in 580.46 seconds.
 Operations' Linux gate passed all 1,857 executed tests, but one further file
 could not collect because the isolated archive omitted its `apps/ops-sync`
@@ -196,9 +207,10 @@ readiness pass.
   `1580d13d-d857-419d-8913-77c3edae40f0` at 100%; Operations deployment
   `85e5416d-8b40-4e03-9d21-199ecbce2c0c` serves version
   `2c08b903-d732-4bc9-8a96-fdea3997053d` at 100%.
-- Fresh remote fetches still show the prepared Ops branch two commits ahead,
-  zero behind main `fcb7d61`, and Alpha six ahead, zero behind main `11fca5ff`.
-  No release was pushed during this pass.
+- The September 4 release-contract reconciliation supersedes those branch-count
+  observations: Operations runtime is pinned to `ab4d83f`, and Project Alpha is
+  pinned to `67cfe73a` at ten commits ahead of `origin/main`. No deployment was
+  performed during the reconciliation.
 
 Superseded next step: this evidence originally called for a direct Project
 Alpha portal key. The corrected architecture keeps the primary Alpha producer
@@ -280,16 +292,18 @@ stored credentials, matched signing keys, or successful signed delivery.
 
 ## Final Alpha configuration verification
 
-The final web/cron configuration and privacy-safe diagnostic were committed
-locally as `443f9b31` on `codex/portal-default-on`. A fresh full Windows PHP 8.2
-run over that final source state passed with exit 0: 767 tests, 6,210 assertions,
+The web/cron configuration and privacy-safe diagnostic were originally
+checkpointed as `443f9b31` on `codex/portal-default-on` and are contained by the
+current reviewed `67cfe73a` pin. A full Windows PHP 8.2 run over that checkpoint
+passed with exit 0: 767 tests, 6,210 assertions,
 91 skipped, no failures, in 3m54s. This supersedes the earlier full-run timing
 caveat for the final cron allowlist edits. `bash -n cron/entrypoint.sh` passed.
 Running the standalone diagnostic locally emitted only fixed booleans/statuses;
 that local environment report is not production configuration evidence.
 
-No Alpha push, image publication, production migration, secret change, or client
-data access occurred. Generated `.phpunit.cache/test-results` was excluded from
-the commit. The remaining release gates still require the primary producer's
+No image publication, production migration, secret change, deployment, or client
+data access occurred. The prepared Alpha source is now pushed at `67cfe73a`;
+generated `.phpunit.cache/test-results` remains outside the reviewed commit. The
+remaining release gates still require the primary producer's
 private configuration verification, receiver signing configuration, migration
 and rollout checks, and live authenticated acceptance.

@@ -408,7 +408,7 @@ test("requires native portal migration-first, default-off, and rollback-drain ev
   evidence.migrations.delivery.nativePortalRollbackDrainReviewed = false;
   evidence.migrations.delivery.nativePortalReleaseEvidenceRef = "";
   const errors = validateEvidence(evidence, { base, head: evidence.releaseCommit, configs, configHashes, now, sourceControlVerified: true });
-  for (const expected of ["nativePortalMigrationsAppliedBeforeFinalWorkers", "nativePortalCapabilitiesDefaultOffAtDeploy", "nativePortalRollbackDrainReviewed", "0184-0189/0051"]) {
+  for (const expected of ["nativePortalMigrationsAppliedBeforeFinalWorkers", "nativePortalCapabilitiesDefaultOffAtDeploy", "nativePortalRollbackDrainReviewed", "0184-0195/0052"]) {
     assert(errors.some((error) => error.includes(expected)), `${expected}: ${errors.join(" | ")}`);
   }
 });
@@ -558,18 +558,19 @@ test("checked-in evidence example stays complete as migrations, flags, gates, an
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const example = JSON.parse(fs.readFileSync(path.join(root, "docs", "staging", "release-evidence.json.example"), "utf8"));
   for (const app of ["delivery", "operations"]) assert.deepEqual(example.migrations[app].expected, [...REQUIRED_STAGING_MIGRATIONS[app]], `migrations.${app}`);
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-11), [
-    "0179_service_assignment_policy_proof_v2.sql",
-    "0180_service_assignment_policy_v1_contract.sql",
-    "0181_service_assignment_request_policy_reviews.sql",
-    "0182_portal_delivery_notification_source_ready.sql",
-    "0183_portal_delivery_notification_direct_source_ready.sql",
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-12), [
     "0184_native_client_feedback.sql",
     "0185_native_service_request_ownership.sql",
     "0186_delivery_notification_authority_provenance.sql",
     "0187_authenticated_content_audit.sql",
     "0188_native_feedback_completion_notices.sql",
     "0189_primary_staff_folder_bindings.sql",
+    "0190_portal_contact_assignments_v4.sql",
+    "0191_portal_projection_wire_contract_claim.sql",
+    "0192_contact_assignment_billing_independence.sql",
+    "0193_bulk_download_parts.sql",
+    "0194_client_delegated_share_expiry.sql",
+    "0195_legacy_workspace_authority_lifecycle.sql",
   ]);
   for (const app of ["delivery", "operations", "ops-sync"]) assert.deepEqual(new Set(example.deployments[app].disabledFeatureFlags), new Set(REQUIRED_DISABLED_FEATURE_FLAGS[app]), `deployments.${app}.disabledFeatureFlags`);
   assert.deepEqual(new Set(Object.keys(example.externalGates)), new Set(REQUIRED_EXTERNAL_GATES));

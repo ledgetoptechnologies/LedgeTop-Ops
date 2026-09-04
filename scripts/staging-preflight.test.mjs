@@ -32,7 +32,6 @@ function stagingConfig(app) {
         CLIENT_ACCESS_TEAM_DOMAIN: STAGING_STATIC_VARS.delivery.CLIENT_ACCESS_TEAM_DOMAIN,
         CLIENT_ACCESS_AUD: "a".repeat(64),
         PROJECT_ALPHA_CATALOG_ACCESS_AUD: "b".repeat(64),
-        PROJECT_ALPHA_PORTAL_ACCESS_AUD: "c".repeat(64),
         MAPBOX_PUBLIC_TOKEN: "pk.staging-client-mapbox-token",
         CLIENT_PORTAL_INVITATION_FROM: "portal@staging.example.test",
       } : {}),
@@ -134,7 +133,7 @@ test("requires the anonymous public-share origin for Operations share links", ()
 test("requires staging-only map, triage, and email bindings", () => {
   const delivery = stagingConfig("delivery");
   delivery.vars.MAPBOX_PUBLIC_TOKEN = "";
-  delivery.vars.PROJECT_ALPHA_PORTAL_ACCESS_AUD = delivery.vars.PROJECT_ALPHA_CATALOG_ACCESS_AUD;
+  delivery.vars.CLIENT_ACCESS_AUD = delivery.vars.PROJECT_ALPHA_CATALOG_ACCESS_AUD;
   delivery.send_email[0].allowed_sender_addresses = ["wrong@staging.example.test"];
   const deliveryErrors = validateApp("delivery", delivery, productionFrom(stagingConfig("delivery")));
   assert(deliveryErrors.some((error) => error.includes("MAPBOX_PUBLIC_TOKEN")), deliveryErrors.join(" | "));
@@ -153,10 +152,14 @@ test("requires shared staging resources to agree", () => {
   configs.operations.d1_databases[1].database_id = "wrong";
   configs.delivery.services[0].service = "wrong-ops-staging";
   configs.delivery.services[1].entrypoint = "WrongViewerIssuer";
+  configs["ops-sync"].services[0].entrypoint = "WrongPortalIngress";
+  configs.delivery.vars.PROJECT_ALPHA_PORTAL_APPLICATION_KEY = "wrong-application-key";
   const errors = validateCrossApp(configs);
   assert(errors.some((error) => error.includes("DELIVERY_DB")));
   assert(errors.some((error) => error.includes("delegated-share signer")));
   assert(errors.some((error) => error.includes("Viewer session issuer")));
+  assert(errors.some((error) => error.includes("portal projection ingress")));
+  assert(errors.some((error) => error.includes("application key")));
 });
 test("resolves logical delivery staging files from apps/client", () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-staging-layout-"));
@@ -217,20 +220,40 @@ test("requires every portal-v2 and Operations capability to be explicitly false"
   }
 });
 
-test("pins the native portal migration-first and default-off release contract", () => {
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-6), [
+test("pins the native portal migration-first and receiver-only release contract", () => {
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-12), [
     "0184_native_client_feedback.sql",
     "0185_native_service_request_ownership.sql",
     "0186_delivery_notification_authority_provenance.sql",
     "0187_authenticated_content_audit.sql",
     "0188_native_feedback_completion_notices.sql",
     "0189_primary_staff_folder_bindings.sql",
+    "0190_portal_contact_assignments_v4.sql",
+    "0191_portal_projection_wire_contract_claim.sql",
+    "0192_contact_assignment_billing_independence.sql",
+    "0193_bulk_download_parts.sql",
+    "0194_client_delegated_share_expiry.sql",
+    "0195_legacy_workspace_authority_lifecycle.sql",
   ]);
-  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.at(-1), "0051_client_hub_internal_notes.sql");
+  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.at(-1), "0052_project_operational_reassignment_recovery.sql");
   assert(REQUIRED_DISABLED_FEATURE_FLAGS.delivery.includes("CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED"));
   assert(REQUIRED_DISABLED_FEATURE_FLAGS.delivery.includes("CLIENT_PORTAL_CONTENT_AUDIT_ENABLED"));
   assert.equal(STAGING_STATIC_VARS.delivery.CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED, "false");
   assert.equal(STAGING_STATIC_VARS.delivery.CLIENT_PORTAL_CONTENT_AUDIT_ENABLED, "false");
+  assert.equal(STAGING_STATIC_VARS.delivery.PROJECT_ALPHA_PORTAL_SYNC_ENABLED, "true");
+  assert.equal(STAGING_STATIC_VARS.delivery.PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED, "false");
+  assert.equal(STAGING_STATIC_VARS.delivery.PROJECT_ALPHA_PORTAL_APPLICATION_KEY, STAGING_STATIC_VARS["ops-sync"].APPLICATION_KEY);
+  for (const obsolete of [
+    "PROJECT_ALPHA_PORTAL_ACCESS_TEAM_DOMAIN", "PROJECT_ALPHA_PORTAL_ACCESS_AUD",
+    "PROJECT_ALPHA_PORTAL_HMAC_KEY_ID", "PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_KEY_ID",
+  ]) assert.equal(STAGING_ALLOWED_VAR_NAMES.delivery.includes(obsolete), false, obsolete);
+  for (const obsolete of ["PROJECT_ALPHA_PORTAL_HMAC_SECRET", "PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_SECRET"])
+    assert.equal(REQUIRED_STAGING_SECRETS.delivery.includes(obsolete), false, obsolete);
+  assert.match(FEATURE_FLAG_ACTIVATION_POLICIES.delivery.PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED.prohibitedReason, /private Client service binding/);
+  assert.deepEqual(STAGING_INVENTORY["ops-sync"].services, [
+    { binding: "CLIENT_PORTAL_PROJECTION_INGRESS", service: "ltds-delivery-staging", entrypoint: "OpsSyncPortalProjectionIngress" },
+  ]);
+  assert.equal(STAGING_INVENTORY.delivery.workflows.find(({ binding }) => binding === "BULK_DOWNLOAD_WORKFLOW").limits.steps, 25000);
   assert.deepEqual(FEATURE_FLAG_ACTIVATION_POLICIES.delivery.CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED.gates, [
     "projectAlphaCatalogProjection", "projectAlphaPortalProjection", "nativePortalRequests",
   ]);

@@ -96,9 +96,9 @@ and warns that Bypass disables Access enforcement in
    Client writer after `0179`, shift all Client traffic to that version, and
    drain every old draft/submission writer. Record the immutable version and
    drain proof. Only then apply `0180`-`0183` from the final input. Keep native
-   capabilities unavailable while applying Client `0184`-`0189`, satisfying
-   the separate `0187` content-audit and `0189` primary-binding barriers, then
-   apply Operations through `0051`. The combined candidate is not an expand-only input; do not
+    capabilities unavailable while applying Client `0184`-`0195`, satisfying
+    the separate `0187` content-audit and `0189` primary-binding barriers, then
+    apply Operations through `0052`. The combined candidate is not an expand-only input; do not
    run one all-pending apply or execute raw migration SQL.
 6. Upload a final version with the portal false and inspect routes, bindings, vars,
    and secret names. Deploy only that reviewed version after deployment
