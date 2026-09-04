@@ -46,18 +46,21 @@ jobs:
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:
           node-version: 24
-          cache: npm
-          cache-dependency-path: apps/${{ matrix.package }}/package-lock.json
 
       - name: Install locked dependencies
-        run: npm ci --prefix apps/${{ matrix.package }}
+        if: matrix.package != 'thumbnail-renderer'
+        working-directory: apps/${{ matrix.package }}
+        run: npm ci
 
       - name: Typecheck
-        run: npm --prefix apps/${{ matrix.package }} run check
+        working-directory: apps/${{ matrix.package }}
+        run: npm run check
 
       - name: Test
-        run: npm --prefix apps/${{ matrix.package }} test
+        working-directory: apps/${{ matrix.package }}
+        run: npm test
 
       - name: Build deployable application
         if: matrix.package != 'thumbnail-renderer'
-        run: npm --prefix apps/${{ matrix.package }} run build
+        working-directory: apps/${{ matrix.package }}
+        run: npm run build
