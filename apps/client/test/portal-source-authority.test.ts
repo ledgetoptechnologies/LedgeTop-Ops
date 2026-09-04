@@ -60,7 +60,7 @@ describe("registered secondary portal authority and authenticated projection", {
       snapshotOrigin: `https://${suffix}.example.test`, snapshotBasePath: "/alpha", applicationKey,
       profile: "business_data", revision: 1, version: 2, state: "active" };
     const secret = `secret-for-${suffix}-`.repeat(4), keyId = `${suffix}-key`;
-    const env = { DELIVERY_DB: db, PROJECT_ALPHA_PORTAL_SYNC_ENABLED: "true", PROJECT_ALPHA_PORTAL_HMAC_SECRET: legacySecret,
+    const env = { DELIVERY_DB: db, PROJECT_ALPHA_PORTAL_SYNC_ENABLED: "true", PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED: "true", PROJECT_ALPHA_PORTAL_HMAC_SECRET: legacySecret,
       PROJECT_ALPHA_CONNECTOR_CREDENTIALS: JSON.stringify({ version: 1, sets: { selected: { portalCurrent: { keyId, value: secret } } } }) } as Env;
     return { connector, secret, keyId, env };
   }

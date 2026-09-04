@@ -7,9 +7,7 @@ import { BULK_DOWNLOAD_RESUME_COOKIE, createBulkDownloadResumeCookie, createSess
 import { matchesEtag } from "./prepared-images";
 import { serveAuthorizedThumbnail, thumbnailFieldsForObject, type ThumbnailJobRow } from "./thumbnails";
 import { recordFirstAccessNotification } from "./notifications";
-import { handleProjectAlphaPortalProjectionRequest } from "./project-alpha-portal";
 export { OpsSyncPortalProjectionIngress } from "./ops-sync-portal-entrypoint";
-import { handleRegisteredProjectAlphaPortalRequest } from "./project-alpha-portal-ingress";
 import { handleProjectAlphaServiceAssignmentsRequest, handleRegisteredProjectAlphaServiceAssignmentsRequest } from "./project-alpha-service-assignments";
 import { friendlyBulkFailure } from "./bulk-download-errors";
 import type { Env, ShareRow } from "./types";
@@ -991,8 +989,6 @@ app.post("/api/internal/client-request-attachments/:attachmentId/scanned", async
 // This path is not part of the browser API. It requires the dedicated
 // Project Alpha Access audience plus a timestamped signature over exact bytes.
 app.post("/api/internal/project-alpha/catalog-v2", c => handleProjectAlphaCatalogRequest(c.req.raw, c.env));
-app.post("/api/internal/project-alpha/portal-v2", c => handleProjectAlphaPortalProjectionRequest(c.req.raw, c.env));
-app.post("/api/internal/project-alpha/sources/:sourceId/portal-v2", c => handleRegisteredProjectAlphaPortalRequest(c.req.raw, c.env, c.req.param("sourceId")));
 app.post("/api/internal/project-alpha/service-assignments-v1", c => handleProjectAlphaServiceAssignmentsRequest(c.req.raw, c.env));
 app.post("/api/internal/project-alpha/sources/:sourceId/service-assignments-v1",
   c => handleRegisteredProjectAlphaServiceAssignmentsRequest(c.req.raw, c.env, c.req.param("sourceId")));

@@ -132,6 +132,7 @@ describe("Project Alpha to authenticated Client delivery cross-repository contra
       CLIENT_ACCESS_AUD: "client-portal-audience",
       DELIVERY_SESSION_SECRET: "crossrepo-session-secret-at-least-thirty-two-bytes",
       PROJECT_ALPHA_PORTAL_SYNC_ENABLED: "true",
+      PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED: "true",
       PROJECT_ALPHA_PORTAL_APPLICATION_KEY: applicationKey,
       PROJECT_ALPHA_PORTAL_HMAC_KEY_ID: keyId,
       PROJECT_ALPHA_PORTAL_HMAC_SECRET: secret,

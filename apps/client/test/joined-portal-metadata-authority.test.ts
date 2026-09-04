@@ -53,6 +53,7 @@ describe("joined Project Alpha metadata remains non-authorizing", () => {
     env = {
       DELIVERY_DB: db,
       PROJECT_ALPHA_PORTAL_SYNC_ENABLED: "true",
+      PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED: "true",
       PROJECT_ALPHA_SERVICE_ASSIGNMENT_SYNC_ENABLED: "true",
       PROJECT_ALPHA_PORTAL_APPLICATION_KEY: applicationKey,
       PROJECT_ALPHA_PORTAL_HMAC_KEY_ID: keyId,

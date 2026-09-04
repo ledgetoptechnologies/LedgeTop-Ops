@@ -20,6 +20,8 @@ the normal production approvals before performing a write.
   event `event_type: "portal.projection"`. Ops Sync authenticates and records
   that source event, validates the nested envelope, then privately invokes the
   Client Worker's named portal-projection entrypoint.
+- `projection_kind` selects the exact inner `portal`, `catalog`, or
+  `service_assignments` contract.
 - `client.ledgetopdroneservices.com` is a legacy browser/public-share/session
   compatibility origin. It is never a machine projection endpoint. The Worker
   returns 404 for `/api/internal/*` on that origin even if edge admission is
@@ -39,6 +41,11 @@ secret, or portal-specific Access application. Rotation of the existing
 External Operations credentials follows the Ops Sync runbook and must preserve
 queued event compatibility.
 
+The Client Worker does not mount the former direct portal-v2 HTTP writers.
+`PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED` remains exactly `false` as a second
+defense if an obsolete handler is accidentally remounted. Existing public
+share, download, authenticated portal, and legacy redirect routes are unchanged.
+
 The checked-in production configuration is the receiver-only state: portal
 sync and schema-v3 relation ingestion are true, while client hierarchy reads,
 automatic identity eligibility, content grants, requests, notifications,
@@ -52,30 +59,41 @@ acknowledging the Project Alpha event.
 
 ## Runtime gates
 
-| Gate | Activation role | Required base-projection state |
-| --- | --- | --- |
-| `PROJECT_ALPHA_PORTAL_SYNC_ENABLED` | Hard ingress gate. Any value other than exact `true` returns 404 before body read or D1 access. | `false`, then `true` only for ingest activation |
-| `CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED` | Schema-v3 parser/storage gate and relation-aware runtime gate. Project Alpha's schema-v3 deliveries are rejected while false. | `true` before the first producer delivery |
-| `CLIENT_PORTAL_HIERARCHY_V2_ENABLED` | Independent client authorization/read cutover. It does not control receiver parsing. | `false` through shadow verification; enabled last |
-| `PROJECT_ALPHA_SERVICE_ASSIGNMENT_SYNC_ENABLED` | Separate service-assignment inbox. | `false` |
-| `CLIENT_PORTAL_SERVICE_ASSIGNMENT_POLICY_ENABLED` | Separate downstream request-narrowing policy. | `false` |
+| Gate | Role |
+| --- | --- |
+| `PROJECT_ALPHA_PORTAL_SYNC_ENABLED` | Enables private portal projection dispatch inside Client. |
+| `PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED` | Emergency legacy handler gate; production must be exactly `false`. |
+| `CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED` | Enables schema-v3 parsing/storage. |
+| `CLIENT_PORTAL_HIERARCHY_V2_ENABLED` | Independent client authorization/read cutover. |
+| `PROJECT_ALPHA_CATALOG_SYNC_ENABLED` | Enables private catalog dispatch. |
+| `PROJECT_ALPHA_SERVICE_ASSIGNMENT_SYNC_ENABLED` | Enables private service-assignment dispatch. |
+| `CLIENT_PORTAL_SERVICE_ASSIGNMENT_POLICY_ENABLED` | Independent downstream request-narrowing policy. |
 
-The base hierarchy rollout does not activate service assignments, invitation or
-membership management, automated identity eligibility, deny-policy management,
-or any other client feature gate.
+Each inner projection keeps its existing strict parser and bound: catalog is
+128 KiB; portal and service assignments are 256 KiB. Ops Sync allows 320 KiB
+for the signed outer wrapper, then Client rechecks the exact inner limit.
 
-Migration `0190_portal_contact_assignments_v4.sql` is a dormant, receiver-first
-schema extension. It leaves the v2/v3 authority tables and lifecycle triggers
-unchanged and adds separate v4 marker and contact-assignment tables. Applying
-the migration does not authorize Project Alpha to emit schema v4 and does not
-enable a contact-role read adapter. A v4 producer requires its own reviewed
-activation plan and matching fixtures after rebasing onto the latest Project
-Alpha `main`.
+## Preflight
 
-## Preflight: no writes
+1. Record the reviewed commits and currently deployed Worker versions.
+2. Apply and verify all required additive D1 migrations. This routing change
+   introduces no migration.
+3. Run Client and Ops Sync typechecks, focused projection tests, configuration
+   type generation, and production dry-run builds.
+4. Verify Client configuration has the expected application key, the required
+   private projection gates, and
+   `PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED=false`.
+5. Verify Ops Sync has the `CLIENT_PORTAL_PROJECTION_INGRESS` named service
+   binding targeting `ltds-clients#OpsSyncPortalProjectionIngress`.
+6. Verify the existing Ops Sync Access application, audience, and Project Alpha
+   HMAC secret are unchanged. Client no longer requires a copied Project Alpha
+   portal HMAC secret or portal-specific Access audience.
+7. Probe both former direct portal-v2 POST paths on every admitted Client host;
+   both must return 404 without reading a body or writing a receipt.
+8. Confirm an existing public share and authenticated portal session still
+   work. Never record cookies, tokens, link fragments, or secret values.
 
-Stop at the first failed check. Save redacted command output with timestamps;
-never save secret values or complete authentication headers.
+## Deployment order
 
 1. Identify the reviewed commit and Worker artifact/version intended for
    deployment. Confirm the worktree is clean and the artifact is built from that
@@ -129,11 +147,27 @@ never save secret values or complete authentication headers.
      or legacy origin receive no projection-handler response; and
    - an existing legacy public share loads, and its same-origin session request
      remains admitted. Do not include share fragments or cookies in evidence.
+9. Deploy `ltds-clients` first. Confirm the named entrypoint is exported and
+   direct portal-v2 POSTs remain 404.
+10. Deploy `ltds-ops-sync` second. Confirm the service binding resolves.
+11. Send one signed portal projection through the existing Project Alpha event
+    URL. Confirm both the source-qualified Ops receipt and the Client delivery
+    receipt complete, then replay it and confirm duplicate acknowledgement with
+    no second mutation. Exercise catalog and service-assignment envelopes only
+    when their individual Client gates are intentionally enabled.
 
-## Ingest-only activation
+## Failure and rollback
 
-Each numbered state is a separately reviewed Worker version. Do not edit live
-variables in place and do not enable the Project Alpha producer before step 4.
+- A missing Client binding, unavailable Client Worker, busy source fence, or
+  transient D1 failure returns a retryable Ops Sync response and leaves the
+  outer receipt pending.
+- A malformed inner envelope, application mismatch, delivery-ID mismatch, or
+  size violation is non-retryable and must not mutate Client state.
+- If Client deployment fails, keep Ops Sync on its prior version.
+- If Ops Sync deployment fails after Client succeeds, the unused named
+  entrypoint is inert; roll Ops Sync back and investigate before retrying.
+- Do not restore the direct portal HTTP routes as a rollback shortcut. Roll
+  back both Workers to their last jointly reviewed versions if necessary.
 
 1. Preserve the preflight version and evidence. Run the repository-owned release
    preflight against the reviewed ingest-only configuration. It must confirm the
@@ -251,3 +285,7 @@ If the receiver cannot remain contract-compatible for the drain, stop the
 producer first, preserve all pending records and credentials, and escalate. Do
 not force a flag-off state that strands revocations or retire the audience or
 signing keys while Project Alpha can still retry.
+
+Production evidence must include redacted version IDs, configuration readback,
+the direct-route 404 probes, one successful event, one exact duplicate, and one
+retryable Client-unavailable case.

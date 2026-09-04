@@ -121,7 +121,9 @@ Project Alpha does not call the Client Worker, an internal HTTP route, or a
 `portal.*` hostname directly. The internal receiver
 is behind the independent exact flag `PROJECT_ALPHA_PORTAL_SYNC_ENABLED=false`
 and additive migration 0125. Receiver enablement does not enable
-`CLIENT_PORTAL_HIERARCHY_V2_ENABLED`. PA principal
+`CLIENT_PORTAL_HIERARCHY_V2_ENABLED`. The former direct portal-v2 HTTP routes
+are not mounted, and `PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED` remains exactly
+`false` as defense in depth. PA principal
 rows are authorization intent only: an LTDS-controlled, provider-verified
 identity binding is required before any projected membership or entitlement is
 effective. Email hints and primary-contact flags never bind or grant access.

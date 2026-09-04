@@ -120,7 +120,7 @@ until the client reviews the current version. A draft may autosave without an
 area, but submission fails 422 whenever any selected immutable service snapshot
 has `geometryRequirement: "required"` and no validated Mapbox polygon is stored.
 
-## Portal hierarchy and entitlement projection (implemented, disabled)
+## Portal hierarchy and entitlement projection through Ops Sync
 
 Project Alpha has one outbound External Operations connection. It posts signed
 events only to `POST https://ops-sync.ledgetopdroneservices.com/v1/project-alpha/events`
@@ -133,6 +133,10 @@ Project Alpha wraps each portal delivery as the strict outer integration event
 like every other External Operations event; Project Alpha adds no portal URL,
 portal Access audience, portal key ID, or portal HMAC secret.
 
+`projection_kind` selects the exact inner `portal`, `catalog`, or
+`service_assignments` contract, and the outer event ID must equal the inner
+delivery ID.
+
 After Ops Sync authenticates and durably records the outer source event, it
 validates the nested portal contract and privately invokes the Client Worker's
 named portal-projection entrypoint. This Worker-to-Worker invocation is not a
@@ -142,6 +146,25 @@ Client receiver is still independently gated by
 hierarchy reads. `CLIENT_PORTAL_HIERARCHY_V2_ENABLED` remains an independent,
 default-off authorization cutover. Neither the Project Alpha machine identity
 nor successful internal invocation authorizes a browser session.
+
+The legacy direct HTTP writers at `/api/internal/project-alpha/portal-v2` and
+`/api/internal/project-alpha/sources/:sourceId/portal-v2` are not mounted by the
+production Client Worker. Their isolated handler seam is additionally guarded
+by `PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED`, which production must keep
+exactly `false`. Public share, download, portal shell, and session routes are
+unchanged; this removal affects only obsolete machine write endpoints.
+
+The Client-side projection configuration is:
+
+```text
+PROJECT_ALPHA_PORTAL_APPLICATION_KEY=ltds_ops
+PROJECT_ALPHA_PORTAL_SYNC_ENABLED=true
+PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED=false
+```
+
+Ops Sync owns the external Access and HMAC credentials. The Client Worker does
+not need a second copy of those secrets. `CLIENT_PORTAL_HIERARCHY_V2_ENABLED`
+remains an independent authorization/read cutover.
 
 The strict schema-v2 envelope carries an opaque `workspaceId`, delivery ID,
 source generation, and monotonic per-workspace source sequence. A snapshot page

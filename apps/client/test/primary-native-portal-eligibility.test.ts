@@ -40,7 +40,7 @@ describe("primary signed-native first-login eligibility", () => {
     }
     env = {
       DELIVERY_DB: db, CLIENT_PORTAL_ENABLED: "true", CLIENT_PORTAL_ORIGIN: origin,
-      PROJECT_ALPHA_PORTAL_SYNC_ENABLED: "true", PROJECT_ALPHA_PORTAL_APPLICATION_KEY: applicationKey,
+      PROJECT_ALPHA_PORTAL_SYNC_ENABLED: "true", PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED: "true", PROJECT_ALPHA_PORTAL_APPLICATION_KEY: applicationKey,
       PROJECT_ALPHA_PORTAL_HMAC_KEY_ID: keyId, PROJECT_ALPHA_PORTAL_HMAC_SECRET: secret,
       PROJECT_ALPHA_PORTAL_ACCESS_TEAM_DOMAIN: "https://team.cloudflareaccess.com",
       PROJECT_ALPHA_PORTAL_ACCESS_AUD: "primary-native-sync-audience",

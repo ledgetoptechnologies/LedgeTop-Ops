@@ -45,6 +45,8 @@ export interface Env {
   PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_SECRET?: string;
   /** Server-only PA portal hierarchy/entitlement projection. Independent and default-off. */
   PROJECT_ALPHA_PORTAL_SYNC_ENABLED?: string;
+  /** Emergency-only legacy HTTP receiver. Production keeps this false; Ops Sync RPC remains independently enabled. */
+  PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED?: string;
   PROJECT_ALPHA_PORTAL_APPLICATION_KEY?: string;
   PROJECT_ALPHA_PORTAL_ACCESS_TEAM_DOMAIN?: string;
   PROJECT_ALPHA_PORTAL_ACCESS_AUD?: string;

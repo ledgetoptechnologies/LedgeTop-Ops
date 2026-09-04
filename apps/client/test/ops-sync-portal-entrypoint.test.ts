@@ -23,7 +23,7 @@ import {getPortalSourceAuthority,readPortalSourceAuthorityProof} from "../src/wo
 import type {Env} from "../src/worker/types";
 
 const applicationKey="ltds_ops";
-const env={PROJECT_ALPHA_PORTAL_SYNC_ENABLED:"true",PROJECT_ALPHA_CATALOG_SYNC_ENABLED:"true",
+const env={PROJECT_ALPHA_PORTAL_SYNC_ENABLED:"true",PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED:"false",PROJECT_ALPHA_CATALOG_SYNC_ENABLED:"true",
   PROJECT_ALPHA_SERVICE_ASSIGNMENT_SYNC_ENABLED:"true",PROJECT_ALPHA_PORTAL_APPLICATION_KEY:applicationKey,
   CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED:"true"} as Env;
 

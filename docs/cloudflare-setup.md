@@ -451,6 +451,16 @@ application, application key, key ID, or HMAC secret to provision in Project
 Alpha or on the Client Worker for this hop. Replay protection and ordered
 receipts remain part of the validated event and projection contracts.
 
+Configure the private Worker-to-Worker hop in `apps/ops-sync/wrangler.jsonc`:
+
+```jsonc
+"services": [{
+  "binding": "CLIENT_PORTAL_PROJECTION_INGRESS",
+  "service": "ltds-clients",
+  "entrypoint": "OpsSyncPortalProjectionIngress"
+}]
+```
+
 Project Alpha keeps only its single **External operations** connection pointed
 at Ops Sync. Remove or leave unset the superseded direct-portal variables
 `EXTERNAL_OPS_CLIENT_PORTAL_BASE_URL`,
@@ -466,7 +476,8 @@ external `/api/internal/*` requests; legacy public-share and same-origin session
 routes remain admitted.
 
 The reviewed receiver-only production configuration sets
-`PROJECT_ALPHA_PORTAL_SYNC_ENABLED=true` and
+`PROJECT_ALPHA_PORTAL_SYNC_ENABLED=true`,
+`PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED=false`, and
 `CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED=true` only after additive migrations
 0125 and 0129 and the snapshot/activation/replay/gap/tombstone/Access-denial
 tests pass. The repository-owned release checks must verify that the Ops Sync

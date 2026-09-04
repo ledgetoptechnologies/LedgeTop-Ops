@@ -21,10 +21,8 @@ test("receiver-only validator retains strict behavior independently of release i
   assert.deepEqual(validatePortalReceiverPreflight(receiverConfig(), current), []);
 });
 
-test("missing primary secret fails with an actionable name", () => {
-  assert.deepEqual(validatePortalReceiverPreflight(receiverConfig(), new Set()), [
-    "PROJECT_ALPHA_PORTAL_HMAC_SECRET is not installed on ltds-clients",
-  ]);
+test("private Ops Sync ingestion does not require a copied Project Alpha secret", () => {
+  assert.deepEqual(validatePortalReceiverPreflight(receiverConfig(), new Set()), []);
 });
 
 test("adjacent client authority and workflow flags cannot ride with receiver activation", () => {
@@ -42,18 +40,18 @@ test("adjacent client authority and workflow flags cannot ride with receiver act
   }
 });
 
-test("rotation secret is paired exactly with a distinct previous key ID", () => {
-  const orphaned = new Set([...current, "PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_SECRET"]);
-  assert.ok(validatePortalReceiverPreflight(receiverConfig(), orphaned).some((error) => error.includes("must be removed")));
-  const rotating = receiverConfig();
-  rotating.vars.PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_KEY_ID = "portal-v0";
-  assert.deepEqual(validatePortalReceiverPreflight(rotating, orphaned), []);
-  assert.ok(validatePortalReceiverPreflight(rotating, current).some((error) => error.includes("is required")));
+test("preflight hard-disables the legacy direct HTTP receiver", () => {
+  const enabled = receiverConfig();
+  enabled.vars.PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED = "true";
+  assert.ok(validatePortalReceiverPreflight(enabled, current).some((error) => error.includes("PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED")));
+  const absent = receiverConfig();
+  delete absent.vars.PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED;
+  assert.ok(validatePortalReceiverPreflight(absent, current).some((error) => error.includes("PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED")));
 });
 
 test("actual release runner loads the committed profile and both configs without network", () => {
   assert.deepEqual(runPortalReleasePreflight(current), { worker: config.name, profile: declaration.profile });
-  assert.throws(() => runPortalReleasePreflight(new Set()), /PROJECT_ALPHA_PORTAL_HMAC_SECRET/);
+  assert.deepEqual(runPortalReleasePreflight(new Set()), { worker: config.name, profile: declaration.profile });
 });
 
 test("receiver-only accepts absent deny-management but rejects every enabled or malformed value", () => {
@@ -85,22 +83,13 @@ for (const profile of ["receiver-only", "default-on-eligibility"]) {
         assert.ok(check(changed).some(error => error.includes(flag)), flag);
       }
     }
-    for (const [flag, value] of [["PROJECT_ALPHA_PORTAL_SYNC_ENABLED", "false"], ["CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED", "false"],
-      ["PROJECT_ALPHA_PORTAL_APPLICATION_KEY", "bad key"], ["PROJECT_ALPHA_PORTAL_HMAC_KEY_ID", "bad key"],
-      ["PROJECT_ALPHA_PORTAL_ACCESS_AUD", "short"], ["PROJECT_ALPHA_PORTAL_ACCESS_TEAM_DOMAIN", "http://example.test"]]) {
+    for (const [flag, value] of [["PROJECT_ALPHA_PORTAL_SYNC_ENABLED", "false"], ["PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED", "true"],
+      ["CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED", "false"], ["PROJECT_ALPHA_PORTAL_APPLICATION_KEY", "bad key"]]) {
       const changed = structuredClone(client);
       changed.vars[flag] = value;
       assert.ok(check(changed).some(error => error.includes(flag)), flag);
     }
-    assert.ok(check(client, new Set()).some(error => error.includes("PROJECT_ALPHA_PORTAL_HMAC_SECRET")));
-    const paired = new Set([...current, "PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_SECRET"]);
-    assert.ok(check(client, paired).some(error => error.includes("must be removed")));
-    const rotating = structuredClone(client);
-    rotating.vars.PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_KEY_ID = "portal-previous";
-    assert.deepEqual(check(rotating, paired), []);
-    assert.ok(check(rotating).some(error => error.includes("is required")));
-    rotating.vars.PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_KEY_ID = rotating.vars.PROJECT_ALPHA_PORTAL_HMAC_KEY_ID;
-    assert.ok(check(rotating, paired).some(error => error.includes("PREVIOUS_HMAC_KEY_ID is invalid")));
+    assert.deepEqual(check(client, new Set()), []);
     if (profile === "default-on-eligibility") assert.ok(validatePortalReceiverPreflight(client, current).length);
   });
 }

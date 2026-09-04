@@ -264,7 +264,7 @@ Portal, public-share, and Incoming identities remain denied in either state.
 
 The example evidence intentionally fails until the client Access/public-path
 contract, migrations, end-to-end tests, final default-off state, and every
-portal-v2 external dependency in `REQUIRED_EXTERNAL_GATES` are recorded. Do not
+Ops-Sync-to-Client private projection dependency in `REQUIRED_EXTERNAL_GATES` are recorded. Do not
 mark future or inferred results true.
 
 It also requires the pushed source ref, exact deployed version/config hashes,

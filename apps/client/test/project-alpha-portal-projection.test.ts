@@ -97,6 +97,7 @@ describe("Project Alpha portal hierarchy projection", () => {
     env = {
       DELIVERY_DB: db,
       PROJECT_ALPHA_PORTAL_SYNC_ENABLED: "true",
+      PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED: "true",
       PROJECT_ALPHA_PORTAL_APPLICATION_KEY: applicationKey,
       PROJECT_ALPHA_PORTAL_HMAC_KEY_ID: keyId,
       PROJECT_ALPHA_PORTAL_HMAC_SECRET: secret,
@@ -184,10 +185,14 @@ describe("Project Alpha portal hierarchy projection", () => {
     const request = () => new Request("https://client.test/api/internal/project-alpha/portal-v2", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
     const disabled = await handleProjectAlphaPortalProjectionRequest(request(), { PROJECT_ALPHA_PORTAL_SYNC_ENABLED: "false" } as Env, async () => { accessCalls += 1; });
     expect(disabled.status).toBe(404);
+    const directDisabled = await handleProjectAlphaPortalProjectionRequest(request(), {
+      PROJECT_ALPHA_PORTAL_SYNC_ENABLED: "true", PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED: "false",
+    } as Env, async () => { accessCalls += 1; });
+    expect(directDisabled.status).toBe(404);
     expect(accessCalls).toBe(0);
     const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
-      const incomplete = await handleProjectAlphaPortalProjectionRequest(request(), { PROJECT_ALPHA_PORTAL_SYNC_ENABLED: "true" } as Env, async () => { accessCalls += 1; });
+      const incomplete = await handleProjectAlphaPortalProjectionRequest(request(), { PROJECT_ALPHA_PORTAL_SYNC_ENABLED: "true", PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED: "true" } as Env, async () => { accessCalls += 1; });
       expect(incomplete.status).toBe(503);
       expect(await incomplete.json()).toEqual({ error: "portal-receiver-misconfigured", reason: "application_key_invalid" });
       for (const malformed of ["too-short", ` ${"s".repeat(32)}`, `${"s".repeat(31)}\n`]) {

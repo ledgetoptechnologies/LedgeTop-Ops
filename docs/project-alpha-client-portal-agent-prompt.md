@@ -141,6 +141,8 @@ Implement this as additive, default-off, independently gated capabilities:
      URL, a direct Client Worker call, or a second administrator-facing
      integration profile. Ops Sync owns validation and private invocation of the
      Client Worker's named portal-projection entrypoint.
+     The former direct Client Worker portal-v2 POST routes must remain unmounted,
+     with `PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED=false` as defense in depth.
    - Publish strict schema v3 only for the separately gated relation contract.
      Resources include organization, standalone client, department, client,
      contact, project, versioned `contains`/`contact_assignment` edges, one
