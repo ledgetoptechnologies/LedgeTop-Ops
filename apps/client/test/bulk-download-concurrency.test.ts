@@ -147,8 +147,9 @@ describe("bounded bulk ZIP concurrency", () => {
     const source = { physicalKey: "large.bin", key: "large.bin", name: "large.bin", etag: "etag", size: 100 * 1024 ** 3 };
     const estimate = assertBulkPreparationCapacity({ root: "", shareId: "share", shareVersion: 1, sources: [source] });
     expect(estimate.crcSteps).toBe(0);
-    expect(estimate.uploadParts).toBeGreaterThan(3_000);
+    expect(estimate.uploadParts).toBe(3_202);
     expect(estimate.workflowSteps).toBe(estimate.uploadParts + 8);
+    expect(estimate.workflowSteps).toBe(3_210);
     expect(estimate.workflowSteps).toBeLessThanOrEqual(24_900);
   });
 

@@ -86,18 +86,21 @@ at 343 ms and the indexed loop at 94 ms, with identical CRC results. This is
 CPU-only development evidence, not a promised end-to-end speedup.
 
 The next cache release has one additive Delivery D1 migration and no credential,
-access-policy, or feature-flag changes. Apply migration 0195 before activating
+access-policy, or feature-flag changes. Apply migration 0196 before activating
 the new Workflow. Publication must still pass the repository's release checks;
 the separate portal work must not be bundled into this change.
 
-Local verification on September 3: 69 tests passed across ZIP, bulk backend,
-bulk client, and concurrency suites. The 100 GiB single-file estimate is 24,009
-steps; 10,626-file coverage still fits one archive. Mocked Workflow execution
-checks checksum dependencies, drain-before-cleanup, cached replay, and split
-parent replay without duplicate child creation. TypeScript and production
-build passed. The progress browser fixture passed on desktop Edge and mobile
-Edge with no horizontal overflow at queued/checking/building/ready stages.
-These are local results; no large production throughput acceptance is claimed.
+Local verification on September 4: 86 tests passed across the ZIP, one-pass
+ZIP, bulk backend, bulk client, concurrency, and archive-cache migration suites.
+The one-pass 100 GiB single-file estimate is 3,210 Workflow steps: 3,202 upload
+parts plus eight fixed steps. The 10,626-file coverage still fits one archive.
+Mocked Workflow execution checks checksum dependencies, drain-before-cleanup,
+cached replay, atomic reuse/deletion races, fair orphan cleanup, D1 query
+budgets, deep alias paths, and split parent replay without duplicate child
+creation. TypeScript and production build passed. The progress browser fixture
+passed on desktop Edge and mobile Edge with no horizontal overflow at
+queued/checking/building/ready stages. These are local results; no large
+production throughput acceptance is claimed.
 
 ## September 3 maintenance deployment
 
