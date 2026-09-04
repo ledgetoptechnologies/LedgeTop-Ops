@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import deliveryWranglerConfig from "../wrangler.jsonc?raw";
 
-vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {} }));
+vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {} }));
 
 import deliveryWorker, {
   bulkQuotaRetryAfterSeconds,

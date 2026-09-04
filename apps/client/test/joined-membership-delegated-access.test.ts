@@ -376,7 +376,10 @@ describe("joined membership, delegated access, expiry, and audit lifecycle", () 
     const audit = {
       membership: await db.prepare("SELECT action FROM portal_v2_membership_audit WHERE workspace_id=? ORDER BY created_at,id")
         .bind(workspaceId).all<{ action: string }>(),
-      delegated: await db.prepare("SELECT event_type FROM client_delegated_share_events WHERE workspace_id=? ORDER BY created_at,id")
+      // created_at has second precision, while event IDs are content-derived and
+      // intentionally carry no chronology. rowid is the append order of this
+      // immutable ledger and therefore the correct order for this lifecycle check.
+      delegated: await db.prepare("SELECT event_type FROM client_delegated_share_events WHERE workspace_id=? ORDER BY rowid")
         .bind(workspaceId).all<{ event_type: string }>(),
       notices: await db.prepare("SELECT event_type,action FROM portal_project_access_notice_audit WHERE workspace_id=? ORDER BY event_type")
         .bind(workspaceId).all<{ event_type: string; action: string }>(),

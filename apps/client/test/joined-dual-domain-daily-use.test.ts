@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {} }));
+vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {} }));
 
 import deliveryWorker, { requestHostAllowed } from "../src/worker/index";
 import { clientPortalRequestOriginAllowed } from "../src/worker/origin-policy";

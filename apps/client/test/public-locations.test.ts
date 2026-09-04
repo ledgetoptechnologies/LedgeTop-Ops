@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {} }));
+vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {} }));
 import { listPublicShareLocations, resolvePublicShareLocation } from "../src/worker/public-locations";
 import worker from "../src/worker/index";
 import { createSessionCookie } from "../src/worker/security";

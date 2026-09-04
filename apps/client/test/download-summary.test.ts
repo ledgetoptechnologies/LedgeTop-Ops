@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {} }));
+vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {} }));
 import worker, { classifyPublicRateLimit } from "../src/worker/index";
 import { listDownloadableObjects, summarizeDownloadableObjects } from "../src/worker/downloadable-files";
 import { encodeItemRef } from "../src/worker/files";
