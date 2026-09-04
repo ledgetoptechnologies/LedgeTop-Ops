@@ -16,6 +16,7 @@ import { encodeItemRef } from "../src/worker/files";
 import { BULK_DOWNLOAD_RESUME_COOKIE, createBulkDownloadResumeCookie, createSessionCookie } from "../src/worker/security";
 import {
   assemblyProgressBytes,
+  BULK_DOWNLOAD_CACHE_RETENTION_MS,
   BULK_DOWNLOAD_RETENTION_DURATION,
   BULK_DOWNLOAD_RETENTION_MS,
   classifyWorkflowFailure,
@@ -592,6 +593,7 @@ describe("bulk-download failures and cleanup", () => {
   it("retains prepared archives long enough for slow resumable downloads", () => {
     expect(BULK_DOWNLOAD_RETENTION_MS).toBe(7 * 24 * 60 * 60 * 1000);
     expect(BULK_DOWNLOAD_RETENTION_DURATION).toBe("7 days");
+    expect(BULK_DOWNLOAD_CACHE_RETENTION_MS).toBe(30 * 24 * 60 * 60 * 1000);
   });
 
   it("extends resumable authorization through archive retention without passing share expiry", () => {
@@ -631,8 +633,9 @@ describe("bulk-download failures and cleanup", () => {
         const statement = {
           bind(...values: unknown[]) { record.values = values; return statement; },
           async all<T>() {
+            if (query.includes("bulk_download_archive_cache")) return { results: [] as T[] };
             if (query.includes("status='expired'")) {
-              return { results: [{ manifest_key: "tmp/job/manifest.json", archive_key: "tmp/job/archive.zip", multipart_upload_id: "upload-1" }] as T[] };
+              return { results: [{ manifest_key: "tmp/job/manifest.json", archive_key: "tmp/job/archive.zip", archive_fingerprint: null, multipart_upload_id: "upload-1" }] as T[] };
             }
             return { results: [{ manifest_key: "tmp/active/manifest.json", archive_key: "tmp/active/archive.zip" }] as T[] };
           },
@@ -649,7 +652,8 @@ describe("bulk-download failures and cleanup", () => {
         resumeMultipartUpload(key: string, uploadId: string) {
           return { async abort() { aborted.push({ key, uploadId }); } };
         },
-        async list() {
+        async list(options: { prefix: string }) {
+          if (options.prefix.includes("bulk-download-cache")) return { objects: [], truncated: false };
           return {
             objects: [
               { key: "tmp/orphan/archive.zip", uploaded: new Date("2026-07-25T00:00:00Z") },
@@ -665,7 +669,7 @@ describe("bulk-download failures and cleanup", () => {
     await cleanupTemporaryZips(env, now);
     expect(aborted).toEqual([{ key: "tmp/job/archive.zip", uploadId: "upload-1" }]);
     expect(deleted).toEqual([
-      ["tmp/job/manifest.json", "tmp/job/archive.zip", "tmp/job/manifest.json.final.json"],
+      ["tmp/job/manifest.json", "tmp/job/manifest.json.resolved.json", "tmp/job/manifest.json.final.json", "tmp/job/archive.zip"],
       ["tmp/orphan/archive.zip"],
     ]);
     const expireUpdateIndex = queries.findIndex(record => record.query.includes("SET status='expired'"));
@@ -674,5 +678,33 @@ describe("bulk-download failures and cleanup", () => {
     expect(expireUpdateIndex).toBeLessThan(claimedJobsIndex);
     expect(queries[expireUpdateIndex]?.values).toEqual([new Date(now).toISOString(), new Date(now).toISOString()]);
     expect(queries.find(record => record.query.includes("DELETE FROM bulk_download_quota"))?.values).toEqual([Math.floor(now / 3_600_000) - 48]);
+  });
+
+  it.each([{ claimed: true }, { claimed: false }])("deletes an expired cached archive only when cleanup wins its reuse race ($claimed)", async ({ claimed }) => {
+    const deleted: Array<string | string[]> = [];
+    const database = {
+      prepare(query: string) {
+        const statement = {
+          bind() { return statement; },
+          async all<T>() {
+            if (query.includes("FROM bulk_download_archive_cache WHERE")) return { results: [{
+              share_id: "share", share_version: 1, selection_fingerprint: "a".repeat(64), archive_key: "_ltds/bulk-download-cache/a.zip", expires_at: "2026-07-01T00:00:00Z",
+            }] as T[] };
+            return { results: [] as T[] };
+          },
+          async run() { return { meta: { changes: query.includes("DELETE FROM bulk_download_archive_cache") ? Number(claimed) : 1 } }; },
+        };
+        return statement;
+      },
+      withSession() { return database; },
+    };
+    await cleanupTemporaryZips({
+      DELIVERY_DB: database,
+      DATA_BUCKET: {
+        async delete(keys: string | string[]) { deleted.push(keys); },
+        async list() { return { objects: [], truncated: false }; },
+      },
+    } as unknown as Env, Date.UTC(2026, 6, 27, 12));
+    expect(deleted).toEqual(claimed ? ["_ltds/bulk-download-cache/a.zip"] : []);
   });
 });

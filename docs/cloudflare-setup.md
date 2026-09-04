@@ -705,22 +705,26 @@ Operations deployment creates/updates its file-operation Workflow binding, the
 `ltds-incoming-upload-lifecycle` Workflow binding, and the thumbnail Queue
 producer/consumers. Follow the separate [thumbnail deployment
 sequence](media-thumbnail-pipeline.md) before enabling that producer. Each
-successful ZIP job sleeps for its 24-hour retention and deletes its own archive;
-the hourly Delivery cleanup is the recovery path for expired or interrupted
-jobs and also prunes old quota rows. Verify one completed job, one intentionally
-failed job, multipart cleanup, the 24-hour archive expiry, the three-per-hour
-exact quota, one copy/move job with an injected retry, and one Dropbox import
+successful ZIP job retains its exact resume authorization for seven days;
+completed immutable archive generations may remain in the exact-selection
+cache for 30 days from last use. The hourly Delivery cleanup is the recovery
+path for expired or interrupted jobs and also prunes expired cache rows,
+orphaned generations, old checksum rows, and quota rows. Verify one completed
+job, one exact cache hit, one intentionally failed job, multipart cleanup,
+resume expiry, cache expiry/reuse races, the three-per-hour exact quota, one
+copy/move job with an injected retry, and one Dropbox import
 job before production rollout.
 
 Bulk ZIPs have no descendant file-count cutoff or total-delivery size cutoff.
 The service prefers one ZIP. When a selection exceeds the safe 100 GiB
 per-archive source boundary, or one Workflow cannot safely prepare it, the
 sorted immutable snapshot is deterministically divided into independently
-resumable ZIP parts. Small source files
-are grouped into bounded 8 MiB/64-object CRC work units, and only the
-`ltds-bulk-download` Workflow is configured for 25,000 steps. A 10,626-file,
+resumable ZIP parts. New ZIPs calculate missing CRC-32 while copying each
+conditional source range once into descriptor-based ZIP64 parts. Exact
+`(key, ETag, size)` checksums and completed selection fingerprints are reused,
+and only the `ltds-bulk-download` Workflow is configured for 25,000 steps. A 10,626-file,
 34.3 GiB WebODM delivery remains one archive under that policy. Each prepared
-R2 object is retained for 24 hours and each download route serves a stable
+job is downloadable for seven days and each download route serves a stable
 ETag, HEAD, and byte-range responses so browser download managers can resume
 individual parts. The client asks the browser to start every part and always
 keeps explicit part links visible because browsers may require the user to

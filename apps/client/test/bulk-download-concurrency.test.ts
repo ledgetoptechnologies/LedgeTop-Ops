@@ -3,13 +3,13 @@ import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 
 vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {} }));
 
-import { BulkDownloadWorkflow, CRC_CONCURRENCY, UPLOAD_CONCURRENCY, assertBulkPreparationCapacity, drainParallel, estimateBulkPreparation, finalBulkManifestKey, planCrcWindows, planCrcWorkUnits } from "../src/worker/workflow";
+import { BulkDownloadWorkflow, CRC_CONCURRENCY, UPLOAD_CONCURRENCY, assertBulkPreparationCapacity, drainParallel, estimateBulkPreparation, estimateOnePassBulkPreparation, finalBulkManifestKey, planCrcWindows, planCrcWorkUnits } from "../src/worker/workflow";
 import { crc32 } from "../src/worker/zip";
 
 const mib = 1024 * 1024;
 const tick = () => new Promise<void>(resolve => setTimeout(resolve, 1));
 
-function harness(failUpload = false, sizes = Array<number>(7).fill(6 * mib), prepared = true) {
+function harness(failUpload = false, sizes = Array<number>(7).fill(6 * mib), prepared = true, reuseArchive = false) {
   const sources = sizes.map((size, index) => ({ physicalKey: `source-${index}`, key: `source-${index}`, name: `photo-${index}.jpg`, size, etag: `etag-${index}` }));
   const snapshot = { root: "", shareId: "share", shareVersion: 1, sources };
   const objects = new Map<string, string>([["snapshot.json", JSON.stringify(snapshot)]]);
@@ -18,23 +18,45 @@ function harness(failUpload = false, sizes = Array<number>(7).fill(6 * mib), pre
   const progress: number[] = [];
   const completedParts: number[] = [];
   const spawned: string[] = [];
+  const checksums = new Map<string, { r2_key: string; etag: string; size: number; crc32: number }>();
+  const uploadedSizes = new Map<number, number>();
+  let completedArchive: { size: number; etag: string } | null = reuseArchive
+    ? { size: 1234, etag: "cached-etag" }
+    : null;
   let status = "running";
   let activeReads = 0; let maximumReads = 0;
   let activeUploads = 0; let maximumUploads = 0;
   let abortedWithActive = -1;
   let failOnce = failUpload;
   const job = { id: "job", share_id: "share", share_version: 1, request_json: "{}", manifest_key: "snapshot.json", archive_key: "archive.zip" };
-  const env = {
-    BULK_DOWNLOAD_WORKFLOW: { create: async ({ id }: { id: string }) => { spawned.push(id); return { id }; } },
-    DELIVERY_DB: { withSession: () => ({ prepare: (sql: string) => ({ bind: (...values: unknown[]) => ({
-      first: async () => sql.includes("SELECT id,") ? job : sql.includes("multipart_upload_id") ? { multipart_upload_id: "upload" } : { status },
+  const database = { prepare: (sql: string) => ({ bind: (...values: unknown[]) => {
+    const statement = {
+      first: async () => sql.includes("SELECT id,") ? job
+        : sql.includes("FROM bulk_download_archive_cache") ? (reuseArchive ? {
+          archive_key: "cache/reused.zip", archive_etag: "cached-etag", archive_size: 1234,
+          file_count: sources.length, total_bytes: sources.reduce((total, source) => total + source.size, 0),
+        } : null)
+        : sql.includes("SELECT status") ? { status }
+        : sql.includes("SELECT archive_key,archive_fingerprint") ? { archive_key: job.archive_key, archive_fingerprint: null, multipart_upload_id: "upload" }
+        : null,
+      all: async () => sql.includes("bulk_download_object_checksums")
+        ? { results: values.flatMap(value => checksums.has(String(value)) ? [checksums.get(String(value))!] : []) }
+        : { results: [] },
       run: async () => {
+        if (sql.includes("INSERT INTO bulk_download_object_checksums")) checksums.set(String(values[0]), { r2_key: String(values[0]), etag: String(values[1]), size: Number(values[2]), crc32: Number(values[3]) });
+        if (sql.includes("SET archive_key=")) job.archive_key = String(values[0]);
         if (sql.includes("status='ready'")) status = "ready";
         if (sql.includes("SET status='failed'")) status = "failed";
-        if (sql.includes("processed_bytes=MAX")) progress.push(Number(values[sql.includes("processed_files=MAX") ? 1 : 0]));
+        if (sql.includes("processed_files=MAX")) progress.push(Number(values[1]));
+        else if (sql.includes("processed_bytes=MAX(0,total_bytes-1)")) progress.push(Math.max(0, sources.reduce((total, source) => total + source.size, 0) - 1));
         return { meta: { changes: 1 } };
       },
-    }) }) }) },
+    };
+    return statement;
+  } }), withSession() { return database; }, async batch(statements: Array<{ run(): Promise<unknown> }>) { return Promise.all(statements.map(statement => statement.run())); } };
+  const env = {
+    BULK_DOWNLOAD_WORKFLOW: { create: async ({ id }: { id: string }) => { spawned.push(id); return { id }; } },
+    DELIVERY_DB: database,
     DATA_BUCKET: {
       get: async (key: string, options?: { range: { offset: number; length: number }; onlyIf?: { etagMatches: string } }) => {
         if (objects.has(key)) return { text: async () => objects.get(key)! };
@@ -45,18 +67,23 @@ function harness(failUpload = false, sizes = Array<number>(7).fill(6 * mib), pre
         return { arrayBuffer: async () => { activeReads -= 1; return new Uint8Array(options!.range.length).fill(index).buffer; } };
       },
       put: async (key: string, value: string) => { objects.set(key, value); },
-      delete: async (keys: string[]) => { for (const key of keys) objects.delete(key); },
+      delete: async (keys: string | string[]) => { for (const key of Array.isArray(keys) ? keys : [keys]) objects.delete(key); },
+      head: async () => completedArchive,
       createMultipartUpload: async () => ({ uploadId: "upload" }),
       resumeMultipartUpload: () => ({
-        uploadPart: async (partNumber: number) => {
+        uploadPart: async (partNumber: number, bytes: Uint8Array) => {
           activeUploads += 1; maximumUploads = Math.max(maximumUploads, activeUploads);
           try {
             if (failOnce && partNumber === 1) { failOnce = false; throw new Error("injected-upload-failure"); }
-            await new Promise<void>(resolve => setTimeout(resolve, 25)); completedParts.push(partNumber);
+            await new Promise<void>(resolve => setTimeout(resolve, 2)); completedParts.push(partNumber); uploadedSizes.set(partNumber, bytes.length);
             return { partNumber, etag: `part-${partNumber}` };
           } finally { activeUploads -= 1; }
         },
-        complete: async (parts: Array<{ partNumber: number }>) => { expect(parts.map(part => part.partNumber)).toEqual(Array.from({ length: estimateBulkPreparation(sources).uploadParts }, (_, index) => index + 1)); },
+        complete: async (parts: Array<{ partNumber: number }>) => {
+          expect(parts.map(part => part.partNumber)).toEqual(Array.from({ length: estimateOnePassBulkPreparation(sources).uploadParts }, (_, index) => index + 1));
+          completedArchive = { size: [...uploadedSizes.values()].reduce((total, size) => total + size, 0), etag: "archive-etag" };
+          return completedArchive;
+        },
         abort: async () => { abortedWithActive = activeUploads + activeReads; },
       }),
     },
@@ -97,10 +124,20 @@ describe("bounded bulk ZIP concurrency", () => {
   it("keeps a 100 GiB single source within the supported single-archive capacity", () => {
     const source = { physicalKey: "large.bin", key: "large.bin", name: "large.bin", etag: "etag", size: 100 * 1024 ** 3 };
     const estimate = assertBulkPreparationCapacity({ root: "", shareId: "share", shareVersion: 1, sources: [source] });
-    expect(estimate.crcSteps).toBe(12_800);
-    expect(estimate.uploadParts).toBe(6_401);
-    expect(estimate.workflowSteps).toBe(24_009);
+    expect(estimate.crcSteps).toBe(0);
+    expect(estimate.uploadParts).toBeGreaterThan(3_000);
+    expect(estimate.workflowSteps).toBe(estimate.uploadParts + 8);
     expect(estimate.workflowSteps).toBeLessThanOrEqual(24_900);
+  });
+
+  it("reuses an exact completed archive without reading sources or creating another multipart upload", async () => {
+    const test = harness(false, [100, 200], true, true);
+    await test.run();
+    expect(test.state().status).toBe("ready");
+    expect(test.state().maximumReads).toBe(0);
+    expect(test.completedParts).toEqual([]);
+    expect(test.calls).toContain("mark-cached-archive-ready");
+    expect(test.calls).not.toContain("create-one-pass-multipart-upload");
   });
 
   it.each([
@@ -113,7 +150,7 @@ describe("bounded bulk ZIP concurrency", () => {
     // The harness interrupts retention: omit its artificial failure-state read,
     // then include the successful retention sleep and expiry it did not execute.
     const actualSuccessSteps = test.cached.size - 1 + 2;
-    expect(estimateBulkPreparation(test.sources).workflowSteps).toBe(actualSuccessSteps);
+    expect(estimateOnePassBulkPreparation(test.sources).workflowSteps).toBe(actualSuccessSteps);
   });
 
   it("bounds CRC windows to 32 MiB and preserves same-file chunk dependencies", () => {
@@ -141,10 +178,10 @@ describe("bounded bulk ZIP concurrency", () => {
     const test = harness();
     await test.run();
     expect(test.state().status).toBe("ready");
-    expect(test.state().maximumReads).toBe(CRC_CONCURRENCY);
-    expect(test.state().maximumUploads).toBe(UPLOAD_CONCURRENCY);
+    expect(test.state().maximumReads).toBe(1);
+    expect(test.state().maximumUploads).toBe(1);
     expect(test.progress).toEqual([...test.progress].sort((a, b) => a - b));
-    expect(test.progress.at(-1)).toBe(42 * mib);
+    expect(test.progress.at(-1)).toBe(42 * mib - 1);
     const immutable = JSON.parse(test.objects.get("snapshot.json")!);
     expect(immutable.sources).toHaveLength(7);
     expect(immutable.entries).toBeUndefined();
@@ -154,7 +191,7 @@ describe("bounded bulk ZIP concurrency", () => {
     await test.run();
     expect(test.calls.length).toBe(counts.calls);
     expect(test.completedParts.length).toBe(counts.uploads);
-    expect(estimateBulkPreparation(test.sources).workflowSteps).toBeGreaterThanOrEqual(test.cached.size);
+    expect(estimateOnePassBulkPreparation(test.sources).workflowSteps).toBeGreaterThanOrEqual(test.cached.size);
   });
 
   it("does not abort or delete artifacts until sibling uploads drain on terminal failure", async () => {
@@ -175,6 +212,6 @@ describe("bounded bulk ZIP concurrency", () => {
     const final = JSON.parse(test.objects.get(finalBulkManifestKey("snapshot.json"))!);
     expect(final.entries.map((entry: { crc32: number }) => entry.crc32)).toEqual(test.sources.map((source, index) => (crc32(new Uint8Array(source.size).fill(index)) ^ 0xffffffff) >>> 0));
     expect(test.progress).toEqual([...test.progress].sort((a, b) => a - b));
-    expect(test.progress.at(-1)).toBe(32 * mib);
+    expect(test.progress.at(-1)).toBe(32 * mib - 1);
   });
 });
