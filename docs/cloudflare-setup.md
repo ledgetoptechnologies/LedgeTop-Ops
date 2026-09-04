@@ -402,33 +402,16 @@ npx.cmd wrangler secret put PROJECT_ALPHA_WEBHOOK_HMAC_SECRET --name ltds-ops-sy
 
 The current Project Alpha contract is HMAC-only, so production explicitly sets `PROJECT_ALPHA_ALLOW_LEGACY_HMAC=true`. LTDS verifies `sha256=<hex>` over the exact `${timestamp}.${rawBody}` bytes. Ed25519 remains preferred if its header and public key are introduced later; an invalid Ed25519 signature never falls back to HMAC. Use `PROJECT_ALPHA_WEBHOOK_ED25519_PREVIOUS_PUBLIC_KEY` only during a coordinated future rotation. The Access Groups API token belongs only on the sync Worker, never in Project Alpha.
 
-The sanitized Service Library projection uses another dedicated Access service
-application targeting only
-`client.ledgetopdroneservices.com/api/internal/project-alpha/catalog-v2`. This
-legacy machine endpoint remains active during the portal hostname transition;
-do not infer the browser portal origin from it.
-Copy its issuer and audience to
-`PROJECT_ALPHA_CATALOG_ACCESS_TEAM_DOMAIN` and
-`PROJECT_ALPHA_CATALOG_ACCESS_AUD` on `ltds-clients`. Configure the same bounded
-application key in Project Alpha and `PROJECT_ALPHA_CATALOG_APPLICATION_KEY`,
-then add the dedicated receiver secret:
-
-```powershell
-npx.cmd wrangler secret put PROJECT_ALPHA_CATALOG_HMAC_SECRET --name ltds-clients
-npx.cmd wrangler secret put PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_SECRET --name ltds-clients
-```
-
-Set `PROJECT_ALPHA_CATALOG_HMAC_KEY_ID` to the sender's current key ID. During
-rotation only, set a distinct `PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_KEY_ID` and
-the previous secret above; delete both previous values after old pending rows
-drain. An unknown key ID is rejected even if its signature matches another key.
-
-Do not reuse an Access audience, service token, or HMAC secret from Ops Sync or
-the draft-quote caller. Keep `PROJECT_ALPHA_CATALOG_SYNC_ENABLED=false` until
+The sanitized Service Library projection uses the same Project Alpha Ops Sync
+Access application, service token, application key, and event signature. Send
+it as `projection_kind: "catalog"` inside the signed `portal.projection` event;
+Ops Sync dispatches it through the private Client service binding. Do not
+provision a catalog-specific Client Access application, public write route, or
+HMAC secret. Keep `PROJECT_ALPHA_CATALOG_SYNC_ENABLED=false` until
 migration 0122 is applied in isolated staging and snapshot, replay, sequence
 gap, stale-draft, leakage, and Access-denial tests pass. Project Alpha keeps the
-service-token client ID/secret; LTDS receives only the Access assertion and
-signed request. See `docs/project-alpha.md` for the exact producer envelope.
+service-token client ID/secret. See `docs/project-alpha.md` for the exact
+producer envelope.
 
 Project Alpha sends portal hierarchy events through the same External
 Operations connection used for its other signed events:

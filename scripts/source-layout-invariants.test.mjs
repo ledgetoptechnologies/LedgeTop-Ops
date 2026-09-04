@@ -65,9 +65,6 @@ const expectedPublicRoutes = [
   "GET|HEAD /portal/*",
   "GET|HEAD /assets/*",
   "POST /api/internal/client-request-attachments/:attachmentId/scanned",
-  "POST /api/internal/project-alpha/catalog-v2",
-  "POST /api/internal/project-alpha/service-assignments-v1",
-  "POST /api/internal/project-alpha/sources/:sourceId/service-assignments-v1",
   "POST /api/public/shares/:publicId/bulk-download",
   "POST /api/public/shares/:publicId/cloud-transfers",
   "POST /api/public/shares/:publicId/cloud-transfers/:jobId/cancel",
@@ -161,6 +158,8 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_KEY_ID, "");
   assert.equal(config.vars.PROJECT_ALPHA_PORTAL_APPLICATION_KEY, "ltds_ops");
   assert.equal(config.vars.PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED, "false");
+  const clientSource = read("apps/client/src/worker/index.ts");
+  assert.doesNotMatch(clientSource, /app\.post\(\s*["']\/api\/internal\/project-alpha\/(?:catalog-v2|service-assignments-v1|sources\/:sourceId\/service-assignments-v1)["']/);
   assert.equal(config.vars.PROJECT_ALPHA_PORTAL_ACCESS_TEAM_DOMAIN, undefined);
   assert.equal(config.vars.PROJECT_ALPHA_PORTAL_ACCESS_AUD, undefined);
   assert.equal(config.vars.PROJECT_ALPHA_PORTAL_HMAC_KEY_ID, undefined);

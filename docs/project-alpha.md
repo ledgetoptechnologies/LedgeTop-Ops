@@ -22,36 +22,21 @@ Project Alpha is authoritative for Business Units, Projects, Project Team member
 
 ## Sanitized Service Library projection (implemented, disabled)
 
-LTDS accepts a server-only catalog v2 projection at
-`POST /api/internal/project-alpha/catalog-v2`. The receiver is disabled unless
-`PROJECT_ALPHA_CATALOG_SYNC_ENABLED` is exactly `true`. It is not a browser API,
-has no CORS allowance, and is separate from client-session authentication.
-Configure a dedicated Cloudflare Access service application/audience in
-`PROJECT_ALPHA_CATALOG_ACCESS_TEAM_DOMAIN` and
-`PROJECT_ALPHA_CATALOG_ACCESS_AUD`. Configure an exact current key ID in
-`PROJECT_ALPHA_CATALOG_HMAC_KEY_ID` and store its unique 32+ byte secret as
-`PROJECT_ALPHA_CATALOG_HMAC_SECRET`; do not reuse the Operations projection,
-pricing-preview, or draft-quote secrets. Both systems use the same bounded
-deployment identifier in `PROJECT_ALPHA_CATALOG_APPLICATION_KEY`.
+Project Alpha publishes catalog v2 through the same signed Ops Sync event URL
+as every other External Operations event. The outer event uses
+`event_type: "portal.projection"` and `projection_kind: "catalog"`; its
+`projection` value is the exact catalog v2 envelope described below. The Client
+Worker has no public catalog write route. Private dispatch remains disabled
+unless `PROJECT_ALPHA_CATALOG_SYNC_ENABLED` is exactly `true`, and it is
+separate from client-session authentication.
 
-During a coordinated rotation only, set a distinct
-`PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_KEY_ID` and its 32+ byte
-`PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_SECRET`. The receiver selects key material
-only by an exact current/previous ID match and rejects unknown IDs. Remove the
-previous pair only after every pending delivery signed with it is drained.
-
-Every request is JSON no larger than 128 KiB and carries:
+The signed outer request is JSON no larger than the Ops Sync ingress limit and
+carries the existing External Operations headers:
 
 ```text
-Cf-Access-Client-Id / Cf-Access-Client-Secret: dedicated service token
-Cf-Access-Jwt-Assertion: issued by the dedicated Access application
-X-Portal-Integration-Application-Key: exact configured application key
-X-Portal-Integration-Timestamp: current ISO timestamp (five-minute window)
-X-Portal-Integration-Body-SHA256: lowercase SHA-256 of the exact body
-X-Portal-Integration-Key-Id: sender-selected bounded rotation key ID
-X-Portal-Integration-Delivery-Id: exact deliveryId from the body
-X-Portal-Integration-Signature: sha256=<lowercase HMAC-SHA-256 hex>
-signature input: <timestamp>\nPOST\n/api/internal/project-alpha/catalog-v2\n<keyId>\n<deliveryId>\n<exact body bytes>
+X-PA-Event-ID: exact outer event_id and inner deliveryId
+X-PA-Timestamp: current ISO timestamp (five-minute window)
+X-PA-Signature: sha256=<HMAC-SHA-256 over timestamp + "." + exact body>
 ```
 
 The strict envelope has `schemaVersion: 2`, `applicationKey`, `deliveryId`,

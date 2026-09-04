@@ -165,13 +165,16 @@ describe("delivery app shell",()=>{
     expect(await publicShare.text()).toBe("/s/existing-link");
     expect(assetFetch).toHaveBeenCalledOnce();
   });
-  it("does not mount either legacy portal-v2 writer even if its emergency handler flag is enabled",async()=>{
+  it("does not mount any legacy Project Alpha projection writer even if receiver flags are enabled",async()=>{
     const assetFetch=vi.fn(async()=>new Response("asset"));
     const env:any={ENVIRONMENT:"production",EXPECTED_HOST:"portal.drone.example",PUBLIC_BASE_URL:"https://portal.drone.example",
       PUBLIC_SHARE_ORIGIN:"https://portal.drone.example",CLIENT_PORTAL_ORIGIN:"https://portal.drone.example",
-      PROJECT_ALPHA_PORTAL_SYNC_ENABLED:"true",PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED:"true",ASSETS:{fetch:assetFetch}};
+      PROJECT_ALPHA_PORTAL_SYNC_ENABLED:"true",PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED:"true",
+      PROJECT_ALPHA_CATALOG_SYNC_ENABLED:"true",PROJECT_ALPHA_SERVICE_ASSIGNMENT_SYNC_ENABLED:"true",ASSETS:{fetch:assetFetch}};
     const context={waitUntil(){},passThroughOnException(){}} as unknown as ExecutionContext;
-    for(const path of ["/api/internal/project-alpha/portal-v2","/api/internal/project-alpha/sources/project-alpha%3Asecondary/portal-v2"]){
+    for(const path of ["/api/internal/project-alpha/portal-v2","/api/internal/project-alpha/sources/project-alpha%3Asecondary/portal-v2",
+      "/api/internal/project-alpha/catalog-v2","/api/internal/project-alpha/service-assignments-v1",
+      "/api/internal/project-alpha/sources/project-alpha%3Asecondary/service-assignments-v1"]){
       const response=await deliveryWorker.fetch(new Request(`https://portal.drone.example${path}`,{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"}),env,context);
       expect(response.status).toBe(404);
     }

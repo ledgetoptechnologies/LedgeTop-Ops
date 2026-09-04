@@ -203,10 +203,11 @@ Implement this as additive, default-off, independently gated capabilities:
    - Never publish unit prices, private formulas, margins, costs,
      tax rules, fulfillment notes, work activities, compensation, credentials,
      raw HTML/JavaScript, arbitrary regexes, or numeric database IDs.
-   - Implement the separately authenticated catalog-v2 complete snapshot and
-     ordered event publisher exactly as documented for
-     `POST /api/internal/project-alpha/catalog-v2`. Reject same-version content
-     changes; a source version is immutable evidence.
+   - Implement catalog-v2 complete snapshots and ordered events as
+     `projection_kind: "catalog"` deliveries inside the existing signed Ops
+     Sync `portal.projection` envelope. Do not create a second Client endpoint
+     or credential set. Reject same-version content changes; a source version
+     is immutable evidence.
    - Treat
      `packages/shared/fixtures/project-alpha-catalog-v2.json` in the LTDS repo as
      the machine-readable compatibility fixture and run it through PA producer

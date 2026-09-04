@@ -264,12 +264,12 @@ Contract rules:
   already submitted revision retains a sanitized name/category/version
   snapshot for audit and staff review.
 
-The catalog is delivered only to
-`POST /api/internal/project-alpha/catalog-v2`, protected by a dedicated Access
-service application and exact-body HMAC. The PA producer capability should be
-named `portal.catalog.publish` (or an equivalent dedicated scope). It must not
-reuse a broad administrative API, the human browser session, or the separate
-pricing/draft credentials.
+The catalog is delivered only as `projection_kind: "catalog"` inside the
+signed `portal.projection` event sent to the existing Ops Sync endpoint. Ops
+Sync privately dispatches the exact inner catalog envelope to Client. There is
+no public Client catalog write route. The PA producer capability should be
+named `portal.catalog.publish` (or an equivalent dedicated scope); it must not
+reuse a broad administrative API or the human browser session.
 
 ## Dynamic, multi-service client request
 

@@ -7,16 +7,16 @@ grant file access, infer assignments, or change any Operations policy.
 
 ## Ingress contract
 
-The two POST-only routes are:
+Project Alpha sends service assignments only as
+`projection_kind: "service_assignments"` inside the existing signed Ops Sync
+`portal.projection` envelope. Ops Sync binds the authenticated source, records
+the outer receipt, and privately dispatches the exact inner v1 body to Client.
+The Client Worker exposes no public service-assignment write route.
 
-- `/api/internal/project-alpha/service-assignments-v1` for the reserved primary source.
-- `/api/internal/project-alpha/sources/:sourceId/service-assignments-v1` for an active registered source authority.
-
-Both routes are hidden unless `PROJECT_ALPHA_SERVICE_ASSIGNMENT_SYNC_ENABLED`
-is exactly `true`. Requests retain the existing Project Alpha Access and HMAC
-requirements, including an exact signed path, timestamp, application key,
-delivery ID, key ID, body digest, and signature. The body is streamed with a
-256 KiB limit and a ten-second read deadline.
+Private dispatch is hidden unless
+`PROJECT_ALPHA_SERVICE_ASSIGNMENT_SYNC_ENABLED` is exactly `true`. The inner
+body retains its 256 KiB limit and strict delivery ID, application key, source,
+and schema checks.
 
 The shared v1 item is intentionally identical to the producer contract. It has
 `assignmentPublicId`, `sourceVersion`, `subjectType`, `subjectPublicId`,
