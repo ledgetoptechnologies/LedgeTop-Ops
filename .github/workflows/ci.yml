@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  source-invariants:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the exact commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Use the supported Node runtime
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 24
+
+      - name: Verify repository contracts
+        run: node --test scripts/source-layout-invariants.test.mjs scripts/client-portal-rollout-manifest.test.mjs scripts/client-portal-release-profile.test.mjs
+
+  packages:
+    name: ${{ matrix.package }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [client, operations, ops-sync, thumbnail-renderer]
+    steps:
+      - name: Check out the exact commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Use the supported Node runtime
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/${{ matrix.package }}/package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci --prefix apps/${{ matrix.package }}
+
+      - name: Typecheck
+        run: npm --prefix apps/${{ matrix.package }} run check
+
+      - name: Test
+        run: npm --prefix apps/${{ matrix.package }} test
+
+      - name: Build deployable application
+        if: matrix.package != 'thumbnail-renderer'
+        run: npm --prefix apps/${{ matrix.package }} run build
