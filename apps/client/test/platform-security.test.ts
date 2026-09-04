@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {} }));
+vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {} }));
 import { decodeItemRef, encodeItemRef, indexedImmediateChildVisibility, isHiddenKey, keyWithinRoot, parseRange, prefixHasBrowsableEntry, prefixHasVisibleContent, streamPlayerUrl, type VisibleContentBucket } from "../src/worker/files";
 import { createSessionCookie, presignR2Get, verifyRotatingSessionCookie, verifySessionCookie } from "../src/worker/security";
 import { hashAccessCode } from "../../operations/src/worker/crypto";
@@ -164,6 +164,21 @@ describe("delivery app shell",()=>{
     expect(publicShare.status).toBe(200);
     expect(await publicShare.text()).toBe("/s/existing-link");
     expect(assetFetch).toHaveBeenCalledOnce();
+  });
+  it("does not mount any legacy Project Alpha projection writer even if receiver flags are enabled",async()=>{
+    const assetFetch=vi.fn(async()=>new Response("asset"));
+    const env:any={ENVIRONMENT:"production",EXPECTED_HOST:"portal.drone.example",PUBLIC_BASE_URL:"https://portal.drone.example",
+      PUBLIC_SHARE_ORIGIN:"https://portal.drone.example",CLIENT_PORTAL_ORIGIN:"https://portal.drone.example",
+      PROJECT_ALPHA_PORTAL_SYNC_ENABLED:"true",PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED:"true",
+      PROJECT_ALPHA_CATALOG_SYNC_ENABLED:"true",PROJECT_ALPHA_SERVICE_ASSIGNMENT_SYNC_ENABLED:"true",ASSETS:{fetch:assetFetch}};
+    const context={waitUntil(){},passThroughOnException(){}} as unknown as ExecutionContext;
+    for(const path of ["/api/internal/project-alpha/portal-v2","/api/internal/project-alpha/sources/project-alpha%3Asecondary/portal-v2",
+      "/api/internal/project-alpha/catalog-v2","/api/internal/project-alpha/service-assignments-v1",
+      "/api/internal/project-alpha/sources/project-alpha%3Asecondary/service-assignments-v1"]){
+      const response=await deliveryWorker.fetch(new Request(`https://portal.drone.example${path}`,{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"}),env,context);
+      expect(response.status).toBe(404);
+    }
+    expect(assetFetch).not.toHaveBeenCalled();
   });
   it("redirects the public root to the configured authenticated portal origin",async()=>{const env:any={ENVIRONMENT:"production",EXPECTED_HOST:"delivery.example",PUBLIC_BASE_URL:"https://delivery.example",PUBLIC_SHARE_ORIGIN:"https://delivery.example",CLIENT_PORTAL_ORIGIN:"https://client.example"};const response=await deliveryWorker.fetch(new Request("https://delivery.example/"),env,{waitUntil(){},passThroughOnException(){}} as unknown as ExecutionContext);expect(response.status).toBe(302);expect(response.headers.get("Location")).toBe("https://client.example/portal");});
   it("keeps the secondary portal root on its own authenticated hostname",async()=>{const env:any={ENVIRONMENT:"production",EXPECTED_HOST:"client.drone.example",PUBLIC_BASE_URL:"https://client.drone.example",PUBLIC_SHARE_ORIGIN:"https://client.drone.example",CLIENT_PORTAL_ORIGIN:"https://client.drone.example",CLIENT_PORTAL_ORIGINS:"https://client.drone.example,https://client.technology.example"};const response=await deliveryWorker.fetch(new Request("https://client.technology.example/"),env,{waitUntil(){},passThroughOnException(){}} as unknown as ExecutionContext);expect(response.status).toBe(302);expect(response.headers.get("Location")).toBe("https://client.technology.example/portal");});

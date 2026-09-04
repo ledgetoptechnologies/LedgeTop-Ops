@@ -57,7 +57,8 @@ function json(status: number, value: object): Response {
  * chooses the source passed to the existing projection implementation. */
 export async function handleRegisteredProjectAlphaPortalRequest(request: Request, env: Env, sourceId: string,
   accessVerifier: (request: Request, authority: ResolvedAuthority) => Promise<void> = verifyRegisteredPortalAccess): Promise<Response> {
-  if (env.PROJECT_ALPHA_PORTAL_SYNC_ENABLED !== "true" || request.method !== "POST") return json(404, { error: "not-found" });
+  if (env.PROJECT_ALPHA_PORTAL_SYNC_ENABLED !== "true" || env.PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED !== "true" || request.method !== "POST")
+    return json(404, { error: "not-found" });
   try {
     if (!await portalSourceAuthoritiesReady(env.DELIVERY_DB.withSession("first-primary"))) return json(503, { error: "portal-authority-unavailable" });
     const authority = await resolvePortalSourceAuthority(env, sourceId);

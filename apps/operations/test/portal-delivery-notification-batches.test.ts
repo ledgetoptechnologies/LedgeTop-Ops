@@ -79,7 +79,8 @@ describe('native delivery staging, exact authority and controls — migrated D1'
     ]);
     env={DELIVERY_DB:db,OPS_DB:ops,PROJECT_ALPHA_PORTAL_APPLICATION_KEY:'project-alpha',PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED:'true',
       CLIENT_PORTAL_HIERARCHY_V2_ENABLED:'true',AUTHENTICATED_DELIVERY_GRANTS_ENABLED:'true',CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED:'true',
-      CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED:'true',DELIVERY_BASE_URL:'https://client.example.test',OPERATIONS_SESSION_SECRET:'native-notification-test-secret-at-least-32'} as Env;
+      CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED:'true',CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED:'true',
+      DELIVERY_BASE_URL:'https://client.example.test',OPERATIONS_SESSION_SECRET:'native-notification-test-secret-at-least-32'} as Env;
     for(const state of ['pending','attempted','processing','sent','failed','suppressed'] as const){
       const f=await fixture(`upgrade-${state}`);await create(f);
       if(state!=='pending')await db.prepare(`UPDATE project_alpha_delivery_portal_notification_outbox SET status=?,attempt_count=?,lease_expires_at=?,last_error=?

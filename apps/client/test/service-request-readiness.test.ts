@@ -77,6 +77,10 @@ describe("request readiness against migrated D1 and real authorization", { timeo
       db.prepare("UPDATE portal_v2_workspaces SET status='active'"),
       db.prepare("UPDATE portal_v2_workspace_memberships SET status='active',revoked_at=NULL,expires_at=NULL"),
       db.prepare("UPDATE portal_v2_entitlements SET status=CASE WHEN id='root-request' THEN 'revoked' ELSE 'active' END,revoked_at=NULL,expires_at=NULL"),
+      // A source-account suspension invalidates the cached legacy directory.
+      // This shared fixture deliberately restores its original authoritative
+      // projection between tests instead of weakening the production fence.
+      db.prepare("UPDATE portal_v2_directory_entities SET active=1 WHERE source_version='legacy-backfill'"),
     ]);
   });
 
@@ -159,6 +163,13 @@ describe("request readiness against migrated D1 and real authorization", { timeo
 
   it("requires the member's own current project grant, not only the account grant", async () => {
     await db.prepare("UPDATE client_account_members SET role='member' WHERE identity_id='identity-a'").run();
+    // Role changes invalidate the cached legacy membership and entitlements.
+    // Model the subsequent successful source reconciliation for this member-
+    // grant test; lifecycle invalidation itself is covered independently.
+    await db.batch([
+      db.prepare("UPDATE portal_v2_workspace_memberships SET status='active',revoked_at=NULL WHERE identity_id='identity-a'"),
+      db.prepare("UPDATE portal_v2_entitlements SET status='active',revoked_at=NULL WHERE identity_id='identity-a' AND id<>'root-request'"),
+    ]);
     expect(await readiness("project-a")).toMatchObject({ canStartRequest: true });
     await db.prepare("UPDATE client_member_project_grants SET revoked_at=datetime('now') WHERE identity_id='identity-a'").run();
     expect(await readiness("project-a")).toMatchObject({ canStartRequest: false });

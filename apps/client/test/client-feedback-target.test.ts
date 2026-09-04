@@ -57,6 +57,12 @@ describe("feedback target authorization against migrated D1",{timeout:60_000},()
       db.prepare("UPDATE projects SET active=1,project_alpha_project_id=CASE WHEN id='project-a' THEN 'pa-project-a' ELSE 'pa-project-b' END"),
       db.prepare("INSERT OR REPLACE INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES (?,'etag-one',200,'2026-08-25T01:00:00Z','image/jpeg','image')").bind(storageKey),
       db.prepare("UPDATE portal_v2_identities SET status='active',revoked_at=NULL,verified_email='a@example.test' WHERE id='identity-a'"),
+      // Earlier race tests intentionally invalidate bootstrap authority via
+      // account root/status changes. Restore the complete test projection,
+      // not only its membership rows, before testing another independent race.
+      db.prepare("UPDATE portal_v2_workspaces SET status='active'"),
+      db.prepare("UPDATE portal_v2_directory_entities SET active=1 WHERE source_version='legacy-backfill'"),
+      db.prepare("UPDATE portal_v2_folder_bindings SET status='active',revoked_at=NULL WHERE source_type='legacy'"),
       db.prepare("UPDATE portal_v2_workspace_memberships SET status='active',revoked_at=NULL,expires_at=NULL"),
       db.prepare("UPDATE portal_v2_entitlements SET status=CASE WHEN id='test-deny' THEN 'revoked' ELSE 'active' END,revoked_at=NULL,expires_at=NULL"),
     ]);

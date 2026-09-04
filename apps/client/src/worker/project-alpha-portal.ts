@@ -1350,7 +1350,8 @@ export function portalProjectionConfigurationIssue(env: Env): PortalProjectionCo
 }
 
 export async function handleProjectAlphaPortalProjectionRequest(request: Request, env: Env, accessVerifier: AccessVerifier = verifyPortalProjectionAccessAssertion): Promise<Response> {
-  if (env.PROJECT_ALPHA_PORTAL_SYNC_ENABLED !== "true") return json(404, { error: "not-found" });
+  if (env.PROJECT_ALPHA_PORTAL_SYNC_ENABLED !== "true" || env.PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED !== "true")
+    return json(404, { error: "not-found" });
   const configurationIssue = portalProjectionConfigurationIssue(env);
   if (configurationIssue) {
     console.error(JSON.stringify({ event: "project_alpha_portal_receiver_misconfigured", reason: configurationIssue }));

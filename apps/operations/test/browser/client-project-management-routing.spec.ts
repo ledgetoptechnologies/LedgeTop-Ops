@@ -39,6 +39,7 @@ async function fixture(page: Page, managementHandler: (route: Route, request: Pl
       csrfToken: "csrf-project-management", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: {} } });
     if (url.pathname === detailBase) return route.fulfill({ json: (options.detail ?? (() => detail()))() });
     if (url.pathname === `${detailBase}/project-management`
+      || url.pathname === "/api/admin/integrations/project-alpha/sync"
       || /^\/api\/admin\/integrations\/project-alpha\/connectors\/[^/]+\/sync$/.test(url.pathname)) return managementHandler(route, request);
     return route.fulfill({ status: 503, json: { error: "Ancillary fixture endpoint unavailable" } });
   });
@@ -82,6 +83,46 @@ test("only a backend-authorized sync control posts once with CSRF and then refre
   await expect(businessProjectsCard(page).getByText("Project synced", { exact: true })).toBeVisible();
   const posts = calls.filter(call => call.method === "POST"); expect(posts).toHaveLength(1); expect(posts[0]!.csrf).toBe("csrf-project-management");
   expect(reads).toBeGreaterThanOrEqual(2);
+});
+
+test("the exact legacy primary source can request its existing synchronization without accepting that path for another source", async ({ page }) => {
+  const primary = "project-alpha:primary", primaryPath = `/clients/sources/${encodeURIComponent(primary)}/business/organizations/42`;
+  const primaryBase = `/api/client-hub/sources/${encodeURIComponent(primary)}/business/organizations/42`;
+  const primaryRoot = { ...root, sourceId: primary };
+  const primaryDetail = () => {
+    const value = detail();
+    value.client.source_id = primary; value.client.source_name = "Primary Project Alpha"; value.client.detail_path = primaryPath;
+    return value;
+  };
+  const { calls } = await fixture(page, async (route, request) => {
+    if (request.method() === "POST") return route.fulfill({ json: { status: "success", changedCollections: [] } });
+    return route.fulfill({ json: status({
+      canonicalRoot: primaryRoot,
+      source: { sourceId: primary, displayName: "Primary Project Alpha", state: "active" },
+      availability: { available: false, reason: "route_not_configured", explanation: "An administrator has not reviewed a Project Alpha project-management link for Primary Project Alpha." },
+      action: null,
+      sync: { ...status().sync,
+        refresh: { label: "Refresh synchronization status", href: `${primaryBase}/project-management`, method: "GET" },
+        requestSync: { label: "Sync source now", href: "/api/admin/integrations/project-alpha/sync", method: "POST" } },
+    }) });
+  }, { permissions: ["team.view", "integrations.manage"], path: primaryPath, base: primaryBase, detail: primaryDetail });
+  await page.goto(primaryPath);
+  const button = page.getByRole("button", { name: "Sync source now" });
+  const dialog = page.waitForEvent("dialog"), click = button.click(), confirmation = await dialog;
+  await confirmation.accept(); await click;
+  await expect(button).toBeEnabled();
+  const posts = calls.filter(call => call.method === "POST");
+  expect(posts).toHaveLength(1); expect(posts[0]!.url.pathname).toBe("/api/admin/integrations/project-alpha/sync");
+  expect(posts[0]!.csrf).toBe("csrf-project-management");
+  const secondaryPage = await page.context().newPage();
+  const secondary = await fixture(secondaryPage, route => route.fulfill({ json: status({
+    sync: { ...status().sync, requestSync: { label: "Sync source now", href: "/api/admin/integrations/project-alpha/sync", method: "POST" } },
+  }) }), { permissions: ["team.view", "integrations.manage"] });
+  await secondaryPage.goto(path);
+  await expect(businessProjectsCard(secondaryPage).getByRole("alert")).toContainText("could not be verified");
+  await expect(secondaryPage.getByRole("button", { name: "Sync source now" })).toHaveCount(0);
+  expect(secondary.calls.filter(call => call.method === "POST")).toHaveLength(0);
+  await secondaryPage.close();
 });
 
 test("unavailable and malformed project-management actions fail closed without local creation", async ({ page }) => {

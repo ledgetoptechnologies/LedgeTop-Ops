@@ -6,6 +6,7 @@ import { splitD1MigrationStatements } from "./helpers/d1-migrations";
 import type { Env } from "../src/worker/types";
 import { getPortalSourceAuthority, portalSourceAuthorityFence, provisionPortalSourceAuthority,
   readPortalSourceAuthorityProof, resolvePortalSourceAuthority, setPortalSourceAuthorityState,
+  readPortalProjectionSourceProof, reservePrimaryPortalSigningKeys, portalProjectionSourceFence,
   type PortalAuthorityConnectorIdentity, type PortalAuthorityRevisionInput } from "../src/worker/project-alpha-portal-authority";
 import { handleRegisteredProjectAlphaPortalRequest, portalSourceProjectionPath, verifyRegisteredPortalAccess } from "../src/worker/project-alpha-portal-ingress";
 import { handleProjectAlphaPortalProjectionRequest } from "../src/worker/project-alpha-portal";
@@ -59,7 +60,7 @@ describe("registered secondary portal authority and authenticated projection", {
       snapshotOrigin: `https://${suffix}.example.test`, snapshotBasePath: "/alpha", applicationKey,
       profile: "business_data", revision: 1, version: 2, state: "active" };
     const secret = `secret-for-${suffix}-`.repeat(4), keyId = `${suffix}-key`;
-    const env = { DELIVERY_DB: db, PROJECT_ALPHA_PORTAL_SYNC_ENABLED: "true", PROJECT_ALPHA_PORTAL_HMAC_SECRET: legacySecret,
+    const env = { DELIVERY_DB: db, PROJECT_ALPHA_PORTAL_SYNC_ENABLED: "true", PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED: "true", PROJECT_ALPHA_PORTAL_HMAC_SECRET: legacySecret,
       PROJECT_ALPHA_CONNECTOR_CREDENTIALS: JSON.stringify({ version: 1, sets: { selected: { portalCurrent: { keyId, value: secret } } } }) } as Env;
     return { connector, secret, keyId, env };
   }
@@ -244,5 +245,40 @@ describe("registered secondary portal authority and authenticated projection", {
     expect(response.status).toBe(409);
     expect(await db.prepare("SELECT workspace_id FROM pa_portal_workspace_sources WHERE workspace_id='must-not-reserve-primary'").first()).toBeNull();
     expect(await db.prepare("SELECT count(*) n FROM pa_portal_projection_receipts WHERE delivery_id=?").bind(payload.deliveryId).first("n")).toBe(0);
+  });
+  it("reads primary consumer proof without enrolling keys and keeps secondary authority distinct", async () => {
+    const f = candidate(), current = `${legacySecret}-consumer-current`, previous = `${legacySecret}-consumer-previous`;
+    const primary = { ...f.env, PROJECT_ALPHA_PORTAL_HMAC_SECRET: current };
+    const count = await db.prepare("SELECT count(*) n FROM pa_portal_source_signing_keys").first("n");
+    for (const secret of [undefined, "short", ` ${current}`, `${current}\n`, "x".repeat(8193), current]) {
+      expect(await readPortalProjectionSourceProof({ ...primary, PROJECT_ALPHA_PORTAL_HMAC_SECRET: secret }, db, "project-alpha:primary")).toBeNull();
+    }
+    expect(await db.prepare("SELECT count(*) n FROM pa_portal_source_signing_keys").first("n")).toBe(count);
+    await reservePrimaryPortalSigningKeys(primary);
+    const first = await readPortalProjectionSourceProof(primary, db, "project-alpha:primary");
+    expect(first).toEqual({ sourceId: "project-alpha:primary", keyFingerprints: [await hash(current)] });
+    for (const invalidPrevious of ["", "short", current, `${previous}\n`])
+      expect(await readPortalProjectionSourceProof({ ...primary, PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_SECRET: invalidPrevious }, db, "project-alpha:primary")).toBeNull();
+    expect(await getPortalSourceAuthority(db, "project-alpha:primary")).toBeNull();
+    await expect(readPortalSourceAuthorityProof(db, "project-alpha:primary")).rejects.toMatchObject({ code: "invalid" });
+    const rotated = { ...primary, PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_SECRET: previous };
+    expect(await readPortalProjectionSourceProof(rotated, db, "project-alpha:primary")).toBeNull();
+    await reservePrimaryPortalSigningKeys(rotated);
+    const next = await readPortalProjectionSourceProof(rotated, db, "project-alpha:primary");
+    expect(next).not.toEqual(first);
+    expect(next).toEqual({ sourceId: "project-alpha:primary", keyFingerprints: [await hash(current), await hash(previous)].sort() });
+    const secondary = await configure(f);
+    expect(await readPortalProjectionSourceProof(f.env, db, f.connector.sourceId)).toMatchObject({ sourceId: f.connector.sourceId, version: secondary.version });
+    expect(await readPortalProjectionSourceProof({ ...f.env, PROJECT_ALPHA_PORTAL_HMAC_SECRET: f.secret }, db, "project-alpha:primary")).toBeNull();
+    await setPortalSourceAuthorityState(f.env, f.connector, secondary.version, "suspended", "admin");
+    expect(await readPortalProjectionSourceProof(f.env, db, f.connector.sourceId)).toBeNull();
+  });
+  it("fences a missing primary signing reservation atomically and propagates ordinary D1 failures", async () => {
+    const proof = { sourceId: "project-alpha:primary" as const, keyFingerprints: [await hash("unreserved-key-for-consumer-fence-at-least-32")] };
+    await expect(db.batch([portalProjectionSourceFence(db, proof),
+      db.prepare("INSERT INTO client_accounts(id,display_name) VALUES('primary-proof-must-rollback','No')")])).rejects.toThrow();
+    expect(await db.prepare("SELECT id FROM client_accounts WHERE id='primary-proof-must-rollback'").first()).toBeNull();
+    const unavailable = { prepare() { throw new Error("ordinary D1 unavailable"); }, batch: db.batch.bind(db) };
+    await expect(readPortalProjectionSourceProof(candidate().env, unavailable, "project-alpha:primary")).rejects.toThrow("ordinary D1 unavailable");
   });
 });

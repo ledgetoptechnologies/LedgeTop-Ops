@@ -72,7 +72,10 @@ beforeAll(async () => {
     script: "export default {fetch(){return new Response('joined-j3')}}", d1Databases: ["OPS_DB"] });
   db = await runtime.getD1Database("OPS_DB") as D1Database; env = { OPS_DB: db, DATA_BUCKET: new Bucket() as unknown as R2Bucket };
   const migrations = new URL("../migrations/", import.meta.url);
-  for (const filename of readdirSync(migrations).filter(name => name.endsWith(".sql") && name <= "0047_project_memory_staff_attachments.sql").sort())
+  // The operational reader is deployed only after the reassignment recovery
+  // boundary, so this joined fixture must exercise that same schema rather
+  // than an obsolete pre-0052 partial database.
+  for (const filename of readdirSync(migrations).filter(name => name.endsWith(".sql") && name <= "0052_project_operational_reassignment_recovery.sql").sort())
     await db.batch(splitD1MigrationStatements(readFileSync(new URL(filename, migrations), "utf8")).map(sql => db.prepare(sql)));
 }, 120_000);
 afterAll(async () => runtime?.dispose());

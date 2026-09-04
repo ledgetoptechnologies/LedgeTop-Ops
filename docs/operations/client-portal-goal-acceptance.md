@@ -18,6 +18,12 @@ It verifies the shared two-domain Access boundary and preserved public links,
 but also records that no portal workspace or membership was provisioned at that
 checkpoint. Treat that state as partially deployed, not live accepted.
 
+The [September 3 Access consolidation evidence](client-portal-access-evidence-2026-09-03.md)
+supersedes that checkpoint's hostname-to-application mapping: both portal
+domains now share the original application, while the legacy client domain has
+its own application. Private-path redirects and public fake-link shells were
+verified, but authenticated J7 workflows remain unverified.
+
 The ordered activation dependencies, rollback rules, bounded local test
 partitions, and joined workflow matrix are maintained in the
 [client portal rollout manifest](client-portal-rollout-manifest.md). That
@@ -27,7 +33,11 @@ mutate production.
 Project Alpha's current onboarding, approval, project, contract, and document
 workflows are authoritative. Portal integration changes must compose on top of
 them through the single External Operations profile; they must not replace,
-fork, or reimplement those workflows in Operations or Client.
+fork, or reimplement those workflows in Operations or Client. The producer must
+emit outer `portal.projection` events to its exact configured Ops Sync webhook;
+Ops Sync validates that existing Access/HMAC contract and privately invokes the
+Client Worker named entrypoint. A direct Project Alpha-to-portal connection is
+an acceptance failure.
 
 ## Evidence states
 
@@ -39,6 +49,32 @@ fork, or reimplement those workflows in Operations or Client.
 - **Missing**: the user workflow or required evidence does not yet exist.
 
 ## Identity, services, and Client Hub
+
+### Default-on provisioning requirement (reconfirmed September 3, 2026)
+
+The current unpublished implementation and exact local test results are in
+[the September 3 local evidence record](client-portal-default-on-local-evidence-2026-09-03.md).
+That record does not replace the production acceptance checkpoint.
+
+Creating an eligible client in Project Alpha must automatically provision its
+portal access through the existing signed connection, without an invitation or
+announcement email. An organization owns one workspace; a standalone client
+owns its own workspace. Organization contacts are scoped principals in that
+workspace, not duplicate organization workspaces. Missing, invalid, or ambiguous
+email addresses require review. Department and individual delivery boundaries
+remain explicit; workspace eligibility never grants arbitrary folder access.
+
+Existing clients must be reconciled automatically in bounded, idempotent
+background batches. An administrator's person/root revocation must survive
+every subsequent sync, reconciliation, and sign-in. Source-qualified records
+from separate Project Alpha instances must never merge by email or name.
+
+Current rollout gates are the historical producer backfill, primary signed
+native workspace enrollment/listing/resource routing, and regression coverage
+for legacy client reparenting and member revocation. These are not yet live
+accepted. Keep coordinated automatic-eligibility flags disabled until the
+joined producer/consumer proof and revocation gates pass. A successful business
+directory sync or a green isolated membership test is not sufficient evidence.
 
 | Requirement | Current evidence | State | Remaining acceptance |
 | --- | --- | --- | --- |

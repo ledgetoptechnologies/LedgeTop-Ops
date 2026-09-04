@@ -65,11 +65,6 @@ const expectedPublicRoutes = [
   "GET|HEAD /portal/*",
   "GET|HEAD /assets/*",
   "POST /api/internal/client-request-attachments/:attachmentId/scanned",
-  "POST /api/internal/project-alpha/catalog-v2",
-  "POST /api/internal/project-alpha/portal-v2",
-  "POST /api/internal/project-alpha/service-assignments-v1",
-  "POST /api/internal/project-alpha/sources/:sourceId/portal-v2",
-  "POST /api/internal/project-alpha/sources/:sourceId/service-assignments-v1",
   "POST /api/public/shares/:publicId/bulk-download",
   "POST /api/public/shares/:publicId/cloud-transfers",
   "POST /api/public/shares/:publicId/cloud-transfers/:jobId/cancel",
@@ -130,7 +125,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   // The digest intentionally moved with the reviewed canonical portal hosts
   // and explicit legacy compatibility origin. Keep the field assertions so a future config change
   // cannot hide behind a digest refresh.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "432d9c334d0518ed9af08e6b8bdc51cbe4e105a8747c05c66672715715e194e0");
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "de7fe0b2e29dfcde0c5853bbf5b36690cc093c83d416e66c4adc67cd0060473e");
   const config = readJson("apps/client/wrangler.jsonc");
   assert.equal(config.name, "ltds-clients");
   assert.equal(config.main, "src/worker/index.ts");
@@ -162,10 +157,13 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_HMAC_KEY_ID, "");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_KEY_ID, "");
   assert.equal(config.vars.PROJECT_ALPHA_PORTAL_APPLICATION_KEY, "ltds_ops");
-  assert.equal(config.vars.PROJECT_ALPHA_PORTAL_ACCESS_TEAM_DOMAIN, "https://ledgetoptechnologies.cloudflareaccess.com");
-  assert.equal(config.vars.PROJECT_ALPHA_PORTAL_ACCESS_AUD, "a722211a2c137a892d5a07e3bf1e1f3f49475f75efd83e12adade21a42e75068");
-  assert.equal(config.vars.PROJECT_ALPHA_PORTAL_HMAC_KEY_ID, "portal-v1");
-  assert.equal(config.vars.PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_KEY_ID, "");
+  assert.equal(config.vars.PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED, "false");
+  const clientSource = read("apps/client/src/worker/index.ts");
+  assert.doesNotMatch(clientSource, /app\.post\(\s*["']\/api\/internal\/project-alpha\/(?:catalog-v2|service-assignments-v1|sources\/:sourceId\/service-assignments-v1)["']/);
+  assert.equal(config.vars.PROJECT_ALPHA_PORTAL_ACCESS_TEAM_DOMAIN, undefined);
+  assert.equal(config.vars.PROJECT_ALPHA_PORTAL_ACCESS_AUD, undefined);
+  assert.equal(config.vars.PROJECT_ALPHA_PORTAL_HMAC_KEY_ID, undefined);
+  assert.equal(config.vars.PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_KEY_ID, undefined);
   assert.equal(config.vars.CLIENT_PORTAL_TEAM_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_REQUEST_V2_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED, "false");
@@ -228,6 +226,9 @@ test("public route, host-namespace guard, health, and isolated cookie contracts 
   const delegated = read("apps/client/src/worker/client-portal/delegated-shares.ts");
   const lifecycle = read("apps/client/src/worker/public-share-lifecycle.ts");
   assert.deepEqual(publicRoutes(worker), expectedPublicRoutes);
+  assert(worker.includes('export { OpsSyncPortalProjectionIngress } from "./ops-sync-portal-entrypoint";'));
+  assert(!worker.includes('app.post("/api/internal/project-alpha/portal-v2"'));
+  assert(!worker.includes('app.post("/api/internal/project-alpha/sources/:sourceId/portal-v2"'));
   assert(worker.includes('app.route("/client-share/api", createClientDelegatedPublicRouter())'));
   assert(worker.includes('const COOKIE_NAME = "__Host-ltds_delivery";'));
   assert(worker.includes('service: "ltds-delivery"'));

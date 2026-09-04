@@ -1,5 +1,6 @@
 import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+vi.mock("cloudflare:workers",()=>({WorkerEntrypoint:class{}}));
 import hierarchyMigration from "../migrations/0121_client_workspace_hierarchy_v2.sql?raw";
 import projectionMigration from "../migrations/0125_project_alpha_portal_projection.sql?raw";
 import relationMigration from "../migrations/0129_portal_hierarchy_relations.sql?raw";
@@ -13,6 +14,7 @@ import { splitD1MigrationStatements } from "./helpers/d1-migrations";
 import { authorizePortalWorkspaceCapability } from "../src/worker/client-portal/workspace-v2";
 import type { VerifiedClientPrincipal } from "../src/worker/client-portal/types";
 import { applyPortalProjectionDelivery, handleProjectAlphaPortalProjectionRequest, parsePortalProjectionDelivery } from "../src/worker/project-alpha-portal";
+import { ingestOpsSyncPortalProjection } from "../src/worker/ops-sync-portal-entrypoint";
 import { createCatalogSourceContext, PRIMARY_ALPHA_SOURCE_ID } from "@ltds/shared";
 import type { Env } from "../src/worker/types";
 import portalFixture from "../../../packages/shared/fixtures/project-alpha-portal-v2.json";
@@ -95,6 +97,7 @@ describe("Project Alpha portal hierarchy projection", () => {
     env = {
       DELIVERY_DB: db,
       PROJECT_ALPHA_PORTAL_SYNC_ENABLED: "true",
+      PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED: "true",
       PROJECT_ALPHA_PORTAL_APPLICATION_KEY: applicationKey,
       PROJECT_ALPHA_PORTAL_HMAC_KEY_ID: keyId,
       PROJECT_ALPHA_PORTAL_HMAC_SECRET: secret,
@@ -129,6 +132,14 @@ describe("Project Alpha portal hierarchy projection", () => {
       acceptedWhenRelationsFlagEnabled: true,
       runtimeFeatureFlagDefault: false,
     });
+  });
+
+  it("accepts the primary projection through the private Ops Sync boundary without copied PA credentials",async()=>{
+    const payload=portalFixture.valid.snapshotPage as Record<string,unknown>;
+    const result=await ingestOpsSyncPortalProjection({...env,PROJECT_ALPHA_PORTAL_HMAC_SECRET:undefined,
+      PROJECT_ALPHA_PORTAL_HMAC_KEY_ID:undefined},{protocolVersion:1,sourceId:PRIMARY_ALPHA_SOURCE_ID,
+      applicationKey,deliveryId:String(payload.deliveryId),projectionKind:"portal",body:JSON.stringify(payload)});
+    expect(result).toEqual({ok:true,protocolVersion:1,status:"completed"});
   });
 
   it("stages a complete bounded generation and atomically activates hierarchy and unbound authorization intent", async () => {
@@ -174,10 +185,14 @@ describe("Project Alpha portal hierarchy projection", () => {
     const request = () => new Request("https://client.test/api/internal/project-alpha/portal-v2", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
     const disabled = await handleProjectAlphaPortalProjectionRequest(request(), { PROJECT_ALPHA_PORTAL_SYNC_ENABLED: "false" } as Env, async () => { accessCalls += 1; });
     expect(disabled.status).toBe(404);
+    const directDisabled = await handleProjectAlphaPortalProjectionRequest(request(), {
+      PROJECT_ALPHA_PORTAL_SYNC_ENABLED: "true", PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED: "false",
+    } as Env, async () => { accessCalls += 1; });
+    expect(directDisabled.status).toBe(404);
     expect(accessCalls).toBe(0);
     const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
-      const incomplete = await handleProjectAlphaPortalProjectionRequest(request(), { PROJECT_ALPHA_PORTAL_SYNC_ENABLED: "true" } as Env, async () => { accessCalls += 1; });
+      const incomplete = await handleProjectAlphaPortalProjectionRequest(request(), { PROJECT_ALPHA_PORTAL_SYNC_ENABLED: "true", PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED: "true" } as Env, async () => { accessCalls += 1; });
       expect(incomplete.status).toBe(503);
       expect(await incomplete.json()).toEqual({ error: "portal-receiver-misconfigured", reason: "application_key_invalid" });
       for (const malformed of ["too-short", ` ${"s".repeat(32)}`, `${"s".repeat(31)}\n`]) {

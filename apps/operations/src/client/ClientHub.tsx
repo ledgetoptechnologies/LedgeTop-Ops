@@ -164,6 +164,8 @@ function sameOriginAction(value: unknown, sourceId: string, method: "GET" | "POS
     if (candidate.origin !== location.origin || candidate.hash || candidate.search) return null;
     const expected = method === "GET" ? currentPath
       : `/api/admin/integrations/project-alpha/connectors/${encodeURIComponent(sourceId)}/sync`;
+    if (method === "POST" && sourceId === "project-alpha:primary"
+      && candidate.pathname === "/api/admin/integrations/project-alpha/sync") return candidate.pathname;
     return candidate.pathname === expected ? candidate.pathname : null;
   } catch { return null; }
 }

@@ -22,36 +22,21 @@ Project Alpha is authoritative for Business Units, Projects, Project Team member
 
 ## Sanitized Service Library projection (implemented, disabled)
 
-LTDS accepts a server-only catalog v2 projection at
-`POST /api/internal/project-alpha/catalog-v2`. The receiver is disabled unless
-`PROJECT_ALPHA_CATALOG_SYNC_ENABLED` is exactly `true`. It is not a browser API,
-has no CORS allowance, and is separate from client-session authentication.
-Configure a dedicated Cloudflare Access service application/audience in
-`PROJECT_ALPHA_CATALOG_ACCESS_TEAM_DOMAIN` and
-`PROJECT_ALPHA_CATALOG_ACCESS_AUD`. Configure an exact current key ID in
-`PROJECT_ALPHA_CATALOG_HMAC_KEY_ID` and store its unique 32+ byte secret as
-`PROJECT_ALPHA_CATALOG_HMAC_SECRET`; do not reuse the Operations projection,
-pricing-preview, or draft-quote secrets. Both systems use the same bounded
-deployment identifier in `PROJECT_ALPHA_CATALOG_APPLICATION_KEY`.
+Project Alpha publishes catalog v2 through the same signed Ops Sync event URL
+as every other External Operations event. The outer event uses
+`event_type: "portal.projection"` and `projection_kind: "catalog"`; its
+`projection` value is the exact catalog v2 envelope described below. The Client
+Worker has no public catalog write route. Private dispatch remains disabled
+unless `PROJECT_ALPHA_CATALOG_SYNC_ENABLED` is exactly `true`, and it is
+separate from client-session authentication.
 
-During a coordinated rotation only, set a distinct
-`PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_KEY_ID` and its 32+ byte
-`PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_SECRET`. The receiver selects key material
-only by an exact current/previous ID match and rejects unknown IDs. Remove the
-previous pair only after every pending delivery signed with it is drained.
-
-Every request is JSON no larger than 128 KiB and carries:
+The signed outer request is JSON no larger than the Ops Sync ingress limit and
+carries the existing External Operations headers:
 
 ```text
-Cf-Access-Client-Id / Cf-Access-Client-Secret: dedicated service token
-Cf-Access-Jwt-Assertion: issued by the dedicated Access application
-X-Portal-Integration-Application-Key: exact configured application key
-X-Portal-Integration-Timestamp: current ISO timestamp (five-minute window)
-X-Portal-Integration-Body-SHA256: lowercase SHA-256 of the exact body
-X-Portal-Integration-Key-Id: sender-selected bounded rotation key ID
-X-Portal-Integration-Delivery-Id: exact deliveryId from the body
-X-Portal-Integration-Signature: sha256=<lowercase HMAC-SHA-256 hex>
-signature input: <timestamp>\nPOST\n/api/internal/project-alpha/catalog-v2\n<keyId>\n<deliveryId>\n<exact body bytes>
+X-PA-Event-ID: exact outer event_id and inner deliveryId
+X-PA-Timestamp: current ISO timestamp (five-minute window)
+X-PA-Signature: sha256=<HMAC-SHA-256 over timestamp + "." + exact body>
 ```
 
 The strict envelope has `schemaVersion: 2`, `applicationKey`, `deliveryId`,
@@ -120,50 +105,51 @@ until the client reviews the current version. A draft may autosave without an
 area, but submission fails 422 whenever any selected immutable service snapshot
 has `geometryRequirement: "required"` and no validated Mapbox polygon is stored.
 
-## Portal hierarchy and entitlement projection (implemented, disabled)
+## Portal hierarchy and entitlement projection through Ops Sync
 
-LTDS accepts the portal-v2 projection only at
-`POST https://portal.ledgetopdroneservices.com/api/internal/project-alpha/portal-v2`.
-The endpoint is part of Project Alpha's single administrator-facing External
-operations connection, while retaining a path-scoped service-auth audience and
-signing key internally. The receiver hard-404s before
-reading the request body or D1 unless `PROJECT_ALPHA_PORTAL_SYNC_ENABLED` is
-exactly `true` and all five dedicated configuration values are present:
+Project Alpha has one outbound External Operations connection. It posts signed
+events only to `POST https://ops-sync.ledgetopdroneservices.com/v1/project-alpha/events`
+using that connection's application key, Service Auth identity, and event HMAC.
+Portal hierarchy, membership, entitlement, and revocation changes are event
+types on that connection; they are not a second Project Alpha destination.
 
-```text
-PROJECT_ALPHA_PORTAL_APPLICATION_KEY
-PROJECT_ALPHA_PORTAL_ACCESS_TEAM_DOMAIN
-PROJECT_ALPHA_PORTAL_ACCESS_AUD
-PROJECT_ALPHA_PORTAL_HMAC_KEY_ID
-PROJECT_ALPHA_PORTAL_HMAC_SECRET (32+ bytes, secret)
-PROJECT_ALPHA_PORTAL_SYNC_ENABLED=false
-```
+Project Alpha wraps each portal delivery as the strict outer integration event
+`event_type: "portal.projection"`. That outer event is authenticated exactly
+like every other External Operations event; Project Alpha adds no portal URL,
+portal Access audience, portal key ID, or portal HMAC secret.
 
-An optional, distinct `PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_KEY_ID` plus
-`PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_SECRET` provides the same bounded overlap
-window as catalog delivery. Supplying only half the pair, reusing the current
-ID, or sending any unconfigured key ID fails closed.
+`projection_kind` selects the exact inner `portal`, `catalog`, or
+`service_assignments` contract, and the outer event ID must equal the inner
+delivery ID.
 
-The path-scoped Access application may reuse the existing Project Alpha service
-token identity from Ops Sync, but it has its own audience and grants access only
-to `portal.ledgetopdroneservices.com/api/internal/project-alpha/*`. The sender
-uses `EXTERNAL_OPS_CLIENT_PORTAL_BASE_URL` to select this canonical host. This
-flag only opens the server-to-server inbox. It does not enable client
-hierarchy reads; `CLIENT_PORTAL_HIERARCHY_V2_ENABLED` remains an independent,
-default-off authorization cutover. Use a separate Access service application,
-application key, audience, and HMAC secret from catalog, pricing, draft-quote,
-Operations projection, and browser credentials. Reusing the established
-Project Alpha service-token identity does not authorize any browser session.
+After Ops Sync authenticates and durably records the outer source event, it
+validates the nested portal contract and privately invokes the Client Worker's
+named portal-projection entrypoint. This Worker-to-Worker invocation is not a
+public HTTP route and does not require a second Project Alpha credential. The
+Client receiver is still independently gated by
+`PROJECT_ALPHA_PORTAL_SYNC_ENABLED`; enabling ingestion does not enable client
+hierarchy reads. `CLIENT_PORTAL_HIERARCHY_V2_ENABLED` remains an independent,
+default-off authorization cutover. Neither the Project Alpha machine identity
+nor successful internal invocation authorizes a browser session.
 
-Requests are JSON up to 256 KiB. The Access assertion must have the configured
-exact issuer and audience. Headers use the same neutral projection set as the
-catalog: application key, current ISO timestamp, exact-body SHA-256, bounded key
-ID, body-matching delivery ID, and signature:
+The legacy direct HTTP writers at `/api/internal/project-alpha/portal-v2` and
+`/api/internal/project-alpha/sources/:sourceId/portal-v2` are not mounted by the
+production Client Worker. Their isolated handler seam is additionally guarded
+by `PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED`, which production must keep
+exactly `false`. Public share, download, portal shell, and session routes are
+unchanged; this removal affects only obsolete machine write endpoints.
+
+The Client-side projection configuration is:
 
 ```text
-X-Portal-Integration-Signature: sha256=<lowercase HMAC-SHA-256 hex>
-signature input: <timestamp>\nPOST\n/api/internal/project-alpha/portal-v2\n<keyId>\n<deliveryId>\n<exact body bytes>
+PROJECT_ALPHA_PORTAL_APPLICATION_KEY=ltds_ops
+PROJECT_ALPHA_PORTAL_SYNC_ENABLED=true
+PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED=false
 ```
+
+Ops Sync owns the external Access and HMAC credentials. The Client Worker does
+not need a second copy of those secrets. `CLIENT_PORTAL_HIERARCHY_V2_ENABLED`
+remains an independent authorization/read cutover.
 
 The strict schema-v2 envelope carries an opaque `workspaceId`, delivery ID,
 source generation, and monotonic per-workspace source sequence. A snapshot page

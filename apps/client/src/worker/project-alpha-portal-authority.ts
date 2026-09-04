@@ -124,6 +124,24 @@ export async function readPortalSourceAuthorityProof(db: PortalAuthorityDatabase
     WHERE authority.source_id=? AND authority.state='active'`).bind(sourceId).first<Row>();
   return row ? proof(row) : null;
 }
+/** Read-only consumer proof. Primary keys must already have been reserved by
+ * authenticated projection ingress; a browser read cannot enroll a new key. */
+export async function readPortalProjectionSourceProof(env: PortalSourceAuthorityEnvironment,
+  db: PortalAuthorityDatabase, sourceId: string): Promise<PortalProjectionWriteProof | null> {
+  if (sourceId !== PRIMARY_ALPHA_SOURCE_ID) return readPortalSourceAuthorityProof(db, sourceId);
+  const validKey = (value: unknown): value is string => typeof value === "string" && value === value.trim()
+    && !/[\u0000-\u001f\u007f]/.test(value) && bytesLength(value) >= 32 && bytesLength(value) <= 8192;
+  if (!validKey(env.PROJECT_ALPHA_PORTAL_HMAC_SECRET)) return null;
+  const previous = env.PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_SECRET;
+  if (previous !== undefined && (!validKey(previous) || previous === env.PROJECT_ALPHA_PORTAL_HMAC_SECRET)) return null;
+  const keys = [env.PROJECT_ALPHA_PORTAL_HMAC_SECRET, env.PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_SECRET]
+    .filter((secret): secret is string => secret !== undefined);
+  const value: PrimaryPortalSigningKeyProof = Object.freeze({ sourceId: PRIMARY_ALPHA_SOURCE_ID,
+    keyFingerprints: Object.freeze([...new Set(await Promise.all(keys.map(hash)))].sort()) });
+  const guard = portalProjectionSourceGuard(value);
+  return (await db.prepare(`SELECT ${guard.sql} ok`).bind(...guard.bindings).first<number>("ok")) === 1 ? value : null;
+}
+function bytesLength(value: string): number { return new TextEncoder().encode(value).byteLength; }
 export function portalSourceAuthorityGuard(value: PortalSourceAuthorityProof): { sql: string; bindings: (string | number)[] } {
   secondarySource(value.sourceId);
   if ([value.revision, value.version, value.connectorRevision, value.connectorVersion].some(n => !Number.isSafeInteger(n) || n < 1)) return invalid();
@@ -147,13 +165,17 @@ function primaryKeyGuard(value: PrimaryPortalSigningKeyProof) {
   return { sql: `(SELECT count(*) FROM pa_portal_source_signing_keys WHERE source_id=?
     AND fingerprint IN (SELECT value FROM json_each(?)))=?`, bindings: [PRIMARY_ALPHA_SOURCE_ID, JSON.stringify(value.keyFingerprints), value.keyFingerprints.length] };
 }
+/** A same-transaction authority fence for either the signed primary producer or
+ * an independently registered secondary producer. Callers must never treat the
+ * primary source as an unguarded special case. */
+export function portalProjectionSourceGuard(value: PortalProjectionWriteProof): { sql: string; bindings: (string | number)[] } {
+  return "keyFingerprints" in value ? primaryKeyGuard(value) : portalSourceAuthorityGuard(value);
+}
 export function portalProjectionSourceFence(db: PortalAuthorityDatabase, value: PortalProjectionWriteProof): D1PreparedStatement {
-  if (!("keyFingerprints" in value)) return portalSourceAuthorityFence(db, value);
-  const guard = primaryKeyGuard(value); return fence(db, value.sourceId, guard.sql, guard.bindings);
+  const guard = portalProjectionSourceGuard(value); return fence(db, value.sourceId, guard.sql, guard.bindings);
 }
 export async function assertPortalProjectionSourceProof(db: PortalAuthorityDatabase, value: PortalProjectionWriteProof): Promise<void> {
-  if (!("keyFingerprints" in value)) return assertPortalSourceAuthorityProof(db, value);
-  const guard = primaryKeyGuard(value);
+  const guard = portalProjectionSourceGuard(value);
   if ((await db.prepare(`SELECT ${guard.sql} ok`).bind(...guard.bindings).first<number>("ok")) !== 1)
     throw new PortalSourceAuthorityError("changed");
 }

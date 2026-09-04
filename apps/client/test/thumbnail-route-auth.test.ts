@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {} }));
+vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {} }));
 import worker from "../src/worker/index";
 import { encodeItemRef } from "../src/worker/files";
 import { createSessionCookie } from "../src/worker/security";
@@ -47,7 +47,7 @@ async function fixture(status: "pending" | "failed" | "ready" = "ready", options
   const secret = "s".repeat(48);
   const env: any = { ENVIRONMENT: "development", EXPECTED_HOST: "client.example", DELIVERY_DB: database, DATA_BUCKET: bucket, PUBLIC_THUMBNAIL_RATE_LIMITER: limiter, DELIVERY_SESSION_SECRET: secret, SESSION_KEY_ID: "v1", AUDIT_IP_SECRET: "a".repeat(48) };
   const cookie = (await createSessionCookie(secret, "v1", share.id, options.cookieVersion ?? share.share_version, Date.now() + 60_000)).split(";")[0]!;
-  const ctx: ExecutionContext = { waitUntil() {}, passThroughOnException() {}, abort() {}, exports: {} as Cloudflare.Exports, props: undefined, tracing: undefined as never };
+  const ctx = { waitUntil() {}, passThroughOnException() {}, abort() {}, exports: {} as Cloudflare.Exports, props: undefined, tracing: undefined as never } as unknown as ExecutionContext;
   const path = `/api/public/shares/${share.public_id}/items/${encodeURIComponent(encodeItemRef(fixtureRelative))}/thumbnail`;
   return { env, cookie, ctx, path, reads, sourceKey: fixtureSourceKey };
 }
@@ -225,7 +225,7 @@ describe("thumbnail route authorization", () => {
       AUDIT_IP_SECRET: "a".repeat(48),
     };
     const cookie = (await createSessionCookie(secret, "v1", share.id, share.share_version, Date.now() + 60_000)).split(";")[0]!;
-    const ctx: ExecutionContext = { waitUntil() {}, passThroughOnException() {}, abort() {}, exports: {} as Cloudflare.Exports, props: undefined, tracing: undefined as never };
+    const ctx = { waitUntil() {}, passThroughOnException() {}, abort() {}, exports: {} as Cloudflare.Exports, props: undefined, tracing: undefined as never } as unknown as ExecutionContext;
     const response = await worker.fetch(new Request(
       `https://client.example/api/public/shares/${share.public_id}/manifest`,
       { headers: { Cookie: cookie } },

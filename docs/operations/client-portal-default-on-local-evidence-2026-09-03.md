@@ -1,0 +1,309 @@
+# Default-on portal provisioning: local evidence, September 3, 2026
+
+This is local implementation evidence, **not a deployment or live acceptance
+record**. The existing production links and Viewer were not changed by these
+checks. The broader client-platform goal remains incomplete.
+
+September 4 reconciliation pins the reviewed Operations runtime boundary at
+`ab4d83fac9f0775228398cc38f5e28c573e25399` and Project Alpha at
+`67cfe73a9a2c4507524a017cd8996aab5598c534`. The Operations boundary is already
+contained by the remote prepared branch; later branch commits are CI/test
+portability and release-packet maintenance and are intentionally excluded from
+the runtime identity. Project Alpha's prepared branch is also present remotely
+at its exact pin and is ten commits ahead of `origin/main`. A local PHPUnit
+result cache is modified in that Project Alpha worktree; it is generated test
+state, not part of either reviewed source pin.
+
+This reconciliation updates release-contract inputs only. It does not finalize
+the contract, deploy either repository, apply a migration, change a feature
+flag, or provide live acceptance evidence.
+
+The September 4 invariant/staging contract run passed 78 of 78 tests. It verifies
+Client migrations through `0195`, Operations through `0052`, Project Alpha
+through `0083` with source SHA-256 pins, the Ops Sync
+`CLIENT_PORTAL_PROJECTION_INGRESS` binding, the shared `ltds_ops_staging`
+application key, absence of direct Client portal Access/HMAC requirements,
+`PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED=false`, and
+`BULK_DOWNLOAD_WORKFLOW.limits.steps=25000`. The checked-in contract remains
+explicitly unfinalized (`RELEASE_CONTRACT_FINALIZED=false`).
+
+## Contract
+
+- Project Alpha creates one workspace per organization or standalone client,
+  with organization contacts represented as scoped principals.
+- Historical roots are reconciled automatically after producer preflight;
+  no per-client pilot enrollment or invitation email is required.
+- Explicit person/root revocations survive backfill and sign-in. Eligibility
+  alone does not grant any delivery folder.
+- Each Project Alpha instance retains its own source-qualified authority.
+
+## Concrete defects addressed
+
+1. Primary native enrollment joined the secondary-source authority registry.
+   Primary signed workspaces therefore could not enroll even when their
+   projections existed. Enrollment, listing and native contexts now accept a
+   read-only proof of the primary keys reserved by authenticated ingress.
+2. Existing producers had mutation hooks but no automatic historical-root
+   backfill. Project Alpha migration `0083` adds durable per-root completion
+   and bounded retry state; cron processes 25 roots per run. Standalone
+   entitlements now use the supported `client` scope.
+3. Legacy bootstrap projections could outlive the underlying account root or
+   membership. Client migration `0195` and read guards invalidate stale legacy
+   authority without changing signed successor generations or public links.
+
+## Terminal local results
+
+Operations focused tests:
+
+| Suite | Passed |
+| --- | ---: |
+| Primary legacy project management | 3 |
+| Share recipient source isolation | 26 |
+| Delivery notification source isolation | 19 |
+| Project Alpha delivery intents | 22 |
+| Delivery intent source runtime | 24 |
+| Portal delivery notification batches | 29 |
+| Client Hub workspace resolution | 12 |
+| Project management routing, desktop/mobile browser | 12 |
+
+The primary-native Client gate passed 11 tests using signed ingress through
+first-login enrollment, listing and native-resource access, including missing
+or ambiguous email, missing/unreserved keys, tombstones and key rotation.
+The authority suite passed 21 tests. Client and Operations typechecks and
+production builds passed. Builds retain the existing large-chunk warning.
+
+The frozen legacy lifecycle suite passed 13 tests, including role-change
+invalidation, signed-successor controls, public-token preservation and atomic
+rollback. Aligned eligibility tests passed 8, secondary workspace tests passed
+9, and cross-repository delivery tests passed 2. Client typecheck passed again
+after those final changes.
+
+Project Alpha's latest focused portal workflow gate passed 140 tests with
+1,204 assertions. The full suite before the final binding-recovery addition
+passed 758 tests with 6,146 assertions and 91 environment skips. All 83 migration
+files passed the repository validator; this is not proof of executing `0083`
+against MySQL.
+
+The then-current Project Alpha checkpoint `17e20c55` subsequently passed its complete
+suite: 759 tests, 6,166 assertions, 90 environment skips, exit 0. The disposable
+network-disabled container used PHP 8.5.10 and PHPUnit 10.5.63 with a git archive
+and a copied existing vendor tree. Five PHP 8.5 deprecations were reported
+(triggered by 17 tests); no source or production files changed. This supersedes
+the earlier pre-final full-suite count. A prior symlinked-vendor harness attempt
+was invalid because Composer resolved classes outside the copied tree.
+
+A subsequent network-isolated, RAM-only MySQL 8.4 test executed `0083`, reran it
+on empty and populated state, and preserved all three fixture rows. Reactivation
+reset only the selected profile, case-distinct root IDs remained distinct, and
+lock-first reads observed the committed disabled profile under REPEATABLE READ.
+The disposable container was removed afterward; production was not accessed.
+Source-layout invariants also passed all 11 tests.
+The rollout-manifest and joined-runner contract tests passed all 6 tests after
+updating the pinned boundaries to Client `0195`, Operations `0052`, and Alpha
+`0083`; both deny-management switches are now included in the dormant-gate test.
+The joined operational-memory/copy-forward regression passed 1/1 after its
+fixture was aligned with the required Operations `0052` schema boundary.
+The J2 joined metadata gate passed 1/1 in 36.47 seconds against all current
+Client migrations. Signed contact/service snapshots and their tombstones did
+not create memberships, authenticated delivery grants, service requests, or
+notification rows while those consumer capabilities were disabled. This is
+metadata-isolation evidence, not proof of enabled first-login provisioning.
+The combined source-layout and rollout-manifest checks subsequently passed
+15/15, including the pinned wire fixtures, public namespace/configuration, and
+repository-owned deployment wrappers.
+
+`packages/shared` and `packages/ui` remain restored to HEAD. No direct Viewer
+changes are included.
+
+## Still required before live acceptance
+
+The corrected Linux Client full gate completed with 989 of 990 tests passing.
+`client-feedback-target.test.ts` failed to establish its initial native target
+for the newly-active-deny insertion race. Earlier cases correctly invalidated
+the workspace, directory, and legacy folder projection via `0195`, while setup
+restored only memberships/entitlements. Restoring those three fixture records
+made the full feedback file pass 25/25 on Linux in 14.37 seconds. Production
+authorization was unchanged; a complete Client rerun was required afterward.
+That corrected, frozen Client rerun has now completed successfully on Linux:
+990/990 Vitest tests and 9/9 deployment-preflight tests, exit 0. The runtime
+candidate was checkpointed locally as `137b286`; that runtime identity is
+superseded by the reviewed `ab4d83f` boundary above. Nothing was deployed by
+those checks.
+The native-resource full file subsequently passed 38/38 in 580.46 seconds.
+Operations' Linux gate passed all 1,857 executed tests, but one further file
+could not collect because the isolated archive omitted its `apps/ops-sync`
+source dependency. That packaging error still requires a corrected complete
+gate; 1,857 passing tests alone is not a full-suite pass.
+With the sync service included, the previously uncollected ordering file passed
+2/2. A subsequent all-app harness attempt stopped before tests because it tried
+`npm ci` for the thumbnail renderer, which has no package lock. The corrected
+full-gate harness retains all application source but installs only the required
+lockfile-owned Client, Operations, and ops-sync dependency trees. Neither
+harness failure is counted as an application pass or failure.
+
+The final corrected frozen Operations gate subsequently passed all 1,859 tests
+across 180 files, exit 0, with structured report `success=true` and zero failed
+or pending tests. Final Client covered 84 files and passed 990/990, plus 9/9
+preflight tests. All disposable test containers and source archives were removed;
+only local result reports remain. Project Alpha's exact-commit frontend tests
+also passed 29/29 on Node 24.20.0. These are local results, not live acceptance.
+
+The new explicit release-profile helper, actual preflight runner with injected
+secret names, rollout tests, and source-layout checks passed 31/31 together.
+The checked-in profile remains `receiver-only`; no Worker flags changed. The
+alternative profile validates coordinated eligibility/deny flags and retains
+no-email and unrelated-capability guards. It does not prove remote readiness.
+
+September 3 remote-ledger attempt: the configured Wrangler login reached the
+Client D1 API, but the migration-list request was rejected with Cloudflare
+authorization code `7403`. No migration was applied and no production data or
+flags were changed. Current remote schema readiness remains unverified; do not
+reuse the earlier September 2 ledger observation as proof of today's state.
+
+The checked-in Client and Operations `deploy` scripts build and deploy Workers;
+neither applies remote D1 migrations. Their `db:migrate:remote` scripts are
+separate operations. A successful push/build therefore does not prove that
+Client `0195` or Operations `0052` exists remotely. Verify the remote ledgers
+and recovery baseline, apply outstanding migrations in the ordered release
+window, and verify them before activating the new receiver behavior. The
+repository workflows inspected here do not establish the external Cloudflare
+build configuration; that configuration must also be checked before pushing.
+
+- Reconcile both prepared branches against current main without overwriting
+  concurrent Project Alpha onboarding/document changes; run Linux CI gates.
+- Deploy the coordinated migrations and code, then activate the four automatic
+  eligibility/deny-management flags together only after receiver readiness.
+- Observe historical roots reaching the receiver, test a new client and an
+  existing client, and verify individual/root revocation on both portal hosts.
+- Recheck old public links and record actual live versions, flags, migration
+  state and rollback evidence in the production evidence record.
+
+The full phased acceptance matrix remains in
+[the rollout manifest](client-portal-rollout-manifest.md).
+
+## Subsequent live readiness readback — September 3
+
+The user-specified temporary Cloudflare token restored authorized API access.
+The earlier `7403` failure no longer blocks readback. No database migration,
+Worker deployment, feature activation, or provisioning was performed in this
+readiness pass.
+
+- Client's latest applied migration is `0194_client_delegated_share_expiry.sql`;
+  `0195` remains pending. Operations has
+  `0052_project_operational_reassignment_recovery.sql` applied.
+- Both databases returned zero rows from `PRAGMA foreign_key_check`. Readback
+  reported zero rows written.
+- Client has **zero** portal-v2 workspaces, workspace memberships, directory
+  generations, and directory checkpoints. This proves that the missing
+  workspace indicators are not merely a stale Client Hub display.
+- Both Workers retain false hierarchy, automatic-eligibility, and identity-deny
+  flags. Operations deny-management is false; Client's optional deny-management
+  flag is absent. Client invitation email remains false.
+- The dedicated Worker secret-list API confirmed that the now-superseded direct
+  portal HMAC was absent from `ltds-clients`. Only secret names/types were
+  inspected, never secret values. Under the corrected single-endpoint contract,
+  that absence is expected and is not a Project Alpha connection failure.
+- Client deployment `7885663d-ff10-4b8e-8f2a-1ef824474ef4` serves version
+  `1580d13d-d857-419d-8913-77c3edae40f0` at 100%; Operations deployment
+  `85e5416d-8b40-4e03-9d21-199ecbce2c0c` serves version
+  `2c08b903-d732-4bc9-8a96-fdea3997053d` at 100%.
+- The September 4 release-contract reconciliation supersedes those branch-count
+  observations: Operations runtime is pinned to `ab4d83f`, and Project Alpha is
+  pinned to `67cfe73a` at ten commits ahead of `origin/main`. No deployment was
+  performed during the reconciliation.
+
+Superseded next step: this evidence originally called for a direct Project
+Alpha portal key. The corrected architecture keeps the primary Alpha producer
+on its existing Ops Sync connection and uses a private named Client Worker
+entrypoint with no second HMAC. Verify that Operations-owned binding, then
+follow the recovery/migration and
+coordinated release gates. Cloudflare account access alone does not grant access
+to the Project Alpha deployment environment. Do not activate eligibility or
+claim automatic provisioning until a signed generation is received and the
+joined enrollment/revocation checks pass.
+
+The separately completed Access application consolidation is recorded in
+[the September 3 Access evidence](client-portal-access-evidence-2026-09-03.md).
+
+## Privacy-safe producer configuration follow-up
+
+The user declined administrator login/client-record access. No Project Alpha
+production data or configuration was accessed in this follow-up; LTT remains
+untouched. Local Alpha changes align the non-secret receiver override between
+web and cron, including the scheduled-job environment allowlist. Regression
+coverage verifies that cron can use encrypted stored credentials without
+receiving the raw signing-secret environment map.
+
+A standalone environment-only diagnostic is packaged for both containers.
+It does not bootstrap the application, query the database, or print values.
+The companion `docs/admin/portal-private-readiness.md` includes a presence-only
+check for existing images. Neither check establishes live signing readiness.
+
+Local Windows PHP 8.2 full PHPUnit run completed with exit 0: 767 tests,
+6,207 assertions, 91 skipped, no failures. Final focused provisioning,
+administration-wiring, and diagnostic tests passed: 44 tests, 266 assertions.
+The full run began before the final cron allowlist/test-assertion edits; those
+edits were covered by the final focused run. Docker verification was unavailable
+because local Docker configuration/engine access was denied. These results are
+not a production deployment or authenticated portal proof. Changes remain local.
+
+## Isolated ZIP maintenance candidate
+
+The user reported slow preparation of a 4,809-file, approximately 30 GB public
+delivery. ZIP performance work was isolated from this portal release:
+`codex/bulk-zip-performance`, commit `14d5fed`, directly on main `fcb7d61`.
+Its eleven changed files contain only ZIP generation, progress display, cleanup,
+regressions, and a runbook; no configuration, migration, credential, or portal
+eligibility changes. The main-based worktree is clean.
+
+Fresh pinned dependencies on that isolated branch passed TypeScript, 69 focused
+ZIP/backend/client/concurrency tests, the production build, and two mocked
+desktop/mobile browser tests. This is stronger than the earlier integration
+branch result, but remains local evidence. Publication is held for the explicit
+maintenance-release decision because the then-current preflight required the
+now-superseded direct portal signing secret. That was not a missing Project Alpha
+connection secret. No running job was cancelled and no source
+objects or public-link authority were changed.
+
+### Maintenance release decision and final state
+
+The user subsequently authorized the limited ZIP-only maintenance release.
+It is now published on main: runtime commit `14d5fed`, evidence commit
+`fc183d0`. Worker version `bf225051-1e8e-49ae-9e4c-4457a2107494` was deployed
+at 100% on September 3 at 19:47:38 UTC. All bindings matched the captured
+pre-release settings exactly; both portal health endpoints returned HTTP 200.
+No migrations, signing secrets, Access policies, or feature flags changed.
+The original large Workflow remained running on its original version and was
+not cancelled. This supersedes the candidate's publication hold above only;
+it does not supersede any portal readiness or live-acceptance gate.
+
+The explicitly approved direct maintenance deployment did not weaken the
+normal portal preflight. Its missing receiver signing secret still blocks
+the coordinated portal activation. Do not infer that the prepared portal
+commits were published because the ZIP maintenance code is now on main.
+
+Before reconciling this prepared branch, account for the equivalent ZIP patch
+already on main; do not duplicate or undo it. Preserve concurrent Alpha
+onboarding/document work and the user's restriction on production client-data
+access. The next external dependency remains primary Alpha producer signing
+readiness, which can be checked by its administrator without providing login
+credentials or client records. Environment presence checks alone do not prove
+stored credentials, matched signing keys, or successful signed delivery.
+
+## Final Alpha configuration verification
+
+The web/cron configuration and privacy-safe diagnostic were originally
+checkpointed as `443f9b31` on `codex/portal-default-on` and are contained by the
+current reviewed `67cfe73a` pin. A full Windows PHP 8.2 run over that checkpoint
+passed with exit 0: 767 tests, 6,210 assertions,
+91 skipped, no failures, in 3m54s. This supersedes the earlier full-run timing
+caveat for the final cron allowlist edits. `bash -n cron/entrypoint.sh` passed.
+Running the standalone diagnostic locally emitted only fixed booleans/statuses;
+that local environment report is not production configuration evidence.
+
+No image publication, production migration, secret change, deployment, or client
+data access occurred. The prepared Alpha source is now pushed at `67cfe73a`;
+generated `.phpunit.cache/test-results` remains outside the reviewed commit. The
+remaining release gates still require the primary producer's
+private configuration verification, receiver signing configuration, migration
+and rollout checks, and live authenticated acceptance.

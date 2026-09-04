@@ -45,7 +45,12 @@ claim that the complete client-portal goal is live accepted.
   connectors. The visible legacy Project Alpha integration must not be described
   as enrolled exact-source portal authority.
 
-## Deliberate blockers
+## Deliberate blockers recorded at the time
+
+The portal-HMAC conclusions in this historical checkpoint are superseded by the
+single-endpoint contract recorded below: Project Alpha uses its existing Ops
+Sync Access and event HMAC for outer `portal.projection` events, and Ops Sync
+privately invokes the Client Worker named entrypoint.
 
 - Deployed secret-name inventory did not contain
   `PROJECT_ALPHA_CONNECTOR_CREDENTIALS` on Operations or Client. Client also did
@@ -260,9 +265,11 @@ live accepted.
 
 ## 2026-09-02 connection-authority clarification
 
-This checkpoint separates the healthy legacy business-record synchronization
-from authenticated portal enrollment. It did not create a connector, provision
-a secret, activate a portal capability, or change a client's effective access.
+This checkpoint separated healthy business-record synchronization from the
+then-proposed direct portal enrollment path. It did not create a connector,
+provision a secret, activate a portal capability, or change a client's effective
+access. Its dedicated-portal-secret conclusion is historical and is not a
+current activation requirement.
 
 - A signed-in, read-only Operations check showed that the existing primary
   Project Alpha business synchronization remained healthy, with a current
@@ -337,10 +344,11 @@ client identity, or alter an existing public-link token.
   automatic eligibility, deny management, team/membership mutation,
   authenticated delivery, requests, notifications, content audit, service
   assignment policy, and delegated shares remained false. The configured
-  portal HMAC key ID was present, but Cloudflare did not list the required
-  `PROJECT_ALPHA_PORTAL_HMAC_SECRET` binding. No secret value was read. Portal
-  ingestion therefore remains unproven and must fail preflight until a
-  dedicated matching producer/receiver secret is provisioned.
+  portal HMAC key ID was present, but Cloudflare did not list the then-required
+  `PROJECT_ALPHA_PORTAL_HMAC_SECRET` binding. No secret value was read. This
+  historical conclusion is superseded by the single-endpoint contract: Project
+  Alpha emits `portal.projection` through Ops Sync and Ops Sync privately invokes
+  the Client Worker named entrypoint, with no second portal HMAC.
 
 ## 2026-09-03 delegated-access expiry checkpoint
 

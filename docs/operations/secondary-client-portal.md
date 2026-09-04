@@ -46,21 +46,14 @@ audit and transaction guards. It enrolls no sources. The existing primary wire
 protocol remains unchanged and primary signing keys cannot acquire a secondary
 key's permanent ownership.
 
-The existing deployment-managed `PROJECT_ALPHA_CONNECTOR_CREDENTIALS` envelope
-may contain `portalCurrent` and optional `portalPrevious` within a credential
-set, each with `keyId` and `value`. Values are secrets: never enter them in an
-administration request, commit them, include them in response JSON or log them.
-The referenced set must be provisioned to Operations and Client before use.
-Keep the existing snapshot/event fields and per-source keys intact.
-
-Secondary ingress is POST
-`/api/internal/project-alpha/sources/:encodedSourceId/portal-v2`.
-The source in the URL is only a candidate: exact registered Access verification
-and the source-owned HMAC over the canonical path and original request bytes
-must both pass. Application key, delivery ID, digest and timestamp are checked;
-the body cannot choose another source. Signed snapshots/events retain the
-existing bounded parsing and source-qualified receipt/ownership contracts.
-Every projection write batch carries a current Delivery-local authority guard.
+Secondary projections enter through the same signed Ops Sync event endpoint as
+the primary source. The Access assertion and outer event signature choose the
+registered source; the body cannot select or override it. Ops Sync reserves a
+source-qualified receipt and privately forwards the exact inner contract to
+Client. Client resolves the current Delivery-local authority proof and carries
+its fence in every secondary projection write batch. The former source-specific
+portal-v2 HTTP route is not mounted and no secondary signing secret is copied
+into Client configuration.
 
 Native client access uses immutable source/workspace mapping and current signed
 principal, membership, entitlement, generation and deny checks. Reusing an email

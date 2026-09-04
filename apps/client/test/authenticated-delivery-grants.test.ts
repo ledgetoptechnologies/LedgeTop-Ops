@@ -22,17 +22,21 @@ describe("authenticated delivery grant live authorization", () => {
       script: "export default { fetch(){ return new Response('ok') } }", d1Databases: { DELIVERY_DB: "auth-grants" } });
     db = await miniflare.getD1Database("DELIVERY_DB") as unknown as D1Database;
     await db.exec(executable(`
-      CREATE TABLE client_accounts(id TEXT PRIMARY KEY,project_alpha_source_id TEXT);
+      CREATE TABLE client_accounts(id TEXT PRIMARY KEY,project_alpha_source_id TEXT,status TEXT,
+        project_alpha_client_id TEXT,project_alpha_organization_id TEXT);
+      CREATE TABLE client_identity_links(id TEXT PRIMARY KEY,account_id TEXT,revoked_at TEXT);
+      CREATE TABLE client_account_members(account_id TEXT,identity_id TEXT,revoked_at TEXT);
       CREATE TABLE portal_v2_identities(id TEXT PRIMARY KEY,issuer TEXT NOT NULL,subject TEXT NOT NULL,verified_email TEXT,
         status TEXT NOT NULL DEFAULT 'active',revoked_at TEXT,created_at TEXT DEFAULT (datetime('now')),updated_at TEXT DEFAULT (datetime('now')),UNIQUE(issuer,subject));
       CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,root_type TEXT NOT NULL,pa_organization_public_id TEXT,pa_client_public_id TEXT,
         legacy_account_id TEXT,display_name TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'active',project_alpha_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
       CREATE TABLE portal_v2_workspace_memberships(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,identity_id TEXT NOT NULL,source_type TEXT,
         status TEXT NOT NULL DEFAULT 'active',expires_at TEXT,revoked_at TEXT,UNIQUE(workspace_id,identity_id),FOREIGN KEY(workspace_id) REFERENCES portal_v2_workspaces(id),FOREIGN KEY(identity_id) REFERENCES portal_v2_identities(id));
-      CREATE TABLE portal_v2_directory_generations(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,status TEXT NOT NULL,complete INTEGER NOT NULL);
+      CREATE TABLE portal_v2_directory_generations(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,status TEXT NOT NULL,complete INTEGER NOT NULL,
+        source_generation TEXT,source_sequence INTEGER);
       CREATE TABLE portal_v2_directory_entities(workspace_id TEXT NOT NULL,generation_id TEXT NOT NULL,entity_type TEXT NOT NULL,public_id TEXT NOT NULL,
         parent_public_id TEXT,display_name TEXT NOT NULL,source_version TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 1,PRIMARY KEY(workspace_id,generation_id,entity_type,public_id));
-      CREATE TABLE portal_v2_directory_checkpoints(workspace_id TEXT PRIMARY KEY,active_generation_id TEXT NOT NULL);
+      CREATE TABLE portal_v2_directory_checkpoints(workspace_id TEXT PRIMARY KEY,active_generation_id TEXT NOT NULL,source_sequence INTEGER);
       CREATE TABLE portal_v2_directory_relations(workspace_id TEXT NOT NULL,generation_id TEXT NOT NULL,relation_type TEXT NOT NULL,
         from_type TEXT NOT NULL,from_public_id TEXT NOT NULL,to_type TEXT NOT NULL,to_public_id TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 1);
       CREATE TABLE portal_v2_entitlements(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,identity_id TEXT NOT NULL,capability TEXT NOT NULL,effect TEXT NOT NULL,

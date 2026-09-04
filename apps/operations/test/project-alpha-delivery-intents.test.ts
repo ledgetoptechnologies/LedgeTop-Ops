@@ -183,6 +183,7 @@ async function createGuestHarness(suffix:string){
   const env={OPS_DB:ops,DELIVERY_DB:delivery,PROJECT_ALPHA_PORTAL_APPLICATION_KEY:"project-alpha",PROJECT_ALPHA_PORTAL_HMAC_KEY_ID:"ops-v1",
     PROJECT_ALPHA_PORTAL_HMAC_SECRET:secret,PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED:"true",PROJECT_ALPHA_DELIVERY_GUEST_ENABLED:"true",
     CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED:"true",CLIENT_PORTAL_HIERARCHY_V2_ENABLED:"true",
+    CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED:"true",CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED:"true",
     AUTHENTICATED_DELIVERY_GRANTS_ENABLED:"true",DELIVERY_BASE_URL:"https://client.example.test",PUBLIC_SHARE_ORIGIN:"https://delivery.example.test",
     DELIVERY_TOKEN_SECRET:"test-delivery-token-secret-that-is-long-enough",NOTIFICATION_FROM:"notifications@example.test"} as unknown as Env;
   const app=new Hono<{Bindings:Env}>();
@@ -435,6 +436,7 @@ describe("Project Alpha delivery-intent boundary", () => {
       const env={OPS_DB:ops,DELIVERY_DB:delivery,PROJECT_ALPHA_PORTAL_APPLICATION_KEY:"project-alpha",PROJECT_ALPHA_PORTAL_HMAC_KEY_ID:"ops-v1",
         PROJECT_ALPHA_PORTAL_HMAC_SECRET:secret,PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED:"true",PROJECT_ALPHA_DELIVERY_GUEST_ENABLED:"false",
         CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED:"true",CLIENT_PORTAL_HIERARCHY_V2_ENABLED:"true",
+        CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED:"true",CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED:"true",
         AUTHENTICATED_DELIVERY_GRANTS_ENABLED:"true",DELIVERY_BASE_URL:"https://client.example.test",PUBLIC_SHARE_ORIGIN:"https://delivery.example.test"} as unknown as Env;
       const app=new Hono<{Bindings:Env}>();
       app.post("/api/internal/project-alpha/delivery-intents",handleProjectAlphaDeliveryIntent);

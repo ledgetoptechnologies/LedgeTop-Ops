@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 
-vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {} }));
+vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {} }));
 
 import { BulkDownloadWorkflow, CRC_CONCURRENCY, UPLOAD_CONCURRENCY, assertBulkPreparationCapacity, drainParallel, estimateBulkPreparation, finalBulkManifestKey, planCrcWindows, planCrcWorkUnits } from "../src/worker/workflow";
 import { crc32 } from "../src/worker/zip";

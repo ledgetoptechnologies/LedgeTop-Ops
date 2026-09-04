@@ -7,6 +7,7 @@ import { unstable_splitSqlQuery } from "wrangler";
 import { handleRequest, reconcileScheduledAccess } from "../src/index";
 import type { Env, ProjectionEvent } from "../src/types";
 import { registerProjectAlphaConnector, reviseProjectAlphaConnector, setProjectAlphaConnectorState, type ProjectAlphaConnectorEnvironment } from "../../operations/src/worker/project-alpha-connectors";
+import contractFixture from "../../../packages/shared/fixtures/project-alpha-ops-sync-portal-projection-v1.json";
 
 const primary="project-alpha:primary", secondary="project-alpha:secondary";
 let runtime: Miniflare, db: D1Database, environment: Env & Pick<ProjectAlphaConnectorEnvironment,"PROJECT_ALPHA_BASE_URL"|"PROJECT_ALPHA_API_KEY">;
@@ -21,6 +22,21 @@ function event(entityId=crypto.randomUUID()): ProjectionEvent {
   const now=new Date().toISOString();
   return {event_id:crypto.randomUUID(),event_type:"projection.changed",occurred_at:now,schema_version:1,application_key:"ltds_ops",
     projection:{entity_type:"business_unit",entity_id:entityId,action:"upsert",source_updated_at:now,data:{name:"Business unit",code:`unit-${entityId}`}}};
+}
+function portalEvent(kind:"portal"|"catalog"|"service_assignments"="portal") {
+  // Portal outbox delivery identities existed before the UUID-only Ops event
+  // contract, so exercise a valid legacy-safe identity on every route.
+  const now=new Date().toISOString(),eventId=`portal-${crypto.randomUUID()}`;
+  return {event_id:eventId,event_type:"portal.projection" as const,occurred_at:now,schema_version:1 as const,
+    application_key:"ltds_ops",projection_kind:kind,projection:{deliveryId:eventId,fixture:true}};
+}
+type ContractFixtureName=keyof typeof contractFixture.valid;
+function contractEvent(name:ContractFixtureName){
+  return JSON.parse(contractFixture.valid[name].body) as ReturnType<typeof portalEvent>;
+}
+async function sha256(value:string):Promise<string>{
+  const digest=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(value));
+  return [...new Uint8Array(digest)].map(byte=>byte.toString(16).padStart(2,"0")).join("");
 }
 async function request(source:string,payload:unknown,options:{key?:string;subject?:string;issuer?:string;audience?:string;legacy?:boolean;hmac?:boolean}={}):Promise<Request> {
   const body=JSON.stringify(payload),timestamp=new Date().toISOString();
@@ -118,6 +134,7 @@ describe("authenticated connector business ingress",{timeout:30_000},()=>{
       if([primary,secondary].some(source=>url===`${accessIssuer(source)}/cdn-cgi/access/certs`))return Response.json({keys:[publicJwk]});
       throw new Error(`Unexpected fixture network request: ${url}`);
     }));
+    environment.CLIENT_PORTAL_PROJECTION_INGRESS=undefined;
   });
   afterEach(()=>vi.unstubAllGlobals());
   afterAll(async()=>{await runtime?.dispose();});
@@ -150,6 +167,76 @@ describe("authenticated connector business ingress",{timeout:30_000},()=>{
   it("keeps the legacy path bound to the enrolled primary even when secondary credentials are valid",async()=>{
     const item=event();expect((await handleRequest(await request(secondary,item,{legacy:true}),environment)).status).toBe(401);
     expect((await handleRequest(await request(primary,item,{legacy:true}),environment)).status).toBe(200);
+  });
+  it.each([
+    ["portal", "portal_contact_upsert"],
+    ["catalog", "catalog_upsert"],
+    ["service_assignments", "service_assignments_page"],
+  ] as const)("routes the byte-pinned signed %s projection through the private Client binding",async(kind,fixtureName)=>{
+    const item=contractEvent(fixtureName),ingestProjectAlphaPortalProjection=vi.fn(async()=>({ok:true as const,protocolVersion:1 as const,status:"completed" as const}));
+    expect(item.projection_kind).toBe(kind);
+    expect(JSON.stringify(item)).toBe(contractFixture.valid[fixtureName].body);
+    expect(await sha256(contractFixture.valid[fixtureName].body)).toBe(contractFixture.valid[fixtureName].sha256);
+    environment.CLIENT_PORTAL_PROJECTION_INGRESS={ingestProjectAlphaPortalProjection};
+    const response=await handleRequest(await request(primary,item,{legacy:true}),environment);
+    expect(response.status).toBe(200);
+    expect(ingestProjectAlphaPortalProjection).toHaveBeenCalledWith({protocolVersion:1,sourceId:primary,
+      applicationKey:"ltds_ops",deliveryId:item.event_id,projectionKind:kind,body:JSON.stringify(item.projection)});
+    expect(await db.prepare("SELECT status FROM integration_event_receipts WHERE projection_source_id=? AND event_id=?")
+      .bind(primary,item.event_id).first("status")).toBe("completed");
+  });
+  it("preserves contact upsert/tombstone order and rejects a conflicting replay",async()=>{
+    const calls:string[]=[],ingestProjectAlphaPortalProjection=vi.fn(async(input:{body:string})=>{
+      calls.push((JSON.parse(input.body) as {event:{action:string}}).event.action);
+      return {ok:true as const,protocolVersion:1 as const,status:"completed" as const};
+    });
+    environment.CLIENT_PORTAL_PROJECTION_INGRESS={ingestProjectAlphaPortalProjection};
+    const upsert=contractEvent("portal_contact_upsert"),tombstone=contractEvent("portal_contact_tombstone");
+    await db.prepare("DELETE FROM integration_event_receipts WHERE projection_source_id=? AND event_id IN (?,?)")
+      .bind(primary,upsert.event_id,tombstone.event_id).run();
+    expect((await handleRequest(await request(primary,upsert,{legacy:true}),environment)).status).toBe(200);
+    expect((await handleRequest(await request(primary,tombstone,{legacy:true}),environment)).status).toBe(200);
+    expect(calls).toEqual(["upsert","tombstone"]);
+    expect(await (await handleRequest(await request(primary,tombstone,{legacy:true}),environment)).json())
+      .toMatchObject({status:"duplicate"});
+    const conflict={...tombstone,occurred_at:"2026-09-02T18:02:01.000Z"};
+    expect((await handleRequest(await request(primary,conflict,{legacy:true}),environment)).status).toBe(409);
+    expect(ingestProjectAlphaPortalProjection).toHaveBeenCalledTimes(2);
+  });
+  it("rejects portal projection application/source claims outside the authenticated envelope",async()=>{
+    const base=contractEvent("portal_contact_upsert");
+    for(const payload of [
+      {...base,event_id:"contract-wrong-application",application_key:"another_app",
+        projection:{...base.projection,deliveryId:"contract-wrong-application"}},
+      {...base,event_id:"contract-source-claim",source_id:primary,
+        projection:{...base.projection,deliveryId:"contract-source-claim"}},
+    ]){
+      const response=await handleRequest(await request(primary,payload,{legacy:true}),environment);
+      expect(response.status).toBe(422);
+      expect(await db.prepare("SELECT count(*) total FROM integration_event_receipts WHERE projection_source_id=? AND event_id=?")
+        .bind(primary,payload.event_id).first("total")).toBe(0);
+    }
+  });
+  it("routes a non-staff source portal projection only under its authenticated source identity",async()=>{
+    const item=portalEvent(),ingestProjectAlphaPortalProjection=vi.fn(async()=>({ok:true as const,protocolVersion:1 as const,status:"completed" as const}));
+    environment.CLIENT_PORTAL_PROJECTION_INGRESS={ingestProjectAlphaPortalProjection};
+    expect((await handleRequest(await request(secondary,item),environment)).status).toBe(200);
+    expect(ingestProjectAlphaPortalProjection).toHaveBeenCalledWith(expect.objectContaining({sourceId:secondary,deliveryId:item.event_id}));
+    expect(await db.prepare("SELECT count(*) total FROM integration_event_receipts WHERE projection_source_id=? AND event_id=? AND status='completed'")
+      .bind(secondary,item.event_id).first("total")).toBe(1);
+  });
+  it("keeps a portal receipt pending when Client is unavailable, then completes the exact retry",async()=>{
+    const item=portalEvent(),ingestProjectAlphaPortalProjection=vi.fn()
+      .mockRejectedValueOnce(new Error("rpc unavailable"))
+      .mockResolvedValueOnce({ok:true as const,protocolVersion:1 as const,status:"completed" as const});
+    environment.CLIENT_PORTAL_PROJECTION_INGRESS={ingestProjectAlphaPortalProjection};
+    expect((await handleRequest(await request(primary,item,{legacy:true}),environment)).status).toBe(503);
+    expect(await db.prepare("SELECT status FROM integration_event_receipts WHERE projection_source_id=? AND event_id=?")
+      .bind(primary,item.event_id).first("status")).toBe("pending");
+    expect((await handleRequest(await request(primary,item,{legacy:true}),environment)).status).toBe(200);
+    expect(ingestProjectAlphaPortalProjection).toHaveBeenCalledTimes(2);
+    expect(await db.prepare("SELECT status FROM integration_event_receipts WHERE projection_source_id=? AND event_id=?")
+      .bind(primary,item.event_id).first("status")).toBe("completed");
   });
   it("rejects another application or body source selector before any source write",async()=>{
     for(const payload of [{...event(),application_key:"another_app"},{...event(),sourceId:primary}]){

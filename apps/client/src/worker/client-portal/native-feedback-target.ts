@@ -8,7 +8,7 @@ import { readNativeAuthenticatedDeliveryGrants } from './authenticated-delivery-
 import { readNativeTargetScopes,type NativeTargetScopes } from './native-portal-scopes';
 import { nativePortalScopesAllowed,resolveNativePortalWorkspaceReadContext,type NativePortalReadContext } from './workspace-v2';
 import { nativeFeedbackTargetSchema,type NativeFeedbackAuthorization,type NativeFeedbackRecord,type NativeFeedbackTarget } from './native-feedback-store';
-import { portalSourceAuthorityGuard } from '../project-alpha-portal-authority';
+import { portalProjectionSourceGuard } from '../project-alpha-portal-authority';
 
 const opaque=z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/);
 export const nativeFeedbackTargetInputSchema=z.discriminatedUnion('kind',[
@@ -38,7 +38,7 @@ function authorizationGuard(context:NativePortalReadContext,principal:VerifiedCl
   const scopes=[...new Set([`workspace:${context.workspaceId}`,...target.scopeProof.map(row=>`${row.entityType}:${row.publicId}`)])];
   const capability=target.kind==='project'?'directory.read':'delivery.view',requiresAllow=!grant||grant.source==='staff';
   const parts:string[]=[],bindings:(string|number|null)[]=[];
-  const authority=portalSourceAuthorityGuard(context.authority);
+  const authority=portalProjectionSourceGuard(context.authority);
   parts.push(authority.sql);bindings.push(...authority.bindings);
   parts.push(`EXISTS(SELECT 1 FROM portal_v2_workspaces workspace
     JOIN pa_portal_workspace_sources source ON source.workspace_id=workspace.id AND source.projection_source_id=workspace.project_alpha_source_id

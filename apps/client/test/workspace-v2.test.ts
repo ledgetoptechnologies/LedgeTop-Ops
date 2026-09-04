@@ -276,7 +276,7 @@ describe("client workspace hierarchy v2", () => {
     })).toBe(false);
   });
 
-  it("is default-off and permits one verified identity to switch between independent workspaces", async () => {
+  it("is default-off and hides an unmapped primary workspace without signing authority", async () => {
     await addWorkspaceB();
     expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_workspace_memberships WHERE workspace_id='workspace-b' AND identity_id='identity-one'").first("count")).toBe(1);
     expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_directory_checkpoints WHERE workspace_id='workspace-b'").first("count")).toBe(1);
@@ -285,10 +285,9 @@ describe("client workspace hierarchy v2", () => {
     expect(await authorizePortalWorkspaceCapability(env, principal, "workspace-b", "workspace.view", {
       scopeType: "workspace", publicId: "workspace-b",
     })).toBe(true);
-    expect((await listPortalWorkspaces(env, principal)).map(workspace => workspace.id)).toEqual([
-      "workspace-account-a",
-      "workspace-b",
-    ]);
+    // workspace-b has an internally consistent v2 graph, but no reserved
+    // primary signing proof. It must not become visible from row shape alone.
+    expect((await listPortalWorkspaces(env, principal)).map(workspace => workspace.id)).toEqual(["workspace-account-a"]);
     expect(await listPortalWorkspaces({ ...env, CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "false" }, principal)).toEqual([]);
   });
 
@@ -448,7 +447,7 @@ describe("client workspace hierarchy v2", () => {
     expect((await router.request("https://client.test/projects", {}, env)).status).toBe(403);
     const response = await router.request("https://client.test/v2/workspaces", {}, env);
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ workspaces: [{ id: "workspace-b" }] });
+    expect(await response.json()).toEqual({ workspaces: [] });
   });
 
   it("resolves one selected workspace and intersects local resources with scoped v2 allows and denies", async () => {

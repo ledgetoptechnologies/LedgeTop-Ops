@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { SUPPORTED_ROLES, type EntitlementEvent, type IntegrationEvent, type ProjectionEvent } from "./types";
+import { SUPPORTED_ROLES, type EntitlementEvent, type IntegrationEvent, type PortalProjectionEvent, type ProjectionEvent } from "./types";
 
 const normalizedEmail = z.string().trim().email().max(254).transform((value) => value.toLowerCase());
 const identifier = z.union([z.string().trim().min(1).max(128), z.number().int().positive()]).transform(String);
@@ -42,7 +42,24 @@ const projectionEventSchema = z.object({
   }).strict(),
 }).strict();
 
+const portalProjectionEventSchema = z.object({
+  // Existing portal delivery IDs predate the UUID-only integration envelope.
+  // Keep them source-qualified and bounded rather than rewriting their identity.
+  event_id: z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/),
+  event_type: z.literal("portal.projection"),
+  occurred_at: z.string().datetime({ offset: true }),
+  schema_version: z.literal(1),
+  application_key: z.string().trim().min(2).max(64).regex(/^[a-z0-9][a-z0-9_-]+$/),
+  projection_kind: z.enum(["portal", "catalog", "service_assignments"]),
+  projection: z.unknown(),
+}).strict();
+
 export function parseIntegrationEvent(value: unknown, applicationKey: string): IntegrationEvent {
+  if (value && typeof value === "object" && (value as {event_type?:unknown}).event_type === "portal.projection") {
+    const event = portalProjectionEventSchema.parse(value) as PortalProjectionEvent;
+    if (event.application_key !== applicationKey.trim().toLowerCase()) throw new Error("application-key-mismatch");
+    return event;
+  }
   if (value && typeof value === "object" && (value as {event_type?:unknown}).event_type === "projection.changed") {
     const event = projectionEventSchema.parse(value) as ProjectionEvent;
     if (event.application_key !== applicationKey.trim().toLowerCase()) throw new Error("application-key-mismatch");

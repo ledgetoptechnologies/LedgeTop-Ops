@@ -64,7 +64,8 @@ describe("source-owned delivery intent runtime and transaction races", () => {
     }
     env = { DELIVERY_DB: database, OPS_DB: database, PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED: "true", PROJECT_ALPHA_PORTAL_APPLICATION_KEY: "project-alpha",
       PROJECT_ALPHA_PORTAL_HMAC_KEY_ID: "ops-v1", PROJECT_ALPHA_PORTAL_HMAC_SECRET: secret, CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true",
-      AUTHENTICATED_DELIVERY_GRANTS_ENABLED: "true", CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED: "true" } as Env;
+      AUTHENTICATED_DELIVERY_GRANTS_ENABLED: "true", CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED: "true",
+      CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: "true", CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED: "true" } as Env;
     const accessKeys=await generateKeyPair("RS256",{extractable:true});
     accessPublicJwk=await exportJWK(accessKeys.publicKey);
     accessPublicJwk.alg="RS256";accessPublicJwk.kid="registered-delivery-access";accessPublicJwk.use="sig";

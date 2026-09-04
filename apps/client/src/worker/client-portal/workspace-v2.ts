@@ -1,7 +1,7 @@
 import type { Env as ClientEnv } from "../types";
 import {invitationPublicationAllowed,invitationRequestsReady} from './invitation-approval-policy';
 import { HTTPException } from 'hono/http-exception';
-import { readPortalSourceAuthorityProof, portalSourceAuthoritiesReady, type PortalSourceAuthorityProof } from "../project-alpha-portal-authority";
+import { readPortalProjectionSourceProof, portalSourceReadableSql, portalSourceAuthoritiesReady, type PortalProjectionWriteProof } from "../project-alpha-portal-authority";
 import { readNativeTargetScopes, type NativeTargetScopes } from "./native-portal-scopes";
 import { projectAccessReadColumns, projectAccessRowAllows, readExpiredScopeProjects, type ProjectAccessReadRow } from './project-access-read';
 import { projectAccessTermsReady,projectAccessTermsSql,readProjectAccessTerms,readWorkspaceInvitationPolicy } from './project-access-terms';
@@ -11,10 +11,13 @@ import { projectAccessCapacitySql } from './project-access-capacity';
 import { d1TablesPresent } from "../schema-readiness";
 import { bindNativePortalEligibility } from "./native-portal-eligibility";
 import { readPrimaryTermRetentionGrants } from './authenticated-delivery-grants';
-import { localOrPrimaryAlphaReference, primaryAlphaReference, primaryWorkspaceAccount } from "./project-alpha-source";
+import { localOrPrimaryAlphaReference, primaryAlphaReference, primaryWorkspaceAccount, primaryLegacyWorkspaceMembership } from "./project-alpha-source";
 import {captureWorkspaceInvitationDelegation} from './project-invitation-delegation';
+import { portalAutomaticEligibilityEnabled } from './portal-automatic-eligibility';
 export type PortalAuthorizationEnv = Pick<ClientEnv, "DELIVERY_DB" | "CLIENT_PORTAL_HIERARCHY_V2_ENABLED" |
   "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED" | "CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED" |
+  "CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED" |
+  "PROJECT_ALPHA_PORTAL_HMAC_SECRET" | "PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_SECRET" |
   "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED" | "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED" |
   "CLIENT_PORTAL_ACCESS_ENROLLMENT_READY" | "AUTHENTICATED_DELIVERY_GRANTS_ENABLED" |
   "PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED">;
@@ -316,7 +319,7 @@ async function resolveGlobalIdentity(
       if (!/no such table:\s*(?:main\.)?portal_v2_identity_eligibility_blocks\b/i.test(error instanceof Error ? error.message : String(error))) throw error;
     }
   }
-  if (allowEligibilityRepair && email && env.CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED === "true") {
+  if (allowEligibilityRepair && email && portalAutomaticEligibilityEnabled(env)) {
     try {
       const blocked = await portalDb(env).prepare(`SELECT 1 ok FROM portal_v2_identity_eligibility_blocks
         WHERE status='active' AND datetime(valid_from)<=datetime('now')
@@ -470,7 +473,8 @@ async function activeWorkspace(
     JOIN portal_v2_workspace_memberships m
       ON m.workspace_id=w.id AND m.identity_id=? AND m.status='active' AND m.revoked_at IS NULL
       AND (m.expires_at IS NULL OR datetime(m.expires_at)>datetime('now'))
-    WHERE w.id=? AND w.status='active' AND ${primaryWorkspaceAccount("w")}`)
+    WHERE w.id=? AND w.status='active' AND ${primaryWorkspaceAccount("w")}
+      AND ${primaryLegacyWorkspaceMembership("w", "m")}`)
     .bind(identityId, workspaceId)
     .first<WorkspaceRow>();
 }
@@ -923,7 +927,7 @@ export interface NativePortalReadContext {
   membershipSourceVersion: string;
   verifiedEmail: string;
   contextVersion: string;
-  authority: PortalSourceAuthorityProof;
+  authority: PortalProjectionWriteProof;
   /** Internal, current authorization facts. Never serialize this structure. */
   workspace: WorkspaceRow;
   grants: Array<EntitlementRow & { capability: NativePortalReadCapability }>;
@@ -964,7 +968,7 @@ export async function resolveNativePortalWorkspaceReadContext(
     JOIN portal_v2_directory_entities root ON root.workspace_id=workspace.id AND root.generation_id=generation.id
       AND root.entity_type=workspace.root_type AND root.public_id=COALESCE(workspace.pa_organization_public_id,workspace.pa_client_public_id) AND root.active=1
     WHERE workspace.id=? AND workspace.status='active' AND workspace.legacy_account_id IS NULL
-      AND workspace.project_alpha_source_id<>'project-alpha:primary' AND lower(person.verified_email)=?
+      AND ${portalSourceReadableSql('workspace.project_alpha_source_id')} AND lower(person.verified_email)=?
       AND (membership.source_type<>'project_alpha' OR EXISTS(SELECT 1 FROM pa_portal_principals current_principal
         WHERE current_principal.workspace_id=workspace.id AND current_principal.identity_id=person.id
           AND current_principal.status='active' AND current_principal.source_version=membership.source_version
@@ -972,7 +976,7 @@ export async function resolveNativePortalWorkspaceReadContext(
     .bind(identity.id, workspaceId,canonicalPrincipalEmail(principal.email)??'').first<WorkspaceRow & { project_alpha_source_id: string; generation_id: string;
       membership_source_version:string;person_email:string }>();
   if (!workspace) return null;
-  const authority = await readPortalSourceAuthorityProof(database, workspace.project_alpha_source_id);
+  const authority = await readPortalProjectionSourceProof(env, database, workspace.project_alpha_source_id);
   if (!authority) return null;
   const termsReady=await projectAccessTermsReady(env.DELIVERY_DB);
   const grants = await database.prepare(`SELECT id,capability,effect,scope_type,scope_public_id,entitlement_version,
@@ -1131,6 +1135,7 @@ export async function readEffectiveWorkspaceRequestProof(
       AND (membership.expires_at IS NULL OR datetime(membership.expires_at)>datetime('now'))
     JOIN portal_v2_workspaces workspace ON workspace.id=membership.workspace_id AND workspace.status='active'
       AND workspace.legacy_account_id IS NOT NULL AND ${primaryWorkspaceAccount("workspace")}
+      AND ${primaryLegacyWorkspaceMembership("workspace", "membership")}
     JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=workspace.id
     JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id
       AND generation.workspace_id=workspace.id AND generation.status='active' AND generation.complete=1
@@ -1401,6 +1406,7 @@ export function effectiveWorkspaceRequestMutationGuardSql(
         AND (membership.expires_at IS NULL OR datetime(membership.expires_at)>datetime('now'))
       JOIN portal_v2_workspaces workspace ON workspace.id=membership.workspace_id
         AND workspace.status='active' AND workspace.legacy_account_id=? AND ${primaryWorkspaceAccount("workspace")}
+        AND ${primaryLegacyWorkspaceMembership("workspace", "membership")}
       JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=workspace.id
         AND checkpoint.active_generation_id=? AND checkpoint.source_sequence=?
       JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id
@@ -1459,7 +1465,8 @@ export async function listPortalWorkspaces(
   const candidates = await portalDb(env).prepare(`
     SELECT w.id,w.root_type,w.pa_organization_public_id,w.pa_client_public_id,w.display_name
     FROM portal_v2_workspace_memberships m
-    JOIN portal_v2_workspaces w ON w.id=m.workspace_id AND w.status='active' AND ${primaryWorkspaceAccount("w")}
+    JOIN portal_v2_workspaces w ON w.id=m.workspace_id AND w.status='active' AND w.legacy_account_id IS NOT NULL AND ${primaryWorkspaceAccount("w")}
+      AND ${primaryLegacyWorkspaceMembership("w", "m")}
     WHERE m.identity_id=? AND m.status='active' AND m.revoked_at IS NULL
       AND (m.expires_at IS NULL OR datetime(m.expires_at)>datetime('now'))
     ORDER BY w.display_name COLLATE NOCASE,w.id LIMIT 101`)
@@ -1486,10 +1493,9 @@ export async function listPortalWorkspaces(
   if (await nativePortalSourceSchemaAvailable(env)) {
     const native = await env.DELIVERY_DB.withSession('first-primary').prepare(`SELECT w.id
       FROM portal_v2_workspace_memberships m JOIN portal_v2_workspaces w ON w.id=m.workspace_id
-      JOIN pa_portal_source_authorities a ON a.source_id=w.project_alpha_source_id AND a.state='active'
       WHERE m.identity_id=? AND m.status='active' AND m.revoked_at IS NULL
         AND (m.expires_at IS NULL OR datetime(m.expires_at)>datetime('now'))
-        AND w.status='active' AND w.legacy_account_id IS NULL ORDER BY w.id LIMIT 33`)
+        AND w.status='active' AND w.legacy_account_id IS NULL AND ${portalSourceReadableSql('w.project_alpha_source_id')} ORDER BY w.id LIMIT 33`)
       .bind(identity.id).all<{id:string}>();
     if (native.results.length > 32) return [];
     for (const row of native.results) {

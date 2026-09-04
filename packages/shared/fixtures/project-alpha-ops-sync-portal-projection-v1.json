@@ -1,0 +1,25 @@
+{
+  "contract": "ltds-project-alpha-ops-sync-portal-projection-v1",
+  "producer": "PortalProjectionOutboxSender::sendClaim",
+  "producerCommit": "70d4d12005960c3f54729a46304571a164db68db",
+  "serialization": "json_encode(JSON_UNESCAPED_SLASHES)",
+  "applicationKey": "ltds_ops",
+  "valid": {
+    "portal_contact_upsert": {
+      "sha256": "3d82e77095b8d81d03924c0f823c9ed815588284acdd1d415be63e5e122ce03d",
+      "body": "{\"event_id\":\"contact-assignment-role-update\",\"event_type\":\"portal.projection\",\"occurred_at\":\"2026-09-02T18:01:00.000Z\",\"schema_version\":1,\"application_key\":\"ltds_ops\",\"projection_kind\":\"portal\",\"projection\":{\"schemaVersion\":4,\"applicationKey\":\"ltds_ops\",\"deliveryId\":\"contact-assignment-role-update\",\"occurredAt\":\"2026-09-02T18:01:00.000Z\",\"sourceGeneration\":\"contact-assignments-generation\",\"sourceSequence\":21,\"workspaceId\":\"pa-workspace-contacts\",\"kind\":\"event\",\"event\":{\"resource\":\"contact_assignment\",\"action\":\"upsert\",\"contactAssignment\":{\"publicId\":\"pa-assignment-project-manager\",\"contactPublicId\":\"pa-contact-manager\",\"clientPublicId\":\"pa-client-manager\",\"scopeType\":\"project\",\"scopePublicId\":\"pa-project-north\",\"role\":\"project_liaison\",\"primary\":false,\"primaryBilling\":true,\"sendProjectInvoices\":false,\"canViewInvoiceLinks\":true,\"sourceVersion\":\"assignment-v2\",\"active\":true}}}}"
+    },
+    "portal_contact_tombstone": {
+      "sha256": "d1d3b1b451042a99b11a26d23a9c69cc926047b3c84808611a914d344e268b2c",
+      "body": "{\"event_id\":\"contact-assignment-tombstone\",\"event_type\":\"portal.projection\",\"occurred_at\":\"2026-09-02T18:02:00.000Z\",\"schema_version\":1,\"application_key\":\"ltds_ops\",\"projection_kind\":\"portal\",\"projection\":{\"schemaVersion\":4,\"applicationKey\":\"ltds_ops\",\"deliveryId\":\"contact-assignment-tombstone\",\"occurredAt\":\"2026-09-02T18:02:00.000Z\",\"sourceGeneration\":\"contact-assignments-generation\",\"sourceSequence\":22,\"workspaceId\":\"pa-workspace-contacts\",\"kind\":\"event\",\"event\":{\"resource\":\"contact_assignment\",\"action\":\"tombstone\",\"publicId\":\"pa-assignment-project-manager\",\"sourceVersion\":\"assignment-v3\"}}}"
+    },
+    "catalog_upsert": {
+      "sha256": "e1ae5006e113177c106a7e5ca6b6aa0967643b275f7724f34d76b139ce660e62",
+      "body": "{\"event_id\":\"contract-catalog-upsert\",\"event_type\":\"portal.projection\",\"occurred_at\":\"2026-09-02T18:03:00.000Z\",\"schema_version\":1,\"application_key\":\"ltds_ops\",\"projection_kind\":\"catalog\",\"projection\":{\"schemaVersion\":2,\"applicationKey\":\"ltds_ops\",\"deliveryId\":\"contract-catalog-upsert\",\"occurredAt\":\"2026-09-02T18:03:00.000Z\",\"sourceGeneration\":\"contract-catalog-generation\",\"sourceSequence\":1,\"kind\":\"event\",\"event\":{\"action\":\"upsert\",\"item\":{\"publicId\":\"svc-site-photography\",\"sourceVersion\":\"catalog-item-v1\",\"name\":\"Site Photography\",\"summary\":\"Client-safe progress photography.\",\"category\":\"Photography\",\"displayOrder\":20,\"geometryRequirement\":\"optional\",\"questions\":[]}}}}"
+    },
+    "service_assignments_page": {
+      "sha256": "d702d08930b0b9191840fda0ffea9af7b578de524c0218db5f6187c00d4a8142",
+      "body": "{\"event_id\":\"contract-service-assignments-page\",\"event_type\":\"portal.projection\",\"occurred_at\":\"2026-08-27T12:00:00.000Z\",\"schema_version\":1,\"application_key\":\"ltds_ops\",\"projection_kind\":\"service_assignments\",\"projection\":{\"schemaVersion\":1,\"applicationKey\":\"ltds_ops\",\"deliveryId\":\"contract-service-assignments-page\",\"occurredAt\":\"2026-08-27T12:00:00.000Z\",\"sourceGeneration\":\"assignments-1-4a38e251314164fc69a2d875\",\"sourceSequence\":1,\"kind\":\"snapshot.page\",\"snapshotHash\":\"4a38e251314164fc69a2d8751b42b7d0181a0db03ad10f84d245021cbe5e7d5c\",\"pageNumber\":1,\"pageCount\":1,\"itemCount\":1,\"items\":[{\"assignmentPublicId\":\"assignment-shared\",\"sourceVersion\":\"sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"subjectType\":\"project\",\"subjectPublicId\":\"project-shared\",\"servicePublicId\":\"service-map\",\"serviceSourceVersion\":\"sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"active\":true,\"effectiveFrom\":null,\"effectiveUntil\":null}]}}"
+    }
+  }
+}

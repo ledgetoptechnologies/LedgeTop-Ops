@@ -58,9 +58,9 @@ The client portal uses `portal.ledgetopdroneservices.com` as its canonical
 origin and `portal.ledgetoptechnologies.com` as an alternate presentation
 origin. `client.ledgetopdroneservices.com` is legacy compatibility only. The
 three hosts use the same Worker, D1 database, verified principal, memberships,
-and grants. Cloudflare's per-application destination limit requires the
-canonical Drone Services portal paths to use a second, narrowly scoped Access
-application. `CLIENT_ACCESS_AUDS` lists both reviewed client audiences while
+and grants. Both `portal.*` hosts use the original Client Portal Access
+application; the legacy `client.*` paths use a separate, narrowly scoped
+Legacy Client Domain application. `CLIENT_ACCESS_AUDS` lists both reviewed client audiences while
 `CLIENT_ACCESS_AUD` retains the original audience for compatibility. Never
 infer ownership or authorization from the request hostname.
 
@@ -78,13 +78,22 @@ Keep the client Access audience, group, and provisioning automation separate
 from Operations staff ACL provisioning.
 
 For the dual-domain rollout, retain the original Access application and
-audience for the legacy and Technologies portal paths. Use a second application
-only for `/portal*` and `/api/client*` on the canonical Drone Services portal,
-copying the same current eligibility rule. Public Bypass applications cover
+audience for `/portal*` and `/api/client*` on both portal domains. Keep the
+second application and its existing audience only for those two paths on the
+legacy client domain. Both audiences remain accepted; do not remove the legacy
+audience merely because new links use the portal hostname. The September 3
+consolidation preserved the policy rules on both applications; see the
+[dated Access evidence and rollback precautions](operations/client-portal-access-evidence-2026-09-03.md).
+Public Bypass applications cover
 only the explicit `/s/*`, `/client-share/*`, `/api/public/shares/*`,
-`/api/public/cloud-transfers/*`, and asset paths. `/api/internal/*` stays on the
-legacy compatibility host during the Project Alpha transition and remains
-independently signed. Existing IDs, credentials, cookies, and revocation state
+`/api/public/cloud-transfers/*`, and asset paths. The canonical Project Alpha
+machine ingress remains
+`ops-sync.ledgetopdroneservices.com/v1/project-alpha/*`. Portal projection is
+an Operations-owned internal hop from Ops Sync to the Client Worker, not a
+public `portal.*` producer route; legacy external projection routes reject
+requests. Follow the
+[Project Alpha activation runbook](operations/project-alpha-portal-activation.md)
+for this machine boundary. Existing IDs, credentials, cookies, and revocation state
 are not rewritten. Cloudflare documents path matching and specificity in
 [Application paths](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/).
 
@@ -393,91 +402,76 @@ npx.cmd wrangler secret put PROJECT_ALPHA_WEBHOOK_HMAC_SECRET --name ltds-ops-sy
 
 The current Project Alpha contract is HMAC-only, so production explicitly sets `PROJECT_ALPHA_ALLOW_LEGACY_HMAC=true`. LTDS verifies `sha256=<hex>` over the exact `${timestamp}.${rawBody}` bytes. Ed25519 remains preferred if its header and public key are introduced later; an invalid Ed25519 signature never falls back to HMAC. Use `PROJECT_ALPHA_WEBHOOK_ED25519_PREVIOUS_PUBLIC_KEY` only during a coordinated future rotation. The Access Groups API token belongs only on the sync Worker, never in Project Alpha.
 
-The sanitized Service Library projection uses another dedicated Access service
-application targeting only
-`client.ledgetopdroneservices.com/api/internal/project-alpha/catalog-v2`. This
-legacy machine endpoint remains active during the portal hostname transition;
-do not infer the browser portal origin from it.
-Copy its issuer and audience to
-`PROJECT_ALPHA_CATALOG_ACCESS_TEAM_DOMAIN` and
-`PROJECT_ALPHA_CATALOG_ACCESS_AUD` on `ltds-clients`. Configure the same bounded
-application key in Project Alpha and `PROJECT_ALPHA_CATALOG_APPLICATION_KEY`,
-then add the dedicated receiver secret:
-
-```powershell
-npx.cmd wrangler secret put PROJECT_ALPHA_CATALOG_HMAC_SECRET --name ltds-clients
-npx.cmd wrangler secret put PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_SECRET --name ltds-clients
-```
-
-Set `PROJECT_ALPHA_CATALOG_HMAC_KEY_ID` to the sender's current key ID. During
-rotation only, set a distinct `PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_KEY_ID` and
-the previous secret above; delete both previous values after old pending rows
-drain. An unknown key ID is rejected even if its signature matches another key.
-
-Do not reuse an Access audience, service token, or HMAC secret from Ops Sync or
-the draft-quote caller. Keep `PROJECT_ALPHA_CATALOG_SYNC_ENABLED=false` until
+The sanitized Service Library projection uses the same Project Alpha Ops Sync
+Access application, service token, application key, and event signature. Send
+it as `projection_kind: "catalog"` inside the signed `portal.projection` event;
+Ops Sync dispatches it through the private Client service binding. Do not
+provision a catalog-specific Client Access application, public write route, or
+HMAC secret. Keep `PROJECT_ALPHA_CATALOG_SYNC_ENABLED=false` until
 migration 0122 is applied in isolated staging and snapshot, replay, sequence
 gap, stale-draft, leakage, and Access-denial tests pass. Project Alpha keeps the
-service-token client ID/secret; LTDS receives only the Access assertion and
-signed request. See `docs/project-alpha.md` for the exact producer envelope.
+service-token client ID/secret. See `docs/project-alpha.md` for the exact
+producer envelope.
 
-The portal hierarchy projection uses a path-specific Access service
-application targeting only
-`portal.ledgetopdroneservices.com/api/internal/project-alpha/*`. Give that
-application a Service Auth policy containing the existing Project Alpha
-service token used by Ops Sync. This reuses the deployed machine identity; it
-does not reuse the Ops Sync Access application or audience, and it does not
-broaden human portal access. Configure the portal application's exact
-issuer/audience as
-`PROJECT_ALPHA_PORTAL_ACCESS_TEAM_DOMAIN` and
-`PROJECT_ALPHA_PORTAL_ACCESS_AUD`, and agree on the bounded
-`PROJECT_ALPHA_PORTAL_APPLICATION_KEY`. Add a unique receiver secret:
+Project Alpha sends portal hierarchy events through the same External
+Operations connection used for its other signed events:
 
-```powershell
-npx.cmd wrangler secret put PROJECT_ALPHA_PORTAL_HMAC_SECRET --name ltds-clients
+```text
+POST https://ops-sync.ledgetopdroneservices.com/v1/project-alpha/events
 ```
 
-Set `PROJECT_ALPHA_PORTAL_HMAC_KEY_ID` to the sender's current key ID. Use the
-distinct `PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_KEY_ID`/previous-secret pair only
-for a bounded rotation overlap; do not create the previous secret during first
-activation. Remove both previous values only after pending delivery drains.
+Keep the existing Ops Sync Access application, audience, service-token
+identity, application key, and Project Alpha event HMAC unchanged. Do not add a
+`portal.*` destination or portal-specific credentials to Project Alpha. Ops
+Sync authenticates and records the source event before deriving the portal
+envelope.
 
-Project Alpha keeps this behind its single **External operations** connection.
-For the LTDS deployment, set its server-only
-`EXTERNAL_OPS_CLIENT_PORTAL_BASE_URL` to
-`https://portal.ledgetopdroneservices.com`, and configure the same key ID and
-HMAC secret through `PORTAL_INTEGRATION_HMAC_SECRETS_JSON` (or the supported
-`EXTERNAL_OPS_CLIENT_PORTAL_SIGNING_KEY_ID` and
-`EXTERNAL_OPS_CLIENT_PORTAL_SIGNING_SECRET` compatibility variables). The
-administrator does not create a second visible integration profile.
+The strict outer event type is `portal.projection`. After validating the
+existing External Operations Access assertion and HMAC, Ops Sync privately
+invokes the Client Worker's named portal-projection entrypoint. The service
+binding is the internal trust boundary; there is no second portal URL, Access
+application, application key, key ID, or HMAC secret to provision in Project
+Alpha or on the Client Worker for this hop. Replay protection and ordered
+receipts remain part of the validated event and projection contracts.
+
+Configure the private Worker-to-Worker hop in `apps/ops-sync/wrangler.jsonc`:
+
+```jsonc
+"services": [{
+  "binding": "CLIENT_PORTAL_PROJECTION_INGRESS",
+  "service": "ltds-clients",
+  "entrypoint": "OpsSyncPortalProjectionIngress"
+}]
+```
+
+Project Alpha keeps only its single **External operations** connection pointed
+at Ops Sync. Remove or leave unset the superseded direct-portal variables
+`EXTERNAL_OPS_CLIENT_PORTAL_BASE_URL`,
+`EXTERNAL_OPS_CLIENT_PORTAL_SIGNING_KEY_ID`, and
+`EXTERNAL_OPS_CLIENT_PORTAL_SIGNING_SECRET`; they are not part of the LTDS
+deployment contract. The private Client Worker binding belongs to Ops Sync, not
+Project Alpha or its administrator-facing form.
 
 The legacy `client.ledgetopdroneservices.com` hostname remains a compatibility
-redirect for public share and portal links. Do not use that redirect as the
-machine projection route: the canonical service application and audience are
-bound to the `portal.*` endpoint above. The Client Worker rejects every
-`/api/internal/*` request on a configured legacy origin even if an edge policy
-is accidentally broadened; legacy public-share and same-origin session routes
-remain admitted.
+redirect for public share and portal links. Neither it nor either `portal.*`
+hostname is a Project Alpha machine-ingress route. The Client Worker rejects
+external `/api/internal/*` requests; legacy public-share and same-origin session
+routes remain admitted.
 
 The reviewed receiver-only production configuration sets
-`PROJECT_ALPHA_PORTAL_SYNC_ENABLED=true` and
+`PROJECT_ALPHA_PORTAL_SYNC_ENABLED=true`,
+`PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED=false`, and
 `CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED=true` only after additive migrations
 0125 and 0129 and the snapshot/activation/replay/gap/tombstone/Access-denial
-tests pass. From `apps/client`, `npm run deploy` is the only supported production
-release command. Its repository-owned wrapper runs the remote-secret preflight
-first and refuses the deploy if `PROJECT_ALPHA_PORTAL_HMAC_SECRET` is not
-installed by name. Do not replace the Worker Builds deploy command with a
-direct Wrangler invocation, which would bypass this gate. Because Cloudflare
-does not expose secret values, an enabled Worker with a malformed value returns
-HTTP 503 `portal-receiver-misconfigured`
-and logs only a redacted reason. Opening the inbox still does not enable client
+tests pass. The repository-owned release checks must verify that the Ops Sync
+service binding targets the reviewed Client Worker named entrypoint and that no
+direct Project Alpha portal credential is required. Opening the internal
+entrypoint still does not enable client
 hierarchy reads: keep
 `CLIENT_PORTAL_HIERARCHY_V2_ENABLED=false` through shadow parity and the
-separate authorization cutover. Never reuse the catalog Access application,
-application key, audience, or HMAC secret. The existing Project Alpha Ops Sync
-service-token identity may be included in the portal-specific Service Auth
-policy, but the Access application and audience remain distinct. Project Alpha
-keeps the token credentials; LTDS stores only the receiver configuration.
+separate authorization cutover. Never reuse the catalog application key,
+audience, or HMAC secret. Project Alpha retains only the Ops Sync machine
+credentials; Operations owns the private Client Worker binding.
 
 Follow the exact preflight, ingest-only activation, read cutover, and drain-first
 rollback in

@@ -6,6 +6,7 @@ import {
   type ServiceRequestNotificationLifecycle,
   type ServiceRequestNotificationSnapshot,
 } from "@ltds/shared";
+import { portalAutomaticEligibilityEnabled } from "./portal-automatic-eligibility";
 import type { Env } from "./types";
 import { sendAdminAlert } from "./alerts";
 import { sendNotificationMail } from "./mailer";
@@ -454,7 +455,7 @@ export async function processProjectAlphaDeliveryPortalNotifications(env:Env):Pr
         owner_scope_type:row.owner_scope_type,owner_public_id:row.owner_public_id,r2_prefix:row.r2_prefix});
       const principalGuard=projectAlphaDeliveryPrincipalGuard({audience:recipient,
         principalSourceVersion:row.principal_source_version,bindingSourceVersion:row.binding_source_version,
-        prefix:row.r2_prefix,allowUnclaimed:env.CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED==="true",source});
+        prefix:row.r2_prefix,allowUnclaimed:portalAutomaticEligibilityEnabled(env),source});
       const grantState=granted
         ? "grant_record.status='active' AND grant_record.revoked_at IS NULL AND (grant_record.expires_at IS NULL OR datetime(grant_record.expires_at)>datetime('now'))"
         : "grant_record.status='revoked' AND grant_record.revoked_at IS NOT NULL";

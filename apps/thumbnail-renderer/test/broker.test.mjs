@@ -119,7 +119,15 @@ test("quarantines a malformed receipt and still processes a valid later receipt"
   await writeFile(malformed, "not-json");
   await writeFile(item.receiptPath, valid);
   try {
-    assert.equal(await brokerOnce(item.config, { fetchImpl: async (url) => head(url) }), "awaiting_manifest_sync");
+    const outcomes = [];
+    // Directory iteration order is platform-specific. A valid receipt may be
+    // finalized and retired before the malformed sibling is encountered.
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      outcomes.push(await brokerOnce(item.config, { fetchImpl: async (url) => head(url) }));
+      try { await readFile(malformed); }
+      catch (error) { if (error?.code === "ENOENT") break; throw error; }
+    }
+    assert.ok(outcomes.includes("awaiting_manifest_sync"));
     await assert.rejects(readFile(malformed), { code: "ENOENT" });
     assert.equal(await readFile(`${malformed}.invalid`, "utf8"), "not-json");
   } finally { await rm(item.root, { recursive: true, force: true }); }

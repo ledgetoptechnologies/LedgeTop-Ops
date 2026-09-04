@@ -7,9 +7,7 @@ import { BULK_DOWNLOAD_RESUME_COOKIE, createBulkDownloadResumeCookie, createSess
 import { matchesEtag } from "./prepared-images";
 import { serveAuthorizedThumbnail, thumbnailFieldsForObject, type ThumbnailJobRow } from "./thumbnails";
 import { recordFirstAccessNotification } from "./notifications";
-import { handleProjectAlphaPortalProjectionRequest } from "./project-alpha-portal";
-import { handleRegisteredProjectAlphaPortalRequest } from "./project-alpha-portal-ingress";
-import { handleProjectAlphaServiceAssignmentsRequest, handleRegisteredProjectAlphaServiceAssignmentsRequest } from "./project-alpha-service-assignments";
+export { OpsSyncPortalProjectionIngress } from "./ops-sync-portal-entrypoint";
 import { friendlyBulkFailure } from "./bulk-download-errors";
 import type { Env, ShareRow } from "./types";
 export { BulkDownloadWorkflow } from "./workflow";
@@ -28,7 +26,6 @@ import { listPublicShareLocations, resolvePublicShareLocation } from "./public-l
 import { createClientPortalRouter } from "./client-portal/routes";
 import { acceptRequestAttachmentScanReceipt, cleanupExpiredRequestAttachments, readRequestAttachmentScanReceipt } from "./client-portal/request-attachments";
 import { createClientDelegatedPublicRouter } from "./client-delegated-public";
-import { handleProjectAlphaCatalogRequest } from "./project-alpha-catalog";
 import { projectAlphaPricingHintProvider } from "./client-portal/project-alpha-pricing-hint";
 import { processInvitationEmailBatch } from "./client-portal/invitation-email";
 import { reconcileExpiredClientDelegatedShares } from "./client-portal/delegated-shares";
@@ -986,15 +983,6 @@ app.post("/api/internal/client-request-attachments/:attachmentId/scanned", async
   const status = await acceptRequestAttachmentScanReceipt(c.env, c.req.header("Authorization") || null, attachmentId, receipt);
   return c.json({ ok: true, status });
 });
-
-// This path is not part of the browser API. It requires the dedicated
-// Project Alpha Access audience plus a timestamped signature over exact bytes.
-app.post("/api/internal/project-alpha/catalog-v2", c => handleProjectAlphaCatalogRequest(c.req.raw, c.env));
-app.post("/api/internal/project-alpha/portal-v2", c => handleProjectAlphaPortalProjectionRequest(c.req.raw, c.env));
-app.post("/api/internal/project-alpha/sources/:sourceId/portal-v2", c => handleRegisteredProjectAlphaPortalRequest(c.req.raw, c.env, c.req.param("sourceId")));
-app.post("/api/internal/project-alpha/service-assignments-v1", c => handleProjectAlphaServiceAssignmentsRequest(c.req.raw, c.env));
-app.post("/api/internal/project-alpha/sources/:sourceId/service-assignments-v1",
-  c => handleRegisteredProjectAlphaServiceAssignmentsRequest(c.req.raw, c.env, c.req.param("sourceId")));
 
 app.route("/api/client", createClientPortalRouter({ pricingHintProvider: projectAlphaPricingHintProvider }));
 app.on(["GET", "HEAD"], "/portal", c => serveAppShell(c.req.raw, c.env.ASSETS));
