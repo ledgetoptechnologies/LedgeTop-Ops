@@ -47,10 +47,12 @@ jobs:
         with:
           node-version: 24
 
-      - name: Install locked dependencies
+      - name: Install linked application dependencies
         if: matrix.package != 'thumbnail-renderer'
-        working-directory: apps/${{ matrix.package }}
-        run: npm ci
+        run: |
+          npm --prefix apps/client ci
+          npm --prefix apps/operations ci
+          npm --prefix apps/ops-sync ci
 
       - name: Typecheck
         working-directory: apps/${{ matrix.package }}
