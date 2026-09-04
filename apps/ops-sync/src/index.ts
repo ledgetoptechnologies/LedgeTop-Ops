@@ -1,6 +1,6 @@
 import { ZodError } from "zod";
 import { reconcileAccessGroup } from "./access-group";
-import { accessCircuitIsOpen, completeEvent, applyEntitlementEventForSource, applyProjectionEventForSource, recordAccessFailure, recordAccessSuccess, recordEventFailure } from "./projection";
+import { accessCircuitIsOpen, completeEvent, applyEntitlementEventForSource, applyProjectionEventForSource, recordAccessFailure, recordAccessSuccess, recordEventFailure, routePortalProjectionEventForSource } from "./projection";
 import { parseIntegrationEvent } from "./schema";
 import { readWebhookBody, requireAccessSubject, sha256Hex, validateRequestTimestamp, verifyAccessAssertion, verifyWebhookSignature, type AccessEnvironment } from "./security";
 import type { Env } from "./types";
@@ -24,6 +24,8 @@ function errorStatus(error: unknown): number {
   if (message === "projection-source-authority-unsupported") return 403;
   if (message === "event-id-conflict") return 409;
   if (message === "projection-entity-busy" || message === "projection-global-busy") return 503;
+  if (message === "client-portal-binding-unavailable" || message === "client-portal-forward-failed") return 503;
+  if (message === "client-portal-projection-rejected") return 422;
   if (message.startsWith("access-group-")) return 503;
   if (error instanceof ZodError || message.includes("mismatch")) return 422;
   if (message.startsWith("projection-data-")) return 422;
@@ -93,21 +95,38 @@ export async function handleRequest(request: Request, env: Env, accessVerifier: 
     catch { throw new SyntaxError("json-invalid"); }
     const event = parseIntegrationEvent(parsed,eventConfig?.applicationKey ?? env.APPLICATION_KEY);
     if (request.headers.get("X-PA-Event-ID") !== event.event_id) return json(422,{error:"event-id-mismatch"});
-    if (!candidate.source.staffAuthority && event.event_type !== "projection.changed") throw new Error("projection-source-authority-unsupported");
+    if (!candidate.source.staffAuthority && event.event_type !== "projection.changed" && event.event_type !== "portal.projection")
+      throw new Error("projection-source-authority-unsupported");
     await assertProjectAlphaConnectorProof(env,candidate.proof);
     source = candidate.source;
+    const authenticatedSource=source;
     proof = candidate.proof;
     eventId = event.event_id;
+    const payloadHash=await sha256Hex(rawBody);
     const result = event.event_type === "projection.changed"
-      ? await applyProjectionEventForSource(env,source,event,await sha256Hex(rawBody),proof)
-      : await applyEntitlementEventForSource(env,source,event,await sha256Hex(rawBody),proof);
+      ? await applyProjectionEventForSource(env,source,event,payloadHash,proof)
+      : event.event_type === "portal.projection"
+        ? await routePortalProjectionEventForSource(env,source,event,payloadHash,async()=>{
+          if(!env.CLIENT_PORTAL_PROJECTION_INGRESS)throw new Error("client-portal-binding-unavailable");
+          const body=JSON.stringify(event.projection);
+          if(typeof body!=="string")throw new Error("client-portal-projection-rejected");
+          const deliveryId=event.projection&&typeof event.projection==="object"&&"deliveryId" in event.projection
+            ? (event.projection as {deliveryId?:unknown}).deliveryId:undefined;
+          if(typeof deliveryId!=="string"||deliveryId!==event.event_id)throw new Error("client-portal-projection-rejected");
+          let forwarded:Awaited<ReturnType<NonNullable<typeof env.CLIENT_PORTAL_PROJECTION_INGRESS>["ingestProjectAlphaPortalProjection"]>>;
+          try{forwarded=await env.CLIENT_PORTAL_PROJECTION_INGRESS.ingestProjectAlphaPortalProjection({protocolVersion:1,
+            sourceId:authenticatedSource.sourceId,applicationKey:event.application_key,deliveryId,projectionKind:event.projection_kind,body});}
+          catch{throw new Error("client-portal-forward-failed");}
+          if(!forwarded.ok)throw new Error(forwarded.retryable?"client-portal-forward-failed":"client-portal-projection-rejected");
+        },proof)
+        : await applyEntitlementEventForSource(env,source,event,payloadHash,proof);
     if (result === "duplicate" || result === "ignored") {
       await assertProjectAlphaConnectorProof(env,proof);
       return json(200,{ok:true,event_id:event.event_id,status:result});
     }
     let accessMembers = 0;
     let accessPending = false;
-    if (event.event_type !== "projection.changed") {
+    if (event.event_type !== "projection.changed" && event.event_type !== "portal.projection") {
       try {
         if(await accessCircuitIsOpen(env))throw new Error("access-group-circuit-open");
         await assertProjectAlphaConnectorProof(env,proof);

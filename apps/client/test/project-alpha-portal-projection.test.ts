@@ -1,5 +1,6 @@
 import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+vi.mock("cloudflare:workers",()=>({WorkerEntrypoint:class{}}));
 import hierarchyMigration from "../migrations/0121_client_workspace_hierarchy_v2.sql?raw";
 import projectionMigration from "../migrations/0125_project_alpha_portal_projection.sql?raw";
 import relationMigration from "../migrations/0129_portal_hierarchy_relations.sql?raw";
@@ -13,6 +14,7 @@ import { splitD1MigrationStatements } from "./helpers/d1-migrations";
 import { authorizePortalWorkspaceCapability } from "../src/worker/client-portal/workspace-v2";
 import type { VerifiedClientPrincipal } from "../src/worker/client-portal/types";
 import { applyPortalProjectionDelivery, handleProjectAlphaPortalProjectionRequest, parsePortalProjectionDelivery } from "../src/worker/project-alpha-portal";
+import { ingestOpsSyncPortalProjection } from "../src/worker/ops-sync-portal-entrypoint";
 import { createCatalogSourceContext, PRIMARY_ALPHA_SOURCE_ID } from "@ltds/shared";
 import type { Env } from "../src/worker/types";
 import portalFixture from "../../../packages/shared/fixtures/project-alpha-portal-v2.json";
@@ -129,6 +131,14 @@ describe("Project Alpha portal hierarchy projection", () => {
       acceptedWhenRelationsFlagEnabled: true,
       runtimeFeatureFlagDefault: false,
     });
+  });
+
+  it("accepts the primary projection through the private Ops Sync boundary without copied PA credentials",async()=>{
+    const payload=portalFixture.valid.snapshotPage as Record<string,unknown>;
+    const result=await ingestOpsSyncPortalProjection({...env,PROJECT_ALPHA_PORTAL_HMAC_SECRET:undefined,
+      PROJECT_ALPHA_PORTAL_HMAC_KEY_ID:undefined},{protocolVersion:1,sourceId:PRIMARY_ALPHA_SOURCE_ID,
+      applicationKey,deliveryId:String(payload.deliveryId),projectionKind:"portal",body:JSON.stringify(payload)});
+    expect(result).toEqual({ok:true,protocolVersion:1,status:"completed"});
   });
 
   it("stages a complete bounded generation and atomically activates hierarchy and unbound authorization intent", async () => {

@@ -1,4 +1,4 @@
-import type { EntitlementEvent, Env, IntegrationEvent, ProjectionEvent } from "./types";
+import type { EntitlementEvent, Env, IntegrationEvent, PortalProjectionEvent, ProjectionEvent } from "./types";
 import {
   PRIMARY_PROJECT_ALPHA_SOURCE,
   createProjectAlphaSourceContext,
@@ -349,6 +349,42 @@ export async function applyProjectionEventForSource(env: Env, source: ProjectAlp
   finally {
     try { await releaseGlobalProjection(env,source,event.event_id); }
     catch(releaseError) { if(!processingError)throw releaseError; }
+  }
+}
+
+/** Reserve the existing source-qualified event receipt around a private portal
+ * handoff. A failed handoff leaves the receipt pending so Project Alpha's
+ * durable outbox can retry; completion happens only after Client commits. */
+export async function routePortalProjectionEventForSource(
+  env: Env,
+  source: ProjectAlphaSourceContext,
+  event: PortalProjectionEvent,
+  payloadHash: string,
+  forward: () => Promise<void>,
+  proof?: ProjectAlphaConnectorProof,
+): Promise<ProjectionResult> {
+  source=createProjectAlphaSourceContext(source.sourceId);
+  await validateSourceProof(env,source,proof);
+  await claimGlobalProjection(env,source,event.event_id);
+  let processingError: unknown;
+  try {
+    const receipt=await env.OPS_DB.prepare("SELECT payload_hash,status FROM integration_event_receipts WHERE projection_source_id=? AND event_id=?")
+      .bind(source.sourceId,event.event_id).first<{payload_hash:string;status:string}>();
+    if(receipt){
+      if(receipt.payload_hash!==payloadHash)throw new Error("event-id-conflict");
+      if(receipt.status==="completed"||receipt.status==="ignored")return "duplicate";
+    }else{
+      await fencedBatch(env,proof,[env.OPS_DB.prepare(`INSERT INTO integration_event_receipts
+        (projection_source_id,event_id,integration,event_type,user_id,occurred_at,payload_hash,status)
+        VALUES (?,?,'project-alpha',?,?,?,?,'pending')`)
+        .bind(source.sourceId,event.event_id,event.event_type,`portal:${event.event_id}`,event.occurred_at,payloadHash)]);
+    }
+    await forward();
+    return "applied";
+  }catch(error){processingError=error;throw error;}
+  finally{
+    try{await releaseGlobalProjection(env,source,event.event_id);}
+    catch(releaseError){if(!processingError)throw releaseError;}
   }
 }
 

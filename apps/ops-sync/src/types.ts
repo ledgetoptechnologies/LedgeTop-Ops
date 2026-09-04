@@ -1,4 +1,7 @@
-export type Env = Cloudflare.Env & {
+// Replace Wrangler's generic Service shape with the entrypoint's typed RPC
+// contract. Keep it optional so a staged deployment fails retryably instead of
+// making local fixtures invent unrelated fetch/connect methods.
+export type Env = Omit<Cloudflare.Env, "CLIENT_PORTAL_PROJECTION_INGRESS"> & {
   CF_ACCESS_GROUP_API_TOKEN: string;
   CF_ACCESS_GROUP_NAME?: string;
   PROJECT_ALPHA_WEBHOOK_HMAC_SECRET: string;
@@ -6,6 +9,7 @@ export type Env = Cloudflare.Env & {
   PROJECT_ALPHA_WEBHOOK_ED25519_PREVIOUS_PUBLIC_KEY?: string;
   PROJECT_ALPHA_ALLOW_LEGACY_HMAC?: string;
   PROJECT_ALPHA_CONNECTOR_CREDENTIALS?: string;
+  CLIENT_PORTAL_PROJECTION_INGRESS?: PortalProjectionIngressBinding;
 };
 
 export const SUPPORTED_ROLES = [
@@ -56,4 +60,28 @@ export interface ProjectionEvent {
   };
 }
 
-export type IntegrationEvent = EntitlementEvent | ProjectionEvent;
+export interface PortalProjectionEvent {
+  event_id: string;
+  event_type: "portal.projection";
+  occurred_at: string;
+  schema_version: 1;
+  application_key: string;
+  projection_kind: "portal" | "catalog" | "service_assignments";
+  projection: unknown;
+}
+
+export interface PortalProjectionIngressBinding {
+  ingestProjectAlphaPortalProjection(input: {
+    protocolVersion: 1;
+    sourceId: string;
+    applicationKey: string;
+    deliveryId: string;
+    projectionKind: "portal" | "catalog" | "service_assignments";
+    body: string;
+  }): Promise<
+    | { ok: true; protocolVersion: 1; status: "completed" | "ignored" | "duplicate" }
+    | { ok: false; protocolVersion: 1; code: string; retryable: boolean }
+  >;
+}
+
+export type IntegrationEvent = EntitlementEvent | ProjectionEvent | PortalProjectionEvent;

@@ -8,6 +8,7 @@ import { matchesEtag } from "./prepared-images";
 import { serveAuthorizedThumbnail, thumbnailFieldsForObject, type ThumbnailJobRow } from "./thumbnails";
 import { recordFirstAccessNotification } from "./notifications";
 import { handleProjectAlphaPortalProjectionRequest } from "./project-alpha-portal";
+export { OpsSyncPortalProjectionIngress } from "./ops-sync-portal-entrypoint";
 import { handleRegisteredProjectAlphaPortalRequest } from "./project-alpha-portal-ingress";
 import { handleProjectAlphaServiceAssignmentsRequest, handleRegisteredProjectAlphaServiceAssignmentsRequest } from "./project-alpha-service-assignments";
 import { friendlyBulkFailure } from "./bulk-download-errors";

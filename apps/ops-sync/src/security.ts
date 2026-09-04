@@ -1,7 +1,10 @@
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 export interface AccessEnvironment { TEAM_DOMAIN: string; CF_ACCESS_AUD: string; }
 
-export const MAX_BODY_BYTES = 64 * 1024;
+// Portal snapshot pages share this authenticated ingress. Allow bounded room
+// for the signed outer envelope; the private Client receiver independently
+// preserves its 256 KiB limit on the embedded projection.
+export const MAX_BODY_BYTES = 320 * 1024;
 export const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 
 /** The declared length is only an early rejection, never the memory bound. */

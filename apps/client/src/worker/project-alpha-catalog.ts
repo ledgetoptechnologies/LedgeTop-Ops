@@ -1,6 +1,7 @@
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { createCatalogSourceContext, PRIMARY_CATALOG_SOURCE, type CatalogSourceContext } from "@ltds/shared";
 import type { Env } from "./types";
+import { assertPortalProjectionSourceProof, portalProjectionSourceFence, PortalSourceAuthorityError, type PortalProjectionWriteProof } from "./project-alpha-portal-authority";
 
 const MAX_BODY_BYTES = 128 * 1024;
 const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
@@ -485,21 +486,31 @@ async function applyEvent(db: CatalogDatabase, sourceId: string, delivery: Event
 /** Internal application of an already parsed/authenticated delivery. The HTTP
  * receiver below selects PRIMARY_CATALOG_SOURCE itself, never a request field.
  * Explicit contexts support isolated local tests, not another enabled connector. */
-export async function applyCatalogProjectionDelivery(env: Env, source: CatalogSourceContext, delivery: CatalogProjectionDelivery, payloadHash: string): Promise<"completed" | "ignored" | "duplicate"> {
+export async function applyCatalogProjectionDelivery(env: Env, source: CatalogSourceContext, delivery: CatalogProjectionDelivery, payloadHash: string,
+  authorityProof?: PortalProjectionWriteProof): Promise<"completed" | "ignored" | "duplicate"> {
   const { sourceId } = createCatalogSourceContext(source.sourceId);
   if (!SHA256_HEX.test(payloadHash)) throw new Error("catalog-body-digest-invalid");
-  const db = env.DELIVERY_DB.withSession("first-primary");
+  const session = env.DELIVERY_DB.withSession("first-primary");
+  if (authorityProof && authorityProof.sourceId !== sourceId) throw new PortalSourceAuthorityError("invalid");
+  if (authorityProof) await assertPortalProjectionSourceProof(session, authorityProof);
+  const db: CatalogDatabase = authorityProof ? { prepare: sql => session.prepare(sql),
+    batch: async <T>(statements: D1PreparedStatement[]) => (await session.batch<T>([
+      portalProjectionSourceFence(session, authorityProof), ...statements,
+    ])).slice(1) } : session;
   const duplicate = await existingReceipt(db, sourceId, delivery.deliveryId, payloadHash);
   if (duplicate) return duplicate;
   try {
-    if (delivery.kind === "snapshot.page") return await stageSnapshotPage(db, sourceId, delivery, payloadHash);
-    if (delivery.kind === "snapshot.activate") return await activateSnapshot(db, sourceId, delivery, payloadHash);
-    return await applyEvent(db, sourceId, delivery, payloadHash);
+    const result = delivery.kind === "snapshot.page" ? await stageSnapshotPage(db, sourceId, delivery, payloadHash)
+      : delivery.kind === "snapshot.activate" ? await activateSnapshot(db, sourceId, delivery, payloadHash)
+        : await applyEvent(db, sourceId, delivery, payloadHash);
+    if (authorityProof) await assertPortalProjectionSourceProof(session, authorityProof);
+    return result;
   } catch (error) {
     // A competing transaction may have committed after this session's first
     // read. Anchor receipt reconciliation on the primary, not an older replica.
     const raced = await existingReceipt(env.DELIVERY_DB.withSession("first-primary"), sourceId, delivery.deliveryId, payloadHash);
     if (raced) return raced;
+    if (error instanceof Error && error.message.includes("pa_portal_source_write_guard")) throw new PortalSourceAuthorityError("changed");
     if (/catalog_delivery_write_guard/.test(error instanceof Error ? error.message : String(error))) throw new Error("catalog-projection-conflict");
     throw error;
   }

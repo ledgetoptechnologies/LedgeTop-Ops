@@ -480,14 +480,13 @@ async function tombstoneSubject(db: ProjectionDatabase, sourceId: string, assign
   return { subjectType: row.subject_type, subjectPublicId: row.subject_public_id };
 }
 
-/** Trusted storage seam. HTTP callers never construct source context/proof. */
-export async function applyServiceAssignmentProjectionDelivery(env: Env, sourceValue: CatalogSourceContext,
-  authorityProof: PortalProjectionWriteProof, delivery: ServiceAssignmentProjectionDeliveryV1,
+async function applyServiceAssignmentProjectionCore(env: Env, sourceValue: CatalogSourceContext,
+  authorityProof: PortalProjectionWriteProof|null, delivery: ServiceAssignmentProjectionDeliveryV1,
   bodyHash: string): Promise<ProjectionStatus> {
   const sourceId = createCatalogSourceContext(sourceValue.sourceId).sourceId;
-  if (authorityProof.sourceId !== sourceId || !SHA256_HEX.test(bodyHash)) throw new PortalSourceAuthorityError("invalid");
+  if ((authorityProof&&authorityProof.sourceId!==sourceId)||!SHA256_HEX.test(bodyHash))throw new PortalSourceAuthorityError("invalid");
   const session = env.DELIVERY_DB.withSession("first-primary");
-  await assertPortalProjectionSourceProof(session, authorityProof);
+  if(authorityProof)await assertPortalProjectionSourceProof(session,authorityProof);
   await assertReceiverAdmission(session, sourceId);
   if (await existingReceipt(session, sourceId, delivery.deliveryId, bodyHash)) return "duplicate";
   const subjects = delivery.kind === "snapshot.page" ? delivery.items
@@ -497,9 +496,9 @@ export async function applyServiceAssignmentProjectionDelivery(env: Env, sourceV
   const proofs = await workspaceProofs(session, sourceId, subjects);
   const db: PortalAuthorityDatabase = {
     prepare: sql => session.prepare(sql),
-    batch: async <T>(statements: D1PreparedStatement[]) => (await session.batch<T>([
-      portalProjectionSourceFence(session, authorityProof), ...statements,
-    ])).slice(1),
+    batch: async <T>(statements: D1PreparedStatement[]) => authorityProof
+      ?(await session.batch<T>([portalProjectionSourceFence(session,authorityProof),...statements])).slice(1)
+      :session.batch<T>(statements),
   };
   try {
     const result = delivery.kind === "snapshot.page"
@@ -507,7 +506,7 @@ export async function applyServiceAssignmentProjectionDelivery(env: Env, sourceV
       : delivery.kind === "snapshot.activate"
         ? await activateSnapshot(db, sourceId, delivery, bodyHash, proofs)
         : await applyEvent(db, sourceId, delivery, bodyHash, proofs);
-    await assertPortalProjectionSourceProof(session, authorityProof);
+    if(authorityProof)await assertPortalProjectionSourceProof(session,authorityProof);
     await assertReceiverAdmission(session, sourceId);
     return result;
   } catch (error) {
@@ -518,6 +517,21 @@ export async function applyServiceAssignmentProjectionDelivery(env: Env, sourceV
       throw new Error("service-assignment-write-conflict");
     throw error;
   }
+}
+
+/** Trusted storage seam. HTTP callers never construct source context/proof. */
+export function applyServiceAssignmentProjectionDelivery(env:Env,sourceValue:CatalogSourceContext,
+  authorityProof:PortalProjectionWriteProof,delivery:ServiceAssignmentProjectionDeliveryV1,bodyHash:string):Promise<ProjectionStatus>{
+  return applyServiceAssignmentProjectionCore(env,sourceValue,authorityProof,delivery,bodyHash);
+}
+
+/** Private Ops Sync seam. Only the fixed primary source may omit a Client-side
+ * authority proof; secondary sources remain fenced by their Client registry. */
+export function applyServiceAssignmentProjectionFromOpsSync(env:Env,sourceValue:CatalogSourceContext,
+  authorityProof:PortalProjectionWriteProof|null,delivery:ServiceAssignmentProjectionDeliveryV1,bodyHash:string):Promise<ProjectionStatus>{
+  const source=createCatalogSourceContext(sourceValue.sourceId);
+  if(source.sourceId!==PRIMARY_ALPHA_SOURCE_ID&&!authorityProof)throw new PortalSourceAuthorityError("invalid");
+  return applyServiceAssignmentProjectionCore(env,source,authorityProof,delivery,bodyHash);
 }
 
 export function serviceAssignmentSourcePath(sourceId: string): string {
