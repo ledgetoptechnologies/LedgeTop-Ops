@@ -1,44 +1,43 @@
 # Project Alpha portal projection activation
 
-This is the production operator runbook for the Project Alpha hierarchy
-projection received by `ltds-clients`. It does not authorize a deployment or a
+This is the production operator runbook for Project Alpha hierarchy events
+received by `ltds-ops-sync` and internally projected to `ltds-clients`. It does
+not authorize a deployment or a
 flag, secret, Access, DNS, or producer change. Record every readback and obtain
 the normal production approvals before performing a write.
 
 ## Fixed boundary
 
-- The only machine base URL is
-  `https://portal.ledgetopdroneservices.com`; the primary route is
-  `POST /api/internal/project-alpha/portal-v2` and registered-source routes are
-  under the same `/api/internal/project-alpha/*` prefix.
-- The path-specific Cloudflare Access service application covers exactly
-  `portal.ledgetopdroneservices.com/api/internal/project-alpha/*`. Its Service
-  Auth policy may contain the existing Project Alpha Ops Sync service-token
-  identity, but the application and audience are portal-specific. It has no
-  human or browser policy.
+- Project Alpha has one machine destination:
+  `https://ops-sync.ledgetopdroneservices.com`; all outbound integration events
+  use `POST /v1/project-alpha/events` through the existing External Operations
+  profile.
+- The existing Ops Sync Cloudflare Access service application, audience,
+  service-token identity, application key, and Project Alpha event HMAC remain
+  the only Project Alpha outbound trust boundary. Portal hierarchy, membership,
+  entitlement, and revocation updates are event types on that connection.
+- Project Alpha wraps each portal delivery in the strict outer integration
+  event `event_type: "portal.projection"`. Ops Sync authenticates and records
+  that source event, validates the nested envelope, then privately invokes the
+  Client Worker's named portal-projection entrypoint.
 - `client.ledgetopdroneservices.com` is a legacy browser/public-share/session
   compatibility origin. It is never a machine projection endpoint. The Worker
   returns 404 for `/api/internal/*` on that origin even if edge admission is
   broader than intended.
-- The current HMAC secret and Access service-token secret stay server-side.
+- The Project Alpha event HMAC and Access service-token secret stay server-side.
   Never print, export, paste into evidence, or pass them on a command line.
 
-The receiver needs these non-secret values:
+The Client receiver retains the independent ingest flag:
 
 ```text
-PROJECT_ALPHA_PORTAL_APPLICATION_KEY
-PROJECT_ALPHA_PORTAL_ACCESS_TEAM_DOMAIN
-PROJECT_ALPHA_PORTAL_ACCESS_AUD
-PROJECT_ALPHA_PORTAL_HMAC_KEY_ID
 PROJECT_ALPHA_PORTAL_SYNC_ENABLED
 ```
 
-`PROJECT_ALPHA_PORTAL_HMAC_SECRET` is the required 32-or-more-byte secret. The
-`PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_KEY_ID` and
-`PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_SECRET` pair is optional and valid only for
-a bounded rotation overlap. Neither half is configured by itself, the previous
-ID differs from the current ID, and no previous pair is created for an initial
-activation.
+The Ops Sync service binding and named entrypoint are the private internal trust
+boundary. There is no Project Alpha portal base URL, portal key ID, portal HMAC
+secret, or portal-specific Access application. Rotation of the existing
+External Operations credentials follows the Ops Sync runbook and must preserve
+queued event compatibility.
 
 The checked-in production configuration is the receiver-only state: portal
 sync and schema-v3 relation ingestion are true, while client hierarchy reads,
@@ -46,15 +45,10 @@ automatic identity eligibility, content grants, requests, notifications,
 membership management, invitations, and delegated sharing remain false.
 The committed `scripts/client-portal-release-profile.json` explicitly selects
 `receiver-only`. It is a versioned release-intent declaration, not activation
-approval or production evidence. `npm run deploy` is the only supported production release command. Its
-repository-owned wrapper executes `deploy:preflight` first and refuses to deploy
-unless the remote Worker secret inventory contains the current HMAC secret. A
-direct Wrangler invocation bypasses this gate and is not an approved release
-path. Cloudflare does not expose secret values for readback, so the Worker independently rejects
-a missing, short, oversized, control-character-containing, or whitespace-padded
-value with HTTP 503 `portal-receiver-misconfigured` and a redacted structured
-reason before Access verification, body reads, or D1 access. Do not enable the
-producer after that response; correct the secret and redeploy.
+approval or production evidence. Repository-owned release checks must verify
+the exact Ops Sync-to-Client service binding and named entrypoint before either
+Worker is deployed. A missing or mismatched binding must fail closed without
+acknowledging the Project Alpha event.
 
 ## Runtime gates
 
@@ -88,7 +82,8 @@ never save secret values or complete authentication headers.
    exact commit. Record the currently active Worker version for rollback.
 2. Run the Client typecheck and focused projection, origin-policy, and Worker
    tests against that exact artifact. Confirm the shared schema-v2 and schema-v3
-   fixtures pass unchanged in both repositories.
+   fixtures pass unchanged in both repositories. Also prove that Project Alpha's
+   producer target is Ops Sync and that no direct `portal.*` target is present.
 3. Run `npx.cmd wrangler d1 migrations list client-data --remote` from
    `apps/client`. It must report no pending migrations for the reviewed artifact,
    including `0121_client_workspace_hierarchy_v2.sql`,
@@ -97,27 +92,26 @@ never save secret values or complete authentication headers.
    dormant v4 extension, also confirm
    `0190_portal_contact_assignments_v4.sql` is applied. Do not activate against a partially
    migrated database and do not roll migrations back.
-4. Read back Worker custom domains/routes. Confirm the canonical
+4. Read back Worker custom domains/routes. Confirm Project Alpha's only ingress
+   is the existing Ops Sync route and its Access application/audience are
+   unchanged. Confirm the canonical
    `portal.ledgetopdroneservices.com` custom domain reaches `ltds-clients`, the
    legacy `client.ledgetopdroneservices.com` compatibility domain still reaches
    the same Worker, and no unrelated hostname routes to the internal namespace.
-5. Read back the path-specific Access application, its Service Auth policy, and
-   its audience. Confirm the path is exactly
-   `portal.ledgetopdroneservices.com/api/internal/project-alpha/*`, the audience
-   equals `PROJECT_ALPHA_PORTAL_ACCESS_AUD`, only the approved machine identity
-   is admitted, and no browser/human policy is present. Confirm the Ops Sync
-   Access application and audience are unchanged.
-6. Check configuration by name and presence only. Confirm all five non-secret
-   values above are non-empty and exact; confirm the current HMAC secret exists
-   without reading it. If rotation is planned, confirm both previous values are
-   present and internally paired; otherwise confirm both are absent. Confirm the
-   two service-assignment flags remain false.
-   From `apps/client`, run `npm run deploy:preflight`. It calls
-   `wrangler secret list --format json`, validates only secret names, and prints
-   no secret values. A missing current secret, an orphaned previous secret, or
-   any disallowed adjacent client-authority/workflow flag fails the preflight.
-   The fixed committed profile and both local Worker configurations are validated
-   before inventory access; deployed configuration still requires separate readback.
+5. Read back the Operations-owned internal route/binding and confirm only Ops
+   Sync can invoke it. Confirm external requests to
+   `portal.ledgetopdroneservices.com/api/internal/project-alpha/*` are not a
+   supported producer path. If an old path-specific Access application still
+   exists, keep it deny-only during transition and remove it only in a separately
+   reviewed cleanup after queued work is drained.
+6. Check configuration by name and presence only. Confirm the Project Alpha
+   connection still targets the exact Ops Sync webhook and uses the existing
+   application key. Confirm Ops Sync has the reviewed Client Worker service
+   binding and named entrypoint, and the two service-assignment flags remain
+   false. The release preflight must reject a missing/misdirected binding, an
+   enabled external portal ingress, or any disallowed adjacent
+   client-authority/workflow flag. Deployed configuration still requires
+   separate readback.
 7. Confirm the receiver-only version has all projection configuration present
    with `PROJECT_ALPHA_PORTAL_SYNC_ENABLED=true`,
    `CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED=true`, and
@@ -125,13 +119,14 @@ never save secret values or complete authentication headers.
    enumerated by the preflight remains false.
 8. Before activating this version, probe the currently deployed false state
    without sensitive logging:
-   - missing or invalid Service Token at the canonical endpoint is denied by
-     Access and never reaches the Worker;
-   - a valid Service Token at the canonical endpoint receives Worker 404 because
-     ingress is false;
-   - `/api/internal/project-alpha/portal-v2` on the legacy origin receives
-     Worker 404 if it reaches the Worker and never receives a projection-handler
-     response; and
+   - missing or invalid Project Alpha Service Token at Ops Sync is denied and
+     never creates an Operations or portal receipt;
+   - a valid Project Alpha event with an invalid event HMAC is rejected without
+     an internal delivery;
+   - an authenticated Ops Sync event receives a retryable failure, not a false
+     acknowledgement, when the internal Client receiver is disabled;
+   - external `/api/internal/project-alpha/portal-v2` requests on every portal
+     or legacy origin receive no projection-handler response; and
    - an existing legacy public share loads, and its same-origin session request
      remains admitted. Do not include share fragments or cookies in evidence.
 
@@ -140,24 +135,26 @@ never save secret values or complete authentication headers.
 Each numbered state is a separately reviewed Worker version. Do not edit live
 variables in place and do not enable the Project Alpha producer before step 4.
 
-1. Preserve the preflight version and evidence. Run `npm run deploy:preflight` against
-   the reviewed ingest-only configuration. It must confirm the remote current
-   secret name exists, both ingest flags are true, and all adjacent authority
-   and workflow flags remain false. Confirm the release diff contains no
-   unrelated configuration change.
-2. Activate that version on `ltds-clients` and read it back. Repeat the legacy
-   internal 404 and legacy public-share/session checks before sending a valid
+1. Preserve the preflight version and evidence. Run the repository-owned release
+   preflight against the reviewed ingest-only configuration. It must confirm the
+   exact private service binding, both ingest flags are true, no direct portal
+   producer route is enabled, and all adjacent authority and workflow flags
+   remain false. Confirm the release diff contains no unrelated configuration
+   change.
+2. Activate the paired reviewed versions on `ltds-clients` and `ltds-ops-sync`
+   and read back the private binding/entrypoint. Repeat the external internal-route
+   rejection and legacy public-share/session checks before sending a valid
    projection.
-3. At the canonical route, prove missing/wrong Access or HMAC material, an
-   unknown key ID, stale timestamp, wrong application key, changed body digest,
-   wrong delivery ID, and invalid schema are rejected with no receipt,
-   checkpoint, or active-generation change. Access/signature/key/timestamp
-   failures return 401 after Access admission; application/body/envelope failures
-   return 422; sequence/generation conflicts return 409.
-4. Authorize Project Alpha separately to use its canonical server-only base URL
-   and schema-v3 contract. Send one bounded staging-equivalent production
-   preflight delivery, then reconcile one pilot workspace. Do not disclose
-   Service Token or HMAC material in tickets, commands, logs, or screenshots.
+3. Prove missing/wrong Project Alpha Access or event HMAC, stale timestamp,
+   wrong application key, changed body digest, wrong delivery ID, wrong outer
+   event type, and invalid nested schema are rejected with no portal receipt,
+   checkpoint, or active-generation change. A source event is not acknowledged
+   as complete until its required private invocation is durable.
+4. Keep Project Alpha on its existing Ops Sync base URL and activate the reviewed
+   portal event types/schema on that single connection. Send one bounded
+   staging-equivalent event, verify Ops Sync's source receipt and internal
+   delivery receipt, then reconcile one pilot workspace. Do not disclose
+   Service Token or either HMAC in tickets, commands, logs, or screenshots.
 5. Verify every `snapshot.page` receipt and contiguous page count while the old
    active generation remains visible. Send `snapshot.activate` only after page
    count, record count, snapshot hash, root, relation, lifecycle, principal, and
@@ -231,21 +228,22 @@ deletes evidence.
    active/prior Worker version IDs, Access/DNS readbacks, receipts, checkpoints,
    and D1 evidence.
 2. Keep `PROJECT_ALPHA_PORTAL_SYNC_ENABLED=true` and
-   `CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED=true`; keep the canonical Access
-   application/audience and current signing key available. During a planned key
-   rotation, keep the valid previous pair available as well. This allows queued
-   revocation/tombstone deliveries to authenticate and parse.
+   `CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED=true`; keep the Ops Sync ingress
+   trust and private Client Worker binding available. During a planned External
+   Operations key rotation, keep the valid previous key available until queued
+   events drain. This allows queued revocation/tombstone deliveries to
+   authenticate and parse.
 3. Coordinate a producer stop, then drain already queued ordered deliveries and
    required tombstones. Confirm their receipts are complete, checkpoints are
-   contiguous, and no pending delivery still depends on the current or previous
-   key. Do not delete projection rows or D1 audit evidence.
+   contiguous, and no pending delivery still depends on a retiring External
+   Operations key. Do not delete projection rows or D1 audit evidence.
 4. Only after the producer is stopped and the drain is acknowledged, activate a
    reviewed receiver version with `PROJECT_ALPHA_PORTAL_SYNC_ENABLED=false`.
    The relation flag may return to false only after no schema-v3 delivery can
-   arrive. Retire previous-key material only after the same proof. Access/DNS
-   retirement is a separately approved final step, never the first rollback
-   action.
-5. Re-probe canonical false-state behavior, legacy internal 404, legacy public
+   arrive. Retire previous External Operations key material only after the same
+   proof. Access/DNS retirement is a separately approved final step, never the
+   first rollback action.
+5. Re-probe Ops Sync false-state behavior, external internal-route rejection, legacy public
    shares and same-origin sessions, Delivery health, and the final Worker/Access/
    flag state. Record the final state and the forward-fix owner.
 

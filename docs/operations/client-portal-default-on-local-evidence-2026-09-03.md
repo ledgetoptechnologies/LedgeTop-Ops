@@ -188,10 +188,10 @@ readiness pass.
 - Both Workers retain false hierarchy, automatic-eligibility, and identity-deny
   flags. Operations deny-management is false; Client's optional deny-management
   flag is absent. Client invitation email remains false.
-- The dedicated Worker secret-list API confirms that
-  `PROJECT_ALPHA_PORTAL_HMAC_SECRET` is absent from `ltds-clients`.
-  Only secret names/types were inspected, never secret values. The ordinary
-  Operations connection does not establish portal-signing readiness.
+- The dedicated Worker secret-list API confirmed that the now-superseded direct
+  portal HMAC was absent from `ltds-clients`. Only secret names/types were
+  inspected, never secret values. Under the corrected single-endpoint contract,
+  that absence is expected and is not a Project Alpha connection failure.
 - Client deployment `7885663d-ff10-4b8e-8f2a-1ef824474ef4` serves version
   `1580d13d-d857-419d-8913-77c3edae40f0` at 100%; Operations deployment
   `85e5416d-8b40-4e03-9d21-199ecbce2c0c` serves version
@@ -200,9 +200,11 @@ readiness pass.
   zero behind main `fcb7d61`, and Alpha six ahead, zero behind main `11fca5ff`.
   No release was pushed during this pass.
 
-Next: verify the primary Alpha producer's deployment-managed portal key and
-runtime configuration, pair its signing secret with the receiver without
-repurposing directory-sync credentials, then follow the recovery/migration and
+Superseded next step: this evidence originally called for a direct Project
+Alpha portal key. The corrected architecture keeps the primary Alpha producer
+on its existing Ops Sync connection and uses a private named Client Worker
+entrypoint with no second HMAC. Verify that Operations-owned binding, then
+follow the recovery/migration and
 coordinated release gates. Cloudflare account access alone does not grant access
 to the Project Alpha deployment environment. Do not activate eligibility or
 claim automatic provisioning until a signed generation is received and the
@@ -246,8 +248,9 @@ Fresh pinned dependencies on that isolated branch passed TypeScript, 69 focused
 ZIP/backend/client/concurrency tests, the production build, and two mocked
 desktop/mobile browser tests. This is stronger than the earlier integration
 branch result, but remains local evidence. Publication is held for the explicit
-maintenance-release decision because the normal portal receiver preflight still
-requires the absent signing secret. No running job was cancelled and no source
+maintenance-release decision because the then-current preflight required the
+now-superseded direct portal signing secret. That was not a missing Project Alpha
+connection secret. No running job was cancelled and no source
 objects or public-link authority were changed.
 
 ### Maintenance release decision and final state

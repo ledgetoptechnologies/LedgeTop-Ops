@@ -113,15 +113,20 @@ committed. Interrupted, partial, out-of-order, duplicated, or split-destination
 delivery retains the last-known-good authorization state and remains retryable.
 The existing v1 projection remains unchanged until portal-v2 parity is recorded.
 
-The LTDS receiver is implemented at
-`POST /api/internal/project-alpha/portal-v2` behind the independent exact flag
-`PROJECT_ALPHA_PORTAL_SYNC_ENABLED=false` and additive migration 0125. Receiver
-enablement does not enable `CLIENT_PORTAL_HIERARCHY_V2_ENABLED`. PA principal
+Project Alpha publishes every portal delivery as the strict outer integration
+event `event_type: "portal.projection"` through its one External Operations
+connection at Ops Sync. Ops Sync authenticates and records the source event,
+then privately invokes the Client Worker's named portal-projection entrypoint.
+Project Alpha does not call the Client Worker, an internal HTTP route, or a
+`portal.*` hostname directly. The internal receiver
+is behind the independent exact flag `PROJECT_ALPHA_PORTAL_SYNC_ENABLED=false`
+and additive migration 0125. Receiver enablement does not enable
+`CLIENT_PORTAL_HIERARCHY_V2_ENABLED`. PA principal
 rows are authorization intent only: an LTDS-controlled, provider-verified
 identity binding is required before any projected membership or entitlement is
 effective. Email hints and primary-contact flags never bind or grant access.
-The exact producer envelope and signing input are documented in
-[the Project Alpha integration guide](project-alpha.md).
+The Project Alpha event envelope and the distinct Operations-internal delivery
+envelope are documented in [the Project Alpha integration guide](project-alpha.md).
 
 Cross-repository compatibility is executable, not prose-only. The shared
 corpus contains strict positive and negative specimens for portal projection

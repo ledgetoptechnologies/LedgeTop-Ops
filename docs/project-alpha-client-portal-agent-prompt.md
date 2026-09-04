@@ -133,9 +133,14 @@ Implement this as additive, default-off, independently gated capabilities:
      outbox write must fail the sensitive mutation rather than silently pass.
 
 2. **Portal-v2 hierarchy projection publisher**
-   - Implement the signed, ordered, complete-generation snapshot and
-     incremental event publisher for LTDS
-     `POST /api/internal/project-alpha/portal-v2` exactly as documented.
+   - Extend the existing signed, ordered event/outbox publisher behind Project
+     Alpha's single External Operations connection. Publish portal hierarchy,
+     membership, entitlement, and revocation deliveries as the strict outer
+     integration event `event_type: "portal.projection"` only to the configured
+     Ops Sync `POST /v1/project-alpha/events` destination. Do not add a portal base
+     URL, a direct Client Worker call, or a second administrator-facing
+     integration profile. Ops Sync owns validation and private invocation of the
+     Client Worker's named portal-projection entrypoint.
    - Publish strict schema v3 only for the separately gated relation contract.
      Resources include organization, standalone client, department, client,
      contact, project, versioned `contains`/`contact_assignment` edges, one
@@ -264,10 +269,13 @@ Implement this as additive, default-off, independently gated capabilities:
      requires.
 
 6. **Integration security and operations**
-   - Use separate credentials/scopes/secrets for portal projection, catalog
-     projection, pricing preview, and draft creation. Portal projection uses
-     its own Access service application/token, application key, and HMAC
-     secret. The exact PA API scopes are `portal.catalog.publish`,
+   - Project Alpha uses the existing External Operations Service Auth identity,
+     application key, and event HMAC for all outbound Operations events,
+     including portal projection events. Do not configure a portal-specific
+     Access application, token, base URL, or HMAC secret in Project Alpha.
+     Operations uses a private service binding, not another credential, for its
+     internal Client Worker hop. Keep unrelated catalog, pricing preview, and
+     draft creation credentials separate. The exact PA API scopes are `portal.catalog.publish`,
      `portal.pricing.preview`, and `portal.quote-draft.create`; do not invent a
      shared replacement scope. A broad/full key must not implicitly inherit a
      write scope.

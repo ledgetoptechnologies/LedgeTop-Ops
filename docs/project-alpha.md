@@ -122,48 +122,26 @@ has `geometryRequirement: "required"` and no validated Mapbox polygon is stored.
 
 ## Portal hierarchy and entitlement projection (implemented, disabled)
 
-LTDS accepts the portal-v2 projection only at
-`POST https://portal.ledgetopdroneservices.com/api/internal/project-alpha/portal-v2`.
-The endpoint is part of Project Alpha's single administrator-facing External
-operations connection, while retaining a path-scoped service-auth audience and
-signing key internally. The receiver hard-404s before
-reading the request body or D1 unless `PROJECT_ALPHA_PORTAL_SYNC_ENABLED` is
-exactly `true` and all five dedicated configuration values are present:
+Project Alpha has one outbound External Operations connection. It posts signed
+events only to `POST https://ops-sync.ledgetopdroneservices.com/v1/project-alpha/events`
+using that connection's application key, Service Auth identity, and event HMAC.
+Portal hierarchy, membership, entitlement, and revocation changes are event
+types on that connection; they are not a second Project Alpha destination.
 
-```text
-PROJECT_ALPHA_PORTAL_APPLICATION_KEY
-PROJECT_ALPHA_PORTAL_ACCESS_TEAM_DOMAIN
-PROJECT_ALPHA_PORTAL_ACCESS_AUD
-PROJECT_ALPHA_PORTAL_HMAC_KEY_ID
-PROJECT_ALPHA_PORTAL_HMAC_SECRET (32+ bytes, secret)
-PROJECT_ALPHA_PORTAL_SYNC_ENABLED=false
-```
+Project Alpha wraps each portal delivery as the strict outer integration event
+`event_type: "portal.projection"`. That outer event is authenticated exactly
+like every other External Operations event; Project Alpha adds no portal URL,
+portal Access audience, portal key ID, or portal HMAC secret.
 
-An optional, distinct `PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_KEY_ID` plus
-`PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_SECRET` provides the same bounded overlap
-window as catalog delivery. Supplying only half the pair, reusing the current
-ID, or sending any unconfigured key ID fails closed.
-
-The path-scoped Access application may reuse the existing Project Alpha service
-token identity from Ops Sync, but it has its own audience and grants access only
-to `portal.ledgetopdroneservices.com/api/internal/project-alpha/*`. The sender
-uses `EXTERNAL_OPS_CLIENT_PORTAL_BASE_URL` to select this canonical host. This
-flag only opens the server-to-server inbox. It does not enable client
-hierarchy reads; `CLIENT_PORTAL_HIERARCHY_V2_ENABLED` remains an independent,
-default-off authorization cutover. Use a separate Access service application,
-application key, audience, and HMAC secret from catalog, pricing, draft-quote,
-Operations projection, and browser credentials. Reusing the established
-Project Alpha service-token identity does not authorize any browser session.
-
-Requests are JSON up to 256 KiB. The Access assertion must have the configured
-exact issuer and audience. Headers use the same neutral projection set as the
-catalog: application key, current ISO timestamp, exact-body SHA-256, bounded key
-ID, body-matching delivery ID, and signature:
-
-```text
-X-Portal-Integration-Signature: sha256=<lowercase HMAC-SHA-256 hex>
-signature input: <timestamp>\nPOST\n/api/internal/project-alpha/portal-v2\n<keyId>\n<deliveryId>\n<exact body bytes>
-```
+After Ops Sync authenticates and durably records the outer source event, it
+validates the nested portal contract and privately invokes the Client Worker's
+named portal-projection entrypoint. This Worker-to-Worker invocation is not a
+public HTTP route and does not require a second Project Alpha credential. The
+Client receiver is still independently gated by
+`PROJECT_ALPHA_PORTAL_SYNC_ENABLED`; enabling ingestion does not enable client
+hierarchy reads. `CLIENT_PORTAL_HIERARCHY_V2_ENABLED` remains an independent,
+default-off authorization cutover. Neither the Project Alpha machine identity
+nor successful internal invocation authorizes a browser session.
 
 The strict schema-v2 envelope carries an opaque `workspaceId`, delivery ID,
 source generation, and monotonic per-workspace source sequence. A snapshot page

@@ -33,7 +33,11 @@ mutate production.
 Project Alpha's current onboarding, approval, project, contract, and document
 workflows are authoritative. Portal integration changes must compose on top of
 them through the single External Operations profile; they must not replace,
-fork, or reimplement those workflows in Operations or Client.
+fork, or reimplement those workflows in Operations or Client. The producer must
+emit outer `portal.projection` events to its exact configured Ops Sync webhook;
+Ops Sync validates that existing Access/HMAC contract and privately invokes the
+Client Worker named entrypoint. A direct Project Alpha-to-portal connection is
+an acceptance failure.
 
 ## Evidence states
 

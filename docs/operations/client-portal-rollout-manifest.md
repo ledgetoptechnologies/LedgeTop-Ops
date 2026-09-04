@@ -14,8 +14,11 @@ The 3D Viewer is outside this manifest while Hermes owns that work.
   producer identities, contacts, projects, portal authority, or billing by
   matching names or email addresses.
 - Project Alpha's current onboarding, approval, project, contract, and document
-  workflows are authoritative. The portal producer composes through the single
-  External Operations profile and must not overwrite or fork those workflows.
+  workflows are authoritative. Every Project Alpha outbound event, including
+  portal hierarchy and revocation data, composes through the single External
+  Operations profile and Ops Sync endpoint. Project Alpha never calls the
+  Client Worker or a `portal.*` hostname directly and must not overwrite or fork
+  those workflows.
 - Contact assignments and service assignments are factual metadata. Neither is
   an access grant, notification policy, billing authority, delivery recipient,
   or request entitlement.
@@ -93,8 +96,10 @@ emergency operation, not the ordinary rollback for additive migrations.
    and Operations through `0052`, plus Project Alpha `0083`. The populated
    `0195` upgrade must prove stale bootstrap authority is invalidated while
    signed native successors and public-link records are preserved.
-4. Provision the exact connector envelope and portal HMAC/service credentials
-   independently. Do not reuse a read-only Project Alpha API key.
+4. Preserve the exact Project Alpha-to-Ops-Sync connector envelope. Configure
+   the private Ops-Sync-to-Client Worker binding and named entrypoint on the
+   Operations side only. Do not add another Project Alpha destination, a second
+   HMAC, or reuse a read-only Project Alpha API key.
 5. Prove signed snapshot, checkpoint selection, recovery, tombstone, replay, and
    root revocation with consumers still off.
 
