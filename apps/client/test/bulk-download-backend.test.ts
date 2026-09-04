@@ -4,6 +4,7 @@ import deliveryWranglerConfig from "../wrangler.jsonc?raw";
 vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {} }));
 
 import deliveryWorker, {
+  BULK_CACHE_CLEANUP_MAX_D1_QUERIES,
   bulkQuotaRetryAfterSeconds,
   bulkDownloadResumeExpiresAt,
   bulkJobProgress,
@@ -15,6 +16,7 @@ import deliveryWorker, {
 import { encodeItemRef } from "../src/worker/files";
 import { BULK_DOWNLOAD_RESUME_COOKIE, createBulkDownloadResumeCookie, createSessionCookie } from "../src/worker/security";
 import {
+  aliasKeysForPhysicalKeys,
   assemblyProgressBytes,
   BULK_DOWNLOAD_CACHE_RETENTION_MS,
   BULK_DOWNLOAD_RETENTION_DURATION,
@@ -22,6 +24,7 @@ import {
   classifyWorkflowFailure,
   crcProgressBytes,
   estimateBulkPreparation,
+  estimateOnePassBulkPreparation,
   MAX_ARCHIVE_SOURCE_BYTES,
   partitionBulkSnapshot,
   planCrcWorkUnits,
@@ -454,6 +457,7 @@ describe("bulk-download snapshot identities", () => {
     aliases: Array<{ physical_key: string; display_name: string }> = [],
   ) {
     const listPrefixes: string[] = [];
+    let aliasQueries = 0;
     const database = {
       prepare(query: string) {
         const statement = {
@@ -462,6 +466,7 @@ describe("bulk-download snapshot identities", () => {
             return (query.includes("FROM shares s JOIN projects") ? { id: share.id, share_version: share.share_version, r2_prefix: share.r2_prefix } : null) as T | null;
           },
           async all<T>() {
+            if (query.includes("FROM file_aliases")) aliasQueries += 1;
             return { results: (query.includes("FROM file_aliases") ? aliases : []) as T[] };
           },
         };
@@ -479,7 +484,7 @@ describe("bulk-download snapshot identities", () => {
         },
       },
     } as unknown as Env;
-    return { env, listPrefixes };
+    return { env, listPrefixes, aliasQueries: () => aliasQueries };
   }
 
   it("stores the unquoted R2 etag and does not expand an exact file into prefix siblings", async () => {
@@ -565,6 +570,34 @@ describe("bulk-download snapshot identities", () => {
     const oversizedSnapshot = await snapshot(tooLarge.env, baseJob);
     expect(partitionBulkSnapshot(oversizedSnapshot)).toHaveLength(2);
   });
+
+  it("bulk-loads aliases for a deep 10,626-file tree within snapshot-selection's D1 query budget", async () => {
+    const listed = Array.from({ length: 10_626 }, (_, index) => ({
+      key: `jobs/client/u${String(index).padStart(5, "0")}/a/b/c/d/e/f/g/h/file.bin`,
+      size: 0, etag: `etag-${index}`, httpEtag: `"etag-${index}"`,
+    }));
+    const value = snapshotEnv("", null, listed);
+    const result = await snapshot(value.env, {
+      id: "job-deep", share_id: share.id, share_version: share.share_version,
+      request_json: JSON.stringify({ all: true }), manifest_key: "manifest", archive_key: "archive",
+    });
+    const estimate = estimateOnePassBulkPreparation(result.sources);
+    expect(result.sources).toHaveLength(10_626);
+    expect(value.aliasQueries()).toBe(estimate.snapshotAliasQueries - 3);
+    expect(value.aliasQueries()).toBe(7);
+    expect(estimate.snapshotAliasQueries).toBe(10);
+    expect(estimate.maximumD1QueriesPerStep).toBeLessThanOrEqual(975);
+  });
+
+  it("stops deep alias-prefix construction at its byte budget", () => {
+    expect(() => aliasKeysForPhysicalKeys([
+      "jobs/client/alpha/bravo/charlie/delta/echo/file.bin",
+      "jobs/client/foxtrot/golf/hotel/india/juliet/file.bin",
+    ], 128)).toThrow("manifest-capacity");
+    expect(aliasKeysForPhysicalKeys(["jobs/client/file.bin"], 128)).toEqual([
+      "jobs/", "jobs/client/", "jobs/client/file.bin",
+    ]);
+  });
 });
 
 describe("bulk-download CRC source reads", () => {
@@ -594,6 +627,8 @@ describe("bulk-download failures and cleanup", () => {
     expect(BULK_DOWNLOAD_RETENTION_MS).toBe(7 * 24 * 60 * 60 * 1000);
     expect(BULK_DOWNLOAD_RETENTION_DURATION).toBe("7 days");
     expect(BULK_DOWNLOAD_CACHE_RETENTION_MS).toBe(30 * 24 * 60 * 60 * 1000);
+    expect(BULK_CACHE_CLEANUP_MAX_D1_QUERIES).toBe(365);
+    expect(BULK_CACHE_CLEANUP_MAX_D1_QUERIES).toBeLessThanOrEqual(975);
   });
 
   it("extends resumable authorization through archive retention without passing share expiry", () => {
@@ -624,7 +659,7 @@ describe("bulk-download failures and cleanup", () => {
   });
 
   it("deletes artifacts for expired active jobs, marks them expired, and prunes old quotas", async () => {
-    const deleted: string[][] = [];
+    const deleted: Array<string | string[]> = [];
     const aborted: Array<{ key: string; uploadId: string }> = [];
     const queries: Array<{ query: string; values: unknown[] }> = [];
     const database = {
@@ -632,18 +667,27 @@ describe("bulk-download failures and cleanup", () => {
         const record = { query, values: [] as unknown[] }; queries.push(record);
         const statement = {
           bind(...values: unknown[]) { record.values = values; return statement; },
+          async first<T>() { return null as T|null; },
           async all<T>() {
             if (query.includes("bulk_download_archive_cache")) return { results: [] as T[] };
+            if (query.includes("bulk_download_archive_generations")) return { results: [] as T[] };
             if (query.includes("status='expired'")) {
               return { results: [{ manifest_key: "tmp/job/manifest.json", archive_key: "tmp/job/archive.zip", archive_fingerprint: null, multipart_upload_id: "upload-1" }] as T[] };
             }
             return { results: [{ manifest_key: "tmp/active/manifest.json", archive_key: "tmp/active/archive.zip" }] as T[] };
           },
-          async run() { return { meta: { changes: 1 } }; },
+          async run() {
+            const isProtectedArchiveClaim = query.includes("UPDATE bulk_download_archive_generations")
+              && record.values.includes("tmp/active/archive.zip");
+            return { meta: { changes: isProtectedArchiveClaim ? 0 : 1 } };
+          },
         };
         return statement;
       },
       withSession() { return database; },
+      async batch(statements: Array<{ run(): Promise<unknown> }>) {
+        return Promise.all(statements.map(statement => statement.run()));
+      },
     };
     const env = {
       DELIVERY_DB: database,
@@ -656,8 +700,8 @@ describe("bulk-download failures and cleanup", () => {
           if (options.prefix.includes("bulk-download-cache")) return { objects: [], truncated: false };
           return {
             objects: [
-              { key: "tmp/orphan/archive.zip", uploaded: new Date("2026-07-25T00:00:00Z") },
-              { key: "tmp/active/archive.zip", uploaded: new Date("2026-07-25T00:00:00Z") },
+              { key: "tmp/orphan/archive.zip", etag: "orphan-etag", size: 100, uploaded: new Date("2026-07-25T00:00:00Z") },
+              { key: "tmp/active/archive.zip", etag: "active-etag", size: 100, uploaded: new Date("2026-07-25T00:00:00Z") },
               { key: "tmp/active/manifest.json.final.json", uploaded: new Date("2026-07-25T00:00:00Z") },
             ],
             truncated: false,
@@ -686,17 +730,26 @@ describe("bulk-download failures and cleanup", () => {
       prepare(query: string) {
         const statement = {
           bind() { return statement; },
+          async first<T>() { return null as T|null; },
           async all<T>() {
             if (query.includes("FROM bulk_download_archive_cache WHERE")) return { results: [{
-              share_id: "share", share_version: 1, selection_fingerprint: "a".repeat(64), archive_key: "_ltds/bulk-download-cache/a.zip", expires_at: "2026-07-01T00:00:00Z",
+              share_id: "share", share_version: 1, selection_fingerprint: "a".repeat(64), archive_key: "_ltds/bulk-download-cache/a.zip",
+              archive_etag: "etag-a", archive_size: 100, expires_at: "2026-07-01T00:00:00Z",
             }] as T[] };
             return { results: [] as T[] };
           },
-          async run() { return { meta: { changes: query.includes("DELETE FROM bulk_download_archive_cache") ? Number(claimed) : 1 } }; },
+          async run() {
+            const isClaimStatement = query.includes("DELETE FROM bulk_download_archive_cache")
+              || query.includes("UPDATE bulk_download_archive_generations");
+            return { meta: { changes: isClaimStatement ? Number(claimed) : 1 } };
+          },
         };
         return statement;
       },
       withSession() { return database; },
+      async batch(statements: Array<{ run(): Promise<unknown> }>) {
+        return Promise.all(statements.map(statement => statement.run()));
+      },
     };
     await cleanupTemporaryZips({
       DELIVERY_DB: database,
@@ -706,5 +759,227 @@ describe("bulk-download failures and cleanup", () => {
       },
     } as unknown as Env, Date.UTC(2026, 6, 27, 12));
     expect(deleted).toEqual(claimed ? ["_ltds/bulk-download-cache/a.zip"] : []);
+  });
+
+  it("does not delete an orphan candidate when reuse claims it after the R2 snapshot", async () => {
+    const archiveKey = "_ltds/bulk-download-cache/a.zip";
+    const deleted: Array<string | string[]> = [];
+    let reuseClaimed = false;
+    let generationClaimSql = "";
+    const database = {
+      prepare(query: string) {
+        const statement = {
+          bind() { return statement; },
+          async first<T>() { return null as T|null; },
+          async all<T>() { return { results: [] as T[] }; },
+          async run() {
+            if (query.includes("UPDATE bulk_download_archive_generations")) {
+              generationClaimSql = query;
+              // The reuse transaction has atomically renewed the cache row and
+              // persisted B's running-job archive_key since cleanup listed R2.
+              const guardsLiveReferences = query.includes("bulk_download_archive_cache")
+                && query.includes("bulk_download_jobs") && query.includes("state IN ('active','deleting')");
+              return { meta: { changes: reuseClaimed && guardsLiveReferences ? 0 : 1 } };
+            }
+            return { meta: { changes: 1 } };
+          },
+        };
+        return statement;
+      },
+      withSession() { return database; },
+      async batch(statements: Array<{ run(): Promise<unknown> }>) {
+        return Promise.all(statements.map(statement => statement.run()));
+      },
+    };
+    await cleanupTemporaryZips({
+      DELIVERY_DB: database,
+      DATA_BUCKET: {
+        async delete(keys: string | string[]) { deleted.push(keys); },
+        async list(options: { prefix: string }) {
+          if (options.prefix === "_ltds/bulk-download-cache/") {
+            reuseClaimed = true;
+            return { objects: [{ key: archiveKey, etag: "etag-a", size: 100, uploaded: new Date("2026-07-25T00:00:00Z") }], truncated: false };
+          }
+          return { objects: [], truncated: false };
+        },
+      },
+    } as unknown as Env, Date.UTC(2026, 6, 27, 12));
+    expect(reuseClaimed).toBe(true);
+    expect(generationClaimSql).toContain("NOT EXISTS (SELECT 1 FROM bulk_download_jobs");
+    expect(deleted).not.toContain(archiveKey);
+  });
+
+  it("rotates the orphan scan past a full protected page", async () => {
+    const prefix = "_ltds/bulk-download-cache/";
+    const protectedKeys = new Set(Array.from({ length: 50 }, (_, index) => `${prefix}${String(index).padStart(3, "0")}.zip`));
+    const orphanKey = `${prefix}050.zip`;
+    const objects = [...protectedKeys, orphanKey].map(key => ({
+      key, etag: `etag-${key}`, size: 100, uploaded: new Date("2026-07-25T00:00:00Z"),
+    }));
+    const cursors = new Map<string, string>();
+    const startAfterValues: Array<string | undefined> = [];
+    const deleted: Array<string | string[]> = [];
+    const database = {
+      prepare(query: string) {
+        let values: unknown[] = [];
+        const statement = {
+          bind(...bound: unknown[]) { values = bound; return statement; },
+          async first<T>() {
+            if (query.includes("bulk_download_cleanup_cursors")) {
+              const cursor = cursors.get(String(values[0]));
+              return (cursor === undefined ? null : { cursor }) as T | null;
+            }
+            return null;
+          },
+          async all<T>() { return { results: [] as T[] }; },
+          async run() {
+            if (query.includes("INSERT INTO bulk_download_cleanup_cursors")) cursors.set(String(values[0]), String(values[1]));
+            if (query.includes("UPDATE bulk_download_archive_generations")) {
+              const key = String(values[1]);
+              const guardsReferences = query.includes("bulk_download_archive_cache") && query.includes("bulk_download_jobs");
+              return { meta: { changes: protectedKeys.has(key) && guardsReferences ? 0 : 1 } };
+            }
+            return { meta: { changes: 1 } };
+          },
+        };
+        return statement;
+      },
+      withSession() { return database; },
+      async batch(statements: Array<{ run(): Promise<unknown> }>) {
+        return Promise.all(statements.map(statement => statement.run()));
+      },
+    };
+    const env = {
+      DELIVERY_DB: database,
+      DATA_BUCKET: {
+        async delete(keys: string | string[]) { deleted.push(keys); },
+        async list(options: { prefix: string; startAfter?: string }) {
+          if (options.prefix !== prefix) return { objects: [], truncated: false };
+          startAfterValues.push(options.startAfter);
+          return { objects: objects.filter(object => !options.startAfter || object.key > options.startAfter), truncated: false };
+        },
+      },
+    } as unknown as Env;
+
+    await cleanupTemporaryZips(env, Date.UTC(2026, 6, 27, 12));
+    expect(deleted).not.toContain(orphanKey);
+    expect(cursors.get("orphan-r2")).toBe(`${prefix}049.zip`);
+
+    await cleanupTemporaryZips(env, Date.UTC(2026, 6, 27, 13));
+    expect(startAfterValues).toEqual([undefined, `${prefix}049.zip`]);
+    expect(deleted).toContain(orphanKey);
+  });
+
+  it("retains a deleting intent after an R2 failure and retries it idempotently", async () => {
+    const archiveKey = "_ltds/bulk-download-cache/retry.zip";
+    let deletingIntent = true;
+    let failDelete = true;
+    let deleteAttempts = 0;
+    const database = {
+      prepare(query: string) {
+        const statement = {
+          bind() { return statement; },
+          async first<T>() { return null as T|null; },
+          async all<T>() {
+            if (query.includes("state='deleting'")) return { results: deletingIntent ? [{ archive_key: archiveKey }] as T[] : [] as T[] };
+            return { results: [] as T[] };
+          },
+          async run() {
+            if (query.startsWith("DELETE FROM bulk_download_archive_generations")) deletingIntent = false;
+            return { meta: { changes: 1 } };
+          },
+        };
+        return statement;
+      },
+      withSession() { return database; },
+      async batch(statements: Array<{ run(): Promise<unknown> }>) {
+        return Promise.all(statements.map(statement => statement.run()));
+      },
+    };
+    const env = {
+      DELIVERY_DB: database,
+      DATA_BUCKET: {
+        async delete(key: string | string[]) {
+          if (key === archiveKey) {
+            deleteAttempts += 1;
+            if (failDelete) throw new Error("transient R2 failure");
+          }
+        },
+        async list() { return { objects: [], truncated: false }; },
+      },
+    } as unknown as Env;
+
+    await cleanupTemporaryZips(env, Date.UTC(2026, 6, 27, 12));
+    expect(deleteAttempts).toBe(1);
+    expect(deletingIntent).toBe(true);
+
+    failDelete = false;
+    await cleanupTemporaryZips(env, Date.UTC(2026, 6, 27, 13));
+    expect(deleteAttempts).toBe(2);
+    expect(deletingIntent).toBe(false);
+  });
+
+  it("rotates past a full page of failed deletion intents", async () => {
+    const failedKeys = new Set(Array.from({ length: 50 }, (_, index) => `cache/${String(index).padStart(3, "0")}.zip`));
+    const laterKey = "cache/050.zip";
+    const deleting = new Set([...failedKeys, laterKey]);
+    const cursors = new Map<string, string>();
+    const deleted: string[] = [];
+    const database = {
+      prepare(query: string) {
+        let values: unknown[] = [];
+        const statement = {
+          bind(...bound: unknown[]) { values = bound; return statement; },
+          async first<T>() {
+            if (query.includes("bulk_download_cleanup_cursors")) {
+              const cursor = cursors.get(String(values[0]));
+              return (cursor === undefined ? null : { cursor }) as T | null;
+            }
+            return null;
+          },
+          async all<T>() {
+            if (query.includes("FROM bulk_download_archive_generations")) {
+              const cursor = String(values[0] || "");
+              const keys = [...deleting].sort();
+              const rotated = [...keys.filter(key => key > cursor), ...keys.filter(key => key <= cursor)].slice(0, 50);
+              return { results: rotated.map(archive_key => ({ archive_key })) as T[] };
+            }
+            return { results: [] as T[] };
+          },
+          async run() {
+            if (query.includes("INSERT INTO bulk_download_cleanup_cursors")) cursors.set(String(values[0]), String(values[1]));
+            if (query.startsWith("DELETE FROM bulk_download_archive_generations")) deleting.delete(String(values[0]));
+            return { meta: { changes: 1 } };
+          },
+        };
+        return statement;
+      },
+      withSession() { return database; },
+      async batch(statements: Array<{ run(): Promise<unknown> }>) {
+        return Promise.all(statements.map(statement => statement.run()));
+      },
+    };
+    const env = {
+      DELIVERY_DB: database,
+      DATA_BUCKET: {
+        async delete(key: string | string[]) {
+          if (typeof key === "string") {
+            if (failedKeys.has(key)) throw new Error("transient R2 failure");
+            deleted.push(key);
+          }
+        },
+        async list() { return { objects: [], truncated: false }; },
+      },
+    } as unknown as Env;
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await cleanupTemporaryZips(env, Date.UTC(2026, 6, 27, 12));
+      expect(deleted).not.toContain(laterKey);
+      expect(cursors.get("deleting")).toBe("cache/049.zip");
+      await cleanupTemporaryZips(env, Date.UTC(2026, 6, 27, 13));
+      expect(deleted).toContain(laterKey);
+    } finally {
+      errorLog.mockRestore();
+    }
   });
 });

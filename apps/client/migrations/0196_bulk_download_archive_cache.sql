@@ -36,7 +36,31 @@ CREATE TABLE bulk_download_archive_cache (
 CREATE INDEX idx_bulk_download_archive_cache_expiry
   ON bulk_download_archive_cache(expires_at);
 
+-- Every completed generation has a durable lifecycle row. Reuse accepts only
+-- active generations; cleanup must atomically move one to deleting before R2.
+CREATE TABLE bulk_download_archive_generations (
+  archive_key TEXT PRIMARY KEY,
+  archive_etag TEXT NOT NULL,
+  archive_size INTEGER NOT NULL CHECK (archive_size > 0),
+  state TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active','deleting')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  deletion_started_at TEXT
+);
+INSERT INTO bulk_download_archive_generations(archive_key,archive_etag,archive_size)
+  SELECT archive_key,archive_etag,archive_size FROM bulk_download_archive_cache;
+CREATE INDEX idx_bulk_download_archive_generations_state
+  ON bulk_download_archive_generations(state,deletion_started_at);
+
 ALTER TABLE bulk_download_jobs ADD COLUMN archive_fingerprint TEXT
   CHECK (archive_fingerprint IS NULL OR length(archive_fingerprint) = 64);
 CREATE INDEX idx_bulk_download_jobs_archive_fingerprint
   ON bulk_download_jobs(share_id,share_version,archive_fingerprint,status,expires_at);
+CREATE INDEX idx_bulk_download_jobs_archive_key_live
+  ON bulk_download_jobs(archive_key,status,expires_at);
+
+-- Cleanup rotates through each candidate space instead of repeatedly starting
+-- from the first protected or transiently failing generation.
+CREATE TABLE bulk_download_cleanup_cursors (
+  scope TEXT PRIMARY KEY CHECK (scope IN ('deleting','expired-cache','orphan-r2')),
+  cursor TEXT NOT NULL DEFAULT ''
+);

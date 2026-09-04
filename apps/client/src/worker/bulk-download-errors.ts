@@ -24,6 +24,7 @@ export function classifyWorkflowFailure(rawError: string): BulkFailure {
     rawError === "manifest-capacity"
     || rawError === "workflow-step-capacity"
     || rawError === "subrequest-capacity"
+    || rawError === "d1-query-capacity"
     || rawError.includes("exceeded CPU time limit")
     || rawError.includes("exceededCpu")
     || rawError.includes("CPU time limit exceeded")
