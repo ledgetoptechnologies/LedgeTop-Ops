@@ -426,6 +426,91 @@ test("client audiences can be searched, reviewed, granted, revoked, and restored
     expectedContextVersion: "a".repeat(64), accessTerms: {kind: "customer", mode: "until_revoked", expiresAt: null}});
 });
 
+test("department audiences require an explicit reviewed grant and reviewed restore", async ({page}) => {
+  const departmentAudience = {type: "department" as const, publicId: "dept-athletics"};
+  let grants: ReturnType<typeof primaryGrant>[] = [];
+  const calls = await mockPrimary(page, (route, call) => {
+    if (call.path === "/api/delivery/authenticated-grants" && call.method === "GET") {
+      return route.fulfill({json: {...primaryContext, grants}});
+    }
+    if (call.path.endsWith("/authenticated-grants/audiences")) {
+      const url = new URL(route.request().url());
+      expect(url.searchParams.get("audienceType")).toBe("department");
+      return route.fulfill({json: {
+        folderBindingId: "binding-acme", workspaceId: "workspace-acme", workspaceLabel: "Acme Workspace", scopeTypeFilter: "department",
+        audiences: [{...departmentAudience, displayName: "Athletics"}],
+      }});
+    }
+    if (call.path.endsWith("/authenticated-grants/preview")) {
+      return route.fulfill({json: {
+        ...primaryPreview(call.body), audienceLabel: "Athletics", recipientCount: 0, dynamicAudience: true,
+        recipientPreview: {mode: "dynamic", currentAuthorizedCount: null, truncated: false},
+      }});
+    }
+    if (call.path === "/api/delivery/authenticated-grants" && call.method === "POST") {
+      const grant = primaryGrant({audience: departmentAudience, audienceLabel: "Athletics", accessTerms: call.body.accessTerms ?? null});
+      grants = [grant];
+      return route.fulfill({status: 201, json: {grant, replayed: false}});
+    }
+    if (call.path.endsWith("/grant-logical/revoke")) {
+      const grant = primaryGrant({...grants[0], audience: departmentAudience, audienceLabel: "Athletics", status: "revoked"});
+      grants = [grant];
+      return route.fulfill({json: {grant, replayed: false}});
+    }
+    if (call.path.endsWith("/grant-logical/restore")) {
+      const prior = grants[0]!;
+      const grant = primaryGrant({id: "grant-v2", version: 2, audience: departmentAudience, audienceLabel: "Athletics", accessTerms: call.body.accessTerms ?? null});
+      grants = [grant, prior];
+      return route.fulfill({status: 201, json: {grant, replayed: false}});
+    }
+    return undefined;
+  });
+
+  await openPrimary(page);
+  await page.getByRole("button", {name: "Department", exact: true}).click();
+  const search = page.getByRole("combobox", {name: "Search departments"});
+  await search.fill("Athletics");
+  await expect(page.getByRole("option", {name: /Athletics/})).toBeVisible();
+  await search.press("ArrowDown");
+  await page.keyboard.press("Enter");
+  await expect(page.getByText(/All currently authorized members of this department/i)).toBeVisible();
+  await page.getByRole("combobox", {name: "Recipient role"}).selectOption("customer");
+  await page.getByRole("button", {name: "Review authenticated access"}).click();
+  let review = page.getByRole("region", {name: "Review authenticated portal access"});
+  await expect(review.locator("dt", {hasText: "Target type"}).locator("..").locator("dd")).toHaveText("Department");
+  await expect(review).toContainText("Athletics");
+  await page.getByRole("button", {name: "Grant authenticated access", exact: true}).click();
+  await expect(page.getByRole("status").filter({hasText: "Authenticated portal access granted"})).toBeVisible();
+  expect(calls.find(call => call.path === "/api/delivery/authenticated-grants" && call.method === "POST")?.body).toMatchObject({
+    audienceType: "department", audiencePublicId: "dept-athletics", expectedContextVersion: "a".repeat(64),
+    accessTerms: {kind: "customer", mode: "until_revoked", expiresAt: null},
+  });
+
+  page.once("dialog", dialog => dialog.accept());
+  await page.getByRole("button", {name: "Revoke", exact: true}).click();
+  await expect(page.getByRole("status").filter({hasText: "Authenticated portal access revoked"})).toBeVisible();
+  expect(calls.find(call => call.path.endsWith("/grant-logical/revoke"))?.body).toEqual({expectedVersion: 1, reasonCode: "client_delivery_access"});
+
+  await page.getByRole("button", {name: "Restore as new version"}).click();
+  await expect(page.getByRole("button", {name: "Department", exact: true})).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("combobox", {name: "Search departments"})).toHaveValue("Athletics");
+  await expect(page.getByRole("button", {name: "Restore authenticated access"})).toHaveCount(0);
+  await page.getByRole("combobox", {name: "Recipient role"}).selectOption("customer");
+  await page.getByRole("button", {name: "Review authenticated access"}).click();
+  review = page.getByRole("region", {name: "Review authenticated portal access"});
+  await expect(review).toContainText("Department");
+  await expect(review).toContainText("Athletics");
+  await page.getByRole("button", {name: "Restore authenticated access"}).click();
+  await expect(page.getByRole("status").filter({hasText: "restored as a new version"})).toBeVisible();
+  const history = page.getByLabel("Authenticated portal grant history");
+  await expect(history).toContainText("Acme Workspace · Department · active · version 2");
+  await expect(history).toContainText("Acme Workspace · Department · revoked · version 1");
+  expect(calls.find(call => call.path.endsWith("/grant-logical/restore"))?.body).toMatchObject({
+    expectedVersion: 1, expectedContextVersion: "a".repeat(64),
+    accessTerms: {kind: "customer", mode: "until_revoked", expiresAt: null},
+  });
+});
+
 test("workspace targeting keeps an individual exact and makes broader scopes an explicit choice", async ({page}) => {
   const calls = await mockPrimary(page, (route, call) => {
     if (call.path.endsWith("/authenticated-grants/audiences")) {
