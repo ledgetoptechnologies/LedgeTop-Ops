@@ -142,6 +142,32 @@ describe("authenticated delivery grant live authorization", () => {
     expect(await listAuthorizedAuthenticatedDeliveryPrefixes(env, principal, "workspace-a")).toEqual(new Set());
   });
 
+  it("authorizes a live department grant and fails closed across revoke and immutable restore", async () => {
+    await db.batch([
+      db.prepare(`INSERT INTO portal_v2_directory_entities(workspace_id,generation_id,entity_type,public_id,parent_public_id,display_name,source_version)
+        VALUES ('workspace-a','generation-a','department','department-a','org-a','Department A','department-v1')`),
+      db.prepare(`INSERT INTO portal_v2_directory_entities(workspace_id,generation_id,entity_type,public_id,parent_public_id,display_name,source_version)
+        VALUES ('workspace-a','generation-a','project','project-department','department-a','Department Project','project-department-v1')`),
+      db.prepare(`INSERT INTO portal_v2_entitlements(id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id)
+        VALUES ('delivery-department','workspace-a','identity-a','delivery.view','allow','project','project-department')`),
+      db.prepare(`INSERT INTO portal_v2_folder_bindings(id,workspace_id,owner_scope_type,owner_public_id,r2_prefix,source_version)
+        VALUES ('binding-department','workspace-a','project','project-department','clients/a/department/','binding-department-v1')`),
+      db.prepare(`INSERT INTO portal_v2_authenticated_delivery_grants(id,logical_grant_id,grant_version,workspace_id,folder_binding_id,binding_source_version,
+        audience_type,audience_public_id,audience_source_version,reason_code,created_by_staff_id)
+        VALUES ('grant-department-v1','grant-department',1,'workspace-a','binding-department','binding-department-v1','department','department-a','department-v1','client_delivery','staff-a')`),
+    ]);
+
+    expect(await authorizeAuthenticatedDeliveryGrant(env, principal, "workspace-a", "binding-department")).toBe(true);
+    await db.prepare(`UPDATE portal_v2_authenticated_delivery_grants SET status='revoked',revoked_at=datetime('now'),
+      revoked_by_staff_id='staff-a',revoke_reason_code='removed' WHERE id='grant-department-v1'`).run();
+    expect(await authorizeAuthenticatedDeliveryGrant(env, principal, "workspace-a", "binding-department")).toBe(false);
+    await db.prepare(`INSERT INTO portal_v2_authenticated_delivery_grants(id,logical_grant_id,grant_version,workspace_id,folder_binding_id,binding_source_version,
+      audience_type,audience_public_id,audience_source_version,reason_code,created_by_staff_id)
+      VALUES ('grant-department-v2','grant-department',2,'workspace-a','binding-department','binding-department-v1','department','department-a','department-v1','restored','staff-a')`).run();
+    expect(await authorizeAuthenticatedDeliveryGrant(env, principal, "workspace-a", "binding-department")).toBe(true);
+    expect(await authorizeAuthenticatedDeliveryGrant(env, {...principal, subject: "subject-b"}, "workspace-a", "binding-department")).toBe(false);
+  });
+
   it("rejects malformed expiry instead of failing open", async () => {
     await expect(db.prepare(`INSERT INTO portal_v2_authenticated_delivery_grants(id,logical_grant_id,grant_version,workspace_id,folder_binding_id,binding_source_version,
       audience_type,audience_public_id,audience_source_version,reason_code,expires_at,created_by_staff_id)
