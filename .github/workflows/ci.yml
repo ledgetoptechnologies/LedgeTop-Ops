@@ -68,9 +68,13 @@ jobs:
         run: npm run build
 
   operations-browser:
-    name: operations-browser
+    name: operations-browser-${{ matrix.project }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [desktop-edge, mobile-edge]
     steps:
       - name: Check out the exact commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -94,13 +98,13 @@ jobs:
 
       - name: Run Operations browser acceptance suite
         working-directory: apps/operations
-        run: npm run test:browser -- --workers=2
+        run: npm run test:browser -- --project=${{ matrix.project }} --workers=2
 
       - name: Upload browser failure evidence
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: operations-browser-${{ github.sha }}
+          name: operations-browser-${{ matrix.project }}-${{ github.sha }}
           path: apps/operations/test-results
           if-no-files-found: ignore
           retention-days: 14
