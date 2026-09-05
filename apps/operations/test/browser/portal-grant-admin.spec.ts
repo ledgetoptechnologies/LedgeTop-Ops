@@ -458,7 +458,7 @@ test("department audiences require an explicit reviewed grant and reviewed resto
       return route.fulfill({json: {grant, replayed: false}});
     }
     if (call.path.endsWith("/grant-logical/restore")) {
-      const prior = grants[0];
+      const prior = grants[0]!;
       const grant = primaryGrant({id: "grant-v2", version: 2, audience: departmentAudience, audienceLabel: "Athletics", accessTerms: call.body.accessTerms ?? null});
       grants = [grant, prior];
       return route.fulfill({status: 201, json: {grant, replayed: false}});
