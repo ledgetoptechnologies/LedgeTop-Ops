@@ -6,6 +6,7 @@ import {
   applyProjectAlphaDeliveryIntent,
   applyProjectAlphaDeliveryIntentRevoke,
   applyProjectAlphaDeliveryPreflight,
+  applyProjectAlphaDeliveryRpcBudget,
   resolveProjectAlphaDeliverySourceProof,
 } from "./project-alpha-delivery-intents";
 
@@ -49,10 +50,13 @@ export async function processProjectAlphaDeliveryIntentIngress(env:Env,value:unk
     const parsed=inputSchema.safeParse(value);
     if(!parsed.success)return{ok:false,protocolVersion:1,code:"invalid_rpc_envelope",retryable:false};
     const input=parsed.data;
+    if(input.intentKind!=="preflight"&&env.PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED!=="true")
+      return{ok:false,protocolVersion:1,code:"not_found_or_disabled",retryable:false};
     try{
+      const authority=await resolveProjectAlphaDeliverySourceProof(env,input.sourceId,input.applicationKey,input.connectorProof);
+      await applyProjectAlphaDeliveryRpcBudget(env,authority.source,input.intentKind);
       let body:unknown;
       try{body=JSON.parse(input.body);}catch{return{ok:false,protocolVersion:1,code:"invalid_intent",retryable:false};}
-      const authority=await resolveProjectAlphaDeliverySourceProof(env,input.sourceId,input.applicationKey,input.connectorProof);
       const auth={deliveryId:input.deliveryId,fingerprint:await fingerprint(input.body)};
       const result=input.intentKind==="preflight"
         ?await applyProjectAlphaDeliveryPreflight(env,body,auth,authority.source,input.applicationKey,authority.proof)

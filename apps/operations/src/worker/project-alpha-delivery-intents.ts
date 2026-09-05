@@ -241,6 +241,14 @@ async function rate(env:Env,source:CatalogSourceContext,scope:"attempt_preflight
   }
   if(typeof count!=="number"||count>maximum)throw new HTTPException(429,{message:"Too many Project Alpha delivery requests"});
 }
+/** Apply the same two source-qualified budgets used by registered HTTP
+ * ingress. Callers must resolve and validate the active source proof first. */
+export async function applyProjectAlphaDeliveryRpcBudget(env:Env,source:CatalogSourceContext,
+  kind:"preflight"|"provision"|"revoke"):Promise<void>{
+  const preflight=kind==="preflight";
+  await rate(env,source,preflight?"attempt_preflight":"attempt_intent",preflight?600:300);
+  await rate(env,source,preflight?"preflight":"intent",preflight?120:60);
+}
 export async function pruneProjectAlphaDeliveryIntentRateLimits(env:Pick<Env,"OPS_DB">):Promise<number>{
   const legacy=await env.OPS_DB.prepare(`DELETE FROM project_alpha_delivery_intent_rate_limits WHERE rowid IN
     (SELECT rowid FROM project_alpha_delivery_intent_rate_limits WHERE datetime(window_start)<=datetime('now','-10 minutes') LIMIT 1000)`).run();

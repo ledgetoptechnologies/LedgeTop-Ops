@@ -4,7 +4,9 @@ import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import { Hono } from "hono";
 import { Miniflare } from "miniflare";
+import { createCatalogSourceContext } from "@ltds/shared";
 import {
+  applyProjectAlphaDeliveryRpcBudget,
   handleProjectAlphaDeliveryIntent,
   handleProjectAlphaDeliveryIntentRevoke,
   handleProjectAlphaDeliveryPreflight,
@@ -374,6 +376,26 @@ describe("Project Alpha delivery-intent boundary", () => {
       expect(await pruneProjectAlphaDeliveryIntentRateLimits({OPS_DB:ops})).toBe(2);
       expect(await ops.prepare("SELECT scope FROM project_alpha_delivery_intent_rate_limits").first<string>("scope")).toBe("preflight");
       expect(await ops.prepare("SELECT scope FROM project_alpha_delivery_intent_source_rate_limits").first<string>("scope")).toBe("preflight");
+    }finally{await mf.dispose();}
+  });
+
+  it("limits private intent requests per source without consuming another source's budget",async()=>{
+    const mf=new Miniflare({compatibilityDate:"2026-08-06",modules:true,
+      script:"export default {fetch(){return new Response('ok')}}",d1Databases:{OPS_DB:"pa-rpc-rate"}});
+    try{
+      const ops=await mf.getD1Database("OPS_DB") as unknown as D1Database;
+      await applyRateMigrations(ops);
+      await ops.prepare(`INSERT INTO project_alpha_delivery_intent_source_rate_limits(source_id,scope,window_start,request_count)
+        VALUES('project-alpha:secondary','intent',strftime('%Y-%m-%dT%H:%M:00Z','now'),60)`).run();
+      const env={OPS_DB:ops} as Env;
+      await expect(applyProjectAlphaDeliveryRpcBudget(env,createCatalogSourceContext("project-alpha:secondary"),"provision"))
+        .rejects.toMatchObject({status:429});
+      await expect(applyProjectAlphaDeliveryRpcBudget(env,createCatalogSourceContext("project-alpha:tertiary"),"provision"))
+        .resolves.toBeUndefined();
+      expect(await ops.prepare("SELECT request_count FROM project_alpha_delivery_intent_source_rate_limits WHERE source_id='project-alpha:secondary' AND scope='intent'")
+        .first("request_count")).toBe(60);
+      expect(await ops.prepare("SELECT request_count FROM project_alpha_delivery_intent_source_rate_limits WHERE source_id='project-alpha:tertiary' AND scope='intent'")
+        .first("request_count")).toBe(1);
     }finally{await mf.dispose();}
   });
 
