@@ -30,7 +30,7 @@ test("bulk ZIP release evidence matches the one-pass archive contract", () => {
 test("Operations browser acceptance remains a required CI job", () => {
   const workflow = read(".github/workflows/ci.yml");
   assert(workflow.includes("operations-browser:"));
-  assert(workflow.includes("npm run test:browser -- --workers=4"));
+  assert(workflow.includes("npm run test:browser -- --workers=2"));
   assert(workflow.includes("playwright install --with-deps msedge"));
   assert(workflow.includes("apps/operations/test-results"));
 });

@@ -94,7 +94,7 @@ jobs:
 
       - name: Run Operations browser acceptance suite
         working-directory: apps/operations
-        run: npm run test:browser -- --workers=4
+        run: npm run test:browser -- --workers=2
 
       - name: Upload browser failure evidence
         if: failure()
