@@ -220,8 +220,8 @@ test("requires every portal-v2 and Operations capability to be explicitly false"
   }
 });
 
-test("pins the native portal migration-first and receiver-only release contract", () => {
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-12), [
+test("pins the native portal and bulk-archive migration-first release contract", () => {
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-13), [
     "0184_native_client_feedback.sql",
     "0185_native_service_request_ownership.sql",
     "0186_delivery_notification_authority_provenance.sql",
@@ -234,6 +234,7 @@ test("pins the native portal migration-first and receiver-only release contract"
     "0193_bulk_download_parts.sql",
     "0194_client_delegated_share_expiry.sql",
     "0195_legacy_workspace_authority_lifecycle.sql",
+    "0196_bulk_download_archive_cache.sql",
   ]);
   assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.at(-1), "0052_project_operational_reassignment_recovery.sql");
   assert(REQUIRED_DISABLED_FEATURE_FLAGS.delivery.includes("CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED"));

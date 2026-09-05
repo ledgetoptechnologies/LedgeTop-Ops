@@ -19,6 +19,14 @@ function filesUnder(relativeDirectory, predicate = () => true) {
   });
 }
 
+test("bulk ZIP release evidence matches the one-pass archive contract", () => {
+  const runbook = read("docs/operations/bulk-zip-performance.md");
+  assert(runbook.includes("Apply migration 0196 before activating"));
+  assert(runbook.includes("86 tests passed"));
+  assert(runbook.includes("3,210 Workflow steps: 3,202 upload"));
+  assert(!/Apply migration 0195|69 tests|24,009/.test(runbook));
+});
+
 const projectAlphaCompatibilityFixtures = [
   "packages/shared/fixtures/project-alpha-portal-v2.json",
   "packages/shared/fixtures/project-alpha-portal-relations-v3.json",

@@ -1,6 +1,10 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import { decodeItemRef, isHiddenKey, keyWithinRoot, normalizeRoot } from "./files";
 import { buildZipLayout, crc32, estimateZipArchiveSize, readZipPart, uniqueZipEntryNames, type ZipManifestEntry } from "./zip";
+import {
+  buildOnePassZipPrefixPart, buildOnePassZipTrailer, initialOnePassZipState, joinZipBytes,
+  planOnePassZipMultipart, type OnePassZipEntry, type OnePassZipState,
+} from "./one-pass-zip";
 import { classifyWorkflowFailure } from "./bulk-download-errors";
 import type { Env } from "./types";
 import { isMovedSourceMarker } from "@ltds/shared";
@@ -10,6 +14,7 @@ export { classifyWorkflowFailure } from "./bulk-download-errors";
 export const MAX_ARCHIVE_SOURCE_BYTES = 100 * 1024 * 1024 * 1024;
 export const BULK_DOWNLOAD_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 export const BULK_DOWNLOAD_RETENTION_DURATION = "7 days";
+export const BULK_DOWNLOAD_CACHE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const CRC_CHUNK = 8 * 1024 * 1024;
 const CRC_PROGRESS_CHECKPOINT = 64 * 1024 * 1024;
 const CRC_FILE_CHECKPOINT = 25;
@@ -23,21 +28,48 @@ const WORKFLOW_STEP_RESERVE = 100;
 const WORKER_SUBREQUEST_LIMIT = 25_000;
 const SUBREQUEST_RESERVE = 100;
 const MANIFEST_MAX_BYTES = 16 * 1024 * 1024;
-// Snapshot, final-manifest write, multipart create/complete, ready transition,
-// retention sleep, and retention expiry.
-const SUCCESS_FIXED_STEPS = 7;
+export const CHECKSUM_SQL_CHUNK = 100;
+const D1_QUERY_LIMIT = 1_000;
+const D1_QUERY_RESERVE = 25;
+export const ALIAS_LOOKUP_MAX_JSON_BYTES = 512 * 1024;
+export const CACHE_REUSE_CLAIM_QUERIES = 2;
+const workflowTextEncoder = new TextEncoder();
+// Snapshot, cache resolution/lookup, multipart create/finalize, ready transition,
+// retention sleep, and retention expiry. Upload parts are counted separately.
+const SUCCESS_FIXED_STEPS = 8;
 
 interface JobRow { id: string; share_id: string; share_version: number; request_json: string; manifest_key: string; archive_key: string; parent_job_id?: string | null; part_index?: number | null; part_count?: number; }
 interface Requested { all?: boolean; items?: string[]; }
 interface Source extends ZipManifestEntry { physicalKey: string; etag: string; }
 interface Snapshot { root: string; shareId: string; shareVersion: number; sources: Array<Omit<Source, "crc32">>; }
 interface FinalManifest { root: string; entries: Source[]; fileCount: number; totalBytes: number; }
+interface ResolvedSnapshot extends Omit<Snapshot, "sources"> { fingerprint: string; sources: OnePassZipEntry[]; }
+interface ArchiveCacheRow { archive_key: string; archive_etag: string; archive_size: number; file_count: number; total_bytes: number; }
+interface ChecksumRow { r2_key: string; etag: string; size: number; crc32: number; }
 type Tombstone = DownloadTombstone;
 type CrcWorkUnit =
   | { kind: "batch"; indexes: number[]; totalBytes: number }
   | { kind: "chunk"; sourceIndex: number; start: number; length: number };
 
 export function finalBulkManifestKey(snapshotKey: string): string { return `${snapshotKey}.final.json`; }
+export function resolvedBulkManifestKey(snapshotKey: string): string { return `${snapshotKey}.resolved.json`; }
+
+function hex(bytes: ArrayBuffer): string { return [...new Uint8Array(bytes)].map(value => value.toString(16).padStart(2, "0")).join(""); }
+
+export async function bulkSelectionFingerprint(snapshotValue: Snapshot): Promise<string> {
+  const canonical = JSON.stringify({
+    format: "ltds-zip64-descriptor-v1",
+    shareId: snapshotValue.shareId,
+    shareVersion: snapshotValue.shareVersion,
+    root: snapshotValue.root,
+    sources: snapshotValue.sources.map(source => ({ key: source.physicalKey, name: source.name, size: source.size, etag: source.etag })),
+  });
+  return hex(await crypto.subtle.digest("SHA-256", workflowTextEncoder.encode(canonical)));
+}
+
+export function bulkCacheArtifactKey(shareId: string, fingerprint: string, jobId: string): string {
+  return `_ltds/bulk-download-cache/v1/${encodeURIComponent(shareId)}/${fingerprint}/${jobId}.zip`;
+}
 
 /** Drain every sibling before propagating failure: cleanup must not race an upload. */
 export async function drainParallel<T>(tasks: ReadonlyArray<() => Promise<T>>): Promise<T[]> {
@@ -70,6 +102,18 @@ export interface BulkPreparationEstimate {
   uploadParts: number;
   workflowSteps: number;
   maximumUploadPartSourceReads: number;
+}
+
+export interface OnePassBulkPreparationEstimate {
+  archiveSize: number;
+  /** Kept for API compatibility; descriptor ZIPs do not need CRC-only steps. */
+  crcSteps: 0;
+  uploadParts: number;
+  workflowSteps: number;
+  maximumUploadPartSourceReads: number;
+  maximumCompletedEntriesPerPart: number;
+  maximumD1QueriesPerStep: number;
+  snapshotAliasQueries: number;
 }
 
 export function crcProgressBytes(totalBytes: number, completedBytes: number): number {
@@ -152,7 +196,7 @@ export function estimateBulkPreparation(sources: readonly Pick<Source, "name" | 
   let offset = 0;
   for (let index = 0; index < sources.length; index += 1) {
     const source = sources[index]!;
-    const nameLength = new TextEncoder().encode(archiveNames[index]!).length;
+    const nameLength = workflowTextEncoder.encode(archiveNames[index]!).length;
     offset += 50 + nameLength;
     if (source.size > 0) {
       const firstPart = Math.floor(offset / ZIP_PART);
@@ -170,20 +214,71 @@ export function estimateBulkPreparation(sources: readonly Pick<Source, "name" | 
   };
 }
 
-export function assertBulkPreparationCapacity(snapshotValue: Snapshot): BulkPreparationEstimate {
-  const manifestBytes = new TextEncoder().encode(JSON.stringify(snapshotValue)).byteLength;
+export function estimateOnePassBulkPreparation(sources: readonly (Pick<Source, "name" | "size"> & Partial<Pick<Source, "physicalKey">>)[]): OnePassBulkPreparationEstimate {
+  const plan = planOnePassZipMultipart(sources);
+  const names = uniqueZipEntryNames(sources.map(source => source.name));
+  const partReads = Array<number>(plan.partCount).fill(0);
+  const partCompletions = Array<number>(plan.partCount).fill(0);
+  let offset = 0;
+  sources.forEach((source, index) => {
+    const headerSize = 50 + workflowTextEncoder.encode(names[index]!).length;
+    const dataStart = offset + headerSize;
+    const dataEnd = dataStart + source.size;
+    if (source.size > 0) {
+      const firstPart = Math.floor(dataStart / plan.partSize);
+      const lastPart = Math.floor((dataEnd - 1) / plan.partSize);
+      for (let part = firstPart; part <= lastPart; part += 1) {
+        const overlap = Math.min(dataEnd, (part + 1) * plan.partSize) - Math.max(dataStart, part * plan.partSize);
+        partReads[part]! += Math.ceil(overlap / (8 * 1024 * 1024));
+      }
+    }
+    offset = dataEnd + 24;
+    partCompletions[Math.min(plan.partCount - 1, Math.floor((offset - 1) / plan.partSize))]! += 1;
+  });
+  const maximumUploadPartSourceReads = partReads.length ? Math.max(...partReads) : 0;
+  const maximumCompletedEntriesPerPart = partCompletions.length ? Math.max(...partCompletions) : 0;
+  const checksumLookupQueries = Math.ceil(sources.length / CHECKSUM_SQL_CHUNK);
+  const maximumChecksumWriteQueries = Math.ceil(maximumCompletedEntriesPerPart / CHECKSUM_SQL_CHUNK);
+  const physicalKeys = sources.flatMap(source => source.physicalKey ? [source.physicalKey] : []);
+  const snapshotAliasQueries = physicalKeys.length === sources.length
+    ? planAliasLookupBatches(aliasKeysForPhysicalKeys(physicalKeys)).length + 3
+    : 0;
+  // resolve: lookup + touch; final part: writes + full checksum lookup + progress.
+  const maximumD1QueriesPerStep = Math.max(
+    checksumLookupQueries * 2,
+    maximumChecksumWriteQueries + checksumLookupQueries + 1,
+    snapshotAliasQueries,
+    CACHE_REUSE_CLAIM_QUERIES,
+  );
+  return {
+    archiveSize: plan.archiveSize,
+    crcSteps: 0,
+    uploadParts: plan.partCount,
+    workflowSteps: SUCCESS_FIXED_STEPS + plan.partCount,
+    maximumUploadPartSourceReads,
+    maximumCompletedEntriesPerPart,
+    maximumD1QueriesPerStep,
+    snapshotAliasQueries,
+  };
+}
+
+export function assertBulkPreparationCapacity(snapshotValue: Snapshot): OnePassBulkPreparationEstimate {
+  const manifestBytes = workflowTextEncoder.encode(JSON.stringify(snapshotValue)).byteLength;
   if (manifestBytes > MANIFEST_MAX_BYTES) throw new Error("manifest-capacity");
-  const estimate = estimateBulkPreparation(snapshotValue.sources);
+  const estimate = estimateOnePassBulkPreparation(snapshotValue.sources);
   if (estimate.uploadParts > 10_000) throw new Error("multipart-part-limit");
   if (estimate.workflowSteps > WORKFLOW_STEP_LIMIT - WORKFLOW_STEP_RESERVE) throw new Error("workflow-step-capacity");
-  // Each upload step also writes the part and its D1 progress checkpoint.
-  if (estimate.maximumUploadPartSourceReads + 2 > WORKER_SUBREQUEST_LIMIT - SUBREQUEST_RESERVE) throw new Error("subrequest-capacity");
+  // Each upload step also persists newly observed checksums in D1 batches,
+  // writes the R2 part, and updates its D1 progress checkpoint.
+  const checksumWrites = Math.ceil(estimate.maximumCompletedEntriesPerPart / CHECKSUM_SQL_CHUNK);
+  if (estimate.maximumUploadPartSourceReads + checksumWrites + 2 > WORKER_SUBREQUEST_LIMIT - SUBREQUEST_RESERVE) throw new Error("subrequest-capacity");
+  if (estimate.maximumD1QueriesPerStep > D1_QUERY_LIMIT - D1_QUERY_RESERVE) throw new Error("d1-query-capacity");
   return estimate;
 }
 
 function capacityFailure(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return ["manifest-capacity", "multipart-part-limit", "workflow-step-capacity", "subrequest-capacity"].includes(message);
+  return ["manifest-capacity", "multipart-part-limit", "workflow-step-capacity", "subrequest-capacity", "d1-query-capacity"].includes(message);
 }
 
 /**
@@ -235,14 +330,50 @@ function displayPath(key: string, root: string, aliases: Map<string, string>): s
   segments.forEach((segment, index) => { physical += segment; const alias = aliases.get(physical + (index === segments.length - 1 ? "" : "/")); names.push(alias || segment); physical += "/"; });
   return names.join("/");
 }
+export function aliasKeysForPhysicalKeys(physicalKeys: readonly string[],maximumBytes=MANIFEST_MAX_BYTES): string[] {
+  const keys: string[] = [];
+  let retainedBytes=0;
+  for (const key of physicalKeys) {
+    const parts = key.split("/");
+    let prefix="";
+    for (let index = 0; index < parts.length; index += 1){
+      prefix+=`${index?"/":""}${parts[index]}`;
+      const aliasKey=`${prefix}${index<parts.length-1?"/":""}`;
+      retainedBytes+=workflowTextEncoder.encode(aliasKey).byteLength;
+      // Enforce the cap before retaining the candidate so adversarial deep
+      // paths cannot first materialize an unbounded prefix array.
+      if(retainedBytes>maximumBytes)throw new Error("manifest-capacity");
+      keys.push(aliasKey);
+    }
+  }
+  return keys;
+}
+
+/** Keep each one-parameter JSON lookup comfortably below D1's value limit. */
+export function planAliasLookupBatches(keys: readonly string[]): string[][] {
+  const batches: string[][] = [];
+  let batch: string[] = [];
+  let bytes = 2;
+  for (const key of new Set(keys)) {
+    const itemBytes = workflowTextEncoder.encode(JSON.stringify(key)).byteLength;
+    const addedBytes = itemBytes + (batch.length ? 1 : 0);
+    if (batch.length && bytes + addedBytes > ALIAS_LOOKUP_MAX_JSON_BYTES) {
+      batches.push(batch); batch = []; bytes = 2;
+    }
+    batch.push(key);
+    bytes += itemBytes + (batch.length > 1 ? 1 : 0);
+  }
+  if (batch.length) batches.push(batch);
+  return batches;
+}
 function isTrashed(tombstones: Tombstone[], key: string): boolean {
   return tombstones.some(tombstone => tombstone.tombstone_kind === "exact" ? tombstone.physical_key === key : key.startsWith(tombstone.physical_key));
 }
 async function loadAliases(env: Env, keys: string[]): Promise<Map<string, string>> {
-  const aliases = new Map<string, string>(); const unique = [...new Set(keys)];
-  for (let offset = 0; offset < unique.length; offset += 100) {
-    const batch = unique.slice(offset, offset + 100); if (!batch.length) continue;
-    const result = await db(env).prepare(`SELECT physical_key,display_name FROM file_aliases WHERE physical_key IN (${batch.map(() => "?").join(",")})`).bind(...batch).all<{ physical_key: string; display_name: string }>();
+  const aliases = new Map<string, string>();
+  for (const batch of planAliasLookupBatches(keys)) {
+    const result = await db(env).prepare(`SELECT f.physical_key,f.display_name FROM file_aliases f
+      JOIN json_each(?) requested ON f.physical_key=requested.value`).bind(JSON.stringify(batch)).all<{ physical_key: string; display_name: string }>();
     for (const row of result.results) aliases.set(row.physical_key, row.display_name);
   }
   return aliases;
@@ -262,6 +393,105 @@ export async function readSourceRange(
   const bytes = new Uint8Array(await object.arrayBuffer());
   if (bytes.length !== length) throw new Error("source-short-read");
   return bytes;
+}
+
+async function loadChecksumCache(env: Env, sources: readonly OnePassZipEntry[]): Promise<Map<string, number>> {
+  const found = new Map<string, number>();
+  for (let offset = 0; offset < sources.length; offset += 100) {
+    const batch = sources.slice(offset, offset + 100);
+    const rows = await db(env).prepare(`SELECT r2_key,etag,size,crc32 FROM bulk_download_object_checksums
+      WHERE r2_key IN (${batch.map(() => "?").join(",")})`).bind(...batch.map(source => source.physicalKey)).all<ChecksumRow>();
+    const expected = new Map(batch.map(source => [source.physicalKey, source]));
+    for (const row of rows.results) {
+      const source = expected.get(row.r2_key);
+      if (source && row.etag === source.etag && row.size === source.size && Number.isInteger(row.crc32) && row.crc32 >= 0 && row.crc32 <= 0xffffffff)
+        found.set(row.r2_key, row.crc32);
+    }
+  }
+  return found;
+}
+
+async function touchChecksumCache(env: Env, sources: readonly OnePassZipEntry[]): Promise<void> {
+  const hits = sources.filter(source => source.crc32 !== undefined);
+  for (let offset = 0; offset < hits.length; offset += CHECKSUM_SQL_CHUNK) {
+    const identities = hits.slice(offset, offset + CHECKSUM_SQL_CHUNK).map(source => ({
+      key: source.physicalKey, etag: source.etag, size: source.size, crc32: source.crc32,
+    }));
+    await env.DELIVERY_DB.prepare(`WITH identities AS (
+      SELECT json_extract(value,'$.key') AS r2_key,json_extract(value,'$.etag') AS etag,
+        json_extract(value,'$.size') AS size,json_extract(value,'$.crc32') AS crc32 FROM json_each(?)
+    ) UPDATE bulk_download_object_checksums SET last_used_at=datetime('now')
+      WHERE (r2_key,etag,size,crc32) IN (SELECT r2_key,etag,size,crc32 FROM identities)`)
+      .bind(JSON.stringify(identities)).run();
+  }
+}
+
+async function persistCalculatedChecksums(
+  env: Env,
+  sources: readonly OnePassZipEntry[],
+  checksums: readonly { entryIndex: number; crc32: number; calculated: boolean }[],
+): Promise<void> {
+  const values = checksums.filter(value => value.calculated);
+  for (let offset = 0; offset < values.length; offset += CHECKSUM_SQL_CHUNK) {
+    const rows = values.slice(offset, offset + CHECKSUM_SQL_CHUNK).map(value => {
+      const source = sources[value.entryIndex]!;
+      return { key: source.physicalKey, etag: source.etag, size: source.size, crc32: value.crc32 };
+    });
+    await env.DELIVERY_DB.prepare(`INSERT INTO bulk_download_object_checksums(r2_key,etag,size,crc32)
+      SELECT json_extract(value,'$.key'),json_extract(value,'$.etag'),json_extract(value,'$.size'),json_extract(value,'$.crc32')
+      FROM json_each(?) WHERE true ON CONFLICT(r2_key,etag,size) DO UPDATE SET crc32=excluded.crc32,
+        calculated_at=datetime('now'),last_used_at=datetime('now')`)
+      .bind(JSON.stringify(rows)).run();
+  }
+}
+
+async function resolveSnapshotChecksums(env: Env, snapshotValue: Snapshot): Promise<ResolvedSnapshot> {
+  const fingerprint = await bulkSelectionFingerprint(snapshotValue);
+  const provisional = snapshotValue.sources.map(source => ({ ...source })) as OnePassZipEntry[];
+  const cached = await loadChecksumCache(env, provisional);
+  const sources = provisional.map(source => cached.has(source.physicalKey) ? { ...source, crc32: cached.get(source.physicalKey)! } : source);
+  await touchChecksumCache(env, sources);
+  return { ...snapshotValue, fingerprint, sources };
+}
+
+async function completedEntries(env: Env, resolved: ResolvedSnapshot): Promise<Source[]> {
+  const cached = await loadChecksumCache(env, resolved.sources);
+  return resolved.sources.map(source => {
+    const checksum = source.crc32 ?? cached.get(source.physicalKey);
+    if (checksum === undefined) throw new Error("checksum-cache-incomplete");
+    return { ...source, crc32: checksum };
+  });
+}
+
+async function reuseCachedArchive(env: Env, job: JobRow, resolved: ResolvedSnapshot): Promise<ArchiveCacheRow | null> {
+  const row = await db(env).prepare(`SELECT c.archive_key,c.archive_etag,c.archive_size,c.file_count,c.total_bytes
+    FROM bulk_download_archive_cache c JOIN bulk_download_archive_generations g ON g.archive_key=c.archive_key
+    WHERE c.share_id=? AND c.share_version=? AND c.selection_fingerprint=? AND datetime(c.expires_at)>datetime('now')
+      AND g.state='active' AND g.archive_etag=c.archive_etag AND g.archive_size=c.archive_size`)
+    .bind(job.share_id, job.share_version, resolved.fingerprint).first<ArchiveCacheRow>();
+  if (!row) return null;
+  const head = await env.DATA_BUCKET.head(row.archive_key);
+  if (!head || head.etag !== row.archive_etag || head.size !== row.archive_size) return null;
+  // D1 batch is transactional: cleanup cannot observe the renewed cache lease
+  // without also observing this running job's reference to the exact archive.
+  const claimResults = await env.DELIVERY_DB.batch([
+    env.DELIVERY_DB.prepare(`UPDATE bulk_download_archive_cache SET expires_at=datetime('now','+30 days'),last_used_at=datetime('now')
+      WHERE share_id=? AND share_version=? AND selection_fingerprint=? AND archive_key=? AND archive_etag=?
+        AND archive_size=? AND datetime(expires_at)>datetime('now') AND EXISTS (
+          SELECT 1 FROM bulk_download_archive_generations WHERE archive_key=? AND archive_etag=? AND archive_size=? AND state='active'
+        )`)
+      .bind(job.share_id, job.share_version, resolved.fingerprint, row.archive_key, row.archive_etag, row.archive_size,
+        row.archive_key, row.archive_etag, row.archive_size),
+    env.DELIVERY_DB.prepare(`UPDATE bulk_download_jobs SET archive_key=?,archive_fingerprint=?,archive_size=?,updated_at=datetime('now')
+      WHERE id=? AND status IN ('queued','running') AND EXISTS (
+        SELECT 1 FROM bulk_download_archive_cache WHERE share_id=? AND share_version=? AND selection_fingerprint=?
+          AND archive_key=? AND archive_etag=? AND archive_size=? AND datetime(expires_at)>datetime('now')
+          AND EXISTS (SELECT 1 FROM bulk_download_archive_generations WHERE archive_key=? AND archive_etag=? AND archive_size=? AND state='active')
+      )`).bind(row.archive_key, resolved.fingerprint, row.archive_size, job.id, job.share_id, job.share_version,
+        resolved.fingerprint, row.archive_key, row.archive_etag, row.archive_size, row.archive_key, row.archive_etag, row.archive_size),
+  ]);
+  if (!claimResults[0]?.meta.changes || !claimResults[1]?.meta.changes) return null;
+  return row;
 }
 
 export async function snapshot(env: Env, job: JobRow): Promise<Snapshot> {
@@ -290,16 +520,8 @@ export async function snapshot(env: Env, job: JobRow): Promise<Snapshot> {
   }
   const physicalKeys = [...files.keys()].sort((left, right) => left.localeCompare(right));
   if (!physicalKeys.length) throw new Error("empty-selection");
-  const aliasKeys: string[] = []; let aliasMetadataBytes = 0; const textEncoder = new TextEncoder();
-  for (const key of physicalKeys) {
-    const parts = key.split("/");
-    for (let index = 1; index <= parts.length; index += 1) {
-      const aliasKey = `${parts.slice(0, index).join("/")}${index < parts.length ? "/" : ""}`;
-      aliasMetadataBytes += textEncoder.encode(aliasKey).length;
-      if (aliasMetadataBytes > MANIFEST_MAX_BYTES) throw new Error("manifest-capacity");
-      aliasKeys.push(aliasKey);
-    }
-  }
+  const aliasKeys = aliasKeysForPhysicalKeys(physicalKeys);
+  if (planAliasLookupBatches(aliasKeys).length + 3 > D1_QUERY_LIMIT - D1_QUERY_RESERVE) throw new Error("d1-query-capacity");
   const aliases = await loadAliases(env, aliasKeys);
   const sources = physicalKeys.map(key => ({ physicalKey: key, key, name: displayPath(key, root, aliases), size: files.get(key)!.size, etag: files.get(key)!.etag }));
   return { root, shareId: share.id, shareVersion: share.share_version, sources };
@@ -366,104 +588,114 @@ export class BulkDownloadWorkflow extends WorkflowEntrypoint<Env> {
           return { count: snap.sources.length, totalBytes };
         });
       }
-      const prepared: Source[] = new Array(snap.sources.length);
-      const totalSourceBytes = snap.sources.reduce((total, source) => total + source.size, 0);
-      let completedCrcBytes = 0;
-      let completedFiles = 0;
-      const crcStates = new Array<number>(snap.sources.length).fill(0xffffffff);
-      const workUnits = planCrcWorkUnits(snap.sources);
-      for (const window of planCrcWindows(workUnits)) {
-        const previousBytes = completedCrcBytes;
-        const previousFiles = completedFiles;
-        const results = await drainParallel(window.map(unitIndex => async () => {
-          const unit = workUnits[unitIndex]!;
-          if (unit.kind === "batch") {
-            const result = await step.do(`crc-batch-${unitIndex}`, { retries: { limit: 3, delay: "5 seconds", backoff: "exponential" } }, async () => {
-              const entries: Array<{ sourceIndex: number; crc32: number }> = [];
-              for (const sourceIndex of unit.indexes) {
-                const source = snap.sources[sourceIndex]!;
-                const bytes = source.size ? await readSourceRange(this.env.DATA_BUCKET, source, 0, source.size) : new Uint8Array();
-                entries.push({ sourceIndex, crc32: (crc32(bytes) ^ 0xffffffff) >>> 0 });
-              }
-              const nextFiles = unit.indexes.at(-1)! + 1;
-              return { entries, bytes: unit.totalBytes, completedFiles: nextFiles };
-            });
-            return { kind: "batch" as const, result };
-          }
-          const source = snap.sources[unit.sourceIndex]!;
-          const priorCrc = crcStates[unit.sourceIndex]!;
-          const result = await step.do(`crc-${unit.sourceIndex}-${unit.start}`, { retries: { limit: 3, delay: "5 seconds", backoff: "exponential" } }, async () => {
-            const bytes = await readSourceRange(this.env.DATA_BUCKET, source, unit.start, unit.length);
-            const sourceComplete = unit.start + bytes.length === source.size;
-            const nextFiles = sourceComplete ? unit.sourceIndex + 1 : previousFiles;
-            return { crc: crc32(bytes, priorCrc), bytes: bytes.length, sourceComplete, completedFiles: nextFiles };
-          });
-          return { kind: "chunk" as const, sourceIndex: unit.sourceIndex, result };
-        }));
-        // Reconstruct state only from durable results, in original source order.
-        for (const completed of results) {
-          completedCrcBytes += completed.result.bytes;
-          if (completed.kind === "batch") {
-            for (const entry of completed.result.entries) prepared[entry.sourceIndex] = { ...snap.sources[entry.sourceIndex]!, crc32: entry.crc32 };
-            completedFiles = completed.result.completedFiles;
-          } else {
-            crcStates[completed.sourceIndex] = completed.result.crc;
-            if (completed.result.sourceComplete) {
-              prepared[completed.sourceIndex] = { ...snap.sources[completed.sourceIndex]!, crc32: (completed.result.crc ^ 0xffffffff) >>> 0 };
-              completedFiles = completed.sourceIndex + 1;
-            }
-          }
-        }
-        if (shouldCheckpointCrcChunk(previousBytes, completedCrcBytes) || shouldCheckpointCrcFile(previousFiles, completedFiles, snap.sources.length)) {
-          await step.do(`crc-progress-${window.at(-1)!}`, async () => {
-            await db(this.env).prepare("UPDATE bulk_download_jobs SET processed_files=MAX(processed_files,?),processed_bytes=MAX(processed_bytes,?),updated_at=datetime('now') WHERE id=? AND status='running'")
-              .bind(completedFiles, crcProgressBytes(totalSourceBytes, completedCrcBytes), job.id).run();
-            return { completedFiles, completedBytes: completedCrcBytes };
-          });
-        }
-      }
-      await step.do("write-final-manifest", async () => {
-        const result: FinalManifest = { root: snap.root, entries: prepared, fileCount: prepared.length, totalBytes: prepared.reduce((total, source) => total + source.size, 0) };
-        await this.env.DATA_BUCKET.put(finalBulkManifestKey(job.manifest_key), JSON.stringify(result));
-        // Do not persist a potentially multi-megabyte manifest as Workflow step
-        // state. R2 is the durable source of truth for the assembly phase.
-        return { fileCount: result.fileCount, totalBytes: result.totalBytes };
+      const resolution = await step.do("resolve-checksum-cache", async () => {
+        const value = await resolveSnapshotChecksums(this.env, snap);
+        await this.env.DATA_BUCKET.put(resolvedBulkManifestKey(job.manifest_key), JSON.stringify(value));
+        return { fingerprint: value.fingerprint, cachedChecksums: value.sources.filter(source => source.crc32 !== undefined).length };
       });
-      const finalManifest = await readJson<FinalManifest>(this.env, finalBulkManifestKey(job.manifest_key));
-      const layout = buildZipLayout(finalManifest.entries);
-      const upload = await step.do("create-multipart-upload", async () => { const result = await this.env.DATA_BUCKET.createMultipartUpload(job.archive_key, { httpMetadata: { contentType: "application/zip", contentDisposition: "attachment" } }); await db(this.env).prepare("UPDATE bulk_download_jobs SET multipart_upload_id=?,archive_size=?,updated_at=datetime('now') WHERE id=?").bind(result.uploadId, layout.archiveSize, job.id).run(); return { uploadId: result.uploadId, archiveSize: layout.archiveSize }; });
-      const parts: Array<{ partNumber: number; etag: string }> = [];
-      const partCount = Math.ceil(layout.archiveSize / ZIP_PART); if (partCount > 10_000) throw new Error("multipart-part-limit");
-      for (let firstPart = 1; firstPart <= partCount; firstPart += UPLOAD_CONCURRENCY) {
-        const window = Array.from({ length: Math.min(UPLOAD_CONCURRENCY, partCount - firstPart + 1) }, (_, index) => firstPart + index);
-        const uploaded = await drainParallel(window.map(partNumber => async () => {
-          const start = (partNumber - 1) * ZIP_PART;
-          const length = Math.min(ZIP_PART, layout.archiveSize - start);
-          return step.do(`upload-${partNumber}`, { retries: { limit: 4, delay: "10 seconds", backoff: "exponential" } }, async () => {
-            const bytes = await readZipPart(this.env.DATA_BUCKET, layout, start, length);
-            const uploadRef = this.env.DATA_BUCKET.resumeMultipartUpload(job.archive_key, upload.uploadId);
-            const result = await uploadRef.uploadPart(partNumber, bytes);
-            return { partNumber: result.partNumber, etag: result.etag };
-          });
-        }));
-        parts.push(...uploaded);
-        const lastPart = window.at(-1)!;
-        await step.do(`upload-progress-${lastPart}`, async () => {
-          const uploadedBytes = Math.min(layout.archiveSize, lastPart * ZIP_PART);
-          await db(this.env).prepare("UPDATE bulk_download_jobs SET processed_bytes=MAX(processed_bytes,?),updated_at=datetime('now') WHERE id=? AND status='running'")
-            .bind(assemblyProgressBytes(finalManifest.totalBytes, layout.archiveSize, uploadedBytes), job.id).run();
-          return { uploadedBytes };
+      const resolved = await readJson<ResolvedSnapshot>(this.env, resolvedBulkManifestKey(job.manifest_key));
+      if (resolved.fingerprint !== resolution.fingerprint) throw new Error("resolved-manifest-identity-mismatch");
+      const cachedArchive = await step.do("reuse-completed-archive", async () => reuseCachedArchive(this.env, job, resolved));
+      if (cachedArchive) {
+        await step.do("mark-cached-archive-ready", async () => {
+          const result = await db(this.env).prepare(`UPDATE bulk_download_jobs SET status='ready',archive_key=?,archive_fingerprint=?,
+            archive_size=?,file_count=?,processed_files=?,total_bytes=?,processed_bytes=?,multipart_upload_id=NULL,
+            expires_at=datetime('now','+7 days'),updated_at=datetime('now') WHERE id=? AND (
+              status IN ('queued','running') OR (status='ready' AND archive_key=? AND archive_fingerprint=? AND archive_size=?)
+            )`)
+            .bind(cachedArchive.archive_key, resolved.fingerprint, cachedArchive.archive_size, cachedArchive.file_count,
+              cachedArchive.file_count, cachedArchive.total_bytes, cachedArchive.total_bytes, job.id,
+              cachedArchive.archive_key, resolved.fingerprint, cachedArchive.archive_size).run();
+          if (!result.meta.changes) throw new Error("job-no-longer-active");
+          return { status: "ready", cache: "hit" };
         });
+        await step.sleep("cached-download-retention", BULK_DOWNLOAD_RETENTION_DURATION);
+        await step.do("expire-cached-download", async () => {
+          await this.env.DATA_BUCKET.delete([job.manifest_key, resolvedBulkManifestKey(job.manifest_key), finalBulkManifestKey(job.manifest_key)]);
+          await db(this.env).prepare("UPDATE bulk_download_jobs SET status='expired',updated_at=datetime('now') WHERE id=? AND status='ready'").bind(job.id).run();
+          return { status: "expired" };
+        });
+        return;
       }
-      await step.do("complete-multipart-upload", { retries: { limit: 3, delay: "10 seconds", backoff: "exponential" } }, async () => { const uploadRef = this.env.DATA_BUCKET.resumeMultipartUpload(job.archive_key, upload.uploadId); await uploadRef.complete(parts); return { archiveSize: layout.archiveSize }; });
+
+      const plan = planOnePassZipMultipart(resolved.sources);
+      if (plan.partCount > 10_000) throw new Error("multipart-part-limit");
+      const archiveKey = bulkCacheArtifactKey(job.share_id, resolved.fingerprint, job.id);
+      const upload = await step.do("create-one-pass-multipart-upload", async () => {
+        const result = await this.env.DATA_BUCKET.createMultipartUpload(archiveKey, { httpMetadata: { contentType: "application/zip", contentDisposition: "attachment" } });
+        await db(this.env).prepare(`UPDATE bulk_download_jobs SET archive_key=?,archive_fingerprint=?,multipart_upload_id=?,archive_size=?,
+          updated_at=datetime('now') WHERE id=? AND status='running'`).bind(archiveKey, resolved.fingerprint, result.uploadId, plan.archiveSize, job.id).run();
+        return { uploadId: result.uploadId };
+      });
+      const parts: Array<{ partNumber: number; etag: string }> = [];
+      let state: OnePassZipState = initialOnePassZipState();
+      for (let partNumber = 1; partNumber <= plan.prefixPartCount; partNumber += 1) {
+        const result = await step.do(`write-one-pass-part-${partNumber}`, { retries: { limit: 4, delay: "10 seconds", backoff: "exponential" } }, async () => {
+          const built = await buildOnePassZipPrefixPart(this.env.DATA_BUCKET, resolved.sources, state, plan.partSize);
+          await persistCalculatedChecksums(this.env, resolved.sources, built.completedChecksums);
+          const uploaded = await this.env.DATA_BUCKET.resumeMultipartUpload(archiveKey, upload.uploadId).uploadPart(partNumber, built.bytes);
+          const totalBytes = resolved.sources.reduce((total, source) => total + source.size, 0);
+          const progress = plan.prefixSize > 0 ? Math.min(totalBytes - 1, Math.floor(totalBytes * built.state.archiveOffset / plan.prefixSize)) : 0;
+          await db(this.env).prepare(`UPDATE bulk_download_jobs SET processed_files=MAX(processed_files,?),processed_bytes=MAX(processed_bytes,?),
+            updated_at=datetime('now') WHERE id=? AND status='running'`).bind(built.state.completedFiles, Math.max(0, progress), job.id).run();
+          return { state: built.state, part: { partNumber: uploaded.partNumber, etag: uploaded.etag } };
+        });
+        state = result.state;
+        parts.push(result.part);
+      }
+      const finalPartNumber = plan.prefixPartCount + 1;
+      const finalPart = await step.do(`write-one-pass-part-${finalPartNumber}`, { retries: { limit: 4, delay: "10 seconds", backoff: "exponential" } }, async () => {
+        const built = await buildOnePassZipPrefixPart(this.env.DATA_BUCKET, resolved.sources, state, plan.finalPrefixBytes);
+        await persistCalculatedChecksums(this.env, resolved.sources, built.completedChecksums);
+        if (built.state.stage !== "done" || built.state.archiveOffset !== plan.prefixSize) throw new Error("ZIP prefix did not finish at the planned boundary");
+        const entries = await completedEntries(this.env, resolved);
+        const manifest: FinalManifest = { root: resolved.root, entries, fileCount: entries.length, totalBytes: entries.reduce((total, source) => total + source.size, 0) };
+        await this.env.DATA_BUCKET.put(finalBulkManifestKey(job.manifest_key), JSON.stringify(manifest));
+        const trailer = buildOnePassZipTrailer(entries);
+        if (trailer.length !== plan.trailerSize) throw new Error("ZIP trailer size changed");
+        const bytes = joinZipBytes(built.bytes, trailer);
+        if (bytes.length > plan.partSize || bytes.length !== plan.archiveSize - plan.prefixPartCount * plan.partSize) throw new Error("ZIP final part does not match the multipart plan");
+        const uploaded = await this.env.DATA_BUCKET.resumeMultipartUpload(archiveKey, upload.uploadId).uploadPart(finalPartNumber, bytes);
+        await db(this.env).prepare(`UPDATE bulk_download_jobs SET processed_files=file_count,processed_bytes=MAX(0,total_bytes-1),
+          updated_at=datetime('now') WHERE id=? AND status='running'`).bind(job.id).run();
+        return { part: { partNumber: uploaded.partNumber, etag: uploaded.etag } };
+      });
+      parts.push(finalPart.part);
+      await step.do("complete-one-pass-multipart-upload", { retries: { limit: 3, delay: "10 seconds", backoff: "exponential" } }, async () => {
+        let object = await this.env.DATA_BUCKET.head(archiveKey);
+        if (!object || object.size !== plan.archiveSize) {
+          object = await this.env.DATA_BUCKET.resumeMultipartUpload(archiveKey, upload.uploadId).complete(parts);
+        }
+        if (object.size !== plan.archiveSize) throw new Error("ZIP completed with an unexpected size");
+        const persisted = await this.env.DELIVERY_DB.batch([
+          this.env.DELIVERY_DB.prepare(`INSERT INTO bulk_download_archive_generations(archive_key,archive_etag,archive_size,state)
+            VALUES(?,?,?,'active') ON CONFLICT(archive_key) DO UPDATE SET archive_etag=excluded.archive_etag,
+              archive_size=excluded.archive_size WHERE bulk_download_archive_generations.state='active'`)
+            .bind(archiveKey, object.etag, plan.archiveSize),
+          this.env.DELIVERY_DB.prepare(`INSERT INTO bulk_download_archive_cache
+          (share_id,share_version,selection_fingerprint,archive_key,archive_etag,archive_size,file_count,total_bytes,expires_at)
+          VALUES (?,?,?,?,?,?,?,?,datetime('now','+30 days'))
+          ON CONFLICT(share_id,share_version,selection_fingerprint) DO UPDATE SET archive_key=excluded.archive_key,
+            archive_etag=excluded.archive_etag,archive_size=excluded.archive_size,file_count=excluded.file_count,total_bytes=excluded.total_bytes,
+            expires_at=excluded.expires_at,last_used_at=datetime('now')`)
+          .bind(job.share_id, job.share_version, resolved.fingerprint, archiveKey, object.etag, plan.archiveSize,
+            resolved.sources.length, resolved.sources.reduce((total, source) => total + source.size, 0)),
+        ]);
+        if (!persisted[0]?.meta.changes || !persisted[1]?.meta.changes) throw new Error("archive-generation-not-active");
+        return { archiveSize: plan.archiveSize, etag: object.etag };
+      });
       await step.do("mark-ready", async () => {
-        const result = await db(this.env).prepare("UPDATE bulk_download_jobs SET status='ready',processed_files=file_count,processed_bytes=total_bytes,multipart_upload_id=NULL,expires_at=datetime('now','+7 days'),updated_at=datetime('now') WHERE id=? AND status IN ('queued','running')").bind(job.id).run();
+        const result = await db(this.env).prepare(`UPDATE bulk_download_jobs SET status='ready',processed_files=file_count,
+          processed_bytes=total_bytes,multipart_upload_id=NULL,expires_at=datetime('now','+7 days'),updated_at=datetime('now')
+          WHERE id=? AND (status IN ('queued','running') OR
+            (status='ready' AND archive_key=? AND archive_fingerprint=? AND archive_size=?))`)
+          .bind(job.id, archiveKey, resolved.fingerprint, plan.archiveSize).run();
         if (!result.meta.changes) throw new Error("job-no-longer-active");
         return { status: "ready" };
       });
       await step.sleep("temporary-download-retention", BULK_DOWNLOAD_RETENTION_DURATION);
       await step.do("expire-temporary-download", async () => {
-        await this.env.DATA_BUCKET.delete([job.archive_key, job.manifest_key, finalBulkManifestKey(job.manifest_key)]);
+        await this.env.DATA_BUCKET.delete([job.manifest_key, resolvedBulkManifestKey(job.manifest_key), finalBulkManifestKey(job.manifest_key)]);
         await db(this.env).prepare("UPDATE bulk_download_jobs SET status='expired',updated_at=datetime('now') WHERE id=? AND status='ready'").bind(job.id).run();
         return { status: "expired" };
       });
@@ -477,11 +709,21 @@ export class BulkDownloadWorkflow extends WorkflowEntrypoint<Env> {
         return;
       }
       await step.do("cleanup-failed-artifacts", async () => {
-        const current = await db(this.env).prepare("SELECT multipart_upload_id FROM bulk_download_jobs WHERE id=?").bind(job.id).first<{ multipart_upload_id: string | null }>();
+        const current = await db(this.env).prepare("SELECT archive_key,archive_fingerprint,multipart_upload_id FROM bulk_download_jobs WHERE id=?")
+          .bind(job.id).first<{ archive_key: string; archive_fingerprint: string | null; multipart_upload_id: string | null }>();
         if (current?.multipart_upload_id) {
-          try { await this.env.DATA_BUCKET.resumeMultipartUpload(job.archive_key, current.multipart_upload_id).abort(); } catch { /* already completed or absent */ }
+          try { await this.env.DATA_BUCKET.resumeMultipartUpload(current.archive_key, current.multipart_upload_id).abort(); } catch { /* already completed or absent */ }
         }
-        await this.env.DATA_BUCKET.delete([job.archive_key, job.manifest_key, finalBulkManifestKey(job.manifest_key)]);
+        await this.env.DATA_BUCKET.delete([
+          // Once an archive has a fingerprint, another Workflow may already
+          // have selected it for reuse without persisting its job reference.
+          // Abort incomplete multipart state above, but leave any completed
+          // generation to the protected >24-hour orphan sweep.
+          ...(!current?.archive_fingerprint && current?.archive_key ? [current.archive_key] : []),
+          job.manifest_key,
+          resolvedBulkManifestKey(job.manifest_key),
+          finalBulkManifestKey(job.manifest_key),
+        ]);
         return { cleaned: true };
       });
       await step.do("mark-failed", async () => { await db(this.env).prepare("UPDATE bulk_download_jobs SET status='failed',error_code=?,error_message=?,updated_at=datetime('now') WHERE id=? AND status IN ('queued','running')").bind(failure.code, failure.message, job.id).run(); return { status: "failed" }; });

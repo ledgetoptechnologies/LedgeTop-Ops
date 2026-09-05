@@ -244,6 +244,7 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0193_bulk_download_parts.sql",
     "0194_client_delegated_share_expiry.sql",
     "0195_legacy_workspace_authority_lifecycle.sql",
+    "0196_bulk_download_archive_cache.sql",
   ]),
   operations: Object.freeze([
     "0014_staff_acl_controls.sql",

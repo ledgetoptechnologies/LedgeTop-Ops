@@ -435,7 +435,8 @@
         "0192_contact_assignment_billing_independence.sql",
         "0193_bulk_download_parts.sql",
         "0194_client_delegated_share_expiry.sql",
-        "0195_legacy_workspace_authority_lifecycle.sql"
+        "0195_legacy_workspace_authority_lifecycle.sql",
+        "0196_bulk_download_archive_cache.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",

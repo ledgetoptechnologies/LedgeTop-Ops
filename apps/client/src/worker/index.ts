@@ -52,6 +52,14 @@ const app = new Hono<{ Bindings: Env; Variables: Variables }>();
 const COOKIE_NAME = "__Host-ltds_delivery";
 const PUBLIC_DELIVERY_PAGE_SIZE=150;
 const PUBLIC_MEDIA_LOOKUP_CHUNK_SIZE=50;
+const BULK_CACHE_PENDING_DELETE_LIMIT=50;
+const BULK_CACHE_EXPIRED_ROW_LIMIT=50;
+const BULK_CACHE_ORPHAN_CLAIM_LIMIT=50;
+// Fixed statements (job expiry/reads, candidate reads, pruning) plus the
+// worst case of one finalize statement per pending intent and three statements
+// (two-statement claim + finalize) per newly claimed generation.
+export const BULK_CACHE_CLEANUP_MAX_D1_QUERIES=9+BULK_CACHE_PENDING_DELETE_LIMIT
+  +3*BULK_CACHE_EXPIRED_ROW_LIMIT+3*BULK_CACHE_ORPHAN_CLAIM_LIMIT+6;
 
 function cloudEnv(env:Env):CloudTransferEnv{if(!env.CLOUD_TRANSFER_TOKEN_SECRET)throw new HTTPException(503,{message:"Cloud copy is not configured"});return env as CloudTransferEnv;}
 function cloudProvider(value:string):CloudProvider{if(value==="dropbox")return"dropbox";if(value==="google"||value==="google-drive")return"google";throw new HTTPException(404,{message:"Cloud provider not found"});}
@@ -725,12 +733,12 @@ function validateBulkRequest(value: unknown): { all?: boolean; items?: string[] 
 
 async function getBulkJob(c: any, jobId: string): Promise<any> {
   const share = c.get("share") as ShareRow;
-  return primaryDb(c.env).prepare("SELECT id,status,file_count,processed_files,total_bytes,processed_bytes,archive_size,error_code,error_message,expires_at,manifest_key,archive_key,parent_job_id,part_index,part_count FROM bulk_download_jobs WHERE id=? AND share_id=? AND share_version=?").bind(jobId, share.id, share.share_version).first<any>();
+  return primaryDb(c.env).prepare("SELECT id,status,file_count,processed_files,total_bytes,processed_bytes,archive_size,error_code,error_message,expires_at,manifest_key,archive_key,archive_fingerprint,parent_job_id,part_index,part_count FROM bulk_download_jobs WHERE id=? AND share_id=? AND share_version=?").bind(jobId, share.id, share.share_version).first<any>();
 }
 
 async function getBulkParts(c: any, parentJobId: string): Promise<any[]> {
   const share = c.get("share") as ShareRow;
-  return (await primaryDb(c.env).prepare("SELECT id,status,file_count,processed_files,total_bytes,processed_bytes,archive_size,error_code,error_message,expires_at,manifest_key,archive_key,parent_job_id,part_index,part_count FROM bulk_download_jobs WHERE parent_job_id=? AND share_id=? AND share_version=? ORDER BY part_index ASC")
+  return (await primaryDb(c.env).prepare("SELECT id,status,file_count,processed_files,total_bytes,processed_bytes,archive_size,error_code,error_message,expires_at,manifest_key,archive_key,archive_fingerprint,parent_job_id,part_index,part_count FROM bulk_download_jobs WHERE parent_job_id=? AND share_id=? AND share_version=? ORDER BY part_index ASC")
     .bind(parentJobId, share.id, share.share_version).all<any>()).results;
 }
 
@@ -794,7 +802,12 @@ async function expireReadyBulkJob(c: any, job: any): Promise<void> {
   if (!readyBulkJobIsExpired(job)) return;
   await primaryDb(c.env).prepare("UPDATE bulk_download_jobs SET status='expired',updated_at=datetime('now') WHERE id=? AND status='ready' AND datetime(expires_at)<=datetime('now')").bind(job.id).run();
   job.status = "expired";
-  c.executionCtx.waitUntil(c.env.DATA_BUCKET.delete([job.archive_key, job.manifest_key, `${job.manifest_key}.final.json`]));
+  c.executionCtx.waitUntil(c.env.DATA_BUCKET.delete([
+    ...(!job.archive_fingerprint ? [job.archive_key] : []),
+    job.manifest_key,
+    `${job.manifest_key}.resolved.json`,
+    `${job.manifest_key}.final.json`,
+  ]));
 }
 
 app.post("/api/public/shares/:publicId/bulk-download", async c => {
@@ -948,9 +961,15 @@ app.on(["GET","HEAD"],"/api/public/cloud-transfers/source/:grant",async c=>{
 
 export async function cleanupTemporaryZips(env: Env, now = Date.now()): Promise<void> {
   const nowIso = new Date(now).toISOString();
+  const cleanupCursor = async (scope:"deleting"|"expired-cache"|"orphan-r2"):Promise<string> =>
+    (await primaryDb(env).prepare("SELECT cursor FROM bulk_download_cleanup_cursors WHERE scope=?").bind(scope).first<{cursor:string}>())?.cursor||"";
+  const saveCleanupCursor = async (scope:"deleting"|"expired-cache"|"orphan-r2",cursor:string):Promise<void> => {
+    await primaryDb(env).prepare(`INSERT INTO bulk_download_cleanup_cursors(scope,cursor) VALUES(?,?)
+      ON CONFLICT(scope) DO UPDATE SET cursor=excluded.cursor`).bind(scope,cursor).run();
+  };
   await primaryDb(env).prepare("UPDATE bulk_download_jobs SET status='expired',updated_at=datetime(?) WHERE status IN ('queued','running','ready') AND datetime(expires_at)<=datetime(?)").bind(nowIso, nowIso).run();
-  const expiredJobs = await primaryDb(env).prepare("SELECT manifest_key,archive_key,multipart_upload_id FROM bulk_download_jobs WHERE status='expired' AND updated_at=datetime(?) AND datetime(expires_at)<=datetime(?)")
-    .bind(nowIso, nowIso).all<{ manifest_key: string; archive_key: string; multipart_upload_id: string | null }>();
+  const expiredJobs = await primaryDb(env).prepare("SELECT manifest_key,archive_key,archive_fingerprint,multipart_upload_id FROM bulk_download_jobs WHERE status='expired' AND updated_at=datetime(?) AND datetime(expires_at)<=datetime(?)")
+    .bind(nowIso, nowIso).all<{ manifest_key: string; archive_key: string; archive_fingerprint: string | null; multipart_upload_id: string | null }>();
   for (const job of expiredJobs.results) {
     if (!job.multipart_upload_id) continue;
     try {
@@ -959,11 +978,16 @@ export async function cleanupTemporaryZips(env: Env, now = Date.now()): Promise<
       console.error(JSON.stringify({ event: "bulk-download.cleanup-abort-failed", archiveKey: job.archive_key, error: error instanceof Error ? error.message : String(error) }));
     }
   }
-  const artifactKeys = [...new Set(expiredJobs.results.flatMap(job => [job.manifest_key, job.archive_key, `${job.manifest_key}.final.json`]).filter(Boolean))];
+  const artifactKeys = [...new Set(expiredJobs.results.flatMap(job => [
+    job.manifest_key,
+    `${job.manifest_key}.resolved.json`,
+    `${job.manifest_key}.final.json`,
+    ...(!job.archive_fingerprint ? [job.archive_key] : []),
+  ]).filter(Boolean))];
   for (let offset = 0; offset < artifactKeys.length; offset += 1000) await env.DATA_BUCKET.delete(artifactKeys.slice(offset, offset + 1000));
   const activeJobs = await primaryDb(env).prepare("SELECT manifest_key,archive_key FROM bulk_download_jobs WHERE status IN ('queued','running','ready') AND datetime(expires_at)>datetime(?)")
     .bind(nowIso).all<{ manifest_key: string; archive_key: string }>();
-  const protectedKeys = new Set(activeJobs.results.flatMap(job => [job.manifest_key, job.archive_key, `${job.manifest_key}.final.json`]).filter(Boolean));
+  const protectedKeys = new Set(activeJobs.results.flatMap(job => [job.manifest_key, job.archive_key, `${job.manifest_key}.resolved.json`, `${job.manifest_key}.final.json`]).filter(Boolean));
   const cutoff = now - 24 * 60 * 60 * 1000;
   let cursor: string | undefined;
   do {
@@ -972,6 +996,76 @@ export async function cleanupTemporaryZips(env: Env, now = Date.now()): Promise<
     if (orphaned.length) await env.DATA_BUCKET.delete(orphaned);
     cursor = listed.truncated ? listed.cursor : undefined;
   } while (cursor);
+
+  const finishGenerationDeletion = async (archiveKey: string): Promise<void> => {
+    try {
+      await env.DATA_BUCKET.delete(archiveKey);
+      await primaryDb(env).prepare("DELETE FROM bulk_download_archive_generations WHERE archive_key=? AND state='deleting'").bind(archiveKey).run();
+    } catch (error) {
+      console.error(JSON.stringify({ event: "bulk-download.cache-delete-failed", archiveKey, error: error instanceof Error ? error.message : String(error) }));
+    }
+  };
+  // A failed R2 delete leaves a durable deleting row. Reuse rejects it and the
+  // next cleanup retries idempotently before considering new candidates.
+  const deletingCursor=await cleanupCursor("deleting");
+  const pendingDeletes = await primaryDb(env).prepare(`SELECT archive_key FROM bulk_download_archive_generations
+    WHERE state='deleting' ORDER BY CASE WHEN archive_key>? THEN 0 ELSE 1 END,archive_key LIMIT ${BULK_CACHE_PENDING_DELETE_LIMIT}`).bind(deletingCursor)
+    .all<{ archive_key: string }>();
+  for (const pending of pendingDeletes.results) await finishGenerationDeletion(pending.archive_key);
+  if(pendingDeletes.results.length)await saveCleanupCursor("deleting",pendingDeletes.results.at(-1)!.archive_key);
+
+  const expiredCursor=await cleanupCursor("expired-cache");
+  const expiredCache = await primaryDb(env).prepare(`SELECT rowid AS cleanup_rowid,share_id,share_version,selection_fingerprint,archive_key,archive_etag,archive_size,expires_at
+    FROM bulk_download_archive_cache WHERE datetime(expires_at)<=datetime(?)
+    ORDER BY CASE WHEN rowid>CAST(? AS INTEGER) THEN 0 ELSE 1 END,rowid LIMIT ${BULK_CACHE_EXPIRED_ROW_LIMIT}`).bind(nowIso,expiredCursor||"0")
+    .all<{ cleanup_rowid: number; share_id: string; share_version: number; selection_fingerprint: string; archive_key: string; archive_etag: string; archive_size: number; expires_at: string }>();
+  for (const cached of expiredCache.results) {
+    const claimed = await env.DELIVERY_DB.batch([
+      env.DELIVERY_DB.prepare(`DELETE FROM bulk_download_archive_cache
+        WHERE share_id=? AND share_version=? AND selection_fingerprint=? AND archive_key=? AND archive_etag=? AND archive_size=? AND expires_at=?
+          AND NOT EXISTS (SELECT 1 FROM bulk_download_jobs WHERE archive_key=? AND status IN ('queued','running','ready') AND datetime(expires_at)>datetime(?))`)
+        .bind(cached.share_id, cached.share_version, cached.selection_fingerprint, cached.archive_key, cached.archive_etag,
+          cached.archive_size, cached.expires_at, cached.archive_key, nowIso),
+      env.DELIVERY_DB.prepare(`UPDATE bulk_download_archive_generations SET state='deleting',deletion_started_at=COALESCE(deletion_started_at,datetime(?))
+        WHERE archive_key=? AND archive_etag=? AND archive_size=? AND state IN ('active','deleting')
+          AND NOT EXISTS (SELECT 1 FROM bulk_download_archive_cache WHERE archive_key=? AND datetime(expires_at)>datetime(?))
+          AND NOT EXISTS (SELECT 1 FROM bulk_download_jobs WHERE archive_key=? AND status IN ('queued','running','ready') AND datetime(expires_at)>datetime(?))`)
+        .bind(nowIso, cached.archive_key, cached.archive_etag, cached.archive_size, cached.archive_key, nowIso, cached.archive_key, nowIso),
+    ]);
+    if (claimed[0]?.meta.changes && claimed[1]?.meta.changes) await finishGenerationDeletion(cached.archive_key);
+  }
+  if(expiredCache.results.length)await saveCleanupCursor("expired-cache",String(expiredCache.results.at(-1)!.cleanup_rowid));
+
+  const orphanCursor=await cleanupCursor("orphan-r2");
+  let orphanScanAfter=orphanCursor;
+  let remainingOrphanClaims = BULK_CACHE_ORPHAN_CLAIM_LIMIT;
+  let orphanPages=0;
+  while(remainingOrphanClaims>0&&orphanPages<20){
+    const listed = await env.DATA_BUCKET.list({ prefix: "_ltds/bulk-download-cache/", limit: 1000,...(orphanScanAfter?{startAfter:orphanScanAfter}:{}) });
+    orphanPages+=1;
+    if(!listed.objects.length){orphanScanAfter="";break;}
+    let scannedWholePage=true;
+    for (const object of listed.objects) {
+      orphanScanAfter=object.key;
+      if(object.uploaded.getTime()>=cutoff)continue;
+      const claimed = await env.DELIVERY_DB.batch([
+        env.DELIVERY_DB.prepare(`INSERT INTO bulk_download_archive_generations(archive_key,archive_etag,archive_size,state)
+          VALUES(?,?,?,'active') ON CONFLICT(archive_key) DO NOTHING`).bind(object.key, object.etag, object.size),
+        env.DELIVERY_DB.prepare(`UPDATE bulk_download_archive_generations SET state='deleting',deletion_started_at=COALESCE(deletion_started_at,datetime(?))
+          WHERE archive_key=? AND archive_etag=? AND archive_size=? AND state IN ('active','deleting')
+            AND NOT EXISTS (SELECT 1 FROM bulk_download_archive_cache WHERE archive_key=? AND datetime(expires_at)>datetime(?))
+            AND NOT EXISTS (SELECT 1 FROM bulk_download_jobs WHERE archive_key=? AND status IN ('queued','running','ready') AND datetime(expires_at)>datetime(?))`)
+          .bind(nowIso, object.key, object.etag, object.size, object.key, nowIso, object.key, nowIso),
+      ]);
+      if (claimed[1]?.meta.changes) await finishGenerationDeletion(object.key);
+      remainingOrphanClaims-=1;
+      if(!remainingOrphanClaims){scannedWholePage=false;break;}
+    }
+    if(scannedWholePage&&!listed.truncated){orphanScanAfter="";break;}
+  }
+  await saveCleanupCursor("orphan-r2",orphanScanAfter);
+
+  await primaryDb(env).prepare("DELETE FROM bulk_download_object_checksums WHERE datetime(last_used_at)<datetime(?,'-180 days')").bind(nowIso).run();
   const currentWindow = Math.floor(now / (60 * 60 * 1000));
   await primaryDb(env).prepare("DELETE FROM bulk_download_quota WHERE window_start<?").bind(currentWindow - 48).run();
 }
