@@ -1,11 +1,27 @@
 # Delivery intent and guest-link source ownership
 
-Status: implemented and locally verified, updated August 31, 2026. Unpublished;
+Status: implemented and locally verified, updated September 4, 2026. Unpublished;
 no production migration, connector activation, mail or access change is implied.
 This follows [native portal ownership](portal-source-ownership.md) and the
 [multi-source design](multi-source-client-design.md).
 
 ## Contract
+
+Managed delivery now uses the same authenticated Project Alpha event endpoint
+as projections and service assignments. Project Alpha emits a strict
+`delivery.intent` envelope to Ops Sync; Ops Sync authenticates the configured
+source and forwards the inner intent through the route-less
+`ProjectAlphaDeliveryIntentIngress` service binding. Project Alpha must not be
+configured with a second Operations or portal delivery URL.
+
+The outer receipt identity is operation-qualified:
+`delivery.intent:<preflight|provision|revoke>:<deliveryId>`. Delivery IDs are
+limited to 96 safe characters so this value is never truncated. Preflight,
+provision and revoke can therefore use the same downstream delivery identity
+without colliding, while an exact retry of one operation retains the same outer
+event ID and byte-identical body. A repeated event ID with a different body is
+rejected. Completed exact retries re-enter the idempotent private Operations
+entrypoint so the committed receipt or preflight result can be recovered.
 
 Migration `0159_delivery_intent_source_provenance.sql` preserves globally stable
 receipt handles while qualifying create/revoke replay keys by
@@ -20,18 +36,18 @@ indexes and triggers. It uses deferred foreign-key validation in one atomic
 batch, without renaming the old parent or deleting grant/audit/outbox history.
 Do not split the migration into independently committed statements.
 
-The legacy scalar-configured HTTP routes remain primary-only. A registered
-business-data source uses the source-qualified routes under
-`/api/internal/project-alpha/sources/:sourceId/delivery-intents`. Operations
-derives the source from that canonical path and an active registry revision;
-it never trusts a body or free-form source header. The request must pass both an
-RS256 Cloudflare Access assertion with the exact registered issuer, audience and
-subject and the source revision's current/previous HMAC key. Remote Access JWKS
-resolvers are cached by validated HTTPS origin and bounded to 32 issuers.
-After Access succeeds, a separate coarse source-scoped attempt budget runs
-before deploy credentials or request bodies are parsed. Invalid HMAC traffic
-therefore cannot do unlimited application work or consume the smaller accepted
-preflight/intent quota.
+The old direct HTTP routes are compatibility-only. They are default-off and
+require both `PROJECT_ALPHA_DELIVERY_DIRECT_COMPAT_ENABLED=true` and a valid
+`PROJECT_ALPHA_DELIVERY_DIRECT_COMPAT_UNTIL` no more than 14 days in the future.
+Missing, expired, or overlong windows fail closed, and only the exact incoming
+host plus three signed POST paths are accepted. Remove the compatibility route
+and variables after the Project Alpha outbox has drained through Ops Sync.
+
+Ops Sync never trusts a source selector in the delivery body. The already
+authenticated connector source, application key, active revision and version
+are passed over the private binding. Operations rechecks that proof against its
+current delivery authority before parsing the intent and again in the existing
+transaction fence immediately before the authoritative write.
 
 The first statement in each create/revoke transaction rechecks the registered
 source revision, connector revision and versions. Authority changed before the
@@ -102,13 +118,21 @@ acceptance remain separate release gates.
    authority choice and approve each producer/consumer release separately.
 2. Back up the target database and record its migration/code checkpoint using
    the established release procedure. Rehearse the populated upgrade locally.
-3. Apply the full pending migration sequence and paired Operations/Client code
+3. Deploy the compatible Operations Worker first, with the route-less
+   entrypoint available and the direct compatibility gate still false. Then
+   deploy Ops Sync with its Operations service binding. Finally deploy Project
+   Alpha's unified outbox writer. Do not enable Project Alpha delivery until
+   all three versions and the active source authority agree.
+4. Apply the full pending migration sequence and paired Operations/Client code
    in a controlled release window. Old intent writers omit the now-required
    source field; do not roll back only the application after this migration.
-4. Verify primary and registered-source preflight/create/replay/revoke,
+5. Verify primary and registered-source preflight/create/replay/revoke,
    current/previous key overlap, recipient suppression, existing receipt
    URLs/history, fair queue progress and retry exhaustion before activation.
-5. On failure, stop new acceptance and use the approved coordinated recovery
+6. Drain any temporarily admitted direct-route work, disable the compatibility
+   flag, clear its expiry, and remove the compatibility route in the next
+   release. The time-box rejects traffic even if that cleanup is delayed.
+7. On failure, stop new acceptance and use the approved coordinated recovery
    plan. Never drop receipts to clear retries or restore permissions by hand.
 
 Remaining gates include approved source enrollment, source-pinned outbound

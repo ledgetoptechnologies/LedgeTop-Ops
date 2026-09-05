@@ -1,4 +1,4 @@
-import type { EntitlementEvent, Env, IntegrationEvent, PortalProjectionEvent, ProjectionEvent } from "./types";
+import type { DeliveryIntentEvent, EntitlementEvent, Env, IntegrationEvent, PortalProjectionEvent, ProjectionEvent } from "./types";
 import {
   PRIMARY_PROJECT_ALPHA_SOURCE,
   createProjectAlphaSourceContext,
@@ -386,6 +386,30 @@ export async function routePortalProjectionEventForSource(
     try{await releaseGlobalProjection(env,source,event.event_id);}
     catch(releaseError){if(!processingError)throw releaseError;}
   }
+}
+
+/** Delivery retries must recover the committed Operations receipt, so an exact
+ * completed replay deliberately re-enters the private idempotent RPC after
+ * both connector proofs are revalidated. */
+export async function routeDeliveryIntentEventForSource<T>(env:Env,source:ProjectAlphaSourceContext,
+  event:DeliveryIntentEvent,payloadHash:string,forward:()=>Promise<T>,proof?:ProjectAlphaConnectorProof):Promise<{status:"applied"|"duplicate";result:T}>{
+  source=createProjectAlphaSourceContext(source.sourceId);
+  await validateSourceProof(env,source,proof);
+  await claimGlobalProjection(env,source,event.event_id);
+  let processingError:unknown;
+  try{
+    const receipt=await env.OPS_DB.prepare("SELECT payload_hash,status FROM integration_event_receipts WHERE projection_source_id=? AND event_id=?")
+      .bind(source.sourceId,event.event_id).first<{payload_hash:string;status:string}>();
+    if(receipt?.payload_hash!==undefined&&receipt.payload_hash!==payloadHash)throw new Error("event-id-conflict");
+    if(!receipt)await fencedBatch(env,proof,[env.OPS_DB.prepare(`INSERT INTO integration_event_receipts
+      (projection_source_id,event_id,integration,event_type,user_id,occurred_at,payload_hash,status)
+      VALUES (?,?,'project-alpha',?,?,?,?,'pending')`).bind(source.sourceId,event.event_id,event.event_type,
+        `delivery:${event.event_id}`,event.occurred_at,payloadHash)]);
+    await validateSourceProof(env,source,proof);
+    const result=await forward();
+    return{status:receipt?.status==="completed"||receipt?.status==="ignored"?"duplicate":"applied",result};
+  }catch(error){processingError=error;throw error;}
+  finally{try{await releaseGlobalProjection(env,source,event.event_id);}catch(releaseError){if(!processingError)throw releaseError;}}
 }
 
 export async function completeEvent(env: Env, event: IntegrationEvent, preserveError = false, source: ProjectAlphaSourceContext = PRIMARY_PROJECT_ALPHA_SOURCE, proof?: ProjectAlphaConnectorProof): Promise<void> {

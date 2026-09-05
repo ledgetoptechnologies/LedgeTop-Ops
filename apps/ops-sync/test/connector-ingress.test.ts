@@ -30,6 +30,14 @@ function portalEvent(kind:"portal"|"catalog"|"service_assignments"="portal") {
   return {event_id:eventId,event_type:"portal.projection" as const,occurred_at:now,schema_version:1 as const,
     application_key:"ltds_ops",projection_kind:kind,projection:{deliveryId:eventId,fixture:true}};
 }
+function deliveryEvent(deliveryId=`delivery-${crypto.randomUUID()}`,label:string|null="Johnson Road"){
+  const now=new Date().toISOString();
+  return{event_id:`delivery.intent:provision:${deliveryId}`,event_type:"delivery.intent" as const,occurred_at:now,schema_version:1 as const,
+    application_key:"ltds_ops",intent_kind:"provision" as const,intent:{schemaVersion:1 as const,applicationKey:"ltds_ops",
+      deliveryId,occurredAt:now,scope:{type:"project" as const,publicId:"project-public"},
+      audience:{type:"principal" as const,publicId:"principal-public"},accessMode:"portal" as const,
+      expiresAt:null,label,notify:true as const}};
+}
 type ContractFixtureName=keyof typeof contractFixture.valid;
 function contractEvent(name:ContractFixtureName){
   return JSON.parse(contractFixture.valid[name].body) as ReturnType<typeof portalEvent>;
@@ -135,6 +143,7 @@ describe("authenticated connector business ingress",{timeout:30_000},()=>{
       throw new Error(`Unexpected fixture network request: ${url}`);
     }));
     environment.CLIENT_PORTAL_PROJECTION_INGRESS=undefined;
+    environment.OPERATIONS_DELIVERY_INTENT_INGRESS=undefined;
   });
   afterEach(()=>vi.unstubAllGlobals());
   afterAll(async()=>{await runtime?.dispose();});
@@ -224,6 +233,61 @@ describe("authenticated connector business ingress",{timeout:30_000},()=>{
     expect(ingestProjectAlphaPortalProjection).toHaveBeenCalledWith(expect.objectContaining({sourceId:secondary,deliveryId:item.event_id}));
     expect(await db.prepare("SELECT count(*) total FROM integration_event_receipts WHERE projection_source_id=? AND event_id=? AND status='completed'")
       .bind(secondary,item.event_id).first("total")).toBe(1);
+  });
+  it("routes delivery intents through Operations, recovers exact replays, and rejects conflicts",async()=>{
+    const item=deliveryEvent(),ingestProjectAlphaDeliveryIntent=vi.fn(async()=>({ok:true as const,protocolVersion:1 as const,
+      result:{receiptId:"receipt-one",status:"accepted"}}));
+    environment.OPERATIONS_DELIVERY_INTENT_INGRESS={ingestProjectAlphaDeliveryIntent};
+    const first=await handleRequest(await request(primary,item),environment);
+    expect(first.status).toBe(200);
+    expect(await first.json()).toMatchObject({status:"completed",result:{receiptId:"receipt-one",status:"accepted"}});
+    const replay=await handleRequest(await request(primary,item),environment);
+    expect(await replay.json()).toMatchObject({status:"duplicate",result:{receiptId:"receipt-one",status:"accepted"}});
+    expect(ingestProjectAlphaDeliveryIntent).toHaveBeenCalledTimes(2);
+    expect(ingestProjectAlphaDeliveryIntent).toHaveBeenLastCalledWith({protocolVersion:1,sourceId:primary,
+      applicationKey:"ltds_ops",deliveryId:item.intent.deliveryId,intentKind:"provision",body:JSON.stringify(item.intent),
+      connectorProof:expect.objectContaining({revision:expect.any(Number),version:expect.any(Number)})});
+    const conflict={...item,intent:{...item.intent,label:"Changed"}};
+    expect((await handleRequest(await request(primary,conflict),environment)).status).toBe(409);
+    expect(ingestProjectAlphaDeliveryIntent).toHaveBeenCalledTimes(2);
+  });
+  it("accepts preflight and provision as separate operations for the same delivery identity",async()=>{
+    const provision=deliveryEvent("shared-delivery-id"),now=new Date().toISOString();
+    const preflight={event_id:"delivery.intent:preflight:shared-delivery-id",event_type:"delivery.intent" as const,
+      occurred_at:now,schema_version:1 as const,application_key:"ltds_ops",intent_kind:"preflight" as const,
+      intent:{schemaVersion:1 as const,applicationKey:"ltds_ops",deliveryId:"shared-delivery-id",occurredAt:now}};
+    const ingestProjectAlphaDeliveryIntent=vi.fn(async(input:{intentKind:string})=>({ok:true as const,protocolVersion:1 as const,
+      result:input.intentKind==="preflight"?{status:"ready",schemaVersion:1,integrationEnabled:true,portalSupported:true,
+        guestSupported:false,revocationSupported:true}:{receiptId:"receipt-shared",status:"accepted"}}));
+    environment.OPERATIONS_DELIVERY_INTENT_INGRESS={ingestProjectAlphaDeliveryIntent};
+    expect((await handleRequest(await request(primary,preflight),environment)).status).toBe(200);
+    expect((await handleRequest(await request(primary,provision),environment)).status).toBe(200);
+    expect(ingestProjectAlphaDeliveryIntent.mock.calls.map(([input])=>input.intentKind)).toEqual(["preflight","provision"]);
+    expect(await db.prepare("SELECT count(*) total FROM integration_event_receipts WHERE projection_source_id=? AND event_id LIKE 'delivery.intent:%:shared-delivery-id'")
+      .bind(primary).first("total")).toBe(2);
+  });
+  it("keeps delivery identities source-qualified and requires the authenticated connector",async()=>{
+    const item=deliveryEvent(),ingestProjectAlphaDeliveryIntent=vi.fn(async(input:{sourceId:string})=>({ok:true as const,
+      protocolVersion:1 as const,result:{receiptId:`receipt-${input.sourceId}`,status:"accepted"}}));
+    environment.OPERATIONS_DELIVERY_INTENT_INGRESS={ingestProjectAlphaDeliveryIntent};
+    expect((await handleRequest(await request(primary,item),environment)).status).toBe(200);
+    expect((await handleRequest(await request(secondary,item),environment)).status).toBe(200);
+    expect(ingestProjectAlphaDeliveryIntent.mock.calls.map(([input])=>input.sourceId)).toEqual([primary,secondary]);
+    expect((await handleRequest(await request(secondary,deliveryEvent(),{key:primary}),environment)).status).toBe(401);
+  });
+  it("reauthorizes completed delivery retries and rejects malformed envelopes before forwarding",async()=>{
+    const item=deliveryEvent(),ingestProjectAlphaDeliveryIntent=vi.fn(async()=>({ok:true as const,protocolVersion:1 as const,
+      result:{receiptId:"receipt-authority",status:"accepted"}}));
+    environment.OPERATIONS_DELIVERY_INTENT_INGRESS={ingestProjectAlphaDeliveryIntent};
+    expect((await handleRequest(await request(secondary,item),environment)).status).toBe(200);
+    await suspended();
+    expect((await handleRequest(await request(secondary,item),environment)).status).toBe(409);
+    expect(ingestProjectAlphaDeliveryIntent).toHaveBeenCalledTimes(1);
+    for(const malformed of [
+      {...deliveryEvent(),extra:true},
+      (()=>{const value=deliveryEvent();return{...value,event_id:"different-delivery"};})(),
+      (()=>{const value=deliveryEvent();return{...value,intent:{...value.intent,notify:false}};})(),
+    ])expect((await handleRequest(await request(primary,malformed),environment)).status).toBe(422);
   });
   it("keeps a portal receipt pending when Client is unavailable, then completes the exact retry",async()=>{
     const item=portalEvent(),ingestProjectAlphaPortalProjection=vi.fn()

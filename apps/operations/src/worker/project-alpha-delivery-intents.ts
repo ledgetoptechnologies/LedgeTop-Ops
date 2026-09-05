@@ -41,7 +41,7 @@ const revokeSchema=preflightSchema.extend({receiptId:z.string().regex(SAFE_ID),r
 
 type IntentContext = Pick<Context<{ Bindings: Env }>, "env" | "req" | "json">;
 type PortalSigningKey = z.infer<typeof portalSigningKeySchema> & { fingerprint: string };
-type DeliverySourceProof = { sourceId:string; revision:number; version:number; connectorRevision:number; connectorVersion:number };
+export type DeliverySourceProof = { sourceId:string; revision:number; version:number; connectorRevision:number; connectorVersion:number };
 type DeliveryAuthority = { applicationKey:string; current:PortalSigningKey; previous:PortalSigningKey|null;
   accessIssuer:string; accessAudience:string; accessSubject:string; proof?:DeliverySourceProof };
 type DeliveryAccessAuthority = Pick<DeliveryAuthority,"accessIssuer"|"accessAudience"|"accessSubject">;
@@ -103,8 +103,8 @@ async function assertSourceProof(database:D1Database,proof:DeliverySourceProof):
   if(live!==1)throw new HTTPException(409,{message:"Project Alpha delivery authority changed"});
 }
 type RegisteredAuthorityMetadata=DeliveryAccessAuthority&DeliverySourceAuthorityRow&{proof:DeliverySourceProof};
-async function resolveRegisteredAuthorityMetadata(env:Env,sourceId:string):Promise<RegisteredAuthorityMetadata>{
-  const source=registeredSource(sourceId).sourceId;
+async function resolveAuthorityMetadata(env:Env,sourceId:string,registeredOnly=true):Promise<RegisteredAuthorityMetadata>{
+  const source=registeredOnly?registeredSource(sourceId).sourceId:createCatalogSourceContext(sourceId).sourceId;
   const database=db(env);
   let row:DeliverySourceAuthorityRow|null;
   try{
@@ -125,6 +125,14 @@ async function resolveRegisteredAuthorityMetadata(env:Env,sourceId:string):Promi
   if([proof.revision,proof.version,proof.connectorRevision,proof.connectorVersion].some(value=>!Number.isSafeInteger(value)||value<1))
     throw new HTTPException(503,{message:"Project Alpha delivery authority is unavailable"});
   return{...row,accessIssuer:issuer.origin,accessAudience:row.access_audience,accessSubject:row.access_subject,proof};
+}
+export async function resolveProjectAlphaDeliverySourceProof(env:Env,sourceId:string,applicationKey:string,
+  connectorProof:{revision:number;version:number}):Promise<{source:CatalogSourceContext;proof:DeliverySourceProof}>{
+  const metadata=await resolveAuthorityMetadata(env,sourceId,false);
+  if(metadata.application_key!==applicationKey||metadata.connector_revision!==connectorProof.revision||
+    metadata.connector_version!==connectorProof.version)throw new HTTPException(409,{message:"Project Alpha delivery authority changed"});
+  await assertSourceProof(db(env),metadata.proof);
+  return{source:createCatalogSourceContext(metadata.source_id),proof:metadata.proof};
 }
 async function loadRegisteredSigningAuthority(env:Env,metadata:RegisteredAuthorityMetadata):Promise<DeliveryAuthority>{
   let current:PortalSigningKey,previous:PortalSigningKey|null;
@@ -204,7 +212,15 @@ export function projectAlphaDeliveryMachineRequest(method:string,path:string): b
   return method.toUpperCase()==="POST" && ((path===PATH || path===PREFLIGHT_PATH || path===REVOKE_PATH)
     || /^\/api\/internal\/project-alpha\/sources\/[^/]+\/delivery-intents(?:\/preflight|\/revoke)?$/.test(path));
 }
-export function projectAlphaDeliveryMachineHostRequest(urlValue:string,method:string,env:Pick<Env,"INCOMING_EXPECTED_HOST">):boolean{
+export function projectAlphaDeliveryMachineHostRequest(urlValue:string,method:string,
+  env:Partial<Pick<Env,"INCOMING_EXPECTED_HOST"|"PROJECT_ALPHA_DELIVERY_DIRECT_COMPAT_ENABLED"|"PROJECT_ALPHA_DELIVERY_DIRECT_COMPAT_UNTIL">>,
+  now=Date.now()):boolean{
+  if(env.PROJECT_ALPHA_DELIVERY_DIRECT_COMPAT_ENABLED!=="true")return false;
+  const until=Date.parse(env.PROJECT_ALPHA_DELIVERY_DIRECT_COMPAT_UNTIL??"");
+  // Compatibility must be deliberately time-boxed. A missing, expired, or
+  // excessively long window fails closed so the direct public path cannot
+  // become a permanent bypass around authenticated Ops Sync ingress.
+  if(!Number.isFinite(until)||until<now||until>now+14*24*60*60*1000)return false;
   try{const url=new URL(urlValue);return url.host===env.INCOMING_EXPECTED_HOST&&projectAlphaDeliveryMachineRequest(method,url.pathname);}catch{return false;}
 }
 function decode(raw:Uint8Array):unknown{try{return JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(raw));}catch{throw new HTTPException(400,{message:"Delivery intent JSON is invalid"});}}
@@ -224,6 +240,14 @@ async function rate(env:Env,source:CatalogSourceContext,scope:"attempt_preflight
       .bind(source.sourceId,scope,maximum).first<number>("request_count");
   }
   if(typeof count!=="number"||count>maximum)throw new HTTPException(429,{message:"Too many Project Alpha delivery requests"});
+}
+/** Apply the same two source-qualified budgets used by registered HTTP
+ * ingress. Callers must resolve and validate the active source proof first. */
+export async function applyProjectAlphaDeliveryRpcBudget(env:Env,source:CatalogSourceContext,
+  kind:"preflight"|"provision"|"revoke"):Promise<void>{
+  const preflight=kind==="preflight";
+  await rate(env,source,preflight?"attempt_preflight":"attempt_intent",preflight?600:300);
+  await rate(env,source,preflight?"preflight":"intent",preflight?120:60);
 }
 export async function pruneProjectAlphaDeliveryIntentRateLimits(env:Pick<Env,"OPS_DB">):Promise<number>{
   const legacy=await env.OPS_DB.prepare(`DELETE FROM project_alpha_delivery_intent_rate_limits WHERE rowid IN
@@ -245,6 +269,19 @@ export async function handleProjectAlphaDeliveryPreflight(c: IntentContext) {
     guestSupported:c.env.PROJECT_ALPHA_DELIVERY_GUEST_ENABLED==="true",revocationSupported:true });
 }
 
+export async function applyProjectAlphaDeliveryPreflight(env:Env,payload:unknown,auth:DeliveryAuthentication,
+  trustedSource:CatalogSourceContext,expectedApplicationKey:string,authorityProof:DeliverySourceProof){
+  const source=createCatalogSourceContext(trustedSource.sourceId),parsed=preflightSchema.safeParse(payload);
+  if(!parsed.success||parsed.data.applicationKey!==expectedApplicationKey||parsed.data.deliveryId!==auth.deliveryId||
+    !HEX.test(auth.fingerprint))throw new HTTPException(400,{message:"Delivery preflight is invalid"});
+  if(authorityProof.sourceId!==source.sourceId)throw new HTTPException(409,{message:"Project Alpha delivery authority changed"});
+  await assertSourceProof(db(env),authorityProof);
+  return{status:"ready" as const,schemaVersion:1 as const,
+    integrationEnabled:env.PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED==="true",
+    portalSupported:env.CLIENT_PORTAL_HIERARCHY_V2_ENABLED==="true"&&env.AUTHENTICATED_DELIVERY_GRANTS_ENABLED==="true",
+    guestSupported:env.PROJECT_ALPHA_DELIVERY_GUEST_ENABLED==="true",revocationSupported:true};
+}
+
 export async function handleProjectAlphaDeliveryIntent(c: IntentContext) {
   if (c.env.PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED!=="true") throw new HTTPException(404,{message:"Not found"});
   const authority=legacyAuthority(c.env),raw=await body(c.req.raw),auth=await authenticate(c.req.raw,raw,PATH,authority);
@@ -255,7 +292,7 @@ export async function handleProjectAlphaDeliveryIntent(c: IntentContext) {
 async function registered(c:IntentContext,sourceId:string,suffix:""|"/preflight"|"/revoke",
   accessVerifier:(request:Request,authority:DeliveryAccessAuthority)=>Promise<void>=verifyRegisteredDeliveryAccess){
   if(c.env.PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED!=="true"&&suffix!=="/preflight")throw new HTTPException(404,{message:"Not found"});
-  const metadata=await resolveRegisteredAuthorityMetadata(c.env,sourceId),source=createCatalogSourceContext(metadata.proof.sourceId);
+  const metadata=await resolveAuthorityMetadata(c.env,sourceId),source=createCatalogSourceContext(metadata.proof.sourceId);
   const path=sourcePath(source.sourceId,suffix);
   await accessVerifier(c.req.raw,metadata);
   await rate(c.env,source,suffix==="/preflight"?"attempt_preflight":"attempt_intent",suffix==="/preflight"?600:300);
