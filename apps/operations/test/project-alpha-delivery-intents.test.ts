@@ -298,12 +298,26 @@ describe("Project Alpha delivery-intent boundary", () => {
   });
 
   it("accepts machine requests only on the incoming host", () => {
-    const env = { INCOMING_EXPECTED_HOST: "incoming.example.test" };
+    const now=Date.parse("2026-09-04T12:00:00.000Z");
+    const env = { INCOMING_EXPECTED_HOST: "incoming.example.test", PROJECT_ALPHA_DELIVERY_DIRECT_COMPAT_ENABLED:"true",
+      PROJECT_ALPHA_DELIVERY_DIRECT_COMPAT_UNTIL:"2026-09-11T12:00:00.000Z" };
     expect(projectAlphaDeliveryMachineHostRequest(
-      "https://incoming.example.test/api/internal/project-alpha/delivery-intents", "POST", env,
+      "https://incoming.example.test/api/internal/project-alpha/delivery-intents", "POST", env,now,
     )).toBe(true);
     expect(projectAlphaDeliveryMachineHostRequest(
-      "https://ops.example.test/api/internal/project-alpha/delivery-intents", "POST", env,
+      "https://ops.example.test/api/internal/project-alpha/delivery-intents", "POST", env,now,
+    )).toBe(false);
+    expect(projectAlphaDeliveryMachineHostRequest(
+      "https://incoming.example.test/api/internal/project-alpha/delivery-intents", "POST",
+      { INCOMING_EXPECTED_HOST:"incoming.example.test" },now,
+    )).toBe(false);
+    expect(projectAlphaDeliveryMachineHostRequest(
+      "https://incoming.example.test/api/internal/project-alpha/delivery-intents", "POST",
+      {...env,PROJECT_ALPHA_DELIVERY_DIRECT_COMPAT_UNTIL:"2026-10-01T12:00:00.000Z"},now,
+    )).toBe(false);
+    expect(projectAlphaDeliveryMachineHostRequest(
+      "https://incoming.example.test/api/internal/project-alpha/delivery-intents", "POST",env,
+      Date.parse("2026-09-11T12:00:00.001Z"),
     )).toBe(false);
   });
 

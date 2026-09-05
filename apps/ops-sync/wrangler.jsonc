@@ -48,6 +48,11 @@
       "binding": "CLIENT_PORTAL_PROJECTION_INGRESS",
       "service": "ltds-clients",
       "entrypoint": "OpsSyncPortalProjectionIngress"
+    },
+    {
+      "binding": "OPERATIONS_DELIVERY_INTENT_INGRESS",
+      "service": "ltds-ops",
+      "entrypoint": "ProjectAlphaDeliveryIntentIngress"
     }
   ]
 }
