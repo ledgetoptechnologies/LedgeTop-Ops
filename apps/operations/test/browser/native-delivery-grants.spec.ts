@@ -266,8 +266,9 @@ test("uncertain create refresh supports cancellation and uncertain cancel retrie
 
 test("grant feature flag off does not probe native endpoints", async ({page}) => {
   const calls = await mock(page, undefined, false); await page.goto("/delivery"); await page.getByRole("button", {name: "Actions for Acme"}).click(); await page.getByRole("menuitem", {name: "Share", exact: true}).click();
-  await page.getByRole("tab", {name: "Client Workspace"}).click();
-  await expect(page.getByRole("status").filter({hasText: "not available for this deployment"})).toBeVisible();
+  const workspaceTab = page.getByRole("tab", {name: "Client Workspace"});
+  await expect(workspaceTab).toBeDisabled();
+  await expect(workspaceTab).toHaveAttribute("title", "Client Workspace sharing is not enabled for this deployment.");
   expect(calls.some(call => call.path.startsWith("/api/delivery/native-grants"))).toBe(false);
 });
 

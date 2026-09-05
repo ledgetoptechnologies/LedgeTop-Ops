@@ -66,3 +66,41 @@ jobs:
         if: matrix.package != 'thumbnail-renderer'
         working-directory: apps/${{ matrix.package }}
         run: npm run build
+
+  operations-browser:
+    name: operations-browser
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out the exact commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Use the supported Node runtime
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 24
+
+      - name: Install linked application dependencies
+        run: |
+          npm --prefix apps/client ci
+          npm --prefix apps/operations ci
+          npm --prefix apps/ops-sync ci
+
+      - name: Install Microsoft Edge
+        working-directory: apps/operations
+        run: npx playwright install --with-deps msedge
+
+      - name: Run Operations browser acceptance suite
+        working-directory: apps/operations
+        run: npm run test:browser -- --workers=4
+
+      - name: Upload browser failure evidence
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: operations-browser-${{ github.sha }}
+          path: apps/operations/test-results
+          if-no-files-found: ignore
+          retention-days: 14
