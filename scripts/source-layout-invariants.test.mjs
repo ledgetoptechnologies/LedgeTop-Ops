@@ -27,6 +27,15 @@ test("bulk ZIP release evidence matches the one-pass archive contract", () => {
   assert(!/Apply migration 0195|69 tests|24,009/.test(runbook));
 });
 
+test("Operations browser acceptance remains a required CI job", () => {
+  const workflow = read(".github/workflows/ci.yml");
+  assert(workflow.includes("operations-browser:"));
+  assert(workflow.includes("project: [desktop-edge, mobile-edge]"));
+  assert(workflow.includes("npm run test:browser -- --project=${{ matrix.project }} --workers=2"));
+  assert(workflow.includes("playwright install --with-deps msedge"));
+  assert(workflow.includes("apps/operations/test-results"));
+});
+
 const projectAlphaCompatibilityFixtures = [
   "packages/shared/fixtures/project-alpha-portal-v2.json",
   "packages/shared/fixtures/project-alpha-portal-relations-v3.json",
