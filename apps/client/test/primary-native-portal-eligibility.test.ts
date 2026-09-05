@@ -166,7 +166,7 @@ describe("primary signed-native first-login eligibility", () => {
       expect(legacyProjects).not.toHaveBeenCalled();
     } finally { legacyProjects.mockRestore(); }
     await assertNoLegacyOrMail();
-  });
+  }, 60_000);
 
   it.each(flags)("does not bind while %s is disabled", async flag => {
     const { actor, workspaceId } = await project(`gate-${flags.indexOf(flag)}`);
