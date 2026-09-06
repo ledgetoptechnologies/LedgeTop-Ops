@@ -113,6 +113,18 @@ Current delivery-history increment (working tree following `c94e834`):
   behavior, including bridge revocation, principal version replacement and
   verified-email identity rebinding. This is local authorization evidence,
   not live Project Alpha provisioning acceptance.
+  Full browser run 87958 remains live. It exposed a harness routing error:
+  dual-domain specs were discovered by the localhost configuration and expected
+  a named portal host instead of 127.0.0.1. The base configuration now excludes
+  only that file, and `test:browser` runs both the base and J7 configurations.
+  List-only verification reports 400 base tests plus 16 two-domain tests, so
+  this partitions rather than drops coverage. Both correctly configured runtime
+  runs remain required after 87958 terminates; do not reuse its known failures
+  as a passing result or start a second server on the same port.
+  Run 87958 has now terminated with exit 1: 398 passed, eight skipped and the
+  two expected hostname-configuration failures (desktop and mobile), 7.3 minutes.
+  The partition regression itself passes two unit tests, and diff checking is
+  clean. Correctly configured runtime verification follows this terminal run.
 - D1 and cursor regression run 51198 exited 0: 21 tests passed, including
   current delivery revocation, mixed-kind pagination and rejection of a valid
   legacy cursor envelope. Client type check and build 97972 exited 0.

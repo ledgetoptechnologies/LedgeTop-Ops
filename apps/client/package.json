@@ -10,7 +10,7 @@
     "deploy:preflight": "node scripts/project-alpha-portal-receiver-preflight.mjs",
     "deploy": "npm run deploy:preflight && vite build && wrangler deploy",
     "test": "node --test scripts/project-alpha-portal-receiver-preflight.test.mjs && vitest run --config vitest.config.ts",
-    "test:browser": "npm run build && playwright test --config playwright.config.ts",
+    "test:browser": "npm run build && playwright test --config playwright.config.ts && playwright test --config playwright.j7.config.ts",
     "cf-typegen": "node ../../scripts/wrangler-typegen.mjs",
     "cf-typegen:check": "node ../../scripts/wrangler-typegen.mjs --check",
     "db:migrate:local": "wrangler d1 migrations apply client-data --local",
