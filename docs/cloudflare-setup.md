@@ -11,7 +11,7 @@ deleting recipient snapshots.
 
 ## 1. Worker Builds
 
-Configure the Git repository `ledgetoptechnologies/LTDS-Ops` three times:
+Configure the Git repository `ledgetoptechnologies/LedgeTop-Ops` three times:
 
 | Setting | Operations | Delivery | Ops Sync |
 |---|---|---|---|
@@ -169,7 +169,7 @@ Delivery access codes use a shared HMAC pepper. Generate one cryptographically r
 
 ## 2. Operations hostname and Access
 
-1. Attach `ops.ledgetopdroneservices.com` and `ops.ledgetoptechnologies.com` to Worker `ltds-ops`.
+1. Attach `ops.ledgetopdroneservices.com` and `ops.ledgetoptechnologies.com` to Worker `ledgetop-ops`.
 2. Create a Cloudflare Access self-hosted application named **LTDS Operations**.
 3. Set both exact Operations hosts as destinations on the same production Access application and retain its audience and policies.
 4. Under **Access controls > Policies > Rule groups**, create the dedicated automation-owned **LTDS Ops Users** rule group. Create an Allow policy whose Include rule references that group, and keep the protected Owner in the group.
@@ -282,7 +282,7 @@ Stream assets. Original R2 objects remain the authorized download source.
 After Stream activation, create a Stream Write API token and set these Ops runtime secrets/settings:
 
 ```powershell
-npx.cmd wrangler secret put STREAM_API_TOKEN --name ltds-ops
+npx.cmd wrangler secret put STREAM_API_TOKEN --name ledgetop-ops
 ```
 
 Set `STREAM_ACCOUNT_ID` and `STREAM_CUSTOMER_CODE` as non-secret runtime variables. Do not give the Delivery Worker the Stream management token.
@@ -369,7 +369,7 @@ apply the production policy to staging.
 Set the Ops runtime secret:
 
 ```powershell
-npx.cmd wrangler secret put PROJECT_ALPHA_API_KEY --name ltds-ops
+npx.cmd wrangler secret put PROJECT_ALPHA_API_KEY --name ledgetop-ops
 ```
 
 Set `PROJECT_ALPHA_BASE_URL` to the production Project Alpha origin. The key must have only `ops.sync.read`.
@@ -379,8 +379,8 @@ disabled until Project Alpha implements and passes the contract in
 `docs/project-alpha.md`:
 
 ```powershell
-npx.cmd wrangler secret put PROJECT_ALPHA_DRAFT_QUOTE_API_KEY --name ltds-ops
-npx.cmd wrangler secret put PROJECT_ALPHA_DRAFT_QUOTE_HMAC_SECRET --name ltds-ops
+npx.cmd wrangler secret put PROJECT_ALPHA_DRAFT_QUOTE_API_KEY --name ledgetop-ops
+npx.cmd wrangler secret put PROJECT_ALPHA_DRAFT_QUOTE_HMAC_SECRET --name ledgetop-ops
 ```
 
 The first key must have only `portal.quote-draft.create`; the HMAC secret must
@@ -389,15 +389,15 @@ through migration and staging verification. Setting a secret with Wrangler can
 create a Worker version, so follow the reviewed release procedure rather than
 running these commands during a read-only validation.
 
-Create a separate self-hosted Access application named **LTDS Ops Sync** for `ops-sync.ledgetopdroneservices.com/*`. Add a Service Auth policy whose include rule is the Project Alpha service token. Copy that application's AUD into `CF_ACCESS_AUD` on `ltds-ops-sync`. Its service-token client ID and secret belong only in Project Alpha.
+Create a separate self-hosted Access application named **LedgeTop Ops Sync** for `ops-sync.ledgetopdroneservices.com/*`. Add a Service Auth policy whose include rule is the Project Alpha service token. Copy that application's AUD into `CF_ACCESS_AUD` on `ledgetop-ops-sync`. Its service-token client ID and secret belong only in Project Alpha.
 
 Set `CF_ACCOUNT_ID`, `CF_ACCESS_GROUP_ID`, the exact deployment-specific `CF_ACCESS_GROUP_NAME`, and a deployment-specific `APPLICATION_KEY` (for example, `field_operations`) on the provisioning Worker. Configure the same application key on the Operations snapshot importer and in Project Alpha. The group name lets reconciliation safely recover when a configured group identifier has been replaced. Bind `OPS_DB` to the deployment's Operations D1 database and add these Worker secrets:
 
 The checked-in LTDS production configuration uses `ltds_ops`; this is not a Project Alpha convention or a default for other deployments.
 
 ```powershell
-npx.cmd wrangler secret put CF_ACCESS_GROUP_API_TOKEN --name ltds-ops-sync
-npx.cmd wrangler secret put PROJECT_ALPHA_WEBHOOK_HMAC_SECRET --name ltds-ops-sync
+npx.cmd wrangler secret put CF_ACCESS_GROUP_API_TOKEN --name ledgetop-ops-sync
+npx.cmd wrangler secret put PROJECT_ALPHA_WEBHOOK_HMAC_SECRET --name ledgetop-ops-sync
 ```
 
 The current Project Alpha contract is HMAC-only, so production explicitly sets `PROJECT_ALPHA_ALLOW_LEGACY_HMAC=true`. LTDS verifies `sha256=<hex>` over the exact `${timestamp}.${rawBody}` bytes. Ed25519 remains preferred if its header and public key are introduced later; an invalid Ed25519 signature never falls back to HMAC. Use `PROJECT_ALPHA_WEBHOOK_ED25519_PREVIOUS_PUBLIC_KEY` only during a coordinated future rotation. The Access Groups API token belongs only on the sync Worker, never in Project Alpha.
@@ -439,7 +439,7 @@ Configure the private Worker-to-Worker hop in `apps/ops-sync/wrangler.jsonc`:
 ```jsonc
 "services": [{
   "binding": "CLIENT_PORTAL_PROJECTION_INGRESS",
-  "service": "ltds-clients",
+  "service": "ledgetop-clients",
   "entrypoint": "OpsSyncPortalProjectionIngress"
 }]
 ```
@@ -547,8 +547,8 @@ integration. Set `PROJECT_ALPHA_PRICING_HINT_URL` to the exact HTTPS endpoint,
 currency codes (normally `USD`). Provision two dedicated secrets:
 
 ```powershell
-npx.cmd wrangler secret put PROJECT_ALPHA_PRICING_HINT_API_KEY --name ltds-clients
-npx.cmd wrangler secret put PROJECT_ALPHA_PRICING_HINT_HMAC_SECRET --name ltds-clients
+npx.cmd wrangler secret put PROJECT_ALPHA_PRICING_HINT_API_KEY --name ledgetop-clients
+npx.cmd wrangler secret put PROJECT_ALPHA_PRICING_HINT_HMAC_SECRET --name ledgetop-clients
 ```
 
 The API key must have only `portal.pricing.preview`; the HMAC secret must be at
@@ -564,7 +564,7 @@ Create separate staging Workers for all three services, D1 databases, R2 buckets
 
 ## 7. Incoming requests
 
-Create the private `ltds-incoming` bucket. Route `incoming.ledgetopdroneservices.com` to `ltds-ops`, but keep human Cloudflare Access limited to the two exact `ops.*` hosts. Create a Turnstile widget restricted to the Incoming hostname, set `TURNSTILE_SITE_KEY`, and provision on Operations:
+Create the private `ltds-incoming` bucket. Route `incoming.ledgetopdroneservices.com` to `ledgetop-ops`, but keep human Cloudflare Access limited to the two exact `ops.*` hosts. Create a Turnstile widget restricted to the Incoming hostname, set `TURNSTILE_SITE_KEY`, and provision on Operations:
 
 ```powershell
 Set-Location apps/operations
@@ -579,7 +579,7 @@ Apply `apps/operations/r2-incoming-cors.json`, expose `ETag`, and configure a 14
 
 ## 7a. Authenticated staff delivery uploads
 
-Authenticated delivery upload authorization remains on `ltds-ops`; part bytes
+Authenticated delivery upload authorization remains on `ledgetop-ops`; part bytes
 go directly from the authorized browser to the private R2 S3 endpoint. A
 separate public upload Worker, public bucket, or public hostname is neither
 required nor permitted. Keep
@@ -625,8 +625,8 @@ to Client variables, browser assets, or build variables. Provision the matching
 
 ```powershell
 Set-Location apps/operations
-npx.cmd wrangler secret put VIEWER_SERVICE_HMAC_SECRET --name ltds-ops
-npx.cmd wrangler secret put VIEWER_EVENT_HMAC_SECRET --name ltds-ops
+npx.cmd wrangler secret put VIEWER_SERVICE_HMAC_SECRET --name ledgetop-ops
+npx.cmd wrangler secret put VIEWER_EVENT_HMAC_SECRET --name ledgetop-ops
 ```
 
 Set `VIEWER_BASE_URL` to the bare HTTPS Viewer origin and
@@ -700,7 +700,7 @@ the private `THUMBNAIL_RENDERER` Container binding resolves with four maximum
 instance, internet disabled and no SSH/public route; the existing R2
 object-create notification still feeds `ltds-file-events`; and both the
 15-minute and 5-minute crons are present. Apply Delivery `0151` before
-uploading the dependent Operations version. The existing private `ltds-ops`
+uploading the dependent Operations version. The existing private `ledgetop-ops`
 Worker owns the thumbnail consumer; no separate or public `ltds-thumbnails`
 Worker is needed. Repository configuration does not prove remote resources or
 Container entitlement exist.
@@ -751,7 +751,7 @@ application limits or upgrade first.
 
 ## 10. Email alerts
 
-Onboard the sending domain in Cloudflare Email Service, add an `EMAIL` send-email binding to `ltds-ops`, and set non-empty `ALERT_FROM` and `ALERT_TO`. Until all three are present, alerts deliberately remain disabled. Send a staging reconciliation alert and verify delivery before enabling production automation.
+Onboard the sending domain in Cloudflare Email Service, add an `EMAIL` send-email binding to `ledgetop-ops`, and set non-empty `ALERT_FROM` and `ALERT_TO`. Until all three are present, alerts deliberately remain disabled. Send a staging reconciliation alert and verify delivery before enabling production automation.
 
 ## 11. Current provisioned resources
 

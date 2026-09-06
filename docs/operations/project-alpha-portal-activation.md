@@ -1,7 +1,7 @@
 # Project Alpha portal projection activation
 
 This is the production operator runbook for Project Alpha hierarchy events
-received by `ltds-ops-sync` and internally projected to `ltds-clients`. It does
+received by `ledgetop-ops-sync` and internally projected to `ledgetop-clients`. It does
 not authorize a deployment or a
 flag, secret, Access, DNS, or producer change. Record every readback and obtain
 the normal production approvals before performing a write.
@@ -85,7 +85,7 @@ for the signed outer wrapper, then Client rechecks the exact inner limit.
    private projection gates, and
    `PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED=false`.
 5. Verify Ops Sync has the `CLIENT_PORTAL_PROJECTION_INGRESS` named service
-   binding targeting `ltds-clients#OpsSyncPortalProjectionIngress`.
+   binding targeting `ledgetop-clients#OpsSyncPortalProjectionIngress`.
 6. Verify the existing Ops Sync Access application, audience, and Project Alpha
    HMAC secret are unchanged. Client no longer requires a copied Project Alpha
    portal HMAC secret or portal-specific Access audience.
@@ -114,7 +114,7 @@ for the signed outer wrapper, then Client rechecks the exact inner limit.
 4. Read back Worker custom domains/routes. Confirm Project Alpha's only ingress
    is the existing Ops Sync route and its Access application/audience are
    unchanged. Confirm the canonical
-   `portal.ledgetopdroneservices.com` custom domain reaches `ltds-clients`, the
+   `portal.ledgetopdroneservices.com` custom domain reaches `ledgetop-clients`, the
    legacy `client.ledgetopdroneservices.com` compatibility domain still reaches
    the same Worker, and no unrelated hostname routes to the internal namespace.
 5. Read back the Operations-owned internal route/binding and confirm only Ops
@@ -148,9 +148,9 @@ for the signed outer wrapper, then Client rechecks the exact inner limit.
      or legacy origin receive no projection-handler response; and
    - an existing legacy public share loads, and its same-origin session request
      remains admitted. Do not include share fragments or cookies in evidence.
-9. Deploy `ltds-clients` first. Confirm the named entrypoint is exported and
+9. Deploy `ledgetop-clients` first. Confirm the named entrypoint is exported and
    direct portal-v2 POSTs remain 404.
-10. Deploy `ltds-ops-sync` second. Confirm the service binding resolves.
+10. Deploy `ledgetop-ops-sync` second. Confirm the service binding resolves.
 11. Send one signed portal projection through the existing Project Alpha event
     URL. Confirm both the source-qualified Ops receipt and the Client delivery
     receipt complete, then replay it and confirm duplicate acknowledgement with
@@ -176,7 +176,7 @@ for the signed outer wrapper, then Client rechecks the exact inner limit.
    producer route is enabled, and all adjacent authority and workflow flags
    remain false. Confirm the release diff contains no unrelated configuration
    change.
-2. Activate the paired reviewed versions on `ltds-clients` and `ltds-ops-sync`
+2. Activate the paired reviewed versions on `ledgetop-clients` and `ledgetop-ops-sync`
    and read back the private binding/entrypoint. Repeat the external internal-route
    rejection and legacy public-share/session checks before sending a valid
    projection.

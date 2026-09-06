@@ -27,7 +27,7 @@ The Client Worker binding is:
 ```json
 {
   "binding": "CLIENT_DELEGATED_SHARE_SIGNER",
-  "service": "ltds-ops",
+  "service": "ledgetop-ops",
   "entrypoint": "ClientDelegatedShareSigner"
 }
 ```

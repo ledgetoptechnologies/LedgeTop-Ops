@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "ltds-ops-sync",
+  "name": "ledgetop-ops-sync",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-22",
   "compatibility_flags": ["nodejs_compat"],
@@ -46,7 +46,7 @@
   "services": [
     {
       "binding": "CLIENT_PORTAL_PROJECTION_INGRESS",
-      "service": "ltds-clients",
+      "service": "ledgetop-clients",
       "entrypoint": "OpsSyncPortalProjectionIngress"
     }
   ]

@@ -244,7 +244,8 @@ deploy `latest`, a mutable tag, or a locally copied script layered onto an
 unrelated FFmpeg image. Before it writes that receipt, the workflow reads the
 commit tag back from the registry, compares the resolved digest with the build
 result, and runs the all-media canary against that exact published digest. The
-workflow does not deploy `ltds-ops`, `ltds-clients`, or `ltds-ops-sync`.
+workflow does not deploy `ledgetop-ops`, `ledgetop-clients`, or
+`ledgetop-ops-sync`.
 
 ## Cloudflare resources
 

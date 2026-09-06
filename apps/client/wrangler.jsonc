@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "ltds-clients",
+  "name": "ledgetop-clients",
   "main": "src/worker/index.ts",
   "compatibility_date": "2026-07-16",
   "compatibility_flags": ["nodejs_compat"],
@@ -156,12 +156,12 @@
   "services": [
     {
       "binding": "CLIENT_DELEGATED_SHARE_SIGNER",
-      "service": "ltds-ops",
+      "service": "ledgetop-ops",
       "entrypoint": "ClientDelegatedShareSigner"
     },
     {
       "binding": "VIEWER_SESSION_ISSUER",
-      "service": "ltds-ops",
+      "service": "ledgetop-ops",
       "entrypoint": "ViewerSessionIssuer"
     }
   ],

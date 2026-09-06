@@ -21,7 +21,7 @@ the user separately authorizes it.
 
 Your objective is to implement Project Alpha's half of the LTDS Client Portal
 v2 contract. The exact reviewed LTDS compatibility source is
-`https://github.com/ledgetoptechnologies/LTDS-Ops.git` commit
+`https://github.com/ledgetoptechnologies/LedgeTop-Ops.git` commit
 `b1ee064d8e9a78ff1fbc43c671bff4c2c58d4c38`; this is the exact reviewed LTDS
 implementation commit supplied with this handoff; do not substitute a branch tip
 or another checkout. Treat that commit's repository-relative

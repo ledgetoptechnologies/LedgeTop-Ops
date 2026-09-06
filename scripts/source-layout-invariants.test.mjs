@@ -145,9 +145,9 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   // The digest intentionally moved with the reviewed canonical portal hosts
   // and explicit legacy compatibility origin. Keep the field assertions so a future config change
   // cannot hide behind a digest refresh.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "2ac2e4bfa69f8a5e33914ef7bce0b78522df0983a1ef34a965384b2e58ac6b92");
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "2d827759428fe797f5810a0b8d630fcd12b2448e26b56168e4e53779d37ada9e");
   const config = readJson("apps/client/wrangler.jsonc");
-  assert.equal(config.name, "ltds-clients");
+  assert.equal(config.name, "ledgetop-clients");
   assert.equal(config.main, "src/worker/index.ts");
   assert.deepEqual(config.routes, [
     { pattern: "client.ledgetopdroneservices.com", custom_domain: true },
@@ -225,12 +225,12 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.deepEqual(config.services, [
     {
       binding: "CLIENT_DELEGATED_SHARE_SIGNER",
-      service: "ltds-ops",
+      service: "ledgetop-ops",
       entrypoint: "ClientDelegatedShareSigner",
     },
     {
       binding: "VIEWER_SESSION_ISSUER",
-      service: "ltds-ops",
+      service: "ledgetop-ops",
       entrypoint: "ViewerSessionIssuer",
     },
   ]);
@@ -286,7 +286,7 @@ test("the Operations business-party lifecycle migration stays LF-only for D1 tri
 test("the Project Alpha handoff stays pinned to the reviewed compatibility corpus", () => {
   const prompt = read("docs/project-alpha-client-portal-agent-prompt.md").replaceAll("\r\n", "\n");
   assert(prompt.includes("Project Alpha commit `60e735265e0d50ef880fde33e058d213a8b70c4b`"));
-  assert(prompt.includes("LTDS-Ops.git` commit\n`b1ee064d8e9a78ff1fbc43c671bff4c2c58d4c38`"));
+  assert(prompt.includes("LedgeTop-Ops.git` commit\n`b1ee064d8e9a78ff1fbc43c671bff4c2c58d4c38`"));
 
   for (const fixture of projectAlphaCompatibilityFixtures) {
     const fixtureName = path.basename(fixture);
