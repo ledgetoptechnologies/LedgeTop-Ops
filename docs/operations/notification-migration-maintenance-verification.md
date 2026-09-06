@@ -47,9 +47,11 @@ baseline, and no container image is rebuilt or replaced by that invocation.
 
 ## Still required
 
-The full Client/Operations candidate runs remain pending. The older candidate
-Operations run reported the outdated three-statement fixture assertion, fixed
-above; focused results do not reclassify that run as passing. Complete the
+The frozen candidate Client run (session 41232, checkout `3e0ed29`) completed
+with exit 0: 95 files / 1,073 tests passed in 3,798.98 seconds. This does not
+include subsequent maintenance or delivery-history changes. The Operations
+candidate run remains live and reported the outdated three-statement fixture
+assertion, fixed above; focused results do not reclassify that run as passing. Complete the
 remaining gates, reconcile the tested revision, then follow R8a in production.
 There has been no production maintenance activation, migration, or deployment
 for this increment. The separate formal security scan finalization failure
