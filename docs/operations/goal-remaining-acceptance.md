@@ -355,3 +355,26 @@ access subsequently saved the required Markdown file, but scan finalization
 failed in `workbench_db.py complete-scan`; no completion retry was made and the
 scan is not claimed complete. Live PA synchronization and
 default-on workspace provisioning remain unverified; no release is claimed.
+
+### September 6 direct-release authorization and live readback
+
+The owner confirmed exhausted build minutes and authorized a local-gated Wrangler
+release with repository synchronization. This supersedes waiting for Actions
+capacity; it does not authorize bypassing branch protections or skipping tests.
+PR #26 was subsequently pushed to `521583c`. Both complete candidate package
+suites remain live; the focused and browser results above remain separate evidence.
+
+Read-only production checks found no pending Operations migrations and Client
+migrations 0200/0201 pending. The notification outbox contains 13 sent and two
+failed rows, with no pending/processing rows at observation time; the inbox is
+empty and foreign-key checks are clean. Do not retry the failed mail as a side
+effect of deployment. R8a still needs a verified writer/dispatcher pause and drain
+mechanism before its preserving table rebuild; an empty queue alone is not one.
+
+The primary-source Ops receipt ledger contains business/entitlement events but
+no portal.projection receipts. Client portal projection receipts and generations
+are also empty, as are portal workspaces. This proves no accepted provisioning
+state exists in those ledgers, not why upstream delivery is missing or rejected.
+Continue tracing the unchanged LTDS signed endpoint and producer status; do not
+create a parallel connection or enroll LTT. No production writes or deployment
+were performed for these checks.
