@@ -41,7 +41,9 @@ function featureDetail(key: NativeWorkspaceFeatureKey, readiness: NativeWorkspac
   if (key === "feedback") return status.state === "available"
     ? "Feedback is ready for individually authorized projects and delivery items. Access is checked again when feedback is sent or opened."
     : status.state === "not_in_access" ? "Feedback is not in your current directory access." : "Feedback storage is not ready for this workspace.";
-  if (key === "models") return "3D model viewing is not connected for this Project Alpha source.";
+  if (key === "models") return status.state === "available"
+    ? "3D models explicitly shared with this workspace are ready. Access is checked again whenever a model opens."
+    : "3D model viewing is not connected for this Project Alpha source.";
   if (key === "team") return "Workspace member management is not connected for this Project Alpha source.";
   return "Billing is managed by the source system and is not connected in this workspace.";
 }
@@ -55,11 +57,12 @@ function FeatureReadiness({features}: {features: NativeWorkspaceFeatureReadiness
   </Card>;
 }
 
-export function NativeWorkspaceContent({ context, page, projectId, feedbackId, onInvalid, renderFiles, openProject, renderTeam, renderRequests }: {
+export function NativeWorkspaceContent({ context, page, projectId, feedbackId, onInvalid, renderFiles, openProject, renderTeam, renderRequests, renderModels }: {
   context: NativePortalBootstrap; page: ClientPortalPage; projectId: string | null; feedbackId?: string | null;
   onInvalid: (caught: unknown) => void; renderFiles: (options: NativeFileBrowserOptions) => ReactNode; openProject: (id: string) => void;
   renderTeam?: () => ReactNode;
   renderRequests?: (projects: PortalProject[], projectId?: string) => ReactNode;
+  renderModels?: (projectId: string) => ReactNode;
 }) {
   const [locationSearch, setLocationSearch] = useState(location.search);
   const [hierarchy, setHierarchy] = useState<NativeHierarchy["entries"]>([]);
@@ -135,7 +138,7 @@ export function NativeWorkspaceContent({ context, page, projectId, feedbackId, o
   const parentLabel = (entry: NativeHierarchy["entries"][number]) => entry.parentType && entry.parentPublicId ? entryLabels.get(`${entry.parentType}:${entry.parentPublicId}`) : undefined;
   const projectTab = params.get("tab") ?? "";
   const unsupportedRoute = ((page === "requests" || page === "request-new" || (page === "project" && projectTab === "requests")) && !context.capabilities.requestV2) ||
-    (page === "feedback" && !context.capabilities.feedback) || (page === "project" && projectTab === "models");
+    (page === "feedback" && !context.capabilities.feedback) || (page === "project" && projectTab === "models" && !context.capabilities.viewer);
   const unavailableFeature: NativeWorkspaceFeatureKey = page === "feedback" ? "feedback"
     : page === "project" && params.get("tab") === "models" ? "models" : "serviceRequests";
 
@@ -144,6 +147,7 @@ export function NativeWorkspaceContent({ context, page, projectId, feedbackId, o
     {unsupportedRoute ? <><Card title="Feature unavailable"><p>{featureDetail(unavailableFeature, context.features)}</p></Card><FeatureReadiness features={context.features} /></> :
       ((page === "requests" || page === "request-new") || (page === "project" && projectTab === "requests")) && context.capabilities.requestV2 && renderRequests
         ? renderRequests(requestProjects, page === "project" ? projectId ?? undefined : undefined)
+        : page === "project" && projectTab === "models" && projectId && context.capabilities.viewer && renderModels ? renderModels(projectId)
         : page === "feedback" ? <PortalFeedback nativeWorkspaceId={context.workspace.id} id={feedbackId} /> : page === "account" ? <><Card title="Workspace access"><p>You are viewing resources shared with your signed-in identity in this workspace. Access is evaluated from the current Project Alpha source and workspace authorization.</p></Card>{renderTeam?.()}<FeatureReadiness features={context.features} /></> : page === "not-found" ? <Card title="Page unavailable"><p>This page is not available in this workspace.</p></Card> : relevantHierarchy ? <>
       <Card title={page === "dashboard" ? "Workspace directory" : page === "project" ? "Project" : "Projects"}>
         {!context.capabilities.directoryRead ? <p>The directory is not included in your current workspace access.</p> : <>

@@ -9,6 +9,9 @@ import {
   type ClientViewerShareResultCodeV1,
   type ClientViewerSessionRequestV1,
   type ClientViewerSessionResultV1,
+  type NativeClientViewerAuthorizationV1,
+  type NativeClientViewerModelsResultV1,
+  type NativeClientViewerSessionRequestV1,
   ViewerServiceError,
 } from "@ltds/shared";
 import { z } from "zod";
@@ -17,6 +20,11 @@ import { issueViewerSession, type AssociationRow } from "./viewer-integration";
 import { hmac, sha256 } from "./crypto";
 import { viewerPublicSharesEnabled, viewerServiceClient } from "./viewer-integration";
 import { portalRootAccessAllowedSql } from "./client-portal-root-access";
+import {
+  authorizeNativePortalReadTarget,
+  resolveNativePortalWorkspaceReadContext,
+} from "../../../client/src/worker/client-portal/workspace-v2";
+import type { Env as ClientEnv } from "../../../client/src/worker/types";
 
 const opaqueId = z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/);
 const requestSchema = z.object({
@@ -46,9 +54,138 @@ const shareRevokeSchema = shareAuthorizationSchema.extend({
   idempotencyKey: z.string().min(16).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/),
 }).strict();
 
+const sourceId = z.string().min(15).max(78).regex(/^project-alpha:[a-z0-9][a-z0-9_-]*$/);
+const nativeAuthorizationSchema = z.object({
+  protocolVersion: z.literal(1),
+  sourceId,
+  workspaceId: opaqueId,
+  identityId: opaqueId,
+  principalIssuer: z.string().min(1).max(512),
+  principalSubject: z.string().min(1).max(512),
+  verifiedEmail: z.email().max(320),
+  projectPublicId: z.string().min(1).max(256).regex(/^[^\u0000-\u001f\u007f]+$/),
+  contextVersion: z.string().length(64).regex(/^[0-9a-f]+$/),
+}).strict();
+const nativeSessionSchema = nativeAuthorizationSchema.extend({
+  associationId: opaqueId,
+  idempotencyKey: z.string().min(16).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/),
+  displayUnits: z.enum(["imperial", "metric"]),
+}).strict();
+
 function db(env: Env): D1Database {
   const candidate = env.DELIVERY_DB as D1Database & { withSession?: (consistency: "first-primary") => D1Database };
   return candidate.withSession?.("first-primary") ?? candidate;
+}
+
+async function nativeContext(env: Env, input: z.infer<typeof nativeAuthorizationSchema>) {
+  const context = await resolveNativePortalWorkspaceReadContext(env as unknown as ClientEnv, {
+    issuer: input.principalIssuer,
+    subject: input.principalSubject,
+    email: input.verifiedEmail,
+  }, input.workspaceId);
+  if (!context || context.sourceId !== input.sourceId || context.identityId !== input.identityId ||
+    context.contextVersion !== input.contextVersion) return null;
+  if (!await authorizeNativePortalReadTarget(env as unknown as ClientEnv, context, "delivery.view", {
+    scopeType: "project", publicId: input.projectPublicId,
+  })) return null;
+  return context;
+}
+
+const NATIVE_ASSOCIATIONS_SQL = `SELECT association.*,
+  MIN(native_grant.authorization_expires_at) viewer_grant_expires_at,
+  MAX(native_grant.can_measure) authorization_can_measure,
+  MAX(native_grant.can_view_cameras) authorization_can_view_cameras,
+  MAX(native_grant.can_download) authorization_can_download
+FROM viewer_model_associations association
+JOIN projects project ON project.id=association.project_id AND project.active=1
+  AND project.project_alpha_source_id=? AND project.project_alpha_project_id=?
+  AND project.project_alpha_project_id=association.project_alpha_project_id
+  AND project.source_updated_at=association.project_source_version
+JOIN portal_v2_directory_entities projected_project ON projected_project.workspace_id=?
+  AND projected_project.generation_id=? AND projected_project.entity_type='project'
+  AND projected_project.public_id=? AND projected_project.source_version=association.project_source_version
+  AND projected_project.active=1
+JOIN viewer_native_client_grants native_grant ON native_grant.source_id=?
+  AND native_grant.workspace_id=? AND native_grant.project_public_id=?
+  AND native_grant.status='active' AND native_grant.revoked_at IS NULL
+  AND (native_grant.authorization_expires_at IS NULL OR datetime(native_grant.authorization_expires_at)>datetime('now'))
+  AND ((native_grant.scope_type='project' AND native_grant.include_future_published=1)
+    OR (native_grant.scope_type='task' AND native_grant.association_id=association.id))
+WHERE association.state='active' AND association.revoked_at IS NULL AND association.model_status='ready'
+  AND (? IS NULL OR association.id=?)
+GROUP BY association.id
+ORDER BY association.model_title COLLATE NOCASE,association.id LIMIT 101`;
+
+async function nativeAssociations(env: Env, input: z.infer<typeof nativeAuthorizationSchema>, associationId?: string) {
+  const context = await nativeContext(env, input);
+  if (!context) return null;
+  const rows = await db(env).prepare(NATIVE_ASSOCIATIONS_SQL).bind(
+    input.sourceId, input.projectPublicId, input.workspaceId, context.generationId, input.projectPublicId,
+    input.sourceId, input.workspaceId, input.projectPublicId, associationId ?? null, associationId ?? null,
+  ).all<AssociationRow>();
+  if (rows.results.length > 100) throw new Error("native_viewer_capacity");
+  // Fence authority changes between the resource lookup and its use.
+  const current = await nativeContext(env, input);
+  if (!current || current.contextVersion !== context.contextVersion) return null;
+  const membershipExpiry = (context.workspace as unknown as { membership_expires_at?: string | null }).membership_expires_at;
+  // Conservatively cap the Viewer grant to every current delivery-view allow.
+  // A narrower unrelated entitlement can only shorten the session, never
+  // extend it beyond the exact target authority proved above.
+  const entitlementExpiries = (context.grants as Array<{ effect:string; expires_at?:string|null }>)
+    .filter(grant => grant.effect === "allow").map(grant => grant.expires_at);
+  for (const row of rows.results) row.authorization_expires_at = minimumExpiry(
+    row.viewer_grant_expires_at, membershipExpiry, ...entitlementExpiries,
+  );
+  return rows.results;
+}
+
+export async function listNativeClientViewerModels(
+  env: Env, request: NativeClientViewerAuthorizationV1,
+): Promise<NativeClientViewerModelsResultV1> {
+  const parsed = nativeAuthorizationSchema.safeParse(request);
+  if (!parsed.success) return { ok: false, protocolVersion: 1, code: "invalid_request" };
+  if (env.CLIENT_VIEWER_SESSION_ISSUER_ENABLED !== "true") return { ok: false, protocolVersion: 1, code: "configuration_error" };
+  try {
+    const associations = await nativeAssociations(env, parsed.data);
+    if (!associations) return { ok: false, protocolVersion: 1, code: "denied" };
+    return { ok: true, protocolVersion: 1, models: associations.map(row => ({
+      associationId: row.id, title: row.model_title, provider: row.model_provider,
+      modelId: row.viewer_model_id, modelVersionId: row.viewer_model_version_id,
+      updatedAt: row.updated_at, canShare: false as const,
+    })) };
+  } catch (error) {
+    return { ok: false, protocolVersion: 1, code: error instanceof Error && /no such table/.test(error.message)
+      ? "configuration_error" : "temporarily_unavailable" };
+  }
+}
+
+export async function issueNativeClientViewerSession(
+  env: Env, request: NativeClientViewerSessionRequestV1,
+): Promise<ClientViewerSessionResultV1> {
+  const parsed = nativeSessionSchema.safeParse(request);
+  if (!parsed.success) return failure("invalid_request");
+  if (env.CLIENT_VIEWER_SESSION_ISSUER_ENABLED !== "true") return failure("configuration_error");
+  try {
+    const associations = await nativeAssociations(env, parsed.data, parsed.data.associationId);
+    if (!associations || associations.length !== 1) return failure("denied");
+    const association = associations[0]!;
+    const grant = await issueViewerSession({
+      env, actorId: parsed.data.identityId, audience: "client", association,
+      idempotencyKey: parsed.data.idempotencyKey, displayUnits: parsed.data.displayUnits,
+      verifiedIndividualIdentity: {
+        identityId: parsed.data.identityId,
+        principalIssuer: parsed.data.principalIssuer,
+        principalSubject: parsed.data.principalSubject,
+      },
+    });
+    return { ok: true, protocolVersion: 1, ...grant };
+  } catch (error) {
+    if (error instanceof ViewerServiceError) return failure(
+      error.code === "not_configured" || error.code === "invalid_configuration"
+        ? "configuration_error" : error.code === "not_found" ? "not_found" : "temporarily_unavailable",
+    );
+    return failure(error instanceof Error && /no such table/.test(error.message) ? "configuration_error" : "temporarily_unavailable");
+  }
 }
 
 export async function pruneClientViewerShareReceipts(env: Pick<Env, "DELIVERY_DB">): Promise<number> {

@@ -103,7 +103,7 @@ import { LeaveFeedback, PortalFeedback } from "./PortalFeedback";
 import { PortalNotifications } from "./PortalNotifications";
 import { loadFeedbackFile, withPortalWorkspace } from "./feedback-api";
 import { NativeWorkspaceContent } from "./NativeWorkspaceContent";
-import type { NativePortalBootstrap } from "./native-portal-api";
+import { createNativeViewerSession, loadNativeViewerModels, type NativePortalBootstrap } from "./native-portal-api";
 import { invitationCapabilitiesLabel, invitationRequestSchema } from "./invitation-request-api";
 import { PortalInvitationRequests } from "./PortalInvitationRequests";
 import { PortalAddressBook, PortalAddressBookPicker } from "./PortalAddressBook";
@@ -1867,7 +1867,11 @@ function LegacyServiceRequestForm({
   );
 }
 
-function ProjectViewerModels({ projectId, initialDisplayUnits }: { projectId: string; initialDisplayUnits: "imperial" | "metric" }) {
+function ProjectViewerModels({ projectId, initialDisplayUnits, loadModels = loadPortalViewerModels,
+  issueSession = createPortalViewerSession, persistUnits = updatePortalViewerUnits }: { projectId: string; initialDisplayUnits: "imperial" | "metric";
+    loadModels?: (projectId:string)=>Promise<PortalViewerModel[]>;
+    issueSession?: (projectId:string,associationId:string,idempotency:string,displayUnits:"imperial"|"metric")=>Promise<import('./portal-api').PortalViewerSession>;
+    persistUnits?: ((units:"imperial"|"metric")=>Promise<unknown>)|null }) {
   const [models, setModels] = useState<PortalViewerModel[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -1876,7 +1880,7 @@ function ProjectViewerModels({ projectId, initialDisplayUnits }: { projectId: st
   useEffect(() => {
     let active = true;
     setModels(null); setError("");
-    loadPortalViewerModels(projectId)
+    loadModels(projectId)
       .then(value => { if (active) setModels(value); })
       .catch(caught => { if (active) { setModels([]); setError((caught as Error).message); } });
     return () => { active = false; };
@@ -1899,7 +1903,7 @@ function ProjectViewerModels({ projectId, initialDisplayUnits }: { projectId: st
     <label className="portal-viewer-units">Measurement units<select value={displayUnits} onChange={event => {
       const next = event.target.value as "imperial" | "metric";
       setDisplayUnits(next); writeClientViewerUnits(next);
-      void updatePortalViewerUnits(next).catch(caught => setError((caught as Error).message));
+      if(persistUnits)void persistUnits(next).catch(caught => setError((caught as Error).message));
     }}><option value="imperial">Imperial</option><option value="metric">Metric</option></select></label>
     {!models.length ? <EmptyState title="No 3D models available" detail="Your LTDS team has not associated a 3D model with this project." /> :
       <div className="portal-viewer-model-grid">{models.map(model => <article key={model.associationId}>
@@ -2984,6 +2988,9 @@ export function ClientPortalApp({
       onInvalid={caught => { bootstrapController.current?.abort(); const status = (caught as RequestError).status; setGate(status === 409 ? {status: "blocked", title: "Workspace changed", detail: "Your workspace changed. Refresh the portal before continuing."} : status === 404 || status === 410 ? {status: "blocked", title: "Shared item unavailable", detail: "This shared item or its access has changed. Refresh the portal to check your current workspace."} : blockedPortal(caught)); }}
       renderTeam={native.capabilities.workspaceMembershipManagement ? () => <Card title="Team access" className="portal-team-card"><WorkspaceTeamPanel initialWorkspaceId={native.workspace.id} workspaceMode="native" expectedSourceId={native.workspace.sourceId} invitationEmailDelivery={native.capabilities.invitationEmailDelivery} hierarchyScopedInvitations={native.capabilities.hierarchyScopedInvitations} /></Card> : undefined}
       renderRequests={renderRequestSurface}
+      renderModels={id => <ProjectViewerModels projectId={id} initialDisplayUnits={readClientViewerUnits()}
+        loadModels={project => loadNativeViewerModels(native,project)}
+        issueSession={(project,association,key,units)=>createNativeViewerSession(native,project,association,key,units)} persistUnits={null} />}
       renderFiles={options => <FileBrowser key={options.folderId ?? "linked-file"} {...options} feedback={native.capabilities.feedback} nativeFeedbackWorkspaceId={native.workspace.id} workspaceId={native.workspace.id} mapToken={null} locationScopeLabel="" emptyTitle="No files shown" emptyDetail={options.folderId ? "This shared folder has no files on this page." : "Open a delivery folder to browse its files."} />} />;
   else if (page === "project")
     content = selectedProject ? (

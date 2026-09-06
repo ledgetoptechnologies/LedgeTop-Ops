@@ -407,7 +407,7 @@ export function OperationsApp() {
           <DeliveryHub {...props} />
         )}{" "}
         {page === "viewer" && allowed(session.user, "viewer.view") && (
-          <ViewerDataOverview />
+          <ViewerDataOverview session={session} />
         )}{" "}
         {page === "team" && allowed(session.user, "team.view") && (
           <Team {...props} />
@@ -3669,6 +3669,10 @@ type ViewerOverviewResponse = {
   overview: ViewerPlatformOverview | null;
 };
 type ViewerWorkspaceGrant = ViewerAdminSessionGrant & { workspaceUrl: string };
+type NativeViewerGrantTarget = {sourceId:string;workspaceId:string;workspaceName:string;projectPublicId:string;projectName:string;
+  associations:Array<{id:string;modelTitle:string}>};
+type NativeViewerGrantWorkspace = {targets:NativeViewerGrantTarget[];grants:Array<{id:string;workspace_name:string;project_name:string;
+  model_title:string|null;scope_type:"project"|"task";authorization_expires_at:string|null}>};
 
 const VIEWER_WORKSPACE_PROTOCOL_VERSION = 1;
 const VIEWER_WORKSPACE_MESSAGE_ID = /^[A-Za-z0-9_-]{16,128}$/;
@@ -3692,7 +3696,36 @@ function exactViewerWorkspaceMessage(
     : null;
 }
 
-function ViewerDataOverview() {
+function NativeViewerClientAccess(){
+  const {data,error,reload,loading}=useLoad(()=>api<NativeViewerGrantWorkspace>("/api/viewer/native-client-grants"),[]);
+  const [targetIndex,setTargetIndex]=useState(0),[scope,setScope]=useState<"project"|"task">("task"),[associationId,setAssociationId]=useState("");
+  const [busy,setBusy]=useState(false),[actionError,setActionError]=useState("");const target=data?.targets[targetIndex];
+  useEffect(()=>{if(target&&!target.associations.some(item=>item.id===associationId))setAssociationId(target.associations[0]?.id??"");},[associationId,target]);
+  const create=async(event:React.FormEvent)=>{event.preventDefault();if(!target||(scope==="task"&&!associationId)||busy)return;setBusy(true);setActionError("");
+    try{await api("/api/viewer/native-client-grants",{method:"POST",headers:{"Idempotency-Key":crypto.randomUUID()},body:JSON.stringify({
+      sourceId:target.sourceId,workspaceId:target.workspaceId,projectPublicId:target.projectPublicId,scopeType:scope,
+      associationId:scope==="task"?associationId:null,includeFuturePublished:scope==="project",expiresAt:null,
+      permissions:{measure:true,cameras:true,download:false}})});await reload();}catch(caught){setActionError((caught as Error).message);}finally{setBusy(false);}};
+  const revoke=async(grant:NativeViewerGrantWorkspace["grants"][number])=>{if(!window.confirm(`Remove ${grant.project_name} Viewer access?`))return;
+    setBusy(true);setActionError("");try{await api(`/api/viewer/native-client-grants/${encodeURIComponent(grant.id)}`,{method:"DELETE",
+      headers:{"Idempotency-Key":crypto.randomUUID()},body:JSON.stringify({reason:"Removed by Operations administrator"})});await reload();}
+    catch(caught){setActionError((caught as Error).message);}finally{setBusy(false);}};
+  if(loading&&!data)return <Card title="Native client Viewer access"><Loading /></Card>;
+  return <Card title="Native client Viewer access"><p className="viewer-association-help">Grant an exact portal project or one published model. Clients can view and measure, but cannot create public shares.</p>
+    <ErrorLine error={error||actionError}/>{data&&<><form className="viewer-association-form" onSubmit={create}>
+      <label>Client workspace and project<select value={targetIndex} onChange={event=>setTargetIndex(Number(event.target.value))} required>
+        {!data.targets.length&&<option value="">No eligible native projects</option>}{data.targets.map((item,index)=><option key={`${item.sourceId}:${item.workspaceId}:${item.projectPublicId}`} value={index}>{item.workspaceName} · {item.projectName}</option>)}</select></label>
+      <label>Access scope<select value={scope} onChange={event=>setScope(event.target.value as "project"|"task")}><option value="task">One model</option><option value="project">All published project models</option></select></label>
+      {scope==="task"&&<label>Model<select value={associationId} onChange={event=>setAssociationId(event.target.value)} required>
+        {!target?.associations.length&&<option value="">No ready model associations</option>}{target?.associations.map(item=><option key={item.id} value={item.id}>{item.modelTitle}</option>)}</select></label>}
+      <button type="submit" className="button-orange" disabled={busy||!target||(scope==="task"&&!associationId)}>{busy?"Saving…":"Grant portal access"}</button>
+    </form>{data.grants.length?<div className="viewer-association-list">{data.grants.map(grant=><article key={grant.id}><div><StatusPill tone="success">active</StatusPill>
+      <h3>{grant.model_title||grant.project_name}</h3><p>{grant.workspace_name} · {grant.scope_type} access</p><small>{grant.authorization_expires_at?`Expires ${date(grant.authorization_expires_at)}`:"No scheduled expiry"}</small></div>
+      <button type="button" className="button-danger button-small" disabled={busy} onClick={()=>void revoke(grant)}>Revoke access</button></article>)}</div>:
+      <EmptyState title="No native Viewer access" detail="Grant an exact model or project above."/>}</>}</Card>;
+}
+
+function ViewerDataOverview({session}:{session:Session}) {
   const { data, error, reload } = useLoad<ViewerOverviewResponse>(() => api("/api/viewer/overview"), []);
   const [opening, setOpening] = useState(false), [actionError, setActionError] = useState("");
   const reauthorizationState = new URLSearchParams(location.search).get("state");
@@ -3814,6 +3847,7 @@ function ViewerDataOverview() {
     </div>
     {value.jobs.failed > 0 && <p className="notice warning">{value.jobs.failed} processing job{value.jobs.failed === 1 ? " needs" : "s need"} attention in Viewer.</p>}
     <small>Updated {date(value.generatedAt)}. This overview contains totals only; no model files or internal storage paths pass through Operations.</small>
+    {allowed(session.user,"viewer.manage")&&<NativeViewerClientAccess/>}
   </div>;
 }
 

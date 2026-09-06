@@ -102,6 +102,30 @@ test("same public project IDs remain source-separated and project links preserve
   await expect(page.getByText("Coastal seawall construction documentation", {exact: true})).toHaveCount(0);
 });
 
+test("native project Models lists only the source-qualified adapter and never exposes resharing", async ({page}) => {
+  const calls = await mock(page, (route, call) => {
+    if (call.path.endsWith("workspace-b/context")) {
+      const value = context();
+      return route.fulfill({json: {...value,
+        features: {...value.features, models: {state: "available", reason: "resource_authorization_required"}},
+        capabilities: {...value.capabilities, viewer: true, viewerShares: false},
+      }});
+    }
+    if (call.path.endsWith("workspace-b/projects/project-shared/models")) return route.fulfill({json: {
+      ...envelope(), models: [{associationId: "association-one", title: "Seawall model", provider: "webodm",
+        modelId: "model-one", modelVersionId: "version-one", updatedAt: date, canShare: false}],
+    }});
+    return undefined;
+  });
+  await page.goto("/portal/projects/project-shared?workspace=workspace-b&tab=models");
+  await expect(page.getByRole("heading", {name: "Seawall model"})).toBeVisible();
+  await expect(page.getByRole("button", {name: "Open 3D model in new tab"})).toBeVisible();
+  await expect(page.getByText(/Share 3D model/)).toHaveCount(0);
+  expect(calls.some(call => call.path.endsWith("workspace-b/projects/project-shared/models") &&
+    call.query.get("expectedContext") === "context-workspace-b")).toBe(true);
+  expect(calls.some(call => call.path === "/api/client/projects/project-shared/models")).toBe(false);
+});
+
 test("native folders, exact preview and download remain scoped and preserve keyboard focus", async ({page}) => {
   const calls = await mock(page); await page.goto("/portal/deliveries?workspace=workspace-b");
   const folderButton = page.getByRole("button", {name: /^Open folder\s*:/}); await folderButton.focus(); await page.keyboard.press("Enter");
