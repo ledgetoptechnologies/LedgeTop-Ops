@@ -1688,8 +1688,11 @@ tbody tr:last-child td { border: 0; }
 .client-hub-title-status { display: grid; justify-items: end; gap: .3rem; max-width: min(100%, 32rem); padding: .65rem .75rem; border: 1px solid var(--line); border-radius: 10px; background: var(--paper); }
 .client-hub-title-status > small { color: var(--muted); line-height: 1.4; text-align: right; }
 .client-hub-detail-grid { grid-template-columns: minmax(0, 1fr); align-items: start; gap: .85rem; }
-.client-hub-wide-panel { grid-column: 1 / -1; min-width: 0; }
-.client-hub-audit-panel { grid-column: 1 / -1; min-width: 0; }
+.client-hub-wide-panel, .client-hub-audit-panel { min-width: 0; }
+.client-hub-danger-zone { grid-column: 1 / -1; display: grid; gap: .8rem; min-width: 0; margin-top: .65rem; padding: 1rem; border: 1px solid #e9b4a7; border-radius: 12px; background: #fff8f6; }
+.client-hub-danger-zone > header { display: grid; gap: .25rem; }
+.client-hub-danger-zone > header :is(h3,p) { margin: 0; }
+.client-hub-danger-zone > header > p:last-child { color: var(--muted); }
 .client-hub-detail-grid .client-hub-contact-list { grid-template-columns: repeat(auto-fit,minmax(min(100%,26rem),1fr)); }
 .client-hub-detail-grid .simple-rows > a { color: inherit; text-decoration: none; }
 .client-hub-detail-grid > *, .client-hub-collection { min-width: 0; }
@@ -2728,4 +2731,17 @@ ul { color: var(--muted); }
   .delegated-share-admin-row .actions select { grid-column: 1 / -1; width: 100%; }
   .authenticated-grant-row, .portal-denial-row { align-items: stretch; flex-direction: column; }
   .authenticated-grant-row button, .portal-denial-row button { width: 100%; min-height: 44px; }
+}
+
+/* Client workspaces progressively use the available canvas without turning
+   narrow cards into horizontal scrollers. The danger zone always remains a
+   distinct final row, irrespective of the active column count. */
+@media (min-width: 640px) {
+  .dashboard-grid.client-hub-detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (min-width: 1120px) {
+  .dashboard-grid.client-hub-detail-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (min-width: 1800px) {
+  .dashboard-grid.client-hub-detail-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 }
