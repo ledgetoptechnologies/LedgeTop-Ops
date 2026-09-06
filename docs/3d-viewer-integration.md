@@ -125,6 +125,13 @@ reauthorizing the current identity, hierarchy, source grant/association,
 denylist state, and model lifecycle. A Viewer session may not outlive any
 explicit LTDS or Viewer expiry used to authorize it.
 
+Revoking one native client grant blocks new sessions for that grant immediately,
+without rotating the project-wide association version or interrupting other
+clients. A session issued before revocation can remain usable until its signed
+authorization expires, for at most 30 minutes. Until the Viewer supports a
+grant-specific revocation protocol, urgent containment requires the broader
+model-association revocation.
+
 The browser never receives the service key, provider credentials, storage
 paths, or a model-wide asset credential.
 

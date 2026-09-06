@@ -1,15 +1,24 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { openViewerShell, validateViewerSessionModel } from "@ltds/ui";
-import { clientViewerShellPath, parseClientViewerShellRoute } from "../src/client/ClientViewerShell";
+import { clientViewerShellPath, nativeClientViewerShellPath, parseClientViewerShellRoute } from "../src/client/ClientViewerShell";
 
 afterEach(() => vi.unstubAllGlobals());
 
 describe("client Viewer shell", () => {
   it("round trips only opaque routing identifiers", () => {
     const route = { projectId: "project-one", associationId: "association_one", modelId: "model-1" };
-    expect(parseClientViewerShellRoute(clientViewerShellPath(route))).toEqual(route);
+    expect(parseClientViewerShellRoute(clientViewerShellPath(route))).toEqual({mode: "legacy", ...route});
     expect(parseClientViewerShellRoute("/portal/viewer/project/association/model%2Fescape")).toBeNull();
     expect(parseClientViewerShellRoute("/portal/viewer/project/association")).toBeNull();
+  });
+
+  it("round-trips an exact native workspace route without placing authority or secrets in the URL", () => {
+    const route = {workspaceId: "workspace-one", projectId: "project one", associationId: "association-one", modelId: "model-one"};
+    const path = nativeClientViewerShellPath(route);
+    expect(path).toBe("/portal/viewer/native/workspace-one/project%20one/association-one/model-one");
+    expect(parseClientViewerShellRoute(path)).toEqual({mode: "native", ...route});
+    expect(path).not.toContain("context");
+    expect(path).not.toContain("grant");
   });
 
   it("detaches the blank window before same-origin navigation", () => {

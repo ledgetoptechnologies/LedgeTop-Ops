@@ -528,6 +528,38 @@ export type ClientViewerSessionResultV1 =
       code: "invalid_request" | "denied" | "not_found" | "configuration_error" | "temporarily_unavailable";
     };
 
+export interface NativeClientViewerAuthorizationV1 {
+  protocolVersion: 1;
+  sourceId: string;
+  workspaceId: string;
+  identityId: string;
+  principalIssuer: string;
+  principalSubject: string;
+  verifiedEmail: string;
+  projectPublicId: string;
+  contextVersion: string;
+}
+
+export interface NativeClientViewerSessionRequestV1 extends NativeClientViewerAuthorizationV1 {
+  associationId: string;
+  idempotencyKey: string;
+  displayUnits: ViewerDisplayUnits;
+}
+
+export interface NativeClientViewerModelSummaryV1 {
+  associationId: string;
+  title: string;
+  provider: string;
+  modelId: string;
+  modelVersionId: string;
+  updatedAt: string;
+  canShare: false;
+}
+
+export type NativeClientViewerModelsResultV1 =
+  | { ok: true; protocolVersion: 1; models: NativeClientViewerModelSummaryV1[] }
+  | { ok: false; protocolVersion: 1; code: "invalid_request" | "denied" | "not_found" | "configuration_error" | "temporarily_unavailable" };
+
 export interface ClientViewerShareAuthorizationV1 {
   protocolVersion: 1;
   workspaceId: string;
@@ -573,6 +605,8 @@ export type ClientViewerShareRevokeResultV1 =
 
 export interface ViewerSessionIssuerBinding {
   issueClientViewerSession(request: ClientViewerSessionRequestV1): Promise<ClientViewerSessionResultV1>;
+  listNativeClientViewerModels(request: NativeClientViewerAuthorizationV1): Promise<NativeClientViewerModelsResultV1>;
+  issueNativeClientViewerSession(request: NativeClientViewerSessionRequestV1): Promise<ClientViewerSessionResultV1>;
   createClientViewerShare(request: ClientViewerShareCreateRequestV1): Promise<ClientViewerShareCreateResultV1>;
   listClientViewerShares(request: ClientViewerShareListRequestV1): Promise<ClientViewerShareListResultV1>;
   revokeClientViewerShare(request: ClientViewerShareRevokeRequestV1): Promise<ClientViewerShareRevokeResultV1>;

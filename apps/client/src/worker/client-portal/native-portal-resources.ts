@@ -4,7 +4,7 @@ import { isMovedSourceMarker,type ClientFeedbackDetail,type ClientFeedbackEvent,
 import type { Env } from '../types';
 import type { ClientPortalFile, VerifiedClientPrincipal, ClientFilePage } from './types';
 import { isHiddenKey, kindForKey, normalizeRoot, parseRange, safeFileName, validateRelativePath } from '../files';
-import { nativePortalScopesAllowed, resolveNativePortalWorkspaceReadContext, nativePortalSourceSchemaAvailable,
+import { authorizeNativePortalReadTarget, nativePortalScopesAllowed, resolveNativePortalWorkspaceReadContext, nativePortalSourceSchemaAvailable,
   type NativePortalReadContext, type PortalDirectoryEntry } from './workspace-v2';
 import { readNativeAuthenticatedDeliveryGrants, readNativeAuthenticatedDeliveryPage, nativeDeliveryResourcesReady } from './authenticated-delivery-grants';
 import { encodeNativePortalHandle, decodeNativePortalHandle, type NativePortalHandle } from './native-portal-handles';
@@ -19,6 +19,7 @@ import { z } from 'zod';
 import { clientPortalRequestOriginAllowed } from '../origin-policy';
 import { appendAuthenticatedContentStart,authenticatedContentAuditRequired } from './authenticated-content-audit';
 import { nativeFeedbackEnabledForContext,nativeFeedbackNotificationsSchemaAvailable } from './native-feedback-authority';
+import type { NativeClientViewerAuthorizationV1, NativeClientViewerSessionRequestV1 } from '@ltds/shared';
 
 type Bindings = {Bindings:Env;Variables:{clientPrincipal:VerifiedClientPrincipal}};
 type Ctx = Context<Bindings>;
@@ -29,6 +30,9 @@ const unavailable = ():never => {throw new HTTPException(404,{message:'Delivery 
 const changed = ():never => {throw new HTTPException(409,{message:'Workspace access changed. Refresh this workspace to continue.'});};
 const invalid = ():never => {throw new HTTPException(400,{message:'Invalid delivery cursor'});};
 const clean = (value:string,max=500) => value.replace(/[\u0000-\u001f\u007f]/g,'').slice(0,max);
+function exactCoordinate(value:string,max:number):string|null {
+  return value.length>0&&value.length<=max&&clean(value,max)===value?value:null;
+}
 const canonicalEtag=(value:string)=>value.trim().replace(/^W\//,'').replace(/^"|"$/g,'');
 function envelope(context:NativePortalReadContext) {return {workspaceId:context.workspaceId,sourceId:context.sourceId,contextVersion:context.contextVersion};}
 function database(env:Env){return env.DELIVERY_DB.withSession('first-primary');}
@@ -89,6 +93,21 @@ async function recheck(c:Ctx,context:NativePortalReadContext):Promise<void> {
   const current=await resolveNativePortalWorkspaceReadContext(c.env,c.get('clientPrincipal'),context.workspaceId);
   if(!current||current.contextVersion!==context.contextVersion)return changed();
 }
+async function nativeViewerReady(c:Ctx):Promise<boolean>{
+  if(c.env.CLIENT_VIEWER_ENABLED!=="true"||!c.env.VIEWER_SESSION_ISSUER)return false;
+  try{return (await database(c.env).prepare("SELECT COUNT(*) count FROM sqlite_master WHERE type='table' AND name='viewer_native_client_grants'")
+    .first<number>('count'))===1;}catch{return false;}
+}
+function nativeViewerAuthorization(c:Ctx,context:NativePortalReadContext,projectPublicId:string):NativeClientViewerAuthorizationV1{
+  const principal=c.get('clientPrincipal');return {protocolVersion:1,sourceId:context.sourceId,workspaceId:context.workspaceId,
+    identityId:context.identityId,principalIssuer:principal.issuer,principalSubject:principal.subject,verifiedEmail:principal.email,
+    projectPublicId,contextVersion:context.contextVersion};
+}
+function nativeViewerFailure(code:string):never{
+  if(code==='invalid_request')throw new HTTPException(400,{message:'Viewer request is invalid'});
+  if(code==='denied'||code==='not_found')throw new HTTPException(404,{message:'3D model not found'});
+  throw new HTTPException(503,{message:'3D Viewer is temporarily unavailable'});
+}
 async function nativeFeedbackReady(c:Ctx,context:NativePortalReadContext):Promise<boolean>{
   return nativeFeedbackEnabledForContext(c.env,context)
     && await nativeFeedbackSchemaAvailable(c.env)
@@ -142,14 +161,37 @@ export function createNativePortalWorkspaceRouter():Hono<Bindings> {
     const deliveryView=await nativeDeliveryResourcesReady(c.env);
     const feedback=await nativeFeedbackReady(c,context);
     const serviceRequests=nativeServiceRequestsEnabled(c.env)&&await nativeRequestSchemaReady(c.env);
+    const viewer=await nativeViewerReady(c);
     const requestAttachments=serviceRequests&&requestAttachmentsAvailable(c.env);
     const features=nativeWorkspaceFeatureReadiness({directoryAuthorized:directoryRead,deliveryBackendReady:deliveryView,
-      feedbackBackendReady:feedback,serviceRequestsReady:serviceRequests});
+      feedbackBackendReady:feedback,serviceRequestsReady:serviceRequests,viewerBackendReady:viewer});
     await recheck(c,context);
     return c.json({workspace:{id:context.workspaceId,sourceId:context.sourceId,displayName:clean(context.displayName),rootType:context.rootType,
       rootPublicId:context.rootPublicId,resourceMode:'native' as const},contextVersion:context.contextVersion,features,capabilities:{directoryRead,deliveryView,
       requestV2:serviceRequests,requestAttachments,feedback:feedback&&directoryRead,manageTeam:false,workspaceMembershipManagement:false,delegatedShares:false,
-      viewer:false,viewerShares:false,viewBilling:false}});
+      viewer,viewerShares:false,viewBilling:false}});
+  });
+  router.get('/:workspaceId/projects/:projectId/models',async c=>{
+    if(!await nativeViewerReady(c)||!c.env.VIEWER_SESSION_ISSUER)throw new HTTPException(404,{message:'Not found'});
+    const context=await contextFor(c),projectId=exactCoordinate(c.req.param('projectId')??'',256);
+    if(!projectId||!await authorizeNativePortalReadTarget(c.env,context,'delivery.view',{scopeType:'project',publicId:projectId}))return unavailable();
+    const result=await c.env.VIEWER_SESSION_ISSUER.listNativeClientViewerModels(nativeViewerAuthorization(c,context,projectId));
+    if(!result.ok)return nativeViewerFailure(result.code);
+    await recheck(c,context);return c.json({...envelope(context),models:result.models});
+  });
+  router.post('/:workspaceId/projects/:projectId/models/:associationId/session',async c=>{
+    sameOrigin(c);if(!await nativeViewerReady(c)||!c.env.VIEWER_SESSION_ISSUER)throw new HTTPException(404,{message:'Not found'});
+    const context=await contextFor(c),projectId=exactCoordinate(c.req.param('projectId')??'',256),associationId=exactCoordinate(c.req.param('associationId')??'',128);
+    const key=z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/).safeParse(c.req.header('Idempotency-Key'));
+    const body=z.object({displayUnits:z.enum(['imperial','metric']).default('imperial')}).strict().safeParse(await boundedJson(c));
+    if(!projectId||!associationId||!key.success||!body.success||
+      !await authorizeNativePortalReadTarget(c.env,context,'delivery.view',{scopeType:'project',publicId:projectId}))return unavailable();
+    const request:NativeClientViewerSessionRequestV1={...nativeViewerAuthorization(c,context,projectId),associationId,
+      idempotencyKey:key.data,displayUnits:body.data.displayUnits};
+    const result=await c.env.VIEWER_SESSION_ISSUER.issueNativeClientViewerSession(request);
+    if(!result.ok)return nativeViewerFailure(result.code);
+    await recheck(c,context);return c.json({grant:result.grant,grantExpiresAt:result.grantExpiresAt,modelId:result.modelId,
+      sessionTtlSeconds:result.sessionTtlSeconds,redeemUrl:result.redeemUrl,embedUrl:result.embedUrl},201);
   });
   router.post('/:workspaceId/feedback',async c=>{
     sameOrigin(c);const context=await contextFor(c);await requireNativeFeedback(c,context);

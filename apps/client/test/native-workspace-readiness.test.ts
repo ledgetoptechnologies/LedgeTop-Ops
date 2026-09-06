@@ -53,6 +53,13 @@ describe('native workspace feature readiness', () => {
       .toEqual({state:'available',reason:'resource_authorization_required'});
   });
 
+  it('advertises native models only after the private issuer and grant schema are ready',()=>{
+    expect(nativeWorkspaceFeatureReadiness({directoryAuthorized:true,deliveryBackendReady:true,viewerBackendReady:false}).models)
+      .toEqual({state:'not_supported',reason:'source_not_supported'});
+    expect(nativeWorkspaceFeatureReadiness({directoryAuthorized:true,deliveryBackendReady:true,viewerBackendReady:true}).models)
+      .toEqual({state:'available',reason:'resource_authorization_required'});
+  });
+
   it('does not claim directory access when a workspace deny overrides an allow', () => {
     const current=context([grant('allow','workspace','workspace-a'),grant('deny','workspace','workspace-a')]);
     expect(nativeDirectoryAuthorizationFromProofs(current,new Map([['organization:organization-a',proof('organization','organization-a')]]),Date.parse('2026-08-26T12:00:00Z'))).toBe(false);

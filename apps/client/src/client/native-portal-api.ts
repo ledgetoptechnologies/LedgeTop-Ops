@@ -37,7 +37,8 @@ function validFeatureReadiness(value: unknown): value is NativeWorkspaceFeatureR
     (exactFeature(features.deliveries, "available", "resource_authorization_required") || exactFeature(features.deliveries, "temporarily_unavailable", "backend_unavailable")) &&
     (exactFeature(features.feedback, "available", "resource_authorization_required") || exactFeature(features.feedback, "not_in_access", "capability_not_granted") || exactFeature(features.feedback, "temporarily_unavailable", "backend_unavailable")) &&
     (exactFeature(features.serviceRequests, "available", "resource_authorization_required") || exactFeature(features.serviceRequests, "not_supported", "source_not_supported")) &&
-    (["models", "team", "billing"] as const).every(key => exactFeature(features[key], "not_supported", "source_not_supported"));
+    (exactFeature(features.models, "available", "resource_authorization_required") || exactFeature(features.models, "not_supported", "source_not_supported")) &&
+    (["team", "billing"] as const).every(key => exactFeature(features[key], "not_supported", "source_not_supported"));
 }
 export function nativeWorkspaceBase(workspaceId: string): string { return `/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}`; }
 export async function loadNativePortalContext(workspace: PortalWorkspace, request: PortalRequest = requestJson, signal?: AbortSignal): Promise<NativePortalContext> {
@@ -46,11 +47,12 @@ export async function loadNativePortalContext(workspace: PortalWorkspace, reques
       value.workspace.sourceId !== workspace.sourceId || !text(value.workspace.displayName, 4000) || !text(value.workspace.rootPublicId, 256) ||
       value.workspace.rootType !== workspace.rootType || value.workspace.rootPublicId !== workspace.rootPublicId || !text(value.contextVersion) ||
       typeof value.capabilities?.directoryRead !== "boolean" || typeof value.capabilities?.deliveryView !== "boolean" ||
-      typeof value.capabilities?.feedback !== "boolean" ||
+      typeof value.capabilities?.feedback !== "boolean" || (value.capabilities?.viewer !== undefined && typeof value.capabilities.viewer !== "boolean") ||
       !validFeatureReadiness(value.features) || (value.features.directory.state === "available") !== value.capabilities.directoryRead ||
       (value.features.deliveries.state === "available") !== value.capabilities.deliveryView ||
       (value.features.serviceRequests.state === "available") !== (value.capabilities.requestV2 === true) ||
-      (value.features.feedback.state === "available") !== value.capabilities.feedback) throw invalid();
+      (value.features.feedback.state === "available") !== value.capabilities.feedback ||
+      (value.features.models.state === "available") !== (value.capabilities.viewer === true)) throw invalid();
   return value;
 }
 function verifyEnvelope(value: NativeEnvelope, context: NativePortalContext): void {
@@ -72,6 +74,18 @@ export async function loadNativeDeliveries(context: NativePortalContext, cursor:
   verifyEnvelope(value, context);
   if (!Array.isArray(value.items) || !value.page || !nullableText(value.page.nextCursor) || (cursor !== null && value.page.nextCursor === cursor) || value.items.some(item => !item || !text(item.id) || !text(item.displayName, 4000) || !text(item.owner?.type, 64) || !text(item.owner.publicId, 256))) throw invalid();
   return value;
+}
+export async function loadNativeViewerModels(context:NativePortalContext,projectId:string,signal?:AbortSignal):Promise<import('./portal-api').PortalViewerModel[]>{
+  const value=await requestJson<NativeEnvelope&{models:import('./portal-api').PortalViewerModel[]}>(path(context,`projects/${encodeURIComponent(projectId)}/models`),{signal});
+  verifyEnvelope(value,context);
+  if(!Array.isArray(value.models)||value.models.some(model=>!model||!text(model.associationId,128)||!text(model.title,240)||
+    !text(model.provider,80)||!text(model.modelId,128)||!text(model.modelVersionId,128)||!text(model.updatedAt,64)||model.canShare!==false))throw invalid();
+  return value.models;
+}
+export async function createNativeViewerSession(context:NativePortalContext,projectId:string,associationId:string,idempotency:string,
+  displayUnits:'imperial'|'metric'):Promise<import('./portal-api').PortalViewerSession>{
+  return requestJson(`${nativeWorkspaceBase(context.workspace.id)}/projects/${encodeURIComponent(projectId)}/models/${encodeURIComponent(associationId)}/session?expectedContext=${encodeURIComponent(context.contextVersion)}`,
+    {method:'POST',headers:{'Idempotency-Key':idempotency},body:JSON.stringify({displayUnits})});
 }
 function mediaPath(value: unknown, context: NativePortalContext, fileId: string, suffix: "preview" | "download"): boolean {
   if (!text(value) || /[\\\u0000-\u001f\u007f]/.test(value)) return false;

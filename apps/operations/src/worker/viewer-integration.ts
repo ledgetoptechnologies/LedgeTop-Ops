@@ -42,7 +42,45 @@ const clientGrantInput = z.object({
   if (value.expiresAt && Date.parse(value.expiresAt) <= Date.now())
     context.addIssue({ code: "custom", path: ["expiresAt"], message: "Grant expiry must be in the future" });
 });
+const nativeClientGrantInput = z.object({
+  sourceId: z.string().min(15).max(78).regex(/^project-alpha:[a-z0-9][a-z0-9_-]*$/),
+  workspaceId: opaqueId,
+  projectPublicId: z.string().min(1).max(256).regex(/^[^\u0000-\u001f\u007f]+$/),
+  scopeType: z.enum(["project", "task"]),
+  associationId: opaqueId.nullable(),
+  includeFuturePublished: z.boolean().default(false),
+  expiresAt: z.iso.datetime({ offset: true }).nullable(),
+  permissions: z.object({ measure: z.boolean().default(true), cameras: z.boolean().default(true), download: z.boolean().default(false) }).strict(),
+}).strict().superRefine((value, context) => {
+  if (value.scopeType === "project" && value.associationId !== null)
+    context.addIssue({ code: "custom", path: ["associationId"], message: "Project grants cannot select a task" });
+  if (value.scopeType === "task" && value.associationId === null)
+    context.addIssue({ code: "custom", path: ["associationId"], message: "Task grants require an association" });
+  if (value.scopeType === "task" && value.includeFuturePublished)
+    context.addIssue({ code: "custom", path: ["includeFuturePublished"], message: "Task grants cannot include future tasks" });
+  if (value.scopeType === "project" && !value.includeFuturePublished)
+    context.addIssue({ code: "custom", path: ["includeFuturePublished"], message: "Project grants must include published tasks" });
+  if (value.expiresAt && Date.parse(value.expiresAt) <= Date.now())
+    context.addIssue({ code: "custom", path: ["expiresAt"], message: "Grant expiry must be in the future" });
+});
 const revokeInput = z.object({ reason: z.string().trim().min(1).max(240) }).strict();
+const nativeClientGrantSnapshot = z.object({
+  id: opaqueId, source_id: z.string(), workspace_id: opaqueId, project_public_id: z.string(),
+  scope_type: z.enum(["project", "task"]), association_id: opaqueId.nullable(), include_future_published: z.number().int(),
+  can_measure: z.number().int(), can_view_cameras: z.number().int(), can_download: z.number().int(),
+  authorization_expires_at: z.string().nullable(), grant_version: z.number().int(), status: z.literal("active"),
+  created_by_staff_id: opaqueId, created_at: z.string(), updated_at: z.string(), revoked_at: z.null(),
+  revoked_by_staff_id: z.null(), revoke_reason: z.null(), workspace_name: z.string(), project_name: z.string(),
+  model_title: z.string().nullable(),
+}).strict();
+type NativeClientGrantSnapshot = z.infer<typeof nativeClientGrantSnapshot>;
+function parseNativeClientGrantSnapshot(value:string):NativeClientGrantSnapshot{
+  let decoded:unknown;
+  try{decoded=JSON.parse(value);}catch{throw new HTTPException(500,{message:"Stored native Viewer grant receipt is invalid"});}
+  const parsed=nativeClientGrantSnapshot.safeParse(decoded);
+  if(!parsed.success)throw new HTTPException(500,{message:"Stored native Viewer grant receipt is invalid"});
+  return parsed.data;
+}
 const publicShareInput = z.object({
   label: z.string().trim().max(120).nullable().optional(),
   expiresAt: z.iso.datetime({ offset: true }).nullable(),
@@ -362,6 +400,165 @@ export async function revokeViewerClientGrant(input: {
     "viewer.client_grant.revoked", "viewer_client_grant", grant.id, null, { reason: value.data.reason })]);
   const sessionRevocation = await drainViewerSessionRevocations(input.env);
   return { success: true, replayed: Boolean(prior), sessionRevocation };
+}
+
+export async function listNativeViewerClientGrants(env: Env, principal: StaffPrincipal) {
+  await requireGlobalViewer(env, principal, "viewer.manage");
+  const rows = await primaryDeliveryDb(env).prepare(`SELECT grant_record.*,
+    workspace.display_name workspace_name,project.display_name project_name,association.model_title
+    FROM viewer_native_client_grants grant_record
+    JOIN portal_v2_workspaces workspace ON workspace.id=grant_record.workspace_id
+      AND workspace.project_alpha_source_id=grant_record.source_id
+    LEFT JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=workspace.id
+    LEFT JOIN portal_v2_directory_entities project ON project.workspace_id=workspace.id
+      AND project.generation_id=checkpoint.active_generation_id AND project.entity_type='project'
+      AND project.public_id=grant_record.project_public_id
+    LEFT JOIN viewer_model_associations association ON association.id=grant_record.association_id
+    WHERE grant_record.status='active' AND grant_record.revoked_at IS NULL
+    ORDER BY grant_record.created_at DESC,grant_record.id LIMIT 501`).all<Record<string,unknown>>();
+  if(rows.results.length>500)throw new HTTPException(503,{message:"The native Viewer grant list is too large"});
+  return rows.results;
+}
+
+export async function listNativeViewerClientGrantWorkspace(env:Env,principal:StaffPrincipal){
+  await requireGlobalViewer(env,principal,"viewer.manage");
+  const database=primaryDeliveryDb(env);
+  const [grants,rows]=await Promise.all([listNativeViewerClientGrants(env,principal),database.prepare(`SELECT
+    workspace.id workspace_id,workspace.project_alpha_source_id source_id,workspace.display_name workspace_name,
+    entity.public_id project_public_id,entity.display_name project_name,association.id association_id,association.model_title
+    FROM portal_v2_workspaces workspace
+    JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=workspace.id
+    JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id
+      AND generation.workspace_id=workspace.id AND generation.status='active' AND generation.complete=1
+    JOIN portal_v2_directory_entities entity ON entity.workspace_id=workspace.id AND entity.generation_id=generation.id
+      AND entity.entity_type='project' AND entity.active=1
+    JOIN projects project ON project.project_alpha_source_id=workspace.project_alpha_source_id
+      AND project.project_alpha_project_id=entity.public_id AND project.source_updated_at=entity.source_version AND project.active=1
+    LEFT JOIN viewer_model_associations association ON association.project_id=project.id
+      AND association.project_alpha_project_id=entity.public_id AND association.project_source_version=entity.source_version
+      AND association.state='active' AND association.revoked_at IS NULL AND association.model_status='ready'
+    WHERE workspace.status='active' AND workspace.legacy_account_id IS NULL
+    ORDER BY workspace.display_name COLLATE NOCASE,entity.display_name COLLATE NOCASE,association.model_title COLLATE NOCASE LIMIT 501`)
+    .all<{workspace_id:string;source_id:string;workspace_name:string;project_public_id:string;project_name:string;
+      association_id:string|null;model_title:string|null}>()]);
+  if(rows.results.length>500)throw new HTTPException(503,{message:"The native Viewer target list is too large"});
+  const targets=new Map<string,{sourceId:string;workspaceId:string;workspaceName:string;projectPublicId:string;projectName:string;
+    associations:Array<{id:string;modelTitle:string}>}>();
+  for(const row of rows.results){const key=`${row.source_id}\u0000${row.workspace_id}\u0000${row.project_public_id}`;
+    let target=targets.get(key);if(!target){target={sourceId:row.source_id,workspaceId:row.workspace_id,workspaceName:row.workspace_name,
+      projectPublicId:row.project_public_id,projectName:row.project_name,associations:[]};targets.set(key,target);}
+    if(row.association_id&&row.model_title)target.associations.push({id:row.association_id,modelTitle:row.model_title});}
+  return {grants,targets:[...targets.values()]};
+}
+
+async function requireNativeViewerGrantTarget(env:Env,value:z.infer<typeof nativeClientGrantInput>):Promise<{
+  workspaceName:string;projectName:string;modelTitle:string|null}>{
+  const database=primaryDeliveryDb(env);
+  const target=await database.prepare(`SELECT entity.source_version,workspace.display_name workspace_name,
+      entity.display_name project_name FROM portal_v2_workspaces workspace
+    JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=workspace.id
+    JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id
+      AND generation.workspace_id=workspace.id AND generation.status='active' AND generation.complete=1
+    JOIN portal_v2_directory_entities entity ON entity.workspace_id=workspace.id AND entity.generation_id=generation.id
+      AND entity.entity_type='project' AND entity.public_id=? AND entity.active=1
+    WHERE workspace.id=? AND workspace.project_alpha_source_id=? AND workspace.legacy_account_id IS NULL
+      AND workspace.status='active' LIMIT 2`).bind(value.projectPublicId,value.workspaceId,value.sourceId)
+    .all<{source_version:string;workspace_name:string;project_name:string}>();
+  if(target.results.length!==1)throw new HTTPException(404,{message:"Native client project not found"});
+  let modelTitle:string|null=null;
+  if(value.associationId){
+    const association=await database.prepare(`SELECT association.id,association.model_title FROM viewer_model_associations association
+      JOIN projects project ON project.id=association.project_id AND project.active=1
+        AND project.project_alpha_source_id=? AND project.project_alpha_project_id=?
+        AND project.source_updated_at=association.project_source_version
+      WHERE association.id=? AND association.state='active' AND association.revoked_at IS NULL
+        AND association.model_status='ready' AND association.project_source_version=?`)
+      .bind(value.sourceId,value.projectPublicId,value.associationId,target.results[0]!.source_version)
+      .first<{id:string;model_title:string}>();
+    if(!association)throw new HTTPException(404,{message:"Published native Viewer task not found"});
+    modelTitle=association.model_title;
+  }
+  return {workspaceName:target.results[0]!.workspace_name,projectName:target.results[0]!.project_name,modelTitle};
+}
+
+export async function createNativeViewerClientGrant(input:{env:Env;principal:StaffPrincipal;
+  grant:z.infer<typeof nativeClientGrantInput>;idempotencyKey:string;request:Request}){
+  await requireGlobalViewer(input.env,input.principal,"viewer.manage");
+  const parsed=nativeClientGrantInput.safeParse(input.grant),key=idempotencyKey.safeParse(input.idempotencyKey);
+  if(!parsed.success||!key.success)throw new HTTPException(400,{message:"Native Viewer client grant is invalid"});
+  const database=primaryDeliveryDb(input.env),fingerprint=await associationMutationFingerprint("native-grant.create",parsed.data);
+  const prior=await database.prepare(`SELECT request_fingerprint,grant_id,response_json FROM viewer_native_client_grant_mutation_receipts
+    WHERE actor_staff_id=? AND idempotency_key=?`).bind(input.principal.id,key.data)
+    .first<{request_fingerprint:string;grant_id:string;response_json:string}>();
+  if(prior){if(prior.request_fingerprint!==fingerprint)throw new HTTPException(409,{message:"Idempotency-Key was already used"});
+    return {grant:parseNativeClientGrantSnapshot(prior.response_json),replayed:true};}
+  const target=await requireNativeViewerGrantTarget(input.env,parsed.data);
+  const count=await database.prepare("SELECT COUNT(*) count FROM viewer_native_client_grants WHERE status='active' AND revoked_at IS NULL").first<number>('count')??0;
+  if(count>=500)throw new HTTPException(503,{message:"The native Viewer grant list is at capacity"});
+  const grantId=crypto.randomUUID(),now=new Date().toISOString();
+  const snapshot:NativeClientGrantSnapshot={id:grantId,source_id:parsed.data.sourceId,workspace_id:parsed.data.workspaceId,
+    project_public_id:parsed.data.projectPublicId,scope_type:parsed.data.scopeType,association_id:parsed.data.associationId,
+    include_future_published:parsed.data.scopeType==='project'&&parsed.data.includeFuturePublished?1:0,
+    can_measure:parsed.data.permissions.measure?1:0,can_view_cameras:parsed.data.permissions.cameras?1:0,
+    can_download:parsed.data.permissions.download?1:0,authorization_expires_at:parsed.data.expiresAt,grant_version:1,status:"active",
+    created_by_staff_id:input.principal.id,created_at:now,updated_at:now,revoked_at:null,revoked_by_staff_id:null,revoke_reason:null,
+    workspace_name:target.workspaceName,project_name:target.projectName,model_title:target.modelTitle};
+  try{await database.batch([
+    database.prepare(`INSERT INTO viewer_native_client_grants(id,source_id,workspace_id,project_public_id,scope_type,association_id,
+      include_future_published,can_measure,can_view_cameras,can_download,authorization_expires_at,created_by_staff_id)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).bind(grantId,parsed.data.sourceId,parsed.data.workspaceId,parsed.data.projectPublicId,
+      parsed.data.scopeType,parsed.data.associationId,parsed.data.scopeType==='project'&&parsed.data.includeFuturePublished?1:0,
+      parsed.data.permissions.measure?1:0,parsed.data.permissions.cameras?1:0,parsed.data.permissions.download?1:0,
+      parsed.data.expiresAt,input.principal.id),
+    database.prepare(`UPDATE viewer_native_client_grants SET created_at=?,updated_at=? WHERE id=?`).bind(now,now,grantId),
+    database.prepare(`INSERT INTO viewer_native_client_grant_mutation_receipts(actor_staff_id,idempotency_key,action,request_fingerprint,grant_id,response_json)
+      VALUES(?,?,'grant.create',?,?,?)`).bind(input.principal.id,key.data,fingerprint,grantId,JSON.stringify(snapshot)),
+    database.prepare(`INSERT INTO viewer_native_client_grant_audit(id,grant_id,action,actor_staff_id,idempotency_key,details_json)
+      VALUES(?,?,'grant.created',?,?,?)`).bind(crypto.randomUUID(),grantId,input.principal.id,key.data,JSON.stringify(parsed.data)),
+  ]);}catch(error){const raced=await database.prepare(`SELECT request_fingerprint,grant_id,response_json FROM viewer_native_client_grant_mutation_receipts
+    WHERE actor_staff_id=? AND idempotency_key=?`).bind(input.principal.id,key.data)
+    .first<{request_fingerprint:string;grant_id:string;response_json:string}>();
+    if(raced?.request_fingerprint===fingerprint)return {grant:parseNativeClientGrantSnapshot(raced.response_json),replayed:true};throw error;}
+  await input.env.OPS_DB.batch([await auditStatement(input.env,input.request,input.principal,"viewer.native_client_grant.created",
+    "viewer_native_client_grant",grantId,null,{sourceId:parsed.data.sourceId,workspaceId:parsed.data.workspaceId,projectPublicId:parsed.data.projectPublicId,
+      scopeType:parsed.data.scopeType,associationId:parsed.data.associationId})]);
+  return {grant:snapshot,replayed:false};
+}
+
+export async function revokeNativeViewerClientGrant(input:{env:Env;principal:StaffPrincipal;grantId:string;reason:string;
+  idempotencyKey:string;request:Request}){
+  await requireGlobalViewer(input.env,input.principal,"viewer.manage");
+  const grantId=opaqueId.safeParse(input.grantId),value=revokeInput.safeParse({reason:input.reason}),key=idempotencyKey.safeParse(input.idempotencyKey);
+  if(!grantId.success||!value.success||!key.success)throw new HTTPException(400,{message:"Native Viewer grant revocation is invalid"});
+  const database=primaryDeliveryDb(input.env),grant=await database.prepare(`SELECT id,source_id,project_public_id,association_id,status
+    FROM viewer_native_client_grants WHERE id=?`).bind(grantId.data)
+    .first<{id:string;source_id:string;project_public_id:string;association_id:string|null;status:string}>();
+  if(!grant)throw new HTTPException(404,{message:"Native Viewer grant not found"});
+  const fingerprint=await associationMutationFingerprint("native-grant.revoke",{grantId:grant.id,reason:value.data.reason});
+  const prior=await database.prepare(`SELECT request_fingerprint FROM viewer_native_client_grant_mutation_receipts
+    WHERE actor_staff_id=? AND idempotency_key=?`).bind(input.principal.id,key.data).first<string>('request_fingerprint');
+  if(prior&&prior!==fingerprint)throw new HTTPException(409,{message:"Idempotency-Key was already used"});
+  if(!prior&&grant.status!=="active")throw new HTTPException(409,{message:"Native Viewer grant is already revoked"});
+  if(!prior)try{await database.batch([
+    database.prepare(`UPDATE viewer_native_client_grants SET status='revoked',grant_version=grant_version+1,revoked_at=datetime('now'),
+      revoked_by_staff_id=?,revoke_reason=?,updated_at=datetime('now') WHERE id=? AND status='active'`).bind(input.principal.id,value.data.reason,grant.id),
+    database.prepare(`INSERT INTO viewer_native_client_grant_mutation_receipts(actor_staff_id,idempotency_key,action,request_fingerprint,grant_id,response_json)
+      VALUES(?,?,'grant.revoke',?,?,?)`).bind(input.principal.id,key.data,fingerprint,grant.id,
+        JSON.stringify({success:true,existingSessionsExpireWithinSeconds:1800})),
+    database.prepare(`INSERT INTO viewer_native_client_grant_audit(id,grant_id,action,actor_staff_id,idempotency_key,details_json)
+      VALUES(?,?,'grant.revoked',?,?,?)`).bind(crypto.randomUUID(),grant.id,input.principal.id,key.data,JSON.stringify({reason:value.data.reason})),
+  ]);}catch(error){
+    const raced=await database.prepare(`SELECT request_fingerprint FROM viewer_native_client_grant_mutation_receipts
+      WHERE actor_staff_id=? AND idempotency_key=?`).bind(input.principal.id,key.data).first<string>('request_fingerprint');
+    if(raced===fingerprint)return {success:true as const,replayed:true,existingSessionsExpireWithinSeconds:1800};
+    if(raced)throw new HTTPException(409,{message:"Idempotency-Key was already used"});
+    const current=await database.prepare("SELECT status FROM viewer_native_client_grants WHERE id=?").bind(grant.id).first<string>('status');
+    if(current!=="active")throw new HTTPException(409,{message:"Native Viewer grant is already revoked"});
+    throw error;
+  }
+  if(!prior)await input.env.OPS_DB.batch([await auditStatement(input.env,input.request,input.principal,"viewer.native_client_grant.revoked",
+    "viewer_native_client_grant",grant.id,null,{reason:value.data.reason})]);
+  return {success:true as const,replayed:Boolean(prior),existingSessionsExpireWithinSeconds:1800};
 }
 
 async function listProjectOptions(env: Env): Promise<PortalProjectRow[]> {
@@ -757,6 +954,28 @@ export function registerViewerIntegrationRoutes(app: ViewerApp): void {
       idempotencyKey: key.data, request: c.req.raw,
     });
     return c.json(result, result.sessionRevocation.pending ? 202 : 200);
+  });
+
+  app.get("/api/viewer/native-client-grants", async c => {
+    return c.json(await listNativeViewerClientGrantWorkspace(c.env,c.get("principal")));
+  });
+
+  app.post("/api/viewer/native-client-grants", async c => {
+    const parsed=nativeClientGrantInput.safeParse(await c.req.json().catch(()=>null));
+    const key=idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
+    if(!parsed.success||!key.success)throw new HTTPException(400,{message:"Native Viewer client grant is invalid"});
+    const result=await createNativeViewerClientGrant({env:c.env,principal:c.get("principal"),grant:parsed.data,
+      idempotencyKey:key.data,request:c.req.raw});
+    return c.json(result,result.replayed?200:201);
+  });
+
+  app.delete("/api/viewer/native-client-grants/:grantId", async c => {
+    const grantId=opaqueId.safeParse(c.req.param("grantId")),value=revokeInput.safeParse(await c.req.json().catch(()=>null));
+    const key=idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
+    if(!grantId.success||!value.success||!key.success)throw new HTTPException(400,{message:"Native Viewer grant revocation is invalid"});
+    const result=await revokeNativeViewerClientGrant({env:c.env,principal:c.get("principal"),grantId:grantId.data,
+      reason:value.data.reason,idempotencyKey:key.data,request:c.req.raw});
+    return c.json(result,200);
   });
 
   app.post("/api/viewer/associations", async c => {

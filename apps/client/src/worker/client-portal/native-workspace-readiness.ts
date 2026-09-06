@@ -86,6 +86,7 @@ export function nativeWorkspaceFeatureReadiness(input: {
   deliveryBackendReady: boolean;
   feedbackBackendReady?: boolean;
   serviceRequestsReady?: boolean;
+  viewerBackendReady?: boolean;
 }): NativeWorkspaceFeatureReadiness {
   const unsupported: NativeWorkspaceFeatureStatus = { state: 'not_supported', reason: 'source_not_supported' };
   return {
@@ -103,7 +104,9 @@ export function nativeWorkspaceFeatureReadiness(input: {
       : input.feedbackBackendReady
         ? { state: 'not_in_access', reason: 'capability_not_granted' }
         : { state: 'temporarily_unavailable', reason: 'backend_unavailable' },
-    models: { ...unsupported },
+    models: input.viewerBackendReady
+      ? { state: 'available', reason: 'resource_authorization_required' }
+      : { ...unsupported },
     team: { ...unsupported },
     billing: { ...unsupported },
   };

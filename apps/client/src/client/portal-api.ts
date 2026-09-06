@@ -240,7 +240,7 @@ export async function loadPortalBootstrap(
         workspaceMembershipManagement: session.capabilities?.workspaceMembershipManagement === true,
         hierarchyScopedInvitations: session.capabilities?.hierarchyScopedInvitations === true,
         invitationEmailDelivery: session.capabilities?.invitationEmailDelivery === true,
-        delegatedShares: false, viewer: false, viewerShares: false, feedback: context.capabilities.feedback === true,
+        delegatedShares: false, viewer: context.capabilities.viewer === true, viewerShares: false, feedback: context.capabilities.feedback === true,
       },
     };
   }
