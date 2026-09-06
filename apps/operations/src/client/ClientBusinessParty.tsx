@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Card, StatusPill } from "@ltds/ui";
 import { api, ApiError } from "./api";
 import { clientDirectoryReturnPath, type ClientKind, type ClientSummary } from "./ClientDirectory";
+import type { ClientServiceAssignmentResult } from "./ClientServiceAssignments";
 
 interface BusinessRoot { sourceId: string; kind: ClientKind; recordId: string }
 interface PartyMember { linkId: string | null; root: BusinessRoot; displayName: string; sourceName: string; detailPath: string | null; availability: "available" | "unavailable" }
@@ -21,7 +22,8 @@ interface SourceWorkspace {
     capabilities: { directory: boolean; requests: boolean; delivery: boolean; viewer: boolean } };
   projects: { items: SourceProject[]; page: SourcePage };
   contacts: { items: SourceContact[]; page: SourcePage };
-  entryPoints: { source: string; projects: string; contacts: string; access: string; delivery: string; audit: string };
+  serviceAssignments: ClientServiceAssignmentResult;
+  entryPoints: { source: string; projects: string; contacts: string; serviceAssignments: string; access: string; delivery: string; audit: string };
 }
 interface SourceWorkspaceState { busy: boolean; error: string; data: SourceWorkspace | null }
 type Operation = { action: "create"; displayName: string; roots: BusinessRoot[] }
@@ -66,6 +68,21 @@ function validPage(value: SourcePage): boolean {
     && Number.isInteger(value.returned) && value.returned >= 0 && Number.isInteger(value.limit) && value.limit > 0
     && (value.nextCursor === null || typeof value.nextCursor === "string"));
 }
+function validServiceAssignments(value: ClientServiceAssignmentResult, member: PartyMember, contextVersion: string): boolean {
+  const root = value?.canonicalRoot;
+  return Boolean(value && root && root.sourceId === member.root.sourceId && root.rootNamespace === "business"
+    && root.kind === member.root.kind && root.publicId === member.root.recordId && value.contextVersion === contextVersion
+    && validPage(value.page) && Array.isArray(value.items) && value.items.length <= 5 && value.page.returned === value.items.length
+    && (value.page.available || value.items.length === 0) && value.items.every(row => row && typeof row.row_key === "string"
+      && typeof row.service_label === "string" && typeof row.service_public_id === "string" && row.source_id === member.root.sourceId
+      && ["effective", "upcoming", "expired", "needs_review"].includes(row.effective_status))
+    && value.readiness && ["ready", "unavailable"].includes(value.readiness.tables)
+    && ["ready", "not_enrolled", "suspended", "unavailable"].includes(value.readiness.receiver)
+    && ["observed", "unobserved", "unavailable"].includes(value.readiness.source)
+    && ["ready", "unavailable"].includes(value.readiness.directory)
+    && ["ready", "unavailable"].includes(value.readiness.projection)
+    && ["ready", "unavailable"].includes(value.readiness.catalog));
+}
 function validSourceWorkspace(value: SourceWorkspace, party: BusinessParty, member: PartyMember): boolean {
   const base = sourcePath(member);
   return Boolean(value && value.partyId === party.id && value.partyVersion === party.version && value.member
@@ -83,8 +100,10 @@ function validSourceWorkspace(value: SourceWorkspace, party: BusinessParty, memb
     && Array.isArray(value.contacts?.items) && validPage(value.contacts.page)
     && value.contacts.items.every(row => row && typeof row.public_id === "string" && typeof row.display_name === "string"
       && (row.email === null || typeof row.email === "string") && (row.phone === null || typeof row.phone === "string"))
+    && validServiceAssignments(value.serviceAssignments, member, value.contextVersion)
     && value.entryPoints?.source === base && value.entryPoints.projects === `${base}#client-business-projects`
     && value.entryPoints.contacts === `${base}#client-business-contacts`
+    && value.entryPoints.serviceAssignments === `${base}#client-service-assignments`
     && value.entryPoints.access === `${base}#client-portal-access`
     && value.entryPoints.delivery === `${base}#client-delivery-access`
     && value.entryPoints.audit === `${base}#client-audit`);
@@ -101,6 +120,11 @@ function unavailablePageMessage(page: SourcePage, subject: "Projects" | "Contact
   if (page.reason === "workspace_unavailable") return `${subject} are unavailable until this source workspace is ready.`;
   if (page.reason === "not_applicable") return `${subject} are not provided by this source.`;
   return `${subject} are currently unavailable from this source.`;
+}
+function serviceAssignmentMessage(result: ClientServiceAssignmentResult): string {
+  if (result.page.available) return result.items.length ? "" : "No service assignments are currently recorded for this exact source record.";
+  if (result.page.reason === "permission_required") return "Service assignments require both Client Hub directory and operations-management access.";
+  return "Service assignments are currently unavailable from this exact source record.";
 }
 function directoryFilters(): string { return clientDirectoryReturnPath().replace(/^\/clients/, ""); }
 function sourceEntryPath(path: string): string {
@@ -348,7 +372,7 @@ export function ClientBusinessParty({ partyId }: { partyId: string }) {
     return () => { parentSignal?.removeEventListener("abort", abort); controller.abort(); };
   }, [party, sourceRevision]);
   useEffect(() => {
-    if (!party || !/^#customer-(?:sources|projects|contacts|access)$/.test(location.hash)) return;
+    if (!party || !/^#customer-(?:sources|projects|contacts|services|access)$/.test(location.hash)) return;
     const target = document.getElementById(location.hash.slice(1));
     if (target) requestAnimationFrame(() => target.scrollIntoView({ block: "start" }));
   }, [party]);
@@ -375,7 +399,8 @@ export function ClientBusinessParty({ partyId }: { partyId: string }) {
       </dl>
       <nav className="business-party-section-nav" aria-label="Customer workspace sections">
         <a href={sectionHref("customer-sources")}>Source records</a><a href={sectionHref("customer-projects")}>Projects</a>
-        <a href={sectionHref("customer-contacts")}>Contacts</a><a href={sectionHref("customer-access")}>Access, delivery, and audit</a>
+        <a href={sectionHref("customer-contacts")}>Contacts</a><a href={sectionHref("customer-services")}>Services</a>
+        <a href={sectionHref("customer-access")}>Access, delivery, and audit</a>
       </nav>
       {party.needsReview && <p role="status">A linked source record is no longer available. Review and unlink that record before adding another. Unavailable record details are not shown.</p>}
       {operation ? <Card><PartyReview operation={operation} contextSignal={pending.current!.signal} onCancel={refresh} onInvalidated={invalidate} onSaved={saved} /></Card>
@@ -425,6 +450,24 @@ export function ClientBusinessParty({ partyId }: { partyId: string }) {
                         <div><strong>{contact.display_name}</strong><small>{contact.email || contact.phone || "No contact details provided"}</small></div>
                       </li>)}</ul>{!state.data.contacts.items.length && <p>No business contacts are visible from this source.</p>}
                         <a className="button button-ghost" href={sourceEntryPath(state.data.entryPoints.contacts)}>Open {member.sourceName} contacts</a></> : null}
+              </Card>;
+            })}</div>
+          </section>
+          <section id="customer-services" className="business-party-section" aria-labelledby="customer-services-title"><h3 id="customer-services-title">Service assignments</h3>
+            <p>Assigned services from each Project Alpha connection. Viewing services here does not change portal or file access.</p>
+            <div className="business-party-sources">{party.members.map(member => {
+              const state = member.linkId ? sourceStates[member.linkId] : undefined;
+              return <Card key={`services:${member.linkId}`} title={member.sourceName}>
+                {member.availability === "unavailable" ? <p>Service assignments are unavailable until this source link is reviewed.</p>
+                  : state?.busy ? <p role="status">Loading {member.sourceName} service assignments…</p>
+                    : state?.error ? <div role="alert"><p>{state.error}</p><button type="button" className="button-ghost" onClick={() => setSourceRevision(value => value + 1)}>Refresh source services</button></div>
+                      : state?.data ? <>{serviceAssignmentMessage(state.data.serviceAssignments)
+                        ? <><p>{serviceAssignmentMessage(state.data.serviceAssignments)}</p><button type="button" className="button-ghost" onClick={() => setSourceRevision(value => value + 1)}>Refresh source services</button></>
+                        : <ul className="business-party-preview-list">{state.data.serviceAssignments.items.map(assignment => <li key={assignment.row_key}>
+                          <div><strong>{assignment.service_label}</strong><small>{member.sourceName} · {assignment.service_public_id}</small></div>
+                          <StatusPill tone={assignment.effective_status === "effective" ? "success" : assignment.effective_status === "upcoming" || assignment.effective_status === "needs_review" ? "warning" : "neutral"}>{assignment.effective_status.replaceAll("_", " ")}</StatusPill>
+                        </li>)}</ul>}
+                        <a className="button button-ghost" href={sourceEntryPath(state.data.entryPoints.serviceAssignments)}>Open {member.sourceName} service assignments</a></> : null}
               </Card>;
             })}</div>
           </section>

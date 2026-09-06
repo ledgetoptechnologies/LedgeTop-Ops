@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   readBusinessParty: vi.fn(),
   listProjects: vi.fn(),
   listCollection: vi.fn(),
+  listServiceAssignments: vi.fn(),
   resolveContext: vi.fn(),
   verifyContext: vi.fn(),
 }));
@@ -14,6 +15,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("../src/worker/business-parties", () => ({ readBusinessParty: mocks.readBusinessParty }));
 vi.mock("../src/worker/client-hub-business-projects", () => ({ listClientHubBusinessProjects: mocks.listProjects }));
 vi.mock("../src/worker/client-hub-collections", () => ({ listClientHubCollection: mocks.listCollection }));
+vi.mock("../src/worker/client-service-assignments", () => ({ listClientServiceAssignments: mocks.listServiceAssignments }));
 vi.mock("../src/worker/client-hub", () => ({
   resolveClientHubDetailContext: mocks.resolveContext,
   verifyClientHubDetailContext: mocks.verifyContext,
@@ -43,6 +45,10 @@ const projects = { items: [{ id: "project-secondary" }], page: { available: true
   hasMore: false, returned: 1, limit: 5 }, canonicalRoot: context.canonicalRoot, contextVersion: context.contextVersion };
 const contacts = { items: [{ id: "contact-secondary" }], page: { available: true, reason: null, nextCursor: null,
   hasMore: false, returned: 1, limit: 5 }, canonicalRoot: context.canonicalRoot, contextVersion: context.contextVersion };
+const serviceAssignments = { items: [{ row_key: "assignment-secondary", service_label: "Aerial mapping", effective_status: "effective" }],
+  page: { available: true, reason: null, nextCursor: null, hasMore: false, returned: 1, limit: 5 },
+  readiness: { tables: "ready", receiver: "ready", source: "observed", directory: "ready", projection: "ready", catalog: "ready" },
+  canonicalRoot: context.canonicalRoot, contextVersion: context.contextVersion, refreshedAt: "2026-08-30T00:00:00.000Z" };
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -50,6 +56,7 @@ beforeEach(() => {
   mocks.resolveContext.mockResolvedValue(context);
   mocks.listProjects.mockResolvedValue(projects);
   mocks.listCollection.mockResolvedValue(contacts);
+  mocks.listServiceAssignments.mockResolvedValue(serviceAssignments);
   mocks.verifyContext.mockResolvedValue(undefined);
 });
 
@@ -59,13 +66,15 @@ describe("unified business-party source workspace", () => {
     expect(mocks.resolveContext).toHaveBeenCalledWith(env, principal, "organization", "org-2", "project-alpha:secondary", "business");
     expect(mocks.listProjects).toHaveBeenCalledWith(env, principal, context, { initial: true, limit: 5 });
     expect(mocks.listCollection).toHaveBeenCalledWith(env, context, "businessContacts", { initial: true, limit: 5 });
+    expect(mocks.listServiceAssignments).toHaveBeenCalledWith(env, principal, context, { initial: true, limit: 5 });
     expect(mocks.verifyContext).toHaveBeenCalledTimes(2);
     expect(mocks.verifyContext).toHaveBeenNthCalledWith(1, env, principal, context);
     expect(mocks.verifyContext).toHaveBeenNthCalledWith(2, env, principal, context);
     expect(mocks.readBusinessParty).toHaveBeenCalledTimes(2);
     expect(result).toMatchObject({ partyId: "party-a", partyVersion: 4, canonicalRoot: context.canonicalRoot,
-      projects, contacts, source: { workspaceAvailable: true, capabilities: context.access },
+      projects, contacts, serviceAssignments, source: { workspaceAvailable: true, capabilities: context.access },
       entryPoints: { projects: `${member.detailPath}#client-business-projects`, contacts: `${member.detailPath}#client-business-contacts`,
+        serviceAssignments: `${member.detailPath}#client-service-assignments`,
         access: `${member.detailPath}#client-portal-access`, delivery: `${member.detailPath}#client-delivery-access`,
         audit: `${member.detailPath}#client-audit` } });
   });
@@ -80,6 +89,7 @@ describe("unified business-party source workspace", () => {
       .rejects.toMatchObject({ status: 409 } satisfies Partial<HTTPException>);
     expect(mocks.resolveContext).not.toHaveBeenCalled();
     expect(mocks.listProjects).not.toHaveBeenCalled();
+    expect(mocks.listServiceAssignments).not.toHaveBeenCalled();
   });
 
   it("rejects a canonical source mismatch without releasing any source records", async () => {
@@ -88,6 +98,7 @@ describe("unified business-party source workspace", () => {
       .rejects.toMatchObject({ status: 409 } satisfies Partial<HTTPException>);
     expect(mocks.listProjects).not.toHaveBeenCalled();
     expect(mocks.listCollection).not.toHaveBeenCalled();
+    expect(mocks.listServiceAssignments).not.toHaveBeenCalled();
   });
 
   it("discards hydrated data when membership changes during independent reads", async () => {

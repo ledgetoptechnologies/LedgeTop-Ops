@@ -518,7 +518,7 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess }: { route
           canonicalRoot={{ sourceId: data.client.source_id, rootNamespace: data.client.root_namespace, kind: data.client.kind, publicId: data.client.public_id }}
           contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} />
       </div>}
-      {data.serviceAssignments && portalBasePath && data.client.source_id && data.client.root_namespace && <div className="client-hub-audit-panel">
+      {data.serviceAssignments && portalBasePath && data.client.source_id && data.client.root_namespace && <div id="client-service-assignments" className="client-hub-audit-panel">
         <ClientServiceAssignments initialPage={data.serviceAssignments} basePath={portalBasePath}
           contextVersion={data.contextVersion || data.serviceAssignments.contextVersion}
           canonicalRoot={{ sourceId: data.client.source_id, rootNamespace: data.client.root_namespace, kind: data.client.kind,

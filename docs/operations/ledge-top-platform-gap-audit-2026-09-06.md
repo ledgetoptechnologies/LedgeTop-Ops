@@ -25,6 +25,32 @@ second business database, or Viewer work as part of this audit.
 
 ## Findings
 
+### Verification checkpoint — September 6 continuation
+
+- Deployment-name alignment is pushed in commit `113a3e6` on Operations PR
+  #26. The three production builds, deployment dry runs, TypeScript checks,
+  generated binding checks, and release preflight passed locally. Existing
+  storage and protocol identifiers were preserved.
+- The focused authenticated-delivery access-terms suite passed all 30 cases.
+  This does not replace the incomplete full Operations suite evidence.
+- GitHub run `34047071207` started no test steps. Its annotation states that
+  recent account payments failed or the spending limit must be increased.
+  Cloudflare build `52ab3d0a-a545-45d0-9aa7-5ca49ad73e4d` also failed, but its
+  error log is not yet available. Neither failure is recorded as a code pass.
+- Service-assignment recovery is fixed locally in `d1b037a`: unavailable
+  results retain refresh/error/retry controls. All 12 service-assignment
+  browser cases passed across desktop and mobile, including recovery from
+  unavailable projection through a temporary request failure.
+- Linked customer workspaces now include up to five service assignments per
+  source, using the existing exact-source reader, context checks, readiness
+  results, and links to the owning source's full service list. Unavailable
+  services can be refreshed locally. Linking still does not combine access.
+  The focused workspace tests passed 7/7 and TypeScript passed. The combined
+  linked-customer/service browser run passed 58 cases; two new cases initially
+  had an ambiguous error locator. After scoping that locator to Services, both
+  desktop/mobile cases passed on rerun. Production build passed. These are
+  local results, pending the release blockers above.
+
 ### Implemented or locally verified
 
 - Client Hub/detail, source-qualified business-party linking, portal identity
