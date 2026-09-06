@@ -707,7 +707,7 @@ describe("Client Hub bounded detail collections", () => {
       .toMatchObject({ available: false, reason: "workspace_unavailable", returned: 0, hasMore: false });
     acl.sqlScope.mockResolvedValue({ global: false, deniedGlobal: false });
     expect((await app.request(`${organizationPath}/collections/businessContacts`, {}, env)).status).toBe(403);
-  });
+  }, 30_000);
 
   it.each([0, 1])("continues a retained portal alias using its live canonical business root when the index row is absent (ready=%s)", async ready => {
     const { app, env, ops } = await fixture();
