@@ -5,5 +5,9 @@ import "mapbox-gl/dist/mapbox-gl.css";
 import "./styles.css";
 import "./request-workflow.css";
 import { OperationsApp } from "./OperationsApp";
+import { OperationsViewerShell, parseOperationsViewerShellRoute } from "./OperationsViewerShell";
 
-createRoot(document.getElementById("root")!).render(<StrictMode><OperationsApp /></StrictMode>);
+const viewerShellRoute = parseOperationsViewerShellRoute(window.location.pathname);
+createRoot(document.getElementById("root")!).render(<StrictMode>{viewerShellRoute
+  ? <OperationsViewerShell route={viewerShellRoute} />
+  : <OperationsApp />}</StrictMode>);

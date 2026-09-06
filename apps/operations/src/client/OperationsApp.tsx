@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { createPortal } from "react-dom";
-import { BRAND, type DeliveryLocationCollection, type Permission, type SessionUser, type ViewerAdminSessionGrant, type ViewerModelSummary, type ViewerPlatformOverview, type ViewerPublicShareSummary, type ViewerSessionGrant } from "@ltds/shared";
-import { AccountMenu, Brand, Card, EmptyState, Loading, StatusPill, openViewerWindow } from "@ltds/ui";
+import { BRAND, type DeliveryLocationCollection, type Permission, type SessionUser, type ViewerAdminSessionGrant, type ViewerModelSummary, type ViewerPlatformOverview, type ViewerPublicShareSummary } from "@ltds/shared";
+import { AccountMenu, Brand, Card, EmptyState, Loading, StatusPill, openViewerShell } from "@ltds/ui";
 import { ApiError, api, setCsrf } from "./api";
+import { operationsViewerShellPath } from "./OperationsViewerShell";
 import { generateSecureAccessCode } from "./access-code";
 import {
   DELIVERY_JOBS_PREFIX,
@@ -6782,20 +6783,10 @@ function ViewerModels({ session }: { session: Session }) {
     finally { setBusy(false); }
   };
 
-  const requestSession = useCallback((associationId: string) => api<ViewerSessionGrant>(
-    `/api/viewer/associations/${encodeURIComponent(associationId)}/session`,
-    { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() } },
-  ), []);
-
   const open = async (association: ViewerAssociation) => {
     setBusy(true); setActionError("");
     try {
-      await openViewerWindow({
-        modelId: association.viewerModelId,
-        title: association.modelTitle,
-        issueSession: () => requestSession(association.id),
-        onStatus: (status, message) => { if (status === "at-risk") setActionError(message); },
-      });
+      openViewerShell(operationsViewerShellPath({ associationId: association.id, modelId: association.viewerModelId }));
     }
     catch (caught) { setActionError((caught as Error).message); }
     finally { setBusy(false); }
