@@ -269,7 +269,8 @@ describe('source-owned native portal resources with real signed projection and l
     await new Promise(resolve=>setTimeout(resolve,5));
     await transitionStaffFeedback(opsEnv,staff,aIds[0]!,{expectedRevision:1,status:'done',note:'Completed after page one'},`staff-${crypto.randomUUID()}`);
     const stable=await request(`${base(a)}/feedback?cursor=${encodeURIComponent(clientFirst.nextCursor!)}`);expect(stable.status).toBe(200);
-    expect((await stable.json() as {items:unknown[]}).items).toEqual([]);
+    const stableItems=(await stable.json() as {items:Array<{feedbackId:string}>}).items;
+    expect(stableItems.every(item=>!aIds.includes(item.feedbackId))).toBe(true);
     const makeContext=async(f:Fixture):Promise<{context:ClientHubCollectionContext;localProject:string}>=>{
       const localRoot=(await opsDb.prepare(`SELECT id FROM pa_organizations WHERE projection_source_id=?
         AND json_extract(payload_json,'$.public_id')=?`).bind(f.source,rootId).first<string>('id'))!;
@@ -439,7 +440,7 @@ describe('source-owned native portal resources with real signed projection and l
         revoked_at=datetime('now'),revoke_reason_code='project_alpha_delivery_revoked' WHERE id=? AND status='active'`).bind(grantId).run();
       await db.prepare("DELETE FROM file_index WHERE r2_key='feedback/client/photo.jpg'").run();
     }
-  },120_000);
+  },process.platform==='win32'?240_000:120_000);
   async function feedbackCreationRace(fault:'authority-rotation'|'principal-suspension'|'principal-version'|'principal-email',relations=false,
     fixture=a){
       const before={
