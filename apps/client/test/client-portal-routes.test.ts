@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {} }));
 import deliveryWorker from "../src/worker/index";
+import { Hono } from "hono";
 import { createClientPortalRouter } from "../src/worker/client-portal/routes";
 import type {
   ClientPortalRepository,
@@ -561,6 +562,23 @@ describe("client portal activation hardening", () => {
     const allowed = await app.request("https://client.example/notifications/notice-1", { method: "PATCH", headers: { Origin: "https://client.example", "Content-Type": "application/json" }, body: JSON.stringify({ action: "dismiss" }) }, env("true", "https://client.example"));
     expect(allowed.status).toBe(200);
     expect(updateNotification).toHaveBeenCalledWith(expect.anything(), session, "notice-1", "dismiss");
+  });
+
+  it("pauses notification-table writers without blocking notification reads", async () => {
+    const updateNotification = vi.fn(async () => true);
+    const app = new Hono().route("/api/client", createClientPortalRouter({ resolvePrincipal: principal, repository: repository({ updateNotification }) }));
+    const maintenance = { ...env("true", "https://client.example"), CLIENT_PORTAL_NOTIFICATION_MIGRATION_MAINTENANCE: "true" };
+    const read = await app.request("https://client.example/api/client/notifications", {}, maintenance);
+    expect(read.status).toBe(200);
+    const paused = await app.request("https://client.example/api/client/notifications/notice-1", {
+      method: "PATCH",
+      headers: { Origin: "https://client.example", "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "read" }),
+    }, maintenance);
+    expect(paused.status).toBe(503);
+    expect(paused.headers.get("Retry-After")).toBe("900");
+    expect(await paused.json()).toMatchObject({ code: "notification_migration_maintenance" });
+    expect(updateNotification).not.toHaveBeenCalled();
   });
 
   it("keeps the portal usable before the additive notification schema is migrated", async () => {

@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { Hono } from "hono";
 import { createClientPortalRouter } from "../src/worker/client-portal/routes";
 import { d1ClientPortalRepository } from "../src/worker/client-portal/repository";
 import type { VerifiedClientPrincipal } from "../src/worker/client-portal/types";
@@ -99,18 +100,18 @@ describe("native PA draft notification history — migrated D1", { timeout: 240_
     return { identity, workspace, request, notification, source, requestEntitlement: `request.create-${suffix}` };
   }
 
-  const history = (principal: VerifiedClientPrincipal, workspace: string) => createClientPortalRouter({
+  const history = (principal: VerifiedClientPrincipal, workspace: string) => new Hono().route("/api/client", createClientPortalRouter({
     resolvePrincipal: async () => principal,
     repository: d1ClientPortalRepository,
-  }).request(`${origin}/notification-history`, { headers: { "X-LTDS-Workspace-Id": workspace } }, env);
-  const mutate = (principal: VerifiedClientPrincipal, workspace: string, notification: string, action: "read" | "dismiss") => createClientPortalRouter({
+  })).request(`${origin}/api/client/notification-history`, { headers: { "X-LTDS-Workspace-Id": workspace } }, env);
+  const mutate = (principal: VerifiedClientPrincipal, workspace: string, notification: string, action: "read" | "dismiss", bindings = env) => new Hono().route("/api/client", createClientPortalRouter({
     resolvePrincipal: async () => principal,
     repository: d1ClientPortalRepository,
-  }).request(`${origin}/notifications/${notification}`, {
+  })).request(`${origin}/api/client/notifications/${notification}`, {
     method: "PATCH",
     headers: { Origin: origin, "Content-Type": "application/json", "X-LTDS-Workspace-Id": workspace },
     body: JSON.stringify({ action }),
-  }, env);
+  }, bindings);
 
   it("shows the PA draft notice only to its current native owner and removes it as authority changes", async () => {
     const mine = await seed("owner", owner);
@@ -152,5 +153,13 @@ describe("native PA draft notification history — migrated D1", { timeout: 240_
       .bind(mine.workspace, mine.identity).run();
     expect((await history(owner, mine.workspace)).status).toBe(403);
     expect((await history(other, theirs.workspace)).status).toBe(200);
+  });
+
+  it("pauses a mounted native inbox mutation without weakening foreign-workspace denial", async () => {
+    const mine = await seed("maintenance", owner);
+    const paused = await mutate(owner, mine.workspace, mine.notification, "read", { ...env, CLIENT_PORTAL_NOTIFICATION_MIGRATION_MAINTENANCE: "true" } as Env);
+    expect(paused.status).toBe(503);
+    expect(paused.headers.get("Retry-After")).toBe("900");
+    expect((await history(other, mine.workspace)).status).toBe(403);
   });
 });

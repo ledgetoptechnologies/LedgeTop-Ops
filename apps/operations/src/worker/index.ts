@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { notificationMigrationMaintenanceActive, notificationMigrationMaintenanceResponse } from "@ltds/shared";
 import { secureHeaders } from "hono/secure-headers";
 import { z } from "zod";
 import {
@@ -402,6 +403,10 @@ app.use("/api/*", async (c, next) => {
         message: "Administrator access required for this change",
       });
     await requireMutationSecurity(c.req.raw, c.env, principal);
+    if (notificationMigrationMaintenanceActive(c.env) &&
+      ((c.req.path.startsWith("/api/client-service-requests/") && ["POST", "PATCH"].includes(c.req.method)) ||
+        /^\/api\/client-portal\/accounts\/[^/]+\/folder-grants(?:\/|$)/.test(c.req.path)))
+      return notificationMigrationMaintenanceResponse();
   }
   await next();
 });
@@ -3210,11 +3215,14 @@ async function scheduled(
     ctx.waitUntil(processLegacyVideoThumbnailRecovery(env));
     ctx.waitUntil(republishPendingThumbnailFallbacks(env));
     try {
+      const notificationMaintenance = notificationMigrationMaintenanceActive(env);
       await Promise.all([
-        processClientPortalRequestNotifications(env),
+        ...(notificationMaintenance ? [] : [
+          processClientPortalRequestNotifications(env),
+          processClientFolderGrantNotifications(env),
+          processClientFolderChangeNotifications(env),
+        ]),
         processIncomingUploadNotifications(env),
-        processClientFolderGrantNotifications(env),
-        processClientFolderChangeNotifications(env),
         processClientFeedbackNotifications(env),
         processViewerProcessingNotifications(env),
         processProjectAccessExpiryNotifications(env),

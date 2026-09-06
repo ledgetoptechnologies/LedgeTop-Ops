@@ -252,6 +252,44 @@ evidence; that record is not production acceptance.
    access revocation. Native draft notices remain in-app only. Do not enroll
    LTT or send portal invitation announcements as part of this rollout.
 
+##### 0201 maintenance barrier
+
+`CLIENT_PORTAL_NOTIFICATION_MIGRATION_MAINTENANCE` is the coordinated,
+default-false release barrier for this whole-table rebuild. Set it to `true`
+in both the Client and Operations versions before the checkpoint. Client
+request/draft mutations and notification read/dismiss mutations return `503`
+with `Retry-After: 900`; Operations request, quote, and folder-grant mutations
+do the same. The Operations five-minute client-request notification invocation
+continues unrelated maintenance but skips all routines that claim the request
+outbox or insert the client inbox.
+
+This is a stop-new-work barrier, not an immediate drain. After both deployed
+versions and their flag values have been read back, wait for in-flight HTTP
+requests and the current scheduled invocation to finish. Then wait through the
+maximum active request-outbox lease (15 minutes) and prove there are no
+`processing` rows before recording the checkpoint/counts/high-water marks and
+applying 0201. Do not treat an empty point-in-time query as a drain proof.
+
+After migration verification, publish the compatible Operations writer and
+Client reader with the barrier still `true`. Resume only by publishing both
+versions with the flag `false`, read back their version/configuration, and then
+run the R8a receipt/retry/revocation/source-revision checks. The current
+production draft producer remains separately default-off through
+`PROJECT_ALPHA_DRAFT_QUOTES_ENABLED=false`; it must not be enabled until the
+0201 migration and compatible writer/readback are complete.
+
+For this reviewed worker-only Operations release, where the existing container
+image and stage are intentionally unchanged, use the explicit configuration
+and prevent Wrangler from creating or rolling out a container revision:
+
+```powershell
+& '.\apps\operations\node_modules\.bin\wrangler.cmd' deploy --config apps/operations/wrangler.jsonc --containers-rollout none
+```
+
+This command is only the approved publish invocation after the pause/drain and
+migration gates above; it does not replace them. Do not substitute a container
+build, image update, or a package `deploy` wrapper for this release.
+
 Rollback stops new production/dispatch of this event while preserving receipts
 and queued notices. Keep the expanded schema and a compatible reader; do not
 downgrade the CHECK constraint or delete new-event rows to fit an older schema.
