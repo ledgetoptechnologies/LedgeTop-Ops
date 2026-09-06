@@ -36,8 +36,10 @@ R8a of [the rollout manifest](client-portal-rollout-manifest.md).
   1,018 passed in 6.0 minutes, desktop and mobile Edge (session 83861, exit 0).
   This uses local fixtures, not production authority or live provisioning.
   Manual screenshot review found the organization-contact editor cramped inside
-  its desktop grid card despite passing tests; responsive editor correction and
-  a stronger layout regression are still required.
+  its desktop grid card despite passing tests. Follow-up `9594939` uses the card's
+  available width to stack controls; its type check, production build, and 36
+  desktop/mobile contact tests passed. The 1280px screenshot was reviewed after
+  the fix, and the new regression checks actual field widths and stacking.
 
 Operations uses `--containers-rollout none` for this Worker-only release. No
 container source, package manifest or lockfile differs from the inspected main
