@@ -76,14 +76,31 @@ having been provisioned. In the displayed release, `send-now` invokes
 `ExternalOpsSyncOrchestrator`, which calls `activateConfiguredConnection`
 before reconciliation and delivery. Trace that activation or its diagnostic
 failure before changing endpoints or requiring individual invitations.
-The previously reported diagnostic `54ad8e9a26c6` has not yet been attributed
-to a verified exception. LTT remains unconfigured and outside this activation.
+The reported diagnostic `54ad8e9a26c6` was subsequently matched exactly to
+the handler's SHA-256 truncation of this exception identity:
+`PDOException:SQLSTATE[HY000]: General error: 1366 Incorrect integer value: '' for column 'contact_assignment_projection_enabled' at row 1`.
+The profile INSERT/UPDATE passes PHP boolean flags directly in PDO's execute
+array; false becomes an empty string rather than an integer zero. This
+explains why permissive SQLite fixtures passed while strict production MySQL
+rejected the default-off flag. Serialize profile flags explicitly as 0/1 and
+verify the actual bound values, then perform live activation acceptance after
+release. Do not change the endpoint, credentials, or default-off optional
+contact/service capabilities to work around this storage error. LTT remains
+unconfigured and outside this activation.
 
 The local `PortalClientProvisioningTest.php` passed 37 tests / 222 assertions
 at PA `636f1d27` using PHP 8.2.12. Its SQLite fixtures cover activation and
 revocation preservation; they do not establish the production MySQL schema,
 successful activation on `fdf8520`, or receiver acceptance. Keep those live
 acceptance requirements open even when this focused test is green.
+
+The signed-in diagnostics page also confirms the same integration failure
+code in `error_log.txt` at September 6 14:47:06 UTC; that deployed handler logs
+only the hash, not the exception class or SQLSTATE. The recent cron view
+repeats provisioning `Ready no` with zero considered roots and no delivered
+projection events. Do not attribute unrelated historical log errors to this
+activation. Preserve sanitized exception class/code diagnostics in future
+releases rather than logging request values or secrets.
 
 | Gate | Role |
 | --- | --- |
