@@ -18,7 +18,7 @@ import { Hono } from 'hono';
 vi.mock('cloudflare:workers',()=>({WorkflowEntrypoint:class{},WorkerEntrypoint:class{},DurableObject:class{}}));
 import { previewNativeDeliveryGrant,createNativeDeliveryGrant } from '../src/worker/native-delivery-bindings';
 import { getStaffFeedback,transitionStaffFeedback } from '../src/worker/client-feedback';
-import { listClientHubProjectFeedbackHistory } from '../src/worker/client-hub-project-feedback-history';
+import { listClientHubFeedbackHistory, listClientHubProjectFeedbackHistory } from '../src/worker/client-hub-project-feedback-history';
 import type { ClientHubCollectionContext } from '../src/worker/client-hub-collections';
 import { registerProjectAlphaConnector,setProjectAlphaConnectorState } from '../src/worker/project-alpha-connectors';
 import { createProjectAlphaSourceContext,prepareProjectAlphaSourceRecords } from '../src/worker/project-alpha-source';
@@ -105,6 +105,8 @@ describe('source-owned native portal resources with real signed projection and l
       new URL('../../client/migrations/0187_authenticated_content_audit.sql',import.meta.url),'utf8')).map(sql=>db.prepare(sql)));
     await db.batch(splitD1MigrationStatements(readFileSync(
       new URL('../../client/migrations/0188_native_feedback_completion_notices.sql',import.meta.url),'utf8')).map(sql=>db.prepare(sql)));
+    await db.batch(splitD1MigrationStatements(readFileSync(
+      new URL('../../client/migrations/0200_native_feedback_workspace_history.sql',import.meta.url),'utf8')).map(sql=>db.prepare(sql)));
     // Relation-mode snapshots require the current immutable wire claim and
     // its additive contact-contract table, even when the payload is schema v3.
     for(const name of ['0190_portal_contact_assignments_v4.sql','0191_portal_projection_wire_contract_claim.sql'])
@@ -259,6 +261,11 @@ describe('source-owned native portal resources with real signed projection and l
     const bp=await listClientHubProjectFeedbackHistory(historyEnv,staff,bc.context,bc.localProject,{limit:5});
     expect(bp.items.map(item=>item.feedbackId)).toEqual([bId]);expect(JSON.stringify(bp)).not.toContain(aIds[0]);
     expect(JSON.stringify([...first.items,...bp.items])).not.toMatch(/Private [ab]/);
+    const rootPage=await listClientHubFeedbackHistory(historyEnv,staff,ac.context,{limit:5});
+    expect(rootPage.items.map(item=>item.feedbackId)).toEqual(expect.arrayContaining(aIds.slice(-5)));
+    expect(JSON.stringify(rootPage)).not.toContain(bId);
+    await expect(listClientHubFeedbackHistory(historyEnv,staff,bc.context,{limit:5,cursor:rootPage.page.nextCursor!}))
+      .rejects.toMatchObject({status:400});
   },120_000);
   it('lists only immediate children, hides internal objects, and returns no raw storage key',async()=>{
     const result=await files(b);expect(result.files.map(f=>f.name)).toEqual(['report.txt']);expect(result.folders?.map(f=>f.name)).toEqual(['child']);
@@ -310,6 +317,23 @@ describe('source-owned native portal resources with real signed projection and l
       const orgFeedback=await createFeedback({kind:'folder',projectId:null,folderId:orgFolder.id},'Please review the organization folder.');
       const filePage=await (await request(`${base(a)}/folders/${clientFolder.id}`)).json() as ClientFilePage;
       const clientFeedback=await createFeedback({kind:'file',projectId:null,fileId:filePage.files[0]!.id},'Please review the client file.');
+      const localRoot=(await opsDb.prepare(`SELECT id FROM pa_organizations WHERE projection_source_id=?
+        AND json_extract(payload_json,'$.public_id')=?`).bind(a.source,rootId).first<string>('id'))!;
+      const historyContext={root:{source_id:a.source,root_namespace:'business',kind:'organization',public_id:localRoot,pa_public_id:rootId,
+        mapping_status:'mapped',display_name:'Customer a',sort_name:'customer a',status:'active',portal_status:'active',workspace_id:a.workspace,
+        legacy_account_id:null,account_count:0,project_count:1,request_count:0,contact_count:0,meaningful_activity_at:null,source_version:'root-v1',
+        indexed_at:'',scan_generation:1},canonicalRoot:{sourceId:a.source,rootNamespace:'business',kind:'organization',publicId:localRoot},
+        access:{directory:true,requests:true,delivery:true,viewer:false},contextVersion:'c'.repeat(43)} as ClientHubCollectionContext;
+      const rootHistory=await listClientHubFeedbackHistory({...opsEnv,OPERATIONS_SESSION_SECRET:'native-root-history-secret-0123456789'},staff,historyContext,{limit:5});
+      expect(rootHistory.items.map(item=>[item.feedbackId,item.target.kind])).toEqual(expect.arrayContaining([
+        [projectFeedback,'project'],[orgFeedback,'folder'],[clientFeedback,'file'],
+      ]));
+      expect(JSON.stringify(rootHistory)).not.toMatch(/Please review|completionNote|actor|message|note|storageKey|fingerprint|scopeProof/i);
+      const nativePlan=await db.prepare(`EXPLAIN QUERY PLAN SELECT rowid watermark,id,created_at FROM portal_native_feedback
+        INDEXED BY idx_portal_native_feedback_workspace_chronological WHERE source_id=? AND workspace_id=? AND rowid<=? AND created_at<=?
+        ORDER BY created_at DESC,id DESC LIMIT 51`).bind(a.source,a.workspace,Number.MAX_SAFE_INTEGER,new Date().toISOString()).all<{detail:string}>();
+      expect(nativePlan.results.some(row=>row.detail.includes('idx_portal_native_feedback_workspace_chronological')
+        &&row.detail.includes('source_id=?')&&row.detail.includes('workspace_id=?'))).toBe(true);
       for(const [id,ownerType] of [[orgFeedback,'organization'],[clientFeedback,'client']] as const){
         const row=await db.prepare(`SELECT owner_scope_type ownerType,owner_public_id ownerId,project_public_id projectId
           FROM portal_native_feedback WHERE id=?`).bind(id).first();

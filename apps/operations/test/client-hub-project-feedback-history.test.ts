@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { HTTPException } from "hono/http-exception";
+import { createFeedbackRecord, type FeedbackWriteAuthorization } from "../../client/src/worker/client-portal/feedback-store";
 import type { ClientHubCollectionContext } from "../src/worker/client-hub-collections";
 import { feedbackFixture, feedbackStaff } from "./helpers/client-feedback-fixture";
 
@@ -15,7 +16,7 @@ vi.mock("../src/worker/client-hub-business-project-detail",()=>({
       project:{id:projectId,status:"active",manager:null,start_date:null,end_date:null}};
   }),
 }));
-import { listClientHubProjectFeedbackHistory } from "../src/worker/client-hub-project-feedback-history";
+import { listClientHubFeedbackHistory, listClientHubProjectFeedbackHistory } from "../src/worker/client-hub-project-feedback-history";
 import { transitionStaffFeedback } from "../src/worker/client-feedback";
 
 function context(publicId:string,sourceId:ClientHubCollectionContext["root"]["source_id"]="project-alpha:primary"):ClientHubCollectionContext{
@@ -106,5 +107,38 @@ describe("Client Hub project feedback history",{timeout:60_000},()=>{
     projectRead.changed=true;
     await expect(listClientHubProjectFeedbackHistory(fixture.env,feedbackStaff,context(owner.pa),owner.pa,{limit:5})).rejects.toMatchObject({status:409});
     projectRead.changed=false;
+  });
+
+  it("lists project, folder and file lifecycle metadata for the exact primary client without private content",async()=>{
+    const owner=await fixture.seed();
+    const project=await owner.create("Private project message");
+    await fixture.db.prepare(`UPDATE client_folder_associations SET scope_type='project',project_id=? WHERE id=?`)
+      .bind(owner.id,owner.id).run();
+    const base=owner.authorization,target=base.target,sourceOwner={...target.sourceOwner,
+      project:{projectAlphaProjectId:owner.pa,sourceUpdatedAt:null},association:{prefix:owner.prefix}};
+    const folderAuthorization:FeedbackWriteAuthorization={...base,target:{...target,kind:"folder",projectId:owner.id,
+      associationId:owner.id,relativePath:"deliverables/",storageKey:null,label:"Deliverables",projectName:"North site",sourceOwner}};
+    const fileAuthorization:FeedbackWriteAuthorization={...base,target:{...folderAuthorization.target,kind:"file",relativePath:"deliverables/photo.jpg",
+      storageKey:`${owner.prefix}deliverables/photo.jpg`,label:"photo.jpg",sourceOwner:{...sourceOwner,file:{etag:"etag",size:100,uploadedAt:"2026-08-25T00:00:00Z"}}}};
+    const folder=(await createFeedbackRecord(fixture.db,folderAuthorization,"Private folder message",`folder-${crypto.randomUUID()}`)).record;
+    const file=(await createFeedbackRecord(fixture.db,fileAuthorization,"Private file message",`file-${crypto.randomUUID()}`)).record;
+    const result=await listClientHubFeedbackHistory(fixture.env,feedbackStaff,context(owner.pa),{limit:5,expectedContextVersion:"a".repeat(43)});
+    expect(result.items.map(item=>[item.feedbackId,item.target.kind,item.target.label])).toEqual(expect.arrayContaining([
+      [project.id,"project","North site"],[folder.id,"folder","Deliverables"],[file.id,"file","photo.jpg"],
+    ]));
+    expect(JSON.stringify(result)).not.toMatch(/Private (project|folder|file)|completionNote|actor|message|note|sourceOwner|storageKey|identity|fingerprint|guard/i);
+  });
+
+  it("uses the primary exact-account history index and invalidates a continued page after account mapping changes",async()=>{
+    const owner=await fixture.seed();for(let index=0;index<6;index++)await owner.create(`Hidden ${index}`);
+    const plan=await fixture.db.prepare(`EXPLAIN QUERY PLAN SELECT rowid watermark,id,created_at FROM client_feedback
+      INDEXED BY idx_client_feedback_account_chronological WHERE account_id=? AND rowid<=? AND created_at<=?
+      ORDER BY created_at DESC,id DESC LIMIT 51`).bind(owner.id,Number.MAX_SAFE_INTEGER,new Date().toISOString()).all<{detail:string}>();
+    expect(plan.results.some(row=>row.detail.includes("idx_client_feedback_account_chronological")&&row.detail.includes("account_id=?"))).toBe(true);
+    const first=await listClientHubFeedbackHistory(fixture.env,feedbackStaff,context(owner.pa),{limit:5});
+    expect(first.page.nextCursor).toBeTruthy();
+    await fixture.db.prepare("UPDATE client_accounts SET status='suspended' WHERE id=?").bind(owner.id).run();
+    await expect(listClientHubFeedbackHistory(fixture.env,feedbackStaff,context(owner.pa),{limit:25,cursor:first.page.nextCursor!}))
+      .rejects.toMatchObject({status:409});
   });
 });

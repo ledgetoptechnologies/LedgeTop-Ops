@@ -11,7 +11,7 @@ import { CLIENT_HUB_COLLECTIONS, createClientHubCollectionContext, isClientHubCo
   type ClientHubCollectionContext, type ClientHubPermissions } from "./client-hub-collections";
 import { listClientHubBusinessProjects, BUSINESS_PROJECT_FILTERS, type BusinessProjectFilter } from "./client-hub-business-projects";
 import { readClientHubBusinessProjectDetail } from "./client-hub-business-project-detail";
-import { listClientHubProjectFeedbackHistory } from "./client-hub-project-feedback-history";
+import { listClientHubFeedbackHistory, listClientHubProjectFeedbackHistory } from "./client-hub-project-feedback-history";
 import { isPortalIdentityCollection, listPortalIdentityCollection, listPortalIdentityPage, portalIdentityQuery } from "./client-portal-identity-read";
 import { registerClientInternalNoteRoutes } from "./client-internal-note-routes";
 import { readBoundedJson } from "./bounded-json";
@@ -458,6 +458,22 @@ export function registerClientHubRoutes(app: App): void {
     const context = await resolveDetailContext(c.env,principal,kind,c.req.param("publicId"),c.req.param("sourceId"),"business");
     const rawLimit = c.req.query("limit");
     const result = await listClientHubProjectFeedbackHistory(c.env,principal,context,c.req.param("projectId"),{
+      expectedContextVersion:c.req.query("expectedContextVersion"),cursor:c.req.query("cursor"),
+      limit:rawLimit===undefined?5:/^\d+$/.test(rawLimit)?Number(rawLimit):Number.NaN,
+    });
+    await verifyContext(c.env,principal,context);
+    c.header("Cache-Control","no-store");
+    return c.json(result);
+  });
+  app.get("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/feedback-history",async c=>{
+    if(c.req.param("rootNamespace")!=="business"||!isBusinessProjectionSource(c.req.param("sourceId")))
+      throw new HTTPException(404,{message:"Client feedback history is unavailable for this source"});
+    const kind=routeKind(c.req.param("kind"));
+    if(!kind)throw new HTTPException(404,{message:"Client not found"});
+    const principal=c.get("principal");
+    const context=await resolveDetailContext(c.env,principal,kind,c.req.param("publicId"),c.req.param("sourceId"),"business");
+    const rawLimit=c.req.query("limit");
+    const result=await listClientHubFeedbackHistory(c.env,principal,context,{
       expectedContextVersion:c.req.query("expectedContextVersion"),cursor:c.req.query("cursor"),
       limit:rawLimit===undefined?5:/^\d+$/.test(rawLimit)?Number(rawLimit):Number.NaN,
     });
