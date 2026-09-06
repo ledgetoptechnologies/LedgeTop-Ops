@@ -69,10 +69,14 @@ CREATE TABLE viewer_native_client_grant_mutation_receipts (
   action TEXT NOT NULL CHECK (action IN ('grant.create','grant.revoke')),
   request_fingerprint TEXT NOT NULL,
   grant_id TEXT NOT NULL,
+  response_json TEXT NOT NULL CHECK (json_valid(response_json)),
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   PRIMARY KEY (actor_staff_id,idempotency_key),
   FOREIGN KEY (grant_id) REFERENCES viewer_native_client_grants(id) ON DELETE RESTRICT
 );
+CREATE UNIQUE INDEX idx_viewer_native_grant_single_revoke
+  ON viewer_native_client_grant_mutation_receipts(grant_id)
+  WHERE action='grant.revoke';
 
 CREATE TABLE viewer_native_client_grant_audit (
   id TEXT PRIMARY KEY,

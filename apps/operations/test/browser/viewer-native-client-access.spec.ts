@@ -13,9 +13,10 @@ test('native portal Viewer grants are explicit, exact and revocable from Operati
       workspaceId:'workspace-one',workspaceName:'Greenwood',projectPublicId:'project-one',projectName:'Church',associations:[{id:'association-one',modelTitle:'Church model'}]}],
       grants:granted&&!revoked?[{id:'grant-one',workspace_name:'Greenwood',project_name:'Church',model_title:'Church model',scope_type:'task',authorization_expires_at:null}]:[]}});
     if(path==='/api/viewer/native-client-grants'&&request.method()==='POST'){createBody=request.postDataJSON();granted=true;return route.fulfill({status:201,json:{grant:{id:'grant-one'},replayed:false}});}
-    if(path==='/api/viewer/native-client-grants/grant-one'&&request.method()==='DELETE'){revoked=true;return route.fulfill({json:{success:true,replayed:false,sessionRevocation:{delivered:1,pending:0}}});}
+    if(path==='/api/viewer/native-client-grants/grant-one'&&request.method()==='DELETE'){revoked=true;return route.fulfill({json:{success:true,replayed:false,existingSessionsExpireWithinSeconds:1800}});}
     return route.fulfill({status:404,json:{error:'Not found'}});});
   await page.goto('/viewer');await expect(page.getByRole('heading',{name:'Native client Viewer access'})).toBeVisible();
+  await expect(page.getByText(/existing session can remain active for up to 30 minutes/)).toBeVisible();
   await page.getByRole('button',{name:'Grant portal access'}).click();await expect(page.getByRole('heading',{name:'Church model'})).toBeVisible();
   expect(createBody).toMatchObject({sourceId:'project-alpha:primary',workspaceId:'workspace-one',projectPublicId:'project-one',scopeType:'task',
     associationId:'association-one',includeFuturePublished:false,permissions:{measure:true,cameras:true,download:false}});

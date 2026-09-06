@@ -22,6 +22,10 @@ describe("native Viewer grant migration",()=>{
     expect(()=>db.prepare("UPDATE viewer_native_client_grants SET status='active',revoked_at=NULL WHERE id='grant-one'").run()).toThrow(/immutable/);
     expect(()=>insert().run("project-without-future","project-alpha:primary","workspace-one","pa-project-one","project",null,0,"staff-one")).toThrow();
     insert().run("grant-five","project-alpha:primary","workspace-one","pa-project-one","task","association-one",0,"staff-one");
+    const receipt=db.prepare(`INSERT INTO viewer_native_client_grant_mutation_receipts
+      (actor_staff_id,idempotency_key,action,request_fingerprint,grant_id,response_json) VALUES(?,?,'grant.revoke',?,?,?)`);
+    receipt.run("staff-one","revoke-key-one","fingerprint-one","grant-one",'{"success":true}');
+    expect(()=>receipt.run("staff-two","revoke-key-two","fingerprint-two","grant-one",'{"success":true}')).toThrow();
     expect(db.prepare("SELECT COUNT(*) count FROM viewer_native_client_grants").get()).toEqual({count:2});db.close();
   });
 });

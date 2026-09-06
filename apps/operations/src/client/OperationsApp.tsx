@@ -3706,12 +3706,12 @@ function NativeViewerClientAccess(){
       sourceId:target.sourceId,workspaceId:target.workspaceId,projectPublicId:target.projectPublicId,scopeType:scope,
       associationId:scope==="task"?associationId:null,includeFuturePublished:scope==="project",expiresAt:null,
       permissions:{measure:true,cameras:true,download:false}})});await reload();}catch(caught){setActionError((caught as Error).message);}finally{setBusy(false);}};
-  const revoke=async(grant:NativeViewerGrantWorkspace["grants"][number])=>{if(!window.confirm(`Remove ${grant.project_name} Viewer access?`))return;
+  const revoke=async(grant:NativeViewerGrantWorkspace["grants"][number])=>{if(!window.confirm(`Remove ${grant.project_name} Viewer access? New sessions are blocked immediately. An existing session may remain active for up to 30 minutes.`))return;
     setBusy(true);setActionError("");try{await api(`/api/viewer/native-client-grants/${encodeURIComponent(grant.id)}`,{method:"DELETE",
       headers:{"Idempotency-Key":crypto.randomUUID()},body:JSON.stringify({reason:"Removed by Operations administrator"})});await reload();}
     catch(caught){setActionError((caught as Error).message);}finally{setBusy(false);}};
   if(loading&&!data)return <Card title="Native client Viewer access"><Loading /></Card>;
-  return <Card title="Native client Viewer access"><p className="viewer-association-help">Grant an exact portal project or one published model. Clients can view and measure, but cannot create public shares.</p>
+  return <Card title="Native client Viewer access"><p className="viewer-association-help">Grant an exact portal project or one published model. Clients can view and measure, but cannot create public shares. Revocation blocks new sessions immediately; an existing session can remain active for up to 30 minutes.</p>
     <ErrorLine error={error||actionError}/>{data&&<><form className="viewer-association-form" onSubmit={create}>
       <label>Client workspace and project<select value={targetIndex} onChange={event=>setTargetIndex(Number(event.target.value))} required>
         {!data.targets.length&&<option value="">No eligible native projects</option>}{data.targets.map((item,index)=><option key={`${item.sourceId}:${item.workspaceId}:${item.projectPublicId}`} value={index}>{item.workspaceName} · {item.projectName}</option>)}</select></label>
