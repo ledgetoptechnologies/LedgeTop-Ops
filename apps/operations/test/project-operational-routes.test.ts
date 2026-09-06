@@ -33,6 +33,8 @@ vi.mock("../src/worker/client-hub-collections", async importOriginal => ({
   listClientHubCollection: services.listClientHubCollection,
 }));
 vi.mock("../src/worker/project-recurring-copy-forward", () => ({
+  RECURRING_PROJECT_COPY_VERSION_CHANGED: "recurring_project_copy_version_changed",
+  RecurringProjectCopyVersionChanged: class extends HTTPException { code = "recurring_project_copy_version_changed"; constructor() { super(409, { message: "Re-preview the copy" }); } },
   previewRecurringProjectCopy: services.previewRecurringProjectCopy,
   commitRecurringProjectCopy: services.commitRecurringProjectCopy,
 }));
@@ -44,6 +46,7 @@ vi.mock("../src/worker/project-operational-recovery", () => ({
 
 import { registerProjectOperationalRoutes } from "../src/worker/project-operational-routes";
 import { ProjectOperationalRecoveryRequired } from "../src/worker/project-operational-memory";
+import { RecurringProjectCopyVersionChanged } from "../src/worker/project-recurring-copy-forward";
 import type { ClientHubCollectionContext } from "../src/worker/client-hub-collections";
 import type { Env, StaffPrincipal } from "../src/worker/types";
 
@@ -212,6 +215,17 @@ describe("project operational routes", () => {
     expect(commit.status).toBe(200); expect(commit.headers.get("Cache-Control")).toBe("no-store");
     expect(services.commitRecurringProjectCopy).toHaveBeenCalledWith(env, principal, context, commitBody);
     expect(verify).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["preview", "commit"])("serializes a revalidated copy %s version mismatch with its narrow code", async action => {
+    const { app, verify, env } = fixture();
+    const conflict = new RecurringProjectCopyVersionChanged();
+    (action === "preview" ? services.previewRecurringProjectCopy : services.commitRecurringProjectCopy).mockRejectedValueOnce(conflict);
+    const response = await app.request(`${path}/recurring-copy/${action}`, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ destinationProjectId: "project-one" }) }, env);
+    expect(response.status).toBe(409); expect(response.headers.get("Cache-Control")).toBe("no-store");
+    await expect(response.json()).resolves.toMatchObject({ code: "recurring_project_copy_version_changed", error: "Re-preview the copy" });
+    expect(verify).toHaveBeenCalledTimes(1);
   });
 
   it.each(["preview", "commit"])("rejects a %s body that targets a project other than the open route", async action => {

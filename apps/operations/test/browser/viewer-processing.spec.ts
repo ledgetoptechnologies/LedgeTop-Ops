@@ -8,8 +8,15 @@ test("Operations shows a bounded Viewer overview and opens management on the Vie
       <script>
         const session = { version: 1, sessionId: "session-workspace-one", subject: "ops:staff-one", expiresAt: new Date(Date.now() + 60_000).toISOString() };
         addEventListener("message", event => {
-          if (event.source !== opener || event.data?.type !== "ltds-viewer:renew-workspace-session") return;
+          if (event.source !== opener) return;
+          if (event.data?.type === "ltds-viewer:workspace-session-renewal-failed") {
+            document.body.dataset.failedRequest = event.data.requestId;
+            document.body.dataset.retryable = String(event.data.retryable);
+            return;
+          }
+          if (event.data?.type !== "ltds-viewer:renew-workspace-session") return;
           document.body.dataset.renewalGrant = event.data.grant;
+          document.body.dataset.renewalRequest = event.data.requestId;
         });
         setTimeout(() => opener.postMessage({ ...session, type: "ltds-viewer:workspace-ready" }, "*"), 50);
         setTimeout(() => opener.postMessage({ ...session, type: "ltds-viewer:workspace-session-expiring", requestId: "workspace-renew-0001" }, "*"), 100);
@@ -43,6 +50,9 @@ test("Operations shows a bounded Viewer overview and opens management on the Vie
     } });
     if (url.pathname === "/api/viewer/admin-grant" && request.method() === "POST") {
       adminGrantCount += 1;
+      if (adminGrantCount === 4 || adminGrantCount === 5) return route.fulfill({
+        status: adminGrantCount === 4 ? 503 : 403, json: { error: "Renewal unavailable" },
+      });
       const grant = (adminGrantCount === 1 ? "g" : "h").repeat(43);
       return route.fulfill({ status: 201, json: {
       grant, grantExpiresAt: new Date(Date.now() + 60_000).toISOString(), sessionTtlSeconds: 1800,
@@ -76,6 +86,25 @@ test("Operations shows a bounded Viewer overview and opens management on the Vie
   expect(opened.url()).toBe(`https://viewer.ledgetopdroneservices.com/workspace/${"g".repeat(43)}`);
   await expect.poll(() => opened.evaluate(() => document.body.dataset.renewalGrant)).toBe("h".repeat(43));
   expect(operationsRequests.filter(value => value === "POST /api/viewer/admin-grant")).toHaveLength(2);
+  await expect.poll(() => opened.evaluate(() => document.body.dataset.renewalRequest)).toBe("workspace-renew-0001");
+  const requestRenewal = (requestId: string, subject = "ops:staff-one") => opened.evaluate(({ requestId, subject }) => {
+    window.opener.postMessage({ version: 1, type: "ltds-viewer:workspace-session-expiring", requestId,
+      sessionId: "session-workspace-one", subject, expiresAt: new Date(Date.now() - 1_000).toISOString() }, "*");
+  }, { requestId, subject });
+  // An expired Viewer session may request fresh server authority; cached expiry
+  // itself is never extended by this controller.
+  await requestRenewal("workspace-renew-0002");
+  await expect.poll(() => opened.evaluate(() => document.body.dataset.renewalRequest)).toBe("workspace-renew-0002");
+  await requestRenewal("workspace-renew-0002"); // duplicate must not issue twice
+  await requestRenewal("workspace-renew-other", "ops:another-staff");
+  await requestRenewal("workspace-renew-0003");
+  await expect.poll(() => opened.evaluate(() => document.body.dataset.failedRequest)).toBe("workspace-renew-0003");
+  await expect.poll(() => opened.evaluate(() => document.body.dataset.retryable)).toBe("true");
+  await requestRenewal("workspace-renew-0004");
+  await expect.poll(() => opened.evaluate(() => document.body.dataset.failedRequest)).toBe("workspace-renew-0004");
+  await expect.poll(() => opened.evaluate(() => document.body.dataset.retryable)).toBe("false");
+  expect(adminGrantCount).toBe(5);
+  expect(opened.url()).toBe(`https://viewer.ledgetopdroneservices.com/workspace/${"g".repeat(43)}`);
 });
 
 test("Operations keeps disabled Viewer management out of the Data hub", async ({ page }) => {

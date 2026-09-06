@@ -33,6 +33,8 @@ interface Attempt { fingerprint: string; key: string }
 const record = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const rootKey = (root: BusinessProjectDetail["canonicalRoot"]) => JSON.stringify([root.sourceId, root.rootNamespace, root.kind, root.publicId]);
 const invalidatesWorkspace = (error: unknown): error is ApiError => error instanceof ApiError && [401, 403, 404, 409].includes(error.status);
+const isRecoverableVersionConflict = (error: unknown): error is ApiError => error instanceof ApiError && error.status === 409
+  && error.payload.code === "recurring_project_copy_version_changed";
 const safeInteger = (value: unknown) => Number.isSafeInteger(value) && (value as number) >= 0;
 function validCandidateResult(value: unknown, root: BusinessProjectDetail["canonicalRoot"], contextVersion: string,
   previousCursor?: string): value is CandidateResult {
@@ -181,7 +183,10 @@ export function RecurringProjectCopyForward({ root, projectId, projectStatus, co
     } catch (caught) {
       if (controller.signal.aborted || request !== sequence.current) return;
       const message = caught instanceof Error ? caught.message : "The copy preview could not be prepared.";
-      if (invalidatesWorkspace(caught)) onInvalidated(message, caught.status); else { setError(message); setStatus(""); }
+      if (isRecoverableVersionConflict(caught)) {
+        setPreview(null); setConfirmed(false); commitAttempt.current = null;
+        setError(message); setStatus("The selected source and sections are still available. Preview the copy again.");
+      } else if (invalidatesWorkspace(caught)) onInvalidated(message, caught.status); else { setError(message); setStatus(""); }
     } finally {
       contextSignal.removeEventListener("abort", abort);
       if (active.current && request === sequence.current) setBusy(null);
@@ -211,7 +216,10 @@ export function RecurringProjectCopyForward({ root, projectId, projectStatus, co
     } catch (caught) {
       if (controller.signal.aborted || request !== sequence.current) return;
       const message = caught instanceof Error ? caught.message : "The reviewed copy could not be applied.";
-      if (invalidatesWorkspace(caught)) onInvalidated(message, caught.status); else { setError(message); setStatus(""); }
+      if (isRecoverableVersionConflict(caught)) {
+        setPreview(null); setConfirmed(false); commitAttempt.current = null;
+        setError(message); setStatus("The selected source and sections are still available. Preview the copy again.");
+      } else if (invalidatesWorkspace(caught)) onInvalidated(message, caught.status); else { setError(message); setStatus(""); }
     } finally {
       contextSignal.removeEventListener("abort", abort);
       if (active.current && request === sequence.current) setBusy(null);

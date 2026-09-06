@@ -27,6 +27,16 @@ second business database, or Viewer work as part of this audit.
 
 ### Verification checkpoint — September 6 continuation
 
+- Copy-forward recovery and the Viewer continuity acceptance checklist were
+  pushed in `76ce130`. Focused desktop/mobile browser tests passed 10/10 and
+  Operations TypeScript checking passed. These are not deployed claims.
+- Rechecking that push: GitHub run `34048448009` again ran zero steps in every
+  job; its Operations annotation explicitly reports failed account payments or
+  a spending-limit issue. Cloudflare build
+  `c31701da-7473-4eb3-9e34-91e01c34eeed` failed separately; its underlying error
+  remains unknown. Do not treat the missing CI executions as test failures in
+  code, or bypass the unexplained Cloudflare build failure.
+
 - Deployment-name alignment is pushed in commit `113a3e6` on Operations PR
   #26. The three production builds, deployment dry runs, TypeScript checks,
   generated binding checks, and release preflight passed locally. Existing
@@ -262,6 +272,38 @@ signed asset URLs or private measurement contents. All live checks above remain
 **unverified** until actual runtime evidence is collected. Local issuer, shell
 and renewal tests are supporting evidence only; no blanket TTL increase is
 authorized or needed by this handoff.
+
+Static follow-up: the current Operations shell uses `ViewerEmbed` in
+`packages/ui/src/index.tsx`. Its renewal messages and acknowledgements lack a
+request discriminator: a delayed acknowledgement for an earlier attempt can
+clear the latest acknowledgement timer. Issuance failures also share a generic
+retry catch instead of separating authorization denial from transport failure.
+Reconcile the actual Viewer protocol read-only before adding correlation fields;
+do not invent a one-sided protocol change. Add exact-frame/origin stale-ACK,
+denied-issuance versus transient failure, and sleep/expiry regressions.
+
+Existing Operations `viewer-shell.spec.ts` passed 2/2 locally on September 6,
+but verifies initial issuance and model mismatch only, not those renewal cases.
+The cached session bootstrap alone is not a proven cookie-refresh defect.
+The local `viewer-session-issuer.test.ts` and
+`viewer-native-session-issuer.test.ts` gate passed 20/20 together. This supports
+issuer identity/authorization behavior, not deployed renewal continuity.
+
+Published Viewer source inspected read-only at
+`b38f0c13236f89e750cb556461221a995ec61bc8`: `main.js` generates and echoes
+`requestId` for its `reviewSessionChannel` path, and strictly checks matching
+request fields there. Its non-review-channel iframe path uses no request ID.
+Therefore the shared `ViewerEmbed` finding must not be generalized into a claim
+that the newer workspace channel lacks correlation. Operations workspace
+controller and legacy iframe acceptance must be tracked separately. Do not add
+an iframe correlation field unless the Viewer contract supports its echo.
+
+The expanded local Operations `viewer-processing.spec.ts` passed 6/6. Its
+simulated workspace exercises two correlated grants without navigation, an
+expired-session request for fresh authority, duplicate suppression, rejection
+of a different subject, and 503 retryable versus 403 nonretryable responses.
+This verifies the Operations controller only: it does not exercise actual
+Viewer redemption, measurement saving, client identity, or two live TTL cycles.
 
 The repository contains a substantial, well-tested local foundation, but the
 handoffs overstate completion of Hermes/API, website, monthly-report,

@@ -4,7 +4,7 @@ import { isBusinessProjectionSource } from "./client-hub-source";
 import { listClientHubCollection, type ClientHubCollectionContext } from "./client-hub-collections";
 import { PROJECT_OPERATIONAL_RECOVERY_REQUIRED, ProjectOperationalRecoveryRequired, readProjectMemoryRevision, readProjectOperationalWorkspace, saveProjectMemory, saveProjectOperationalContacts } from "./project-operational-memory";
 import { serveProjectMemoryAttachment, uploadProjectMemoryAttachment } from "./project-memory-attachments";
-import { commitRecurringProjectCopy, previewRecurringProjectCopy } from "./project-recurring-copy-forward";
+import { commitRecurringProjectCopy, previewRecurringProjectCopy, RecurringProjectCopyVersionChanged } from "./project-recurring-copy-forward";
 import { canRecoverProjectOperational, commitProjectOperationalRecovery, previewProjectOperationalRecovery } from "./project-operational-recovery";
 import type { Env, StaffPrincipal } from "./types";
 
@@ -117,7 +117,14 @@ export function registerProjectOperationalRoutes(app: App, resolveContext: Resol
     const clientKind = routeKind(c, "Recurring-project copy is unavailable for this source"), principal = c.get("principal");
     const context = await resolveContext(c.env, principal, clientKind, c.req.param("publicId"), c.req.param("sourceId"), "business");
     const body = destinationBoundBody(await c.req.json().catch(() => undefined), c.req.param("projectId"));
-    const result = await previewRecurringProjectCopy(c.env, principal, context, body);
+    let result;
+    try { result = await previewRecurringProjectCopy(c.env, principal, context, body); }
+    catch (error) {
+      if (!(error instanceof RecurringProjectCopyVersionChanged)) throw error;
+      await verifyContext(c.env, principal, context);
+      c.header("Cache-Control", "no-store");
+      return c.json({ error: error.message, code: error.code }, 409);
+    }
     await verifyContext(c.env, principal, context);
     c.header("Cache-Control", "no-store");
     return c.json(result);
@@ -126,7 +133,14 @@ export function registerProjectOperationalRoutes(app: App, resolveContext: Resol
     const clientKind = routeKind(c, "Recurring-project copy is unavailable for this source"), principal = c.get("principal");
     const context = await resolveContext(c.env, principal, clientKind, c.req.param("publicId"), c.req.param("sourceId"), "business");
     const body = destinationBoundBody(await c.req.json().catch(() => undefined), c.req.param("projectId"));
-    const result = await commitRecurringProjectCopy(c.env, principal, context, body);
+    let result;
+    try { result = await commitRecurringProjectCopy(c.env, principal, context, body); }
+    catch (error) {
+      if (!(error instanceof RecurringProjectCopyVersionChanged)) throw error;
+      await verifyContext(c.env, principal, context);
+      c.header("Cache-Control", "no-store");
+      return c.json({ error: error.message, code: error.code }, 409);
+    }
     await verifyContext(c.env, principal, context);
     c.header("Cache-Control", "no-store");
     return c.json(result);

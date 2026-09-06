@@ -35,6 +35,13 @@ export const commitRecurringProjectCopySchema = previewRecurringProjectCopySchem
 });
 export type PreviewRecurringProjectCopyInput = z.infer<typeof previewRecurringProjectCopySchema>;
 export type CommitRecurringProjectCopyInput = z.infer<typeof commitRecurringProjectCopySchema>;
+export const RECURRING_PROJECT_COPY_VERSION_CHANGED = "recurring_project_copy_version_changed";
+/** A narrow retry signal: authority and ownership were rechecked after an
+ * ordinary contacts/memory optimistic-version mismatch. */
+export class RecurringProjectCopyVersionChanged extends HTTPException {
+  readonly code = RECURRING_PROJECT_COPY_VERSION_CHANGED;
+  constructor() { super(409, { message: "Operational contacts or project memory changed. Re-preview the copy before applying it." }); }
+}
 
 interface ProjectRow { id: string; projection_source_id: string; client_id: string | null; organization_id: string | null;
   status: string | null; active: number; last_sync_id: string }
@@ -145,6 +152,13 @@ async function authorizePair(env: Environment, principal: StaffPrincipal, contex
     || nextRoot.last_sync_id !== root.last_sync_id) changed();
   return { source, destination, root, policy, sourceProof };
 }
+async function reverifyPair(env: Environment, principal: StaffPrincipal, context: ClientHubCollectionContext,
+  input: PreviewRecurringProjectCopyInput, pair: AuthorizedPair): Promise<void> {
+  const current = await authorizePair(env, principal, context, input);
+  if (current.source.last_sync_id !== pair.source.last_sync_id || current.destination.last_sync_id !== pair.destination.last_sync_id
+    || current.root.last_sync_id !== pair.root.last_sync_id || current.policy.proof !== pair.policy.proof
+    || current.sourceProof !== pair.sourceProof) changed();
+}
 function parseMemory(raw: string | null): ProjectMemorySnapshot {
   if (raw === null) return emptyMemory();
   try {
@@ -195,7 +209,12 @@ async function buildPlan(env: Environment, principal: StaffPrincipal, context: C
     overlay(db, context, pair.source.id, input.selectedContactRoles), overlay(db, context, pair.destination.id, []),
   ]);
   if (source.contactsVersion !== input.expected.sourceContactsVersion || destination.contactsVersion !== input.expected.destinationContactsVersion
-    || source.memoryVersion !== input.expected.sourceMemoryVersion || destination.memoryVersion !== input.expected.destinationMemoryVersion) changed();
+    || source.memoryVersion !== input.expected.sourceMemoryVersion || destination.memoryVersion !== input.expected.destinationMemoryVersion) {
+    // Do not turn an ownership, permission, or context race into a retryable
+    // version conflict. Re-read all live authority before classifying it.
+    await reverifyPair(env, principal, context, input, pair);
+    throw new RecurringProjectCopyVersionChanged();
+  }
 
   const selectedSource = source.contacts.filter(row => input.selectedContactRoles.includes(row.role));
   const destinationByKey = new Map(destination.contacts.map(row => [`${row.contact_id}\u0000${row.role}`, row]));
@@ -239,13 +258,7 @@ async function buildPlan(env: Environment, principal: StaffPrincipal, context: C
     memory: source.memoryVersion }, destination: { project: pair.destination.last_sync_id, contacts: destination.contactsVersion,
     memory: destination.memoryVersion }, contacts: contacts.map(row => [row.id, contactComparable(row)]), memory,
     contactConflicts, memoryConflicts, copiedContacts, copiedMemorySections });
-  const [currentPolicy, currentProof, currentSource, currentDestination, currentRoot] = await Promise.all([
-    readClientHubBusinessProjectPolicy(env as Env, principal), clientHubBusinessProjectSourceProof(env as Env, context),
-    projectRow(db, context, pair.source.id, pair.policy), projectRow(db, context, pair.destination.id, pair.policy), rootRow(db, context),
-  ]);
-  if (currentPolicy.proof !== pair.policy.proof || currentProof !== pair.sourceProof || !currentSource || !currentDestination || !currentRoot
-    || currentSource.last_sync_id !== pair.source.last_sync_id || currentDestination.last_sync_id !== pair.destination.last_sync_id
-    || currentRoot.last_sync_id !== pair.root.last_sync_id) changed();
+  await reverifyPair(env, principal, context, input, pair);
   return { input, context, pair, source, destination, contacts, memory, contactsChanged, memoryChanged, contactConflicts,
     memoryConflicts, copiedContacts, copiedMemorySections, sourceContactIds, fingerprint };
 }

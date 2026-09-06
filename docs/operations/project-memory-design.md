@@ -205,10 +205,13 @@ Starting another preview now clears the previous preview and confirmation even
 when the new request fails. The same 10/10 browser gate verifies failed preview
 refresh, retained selections, fresh confirmation, and stable commit retry keys.
 
-One additional recovery gap remains: ordinary stale-version conflicts should retain recoverable selections, while
-authorization and ownership changes must still clear protected data. The latter
-requires an explicit server conflict discriminator rather than treating every
-409 response as safe to retain. This conflict distinction is pending work, not a verified fix.
+Ordinary contacts/memory version conflicts now return a narrow typed code only
+after live pair and context revalidation. The UI retains selections but removes
+the preview and confirmation. Unknown, ownership, and authorization conflicts
+still invalidate protected workspace data. The focused backend gate passed
+40/40, TypeScript passed, and rebuilt desktop/mobile recovery cases passed 2/2.
+An injected project-change race verifies that revalidation does not classify it
+as a recoverable overlay conflict. These remain local, not deployment, results.
 
 1. **Crew contributions:** may assigned staff append their own observations, or
    are all edits manager-only? If staff can contribute, can they edit another

@@ -3,6 +3,7 @@ import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import { commitRecurringProjectCopy, previewRecurringProjectCopy,
+  RECURRING_PROJECT_COPY_VERSION_CHANGED, RecurringProjectCopyVersionChanged,
   type PreviewRecurringProjectCopyInput } from "../src/worker/project-recurring-copy-forward";
 import { saveProjectMemory, saveProjectOperationalContacts, type ProjectMemorySnapshot } from "../src/worker/project-operational-memory";
 import type { ProjectMemorySection } from "../src/worker/project-operational-memory";
@@ -114,6 +115,23 @@ function racingDatabase(action: () => Promise<void>): D1Database {
       if (!fired) { fired = true; await action(); }
       return target.batch<T>(values.map(value => statements.get(value) ?? value));
     };
+    const value = Reflect.get(target, property, target); return typeof value === "function" ? value.bind(target) : value;
+  } }) as D1Database;
+  return proxy;
+}
+
+function racingOverlayReadDatabase(action: () => Promise<void>): D1Database {
+  const raw = db; let fired = false;
+  const wrap = (statement: D1PreparedStatement, sql: string): D1PreparedStatement => new Proxy(statement, { get(target, property) {
+    if (property === "bind") return (...values: unknown[]) => wrap(target.bind(...values), sql);
+    if (property === "all" && sql.includes("project_operational_contact_assignments")) return async () => {
+      const result = await target.all(); if (!fired) { fired = true; await action(); } return result;
+    };
+    const value = Reflect.get(target, property, target); return typeof value === "function" ? value.bind(target) : value;
+  } }) as D1PreparedStatement;
+  const proxy = new Proxy(raw, { get(target, property) {
+    if (property === "withSession") return () => proxy;
+    if (property === "prepare") return (sql: string) => wrap(target.prepare(sql), sql);
     const value = Reflect.get(target, property, target); return typeof value === "function" ? value.bind(target) : value;
   } }) as D1Database;
   return proxy;
@@ -270,6 +288,26 @@ describe("recurring project operational copy-forward", () => {
     const contactsOnly = { ...base, selectedMemorySections: [] as ProjectMemorySection[] };
     await expect(previewRecurringProjectCopy(env, owner, item.context, contactsOnly)).resolves.toBeTruthy();
     await db.prepare("DELETE FROM staff_permission_overrides WHERE id=?").bind(`deny-copy-${sequence}`).run();
+  }, TIMEOUT);
+
+  it("classifies only a revalidated ordinary overlay-version mismatch as recoverable", async () => {
+    const item = await fixture(), state = await seedSource(item, { sourceInstructions: "Copy", sourcePlan: "Plan" });
+    await saveProjectMemory(env, owner, item.context, item.destinationProjectId, { expectedContextVersion: item.context.contextVersion,
+      expectedVersion: state.destinationMemory, idempotencyKey: key(), memory: memory({ plan: "Concurrent destination update" }) });
+    await expect(previewRecurringProjectCopy(env, owner, item.context, request(item, state))).rejects.toMatchObject({
+      status: 409, code: RECURRING_PROJECT_COPY_VERSION_CHANGED,
+    });
+
+    const moved = await fixture(), movedState = await seedSource(moved, { sourceInstructions: "Copy" });
+    const race = racingOverlayReadDatabase(async () => { await db.prepare("UPDATE pa_projects SET last_sync_id=last_sync_id||'-race' WHERE id=?")
+      .bind(moved.destinationProjectId).run(); });
+    let error: unknown;
+    try { await previewRecurringProjectCopy({ OPS_DB: race }, owner, moved.context, request(moved, movedState, {
+      selectedMemorySections: [], expected: { ...request(moved, movedState).expected, destinationContactsVersion: movedState.destinationContacts + 1 },
+    })); } catch (caught) { error = caught; }
+    expect(error).toBeDefined();
+    expect(error).not.toBeInstanceOf(RecurringProjectCopyVersionChanged);
+    expect(error).toMatchObject({ status: 409 });
   }, TIMEOUT);
 
   it("rejects stale previews, project races, and selected contact movement", async () => {
