@@ -44,6 +44,16 @@ test("an administrator can grant a synced operator base 3D-model access without 
   });
 
   await page.goto("/team");
+  const categories = page.getByRole("tablist", { name: "Kollin access categories" });
+  const operationsTab = categories.getByRole("tab", { name: "Operations" });
+  const viewerTab = categories.getByRole("tab", { name: "3D Models" });
+  await expect(operationsTab).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("group", { name: "Operations access" })).toBeVisible();
+  await expect(page.getByRole("group", { name: "3D Models access" })).toBeHidden();
+  await operationsTab.focus();
+  await operationsTab.press("ArrowRight");
+  await expect(viewerTab).toBeFocused();
+  await expect(viewerTab).toHaveAttribute("aria-selected", "true");
   const viewer = page.getByRole("group", { name: "3D Models access" });
   await expect(viewer).toBeVisible();
   await expect(viewer.getByLabel("View and open 3D models")).not.toBeChecked();
