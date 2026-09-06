@@ -5,6 +5,7 @@ import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrati
 import { registerProjectAlphaConnector, resolveProjectAlphaConnector, reviseProjectAlphaConnector, setProjectAlphaConnectorState,
   type ProjectAlphaConnectorEnvironment, type ProjectAlphaConnectorRevisionInput } from "../src/worker/project-alpha-connectors";
 import { syncRegisteredProjectAlpha } from "../src/worker/project-alpha";
+import { resolveClientHubSourceRoot } from "../src/worker/client-hub-source";
 import type { Env } from "../src/worker/types";
 
 const primary = "project-alpha:primary";
@@ -26,7 +27,8 @@ function page(label: string, index: number) {
     application_entitlements: [{ id: 8, user_id: 1, application_key: "ltds_ops", role_key: "role-admin", enabled: true }],
   });
   else Object.assign(value, {
-    projects: [{ id: 5, name: `${label} project`, client_id: 4, organization_id: 3, business_unit_id: 2, manager_user_id: 1, status: "active" }],
+    projects: [{ id: 5, name: `${label} project`, client_id: 4, organization_id: 3, business_unit_id: 2,
+      manager_user_id: 1, status: "active", public_id: "c".repeat(32) }],
     project_assignments: [{ id: 6, project_id: 5, user_id: 1 }],
     service_locations: [{ id: 7, project_id: 5, client_id: 4, organization_id: 3, latitude: 44, longitude: -88 }],
     operations: [{ id: 9, project_id: 5, business_unit_id: 2, title: `${label} operation`, status: "scheduled", created_by: 1 }],
@@ -87,7 +89,7 @@ async function secondary(name: string) {
   const sourceId = `project-alpha:${name}`, origin = `https://${name}.example.test`;
   await registerProjectAlphaConnector(env, { sourceId, producerBindingId: `producer-${name}`, snapshotOrigin: origin,
     applicationKey: "ltds_ops", profile: "business_data", displayName: name, revision: revision(name) }, "fixture-admin");
-  await setProjectAlphaConnectorState(env, sourceId, { expectedVersion: 1, state: "active" }, "fixture-admin");
+  await setProjectAlphaConnectorState(env, sourceId, { expectedVersion: 1, state: "active", readVisible: true }, "fixture-admin");
   return { sourceId, origin, name, apiKey: sets[name]!.snapshotApiKey };
 }
 function stableFetch(label: string) {
@@ -166,7 +168,16 @@ describe("registered source snapshot end-to-end", () => {
     const project = await ops.prepare("SELECT id,client_id,payload_json FROM pa_projects WHERE projection_source_id=?").bind(source.sourceId)
       .first<{ id: string; client_id: string; payload_json: string }>();
     expect(project?.id).toMatch(/^pa-local-/); expect(project?.client_id).not.toBe("4");
-    expect(JSON.parse(project?.payload_json ?? "null")).toMatchObject({ id: 5, name: "Secondary project", client_id: 4 });
+    expect(JSON.parse(project?.payload_json ?? "null")).toMatchObject({ id: 5, name: "Secondary project", client_id: 4,
+      public_id: "c".repeat(32) });
+    const organization = await ops.prepare("SELECT id,payload_json FROM pa_organizations WHERE projection_source_id=?")
+      .bind(source.sourceId).first<{ id: string; payload_json: string }>();
+    const client = await ops.prepare("SELECT id,payload_json FROM pa_clients WHERE projection_source_id=?")
+      .bind(source.sourceId).first<{ id: string; payload_json: string }>();
+    expect(JSON.parse(organization?.payload_json ?? "null")).toMatchObject({ public_id: "a".repeat(32) });
+    expect(JSON.parse(client?.payload_json ?? "null")).toMatchObject({ public_id: "b".repeat(32) });
+    await expect(resolveClientHubSourceRoot(env, "organization", organization!.id, source.sourceId)).resolves
+      .toMatchObject({ pa_public_id: "a".repeat(32), mapping_status: "mapped" });
     expect(await ops.prepare("SELECT name FROM pa_projects WHERE id='5'").first("name")).toBe("Primary project");
     expect(await ops.prepare("SELECT display_name FROM pa_users WHERE id='1'").first("display_name")).toBe("Primary user");
     expect(await ops.prepare("SELECT count(*) count FROM pa_application_entitlements WHERE projection_source_id=?").bind(source.sourceId).first("count")).toBe(0);
