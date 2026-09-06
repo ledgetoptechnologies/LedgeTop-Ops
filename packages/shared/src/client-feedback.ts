@@ -135,7 +135,11 @@ export interface PortalNotificationHistoryItem {
 export interface PortalNotificationHistoryPage {
   scope: { sourceId: string; workspaceId: string | null; rootType: string; rootPublicId: string };
   asOf: string;
-  coverage: { requests: "included"; feedback: "included"; delivery: "omitted_no_explicit_grant_authority" };
+  coverage: {
+    requests: "included" | "omitted_feature_disabled" | "omitted_schema_unavailable";
+    feedback: "included" | "omitted_feature_disabled" | "omitted_schema_unavailable";
+    delivery: "omitted_no_explicit_grant_authority";
+  };
   items: PortalNotificationHistoryItem[];
   nextCursor: string | null;
 }

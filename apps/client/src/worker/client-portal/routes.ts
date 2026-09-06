@@ -2243,7 +2243,7 @@ export function createClientPortalRouter(
   });
 
   router.route("/",createClientFeedbackRouter(feedbackSchemaAvailable));
-  router.route("/",createClientNotificationHistoryRouter());
+  router.route("/",createClientNotificationHistoryRouter({notificationSchemaAvailable,feedbackSchemaAvailable}));
   return router;
 }
 type ClientFileRange = { offset: number; length: number };

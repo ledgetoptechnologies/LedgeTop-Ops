@@ -861,6 +861,25 @@ describe("client portal migrated-D1 end-to-end contract", () => {
     ]);
   });
 
+  it("freezes truthful notification coverage across continuation pages",async()=>{
+    await db.batch(Array.from({length:26},(_,index)=>db.prepare(`INSERT INTO client_portal_notifications
+      (id,account_id,recipient_identity_id,event_type,source_type,source_id,dedupe_key,title,body,action_path,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)`).bind(`coverage-${String(index).padStart(2,'0')}`,'account-a','identity-a','request_status','service_request','billing-request',
+        `coverage-key-${index}`,'Coverage notice','A request changed.','/portal/requests',`2026-09-05T12:${String(index).padStart(2,'0')}:00.000Z`)));
+    let notifications=true;
+    const app=()=>createClientPortalRouter({resolvePrincipal:async()=>principal,repository:d1ClientPortalRepository,
+      notificationSchemaAvailable:async()=>notifications,feedbackSchemaAvailable:async()=>false});
+    const first=await app().request(`${portalOrigin}/notification-history`,{},env);expect(first.status).toBe(200);
+    const firstPage=await first.json() as {coverage:{requests:string;feedback:string};nextCursor:string|null};
+    expect(firstPage.coverage).toMatchObject({requests:'included',feedback:'omitted_schema_unavailable'});expect(firstPage.nextCursor).toBeTruthy();
+    notifications=false;
+    const continuation=await app().request(`${portalOrigin}/notification-history?cursor=${encodeURIComponent(firstPage.nextCursor!)}`,{},env);
+    expect(continuation.status).toBe(503);
+    const fresh=await app().request(`${portalOrigin}/notification-history`,{},env);expect(fresh.status).toBe(200);
+    expect(await fresh.json()).toMatchObject({coverage:{requests:'omitted_schema_unavailable',feedback:'omitted_schema_unavailable'},items:[],nextCursor:null});
+    await db.prepare("DELETE FROM client_portal_notifications WHERE id LIKE 'coverage-%'").run();
+  });
+
   it("keeps the incomplete invitation workflow unavailable in the pilot", async () => {
     const invitationResponse = await portal().request(`${portalOrigin}/team/invitations`, {
       method: "POST",

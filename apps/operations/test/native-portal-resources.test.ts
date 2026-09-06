@@ -230,6 +230,21 @@ describe('source-owned native portal resources with real signed projection and l
         entries:expect.arrayContaining([{type:'project',publicId:projectId,parentPublicId:rootId,parentType:'organization',displayName:`Project ${f.name}`,sourceVersion:'project-v1'}])});
     }
   });
+  it('keeps unified native notices exact-source/workspace bound and hides them after source revocation',async()=>{
+    const created=await request(`${base(a)}/feedback`,{method:'POST',headers:{Origin:'https://client.test','Content-Type':'application/json',
+      'Idempotency-Key':`notice-history-${crypto.randomUUID()}`},body:JSON.stringify({target:{kind:'project',projectId},message:'Private native notice fixture.'})});
+    expect(created.status).toBe(201);const feedbackId=(await created.json() as {feedback:{id:string}}).feedback.id;
+    await transitionStaffFeedback(opsEnv,staff,feedbackId,{expectedRevision:1,status:'done',note:'Native completion.'},`notice-${crypto.randomUUID()}`);
+    const exact=await request('/notification-history',{headers:{'X-LTDS-Workspace-Id':a.workspace}});expect(exact.status).toBe(200);
+    const page=await exact.json() as {scope:{sourceId:string;workspaceId:string};coverage:{requests:string;feedback:string};items:Array<{kind:string;body:string}>};
+    expect(page.scope).toEqual(expect.objectContaining({sourceId:a.source,workspaceId:a.workspace}));
+    expect(page.coverage).toEqual(expect.objectContaining({requests:'omitted_feature_disabled',feedback:'included'}));
+    expect(page.items).toContainEqual(expect.objectContaining({kind:'feedback',body:'Native completion.'}));
+    expect(JSON.stringify(page)).not.toMatch(/Private native notice fixture|same-person|recipient_identity|scopeProof/);
+    const collision=await request('/notification-history',{headers:{'X-LTDS-Workspace-Id':b.workspace}});expect(collision.status).toBe(200);
+    expect(JSON.stringify(await collision.json())).not.toContain('Native completion.');
+    await state(a,'suspended');expect((await request('/notification-history',{headers:{'X-LTDS-Workspace-Id':a.workspace}})).status).toBe(403);await state(a,'active');
+  });
   it('lists native project feedback by exact source and workspace when public IDs collide',async()=>{
     const create=async(f:Fixture,index:number)=>{
       const response=await request(`${base(f)}/feedback`,{method:'POST',headers:{Origin:'https://client.test','Content-Type':'application/json',

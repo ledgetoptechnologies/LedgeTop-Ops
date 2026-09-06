@@ -9,12 +9,21 @@ import {nativeRequestSchemaReady,nativeServiceRequestsEnabled,resolveNativeReque
 import {readFeedbackRecord} from './feedback-store';
 import {reauthorizeFeedbackRecipient} from './feedback-target';
 import {readNativeFeedbackRecord} from './native-feedback-store';
+import {nativeFeedbackSchemaAvailable} from './native-feedback-store';
 import {reauthorizeNativeFeedbackRecipient} from './native-feedback-target';
+import {nativeFeedbackEnabledForContext,nativeFeedbackNotificationsSchemaAvailable} from './native-feedback-authority';
 import {decodeNotificationHistoryCursor,encodeNotificationHistoryCursor,notificationHistoryScope} from './notification-history-cursor';
 
 type Variables={clientSession:ClientPortalSession;clientPrincipal:VerifiedClientPrincipal;clientWorkspace:EffectivePortalWorkspaceContext|null};
 const PAGE=25,TTL=15*60_000;
 type Raw={rowid:number;id:string;kind:'request'|'feedback';title:string;body:string;actionPath:string|null;readAt:string|null;createdAt:string};
+type LedgerCoverage='included'|'omitted_feature_disabled'|'omitted_schema_unavailable';
+type Dependencies={notificationSchemaAvailable:(env:Env)=>Promise<boolean>;feedbackSchemaAvailable:(env:Env)=>Promise<boolean>};
+export function notificationHistoryCoverage(input:{native:boolean;notifications:boolean;primaryFeedback:boolean;nativeRequestsEnabled:boolean;nativeRequestSchema:boolean;nativeFeedbackEnabled:boolean;nativeFeedbackSchema:boolean}):{requests:LedgerCoverage;feedback:LedgerCoverage}{
+  if(!input.native)return {requests:input.notifications?'included':'omitted_schema_unavailable',feedback:input.primaryFeedback?'included':'omitted_schema_unavailable'};
+  return {requests:!input.nativeRequestsEnabled?'omitted_feature_disabled':!input.notifications||!input.nativeRequestSchema?'omitted_schema_unavailable':'included',
+    feedback:!input.nativeFeedbackEnabled?'omitted_feature_disabled':!input.nativeFeedbackSchema?'omitted_schema_unavailable':'included'};
+}
 const db=(env:Env)=>env.DELIVERY_DB.withSession('first-primary');
 const key=(row:Raw)=>`${row.kind}:${row.id}`;
 const before=(after:[string,string]|undefined)=>after??[null,null];
@@ -105,15 +114,24 @@ async function authorizeFeedback(env:Env,principal:VerifiedClientPrincipal,sessi
   return final&&finalResolved&&final.updatedAt<=asOf&&final.updatedAt===feedback.updatedAt&&final.revision===feedback.revision&&final.status===feedback.status?final:null;
 }
 
-export function createClientNotificationHistoryRouter(){const router=new Hono<{Bindings:Env;Variables:Variables}>();
+async function currentCoverage(env:Env,session:ClientPortalSession,native:NativePortalReadContext|null,deps:Dependencies):Promise<{requests:LedgerCoverage;feedback:LedgerCoverage}>{
+  const notifications=await deps.notificationSchemaAvailable(env);
+  if(!session.nativeSourceId)return notificationHistoryCoverage({native:false,notifications,primaryFeedback:await deps.feedbackSchemaAvailable(env),nativeRequestsEnabled:false,nativeRequestSchema:false,nativeFeedbackEnabled:false,nativeFeedbackSchema:false});
+  const nativeRequestsEnabled=nativeServiceRequestsEnabled(env),nativeFeedbackEnabled=!!native&&nativeFeedbackEnabledForContext(env,native);
+  return notificationHistoryCoverage({native:true,notifications,primaryFeedback:false,nativeRequestsEnabled,nativeRequestSchema:nativeRequestsEnabled&&await nativeRequestSchemaReady(env),nativeFeedbackEnabled,
+    nativeFeedbackSchema:nativeFeedbackEnabled&&await nativeFeedbackSchemaAvailable(env)&&await nativeFeedbackNotificationsSchemaAvailable(env)});
+}
+export function createClientNotificationHistoryRouter(deps:Dependencies){const router=new Hono<{Bindings:Env;Variables:Variables}>();
   router.get('/notification-history',async c=>{const query=c.req.queries();if(Object.keys(query).some(k=>k!=='cursor')||Object.values(query).some(v=>v.length!==1))throw new HTTPException(400,{message:'Notification query is invalid'});
     const principal=c.get('clientPrincipal'),session=c.get('clientSession'),workspace=c.get('clientWorkspace'),resolved=await scopeFor(c.env,principal,session,workspace);if(!resolved)throw new HTTPException(404,{message:'Notifications not found'});
     const scopeHash=await notificationHistoryScope({...resolved.scope,identityId:session.nativePortalIdentityId??session.identityId}),encoded=c.req.query('cursor'),cursor=encoded?await decodeNotificationHistoryCursor(c.env,principal,encoded):null;
     if(encoded&&(!cursor||cursor.scope!==scopeHash||cursor.expires<Date.now()))throw new HTTPException(409,{message:'Notification page changed. Refresh this workspace.'});
-    const asOf=cursor?.asOf??new Date().toISOString(),requestWater=cursor?.water.requests??Number(await db(c.env).prepare('SELECT COALESCE(MAX(rowid),0) water FROM client_portal_notifications').first('water')??0),
-      feedbackWater=cursor?.water.feedback??Number(await db(c.env).prepare(session.nativeSourceId?'SELECT COALESCE(MAX(rowid),0) water FROM portal_native_feedback_notifications':'SELECT COALESCE(MAX(rowid),0) water FROM client_feedback_notifications').first('water')??0);
-    const requestHistoryAvailable=!session.nativeSourceId||nativeServiceRequestsEnabled(c.env)&&await nativeRequestSchemaReady(c.env);
-    const [requests,feedback]=await Promise.all([requestHistoryAvailable?requestRows(c.env,session,requestWater,asOf,cursor?.after):Promise.resolve({results:[]} as {results:Raw[]}),feedbackRows(c.env,principal,session,workspace?.identityId??null,feedbackWater,asOf,cursor?.after)]);
+    const readiness=await currentCoverage(c.env,session,resolved.context,deps),coverage=cursor?.coverage??readiness;
+    if(cursor&&coverage.requests==='included'&&readiness.requests!=='included')throw new HTTPException(readiness.requests==='omitted_schema_unavailable'?503:409,{message:'Notification history availability changed. Refresh this workspace.'});
+    if(cursor&&coverage.feedback==='included'&&readiness.feedback!=='included')throw new HTTPException(readiness.feedback==='omitted_schema_unavailable'?503:409,{message:'Notification history availability changed. Refresh this workspace.'});
+    const asOf=cursor?.asOf??new Date().toISOString(),requestWater=coverage.requests!=='included'?0:cursor?.water.requests??Number(await db(c.env).prepare('SELECT COALESCE(MAX(rowid),0) water FROM client_portal_notifications').first('water')??0),
+      feedbackWater=coverage.feedback!=='included'?0:cursor?.water.feedback??Number(await db(c.env).prepare(session.nativeSourceId?'SELECT COALESCE(MAX(rowid),0) water FROM portal_native_feedback_notifications':'SELECT COALESCE(MAX(rowid),0) water FROM client_feedback_notifications').first('water')??0);
+    const [requests,feedback]=await Promise.all([coverage.requests==='included'?requestRows(c.env,session,requestWater,asOf,cursor?.after):Promise.resolve({results:[]} as {results:Raw[]}),coverage.feedback==='included'?feedbackRows(c.env,principal,session,workspace?.identityId??null,feedbackWater,asOf,cursor?.after):Promise.resolve({results:[]} as {results:Raw[]})]);
     const raw=[...requests.results,...feedback.results].sort((a,b)=>b.createdAt.localeCompare(a.createdAt)||key(b).localeCompare(key(a))),examined=raw.slice(0,PAGE),items:PortalNotificationHistoryItem[]=[];
     for(const row of examined){if(row.kind==='request'){const current=await authorizeRequest(c.env,principal,session,workspace,resolved.scope.sourceId,row,asOf);if(!current)continue;
         items.push({id:row.id,kind:'request',title:row.title,body:row.body,actionPath:cleanPath(row.actionPath),readAt:row.readAt,createdAt:row.createdAt,mutationPath:`/api/client/notifications/${encodeURIComponent(row.id)}`});}
@@ -122,6 +140,6 @@ export function createClientNotificationHistoryRouter(){const router=new Hono<{B
         const suffix=session.nativeSourceId?`/api/client/v2/workspaces/${encodeURIComponent(session.workspaceId!)}/feedback-notifications`:'/api/client/feedback-notifications';
         items.push({id:row.id,kind:'feedback',title:row.title,body:row.body,actionPath:`/portal/feedback/${encodeURIComponent(current.id)}${session.workspaceId?`?workspace=${encodeURIComponent(session.workspaceId)}`:''}`,readAt:row.readAt,createdAt:row.createdAt,mutationPath:`${suffix}/${encodeURIComponent(row.id)}`});}}
     const final=await scopeFor(c.env,principal,session,workspace);if(!final||await notificationHistoryScope({...final.scope,identityId:session.nativePortalIdentityId??session.identityId})!==scopeHash)throw new HTTPException(409,{message:'Notification access changed. Refresh this workspace.'});
-    const last=examined.at(-1),nextCursor=raw.length>PAGE&&last?await encodeNotificationHistoryCursor(c.env,principal,{v:1,scope:scopeHash,asOf,water:{requests:requestWater,feedback:feedbackWater},after:[last.createdAt,key(last)],expires:Date.now()+TTL}):null;
-    const response:PortalNotificationHistoryPage={scope:resolved.scope,asOf,coverage:{requests:'included',feedback:'included',delivery:'omitted_no_explicit_grant_authority'},items,nextCursor};return c.json(response);
+    const last=examined.at(-1),nextCursor=raw.length>PAGE&&last?await encodeNotificationHistoryCursor(c.env,principal,{v:1,scope:scopeHash,asOf,coverage,water:{requests:requestWater,feedback:feedbackWater},after:[last.createdAt,key(last)],expires:Date.now()+TTL}):null;
+    const response:PortalNotificationHistoryPage={scope:resolved.scope,asOf,coverage:{...coverage,delivery:'omitted_no_explicit_grant_authority'},items,nextCursor};return c.json(response);
   });return router;}

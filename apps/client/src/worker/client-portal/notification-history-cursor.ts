@@ -2,9 +2,13 @@ import {z} from 'zod';
 import type {Env} from '../types';
 import type {VerifiedClientPrincipal} from './types';
 
-const schema=z.object({v:z.literal(1),scope:z.string().length(64),asOf:z.string().datetime(),
+const ledger=z.enum(['included','omitted_feature_disabled','omitted_schema_unavailable']);
+const schema=z.object({v:z.literal(1),scope:z.string().length(64),asOf:z.string().datetime(),coverage:z.object({requests:ledger,feedback:ledger}).strict(),
   water:z.object({requests:z.number().int().nonnegative(),feedback:z.number().int().nonnegative()}).strict(),
-  after:z.tuple([z.string().datetime(),z.string().min(1).max(180)]),expires:z.number().int().positive()}).strict();
+  after:z.tuple([z.string().datetime(),z.string().min(1).max(180)]),expires:z.number().int().positive()}).strict().superRefine((value,ctx)=>{
+    if(value.coverage.requests!=='included'&&value.water.requests!==0)ctx.addIssue({code:'custom',path:['water','requests'],message:'omitted request watermark must be zero'});
+    if(value.coverage.feedback!=='included'&&value.water.feedback!==0)ctx.addIssue({code:'custom',path:['water','feedback'],message:'omitted feedback watermark must be zero'});
+  });
 export type NotificationHistoryCursor=z.infer<typeof schema>;
 const encoder=new TextEncoder();
 const b64=(bytes:Uint8Array)=>{let raw='';for(const byte of bytes)raw+=String.fromCharCode(byte);return btoa(raw).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');};
