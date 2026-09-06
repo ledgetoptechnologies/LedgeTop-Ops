@@ -1188,6 +1188,16 @@
 }
 .portal-work-area-update span { color: #3d4650; }
 .portal-work-area-update small { color: #6d737a; }
+.portal-pa-draft-created {
+  display: grid;
+  gap: .2rem;
+  padding: .7rem .85rem;
+  border: 1px solid #acd8c1;
+  border-radius: .55rem;
+  background: #f1fbf5;
+  color: #174d2e;
+}
+.portal-pa-draft-created span { color: #315f45; }
 
 /* ---------------------------------------------------------------------------
    Portal request form

@@ -194,7 +194,8 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
 }
 
-function statusLabel(status: PortalServiceRequestStatus): string {
+function statusLabel(status: PortalServiceRequestStatus, projectAlphaDraftCreated?: boolean): string {
+  if (projectAlphaDraftCreated && !["declined", "cancelled", "completed"].includes(status)) return "PA draft quote created";
   if (status === "accepted_pending_pa_linkage")
     return "Approved · preparing PA draft quote";
   if (status === "accepted_linked") return "PA draft quote created";
@@ -205,9 +206,11 @@ function statusLabel(status: PortalServiceRequestStatus): string {
 
 function statusTone(
   status: PortalServiceRequestStatus,
+  projectAlphaDraftCreated?: boolean,
 ): "neutral" | "success" | "warning" | "danger" {
   if (status === "completed") return "success";
   if (status === "cancelled" || status === "declined") return "danger";
+  if (projectAlphaDraftCreated) return "success";
   if (status === "submitted" || status === "accepted_pending_pa_linkage")
     return "warning";
   return "neutral";
@@ -760,6 +763,12 @@ function RequestList({
             </div>
             <EstimateSummary request={request} onRespond={onEstimateRespond} />
             <QuoteSummary request={request} />
+            {request.projectAlphaDraftCreated && (
+              <aside className="portal-pa-draft-created" role="status">
+                <strong>Project Alpha draft quote created</strong>
+                <span>This does not mean you accepted it.</span>
+              </aside>
+            )}
             {request.workAreaRevision && (
               <aside className="portal-work-area-update" role="status">
                 <strong>Operations updated the work area</strong>
@@ -771,8 +780,8 @@ function RequestList({
             )}
           </div>
           <div className="portal-request-state">
-            <StatusPill tone={statusTone(request.status)}>
-              {statusLabel(request.status)}
+            <StatusPill tone={statusTone(request.status, request.projectAlphaDraftCreated)}>
+              {statusLabel(request.status, request.projectAlphaDraftCreated)}
             </StatusPill>
             <time>{formatDate(request.createdAt)}</time>
           </div>
@@ -3078,7 +3087,7 @@ export function ClientPortalApp({
             <span className="portal-stat">
               {
                 requests.filter(
-                  (request) => request.status === "accepted_linked",
+                  (request) => request.projectAlphaDraftCreated || request.status === "accepted_linked",
                 ).length
               }
             </span>

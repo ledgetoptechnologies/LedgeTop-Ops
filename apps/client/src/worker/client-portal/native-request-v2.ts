@@ -82,9 +82,23 @@ function mapRequest(row: Record<string, unknown>): ClientServiceRequest {
     latitude: row.latitude as number | null, longitude: row.longitude as number | null,
     areaGeoJson: row.area_geojson ? JSON.parse(String(row.area_geojson)) : null,
     poiPoints: row.poi_points_json ? JSON.parse(String(row.poi_points_json)) : [],
-    status: row.status as ClientServiceRequest["status"], acceptedQuote: null, operationalEstimate: null,
+    status: row.status as ClientServiceRequest["status"], ...(row.project_alpha_draft_created === 1 ? { projectAlphaDraftCreated: true } : {}), acceptedQuote: null, operationalEstimate: null,
     createdAt: String(row.created_at), updatedAt: String(row.updated_at),
   };
+}
+
+const nativeCurrentDraftReceiptColumn = `EXISTS(SELECT 1 FROM request_pa_draft_quote_receipts receipt
+  WHERE receipt.request_id=request.id AND receipt.source_id=request.catalog_source_id
+    AND receipt.scope_stale_at IS NULL
+    AND receipt.request_revision=COALESCE((SELECT MAX(revision.revision_number)
+      FROM request_revisions revision WHERE revision.request_id=request.id),0)
+    AND receipt.area_revision=COALESCE((SELECT MAX(area.revision_number)
+      FROM client_service_request_area_revisions area WHERE area.request_id=request.id),0)) project_alpha_draft_created`;
+
+function missingDraftReceiptSchema(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /no such table:\s*(?:request_pa_draft_quote_receipts|client_service_request_area_revisions)\b/i.test(message) ||
+    /no such column:\s*(?:receipt\.)?(?:scope_stale_at|source_id)\b/i.test(message);
 }
 
 async function selections(
@@ -438,10 +452,19 @@ async function attachmentBlock(env: Env, draftId: string, sourceId: string) {
 
 async function loadNativeRequest(env: Env, session: ClientPortalSession, requestId: string): Promise<ClientServiceRequest | null> {
   if (!session.workspaceId || !session.nativePortalIdentityId || !session.nativeSourceId) return null;
-  const row = await database(env).prepare(`SELECT * FROM client_service_requests
-    WHERE id=? AND portal_workspace_id=? AND portal_identity_id=? AND catalog_source_id=?`)
-    .bind(requestId, session.workspaceId, session.nativePortalIdentityId, session.nativeSourceId)
-    .first<Record<string, unknown>>();
+  let row: Record<string, unknown> | null;
+  try {
+    row = await database(env).prepare(`SELECT request.*,${nativeCurrentDraftReceiptColumn} FROM client_service_requests request
+      WHERE request.id=? AND request.portal_workspace_id=? AND request.portal_identity_id=? AND request.catalog_source_id=?`)
+      .bind(requestId, session.workspaceId, session.nativePortalIdentityId, session.nativeSourceId)
+      .first<Record<string, unknown>>();
+  } catch (error) {
+    if (!missingDraftReceiptSchema(error)) throw error;
+    row = await database(env).prepare(`SELECT * FROM client_service_requests
+      WHERE id=? AND portal_workspace_id=? AND portal_identity_id=? AND catalog_source_id=?`)
+      .bind(requestId, session.workspaceId, session.nativePortalIdentityId, session.nativeSourceId)
+      .first<Record<string, unknown>>();
+  }
   if (!row) return null;
   const proof = await resolveNativeRequestAuthority(env, session, row.portal_project_public_id as string | null);
   return proof && proof.sourceId === row.catalog_source_id ? mapRequest(row) : null;
@@ -647,10 +670,19 @@ export async function cancelNativeServiceRequest(env: Env, session: ClientPortal
 export async function listNativeServiceRequests(env: Env, session: ClientPortalSession): Promise<ClientServiceRequest[]> {
   const root = await resolveNativeRequestAuthority(env, session, null);
   if (!root) return [];
-  const rows = await database(env).prepare(`SELECT * FROM client_service_requests
-    WHERE portal_workspace_id=? AND portal_identity_id=? AND catalog_source_id=?
-    ORDER BY created_at DESC,id DESC LIMIT 100`).bind(root.workspaceId, root.identityId, root.sourceId)
-    .all<Record<string, unknown>>();
+  let rows: D1Result<Record<string, unknown>>;
+  try {
+    rows = await database(env).prepare(`SELECT request.*,${nativeCurrentDraftReceiptColumn} FROM client_service_requests request
+      WHERE request.portal_workspace_id=? AND request.portal_identity_id=? AND request.catalog_source_id=?
+      ORDER BY request.created_at DESC,request.id DESC LIMIT 100`).bind(root.workspaceId, root.identityId, root.sourceId)
+      .all<Record<string, unknown>>();
+  } catch (error) {
+    if (!missingDraftReceiptSchema(error)) throw error;
+    rows = await database(env).prepare(`SELECT * FROM client_service_requests
+      WHERE portal_workspace_id=? AND portal_identity_id=? AND catalog_source_id=?
+      ORDER BY created_at DESC,id DESC LIMIT 100`).bind(root.workspaceId, root.identityId, root.sourceId)
+      .all<Record<string, unknown>>();
+  }
   const result: ClientServiceRequest[] = [];
   for (const row of rows.results) {
     const proof = await resolveNativeRequestAuthority(env, session, row.portal_project_public_id as string | null);

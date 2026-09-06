@@ -362,6 +362,8 @@ export interface ClientServiceRequest {
     changeSummary: string;
     updatedAt: string;
   } | null;
+  /** A current, source-qualified Project Alpha draft receipt exists. */
+  projectAlphaDraftCreated?: boolean;
   status: "submitted" | "under_review" | "accepted_pending_pa_linkage" | "accepted_linked" | "declined" | "cancelled" | "completed";
   acceptedQuote?: ClientAcceptedQuote | null;
   operationalEstimate?: ClientOperationalEstimate | null;

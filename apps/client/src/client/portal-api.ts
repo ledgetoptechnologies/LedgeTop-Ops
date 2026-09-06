@@ -134,6 +134,8 @@ export interface PortalServiceRequest {
     changeSummary: string;
     updatedAt: string;
   } | null;
+  /** A current Project Alpha draft exists; no commercial artifact is exposed. */
+  projectAlphaDraftCreated?: boolean;
   acceptedQuote?: PortalAcceptedQuote | null;
   operationalEstimate?: PortalOperationalEstimate | null;
   status: PortalServiceRequestStatus;

@@ -363,6 +363,49 @@ describe("client service request listing", () => {
     expect(value.calls[1]?.sql).not.toContain("client_service_request_area_revisions");
     expect(value.calls[1]?.sql).toContain("NULL work_area_revision_number");
   });
+
+  it.each([
+    ["missing table", "D1_ERROR: no such table: request_pa_draft_quote_receipts: SQLITE_ERROR"],
+    ["qualified missing source", "D1_ERROR: no such column: receipt.source_id: SQLITE_ERROR"],
+    ["unqualified missing source", "D1_ERROR: no such column: source_id: SQLITE_ERROR"],
+  ])("keeps current request history readable with %s draft-receipt schema", async (_scenario, databaseError) => {
+    const value = recordingEnv({
+      all: call => {
+        if (call.sql.includes("request_pa_draft_quote_receipts"))
+          throw new Error(databaseError);
+        return [{ id: "request-compatible", project_id: null, parent_request_id: null,
+          request_type: "service", title: "Compatible request", details: "No receipt schema yet.",
+          location_text: null, preferred_start_at: null, area_geojson: null, poi_points_json: "[]",
+          status: "under_review", created_at: "2026-08-01 12:00:00", updated_at: "2026-08-01 12:00:00" }];
+      },
+    });
+    const requests = await d1ClientPortalRepository.listServiceRequests(value.env, session);
+    expect(requests).toEqual([expect.objectContaining({ id: "request-compatible" })]);
+    expect(requests[0]).not.toHaveProperty("projectAlphaDraftCreated");
+    expect(value.calls.some(call => !call.sql.includes("request_pa_draft_quote_receipts"))).toBe(true);
+    const compatibleRead = value.calls.find(call => !call.sql.includes("request_pa_draft_quote_receipts"))!;
+    expect(compatibleRead.sql).toContain("client_service_request_area_revisions");
+    expect(compatibleRead.sql).toContain("quote.scope_stale_at IS NULL");
+  });
+
+  it("reads only an exact current, source-qualified, non-stale Project Alpha draft receipt", async () => {
+    const value = recordingEnv({
+      all: () => [{ id: "request-receipt", project_id: null, parent_request_id: null,
+        request_type: "service", title: "Receipt state", details: "Current receipt only.",
+        location_text: null, preferred_start_at: null, area_geojson: null, poi_points_json: "[]",
+        project_alpha_draft_created: 1, status: "accepted_pending_pa_linkage",
+        created_at: "2026-08-01 12:00:00", updated_at: "2026-08-01 12:00:00" }],
+    });
+    const [request] = await d1ClientPortalRepository.listServiceRequests(value.env, session);
+    expect(request).toMatchObject({ id: "request-receipt", projectAlphaDraftCreated: true });
+    const sql = value.calls[0]!.sql;
+    expect(sql).toContain("receipt.source_id=r.catalog_source_id");
+    expect(sql).toContain("receipt.scope_stale_at IS NULL");
+    expect(sql).toContain("receipt.request_revision=COALESCE");
+    expect(sql).toContain("receipt.area_revision=COALESCE(effective_area.revision_number,0)");
+    expect(request).not.toHaveProperty("projectAlphaDraftDocumentNumber");
+    expect(request).not.toHaveProperty("projectAlphaDraftEditorUrl");
+  });
 });
 
 describe("client service request idempotency", () => {
