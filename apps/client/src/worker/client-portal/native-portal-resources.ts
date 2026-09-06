@@ -1,6 +1,6 @@
 import { Hono, type Context } from 'hono';
 import { HTTPException } from 'hono/http-exception';
-import { isMovedSourceMarker,type ClientFeedbackDetail,type ClientFeedbackEvent,type ClientFeedbackItem } from '@ltds/shared';
+import { isMovedSourceMarker,type ClientFeedbackDetail,type ClientFeedbackEvent,type ClientFeedbackItem,type ClientFeedbackHistoryItem,type PortalFeedbackHistoryPage } from '@ltds/shared';
 import type { Env } from '../types';
 import type { ClientPortalFile, VerifiedClientPrincipal, ClientFilePage } from './types';
 import { isHiddenKey, kindForKey, normalizeRoot, parseRange, safeFileName, validateRelativePath } from '../files';
@@ -20,12 +20,14 @@ import { clientPortalRequestOriginAllowed } from '../origin-policy';
 import { appendAuthenticatedContentStart,authenticatedContentAuditRequired } from './authenticated-content-audit';
 import { nativeFeedbackEnabledForContext,nativeFeedbackNotificationsSchemaAvailable } from './native-feedback-authority';
 import type { NativeClientViewerAuthorizationV1, NativeClientViewerSessionRequestV1 } from '@ltds/shared';
+import { decodeFeedbackHistoryCursor,encodeFeedbackHistoryCursor,feedbackHistoryScope } from './feedback-history-cursor';
 
 type Bindings = {Bindings:Env;Variables:{clientPrincipal:VerifiedClientPrincipal}};
 type Ctx = Context<Bindings>;
 type Grant = Awaited<ReturnType<typeof readNativeAuthenticatedDeliveryGrants>>[number];
 type FileRow = {r2_key:string;etag:string;size:number;uploaded_at:string;content_type:string|null;media_kind:string};
 const PAGE = 25;
+const FEEDBACK_PAGE=5,CURSOR_TTL_MS=15*60_000;
 const unavailable = ():never => {throw new HTTPException(404,{message:'Delivery is unavailable'});};
 const changed = ():never => {throw new HTTPException(409,{message:'Workspace access changed. Refresh this workspace to continue.'});};
 const invalid = ():never => {throw new HTTPException(400,{message:'Invalid delivery cursor'});};
@@ -56,10 +58,23 @@ async function nativeFeedbackDetail(env:Env,row:NativeFeedbackRecord,resolved:Re
   if(events.results.length>3)throw new HTTPException(503,{message:'Feedback history is unavailable'});
   return {feedback:await nativeFeedbackItem(env,row,resolved),events:events.results};
 }
-function feedbackCursor(value:string|undefined):{at:string;id:string}|null{if(!value)return null;try{if(value.length>1024||!/^[A-Za-z0-9_-]+$/.test(value))throw new Error();
-  const decoded=JSON.parse(atob(value.replace(/-/g,'+').replace(/_/g,'/')));return z.object({at:z.string().max(40),id:z.string().regex(/^native_[A-Za-z0-9-]+$/)}).strict().parse(decoded);
-}catch{throw new HTTPException(409,{message:'Feedback page changed. Refresh this workspace.'});}}
-function encodeFeedbackCursor(row:{created_at:string;id:string}){return btoa(JSON.stringify({at:row.created_at,id:row.id})).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
+const lifecycleAction=(status:string):'submitted'|'started'|'completed'=>status==='new'?'submitted':status==='in_progress'?'started':'completed';
+async function nativeHistoryItem(c:Ctx,row:NativeFeedbackRecord,context:NativePortalReadContext):Promise<ClientFeedbackHistoryItem|null>{
+  const principal=c.get('clientPrincipal');
+  if(row.context.sourceId!==context.sourceId||row.context.workspaceId!==context.workspaceId||row.context.identityId!==context.identityId||
+    row.context.issuer!==principal.issuer||row.context.subject!==principal.subject||row.target.rootType!==context.rootType||row.target.rootPublicId!==context.rootPublicId)return null;
+  const resolved=await reauthorizeNativeFeedbackRecipient(c.env,row);
+  if(!resolved||resolved.context.sourceId!==context.sourceId||resolved.context.workspaceId!==context.workspaceId||resolved.context.identityId!==context.identityId)return null;
+  const events=await database(c.env).prepare(`SELECT revision,status,created_at occurredAt FROM portal_native_feedback_events
+    WHERE feedback_id=? ORDER BY revision`).bind(row.id).all<{revision:number;status:string;occurredAt:string}>();
+  if(events.results.length!==row.revision||events.results.at(-1)?.status!==row.status)return null;
+  const released=await readNativeFeedbackRecord(database(c.env),row.id);
+  if(!released||released.revision!==row.revision||released.status!==row.status||released.updatedAt!==row.updatedAt||!await reauthorizeNativeFeedbackRecipient(c.env,released))return null;
+  return {feedbackId:row.id,createdAt:row.createdAt,status:row.status,
+    events:events.results.map(event=>({revision:event.revision,action:lifecycleAction(event.status),occurredAt:event.occurredAt})),
+    detailPath:`/portal/feedback/${encodeURIComponent(row.id)}?workspace=${encodeURIComponent(context.workspaceId)}`,
+    target:{kind:row.target.kind,label:row.target.label,projectName:row.target.projectName}};
+}
 function notificationCursor(value:string|undefined):{at:string;id:string}|null{if(!value)return null;try{if(value.length>1024||!/^[A-Za-z0-9_-]+$/.test(value))throw new Error();
   const decoded=JSON.parse(atob(value.replace(/-/g,'+').replace(/_/g,'/')));return z.object({at:z.string().max(40),id:z.string().uuid()}).strict().parse(decoded);
 }catch{throw new HTTPException(409,{message:'Notification page changed. Refresh this workspace.'});}}
@@ -212,16 +227,29 @@ export function createNativePortalWorkspaceRouter():Hono<Bindings> {
   });
   router.get('/:workspaceId/feedback',async c=>{
     const context=await contextFor(c);await requireNativeFeedback(c,context);
-    const principal=c.get('clientPrincipal'),cursor=feedbackCursor(c.req.query('cursor'));
-    const rows=await database(c.env).prepare(`SELECT id,created_at FROM portal_native_feedback WHERE source_id=? AND workspace_id=?
+    const query=c.req.queries();if(Object.keys(query).some(key=>!['cursor','expectedContext'].includes(key))||Object.values(query).some(values=>values.length!==1))
+      throw new HTTPException(400,{message:'Feedback query is invalid'});
+    const principal=c.get('clientPrincipal'),scope={sourceId:context.sourceId,workspaceId:context.workspaceId,rootType:context.rootType,
+      rootPublicId:context.rootPublicId,identityId:context.identityId,contextVersion:context.contextVersion},scopeHash=await feedbackHistoryScope(scope);
+    const encoded=c.req.query('cursor'),cursor=encoded?await decodeFeedbackHistoryCursor(c.env,principal,encoded):null;
+    if(encoded&&(!cursor||cursor.scope!==scopeHash||cursor.expires<Date.now()))throw new HTTPException(409,{message:'Feedback page changed. Refresh this workspace.'});
+    const asOf=cursor?.asOf??new Date().toISOString(),water=cursor?.water??Number(await database(c.env).prepare(`SELECT COALESCE(MAX(rowid),0) water
+      FROM portal_native_feedback WHERE source_id=? AND workspace_id=? AND creator_identity_id=? AND principal_issuer=? AND principal_subject=?`)
+      .bind(context.sourceId,context.workspaceId,context.identityId,principal.issuer,principal.subject).first('water')??0);
+    const rows=await database(c.env).prepare(`SELECT rowid,id,created_at FROM portal_native_feedback WHERE source_id=? AND workspace_id=?
       AND creator_identity_id=? AND principal_issuer=? AND principal_subject=?
-      AND (? IS NULL OR created_at<? OR (created_at=? AND id<?)) ORDER BY created_at DESC,id DESC LIMIT 6`)
-      .bind(context.sourceId,context.workspaceId,context.identityId,principal.issuer,principal.subject,cursor?.at??null,cursor?.at??null,cursor?.at??null,cursor?.id??null)
-      .all<{id:string;created_at:string}>();
-    const examined=rows.results.slice(0,5),items:ClientFeedbackItem[]=[];
+      AND rowid<=? AND created_at<=? AND (? IS NULL OR created_at<? OR (created_at=? AND id<?)) ORDER BY created_at DESC,id DESC LIMIT ?`)
+      .bind(context.sourceId,context.workspaceId,context.identityId,principal.issuer,principal.subject,water,asOf,
+        cursor?.after[0]??null,cursor?.after[0]??null,cursor?.after[0]??null,cursor?.after[1]??null,FEEDBACK_PAGE+1)
+      .all<{rowid:number;id:string;created_at:string}>();
+    const examined=rows.results.slice(0,FEEDBACK_PAGE),items:ClientFeedbackHistoryItem[]=[];
     for(const entry of examined){const record=await readNativeFeedbackRecord(database(c.env),entry.id);if(!record)continue;
-      const resolved=await reauthorizeNativeFeedbackRecipient(c.env,record);if(resolved)items.push(await nativeFeedbackItem(c.env,record,resolved));}
-    await recheck(c,context);return c.json({items,nextCursor:rows.results.length>5?encodeFeedbackCursor(examined.at(-1)!):null});
+      const item=await nativeHistoryItem(c,record,context);if(item)items.push(item);}
+    await recheck(c,context);
+    const nextCursor=rows.results.length>FEEDBACK_PAGE&&examined.length?await encodeFeedbackHistoryCursor(c.env,principal,
+      {v:1,scope:scopeHash,asOf,water,after:[examined.at(-1)!.created_at,examined.at(-1)!.id],expires:Date.now()+CURSOR_TTL_MS}):null;
+    const response:PortalFeedbackHistoryPage={scope:{sourceId:context.sourceId,workspaceId:context.workspaceId,rootType:context.rootType,
+      rootPublicId:context.rootPublicId},asOf,items,nextCursor};return c.json(response);
   });
   router.get('/:workspaceId/feedback/:id',async c=>{
     const context=await contextFor(c);await requireNativeFeedback(c,context);

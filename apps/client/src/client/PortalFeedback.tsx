@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Card, StatusPill } from "@ltds/ui";
-import { CLIENT_FEEDBACK_MESSAGE_LIMIT, type ClientFeedbackDetail, type ClientFeedbackItem, type ClientFeedbackTargetInput } from "@ltds/shared";
+import { CLIENT_FEEDBACK_MESSAGE_LIMIT, type ClientFeedbackDetail, type ClientFeedbackHistoryItem, type ClientFeedbackItem, type ClientFeedbackTargetInput } from "@ltds/shared";
 import type { RequestError } from "./bulk-download";
 import { feedbackPath, feedbackStatusLabel, loadFeedback, loadFeedbackDetail, safeFeedbackTargetPath, submitFeedback } from "./feedback-api";
 import "./PortalFeedback.css";
@@ -52,7 +52,7 @@ export function LeaveFeedback({ target, label, compact = false, nativeWorkspaceI
 }
 
 export function PortalFeedback({ id, nativeWorkspaceId = null }: { id?: string | null; nativeWorkspaceId?: string | null }) {
-  const [items, setItems] = useState<ClientFeedbackItem[]>([]), [detail, setDetail] = useState<ClientFeedbackDetail | null>(null);
+  const [items, setItems] = useState<ClientFeedbackHistoryItem[]>([]), [detail, setDetail] = useState<ClientFeedbackDetail | null>(null);
   const [cursor, setCursor] = useState<string | null>(null), [loading, setLoading] = useState(true), [error, setError] = useState("");
   const pending = useRef<AbortController | null>(null), sequence = useRef(0);
   const retryCursor = useRef<string | null>(null);
@@ -64,7 +64,7 @@ export function PortalFeedback({ id, nativeWorkspaceId = null }: { id?: string |
       const result = id ? await loadFeedbackDetail(id, controller.signal, nativeWorkspaceId) : await loadFeedback(next, controller.signal, nativeWorkspaceId);
       if (controller.signal.aborted || run !== sequence.current) return;
       if ("feedback" in result) setDetail(result);
-      else { setItems(current => [...new Map((next ? [...current, ...result.items] : result.items).map(item => [item.id, item])).values()]); setCursor(result.nextCursor); }
+      else { setItems(current => [...new Map((next ? [...current, ...result.items] : result.items).map(item => [item.feedbackId, item])).values()]); setCursor(result.nextCursor); }
     } catch (caught) {
       if (controller.signal.aborted || run !== sequence.current) return;
       if ([401, 403, 404, 409, 410].includes((caught as RequestError).status ?? 0)) { setItems([]); setDetail(null); setCursor(null); retryCursor.current = null; }
@@ -77,8 +77,15 @@ export function PortalFeedback({ id, nativeWorkspaceId = null }: { id?: string |
     {error && <div className="portal-inline-error" role="alert"><p>{error}</p><button className="button-ghost" onClick={() => void load(retryCursor.current)}>Retry feedback</button></div>}
     {loading && <p role="status">Loading feedback…</p>}
     {detail && <Card title={detail.feedback.target.label}><FeedbackSummary item={detail.feedback} /><section className="portal-feedback-history" aria-label="Feedback history"><h3>Updates</h3>{detail.events.map(event => <article key={event.revision}><strong>{feedbackStatusLabel(event.status)}</strong><small>{new Date(event.createdAt).toLocaleString()} · {event.actor === "staff" ? "Your team" : "You"}</small>{event.note && <p>{event.note}</p>}</article>)}</section></Card>}
-    {!id && <><div className="portal-feedback-list">{items.map(item => <Card key={item.id}><a href={feedbackPath(item.id)}><h2>{item.target.label}</h2></a><FeedbackSummary item={item} /></Card>)}</div>{!loading && !error && !items.length && <p>{cursor ? "No available feedback in this page. Continue to check more records." : "No feedback submitted yet. Use Leave Feedback on a project, folder, or file."}</p>}{cursor && <button className="button-ghost" disabled={loading} onClick={() => void load(cursor)}>Load more feedback</button>}</>}
+    {!id && <><div className="portal-feedback-list">{items.map(item => <Card key={item.feedbackId}><a href={item.detailPath}><h2>{item.target.label}</h2></a><HistorySummary item={item} /></Card>)}</div>{!loading && !error && !items.length && <p>{cursor ? "No available feedback in this page. Continue to check more records." : "No feedback submitted yet. Use Leave Feedback on a project, folder, or file."}</p>}{cursor && <button className="button-ghost" disabled={loading} onClick={() => void load(cursor)}>Load more feedback</button>}</>}
   </div>;
+}
+function HistorySummary({item}:{item:ClientFeedbackHistoryItem}){
+  return <div className="portal-feedback-summary"><StatusPill tone={item.status==="done"?"success":"neutral"}>{feedbackStatusLabel(item.status)}</StatusPill>
+    <p>{item.target.projectName?`${item.target.projectName} · `:""}{item.target.kind}</p>
+    <section className="portal-feedback-history" aria-label={`Updates for ${item.target.label}`}>{item.events.map(event=><article key={event.revision}>
+      <strong>{event.action==="submitted"?"Submitted":event.action==="started"?"In Progress":"Done"}</strong><small>{new Date(event.occurredAt).toLocaleString()}</small>
+    </article>)}</section><a className="button button-ghost" href={item.detailPath}>View details</a></div>;
 }
 function FeedbackSummary({ item }: { item: ClientFeedbackItem }) {
   const path = item.target.available ? safeFeedbackTargetPath(item.target.actionPath) : null;

@@ -4,6 +4,7 @@ const project = {id: "project-one", externalRef: "ALPHA-1", clientName: "Acme", 
 function file(id = "cf1_photo") { return {id, name: `${id}.jpg`, size: 2048, uploadedAt: date, contentType: "image/jpeg", kind: "image", previewPath: `/api/client/files/${id}/preview?projectId=project-one`, thumbnailPath: null, downloadPath: `/api/client/files/${id}/download?projectId=project-one`}; }
 function item(overrides: Record<string, unknown> = {}) {return {id: "feedback-one", revision: 1, status: "new", message: "Please check the north edge.", completionNote: null, target: {kind: "file", projectId: "project-one", label: "North edge photo.jpg", projectName: "Church survey", available: true, actionPath: "/portal/projects/project-one?tab=files&folder=pf2_edited&file=cf1_photo"}, createdAt: date, updatedAt: date, completedAt: null, ...overrides};}
 function detail(overrides: Record<string, unknown> = {}) {return {feedback: item(overrides), events: [{revision: 1, actor: "client", status: "new", note: null, createdAt: date}]};}
+function history(workspaceId:string|null=null,overrides:Record<string,unknown>={}){return {scope:{sourceId:"project-alpha:primary",workspaceId,rootType:"organization",rootPublicId:"org-one"},asOf:"2026-08-25T13:00:00Z",items:[{feedbackId:"feedback-one",createdAt:date,status:"new",events:[{revision:1,action:"submitted",occurredAt:date}],detailPath:`/portal/feedback/feedback-one${workspaceId?`?workspace=${workspaceId}`:""}`,target:{kind:"file",label:"North edge photo.jpg",projectName:"Church survey"}}],nextCursor:null,...overrides};}
 type Call = {path: string; method: string; query: URLSearchParams; workspace?: string; body: any; key?: string};
 async function mock(page: Page, custom?: (route: Route, url: URL, call: Call) => Promise<unknown> | undefined, options: {workspace?: boolean; enabled?: boolean} = {}) {
   const calls: Call[] = [];
@@ -22,7 +23,7 @@ async function mock(page: Page, custom?: (route: Route, url: URL, call: Call) =>
     if (call.path === "/api/client/projects/project-one/files" || call.path === "/api/client/past-deliveries") return route.fulfill({json: {files: [file()], folders: [], breadcrumbs: [{id: null, name: "Project files"}, ...(call.query.get("folder") ? [{id: "pf2_edited", name: "Edited"}] : [])], folderId: call.query.get("folder"), prefix: "", cursor: null}});
     if (/\/files\/[^/]+\/metadata$/.test(call.path)) return route.fulfill({json: {file: file(call.path.split("/").at(-2)), projectId: call.query.get("projectId"), workspaceId: call.workspace || null}});
     if (call.path.endsWith("/preview")) return route.fulfill({contentType: "image/svg+xml", body: '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100" fill="#ddd"/></svg>'});
-    if (call.path === "/api/client/feedback" && call.method === "GET") return route.fulfill({json: {items: [item()], nextCursor: null}});
+    if (call.path === "/api/client/feedback" && call.method === "GET") return route.fulfill({json: history(call.workspace??null)});
     if (call.path === "/api/client/feedback" && call.method === "POST") return route.fulfill({json: detail({message: call.body.message})});
     if (call.path === "/api/client/feedback/feedback-one") return route.fulfill({json: detail()});
     return route.fulfill({status: 404, json: {error: "Not found"}});
@@ -112,7 +113,7 @@ test("late notification continuation cannot resurrect a dismissed feedback updat
 });
 
 test("empty creator list pages with a continuation do not claim feedback is absent", async ({page}) => {
-  await mock(page, (route, _url, call) => call.path === "/api/client/feedback" ? route.fulfill({json: call.query.has("cursor") ? {items: [item()], nextCursor: null} : {items: [], nextCursor: "next"}}) : undefined);
+  await mock(page, (route, _url, call) => call.path === "/api/client/feedback" ? route.fulfill({json: call.query.has("cursor") ? history() : history(null,{items:[],nextCursor:"next"})}) : undefined);
   await page.goto("/portal/feedback"); await expect(page.getByText(/Continue to check more records/)).toBeVisible(); await page.getByRole("button", {name: "Load more feedback"}).click(); await expect(page.getByRole("heading", {name: "North edge photo.jpg"})).toBeVisible();
 });
 
@@ -122,8 +123,13 @@ test("creator history with a replaced original preserves notes but provides no b
 });
 
 test("continuation authorization failure clears previously visible creator feedback", async ({page}) => {
-  await mock(page, (route, _url, call) => call.path === "/api/client/feedback" ? route.fulfill(call.query.has("cursor") ? {status: 403, json: {error: "Denied"}} : {json: {items: [item()], nextCursor: "next"}}) : undefined);
-  await page.goto("/portal/feedback"); await expect(page.getByText("Please check the north edge.")).toBeVisible(); await page.getByRole("button", {name: "Load more feedback"}).click(); await expect(page.getByRole("alert")).toBeVisible(); await expect(page.getByText("Please check the north edge.")).toHaveCount(0);
+  await mock(page, (route, _url, call) => call.path === "/api/client/feedback" ? route.fulfill(call.query.has("cursor") ? {status: 403, json: {error: "Denied"}} : {json: history(null,{nextCursor:"next"})}) : undefined);
+  await page.goto("/portal/feedback"); await expect(page.getByText("North edge photo.jpg")).toBeVisible(); await expect(page.getByText("Please check the north edge.")).toHaveCount(0); await page.getByRole("button", {name: "Load more feedback"}).click(); await expect(page.getByRole("alert")).toBeVisible(); await expect(page.getByText("North edge photo.jpg")).toHaveCount(0);
+});
+
+test("feedback history rejects bodies on the redacted list contract",async({page})=>{
+  await mock(page,(route,_url,call)=>call.path==="/api/client/feedback"&&call.method==="GET"?route.fulfill({json:history(null,{items:[{...history().items[0],message:"private body"}]})}):undefined);
+  await page.goto("/portal/feedback");await expect(page.getByRole("alert")).toBeVisible();await expect(page.getByText("private body")).toHaveCount(0);
 });
 
 test("feedback notifications stay in one bell with separate paging and explicit read actions", async ({page}) => {
@@ -153,4 +159,11 @@ for (const width of [375, 640, 1280, 3440]) test(`feedback composer and detail r
     await page.goto("/portal/projects/project-one?tab=files&file=cf1_photo"); const preview = page.getByRole("dialog", {name: "Preview cf1_photo.jpg"}); await preview.getByRole("button", {name: "Leave Feedback"}).click(); await preview.getByLabel("Your feedback").fill("Please check this exact image.");
     await expect(preview.locator("img")).toHaveCount(1); expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true); await page.screenshot({path: info.outputPath(`feedback-preview-${width}.png`)});
   }
+});
+
+for(const width of [375,1280])test(`redacted feedback history is usable at ${width}px`,async({page},info)=>{
+  test.skip(info.project.name!=="desktop-edge","Explicit viewport coverage");await page.setViewportSize({width,height:900});await mock(page);await page.goto("/portal/feedback");
+  await expect(page.getByRole("heading",{name:"North edge photo.jpg"})).toBeVisible();await expect(page.getByText("Please check the north edge.")).toHaveCount(0);
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1)).toBe(true);
+  expect(await page.getByRole("link",{name:"View details"}).evaluate(link=>link.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44);
 });
