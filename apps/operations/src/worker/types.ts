@@ -20,8 +20,11 @@ export type Env = Omit<
   | "CLIENT_PORTAL_ORIGINS"
   | "OPERATIONS_ORIGINS"
   | "CLIENT_HUB_PA_CONTACT_ASSIGNMENTS_ENABLED"
+  | "CLIENT_PORTAL_NOTIFICATION_MIGRATION_MAINTENANCE"
 > & {
   PROJECT_ALPHA_API_KEY?: string;
+  /** Temporary release barrier for the preserving client-notification table rebuild. */
+  CLIENT_PORTAL_NOTIFICATION_MIGRATION_MAINTENANCE?: string;
   /** Deploy-managed connector credential sets; never returned by registry APIs. */
   PROJECT_ALPHA_CONNECTOR_CREDENTIALS?: string;
   /** Temporary, default-off gate for numeric quote linkage on pre-catalog requests only. */

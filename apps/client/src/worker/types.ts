@@ -24,6 +24,8 @@ export interface Env {
   LEGACY_CLIENT_ORIGINS?: string;
   /** Immutable, privacy-bounded authenticated content-start audit producer. Default-off. */
   CLIENT_PORTAL_CONTENT_AUDIT_ENABLED?: string;
+  /** Temporary release barrier for the preserving client-notification table rebuild. */
+  CLIENT_PORTAL_NOTIFICATION_MIGRATION_MAINTENANCE?: string;
   /** Dedicated HMAC key for content/version fingerprints; never reused for IP or sessions. */
   CLIENT_PORTAL_CONTENT_AUDIT_HMAC_SECRET?: string;
   CLIENT_PORTAL_REQUEST_V2_ENABLED?: string;

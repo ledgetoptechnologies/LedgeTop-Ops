@@ -97,6 +97,7 @@ import {
   type ProjectAlphaPricingAuthorizationContextResolver,
 } from "./project-alpha-pricing-hint";
 import { clientPortalNotificationsAvailable } from "./schema-readiness";
+import { notificationMigrationMaintenanceActive, notificationMigrationMaintenanceResponse } from "./notification-migration-maintenance";
 import { readClientRequestReadiness } from "./request-readiness";
 import { createNativePortalWorkspaceRouter } from "./native-portal-resources";
 import {createWorkspaceAddressContact,deleteWorkspaceAddressContact,listWorkspaceAddressContacts,readWorkspaceAddressContact,
@@ -486,6 +487,9 @@ export function createClientPortalRouter(
     });
     c.set("clientPrincipal", principal);
     c.set("clientWorkspace", workspace);
+    if (notificationMigrationMaintenanceActive(c.env) && ["POST", "PUT", "PATCH", "DELETE"].includes(c.req.method) &&
+      (/^\/(?:service-request-drafts|service-requests)(?:\/|$)/.test(c.req.path) || /^\/notifications\//.test(c.req.path)))
+      return notificationMigrationMaintenanceResponse();
     await next();
   });
 
