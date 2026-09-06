@@ -8,12 +8,18 @@ const operations = JSON.parse(fs.readFileSync(new URL("../apps/operations/wrangl
 const receiver = { schemaVersion: 1, profile: "receiver-only" };
 const activation = { schemaVersion: 1, profile: "default-on-eligibility" };
 const authenticated = { schemaVersion: 1, profile: "primary-authenticated-delivery" };
+const authenticatedPaused = { schemaVersion: 1, profile: "primary-authenticated-delivery-paused" };
 function configs(profile) {
   const pair = [structuredClone(client), structuredClone(operations)];
   for (const config of pair) {
     for (const flag of eligibilityFlags) config.vars[flag] = profile === receiver ? "false" : "true";
-    for (const flag of authenticatedDeliveryFlags) config.vars[flag] = profile === authenticated ? "true" : "false";
-    if (profile !== authenticated) config.vars.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED = config === pair[0] ? "true" : "false";
+    const authenticatedEnabled = profile === authenticated || profile === authenticatedPaused;
+    for (const flag of authenticatedDeliveryFlags) {
+      config.vars[flag] = flag === "AUTHENTICATED_DELIVERY_CREATION_ENABLED"
+        ? (profile === authenticated ? "true" : "false")
+        : (authenticatedEnabled ? "true" : "false");
+    }
+    config.vars.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED = config === pair[0] || authenticatedEnabled ? "true" : "false";
   }
   return pair;
 }
@@ -27,12 +33,13 @@ test("missing, malformed, unknown, and extra-field profiles never infer activati
   const pair = configs(activation);
   for (const declaration of [undefined, null, [], "default-on-eligibility", {}, { profile: activation.profile },
     { ...activation, schemaVersion: "1" }, { ...activation, profile: "DEFAULT-ON-ELIGIBILITY" },
-    { ...activation, profile: "eligibility-paused" }, { ...activation, bypass: true }]) {
+    { ...activation, profile: "eligibility-paused" }, { ...activation, profile: "primary-authenticated-delivery-PAUSED" },
+    { ...activation, bypass: true }]) {
     assert.ok(validatePortalReleaseProfile(declaration, ...pair).length);
   }
 });
 
-for (const declaration of [receiver, activation, authenticated]) {
+for (const declaration of [receiver, activation, authenticated, authenticatedPaused]) {
   test(`${declaration.profile} requires a complete exact bundle on each Worker`, () => {
     assert.deepEqual(validatePortalReleaseProfile(declaration, ...configs(declaration)), []);
     for (const index of [0, 1]) for (const flag of eligibilityFlags) {
@@ -73,8 +80,26 @@ for (const declaration of [receiver, activation, authenticated]) {
 test("one Worker cannot declare activation while the other remains receiver-only", () => {
   const enabled = configs(activation);
   const disabled = configs(receiver);
-for (const declaration of [receiver, activation, authenticated]) {
+for (const declaration of [receiver, activation, authenticated, authenticatedPaused]) {
     assert.ok(validatePortalReleaseProfile(declaration, enabled[0], disabled[1]).length);
     assert.ok(validatePortalReleaseProfile(declaration, disabled[0], enabled[1]).length);
   }
+});
+
+test("paused authenticated delivery preserves enforcement and revocation while blocking authority expansion", () => {
+  const [pausedClient, pausedOperations] = configs(authenticatedPaused);
+  assert.deepEqual(validatePortalReleaseProfile(authenticatedPaused, pausedClient, pausedOperations), []);
+  for (const config of [pausedClient, pausedOperations]) {
+    assert.equal(config.vars.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED, "true");
+    assert.equal(config.vars.AUTHENTICATED_DELIVERY_GRANTS_ENABLED, "true");
+    assert.equal(config.vars.PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED, "true");
+    assert.equal(config.vars.AUTHENTICATED_DELIVERY_CREATION_ENABLED, "false");
+  }
+  const [activeClient, activeOperations] = configs(authenticated);
+  const pausedErrors = validatePortalReleaseProfile(authenticatedPaused, activeClient, activeOperations);
+  assert.ok(pausedErrors.length > 0);
+  assert.ok(pausedErrors.every(error => error.includes("AUTHENTICATED_DELIVERY_CREATION_ENABLED")));
+  const activeErrors = validatePortalReleaseProfile(authenticated, pausedClient, pausedOperations);
+  assert.ok(activeErrors.length > 0);
+  assert.ok(activeErrors.every(error => error.includes("AUTHENTICATED_DELIVERY_CREATION_ENABLED")));
 });

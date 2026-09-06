@@ -482,6 +482,12 @@ stops new grants, restores, and bindings without disabling reads, audits, or
 revokes. Portal emails/notifications and unrelated Project Alpha or membership
 mutation flags stay off.
 
+Select `primary-authenticated-delivery-paused` for that creation-off state. It
+requires hierarchy relations, grant management, and authority mutations to stay
+on in both Workers while requiring creation off. This is the normal first
+rollback artifact after authenticated delivery has been activated; do not use
+`default-on-eligibility` as a substitute because that also disables grant reads.
+
 Follow the exact preflight, ingest-only activation, read cutover, and drain-first
 rollback in
 [`docs/operations/project-alpha-portal-activation.md`](operations/project-alpha-portal-activation.md).
