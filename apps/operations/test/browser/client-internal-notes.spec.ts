@@ -35,7 +35,7 @@ async function mock(page: Page, mutate?: (request: { method: string; key: string
 test("internal notes are clearly private, responsive, and create within the exact Client Hub root", async ({ page }) => {
   await page.setViewportSize({ width: 375, height: 800 }); const state = await mock(page); await page.goto(clientPath);
   const region = page.getByRole("region", { name: "Internal client notes" });
-  await expect(page.getByText("No portal workspace linked", { exact: true })).toBeVisible();
+  await expect(page.getByText("Client ID sync incomplete", { exact: true })).toBeVisible();
   await expect(region.getByText("Operations staff only.", { exact: false })).toBeVisible();
   await expect(region).toContainText("never shown in the client portal or synchronized to Project Alpha");
   await region.getByRole("button", { name: "Add note" }).click();

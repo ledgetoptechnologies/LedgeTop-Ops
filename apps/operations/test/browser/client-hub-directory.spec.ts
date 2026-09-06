@@ -58,6 +58,35 @@ test("empty pending review stays out of the way when the client directory is ava
   await expect(page.getByRole("link", { name: "Open Acme client workspace" })).toBeVisible();
 });
 
+test("a synced Project Alpha client explains that its automatic workspace is still pending", async ({ page }) => {
+  const pending = {
+    ...client("org-pending", "Pending workspace"),
+    pa_public_id: "b".repeat(32),
+    portal_status: "mapping_unavailable",
+  };
+  await mock(page, route => route.fulfill({ json: { clients: [pending], nextCursor: null, capabilities } }),
+    ["team.view", "operations.manage"], []);
+
+  await page.goto("/clients");
+  await expect(page.getByText("Workspace sync pending", { exact: true })).toBeVisible();
+  await expect(page.getByText(
+    "Project Alpha synced this client, but its automatic portal workspace has not reached Client Delivery yet. No approval is required.",
+    { exact: true },
+  )).toBeVisible();
+  await expect(page.getByText("Client ID sync incomplete", { exact: true })).toHaveCount(0);
+});
+
+test("a revoked client root is prominent in the directory", async ({ page }) => {
+  const revoked = { ...client("org-revoked", "Revoked client"), pa_public_id: "c".repeat(32),
+    workspace_id: "workspace-revoked", portal_status: "active", portal_access_state: "revoked" };
+  await mock(page, route => route.fulfill({ json: { clients: [revoked], nextCursor: null, capabilities } }),
+    ["team.view", "operations.manage"], []);
+  await page.goto("/clients");
+  const card = page.getByRole("link", { name: "Open Revoked client client workspace" });
+  await expect(card.getByText("Portal access revoked", { exact: true })).toBeVisible();
+  await expect(card).toContainText("An administrator disabled this client's portal root");
+});
+
 test("matching business IDs from two producers retain source labels, contacts and project navigation without borrowing portal access", async ({ page }, testInfo) => {
   const errors: string[] = [], reads: URL[] = [];
   page.on("pageerror", error => errors.push(error.message));
@@ -106,7 +135,7 @@ test("matching business IDs from two producers retain source labels, contacts an
   await expect(page.locator(".client-directory-card")).toHaveCount(2);
   await expect(page.getByRole("link", { name: "Open Primary business client workspace" })).toContainText("Project Alpha");
   await expect(page.getByRole("link", { name: "Open Secondary business client workspace" })).toContainText("project-alpha:secondary");
-  await expect(page.getByRole("link", { name: "Open Secondary business client workspace" })).toContainText("active");
+  await expect(page.getByRole("link", { name: "Open Secondary business client workspace" })).toContainText("Portal ready");
   await page.getByRole("link", { name: "Open Primary business client workspace" }).click();
   await expect(page.getByText("Primary contact", { exact: true })).toBeVisible();
   await expect(page.getByRole("link", { name: "Primary project", exact: true })).toHaveAttribute("href", roots[0]!.detail_path + "/projects/9");
@@ -166,7 +195,7 @@ test("directory loads bounded direct-link cards and appends pages without losing
   await expect(page.getByText("Shared projects", { exact: true })).toHaveCount(4);
   await expect(page.getByText("Contact records", { exact: true })).toHaveCount(4);
   await expect(page.getByText("Portal workspace · business link pending", { exact: true })).toBeVisible();
-  await expect(page.getByText("No portal workspace linked", { exact: true })).toHaveCount(2);
+  await expect(page.getByText("Client ID sync incomplete", { exact: true })).toHaveCount(2);
   await expect(page.getByRole("link", { name: "Open Alpha individual client workspace" })).toHaveAttribute("href", first[1]!.detail_path);
   await expect(page.getByRole("link", { name: "Open Portal individual client workspace" })).toHaveAttribute("href", first[3]!.detail_path);
   await expect(page.getByRole("link", { name: "Open Acme client workspace" })).toHaveAttribute("href", first[0]!.detail_path);
@@ -290,11 +319,11 @@ test("search scope and verified legacy portal connections are represented honest
   await expect(help).toContainText("Portal-only contact and login search is not available.");
   await expect(page.getByRole("searchbox", { name: "Search clients" })).toHaveAttribute("aria-describedby", "client-directory-search-help");
   const legacyCard = page.getByRole("link", { name: "Open Verified legacy client client workspace" });
-  await expect(legacyCard.getByText("active", { exact: true })).toBeVisible();
-  await expect(legacyCard.getByText("No portal workspace linked")).toHaveCount(0);
+  await expect(legacyCard.getByText("Portal ready", { exact: true })).toBeVisible();
+  await expect(legacyCard.getByText("Client ID sync incomplete")).toHaveCount(0);
   const unmappedCard = page.getByRole("link", { name: "Open Unmapped client client workspace" });
-  await expect(unmappedCard.getByText("No portal workspace linked")).toBeVisible();
-  await expect(unmappedCard.locator(".client-directory-portal-state")).toHaveAttribute("aria-label", /not an access approval decision/);
+  await expect(unmappedCard.getByText("Client ID sync incomplete")).toBeVisible();
+  await expect(unmappedCard.locator(".client-directory-portal-state")).toHaveAttribute("aria-label", /exact Project Alpha client identifier/);
   await expect(page.getByRole("link", { name: "Open Portal-only client client workspace" }).getByText("Portal workspace · business link pending")).toBeVisible();
 });
 

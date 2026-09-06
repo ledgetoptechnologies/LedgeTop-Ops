@@ -19,7 +19,12 @@ describe("public-share directory recipients", () => {
     db = await miniflare.getD1Database("DELIVERY_DB") as unknown as D1Database;
     await db.exec(`
       CREATE TABLE shares(id TEXT PRIMARY KEY,recipient_email TEXT,share_version INTEGER NOT NULL DEFAULT 1);
-      CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,status TEXT NOT NULL,project_alpha_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
+      CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,status TEXT NOT NULL,
+        project_alpha_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary',root_type TEXT DEFAULT 'organization',
+        pa_organization_public_id TEXT DEFAULT 'org-acme',pa_client_public_id TEXT);
+      CREATE TABLE portal_v2_root_access_policies(
+        projection_source_id TEXT,root_type TEXT,root_public_id TEXT,state TEXT,
+        PRIMARY KEY(projection_source_id,root_type,root_public_id));
       CREATE TABLE portal_v2_directory_generations(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,status TEXT NOT NULL,complete INTEGER NOT NULL);
       CREATE TABLE portal_v2_directory_checkpoints(workspace_id TEXT PRIMARY KEY,active_generation_id TEXT NOT NULL);
       CREATE TABLE portal_v2_directory_entities(workspace_id TEXT NOT NULL,generation_id TEXT NOT NULL,entity_type TEXT NOT NULL,public_id TEXT NOT NULL,parent_public_id TEXT,display_name TEXT NOT NULL,active INTEGER NOT NULL);
@@ -68,7 +73,7 @@ describe("public-share directory recipients", () => {
 
   it("does not resolve recipients from an overlapping secondary native workspace", async () => {
     await db.batch([
-      db.prepare("INSERT INTO portal_v2_workspaces VALUES('workspace-secondary','active','project-alpha:secondary')"),
+      db.prepare("INSERT INTO portal_v2_workspaces(id,status,project_alpha_source_id) VALUES('workspace-secondary','active','project-alpha:secondary')"),
       db.prepare("INSERT INTO portal_v2_directory_generations VALUES('generation-secondary','workspace-secondary','active',1)"),
       db.prepare("INSERT INTO portal_v2_directory_checkpoints VALUES('workspace-secondary','generation-secondary')"),
       db.prepare("INSERT INTO portal_v2_directory_entities VALUES('workspace-secondary','generation-secondary','project','project-north',NULL,'Secondary Project',1)"),
@@ -83,6 +88,17 @@ describe("public-share directory recipients", () => {
   it("offers only the exact folder owner's ancestor organization/department/client/project path", async () => {
     const result = await searchShareRecipients(env, "jobs/acme/north/", "Acme");
     expect(result.audiences).toContainEqual({ audienceType: "organization", publicId: "org-acme", displayName: "Acme" });
+  });
+
+  it("does not discover or resolve recipients for a revoked client root", async () => {
+    await db.prepare(`INSERT INTO portal_v2_root_access_policies
+      VALUES('project-alpha:primary','organization','org-acme','revoked')`).run();
+    const guarded = { ...env, CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED: "true" };
+    await expect(searchShareRecipients(guarded, "jobs/acme/north/", "manager"))
+      .rejects.toMatchObject({ status: 409 });
+    await expect(resolveShareAudience(guarded, "jobs/acme/north/", "principal", "principal-duplicate"))
+      .rejects.toMatchObject({ status: 409 });
+    await db.prepare("DELETE FROM portal_v2_root_access_policies").run();
   });
 
   it("resolves and immutably snapshots a deduped authorized group audience", async () => {

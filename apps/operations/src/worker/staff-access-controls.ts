@@ -9,6 +9,14 @@ export const STAFF_ACCESS_CONTROLS = {
   deliveryLinkAudit: ["delivery.share.audit"],
   teamRoster: ["team.view"],
   administration: ["administration.view"],
+  viewerAccess: ["viewer.view"],
+  viewerDatasets: ["viewer.datasets.manage"],
+  viewerProcessing: ["viewer.processing.manage"],
+  viewerPublish: ["viewer.publish"],
+  viewerShareCreate: ["viewer.share.create"],
+  viewerShareRevoke: ["viewer.share.revoke"],
+  viewerClientAccess: ["viewer.manage"],
+  viewerStoragePurge: ["viewer.storage.purge"],
 } as const satisfies Record<string, readonly Permission[]>;
 
 export type StaffAccessControl = keyof typeof STAFF_ACCESS_CONTROLS;

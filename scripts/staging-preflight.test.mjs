@@ -220,8 +220,8 @@ test("requires every portal-v2 and Operations capability to be explicitly false"
   }
 });
 
-test("pins the native portal and bulk-archive migration-first release contract", () => {
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-13), [
+test("pins the native portal, root-access, incoming-notification, and bulk-archive migration-first release contract", () => {
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-15), [
     "0184_native_client_feedback.sql",
     "0185_native_service_request_ownership.sql",
     "0186_delivery_notification_authority_provenance.sql",
@@ -235,12 +235,16 @@ test("pins the native portal and bulk-archive migration-first release contract",
     "0194_client_delegated_share_expiry.sql",
     "0195_legacy_workspace_authority_lifecycle.sql",
     "0196_bulk_download_archive_cache.sql",
+    "0197_portal_root_access_policy.sql",
+    "0198_incoming_upload_owner_notifications.sql",
   ]);
   assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.at(-1), "0052_project_operational_reassignment_recovery.sql");
   assert(REQUIRED_DISABLED_FEATURE_FLAGS.delivery.includes("CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED"));
   assert(REQUIRED_DISABLED_FEATURE_FLAGS.delivery.includes("CLIENT_PORTAL_CONTENT_AUDIT_ENABLED"));
   assert.equal(STAGING_STATIC_VARS.delivery.CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED, "false");
   assert.equal(STAGING_STATIC_VARS.delivery.CLIENT_PORTAL_CONTENT_AUDIT_ENABLED, "false");
+  assert.equal(STAGING_STATIC_VARS.delivery.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED, "false");
+  assert.equal(STAGING_STATIC_VARS.operations.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED, "false");
   assert.equal(STAGING_STATIC_VARS.delivery.PROJECT_ALPHA_PORTAL_SYNC_ENABLED, "true");
   assert.equal(STAGING_STATIC_VARS.delivery.PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED, "false");
   assert.equal(STAGING_STATIC_VARS.delivery.PROJECT_ALPHA_PORTAL_APPLICATION_KEY, STAGING_STATIC_VARS["ops-sync"].APPLICATION_KEY);
@@ -270,8 +274,8 @@ test("pins the native portal and bulk-archive migration-first release contract",
   ]) assert(runbook.includes(invariant), invariant);
 
   const evidence = JSON.parse(fs.readFileSync(path.join(root, "docs", "staging", "release-evidence.json.example"), "utf8"));
-  assert.deepEqual(evidence.migrations.delivery.expected.slice(-3), REQUIRED_STAGING_MIGRATIONS.delivery.slice(-3));
-  assert.equal(evidence.migrations.operations.expected.at(-1), REQUIRED_STAGING_MIGRATIONS.operations.at(-1));
+  assert.deepEqual(evidence.migrations.delivery.expected, REQUIRED_STAGING_MIGRATIONS.delivery);
+  assert.deepEqual(evidence.migrations.operations.expected, REQUIRED_STAGING_MIGRATIONS.operations);
   assert.equal(evidence.externalGates.nativePortalRequests.ready, false);
   assert.equal(evidence.externalGates.nativePortalFeedback.ready, false);
 });

@@ -98,7 +98,7 @@ describe('real D1 native staff folder binding and exact principal delegation',{t
   beforeAll(async()=>{
     runtime=new Miniflare({modules:true,compatibilityDate:'2026-07-22',script:"export default {fetch(){return new Response('native-producer')}}",d1Databases:['OPS_DB','DELIVERY_DB','EMPTY_DB']});
     ops=await runtime.getD1Database('OPS_DB') as D1Database;delivery=await runtime.getD1Database('DELIVERY_DB') as D1Database;
-    for(const [db,path,cap] of [[ops,new URL('../migrations/',import.meta.url),'0040'],[delivery,new URL('../../client/migrations/',import.meta.url),'0189']] as const)
+    for(const [db,path,cap] of [[ops,new URL('../migrations/',import.meta.url),'0040'],[delivery,new URL('../../client/migrations/',import.meta.url),'0197']] as const)
       for(const name of readdirSync(path).filter(n=>/^\d{4}_.*\.sql$/.test(n)&&n.slice(0,4)<=cap).sort())
         await db.batch(splitD1MigrationStatements(readFileSync(new URL(name,path),'utf8')).map(sql=>db.prepare(sql)));
     const primaryCredential={snapshotApiKey:'primary-snapshot-key',eventCurrent:{keyId:'primary-key',algorithm:'ed25519',value:key(1)}},
@@ -107,6 +107,7 @@ describe('real D1 native staff folder binding and exact principal delegation',{t
     const configured:Partial<Env>&ProjectAlphaConnectorEnvironment={OPS_DB:ops,DELIVERY_DB:delivery,PROJECT_ALPHA_BASE_URL:'https://primary.example.test/',PROJECT_ALPHA_API_KEY:primaryCredential.snapshotApiKey,
       APPLICATION_KEY:'ltds_ops',PROJECT_ALPHA_WEBHOOK_ED25519_PUBLIC_KEY:key(1),PROJECT_ALPHA_CONNECTOR_CREDENTIALS:JSON.stringify({version:1,sets:{primary:primaryCredential,secondary:secondaryCredential}}),
       CLIENT_PORTAL_HIERARCHY_V2_ENABLED:'true',AUTHENTICATED_DELIVERY_GRANTS_ENABLED:'true',CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED:'true',
+      CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED:'true',
       PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED:'true',
       PUBLIC_BASE_URL:'https://operations.example.test',OPERATIONS_SESSION_SECRET:'fixture-session-secret-at-least-32-bytes'};
     // This focused fixture supplies only bindings exercised by the producer.
@@ -148,6 +149,15 @@ describe('real D1 native staff folder binding and exact principal delegation',{t
     expect(targets.targets).toContainEqual({sourceId,sourceName:'Secondary Alpha',workspaceId:f.operation.workspaceId,workspaceName:`Workspace ${counter}`,projectId:f.project,projectName:`Native Project ${counter}`,projectEndSupported:false});
     const recipients=await searchNativeDeliveryRecipients(env,principal,{...f.operation,q:`Person ${counter}`});expect(recipients.recipients[0]?.principalPublicId).toBe('exact-person');
     const preview=await previewNativeDeliveryGrant(env,principal,f.operation);expect(preview.operation).toEqual(f.operation);expect(preview.contextVersion).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it('refuses native delivery grant issuance while the client root is revoked',async()=>{
+    const f=await fixture();
+    await delivery.prepare(`INSERT INTO portal_v2_root_access_policies
+      (projection_source_id,root_type,root_public_id,state,reason_code,created_by_staff_id,updated_by_staff_id)
+      VALUES(?,'organization',?,'revoked','security_hold',?,?)`)
+      .bind(sourceId,f.rootPublic,principal.id,principal.id).run();
+    await expect(previewNativeDeliveryGrant(env,principal,f.operation)).rejects.toMatchObject({status:404});
   });
   it.each([undefined,'false'] as const)('blocks native create and revoke without writes when the authority mutation flag is %s',async flag=>{
     const f=await fixture(),body=await input(f),target={...env,PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED:flag} as Env;

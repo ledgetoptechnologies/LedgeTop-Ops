@@ -16,6 +16,7 @@ import type { Env } from "./types";
 import { issueViewerSession, type AssociationRow } from "./viewer-integration";
 import { hmac, sha256 } from "./crypto";
 import { viewerPublicSharesEnabled, viewerServiceClient } from "./viewer-integration";
+import { portalRootAccessAllowedSql } from "./client-portal-root-access";
 
 const opaqueId = z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/);
 const requestSchema = z.object({
@@ -62,7 +63,8 @@ export async function pruneClientViewerShareReceipts(env: Pick<Env, "DELIVERY_DB
   return expired.meta.changes || 0;
 }
 
-const AUTHORIZED_ASSOCIATION_SQL = (capability: "delivery.view" | "viewer.share.create") => `WITH RECURSIVE live AS (
+const AUTHORIZED_ASSOCIATION_SQL = (env: Pick<Env, "CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED">,
+  capability: "delivery.view" | "viewer.share.create") => `WITH RECURSIVE live AS (
   SELECT association.*,project.project_alpha_project_id live_project_public_id,membership.expires_at membership_expires_at,
     (SELECT MIN(viewer_grant.authorization_expires_at) FROM viewer_client_grants viewer_grant
       WHERE viewer_grant.account_id=project_grant.account_id AND viewer_grant.project_id=project.id
@@ -110,6 +112,7 @@ const AUTHORIZED_ASSOCIATION_SQL = (capability: "delivery.view" | "viewer.share.
     AND member.revoked_at IS NULL
   WHERE association.id=? AND association.project_id=? AND association.state='active'
     AND association.model_status='ready' AND association.revoked_at IS NULL
+    AND ${portalRootAccessAllowedSql(env, "workspace")}
     AND NOT EXISTS (
       SELECT 1 FROM portal_v2_identity_eligibility_blocks eligibility_block
       WHERE eligibility_block.status='active'
@@ -220,7 +223,7 @@ export async function authorizeClientViewerAssociation(
 ): Promise<AssociationRow | null> {
   if (env.CLIENT_VIEWER_SESSION_ISSUER_ENABLED !== "true" || env.CLIENT_PORTAL_HIERARCHY_V2_ENABLED !== "true")
     return null;
-  const result = await db(env).prepare(AUTHORIZED_ASSOCIATION_SQL(capability)).bind(
+  const result = await db(env).prepare(AUTHORIZED_ASSOCIATION_SQL(env, capability)).bind(
     input.legacyAccountId,
     input.identityId, input.principalIssuer, input.principalSubject,
     input.workspaceId,

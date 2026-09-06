@@ -71,7 +71,7 @@ describe("source-pinned PA delivery recipient and transaction guard", () => {
   }
 
   function guard(audience: ShareAudienceSnapshot, source = PRIMARY_CATALOG_SOURCE, requestPrefix = prefix, allowUnclaimed = true) {
-    return projectAlphaDeliveryPrincipalGuard({ audience, principalSourceVersion: version,
+    return projectAlphaDeliveryPrincipalGuard({ CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED: "false" }, { audience, principalSourceVersion: version,
       bindingSourceVersion: "binding-v1", prefix: requestPrefix, allowUnclaimed, source });
   }
   function permits(value: ReturnType<typeof projectAlphaDeliveryPrincipalGuard>) {

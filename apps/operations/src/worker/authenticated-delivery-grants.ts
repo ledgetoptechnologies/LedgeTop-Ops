@@ -13,6 +13,7 @@ import { NATIVE_PORTAL_TARGET_SCOPES_SQL,readNativeTargetScopes } from '../../..
 import { authorizePortalWorkspaceCapability } from '../../../client/src/worker/client-portal/workspace-v2';
 import {requireProjectAccessAuthorityMutations} from './project-access-mutation-gate';
 import {requireActivePrimaryWorkspaceBindingReceipt} from './primary-delivery-workspace-bindings';
+import { portalRootAccessAllowedSql } from './client-portal-root-access';
 
 const OPAQUE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const IDEMPOTENCY = /^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/;
@@ -147,7 +148,7 @@ async function bindingContext(env: Env, bindingId: string): Promise<BindingConte
       ON owner.workspace_id=binding.workspace_id AND owner.generation_id=checkpoint.active_generation_id
       AND owner.entity_type=binding.owner_scope_type AND owner.public_id=binding.owner_public_id AND owner.active=1
     WHERE binding.id=? AND binding.status='active' AND binding.revoked_at IS NULL
-      AND binding.source_version IS NOT NULL`).bind(bindingId).first<{
+      AND binding.source_version IS NOT NULL AND ${portalRootAccessAllowedSql(env, 'workspace')}`).bind(bindingId).first<{
       id: string; workspace_id: string; owner_scope_type: BindingContext["ownerType"];
       owner_public_id: string; r2_prefix: string; source_version: string; active_generation_id: string;
       workspace_label:string;root_type:BindingContext['rootType'];root_public_id:string;owner_name:string;source_type:string;
@@ -177,6 +178,7 @@ async function bindingIdForFolderKey(env: Env, folderKey: string): Promise<strin
     FROM portal_v2_folder_bindings binding JOIN portal_v2_workspaces workspace ON workspace.id=binding.workspace_id
     WHERE binding.status='active' AND binding.revoked_at IS NULL AND binding.r2_prefix IN (?,?)
       AND workspace.project_alpha_source_id='project-alpha:primary'
+      AND ${portalRootAccessAllowedSql(env, 'workspace')}
     ORDER BY binding.updated_at DESC,binding.id LIMIT 2`).bind(prefix, prefix.slice(0, -1)).all<{ id: string; r2_prefix: string }>();
   const matches = rows.results.filter(row => normalizePrefix(row.r2_prefix) === prefix);
   if (matches.length !== 1) throw new HTTPException(404, { message: "This folder is not bound to a client workspace" });
@@ -206,7 +208,8 @@ export async function resolveAuthenticatedDeliveryGrantNotificationTarget(
       AND recipient.workspace_id=grant_record.workspace_id
       AND recipient.principal_public_id=grant_record.audience_public_id
       AND recipient.principal_source_version=grant_record.audience_source_version
-    WHERE grant_record.id=? AND grant_record.audience_type='principal' LIMIT 2`)
+    WHERE grant_record.id=? AND grant_record.audience_type='principal'
+      AND ${portalRootAccessAllowedSql(env, 'workspace')} LIMIT 2`)
     .bind(grantId).all<{id:string;logical_grant_id:string;grant_version:number;workspace_id:string;
       folder_binding_id:string;binding_source_version:string;audience_public_id:string;audience_source_version:string;
       identity_id:string;status:string;revoked_at:string|null;expires_at:string|null;terms_current:number}>();
@@ -296,7 +299,7 @@ async function primaryNotificationOwner(env:Env,context:BindingContext):Promise<
 const primaryScopeExpressions=["json_extract((SELECT v FROM input),'$.targets')","json_extract((SELECT v FROM input),'$.workspaceId')",
   "json_extract((SELECT v FROM input),'$.generationId')","json_extract((SELECT v FROM input),'$.relations')",'66'];
 const primaryScopeQuery=NATIVE_PORTAL_TARGET_SCOPES_SQL.replace(/\?([1-5])\b/g,(_match,n:string)=>primaryScopeExpressions[Number(n)-1]!);
-const primaryGrantProofSql=`WITH input AS(SELECT json(?) v),scope_rows AS(${primaryScopeQuery}),
+const primaryGrantProofSql=(env:Pick<Env,'CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED'>)=>`WITH input AS(SELECT json(?) v),scope_rows AS(${primaryScopeQuery}),
   selected_people AS(SELECT p.public_id,p.identity_id,p.source_version,p.status,p.email_hint,p.display_name,i.issuer,i.subject,i.verified_email,i.status identity_status,i.revoked_at,
     m.status membership_status,m.revoked_at membership_revoked,m.expires_at,m.source_type membership_source,m.source_version membership_version,
     CASE WHEN m.expires_at IS NULL OR datetime(m.expires_at)>datetime('now') THEN 1 ELSE 0 END membership_live
@@ -309,7 +312,8 @@ const primaryGrantProofSql=`WITH input AS(SELECT json(?) v),scope_rows AS(${prim
       account.id,account.project_alpha_source_id,source.projection_source_id,source.source_workspace_id)
       FROM input JOIN portal_v2_folder_bindings b ON b.id=json_extract(v,'$.bindingId') JOIN portal_v2_workspaces w ON w.id=b.workspace_id
       JOIN portal_v2_directory_checkpoints cp ON cp.workspace_id=w.id LEFT JOIN client_accounts account ON account.id=w.legacy_account_id
-      LEFT JOIN pa_portal_workspace_sources source ON source.workspace_id=w.id),
+      LEFT JOIN pa_portal_workspace_sources source ON source.workspace_id=w.id
+      WHERE ${portalRootAccessAllowedSql(env, 'w')}),
     'scopes',(SELECT json_group_array(json_array(target_type,target_id,entity_type,public_id,parent_public_id,source_version,depth,display_name,binding_version,retained)) FROM scope_rows),
     'people',(SELECT json_group_array(json_array(public_id,identity_id,source_version,status,email_hint,display_name,issuer,subject,verified_email,identity_status,revoked_at,membership_status,membership_revoked,expires_at,membership_live,membership_source,membership_version)) FROM selected_people),
     'audience',(SELECT json_array(e.entity_type,e.public_id,e.parent_public_id,e.display_name,e.source_version,e.active)
@@ -337,7 +341,7 @@ const primaryGrantProofSql=`WITH input AS(SELECT json(?) v),scope_rows AS(${prim
 interface ExplicitPrimaryReview {input:string;proof:string;opsProof:string;terms:ProjectAccessTermsInput|null;
   selected:{sourceVersion:string;displayName:string};recipients:Recipient[];preview:AuthenticatedDeliveryGrantPreview}
 async function readPrimaryProof(env:Env,input:string){
-  const value=await deliveryDb(env).prepare(primaryGrantProofSql).bind(input).first<string>('proof');
+  const value=await deliveryDb(env).prepare(primaryGrantProofSql(env)).bind(input).first<string>('proof');
   if(!value||value.length>100_000)throw new HTTPException(409,{message:'Grant context changed; review again'});
   const parsed=JSON.parse(value) as Record<string,unknown>;
   if(['scopes','people','rules','denials','blocks'].some(key=>!Array.isArray(parsed[key])||parsed[key].length>200))throw new HTTPException(503,{message:'Grant authorization exceeds safe capacity'});
@@ -721,7 +725,7 @@ async function insertGrant(env: Env, principal: StaffPrincipal, context: Binding
     input.review.terms,{type:'staff',id:principal.id},`primary-grant-${id}`):null;
   if(input.review&&(await reviewOpsProof(env,principal,context,input.review.terms)).json!==input.review.opsProof)throw new HTTPException(409,{message:'Grant context changed; review again'});
   await db.batch([
-    ...(input.review?[db.prepare(`WITH current_proof AS MATERIALIZED (${primaryGrantProofSql})
+    ...(input.review?[db.prepare(`WITH current_proof AS MATERIALIZED (${primaryGrantProofSql(env)})
       INSERT INTO portal_project_access_write_fences(id,write_guard)
       SELECT ?,CASE WHEN count(*)=1 AND max(proof)=? ${input.restoreFrom?`AND EXISTS(SELECT 1 FROM portal_v2_authenticated_delivery_grants old
         WHERE old.id=? AND old.grant_version=? AND (old.status IN('revoked','expired') OR (old.status='active' AND

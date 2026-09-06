@@ -113,6 +113,7 @@ describe("exact-target service-assignment request policy", { timeout: 60_000 }, 
       CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true",
       CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED: "true",
       CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: "true",
+      CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED: "true",
       CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED: "true",
       PROJECT_ALPHA_SERVICE_ASSIGNMENT_SYNC_ENABLED: "true",
       CLIENT_PORTAL_SERVICE_ASSIGNMENT_POLICY_ENABLED: "true",
@@ -1003,7 +1004,16 @@ describe("exact-target service-assignment request policy", { timeout: 60_000 }, 
     expect(requestAuthority).toMatchObject({ projectAllowed: true,
       mutationProof: { workspaceId, localProjectId: "project-a", projectPublicId: "pa-project-a" } });
     const requestGuard = effectiveWorkspaceRequestMutationGuardSql(requestAuthority!.mutationProof);
+    expect(requestGuard.sql).toContain("portal_v2_root_access_policies");
+    expect(requestGuard.sql).toContain("root_policy.state='revoked'");
     expect(await db.prepare(`SELECT ${requestGuard.sql} allowed`).bind(...requestGuard.bindings).first<number>("allowed")).toBe(1);
+    await db.prepare(`INSERT INTO portal_v2_root_access_policies
+      (projection_source_id,root_type,root_public_id,state,reason_code,created_by_staff_id,updated_by_staff_id)
+      VALUES (?,'organization','pa-org-policy','revoked','security_concern','staff-one','staff-one')`).bind(sourceId).run();
+    expect(await db.prepare(`SELECT ${requestGuard.sql} allowed`).bind(...requestGuard.bindings).first<number>("allowed")).toBe(0);
+    await db.prepare(`UPDATE portal_v2_root_access_policies SET state='active',version=version+1,
+      reason_code='restored',updated_by_staff_id='staff-one',updated_at=datetime('now')
+      WHERE projection_source_id=? AND root_type='organization' AND root_public_id='pa-org-policy'`).bind(sourceId).run();
     const created = await createServiceRequestDraft(env, session, input, "policy-create-key-0001");
     expect(created?.kind).toBe("created");
     const stored = await db.prepare(`SELECT service_assignment_policy_v2_json proof

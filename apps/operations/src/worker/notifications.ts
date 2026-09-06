@@ -17,6 +17,7 @@ import { advanceNotificationSourceSchedule, nativeBindingGuard, nativeDeliveryNo
   processPortalDeliveryNotificationBatches, scheduledNotificationSources } from "./portal-delivery-notification-batches";
 import { recoverDeliveryShareSecret } from "./delivery-secret-recovery";
 import { publicShareOrigin } from "./origins";
+import { portalRootAccessAllowedSql } from "./client-portal-root-access";
 
 export type NotificationKind = "share_created" | "share_updated" | "share_revoked" | "first_access" | "expiring_72h";
 export interface NotificationPayload { publicId?: string | null; shareUrl?: string; clientName?: string; projectName?: string; r2Prefix?: string; expiresAt?: string | null; }
@@ -422,7 +423,7 @@ export async function processProjectAlphaDeliveryPortalNotifications(env:Env):Pr
         (outbox.status='processing' AND datetime(outbox.lease_expires_at)<=datetime('now')))
         AND outbox.id=? AND outbox.attempt_count<3
         ${directLane}
-        AND ${liveSource} AND ${liveOwner}
+        AND ${liveSource} AND ${liveOwner} AND ${portalRootAccessAllowedSql(env, "workspace")}
         AND ((outbox.event_type='revoked' AND grant_record.status='revoked' AND grant_record.revoked_at IS NOT NULL)
           OR (outbox.event_type='granted' AND grant_record.status='active' AND
           (grant_record.expires_at IS NULL OR datetime(grant_record.expires_at)>datetime('now'))))
@@ -449,11 +450,11 @@ export async function processProjectAlphaDeliveryPortalNotifications(env:Env):Pr
       const recipientEmail=recipient.recipients[0]?.email;
       if(!recipientEmail)throw new Error("recipient-unavailable");
       const granted=row.event_type==="granted",url=`${env.DELIVERY_BASE_URL.replace(/\/$/,"")}/portal/deliveries`;
-      const bindingGuard=nativeBindingGuard({source_id:source.sourceId,workspace_id:row.workspace_id,
+      const bindingGuard=nativeBindingGuard(env,{source_id:source.sourceId,workspace_id:row.workspace_id,
         folder_binding_id:row.folder_binding_id,binding_source_version:row.binding_source_version,
         principal_public_id:row.principal_public_id,principal_source_version:row.principal_source_version,
         owner_scope_type:row.owner_scope_type,owner_public_id:row.owner_public_id,r2_prefix:row.r2_prefix});
-      const principalGuard=projectAlphaDeliveryPrincipalGuard({audience:recipient,
+      const principalGuard=projectAlphaDeliveryPrincipalGuard(env,{audience:recipient,
         principalSourceVersion:row.principal_source_version,bindingSourceVersion:row.binding_source_version,
         prefix:row.r2_prefix,allowUnclaimed:portalAutomaticEligibilityEnabled(env),source});
       const grantState=granted

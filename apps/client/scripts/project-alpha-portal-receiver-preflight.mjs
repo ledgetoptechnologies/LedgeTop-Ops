@@ -53,7 +53,7 @@ function validatePortalCommonPreflight(config, secretNames) {
 export function validatePortalReceiverPreflight(config, secretNames = new Set()) {
   const errors = validatePortalCommonPreflight(config, secretNames);
   if (!config?.vars || typeof config.vars !== "object" || Array.isArray(config.vars)) return errors;
-  for (const flag of ["CLIENT_PORTAL_HIERARCHY_V2_ENABLED", "CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED", "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED"]) {
+  for (const flag of ["CLIENT_PORTAL_HIERARCHY_V2_ENABLED", "CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED", "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED", "CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED"]) {
     if (config.vars[flag] !== "false") errors.push(`${flag} must remain exactly false for the receiver-only release`);
   }
   const denyManagement = config.vars.CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED;

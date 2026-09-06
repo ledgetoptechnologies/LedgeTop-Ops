@@ -28,3 +28,6 @@
   .portal-access-tools { display: grid; grid-template-columns: 1fr; }
   .portal-access-tools button { width: 100%; }
 }
+.portal-root-access{display:flex;align-items:flex-start;justify-content:space-between;gap:1rem;padding:1rem;border:1px solid var(--line);border-radius:.75rem;background:#f7f9fa}
+.portal-root-access>div{min-width:0}.portal-root-access p{margin:.35rem 0}.portal-root-access-revoked{border-color:#a12c2c;background:#fff5f5}
+@media(max-width:720px){.portal-root-access{align-items:stretch;flex-direction:column}}

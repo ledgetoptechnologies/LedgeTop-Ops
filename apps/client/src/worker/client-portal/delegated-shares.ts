@@ -12,6 +12,7 @@ import {
   authenticatedDeliveryGrantsEnabled,
   authorizeAuthenticatedDeliveryGrant,
 } from "./authenticated-delivery-grants";
+import { portalRootAccessAllowedSql } from "./workspace-access-policy";
 
 export const CLIENT_DELEGATED_SHARE_COOKIE = "__Secure-ltds_client_share";
 export const CLIENT_DELEGATED_SHARE_PATH_PREFIX = "/client-share/";
@@ -258,7 +259,7 @@ async function principalIdentityId(
 }
 
 async function delegationPolicyRow(
-  env: Pick<Env, "DELIVERY_DB">,
+  env: Pick<Env, "DELIVERY_DB" | "CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED">,
   workspaceId: string,
   delegationId: string,
   targetId: string,
@@ -283,6 +284,7 @@ async function delegationPolicyRow(
       ON identity.id=delegation.identity_id AND identity.status='active' AND identity.revoked_at IS NULL
     JOIN portal_v2_workspaces workspace
       ON workspace.id=delegation.workspace_id AND workspace.status='active'
+      AND ${portalRootAccessAllowedSql(env.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED === "true", "workspace")}
     JOIN portal_v2_workspace_memberships membership
       ON membership.workspace_id=delegation.workspace_id AND membership.identity_id=delegation.identity_id
       AND membership.status='active' AND membership.revoked_at IS NULL

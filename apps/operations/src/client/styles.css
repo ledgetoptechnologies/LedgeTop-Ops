@@ -944,6 +944,9 @@ tbody tr:last-child td { border: 0; }
   overflow-wrap: anywhere;
   line-height: 1.35;
 }
+.local-access-toggle .danger-control {
+  color: var(--danger);
+}
 .local-access-toggle label + label {
   padding-top: .55rem;
   border-top: 1px solid var(--line);
@@ -1565,7 +1568,8 @@ tbody tr:last-child td { border: 0; }
 .client-directory-card > small { color: var(--muted); }
 .client-directory-card-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .45rem; }
 .client-directory-card-header > small { color: var(--muted); }
-.client-directory-portal-state { max-width: 100%; }
+.client-directory-portal-state { display: grid; justify-items: end; gap: .25rem; max-width: min(100%, 28rem); }
+.client-directory-portal-state > small { color: var(--muted); font-size: .72rem; line-height: 1.35; text-align: right; }
 .client-directory-card-counts { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: .65rem; margin: auto 0 0; padding-top: .25rem; }
 .client-directory-card-counts dt { color: var(--muted); font-size: .75rem; }
 .client-directory-card-counts dd { margin: .25rem 0 0; font-size: 1.1rem; font-weight: 800; }
@@ -1650,8 +1654,12 @@ tbody tr:last-child td { border: 0; }
 .client-access-management-list > section > div:first-child { display: grid; min-width: 0; }
 .client-access-management-list > section > .actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: .5rem; }
 .client-hub-back { display: inline-flex; margin-bottom: 1rem; }
-.client-hub-detail-grid { align-items: start; }
+.client-hub-title-status { display: grid; justify-items: end; gap: .3rem; max-width: min(100%, 32rem); padding: .65rem .75rem; border: 1px solid var(--line); border-radius: 10px; background: var(--paper); }
+.client-hub-title-status > small { color: var(--muted); line-height: 1.4; text-align: right; }
+.client-hub-detail-grid { grid-template-columns: minmax(0, 1fr); align-items: start; gap: .85rem; }
+.client-hub-wide-panel { grid-column: 1 / -1; min-width: 0; }
 .client-hub-audit-panel { grid-column: 1 / -1; min-width: 0; }
+.client-hub-detail-grid .client-hub-contact-list { grid-template-columns: repeat(auto-fit,minmax(min(100%,26rem),1fr)); }
 .client-hub-detail-grid .simple-rows > a { color: inherit; text-decoration: none; }
 .client-hub-detail-grid > *, .client-hub-collection { min-width: 0; }
 .client-hub-detail-grid, .client-hub-title { overflow-wrap: anywhere; }
@@ -1682,6 +1690,8 @@ tbody tr:last-child td { border: 0; }
 .client-project-management button, .client-project-management a.button { min-height: 44px; }
 @media (max-width: 640px) {
   .client-hub-title { flex-wrap: wrap; }
+  .client-hub-title-status { justify-items: start; }
+  .client-hub-title-status > small { text-align: left; }
   .client-hub-collection .simple-rows > div, .client-hub-collection .simple-rows > a { flex-wrap: wrap; }
   .client-project-management-summary, .client-project-management-actions { align-items: stretch; flex-direction: column; }
   .client-project-management-summary a, .client-project-management-actions button { width: 100%; }
@@ -2262,6 +2272,8 @@ tbody tr:last-child td { border: 0; }
   border-radius: 6px;
 }
 .incoming-upload-list > div:nth-child(even) { background: #f7f9fa; }
+.incoming-upload-list > div > div:first-child { display: grid; gap: .2rem; min-width: 0; }
+.incoming-upload-status-detail { color: var(--muted); line-height: 1.35; }
 
 /* ---------------------------------------------------------------------------
    Share management

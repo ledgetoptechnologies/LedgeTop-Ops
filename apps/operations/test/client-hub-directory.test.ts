@@ -15,12 +15,18 @@ const sql = (value: string) => value.replace(/^\s*--.*$/gm, "").replace(/\s*\n\s
 describe("source-qualified Client Hub directory", () => {
   let runtime: Miniflare;
   let db: D1Database;
+  let deliveryDb: D1Database;
   let env: Env;
   beforeAll(async () => {
     runtime = new Miniflare({ compatibilityDate: "2026-08-06", modules: true,
-      script: "export default { fetch(){return new Response('ok')} }", d1Databases: { OPS_DB: "hub-directory" } });
+      script: "export default { fetch(){return new Response('ok')} }",
+      d1Databases: { OPS_DB: "hub-directory", DELIVERY_DB: "hub-directory-delivery" } });
     db = await runtime.getD1Database("OPS_DB") as unknown as D1Database;
-    env = { OPS_DB: db } as Env;
+    deliveryDb = await runtime.getD1Database("DELIVERY_DB") as unknown as D1Database;
+    env = { OPS_DB: db, DELIVERY_DB: deliveryDb, CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED: "true" } as Env;
+    await deliveryDb.batch(splitD1MigrationStatements(readFileSync(
+      new URL("../../client/migrations/0197_portal_root_access_policy.sql", import.meta.url), "utf8",
+    )).map(statement => deliveryDb.prepare(statement)));
     await db.exec(sql(`
       CREATE TABLE role_permissions(role_id TEXT,permission_key TEXT);
       CREATE TABLE staff_role_assignments(staff_id TEXT,role_id TEXT,scope TEXT,division_id TEXT);
@@ -43,6 +49,7 @@ describe("source-qualified Client Hub directory", () => {
     await db.batch(splitD1MigrationStatements(readFileSync(new URL("../migrations/0037_client_business_activity.sql", import.meta.url), "utf8")).map(statement => db.prepare(statement)));
   });
   beforeEach(async () => {
+    await deliveryDb.prepare("UPDATE portal_v2_root_access_policies SET state='active'").run();
     await db.batch([
       db.prepare("DELETE FROM client_hub_search_values"), db.prepare("DELETE FROM client_hub_roots"),
       db.prepare("DELETE FROM staff_role_assignments"), db.prepare("DELETE FROM staff_permission_overrides"),
@@ -52,6 +59,22 @@ describe("source-qualified Client Hub directory", () => {
       db.prepare("UPDATE client_hub_directory_state SET ready=1,last_success_at=NULL WHERE id='directory'"),
       db.prepare("UPDATE pa_connectors SET read_visible=0,version=version+1 WHERE source_id<>'project-alpha:primary'"),
     ]);
+  });
+
+  it("hydrates a revoked root independently of workspace projection readiness", async () => {
+    const publicId = "a".repeat(32);
+    await registerVisibleTestSource(db, "project-alpha:secondary", "Secondary Project Alpha");
+    await roots([{ id: "revoked-org", kind: "organization", name: "Revoked organization",
+      source: "project-alpha:secondary" }]);
+    await db.prepare("UPDATE pa_organizations SET payload_json=? WHERE id=? AND projection_source_id=?")
+      .bind(JSON.stringify({ public_id: publicId }), "revoked-org", "project-alpha:secondary").run();
+    await deliveryDb.prepare(`INSERT INTO portal_v2_root_access_policies
+      (projection_source_id,root_type,root_public_id,state,reason_code,created_by_staff_id,updated_by_staff_id)
+      VALUES ('project-alpha:secondary','organization',?,'revoked','security_concern','staff-a','staff-a')`)
+      .bind(publicId).run();
+    const client = (await listClientHubRoots(env, staff)).clients[0];
+    expect(client).toMatchObject({ public_id: "revoked-org", pa_public_id: publicId,
+      portal_access_state: "revoked" });
   });
   afterAll(async () => runtime.dispose());
 

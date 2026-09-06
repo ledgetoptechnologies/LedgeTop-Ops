@@ -1,4 +1,4 @@
 {
   "schemaVersion": 1,
-  "profile": "receiver-only"
+  "profile": "default-on-eligibility"
 }

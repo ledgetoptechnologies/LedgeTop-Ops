@@ -29,7 +29,7 @@ const principal = { id: "staff-admin", email: "admin@example.com", displayName: 
 const executionCtx = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
 
 function environment(
-  target: { id: string; sync_protected: number; status?: string } = { id: "staff-target", sync_protected: 0 },
+  target: { id: string; sync_protected: number; status?: string; owner_role?: number } = { id: "staff-target", sync_protected: 0 },
   staffRows: Record<string, unknown>[] = [],
 ) {
   const prepared: Array<{ sql: string; values: unknown[] }> = [];
@@ -41,8 +41,8 @@ function environment(
         values: [] as unknown[],
         bind(...values: unknown[]) { this.values = values; prepared.push(this); return this; },
         async first() {
-          if (sql.includes("SELECT id,email,status,sync_protected FROM staff_users")) {
-            return { ...target, email: "target@example.com", status: target.status || "active" };
+          if (sql.includes("FROM staff_users staff WHERE staff.id=?")) {
+            return { ...target, email: "target@example.com", status: target.status || "active", owner_role: target.owner_role || 0 };
           }
           return null;
         },
@@ -77,6 +77,14 @@ const controls = {
   deliveryLinkAudit: false,
   teamRoster: false,
   administration: false,
+  viewerAccess: true,
+  viewerDatasets: false,
+  viewerProcessing: false,
+  viewerPublish: false,
+  viewerShareCreate: false,
+  viewerShareRevoke: false,
+  viewerClientAccess: false,
+  viewerStoragePurge: false,
 };
 
 describe("staff access-control route", () => {
@@ -100,10 +108,11 @@ describe("staff access-control route", () => {
     expect(response.status).toBe(200);
     expect(state.batchCount()).toBe(1);
     const inserts = state.prepared.filter(call => call.sql.startsWith("INSERT INTO staff_permission_overrides"));
-    expect(inserts).toHaveLength(8);
+    expect(inserts).toHaveLength(16);
     expect(inserts.find(call => call.values[2] === "delivery.browse")?.values[3]).toBe("allow");
-    expect(inserts.filter(call => call.values[2] !== "delivery.browse").every(call => call.values[3] === "deny")).toBe(true);
-    expect(state.prepared.filter(call => call.sql.startsWith("DELETE FROM staff_permission_overrides"))).toHaveLength(8);
+    expect(inserts.find(call => call.values[2] === "viewer.view")?.values[3]).toBe("allow");
+    expect(inserts.filter(call => !["delivery.browse", "viewer.view"].includes(String(call.values[2]))).every(call => call.values[3] === "deny")).toBe(true);
+    expect(state.prepared.filter(call => call.sql.startsWith("DELETE FROM staff_permission_overrides"))).toHaveLength(16);
   });
 
   it("rejects self-edit and protected-owner edits before writing a batch", async () => {
@@ -129,6 +138,24 @@ describe("staff access-control route", () => {
     }), state.env as any, executionCtx);
     expect(response.status).toBe(200);
     expect(state.batchCount()).toBe(1);
+  });
+
+  it("does not broaden permanent Viewer storage purge beyond a global owner", async () => {
+    const state = environment();
+    const response = await worker.fetch(new Request("https://ops.example/api/admin/staff/staff-target/access-controls", {
+      method: "PUT", headers: { "Content-Type": "application/json", Origin: "https://ops.example" },
+      body: JSON.stringify({ ...controls, viewerStoragePurge: true }),
+    }), state.env as any, executionCtx);
+    expect(response.status).toBe(403);
+    expect(state.batchCount()).toBe(0);
+
+    const owner = environment({ id: "staff-owner-two", sync_protected: 0, owner_role: 1 });
+    const ownerResponse = await worker.fetch(new Request("https://ops.example/api/admin/staff/staff-owner-two/access-controls", {
+      method: "PUT", headers: { "Content-Type": "application/json", Origin: "https://ops.example" },
+      body: JSON.stringify({ ...controls, viewerStoragePurge: true }),
+    }), owner.env as any, executionCtx);
+    expect(ownerResponse.status).toBe(200);
+    expect(owner.batchCount()).toBe(1);
   });
 
   it("excludes staff in explicitly denied divisions even with a global team allow", async () => {
@@ -193,6 +220,9 @@ describe("staff access-control route", () => {
       executionCtx,
     );
     const adminPerson = ((await adminResponse.json()) as { staff: Array<Record<string, any>> }).staff[0]!;
-    expect(adminPerson.localControls).toMatchObject({ teamRoster: true, deliveryBrowse: true, deliveryLinkCreate: false });
+    expect(adminPerson.localControls).toMatchObject({
+      teamRoster: true, deliveryBrowse: true, deliveryLinkCreate: false,
+      viewerAccess: false, viewerDatasets: false, viewerStoragePurge: false,
+    });
   });
 });

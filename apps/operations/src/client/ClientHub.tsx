@@ -3,7 +3,7 @@ import { Card, EmptyState, Loading, StatusPill } from "@ltds/ui";
 import type { Permission } from "@ltds/shared";
 import { api, ApiError } from "./api";
 import { ClientRequestWorkflow } from "./ClientRequestWorkflow";
-import { ClientPortalAccessPanel, type PortalIdentityPage } from "./ClientPortalAccessPanel";
+import { ClientPortalAccessPanel, type PortalIdentityPage, type PortalRootAccess } from "./ClientPortalAccessPanel";
 import { ClientExternalAccessRoster, type ExternalAccessResult } from "./ClientExternalAccessRoster";
 import { ClientServiceAssignments, type ClientServiceAssignmentResult } from "./ClientServiceAssignments";
 import { businessProjectHref } from "./business-project-route";
@@ -40,6 +40,7 @@ interface ClientDetailResponse {
   contextVersion?: string;
   pages?: Partial<Record<ClientCollectionName, ClientCollectionPage>>;
   portalIdentities?: PortalIdentityPage;
+  portalRootAccess?: PortalRootAccess;
   externalAccess?: ExternalAccessResult;
   serviceAssignments?: ClientServiceAssignmentResult;
   businessProjects?: BusinessProject[];
@@ -460,6 +461,8 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess }: { route
     <a className="button-ghost" href={clientDirectoryReturnPath()}>Back to Client Hub</a>
   </Card>;
   const data = state.data;
+  const portalStatus = clientPortalStatus({ ...data.client,
+    portal_access_state: data.portalRootAccess?.state === "revoked" ? "revoked" : data.client.portal_access_state });
   const collectionProps = { client: data.client, contextVersion: data.contextVersion, contextSignal: contextController.current.signal, onInvalidated: invalidate };
   const portalBasePath = data.client.source_id && data.client.root_namespace
     ? `/api/client-hub/sources/${encodeURIComponent(data.client.source_id)}/${data.client.root_namespace}/${data.client.route_kind}/${encodeURIComponent(data.client.public_id)}` : null;
@@ -469,15 +472,18 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess }: { route
       <div><small>{data.client.kind === "organization" ? "Organization" : "Standalone client"}</small><h2>{data.client.display_name}</h2>
         {data.client.source_name && <p>{data.client.source_name}</p>}
         {data.client.root_namespace === "portal" && <p>Portal workspace · business link pending</p>}</div>
-      <StatusPill tone={clientPortalStatus(data.client).tone}>{clientPortalStatus(data.client).label}</StatusPill>
+      <div className="client-hub-title-status"><StatusPill tone={portalStatus.tone}>{portalStatus.label}</StatusPill>
+        {portalStatus.description && <small>{portalStatus.description}</small>}</div>
     </div>
     <SourceBusinessParty key={revision} client={data.client} party={data.businessParty} canManage={data.canManageBusinessParties}
       contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} onRefresh={refresh} />
     <p className="client-hub-inventory-note">{data.businessProjects ? "Business projects are separate from the work shared with this client and their portal access." : "These sections show work shared with this client. Full business project history is separate."}</p>
     <div className="dashboard-grid client-hub-detail-grid" key={revision}>
-      {data.internalNotesAvailable === true && data.client.source_id && data.client.root_namespace && data.contextVersion && <ClientInternalNotes
-        root={{ sourceId: data.client.source_id, rootNamespace: data.client.root_namespace, kind: data.client.kind, publicId: data.client.public_id }}
-        contextVersion={data.contextVersion} contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} />}
+      {data.internalNotesAvailable === true && data.client.source_id && data.client.root_namespace && data.contextVersion && <div className="client-hub-wide-panel">
+        <ClientInternalNotes
+          root={{ sourceId: data.client.source_id, rootNamespace: data.client.root_namespace, kind: data.client.kind, publicId: data.client.public_id }}
+          contextVersion={data.contextVersion} contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} />
+      </div>}
       <span id="client-business-contacts" className="client-hub-anchor" aria-hidden="true" />
       <Card title="Business contacts">
         <ClientCollection {...collectionProps} collection="businessContacts" label="Business contacts" initial={data.contacts.filter(contact => contact.record_type === "business_contact")} page={data.pages?.businessContacts}
@@ -508,6 +514,7 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess }: { route
       </div>}
       {data.client.workspace_id && data.client.source_id === "project-alpha:primary" && (invitationAccess?.enabled && invitationAccess.canManagePolicy ? <ClientInvitationPolicy key={`${data.client.source_id}:${data.client.workspace_id}:${revision}`} workspaceId={data.client.workspace_id} sourceId={data.client.source_id} contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} /> : invitationAccess?.error ? <Card title="Invitation policy"><p role="alert">{invitationAccess.error}</p></Card> : null)}
       {data.portalIdentities ? portalBasePath ? <ClientPortalAccessPanel initialPage={data.portalIdentities} basePath={portalBasePath}
+        rootAccess={data.portalRootAccess}
         contextVersion={data.contextVersion || data.portalIdentities.contextVersion} contextSignal={collectionProps.contextSignal} onInvalidated={invalidate}
         feedback={portalFeedback} onChanged={message => { if (!collectionProps.contextSignal.aborted) { setPortalFeedback(message); refresh(); } }} />
         : <Card title="Portal logins"><p>Refresh this client workspace before viewing portal logins.</p></Card>

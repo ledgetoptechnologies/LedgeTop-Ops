@@ -63,14 +63,14 @@ describe("incoming upload public routes", () => {
   beforeAll(async () => {
     miniflare = new Miniflare({ compatibilityDate: "2026-08-06", modules: true, script: "export default { fetch() { return new Response('ok'); } };", d1Databases: { DB: "incoming-routes" } });
     db = await miniflare.getD1Database("DB") as unknown as D1Database;
-    for (const name of ["0090_aliases_incoming_requests.sql", "0093_reusable_incoming_uploads.sql", "0116_incoming_upload_hardening.sql"]) {
+    for (const name of ["0090_aliases_incoming_requests.sql", "0093_reusable_incoming_uploads.sql", "0116_incoming_upload_hardening.sql", "0198_incoming_upload_owner_notifications.sql"]) {
       const sql = readFileSync(new URL(`../../client/migrations/${name}`, import.meta.url), "utf8").replace(/^\s*--.*$/gm, "").replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "");
       await db.exec(sql.replace(/\s*\n\s*/g, " "));
     }
   });
 
   beforeEach(async () => {
-    await db.exec("DELETE FROM public_rate_limits; DELETE FROM file_request_upload_parts; DELETE FROM file_request_uploads; DELETE FROM file_request_contributors; DELETE FROM file_requests;");
+    await db.exec("DELETE FROM public_rate_limits; DELETE FROM incoming_upload_notification_digest_items; DELETE FROM incoming_upload_notification_digests; DELETE FROM file_request_upload_parts; DELETE FROM file_request_uploads; DELETE FROM file_request_contributors; DELETE FROM file_requests;");
     await db.batch([
       db.prepare("INSERT INTO file_requests(id,public_id,title,created_by,expires_at,max_files,max_bytes,session_version) VALUES('request-a','public-a','Upload','staff',datetime('now','+1 day'),10,1000,1)"),
       db.prepare("INSERT INTO file_request_contributors(id,request_id,name,email,client_address_hash) VALUES('contributor-a','request-a','Client','client@example.test','hash')"),
@@ -116,7 +116,13 @@ describe("incoming upload public routes", () => {
     expect(complete.status).toBe(200);
     expect(await complete.json()).toMatchObject({ status: "quarantined", idempotent: false });
     expect(await db.prepare("SELECT COUNT(*) count FROM file_request_upload_parts WHERE upload_id=?").bind(init.fileId).first()).toEqual({ count: 0 });
+    expect(await db.prepare("SELECT id,request_id,contributor_id,owner_staff_id,digest_version,file_count,total_bytes,status,attempt_count FROM incoming_upload_notification_digests").first()).toEqual({
+      id: "incoming-upload-digest:request-a:contributor-a:v1", request_id: "request-a", contributor_id: "contributor-a",
+      owner_staff_id: "staff", digest_version: 1, file_count: 1, total_bytes: 4, status: "pending", attempt_count: 0,
+    });
     expect(await (await request(`/api/public/requests/public-a/files/${init.fileId}/complete`, "POST", { parts: [{ partNumber: 1, etag }] })).json()).toMatchObject({ status: "quarantined", idempotent: true });
+    expect(await db.prepare("SELECT COUNT(*) count FROM incoming_upload_notification_digest_items WHERE upload_id=?").bind(init.fileId).first()).toEqual({ count: 1 });
+    expect(await db.prepare("SELECT file_count,total_bytes FROM incoming_upload_notification_digests").first()).toEqual({ file_count: 1, total_bytes: 4 });
   });
 
   it("accepts a legitimate multipart completion body above the small-route JSON limit", async () => {

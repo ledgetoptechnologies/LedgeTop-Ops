@@ -592,7 +592,7 @@ export async function createProjectAlphaDeliveryGuestShare(env:Env,input:{
     selected.directoryGenerationId!==input.expectedBinding.directoryGenerationId)
     throw new HTTPException(409,{message:"Delivery folder authority changed"});
   if(!selected.recipients.length)throw new HTTPException(409,{message:"Delivery audience has no eligible recipients"});
-  const guard=projectAlphaDeliveryPrincipalGuard({audience:selected,principalSourceVersion:input.audience.sourceVersion,
+  const guard=projectAlphaDeliveryPrincipalGuard(env,{audience:selected,principalSourceVersion:input.audience.sourceVersion,
     bindingSourceVersion:input.expectedBinding.bindingSourceVersion,prefix,
     allowUnclaimed:portalAutomaticEligibilityEnabled(env),source});
   const projectGuard=`EXISTS(SELECT 1 FROM projects WHERE id=? AND active=1 AND r2_prefix=?

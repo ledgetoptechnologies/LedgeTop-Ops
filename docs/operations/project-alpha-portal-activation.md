@@ -46,13 +46,14 @@ The Client Worker does not mount the former direct portal-v2 HTTP writers.
 defense if an obsolete handler is accidentally remounted. Existing public
 share, download, authenticated portal, and legacy redirect routes are unchanged.
 
-The checked-in production configuration is the receiver-only state: portal
-sync and schema-v3 relation ingestion are true, while client hierarchy reads,
-automatic identity eligibility, content grants, requests, notifications,
-membership management, invitations, and delegated sharing remain false.
-The committed `scripts/client-portal-release-profile.json` explicitly selects
-`receiver-only`. It is a versioned release-intent declaration, not activation
-approval or production evidence. Repository-owned release checks must verify
+The checked-in production configuration is the reviewed default-on eligibility
+state: portal sync, hierarchy reads, automatic identity eligibility, denylist
+enforcement, and deny-policy management are enabled together. Content grants,
+requests, notifications, membership management, invitations, and delegated
+sharing remain independently disabled. The committed
+`scripts/client-portal-release-profile.json` explicitly selects
+`default-on-eligibility`. It is a versioned release-intent declaration, not
+production evidence. Repository-owned release checks must verify
 the exact Ops Sync-to-Client service binding and named entrypoint before either
 Worker is deployed. A missing or mismatched binding must fail closed without
 acknowledging the Project Alpha event.
@@ -212,13 +213,14 @@ for the signed outer wrapper, then Client rechecks the exact inner limit.
 
 Only after R0/R1 and joined eligibility/revocation verification, prepare a
 separately reviewed commit selecting `default-on-eligibility` in
-`scripts/client-portal-release-profile.json` (`schemaVersion: 1`). Set these four
+`scripts/client-portal-release-profile.json` (`schemaVersion: 1`). Set these five
 flags exactly `true` in **both** Client and Operations configurations:
 
 - `CLIENT_PORTAL_HIERARCHY_V2_ENABLED`
 - `CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED`
 - `CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED`
 - `CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED`
+- `CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED`
 
 The receiver-only profile requires those flags exactly `false`; only Client's
 existing omitted deny-management flag may remain absent. Missing or unknown

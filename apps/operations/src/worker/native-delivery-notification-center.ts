@@ -174,7 +174,7 @@ export async function controlNativeDeliveryNotification(env:Env,principal:StaffP
   if(row.status!=='pending'||row.revision!==expectedRevision)changed();
   const auth=action==='send-now'?await authorizeNativeDeliveryNotification(env,row):null;
   if(action==='send-now'&&!auth)changed();
-  const guard=auth?.guard??nativeBindingGuard(row),status=action==='cancel'?'cancelled':'pending';
+  const guard=auth?.guard??nativeBindingGuard(env,row),status=action==='cancel'?'cancelled':'pending';
   let applied=false;
   try{
     await recheck();

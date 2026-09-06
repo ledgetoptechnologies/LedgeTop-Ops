@@ -15,7 +15,7 @@ const principal = { id: "staff-target" } as StaffPrincipal;
 
 describe("staff access controls", () => {
   it("keeps the ACL vocabulary constrained to known permissions", () => {
-    for (const permission of ["operations.view", "operations.view_all", "sops.assign", "delivery.browse", "delivery.share.create", "delivery.share.revoke", "delivery.share.audit", "team.view", "administration.view"]) {
+    for (const permission of ["operations.view", "operations.view_all", "sops.assign", "delivery.browse", "delivery.share.create", "delivery.share.revoke", "delivery.share.audit", "team.view", "administration.view", "viewer.view", "viewer.datasets.manage", "viewer.processing.manage", "viewer.publish", "viewer.share.create", "viewer.share.revoke", "viewer.manage", "viewer.storage.purge"]) {
       expect(PERMISSIONS).toContain(permission);
     }
   });
@@ -61,6 +61,10 @@ describe("staff access controls", () => {
     expect(client).toContain("View all operations, projects, and tasks");
     expect(client).toContain("Create client links");
     expect(client).toContain("Assign published SOPs to visible work");
+    expect(client).toContain("3D Models access");
+    expect(client).toContain("View and open 3D models");
+    expect(client).toContain("Permanently purge Viewer storage (owner only)");
+    expect(client).not.toContain('viewerImport:');
   });
 
   it("keeps each team access control inside a responsive card row", () => {
