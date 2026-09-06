@@ -6,6 +6,7 @@ import type {
   ViewerPublicShareCreation,
   ViewerPublicShareSummary,
   ViewerSessionGrant,
+  ViewerShellSessionGrant,
 } from "./viewer-service";
 
 export const PERMISSIONS = [
@@ -520,7 +521,7 @@ export interface ClientViewerSessionRequestV1 {
 }
 
 export type ClientViewerSessionResultV1 =
-  | ({ ok: true; protocolVersion: 1 } & ViewerSessionGrant)
+  | ({ ok: true; protocolVersion: 1 } & ViewerShellSessionGrant)
   | {
       ok: false;
       protocolVersion: 1;

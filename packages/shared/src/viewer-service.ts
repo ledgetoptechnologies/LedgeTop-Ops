@@ -25,6 +25,11 @@ export interface ViewerSessionGrant {
   embedUrl: string;
 }
 
+/** Session response owned by an LTDS same-origin shell. */
+export interface ViewerShellSessionGrant extends ViewerSessionGrant {
+  modelId: string;
+}
+
 export interface ViewerPublishedSessionSourceAuthorization {
   type: "model_association";
   id: string;

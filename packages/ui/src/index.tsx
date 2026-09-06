@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PropsWithChildren, type ReactNode } from "react";
 import { BRAND } from "@ltds/shared";
-import type { ViewerSessionGrant } from "@ltds/shared";
+import type { ViewerSessionGrant, ViewerShellSessionGrant } from "@ltds/shared";
 import { CLOUDFLARE_ACCESS_LOGOUT_PATH } from "./access";
 export { CLOUDFLARE_ACCESS_LOGOUT_PATH } from "./access";
 
@@ -115,6 +115,127 @@ export function isSafeViewerSessionUrl(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+export type ViewerShellOpenResult = "new-tab" | "same-tab";
+
+/**
+ * Opens a same-origin LTDS shell without leaving an opener relationship on the
+ * destination page. The temporary blank page lets us detect popup blocking;
+ * it runs no application code and is detached before navigation.
+ */
+export function openViewerShell(path: string): ViewerShellOpenResult {
+  const destination = new URL(path, window.location.origin);
+  if (destination.origin !== window.location.origin)
+    throw new Error("Viewer shell must use the current application origin");
+  const viewerWindow = window.open("about:blank", "_blank");
+  if (!viewerWindow) {
+    window.location.assign(destination.href);
+    return "same-tab";
+  }
+  try {
+    viewerWindow.opener = null;
+    viewerWindow.location.replace(destination.href);
+    return "new-tab";
+  } catch {
+    viewerWindow.close();
+    window.location.assign(destination.href);
+    return "same-tab";
+  }
+}
+
+/**
+ * Same-origin owner for a renewable Viewer iframe. A failed issuance keeps its
+ * idempotency key so an ambiguous response can be retried without minting a
+ * second grant. A new key is allocated only after a successful issuance.
+ */
+export function RenewableViewerShell<T extends ViewerShellSessionGrant>({
+  routeKey,
+  modelId,
+  title,
+  issueSession,
+  onExit,
+}: {
+  routeKey: string;
+  modelId: string;
+  title: string;
+  issueSession: (idempotencyKey: string) => Promise<T>;
+  onExit?: () => void;
+}) {
+  return <RenewableViewerShellRoute
+    key={routeKey}
+    modelId={modelId}
+    title={title}
+    issueSession={issueSession}
+    onExit={onExit}
+  />;
+}
+
+export function validateViewerSessionModel<T extends ViewerSessionGrant>(session: T, modelId: string): T & ViewerShellSessionGrant {
+  if (!("modelId" in session) || typeof session.modelId !== "string" || session.modelId !== modelId)
+    throw new Error("Viewer session does not match the requested model");
+  return session as T & ViewerShellSessionGrant;
+}
+
+function RenewableViewerShellRoute<T extends ViewerShellSessionGrant>({
+  modelId,
+  title,
+  issueSession,
+  onExit,
+}: {
+  modelId: string;
+  title: string;
+  issueSession: (idempotencyKey: string) => Promise<T>;
+  onExit?: () => void;
+}) {
+  const [session, setSession] = useState<T | null>(null);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+  const issuanceKey = useRef<string | null>(null);
+  const issuance = useRef<Promise<T> | null>(null);
+  const issueSessionRef = useRef(issueSession);
+  const mounted = useRef(true);
+  issueSessionRef.current = issueSession;
+
+  const issue = useCallback((): Promise<T> => {
+    if (issuance.current) return issuance.current;
+    const key = issuanceKey.current ?? crypto.randomUUID();
+    issuanceKey.current = key;
+    const request = issueSessionRef.current(key).then(next => {
+      validateViewerSessionModel(next, modelId);
+      issuanceKey.current = null;
+      return next;
+    }).finally(() => {
+      if (issuance.current === request) issuance.current = null;
+    });
+    issuance.current = request;
+    return request;
+  }, [modelId]);
+
+  const start = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const next = await issue();
+      if (mounted.current) setSession(next);
+    } catch (caught) {
+      if (mounted.current) setError(caught instanceof Error ? caught.message : "3D Viewer authorization is temporarily unavailable");
+    } finally {
+      if (mounted.current) setLoading(false);
+    }
+  }, [issue]);
+
+  useEffect(() => {
+    mounted.current = true;
+    void start();
+    return () => { mounted.current = false; };
+  }, [start]);
+
+  if (loading && !session)
+    return <main className="viewer-shell-page"><Loading /></main>;
+  if (!session)
+    return <main className="viewer-shell-page"><Card title="Secure 3D Viewer"><p className="viewer-session-error" role="alert">{error}</p><div className="actions"><button type="button" className="button-orange" onClick={() => void start()}>Retry secure session</button>{onExit && <button type="button" className="button-ghost" onClick={onExit}>Back</button>}</div></Card></main>;
+  return <main className="viewer-shell-page"><ViewerEmbed modelId={modelId} title={title} session={session} renew={issue} onClose={onExit} /></main>;
 }
 
 /**

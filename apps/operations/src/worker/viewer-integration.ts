@@ -868,10 +868,11 @@ export function registerViewerIntegrationRoutes(app: ViewerApp): void {
     const association = await currentStaffAssociation(c.env, associationId.data);
     if (!association) throw new HTTPException(404, { message: "3D model not found" });
     try {
-      return c.json(await issueViewerSession({
+      const grant = await issueViewerSession({
         env: c.env, actorId: principal.id, audience: "ops", association, idempotencyKey: key.data,
         displayUnits: await resolveViewerUnits(c.env, principal.id),
-      }), 201);
+      });
+      return c.json({ ...grant, modelId: association.viewer_model_id }, 201);
     } catch (error) { return viewerError(error); }
   });
 
