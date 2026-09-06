@@ -234,6 +234,35 @@ second business database, or Viewer work as part of this audit.
 
 ## Audit conclusion
 
+### Viewer session continuity follow-up (September 6)
+
+The Viewer owner's follow-up is an acceptance requirement, not evidence of an
+Operations deployment or a new endpoint contract. Keep the Viewer repository
+read-only and preserve concurrent work. Operations must verify:
+
+- Deployed issuer/controller revisions and actual TTL configuration. The
+  handoff reports a 1,800-second default, 3,600-second cap, and possibly earlier
+  upstream `__authorizedUntil`; verify these against server deadlines rather
+  than inferring authority from an authenticated Operations page.
+- At least two live renewal cycles with map/cloud switching and a private
+  measurement save near renewal, preserving individual subject, model/version,
+  audience and permission scope.
+- Correlated request receipt, acknowledgement and redemption; normal cookie
+  refresh without sign-in navigation; bounded in-place retries for transport
+  errors, distinct from revocation or rejected authorization.
+- Sleep past the renewal window and resume: reauthorize only if current
+  authority remains valid, otherwise require sign-in. Cached state must never
+  extend expired or revoked access.
+- Separate staff and individually identified client acceptance. Private records
+  remain isolated and client shares never grant processing/import/admin rights.
+
+Record revision identifiers, correlation IDs, response reasons and time deltas
+between issuance, Viewer expiry and upstream expiry. Never record credentials,
+signed asset URLs or private measurement contents. All live checks above remain
+**unverified** until actual runtime evidence is collected. Local issuer, shell
+and renewal tests are supporting evidence only; no blanket TTL increase is
+authorized or needed by this handoff.
+
 The repository contains a substantial, well-tested local foundation, but the
 handoffs overstate completion of Hermes/API, website, monthly-report,
 multi-source live enrollment, and production portal reconciliation. The safest

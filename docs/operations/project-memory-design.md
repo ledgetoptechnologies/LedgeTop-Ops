@@ -195,6 +195,21 @@ current authority and make historical versus current revision selection explicit
 
 ## Product decisions still open
 
+### September 6 workflow audit follow-up
+
+The previous-project selector now offers an in-place retry after a transient
+collection failure and preserves selected copy sections. The focused desktop
+and mobile copy-forward browser gate passed 10/10 after this change.
+
+Starting another preview now clears the previous preview and confirmation even
+when the new request fails. The same 10/10 browser gate verifies failed preview
+refresh, retained selections, fresh confirmation, and stable commit retry keys.
+
+One additional recovery gap remains: ordinary stale-version conflicts should retain recoverable selections, while
+authorization and ownership changes must still clear protected data. The latter
+requires an explicit server conflict discriminator rather than treating every
+409 response as safe to retain. This conflict distinction is pending work, not a verified fix.
+
 1. **Crew contributions:** may assigned staff append their own observations, or
    are all edits manager-only? If staff can contribute, can they edit another
    person's observations or the original plan? An optional question is pending;

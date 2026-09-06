@@ -104,13 +104,14 @@ export function RecurringProjectCopyForward({ root, projectId, projectStatus, co
   const [preview, setPreview] = useState<CopyPreview | null>(null), [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState<"projects" | "preview" | "commit" | null>(null);
   const [error, setError] = useState(""), [status, setStatus] = useState("");
+  const [projectsFailed, setProjectsFailed] = useState(false);
   const active = useRef(true), pending = useRef<AbortController | null>(null), sequence = useRef(0), commitAttempt = useRef<Attempt | null>(null);
 
   const clearPreview = () => { setPreview(null); setConfirmed(false); setError(""); setStatus(""); commitAttempt.current = null; };
   const loadProjects = async (more = false) => {
     if (!eligible || contextSignal.aborted || busy || (more && (!page?.hasMore || !page.nextCursor))) return;
     const previousCursor = more ? page!.nextCursor! : undefined, controller = new AbortController(), request = ++sequence.current;
-    pending.current?.abort(); pending.current = controller; setBusy("projects"); setError("");
+    pending.current?.abort(); pending.current = controller; setBusy("projects"); setError(""); setProjectsFailed(false);
     const abort = () => controller.abort(); contextSignal.addEventListener("abort", abort, { once: true });
     try {
       const query = new URLSearchParams({ filter: "all", limit: "25", expectedContextVersion: contextVersion });
@@ -128,7 +129,7 @@ export function RecurringProjectCopyForward({ root, projectId, projectStatus, co
     } catch (caught) {
       if (controller.signal.aborted || request !== sequence.current) return;
       const message = caught instanceof Error ? caught.message : "Previous projects could not be loaded.";
-      if (invalidatesWorkspace(caught)) onInvalidated(message, caught.status); else setError(message);
+      if (invalidatesWorkspace(caught)) onInvalidated(message, caught.status); else { setError(message); setProjectsFailed(true); }
     } finally {
       contextSignal.removeEventListener("abort", abort);
       if (active.current && request === sequence.current) setBusy(null);
@@ -154,6 +155,8 @@ export function RecurringProjectCopyForward({ root, projectId, projectStatus, co
     if (busy || contextSignal.aborted) return;
     if (!sourceId) { setError("Choose a previous project first."); return; }
     if (!selectedRoles.length && !selectedSections.length) { setError("Select at least one contact role or project-memory section."); return; }
+    // A refreshed preview requires fresh review, even if the request fails.
+    setPreview(null); setConfirmed(false);
     const controller = new AbortController(), request = ++sequence.current;
     pending.current?.abort(); pending.current = controller; setBusy("preview"); setError(""); setStatus("Preparing a live copy preview…");
     const abort = () => controller.abort(); contextSignal.addEventListener("abort", abort, { once: true });
@@ -224,6 +227,7 @@ export function RecurringProjectCopyForward({ root, projectId, projectStatus, co
     <label>Previous project<select value={sourceId} onChange={event => { clearPreview(); setSourceId(event.target.value); }} disabled={Boolean(busy)}>
       <option value="">Choose a previous project</option>{projects.map(project => <option key={project.id} value={project.id}>{project.name} · {project.status?.replaceAll("_", " ") || "status not recorded"}</option>)}</select></label>
     {busy === "projects" && !projects.length && <p role="status">Loading previous projects…</p>}
+    {projectsFailed && <button type="button" className="button-ghost" disabled={Boolean(busy)} onClick={() => void loadProjects(Boolean(page?.hasMore))}>Retry loading previous projects</button>}
     {page?.hasMore && <button type="button" className="button-ghost" disabled={Boolean(busy)} onClick={() => void loadProjects(true)}>{busy === "projects" ? "Loading projects…" : "Load more previous projects"}</button>}
     <div className="recurring-project-copy-options">
       <fieldset><legend>Operational contacts</legend>{contactRoles.map(([role, label]) => <label key={role}><input type="checkbox" checked={selectedRoles.includes(role)}
