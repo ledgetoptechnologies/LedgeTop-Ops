@@ -160,3 +160,37 @@ case only; never add an automatic retry around a commit-ambiguous mutation.
 The exact migration, flag, test-file, dependency, and rollback mapping for J1–J7
 is in the rollout manifest. Production evidence belongs only in the dated
 production-evidence record; do not mark a row live accepted from fixtures.
+
+### J6 follow-up — confirmed draft visibility and notification
+
+The September 6 joined audit found that confirmed PA draft receipts were saved
+with request/admin audit records but without a client notification outbox
+intent. A derived draft-created label alone does not complete J6. Track both:
+
+- Exact-source, current request/area revision, non-stale receipt visibility in
+  primary/native client request readers, without financial/editor details or
+  a request lifecycle change.
+- An atomic, receipt-deduplicated informational notification intent; dispatch
+  must recheck current recipient authority. Native delivery must not acquire
+  email authority merely because a receipt exists. No notice may imply quote
+  acceptance, payment, or access to an unshared resource.
+
+These slices are in isolated implementation branches and remain unverified for
+production. The broader primary/native browser rerun passed 184/184 cases after
+the 12 old split-notification fixtures were updated to the unified history
+contract. The focused D1 receipt rerun initially passed four cases and failed two
+because wrong-source fixtures violated the composite request/source foreign key.
+The fixtures now use valid distinct-source requests and both focused cases passed;
+a complete three-file database regression rerun then completed 80 passed/14
+failed because receipt fixtures outlived a DELETE-based catalog test cleanup.
+Receipt-reader tests now have a dedicated migrated database; the reader/catalog
+rerun passed 60/60. The native policy and repository cases passed separately
+(23 and 17): all 100 cases passed across runs, not one combined run. Database
+immutability constraints were preserved. Browser checks do not prove live
+provisioning. Notification checks now pass: producer 51, native D1 dispatcher 8,
+unit 19, populated migration 3, and primary history/revocation 2. Native client
+history readback and the combined release gates remain open.
+The review additionally requires root-workspace requests (without a project),
+current receipt/revision checks at dispatch, exact claim/attempt/lease fences,
+and idempotent success for an already-created matching inbox record. Typechecks
+and mocked notification cases alone do not close these requirements.
