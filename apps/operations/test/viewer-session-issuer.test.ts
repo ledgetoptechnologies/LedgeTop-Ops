@@ -7,6 +7,7 @@ import type { ClientViewerSessionRequestV1 } from "@ltds/shared";
 import {
   authorizeClientViewerAssociation,
   createClientViewerShare,
+  issueClientViewerSession,
   introspectClientViewerSourceAuthorization,
   listClientViewerShares,
   pruneClientViewerShareReceipts,
@@ -277,6 +278,7 @@ describe("client Viewer authorization", () => {
       expect(JSON.parse(String(init?.body))).toMatchObject({
         sourceAuthorization: { type: "model_association", id: "association-one", version: 1 },
       });
+      expect(JSON.parse(String(init?.body)).permissions).not.toHaveProperty("personalMeasurements");
       return Response.json({
         grant: "00000000-0000-4000-8000-000000000001", grantExpiresAt: expires, sessionTtlSeconds: 900,
         modelVersionId: "viewer-version-one", redeemUrl: "https://viewer.example.test/api/v1/sessions/redeem",
@@ -290,6 +292,46 @@ describe("client Viewer authorization", () => {
       env, actorId: "staff-one", audience: "ops", association: association!,
       idempotencyKey: "viewer-session-key-source-0001", displayUnits: "imperial",
     })).resolves.toMatchObject({ grant: "00000000-0000-4000-8000-000000000001" });
+  });
+
+  it("attests only the exact authorized individual client subject", async () => {
+    const { env } = await fixture();
+    const expires = new Date(Date.now() + 10 * 60_000).toISOString();
+    const sessionBodies: Array<Record<string, unknown>> = [];
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/api/v1/models") return Response.json({ models: [{
+        id: "viewer-model-one", title: "Point cloud", provider: "webodm", status: "ready", available: true,
+        activeVersion: { id: "viewer-version-one", providerVersionId: "provider-version-one",
+          createdAt: expires, updatedAt: expires }, updatedAt: expires,
+      }] });
+      sessionBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return Response.json({
+        grant: "00000000-0000-4000-8000-000000000001", grantExpiresAt: expires, sessionTtlSeconds: 900,
+        modelVersionId: "viewer-version-one", redeemUrl: "https://viewer.example.test/api/v1/sessions/redeem",
+        embedUrl: "https://viewer.example.test/session/00000000-0000-4000-8000-000000000001",
+      });
+    });
+    vi.stubGlobal("fetch", fetcher);
+
+    await expect(issueClientViewerSession(env, request)).resolves.toMatchObject({ ok: true });
+    expect(sessionBodies).toHaveLength(1);
+    expect(sessionBodies[0]).toMatchObject({
+      subject: "client:identity-one",
+      audience: "client",
+      modelVersionId: "viewer-version-one",
+      permissions: { view: true, measure: true, cameras: true, download: false, personalMeasurements: true },
+      sourceAuthorization: { type: "model_association", id: "association-one", version: 1 },
+    });
+    expect(Date.parse(String(sessionBodies[0]?.authorizationExpiresAt))).toBeLessThanOrEqual(Date.now() + 20 * 60_000);
+
+    const callsBeforeDenial = fetcher.mock.calls.length;
+    await expect(issueClientViewerSession(env, {
+      ...request,
+      principalSubject: "different-person",
+      idempotencyKey: "viewer-session-key-denied-0001",
+    })).resolves.toEqual({ ok: false, protocolVersion: 1, code: "denied" });
+    expect(fetcher).toHaveBeenCalledTimes(callsBeforeDenial);
   });
 
   it("fails closed for an explicit entitlement denial", async () => {
