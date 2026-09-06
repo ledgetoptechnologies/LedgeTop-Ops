@@ -145,7 +145,8 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   // The digest intentionally moved with the reviewed canonical portal hosts
   // and explicit legacy compatibility origin. Keep the field assertions so a future config change
   // cannot hide behind a digest refresh.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "2d827759428fe797f5810a0b8d630fcd12b2448e26b56168e4e53779d37ada9e");
+  // Reviewed addition: the notification migration maintenance switch is off by default.
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "936b0b8960e24ecc0fb0f7a2adc11b1f0c447abd8ff49d7a4d5871c58e476151");
   const config = readJson("apps/client/wrangler.jsonc");
   assert.equal(config.name, "ledgetop-clients");
   assert.equal(config.main, "src/worker/index.ts");
@@ -174,6 +175,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.equal(config.vars.CLIENT_ACCESS_AUDS, `${config.vars.CLIENT_ACCESS_AUD},3bc9637846ccf4e1343b969cc8f14ed2cb0628956293463cf164c4080fa47e57`);
   assert.equal(config.vars.CLIENT_PORTAL_ENABLED, "true");
   assert.equal(config.vars.CLIENT_PORTAL_CONTENT_AUDIT_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_NOTIFICATION_MIGRATION_MAINTENANCE, "false");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_HMAC_KEY_ID, "");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_KEY_ID, "");
   assert.equal(config.vars.PROJECT_ALPHA_PORTAL_APPLICATION_KEY, "ltds_ops");
