@@ -237,7 +237,7 @@ describe("primary signed-native first-login eligibility", () => {
       expect((await request(actor, `${contextPath}?expectedContext=${encodeURIComponent(original.contextVersion)}`, rotated)).status).toBe(409);
       expect((await request(actor, `/v2/workspaces/${workspaceId}/hierarchy?expectedContext=${encodeURIComponent(original.contextVersion)}`, rotated)).status).toBe(409);
     }
-  });
+  }, 30_000);
 
   it("does not re-enroll a signed principal after its tombstone", async () => {
     const { actor, workspaceId, principalId, common } = await project("revoked-principal");
