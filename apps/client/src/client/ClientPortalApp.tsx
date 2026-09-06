@@ -7,7 +7,7 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
-import { AccountMenu, Brand, Card, EmptyState, Loading, StatusPill, openViewerWindow } from "@ltds/ui";
+import { AccountMenu, Brand, Card, EmptyState, Loading, StatusPill, openViewerShell } from "@ltds/ui";
 import type { DeliveryLocationCollection } from "@ltds/shared";
 import type { RequestError } from "./bulk-download";
 import {
@@ -24,7 +24,6 @@ import {
   loadPortalProjectFileLocations,
   loadPortalProjectFolderFiles,
   loadPortalViewerModels,
-  createPortalViewerSession,
   setPortalWorkspaceSelection,
   loadPortalPricingHint,
   listPortalRequestAttachments,
@@ -87,6 +86,7 @@ import {
   type PortalDelegatedShareTarget,
 } from "./portal-api";
 import { readClientViewerUnits, writeClientViewerUnits } from "./viewer-units-preference";
+import { clientViewerShellPath } from "./ClientViewerShell";
 import {
   clientPortalPath,
   clientProjectPath,
@@ -1882,20 +1882,13 @@ function ProjectViewerModels({ projectId, initialDisplayUnits }: { projectId: st
     return () => { active = false; };
   }, [projectId]);
 
-  const requestSession = useCallback((associationId: string) =>
-    createPortalViewerSession(projectId, associationId, crypto.randomUUID(), displayUnits), [displayUnits, projectId]);
-
   const open = async (model: PortalViewerModel) => {
     setBusy(true); setError("");
     try {
-      await openViewerWindow({
-        modelId: model.modelId,
-        title: model.title,
-        issueSession: () => requestSession(model.associationId),
-        onStatus: (status, message) => {
-          if (status === "at-risk") setError(message);
-        },
-      });
+      // The openerless shell cannot read React state from this tab. Persist only
+      // this non-secret preference; authorization remains in same-origin cookies.
+      writeClientViewerUnits(displayUnits);
+      openViewerShell(clientViewerShellPath({ projectId, associationId: model.associationId, modelId: model.modelId }));
     } catch (caught) { setError((caught as Error).message); }
     finally { setBusy(false); }
   };
