@@ -26,6 +26,7 @@ export function parseClientViewerShellRoute(pathname: string): ClientViewerShell
 
 export function ClientViewerShell({ route }: { route: ClientViewerShellRoute }) {
   return <RenewableViewerShell
+    routeKey={`${route.projectId}:${route.associationId}:${route.modelId}`}
     modelId={route.modelId}
     title="Client 3D model"
     issueSession={key => createPortalViewerSession(route.projectId, route.associationId, key, readClientViewerUnits())}

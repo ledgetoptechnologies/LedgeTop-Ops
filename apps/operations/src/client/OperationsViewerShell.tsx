@@ -41,6 +41,7 @@ export function OperationsViewerShell({ route }: { route: OperationsViewerShellR
   };
 
   return <RenewableViewerShell
+    routeKey={`${route.associationId}:${route.modelId}`}
     modelId={route.modelId}
     title="Operations 3D model"
     issueSession={async key => {

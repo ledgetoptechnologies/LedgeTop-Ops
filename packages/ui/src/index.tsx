@@ -150,6 +150,34 @@ export function openViewerShell(path: string): ViewerShellOpenResult {
  * second grant. A new key is allocated only after a successful issuance.
  */
 export function RenewableViewerShell<T extends ViewerSessionGrant>({
+  routeKey,
+  modelId,
+  title,
+  issueSession,
+  onExit,
+}: {
+  routeKey: string;
+  modelId: string;
+  title: string;
+  issueSession: (idempotencyKey: string) => Promise<T>;
+  onExit?: () => void;
+}) {
+  return <RenewableViewerShellRoute
+    key={routeKey}
+    modelId={modelId}
+    title={title}
+    issueSession={issueSession}
+    onExit={onExit}
+  />;
+}
+
+export function validateViewerSessionModel<T extends ViewerSessionGrant>(session: T, modelId: string): T {
+  if ("modelId" in session && session.modelId !== modelId)
+    throw new Error("Viewer session does not match the requested model");
+  return session;
+}
+
+function RenewableViewerShellRoute<T extends ViewerSessionGrant>({
   modelId,
   title,
   issueSession,
@@ -165,13 +193,16 @@ export function RenewableViewerShell<T extends ViewerSessionGrant>({
   const [loading, setLoading] = useState(true);
   const issuanceKey = useRef<string | null>(null);
   const issuance = useRef<Promise<T> | null>(null);
+  const issueSessionRef = useRef(issueSession);
   const mounted = useRef(true);
+  issueSessionRef.current = issueSession;
 
   const issue = useCallback((): Promise<T> => {
     if (issuance.current) return issuance.current;
     const key = issuanceKey.current ?? crypto.randomUUID();
     issuanceKey.current = key;
-    const request = issueSession(key).then(next => {
+    const request = issueSessionRef.current(key).then(next => {
+      validateViewerSessionModel(next, modelId);
       issuanceKey.current = null;
       return next;
     }).finally(() => {
@@ -179,7 +210,7 @@ export function RenewableViewerShell<T extends ViewerSessionGrant>({
     });
     issuance.current = request;
     return request;
-  }, [issueSession]);
+  }, [modelId]);
 
   const start = useCallback(async () => {
     setLoading(true);
