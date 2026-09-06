@@ -11,7 +11,7 @@ const sourceClientPath=(sourceId:string)=>`/clients/sources/${encodeURIComponent
 function project(sourceId:string=root.sourceId):BusinessProjectDetail{return {canonicalRoot:{...root,sourceId},client:{display_name:"Acme Construction",detail_path:sourceClientPath(sourceId)},
   contextVersion:"project-context",refreshedAt:"2026-08-25T12:00:00.000Z",project:{id:"project-one",name:"Church survey",status:"active",description:null,
     start_date:null,end_date:null,created_at:"2026-08-01T12:00:00.000Z",manager:null},linkedContact:null,
-  feedbackHistoryAvailable:sourceId===root.sourceId,
+  feedbackHistoryAvailable:true,
   availability:{linkedContact:"not_projected",siteContacts:"not_projected",billingContacts:"not_projected",projectMemory:"not_projected"}};}
 function item(index:number){const feedbackId=`feedback-${String(index).padStart(2,"0")}`,done=index%2===0;
   return {feedbackId,createdAt:`2026-08-${String(20-index).padStart(2,"0")}T12:00:00.000Z`,status:done?"done" as const:"new" as const,
@@ -19,7 +19,7 @@ function item(index:number){const feedbackId=`feedback-${String(index).padStart(
       {revision:2,action:"completed" as const,occurredAt:`2026-08-${String(21-index).padStart(2,"0")}T12:00:00.000Z`}]
       :[{revision:1,action:"submitted" as const,occurredAt:`2026-08-${String(20-index).padStart(2,"0")}T12:00:00.000Z`}],
     detailPath:`/clients/feedback/${feedbackId}?status=all`};}
-function page(items:ReturnType<typeof item>[],nextCursor:string|null):ProjectFeedbackHistoryPage{return {canonicalRoot:root,projectId:"project-one",
+function page(items:ReturnType<typeof item>[],nextCursor:string|null,sourceId:string=root.sourceId):ProjectFeedbackHistoryPage{return {canonicalRoot:{...root,sourceId},projectId:"project-one",
   contextVersion:"project-context",refreshedAt:"2026-08-25T12:00:00.000Z",asOf:"2026-08-25T12:00:00.000Z",coverage:"feedback_only",items,
   page:{available:true,reason:null,nextCursor,hasMore:Boolean(nextCursor),returned:items.length,limit:nextCursor==="cursor-a"?5:25}};}
 async function fixture(pageObject:Page,handler:(route:Route,url:URL)=>Promise<unknown>,options:{sourceId?:string;feedbackEnabled?:boolean}={}){
@@ -111,12 +111,21 @@ test("same-minute feedback links retain unique accessible names",async({page:pag
   expect(names).toHaveLength(2);expect(new Set(names).size).toBe(2);
 });
 
-test("a secondary project route does not render or probe primary-only feedback history",async({page:pageObject})=>{
-  const calls=await fixture(pageObject,route=>route.fulfill({status:500}),{sourceId:"project-alpha:secondary"});
-  await pageObject.goto(`${sourceClientPath("project-alpha:secondary")}/projects/project-one`);
+test("a secondary project loads its source-qualified feedback history and retries on mobile",async({page:pageObject})=>{
+  const sourceId="project-alpha:secondary";let attempts=0;
+  await pageObject.setViewportSize({width:375,height:960});
+  const calls=await fixture(pageObject,(route,url)=>url.pathname.endsWith("/feedback-history")
+    ?++attempts===1?route.fulfill({status:503,json:{error:"Feedback is warming up"}}):route.fulfill({json:page([0].map(item),null,sourceId)})
+    :route.fulfill({status:500}),{sourceId});
+  await pageObject.goto(`${sourceClientPath(sourceId)}/projects/project-one`);
   await expect(workspace(pageObject).getByRole("heading",{name:"Church survey",exact:true})).toBeVisible();
-  await expect(pageObject.getByRole("region",{name:"Project feedback history",exact:true})).toHaveCount(0);
-  expect(calls.some(call=>call.url.pathname.includes("feedback-history"))).toBe(false);
+  await history(pageObject).getByRole("button",{name:"Show feedback history",exact:true}).click();
+  await expect(history(pageObject).getByRole("alert")).toContainText("Feedback is warming up");
+  await history(pageObject).getByRole("button",{name:"Retry feedback history",exact:true}).click();
+  await expect(history(pageObject).getByText("1 feedback record shown",{exact:true})).toBeVisible();
+  expect(calls.filter(call=>call.url.pathname.includes("feedback-history"))).toHaveLength(2);
+  expect(calls.every(call=>!call.url.pathname.includes(encodeURIComponent(root.sourceId)))).toBe(true);
+  await expect.poll(()=>pageObject.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
 });
 
 test("a disabled feedback capability does not render or probe the history on a valid primary project",async({page:pageObject})=>{

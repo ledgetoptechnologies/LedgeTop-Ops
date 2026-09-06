@@ -27,7 +27,7 @@ const actionSchema = z.object({ expectedRevision: z.number().int().min(1).max(2)
 const tables = ["client_feedback", "client_feedback_events", "client_feedback_mutations", "client_feedback_notifications", "client_feedback_notification_outbox"];
 const nativeTables=['portal_native_feedback','portal_native_feedback_events','portal_native_feedback_mutations',
   'portal_native_feedback_notifications'];
-async function nativeFeedbackReady(env:Env):Promise<boolean>{return await d1TablesPresent(env.DELIVERY_DB,nativeTables)
+export async function nativeFeedbackReady(env:Env):Promise<boolean>{return await d1TablesPresent(env.DELIVERY_DB,nativeTables)
   && await nativeFeedbackNotificationsSchemaAvailable(env);}
 function missing(): never { throw new HTTPException(404, { message: "Feedback is unavailable" }); }
 function changed(): never { throw new HTTPException(409, { message: "Feedback or access changed. Refresh before trying again." }); }

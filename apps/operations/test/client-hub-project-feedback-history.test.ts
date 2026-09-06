@@ -49,10 +49,10 @@ describe("Client Hub project feedback history",{timeout:60_000},()=>{
     expect(combined.every(item=>item.detailPath===`/clients/feedback/${encodeURIComponent(item.feedbackId)}?status=all`)).toBe(true);
   });
 
-  it("never borrows primary feedback for a secondary source with the same raw IDs",async()=>{
+  it("enables secondary history without borrowing primary feedback for colliding raw IDs",async()=>{
     const owner=await fixture.seed(),record=await owner.create();
     const result=await listClientHubProjectFeedbackHistory(fixture.env,feedbackStaff,context(owner.pa,"project-alpha:secondary"),owner.pa,{limit:5});
-    expect(result).toMatchObject({coverage:"feedback_only",items:[],page:{available:false,reason:"unsupported_source",nextCursor:null}});
+    expect(result).toMatchObject({coverage:"feedback_only",items:[],page:{available:true,reason:null,nextCursor:null}});
     expect(JSON.stringify(result)).not.toContain(record.id);
   });
 
@@ -97,11 +97,11 @@ describe("Client Hub project feedback history",{timeout:60_000},()=>{
     expect(await fixture.db.prepare("SELECT id FROM client_feedback WHERE id=?").bind(record.id).first("id")).toBe(record.id);
   });
 
-  it("uses the existing source-qualified project index and invalidates project changes",async()=>{
+  it("uses the source-qualified project index with a stable row watermark and invalidates project changes",async()=>{
     const owner=await fixture.seed();await owner.create();
-    const plan=await fixture.db.prepare(`EXPLAIN QUERY PLAN SELECT id,created_at FROM client_feedback INDEXED BY idx_client_feedback_project
-      WHERE account_id=? AND project_id=? AND created_at<=? ORDER BY created_at DESC,id DESC LIMIT 51`)
-      .bind(owner.id,owner.id,new Date().toISOString()).all<{detail:string}>();
+    const plan=await fixture.db.prepare(`EXPLAIN QUERY PLAN SELECT rowid watermark,id,created_at FROM client_feedback INDEXED BY idx_client_feedback_project
+      WHERE account_id=? AND project_id=? AND rowid<=? AND created_at<=? ORDER BY created_at DESC,id DESC LIMIT 51`)
+      .bind(owner.id,owner.id,Number.MAX_SAFE_INTEGER,new Date().toISOString()).all<{detail:string}>();
     expect(plan.results.some(row=>row.detail.includes("idx_client_feedback_project")&&row.detail.includes("account_id=?")&&row.detail.includes("project_id=?"))).toBe(true);
     projectRead.changed=true;
     await expect(listClientHubProjectFeedbackHistory(fixture.env,feedbackStaff,context(owner.pa),owner.pa,{limit:5})).rejects.toMatchObject({status:409});
