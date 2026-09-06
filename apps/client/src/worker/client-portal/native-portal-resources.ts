@@ -59,7 +59,8 @@ async function nativeFeedbackDetail(env:Env,row:NativeFeedbackRecord,resolved:Re
   return {feedback:await nativeFeedbackItem(env,row,resolved),events:events.results};
 }
 const lifecycleAction=(status:string):'submitted'|'started'|'completed'=>status==='new'?'submitted':status==='in_progress'?'started':'completed';
-async function nativeHistoryItem(c:Ctx,row:NativeFeedbackRecord,context:NativePortalReadContext):Promise<ClientFeedbackHistoryItem|null>{
+async function nativeHistoryItem(c:Ctx,row:NativeFeedbackRecord,context:NativePortalReadContext,asOf:string):Promise<ClientFeedbackHistoryItem|null>{
+  if(Date.parse(row.updatedAt)>Date.parse(asOf))return null;
   const principal=c.get('clientPrincipal');
   if(row.context.sourceId!==context.sourceId||row.context.workspaceId!==context.workspaceId||row.context.identityId!==context.identityId||
     row.context.issuer!==principal.issuer||row.context.subject!==principal.subject||row.target.rootType!==context.rootType||row.target.rootPublicId!==context.rootPublicId)return null;
@@ -67,9 +68,9 @@ async function nativeHistoryItem(c:Ctx,row:NativeFeedbackRecord,context:NativePo
   if(!resolved||resolved.context.sourceId!==context.sourceId||resolved.context.workspaceId!==context.workspaceId||resolved.context.identityId!==context.identityId)return null;
   const events=await database(c.env).prepare(`SELECT revision,status,created_at occurredAt FROM portal_native_feedback_events
     WHERE feedback_id=? ORDER BY revision`).bind(row.id).all<{revision:number;status:string;occurredAt:string}>();
-  if(events.results.length!==row.revision||events.results.at(-1)?.status!==row.status)return null;
+  if(events.results.length!==row.revision||events.results.at(-1)?.status!==row.status||events.results.some(event=>Date.parse(event.occurredAt)>Date.parse(asOf)))return null;
   const released=await readNativeFeedbackRecord(database(c.env),row.id);
-  if(!released||released.revision!==row.revision||released.status!==row.status||released.updatedAt!==row.updatedAt||!await reauthorizeNativeFeedbackRecipient(c.env,released))return null;
+  if(!released||released.revision!==row.revision||released.status!==row.status||released.updatedAt!==row.updatedAt||Date.parse(released.updatedAt)>Date.parse(asOf)||!await reauthorizeNativeFeedbackRecipient(c.env,released))return null;
   return {feedbackId:row.id,createdAt:row.createdAt,status:row.status,
     events:events.results.map(event=>({revision:event.revision,action:lifecycleAction(event.status),occurredAt:event.occurredAt})),
     detailPath:`/portal/feedback/${encodeURIComponent(row.id)}?workspace=${encodeURIComponent(context.workspaceId)}`,
@@ -244,7 +245,7 @@ export function createNativePortalWorkspaceRouter():Hono<Bindings> {
       .all<{rowid:number;id:string;created_at:string}>();
     const examined=rows.results.slice(0,FEEDBACK_PAGE),items:ClientFeedbackHistoryItem[]=[];
     for(const entry of examined){const record=await readNativeFeedbackRecord(database(c.env),entry.id);if(!record)continue;
-      const item=await nativeHistoryItem(c,record,context);if(item)items.push(item);}
+      const item=await nativeHistoryItem(c,record,context,asOf);if(item)items.push(item);}
     await recheck(c,context);
     const nextCursor=rows.results.length>FEEDBACK_PAGE&&examined.length?await encodeFeedbackHistoryCursor(c.env,principal,
       {v:1,scope:scopeHash,asOf,water,after:[examined.at(-1)!.created_at,examined.at(-1)!.id],expires:Date.now()+CURSOR_TTL_MS}):null;

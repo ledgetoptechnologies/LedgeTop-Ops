@@ -120,14 +120,15 @@ async function primaryHistoryScope(c: FeedbackContext) {
   return {...row,workspaceId:null,accountId:session.accountId,identityId:session.identityId,workspaceIdentityId:null};
 }
 const lifecycleAction=(status:string):"submitted"|"started"|"completed"=>status==="new"?"submitted":status==="in_progress"?"started":"completed";
-async function primaryHistoryItem(c:FeedbackContext,record:FeedbackRecord):Promise<ClientFeedbackHistoryItem|null>{
+async function primaryHistoryItem(c:FeedbackContext,record:FeedbackRecord,asOf:string):Promise<ClientFeedbackHistoryItem|null>{
+  if(Date.parse(record.updatedAt)>Date.parse(asOf))return null;
   const resolved=await authorized(c,record);if(!resolved)return null;
   const events=await c.env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT revision,status,created_at occurredAt FROM client_feedback_events
     WHERE feedback_id=? ORDER BY revision`).bind(record.id).all<{revision:number;status:string;occurredAt:string}>();
-  if(events.results.length!==record.revision||events.results.at(-1)?.status!==record.status)return null;
+  if(events.results.length!==record.revision||events.results.at(-1)?.status!==record.status||events.results.some(event=>Date.parse(event.occurredAt)>Date.parse(asOf)))return null;
   await current(c,resolved);
   const released=await readFeedbackRecord(c.env.DELIVERY_DB,record.id);
-  if(!released||released.revision!==record.revision||released.status!==record.status||released.updatedAt!==record.updatedAt||!await authorized(c,released))return null;
+  if(!released||released.revision!==record.revision||released.status!==record.status||released.updatedAt!==record.updatedAt||Date.parse(released.updatedAt)>Date.parse(asOf)||!await authorized(c,released))return null;
   return {feedbackId:record.id,createdAt:record.createdAt,status:record.status,
     events:events.results.map(event=>({revision:event.revision,action:lifecycleAction(event.status),occurredAt:event.occurredAt})),
     detailPath:`/portal/feedback/${encodeURIComponent(record.id)}${record.context.workspaceId?`?workspace=${encodeURIComponent(record.context.workspaceId)}`:""}`,
@@ -208,7 +209,7 @@ export function createClientFeedbackRouter(schemaAvailable: (env: Env) => Promis
     const examined=rows.results.slice(0,PAGE_SIZE),items:ClientFeedbackHistoryItem[]=[];
     for (const row of examined) {
       const record = await readFeedbackRecord(c.env.DELIVERY_DB,row.id); if (!record) continue;
-      const item=await primaryHistoryItem(c,record);if(item)items.push(item);
+      const item=await primaryHistoryItem(c,record,asOf);if(item)items.push(item);
     }
     const currentScope=await primaryHistoryScope(c);if(!currentScope||await feedbackHistoryScope(currentScope)!==scopeHash)
       throw new HTTPException(409,{message:"Feedback access changed. Refresh the client workspace."});

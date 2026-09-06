@@ -251,6 +251,10 @@ describe('source-owned native portal resources with real signed projection and l
       ORDER BY created_at DESC,id DESC LIMIT 6`).bind(a.source,a.workspace,'same-person',issuer,principal.subject,Number.MAX_SAFE_INTEGER,new Date().toISOString()).all<{detail:string}>();
     expect(clientPlan.results.some(row=>row.detail.includes('idx_portal_native_feedback_author'))).toBe(true);
     expect((await request(`${base(b)}/feedback?cursor=${encodeURIComponent(clientFirst.nextCursor!)}`)).status).toBe(409);
+    await new Promise(resolve=>setTimeout(resolve,5));
+    await transitionStaffFeedback(opsEnv,staff,aIds[0]!,{expectedRevision:1,status:'done',note:'Completed after page one'},`staff-${crypto.randomUUID()}`);
+    const stable=await request(`${base(a)}/feedback?cursor=${encodeURIComponent(clientFirst.nextCursor!)}`);expect(stable.status).toBe(200);
+    expect((await stable.json() as {items:unknown[]}).items).toEqual([]);
     const makeContext=async(f:Fixture):Promise<{context:ClientHubCollectionContext;localProject:string}>=>{
       const localRoot=(await opsDb.prepare(`SELECT id FROM pa_organizations WHERE projection_source_id=?
         AND json_extract(payload_json,'$.public_id')=?`).bind(f.source,rootId).first<string>('id'))!;

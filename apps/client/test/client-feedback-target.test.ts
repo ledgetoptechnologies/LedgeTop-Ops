@@ -8,7 +8,7 @@ import { createClientPortalRouter } from "../src/worker/client-portal/routes";
 import { createClientPortalFileHandle,encodeProjectFolderHandle,d1ClientPortalRepository } from "../src/worker/client-portal/repository";
 import { resolveEffectivePortalWorkspaceContext } from "../src/worker/client-portal/workspace-v2";
 import { resolveClientFeedbackTarget,reauthorizeFeedbackRecipient,clientFeedbackTargetActionPath,type FeedbackTargetInput } from "../src/worker/client-portal/feedback-target";
-import { createFeedbackRecord,transitionFeedbackRecord } from "../src/worker/client-portal/feedback-store";
+import { createFeedbackRecord,readFeedbackRecord,transitionFeedbackRecord } from "../src/worker/client-portal/feedback-store";
 import { splitD1MigrationStatements } from "./helpers/d1-migrations";
 
 const origin="https://client.test", storageKey="clients/a/north/edited/photo.jpg";
@@ -255,6 +255,11 @@ describe("feedback target authorization against migrated D1",{timeout:60_000},()
     expect(plan.results.some(row=>row.detail.includes("idx_client_feedback_author"))).toBe(true);
     const other=router({...principal,subject:"feedback-b",email:"b@example.test"});
     expect((await other.request(`${origin}/feedback?cursor=${encodeURIComponent(first.nextCursor!)}`,{},env)).status).toBe(409);
+    await new Promise(resolve=>setTimeout(resolve,5));
+    const oldest=await readFeedbackRecord(db,ids[0]!);expect(oldest).not.toBeNull();
+    await transitionFeedbackRecord(db,oldest!,"staff",{expectedRevision:1,status:"done",note:"Completed after page one"},mutationKey(),{sql:"1",bindings:[]});
+    const stable=await router().request(`${origin}/feedback?cursor=${encodeURIComponent(first.nextCursor!)}`,{},env);expect(stable.status).toBe(200);
+    expect((await stable.json() as {items:unknown[]}).items).toEqual([]);
     await db.prepare("UPDATE client_project_grants SET revoked_at=datetime('now') WHERE project_id='project-a'").run();
     const revoked=await router().request(`${origin}/feedback?cursor=${encodeURIComponent(first.nextCursor!)}`,{},env);
     expect(revoked.status).toBe(200);expect((await revoked.json() as {items:unknown[]}).items).toEqual([]);
