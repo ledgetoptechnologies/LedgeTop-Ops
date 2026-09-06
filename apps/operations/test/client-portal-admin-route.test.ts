@@ -638,7 +638,7 @@ describe("verified Project Alpha quote linkage", () => {
         expect(values[5]).toBe(journal.command?.payload_hash);
         expect(values[14]).toBe(1);
         const columns = ["id", "request_id", "request_revision", "area_revision", "idempotency_key", "payload_hash", "project_alpha_receipt_id", "project_alpha_artifact_public_id", "document_number", "artifact_version", "editor_path", "created_by", "source_id", "command_id"];
-        const pendingReceipt = {
+        const pendingReceipt: Record<string, unknown> = {
           ...Object.fromEntries(columns.map((column, index) => [column, values[index]])),
           artifact_status: "draft", scope_stale_at: null, created_at: "2026-08-13T12:00:00Z",
         };
