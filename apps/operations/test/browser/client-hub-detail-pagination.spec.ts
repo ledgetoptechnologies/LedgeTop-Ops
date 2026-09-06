@@ -94,6 +94,22 @@ async function open(page: Page, path = canonicalPath) {
 }
 async function lateFulfill(route: Route, json: unknown) { await route.fulfill({ json }).catch(() => undefined); }
 
+for (const viewport of [{ width: 375, height: 900 }, { width: 1280, height: 720 }]) {
+  test(`async client workspace deep links land on their requested section at ${viewport.width}px`, async ({ page }) => {
+    await mock(page, (route, collection) => route.fulfill({ json: reply(collection) }));
+    await page.setViewportSize(viewport);
+    await page.goto(`${canonicalPath}#client-business-projects`);
+    await expect(page.getByRole("heading", { name: "Acme Construction", exact: true })).toBeVisible();
+    await expect.poll(() => page.evaluate(() => {
+      const target = document.getElementById("client-business-projects");
+      if (!target) return false;
+      const top = target.getBoundingClientRect().top;
+      return top >= 0 && top <= 100;
+    })).toBe(true);
+    await expect(page).toHaveURL(/#client-business-projects$/);
+  });
+}
+
 test("Project Alpha contact roles stay separate, informational and responsive", async ({ page }) => {
   const response = detailWithContactRoles([
       { contactDisplayName: "Craig Contact", clientDisplayName: "Craig Client", scopeType: "department", scopeDisplayName: "Athletics",
@@ -324,8 +340,12 @@ test("navigating to another client aborts pending sections and never appends old
   await open(page);
   await loadButton(page, "projects").click();
   await expect.poll(() => Boolean(pending)).toBe(true);
-  await page.evaluate(path => { history.pushState({}, "", path); dispatchEvent(new PopStateEvent("popstate")); }, canonicalPath.replace("/42", "/43"));
+  await page.evaluate(path => { history.pushState({}, "", path); dispatchEvent(new PopStateEvent("popstate")); }, `${canonicalPath.replace("/42", "/43")}#client-business-projects`);
   await expect(page.getByRole("heading", { name: "Acme refreshed" })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => {
+    const target = document.getElementById("client-business-projects");
+    return target ? target.getBoundingClientRect().top >= 0 && target.getBoundingClientRect().top <= 100 : false;
+  })).toBe(true);
   await lateFulfill(pending!, reply("projects"));
   await expect(region(page, "projects").getByText("Shared project 2", { exact: true })).toHaveCount(0);
   await expect(region(page, "projects").getByRole("status")).toHaveText("1 shown");

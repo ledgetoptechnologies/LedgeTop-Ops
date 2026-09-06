@@ -494,7 +494,7 @@ function focusFirstTypeaheadOption(event: ReactKeyboardEvent<HTMLInputElement>) 
 function moveTypeaheadOption(event: ReactKeyboardEvent<HTMLButtonElement>, inputId: string) {
   if (!['ArrowDown', 'ArrowUp', 'Escape'].includes(event.key)) return;
   event.preventDefault();
-  if (event.key === "Escape") { document.getElementById(inputId)?.focus(); return; }
+  if (event.key === "Escape") { event.stopPropagation(); document.getElementById(inputId)?.focus(); return; }
   const options = Array.from(event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="option"]') ?? []);
   const index = options.indexOf(event.currentTarget);
   const next = event.key === "ArrowDown" ? Math.min(options.length - 1, index + 1) : Math.max(0, index - 1);
@@ -5230,6 +5230,8 @@ function ShareDialog({
   const [shareMode, setShareMode] = useState<"public" | "workspace">("public");
   const dialog = useRef<HTMLDivElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
+  const publicShareTab = useRef<HTMLButtonElement>(null);
+  const workspaceShareTab = useRef<HTMLButtonElement>(null);
   const opener = useRef<HTMLElement | null>(null);
   const closeRef = useRef(close);
   const busyRef = useRef(busy);
@@ -5262,6 +5264,22 @@ function ShareDialog({
     } else if (!event.shiftKey && document.activeElement === last) {
       event.preventDefault(); first.focus();
     }
+  };
+
+  const handleShareModeKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const tabs = authenticatedGrantsEnabled
+      ? [{ mode: "public" as const, ref: publicShareTab }, { mode: "workspace" as const, ref: workspaceShareTab }]
+      : [{ mode: "public" as const, ref: publicShareTab }];
+    const current = Math.max(0, tabs.findIndex(tab => tab.mode === shareMode));
+    const next = event.key === "Home" ? 0
+      : event.key === "End" ? tabs.length - 1
+        : event.key === "ArrowRight" ? (current + 1) % tabs.length
+          : (current - 1 + tabs.length) % tabs.length;
+    const tab = tabs[next]!;
+    setShareMode(tab.mode);
+    tab.ref.current?.focus();
   };
 
   useEffect(() => {
@@ -5396,26 +5414,36 @@ function ShareDialog({
         </div>
         {!fileTarget && <div className="share-mode-selector" role="tablist" aria-label="Sharing method">
           <button
+            ref={publicShareTab}
+            id="share-mode-tab-public"
             type="button"
             role="tab"
             aria-selected={shareMode === "public"}
+            aria-controls="share-mode-panel-public"
+            tabIndex={shareMode === "public" ? 0 : -1}
             className={shareMode === "public" ? "active" : "button-ghost"}
             onClick={() => setShareMode("public")}
+            onKeyDown={handleShareModeKeyDown}
             disabled={busy}
           >Public link</button>
           <button
+            ref={workspaceShareTab}
+            id="share-mode-tab-workspace"
             type="button"
             role="tab"
             aria-selected={shareMode === "workspace"}
+            aria-controls="share-mode-panel-workspace"
+            tabIndex={shareMode === "workspace" ? 0 : -1}
             className={shareMode === "workspace" ? "active" : "button-ghost"}
             onClick={() => setShareMode("workspace")}
+            onKeyDown={handleShareModeKeyDown}
             disabled={busy || !authenticatedGrantsEnabled}
             title={!authenticatedGrantsEnabled ? authenticatedGrantReadinessMessage : undefined}
           >Client Workspace</button>
         </div>}
         {!fileTarget && !authenticatedGrantsEnabled && <div className="notice" role="status">{authenticatedGrantReadinessMessage} <a href="/clients#client-portal-setup">Open Client Hub portal setup</a> to check readiness.</div>}
         {!fileTarget && shareMode === "workspace" ? (
-          <section className="share-mode-panel" role="tabpanel" aria-label="Client Workspace sharing">
+          <section id="share-mode-panel-workspace" className="share-mode-panel" role="tabpanel" aria-labelledby="share-mode-tab-workspace">
             <header>
               <strong>Authenticated Client Workspace access</strong>
               <small>Choose an exact individual, a department, or an organization. Access covers this folder and every nested folder and file. This does not create a public link.</small>
@@ -5430,8 +5458,10 @@ function ShareDialog({
               <ClientDelegatedFolderProvisioning folder={folder} />
             </details>}
           </section>
-        ) : activeLoadError ? (
-          <div className="notice error" role="alert">
+        ) : (
+          <section id={!fileTarget ? "share-mode-panel-public" : undefined}
+            role={!fileTarget ? "tabpanel" : undefined} aria-labelledby={!fileTarget ? "share-mode-tab-public" : undefined}>
+          {activeLoadError ? <div className="notice error" role="alert">
             <strong>Share status unavailable.</strong> {activeLoadError}
             <div className="actions">
               <button className="button-ghost button-small" type="button" onClick={() => setActiveLoadAttempt(value => value + 1)}>
@@ -5439,9 +5469,7 @@ function ShareDialog({
               </button>
             </div>
           </div>
-        ) : active === undefined ? (
-          <Loading />
-        ) : (
+        : active === undefined ? <Loading /> :
           <>
             {!fileTarget && <p className="share-mode-description">Create a bearer link for anyone who receives the complete URL. Use an access code when the content should not be open to everyone holding the link.</p>}
             {shown && (
@@ -5582,6 +5610,7 @@ function ShareDialog({
                   placeholder="Type a client name or email"
                   autoComplete="off"
                   disabled={busy}
+                  onKeyDown={focusFirstTypeaheadOption}
                 />
                 {recipientOptions.length > 0 && <div id="share-recipient-options" className="client-workspace-typeahead" role="listbox">
                   {recipientOptions.map(option => <button
@@ -5589,6 +5618,7 @@ function ShareDialog({
                     role="option"
                     aria-selected={selectedRecipient?.publicId === option.publicId && selectedRecipient?.audienceType === option.audienceType}
                     key={`${option.audienceType}:${option.publicId}`}
+                    onKeyDown={event => moveTypeaheadOption(event, "share-recipient-search")}
                     onClick={() => {
                       setSelectedRecipient(option);
                       setRecipientQuery(`${option.displayName}${option.email ? ` (${option.email})` : ""}`);
@@ -5746,6 +5776,8 @@ function ShareDialog({
               </div>
             )}
           </>
+        }
+          </section>
         )}
         </Card>
       </div>

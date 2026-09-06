@@ -451,6 +451,12 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess }: { route
   };
   const sourcePath = route.sourceId ? `sources/${encodeURIComponent(route.sourceId)}/${route.rootNamespace ? `${route.rootNamespace}/` : ""}` : "";
   const state = useClientHub<ClientDetailResponse>(invalidated ? null : `/api/client-hub/${sourcePath}${route.kind}/${encodeURIComponent(route.publicId)}?revision=${revision}`);
+  useEffect(() => {
+    if (!state.data || !/^#client-(?:business-(?:contacts|projects)|portal-access|delivery-access|audit)$/.test(location.hash)) return;
+    const targetId = location.hash.slice(1);
+    const frame = requestAnimationFrame(() => document.getElementById(targetId)?.scrollIntoView({ block: "start" }));
+    return () => cancelAnimationFrame(frame);
+  }, [state.data, revision]);
   if (invalidated) return <Card><div role="alert"><EmptyState title="Client workspace needs refreshing" detail={invalidated} /></div>
     <button type="button" className="button-orange" onClick={refresh}>Refresh client workspace</button>
     <a className="button-ghost" href={clientDirectoryReturnPath()}>Back to Client Hub</a>
