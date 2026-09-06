@@ -27,6 +27,28 @@ second business database, or Viewer work as part of this audit.
 
 ### Verification checkpoint — September 6 continuation
 
+- Primary provisioning now has a concrete diagnosed failure: the live
+  `54ad8e9a26c6` diagnostic exactly matches strict MySQL rejecting an empty
+  `contact_assignment_projection_enabled` integer. PA fix `3ea246c3`,
+  PR #174, serializes all profile flags as 0/1. It is based on current PA main
+  `953866f1` and does not change credentials, optional capabilities, or LTT.
+  Local PHPUnit completed 783 tests / 6,365 assertions with 91 environment
+  skips and no failures; focused provisioning passed 38 / 229, and generic
+  integration frontend checks passed 4/4. Deployment and live activation are
+  still required; see `project-alpha-portal-activation.md` for exact evidence.
+- PA PR #174 merged as `80fb0cc028655d885be37d798797da280d92aeb8`
+  after all checks passed, including container startup, PHPUnit, Composer
+  audit, frontend regressions, and MySQL portal scope-lock checks in run
+  `34050120752`. Independent functional review found no regression. All 29
+  local frontend tests also passed. Image publication and production pull /
+  activation remain separate acceptance steps; merged code is not live proof.
+- Operations push `75095ef` has the same verified GitHub billing/spending
+  blocker on run `34050219046`; source-invariants check annotation confirms
+  the job never started. Cloudflare build
+  `4ca690c0-369e-4e0d-b13f-fa531a885e16` failed separately without a diagnosed
+  cause. Project Alpha's PR #174 CI is running normally, so do not describe
+  this as every repository's CI being unavailable.
+
 - Copy-forward recovery and the Viewer continuity acceptance checklist were
   pushed in `76ce130`. Focused desktop/mobile browser tests passed 10/10 and
   Operations TypeScript checking passed. These are not deployed claims.

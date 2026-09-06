@@ -69,11 +69,17 @@ background batches. An administrator's person/root revocation must survive
 every subsequent sync, reconciliation, and sign-in. Source-qualified records
 from separate Project Alpha instances must never merge by email or name.
 
-Current rollout gates are the historical producer backfill, primary signed
+Remaining live acceptance gates are the historical producer backfill, primary signed
 native workspace enrollment/listing/resource routing, and regression coverage
 for legacy client reparenting and member revocation. These are not yet live
-accepted. Keep coordinated automatic-eligibility flags disabled until the
-joined producer/consumer proof and revocation gates pass. A successful business
+accepted. The current checked-in release profile is `default-on-eligibility`;
+the earlier receiver-only disabled-flag checkpoint is historical, not an
+instruction to turn off the current coordinated configuration. Follow
+[the activation runbook](project-alpha-portal-activation.md) and its profile-aware
+preflight, and distinguish deployed flags from successful workspace creation.
+PA's strict-MySQL activation fix is merged in `80fb0cc` (PR #174), but image
+publication, production recreation, and successful reconciliation still require
+verification. A successful business
 directory sync or a green isolated membership test is not sufficient evidence.
 
 | Requirement | Current evidence | State | Remaining acceptance |
