@@ -48,6 +48,26 @@ async function mock(pageInstance: Page, handler: Handler, detailFactory: () => u
 }
 const card = (pageInstance: Page) => pageInstance.getByRole("region", { name: "Project Alpha service assignments", exact: true });
 
+test("unavailable assignments can refresh and recover after a transient failure", async ({ page }) => {
+  let attempts = 0;
+  const requests = await mock(page, async (route, url) => {
+    if (url.pathname !== `${base}/service-assignments`) return route.fulfill({ status: 404 });
+    attempts += 1;
+    return attempts === 1
+      ? route.fulfill({ status: 503, json: { error: "Sync temporarily unavailable" } })
+      : route.fulfill({ json: assignmentPage([row("recovered")]) });
+  }, () => detail(assignmentPage([], false, "", { available: false, reason: "projection_not_ready" })));
+  await page.goto(path);
+  await expect(card(page).getByText("Service assignments unavailable", { exact: true })).toBeVisible();
+  await card(page).getByRole("button", { name: "Refresh service assignments" }).click();
+  await expect(card(page).getByRole("alert")).toContainText("Sync temporarily unavailable");
+  await card(page).getByRole("button", { name: "Retry service assignments" }).click();
+  await expect(card(page).getByText("Service recovered", { exact: true })).toBeVisible();
+  await expect(card(page).getByText("Service assignments unavailable", { exact: true })).toHaveCount(0);
+  expect(attempts).toBe(2);
+  expect(requests.every(request => request.method === "GET")).toBe(true);
+});
+
 test("service assignments are exact, read-only, progressively loaded, and URL-filtered", async ({ page }) => {
   const requests = await mock(page, async (route, url) => {
     if (url.pathname !== `${base}/service-assignments`) return route.fulfill({ status: 404 });
