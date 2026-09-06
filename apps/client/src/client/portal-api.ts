@@ -1,5 +1,5 @@
 import { requestJson, selectClientWorkspaceId, selectedClientWorkspaceId } from "./bulk-download";
-import type { DeliveryLocationCollection, ViewerPublicShareCreation, ViewerPublicShareSummary } from "@ltds/shared";
+import type { DeliveryLocationCollection, ViewerPublicShareCreation, ViewerPublicShareSummary, ViewerShellSessionGrant } from "@ltds/shared";
 import { loadNativePortalContext, type NativePortalBootstrap } from "./native-portal-api";
 
 export interface PortalCapabilities {
@@ -291,13 +291,7 @@ export interface PortalViewerModel {
 export type PortalViewerShare = ViewerPublicShareSummary;
 export type PortalViewerShareCreation = ViewerPublicShareCreation & { replayed: boolean };
 
-export interface PortalViewerSession {
-  grant: string;
-  grantExpiresAt: string;
-  sessionTtlSeconds: number;
-  redeemUrl: string;
-  embedUrl: string;
-}
+export interface PortalViewerSession extends ViewerShellSessionGrant {}
 
 export async function loadPortalViewerModels(
   projectId: string,

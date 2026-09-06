@@ -303,7 +303,7 @@ describe("client portal browser API boundary", () => {
 describe("client Viewer unit preference", () => {
   it.each(["imperial", "metric"] as const)("sends %s in every session request", async displayUnits => {
     const mockRequest = vi.fn(async (_path: string, init?: RequestInit) => ({
-      grant: "grant", grantExpiresAt: "2026-08-16T12:01:00Z", sessionTtlSeconds: 900,
+      modelId: "model-one", grant: "grant", grantExpiresAt: "2026-08-16T12:01:00Z", sessionTtlSeconds: 900,
       redeemUrl: "https://viewer.example.test/api/v1/sessions/redeem",
       embedUrl: "https://viewer.example.test/session/grant",
     }));

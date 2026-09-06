@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PropsWithChildren, type ReactNode } from "react";
 import { BRAND } from "@ltds/shared";
-import type { ViewerSessionGrant } from "@ltds/shared";
+import type { ViewerSessionGrant, ViewerShellSessionGrant } from "@ltds/shared";
 import { CLOUDFLARE_ACCESS_LOGOUT_PATH } from "./access";
 export { CLOUDFLARE_ACCESS_LOGOUT_PATH } from "./access";
 
@@ -149,7 +149,7 @@ export function openViewerShell(path: string): ViewerShellOpenResult {
  * idempotency key so an ambiguous response can be retried without minting a
  * second grant. A new key is allocated only after a successful issuance.
  */
-export function RenewableViewerShell<T extends ViewerSessionGrant>({
+export function RenewableViewerShell<T extends ViewerShellSessionGrant>({
   routeKey,
   modelId,
   title,
@@ -171,13 +171,13 @@ export function RenewableViewerShell<T extends ViewerSessionGrant>({
   />;
 }
 
-export function validateViewerSessionModel<T extends ViewerSessionGrant>(session: T, modelId: string): T {
-  if ("modelId" in session && session.modelId !== modelId)
+export function validateViewerSessionModel<T extends ViewerSessionGrant>(session: T, modelId: string): T & ViewerShellSessionGrant {
+  if (!("modelId" in session) || typeof session.modelId !== "string" || session.modelId !== modelId)
     throw new Error("Viewer session does not match the requested model");
-  return session;
+  return session as T & ViewerShellSessionGrant;
 }
 
-function RenewableViewerShellRoute<T extends ViewerSessionGrant>({
+function RenewableViewerShellRoute<T extends ViewerShellSessionGrant>({
   modelId,
   title,
   issueSession,

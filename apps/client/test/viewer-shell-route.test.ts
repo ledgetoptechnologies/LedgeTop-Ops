@@ -44,4 +44,12 @@ describe("client Viewer shell", () => {
     expect(() => validateViewerSessionModel(session, "model-one")).toThrow("does not match");
     expect(validateViewerSessionModel(session, "model-two")).toBe(session);
   });
+
+  it("fails closed when a session omits model identity", () => {
+    const session = {
+      grant: "grant", grantExpiresAt: "2026-09-06T00:00:00.000Z", sessionTtlSeconds: 60,
+      redeemUrl: "https://viewer.example.test/redeem", embedUrl: "https://viewer.example.test/session/grant",
+    };
+    expect(() => validateViewerSessionModel(session, "model-one")).toThrow("does not match");
+  });
 });

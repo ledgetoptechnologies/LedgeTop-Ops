@@ -1186,6 +1186,7 @@ export function createClientPortalRouter(
       throw new HTTPException(503, { message: "3D Viewer is temporarily unavailable" });
     }
     return c.json({
+      modelId: result.modelId,
       grant: result.grant,
       grantExpiresAt: result.grantExpiresAt,
       sessionTtlSeconds: result.sessionTtlSeconds,

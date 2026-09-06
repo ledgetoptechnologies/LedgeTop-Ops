@@ -314,7 +314,7 @@ describe("client Viewer authorization", () => {
     });
     vi.stubGlobal("fetch", fetcher);
 
-    await expect(issueClientViewerSession(env, request)).resolves.toMatchObject({ ok: true });
+    await expect(issueClientViewerSession(env, request)).resolves.toMatchObject({ ok: true, modelId: "viewer-model-one" });
     expect(sessionBodies).toHaveLength(1);
     expect(sessionBodies[0]).toMatchObject({
       subject: "client:identity-one",

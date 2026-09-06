@@ -1,4 +1,4 @@
-import type { ViewerSessionGrant } from "@ltds/shared";
+import type { ViewerShellSessionGrant } from "@ltds/shared";
 import { RenewableViewerShell } from "@ltds/ui";
 import { useRef } from "react";
 import { api, setCsrf } from "./api";
@@ -46,7 +46,7 @@ export function OperationsViewerShell({ route }: { route: OperationsViewerShellR
     title="Operations 3D model"
     issueSession={async key => {
       await ensureAuthenticatedSession();
-      return api<ViewerSessionGrant>(
+      return api<ViewerShellSessionGrant>(
         `/api/viewer/associations/${encodeURIComponent(route.associationId)}/session`,
         { method: "POST", headers: { "Idempotency-Key": key } },
       );

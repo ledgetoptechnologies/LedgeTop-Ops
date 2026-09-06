@@ -1154,7 +1154,7 @@ test("client Viewer sharing is opt-in, owner-scoped, and responsive at 390 and 3
       modelId: "model-one", modelVersionId: "version-one", updatedAt: "2026-08-16T12:00:00.000Z", canShare: true,
     }] } });
     if (path === "/api/client/viewer/preferences" && request.method() === "PATCH") { preferenceUnits = String((request.postDataJSON() as { displayUnits?: string }).displayUnits || ""); return route.fulfill({ json: { displayUnits: preferenceUnits } }); }
-    if (path === "/api/client/projects/project-a/models/association-one/session" && request.method() === "POST") { sessionUnits = String((request.postDataJSON() as { displayUnits?: string }).displayUnits || ""); return route.fulfill({ status: 201, json: { grant: "11111111-1111-4111-8111-111111111111", grantExpiresAt: new Date(Date.now() + 60_000).toISOString(), sessionTtlSeconds: 1800, redeemUrl: "https://viewer.example.test/api/v1/sessions/redeem", embedUrl: "https://viewer.example.test/session/11111111-1111-4111-8111-111111111111" } }); }
+    if (path === "/api/client/projects/project-a/models/association-one/session" && request.method() === "POST") { sessionUnits = String((request.postDataJSON() as { displayUnits?: string }).displayUnits || ""); return route.fulfill({ status: 201, json: { modelId: "model-one", grant: "11111111-1111-4111-8111-111111111111", grantExpiresAt: new Date(Date.now() + 60_000).toISOString(), sessionTtlSeconds: 1800, redeemUrl: "https://viewer.example.test/api/v1/sessions/redeem", embedUrl: "https://viewer.example.test/session/11111111-1111-4111-8111-111111111111" } }); }
     if (path === "/api/client/projects/project-a/models/association-one/shares" && request.method() === "GET") return route.fulfill({ json: { shares: [...(active ? [{
       id: "share-one", modelId: "model-one", versionPolicy: "latest", modelVersionId: null, hasPassword: true,
       permissions: { view: true, measure: true, cameras: true, download: false }, label: "Engineer review",
@@ -1257,6 +1257,7 @@ test("Viewer shell is openerless and keeps the iframe and idempotency key across
       sessionIdempotencyKeys.push(request.headers()["idempotency-key"] || "");
       if (sessionRequests === 2) return route.fulfill({ status: 503, json: { error: "temporary authorization failure" } });
       return route.fulfill({ status: 201, json: {
+        modelId: "model-one",
         grant: sessionRequests === 1 ? "11111111-1111-4111-8111-111111111111" : "22222222-2222-4222-8222-222222222222",
         grantExpiresAt: new Date(Date.now() + 60_000).toISOString(), sessionTtlSeconds: 1800,
         redeemUrl: `${viewerOrigin}/api/v1/sessions/redeem`, embedUrl: `${viewerOrigin}/session/${sessionRequests === 1 ? "11111111-1111-4111-8111-111111111111" : "22222222-2222-4222-8222-222222222222"}`,
