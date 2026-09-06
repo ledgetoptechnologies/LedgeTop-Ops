@@ -328,9 +328,30 @@ use `ledgetop-ops`; only the test expectation was corrected. Its focused test
 passed (1 passed, 6 unselected). The already-running full suite is still pending;
 the focused result does not establish a full-suite pass.
 
+The older run subsequently finished: 184 files passed and one file failed;
+1,898 tests passed and one failed, in 7,395.27 seconds. Its sole failure is the
+old Worker-name assertion above. This is baseline evidence, not a full test
+result for the joined candidate `61a59ec`. On that candidate, both app type
+checks and all 33 source-layout/release-profile/manifest tests pass. Focused
+Client D1 tests passed 31/31 (131.22 seconds), and Operations receipt/notification
+tests passed 60/60 (171.34 seconds). Both production builds pass, with bundle-size
+warnings retained. All 184 desktop/mobile portal browser tests passed (2.6 minutes).
+The 375px delivery and 1280px directory screenshots were inspected: controls
+and long labels remain contained and readable. The source identifier remains
+technical customer-facing copy and may warrant later UX refinement.
+These candidate checks do not replace the full package gates or live acceptance.
+
+PR #26 remains at `d448137`, open with failed checks. GitHub's Client check
+annotation explicitly says the job did not start because recent account payments
+failed or the spending limit needs increasing. Billing changes and bypassing
+required CI are not authorized; the owner was asked to restore Actions capacity.
+
 The isolated PA draft notification/status range `f8e8641..b93734e` has completed
 source review of all 12 changed files with no plausible security candidates.
 The security scan remains unfinalized because its required Markdown artifact
 directory denied filesystem access. The canonical model and partial review
-checkpoint are saved through the scan service. Live PA synchronization and
+checkpoint are saved through the scan service. Limited user-approved elevated
+access subsequently saved the required Markdown file, but scan finalization
+failed in `workbench_db.py complete-scan`; no completion retry was made and the
+scan is not claimed complete. Live PA synchronization and
 default-on workspace provisioning remain unverified; no release is claimed.
