@@ -156,10 +156,13 @@ describe("native PA draft notification history — migrated D1", { timeout: 240_
   });
 
   it("pauses a mounted native inbox mutation without weakening foreign-workspace denial", async () => {
-    const mine = await seed("maintenance", owner);
-    const paused = await mutate(owner, mine.workspace, mine.notification, "read", { ...env, CLIENT_PORTAL_NOTIFICATION_MIGRATION_MAINTENANCE: "true" } as Env);
+    const maintenanceOwner = { ...owner, subject: "native-maintenance-owner", email: "maintenance-owner@example.test" };
+    const mine = await seed("maintenance", maintenanceOwner);
+    const maintenanceEnv = { ...env, CLIENT_PORTAL_NOTIFICATION_MIGRATION_MAINTENANCE: "true" };
+    const paused = await mutate(maintenanceOwner, mine.workspace, mine.notification, "read", maintenanceEnv);
     expect(paused.status).toBe(503);
     expect(paused.headers.get("Retry-After")).toBe("900");
-    expect((await history(other, mine.workspace)).status).toBe(403);
+    expect(await db.prepare("SELECT read_at FROM client_portal_notifications WHERE id=?").bind(mine.notification).first("read_at")).toBeNull();
+    expect((await mutate(other, mine.workspace, mine.notification, "read", maintenanceEnv)).status).toBe(403);
   });
 });
