@@ -407,8 +407,10 @@ export async function listViewerClientGrantWorkspace(env: Env, principal: StaffP
     listAssociations(env),
   ]);
   if (projectRows.results.length > 500) throw new HTTPException(503,{message:"The Viewer client project list is too large"});
-  const liveAssociations = (await Promise.all(associationRows.slice(0,501).map(async row =>
-    await currentStaffAssociation(env,row.id) ? row : null))).filter((row): row is NonNullable<typeof row> => row !== null);
+  const liveAssociations = (await Promise.all(associationRows.slice(0,501).map(async row => {
+    const current = await currentStaffAssociation(env,row.id);
+    return current ? associationView(current) : null;
+  }))).filter((row): row is NonNullable<typeof row> => row !== null);
   if (associationRows.length > 500 || liveAssociations.length > 500)
     throw new HTTPException(503,{message:"The Viewer client task list is too large"});
   return {
@@ -418,7 +420,13 @@ export async function listViewerClientGrantWorkspace(env: Env, principal: StaffP
       permissions:{measure:Boolean(row.can_measure),cameras:Boolean(row.can_view_cameras),download:Boolean(row.can_download)},
       expiresAt:row.authorization_expires_at, status:row.status, createdAt:row.created_at, revokedAt:row.revoked_at })),
     projects: projectRows.results.map(row=>({id:row.id,accountId:row.account_id,clientName:row.client_name,projectName:row.project_name})),
-    associations: liveAssociations.map(row=>({id:row.id,projectId:row.projectId,modelTitle:row.modelTitle})),
+    associations: liveAssociations.map(row=>({
+      id:row.id,
+      projectId:row.projectId,
+      viewerModelId:row.viewerModelId,
+      viewerModelVersionId:row.viewerModelVersionId,
+      modelTitle:row.modelTitle,
+    })),
   };
 }
 

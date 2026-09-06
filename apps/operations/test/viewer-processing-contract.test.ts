@@ -23,7 +23,7 @@ const routes = JSON.parse(routeBytes);
 describe("Viewer processing cross-service contract", () => {
   it("pins the byte-identical cross-repository route fixture", () => {
     expect(createHash("sha256").update(routeBytes).digest("hex").toUpperCase())
-      .toBe("0FD00D7DFB6440A04084BC84B27EB2A223081D3F51FCA36F1E521144F86A6703");
+      .toBe("A60F7C8E2A33461621E63112BF94EB9D578C2B14D8DD03E256C267BAE566D6B9");
   });
   it("pins the exact admin-grant body and service HMAC", async () => {
     const value = fixture.adminGrant;
@@ -54,6 +54,13 @@ describe("Viewer processing cross-service contract", () => {
       body:value.body,timestamp:value.timestamp,nonce:value.nonce }))
       .toEqual({contentSha256:value.contentSha256,signature:value.signature});
     expect(routes.clientGrantWorkspaceListed.projects[0].accountId).toBe("account-one");
+    expect(routes.clientGrantWorkspaceListed.associations[0]).toEqual({
+      id: "association-one",
+      projectId: "project-one",
+      viewerModelId: "model-one",
+      viewerModelVersionId: "version-one",
+      modelTitle: "Map flight 1",
+    });
     expect(routes.clientGrantWorkspaceCreated.grants[0].scopeType).toBe("project");
     expect(routes.clientGrantWorkspaceRevoked.grants).toEqual([]);
   });
