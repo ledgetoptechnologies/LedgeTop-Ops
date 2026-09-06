@@ -84,6 +84,17 @@ second business database, or Viewer work as part of this audit.
 
 ### Partial, gated, or not live-proven
 
+- September 6 read-only live UI inspection: an existing primary organization
+  shows no linked portal workspace while its root eligibility policy is active.
+  The primary business sync is healthy. Administration reports the exact-source
+  upgrade not enrolled, feedback/requests unverified, and delegated sharing and
+  expiry companions disabled. This does not establish the cause of missing
+  provisioning: verify the existing primary producer/receiver and reconciliation
+  separately; do not enroll a second source or treat business sync as proof.
+  The local access panel now distinguishes eligibility from linked-workspace
+  sign-in readiness, with 4/4 desktop/mobile wording and revocation cases passed.
+  No production access settings or client data were changed during inspection.
+
 - The second Project Alpha producer (Ledge Top Technologies) remains a
   separately gated enrollment. Do not infer that source-scoped code means the
   second production source is active.

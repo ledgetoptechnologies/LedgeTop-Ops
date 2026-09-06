@@ -346,11 +346,13 @@ export function ClientPortalAccessPanel({ initialPage, rootAccess, basePath, con
       if (active.current && !contextSignal.aborted) { claimed.current = false; pending.current = null; setBusy(false); }
     }
   };
+  const workspaceUnavailable = (listing.value || initialPage).page.reason === "workspace_unavailable";
   return <Card title="Portal logins"><section className="portal-access-panel" aria-label="Portal logins">
     <p>Business contacts do not grant portal login or file access. Portal membership and shared content are authorized separately.</p>
     {rootAccess?.available && <section className={`portal-root-access portal-root-access-${rootAccess.state}`} aria-label="Client workspace portal access">
-      <div><strong>{rootAccess.state === "revoked" ? "Portal access revoked for this client workspace" : "Portal access enabled for this client workspace"}</strong>
+      <div><strong>{rootAccess.state === "revoked" ? "Portal access revoked for this client workspace" : workspaceUnavailable ? "Portal eligibility enabled — workspace not linked" : "Portal access enabled for this client workspace"}</strong>
         <p>{rootAccess.state === "revoked" ? "Current and future people cannot enter this workspace. Memberships and shared content are preserved for restoration."
+          : workspaceUnavailable ? "This client is eligible for automatic portal setup, but Operations has not verified a linked workspace. Eligibility alone does not confirm sign-in readiness. No manual invitation is required."
           : "Eligible Project Alpha clients can sign in automatically. Individual restrictions and content permissions still apply."}</p>
         {rootAccess.updatedAt && <small>Policy updated {date(rootAccess.updatedAt)}.</small>}</div>
       {rootAccess.canRevoke && <button type="button" className="button-danger" disabled={busy} onClick={() => void mutateRoot("revoke")}>Revoke workspace portal access</button>}
