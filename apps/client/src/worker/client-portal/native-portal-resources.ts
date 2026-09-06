@@ -190,7 +190,7 @@ export function createNativePortalWorkspaceRouter():Hono<Bindings> {
       idempotencyKey:key.data,displayUnits:body.data.displayUnits};
     const result=await c.env.VIEWER_SESSION_ISSUER.issueNativeClientViewerSession(request);
     if(!result.ok)return nativeViewerFailure(result.code);
-    await recheck(c,context);return c.json({grant:result.grant,grantExpiresAt:result.grantExpiresAt,
+    await recheck(c,context);return c.json({grant:result.grant,grantExpiresAt:result.grantExpiresAt,modelId:result.modelId,
       sessionTtlSeconds:result.sessionTtlSeconds,redeemUrl:result.redeemUrl,embedUrl:result.embedUrl},201);
   });
   router.post('/:workspaceId/feedback',async c=>{

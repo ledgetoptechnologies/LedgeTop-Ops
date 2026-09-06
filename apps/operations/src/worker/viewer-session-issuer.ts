@@ -178,7 +178,7 @@ export async function issueNativeClientViewerSession(
         principalSubject: parsed.data.principalSubject,
       },
     });
-    return { ok: true, protocolVersion: 1, ...grant };
+    return { ok: true, protocolVersion: 1, ...grant, modelId: association.viewer_model_id };
   } catch (error) {
     if (error instanceof ViewerServiceError) return failure(
       error.code === "not_configured" || error.code === "invalid_configuration"

@@ -86,7 +86,7 @@ import {
   type PortalDelegatedShareTarget,
 } from "./portal-api";
 import { readClientViewerUnits, writeClientViewerUnits } from "./viewer-units-preference";
-import { clientViewerShellPath } from "./ClientViewerShell";
+import { clientViewerShellPath, nativeClientViewerShellPath } from "./ClientViewerShell";
 import {
   clientPortalPath,
   clientProjectPath,
@@ -103,7 +103,7 @@ import { LeaveFeedback, PortalFeedback } from "./PortalFeedback";
 import { PortalNotifications } from "./PortalNotifications";
 import { loadFeedbackFile, withPortalWorkspace } from "./feedback-api";
 import { NativeWorkspaceContent } from "./NativeWorkspaceContent";
-import { createNativeViewerSession, loadNativeViewerModels, type NativePortalBootstrap } from "./native-portal-api";
+import { loadNativeViewerModels, type NativePortalBootstrap } from "./native-portal-api";
 import { invitationCapabilitiesLabel, invitationRequestSchema } from "./invitation-request-api";
 import { PortalInvitationRequests } from "./PortalInvitationRequests";
 import { PortalAddressBook, PortalAddressBookPicker } from "./PortalAddressBook";
@@ -1868,9 +1868,9 @@ function LegacyServiceRequestForm({
 }
 
 function ProjectViewerModels({ projectId, initialDisplayUnits, loadModels = loadPortalViewerModels,
-  issueSession = createPortalViewerSession, persistUnits = updatePortalViewerUnits }: { projectId: string; initialDisplayUnits: "imperial" | "metric";
+  shellPath = model => clientViewerShellPath({ projectId, associationId: model.associationId, modelId: model.modelId }), persistUnits = updatePortalViewerUnits }: { projectId: string; initialDisplayUnits: "imperial" | "metric";
     loadModels?: (projectId:string)=>Promise<PortalViewerModel[]>;
-    issueSession?: (projectId:string,associationId:string,idempotency:string,displayUnits:"imperial"|"metric")=>Promise<import('./portal-api').PortalViewerSession>;
+    shellPath?: (model:PortalViewerModel)=>string;
     persistUnits?: ((units:"imperial"|"metric")=>Promise<unknown>)|null }) {
   const [models, setModels] = useState<PortalViewerModel[] | null>(null);
   const [busy, setBusy] = useState(false);
@@ -1892,7 +1892,7 @@ function ProjectViewerModels({ projectId, initialDisplayUnits, loadModels = load
       // The openerless shell cannot read React state from this tab. Persist only
       // this non-secret preference; authorization remains in same-origin cookies.
       writeClientViewerUnits(displayUnits);
-      openViewerShell(clientViewerShellPath({ projectId, associationId: model.associationId, modelId: model.modelId }));
+      openViewerShell(shellPath(model));
     } catch (caught) { setError((caught as Error).message); }
     finally { setBusy(false); }
   };
@@ -2990,7 +2990,8 @@ export function ClientPortalApp({
       renderRequests={renderRequestSurface}
       renderModels={id => <ProjectViewerModels projectId={id} initialDisplayUnits={readClientViewerUnits()}
         loadModels={project => loadNativeViewerModels(native,project)}
-        issueSession={(project,association,key,units)=>createNativeViewerSession(native,project,association,key,units)} persistUnits={null} />}
+        shellPath={model=>nativeClientViewerShellPath({workspaceId:native.workspace.id,projectId:id,associationId:model.associationId,modelId:model.modelId})}
+        persistUnits={null} />}
       renderFiles={options => <FileBrowser key={options.folderId ?? "linked-file"} {...options} feedback={native.capabilities.feedback} nativeFeedbackWorkspaceId={native.workspace.id} workspaceId={native.workspace.id} mapToken={null} locationScopeLabel="" emptyTitle="No files shown" emptyDetail={options.folderId ? "This shared folder has no files on this page." : "Open a delivery folder to browse its files."} />} />;
   else if (page === "project")
     content = selectedProject ? (

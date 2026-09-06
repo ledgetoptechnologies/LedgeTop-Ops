@@ -66,7 +66,7 @@ describe("native client Viewer issuance",()=>{
       grants:[{effect:"allow",expires_at:expiry}]});
     const request:NativeClientViewerSessionRequestV1={...auth,associationId:"association-one",
       idempotencyKey:"native-viewer-session-0001",displayUnits:"imperial"};
-    expect((await issueNativeClientViewerSession(env,request)).ok).toBe(true);
+    expect(await issueNativeClientViewerSession(env,request)).toMatchObject({ok:true,modelId:"model-one"});
     expect(mocks.issue).toHaveBeenCalledWith(expect.objectContaining({actorId:"identity-one",audience:"client",verifiedIndividualIdentity:{
       identityId:"identity-one",principalIssuer:"https://portal.example.test",principalSubject:"subject-one"}}));
     expect(mocks.issue).toHaveBeenCalledWith(expect.objectContaining({association:expect.objectContaining({authorization_expires_at:expiry})}));
