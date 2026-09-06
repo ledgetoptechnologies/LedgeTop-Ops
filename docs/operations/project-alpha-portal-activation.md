@@ -60,6 +60,31 @@ acknowledging the Project Alpha event.
 
 ## Runtime gates
 
+### September 6 primary-instance readback
+
+The signed-in LTDS Project Alpha settings page reported release `fdf8520`,
+the unchanged `ops-sync.ledgetopdroneservices.com/v1/project-alpha/events`
+destination, and an enabled/Ready ordinary connection. Its separate producer
+status was Paused, with zero active workspaces, zero historical roots, and
+zero queued/failed events. The explicit prerequisite was "portal producer
+saved for this connection." This readback involved no settings writes.
+
+This is evidence of an unactivated producer, not proof of invalid credentials,
+a Client receiver rejection, or completion of the historical backfill. Zero
+historical roots before activation must not be interpreted as all clients
+having been provisioned. In the displayed release, `send-now` invokes
+`ExternalOpsSyncOrchestrator`, which calls `activateConfiguredConnection`
+before reconciliation and delivery. Trace that activation or its diagnostic
+failure before changing endpoints or requiring individual invitations.
+The previously reported diagnostic `54ad8e9a26c6` has not yet been attributed
+to a verified exception. LTT remains unconfigured and outside this activation.
+
+The local `PortalClientProvisioningTest.php` passed 37 tests / 222 assertions
+at PA `636f1d27` using PHP 8.2.12. Its SQLite fixtures cover activation and
+revocation preservation; they do not establish the production MySQL schema,
+successful activation on `fdf8520`, or receiver acceptance. Keep those live
+acceptance requirements open even when this focused test is green.
+
 | Gate | Role |
 | --- | --- |
 | `PROJECT_ALPHA_PORTAL_SYNC_ENABLED` | Enables private portal projection dispatch inside Client. |
@@ -95,6 +120,24 @@ for the signed outer wrapper, then Client rechecks the exact inner limit.
    work. Never record cookies, tokens, link fragments, or secret values.
 
 ## Deployment order
+
+### Read the release profile first
+
+The numbered procedure below describes the historical receiver-only rollout.
+In particular, its `CLIENT_PORTAL_HIERARCHY_V2_ENABLED=false` checks and
+adjacent-flag false assertions are **not** the current default-on eligibility
+configuration. Do not copy those values into a live default-on installation.
+For the current release, use `scripts/client-portal-release-profile.json` and
+the profile-aware release preflight as the exact configuration contract,
+preserving enabled deny enforcement and eligibility. Retain the ordering,
+schema, private-ingress, replay and compatibility checks below. Read back the
+deployed state separately; a checked-in profile is intent, not live evidence.
+
+When diagnosing missing workspaces, record the existing primary producer's
+routing status and queued/failed event diagnostic, the Ops Sync receipt status,
+and the Client receipt/checkpoint status. A healthy business snapshot or active
+eligibility policy does not prove a portal event was produced or applied. Do
+not enroll the secondary source or change the primary URL as a diagnostic fix.
 
 1. Identify the reviewed commit and Worker artifact/version intended for
    deployment. Confirm the worktree is clean and the artifact is built from that
