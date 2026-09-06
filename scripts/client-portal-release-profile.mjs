@@ -54,8 +54,12 @@ export function validatePortalReleaseProfile(declaration, clientConfig, operatio
     }
     const authenticatedExpected = declaration.profile === "primary-authenticated-delivery" ? "true" : "false";
     for (const flag of authenticatedDeliveryFlags) {
-      const flagExpected = flag === "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED" && declaration.profile === "default-on-eligibility"
-        ? (label === "Client" ? "true" : "false") : authenticatedExpected;
+      // The Client receiver must always ingest the schema-v3 relationship
+      // projection. Operations only consumes those relations when the paired
+      // authenticated-delivery profile is explicitly active.
+      const flagExpected = flag === "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED"
+        ? (label === "Client" || declaration.profile === "primary-authenticated-delivery" ? "true" : "false")
+        : authenticatedExpected;
       if (config.vars[flag] !== flagExpected) errors.push(`${label} ${flag} must be exactly ${flagExpected} for ${declaration.profile}`);
     }
     const mailFlags = label === "Client" ? ["CLIENT_PORTAL_INVITATION_EMAIL_ENABLED"] : operationsMailFlags;

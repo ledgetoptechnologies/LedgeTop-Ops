@@ -13,7 +13,7 @@ function configs(profile) {
   for (const config of pair) {
     for (const flag of eligibilityFlags) config.vars[flag] = profile === receiver ? "false" : "true";
     for (const flag of authenticatedDeliveryFlags) config.vars[flag] = profile === authenticated ? "true" : "false";
-    if (profile === activation) config.vars.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED = config === pair[0] ? "true" : "false";
+    if (profile !== authenticated) config.vars.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED = config === pair[0] ? "true" : "false";
   }
   return pair;
 }
