@@ -19,6 +19,11 @@ export const authenticatedDeliveryFlags = Object.freeze([
   "AUTHENTICATED_DELIVERY_CREATION_ENABLED",
 ]);
 
+const authenticatedDeliveryProfiles = new Set([
+  "primary-authenticated-delivery",
+  "primary-authenticated-delivery-paused",
+]);
+
 const dormantClientMutations = Object.freeze([
   "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED",
   "CLIENT_PORTAL_PEER_ADMIN_ENABLED",
@@ -34,9 +39,9 @@ const dormantOperationsMutations = Object.freeze([
 export function validatePortalReleaseProfile(declaration, clientConfig, operationsConfig) {
   if (!declaration || typeof declaration !== "object" || Array.isArray(declaration) ||
       declaration.schemaVersion !== 1 ||
-      !["receiver-only", "default-on-eligibility", "primary-authenticated-delivery"].includes(declaration.profile) ||
+      !["receiver-only", "default-on-eligibility", "primary-authenticated-delivery", "primary-authenticated-delivery-paused"].includes(declaration.profile) ||
       Object.keys(declaration).some(key => !["schemaVersion", "profile"].includes(key))) {
-    return ["Portal release profile must declare schemaVersion 1 and an explicit receiver-only, default-on-eligibility, or primary-authenticated-delivery profile, with no extra fields"];
+    return ["Portal release profile must declare schemaVersion 1 and an explicit receiver-only, default-on-eligibility, primary-authenticated-delivery, or primary-authenticated-delivery-paused profile, with no extra fields"];
   }
   const errors = [];
   const expected = declaration.profile === "receiver-only" ? "false" : "true";
@@ -52,14 +57,16 @@ export function validatePortalReleaseProfile(declaration, clientConfig, operatio
           flag === "CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED" && value === undefined) continue;
       if (value !== expected) errors.push(`${label} ${flag} must be exactly ${expected} for ${declaration.profile}`);
     }
-    const authenticatedExpected = declaration.profile === "primary-authenticated-delivery" ? "true" : "false";
+    const authenticatedEnabled = authenticatedDeliveryProfiles.has(declaration.profile);
     for (const flag of authenticatedDeliveryFlags) {
       // The Client receiver must always ingest the schema-v3 relationship
       // projection. Operations only consumes those relations when the paired
       // authenticated-delivery profile is explicitly active.
       const flagExpected = flag === "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED"
-        ? (label === "Client" || declaration.profile === "primary-authenticated-delivery" ? "true" : "false")
-        : authenticatedExpected;
+        ? (label === "Client" || authenticatedEnabled ? "true" : "false")
+        : flag === "AUTHENTICATED_DELIVERY_CREATION_ENABLED"
+          ? (declaration.profile === "primary-authenticated-delivery" ? "true" : "false")
+          : (authenticatedEnabled ? "true" : "false");
       if (config.vars[flag] !== flagExpected) errors.push(`${label} ${flag} must be exactly ${flagExpected} for ${declaration.profile}`);
     }
     const mailFlags = label === "Client" ? ["CLIENT_PORTAL_INVITATION_EMAIL_ENABLED"] : operationsMailFlags;

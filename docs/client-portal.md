@@ -345,6 +345,11 @@ Operations. It may be selected only after migration `0137`, Project Alpha
 projection parity, and end-to-end staging create/restore/revoke/deny and
 kill-switch evidence are recorded. Notification/email, Project Alpha delivery-
 intent/guest, membership, peer-admin, and address-book mutations remain off.
+The companion `primary-authenticated-delivery-paused` profile keeps hierarchy
+relations, grant enforcement, authority-history writes, reads, audits, and
+revokes active while requiring `AUTHENTICATED_DELIVERY_CREATION_ENABLED=false`
+in both Workers. Use it as the source-controlled first rollback step; it does
+not revoke an existing grant or disable Project Alpha projection ingestion.
 
 The requested final post-fix diff rescan workspace
 `039e35dd-7458-4707-98d8-9af6f3a67225` remained at setup awaiting **Start

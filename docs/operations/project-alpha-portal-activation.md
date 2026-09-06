@@ -228,7 +228,7 @@ profiles, extra profile fields, partial bundles, and mixed local Worker states
 fail closed. No environment variable or inferred flag combination selects a
 profile. The original receiver-only validator remains strict independently.
 
-Both profiles preserve receiver ingress, relation ingestion, Access/HMAC and
+All release profiles preserve receiver ingress, relation ingestion, Access/HMAC and
 rotation checks and all unrelated Client false-flag constraints. Invitation
 email remains false, as do Operations authenticated-delivery and project-access
 expiry notifications. Default-on provisioning and historical backfill send no
@@ -243,13 +243,16 @@ eligibility. Run `npm run deploy` for the Client release; never bypass the
 preflight with direct Wrangler. Record live first-login, backfill, revocation,
 both-host session and preserved-public-link evidence separately.
 
-No reconciliation-paused profile is implemented. The recorded receiver-only
-version is an emergency access-disable rollback, not a promise of continued
-hierarchy/deny-management reads. A normal pause retaining those reads requires
-a separately reviewed exact configuration and gate change. In either case,
-retain identities, workspace and denial records, preserve administrator opt-outs,
-keep mail disabled, and preserve receiver compatibility for queued revocations;
-never delete workspaces or denial state to simulate rollback.
+`primary-authenticated-delivery-paused` is the source-controlled first rollback
+step for authenticated delivery. It keeps hierarchy relations, grant
+enforcement, authority mutations, reads, audits, and revokes active while
+requiring new grant, restore, and folder-binding creation off in both Workers.
+It is not a general reconciliation pause. The recorded receiver-only version is
+an emergency access-disable rollback, not a promise of continued hierarchy or
+grant reads. In either case, retain identities, workspace and denial records,
+preserve administrator opt-outs, keep mail disabled, and preserve receiver
+compatibility for queued revocations; never delete workspaces or denial state to
+simulate rollback.
 
 ## Drain-first rollback
 

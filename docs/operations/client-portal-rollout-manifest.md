@@ -145,19 +145,20 @@ profile. It requires the hierarchy-relations, grant-management, authority-
 mutation, and creation switches to match in Client and Operations. Email and
 notification flags, Project Alpha delivery intents/guests, membership, peer-
 admin, and address-book mutations remain off. Roll back creation first by
-setting `AUTHENTICATED_DELIVERY_CREATION_ENABLED=false`; existing reads,
-audits, and revokes remain available while the grant and mutation switches stay
-on. Only disable the broader grant-management switch after active grants have
-been reviewed or revoked.
+selecting `primary-authenticated-delivery-paused`, which requires
+`AUTHENTICATED_DELIVERY_CREATION_ENABLED=false` in both Workers while keeping
+hierarchy relations, grant enforcement, authority mutations, reads, audits, and
+revokes on. Only disable the broader grant-management switch after active grants
+have been reviewed or revoked.
 
 This verifies local release intent only: migrations, approved artifact, remote
 versions/flags and Operations deny-management readiness require separate
 readback before Client activation. See the explicit profile procedure in
-[the activation runbook](project-alpha-portal-activation.md). No paused profile
-exists; a normal reconciliation pause retaining deny/recovery reads needs a
-separate reviewed gate/configuration change. Selecting the repository's
-`receiver-only` profile is an emergency access-disable rollback, not a promise
-that those reads remain active.
+[the activation runbook](project-alpha-portal-activation.md). The authenticated-
+delivery paused profile only stops new grant, restore, and binding writes; it is
+not a general reconciliation pause. Selecting the repository's `receiver-only`
+profile is an emergency access-disable rollback, not a promise that reads remain
+active.
 
 Rollback: disable new reconciliation, retain identities and denial state, and
 keep revocation/recovery reads available. Do not delete a workspace to simulate
