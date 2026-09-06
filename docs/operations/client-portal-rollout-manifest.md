@@ -46,7 +46,17 @@ Record without secrets:
 7. Queue, outbox, notification, and reconciliation backlog counts. Do not open
    a new window while a prior backlog is unexplained.
 
-## Current dormant capability map
+## Capability map and release profile
+
+The current checked-in `scripts/client-portal-release-profile.json` selects
+`default-on-eligibility`. In that profile, hierarchy, automatic eligibility,
+and deny enforcement/management are enabled together. The earlier dormant
+hierarchy state below describes the receiver-only baseline, not a rollback
+instruction. Use the profile-aware preflight and
+[activation runbook](project-alpha-portal-activation.md) for current release
+settings; verify production separately. Other capability families remain
+independently gated. Neither enabled flags nor published PA fix `80fb0cc`
+prove that a specific workspace has been provisioned.
 
 `CLIENT_PORTAL_ENABLED=true`, `PROJECT_ALPHA_PORTAL_SYNC_ENABLED=true`, and
 `CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED=true` are receiver foundations, not
@@ -54,8 +64,9 @@ proof that a client has access. Operations also keeps
 `CLIENT_PORTAL_PRIMARY_WORKSPACE_RECONCILIATION_ENABLED=true` for the reviewed
 primary reconciliation path.
 
-The following capability families remain off or empty in the production
-configuration unless a dated evidence record explicitly says otherwise:
+The following table lists capability dependencies. Except for the coordinated
+hierarchy/eligibility family described above, these families remain off or
+empty unless a dated evidence record explicitly says otherwise:
 
 | Capability | Client flags | Operations flags | Required schema/dependency |
 | --- | --- | --- | --- |
