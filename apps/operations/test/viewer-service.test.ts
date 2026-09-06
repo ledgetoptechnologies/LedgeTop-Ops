@@ -95,6 +95,49 @@ describe("Viewer service client", () => {
     })).rejects.toBeInstanceOf(ViewerServiceError);
   });
 
+  it("serializes personal measurement attestation only when explicitly enabled", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      const grant = `00000000-0000-4000-8000-00000000000${bodies.length}`;
+      return Response.json({
+        grant,
+        grantExpiresAt: "2026-08-15T05:01:00.000Z",
+        sessionTtlSeconds: 900,
+        modelVersionId: "version-one",
+        redeemUrl: "https://viewer.example.test/api/v1/sessions/redeem",
+        embedUrl: `https://viewer.example.test/session/${grant}`,
+      }, { status: 201 });
+    });
+    const client = new ViewerServiceClient(
+      { baseUrl: "https://viewer.example.test", keyId: "ops-v1", secret },
+      fetcher as typeof fetch,
+    );
+    const base = {
+      modelId: "model-one",
+      modelVersionId: "version-one",
+      subject: "client:identity-one",
+      audience: "client" as const,
+      authorizationExpiresAt: "2026-08-15T05:30:00.000Z",
+    };
+
+    await client.createSession({
+      ...base,
+      idempotencyKey: "viewer-session-key-omitted",
+      permissions: { view: true, measure: true },
+    });
+    await client.createSession({
+      ...base,
+      idempotencyKey: "viewer-session-key-attested",
+      permissions: { view: true, measure: true, personalMeasurements: true },
+    });
+
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]?.permissions).toEqual({ view: true, measure: true });
+    expect(bodies[0]?.permissions).not.toHaveProperty("personalMeasurements");
+    expect(bodies[1]?.permissions).toEqual({ view: true, measure: true, personalMeasurements: true });
+  });
+
   it("revokes an exact model-association authorization with a signed idempotent request", async () => {
     const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       expect(new URL(String(input)).pathname).toBe("/api/v1/published-sessions/source-authorization");

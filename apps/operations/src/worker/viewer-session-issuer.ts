@@ -576,6 +576,11 @@ export async function issueClientViewerSession(
       association,
       idempotencyKey: parsed.data.idempotencyKey,
       displayUnits: parsed.data.displayUnits,
+      verifiedIndividualIdentity: {
+        identityId: parsed.data.identityId,
+        principalIssuer: parsed.data.principalIssuer,
+        principalSubject: parsed.data.principalSubject,
+      },
     });
     return { ok: true, protocolVersion: 1, ...grant };
   } catch (error) {

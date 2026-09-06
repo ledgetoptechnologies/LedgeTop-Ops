@@ -518,13 +518,23 @@ export async function issueViewerSession(input: {
   association: AssociationRow;
   idempotencyKey: string;
   displayUnits?: ViewerDisplayUnits;
+  verifiedIndividualIdentity?: {
+    identityId: string;
+    principalIssuer: string;
+    principalSubject: string;
+  };
 }): Promise<ViewerSessionGrant> {
+  const personalMeasurements = input.audience === "client" &&
+    input.verifiedIndividualIdentity?.identityId === input.actorId &&
+    input.verifiedIndividualIdentity.principalIssuer.length > 0 &&
+    input.verifiedIndividualIdentity.principalSubject.length > 0;
   const requestFingerprint = await sha256(JSON.stringify({
     associationId: input.association.id,
     associationVersion: input.association.association_version,
     viewerModelId: input.association.viewer_model_id,
     viewerModelVersionId: input.association.viewer_model_version_id,
     displayUnits: input.displayUnits || "imperial",
+    ...(personalMeasurements ? { personalMeasurements: true } : {}),
   }));
   const db = primaryDeliveryDb(input.env);
   const client = viewerServiceClient(input.env);
@@ -561,6 +571,7 @@ export async function issueViewerSession(input: {
       measure: input.association.authorization_can_measure !== 0,
       cameras: input.association.authorization_can_view_cameras !== 0,
       download: input.association.authorization_can_download === 1,
+      ...(personalMeasurements ? { personalMeasurements: true } : {}),
     },
     sourceAuthorization: {
       type: "model_association", id: input.association.id, version: input.association.association_version,

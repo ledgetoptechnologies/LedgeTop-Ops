@@ -855,7 +855,13 @@ export class ViewerServiceClient {
     idempotencyKey: string;
     authorizationExpiresAt: string;
     displayUnits?: ViewerDisplayUnits;
-    permissions?: { view: true; measure?: boolean; cameras?: boolean; download?: boolean };
+    permissions?: {
+      view: true;
+      measure?: boolean;
+      cameras?: boolean;
+      download?: boolean;
+      personalMeasurements?: boolean;
+    };
     sourceAuthorization?: ViewerPublishedSessionSourceAuthorization;
   }): Promise<ViewerSessionGrant> {
     const path = `/api/v1/models/${encodeURIComponent(input.modelId)}/sessions`;
