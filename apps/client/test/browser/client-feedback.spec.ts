@@ -18,6 +18,7 @@ async function mock(page: Page, custom?: (route: Route, url: URL, call: Call) =>
     if (call.path === "/api/client/map-config") return route.fulfill({json: {mapboxPublicToken: null}});
     if (call.path === "/api/client/request-readiness") return route.fulfill({json: {mode: "legacy", workspaceId: call.workspace || null, target: {kind: "root", projectId: null}, canStartRequest: false, reason: "request_not_permitted", root: {canStartRequest: false, reason: "request_not_permitted"}, projectRequestsSupported: false, refreshedAt: date}});
     if (call.path === "/api/client/notifications") return route.fulfill({json: {notifications: [], unreadCount: 0, cursor: null}});
+    if (call.path === "/api/client/notification-history") return route.fulfill({json: {scope:{sourceId:"project-alpha:primary",workspaceId:call.workspace??null,rootType:"organization",rootPublicId:"org-one"},asOf:"2026-08-25T13:00:00Z",coverage:{requests:"included",feedback:"included",delivery:"omitted_no_explicit_grant_authority"},items:[],nextCursor:null}});
     if (call.path === "/api/client/feedback-notifications") return route.fulfill({json: {notifications: [], nextCursor: null}});
     if (call.path.endsWith("file-locations") || call.path.endsWith("past-delivery-locations")) return route.fulfill({json: {points: [], imageCount: 0, truncated: false}});
     if (call.path === "/api/client/projects/project-one/files" || call.path === "/api/client/past-deliveries") return route.fulfill({json: {files: [file()], folders: [], breadcrumbs: [{id: null, name: "Project files"}, ...(call.query.get("folder") ? [{id: "pf2_edited", name: "Edited"}] : [])], folderId: call.query.get("folder"), prefix: "", cursor: null}});
@@ -166,4 +167,17 @@ for(const width of [375,1280])test(`redacted feedback history is usable at ${wid
   await expect(page.getByRole("heading",{name:"North edge photo.jpg"})).toBeVisible();await expect(page.getByText("Please check the north edge.")).toHaveCount(0);
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1)).toBe(true);
   expect(await page.getByRole("link",{name:"View details"}).evaluate(link=>link.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44);
+});
+
+for(const width of [375,1280])test(`unified notification history is usable at ${width}px`,async({page},info)=>{
+  test.skip(info.project.name!=="desktop-edge","Explicit viewport coverage");await page.setViewportSize({width,height:900});
+  const calls=await mock(page,(route,_url,call)=>call.path==="/api/client/notification-history"?route.fulfill({json:{scope:{sourceId:"project-alpha:primary",workspaceId:null,rootType:"organization",rootPublicId:"org-one"},asOf:"2026-08-25T13:00:00Z",coverage:{requests:"included",feedback:"included",delivery:"omitted_no_explicit_grant_authority"},items:[
+    {id:"request-notice",kind:"request",title:"Request accepted",body:"Your request was accepted.",actionPath:"/portal/requests",readAt:null,createdAt:date,mutationPath:"/api/client/notifications/request-notice"},
+    {id:"feedback-notice",kind:"feedback",title:"Feedback completed",body:"Review complete.",actionPath:"/portal/feedback/feedback-one",readAt:null,createdAt:date,mutationPath:"/api/client/feedback-notifications/feedback-notice"}],nextCursor:null}}):
+    call.path==="/api/client/notifications/request-notice"&&call.method==="PATCH"?route.fulfill({json:{success:true}}):undefined);
+  await page.goto("/portal");const bell=page.getByRole("button",{name:/Notifications, 2 unread updates/});await expect(bell).toBeVisible();await bell.click();
+  const panel=page.getByRole("region",{name:"Notifications"});await expect(panel.getByText("Request accepted")).toBeVisible();await expect(panel.getByText("Feedback completed")).toBeVisible();
+  await expect(panel.getByText(/Delivery-change notices remain/)).toBeVisible();expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1)).toBe(true);
+  expect(await panel.getByRole("button",{name:"Mark read"}).first().evaluate(button=>button.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44);
+  await panel.getByRole("button",{name:"Mark read"}).first().click();expect(calls.some(call=>call.path==="/api/client/notifications/request-notice"&&call.method==="PATCH")).toBe(true);
 });

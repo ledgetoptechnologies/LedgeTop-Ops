@@ -842,10 +842,17 @@ describe("client portal migrated-D1 end-to-end contract", () => {
     ]);
     const visible = await portal().request(`${portalOrigin}/notifications`, {}, env);
     expect((await visible.json() as any).notifications.map((item: any) => item.id)).toContain("project-notice");
+    const history=await portal().request(`${portalOrigin}/notification-history`,{},env);expect(history.status).toBe(200);
+    const historyPage=await history.json() as {coverage:{delivery:string};items:Array<{id:string;kind:string}>};
+    expect(historyPage.items).toContainEqual(expect.objectContaining({id:"project-notice",kind:"request"}));
+    expect(historyPage.coverage.delivery).toBe("omitted_no_explicit_grant_authority");
+    expect(JSON.stringify(historyPage)).not.toMatch(/recipient_identity|created_by_identity|details|identity-a/);
 
     await db.prepare("UPDATE client_member_project_grants SET revoked_at=datetime('now') WHERE account_id='account-a' AND identity_id='identity-a' AND project_id='project-a'").run();
     const hidden = await portal().request(`${portalOrigin}/notifications`, {}, env);
     expect((await hidden.json() as any).notifications.map((item: any) => item.id)).not.toContain("project-notice");
+    const hiddenHistory=await portal().request(`${portalOrigin}/notification-history`,{},env);
+    expect((await hiddenHistory.json() as {items:Array<{id:string}>}).items.map(item=>item.id)).not.toContain("project-notice");
 
     await db.batch([
       db.prepare("DELETE FROM client_portal_notifications WHERE id='project-notice'"),

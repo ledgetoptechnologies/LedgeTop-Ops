@@ -368,6 +368,13 @@ describe('source-owned native portal resources with real signed projection and l
       const inbox=await inboxResponse.json() as {notifications:Array<{id:string;feedbackId:string;readAt:string|null;actionPath:string}>};
       const notice=inbox.notifications.find(item=>item.feedbackId===orgFeedback);expect(notice).toMatchObject({readAt:null,
         actionPath:`/portal/feedback/${encodeURIComponent(orgFeedback)}?workspace=${encodeURIComponent(a.workspace)}`});
+      const historyResponse=await request('/notification-history',{headers:{'X-LTDS-Workspace-Id':a.workspace}});expect(historyResponse.status).toBe(200);
+      const history=await historyResponse.json() as {scope:{sourceId:string;workspaceId:string};coverage:{delivery:string};items:Array<{id:string;kind:string;body:string}>};
+      expect(history.scope).toMatchObject({sourceId:a.source,workspaceId:a.workspace});expect(history.coverage.delivery).toBe('omitted_no_explicit_grant_authority');
+      expect(history.items).toContainEqual(expect.objectContaining({id:notice!.id,kind:'feedback',body:'Reviewed.'}));
+      expect(JSON.stringify(history)).not.toMatch(/Please review|recipient_identity|same-person|scopeProof/);
+      const collision=await request('/notification-history',{headers:{'X-LTDS-Workspace-Id':b.workspace}});expect(collision.status).toBe(200);
+      expect((await collision.json() as {items:Array<{id:string}>}).items.map(item=>item.id)).not.toContain(notice!.id);
       expect((await request(`${base(b)}/feedback-notifications/${notice!.id}`,{method:'PATCH',headers:{Origin:'https://client.test','Content-Type':'application/json'},
         body:JSON.stringify({action:'read'})})).status).toBe(404);
       const marked=await request(`${base(a)}/feedback-notifications/${notice!.id}`,{method:'PATCH',headers:{Origin:'https://client.test','Content-Type':'application/json'},
@@ -377,6 +384,8 @@ describe('source-owned native portal resources with real signed projection and l
         revoked_at=datetime('now'),revoke_reason_code='project_alpha_delivery_revoked' WHERE id=?`).bind(org.grantId).run();
       const afterGrantRevoke=await (await request(`${base(a)}/feedback-notifications`)).json() as {notifications:Array<{id:string}>};
       expect(afterGrantRevoke.notifications.some(item=>item.id===notice!.id)).toBe(false);
+      const revokedHistory=await request('/notification-history',{headers:{'X-LTDS-Workspace-Id':a.workspace}});
+      expect((await revokedHistory.json() as {items:Array<{id:string}>}).items.map(item=>item.id)).not.toContain(notice!.id);
       expect((await request(`${base(a)}/feedback-notifications/${notice!.id}`,{method:'PATCH',headers:{Origin:'https://client.test','Content-Type':'application/json'},
         body:JSON.stringify({action:'dismiss'})})).status).toBe(404);
       expect(await db.prepare('SELECT dismissed_at FROM portal_native_feedback_notifications WHERE id=?').bind(notice!.id).first<string>('dismissed_at')).toBeNull();

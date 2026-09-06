@@ -18,6 +18,7 @@ import {
   NativeNotificationAuthorizationOverflowError,
 } from "./repository";
 import { clientFeedbackSchemaAvailable, createClientFeedbackRouter } from "./feedback-routes";
+import {createClientNotificationHistoryRouter} from './notification-history';
 import type {
   ClientPortalRepository,
   ClientPortalSession,
@@ -444,13 +445,14 @@ export function createClientPortalRouter(
             canViewBilling: workspace.canViewBilling,
           };
         } else {
-          const nativeRequestPath = /^\/(?:request-readiness|service-catalog(?:\/page)?|service-request-drafts|service-requests|notifications)(?:\/|$)/
+          const nativeRequestPath = /^\/(?:request-readiness|service-catalog(?:\/page)?|service-request-drafts|service-requests|notifications|notification-history)(?:\/|$)/
             .test(c.req.path);
-          const native = selectedWorkspace && nativeRequestPath && nativeServiceRequestsEnabled(c.env)
+          const notificationHistoryRequest=c.req.path==='/notification-history';
+          const native = selectedWorkspace && nativeRequestPath && (notificationHistoryRequest||nativeServiceRequestsEnabled(c.env))
             ? await resolveNativePortalWorkspaceReadContext(c.env, principal, selectedWorkspace)
             : null;
           if (!native) throw new HTTPException(403, { message: "Select an authorized client workspace" });
-          if (!await nativeRequestSchemaReady(c.env) && !c.req.path.endsWith("/request-readiness"))
+          if (!notificationHistoryRequest&&!await nativeRequestSchemaReady(c.env) && !c.req.path.endsWith("/request-readiness"))
             throw new HTTPException(503, { res: Response.json({
               error: "Native service requests are temporarily unavailable until storage migration is ready.",
               code: "request_unavailable",
@@ -2241,6 +2243,7 @@ export function createClientPortalRouter(
   });
 
   router.route("/",createClientFeedbackRouter(feedbackSchemaAvailable));
+  router.route("/",createClientNotificationHistoryRouter());
   return router;
 }
 type ClientFileRange = { offset: number; length: number };

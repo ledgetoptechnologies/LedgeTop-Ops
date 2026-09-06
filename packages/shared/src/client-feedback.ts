@@ -121,6 +121,25 @@ export interface PortalFeedbackHistoryPage {
   nextCursor: string | null;
 }
 
+export interface PortalNotificationHistoryItem {
+  id: string;
+  kind: "request" | "feedback";
+  title: string;
+  body: string;
+  actionPath: string | null;
+  readAt: string | null;
+  createdAt: string;
+  mutationPath: string;
+}
+
+export interface PortalNotificationHistoryPage {
+  scope: { sourceId: string; workspaceId: string | null; rootType: string; rootPublicId: string };
+  asOf: string;
+  coverage: { requests: "included"; feedback: "included"; delivery: "omitted_no_explicit_grant_authority" };
+  items: PortalNotificationHistoryItem[];
+  nextCursor: string | null;
+}
+
 export const CLIENT_FEEDBACK_MESSAGE_LIMIT = 5000;
 export const CLIENT_FEEDBACK_NOTE_LIMIT = 2000;
 
