@@ -107,6 +107,12 @@ Current delivery-history increment (working tree following `c94e834`):
   interrupted by that reviewer without a terminal result and is not counted.
   Full service-assignment policy run 23379 remains live and predates this last
   visibility addition; it must not be represented as final-candidate coverage.
+  The separate migrated-D1 eligibility compatibility suite passes (two tests,
+  24.28 seconds). It captures the guard before changes and then verifies both
+  ordinary workspace.view revocation/deny and default-on eligibility shell
+  behavior, including bridge revocation, principal version replacement and
+  verified-email identity rebinding. This is local authorization evidence,
+  not live Project Alpha provisioning acceptance.
 - D1 and cursor regression run 51198 exited 0: 21 tests passed, including
   current delivery revocation, mixed-kind pagination and rejection of a valid
   legacy cursor envelope. Client type check and build 97972 exited 0.

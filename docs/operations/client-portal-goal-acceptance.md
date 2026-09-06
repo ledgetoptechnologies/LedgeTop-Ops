@@ -11,6 +11,13 @@ their presentation through explicit source-qualified business-party links, but
 must not merge producer records by name, email, or other inferred similarity.
 The 3D Viewer is outside this work while Hermes is changing it.
 
+Current deployment authorization is LTDS only. Checklist references to a second
+configured producer or a live secondary-source exercise do not authorize
+enrolling LTT. Use synthetic secondary-source isolation tests locally, and
+leave any unavailable live-secondary gate explicitly pending until the owner
+configures that instance. Do not substitute a second connection for the existing
+LTDS signed endpoint or enable a source merely to satisfy this checklist.
+
 The dated production admission, migration, and provisioning checkpoint is
 recorded in
 [client-portal-production-evidence-2026-09-01.md](client-portal-production-evidence-2026-09-01.md).
