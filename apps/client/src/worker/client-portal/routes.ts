@@ -1,6 +1,6 @@
 import { Hono, type Context } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { isMovedSourceMarker } from "@ltds/shared";
+import { isMovedSourceMarker, notificationMigrationMaintenanceActive, notificationMigrationMaintenanceResponse } from "@ltds/shared";
 import type {
   ClientDelegatedShareSignerRequestV1,
   ClientViewerSessionRequestV1,
@@ -97,7 +97,6 @@ import {
   type ProjectAlphaPricingAuthorizationContextResolver,
 } from "./project-alpha-pricing-hint";
 import { clientPortalNotificationsAvailable } from "./schema-readiness";
-import { notificationMigrationMaintenanceActive, notificationMigrationMaintenanceResponse } from "./notification-migration-maintenance";
 import { readClientRequestReadiness } from "./request-readiness";
 import { createNativePortalWorkspaceRouter } from "./native-portal-resources";
 import {createWorkspaceAddressContact,deleteWorkspaceAddressContact,listWorkspaceAddressContacts,readWorkspaceAddressContact,
@@ -446,9 +445,9 @@ export function createClientPortalRouter(
             canViewBilling: workspace.canViewBilling,
           };
         } else {
-          const nativeRequestPath = /^\/(?:request-readiness|service-catalog(?:\/page)?|service-request-drafts|service-requests|notifications|notification-history)(?:\/|$)/
+          const nativeRequestPath = /^(?:\/api\/client)?\/(?:request-readiness|service-catalog(?:\/page)?|service-request-drafts|service-requests|notifications|notification-history)(?:\/|$)/
             .test(c.req.path);
-          const notificationHistoryRequest=c.req.path==='/notification-history';
+          const notificationHistoryRequest=/^(?:\/api\/client)?\/notification-history$/.test(c.req.path);
           const native = selectedWorkspace && nativeRequestPath && (notificationHistoryRequest||nativeServiceRequestsEnabled(c.env))
             ? await resolveNativePortalWorkspaceReadContext(c.env, principal, selectedWorkspace)
             : null;
@@ -488,7 +487,7 @@ export function createClientPortalRouter(
     c.set("clientPrincipal", principal);
     c.set("clientWorkspace", workspace);
     if (notificationMigrationMaintenanceActive(c.env) && ["POST", "PUT", "PATCH", "DELETE"].includes(c.req.method) &&
-      (/^\/(?:service-request-drafts|service-requests)(?:\/|$)/.test(c.req.path) || /^\/notifications\//.test(c.req.path)))
+      (/^(?:\/api\/client)?\/(?:service-request-drafts|service-requests)(?:\/|$)/.test(c.req.path) || /^(?:\/api\/client)?\/notifications\//.test(c.req.path)))
       return notificationMigrationMaintenanceResponse();
     await next();
   });

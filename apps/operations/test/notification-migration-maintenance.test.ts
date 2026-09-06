@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   notificationMigrationMaintenanceActive,
   notificationMigrationMaintenanceResponse,
-} from "../../client/src/worker/client-portal/notification-migration-maintenance";
+} from "@ltds/shared";
 
 describe("notification migration maintenance control", () => {
   it("is default-off and returns a retryable response only for the explicit true value", async () => {

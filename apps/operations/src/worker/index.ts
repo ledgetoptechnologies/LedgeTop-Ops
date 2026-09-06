@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { notificationMigrationMaintenanceActive, notificationMigrationMaintenanceResponse } from "../../../client/src/worker/client-portal/notification-migration-maintenance";
+import { notificationMigrationMaintenanceActive, notificationMigrationMaintenanceResponse } from "@ltds/shared";
 import { secureHeaders } from "hono/secure-headers";
 import { z } from "zod";
 import {

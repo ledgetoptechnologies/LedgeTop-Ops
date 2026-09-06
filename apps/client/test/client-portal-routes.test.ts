@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {} }));
 import deliveryWorker from "../src/worker/index";
+import { Hono } from "hono";
 import { createClientPortalRouter } from "../src/worker/client-portal/routes";
 import type {
   ClientPortalRepository,
@@ -565,11 +566,11 @@ describe("client portal activation hardening", () => {
 
   it("pauses notification-table writers without blocking notification reads", async () => {
     const updateNotification = vi.fn(async () => true);
-    const app = createClientPortalRouter({ resolvePrincipal: principal, repository: repository({ updateNotification }) });
+    const app = new Hono().route("/api/client", createClientPortalRouter({ resolvePrincipal: principal, repository: repository({ updateNotification }) }));
     const maintenance = { ...env("true", "https://client.example"), CLIENT_PORTAL_NOTIFICATION_MIGRATION_MAINTENANCE: "true" };
-    const read = await app.request("https://client.example/notifications", {}, maintenance);
+    const read = await app.request("https://client.example/api/client/notifications", {}, maintenance);
     expect(read.status).toBe(200);
-    const paused = await app.request("https://client.example/notifications/notice-1", {
+    const paused = await app.request("https://client.example/api/client/notifications/notice-1", {
       method: "PATCH",
       headers: { Origin: "https://client.example", "Content-Type": "application/json" },
       body: JSON.stringify({ action: "read" }),
