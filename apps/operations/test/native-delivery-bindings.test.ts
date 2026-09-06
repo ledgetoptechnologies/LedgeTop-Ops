@@ -106,7 +106,7 @@ describe('real D1 native staff folder binding and exact principal delegation',{t
         portalCurrent:{keyId:'portal-key',value:'secondary-portal-secret-at-least-thirty-two-bytes'}};
     const configured:Partial<Env>&ProjectAlphaConnectorEnvironment={OPS_DB:ops,DELIVERY_DB:delivery,PROJECT_ALPHA_BASE_URL:'https://primary.example.test/',PROJECT_ALPHA_API_KEY:primaryCredential.snapshotApiKey,
       APPLICATION_KEY:'ltds_ops',PROJECT_ALPHA_WEBHOOK_ED25519_PUBLIC_KEY:key(1),PROJECT_ALPHA_CONNECTOR_CREDENTIALS:JSON.stringify({version:1,sets:{primary:primaryCredential,secondary:secondaryCredential}}),
-      CLIENT_PORTAL_HIERARCHY_V2_ENABLED:'true',AUTHENTICATED_DELIVERY_GRANTS_ENABLED:'true',CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED:'true',
+      CLIENT_PORTAL_HIERARCHY_V2_ENABLED:'true',AUTHENTICATED_DELIVERY_GRANTS_ENABLED:'true',AUTHENTICATED_DELIVERY_CREATION_ENABLED:'true',CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED:'true',
       CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED:'true',
       PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED:'true',
       PUBLIC_BASE_URL:'https://operations.example.test',OPERATIONS_SESSION_SECRET:'fixture-session-secret-at-least-32-bytes'};
@@ -174,6 +174,15 @@ describe('real D1 native staff folder binding and exact principal delegation',{t
     expect(await ops.prepare('SELECT count(*) n FROM native_delivery_authorizations WHERE idempotency_key=?').bind(revokeKey).first<number>('n')).toBe(0);
     expect(await delivery.prepare('SELECT status FROM portal_v2_authenticated_delivery_grants WHERE id=?').bind(created.grant.id).first<string>('status')).toBe('active');
     expect(await delivery.prepare("SELECT count(*) n FROM portal_native_staff_grant_events WHERE grant_id=? AND action='revoked'").bind(created.grant.id).first<number>('n')).toBe(0);
+  });
+  it('pauses native creation while preserving existing grant revocation',async()=>{
+    const existing=await fixture(),created=await create(existing,`native-creation-seed-${counter}`),target={...env,AUTHENTICATED_DELIVERY_CREATION_ENABLED:'false'} as Env;
+    const candidate=await fixture(),body=await input(candidate,target),createKey=`native-creation-paused-${counter}`;
+    await expect(createNativeDeliveryGrant(target,principal,body,createKey)).rejects.toMatchObject({status:503});
+    expect(await ops.prepare('SELECT count(*) n FROM native_delivery_authorizations WHERE idempotency_key=?').bind(createKey).first<number>('n')).toBe(0);
+    const revoked=await revokeNativeDeliveryGrant(target,principal,created.grant.id,
+      {folderRef:existing.operation.folderRef,expectedVersion:1,reasonCode:'creation_paused'},`native-creation-revoke-${counter}`);
+    expect(revoked.grant.status).toBe('revoked');
   });
   it('publishes exactly once, replays and preserves all legacy accounts',async()=>{
     const f=await fixture(),before=await delivery.prepare('SELECT count(*) n FROM client_accounts').first('n'),body=await input(f);

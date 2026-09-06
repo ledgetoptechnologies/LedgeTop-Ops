@@ -61,7 +61,7 @@ describe("primary signed workspace folder binding",{timeout:60_000,concurrent:fa
     await migrate(ops,new URL("../migrations/",import.meta.url),"0050");
     await migrate(delivery,new URL("../../client/migrations/",import.meta.url),"0189");
     env={OPS_DB:ops,DELIVERY_DB:delivery,CLIENT_PORTAL_HIERARCHY_V2_ENABLED:"true",CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED:"true",
-      AUTHENTICATED_DELIVERY_GRANTS_ENABLED:"true"} as Env;
+      AUTHENTICATED_DELIVERY_GRANTS_ENABLED:"true",PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED:"true",AUTHENTICATED_DELIVERY_CREATION_ENABLED:"true"} as Env;
     await ops.batch([
       ops.prepare(`INSERT INTO staff_users(id,email,display_name,access_subject,status) VALUES(?,?,?,?,'active')`).bind(staff.id,staff.email,staff.displayName,staff.accessSubject),
       ops.prepare(`INSERT INTO divisions(id,name,code,active) VALUES('division-one','Division one','ONE',1)`),
@@ -106,7 +106,11 @@ describe("primary signed workspace folder binding",{timeout:60_000,concurrent:fa
     },"primary-root-binding-create");
     expect(created.binding).toMatchObject({state:"active",ownerScopeType:"organization",ownerPublicId:organizationPublic});
     if(!created.binding)throw new Error("Expected an active primary root binding");
-    const revoked=await revokePrimaryWorkspaceBinding(env,staff,created.binding.bindingId,"Jobs/Clients/Acme/",{
+    const creationPaused={...env,AUTHENTICATED_DELIVERY_CREATION_ENABLED:"false"} as Env;
+    await expect(createPrimaryWorkspaceBinding(creationPaused,staff,"Jobs/Clients/Acme/Survey/Paused/",{
+      folderRef:"unused-paused-ref",workspaceId:workspace,reasonCode:"creation_paused",expectedContextVersion:result.targets[0]!.contextVersion,
+    },"primary-paused-binding-create")).rejects.toMatchObject({status:503});
+    const revoked=await revokePrimaryWorkspaceBinding(creationPaused,staff,created.binding.bindingId,"Jobs/Clients/Acme/",{
       folderRef:"unused-root-ref",expectedVersion:1,reasonCode:"client_workspace_root_unlink",
     },"primary-root-binding-revoke");
     expect(revoked.binding).toMatchObject({state:"revoked",version:2});

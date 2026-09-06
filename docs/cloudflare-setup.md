@@ -473,6 +473,15 @@ after that shadow parity gate. Never reuse the catalog application key,
 audience, or HMAC secret. Project Alpha retains only the Ops Sync machine
 credentials; Operations owns the private Client Worker binding.
 
+Authenticated delivery is a separate reviewed release profile, not part of the
+default eligibility rollout. `primary-authenticated-delivery` requires exact
+Client/Operations parity for hierarchy relations, grant management, authority
+mutations, and `AUTHENTICATED_DELIVERY_CREATION_ENABLED`. Keep the creation flag
+off in production until staging evidence is approved. Turning it off later
+stops new grants, restores, and bindings without disabling reads, audits, or
+revokes. Portal emails/notifications and unrelated Project Alpha or membership
+mutation flags stay off.
+
 Follow the exact preflight, ingest-only activation, read cutover, and drain-first
 rollback in
 [`docs/operations/project-alpha-portal-activation.md`](operations/project-alpha-portal-activation.md).

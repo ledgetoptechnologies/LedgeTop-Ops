@@ -885,7 +885,7 @@ test("permission-gated current-folder sharing uses the normalized active folder 
       status: "Active", profileType: "Administrator", isAdministrator: true,
       permissions: ["delivery.browse", "delivery.share.create", "delivery.share.revoke"], divisions: [],
     }, csrfToken: "csrf-current-folder-share", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null,
-      capabilities: { deliveryJobsRoot: { enabled: true }, authenticatedDeliveryGrants: { enabled: true } } } });
+      capabilities: { deliveryJobsRoot: { enabled: true }, authenticatedDeliveryGrants: { enabled: true, creationEnabled: true } } } });
     if (url.pathname === "/api/delivery/folders") return route.fulfill({ json: { prefix: url.searchParams.get("prefix"), folders: [], files: [], nextCursor: null } });
     if (url.pathname === "/api/delivery/folders/locations") return route.fulfill({ json: { points: [], imageCount: 0, truncated: false } });
     if (url.pathname === "/api/delivery/shares/active") {

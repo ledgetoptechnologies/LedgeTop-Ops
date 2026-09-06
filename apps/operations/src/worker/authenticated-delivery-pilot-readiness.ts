@@ -1,6 +1,7 @@
 import { authenticatedDeliveryChangeNotificationsReady, authenticatedDeliveryNotificationsEnabled } from "./authenticated-delivery-change-notifications";
 import { projectAccessAuthorityMutationsEnabled } from "./project-access-mutation-gate";
 import type { Env } from "./types";
+import { authenticatedDeliveryCreationEnabled } from "./authenticated-delivery-creation-gate";
 
 const REQUIRED_TABLES = [
   "portal_v2_workspaces",
@@ -31,8 +32,10 @@ const REQUIRED_TABLES = [
 
 export type AuthenticatedDeliveryReadinessReason =
   | "hierarchy_disabled"
+  | "hierarchy_relations_disabled"
   | "grants_disabled"
   | "authority_mutations_disabled"
+  | "creation_disabled"
   | "schema_unavailable"
   | "primary_projection_unavailable"
   | "unreceipted_bindings"
@@ -45,9 +48,11 @@ export interface AuthenticatedDeliveryPilotReadiness {
   enabled: boolean;
   /** Whether the complete closed pilot, including staged notifications, is ready. */
   pilotReady: boolean;
+  /** Whether authority-expanding create, restore, and bind controls may be shown. */
+  creationEnabled: boolean;
   reasons: AuthenticatedDeliveryReadinessReason[];
   checks: {
-    flags: { hierarchy: boolean; grants: boolean; authorityMutations: boolean; notifications: boolean };
+    flags: { hierarchy: boolean; hierarchyRelations: boolean; grants: boolean; authorityMutations: boolean; creation: boolean; notifications: boolean };
     schema: { ready: boolean };
     primaryProjection: { ready: boolean; activeWorkspaceCount: number | null };
     bindings: { unreceiptedActiveCount: number | null };
@@ -73,14 +78,18 @@ function count(value: unknown): number {
 export async function authenticatedDeliveryPilotReadiness(env: Env): Promise<AuthenticatedDeliveryPilotReadiness> {
   const flags = {
     hierarchy: env.CLIENT_PORTAL_HIERARCHY_V2_ENABLED === "true",
+    hierarchyRelations: env.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED === "true",
     grants: env.AUTHENTICATED_DELIVERY_GRANTS_ENABLED === "true",
     authorityMutations: projectAccessAuthorityMutationsEnabled(env),
+    creation: authenticatedDeliveryCreationEnabled(env),
     notifications: authenticatedDeliveryNotificationsEnabled(env),
   };
   const reasons: AuthenticatedDeliveryReadinessReason[] = [];
   if (!flags.hierarchy) reasons.push("hierarchy_disabled");
+  if (!flags.hierarchyRelations) reasons.push("hierarchy_relations_disabled");
   if (!flags.grants) reasons.push("grants_disabled");
   if (!flags.authorityMutations) reasons.push("authority_mutations_disabled");
+  if (!flags.creation) reasons.push("creation_disabled");
 
   let schemaReady = false;
   let projectionCount: number | null = null;
@@ -140,13 +149,15 @@ export async function authenticatedDeliveryPilotReadiness(env: Env): Promise<Aut
   }
 
   const mutationBlockers: AuthenticatedDeliveryReadinessReason[] = [
-    "hierarchy_disabled", "grants_disabled", "authority_mutations_disabled", "schema_unavailable",
+    "hierarchy_disabled", "hierarchy_relations_disabled", "grants_disabled", "authority_mutations_disabled", "schema_unavailable",
     "primary_projection_unavailable", "unreceipted_bindings", "readiness_check_unavailable",
   ];
   const enabled = !reasons.some(reason => mutationBlockers.includes(reason));
+  const creationEnabled = enabled && flags.creation;
   return {
     enabled,
-    pilotReady: enabled && notificationsReady,
+    creationEnabled,
+    pilotReady: creationEnabled && notificationsReady,
     reasons,
     checks: {
       flags,

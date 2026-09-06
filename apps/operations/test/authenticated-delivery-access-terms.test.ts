@@ -108,7 +108,7 @@ describe('primary staff project access terms and real customer history',{timeout
         await db.batch(splitD1MigrationStatements(readFileSync(new URL(name,path),'utf8')).map(sql=>db.prepare(sql)));
     await delivery.batch(splitD1MigrationStatements(readFileSync(
       new URL('../../client/migrations/0172_project_access_authority_history.sql',import.meta.url),'utf8')).map(sql=>delivery.prepare(sql)));
-    env={OPS_DB:ops,DELIVERY_DB:delivery,CLIENT_PORTAL_HIERARCHY_V2_ENABLED:'true',AUTHENTICATED_DELIVERY_GRANTS_ENABLED:'true',CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED:'true',
+    env={OPS_DB:ops,DELIVERY_DB:delivery,CLIENT_PORTAL_HIERARCHY_V2_ENABLED:'true',AUTHENTICATED_DELIVERY_GRANTS_ENABLED:'true',AUTHENTICATED_DELIVERY_CREATION_ENABLED:'true',CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED:'true',
       PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED:'true'} as Env;
     await ops.batch([
       ops.prepare(`INSERT INTO staff_users(id,email,display_name,access_subject,status) VALUES(?,?,?,?,'active')`).bind(staff.id,staff.email,staff.displayName,staff.accessSubject),
@@ -146,6 +146,20 @@ describe('primary staff project access terms and real customer history',{timeout
     await expect(restoreAuthenticatedDeliveryGrant(target,staff,created.grant.grantId,1,'gate_test',null,restoreKey)).rejects.toMatchObject({status:503});
     expect(await delivery.prepare('SELECT count(*) n FROM portal_v2_authenticated_delivery_grants WHERE logical_grant_id=?').bind(created.grant.grantId).first<number>('n')).toBe(1);
     expect(await delivery.prepare('SELECT count(*) n FROM portal_v2_authenticated_delivery_grant_mutations WHERE idempotency_key=?').bind(restoreKey).first<number>('n')).toBe(0);
+  });
+  it('stops create and restore while preserving reads and revoke when the creation switch is off',async()=>{
+    const existing=await fixture(),created=await create(existing),target={...env,AUTHENTICATED_DELIVERY_CREATION_ENABLED:'false'} as Env;
+    expect((await listAuthenticatedDeliveryGrants(target,staff,existing.prefix)).grants).toHaveLength(1);
+    const candidate=await fixture(),candidateInput=await reviewed(candidate,target);
+    await expect(createAuthenticatedDeliveryGrant(target,staff,candidateInput,`creation-off-create-${candidate.n}`)).rejects.toMatchObject({status:503});
+    const revoked=await revokeAuthenticatedDeliveryGrant(target,staff,created.grant.grantId,1,'creation_switch',`creation-off-revoke-${existing.n}`);
+    expect(revoked.grant.status).toBe('revoked');
+    await expect(restoreAuthenticatedDeliveryGrant(target,staff,created.grant.grantId,1,'creation_switch',null,
+      `creation-off-restore-${existing.n}`)).rejects.toMatchObject({status:503});
+    const restoreOperation={...existing.operation,reasonCode:'creation_resumed'},restorePreview=await previewAuthenticatedDeliveryGrant(env,staff,restoreOperation);
+    const restored=await restoreAuthenticatedDeliveryGrant(env,staff,created.grant.grantId,1,'creation_resumed',null,
+      `creation-on-restore-${existing.n}`,{accessTerms:restoreOperation.accessTerms,expectedContextVersion:restorePreview.contextVersion});
+    expect(restored.grant.status).toBe('active');
   });
   it('requires explicit project review, rejects invalid classifications and date mismatches',async()=>{
     const f=await fixture();await expect(createAuthenticatedDeliveryGrant(env,staff,f.operation,`missing-review-${f.n}`)).rejects.toMatchObject({status:409});

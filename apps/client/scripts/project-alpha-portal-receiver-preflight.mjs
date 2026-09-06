@@ -17,11 +17,9 @@ const disabledReceiverAdjacentFlags = Object.freeze([
   "CLIENT_PORTAL_SERVICE_ASSIGNMENT_POLICY_ENABLED",
   "CLIENT_REQUEST_ATTACHMENTS_ENABLED",
   "CLIENT_PORTAL_TEAM_ENABLED",
-  "AUTHENTICATED_DELIVERY_GRANTS_ENABLED",
   "CLIENT_VIEWER_ENABLED",
   "CLIENT_VIEWER_SHARES_ENABLED",
   "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED",
-  "PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED",
   "CLIENT_PORTAL_PEER_ADMIN_ENABLED",
   "CLIENT_PORTAL_ADDRESS_BOOK_ENABLED",
   "CLIENT_PORTAL_ACCESS_ENROLLMENT_READY",
@@ -53,7 +51,8 @@ function validatePortalCommonPreflight(config, secretNames) {
 export function validatePortalReceiverPreflight(config, secretNames = new Set()) {
   const errors = validatePortalCommonPreflight(config, secretNames);
   if (!config?.vars || typeof config.vars !== "object" || Array.isArray(config.vars)) return errors;
-  for (const flag of ["CLIENT_PORTAL_HIERARCHY_V2_ENABLED", "CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED", "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED", "CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED"]) {
+  for (const flag of ["CLIENT_PORTAL_HIERARCHY_V2_ENABLED", "CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED", "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED", "CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED",
+    "AUTHENTICATED_DELIVERY_GRANTS_ENABLED", "PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED", "AUTHENTICATED_DELIVERY_CREATION_ENABLED"]) {
     if (config.vars[flag] !== "false") errors.push(`${flag} must remain exactly false for the receiver-only release`);
   }
   const denyManagement = config.vars.CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED;

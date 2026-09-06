@@ -29,7 +29,8 @@ describe("authenticated delivery pilot readiness", { timeout: 180_000, concurren
   it("fails closed with typed flag and projection reasons and no identifiers", async () => {
     const result = await authenticatedDeliveryPilotReadiness(env);
     expect(result).toMatchObject({ enabled: false, pilotReady: false, reasons: expect.arrayContaining([
-      "hierarchy_disabled", "grants_disabled", "authority_mutations_disabled", "primary_projection_unavailable", "notifications_disabled",
+      "hierarchy_disabled", "hierarchy_relations_disabled", "grants_disabled", "authority_mutations_disabled", "creation_disabled",
+      "primary_projection_unavailable", "notifications_disabled",
     ]) });
     expect(JSON.stringify(result)).not.toContain(workspace);
     expect(JSON.stringify(result)).not.toContain(organization);
@@ -38,13 +39,15 @@ describe("authenticated delivery pilot readiness", { timeout: 180_000, concurren
   it("fails closed instead of throwing when the migration schema is absent", async () => {
     const result = await authenticatedDeliveryPilotReadiness({ DELIVERY_DB: emptyDb,
       CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true", AUTHENTICATED_DELIVERY_GRANTS_ENABLED: "true",
-      PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED: "true", AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED: "true" } as Env);
+      CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED: "true", PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED: "true",
+      AUTHENTICATED_DELIVERY_CREATION_ENABLED: "true", AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED: "true" } as Env);
     expect(result).toMatchObject({ enabled: false, pilotReady: false, reasons: ["schema_unavailable", "notification_schema_unavailable"],
       checks: { schema: { ready: false }, primaryProjection: { activeWorkspaceCount: null }, bindings: { unreceiptedActiveCount: null } } });
   });
 
   it("separates mutation readiness from notification pilot readiness", async () => {
     env.CLIENT_PORTAL_HIERARCHY_V2_ENABLED = "true";
+    env.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED = "true";
     env.AUTHENTICATED_DELIVERY_GRANTS_ENABLED = "true";
     env.PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED = "true";
     const snapshot = "pilot-snapshot", directory = "pilot-directory";
@@ -61,13 +64,14 @@ describe("authenticated delivery pilot readiness", { timeout: 180_000, concurren
         VALUES(?,'source',1,?)`).bind(workspace, snapshot),
     ]);
     const result = await authenticatedDeliveryPilotReadiness(env);
-    expect(result).toMatchObject({ enabled: true, pilotReady: false,
+    expect(result).toMatchObject({ enabled: true, creationEnabled: false, pilotReady: false,
       checks: { primaryProjection: { ready: true, activeWorkspaceCount: 1 }, bindings: { unreceiptedActiveCount: 0 } } });
-    expect(result.reasons).toEqual(["notifications_disabled"]);
+    expect(result.reasons).toEqual(["creation_disabled", "notifications_disabled"]);
 
+    env.AUTHENTICATED_DELIVERY_CREATION_ENABLED = "true";
     env.AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED = "true";
     const complete = await authenticatedDeliveryPilotReadiness(env);
-    expect(complete).toMatchObject({ enabled: true, pilotReady: true, reasons: [], checks: { notifications: { ready: true } } });
+    expect(complete).toMatchObject({ enabled: true, creationEnabled: true, pilotReady: true, reasons: [], checks: { notifications: { ready: true } } });
   });
 
   it("blocks mutation controls when an active Operations binding lacks its 0189 receipt", async () => {

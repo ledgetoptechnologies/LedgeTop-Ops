@@ -16,7 +16,7 @@ async function mock(page: Page, override?: (route: Route, call: Call) => Promise
   await page.route("**/api/**", async route => {
     const request = route.request(), url = new URL(request.url()), call = {path: url.pathname, query: url.searchParams, method: request.method(), body: request.postData() ? request.postDataJSON() : null, key: request.headers()["idempotency-key"]}; calls.push(call);
     const handled = override?.(route, call); if (handled) return handled;
-    if (call.path === "/api/session") return route.fulfill({json: {user, csrfToken: "csrf-native", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: {deliveryJobsRoot: {enabled: true}, authenticatedDeliveryGrants: {enabled}}}});
+    if (call.path === "/api/session") return route.fulfill({json: {user, csrfToken: "csrf-native", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: {deliveryJobsRoot: {enabled: true}, authenticatedDeliveryGrants: {enabled, creationEnabled: enabled}}}});
     if (call.path === "/api/delivery/folders") return route.fulfill({json: {prefix: call.query.get("prefix") || "Jobs/Clients/", folders: [{id: "folder-acme", prefix: "Jobs/Clients/Acme/", name: "Acme", displayName: "Acme", kind: "folder"}], files: [], nextCursor: null}});
     if (call.path === "/api/delivery/folders/locations") return route.fulfill({json: {points: [], imageCount: 0, truncated: false}});
     if (call.path === "/api/delivery/shares/active") return route.fulfill({json: {share: null}});

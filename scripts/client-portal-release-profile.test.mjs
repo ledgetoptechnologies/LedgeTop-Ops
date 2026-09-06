@@ -1,15 +1,20 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
-import { eligibilityFlags, validatePortalReleaseProfile } from "./client-portal-release-profile.mjs";
+import { authenticatedDeliveryFlags, eligibilityFlags, validatePortalReleaseProfile } from "./client-portal-release-profile.mjs";
 
 const client = JSON.parse(fs.readFileSync(new URL("../apps/client/wrangler.jsonc", import.meta.url), "utf8"));
 const operations = JSON.parse(fs.readFileSync(new URL("../apps/operations/wrangler.jsonc", import.meta.url), "utf8"));
 const receiver = { schemaVersion: 1, profile: "receiver-only" };
 const activation = { schemaVersion: 1, profile: "default-on-eligibility" };
+const authenticated = { schemaVersion: 1, profile: "primary-authenticated-delivery" };
 function configs(profile) {
   const pair = [structuredClone(client), structuredClone(operations)];
-  for (const config of pair) for (const flag of eligibilityFlags) config.vars[flag] = profile === activation ? "true" : "false";
+  for (const config of pair) {
+    for (const flag of eligibilityFlags) config.vars[flag] = profile === receiver ? "false" : "true";
+    for (const flag of authenticatedDeliveryFlags) config.vars[flag] = profile === authenticated ? "true" : "false";
+    if (profile === activation) config.vars.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED = config === pair[0] ? "true" : "false";
+  }
   return pair;
 }
 
@@ -27,11 +32,12 @@ test("missing, malformed, unknown, and extra-field profiles never infer activati
   }
 });
 
-for (const declaration of [receiver, activation]) {
+for (const declaration of [receiver, activation, authenticated]) {
   test(`${declaration.profile} requires a complete exact bundle on each Worker`, () => {
     assert.deepEqual(validatePortalReleaseProfile(declaration, ...configs(declaration)), []);
     for (const index of [0, 1]) for (const flag of eligibilityFlags) {
-      for (const value of [undefined, null, true, false, "TRUE", " true ", declaration === activation ? "false" : "true"]) {
+      const opposite = declaration === receiver ? "true" : "false";
+      for (const value of [undefined, null, true, false, "TRUE", " true ", opposite]) {
         const pair = configs(declaration);
         pair[index].vars[flag] = value;
         const optionalAbsent = declaration === receiver && index === 0 && flag === "CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED" && value === undefined;
@@ -42,6 +48,14 @@ for (const declaration of [receiver, activation]) {
       const pair = configs(declaration);
       pair[index].vars = null;
       assert.ok(validatePortalReleaseProfile(declaration, ...pair).length);
+    }
+  });
+
+  test(`${declaration.profile} requires the exact authenticated-delivery and hierarchy-relation bundle`, () => {
+    for (const index of [0, 1]) for (const flag of authenticatedDeliveryFlags) {
+      const pair = configs(declaration);
+      pair[index].vars[flag] = pair[index].vars[flag] === "true" ? "false" : "true";
+      assert.ok(validatePortalReleaseProfile(declaration, ...pair).some(error => error.includes(flag)));
     }
   });
 
@@ -59,7 +73,7 @@ for (const declaration of [receiver, activation]) {
 test("one Worker cannot declare activation while the other remains receiver-only", () => {
   const enabled = configs(activation);
   const disabled = configs(receiver);
-  for (const declaration of [receiver, activation]) {
+for (const declaration of [receiver, activation, authenticated]) {
     assert.ok(validatePortalReleaseProfile(declaration, enabled[0], disabled[1]).length);
     assert.ok(validatePortalReleaseProfile(declaration, disabled[0], enabled[1]).length);
   }
