@@ -378,3 +378,20 @@ state exists in those ledgers, not why upstream delivery is missing or rejected.
 Continue tracing the unchanged LTDS signed endpoint and producer status; do not
 create a parallel connection or enroll LTT. No production writes or deployment
 were performed for these checks.
+
+The renewed in-app PA session subsequently confirmed the connection is Ready,
+but portal routing is Paused, queued/failed is 0/0, and active workspaces is 0.
+The prerequisite warning is `portal producer saved for this connection`.
+Only navigation and aggregate synchronization status were inspected; credentials
+and client rosters were not read. The served panel still says `Client portal
+provisioning`, unlike current PA main's `Connected workspace synchronization`.
+PA main `80fb0cc028655d885be37d798797da280d92aeb8` includes the strict-MySQL
+boolean serialization fix; its Docker run `34050403843` completed successfully.
+The owner was asked to recreate LTDS web/cron from that release while preserving
+database volumes. This is a served-version mismatch, not proof of the exact
+container digest or permission to retry activation on the older served code.
+
+Live Operations type-to-search was also exercised without pressing Enter:
+an existing standalone-client name narrowed 22 displayed entries to exactly one
+and updated the URL query. This verifies that production interaction, not
+large-directory pagination, all search fields, or portal access provisioning.
