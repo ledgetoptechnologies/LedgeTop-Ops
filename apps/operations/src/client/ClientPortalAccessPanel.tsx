@@ -36,6 +36,10 @@ export interface PortalIdentityPage extends PortalPage<PortalIdentitySummary> {
   capabilities: { canManagePortal: boolean; canManageEligibilityBlocks: boolean; canManageWorkspaceAccess?: boolean;
     canReviewIdentityDetails?: boolean };
 }
+export interface PortalRootAccess {
+  available: boolean; state: "active" | "revoked"; version: number; reasonCode: string | null;
+  updatedAt: string | null; canRevoke: boolean; canRestore: boolean;
+}
 interface AccessRule extends PortalRecord {
   id: string; capability: string; effect: "allow" | "deny"; scope_type: string; scope_public_id: string;
   scope_label: string; status: string; valid_from: string; expires_at: string | null;
@@ -229,8 +233,9 @@ function IdentityRow({ identity, basePath, contextVersion, contextSignal, capabi
   </article>;
 }
 
-export function ClientPortalAccessPanel({ initialPage, basePath, contextVersion, contextSignal, onInvalidated, onChanged, feedback }: {
+export function ClientPortalAccessPanel({ initialPage, rootAccess, basePath, contextVersion, contextSignal, onInvalidated, onChanged, feedback }: {
   initialPage: PortalIdentityPage; basePath: string; contextVersion: string; contextSignal: AbortSignal;
+  rootAccess?: PortalRootAccess;
   onInvalidated: (message: string) => void; onChanged: (message: string) => void; feedback?: string;
 }) {
   const [query, setQuery] = useState(readQuery), [draft, setDraft] = useState(readQuery);
@@ -259,6 +264,32 @@ export function ClientPortalAccessPanel({ initialPage, basePath, contextVersion,
     setQuery(normalized); setDraft(normalized);
   };
   const submit = (event: FormEvent) => { event.preventDefault(); search(draft); };
+  const mutateRoot = async (action: "revoke" | "restore") => {
+    if (claimed.current || contextSignal.aborted || !rootAccess?.available) return;
+    const label = action === "revoke" ? "Revoke portal access for this entire client workspace, including current and future people? Memberships and shared content will be preserved."
+      : "Restore portal access for this client workspace? Individual sign-in blocks and content permissions will still apply.";
+    if (!confirm(label)) return;
+    claimed.current = true; setBusy(true);
+    const operation = JSON.stringify([basePath, rootAccess.version, action]);
+    const idempotencyKey = attempts.current.get(operation) || crypto.randomUUID(); attempts.current.set(operation, idempotencyKey);
+    const abort = new AbortController(); pending.current = abort;
+    try {
+      await api(`${basePath}/portal-access/${action}`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey },
+        signal: abort.signal, body: JSON.stringify({ expectedContextVersion: contextVersion,
+          expectedVersion: rootAccess.version, reasonCode: action === "revoke" ? "operator_root_revocation" : "operator_root_restore" }) });
+      if (!active.current || abort.signal.aborted || contextSignal.aborted) return;
+      attempts.current.delete(operation);
+      onChanged(action === "revoke" ? "Portal access revoked for this entire client workspace."
+        : "Portal access restored for this client workspace. Individual restrictions still apply.");
+    } catch (error) {
+      if (!active.current || abort.signal.aborted || contextSignal.aborted) return;
+      const message = error instanceof Error ? error.message : "Portal workspace access could not be changed.";
+      if (isContextFailure(error)) onInvalidated(message); else setMutationFeedback(value => ({ ...value,
+        root: { message, error: true } }));
+    } finally {
+      if (active.current && !contextSignal.aborted) { claimed.current = false; pending.current = null; setBusy(false); }
+    }
+  };
   const mutate = async (mutation: Mutation) => {
     if (claimed.current || contextSignal.aborted) return;
     const { identity, action, blockId } = mutation;
@@ -317,6 +348,15 @@ export function ClientPortalAccessPanel({ initialPage, basePath, contextVersion,
   };
   return <Card title="Portal logins"><section className="portal-access-panel" aria-label="Portal logins">
     <p>Business contacts do not grant portal login or file access. Portal membership and shared content are authorized separately.</p>
+    {rootAccess?.available && <section className={`portal-root-access portal-root-access-${rootAccess.state}`} aria-label="Client workspace portal access">
+      <div><strong>{rootAccess.state === "revoked" ? "Portal access revoked for this client workspace" : "Portal access enabled for this client workspace"}</strong>
+        <p>{rootAccess.state === "revoked" ? "Current and future people cannot enter this workspace. Memberships and shared content are preserved for restoration."
+          : "Eligible Project Alpha clients can sign in automatically. Individual restrictions and content permissions still apply."}</p>
+        {rootAccess.updatedAt && <small>Policy updated {date(rootAccess.updatedAt)}.</small>}</div>
+      {rootAccess.canRevoke && <button type="button" className="button-danger" disabled={busy} onClick={() => void mutateRoot("revoke")}>Revoke workspace portal access</button>}
+      {rootAccess.canRestore && <button type="button" className="button-ghost" disabled={busy} onClick={() => void mutateRoot("restore")}>Restore workspace portal access</button>}
+    </section>}
+    {mutationFeedback.root && <p className="portal-access-error" role="alert">{mutationFeedback.root.message}</p>}
     {feedback && <p className="portal-access-feedback" role="status">{feedback}</p>}
     {(listing.value || initialPage).page.available === false ? <p>{unavailableMessage((listing.value || initialPage).page.reason)}</p> : <>
       <form onSubmit={submit} className="portal-access-search">

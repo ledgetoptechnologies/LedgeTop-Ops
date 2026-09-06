@@ -17,6 +17,7 @@ import { registerClientInternalNoteRoutes } from "./client-internal-note-routes"
 import { readBoundedJson } from "./bounded-json";
 import { reactivateClientPortalWorkspaceAccess, suspendClientPortalWorkspaceAccess,
   type WorkspaceAccessMutationInput, type WorkspaceAccessReactivationInput } from "./client-portal-workspace-access";
+import { mutatePortalRootAccess, readPortalRootAccess } from "./client-portal-root-access";
 import { externalAccessQuery, listClientExternalAccess } from "./client-external-access";
 import { listClientServiceAssignments, serviceAssignmentQuery } from "./client-service-assignments";
 import type { Env, StaffPrincipal } from "./types";
@@ -237,8 +238,9 @@ async function clientHubDetail(env: Env, principal: StaffPrincipal, kind: Client
   const context = await resolveDetailContext(env, principal, kind, publicId, sourceId, rootNamespace);
   const workspace = context.root, access = context.access;
   const contactRolesAvailable = projectAlphaContactRolesEnabled(env) && workspace.root_namespace === "business";
-  const [portalIdentities, externalAccess, serviceAssignments, collections, projectAlphaContactRoles] = await Promise.all([
+  const [portalIdentities, portalRootAccess, externalAccess, serviceAssignments, collections, projectAlphaContactRoles] = await Promise.all([
     listPortalIdentityPage(env, principal, { kind: "client", context }, { limit: 5 }),
+    readPortalRootAccess(env, principal, context),
     listClientExternalAccess(env, context, { limit: 5 }),
     listClientServiceAssignments(env, principal, context, { initial: true, limit: 5 }),
     Promise.all(DETAIL_COLLECTIONS.map(async collection => ({ collection,
@@ -261,6 +263,7 @@ async function clientHubDetail(env: Env, principal: StaffPrincipal, kind: Client
     client: { ...workspace, route_kind: clientHubRouteKind(workspace.kind), detail_path: clientHubDetailPath(workspace) },
     contacts: items("businessContacts"),
     portalIdentities,
+    portalRootAccess,
     externalAccess,
     serviceAssignments,
     accounts: items("accounts"),
@@ -297,6 +300,17 @@ function workspaceAccessMutationInput(value: unknown, reactivate: boolean): Work
       && (typeof input.denialId !== "string" || typeof input.expectedUpdatedAt !== "string")))
     throw new HTTPException(400, { message: "Portal workspace access request is invalid" });
   return input as unknown as WorkspaceAccessMutationInput | WorkspaceAccessReactivationInput;
+}
+
+function rootAccessMutationInput(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new HTTPException(400, { message: "Portal root access request is invalid" });
+  const input = value as Record<string, unknown>;
+  if (Object.keys(input).some(key => !["expectedContextVersion", "expectedVersion", "reasonCode"].includes(key))
+    || typeof input.expectedContextVersion !== "string" || typeof input.expectedVersion !== "number"
+    || typeof input.reasonCode !== "string")
+    throw new HTTPException(400, { message: "Portal root access request is invalid" });
+  return input as { expectedContextVersion: string; expectedVersion: number; reasonCode: string };
 }
 
 export function registerClientHubRoutes(app: App): void {
@@ -485,6 +499,20 @@ export function registerClientHubRoutes(app: App): void {
     await verifyContext(c.env, principal, context);
     c.header("Cache-Control", "no-store");
     return c.json(result);
+  });
+  app.post("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/portal-access/:action", async c => {
+    const kind = routeKind(c.req.param("kind"));
+    const action = c.req.param("action");
+    if (!kind || (action !== "revoke" && action !== "restore"))
+      throw new HTTPException(404, { message: "Client not found" });
+    const principal = c.get("principal");
+    const context = await resolveDetailContext(c.env, principal, kind, c.req.param("publicId"),
+      c.req.param("sourceId"), c.req.param("rootNamespace"));
+    const input = rootAccessMutationInput(await readBoundedJson(c.req.raw, 16_384, "Portal root access request"));
+    const result = await mutatePortalRootAccess(c.env, principal, context, { ...input, action },
+      c.req.header("Idempotency-Key") || "", () => verifyContext(c.env, principal, context));
+    c.header("Cache-Control", "no-store");
+    return c.json(result, result.replayed ? 200 : 201);
   });
   app.get("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/external-access", async c => {
     const kind = routeKind(c.req.param("kind"));

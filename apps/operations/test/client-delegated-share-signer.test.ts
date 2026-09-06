@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ClientDelegatedShareSignerRequestV1 } from "@ltds/shared";
 import { readFileSync } from "node:fs";
 import migration from "../../client/migrations/0124_client_delegated_public_shares.sql?raw";
+import rootAccessMigration from "../../client/migrations/0197_portal_root_access_policy.sql?raw";
 import { sha256 } from "../src/worker/crypto";
 import { signClientDelegatedShare } from "../src/worker/client-delegated-share-signer";
 import type { Env } from "../src/worker/types";
@@ -67,6 +68,7 @@ async function fixture(): Promise<Fixture> {
       status TEXT NOT NULL,revoked_at TEXT,UNIQUE(id,workspace_id));
   `);
   await applySql(db, migration);
+  await applySql(db, rootAccessMigration);
   await db.prepare("PRAGMA foreign_keys=ON").run();
   await db.batch([
     db.prepare(`INSERT INTO portal_v2_identities(id,issuer,subject,verified_email,status)
@@ -118,6 +120,7 @@ async function fixture(): Promise<Fixture> {
     DELIVERY_TOKEN_SECRET: "operations-token-secret-value-that-never-leaves",
     DELIVERY_ACCESS_CODE_PEPPER: "operations-access-pepper-value-that-never-leaves",
     CLIENT_DELEGATED_SHARE_SIGNER_ENABLED: "true",
+    CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED: "true",
   } as Env;
   const request: ClientDelegatedShareSignerRequestV1 = {
     protocolVersion: 1,
@@ -207,6 +210,19 @@ describe("private Operations client-delegated share signer", () => {
       .bind(workspaceId, identityId, workspaceId).run();
     await expect(signClientDelegatedShare(env, request))
       .resolves.toEqual({ ok: false, protocolVersion: 1, code: "denied" });
+  });
+
+  it("does not mint a bearer after the exact workspace root is revoked", async () => {
+    const { db, env, request } = await fixture();
+    await db.prepare(`INSERT INTO portal_v2_root_access_policies
+      (projection_source_id,root_type,root_public_id,state,version,reason_code,
+       created_by_staff_id,updated_by_staff_id,updated_at)
+      VALUES ('project-alpha:primary','organization','pa-org-one','revoked',1,
+        'security_concern','staff-one','staff-one',datetime('now'))`).run();
+    await expect(signClientDelegatedShare(env, request))
+      .resolves.toEqual({ ok: false, protocolVersion: 1, code: "denied" });
+    expect(await db.prepare("SELECT COUNT(*) count FROM client_delegated_shares")
+      .first<number>("count")).toBe(0);
   });
 
   it("denies stale or revoked delegation, binding and target versions", async () => {

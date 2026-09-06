@@ -116,6 +116,7 @@ export type Env = Omit<
   CLIENT_REQUEST_TRIAGE_TO?: string;
   /** Default-off staff mutation surface for portal-v2 identity denials. */
   CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED?: string;
+  CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED?: string;
   /** Mirrors the client Worker denylist rollout for safe grant recipient checks. */
   CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED?: string;
   CLIENT_PORTAL_OPERATIONS_MANAGEMENT_ENABLED?: string;

@@ -458,7 +458,7 @@ hostname is a Project Alpha machine-ingress route. The Client Worker rejects
 external `/api/internal/*` requests; legacy public-share and same-origin session
 routes remain admitted.
 
-The reviewed receiver-only production configuration sets
+The historical receiver-only staging configuration set
 `PROJECT_ALPHA_PORTAL_SYNC_ENABLED=true`,
 `PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED=false`, and
 `CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED=true` only after additive migrations
@@ -466,10 +466,10 @@ The reviewed receiver-only production configuration sets
 tests pass. The repository-owned release checks must verify that the Ops Sync
 service binding targets the reviewed Client Worker named entrypoint and that no
 direct Project Alpha portal credential is required. Opening the internal
-entrypoint still does not enable client
-hierarchy reads: keep
-`CLIENT_PORTAL_HIERARCHY_V2_ENABLED=false` through shadow parity and the
-separate authorization cutover. Never reuse the catalog application key,
+entrypoint does not itself enable client hierarchy reads. The current reviewed
+`default-on-eligibility` profile enables hierarchy reads, automatic eligibility,
+denylist enforcement, and deny-policy management together in both Workers only
+after that shadow parity gate. Never reuse the catalog application key,
 audience, or HMAC secret. Project Alpha retains only the Ops Sync machine
 credentials; Operations owns the private Client Worker binding.
 

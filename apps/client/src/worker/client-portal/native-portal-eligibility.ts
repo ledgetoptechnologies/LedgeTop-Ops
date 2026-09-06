@@ -7,6 +7,7 @@ import {
   portalSourceAuthoritiesReady,
 } from '../project-alpha-portal-authority';
 import { portalAutomaticEligibilityEnabled } from './portal-automatic-eligibility';
+import { portalRootAccessAllowedSql } from './workspace-access-policy';
 
 /** The existing opt-in PA principal policy, without a legacy account bridge.
  * Email selects an explicit signed principal, never a business contact. */
@@ -21,7 +22,8 @@ export async function bindNativePortalEligibility(env: PortalAuthorizationEnv, p
     JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=w.id
     JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id
       AND generation.workspace_id=w.id AND generation.status='active' AND generation.complete=1
-    WHERE w.status='active' AND w.legacy_account_id IS NULL AND ${portalSourceReadableSql('w.project_alpha_source_id')}
+    WHERE w.status='active' AND ${portalRootAccessAllowedSql(env.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED === 'true', 'w')}
+      AND w.legacy_account_id IS NULL AND ${portalSourceReadableSql('w.project_alpha_source_id')}
       AND p.status='active' AND lower(p.email_hint)=?
       AND (p.identity_id IS NULL OR p.identity_id=(SELECT id FROM portal_v2_identities WHERE issuer=? AND subject=?))
       AND NOT EXISTS(SELECT 1 FROM pa_portal_principals other WHERE other.workspace_id=p.workspace_id
@@ -49,7 +51,8 @@ export async function bindNativePortalEligibility(env: PortalAuthorizationEnv, p
       AND revoked_at IS NULL AND lower(verified_email)=?`;
     const identityArgs = [principal.issuer,principal.subject,email];
     const live = `(${guard.sql}) AND EXISTS(SELECT 1 FROM pa_portal_principals p
-      JOIN portal_v2_workspaces w ON w.id=p.workspace_id AND w.status='active' AND w.legacy_account_id IS NULL
+      JOIN portal_v2_workspaces w ON w.id=p.workspace_id AND w.status='active'
+        AND ${portalRootAccessAllowedSql(env.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED === 'true', 'w')} AND w.legacy_account_id IS NULL
       JOIN pa_portal_workspace_sources map ON map.workspace_id=w.id AND map.projection_source_id=w.project_alpha_source_id
       JOIN portal_v2_directory_checkpoints cp ON cp.workspace_id=w.id
       JOIN portal_v2_directory_generations g ON g.id=cp.active_generation_id AND g.workspace_id=w.id AND g.complete=1 AND g.status='active'

@@ -90,6 +90,8 @@ describe('native delivery staging, exact authority and controls — migrated D1'
     await db.batch(splitD1MigrationStatements(readFileSync(new URL('../../client/migrations/0161_portal_delivery_notification_batches.sql',import.meta.url),'utf8')).map(sql=>db.prepare(sql)));
     await db.batch(splitD1MigrationStatements(readFileSync(new URL('../../client/migrations/0162_portal_source_authorities.sql',import.meta.url),'utf8')).map(sql=>db.prepare(sql)));
     await db.batch(splitD1MigrationStatements(readFileSync(new URL('../../client/migrations/0182_portal_delivery_notification_source_ready.sql',import.meta.url),'utf8')).map(sql=>db.prepare(sql)));
+    await db.batch(splitD1MigrationStatements(readFileSync(new URL('../../client/migrations/0197_portal_root_access_policy.sql',import.meta.url),'utf8')).map(sql=>db.prepare(sql)));
+    env.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED='true';
   },120_000);
   afterAll(async()=>{await mf?.dispose();});
   beforeEach(async()=>{
@@ -201,6 +203,21 @@ describe('native delivery staging, exact authority and controls — migrated D1'
     await processPortalDeliveryNotificationBatches(env);expect(mailer.sendNotificationMail).toHaveBeenCalledTimes(1);
     const result=await readNativeDeliveryNotification(env,`nb_${row.id}`,staff);expect(result.item).toMatchObject({kind:'portal_delivery',workspaceName:'Workspace dispatch',canCancel:false,canSendNow:false});
     expect(result.item).not.toHaveProperty('addedCount');expect(JSON.stringify(result)).not.toContain('r2_prefix');
+  });
+
+  it('suppresses a queued notification when the client root is revoked before publication',async()=>{
+    const f=await fixture('root-revoked');await create(f);await due(f);
+    const root=await db.prepare(`SELECT project_alpha_source_id,root_type,
+      COALESCE(pa_organization_public_id,pa_client_public_id) root_public_id
+      FROM portal_v2_workspaces WHERE id=?`).bind(f.workspace)
+      .first<{project_alpha_source_id:string;root_type:string;root_public_id:string}>();
+    await db.prepare(`INSERT INTO portal_v2_root_access_policies
+      (projection_source_id,root_type,root_public_id,state,reason_code,created_by_staff_id,updated_by_staff_id)
+      VALUES(?,?,?,'revoked','security_hold',?,?)`)
+      .bind(root!.project_alpha_source_id,root!.root_type,root!.root_public_id,staff.id,staff.id).run();
+    await processPortalDeliveryNotificationBatches(env);
+    expect(mailer.sendNotificationMail).not.toHaveBeenCalled();
+    expect((await batch(f)).status).toBe('suppressed');
   });
   it('round-robins due batches by registered source so one noisy source cannot consume the ten-send window',async()=>{
     const noisySource=createCatalogSourceContext('project-alpha:fair-noisy');

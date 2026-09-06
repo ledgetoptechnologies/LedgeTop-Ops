@@ -4,6 +4,7 @@ import { Miniflare } from "miniflare";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { applyConnectorSchema, registerVisibleTestSource } from "./helpers/project-alpha-connectors";
 import { applyBusinessPartySchema, applyBusinessPartyStaffSchema } from "./helpers/business-parties";
+import rootAccessMigration from "../../client/migrations/0197_portal_root_access_policy.sql?raw";
 
 const acl = vi.hoisted(() => ({
   sqlScope: vi.fn(async () => ({ global: true, deniedGlobal: false })),
@@ -196,10 +197,12 @@ async function fixture() {
     INSERT INTO shares VALUES('share-one','Delivered folder','clients/standalone/project-one/',datetime('now'));
     INSERT INTO client_delivery_grants VALUES('account-standalone','project-one','share-one',datetime('now'),NULL,NULL);
   `);
+  await applySql(delivery, rootAccessMigration.replace(/^\s*--.*$/gm, "").replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, ""));
   const app = new Hono<{ Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } }>();
   app.use("*", async (c, next) => { c.set("principal", principal); c.set("administrator", true); await next(); });
   registerClientHubRoutes(app);
-  const env = { OPS_DB: ops, DELIVERY_DB: delivery } as Env;
+  const env = { OPS_DB: ops, DELIVERY_DB: delivery, CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED: "true",
+    CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: "true", CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED: "true" } as Env;
   return { app, env, ops, delivery };
 }
 
@@ -223,7 +226,74 @@ async function readCollection(app: Awaited<ReturnType<typeof fixture>>["app"], e
   return response.json() as Promise<CollectionResponse>;
 }
 
+function interceptRootCommit(database: D1Database, beforeCommit: () => Promise<void>): D1Database {
+  let fired = false;
+  return new Proxy(database, { get(target, property) {
+    if (property === "withSession") return (...args: Parameters<D1Database["withSession"]>) => {
+      const session = target.withSession(...args);
+      return new Proxy(session, { get(current, key) {
+        if (key === "prepare") return (sql: string) => {
+          const statement = current.prepare(sql);
+          if (!sql.includes("SELECT version FROM portal_v2_root_access_policy_lock")) return statement;
+          return new Proxy(statement, { get(prepared, method) {
+            if (method === "first") return async (column?: string) => {
+              const result = column === undefined ? await prepared.first() : await prepared.first(column);
+              if (!fired) { fired = true; await beforeCommit(); }
+              return result;
+            };
+            const value = Reflect.get(prepared, method, prepared);
+            return typeof value === "function" ? value.bind(prepared) : value;
+          } });
+        };
+        const value = Reflect.get(current, key, current);
+        return typeof value === "function" ? value.bind(current) : value;
+      } });
+    };
+    const value = Reflect.get(target, property, target);
+    return typeof value === "function" ? value.bind(target) : value;
+  } });
+}
+
+async function rootAccessContext(app: Awaited<ReturnType<typeof fixture>>["app"], env: Env) {
+  const response = await app.request(organizationPath, {}, env);
+  expect(response.status).toBe(200);
+  return response.json() as Promise<{ contextVersion: string; portalRootAccess: { version: number } }>;
+}
+
+async function revokeRoot(app: Awaited<ReturnType<typeof fixture>>["app"], env: Env,
+  current: Awaited<ReturnType<typeof rootAccessContext>>, key: string) {
+  return app.request(`${organizationPath}/portal-access/revoke`, { method: "POST", headers: {
+    "Content-Type": "application/json", "Idempotency-Key": key,
+  }, body: JSON.stringify({ expectedContextVersion: current.contextVersion,
+    expectedVersion: current.portalRootAccess.version, reasonCode: "security_hold" }) }, env);
+}
+
 describe("Client Hub bounded detail collections", () => {
+  it("fences a portal-root revoke when team.view is denied after resolution but before commit", async () => {
+    const { app, env, delivery } = await fixture(), current = await rootAccessContext(app, env);
+    const raced = { ...env, DELIVERY_DB: interceptRootCommit(env.DELIVERY_DB, async () => {
+      acl.sqlScope.mockImplementation(async (...args: unknown[]) => ({
+        global: args[2] !== "team.view", deniedGlobal: args[2] === "team.view",
+      }));
+    }) } as Env;
+    expect((await revokeRoot(app, raced, current, "root-team-race-0001")).status).toBe(409);
+    expect(await delivery.prepare("SELECT count(*) count FROM portal_v2_root_access_policies").first("count")).toBe(0);
+    expect(await delivery.prepare("SELECT count(*) count FROM portal_v2_root_access_policy_audit").first("count")).toBe(0);
+    expect(await delivery.prepare("SELECT count(*) count FROM portal_v2_root_access_policy_mutations").first("count")).toBe(0);
+  });
+
+  it("fences a portal-root revoke when the source mapping changes after resolution but before commit", async () => {
+    const { app, env, ops, delivery } = await fixture(), current = await rootAccessContext(app, env);
+    const raced = { ...env, DELIVERY_DB: interceptRootCommit(env.DELIVERY_DB, async () => {
+      await ops.prepare("UPDATE pa_organizations SET payload_json=? WHERE id='pa-org'")
+        .bind(JSON.stringify({ public_id: replacementUuid })).run();
+    }) } as Env;
+    expect((await revokeRoot(app, raced, current, "root-map-race-0001")).status).toBe(409);
+    expect(await delivery.prepare("SELECT count(*) count FROM portal_v2_root_access_policies").first("count")).toBe(0);
+    expect(await delivery.prepare("SELECT count(*) count FROM portal_v2_root_access_policy_audit").first("count")).toBe(0);
+    expect(await delivery.prepare("SELECT count(*) count FROM portal_v2_root_access_policy_mutations").first("count")).toBe(0);
+  });
+
   it.each(["link", "unlink"] as const)("reads current party metadata after delayed identity hydration and a concurrent %s", async action => {
     const { app, env, ops } = await fixture();
     await registerVisibleTestSource(ops, "project-alpha:secondary", "Second company");

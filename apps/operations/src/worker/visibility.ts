@@ -23,6 +23,14 @@ const EMPLOYEE_PERMISSIONS = new Set<Permission>([
   "delivery.share.audit",
   "team.view",
   "administration.view",
+  "viewer.view",
+  "viewer.manage",
+  "viewer.share.create",
+  "viewer.share.revoke",
+  "viewer.datasets.manage",
+  "viewer.processing.manage",
+  "viewer.publish",
+  "viewer.storage.purge",
 ]);
 
 export function employeePermissions(permissions: Permission[], administrator: boolean): Permission[] {

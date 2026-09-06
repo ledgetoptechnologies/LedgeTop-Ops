@@ -9,6 +9,7 @@ import { readNativeTargetScopes,type NativeTargetScopes } from './native-portal-
 import { nativePortalScopesAllowed,resolveNativePortalWorkspaceReadContext,type NativePortalReadContext } from './workspace-v2';
 import { nativeFeedbackTargetSchema,type NativeFeedbackAuthorization,type NativeFeedbackRecord,type NativeFeedbackTarget } from './native-feedback-store';
 import { portalProjectionSourceGuard } from '../project-alpha-portal-authority';
+import { portalRootAccessAllowedSql } from './workspace-access-policy';
 
 const opaque=z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/);
 export const nativeFeedbackTargetInputSchema=z.discriminatedUnion('kind',[
@@ -32,7 +33,7 @@ function sameGrant(target:NativeFeedbackTarget,grant:Grant){return JSON.stringif
 const visibleFile=`NOT EXISTS(SELECT 1 FROM delivery_tombstones tombstone WHERE tombstone.restored_at IS NULL
   AND (tombstone.physical_key=file.r2_key OR (tombstone.tombstone_kind='prefix' AND substr(file.r2_key,1,length(tombstone.physical_key))=tombstone.physical_key)))`;
 
-function authorizationGuard(context:NativePortalReadContext,principal:VerifiedClientPrincipal,target:NativeFeedbackTarget,grant:Grant|null,available:boolean){
+function authorizationGuard(env:Env,context:NativePortalReadContext,principal:VerifiedClientPrincipal,target:NativeFeedbackTarget,grant:Grant|null,available:boolean){
   // Workspace-scoped entitlements authorize every descendant. Keep the exact
   // target lineage as well so narrower denies still win in the same guard.
   const scopes=[...new Set([`workspace:${context.workspaceId}`,...target.scopeProof.map(row=>`${row.entityType}:${row.publicId}`)])];
@@ -55,6 +56,7 @@ function authorizationGuard(context:NativePortalReadContext,principal:VerifiedCl
     JOIN portal_v2_directory_entities root ON root.workspace_id=workspace.id AND root.generation_id=generation.id AND root.active=1
       AND root.entity_type=workspace.root_type AND root.public_id=COALESCE(workspace.pa_organization_public_id,workspace.pa_client_public_id)
     WHERE workspace.id=? AND workspace.project_alpha_source_id=? AND workspace.legacy_account_id IS NULL AND workspace.status='active'
+      AND ${portalRootAccessAllowedSql(env.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED === 'true','workspace')}
       AND workspace.root_type=? AND COALESCE(workspace.pa_organization_public_id,workspace.pa_client_public_id)=?
       AND identity.issuer=? AND identity.subject=? AND membership.source_type='project_alpha' AND membership.source_version=?
       AND lower(identity.verified_email)=lower(?) AND lower(principal_record.email_hint)=lower(?))`);
@@ -165,7 +167,7 @@ export async function resolveNativeFeedbackTarget(env:Env,principal:VerifiedClie
       ||(grant&&!sameGrant(stored,grant)))return unavailable();}
   const canonical=stored??target,available=value.kind!=='file'||JSON.stringify(canonical.file)===JSON.stringify(target.file);
   return {context:{sourceId:context.sourceId,workspaceId:context.workspaceId,identityId:context.identityId,issuer:principal.issuer,subject:principal.subject},
-    target:canonical,guard:authorizationGuard(context,principal,canonical,grant,available),available,contextVersion:context.contextVersion,grant};
+    target:canonical,guard:authorizationGuard(env,context,principal,canonical,grant,available),available,contextVersion:context.contextVersion,grant};
 }
 
 export async function reauthorizeNativeFeedbackRecipient(env:Env,record:NativeFeedbackRecord):Promise<ResolvedNativeFeedbackTarget|null>{

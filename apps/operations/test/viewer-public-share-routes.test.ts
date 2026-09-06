@@ -177,6 +177,24 @@ describe("Operations Viewer public-share routes", () => {
     expect(outbound).not.toHaveBeenCalled();
   });
 
+  it("blocks a direct known-model share mutation when base Viewer access is explicitly denied", async () => {
+    const outbound = vi.fn();
+    vi.stubGlobal("fetch", outbound);
+    mocks.sqlScope.mockImplementation(async (_env, _principal, permission) => ({
+      global: permission !== "viewer.view", deniedGlobal: permission === "viewer.view",
+      divisions: [], assigned: false, own: false, deniedDivisions: [],
+    }));
+    const response = await worker.fetch(request("/api/viewer/models/model-one/shares", {
+      method: "POST", headers: { "Idempotency-Key": "viewer-public-share-base-deny-0001" },
+      body: JSON.stringify({ expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() }),
+    }), environment() as never, executionCtx);
+    expect(response.status).toBe(403);
+    expect(mocks.sqlScope).toHaveBeenCalledWith(expect.anything(), principal, "viewer.view");
+    expect(mocks.sqlScope).toHaveBeenCalledWith(expect.anything(), principal, "viewer.share.create");
+    expect(outbound).not.toHaveBeenCalled();
+    expect(mocks.auditStatement).not.toHaveBeenCalled();
+  });
+
   it("preserves Viewer idempotency conflicts and does not write a misleading audit event", async () => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(String(input));

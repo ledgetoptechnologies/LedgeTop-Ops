@@ -186,14 +186,36 @@ Operations routes require an authenticated staff session, mutation CSRF, and
 the exact global permission:
 
 - `GET /api/viewer` and session creation require `viewer.view`;
-- association create/refresh/revoke requires `viewer.manage`;
+- every staff mutation requires `viewer.view` as the base gate in addition to
+  its narrower action permission, so revoking model access also blocks direct
+  known-ID requests rather than merely hiding navigation;
+- association create/refresh/revoke and client model grants require
+  `viewer.manage`;
 - `GET /api/viewer/models/:modelId/shares` requires `viewer.view`;
 - `POST /api/viewer/models/:modelId/shares` requires the exact global
   `viewer.share.create` permission;
 - `DELETE /api/viewer/shares/:shareId` requires the exact global
   `viewer.share.revoke` permission;
-- `viewer.import` remains separately reserved; broad project, Viewer-manage,
-  or integration permissions do not imply any public-share or import right.
+- dataset/project writes and imports require `viewer.datasets.manage`;
+- processing, GCP, provider, and preset writes require
+  `viewer.processing.manage`;
+- publication requires `viewer.publish`, while permanent purge requires the
+  owner-sensitive `viewer.storage.purge` permission;
+- `viewer.import` is a legacy reserved permission and is deliberately not
+  exposed in Team controls. The enforced import authority is
+  `viewer.datasets.manage`; broad project, Viewer-manage, or integration
+  permissions do not imply any public-share or import right.
+
+Administrators assign these capabilities in **Administration → Team** under
+the separate **3D Models access** group. Saved unchecked controls create global
+explicit denies, which continue to override Project Alpha roles and local role
+allows. Non-administrator sessions retain only Viewer permissions actually
+present in their effective ACL. Protected-owner and self-edit restrictions are
+unchanged. `viewer.storage.purge` can be enabled only for a current global
+owner; this Team surface cannot promote an operator into destructive storage
+authority. Client portal model access is separate and continues to use signed
+workspace/project entitlements and Viewer client grants rather than staff Team
+controls.
 
 Every share mutation also passes the common same-origin CSRF middleware,
 requires a bounded `Idempotency-Key`, and creates a redacted Operations audit

@@ -108,6 +108,7 @@ import {
   createIncomingStaffRouter,
   dispatchIncomingPublicRequest,
 } from "./incoming";
+import { processIncomingUploadNotifications } from "./incoming-upload-notifications";
 import { incomingUploadsCapability } from "./incoming-policy";
 import { servePdfSourceFile, serveSourceFile } from "./source-file";
 import { directDeliveryUploadsCapability } from "./direct-upload-policy";
@@ -2900,17 +2901,21 @@ app.get("/api/team/staff", async (c) => {
   }
   const where = conditions.length ? conditions.join(" AND ") : "1=1";
   const result = await c.env.OPS_DB.prepare(
-    `SELECT s.id,s.email,s.display_name,s.status,s.last_seen_at,s.provisioning_source,s.sync_protected,GROUP_CONCAT(DISTINCT d.name) divisions,GROUP_CONCAT(DISTINCT r.name) roles,(SELECT GROUP_CONCAT(permission_key) FROM (SELECT rp.permission_key FROM staff_role_assignments inherited_assignment JOIN role_permissions rp ON rp.role_id=inherited_assignment.role_id WHERE inherited_assignment.staff_id=s.id UNION SELECT rp.permission_key FROM local_staff_role_assignments local_assignment JOIN role_permissions rp ON rp.role_id=local_assignment.role_id WHERE local_assignment.staff_id=s.id)) inherited_permissions,GROUP_CONCAT(DISTINCT CASE WHEN po.effect='allow' AND po.scope='global' THEN po.permission_key END) direct_allows,GROUP_CONCAT(DISTINCT CASE WHEN po.effect='deny' AND po.scope='global' THEN po.permission_key END) global_denies FROM staff_users s LEFT JOIN staff_divisions sd ON sd.staff_id=s.id LEFT JOIN divisions d ON d.id=sd.division_id LEFT JOIN staff_role_assignments a ON a.staff_id=s.id LEFT JOIN roles r ON r.id=a.role_id LEFT JOIN staff_permission_overrides po ON po.staff_id=s.id WHERE ${where} GROUP BY s.id ORDER BY s.display_name`,
+    `SELECT s.id,s.email,s.display_name,s.status,s.last_seen_at,s.provisioning_source,s.sync_protected,
+      EXISTS(SELECT 1 FROM staff_role_assignments owner_assignment WHERE owner_assignment.staff_id=s.id
+        AND owner_assignment.role_id='role-owner' AND owner_assignment.scope='global') owner_role,
+      GROUP_CONCAT(DISTINCT d.name) divisions,GROUP_CONCAT(DISTINCT r.name) roles,(SELECT GROUP_CONCAT(permission_key) FROM (SELECT rp.permission_key FROM staff_role_assignments inherited_assignment JOIN role_permissions rp ON rp.role_id=inherited_assignment.role_id WHERE inherited_assignment.staff_id=s.id UNION SELECT rp.permission_key FROM local_staff_role_assignments local_assignment JOIN role_permissions rp ON rp.role_id=local_assignment.role_id WHERE local_assignment.staff_id=s.id)) inherited_permissions,GROUP_CONCAT(DISTINCT CASE WHEN po.effect='allow' AND po.scope='global' THEN po.permission_key END) direct_allows,GROUP_CONCAT(DISTINCT CASE WHEN po.effect='deny' AND po.scope='global' THEN po.permission_key END) global_denies FROM staff_users s LEFT JOIN staff_divisions sd ON sd.staff_id=s.id LEFT JOIN divisions d ON d.id=sd.division_id LEFT JOIN staff_role_assignments a ON a.staff_id=s.id LEFT JOIN roles r ON r.id=a.role_id LEFT JOIN staff_permission_overrides po ON po.staff_id=s.id WHERE ${where} GROUP BY s.id ORDER BY s.display_name`,
   )
     .bind(...values)
     .all<any>();
   return c.json({
     staff: result.results.map((row) => {
-      const { inherited_permissions, direct_allows, global_denies, ...roster } =
+      const { inherited_permissions, direct_allows, global_denies, owner_role, ...roster } =
         row;
       return administrator
         ? {
             ...roster,
+            owner_role: Boolean(owner_role),
             localControls: effectiveStaffAccessControls({
               inheritedPermissions: inherited_permissions,
               directAllows: direct_allows,
@@ -2927,7 +2932,10 @@ app.put("/api/admin/staff/:id/access-controls", async (c) => {
   await requireGlobal(c.env, principal, "roles.manage");
   const value = await body(c, staffAccessSchema);
   const target = await c.env.OPS_DB.prepare(
-    "SELECT id,email,status,sync_protected FROM staff_users WHERE id=?",
+    `SELECT staff.id,staff.email,staff.status,staff.sync_protected,
+      EXISTS(SELECT 1 FROM staff_role_assignments assignment WHERE assignment.staff_id=staff.id
+        AND assignment.role_id='role-owner' AND assignment.scope='global') owner_role
+      FROM staff_users staff WHERE staff.id=?`,
   )
     .bind(c.req.param("id"))
     .first<{
@@ -2935,6 +2943,7 @@ app.put("/api/admin/staff/:id/access-controls", async (c) => {
       email: string;
       status: string;
       sync_protected: number;
+      owner_role: number;
     }>();
   if (!target || !["active", "inactive"].includes(target.status))
     throw new HTTPException(404, { message: "Staff member not found" });
@@ -2945,6 +2954,10 @@ app.put("/api/admin/staff/:id/access-controls", async (c) => {
   if (target.sync_protected || target.id === "staff-beau-koltz")
     throw new HTTPException(409, {
       message: "Protected staff access controls cannot be changed",
+    });
+  if (value.viewerStoragePurge && !target.owner_role)
+    throw new HTTPException(403, {
+      message: "Permanent Viewer storage purge is restricted to a global owner",
     });
   const statements = [] as ReturnType<Env["OPS_DB"]["prepare"]>[];
   for (const [control, permissions] of Object.entries(
@@ -3199,6 +3212,7 @@ async function scheduled(
     try {
       await Promise.all([
         processClientPortalRequestNotifications(env),
+        processIncomingUploadNotifications(env),
         processClientFolderGrantNotifications(env),
         processClientFolderChangeNotifications(env),
         processClientFeedbackNotifications(env),

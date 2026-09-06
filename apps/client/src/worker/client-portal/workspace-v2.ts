@@ -14,9 +14,11 @@ import { readPrimaryTermRetentionGrants } from './authenticated-delivery-grants'
 import { localOrPrimaryAlphaReference, primaryAlphaReference, primaryWorkspaceAccount, primaryLegacyWorkspaceMembership } from "./project-alpha-source";
 import {captureWorkspaceInvitationDelegation} from './project-invitation-delegation';
 import { portalAutomaticEligibilityEnabled } from './portal-automatic-eligibility';
+import { portalRootAccessAllowedSql } from './workspace-access-policy';
 export type PortalAuthorizationEnv = Pick<ClientEnv, "DELIVERY_DB" | "CLIENT_PORTAL_HIERARCHY_V2_ENABLED" |
   "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED" | "CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED" |
   "CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED" |
+  "CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED" |
   "PROJECT_ALPHA_PORTAL_HMAC_SECRET" | "PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_SECRET" |
   "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED" | "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED" |
   "CLIENT_PORTAL_ACCESS_ENROLLMENT_READY" | "AUTHENTICATED_DELIVERY_GRANTS_ENABLED" |
@@ -347,6 +349,7 @@ async function resolveGlobalIdentity(
           workspace.legacy_account_id
         FROM pa_portal_principals principal
         JOIN portal_v2_workspaces workspace ON workspace.id=principal.workspace_id AND workspace.status='active'
+          AND ${portalRootAccessAllowedSql(env.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED === 'true', 'workspace')}
           AND ${primaryAlphaReference("workspace")}
           AND workspace.legacy_account_id IS NOT NULL
         JOIN client_accounts account ON account.id=workspace.legacy_account_id AND account.status='active'
@@ -473,7 +476,7 @@ async function activeWorkspace(
     JOIN portal_v2_workspace_memberships m
       ON m.workspace_id=w.id AND m.identity_id=? AND m.status='active' AND m.revoked_at IS NULL
       AND (m.expires_at IS NULL OR datetime(m.expires_at)>datetime('now'))
-    WHERE w.id=? AND w.status='active' AND ${primaryWorkspaceAccount("w")}
+    WHERE w.id=? AND w.status='active' AND ${portalRootAccessAllowedSql(env.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED === 'true', 'w')} AND ${primaryWorkspaceAccount("w")}
       AND ${primaryLegacyWorkspaceMembership("w", "m")}`)
     .bind(identityId, workspaceId)
     .first<WorkspaceRow>();
@@ -967,7 +970,8 @@ export async function resolveNativePortalWorkspaceReadContext(
       AND generation.workspace_id=workspace.id AND generation.status='active' AND generation.complete=1
     JOIN portal_v2_directory_entities root ON root.workspace_id=workspace.id AND root.generation_id=generation.id
       AND root.entity_type=workspace.root_type AND root.public_id=COALESCE(workspace.pa_organization_public_id,workspace.pa_client_public_id) AND root.active=1
-    WHERE workspace.id=? AND workspace.status='active' AND workspace.legacy_account_id IS NULL
+    WHERE workspace.id=? AND workspace.status='active' AND ${portalRootAccessAllowedSql(env.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED === 'true', 'workspace')}
+      AND workspace.legacy_account_id IS NULL
       AND ${portalSourceReadableSql('workspace.project_alpha_source_id')} AND lower(person.verified_email)=?
       AND (membership.source_type<>'project_alpha' OR EXISTS(SELECT 1 FROM pa_portal_principals current_principal
         WHERE current_principal.workspace_id=workspace.id AND current_principal.identity_id=person.id
@@ -1081,6 +1085,7 @@ export interface EffectiveWorkspaceRequestMutationProof {
   targetScopes: string[];
   relationsEnabled: boolean;
   denylistEnabled: boolean;
+  rootAccessPolicyEnabled: boolean;
   projectAccessTermsReady: boolean;
   allowedRequestEntitlementIds: string[];
   evaluatedAt: string;
@@ -1134,6 +1139,7 @@ export async function readEffectiveWorkspaceRequestProof(
       AND membership.workspace_id=? AND membership.status='active' AND membership.revoked_at IS NULL
       AND (membership.expires_at IS NULL OR datetime(membership.expires_at)>datetime('now'))
     JOIN portal_v2_workspaces workspace ON workspace.id=membership.workspace_id AND workspace.status='active'
+      AND ${portalRootAccessAllowedSql(env.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED === 'true', 'workspace')}
       AND workspace.legacy_account_id IS NOT NULL AND ${primaryWorkspaceAccount("workspace")}
       AND ${primaryLegacyWorkspaceMembership("workspace", "membership")}
     JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=workspace.id
@@ -1285,6 +1291,7 @@ export async function readEffectiveWorkspaceRequestProof(
       targetScopes: [...targetScopesForMutation].sort(),
       relationsEnabled: portalHierarchyRelationsEnabled(env),
       denylistEnabled: portalIdentityDenylistEnabled(env),
+      rootAccessPolicyEnabled: env.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED === 'true',
       projectAccessTermsReady: requestTermsReady,
       allowedRequestEntitlementIds: rules.results.filter(rule => rule.id && rule.capability === "request.create"
         && rule.effect === "allow" && targetScopesForMutation.has(`${rule.scope_type}:${rule.scope_public_id}`)
@@ -1407,6 +1414,7 @@ export function effectiveWorkspaceRequestMutationGuardSql(
       JOIN portal_v2_workspaces workspace ON workspace.id=membership.workspace_id
         AND workspace.status='active' AND workspace.legacy_account_id=? AND ${primaryWorkspaceAccount("workspace")}
         AND ${primaryLegacyWorkspaceMembership("workspace", "membership")}
+        AND ${portalRootAccessAllowedSql(proof.rootAccessPolicyEnabled, "workspace")}
       JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=workspace.id
         AND checkpoint.active_generation_id=? AND checkpoint.source_sequence=?
       JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id
@@ -1465,7 +1473,8 @@ export async function listPortalWorkspaces(
   const candidates = await portalDb(env).prepare(`
     SELECT w.id,w.root_type,w.pa_organization_public_id,w.pa_client_public_id,w.display_name
     FROM portal_v2_workspace_memberships m
-    JOIN portal_v2_workspaces w ON w.id=m.workspace_id AND w.status='active' AND w.legacy_account_id IS NOT NULL AND ${primaryWorkspaceAccount("w")}
+    JOIN portal_v2_workspaces w ON w.id=m.workspace_id AND w.status='active' AND ${portalRootAccessAllowedSql(env.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED === 'true', 'w')}
+      AND w.legacy_account_id IS NOT NULL AND ${primaryWorkspaceAccount("w")}
       AND ${primaryLegacyWorkspaceMembership("w", "m")}
     WHERE m.identity_id=? AND m.status='active' AND m.revoked_at IS NULL
       AND (m.expires_at IS NULL OR datetime(m.expires_at)>datetime('now'))
@@ -1495,7 +1504,8 @@ export async function listPortalWorkspaces(
       FROM portal_v2_workspace_memberships m JOIN portal_v2_workspaces w ON w.id=m.workspace_id
       WHERE m.identity_id=? AND m.status='active' AND m.revoked_at IS NULL
         AND (m.expires_at IS NULL OR datetime(m.expires_at)>datetime('now'))
-        AND w.status='active' AND w.legacy_account_id IS NULL AND ${portalSourceReadableSql('w.project_alpha_source_id')} ORDER BY w.id LIMIT 33`)
+        AND w.status='active' AND ${portalRootAccessAllowedSql(env.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED === 'true', 'w')} AND w.legacy_account_id IS NULL
+        AND ${portalSourceReadableSql('w.project_alpha_source_id')} ORDER BY w.id LIMIT 33`)
       .bind(identity.id).all<{id:string}>();
     if (native.results.length > 32) return [];
     for (const row of native.results) {

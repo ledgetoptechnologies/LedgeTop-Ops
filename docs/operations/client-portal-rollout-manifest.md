@@ -92,10 +92,17 @@ emergency operation, not the ordinary rollback for additive migrations.
 2. Apply Project Alpha producer migrations only after the Project Alpha branch
    has been approved and rebased on current main. Preserve onboarding,
    approvals, projects, contracts, and documents.
-3. For the current default-on release, confirm Client migrations through `0195`
+3. For the current default-on release, confirm Client migrations through `0198`
    and Operations through `0052`, plus Project Alpha `0083`. The populated
    `0195` upgrade must prove stale bootstrap authority is invalidated while
-   signed native successors and public-link records are preserved.
+   signed native successors and public-link records are preserved. `0197` adds
+   the Operations-owned root access overlay. Apply it before either
+   Worker enables `CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED`; this lets an
+   administrator revoke an organization or standalone-client workspace without
+   deleting projected memberships, and later Project Alpha sync cannot clear it.
+   `0198` adds the incoming-upload owner-notification outbox required by the
+   upload completion transaction. Apply it before deploying the Operations
+   Worker so a completed upload cannot fail while recording its notification.
 4. Preserve the exact Project Alpha-to-Ops-Sync connector envelope. Configure
    the private Ops-Sync-to-Client Worker binding and named entrypoint on the
    Operations side only. Do not add another Project Alpha destination, a second
@@ -115,7 +122,7 @@ without manually creating workspace memberships. Repeat for existing clients
 through bounded historical reconciliation. Prove primary and secondary sources
 independently, including primary-native resource routing and legacy compatibility.
 
-Activate the four coordinated eligibility/deny flags only after unique-email,
+Activate the five coordinated eligibility/deny/root-policy flags only after unique-email,
 duplicate-email, invalid-email, unclassified, administrator-revoked, reparented,
 archived, and restored cases pass together. Once the connection is activated,
 all eligible clients are default-on; there is no per-client pilot enrollment
@@ -124,10 +131,10 @@ invitation or announcement emails, and portal eligibility does not grant access
 to unshared folders.
 
 The repository-owned deployment gate reads the fixed, committed
-`scripts/client-portal-release-profile.json`. Its current `receiver-only`
-profile leaves production flags untouched. A later reviewed activation commit
-must explicitly select `default-on-eligibility` with `schemaVersion: 1` and
-set the four flags above exactly true in both Worker configurations. The gate
+`scripts/client-portal-release-profile.json`. The current
+`default-on-eligibility` profile explicitly selects the reviewed activation
+state with `schemaVersion: 1` and sets the five flags above exactly true in
+both Worker configurations. The gate
 rejects partial/mixed bundles and keeps invitation, authenticated-delivery, and
 project-access-expiry mail disabled. It retains all receiver secret, ingress,
 and unrelated Client capability checks. Root Node tests enforce the same
@@ -138,8 +145,9 @@ versions/flags and Operations deny-management readiness require separate
 readback before Client activation. See the explicit profile procedure in
 [the activation runbook](project-alpha-portal-activation.md). No paused profile
 exists; a normal reconciliation pause retaining deny/recovery reads needs a
-separate reviewed gate/configuration change. The recorded receiver-only version
-provides an emergency access-disable rollback, not those retained reads.
+separate reviewed gate/configuration change. Selecting the repository's
+`receiver-only` profile is an emergency access-disable rollback, not a promise
+that those reads remain active.
 
 Rollback: disable new reconciliation, retain identities and denial state, and
 keep revocation/recovery reads available. Do not delete a workspace to simulate

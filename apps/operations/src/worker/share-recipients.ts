@@ -1,6 +1,7 @@
 import { HTTPException } from "hono/http-exception";
 import { createCatalogSourceContext, PRIMARY_CATALOG_SOURCE, type CatalogSourceContext } from "@ltds/shared";
 import { portalAutomaticEligibilityEnabled } from "./portal-automatic-eligibility";
+import { portalRootAccessAllowedSql } from "./client-portal-root-access";
 import type { Env } from "./types";
 
 const SEARCH_LIMIT = 12;
@@ -20,18 +21,19 @@ export function shareDirectoryRecipientsEnabled(env: Pick<Env, "DELIVERY_SHARE_D
   return env.DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED === "true";
 }
 
-function bindingCandidatesSql() {
+function bindingCandidatesSql(env: Pick<Env, "CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED">) {
   return `SELECT binding.id folder_binding_id,binding.workspace_id,binding.owner_scope_type,binding.owner_public_id,checkpoint.active_generation_id directory_generation_id,length(binding.r2_prefix) prefix_length
     FROM portal_v2_folder_bindings binding JOIN portal_v2_workspaces workspace ON workspace.id=binding.workspace_id AND workspace.status='active'
       AND workspace.project_alpha_source_id=?
     JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=binding.workspace_id
     JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id AND generation.workspace_id=binding.workspace_id AND generation.status='active' AND generation.complete=1
     JOIN portal_v2_directory_entities owner ON owner.workspace_id=binding.workspace_id AND owner.generation_id=checkpoint.active_generation_id AND owner.entity_type=binding.owner_scope_type AND owner.public_id=binding.owner_public_id AND owner.active=1
-    WHERE binding.status='active' AND substr(?,1,length(binding.r2_prefix))=binding.r2_prefix ORDER BY length(binding.r2_prefix) DESC,binding.id LIMIT 2`;
+    WHERE binding.status='active' AND ${portalRootAccessAllowedSql(env, "workspace")}
+      AND substr(?,1,length(binding.r2_prefix))=binding.r2_prefix ORDER BY length(binding.r2_prefix) DESC,binding.id LIMIT 2`;
 }
 async function bindingContext(env: Env, prefix: string, source: CatalogSourceContext = PRIMARY_CATALOG_SOURCE): Promise<BindingContext> {
   const { sourceId } = createCatalogSourceContext(source?.sourceId);
-  const rows = await env.DELIVERY_DB.withSession("first-primary").prepare(bindingCandidatesSql()).bind(sourceId,prefix).all<{
+  const rows = await env.DELIVERY_DB.withSession("first-primary").prepare(bindingCandidatesSql(env)).bind(sourceId,prefix).all<{
       folder_binding_id:string;workspace_id:string;owner_scope_type:BindingContext["ownerScopeType"];owner_public_id:string;directory_generation_id:string;prefix_length:number;
     }>();
   const first=rows.results[0];
@@ -139,7 +141,7 @@ export async function resolveProjectAlphaDeliveryPrincipal(env:Env,prefix:string
 
 /** Embed in the transaction's first fail-closed receipt guard. Selection is a
  * read snapshot, not authority: reread binding precedence and recipient policy. */
-export function projectAlphaDeliveryPrincipalGuard(input: {
+export function projectAlphaDeliveryPrincipalGuard(env: Pick<Env, "CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED">, input: {
   audience: ShareAudienceSnapshot; principalSourceVersion: string; bindingSourceVersion: string;
   prefix: string; allowUnclaimed: boolean; source?: CatalogSourceContext;
 }): { sql: string; bindings: (string | number)[] } {
@@ -150,7 +152,7 @@ export function projectAlphaDeliveryPrincipalGuard(input: {
     throw new HTTPException(409,{message:"Delivery recipient selection is invalid"});
   const candidates = principalCandidatesSql(audience,audience.audiencePublicId,input.principalSourceVersion,input.allowUnclaimed);
   return {
-    sql: `EXISTS (WITH current_bindings AS (${bindingCandidatesSql()})
+    sql: `EXISTS (WITH current_bindings AS (${bindingCandidatesSql(env)})
       SELECT 1 FROM current_bindings selected JOIN portal_v2_folder_bindings binding
         ON binding.id=selected.folder_binding_id AND binding.workspace_id=selected.workspace_id
       WHERE selected.workspace_id=? AND selected.folder_binding_id=? AND selected.directory_generation_id=?
@@ -186,7 +188,7 @@ export async function resolveProjectAlphaDeliveryPrincipalProof(env:Env,prefix:s
   const audience:ShareAudienceSnapshot={...context,audienceType:'principal',audiencePublicId:publicId,
     audienceDisplayName:selected.display_name,recipients:[{principalPublicId:publicId,displayName:selected.display_name,email:selected.verified_email}]};
   const identity={id:selected.identity_id,issuer:selected.issuer,subject:selected.subject,email:selected.verified_email};
-  const base=projectAlphaDeliveryPrincipalGuard({audience,principalSourceVersion:sourceVersion,bindingSourceVersion,prefix,allowUnclaimed,source:validated});
+  const base=projectAlphaDeliveryPrincipalGuard(env,{audience,principalSourceVersion:sourceVersion,bindingSourceVersion,prefix,allowUnclaimed,source:validated});
   return {audience,identity,guard:{sql:`${base.sql} AND EXISTS(SELECT 1 FROM (${candidates.sql})
       WHERE identity_id=? AND issuer=? AND subject=? AND verified_email=?)`,
     bindings:[...base.bindings,...candidates.bindings,identity.id,identity.issuer,identity.subject,identity.email]}};

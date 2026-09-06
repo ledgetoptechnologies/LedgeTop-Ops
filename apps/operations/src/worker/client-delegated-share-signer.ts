@@ -8,6 +8,7 @@ import { z } from "zod";
 import { hashAccessCode, hmac, randomToken, sha256 } from "./crypto";
 import type { Env } from "./types";
 import { publicShareOrigin } from "./origins";
+import { portalRootAccessAllowedSql } from "./client-portal-root-access";
 
 const CLIENT_SHARE_PATH_PREFIX = "/client-share/";
 const SIGNER_PROTOCOL_VERSION = 1 as const;
@@ -96,7 +97,8 @@ function contained(rootValue: string, targetValue: string, allowExactRoot: boole
  * lineage, deny precedence, delegation version, binding version and target
  * containment in the same D1 statement that creates the bearer.
  */
-const AUTHORIZED_POLICY_CTE = `WITH RECURSIVE candidate AS (
+function authorizedPolicyCte(env: Env): string {
+  return `WITH RECURSIVE candidate AS (
   SELECT delegation.workspace_id,delegation.identity_id,delegation.id delegation_id,
     delegation.delegation_version,delegation.entitlement_id,delegation.entitlement_version,
     delegation.folder_binding_id,delegation.folder_binding_source_version,
@@ -112,6 +114,7 @@ const AUTHORIZED_POLICY_CTE = `WITH RECURSIVE candidate AS (
     ON identity.id=delegation.identity_id AND identity.status='active' AND identity.revoked_at IS NULL
   JOIN portal_v2_workspaces workspace
     ON workspace.id=delegation.workspace_id AND workspace.status='active'
+    AND ${portalRootAccessAllowedSql(env, "workspace")}
   JOIN portal_v2_workspace_memberships membership
     ON membership.workspace_id=delegation.workspace_id AND membership.identity_id=delegation.identity_id
     AND membership.status='active' AND membership.revoked_at IS NULL
@@ -212,6 +215,7 @@ const AUTHORIZED_POLICY_CTE = `WITH RECURSIVE candidate AS (
         )
     )
 )`;
+}
 
 function policyBindings(input: ClientDelegatedShareSignerRequestV1): unknown[] {
   return [
@@ -334,7 +338,7 @@ export async function signClientDelegatedShare(
     return failure("invalid_request");
 
   const database = signerDb(env);
-  const policy = await database.prepare(`${AUTHORIZED_POLICY_CTE}
+  const policy = await database.prepare(`${authorizedPolicyCte(env)}
     SELECT workspace_id,identity_id,delegation_id,delegation_version,entitlement_id,
       entitlement_version,folder_binding_id,folder_binding_source_version,target_id,
       root_relative_prefix,target_relative_prefix,maximum_link_lifetime_seconds,
@@ -369,7 +373,7 @@ export async function signClientDelegatedShare(
   }
 
   try {
-    const inserted = await database.prepare(`${AUTHORIZED_POLICY_CTE}
+    const inserted = await database.prepare(`${authorizedPolicyCte(env)}
       INSERT INTO client_delegated_shares
         (id,public_id,workspace_id,delegation_id,created_by_identity_id,folder_target_id,
          token_hash,share_version,label,password_hash,password_salt,password_algorithm,

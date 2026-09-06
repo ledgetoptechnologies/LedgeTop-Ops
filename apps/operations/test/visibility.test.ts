@@ -9,9 +9,9 @@ const employee: StaffPrincipal = { id: "staff-7", email: "pilot@example.com", di
 const scope: SqlScope = { global: false, divisions: ["division-30"], assigned: false, own: false, deniedDivisions: [], deniedGlobal: false };
 
 describe("operations visibility", () => {
-  it("limits the employee session to read-only operational permissions", () => {
-    const permissions: Permission[] = ["dashboard.view", "operations.view", "tasks.create", "sops.view", "sops.assign", "delivery.browse", "team.view"];
-    expect(employeePermissions(permissions, false)).toEqual(["dashboard.view", "operations.view", "sops.view", "sops.assign", "delivery.browse", "team.view"]);
+  it("retains employee-facing and Viewer permissions while filtering staff administration mutations", () => {
+    const permissions: Permission[] = ["dashboard.view", "operations.view", "tasks.create", "sops.view", "sops.assign", "delivery.browse", "team.view", "viewer.view", "viewer.processing.manage", "viewer.storage.purge"];
+    expect(employeePermissions(permissions, false)).toEqual(["dashboard.view", "operations.view", "sops.view", "sops.assign", "delivery.browse", "team.view", "viewer.view", "viewer.processing.manage", "viewer.storage.purge"]);
     expect(employeePermissions(permissions, true)).toEqual(permissions);
   });
 

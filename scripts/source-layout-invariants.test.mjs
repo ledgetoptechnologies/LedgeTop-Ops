@@ -142,7 +142,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   // The digest intentionally moved with the reviewed canonical portal hosts
   // and explicit legacy compatibility origin. Keep the field assertions so a future config change
   // cannot hide behind a digest refresh.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "de7fe0b2e29dfcde0c5853bbf5b36690cc093c83d416e66c4adc67cd0060473e");
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "c5672c17326eebe1c36dc694535ebc7afabc9d631043925c7f28b3696aa31ed7");
   const config = readJson("apps/client/wrangler.jsonc");
   assert.equal(config.name, "ltds-clients");
   assert.equal(config.main, "src/worker/index.ts");
@@ -185,8 +185,11 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.equal(config.vars.CLIENT_PORTAL_REQUEST_V2_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED, "false");
   assert.equal(config.vars.CLIENT_REQUEST_ATTACHMENTS_ENABLED, "false");
-  assert.equal(config.vars.CLIENT_PORTAL_HIERARCHY_V2_ENABLED, "false");
-  assert.equal(config.vars.CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_HIERARCHY_V2_ENABLED, "true");
+  assert.equal(config.vars.CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED, "true");
+  assert.equal(config.vars.CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED, "true");
+  assert.equal(config.vars.CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED, "true");
+  assert.equal(config.vars.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED, "true");
   assert.equal(config.vars.AUTHENTICATED_DELIVERY_GRANTS_ENABLED, "false");
   assert.equal(config.vars.CLIENT_VIEWER_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED, "true");

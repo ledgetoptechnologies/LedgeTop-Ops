@@ -15,6 +15,7 @@ import {
   verifyIncomingSession,
 } from "./incoming-security";
 import { incomingRequestPage } from "./incoming-page";
+import { incomingUploadReceivedDigestStatement } from "./incoming-upload-notifications";
 import { canonicalMultipartEtag } from "./multipart-etag";
 import {
   incomingPublicRequestDecision,
@@ -669,14 +670,27 @@ publicApp.post("/api/public/requests/:publicId/files/:fileId/complete", async (c
     await c.env.DELIVERY_DB.prepare("DELETE FROM file_request_upload_parts WHERE upload_id=?").bind(upload.id).run();
     throw new HTTPException(415, { message: "The uploaded content type is not accepted" });
   }
-  const transitioned = await c.env.DELIVERY_DB.prepare(
-    `UPDATE file_request_uploads SET status='quarantined',actual_size=?,etag=?,
-     completed_at=datetime('now'),updated_at=datetime('now')
-     WHERE id=? AND status='uploading' AND EXISTS (
-       SELECT 1 FROM file_requests WHERE id=file_request_uploads.request_id
-       AND revoked_at IS NULL AND datetime(expires_at)>datetime('now')
-     )`,
-  ).bind(object.size, object.etag, upload.id).run();
+  let transitioned: D1Result;
+  try {
+    const transitionResults = await c.env.DELIVERY_DB.batch([
+      c.env.DELIVERY_DB.prepare(
+        `UPDATE file_request_uploads SET status='quarantined',actual_size=?,etag=?,
+         completed_at=datetime('now'),updated_at=datetime('now')
+         WHERE id=? AND status='uploading' AND EXISTS (
+           SELECT 1 FROM file_requests WHERE id=file_request_uploads.request_id
+           AND revoked_at IS NULL AND datetime(expires_at)>datetime('now')
+         )`,
+      ).bind(object.size, object.etag, upload.id),
+      incomingUploadReceivedDigestStatement(c.env.DELIVERY_DB, upload.id),
+    ]);
+    if (!transitionResults[0]) throw new Error("Incoming upload transition returned no result");
+    transitioned = transitionResults[0];
+  } catch (error) {
+    await c.env.DELIVERY_DB.prepare(
+      "UPDATE file_request_uploads SET completion_claimed_at=NULL,updated_at=datetime('now') WHERE id=? AND status='uploading'",
+    ).bind(upload.id).run();
+    throw error;
+  }
   if (transitioned.meta.changes !== 1) {
     await c.env.INCOMING_BUCKET.delete(upload.object_key);
     await releaseQuota(c.env, upload, ["uploading"]);

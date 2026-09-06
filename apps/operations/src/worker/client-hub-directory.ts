@@ -26,6 +26,7 @@ export interface ClientHubRoot {
   sort_name: string;
   status: string;
   portal_status: string;
+  portal_access_state?: "active" | "revoked";
   workspace_id: string | null;
   legacy_account_id: string | null;
   account_count: number;
@@ -36,6 +37,32 @@ export interface ClientHubRoot {
   source_version: string | null;
   indexed_at: string;
   scan_generation: number;
+}
+
+async function hydrateRootAccessStates<T extends Pick<ClientHubRoot,
+  "source_id" | "root_namespace" | "kind" | "pa_public_id">>(env: Env, clients: T[]): Promise<Array<T & {
+    portal_access_state: "active" | "revoked";
+  }>> {
+  if (env.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED !== "true")
+    return clients.map(client => ({ ...client, portal_access_state: "active" as const }));
+  const roots = clients.flatMap(client => client.root_namespace === "business" && client.pa_public_id
+    ? [{ sourceId: client.source_id, rootType: client.kind, rootPublicId: client.pa_public_id }] : []);
+  if (!roots.length) return clients.map(client => ({ ...client, portal_access_state: "active" as const }));
+  const rows = await env.DELIVERY_DB.withSession("first-primary").prepare(`WITH requested AS (
+      SELECT json_extract(value,'$.sourceId') source_id,
+        json_extract(value,'$.rootType') root_type,
+        json_extract(value,'$.rootPublicId') root_public_id
+      FROM json_each(?)
+    ) SELECT policy.projection_source_id source_id,policy.root_type,policy.root_public_id,policy.state
+    FROM portal_v2_root_access_policies policy JOIN requested
+      ON requested.source_id=policy.projection_source_id AND requested.root_type=policy.root_type
+      AND requested.root_public_id=policy.root_public_id
+    WHERE policy.state='revoked' LIMIT 101`).bind(JSON.stringify(roots))
+    .all<{ source_id: string; root_type: ClientHubKind; root_public_id: string; state: "revoked" }>();
+  if (rows.results.length > 100) throw new HTTPException(503, { message: "Client portal status is temporarily unavailable" });
+  const revoked = new Set(rows.results.map(row => JSON.stringify([row.source_id, row.root_type, row.root_public_id])));
+  return clients.map(client => ({ ...client, portal_access_state: client.root_namespace === "business" && client.pa_public_id
+    && revoked.has(JSON.stringify([client.source_id, client.kind, client.pa_public_id])) ? "revoked" : "active" }));
 }
 export interface ClientHubDirectoryState {
   revision: number;
@@ -413,8 +440,7 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
   const roots = results[1]!.results.filter((row): row is LiveRoot => "root_namespace" in row);
   const page = roots.slice(0, limit);
   const last = page.at(-1);
-  return {
-    clients: page.map(({ live_pa_public_id, party_rank: _rank, display_sort_name: _displaySort, live_activity_at, business_party_id, business_party_name, business_party_member_count, ...root }) => ({ ...root,
+  const clients = page.map(({ live_pa_public_id, party_rank: _rank, display_sort_name: _displaySort, live_activity_at, business_party_id, business_party_name, business_party_member_count, ...root }) => ({ ...root,
       meaningful_activity_at: live_activity_at,
       ...(root.root_namespace === "business" && root.pa_public_id !== live_pa_public_id ? {
         pa_public_id: live_pa_public_id, mapping_status: live_pa_public_id ? "mapped" : "missing",
@@ -423,7 +449,9 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
       source_name: sources.find(item => item.source_id === root.source_id)!.display_name,
       ...(business_party_id ? { business_party_id, business_party_name, business_party_member_count } : {}),
       route_kind: clientHubRouteKind(root.kind), detail_path: business_party_id && grouping === "customers"
-        ? `/clients/parties/${encodeURIComponent(business_party_id)}` : clientHubDetailPath(root) })),
+        ? `/clients/parties/${encodeURIComponent(business_party_id)}` : clientHubDetailPath(root) }));
+  return {
+    clients: await hydrateRootAccessStates(env, clients),
     indexUpdatedAt: state.last_success_at,
     activityAsOf: asOf,
     activityCoverage: "project_alpha_business_records" as const,

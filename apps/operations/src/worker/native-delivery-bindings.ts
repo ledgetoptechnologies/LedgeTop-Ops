@@ -14,6 +14,7 @@ import { prepareProjectAccessTerms, projectAccessTermsSql, projectAccessTermsExp
 import { projectAccessAuthorityHistoryReady,projectAccessGrantEvent } from '../../../client/src/worker/client-portal/project-access-authority-history';
 import type { Env, StaffPrincipal } from './types';
 import {requireProjectAccessAuthorityMutations} from './project-access-mutation-gate';
+import { portalRootAccessAllowedSql } from './client-portal-root-access';
 
 type Database = Pick<D1Database,'prepare'|'batch'>;
 const opaque = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/);
@@ -166,7 +167,7 @@ const scopeProofSql=`SELECT json_group_array(json_array(target_type,target_id,en
   depth,display_name,binding_version,retained)) FROM (${scopeQuery})`;
 // Native principals are exact verified identity bindings. No business contact,
 // matching email, audience group or folder prefix creates a recipient.
-const DELIVERY_PROOF_SQL=`WITH input AS(SELECT json(?) v), current_entitlements AS(
+const deliveryProofSql=(env:Pick<Env,'CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED'>)=>`WITH input AS(SELECT json(?) v), current_entitlements AS(
  SELECT entitlement.* FROM input JOIN portal_v2_entitlements entitlement
  ON entitlement.workspace_id=json_extract(v,'$.workspaceId') AND entitlement.capability IN ('workspace.view','directory.read','delivery.view')
  AND entitlement.status='active' AND entitlement.revoked_at IS NULL AND datetime(entitlement.valid_from)<=datetime('now')
@@ -212,6 +213,7 @@ JOIN portal_v2_workspace_memberships membership ON membership.workspace_id=w.id 
  AND (membership.source_type<>'project_alpha' OR (membership.source_version=recipient.source_version
    AND lower(recipient.email_hint)=lower(identity.verified_email)))
 WHERE (generation.id=json_extract(v,'$.generationId') AND (${scopeProofSql})=json_extract(v,'$.scopeProof')
+ AND ${portalRootAccessAllowedSql(env, 'w')}
  AND (SELECT count(*) FROM lineage)<=64
  AND EXISTS(SELECT 1 FROM lineage WHERE entity_type=w.root_type AND public_id=COALESCE(w.pa_organization_public_id,w.pa_client_public_id)))
  AND (EXISTS(SELECT 1 FROM applicable WHERE identity_id=identity.id AND effect='allow')
@@ -283,13 +285,14 @@ async function prepare(env:Env,principal:StaffPrincipal,operation:NativeDelivery
     ||existing.status!=='active'||existing.revoked_at!==null))return error(409,'native_delivery_binding_conflict');
   const bindingId=existing?.id??`native-binding-${await digest([operation.workspaceId,prefix])}`;
   const input=await deliveryInput(env,operation,prefix,ops.value,bindingId,candidateOnly);
-  const json=await primary(env.DELIVERY_DB).prepare(DELIVERY_PROOF_SQL).bind(input).first<string>('proof');
+  const proofSql=deliveryProofSql(env);
+  const json=await primary(env.DELIVERY_DB).prepare(proofSql).bind(input).first<string>('proof');
   if(!json)return error(404,'native_delivery_recipient_unavailable');const current=JSON.parse(json) as DeliveryProof;
   const accessTermsView=operation.accessTerms?(await prepareProjectAccessTerms(primary(env.DELIVERY_DB),
     {sourceId:operation.sourceId,workspaceId:operation.workspaceId,projectPublicId:ops.value.projectPublicId},operation.accessTerms,
     {type:'staff',id:principal.id})).view:null;
   if(existing&&existing.source_version!==current.ownerVersion)return error(409,'native_delivery_binding_changed');
-  const result={operation,prefix,bindingId,opsInput:ops.input,opsJson:ops.json,ops:ops.value,deliveryInput:input,deliveryJson:json,deliverySql:DELIVERY_PROOF_SQL,delivery:current,
+  const result={operation,prefix,bindingId,opsInput:ops.input,opsJson:ops.json,ops:ops.value,deliveryInput:input,deliveryJson:json,deliverySql:proofSql,delivery:current,
     accessTermsView,projectEndSupported:current.accessLifecycle!==null,contextVersion:await digest([operation,ops.json,json])};
   await assertOps(env,result);await assertDelivery(env,result);return result;
 }
@@ -548,7 +551,8 @@ export async function searchNativeDeliveryTargets(env:Env,principal:StaffPrincip
       JOIN portal_v2_directory_generations g ON g.id=cp.active_generation_id AND g.workspace_id=w.id AND g.status='active' AND g.complete=1
       JOIN portal_v2_directory_entities e ON e.workspace_id=w.id AND e.generation_id=g.id AND e.entity_type='project' AND e.public_id=? AND e.active=1
       WHERE w.project_alpha_source_id=? AND w.root_type=? AND COALESCE(w.pa_organization_public_id,w.pa_client_public_id)=?
-        AND w.status='active' AND w.legacy_account_id IS NULL ORDER BY w.id LIMIT 2`)
+        AND w.status='active' AND w.legacy_account_id IS NULL AND ${portalRootAccessAllowedSql(env, 'w')}
+        ORDER BY w.id LIMIT 2`)
       .bind(ops.value.connectorRevision,ops.value.projectPublicId,candidate.projection_source_id,ops.value.rootType,ops.value.rootPublicId).all<{id:string;display_name:string;project_end_supported:number}>();
     if(workspaces.results.length!==1)continue;const w=workspaces.results[0]!;await assertOps(env,{opsInput:ops.input,opsJson:ops.json});
     targets.push({sourceId:candidate.projection_source_id,sourceName:display(ops.value.sourceName),workspaceId:w.id,workspaceName:display(w.display_name),projectId:candidate.id,projectName:display(ops.value.projectName),projectEndSupported:w.project_end_supported===1});

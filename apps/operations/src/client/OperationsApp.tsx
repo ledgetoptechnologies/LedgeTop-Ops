@@ -140,6 +140,15 @@ interface IncomingLink {
 interface IncomingLinkResponse {
   link: IncomingLink | null;
 }
+function incomingUploadStatus(status?: string) {
+  if (status === "quarantined") return {
+    label: "Pending verification",
+    detail: "Upload completed and remains private while the server checks its integrity and scans it. This status does not mean malware was detected.",
+  };
+  if (status === "accepted") return { label: "Ready", detail: null };
+  if (status === "rejected") return { label: "Rejected", detail: "The upload did not pass validation. Review its recorded rejection reason." };
+  return { label: status?.replaceAll("_", " ") || "Uploaded", detail: null };
+}
 const NAV: Array<{
   page: Page;
   label: string;
@@ -4096,7 +4105,9 @@ function IncomingUploads() {
           >
             {link.recentUploads.length ? (
               <div className="incoming-upload-list">
-                {link.recentUploads.map((upload, index) => (
+                {link.recentUploads.map((upload, index) => {
+                  const uploadStatus = incomingUploadStatus(upload.status);
+                  return (
                   <div
                     key={
                       upload.id ||
@@ -4116,6 +4127,7 @@ function IncomingUploads() {
                           ? ` · ${date(upload.uploadedAt || upload.createdAt)}`
                           : ""}
                       </small>
+                      {uploadStatus.detail && <small className="incoming-upload-status-detail">{uploadStatus.detail}</small>}
                     </div>
                     <StatusPill
                       tone={
@@ -4126,10 +4138,11 @@ function IncomingUploads() {
                             : "neutral"
                       }
                     >
-                      {upload.status || "uploaded"}
+                      {uploadStatus.label}
                     </StatusPill>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             ) : (
               <EmptyState
@@ -6078,8 +6091,20 @@ const STAFF_CONTROL_LABELS = {
   deliveryLinkAudit: "View client-link history",
   teamRoster: "View the team roster",
   administration: "View administration status",
+  viewerAccess: "View and open 3D models",
+  viewerDatasets: "Manage Viewer projects, datasets, and imports",
+  viewerProcessing: "Manage processing, ground control, and providers",
+  viewerPublish: "Publish reviewed model outputs",
+  viewerShareCreate: "Create public model links",
+  viewerShareRevoke: "Revoke public model links",
+  viewerClientAccess: "Associate models and manage client model access",
+  viewerStoragePurge: "Permanently purge Viewer storage (owner only)",
 } as const;
 type StaffControl = keyof typeof STAFF_CONTROL_LABELS;
+const STAFF_VIEWER_CONTROLS = new Set<StaffControl>([
+  "viewerAccess", "viewerDatasets", "viewerProcessing", "viewerPublish",
+  "viewerShareCreate", "viewerShareRevoke", "viewerClientAccess", "viewerStoragePurge",
+]);
 function Team({ session }: { session: Session }) {
   const { data, error, reload } = useLoad(
     () => api<{ staff: any[] }>("/api/team/staff"),
@@ -6151,7 +6176,7 @@ function Team({ session }: { session: Session }) {
                     disabled={busy === person.id}
                   >
                     <legend>Operations access</legend>
-                    {(Object.keys(STAFF_CONTROL_LABELS) as StaffControl[]).map(
+                    {(Object.keys(STAFF_CONTROL_LABELS) as StaffControl[]).filter(control => !STAFF_VIEWER_CONTROLS.has(control)).map(
                       (control) => (
                         <label key={control}>
                           <input
@@ -6165,6 +6190,27 @@ function Team({ session }: { session: Session }) {
                         </label>
                       ),
                     )}
+                  </fieldset>
+                  <fieldset
+                    className="local-access-toggle viewer-access-toggle"
+                    disabled={busy === person.id}
+                  >
+                    <legend>3D Models access</legend>
+                    {(Object.keys(STAFF_CONTROL_LABELS) as StaffControl[]).filter(control => STAFF_VIEWER_CONTROLS.has(control)).map(
+                      (control) => {
+                        const ownerOnly = control === "viewerStoragePurge";
+                        return <label key={control} className={ownerOnly ? "danger-control" : undefined}>
+                          <input
+                            type="checkbox"
+                            checked={Boolean(person.localControls?.[control])}
+                            disabled={ownerOnly && !person.owner_role}
+                            onChange={(event) => void update(person, control, event.target.checked)}
+                          />
+                          {STAFF_CONTROL_LABELS[control]}
+                        </label>;
+                      },
+                    )}
+                    <small>Turning off model viewing blocks the Models page and Viewer workspace. Action permissions remain separately denyable.</small>
                   </fieldset>
                   {person.status !== "active" && (
                     <small>

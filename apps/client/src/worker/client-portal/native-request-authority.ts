@@ -8,6 +8,7 @@ import {
   portalIdentityDenylistEnabled,
   resolveNativePortalWorkspaceReadContext,
 } from "./workspace-v2";
+import { portalRootAccessAllowedSql } from "./workspace-access-policy";
 
 const SOURCE_ID = /^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/;
 const PUBLIC_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
@@ -32,6 +33,7 @@ export interface NativeRequestAuthorityProof {
   allowedEntitlementIds: string[];
   authority: PortalProjectionWriteProof;
   denylistEnabled: boolean;
+  rootAccessPolicyEnabled: boolean;
   evaluatedAt: string;
   expiresAt: string;
 }
@@ -168,6 +170,7 @@ export async function resolveNativeRequestAuthority(
     allowedEntitlementIds: allowed.sort(),
     authority: context.authority,
     denylistEnabled: portalIdentityDenylistEnabled(env),
+    rootAccessPolicyEnabled: env.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED === "true",
     evaluatedAt,
     expiresAt: new Date(Date.parse(evaluatedAt) + 30_000).toISOString(),
   });
@@ -211,6 +214,7 @@ export function nativeRequestMutationGuardSql(proof: NativeRequestAuthorityProof
         AND root.generation_id=checkpoint.active_generation_id AND root.entity_type=?
         AND root.public_id=? AND root.active=1
       WHERE workspace.id=? AND workspace.status='active' AND workspace.legacy_account_id IS NULL
+        AND ${portalRootAccessAllowedSql(proof.rootAccessPolicyEnabled,"workspace")}
         AND workspace.project_alpha_source_id=? AND ${authority.sql}
         AND (membership.source_type<>'project_alpha' OR EXISTS(
           SELECT 1 FROM pa_portal_principals current_principal

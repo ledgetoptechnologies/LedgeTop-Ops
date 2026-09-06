@@ -9,6 +9,7 @@ import { d1ColumnPresent, d1TablesPresent } from '../schema-readiness';
 import { HTTPException } from 'hono/http-exception';
 import { projectAccessTermsReady, projectAccessTermsSql } from './project-access-terms';
 import { projectAccessReadColumns, projectAccessRowAllows, type ProjectAccessReadRow } from './project-access-read';
+import { portalRootAccessAllowedSql } from './workspace-access-policy';
 
 const OPAQUE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const AUTHORIZED_BINDING_LIMIT = 100;
@@ -66,6 +67,7 @@ async function candidates(
   // primary staff receipt remains active. If migration 0189 is absent, fail
   // those bindings closed instead of treating old routing metadata as access.
   const primaryReceiptSql=primaryOperationsReceiptSql(primaryReceiptReady,bindingSourceTypeReady);
+  const rootAccessSql=portalRootAccessAllowedSql(env.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED === "true", "workspace");
   const rows = await portalDb(env).prepare(`SELECT DISTINCT 'staff' source,binding.id folder_binding_id,binding.r2_prefix,
       grant_record.id grant_id,grant_record.grant_version,binding.source_version binding_source_version,
       binding.owner_scope_type,binding.owner_public_id,grant_record.audience_type,
@@ -93,7 +95,7 @@ async function candidates(
       AND principal_record.source_version=recipient.principal_source_version
     WHERE identity.issuer=? AND identity.subject=? AND identity.status='active' AND identity.revoked_at IS NULL
       AND EXISTS(SELECT 1 FROM portal_v2_workspaces workspace WHERE workspace.id=membership.workspace_id
-        AND workspace.status='active' AND ${workspaceSource} AND ${primaryReceiptSql})
+        AND workspace.status='active' AND ${rootAccessSql} AND ${workspaceSource} AND ${primaryReceiptSql})
       AND (grant_record.audience_type<>'principal' OR principal_record.public_id IS NOT NULL)
       ${termsReady?`AND ${projectAccessTermsSql({termsId:'grant_record.access_terms_id',workspaceId:'grant_record.workspace_id',projectId:'binding.owner_public_id',legacyRetained:'1'})}`:''}
       ${native ? `AND (grant_record.audience_type<>'principal' OR (recipient.principal_public_id=grant_record.audience_public_id
@@ -143,7 +145,7 @@ async function candidates(
       AND eligibility.verified_email=identity.verified_email
     WHERE identity.issuer=? AND identity.subject=? AND identity.status='active' AND identity.revoked_at IS NULL
       AND EXISTS(SELECT 1 FROM portal_v2_workspaces workspace WHERE workspace.id=membership.workspace_id
-        AND workspace.status='active' AND ${workspaceSource} AND ${primaryReceiptSql}
+        AND workspace.status='active' AND ${rootAccessSql} AND ${workspaceSource} AND ${primaryReceiptSql}
         ${native ? `AND EXISTS(SELECT 1 FROM project_alpha_delivery_intent_receipts receipt
           WHERE receipt.receipt_id=grant_record.receipt_id AND receipt.project_alpha_source_id=workspace.project_alpha_source_id
             AND receipt.access_mode='portal' AND receipt.resource_id=grant_record.id AND receipt.status='accepted')` : ''})
@@ -382,7 +384,9 @@ export async function listAuthorizedAuthenticatedDeliveryPrefixes(
         AND membership.status='active' AND membership.revoked_at IS NULL
         AND (membership.expires_at IS NULL OR datetime(membership.expires_at)>datetime('now'))
       JOIN portal_v2_workspaces workspace
-        ON workspace.id=membership.workspace_id AND workspace.status='active' AND ${primaryWorkspaceAccount("workspace")}
+        ON workspace.id=membership.workspace_id AND workspace.status='active'
+        AND ${portalRootAccessAllowedSql(env.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED === "true", "workspace")}
+        AND ${primaryWorkspaceAccount("workspace")}
       JOIN portal_v2_authenticated_delivery_grants grant_record
         ON grant_record.workspace_id=workspace.id AND grant_record.status='active'
         AND grant_record.revoked_at IS NULL

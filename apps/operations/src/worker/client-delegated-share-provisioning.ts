@@ -1,6 +1,7 @@
 import { HTTPException } from "hono/http-exception";
 import { decodeRef, normalizePrefix } from "./delivery";
 import { sha256 } from "./crypto";
+import { portalRootAccessAllowedSql } from "./client-portal-root-access";
 import type { Env, StaffPrincipal } from "./types";
 
 const OPAQUE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{15,127}$/;
@@ -161,8 +162,9 @@ export async function listDelegatedShareProvisioning(
   provisioningEnabled(env);
   const database = db(env);
   const [workspaceRows, managerRows, targets, delegations, shares] = await Promise.all([
-    database.prepare(`SELECT id,display_name FROM portal_v2_workspaces
-      WHERE status='active' ORDER BY display_name COLLATE NOCASE,id LIMIT 201`).all<{ id: string; display_name: string }>(),
+    database.prepare(`SELECT workspace.id,workspace.display_name FROM portal_v2_workspaces workspace
+      WHERE workspace.status='active' AND ${portalRootAccessAllowedSql(env, "workspace")}
+      ORDER BY workspace.display_name COLLATE NOCASE,workspace.id LIMIT 201`).all<{ id: string; display_name: string }>(),
     database.prepare(`SELECT DISTINCT membership.workspace_id,identity.id identity_id,identity.verified_email,
         entitlement.id entitlement_id,entitlement.entitlement_version
       FROM portal_v2_workspace_memberships membership
@@ -245,6 +247,7 @@ export async function delegatedShareFolderContext(
     FROM portal_v2_folder_bindings binding
     JOIN portal_v2_workspaces workspace ON workspace.id=binding.workspace_id AND workspace.status='active'
     WHERE binding.status='active' AND binding.revoked_at IS NULL
+      AND ${portalRootAccessAllowedSql(env, "workspace")}
       AND substr(?,1,length(binding.r2_prefix))=binding.r2_prefix
     ORDER BY length(binding.r2_prefix) DESC,binding.id LIMIT 2`).bind(folderPrefix)
     .all<{ id: string; workspace_id: string; r2_prefix: string; display_name: string }>();
@@ -354,6 +357,7 @@ export async function createDelegatedShareTarget(
 }
 
 async function qualifyingEntitlement(
+  env: Pick<Env, "CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED">,
   database: D1Database,
   input: { workspaceId: string; identityId: string; entitlementId: string; rootTargetId: string },
 ): Promise<{ version: number; folderBindingId: string; sourceVersion: string } | null> {
@@ -376,6 +380,7 @@ async function qualifyingEntitlement(
         AND binding.workspace_id=target.workspace_id AND binding.status='active' AND binding.revoked_at IS NULL
         AND binding.source_version=target.binding_source_version
       WHERE membership.workspace_id=? AND membership.identity_id=? AND membership.status='active'
+        AND ${portalRootAccessAllowedSql(env, "workspace")}
         AND membership.revoked_at IS NULL
         AND (membership.expires_at IS NULL OR datetime(membership.expires_at)>datetime('now'))
     ), lineage(entity_type,public_id,parent_public_id,depth) AS (
@@ -437,7 +442,7 @@ export async function createDelegatedShareDelegation(
   const replay = await replayedMutation(env, principal, "delegation.create", idempotencyKey, fingerprint);
   if (replay) return { id: replay, replayed: true };
   const database = db(env);
-  const entitlement = await qualifyingEntitlement(database, input);
+  const entitlement = await qualifyingEntitlement(env, database, input);
   if (!entitlement) throw new HTTPException(404, { message: "Manager entitlement is not authorized for this folder" });
   const target = await database.prepare(`SELECT staff_exact_root_approved,relative_prefix FROM client_share_folder_targets
     WHERE id=? AND workspace_id=? AND status='active' AND revoked_at IS NULL`)
@@ -507,7 +512,7 @@ export async function transferDelegatedShareDelegation(
       .bind(delegationId).first<number>("delegation_version");
     return { id: replay, version: version ?? input.expectedVersion + 1, replayed: true };
   }
-  const entitlement = await qualifyingEntitlement(database, {
+  const entitlement = await qualifyingEntitlement(env, database, {
     workspaceId: current.workspace_id, identityId: input.identityId,
     entitlementId: input.entitlementId, rootTargetId: current.root_target_id,
   });

@@ -108,8 +108,13 @@ async function requireGlobalViewer(
   principal: StaffPrincipal,
   permission: Extract<Permission, "viewer.view" | "viewer.manage" | "viewer.share.create" | "viewer.share.revoke">,
 ): Promise<void> {
-  const scope = await sqlScope(env, principal, permission);
-  if (!scope.global || scope.deniedGlobal)
+  const [viewScope, actionScope] = await Promise.all([
+    sqlScope(env, principal, "viewer.view"),
+    permission === "viewer.view" ? Promise.resolve(null) : sqlScope(env, principal, permission),
+  ]);
+  if (!viewScope.global || viewScope.deniedGlobal)
+    throw new HTTPException(403, { message: "Global viewer.view permission required" });
+  if (actionScope && (!actionScope.global || actionScope.deniedGlobal))
     throw new HTTPException(403, { message: `Global ${permission} permission required` });
 }
 

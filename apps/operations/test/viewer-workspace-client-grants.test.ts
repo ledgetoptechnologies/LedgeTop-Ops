@@ -38,6 +38,7 @@ async function setup(): Promise<void> {
     CREATE TABLE viewer_workspace_client_grant_rate_limits(window_start TEXT PRIMARY KEY,request_count INTEGER CHECK(request_count>=1));
     INSERT INTO staff_users VALUES('staff-one','staff@example.test','Staff One','access-subject-one',NULL,'active');
     INSERT INTO staff_role_assignments VALUES('staff-one','viewer-manager','global',NULL);
+    INSERT INTO role_permissions VALUES('viewer-manager','viewer.view');
     INSERT INTO role_permissions VALUES('viewer-manager','viewer.manage');
     INSERT INTO pa_projects VALUES('pa-project-one',1,'2026-08-18T12:00:00.000Z');
   `.replace(/\s*\n\s*/g, " "));
@@ -135,12 +136,14 @@ describe("Viewer workspace client-grant machine bridge", () => {
     expect(await delivery.prepare("SELECT COUNT(*) count FROM viewer_client_grants").first<number>("count")).toBe(0);
   });
 
-  it("requires an active bound staff subject and a live global viewer.manage grant", async () => {
+  it("requires an active bound staff subject plus live global viewer.view and viewer.manage grants", async () => {
     await ops.prepare("UPDATE staff_users SET status='disabled' WHERE id='staff-one'").run();
     expect((await machine({ subject: "ops:staff-one", action: "list" }, "disabled-staff-nonce-01")).status).toBe(403);
     await ops.prepare("UPDATE staff_users SET status='active' WHERE id='staff-one'").run();
     await ops.prepare("DELETE FROM role_permissions").run();
     expect((await machine({ subject: "ops:staff-one", action: "list" }, "missing-permission-0001")).status).toBe(403);
+    await ops.prepare("INSERT INTO role_permissions VALUES('viewer-manager','viewer.manage')").run();
+    expect((await machine({ subject: "ops:staff-one", action: "list" }, "missing-base-view-0001")).status).toBe(403);
   });
 
   it("returns the exact bounded snapshot and rejects more than 500 grants", async () => {

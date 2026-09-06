@@ -3,6 +3,7 @@ import { createCatalogSourceContext, PRIMARY_ALPHA_SOURCE_ID } from "@ltds/share
 import { d1TablesPresent } from "./schema-readiness";
 import { sendNotificationMail } from "./mailer";
 import { resolveProjectAlphaDeliveryPrincipalProof } from "./share-recipients";
+import { portalRootAccessAllowedSql } from "./client-portal-root-access";
 import type { Env } from "./types";
 
 export const NATIVE_NOTIFICATION_TABLES = ["portal_delivery_notification_batches", "portal_delivery_notification_items", "portal_delivery_notification_controls"] as const;
@@ -25,7 +26,8 @@ export const nativeDeliveryNotificationsReady = (env: Env) => d1TablesPresent(en
 export async function nativeNotificationHash(value: string): Promise<string> {
   return [...new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(value)))].map(v=>v.toString(16).padStart(2,"0")).join("");
 }
-function bindingGuard(row:NativeNotificationIdentity,requireActiveSource:boolean):NativeWriteGuard{
+function bindingGuard(env: Pick<Env, "CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED">,
+  row:NativeNotificationIdentity,requireActiveSource:boolean):NativeWriteGuard{
   const sourceAuthority=!requireActiveSource||row.source_id===PRIMARY_ALPHA_SOURCE_ID?"1":`EXISTS(
     SELECT 1 FROM pa_portal_source_authorities authority
     JOIN pa_portal_source_authority_revisions revision ON revision.source_id=authority.source_id
@@ -42,16 +44,18 @@ function bindingGuard(row:NativeNotificationIdentity,requireActiveSource:boolean
     WHERE workspace.project_alpha_source_id=? AND (${sourceAuthority})
       AND workspace.id=? AND binding.id=? AND binding.source_version=? AND binding.owner_scope_type=?
       AND binding.owner_public_id=? AND binding.r2_prefix=?
-      AND binding.status='active' AND binding.revoked_at IS NULL)`,
+      AND binding.status='active' AND binding.revoked_at IS NULL
+      AND ${requireActiveSource ? portalRootAccessAllowedSql(env, "workspace") : "1=1"})`,
     bindings: [row.source_id,row.workspace_id,row.folder_binding_id,row.binding_source_version,row.owner_scope_type,row.owner_public_id,row.r2_prefix] };
 }
-export function nativeBindingGuard(row: NativeNotificationIdentity): NativeWriteGuard {
-  return bindingGuard(row,true);
+export function nativeBindingGuard(env: Pick<Env, "CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED">,
+  row: NativeNotificationIdentity): NativeWriteGuard {
+  return bindingGuard(env,row,true);
 }
 export async function readNativeBinding(env: Env,row: NativeNotificationIdentity): Promise<NativeBindingFacts|null> {
   // Staff history follows connector read visibility. Suspending ingestion must
   // stop future publication without erasing already-projected audit records.
-  const guard=bindingGuard(row,false);
+  const guard=bindingGuard(env,row,false);
   return env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT workspace.display_name workspace_name,owner.display_name owner_name,
     checkpoint.active_generation_id generation_id FROM portal_v2_workspaces workspace
     JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=workspace.id
@@ -174,7 +178,7 @@ export async function authorizePortalDeliveryNotificationBatch(env:Env,row:Nativ
   const args=[row.id,row.source_id,row.workspace_id,row.folder_binding_id,row.binding_source_version,row.principal_public_id,row.principal_source_version];
   const items=(await env.DELIVERY_DB.withSession("first-primary").prepare(liveItemsSql()).bind(...args).all<{id:string;grant_version:number;expires_at:string|null}>()).results;
   if(!items.length||items.length>50)return null;
-  const itemFacts=JSON.stringify(items),bindingGuard=nativeBindingGuard(row);
+  const itemFacts=JSON.stringify(items),bindingGuard=nativeBindingGuard(env,row);
   const guard={sql:`${bindingGuard.sql} AND ${proof.guard.sql}
     AND (SELECT json_group_array(json_object('id',id,'grant_version',grant_version,'expires_at',expires_at)) FROM (${liveItemsSql()}))=?`,
     bindings:[...bindingGuard.bindings,...proof.guard.bindings,...args,itemFacts]};

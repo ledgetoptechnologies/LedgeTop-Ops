@@ -392,6 +392,8 @@ test("populated detail remains readable on mobile, narrow, laptop and ultrawide 
   for (const width of [375, 640, 1280, 3440]) {
     await page.setViewportSize({ width, height: 960 });
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await expect.poll(() => page.locator(".client-hub-detail-grid").evaluate(element =>
+      getComputedStyle(element).gridTemplateColumns.trim().split(/\s+/).length)).toBe(1);
     for (const collection of collections) {
       const button = loadButton(page, collection);
       await button.scrollIntoViewIfNeeded();

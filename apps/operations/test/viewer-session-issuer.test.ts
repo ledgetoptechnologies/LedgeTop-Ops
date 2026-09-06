@@ -74,7 +74,11 @@ async function fixture(): Promise<{ database: D1Database; env: Env }> {
     CREATE TABLE portal_v2_identities(id TEXT PRIMARY KEY,issuer TEXT,subject TEXT,verified_email TEXT,status TEXT,revoked_at TEXT);
     CREATE TABLE portal_v2_workspace_memberships(workspace_id TEXT,identity_id TEXT,status TEXT,revoked_at TEXT,expires_at TEXT);
     CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,root_type TEXT,pa_organization_public_id TEXT,
-      pa_client_public_id TEXT,status TEXT,legacy_account_id TEXT);
+      pa_client_public_id TEXT,status TEXT,legacy_account_id TEXT,
+      project_alpha_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
+    CREATE TABLE portal_v2_root_access_policies(
+      projection_source_id TEXT,root_type TEXT,root_public_id TEXT,state TEXT,
+      PRIMARY KEY(projection_source_id,root_type,root_public_id));
     CREATE TABLE client_identity_links(id TEXT PRIMARY KEY,account_id TEXT,revoked_at TEXT);
     CREATE TABLE client_account_members(account_id TEXT,identity_id TEXT,role TEXT,revoked_at TEXT);
     CREATE TABLE client_member_project_grants(account_id TEXT,identity_id TEXT,project_id TEXT,revoked_at TEXT);
@@ -111,7 +115,8 @@ async function fixture(): Promise<{ database: D1Database; env: Env }> {
       'identity-one','https://clients.example.test','subject-one','client@example.test','active',NULL);
     INSERT INTO portal_v2_workspace_memberships VALUES (
       'workspace-one','identity-one','active',NULL,datetime('now','+20 minutes'));
-    INSERT INTO portal_v2_workspaces VALUES (
+    INSERT INTO portal_v2_workspaces
+      (id,root_type,pa_organization_public_id,pa_client_public_id,status,legacy_account_id) VALUES (
       'workspace-one','organization','pa-org-one',NULL,'active','account-one');
     INSERT INTO client_identity_links VALUES ('legacy-identity-one','account-one',NULL);
     INSERT INTO client_account_members VALUES ('account-one','legacy-identity-one','manager',NULL);
@@ -172,6 +177,14 @@ describe("client Viewer authorization", () => {
       viewer_model_version_id: "viewer-version-one",
     });
     expect(Date.parse(association!.authorization_expires_at!)).toBeGreaterThan(Date.now());
+  });
+
+  it("denies Viewer session authorization while the client root is revoked", async () => {
+    const { database, env } = await fixture();
+    await database.prepare(`INSERT INTO portal_v2_root_access_policies
+      VALUES('project-alpha:primary','organization','pa-org-one','revoked')`).run();
+    expect(await authorizeClientViewerAssociation({ ...env,
+      CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED: "true" }, request)).toBeNull();
   });
 
   it("does not bump association_version on a same-key retry", async () => {

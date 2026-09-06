@@ -1,6 +1,7 @@
 import { Miniflare } from "miniflare";
 import { afterEach, describe, expect, it } from "vitest";
 import eligibilityMigration from "../migrations/0145_portal_identity_eligibility.sql?raw";
+import rootAccessMigration from "../migrations/0197_portal_root_access_policy.sql?raw";
 import { listPortalWorkspaces } from "../src/worker/client-portal/workspace-v2";
 import { d1ClientPortalRepository } from "../src/worker/client-portal/repository";
 import type { Env } from "../src/worker/types";
@@ -47,15 +48,43 @@ async function fixture(): Promise<{ db: D1Database; env: Env }> {
     .replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "").replace(/\s*\n\s*/g, " ");
   await db.exec(migration);
   await db.exec(migration);
+  await db.exec(rootAccessMigration.replace(/^\s*--.*$/gm, "")
+    .replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "").replace(/\s*\n\s*/g, " "));
   return { db, env: { DELIVERY_DB: db, CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true",
     CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED: "true",
     CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: "true",
-    CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED: "true" } as Env };
+    CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED: "true",
+    CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED: "true" } as Env };
 }
 
 afterEach(async () => Promise.all(active.splice(0).map(instance => instance.dispose())));
 
 describe("Project Alpha portal identity eligibility", () => {
+  it("keeps a revoked root closed to current projection refreshes and future automatic enrollment", async () => {
+    const { db, env } = await fixture();
+    await db.prepare("INSERT INTO client_accounts(id,status,display_name,project_alpha_source_id) VALUES('account-one','active','Client','project-alpha:primary')").run();
+    await db.prepare(`INSERT INTO portal_v2_workspaces(id,root_type,pa_organization_public_id,pa_client_public_id,display_name,status,legacy_account_id) VALUES
+      ('workspace-one','organization','org-one',NULL,'Client Workspace','active','account-one')`).run();
+    await db.prepare(`INSERT INTO pa_portal_principals VALUES
+      ('workspace-one','principal-one',NULL,'client@example.test','Client','source-v1','active')`).run();
+    await db.prepare(`INSERT INTO portal_v2_root_access_policies
+      (projection_source_id,root_type,root_public_id,state,reason_code,created_by_staff_id,updated_by_staff_id)
+      VALUES('project-alpha:primary','organization','org-one','revoked','security_hold','staff-one','staff-one')`).run();
+    // Simulate a later Project Alpha activation. The projected status changes,
+    // while the independent Operations policy remains authoritative.
+    await db.prepare("UPDATE portal_v2_workspaces SET status='suspended' WHERE id='workspace-one'").run();
+    await db.prepare("UPDATE portal_v2_workspaces SET status='active' WHERE id='workspace-one'").run();
+    await expect(listPortalWorkspaces(env, { issuer: "https://access.example.test", subject: "subject-one",
+      email: "client@example.test" })).resolves.toEqual([]);
+    expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_identities").first("count")).toBe(0);
+    expect(await db.prepare("SELECT state FROM portal_v2_root_access_policies").first("state")).toBe("revoked");
+    await db.prepare(`UPDATE portal_v2_root_access_policies SET state='active',version=version+1,
+      reason_code='operator_restore',updated_at=datetime('now')`).run();
+    await expect(listPortalWorkspaces(env, { issuer: "https://access.example.test", subject: "subject-one",
+      email: "client@example.test" })).resolves.toEqual([
+        { id: "workspace-one", rootType: "organization", rootPublicId: "org-one", displayName: "Client Workspace" },
+      ]);
+  });
   it("does not bind a secondary workspace principal to the primary account authority", async () => {
     const { db, env } = await fixture();
     // Deliberately inconsistent fixture: runtime must reject even before the

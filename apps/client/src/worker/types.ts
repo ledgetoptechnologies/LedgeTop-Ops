@@ -76,6 +76,7 @@ export interface Env {
   CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED?: string;
   /** Mirrored release barrier proving Operations can administer eligibility blocks. */
   CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED?: string;
+  CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED?: string;
   /** Requires an explicit live authenticated delivery grant in addition to portal-v2 entitlement. */
   AUTHENTICATED_DELIVERY_GRANTS_ENABLED?: string;
   /** Many-to-many PA directory edges and project-retention authorization. Independent/default-off. */

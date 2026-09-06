@@ -22,11 +22,11 @@ function identityPage(items: PortalIdentitySummary[] = [identity("alice", "Alice
   return { items, page: metadata(more, "identity-page-2", 5, items.length), contextVersion: rootContext, refreshedAt: "2026-08-25T12:00:00Z",
     capabilities: { canManagePortal: true, canManageEligibilityBlocks: true, canManageWorkspaceAccess: true } };
 }
-function detail(portalIdentities = identityPage()) {
+function detail(portalIdentities = identityPage(), portalRootAccess?: Record<string, unknown>) {
   return { client: { workspace_id: "workspace-one", public_id: "42", kind: "organization", route_kind: "organizations",
     source_id: "project-alpha:primary", root_namespace: "business", pa_public_id: "a".repeat(32), detail_path: path,
     display_name: "Acme Construction", status: "active", portal_status: "active", account_count: 1, project_count: 0, request_count: 0, contact_count: 1 },
-    contextVersion: rootContext, portalIdentities,
+    contextVersion: rootContext, portalIdentities, portalRootAccess,
     contacts: [{ record_type: "business_contact", row_key: "business:1", contact_key: "business:1", workspace_id: null, public_id: "1",
       display_name: "Business Bailey", email_hint: "bailey@example.test" }],
     accounts: [], projects: [], requests: [], deliveryGrants: [], authenticatedDeliveryGrants: [], viewerGrants: [],
@@ -63,6 +63,30 @@ const panel = (page: Page) => page.getByRole("region", { name: "Portal logins", 
 const person = (page: Page, name = "Alice Client") => panel(page).getByRole("article", { name: `Portal login for ${name}`, exact: true });
 async function open(page: Page, suffix = "") { await page.goto(`${path}${suffix}`); await expect(panel(page)).toBeVisible(); }
 async function late(route: Route, json: unknown) { await route.fulfill({ json }).catch(() => undefined); }
+
+test("an administrator can revoke the whole client workspace and sees the durable blocked state", async ({ page }) => {
+  const activeRoot = { available: true, state: "active", version: 0, reasonCode: null, updatedAt: null,
+    canRevoke: true, canRestore: false };
+  const revokedRoot = { available: true, state: "revoked", version: 1, reasonCode: "operator_root_revocation",
+    updatedAt: "2026-09-05T12:00:00Z", canRevoke: false, canRestore: true };
+  const state = await mock(page, (route, url) => {
+    if (url.pathname === `${base}/portal-access/revoke`) return route.fulfill({ status: 201,
+      json: { outcome: "root_access_revoked", version: 1, replayed: false } });
+    return route.fulfill({ status: 404 });
+  }, count => detail(identityPage(), count === 1 ? activeRoot : revokedRoot));
+  page.on("dialog", dialog => dialog.accept());
+
+  await open(page);
+  await expect(panel(page).getByText("Portal access enabled for this client workspace", { exact: true })).toBeVisible();
+  await panel(page).getByRole("button", { name: "Revoke workspace portal access", exact: true }).click();
+  await expect(page.locator(".client-hub-title-status").getByText("Portal access revoked", { exact: true })).toBeVisible();
+  await expect(panel(page).getByText("Portal access revoked for this client workspace", { exact: true })).toBeVisible();
+  await expect(panel(page).getByText("Current and future people cannot enter this workspace.", { exact: false })).toBeVisible();
+  const request = state.requests.find(item => item.url.pathname === `${base}/portal-access/revoke`)!;
+  expect(request.method).toBe("POST");
+  expect(request.key).toMatch(/^[0-9a-f-]{36}$/i);
+  expect(state.details()).toBe(2);
+});
 
 test("portal summaries are bounded and identity records load only when opened", async ({ page }) => {
   const state = await mock(page, (route, url) => {

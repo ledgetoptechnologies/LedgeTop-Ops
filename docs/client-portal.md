@@ -573,10 +573,10 @@ allow/deny entitlements. Complete PA directory generations, opaque folder
 bindings, and hashed/expiring/revocable invitation records are separate from
 the legacy account and project-grant tables.
 
-`CLIENT_PORTAL_HIERARCHY_V2_ENABLED` is explicitly `false` in the checked-in
-Worker configuration. With the flag off, all existing pilot routes continue to
-use the legacy account/session/grant path. With it on, the new endpoints remain
-fail-closed: they require a verified Access issuer/subject, active global
+The checked-in `default-on-eligibility` release profile enables
+`CLIENT_PORTAL_HIERARCHY_V2_ENABLED`, automatic Project Alpha identity
+eligibility, denylist enforcement, and deny-policy management together in both
+Workers. The endpoints remain fail-closed: they require a verified Access issuer/subject, active global
 identity, active workspace membership, a complete active directory generation,
 an active source entity, and an explicit capability. A matching deny wins.
 Email and `primary_contact` are presentation data and never grant access.
@@ -585,7 +585,9 @@ Operations client administration is independently default-off through
 `CLIENT_PORTAL_OPERATIONS_MANAGEMENT_ENABLED`. With both flags enabled, Team →
 Clients shows the Project Alpha principal, the exact Operations-owned identity
 binding state, effective allow/deny scopes, and invitation delivery status.
-Eligibility and email hints never create a membership or data grant. Staff may
+Eligible Project Alpha contacts may receive an automatic workspace membership;
+that membership does not grant access to any file, folder, model, request, or
+other client content. Staff may
 retry only an existing, unexpired invitation whose secret-bearing outbox row
 is intact; its conditional update, idempotency receipt, and audit entry commit
 atomically. New invitations remain an authorized client-manager action, and

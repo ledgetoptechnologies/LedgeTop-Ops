@@ -366,7 +366,7 @@ export async function applyProjectAlphaDeliveryIntent(env: Env, payload: unknown
     throw new HTTPException(409,{message:"An existing delivery authorization has different policy"});
   const receiptId=crypto.randomUUID(),grantId=exact?.id??crypto.randomUUID(),outboxId=crypto.randomUUID();
   const staging=await nativeDeliveryNotificationsReady(env);
-  const recipientGuard=projectAlphaDeliveryPrincipalGuard({audience:recipient,principalSourceVersion:audience.source_version,
+  const recipientGuard=projectAlphaDeliveryPrincipalGuard(env,{audience:recipient,principalSourceVersion:audience.source_version,
     bindingSourceVersion:binding.source_version,prefix:binding.r2_prefix,allowUnclaimed:portalAutomaticEligibilityEnabled(env),source});
   const guards=[`(${recipientGuard.sql})`,`(SELECT COUNT(*) FROM project_alpha_delivery_portal_grants grant_record WHERE ${grantScope})=?`];
   const guardBindings:(string|number|null)[]=[...recipientGuard.bindings,...grantScopeBindings,active.results.length];

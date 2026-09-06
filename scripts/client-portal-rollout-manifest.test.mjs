@@ -36,6 +36,7 @@ test("portal rollout foundations and dormant gates match the reviewed manifest",
     "CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED",
     "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED",
     "CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED",
+    "CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED",
     "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED",
     "PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED",
     "AUTHENTICATED_DELIVERY_GRANTS_ENABLED",
@@ -57,6 +58,7 @@ test("portal rollout foundations and dormant gates match the reviewed manifest",
     "PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED",
     "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED",
     "CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED",
+    "CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED",
     "CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED",
     "AUTHENTICATED_DELIVERY_GRANTS_ENABLED",
     "AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED",
@@ -83,11 +85,13 @@ test("rollout manifest is pinned to the current receiver migration boundary", ()
     "apps/client/migrations/0193_bulk_download_parts.sql",
     "apps/client/migrations/0194_client_delegated_share_expiry.sql",
     "apps/client/migrations/0195_legacy_workspace_authority_lifecycle.sql",
+    "apps/client/migrations/0197_portal_root_access_policy.sql",
+    "apps/client/migrations/0198_incoming_upload_owner_notifications.sql",
     "apps/operations/migrations/0051_client_hub_internal_notes.sql",
     "apps/operations/migrations/0052_project_operational_reassignment_recovery.sql",
   ]) assert.equal(exists(migration), true, `missing rollout migration ${migration}`);
 
-  assert.match(manifest, /Client migrations through `0195`/);
+  assert.match(manifest, /Client migrations through `0198`/);
   assert.match(manifest, /Operations through `0052`/);
   assert.match(manifest, /Project Alpha `0083`/);
 });
