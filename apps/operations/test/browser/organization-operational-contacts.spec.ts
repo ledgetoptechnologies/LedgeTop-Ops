@@ -278,6 +278,19 @@ test("organization contact editor is usable without overflow from mobile through
     await region(page).scrollIntoViewIfNeeded();
     await page.screenshot({ path: testInfo.outputPath(`organization-contacts-${width}.png`), fullPage: true });
   }
+  await page.setViewportSize({ width: 1280, height: 960 });
+  const editor = region(page).locator(".organization-operational-editor");
+  const [primaryFieldset, deliveryFieldset] = await editor.locator("fieldset").all();
+  const [primaryBounds, deliveryBounds, primarySelectBounds, deliverySelectBounds] = await Promise.all([
+    primaryFieldset!.boundingBox(), deliveryFieldset!.boundingBox(),
+    region(page).getByRole("combobox", { name: "Primary operational contact" }).boundingBox(),
+    region(page).getByRole("combobox", { name: "Delivery contact 1" }).boundingBox(),
+  ]);
+  expect(primaryBounds!.width).toBeLessThan(560);
+  expect(deliveryBounds!.x).toBeCloseTo(primaryBounds!.x, 0);
+  expect(deliveryBounds!.y).toBeGreaterThan(primaryBounds!.y + primaryBounds!.height - 1);
+  expect(primarySelectBounds!.width).toBeGreaterThan(300);
+  expect(deliverySelectBounds!.width).toBeGreaterThan(300);
   const cancel = region(page).getByRole("button", { name: "Cancel contact changes" });
   await cancel.focus(); await page.keyboard.press("Enter");
   await expect(region(page).getByText("Changes cancelled.", { exact: true })).toBeVisible();
