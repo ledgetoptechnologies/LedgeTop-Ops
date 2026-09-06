@@ -27,6 +27,16 @@ second business database, or Viewer work as part of this audit.
 
 ### Verification checkpoint — September 6 continuation
 
+- PA Docker publication run `34050403843` completed successfully for merged
+  `80fb0cc`; production containers still need recreation and live activation
+  acceptance. Publication does not prove that existing clients are provisioned.
+- Client audit-history URL/back-forward restoration now retains normalized
+  filters for Retry after an initial transient failure. The previous Retry
+  control was a no-op because applied filters were null. All 18 desktop/mobile
+  timeline browser tests pass on a fresh build, including restored-link and
+  history failure recovery; Operations TypeScript and build pass. This change
+  does not broaden event visibility, permissions, or server queries.
+
 - Primary provisioning now has a concrete diagnosed failure: the live
   `54ad8e9a26c6` diagnostic exactly matches strict MySQL rejecting an empty
   `contact_assignment_projection_enabled` integer. PA fix `3ea246c3`,

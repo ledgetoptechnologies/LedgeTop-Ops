@@ -244,10 +244,12 @@ export function ClientAuditTimeline({ root, contextVersion, contextSignal, proje
   useEffect(() => {
     const abort = () => { pending.current?.abort(); pending.current = null; sequence.current += 1; };
     const restore = () => {
-      abort(); const restored = draftFromUrl();
+      abort(); const restored = draftFromUrl(), filters = restored ? requestedFilters(restored) : null;
       setDraft(restored ?? defaults); setApplied(null); setItems([]); setCoverage(null); setProjectCoverage(null); setAccessCoverage(null); setNotificationCoverage(null);setContentCoverage(null);
       setPage(null); setBusy(false); setRequested(false); setError(""); setFilterError(""); failedCursor.current = null;
-      if (restored) void load(requestedFilters(restored)!, null);
+      // Keep restored filters available for retry if this first URL/history read
+      // fails before a response has had a chance to establish applied state.
+      if (filters) { setApplied(filters); void load(filters, null); }
     };
     contextSignal.addEventListener("abort", abort);
     window.addEventListener("popstate", restore); restore();
