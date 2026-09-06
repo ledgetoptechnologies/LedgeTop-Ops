@@ -41,7 +41,7 @@ export interface ClientPortalInvitation {
 
 export interface ClientPortalNotification {
   id: string;
-  eventType: "files_added" | "files_removed" | "request_status" | "request_reply" | "estimate_ready" | "request_completed" | "work_area_changed";
+  eventType: "files_added" | "files_removed" | "request_status" | "request_reply" | "estimate_ready" | "request_completed" | "work_area_changed" | "pa_draft_quote_created";
   title: string;
   body: string;
   actionPath: string | null;

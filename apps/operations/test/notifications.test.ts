@@ -21,6 +21,7 @@ function recordingDatabase(callbacks: {
   first?: (call: D1Call) => unknown;
   all?: (call: D1Call) => unknown[];
   changes?: (call: D1Call) => number;
+  run?: (call: D1Call) => void;
 }) {
   const calls: D1Call[] = [];
   const database = {
@@ -33,6 +34,7 @@ function recordingDatabase(callbacks: {
         async first<T>() { return (callbacks.first?.(call) ?? null) as T | null; },
         async all<T>() { return { results: (callbacks.all?.(call) ?? []) as T[] }; },
         async run<T>() {
+          callbacks.run?.(call);
           return { results: [] as T[], meta: { changes: callbacks.changes?.(call) ?? 1 } };
         },
       };
@@ -179,7 +181,7 @@ describe("client notifications", () => {
     const suppressIndex = value.calls.findIndex(call => call.sql.includes("SET status='suppressed'"));
     expect(claimIndex).toBeGreaterThan(-1);
     expect(suppressIndex).toBeGreaterThan(claimIndex);
-    expect(value.calls[suppressIndex]?.binds).toEqual(["unsupported-catalog-source", row.id]);
+    expect(value.calls[suppressIndex]?.binds).toEqual(["unsupported-catalog-source", row.id, 1]);
     expect(value.calls[suppressIndex]?.sql).toContain("lease_expires_at=NULL");
     expect(value.calls[suppressIndex]?.sql).toContain("AND status='processing'");
     const audit = value.calls.find(call => call.sql.includes("INSERT INTO audit_log"));
@@ -200,7 +202,7 @@ describe("client notifications", () => {
     await expect(processClientPortalRequestNotifications({ DELIVERY_DB: value.database, NOTIFICATION_EMAIL: { send } } as unknown as Env)).resolves.toBe(1);
     expect(send).not.toHaveBeenCalled();
     expect(value.calls.some(call => call.sql.includes("INSERT OR IGNORE INTO client_portal_notifications"))).toBe(false);
-    expect(value.calls.find(call => call.sql.includes("SET status='suppressed'"))?.binds).toEqual(["unsupported-business-source", row.id]);
+    expect(value.calls.find(call => call.sql.includes("SET status='suppressed'"))?.binds).toEqual(["unsupported-business-source", row.id, 1]);
   });
 
   it.each([
@@ -232,6 +234,138 @@ describe("client notifications", () => {
     expect(value.calls.some(call => call.sql.includes("SET status='suppressed'"))).toBe(false);
     const audit = value.calls.find(call => call.sql.includes("INSERT INTO audit_log"));
     expect(audit?.binds[0]).toBe("client_request_notification.sent");
+  });
+
+  it("retries a database delivery failure instead of suppressing the claimed request notice", async () => {
+    let reads = 0;
+    const value = recordingDatabase({
+      first: call => {
+        if (call.sql.includes("sqlite_master")) return { count: 0 };
+        if (call.sql.includes("FROM client_portal_notification_outbox")) return ++reads === 1 ? requestNotificationRow() : null;
+        return null;
+      },
+      run: call => { if (call.sql.includes("SET status='sent'")) throw new Error("d1-temporary"); },
+    });
+    await expect(processClientPortalRequestNotifications({ DELIVERY_DB: value.database, DELIVERY_BASE_URL: "https://client.example", PUBLIC_BASE_URL: "https://ops.example", NOTIFICATION_FROM: "notifications@example.test", NOTIFICATION_EMAIL: { send: async () => undefined } } as unknown as Env)).resolves.toBe(1);
+    const retry = value.calls.find(call => call.sql.includes("next_attempt_at=datetime('now',?)"));
+    expect(retry?.binds).toEqual(["pending", "+10 minutes", "d1-temporary", "notice-source", 1]);
+    expect(value.calls.some(call => call.sql.includes("SET status='suppressed'"))).toBe(false);
+  });
+
+  it("does not overwrite a newer outbox state when the claimed attempt lease is stale", async () => {
+    let reads = 0;
+    const value = recordingDatabase({
+      first: call => {
+        if (call.sql.includes("sqlite_master")) return { count: 0 };
+        if (call.sql.includes("FROM client_portal_notification_outbox")) return ++reads === 1 ? requestNotificationRow() : null;
+        return null;
+      },
+      changes: call => call.sql.includes("SET status='sent'") ? 0 : 1,
+    });
+    await expect(processClientPortalRequestNotifications({ DELIVERY_DB: value.database, DELIVERY_BASE_URL: "https://client.example", PUBLIC_BASE_URL: "https://ops.example", NOTIFICATION_FROM: "notifications@example.test", NOTIFICATION_EMAIL: { send: async () => undefined } } as unknown as Env)).resolves.toBe(1);
+    const sent = value.calls.find(call => call.sql.includes("delivered_at=datetime('now')"));
+    expect(sent?.sql).toContain("attempt_count=?");
+    expect(sent?.sql).toContain("lease_expires_at");
+    expect(sent?.binds).toEqual(["notice-source", 1]);
+    expect(value.calls.some(call => call.sql.includes("INSERT INTO audit_log"))).toBe(false);
+    expect(value.calls.some(call => call.sql.includes("next_attempt_at=datetime('now',?)"))).toBe(false);
+    expect(value.calls.some(call => call.sql.includes("SET status='suppressed'"))).toBe(false);
+  });
+
+  it.each([true, false])("rechecks primary draft receipt before delivery (current=%s)", async current => {
+    let reads = 0;
+    const row = requestNotificationRow({ event_type: "pa_draft_quote_created" });
+    const value = recordingDatabase({ first: call => {
+      if (call.sql.includes("sqlite_master")) return { count: 1 };
+      if (call.sql.includes("SELECT EXISTS(") && call.sql.includes("request_pa_draft_quote_receipts")) return current ? 1 : 0;
+      if (call.sql.includes("FROM client_portal_notification_outbox")) return ++reads === 1 ? row : null;
+      return null;
+    } });
+    const send = vi.fn(async () => undefined);
+    await expect(processClientPortalRequestNotifications({ DELIVERY_DB: value.database,
+      DELIVERY_BASE_URL: "https://client.example", PUBLIC_BASE_URL: "https://ops.example",
+      NOTIFICATION_FROM: "notifications@example.test", NOTIFICATION_EMAIL: { send },
+    } as unknown as Env)).resolves.toBe(1);
+    expect(send).toHaveBeenCalledTimes(current ? 1 : 0);
+    const receipt = value.calls.find(call => call.sql.includes("SELECT EXISTS(") && call.sql.includes("request_pa_draft_quote_receipts"));
+    expect(receipt?.sql).toContain("receipt.scope_stale_at IS NULL");
+    expect(receipt?.sql).toContain("receipt.request_revision=");
+    expect(receipt?.sql).toContain("receipt.area_revision=");
+    expect(receipt?.binds).toEqual([row.id, 1, row.request_id, row.account_id, row.requester_identity_id, PRIMARY_ALPHA_SOURCE_ID]);
+    expect(value.calls.some(call => call.sql.includes("INSERT OR IGNORE INTO client_portal_notifications"))).toBe(current);
+    expect(value.calls.some(call => call.sql.includes("SET status='sent'"))).toBe(current);
+    expect(value.calls.some(call => call.sql.includes("last_error='draft-receipt-no-longer-current'"))).toBe(!current);
+  });
+
+  it("delivers a current secondary native request owner only to the in-app inbox, with a live scope and revocation guard", async () => {
+    let reads = 0;
+    const row = requestNotificationRow({
+      catalog_source_id: "project-alpha:secondary", account_source_id: "project-alpha:secondary",
+      recipient_kind: "native_request_owner", event_type: "pa_draft_quote_created",
+      portal_workspace_id: "workspace-native", portal_identity_id: "identity-native", requester_email: "not-an-email",
+    });
+    const value = recordingDatabase({
+      first: call => {
+        if (call.sql.includes("sqlite_master")) return { count: 1 };
+        if (call.sql.includes("FROM client_portal_notification_outbox")) return ++reads === 1 ? row : null;
+        if (call.sql.includes("FROM client_service_requests request")) return {
+          rootType: "organization", rootPublicId: "org-native", generationId: "generation-native", sourceSequence: 7,
+          authorityRevision: 3, authorityVersion: 9, connectorRevision: 4, connectorVersion: 11,
+        };
+        if (call.sql.includes("SELECT portal_project_public_id")) return "project-native";
+        return null;
+      },
+      all: call => call.sql.includes("WITH RECURSIVE") ? [
+        { entity_type: "project", public_id: "project-native", retained: 1, depth: 0 },
+        { entity_type: "organization", public_id: "org-native", retained: 1, depth: 1 },
+      ] : [],
+    });
+    const emailSend = vi.fn(async () => undefined);
+    await expect(processClientPortalRequestNotifications({
+      DELIVERY_DB: value.database, DELIVERY_BASE_URL: "https://client.example", NOTIFICATION_EMAIL: { send: emailSend },
+      CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: "true",
+    } as unknown as Env)).resolves.toBe(1);
+    expect(emailSend).not.toHaveBeenCalled();
+    const inbox = value.calls.find(call => call.sql.includes("INSERT INTO client_portal_notifications"));
+    expect(inbox?.binds).toContain("pa_draft_quote_created");
+    expect(inbox?.sql).toContain("portal_v2_entitlements");
+    expect(inbox?.sql).toContain("portal_v2_identity_denials");
+    expect(inbox?.sql).toContain("checkpoint.active_generation_id=?");
+    expect(value.calls.some(call => call.sql.includes("unsupported-catalog-source"))).toBe(false);
+    expect(value.calls.some(call => call.sql.includes("SET status='sent'"))).toBe(true);
+  });
+
+  it("suppresses a native draft notice when the current generation no longer contains its project, without sending mail", async () => {
+    let reads = 0;
+    const row = requestNotificationRow({ catalog_source_id: "project-alpha:secondary", account_source_id: "project-alpha:secondary",
+      recipient_kind: "native_request_owner", event_type: "pa_draft_quote_created", portal_workspace_id: "workspace-native", portal_identity_id: "identity-native" });
+    const value = recordingDatabase({ first: call => {
+      if (call.sql.includes("sqlite_master")) return { count: 1 };
+      if (call.sql.includes("FROM client_portal_notification_outbox")) return ++reads === 1 ? row : null;
+      if (call.sql.includes("FROM client_service_requests request")) return { rootType: "organization", rootPublicId: "org-native", generationId: "generation-next", sourceSequence: 8, authorityRevision: 3, authorityVersion: 9, connectorRevision: 4, connectorVersion: 11 };
+      if (call.sql.includes("SELECT portal_project_public_id")) return "project-revoked";
+      return null;
+    }, all: () => [] });
+    const emailSend = vi.fn(async () => undefined);
+    await expect(processClientPortalRequestNotifications({ DELIVERY_DB: value.database, NOTIFICATION_EMAIL: { send: emailSend } } as unknown as Env)).resolves.toBe(1);
+    expect(emailSend).not.toHaveBeenCalled();
+    expect(value.calls.find(call => call.sql.includes("SET status='suppressed'") && call.sql.includes("last_error='native-recipient-no-longer-authorized'"))?.binds).toEqual([row.id, 1]);
+  });
+
+  it("delivers a root-scoped native draft notice without inventing a project grant", async () => {
+    let reads = 0;
+    const row = requestNotificationRow({ catalog_source_id: "project-alpha:secondary", account_source_id: "project-alpha:secondary", recipient_kind: "native_request_owner", event_type: "pa_draft_quote_created", portal_workspace_id: "workspace-root", portal_identity_id: "identity-root" });
+    const value = recordingDatabase({ first: call => {
+      if (call.sql.includes("sqlite_master")) return { count: 1 };
+      if (call.sql.includes("FROM client_portal_notification_outbox")) return ++reads === 1 ? row : null;
+      if (call.sql.includes("FROM client_service_requests request")) return { rootType: "organization", rootPublicId: "org-root", generationId: "generation-root", sourceSequence: 1, authorityRevision: 1, authorityVersion: 1, connectorRevision: 1, connectorVersion: 1 };
+      if (call.sql.includes("SELECT portal_project_public_id")) return { project_public_id: null };
+      return null;
+    }, all: call => call.sql.includes("WITH RECURSIVE") ? [{ entity_type: "organization", public_id: "org-root", retained: 1, depth: 0 }] : [] });
+    const send = vi.fn(async () => undefined);
+    await expect(processClientPortalRequestNotifications({ DELIVERY_DB: value.database, DELIVERY_BASE_URL: "https://client.example", NOTIFICATION_EMAIL: { send } } as unknown as Env)).resolves.toBe(1);
+    expect(send).not.toHaveBeenCalled();
+    expect(value.calls.some(call => call.sql.includes("SET status='sent'"))).toBe(true);
   });
 
   it("normalizes optional recipient email and rejects malformed values", () => {
