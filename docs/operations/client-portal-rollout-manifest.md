@@ -231,6 +231,31 @@ R2 credentials, and consolidated two-origin CORS readback. Run all of J6.
 Rollback: stop new draft/submission mutations first; preserve existing request
 reads, review state, attachment receipts, and exact quote handoff receipts.
 
+#### R8a — Confirmed draft notices (Client migration 0201)
+
+This follow-up requires `0201_native_draft_quote_notifications.sql` before
+publishing the Operations draft-receipt writer. See
+[the verification record](pa-draft-notification-verification.md) for local
+evidence; that record is not production acceptance.
+
+1. Pause affected draft mutations and notification dispatch, let in-flight
+   leases drain, and record a recoverable database checkpoint. Capture outbox
+   counts by state and inbox read/dismissed counts plus rowid high-water marks.
+2. Apply 0201 in the existing ordered Client migration sequence. Verify foreign
+   keys, indexes, row counts, rowids, and unchanged pending/leased/read state.
+   This is a preserving table rebuild, not a queue reset.
+3. Publish the coordinated Operations writer/dispatcher and Client reader;
+   then resume the paused paths. Verify one current receipt, idempotent retry,
+   revoked recipient, and source/revision mismatch. A missing enum migration
+   must fail the local receipt transaction, never silently drop its notice.
+4. Verify the intended client's history and read/dismiss behavior, including
+   access revocation. Native draft notices remain in-app only. Do not enroll
+   LTT or send portal invitation announcements as part of this rollout.
+
+Rollback stops new production/dispatch of this event while preserving receipts
+and queued notices. Keep the expanded schema and a compatible reader; do not
+downgrade the CHECK constraint or delete new-event rows to fit an older schema.
+
 ### R9 — Delegated links, expiry, and content audit
 
 Enable the Operations signer and Client delegated-link consumer together. Add

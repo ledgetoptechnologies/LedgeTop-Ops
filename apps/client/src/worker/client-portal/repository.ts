@@ -144,6 +144,7 @@ interface ServiceRequestRow {
   work_area_revision_number: number | null;
   work_area_change_summary: string | null;
   work_area_updated_at: string | null;
+  project_alpha_draft_created: number | null;
   status: ClientServiceRequest["status"];
   created_at: string;
   updated_at: string;
@@ -507,6 +508,7 @@ function mapServiceRequest(
             changeSummary: row.work_area_change_summary!,
             updatedAt: row.work_area_updated_at!,
           } }),
+    ...(row.project_alpha_draft_created === 1 ? { projectAlphaDraftCreated: true } : {}),
     status: row.status,
     acceptedQuote:
       includeBilling && row.quote_status
@@ -591,7 +593,17 @@ const baseServiceRequestColumns = `r.id,r.project_id,r.parent_request_id,r.reque
    r.service_category,r.deliverables_text,r.site_contact_name,r.site_contact_email,r.site_contact_phone,
    r.desired_completion_at,r.latitude,r.longitude`;
 
-const currentServiceRequestColumns = `${baseServiceRequestColumns},
+function currentDraftReceiptColumn(areaRevision: string, enabled: boolean): string {
+  if (!enabled) return "0 project_alpha_draft_created";
+  return `EXISTS(SELECT 1 FROM request_pa_draft_quote_receipts receipt
+    WHERE receipt.request_id=r.id AND receipt.source_id=r.catalog_source_id
+      AND receipt.scope_stale_at IS NULL
+      AND receipt.request_revision=COALESCE((SELECT MAX(revision.revision_number)
+        FROM request_revisions revision WHERE revision.request_id=r.id),0)
+      AND receipt.area_revision=${areaRevision}) project_alpha_draft_created`;
+}
+
+function currentServiceRequestColumns(includeDraftReceipt: boolean) { return `${baseServiceRequestColumns},
    CASE WHEN effective_area.id IS NULL THEN r.area_geojson ELSE effective_area.area_geojson END area_geojson,
    CASE WHEN effective_area.id IS NULL THEN r.poi_points_json ELSE effective_area.poi_points_json END poi_points_json,
    effective_area.revision_number work_area_revision_number,
@@ -602,9 +614,10 @@ const currentServiceRequestColumns = `${baseServiceRequestColumns},
    estimate.id estimate_id,estimate.version estimate_version,estimate.scope_text estimate_scope,
    estimate.estimate_amount_minor,estimate.currency estimate_currency,estimate.status estimate_status,
    estimate.proposed_fields_json estimate_proposed_fields_json,estimate.client_response_note estimate_client_response_note,
-   estimate.updated_at estimate_updated_at`;
+   estimate.updated_at estimate_updated_at,
+   ${currentDraftReceiptColumn("COALESCE(effective_area.revision_number,0)", includeDraftReceipt)}`; }
 
-const legacyServiceRequestColumns = `${baseServiceRequestColumns},
+function legacyServiceRequestColumns(includeDraftReceipt: boolean) { return `${baseServiceRequestColumns},
    r.area_geojson,r.poi_points_json,
    NULL work_area_revision_number,NULL work_area_change_summary,NULL work_area_updated_at,
    r.status,r.created_at,r.updated_at,
@@ -613,7 +626,8 @@ const legacyServiceRequestColumns = `${baseServiceRequestColumns},
    estimate.id estimate_id,estimate.version estimate_version,estimate.scope_text estimate_scope,
    estimate.estimate_amount_minor,estimate.currency estimate_currency,estimate.status estimate_status,
    estimate.proposed_fields_json estimate_proposed_fields_json,estimate.client_response_note estimate_client_response_note,
-   estimate.updated_at estimate_updated_at`;
+   estimate.updated_at estimate_updated_at,
+   ${currentDraftReceiptColumn("0", includeDraftReceipt)}`; }
 
 const currentAcceptedQuoteJoin = `LEFT JOIN request_pa_artifacts quote ON quote.request_id=r.id
   AND quote.artifact_type='quote' AND quote.superseded_at IS NULL AND quote.scope_stale_at IS NULL
@@ -636,19 +650,25 @@ function missingStaffWorkAreaSchema(error: unknown): boolean {
     /no such column:\s*(?:quote\.)?scope_stale_at\b/i.test(message);
 }
 
-function serviceRequestReadSql(legacy: boolean): {
+function missingDraftReceiptSchema(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /no such table:\s*request_pa_draft_quote_receipts\b/i.test(message) ||
+    /no such column:\s*(?:receipt\.)?(?:scope_stale_at|source_id)\b/i.test(message);
+}
+
+function serviceRequestReadSql(legacy: boolean, includeDraftReceipt: boolean): {
   columns: string;
   quoteJoin: string;
   areaJoin: string;
 } {
   return legacy
     ? {
-        columns: legacyServiceRequestColumns,
+        columns: legacyServiceRequestColumns(includeDraftReceipt),
         quoteJoin: legacyAcceptedQuoteJoin,
         areaJoin: "",
       }
     : {
-        columns: currentServiceRequestColumns,
+        columns: currentServiceRequestColumns(includeDraftReceipt),
         quoteJoin: currentAcceptedQuoteJoin,
         areaJoin: effectiveAreaJoin,
       };
@@ -660,10 +680,23 @@ async function serviceRequestRead<T>(
 ): Promise<T> {
   const database = portalDb(env);
   try {
-    return await run(database, serviceRequestReadSql(false));
+    return await run(database, serviceRequestReadSql(false, true));
   } catch (error) {
+    if (missingDraftReceiptSchema(error)) {
+      try {
+        return await run(database, serviceRequestReadSql(false, false));
+      } catch (currentError) {
+        if (!missingStaffWorkAreaSchema(currentError)) throw currentError;
+        return run(database, serviceRequestReadSql(true, false));
+      }
+    }
     if (!missingStaffWorkAreaSchema(error)) throw error;
-    return run(database, serviceRequestReadSql(true));
+    try {
+      return await run(database, serviceRequestReadSql(true, true));
+    } catch (legacyError) {
+      if (!missingDraftReceiptSchema(legacyError)) throw legacyError;
+      return run(database, serviceRequestReadSql(true, false));
+    }
   }
 }
 

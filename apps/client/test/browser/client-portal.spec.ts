@@ -30,6 +30,13 @@ const serviceCatalog = [{
   geometryRequirement: "optional" as const,
   questions: [{ id: "resolution", label: "Preferred resolution", type: "select", required: true, helpText: "Choose the best fit; LTDS will confirm feasibility.", options: [{ value: "standard", label: "Standard" }, { value: "survey", label: "Survey detail" }] }],
 }];
+const notificationHistory = (items: unknown[] = []) => ({
+  scope: { sourceId: "project-alpha:primary", workspaceId: null, rootType: "organization", rootPublicId: "org-a" },
+  asOf: "2026-08-25T12:00:00.000Z",
+  coverage: { requests: "included", feedback: "included", delivery: "omitted_no_explicit_grant_authority" },
+  items,
+  nextCursor: null,
+});
 
 async function mockAuthorizedPortal(
   page: Page,
@@ -108,8 +115,8 @@ async function mockAuthorizedPortal(
     } else if (requestAttachments && request.method() === "DELETE" && path === "/api/client/service-request-drafts/draft-a/attachments/attachment-a") {
       if (attachmentEvents) attachmentEvents.removed = true;
       await route.fulfill({ json: { ok: true, status: "aborted", idempotent: false } });
-    } else if (request.method() === "GET" && path === "/api/client/notifications") {
-      await route.fulfill({ json: { notifications: [{ id: "notice-a", eventType: "files_added", title: "New files available", body: "Files were added to your LTDS client workspace.", actionPath: "/portal/deliveries", readAt: null, createdAt: "2026-08-13T12:00:00.000Z" }], unreadCount: 1, cursor: null } });
+    } else if (request.method() === "GET" && path === "/api/client/notification-history") {
+      await route.fulfill({ json: notificationHistory([{ id: "notice-a", kind: "request", title: "New files available", body: "Files were added to your LTDS client workspace.", actionPath: "/portal/deliveries", mutationPath: "/api/client/notifications/notice-a", readAt: null, createdAt: "2026-08-13T12:00:00.000Z" }]) });
     } else if (request.method() === "PATCH" && path === "/api/client/notifications/notice-a") {
       expect(request.postDataJSON()).toMatchObject({ action: expect.stringMatching(/read|dismiss/) });
       await route.fulfill({ json: { success: true } });
@@ -221,7 +228,7 @@ test("portal identifies an unfinished schema update and retries cleanly on mobil
     if (path === "/api/client/projects") return route.fulfill({ json: { projects } });
     if (path === "/api/client/service-requests") return route.fulfill({ json: { requests } });
     if (path === "/api/client/map-config") return route.fulfill({ json: { mapboxPublicToken: null } });
-    if (path === "/api/client/notifications") return route.fulfill({ json: { notifications: [], unreadCount: 0, cursor: null } });
+    if (path === "/api/client/notification-history") return route.fulfill({ json: notificationHistory() });
     return route.fulfill({ status: 404, json: { error: "Not found" } });
   });
 
@@ -245,7 +252,7 @@ test("client-created links use opaque authorized targets and remain usable on de
     if (path === "/api/client/projects") return route.fulfill({ json: { projects } });
     if (path === "/api/client/service-requests") return route.fulfill({ json: { requests } });
     if (path === "/api/client/map-config") return route.fulfill({ json: { mapboxPublicToken: null } });
-    if (path === "/api/client/notifications") return route.fulfill({ json: { notifications: [], unreadCount: 0, cursor: null } });
+    if (path === "/api/client/notification-history") return route.fulfill({ json: notificationHistory() });
     if (path === "/api/client/past-deliveries") return route.fulfill({ json: { files: [], prefix: "", cursor: null } });
     if (path === "/api/client/past-delivery-locations") return route.fulfill({ json: { points: [], imageCount: 0, truncated: false } });
     if (path.endsWith("/delegated-share-targets")) return route.fulfill({ json: { targets: [{
@@ -321,15 +328,15 @@ test("workspace-v2 selection scopes every authenticated resource request and swi
       await route.fulfill({ json: { requests: [] } });
     } else if (path === "/api/client/map-config") {
       await route.fulfill({ json: { mapboxPublicToken: null } });
-    } else if (path === "/api/client/notifications") {
-      await route.fulfill({ json: { notifications: [], unreadCount: 0, cursor: null } });
+    } else if (path === "/api/client/notification-history") {
+      await route.fulfill({ json: notificationHistory() });
     } else await route.fulfill({ status: 404, json: { error: "Not found" } });
   });
 
   await page.goto("/portal");
   await expect(page.getByRole("heading", { name: "Hello, Alpha" })).toBeVisible();
   await expect(page.getByRole("combobox", { name: "Client workspace" })).toHaveValue("workspace-a");
-  expect(observed.filter(item => ["/api/client/projects", "/api/client/service-requests", "/api/client/map-config", "/api/client/notifications"].includes(item.path)).every(item => item.workspace === "workspace-a")).toBe(true);
+  expect(observed.filter(item => ["/api/client/projects", "/api/client/service-requests", "/api/client/map-config", "/api/client/notification-history"].includes(item.path)).every(item => item.workspace === "workspace-a")).toBe(true);
 
   await page.getByRole("combobox", { name: "Client workspace" }).selectOption("workspace-b");
   await expect(page.getByRole("heading", { name: "Hello, Beta" })).toBeVisible();
@@ -1148,7 +1155,7 @@ test("client Viewer sharing is opt-in, owner-scoped, and responsive at 390 and 3
     if (path === "/api/client/projects") return route.fulfill({ json: { projects } });
     if (path === "/api/client/service-requests") return route.fulfill({ json: { requests } });
     if (path === "/api/client/map-config") return route.fulfill({ json: { mapboxPublicToken: null } });
-    if (path === "/api/client/notifications") return route.fulfill({ json: { notifications: [], unreadCount: 0, cursor: null } });
+    if (path === "/api/client/notification-history") return route.fulfill({ json: notificationHistory() });
     if (path === "/api/client/projects/project-a/models") return route.fulfill({ json: { models: [{
       associationId: "association-one", title: "North Site point cloud", provider: "WebODM",
       modelId: "model-one", modelVersionId: "version-one", updatedAt: "2026-08-16T12:00:00.000Z", canShare: true,
@@ -1246,7 +1253,7 @@ test("Viewer shell is openerless and keeps the iframe and idempotency key across
     if (path === "/api/client/projects") return route.fulfill({ json: { projects } });
     if (path === "/api/client/service-requests") return route.fulfill({ json: { requests } });
     if (path === "/api/client/map-config") return route.fulfill({ json: { mapboxPublicToken: null } });
-    if (path === "/api/client/notifications") return route.fulfill({ json: { notifications: [], unreadCount: 0, cursor: null } });
+    if (path === "/api/client/notification-history") return route.fulfill({ json: notificationHistory() });
     if (path === "/api/client/projects/project-a/models") return route.fulfill({ json: { models: [{
       associationId: "association-one", title: "North Site point cloud", provider: "WebODM",
       modelId: "model-one", modelVersionId: "version-one", updatedAt: "2026-08-16T12:00:00.000Z", canShare: false,
@@ -1604,12 +1611,27 @@ test("client can cancel pre-work requests and sees PA draft creation without an 
   const fixtureRequests: PortalServiceRequest[] = [
     requests[0]!,
     { ...requests[0]!, id: "request-pa-pending", title: "Approved mapping", status: "accepted_pending_pa_linkage" },
-    { ...requests[0]!, id: "request-pa-draft", title: "Quoted mapping", status: "accepted_linked" },
+    { ...requests[0]!, id: "request-pa-draft", title: "Quoted mapping", status: "accepted_pending_pa_linkage", projectAlphaDraftCreated: true },
+    { ...requests[0]!, id: "request-pa-complete", title: "Completed mapping", status: "completed", projectAlphaDraftCreated: true },
+    { ...requests[0]!, id: "request-pa-cancelled", title: "Cancelled mapping", status: "cancelled", projectAlphaDraftCreated: true },
+    { ...requests[0]!, id: "request-pa-declined", title: "Declined mapping", status: "declined", projectAlphaDraftCreated: true },
   ];
   await mockAuthorizedPortal(page, null, fixtureRequests, workflowEvents);
   await page.goto("/portal/requests");
   await expect(page.getByText("Approved · preparing PA draft quote", { exact: true })).toBeVisible();
   await expect(page.getByText("PA draft quote created", { exact: true })).toBeVisible();
+  const quoted = page.locator("article").filter({ hasText: "Quoted mapping" });
+  await expect(quoted.getByText("This does not mean you accepted it.", { exact: true })).toBeVisible();
+  const completed = page.locator("article").filter({ hasText: "Completed mapping" });
+  await expect(completed.getByText("Completed", { exact: true })).toBeVisible();
+  await expect(completed.getByText("PA draft quote created", { exact: true })).toHaveCount(0);
+  for (const status of ["Cancelled", "Declined"]) {
+    const terminal = page.locator("article").filter({ hasText: `${status} mapping` });
+    await expect(terminal.getByText(status, { exact: true })).toBeVisible();
+    await expect(terminal.getByText("PA draft quote created", { exact: true })).toHaveCount(0);
+    await expect(terminal.getByRole("button", { name: "Cancel request", exact: true })).toHaveCount(0);
+  }
+  await expect(page.getByText(/\$|document number|open draft/i)).toHaveCount(0);
   const submitted = page.locator("article").filter({ hasText: requests[0]!.title });
   page.once("dialog", dialog => {
     expect(dialog.message()).toContain("closes the request before work begins");

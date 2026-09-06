@@ -41,7 +41,7 @@ export interface ClientPortalInvitation {
 
 export interface ClientPortalNotification {
   id: string;
-  eventType: "files_added" | "files_removed" | "request_status" | "request_reply" | "estimate_ready" | "request_completed" | "work_area_changed";
+  eventType: "files_added" | "files_removed" | "request_status" | "request_reply" | "estimate_ready" | "request_completed" | "work_area_changed" | "pa_draft_quote_created";
   title: string;
   body: string;
   actionPath: string | null;
@@ -362,6 +362,8 @@ export interface ClientServiceRequest {
     changeSummary: string;
     updatedAt: string;
   } | null;
+  /** A current, source-qualified Project Alpha draft receipt exists. */
+  projectAlphaDraftCreated?: boolean;
   status: "submitted" | "under_review" | "accepted_pending_pa_linkage" | "accepted_linked" | "declined" | "cancelled" | "completed";
   acceptedQuote?: ClientAcceptedQuote | null;
   operationalEstimate?: ClientOperationalEstimate | null;

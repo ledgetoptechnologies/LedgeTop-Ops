@@ -18,12 +18,16 @@ function requestContext(id = "workspace-b", feedback = false) { const value = co
   capabilities: {...value.capabilities, requestV2: true, requestAttachments: false, feedback},
 }; }
 function notification(id: string, title: string, workspaceId = "workspace-b", readAt: string | null = null) { return {
-  id, eventType: "request_status_changed", title, body: `${title} details`, actionPath: `/portal/requests?workspace=${workspaceId}`,
-  readAt, createdAt: date,
+  id, kind: "request", title, body: `${title} details`, actionPath: `/portal/requests?workspace=${workspaceId}`,
+  mutationPath: `/api/client/notifications/${id}`, readAt, createdAt: date,
 }; }
 function feedbackNotification(id: string, feedbackId: string, title: string, readAt: string | null = null) { return {
-  id, feedbackId, title, body: `${title} details`, actionPath: `/portal/feedback/${feedbackId}`,
-  readAt, createdAt: date,
+  id, kind: "feedback", title, body: `${title} details`, actionPath: `/portal/feedback/${feedbackId}?workspace=workspace-b`,
+  mutationPath: `/api/client/v2/workspaces/workspace-b/feedback-notifications/${id}`, readAt, createdAt: date,
+}; }
+function notificationHistory(items: unknown[] = [], coverage = {requests: "included", feedback: "included"}, workspaceId = "workspace-b") { return {
+  scope: {sourceId: workspace(workspaceId).sourceId, workspaceId, rootType: "organization", rootPublicId: "org-shared"}, asOf: date,
+  coverage: {...coverage, delivery: "omitted_no_explicit_grant_authority"}, items, nextCursor: null,
 }; }
 function hierarchy(id = "workspace-b") { return {...envelope(id), page: {nextCursor: null}, entries: [
   {type: "organization", publicId: "org-shared", parentType: null, parentPublicId: null, displayName: workspace(id).displayName, sourceVersion: "1"},
@@ -58,7 +62,7 @@ async function mock(page: Page, override?: Override) {
     if (call.path === "/api/client/projects") return route.fulfill({json: {projects: [{id: "project-primary", externalRef: "PA-1", clientName: "Primary customer", projectName: "Primary-only project", canRequestService: false, status: "active", summary: null, siteAddress: null, serviceAddress: null, projectContactName: null, projectContactEmail: null, projectContactPhone: null, nextMilestone: null, lastUpdateAt: null}]}});
     if (call.path === "/api/client/service-requests") return route.fulfill({json: {requests: []}});
     if (call.path === "/api/client/map-config") return route.fulfill({json: {mapboxPublicToken: null}});
-    if (call.path === "/api/client/notifications") return route.fulfill({json: {notifications: [], unreadCount: 0, cursor: null}});
+    if (call.path === "/api/client/notification-history") return route.fulfill({json: notificationHistory()});
     if (call.path === "/api/client/request-readiness") return route.fulfill({json: {mode: "legacy", workspaceId: "workspace-a", target: {kind: "root", projectId: null}, canStartRequest: false, reason: "request_not_permitted", root: {canStartRequest: false, reason: "request_not_permitted"}, projectRequestsSupported: false, refreshedAt: date}});
     return route.fulfill({status: 404, json: {error: "Unsupported fixture endpoint"}});
   });
@@ -301,7 +305,7 @@ for (const width of [375, 1280]) test(`native service requests expose the shared
       details: "Capture the current work area.", location: null, preferredStartAt: null, serviceCategory: "Mapping",
       deliverables: null, siteContactName: null, siteContactEmail: null, siteContactPhone: null,
       desiredCompletionAt: null, latitude: null, longitude: null, areaGeoJson: null, poiPoints: [],
-      acceptedQuote: null, operationalEstimate: null, status: "submitted", createdAt: date, updatedAt: date,
+      projectAlphaDraftCreated: true, acceptedQuote: null, operationalEstimate: null, status: "accepted_pending_pa_linkage", createdAt: date, updatedAt: date,
     }]}});
     if (call.path === "/api/client/service-request-drafts") return route.fulfill({json: {drafts: []}});
     if (call.path === "/api/client/request-readiness") return route.fulfill({json: {
@@ -313,6 +317,8 @@ for (const width of [375, 1280]) test(`native service requests expose the shared
   await page.goto("/portal/requests?workspace=workspace-b");
   await expect(page.getByRole("heading", {name: "Service requests"})).toBeVisible();
   await expect(page.getByText("Coastal progress mapping", {exact: true})).toBeVisible();
+  await expect(page.getByText("PA draft quote created", {exact: true})).toBeVisible();
+  await expect(page.getByText("This does not mean you accepted it.", {exact: true})).toBeVisible();
   await page.getByRole("button", {name: "Submit new request"}).click();
   await expect(page).toHaveURL(/\/portal\/requests\/new\?workspace=workspace-b/);
   await expect(page.getByRole("heading", {name: "Define your site and scope"})).toBeVisible();
@@ -326,17 +332,12 @@ for (const width of [375, 1280]) test(`native service requests expose the shared
 });
 
 test("native notification bell keeps request and feedback updates in the exact workspace", async ({page}) => {
-  const notices = [notification("notice-new", "Coastal request accepted", "workspace-c"), notification("notice-second", "Coastal request reviewed")];
+  const notices = [notification("notice-new", "Coastal request accepted"), notification("notice-second", "Coastal request reviewed")];
   const feedbackNotices = [feedbackNotification("feedback-notice", "native_feedback-one", "Coastal feedback completed")];
   const mutations: Array<{kind: "request" | "feedback"; id: string; action: string; workspace?: string}> = [];
   const calls = await mock(page, (route, call) => {
     if (call.path === "/api/client/v2/workspaces/workspace-b/context") return route.fulfill({json: requestContext("workspace-b", true)});
-    if (call.path === "/api/client/notifications" && call.method === "GET") return route.fulfill({json: {
-      notifications: notices, unreadCount: notices.filter(item => !item.readAt).length, cursor: null,
-    }});
-    if (call.path === "/api/client/v2/workspaces/workspace-b/feedback-notifications" && call.method === "GET") return route.fulfill({json: {
-      notifications: feedbackNotices, nextCursor: null,
-    }});
+    if (call.path === "/api/client/notification-history" && call.method === "GET") return route.fulfill({json: notificationHistory([...notices, ...feedbackNotices])});
     const match = call.path.match(/^\/api\/client\/notifications\/([^/]+)$/);
     if (match && call.method === "PATCH") {
       const action = (route.request().postDataJSON() as {action: "read" | "dismiss"}).action;
@@ -359,17 +360,17 @@ test("native notification bell keeps request and feedback updates in the exact w
   });
   await page.goto("/portal?workspace=workspace-b");
   const bell = page.locator(".portal-notification-bell");
-  await expect(bell).toHaveAccessibleName(/Notifications, 2 unread request updates, unread feedback updates/); await bell.click();
+  await expect(bell).toHaveAccessibleName(/Notifications, 3 unread updates/); await bell.click();
   const panel = page.getByRole("region", {name: "Notifications"});
-  await expect(panel.getByRole("region", {name: "Request updates"})).toBeVisible();
-  await expect(panel.getByRole("region", {name: "Feedback updates"})).toBeVisible();
+  await expect(panel).toContainText("Coastal request accepted");
+  await expect(panel).toContainText("Coastal feedback completed");
   const first = panel.locator("article", {hasText: "Coastal request accepted"});
   const second = panel.locator("article", {hasText: "Coastal request reviewed"});
   const feedbackItem = panel.locator("article", {hasText: "Coastal feedback completed"});
   await expect(first.getByRole("link", {name: "Coastal request accepted"})).toHaveAttribute("href", "/portal/requests?workspace=workspace-b");
   await expect(feedbackItem.getByRole("link", {name: "Coastal feedback completed"})).toHaveAttribute("href", "/portal/feedback/native_feedback-one?workspace=workspace-b");
   await first.getByRole("button", {name: "Mark read"}).click();
-  await expect(bell).toHaveAccessibleName(/1 unread request update/);
+  await expect(bell).toHaveAccessibleName(/Notifications, 2 unread updates/);
   await feedbackItem.getByRole("button", {name: "Dismiss"}).click();
   await expect(feedbackItem).toHaveCount(0);
   await second.getByRole("button", {name: "Dismiss"}).click();
@@ -382,9 +383,8 @@ test("native notification bell keeps request and feedback updates in the exact w
     {kind: "request", id: "notice-second", action: "dismiss", workspace: "workspace-b"},
     {kind: "request", id: "notice-new", action: "read", workspace: "workspace-b"},
   ]);
-  expect(calls.filter(call => call.path === "/api/client/notifications").every(call => call.workspace === "workspace-b")).toBe(true);
+  expect(calls.filter(call => call.path === "/api/client/notification-history" || call.path.startsWith("/api/client/notifications/")).every(call => call.workspace === "workspace-b")).toBe(true);
   expect(calls.filter(call => call.path.includes("feedback-notifications")).every(call => call.path.startsWith("/api/client/v2/workspaces/workspace-b/") && call.workspace === undefined)).toBe(true);
-  expect(calls.some(call => call.path === "/api/client/feedback-notifications")).toBe(false);
 });
 
 test("native feedback-only workspaces show the bell without probing request notifications", async ({page}) => {
@@ -395,18 +395,17 @@ test("native feedback-only workspaces show the bell without probing request noti
         capabilities: {...value.capabilities, feedback: true},
       }});
     }
-    if (call.path === "/api/client/v2/workspaces/workspace-b/feedback-notifications") return route.fulfill({json: {
-      notifications: [feedbackNotification("feedback-only-notice", "native_feedback-only", "Feedback-only update")], nextCursor: null,
-    }});
+    if (call.path === "/api/client/notification-history") return route.fulfill({json: notificationHistory([
+      feedbackNotification("feedback-only-notice", "native_feedback-only", "Feedback-only update"),
+    ], {requests: "omitted_feature_disabled", feedback: "included"})});
     return undefined;
   });
   await page.goto("/portal?workspace=workspace-b");
-  const bell = page.getByRole("button", {name: /Notifications, unread feedback updates/}); await expect(bell).toBeVisible(); await bell.click();
+  const bell = page.getByRole("button", {name: /Notifications, 1 unread update/}); await expect(bell).toBeVisible(); await bell.click();
   const panel = page.getByRole("region", {name: "Notifications"});
-  await expect(panel.getByRole("region", {name: "Feedback updates"})).toContainText("Feedback-only update");
-  await expect(panel.getByRole("region", {name: "Request updates"})).toHaveCount(0);
-  expect(calls.some(call => call.path === "/api/client/notifications")).toBe(false);
-  expect(calls.some(call => call.path === "/api/client/feedback-notifications")).toBe(false);
+  await expect(panel).toContainText("Feedback-only update");
+  expect(calls.some(call => call.path === "/api/client/notification-history")).toBe(true);
+  expect(calls.some(call => call.path.includes("feedback-notifications"))).toBe(false);
 });
 
 test("switching native sources aborts stale notifications and resets the bell to the selected workspace", async ({page}) => {
@@ -416,30 +415,30 @@ test("switching native sources aborts stale notifications and resets the bell to
       const id = call.path.includes("workspace-b") ? "workspace-b" : "workspace-c";
       return route.fulfill({json: requestContext(id)});
     }
-    if (call.path === "/api/client/notifications" && call.method === "GET") {
-      if (call.workspace === "workspace-b") return wait.then(() => late(route, {notifications: [notification("coastal-stale", "Coastal stale update")], unreadCount: 1, cursor: null}));
-      if (call.workspace === "workspace-c") return route.fulfill({json: {notifications: [notification("mountain-current", "Mountain current update", "workspace-c")], unreadCount: 1, cursor: null}});
+    if (call.path === "/api/client/notification-history" && call.method === "GET") {
+      if (call.workspace === "workspace-b") return wait.then(() => late(route, notificationHistory([notification("coastal-stale", "Coastal stale update")])));
+      if (call.workspace === "workspace-c") return route.fulfill({json: notificationHistory([notification("mountain-current", "Mountain current update", "workspace-c")], undefined, "workspace-c")});
     }
     return undefined;
   });
   await page.goto("/portal?workspace=workspace-b");
-  await expect.poll(() => calls.some(call => call.path === "/api/client/notifications" && call.workspace === "workspace-b")).toBe(true);
+  await expect.poll(() => calls.some(call => call.path === "/api/client/notification-history" && call.workspace === "workspace-b")).toBe(true);
   await page.getByRole("combobox", {name: "Client workspace"}).selectOption("workspace-c");
-  const bell = page.getByRole("button", {name: /Notifications, 1 unread request update/}); await expect(bell).toBeVisible(); await bell.click();
+  const bell = page.getByRole("button", {name: /Notifications, 1 unread update/}); await expect(bell).toBeVisible(); await bell.click();
   await expect(page.getByText("Mountain current update", {exact: true})).toBeVisible(); release();
   await expect(page.getByText("Coastal stale update", {exact: true})).toHaveCount(0);
-  expect(calls.some(call => call.path === "/api/client/notifications" && call.workspace === "workspace-c")).toBe(true);
+  expect(calls.some(call => call.path === "/api/client/notification-history" && call.workspace === "workspace-c")).toBe(true);
 });
 
 for (const width of [390, 1280]) test(`native notification bell is accessible and contained at ${width}px`, async ({page}) => {
   await page.setViewportSize({width, height: 800});
   await mock(page, (route, call) => {
     if (call.path === "/api/client/v2/workspaces/workspace-b/context") return route.fulfill({json: requestContext()});
-    if (call.path === "/api/client/notifications") return route.fulfill({json: {notifications: [notification("notice-responsive", "Responsive native update")], unreadCount: 1, cursor: null}});
+    if (call.path === "/api/client/notification-history") return route.fulfill({json: notificationHistory([notification("notice-responsive", "Responsive native update")])});
     return undefined;
   });
   await page.goto("/portal?workspace=workspace-b");
-  const bell = page.getByRole("button", {name: /Notifications, 1 unread request update/});
+  const bell = page.getByRole("button", {name: /Notifications, 1 unread update/});
   await expect(bell).toBeVisible(); await bell.click();
   const panel = page.getByRole("region", {name: "Notifications"}); await expect(panel).toBeVisible();
   const box = await panel.boundingBox(); expect(box && box.x >= 0 && box.x + box.width <= width).toBeTruthy();

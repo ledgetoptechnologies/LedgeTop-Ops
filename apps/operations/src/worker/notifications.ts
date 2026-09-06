@@ -5,6 +5,7 @@ import {
   createCatalogSourceContext,
   type ServiceRequestNotificationLifecycle,
   type ServiceRequestNotificationSnapshot,
+  NATIVE_PORTAL_TARGET_SCOPES_SQL,
 } from "@ltds/shared";
 import { portalAutomaticEligibilityEnabled } from "./portal-automatic-eligibility";
 import type { Env } from "./types";
@@ -47,8 +48,8 @@ const DIRECT_SOURCE_INDEXES=["idx_project_alpha_delivery_notification_source_dir
   "idx_project_alpha_delivery_notification_pending_exhausted",
   "idx_project_alpha_delivery_notification_processing_exhausted"] as const;
 
-type ClientPortalRequestEvent = "request_submitted" | "request_status_changed" | "request_confirmation_requested" | "request_client_response" | "request_work_area_changed";
-type ClientPortalRequestRecipient = "staff_triage" | "client_requester";
+type ClientPortalRequestEvent = "request_submitted" | "request_status_changed" | "request_confirmation_requested" | "request_client_response" | "request_work_area_changed" | "pa_draft_quote_created";
+type ClientPortalRequestRecipient = "staff_triage" | "client_requester" | "native_request_owner";
 interface ClientPortalRequestNotificationRow {
   id: string;
   request_id: string;
@@ -70,6 +71,142 @@ interface ClientPortalRequestNotificationRow {
   requester_email: string | null;
   account_id: string;
   requester_identity_id: string;
+  portal_workspace_id: string | null;
+  portal_identity_id: string | null;
+}
+
+interface NativeRequestOwnerProof {
+  workspaceId: string;
+  identityId: string;
+  sourceId: string;
+  rootType: "organization" | "standalone_client";
+  rootPublicId: string;
+  generationId: string;
+  sourceSequence: number;
+  authorityRevision: number;
+  authorityVersion: number;
+  connectorRevision: number;
+  connectorVersion: number;
+  projectPublicId: string | null;
+  scopes: string;
+}
+
+/** Builds a current native request-owner proof from the same bounded scope
+ * query used by Client.  It deliberately has no email fallback: ambiguity,
+ * stale generations, revoked identity/membership, or lost project scope all
+ * suppress this in-app-only intent. */
+async function nativeRequestOwnerProof(env: Env, row: ClientPortalRequestNotificationRow): Promise<NativeRequestOwnerProof | null> {
+  if (!row.portal_workspace_id || !row.portal_identity_id || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(row.request_id)) return null;
+  const context = await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT workspace.root_type rootType,
+      COALESCE(workspace.pa_organization_public_id,workspace.pa_client_public_id) rootPublicId,
+      checkpoint.active_generation_id generationId,checkpoint.source_sequence sourceSequence,
+      authority.active_revision authorityRevision,authority.version authorityVersion,
+      authority.connector_revision connectorRevision,authority.connector_version connectorVersion
+    FROM client_service_requests request
+    JOIN portal_v2_workspaces workspace ON workspace.id=request.portal_workspace_id AND workspace.status='active'
+      AND workspace.legacy_account_id IS NULL AND workspace.project_alpha_source_id=request.catalog_source_id
+    JOIN pa_portal_workspace_sources owner ON owner.workspace_id=workspace.id AND owner.projection_source_id=workspace.project_alpha_source_id
+    JOIN pa_portal_source_authorities authority ON authority.source_id=workspace.project_alpha_source_id AND authority.state='active'
+    JOIN portal_v2_identities identity ON identity.id=request.portal_identity_id AND identity.status='active' AND identity.revoked_at IS NULL
+    JOIN portal_v2_workspace_memberships membership ON membership.workspace_id=workspace.id AND membership.identity_id=identity.id
+      AND membership.status='active' AND membership.revoked_at IS NULL AND (membership.expires_at IS NULL OR datetime(membership.expires_at)>datetime('now'))
+    JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=workspace.id
+    JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id AND generation.workspace_id=workspace.id
+      AND generation.status='active' AND generation.complete=1
+    JOIN portal_v2_directory_entities root ON root.workspace_id=workspace.id AND root.generation_id=checkpoint.active_generation_id
+      AND root.entity_type=workspace.root_type AND root.public_id=COALESCE(workspace.pa_organization_public_id,workspace.pa_client_public_id) AND root.active=1
+    WHERE request.id=? AND request.catalog_source_id=? AND request.portal_workspace_id=? AND request.portal_identity_id=?
+      AND ${portalRootAccessAllowedSql(env, "workspace")}
+      AND (membership.source_type<>'project_alpha' OR EXISTS(SELECT 1 FROM pa_portal_principals principal
+        WHERE principal.workspace_id=workspace.id AND principal.identity_id=identity.id AND principal.status='active'
+          AND principal.source_version=membership.source_version AND lower(principal.email_hint)=lower(identity.verified_email)))`)
+    .bind(row.request_id,row.catalog_source_id,row.portal_workspace_id,row.portal_identity_id)
+    .first<Omit<NativeRequestOwnerProof, "workspaceId" | "identityId" | "sourceId" | "scopes">>();
+  if (!context || !["organization", "standalone_client"].includes(context.rootType)) return null;
+  // The outbox read intentionally does not expose the native project public id;
+  // get it from its immutable request row before evaluating the shared scope SQL.
+  const requestTarget = await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT portal_project_public_id project_public_id
+    FROM client_service_requests WHERE id=? AND portal_workspace_id=? AND portal_identity_id=? AND catalog_source_id=?`)
+    .bind(row.request_id,row.portal_workspace_id,row.portal_identity_id,row.catalog_source_id).first<{ project_public_id: string | null }>();
+  if (!requestTarget || (requestTarget.project_public_id !== null && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(requestTarget.project_public_id))) return null;
+  const project = requestTarget.project_public_id;
+  const relations = env.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED === "true";
+  const scoped = await env.DELIVERY_DB.withSession("first-primary").prepare(NATIVE_PORTAL_TARGET_SCOPES_SQL)
+    .bind(JSON.stringify([{ scopeType: project ? "project" : context.rootType, publicId: project ?? context.rootPublicId }]),row.portal_workspace_id,context.generationId,relations ? 1 : 0,66)
+    .all<{ entity_type: string; public_id: string; retained: number; depth: number }>();
+  if (scoped.results.length === 0 || scoped.results.length > (relations ? 64 : 10) || scoped.results.some(item => item.retained <= 0 || (relations && item.depth >= 12))) return null;
+  const scopes = [...new Set(scoped.results.map(item => `${item.entity_type}:${item.public_id}`))];
+  if (!relations && scopes.length !== scoped.results.length) return null;
+  if ((project && !scopes.includes(`project:${project}`)) || !scopes.includes(`${context.rootType}:${context.rootPublicId}`)) return null;
+  scopes.push(`workspace:${row.portal_workspace_id}`);
+  return { workspaceId: row.portal_workspace_id, identityId: row.portal_identity_id, sourceId: row.catalog_source_id, projectPublicId: project,
+    rootType: context.rootType, rootPublicId: context.rootPublicId,
+    generationId: context.generationId, sourceSequence: context.sourceSequence, authorityRevision: context.authorityRevision,
+    authorityVersion: context.authorityVersion, connectorRevision: context.connectorRevision, connectorVersion: context.connectorVersion,
+    scopes: JSON.stringify(scopes.sort()) };
+}
+
+function nativeRequestOwnerGuard(env: Env, proof: NativeRequestOwnerProof, row: ClientPortalRequestNotificationRow): { sql: string; bindings: unknown[] } {
+  const retention = env.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED === "true" ? `AND NOT EXISTS(
+    SELECT 1 FROM json_each(?) target WHERE substr(target.value,1,8)='project:'
+      AND NOT EXISTS(SELECT 1 FROM portal_v2_project_lifecycle lifecycle
+        WHERE lifecycle.workspace_id=workspace.id AND lifecycle.generation_id=checkpoint.active_generation_id
+          AND lifecycle.project_public_id=substr(target.value,9)
+          AND (lifecycle.lifecycle_status='active' OR (lifecycle.lifecycle_status='completed'
+            AND datetime(lifecycle.completed_at,'+30 days')>datetime('now')))))` : "";
+  const denial = env.CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED === "true" ? `AND NOT EXISTS(SELECT 1 FROM portal_v2_identity_denials denial
+      WHERE denial.identity_id=identity.id AND denial.status='active' AND denial.revoked_at IS NULL
+        AND datetime(denial.valid_from)<=datetime('now') AND (denial.expires_at IS NULL OR datetime(denial.expires_at)>datetime('now'))
+        AND (denial.scope_type='global' OR (denial.workspace_id=workspace.id AND denial.scope_public_id IS NOT NULL
+          AND (denial.scope_type || ':' || denial.scope_public_id) IN (SELECT value FROM json_each(?)))))` : "";
+  return { sql: `EXISTS(SELECT 1 FROM client_portal_notification_outbox outbox
+    JOIN client_service_requests request ON request.id=outbox.request_id AND request.catalog_source_id=?
+      AND request.portal_workspace_id=? AND request.portal_identity_id=? AND request.portal_project_public_id IS ?
+      AND request.id=? AND request.account_id=? AND request.created_by_identity_id=?
+    JOIN request_pa_draft_quote_receipts receipt ON outbox.dedupe_key=('pa_draft_quote_created:' || receipt.id || ':native_request_owner')
+      AND receipt.request_id=request.id AND receipt.source_id=request.catalog_source_id AND receipt.scope_stale_at IS NULL
+      AND receipt.request_revision=COALESCE((SELECT MAX(revision_number) FROM request_revisions WHERE request_id=request.id),0)
+      AND receipt.area_revision=COALESCE((SELECT MAX(revision_number) FROM client_service_request_area_revisions WHERE request_id=request.id),0)
+    JOIN portal_v2_workspaces workspace ON workspace.id=request.portal_workspace_id
+    JOIN pa_portal_workspace_sources owner ON owner.workspace_id=workspace.id AND owner.projection_source_id=workspace.project_alpha_source_id
+    JOIN pa_portal_source_authorities authority ON authority.source_id=workspace.project_alpha_source_id AND authority.state='active'
+      AND authority.active_revision=? AND authority.version=? AND authority.connector_revision=? AND authority.connector_version=?
+    JOIN portal_v2_identities identity ON identity.id=? AND identity.status='active' AND identity.revoked_at IS NULL
+    JOIN portal_v2_workspace_memberships membership ON membership.workspace_id=workspace.id AND membership.identity_id=identity.id
+      AND membership.status='active' AND membership.revoked_at IS NULL AND (membership.expires_at IS NULL OR datetime(membership.expires_at)>datetime('now'))
+    JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=workspace.id AND checkpoint.active_generation_id=? AND checkpoint.source_sequence=?
+    JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id AND generation.workspace_id=workspace.id
+      AND generation.status='active' AND generation.complete=1
+    JOIN portal_v2_directory_entities root ON root.workspace_id=workspace.id AND root.generation_id=checkpoint.active_generation_id
+      AND root.entity_type=? AND root.public_id=? AND root.active=1
+      AND root.entity_type=workspace.root_type AND root.public_id=COALESCE(workspace.pa_organization_public_id,workspace.pa_client_public_id)
+    WHERE outbox.id=? AND outbox.event_type='pa_draft_quote_created' AND outbox.recipient_kind='native_request_owner'
+      AND outbox.status='processing' AND outbox.attempt_count=? AND outbox.lease_expires_at IS NOT NULL
+      AND datetime(outbox.lease_expires_at)>datetime('now') AND workspace.id=? AND workspace.project_alpha_source_id=? AND workspace.status='active' AND workspace.legacy_account_id IS NULL
+      AND ${portalRootAccessAllowedSql(env, "workspace")}
+      AND (membership.source_type<>'project_alpha' OR EXISTS(SELECT 1 FROM pa_portal_principals principal
+        WHERE principal.workspace_id=workspace.id AND principal.identity_id=identity.id AND principal.status='active'
+          AND principal.source_version=membership.source_version AND lower(principal.email_hint)=lower(identity.verified_email)))
+      AND (? IS NULL OR EXISTS(SELECT 1 FROM portal_v2_directory_entities project WHERE project.workspace_id=workspace.id
+        AND project.generation_id=checkpoint.active_generation_id AND project.entity_type='project' AND project.active=1
+        AND ('project:' || project.public_id) IN (SELECT value FROM json_each(?))))
+      ${retention}
+      ${denial}
+      AND (SELECT count(*) FROM portal_v2_entitlements counted WHERE counted.workspace_id=workspace.id AND counted.identity_id=identity.id
+        AND counted.capability='request.create' AND counted.status='active' AND counted.revoked_at IS NULL
+        AND datetime(counted.valid_from)<=datetime('now') AND (counted.expires_at IS NULL OR datetime(counted.expires_at)>datetime('now')))<=200
+      AND NOT EXISTS(SELECT 1 FROM portal_v2_entitlements entitlement WHERE entitlement.workspace_id=workspace.id AND entitlement.identity_id=identity.id
+        AND entitlement.capability='request.create' AND entitlement.effect='deny' AND entitlement.status='active' AND entitlement.revoked_at IS NULL
+        AND datetime(entitlement.valid_from)<=datetime('now') AND (entitlement.expires_at IS NULL OR datetime(entitlement.expires_at)>datetime('now'))
+        AND (entitlement.scope_type || ':' || entitlement.scope_public_id) IN (SELECT value FROM json_each(?)))
+      AND EXISTS(SELECT 1 FROM portal_v2_entitlements entitlement WHERE entitlement.workspace_id=workspace.id AND entitlement.identity_id=identity.id
+        AND entitlement.capability='request.create' AND entitlement.effect='allow' AND entitlement.status='active' AND entitlement.revoked_at IS NULL
+        AND datetime(entitlement.valid_from)<=datetime('now') AND (entitlement.expires_at IS NULL OR datetime(entitlement.expires_at)>datetime('now'))
+        AND (entitlement.scope_type || ':' || entitlement.scope_public_id) IN (SELECT value FROM json_each(?))))`,
+    bindings: [proof.sourceId,proof.workspaceId,proof.identityId,proof.projectPublicId,row.request_id,row.account_id,row.requester_identity_id,proof.authorityRevision,proof.authorityVersion,proof.connectorRevision,proof.connectorVersion,proof.identityId,
+      proof.generationId,proof.sourceSequence,proof.rootType,proof.rootPublicId,row.id,row.attempt_count+1,proof.workspaceId,proof.sourceId,proof.projectPublicId,proof.scopes,
+      ...(env.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED === "true" ? [proof.scopes] : []),
+      ...(env.CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED === "true" ? [proof.scopes] : []),proof.scopes,proof.scopes] };
 }
 
 export function normalizeRecipientEmail(value: unknown): string | null {
@@ -571,7 +708,9 @@ function notificationSnapshot(row: ClientPortalRequestNotificationRow): ServiceR
     // Legacy payloads are rebuilt from the same request-scoped, nonfinancial fields below.
   }
   const lifecycle: ServiceRequestNotificationLifecycle =
-    row.event_type === "request_work_area_changed"
+    row.event_type === "pa_draft_quote_created"
+      ? "accepted_linked"
+      : row.event_type === "request_work_area_changed"
       ? "work_area_changed"
       : row.event_type === "request_confirmation_requested"
       ? "estimate_ready"
@@ -613,7 +752,7 @@ export async function processClientPortalRequestNotifications(env: Env): Promise
   let processed = 0;
   for (; processed < 25; processed += 1) {
     const row = await env.DELIVERY_DB.prepare(`SELECT n.id,n.request_id,n.event_type,n.status_value,n.recipient_kind,n.payload_json,n.attempt_count,
-      r.catalog_source_id,r.title,r.project_id,r.service_category,r.location_text,r.latitude,r.longitude,p.project_name,r.account_id,r.created_by_identity_id requester_identity_id,
+      r.catalog_source_id,r.title,r.project_id,r.service_category,r.location_text,r.latitude,r.longitude,p.project_name,r.account_id,r.created_by_identity_id requester_identity_id,r.portal_workspace_id,r.portal_identity_id,
       account.project_alpha_source_id account_source_id,p.project_alpha_source_id project_source_id,
       CASE WHEN n.recipient_kind='client_requester' THEN i.email ELSE NULL END requester_email
       FROM client_portal_notification_outbox n
@@ -648,46 +787,104 @@ export async function processClientPortalRequestNotifications(env: Env): Promise
       (row.account_source_id !== null && row.account_source_id !== PRIMARY_ALPHA_SOURCE_ID) ||
       (row.project_source_id !== null && row.project_source_id !== PRIMARY_ALPHA_SOURCE_ID))) {
       const reason = row.catalog_source_id !== PRIMARY_ALPHA_SOURCE_ID ? "unsupported-catalog-source" : "unsupported-business-source";
-      await env.DELIVERY_DB.prepare("UPDATE client_portal_notification_outbox SET status='suppressed',lease_expires_at=NULL,last_error=?,updated_at=datetime('now') WHERE id=? AND status='processing'")
-        .bind(reason, row.id).run();
-      await auditClientRequestNotification(env, "client_request_notification.suppressed", row, { attempt, reason });
+      const suppressed = await env.DELIVERY_DB.prepare("UPDATE client_portal_notification_outbox SET status='suppressed',lease_expires_at=NULL,last_error=?,updated_at=datetime('now') WHERE id=? AND status='processing' AND attempt_count=? AND datetime(lease_expires_at)>datetime('now')")
+        .bind(reason, row.id, attempt).run();
+      if (suppressed.meta.changes) await auditClientRequestNotification(env, "client_request_notification.suppressed", row, { attempt, reason });
       continue;
     }
-    const recipient = row.recipient_kind === "staff_triage" ? normalizeRecipientEmail(env.CLIENT_REQUEST_TRIAGE_TO) : normalizeRecipientEmail(row.requester_email);
+    const native = row.recipient_kind === "native_request_owner";
+    try {
+    if (row.event_type === "pa_draft_quote_created" && !native) {
+      const current = await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT EXISTS(
+        SELECT 1 FROM request_pa_draft_quote_receipts receipt
+        JOIN client_service_requests request ON request.id=receipt.request_id AND request.catalog_source_id=receipt.source_id
+        JOIN client_portal_notification_outbox outbox ON outbox.request_id=request.id
+          AND outbox.dedupe_key=('pa_draft_quote_created:' || receipt.id || ':client_requester')
+        WHERE outbox.id=? AND outbox.status='processing' AND outbox.attempt_count=? AND datetime(outbox.lease_expires_at)>datetime('now')
+          AND request.id=? AND request.account_id=? AND request.created_by_identity_id=? AND request.catalog_source_id=?
+          AND receipt.scope_stale_at IS NULL
+          AND receipt.request_revision=COALESCE((SELECT MAX(revision_number) FROM request_revisions WHERE request_id=request.id),0)
+          AND receipt.area_revision=COALESCE((SELECT MAX(revision_number) FROM client_service_request_area_revisions WHERE request_id=request.id),0)
+      ) current`).bind(row.id,attempt,row.request_id,row.account_id,row.requester_identity_id,row.catalog_source_id).first<number>("current");
+      if (current !== 1) {
+        const suppressed = await env.DELIVERY_DB.prepare("UPDATE client_portal_notification_outbox SET status='suppressed',lease_expires_at=NULL,last_error='draft-receipt-no-longer-current',updated_at=datetime('now') WHERE id=? AND status='processing' AND attempt_count=? AND datetime(lease_expires_at)>datetime('now')").bind(row.id,attempt).run();
+        if (suppressed.meta.changes) await auditClientRequestNotification(env,"client_request_notification.suppressed",row,{attempt,reason:"draft-receipt-no-longer-current"});
+        continue;
+      }
+    }
+    const recipient = native ? "native-in-app" : row.recipient_kind === "staff_triage" ? normalizeRecipientEmail(env.CLIENT_REQUEST_TRIAGE_TO) : normalizeRecipientEmail(row.requester_email);
+    const nativeProof = native ? await nativeRequestOwnerProof(env, row) : null;
+    if(native && !nativeProof) {
+      const suppressed = await env.DELIVERY_DB.prepare("UPDATE client_portal_notification_outbox SET status='suppressed',lease_expires_at=NULL,last_error='native-recipient-no-longer-authorized',updated_at=datetime('now') WHERE id=? AND status='processing' AND attempt_count=? AND datetime(lease_expires_at)>datetime('now')").bind(row.id,attempt).run();
+      if (suppressed.meta.changes) await auditClientRequestNotification(env,"client_request_notification.suppressed",row,{attempt,reason:"native-recipient-no-longer-authorized"});
+      continue;
+    }
     if (!recipient) {
       const staffRecipientMissing = row.recipient_kind === "staff_triage";
-      await env.DELIVERY_DB.prepare("UPDATE client_portal_notification_outbox SET status=?,lease_expires_at=NULL,last_error=?,updated_at=datetime('now') WHERE id=? AND status='processing'")
-        .bind(staffRecipientMissing ? "failed" : "suppressed", staffRecipientMissing ? "staff-triage-recipient-not-configured" : "requester-email-unavailable", row.id).run();
-      await auditClientRequestNotification(env, staffRecipientMissing ? "client_request_notification.failed" : "client_request_notification.suppressed", row, { attempt });
-      if (staffRecipientMissing)
+      const unavailable = await env.DELIVERY_DB.prepare("UPDATE client_portal_notification_outbox SET status=?,lease_expires_at=NULL,last_error=?,updated_at=datetime('now') WHERE id=? AND status='processing' AND attempt_count=? AND datetime(lease_expires_at)>datetime('now')")
+        .bind(staffRecipientMissing ? "failed" : "suppressed", staffRecipientMissing ? "staff-triage-recipient-not-configured" : "requester-email-unavailable", row.id, attempt).run();
+      if (unavailable.meta.changes) await auditClientRequestNotification(env, staffRecipientMissing ? "client_request_notification.failed" : "client_request_notification.suppressed", row, { attempt });
+      if (staffRecipientMissing && unavailable.meta.changes)
         await sendAdminAlert(env, "Client request triage is not configured", `Notification ${row.id} for request ${row.request_id} could not be routed to staff.`);
       continue;
     }
-    try {
       const snapshot = notificationSnapshot(row);
       const rendered = renderClientRequestNotification(snapshot, actionUrl(env, row, snapshot));
-      if (row.recipient_kind === "client_requester" && portalInboxAvailable) {
+      if (native) {
+        if (!portalInboxAvailable) throw new Error("native-portal-inbox-unavailable");
+        const guard = nativeRequestOwnerGuard(env, nativeProof!, row);
+        const dedupeKey = `service-request:${row.id}`;
+        const title = rendered.subject.slice(0,160);
+        const body = lifecyclePresentation[snapshot.lifecycle].introduction.slice(0,500);
+        // Recheck the exact inbox record inside the same transaction. A pre-read
+        // cannot prove it still exists when a reclaimed outbox attempt commits.
+        const exactInbox = `EXISTS(SELECT 1 FROM client_portal_notifications
+          WHERE account_id=? AND recipient_identity_id=? AND event_type='pa_draft_quote_created'
+            AND source_type='service_request' AND source_id=? AND dedupe_key=? AND title=? AND body=? AND action_path='/portal/requests')`;
+        const inboxBindings = [row.account_id,row.requester_identity_id,row.request_id,dedupeKey,title,body];
+        const inbox = env.DELIVERY_DB.prepare(`INSERT INTO client_portal_notifications
+          (id,account_id,recipient_identity_id,event_type,source_type,source_id,dedupe_key,title,body,action_path)
+          SELECT ?,?,?,?,?,?,?,?,?,? WHERE ${guard.sql}
+          ON CONFLICT(recipient_identity_id,dedupe_key) DO NOTHING`).bind(crypto.randomUUID(),row.account_id,row.requester_identity_id,
+            "pa_draft_quote_created","service_request",row.request_id,dedupeKey,title,body,"/portal/requests",...guard.bindings);
+        const sent = env.DELIVERY_DB.prepare(`UPDATE client_portal_notification_outbox SET status='sent',delivered_at=datetime('now'),lease_expires_at=NULL,updated_at=datetime('now')
+          WHERE id=? AND status='processing' AND ${guard.sql} AND ${exactInbox}`).bind(row.id,...guard.bindings,...inboxBindings);
+        const audit = env.DELIVERY_DB.prepare(`INSERT INTO audit_log(actor_type,actor_id,action,entity_type,entity_id,details_json)
+          SELECT 'system','client-request-notifications','client_request_notification.sent','client_service_request',?,? WHERE ${guard.sql} AND ${exactInbox}`)
+          .bind(row.request_id,JSON.stringify({notificationId:row.id,eventType:row.event_type,recipientKind:row.recipient_kind,attempt}),...guard.bindings,...inboxBindings);
+        // Audit before changing processing -> sent: the shared guard intentionally
+        // requires our live claim. An exact duplicate inbox row is a valid replay.
+        const results = await env.DELIVERY_DB.batch([inbox,audit,sent]);
+        if (!results[1]?.meta.changes || !results[2]?.meta.changes) {
+          const suppressed = await env.DELIVERY_DB.prepare("UPDATE client_portal_notification_outbox SET status='suppressed',lease_expires_at=NULL,last_error='native-recipient-no-longer-authorized',updated_at=datetime('now') WHERE id=? AND status='processing' AND attempt_count=? AND datetime(lease_expires_at)>datetime('now')").bind(row.id,attempt).run();
+          if (suppressed.meta.changes) await auditClientRequestNotification(env,"client_request_notification.suppressed",row,{attempt,reason:"native-recipient-no-longer-authorized"});
+        }
+        continue;
+      }
+      if ((row.recipient_kind === "client_requester" || native) && portalInboxAvailable) {
         const completed = snapshot.lifecycle === "completed";
         const estimate = snapshot.lifecycle === "estimate_ready";
         const workArea = snapshot.lifecycle === "work_area_changed";
         await env.DELIVERY_DB.prepare(`INSERT OR IGNORE INTO client_portal_notifications
           (id,account_id,recipient_identity_id,event_type,source_type,source_id,dedupe_key,title,body,action_path)
           VALUES (?,?,?,?,?,?,?,?,?,?)`).bind(crypto.randomUUID(), row.account_id, row.requester_identity_id,
-            completed ? "request_completed" : estimate ? "estimate_ready" : workArea ? "work_area_changed" : "request_status", "service_request", row.request_id,
+            native && row.event_type === "pa_draft_quote_created" ? "pa_draft_quote_created" : completed ? "request_completed" : estimate ? "estimate_ready" : workArea ? "work_area_changed" : "request_status", "service_request", row.request_id,
             `service-request:${row.id}`, rendered.subject.slice(0, 160),
             (workArea && snapshot.changeSummary ? snapshot.changeSummary : lifecyclePresentation[snapshot.lifecycle].introduction).slice(0, 500),
             "/portal/requests").run();
       }
-      await sendNotificationMail(env, { to: recipient, fromName: "LTDS Client Portal", subject: rendered.subject, text: rendered.text, html: rendered.html, messageIdKey: row.id });
-      await env.DELIVERY_DB.prepare("UPDATE client_portal_notification_outbox SET status='sent',delivered_at=datetime('now'),lease_expires_at=NULL,updated_at=datetime('now') WHERE id=? AND status='processing'").bind(row.id).run();
-      await auditClientRequestNotification(env, "client_request_notification.sent", row, { attempt });
+      if(!native) await sendNotificationMail(env, { to: recipient, fromName: "LTDS Client Portal", subject: rendered.subject, text: rendered.text, html: rendered.html, messageIdKey: row.id });
+      const sent = await env.DELIVERY_DB.prepare("UPDATE client_portal_notification_outbox SET status='sent',delivered_at=datetime('now'),lease_expires_at=NULL,updated_at=datetime('now') WHERE id=? AND status='processing' AND attempt_count=? AND datetime(lease_expires_at)>datetime('now')").bind(row.id, attempt).run();
+      if (sent.meta.changes) await auditClientRequestNotification(env, "client_request_notification.sent", row, { attempt });
     } catch (error) {
       const message = (error instanceof Error ? error.message : "email-send-failed").slice(0, 240);
       const terminal = attempt >= MAX_ATTEMPTS;
-      await env.DELIVERY_DB.prepare("UPDATE client_portal_notification_outbox SET status=?,next_attempt_at=datetime('now',?),lease_expires_at=NULL,last_error=?,updated_at=datetime('now') WHERE id=? AND status='processing'")
-        .bind(terminal ? "failed" : "pending", terminal ? "+0 seconds" : `+${2 ** attempt * 5} minutes`, message, row.id).run();
-      await auditClientRequestNotification(env, terminal ? "client_request_notification.failed" : "client_request_notification.retry_scheduled", row, { attempt, error: message });
-      if (terminal) await sendAdminAlert(env, "Client request notification failed", `${row.event_type} notification ${row.id}: ${message}`);
+      const retried = await env.DELIVERY_DB.prepare("UPDATE client_portal_notification_outbox SET status=?,next_attempt_at=datetime('now',?),lease_expires_at=NULL,last_error=?,updated_at=datetime('now') WHERE id=? AND status='processing' AND attempt_count=? AND datetime(lease_expires_at)>datetime('now')")
+        .bind(terminal ? "failed" : "pending", terminal ? "+0 seconds" : `+${2 ** attempt * 5} minutes`, message, row.id, attempt).run();
+      if (retried.meta.changes) {
+        await auditClientRequestNotification(env, terminal ? "client_request_notification.failed" : "client_request_notification.retry_scheduled", row, { attempt, error: message });
+        if (terminal && !native) await sendAdminAlert(env, "Client request notification failed", `${row.event_type} notification ${row.id}: ${message}`);
+      }
     }
   }
   return processed;

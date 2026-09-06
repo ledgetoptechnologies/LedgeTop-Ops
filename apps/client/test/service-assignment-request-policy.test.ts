@@ -400,6 +400,67 @@ describe("exact-target service-assignment request policy", { timeout: 60_000 }, 
       .toMatchObject({ kind: "replayed", request: { status: "cancelled" } });
   });
 
+  async function submitNativeReceiptFixture(key: string) {
+    await seedSecondaryPolicyContext();
+    await enableSecondaryRequestPolicy();
+    const input: ClientServiceRequestDraftInput = {
+      projectId: null, requestType: "service", title: "Native receipt state", details: "Exact receipt only.",
+      location: null, preferredStartAt: null, deliverables: null, siteContactName: null, siteContactEmail: null,
+      siteContactPhone: null, desiredCompletionAt: null, latitude: null, longitude: null, areaGeoJson: null, poiPoints: [],
+      services: [{ publicId: "root-service", sourceVersion: "service-v1", answers: {} }],
+    };
+    const draft = await createNativeServiceRequestDraft(env, secondarySession, input, `${key}-create`);
+    if (!draft || draft.kind !== "created") throw new Error("native receipt fixture unavailable");
+    const request = await submitNativeServiceRequestDraft(env, secondarySession, draft.draft.id, draft.draft.version, `${key}-submit`);
+    if (!request || request.kind !== "submitted") throw new Error("native receipt request unavailable");
+    return request.request.id;
+  }
+
+  async function seedNativeReceipt(requestId: string, options: { source?: string; stale?: boolean; area?: number } = {}) {
+    const id = `native-command-${requestId}`;
+    await db.prepare(`INSERT INTO request_pa_draft_quote_commands
+        (id,request_id,request_revision,area_revision,source_id,command_endpoint,application_key,editor_origin,destination_fingerprint,idempotency_key,payload_hash,payload_json,created_by)
+        VALUES(?, ?, (SELECT MAX(revision_number) FROM request_revisions WHERE request_id=?), ?, ?, 'https://alpha.example/api/drafts','operations','https://alpha.example',?,?,?,'{}','staff-test')`)
+      .bind(id, requestId, requestId, options.area ?? 0, options.source ?? secondarySourceId, "a".repeat(64), `key-${requestId}`, "b".repeat(64)).run();
+    await db.prepare(`INSERT INTO request_pa_draft_quote_receipts
+        (id,request_id,request_revision,area_revision,idempotency_key,payload_hash,project_alpha_receipt_id,project_alpha_artifact_public_id,artifact_status,artifact_version,editor_path,scope_stale_at,created_by,source_id,command_id)
+        SELECT ?,request_id,request_revision,area_revision,idempotency_key,payload_hash,'receipt','draft','draft',1,'/drafts/draft',?,'staff-test',source_id,id
+        FROM request_pa_draft_quote_commands WHERE id=?`)
+      .bind(`native-receipt-${requestId}`, options.stale ? "2026-09-01T00:00:00.000Z" : null, id).run();
+  }
+
+  async function seedForeignPrimaryReceipt() {
+    const requestId = "native-receipt-foreign-primary";
+    await db.batch([
+      db.prepare(`INSERT INTO client_service_requests
+        (id,account_id,project_id,created_by_identity_id,request_type,title,details,status,idempotency_key,request_fingerprint,catalog_source_id)
+        VALUES(?, 'policy-account', NULL, 'policy-identity', 'service', 'Primary foreign receipt',
+          'A valid record from the distinct primary source.', 'submitted', 'foreign-primary-receipt-key', ?, ?)`)
+        .bind(requestId, "f".repeat(43), sourceId),
+      db.prepare(`INSERT INTO request_revisions(id,request_id,revision_number,author_type,author_id,action,snapshot_json)
+        VALUES('native-receipt-foreign-primary-revision',?,1,'client','policy-identity','submitted','{}')`).bind(requestId),
+    ]);
+    await seedNativeReceipt(requestId, { source: sourceId });
+    return requestId;
+  }
+
+  it.each(["current", "stale", "revision", "area", "wrong source"] as const)("derives native draft completion only for an exact current receipt: %s", async scenario => {
+    const requestId = await submitNativeReceiptFixture(`native-receipt-${scenario.replaceAll(" ", "-")}`);
+    if (scenario === "stale") await seedNativeReceipt(requestId, { stale: true });
+    else if (scenario === "wrong source") await seedForeignPrimaryReceipt();
+    else await seedNativeReceipt(requestId);
+    if (scenario === "revision") await db.prepare(`INSERT INTO request_revisions(id,request_id,revision_number,author_type,author_id,action,snapshot_json)
+      VALUES(?,?,2,'staff','staff-test','staff_proposal','{}')`).bind(`native-revision-${requestId}`, requestId).run();
+    if (scenario === "area") await db.prepare(`INSERT INTO client_service_request_area_revisions
+      (id,request_id,revision_number,base_request_updated_at,area_geojson,poi_points_json,reason,change_summary,created_by,mutation_key,mutation_fingerprint)
+      VALUES(?,?,1,'2026-08-01T00:00:00.000Z',NULL,'[]','Reviewed boundary','Changed area','staff-test',?,?)`)
+      .bind(`native-area-${requestId}`, requestId, `native-area-key-${requestId}`, "c".repeat(64)).run();
+    expect((await listNativeServiceRequests(env, secondarySession)).find(item => item.id === requestId)?.projectAlphaDraftCreated)
+      .toBe(scenario === "current" ? true : undefined);
+    if (scenario === "wrong source")
+      expect((await listNativeServiceRequests(env, secondarySession)).some(item => item.id === "native-receipt-foreign-primary")).toBe(false);
+  });
+
   it("composes native direct creation through the exact-source draft lifecycle and rejects ambiguous selections", async () => {
     await seedSecondaryPolicyContext();
     await enableSecondaryRequestPolicy();

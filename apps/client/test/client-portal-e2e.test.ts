@@ -832,13 +832,13 @@ describe("client portal migrated-D1 end-to-end contract", () => {
     expect(await db.prepare("SELECT COUNT(*) count FROM request_revisions WHERE request_id=? AND action='submitted'").bind(requestId).first("count")).toBe(1);
   }, 15_000);
 
-  it("hides stored service-request notifications after project access is revoked", async () => {
+  it.each(["request_status", "pa_draft_quote_created"] as const)("hides stored %s notifications after project access is revoked", async eventType => {
     await db.batch([
       db.prepare("UPDATE client_account_members SET role='member' WHERE account_id='account-a' AND identity_id='identity-a'"),
       db.prepare("INSERT INTO client_member_project_grants(account_id,identity_id,project_id,granted_by_identity_id) VALUES('account-a','identity-a','project-a','identity-a')"),
       db.prepare(`INSERT INTO client_portal_notifications
         (id,account_id,recipient_identity_id,event_type,source_type,source_id,dedupe_key,title,body,action_path)
-        VALUES ('project-notice','account-a','identity-a','request_status','service_request','billing-request','project-notice-key','Project update','A request changed.','/portal/requests')`),
+        VALUES ('project-notice','account-a','identity-a',?,'service_request','billing-request','project-notice-key','Project update','A request changed.','/portal/requests')`).bind(eventType),
     ]);
     const visible = await portal().request(`${portalOrigin}/notifications`, {}, env);
     expect((await visible.json() as any).notifications.map((item: any) => item.id)).toContain("project-notice");
