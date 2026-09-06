@@ -319,3 +319,18 @@ source-record, request, portal-access, delivery-link and notification ledgers;
 primary-source feedback lifecycle history, authenticated content-read production, global filters,
 client visibility and common retention are now distinct: the feedback adapter is locally verified, while the latter items still remain. No production migration,
 flag change, deployment or push is included in either checkpoint.
+
+### September 6 release verification follow-up
+
+The full Operations run reported an obsolete delegated-signer configuration
+assertion for `ltds-ops`. The checked-in Worker and Client service binding both
+use `ledgetop-ops`; only the test expectation was corrected. Its focused test
+passed (1 passed, 6 unselected). The already-running full suite is still pending;
+the focused result does not establish a full-suite pass.
+
+The isolated PA draft notification/status range `f8e8641..b93734e` has completed
+source review of all 12 changed files with no plausible security candidates.
+The security scan remains unfinalized because its required Markdown artifact
+directory denied filesystem access. The canonical model and partial review
+checkpoint are saved through the scan service. Live PA synchronization and
+default-on workspace provisioning remain unverified; no release is claimed.

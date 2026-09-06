@@ -153,7 +153,7 @@ describe("private Operations client-delegated share signer", () => {
     expect(clientConfig.vars.CLIENT_DELEGATED_SHARES_ENABLED).toBe("false");
     expect(clientConfig.services).toContainEqual({
       binding: "CLIENT_DELEGATED_SHARE_SIGNER",
-      service: "ltds-ops",
+      service: "ledgetop-ops",
       entrypoint: "ClientDelegatedShareSigner",
     });
     expect(JSON.stringify(clientConfig)).not.toContain("DELIVERY_TOKEN_SECRET");
