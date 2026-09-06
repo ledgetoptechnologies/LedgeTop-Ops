@@ -354,3 +354,19 @@ signing keys while Project Alpha can still retry.
 Production evidence must include redacted version IDs, configuration readback,
 the direct-route 404 probes, one successful event, one exact duplicate, and one
 retryable Client-unavailable case.
+
+### September 6 signed-in recheck — activation still pending
+
+After the operator renewed the browser session, the LTDS production page still
+reported `vfdf8520`. The existing Ops Sync connection was Ready, but workspace
+event routing remained Paused with zero active workspaces and zero queued or
+failed workspace events. The page still required the producer to be saved for
+this connection. No settings, credentials, or sync actions were changed during
+this read-only recheck; LTT was not enrolled.
+
+This is not evidence that the activation fix failed: the observed revision
+predates merged PA fix `80fb0cc028655d885be37d798797da280d92aeb8`.
+Pull/recreate the published LTDS PA containers, verify the running revision,
+then perform and inspect activation through the existing connection. Do not
+substitute a new endpoint or claim automatic provisioning is live until the
+resulting workspaces and preserved revocations are verified end to end.
