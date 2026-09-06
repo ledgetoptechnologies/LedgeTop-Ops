@@ -1515,16 +1515,34 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
     };
   },
 
-  async updateNotification(env: Env, session: ClientPortalSession, notificationId: string, action: "read" | "dismiss"): Promise<boolean> {
+  async updateNotification(env: Env, session: ClientPortalSession, notificationId: string, action: "read" | "dismiss", guard?: { sql: string; bindings: unknown[] }): Promise<boolean> {
     if (session.nativeSourceId) return updateNativeNotification(env, session, notificationId, action);
+    const mutationGuard = guard ? `AND ${guard.sql}` : "";
+    const legacyDeliveryGuard = `AND (source_type<>'folder_grant' OR EXISTS(SELECT 1 FROM client_folder_associations association
+            JOIN client_accounts account ON account.id=client_portal_notifications.account_id AND account.status='active'
+            JOIN client_identity_links identity ON identity.id=client_portal_notifications.recipient_identity_id
+              AND identity.account_id=account.id AND identity.revoked_at IS NULL
+            JOIN client_account_members member ON member.account_id=account.id AND member.identity_id=identity.id AND member.revoked_at IS NULL
+            WHERE association.logical_grant_id=client_portal_notifications.source_id AND association.account_id=account.id
+              AND association.revoked_at IS NULL AND COALESCE(account.project_alpha_source_id,'project-alpha:primary')=?
+              AND ((association.scope_type='client' AND association.project_id IS NULL) OR (association.scope_type='project' AND association.project_id IS NOT NULL
+                AND EXISTS(SELECT 1 FROM projects project JOIN client_project_grants project_grant
+                  ON project_grant.project_id=project.id AND project_grant.account_id=account.id AND project_grant.revoked_at IS NULL
+                  WHERE project.id=association.project_id AND project.active=1 AND (member.role='manager' OR EXISTS(
+                    SELECT 1 FROM client_member_project_grants member_grant WHERE member_grant.account_id=account.id
+                      AND member_grant.identity_id=identity.id AND member_grant.project_id=project.id AND member_grant.revoked_at IS NULL)))))))`;
     const result = await portalDb(env).prepare(action === "read"
       ? `UPDATE client_portal_notifications SET read_at=COALESCE(read_at,datetime('now')) WHERE id=? AND account_id=? AND recipient_identity_id=? AND dismissed_at IS NULL
           AND EXISTS (SELECT 1 FROM client_accounts a JOIN client_identity_links i ON i.id=? AND i.account_id=a.id AND i.revoked_at IS NULL
-            JOIN client_account_members m ON m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL WHERE a.id=? AND a.status='active')`
+            JOIN client_account_members m ON m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL WHERE a.id=? AND a.status='active')
+          ${legacyDeliveryGuard}
+          ${mutationGuard}`
       : `UPDATE client_portal_notifications SET dismissed_at=COALESCE(dismissed_at,datetime('now')) WHERE id=? AND account_id=? AND recipient_identity_id=? AND dismissed_at IS NULL
           AND EXISTS (SELECT 1 FROM client_accounts a JOIN client_identity_links i ON i.id=? AND i.account_id=a.id AND i.revoked_at IS NULL
-            JOIN client_account_members m ON m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL WHERE a.id=? AND a.status='active')`)
-      .bind(notificationId, session.accountId, session.identityId, session.identityId, session.accountId).run();
+            JOIN client_account_members m ON m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL WHERE a.id=? AND a.status='active')
+          ${legacyDeliveryGuard}
+          ${mutationGuard}`)
+      .bind(notificationId, session.accountId, session.identityId, session.identityId, session.accountId, PRIMARY_ALPHA_SOURCE_ID, ...(guard?.bindings ?? [])).run();
     return Boolean(result.meta.changes);
   },
 

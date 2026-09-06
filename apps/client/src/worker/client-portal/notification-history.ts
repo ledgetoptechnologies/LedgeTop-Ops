@@ -16,7 +16,7 @@ import {decodeNotificationHistoryCursor,encodeNotificationHistoryCursor,notifica
 
 type Variables={clientSession:ClientPortalSession;clientPrincipal:VerifiedClientPrincipal;clientWorkspace:EffectivePortalWorkspaceContext|null};
 const PAGE=25,TTL=15*60_000;
-type Raw={rowid:number;id:string;kind:'request'|'feedback';title:string;body:string;actionPath:string|null;readAt:string|null;createdAt:string};
+type Raw={rowid:number;id:string;kind:'request'|'feedback'|'delivery';title:string;body:string;actionPath:string|null;readAt:string|null;createdAt:string};
 type LedgerCoverage='included'|'omitted_feature_disabled'|'omitted_schema_unavailable';
 type Dependencies={notificationSchemaAvailable:(env:Env)=>Promise<boolean>;feedbackSchemaAvailable:(env:Env)=>Promise<boolean>};
 export function notificationHistoryCoverage(input:{native:boolean;notifications:boolean;primaryFeedback:boolean;nativeRequestsEnabled:boolean;nativeRequestSchema:boolean;nativeFeedbackEnabled:boolean;nativeFeedbackSchema:boolean}):{requests:LedgerCoverage;feedback:LedgerCoverage}{
@@ -26,6 +26,9 @@ export function notificationHistoryCoverage(input:{native:boolean;notifications:
 }
 const db=(env:Env)=>env.DELIVERY_DB.withSession('first-primary');
 const key=(row:Raw)=>`${row.kind}:${row.id}`;
+// Timestamps and opaque notification keys are ASCII. Use SQLite BINARY order,
+// not locale collation, so the merge and continuation predicate agree.
+const binaryDescending=(a:string,b:string)=>a===b?0:a>b?-1:1;
 const before=(after:[string,string]|undefined)=>after??[null,null];
 const cleanPath=(value:string|null)=>value?.startsWith('/portal/')&&!/[\\\u0000-\u001f\u007f]/.test(value)?value:null;
 
@@ -54,11 +57,13 @@ async function requestRows(env:Env,session:ClientPortalSession,water:number,asOf
       AND n.account_id=r.account_id AND n.recipient_identity_id=r.created_by_identity_id
       AND (? IS NULL OR n.created_at<? OR (n.created_at=? AND 'request:'||n.id<?)) ORDER BY n.created_at DESC,n.id DESC LIMIT ?`)
     .bind(water,asOf,session.workspaceId,session.nativePortalIdentityId,session.nativeSourceId,at,at,at,id,PAGE+1).all<Raw>();
-  return db(env).prepare(`SELECT n.rowid,n.id,'request' kind,n.title,n.body,n.action_path actionPath,n.read_at readAt,n.created_at createdAt
-    FROM client_portal_notifications n JOIN client_service_requests r ON n.source_type='service_request' AND r.id=n.source_id
+  return db(env).prepare(`SELECT n.rowid,n.id,CASE n.source_type WHEN 'folder_grant' THEN 'delivery' ELSE 'request' END kind,n.title,n.body,n.action_path actionPath,n.read_at readAt,n.created_at createdAt
+    FROM client_portal_notifications n
     WHERE n.rowid<=? AND n.created_at<=? AND n.dismissed_at IS NULL AND n.account_id=? AND n.recipient_identity_id=?
-      AND r.account_id=n.account_id AND r.created_by_identity_id=n.recipient_identity_id
-      AND (? IS NULL OR n.created_at<? OR (n.created_at=? AND 'request:'||n.id<?)) ORDER BY n.created_at DESC,n.id DESC LIMIT ?`)
+      AND (n.source_type<>'service_request' OR EXISTS(SELECT 1 FROM client_service_requests r
+        WHERE r.id=n.source_id AND r.account_id=n.account_id AND r.created_by_identity_id=n.recipient_identity_id))
+      AND (? IS NULL OR n.created_at<? OR (n.created_at=? AND (CASE n.source_type WHEN 'folder_grant' THEN 'delivery:' ELSE 'request:' END)||n.id<?))
+    ORDER BY n.created_at DESC,(CASE n.source_type WHEN 'folder_grant' THEN 'delivery:' ELSE 'request:' END)||n.id DESC LIMIT ?`)
     .bind(water,asOf,session.accountId,session.identityId,at,at,at,id,PAGE+1).all<Raw>();
 }
 async function feedbackRows(env:Env,principal:VerifiedClientPrincipal,session:ClientPortalSession,workspaceIdentityId:string|null,water:number,asOf:string,afterKey:[string,string]|undefined){
@@ -100,6 +105,34 @@ async function authorizeRequest(env:Env,principal:VerifiedClientPrincipal,sessio
     .first<{updatedAt:string;title:string;body:string;actionPath:string|null;readAt:string|null;createdAt:string}>();
   return final&&final.updatedAt<=asOf&&final.updatedAt===record.updatedAt&&final.title===record.title&&final.body===record.body&&final.actionPath===record.actionPath&&final.readAt===record.readAt&&final.createdAt===record.createdAt?record:null;
 }
+async function authorizeDelivery(env:Env,principal:VerifiedClientPrincipal,session:ClientPortalSession,workspace:EffectivePortalWorkspaceContext|null,sourceId:string,row:Raw,asOf:string){
+  const notice=await db(env).prepare(`SELECT n.source_id sourceId,n.title,n.body,n.action_path actionPath,n.read_at readAt,n.created_at createdAt
+    FROM client_portal_notifications n WHERE n.id=? AND n.source_type='folder_grant' AND n.dismissed_at IS NULL
+      AND n.account_id=? AND n.recipient_identity_id=?`).bind(row.id,session.accountId,session.identityId)
+    .first<{sourceId:string;title:string;body:string;actionPath:string|null;readAt:string|null;createdAt:string}>();
+  if(!notice||notice.title!==row.title||notice.body!==row.body||notice.createdAt!==row.createdAt||notice.createdAt>asOf)return null;
+  const allowed=async()=>{
+    if(workspace)return authorizeEffectiveWorkspaceNotification(env,principal,workspace,row.id);
+    return (await db(env).prepare(`SELECT 1 ok FROM client_folder_associations association
+    JOIN client_accounts account ON account.id=? AND account.status='active'
+    JOIN client_identity_links identity ON identity.id=? AND identity.account_id=account.id AND identity.revoked_at IS NULL
+    JOIN client_account_members member ON member.account_id=account.id AND member.identity_id=identity.id AND member.revoked_at IS NULL
+    WHERE association.logical_grant_id=? AND association.account_id=account.id AND association.revoked_at IS NULL
+      AND COALESCE(account.project_alpha_source_id,'project-alpha:primary')=?
+      AND ((association.scope_type='client' AND association.project_id IS NULL) OR (association.scope_type='project' AND association.project_id IS NOT NULL
+        AND EXISTS(SELECT 1 FROM projects project JOIN client_project_grants project_grant
+          ON project_grant.project_id=project.id AND project_grant.account_id=account.id AND project_grant.revoked_at IS NULL
+          WHERE project.id=association.project_id AND project.active=1 AND (member.role='manager' OR EXISTS(
+            SELECT 1 FROM client_member_project_grants member_grant WHERE member_grant.account_id=account.id
+              AND member_grant.identity_id=identity.id AND member_grant.project_id=project.id AND member_grant.revoked_at IS NULL)))))`)
+    .bind(session.accountId,session.identityId,notice.sourceId,sourceId).first('ok'))!==null;
+  };
+  if(!await allowed())return null;
+  const final=await db(env).prepare(`SELECT title,body,action_path actionPath,read_at readAt,created_at createdAt FROM client_portal_notifications
+    WHERE id=? AND source_type='folder_grant' AND dismissed_at IS NULL AND account_id=? AND recipient_identity_id=?`).bind(row.id,session.accountId,session.identityId)
+    .first<{title:string;body:string;actionPath:string|null;readAt:string|null;createdAt:string}>();
+  return final&&final.title===notice.title&&final.body===notice.body&&final.actionPath===notice.actionPath&&final.readAt===notice.readAt&&final.createdAt===notice.createdAt&&await allowed()?final:null;
+}
 async function authorizeFeedback(env:Env,principal:VerifiedClientPrincipal,session:ClientPortalSession,row:Raw,native:NativePortalReadContext|null,asOf:string){
   if(native){const notice=await db(env).prepare('SELECT feedback_id FROM portal_native_feedback_notifications WHERE id=? AND dismissed_at IS NULL').bind(row.id).first<{feedback_id:string}>();
     const feedback=notice?await readNativeFeedbackRecord(db(env),notice.feedback_id):null,resolved=feedback?await reauthorizeNativeFeedbackRecipient(env,feedback):null;
@@ -132,14 +165,16 @@ export function createClientNotificationHistoryRouter(deps:Dependencies){const r
     const asOf=cursor?.asOf??new Date().toISOString(),requestWater=coverage.requests!=='included'?0:cursor?.water.requests??Number(await db(c.env).prepare('SELECT COALESCE(MAX(rowid),0) water FROM client_portal_notifications').first('water')??0),
       feedbackWater=coverage.feedback!=='included'?0:cursor?.water.feedback??Number(await db(c.env).prepare(session.nativeSourceId?'SELECT COALESCE(MAX(rowid),0) water FROM portal_native_feedback_notifications':'SELECT COALESCE(MAX(rowid),0) water FROM client_feedback_notifications').first('water')??0);
     const [requests,feedback]=await Promise.all([coverage.requests==='included'?requestRows(c.env,session,requestWater,asOf,cursor?.after):Promise.resolve({results:[]} as {results:Raw[]}),coverage.feedback==='included'?feedbackRows(c.env,principal,session,workspace?.identityId??null,feedbackWater,asOf,cursor?.after):Promise.resolve({results:[]} as {results:Raw[]})]);
-    const raw=[...requests.results,...feedback.results].sort((a,b)=>b.createdAt.localeCompare(a.createdAt)||key(b).localeCompare(key(a))),examined=raw.slice(0,PAGE),items:PortalNotificationHistoryItem[]=[];
+    const raw=[...requests.results,...feedback.results].sort((a,b)=>binaryDescending(a.createdAt,b.createdAt)||binaryDescending(key(a),key(b))),examined=raw.slice(0,PAGE),items:PortalNotificationHistoryItem[]=[];
     for(const row of examined){if(row.kind==='request'){const current=await authorizeRequest(c.env,principal,session,workspace,resolved.scope.sourceId,row,asOf);if(!current)continue;
         items.push({id:row.id,kind:'request',title:row.title,body:row.body,actionPath:cleanPath(row.actionPath),readAt:row.readAt,createdAt:row.createdAt,mutationPath:`/api/client/notifications/${encodeURIComponent(row.id)}`});}
+      else if(row.kind==='delivery'){const current=await authorizeDelivery(c.env,principal,session,workspace,resolved.scope.sourceId,row,asOf);if(!current)continue;
+        items.push({id:row.id,kind:'delivery',title:current.title,body:current.body,actionPath:cleanPath(current.actionPath),readAt:current.readAt,createdAt:current.createdAt,mutationPath:`/api/client/notifications/${encodeURIComponent(row.id)}`});}
       else {const current=await authorizeFeedback(c.env,principal,session,row,resolved.context,asOf);if(!current)continue;
         if(row.body!==(current.completionNote??'Your feedback has been handled.'))continue;
         const suffix=session.nativeSourceId?`/api/client/v2/workspaces/${encodeURIComponent(session.workspaceId!)}/feedback-notifications`:'/api/client/feedback-notifications';
         items.push({id:row.id,kind:'feedback',title:row.title,body:row.body,actionPath:`/portal/feedback/${encodeURIComponent(current.id)}${session.workspaceId?`?workspace=${encodeURIComponent(session.workspaceId)}`:''}`,readAt:row.readAt,createdAt:row.createdAt,mutationPath:`${suffix}/${encodeURIComponent(row.id)}`});}}
     const final=await scopeFor(c.env,principal,session,workspace);if(!final||await notificationHistoryScope({...final.scope,identityId:session.nativePortalIdentityId??session.identityId})!==scopeHash)throw new HTTPException(409,{message:'Notification access changed. Refresh this workspace.'});
-    const last=examined.at(-1),nextCursor=raw.length>PAGE&&last?await encodeNotificationHistoryCursor(c.env,principal,{v:1,scope:scopeHash,asOf,coverage,water:{requests:requestWater,feedback:feedbackWater},after:[last.createdAt,key(last)],expires:Date.now()+TTL}):null;
-    const response:PortalNotificationHistoryPage={scope:resolved.scope,asOf,coverage:{...coverage,delivery:'omitted_no_explicit_grant_authority'},items,nextCursor};return c.json(response);
+    const last=examined.at(-1),nextCursor=raw.length>PAGE&&last?await encodeNotificationHistoryCursor(c.env,principal,{v:2,scope:scopeHash,asOf,coverage,water:{requests:requestWater,feedback:feedbackWater},after:[last.createdAt,key(last)],expires:Date.now()+TTL}):null;
+    const response:PortalNotificationHistoryPage={scope:resolved.scope,asOf,coverage:{...coverage,delivery:!session.nativeSourceId&&coverage.requests==='included'?'included_legacy_portal_notices':'omitted_no_explicit_grant_authority'},items,nextCursor};return c.json(response);
   });return router;}

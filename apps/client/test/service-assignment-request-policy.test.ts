@@ -78,7 +78,7 @@ describe("exact-target service-assignment request policy", { timeout: 60_000 }, 
       compatibilityDate: "2026-08-06",
       modules: true,
       script: "export default {fetch(){return new Response('ok')}}",
-      d1Databases: Object.fromEntries(Array.from({ length: 24 }, (_, index) =>
+      d1Databases: Object.fromEntries(Array.from({ length: 28 }, (_, index) =>
         [`POLICY_DB_${index}`, `service-assignment-policy-${index}`])),
     });
   });
@@ -428,6 +428,65 @@ describe("exact-target service-assignment request policy", { timeout: 60_000 }, 
         FROM request_pa_draft_quote_commands WHERE id=?`)
       .bind(`native-receipt-${requestId}`, options.stale ? "2026-09-01T00:00:00.000Z" : null, id).run();
   }
+
+  it.each([
+    ['read', 'membership'], ['dismiss', 'membership'],
+    ['read', 'capability'], ['dismiss', 'capability'],
+  ] as const)('rejects notification %s when workspace %s is revoked before the write', async (action, revokedAuthority) => {
+    await db.batch([
+      db.prepare(`INSERT INTO client_service_requests
+        (id,account_id,project_id,created_by_identity_id,request_type,title,details,status,catalog_source_id,idempotency_key,request_fingerprint)
+        VALUES ('race-request','policy-account',NULL,'policy-identity','service','Update','Notification race','submitted',?,'race-request-key',?)`)
+        .bind(sourceId, 'r'.repeat(43)),
+      db.prepare(`INSERT INTO client_portal_notifications
+        (id,account_id,recipient_identity_id,event_type,source_type,source_id,dedupe_key,title,body,action_path)
+        VALUES ('race-notice','policy-account','policy-identity','request_status','service_request','race-request','race-notice-key','Update','Request update','/portal/requests')`),
+    ]);
+    let interleave = false, reachedWrite = false;
+    const portal = createClientPortalRouter({
+      resolvePrincipal: async () => ({issuer:'https://issuer.test',subject:'policy-subject',email:'policy@example.test'}),
+      repository: {...d1ClientPortalRepository, async updateNotification(...args) {
+        reachedWrite = true;
+        if (interleave) {
+          if (revokedAuthority === 'membership') await db.prepare("UPDATE portal_v2_workspace_memberships SET revoked_at=datetime('now') WHERE id='policy-membership'").run();
+          else await db.prepare("UPDATE portal_v2_entitlements SET revoked_at=datetime('now') WHERE workspace_id=? AND identity_id='portal-policy-identity' AND capability='request.create'").bind(workspaceId).run();
+        }
+        return d1ClientPortalRepository.updateNotification(...args);
+      }},
+    });
+    const mutate = () => portal.request('https://client.example/notifications/race-notice', {
+      method:'PATCH', headers:{Origin:'https://client.example','Content-Type':'application/json','X-LTDS-Workspace-Id':workspaceId},
+      body:JSON.stringify({action}),
+    }, {...env,CLIENT_PORTAL_ENABLED:'true',CLIENT_PORTAL_ORIGIN:'https://client.example'} as Env);
+    expect((await mutate()).status).toBe(200);
+    expect(reachedWrite).toBe(true);
+    await db.prepare("UPDATE client_portal_notifications SET read_at=NULL,dismissed_at=NULL WHERE id='race-notice'").run();
+    reachedWrite = false; interleave = true;
+    expect((await mutate()).status).toBe(404);
+    expect(reachedWrite).toBe(true);
+    expect(await db.prepare("SELECT read_at,dismissed_at FROM client_portal_notifications WHERE id='race-notice'").first())
+      .toEqual({read_at:null,dismissed_at:null});
+  });
+
+  it('preserves notification read access without a local request-creation grant', async () => {
+    await db.batch([
+      db.prepare("UPDATE client_project_grants SET can_request_service=0 WHERE account_id='policy-account' AND project_id='project-a'"),
+      db.prepare(`INSERT INTO client_service_requests
+        (id,account_id,project_id,created_by_identity_id,request_type,title,details,status,catalog_source_id,idempotency_key,request_fingerprint)
+        VALUES ('read-only-notice-request','policy-account','project-a','policy-identity','service','Update','Existing request','submitted',?,'read-only-notice-key',?)`)
+        .bind(sourceId, 'v'.repeat(43)),
+      db.prepare(`INSERT INTO client_portal_notifications
+        (id,account_id,recipient_identity_id,event_type,source_type,source_id,dedupe_key,title,body,action_path)
+        VALUES ('read-only-notice','policy-account','policy-identity','request_status','service_request','read-only-notice-request','read-only-notice','Update','Existing request update','/portal/requests')`),
+    ]);
+    const portal = createClientPortalRouter({resolvePrincipal:async()=>({issuer:'https://issuer.test',subject:'policy-subject',email:'policy@example.test'})});
+    const response = await portal.request('https://client.example/notifications/read-only-notice', {
+      method:'PATCH',headers:{Origin:'https://client.example','Content-Type':'application/json','X-LTDS-Workspace-Id':workspaceId},
+      body:JSON.stringify({action:'read'}),
+    }, {...env,CLIENT_PORTAL_ENABLED:'true',CLIENT_PORTAL_ORIGIN:'https://client.example'} as Env);
+    expect(response.status).toBe(200);
+    expect(await db.prepare("SELECT read_at IS NOT NULL value FROM client_portal_notifications WHERE id='read-only-notice'").first<number>('value')).toBe(1);
+  });
 
   async function seedForeignPrimaryReceipt() {
     const requestId = "native-receipt-foreign-primary";

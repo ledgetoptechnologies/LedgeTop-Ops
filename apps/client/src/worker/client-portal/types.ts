@@ -411,7 +411,7 @@ export interface ClientPortalRepository {
   listDeliveries(env: Env, session: ClientPortalSession, projectId: string): Promise<ClientDelivery[]>;
   getDeliveryHandoff(env: Env, session: ClientPortalSession, projectId: string, shareId: string): Promise<{ publicId: string } | null>;
   listNotifications(env: Env, session: ClientPortalSession, cursor?: string | null): Promise<{ notifications: ClientPortalNotification[]; unreadCount: number; cursor: string | null }>;
-  updateNotification(env: Env, session: ClientPortalSession, notificationId: string, action: "read" | "dismiss"): Promise<boolean>;
+  updateNotification(env: Env, session: ClientPortalSession, notificationId: string, action: "read" | "dismiss", guard?: { sql: string; bindings: unknown[] }): Promise<boolean>;
   listServiceRequests(env: Env, session: ClientPortalSession): Promise<ClientServiceRequest[]>;
   getServiceRequest(env: Env, session: ClientPortalSession, requestId: string): Promise<ClientServiceRequest | null>;
   createServiceRequest(env: Env, session: ClientPortalSession, input: ClientServiceRequestInput): Promise<ClientServiceRequestDirectCreateResult | null>;

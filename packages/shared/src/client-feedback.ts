@@ -123,7 +123,7 @@ export interface PortalFeedbackHistoryPage {
 
 export interface PortalNotificationHistoryItem {
   id: string;
-  kind: "request" | "feedback";
+  kind: "request" | "feedback" | "delivery";
   title: string;
   body: string;
   actionPath: string | null;
@@ -138,7 +138,7 @@ export interface PortalNotificationHistoryPage {
   coverage: {
     requests: "included" | "omitted_feature_disabled" | "omitted_schema_unavailable";
     feedback: "included" | "omitted_feature_disabled" | "omitted_schema_unavailable";
-    delivery: "omitted_no_explicit_grant_authority";
+    delivery: "included_legacy_portal_notices" | "omitted_no_explicit_grant_authority";
   };
   items: PortalNotificationHistoryItem[];
   nextCursor: string | null;

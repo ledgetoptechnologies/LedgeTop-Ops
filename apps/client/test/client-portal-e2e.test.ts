@@ -6,6 +6,7 @@ import { createClientPortalRouter } from "../src/worker/client-portal/routes";
 import { d1ClientPortalRepository } from "../src/worker/client-portal/repository";
 import type { VerifiedClientPrincipal } from "../src/worker/client-portal/types";
 import type { Env } from "../src/worker/types";
+import { legacyNotificationCursor } from "./helpers/legacy-notification-cursor";
 
 const portalOrigin = "https://client.test";
 const principal: VerifiedClientPrincipal = {
@@ -845,7 +846,7 @@ describe("client portal migrated-D1 end-to-end contract", () => {
     const history=await portal().request(`${portalOrigin}/notification-history`,{},env);expect(history.status).toBe(200);
     const historyPage=await history.json() as {coverage:{delivery:string};items:Array<{id:string;kind:string}>};
     expect(historyPage.items).toContainEqual(expect.objectContaining({id:"project-notice",kind:"request"}));
-    expect(historyPage.coverage.delivery).toBe("omitted_no_explicit_grant_authority");
+    expect(historyPage.coverage.delivery).toBe("included_legacy_portal_notices");
     expect(JSON.stringify(historyPage)).not.toMatch(/recipient_identity|created_by_identity|details|identity-a/);
 
     await db.prepare("UPDATE client_member_project_grants SET revoked_at=datetime('now') WHERE account_id='account-a' AND identity_id='identity-a' AND project_id='project-a'").run();
@@ -859,6 +860,108 @@ describe("client portal migrated-D1 end-to-end contract", () => {
       db.prepare("DELETE FROM client_member_project_grants WHERE account_id='account-a' AND identity_id='identity-a' AND project_id='project-a'"),
       db.prepare("UPDATE client_account_members SET role='manager' WHERE account_id='account-a' AND identity_id='identity-a'"),
     ]);
+  });
+
+  it("shows only live legacy folder-grant notices in history and fences their mutations", async () => {
+    await db.batch([
+      db.prepare("UPDATE client_folder_associations SET logical_grant_id='folder-history-live' WHERE id='folder-project-a'"),
+      db.prepare(`INSERT INTO client_portal_notifications
+        (id,account_id,recipient_identity_id,event_type,source_type,source_id,dedupe_key,title,body,action_path)
+        VALUES ('delivery-history-read','account-a','identity-a','files_added','folder_grant','folder-history-live','delivery-history-read-key','Files available','New files are ready.','/portal/projects/project-a'),
+          ('delivery-history-dismiss','account-a','identity-a','files_added','folder_grant','folder-history-live','delivery-history-dismiss-key','Files available','Dismissible delivery notice.','/portal/projects/project-a'),
+          ('delivery-history-revoke','account-a','identity-a','files_added','folder_grant','folder-history-live','delivery-history-revoke-key','Files available','Revocation fence notice.','/portal/projects/project-a')`),
+      db.prepare(`INSERT INTO delivery_notifications(id,dedupe_key,share_id,kind,recipient_email,payload_json)
+        VALUES('email-queue-only','email-queue-only-key','share-a','first_access','email-only@example.test','{}')`),
+    ]);
+    try {
+    const history = await portal().request(`${portalOrigin}/notification-history`, {}, env);
+    expect(history.status).toBe(200);
+    const page = await history.json() as { coverage: { delivery: string }; items: Array<{ id: string; kind: string }> };
+    expect(page.coverage.delivery).toBe('included_legacy_portal_notices');
+    expect(page.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'delivery-history-read', kind: 'delivery' }),
+      expect.objectContaining({ id: 'delivery-history-dismiss', kind: 'delivery' }),
+      expect.objectContaining({ id: 'delivery-history-revoke', kind: 'delivery' }),
+    ]));
+    expect(page.items.map(item => item.id)).not.toContain('email-queue-only');
+
+    const read = await portal().request(`${portalOrigin}/notifications/delivery-history-read`, {
+      method: 'PATCH', headers: { Origin: portalOrigin, 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'read' }),
+    }, env);
+    expect(read.status).toBe(200);
+    expect(await db.prepare("SELECT read_at IS NOT NULL marked FROM client_portal_notifications WHERE id='delivery-history-read'").first('marked')).toBe(1);
+    const dismiss = await portal().request(`${portalOrigin}/notifications/delivery-history-dismiss`, {
+      method: 'PATCH', headers: { Origin: portalOrigin, 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'dismiss' }),
+    }, env);
+    expect(dismiss.status).toBe(200);
+    expect(await db.prepare("SELECT dismissed_at IS NOT NULL dismissed FROM client_portal_notifications WHERE id='delivery-history-dismiss'").first('dismissed')).toBe(1);
+
+    const revoked = await db.prepare("UPDATE client_folder_associations SET revoked_at=datetime('now') WHERE id='folder-project-a'").run();
+    expect(revoked.meta.changes).toBe(1);
+    const hidden = await portal().request(`${portalOrigin}/notification-history`, {}, env);
+    const hiddenIds = (await hidden.json() as { items: Array<{ id: string }> }).items.map(item => item.id);
+    expect(hiddenIds).not.toContain('delivery-history-read');
+    expect(hiddenIds).not.toContain('delivery-history-revoke');
+    const blocked = await portal().request(`${portalOrigin}/notifications/delivery-history-revoke`, {
+      method: 'PATCH', headers: { Origin: portalOrigin, 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'read' }),
+    }, env);
+    expect(blocked.status).toBe(404);
+    expect(await db.prepare("SELECT read_at FROM client_portal_notifications WHERE id='delivery-history-revoke'").first('read_at')).toBeNull();
+
+    } finally {
+    await db.batch([
+      db.prepare("DELETE FROM delivery_notifications WHERE id='email-queue-only'"),
+      db.prepare("DELETE FROM client_portal_notifications WHERE id LIKE 'delivery-history-%'"),
+      db.prepare("UPDATE client_folder_associations SET logical_grant_id=NULL,revoked_at=NULL WHERE id='folder-project-a'"),
+    ]);
+    }
+  });
+
+  it("continues mixed request and delivery notices with a shared timestamp without skips", async () => {
+    const deliveryIds = Array.from({ length: 52 }, (_, index) => `z-delivery-cursor-${index % 2 ? 'A' : 'a'}-${String(index).padStart(2, '0')}`);
+    await db.batch([
+      db.prepare("UPDATE client_folder_associations SET logical_grant_id='folder-history-cursor' WHERE id='folder-project-a'"),
+      ...deliveryIds.map((notificationId, index) => db.prepare(`INSERT INTO client_portal_notifications
+        (id,account_id,recipient_identity_id,event_type,source_type,source_id,dedupe_key,title,body,action_path,created_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?)`).bind(notificationId, 'account-a', 'identity-a', 'files_added',
+        'folder_grant', 'folder-history-cursor', `delivery-cursor-key-${index}`, 'Files available', 'Mixed cursor notice.', '/portal/projects/project-a', '2026-08-01T00:00:00.000Z')),
+      db.prepare(`INSERT INTO client_portal_notifications
+        (id,account_id,recipient_identity_id,event_type,source_type,source_id,dedupe_key,title,body,action_path,created_at)
+        VALUES('a-request-cursor-same-time','account-a','identity-a','request_status','service_request','billing-request','request-cursor-same-time-key','Request update','Mixed cursor request.','/portal/requests','2026-08-01T00:00:00.000Z')`),
+    ]);
+    try {
+    const first = await portal().request(`${portalOrigin}/notification-history`, {}, env);
+    const firstPage = await first.json() as { items: Array<{ id: string }>; nextCursor: string | null };
+    expect(first.status).toBe(200);
+    expect(firstPage.nextCursor).toBeTruthy();
+    const pages = [firstPage];
+    let cursor = firstPage.nextCursor;
+    for (let pageCount = 0; cursor && pageCount < 10; pageCount++) {
+      const continuation = await portal().request(`${portalOrigin}/notification-history?cursor=${encodeURIComponent(cursor)}`, {}, env);
+      expect(continuation.status).toBe(200);
+      const page = await continuation.json() as { items: Array<{ id: string }>; nextCursor: string | null };
+      pages.push(page);
+      cursor = page.nextCursor;
+    }
+    expect(cursor).toBeNull();
+    const expected = new Set([...deliveryIds, 'a-request-cursor-same-time']);
+    const returnedRows = pages.flatMap(page => page.items);
+    const returned = new Set(returnedRows.map(item => item.id));
+    expect([...expected].filter(id => !returned.has(id))).toEqual([]);
+    expect(returned.size).toBe(returnedRows.length);
+    } finally {
+    await db.batch([
+      db.prepare("DELETE FROM client_portal_notifications WHERE id LIKE 'z-delivery-cursor-%' OR id='a-request-cursor-same-time'"),
+      db.prepare("UPDATE client_folder_associations SET logical_grant_id=NULL WHERE id='folder-project-a'"),
+    ]);
+    }
+  }, 120_000);
+
+  it("requires refresh for an authenticated old-format notification cursor", async () => {
+    const cursor = await legacyNotificationCursor(env.DELIVERY_SESSION_SECRET!, principal);
+    const response = await portal().request(`${portalOrigin}/notification-history?cursor=${encodeURIComponent(cursor)}`, {}, env);
+    expect(response.status).toBe(409);
+    expect(await response.text()).toBe('Notification page changed. Refresh this workspace.');
   });
 
   it("freezes truthful notification coverage across continuation pages",async()=>{

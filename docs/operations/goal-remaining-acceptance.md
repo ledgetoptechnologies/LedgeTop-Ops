@@ -395,3 +395,25 @@ Live Operations type-to-search was also exercised without pressing Enter:
 an existing standalone-client name narrowed 22 displayed entries to exactly one
 and updated the URL query. This verifies that production interaction, not
 large-directory pagination, all search fields, or portal access provisioning.
+
+### September 6 notification follow-up verification
+
+The frozen candidate full suites have now both terminated. Client passed
+1,073 tests; Operations passed 1,913 with two failures: the subsequently
+corrected PA draft test fixture and a Miniflare `EADDRINUSE` connection failure
+in the notification cursor test. This is not a green full Operations run.
+Detailed handles and focused reruns are recorded in
+`notification-migration-maintenance-verification.md`.
+
+The current working increment adds legacy delivery notices to the unified bell,
+fixes binary cursor ordering and late UI responses, and is still under
+authorization verification. The identity-only atomic predicate passes its
+focused D1 regression and Client type checking. Integrated selected-workspace
+write checks must retain delivery visibility without imposing request-creation
+permissions, and must preserve checks for unselected legacy sessions too.
+Native delivery still requires a recipient-facing ledger independent of email
+dispatch state; it remains part of the goal, not a completed feature.
+
+The latest in-app PA retry returned to login. No connection settings, LTT
+enrollment, announcement emails, production migrations or deployments occurred
+in this follow-up. The goal remains active.
