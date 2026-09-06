@@ -156,12 +156,57 @@ describe("Viewer workspace client-grant machine bridge", () => {
     expect(snapshot.projects![0]).toMatchObject({ id: "project-one", accountId: "account-one",
       clientName: "Acme", projectName: "Project One" });
     expect(snapshot.associations).toHaveLength(1);
+    expect(snapshot.associations![0]).toEqual({
+      id: "association-one",
+      projectId: "project-one",
+      viewerModelId: "model-one",
+      viewerModelVersionId: "version-one",
+      modelTitle: "Model One",
+    });
     await delivery.prepare("DROP INDEX live_viewer_grant").run();
     await delivery.prepare(`WITH RECURSIVE numbers(value) AS (SELECT 0 UNION ALL SELECT value+1 FROM numbers WHERE value<500)
       INSERT INTO viewer_client_grants(id,account_id,project_id,scope_type,association_id,include_future_published,
         can_measure,can_view_cameras,can_download,created_by_staff_id,status)
       SELECT 'grant-'||value,'account-one','project-one','project',NULL,1,1,1,0,'staff-one','active' FROM numbers`).run();
     expect((await machine({ subject: "ops:staff-one", action: "list" }, "snapshot-overflow-0001")).status).toBe(503);
+  });
+
+  it("returns identifiers from the exact association row that passed live revalidation", async () => {
+    const realPrepare = delivery.prepare.bind(delivery);
+    let refreshed = false;
+    env.DELIVERY_DB = {
+      prepare(query: string) {
+        const prepared = realPrepare(query);
+        if (!query.includes("WHERE association.id=?")) return prepared;
+        return {
+          bind(...values: unknown[]) {
+            const bound = prepared.bind(...values);
+            return {
+              async first<T = Record<string, unknown>>(columnName?: string) {
+                if (!refreshed) {
+                  refreshed = true;
+                  await realPrepare(`UPDATE viewer_model_associations
+                    SET viewer_model_version_id='version-two',viewer_resource_version='resource-two'
+                    WHERE id='association-one'`).run();
+                }
+                return columnName === undefined ? bound.first<T>() : bound.first<T>(columnName);
+              },
+            } as unknown as D1PreparedStatement;
+          },
+        } as unknown as D1PreparedStatement;
+      },
+    } as unknown as D1Database;
+    const response = await machine({ subject: "ops:staff-one", action: "list" }, "snapshot-refresh-nonce-01");
+    expect(response.status).toBe(200);
+    const snapshot = await response.json() as { associations: Array<Record<string, unknown>> };
+    expect(refreshed).toBe(true);
+    expect(snapshot.associations).toEqual([{
+      id: "association-one",
+      projectId: "project-one",
+      viewerModelId: "model-one",
+      viewerModelVersionId: "version-two",
+      modelTitle: "Model One",
+    }]);
   });
 
   it("creates atomically, replays identically, conflicts on key reuse, and denies stale task associations", async () => {
