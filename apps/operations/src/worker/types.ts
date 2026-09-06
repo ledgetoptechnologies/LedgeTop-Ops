@@ -14,6 +14,7 @@ export type Env = Omit<
   | "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED"
   | "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED"
   | "PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED"
+  | "AUTHENTICATED_DELIVERY_CREATION_ENABLED"
   | "PROJECT_ACCESS_EXPIRY_NOTIFICATIONS_ENABLED"
   | "AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED"
   | "CLIENT_PORTAL_ORIGINS"
@@ -126,6 +127,8 @@ export type Env = Omit<
   AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED?: string;
   /** Default-off explicit authenticated folder-grant management. */
   AUTHENTICATED_DELIVERY_GRANTS_ENABLED?: string;
+  /** Independent default-off gate for new grants, restores, and folder bindings. */
+  AUTHENTICATED_DELIVERY_CREATION_ENABLED?: string;
   /** Default-off LTDS authorization/control-plane integration with the self-hosted Viewer. */
   VIEWER_INTEGRATION_ENABLED?: string;
   /** Default-off administrative dataset and processing control plane. */

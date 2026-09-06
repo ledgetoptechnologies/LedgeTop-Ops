@@ -86,11 +86,12 @@ interface Session {
   };
 }
 type AuthenticatedDeliveryReadinessReason =
-  | "hierarchy_disabled" | "grants_disabled" | "authority_mutations_disabled" | "schema_unavailable"
+  | "hierarchy_disabled" | "hierarchy_relations_disabled" | "grants_disabled" | "authority_mutations_disabled" | "creation_disabled" | "schema_unavailable"
   | "primary_projection_unavailable" | "unreceipted_bindings" | "notifications_disabled"
   | "notification_schema_unavailable" | "readiness_check_unavailable";
 interface AuthenticatedDeliveryCapability {
   enabled: boolean;
+  creationEnabled?: boolean;
   pilotReady?: boolean;
   reasons?: AuthenticatedDeliveryReadinessReason[];
   checks?: { bindings?: { unreceiptedActiveCount: number | null } };
@@ -4727,7 +4728,7 @@ type AuthenticatedGrant = {
   updatedAt: string;
 };
 
-function AuthenticatedDeliveryGrantPanel({ folder, canRevoke, embedded = false }: { folder: { id: string }; canRevoke: boolean; embedded?: boolean }) {
+function AuthenticatedDeliveryGrantPanel({ folder, canRevoke, creationEnabled, embedded = false }: { folder: { id: string }; canRevoke: boolean; creationEnabled: boolean; embedded?: boolean }) {
   const [expanded, setExpanded] = useState(embedded);
   const [mode, setMode] = useState<"primary" | "native">("primary");
   const [nativeBusy, setNativeBusy] = useState(false);
@@ -4735,7 +4736,7 @@ function AuthenticatedDeliveryGrantPanel({ folder, canRevoke, embedded = false }
     {!embedded && <button type="button" className="button-ghost button-small" aria-expanded={expanded} disabled={nativeBusy} onClick={() => setExpanded(value => !value)}>{expanded ? "Close authenticated portal grants" : "Grant to Client Portal"}</button>}
     {expanded && <div className="client-workspace-grant-panel">
       <div className="form-grid native-grant-connection"><label className="full">Portal connection<select value={mode} disabled={nativeBusy} onChange={event => setMode(event.target.value as "primary" | "native")}><option value="primary">Primary portal</option><option value="native">Connected workspace</option></select></label></div>
-      {mode === "native" ? <NativeDeliveryGrantPanel key={folder.id} folder={folder} onBusyChange={setNativeBusy} /> : <PrimaryAuthenticatedDeliveryGrantPanel key={folder.id} folder={folder} canRevoke={canRevoke} onBusyChange={setNativeBusy} />}
+      {mode === "native" ? <NativeDeliveryGrantPanel key={folder.id} folder={folder} creationEnabled={creationEnabled} onBusyChange={setNativeBusy} /> : <PrimaryAuthenticatedDeliveryGrantPanel key={folder.id} folder={folder} canRevoke={canRevoke} creationEnabled={creationEnabled} onBusyChange={setNativeBusy} />}
     </div>}
   </section>;
 }
@@ -4908,7 +4909,7 @@ function PrimaryWorkspaceBindingSetup({folder,onLinked}:{folder:{id:string};onLi
   </section>;
 }
 
-function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, onBusyChange }: { folder: { id: string }; canRevoke: boolean; onBusyChange?: (busy: boolean) => void }) {
+function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, creationEnabled, onBusyChange }: { folder: { id: string }; canRevoke: boolean; creationEnabled: boolean; onBusyChange?: (busy: boolean) => void }) {
   type Context = { folderBindingId: string; sourceId: string; projectName: string | null; accessTermsSupported: boolean; projectEndSupported: boolean };
   type Input = {folderBindingId: string; audienceType: AuthenticatedGrantAudienceType; audiencePublicId: string; reasonCode: string; expiresAt: string | null; accessTerms?: PrimaryGrantTerms};
   type Preview = Context & {operation: Input; contextVersion: string; workspaceId: string; workspaceLabel: string; audienceLabel: string; recipientCount: number; dynamicAudience: boolean; recipientPreview: {mode: "exact" | "dynamic"; currentAuthorizedCount: number | null; truncated: boolean}; accessTerms: PrimaryGrantTerms | null; effectiveAccessExpiresAt: string | null};
@@ -5065,6 +5066,7 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, onBusyChang
       <button type="button" className="button-ghost button-small" disabled={busy || loading} onClick={() => { if (!uncertain) { clearContext(); resetTerms(); } void load(); }}>Refresh authenticated access</button>
       {loading && <Loading />}
       {context && <>
+        {!creationEnabled && <div className="notice" role="status">New Client Workspace access and restores are paused. Existing access can still be reviewed and revoked.</div>}
         {project ? <p>Project: <strong>{context.projectName}</strong></p> : <p>Project-specific access terms require a folder linked to one project. This folder uses existing access rules, without a customer or collaborator classification.</p>}
         {project && !context.accessTermsSupported && <p role="status">Reviewed project access terms are unavailable until the database update is ready. Existing grants can still be reviewed and revoked.</p>}
         {restoreTarget && <p role="status">Reviewing a new version for {restoreTarget.audienceLabel}. Existing grant terms are not silently reused.</p>}
@@ -5075,7 +5077,7 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, onBusyChang
             type="button"
             className={targetType === value ? "active" : "button-ghost"}
             aria-pressed={targetType === value}
-            disabled={disabled}
+            disabled={disabled || !creationEnabled}
             onClick={() => {
               clearReview(); resetTerms(); setTargetType(value); setSelected(null); setRestoreTarget(null);
               setQuery(""); setOptions([]); setSearchStatus("");
@@ -5085,7 +5087,7 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, onBusyChang
         <label htmlFor="authenticated-grant-audience">Search {targetType === "principal" ? "individuals" : `${targetType}s`}</label>
         <input id="authenticated-grant-audience" type="search" role="combobox" aria-autocomplete="list"
           aria-expanded={options.length > 0} aria-controls="authenticated-grant-options" autoComplete="off"
-          placeholder={targetType === "principal" ? "Type a client name or email" : `Type a ${targetType} name`} value={query} disabled={disabled}
+          placeholder={targetType === "principal" ? "Type a client name or email" : `Type a ${targetType} name`} value={query} disabled={disabled || !creationEnabled}
           onKeyDown={focusFirstTypeaheadOption}
           onChange={event => { clearReview(); resetTerms(); if (targetType === "project") setTargetType("principal"); setQuery(event.target.value); setSelected(null); setRestoreTarget(null); setSearchStatus(""); }} />
         {options.length > 0 && <div id="authenticated-grant-options" className="client-workspace-typeahead" role="listbox">
@@ -5103,7 +5105,7 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, onBusyChang
             : `All currently authorized members of this ${selected.type}; membership changes are applied dynamically.`}
         </small>}
         <div className="form-grid authenticated-grant-fields">
-          <label>Reason code<input value={reasonCode} disabled={disabled} maxLength={80} pattern="[A-Za-z0-9][A-Za-z0-9._:-]{0,79}" onChange={event => { setReasonCode(event.target.value); clearReview(); }} /></label>
+          <label>Reason code<input value={reasonCode} disabled={disabled || !creationEnabled} maxLength={80} pattern="[A-Za-z0-9][A-Za-z0-9._:-]{0,79}" onChange={event => { setReasonCode(event.target.value); clearReview(); }} /></label>
           {project && <label>Recipient role<select value={accessKind} disabled={disabled || !selected || !context.accessTermsSupported} onChange={event => { const kind = event.target.value as PrimaryGrantTerms["kind"] | ""; setAccessKind(kind); setAccessMode(kind === "customer" ? "until_revoked" : kind === "collaborator" && context.projectEndSupported ? "project_end" : ""); setExpiresAt(""); clearReview(); }}><option value="">Choose customer or collaborator</option><option value="customer">Customer</option><option value="collaborator">Collaborator</option></select></label>}
           {project && accessKind === "collaborator" && <label>Collaborator access duration<select value={accessMode} disabled={disabled} onChange={event => { setAccessMode(event.target.value as PrimaryGrantTerms["mode"] | ""); setExpiresAt(""); clearReview(); }}><option value="">Choose access duration</option><option value="project_end" disabled={!context.projectEndSupported}>Project completion + 7 days</option><option value="specific_date">Specific date</option><option value="until_revoked">Until revoked</option></select></label>}
           {(!project || accessMode === "specific_date") && <label>{project ? "Collaborator access expires" : "Expires (optional)"}<input type="datetime-local" value={expiresAt} disabled={disabled} onChange={event => { setExpiresAt(event.target.value); clearReview(); }} /></label>}
@@ -5112,13 +5114,13 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, onBusyChang
         {project && accessKind === "collaborator" && !context.projectEndSupported && <p>Verified project completion is not available. Choose a specific date or until revoked.</p>}
         {project && accessMode === "project_end" && <p>Access ends seven days after the first verified project completion. Reopening does not renew expired access.</p>}
         {project && accessKind === "collaborator" && accessMode === "until_revoked" && <p>Access will not end automatically when the project completes. It remains until revoked.</p>}
-        {!preview && <button type="button" className="button-orange button-small" disabled={disabled || !selected || !reasonCode || project && (!context.accessTermsSupported || !accessKind || !accessMode)} onClick={() => void review()}>Review authenticated access</button>}
-        {preview && <section className="primary-authenticated-grant-review" aria-label="Review authenticated portal access"><h4 ref={reviewTitle} tabIndex={-1}>Confirm authenticated access</h4><dl>{[["Workspace", preview.workspaceLabel], ["Project", preview.projectName ?? "No project-specific access terms"], ["Recipient", preview.audienceLabel], ["Target type", selected ? AUTHENTICATED_GRANT_AUDIENCE_LABEL[selected.type] : "Unknown"], ["Recipient rule", selected?.type === "principal" ? "This exact verified person only" : "Current authorized members; membership is rechecked"], ["Recipient preview", selected?.type === "principal" ? `${preview.recipientCount} exact verified person` : preview.recipientCount > 0 ? `${preview.recipientPreview?.truncated ? "At least " : "Up to "}${preview.recipientCount} currently eligible people; final membership is checked when opened` : "Dynamic membership; final recipients are checked when opened"], ["Access terms", termsLabel(preview.accessTerms)], ["Access ends", preview.effectiveAccessExpiresAt ? date(preview.effectiveAccessExpiresAt) : preview.accessTerms?.mode === "project_end" ? "Awaiting verified project completion, then 7 days" : "When revoked"]].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>{preview.accessTerms?.mode === "project_end" && <p>Reopening does not renew expired access.</p>}<p>Confirm this recipient and scope. This grants only the reviewed folder access; it never widens an individual to their organization and creates no public link.</p><div className="actions"><button type="button" className="button-orange" disabled={disabled} onClick={create}>{restoreTarget ? "Restore authenticated access" : "Grant authenticated access"}</button><button type="button" className="button-ghost" disabled={busy || uncertain} onClick={() => setPreview(null)}>Cancel review</button></div></section>}
+        {!preview && <button type="button" className="button-orange button-small" disabled={disabled || !creationEnabled || !selected || !reasonCode || project && (!context.accessTermsSupported || !accessKind || !accessMode)} onClick={() => void review()}>Review authenticated access</button>}
+        {preview && <section className="primary-authenticated-grant-review" aria-label="Review authenticated portal access"><h4 ref={reviewTitle} tabIndex={-1}>Confirm authenticated access</h4><dl>{[["Workspace", preview.workspaceLabel], ["Project", preview.projectName ?? "No project-specific access terms"], ["Recipient", preview.audienceLabel], ["Target type", selected ? AUTHENTICATED_GRANT_AUDIENCE_LABEL[selected.type] : "Unknown"], ["Recipient rule", selected?.type === "principal" ? "This exact verified person only" : "Current authorized members; membership is rechecked"], ["Recipient preview", selected?.type === "principal" ? `${preview.recipientCount} exact verified person` : preview.recipientCount > 0 ? `${preview.recipientPreview?.truncated ? "At least " : "Up to "}${preview.recipientCount} currently eligible people; final membership is checked when opened` : "Dynamic membership; final recipients are checked when opened"], ["Access terms", termsLabel(preview.accessTerms)], ["Access ends", preview.effectiveAccessExpiresAt ? date(preview.effectiveAccessExpiresAt) : preview.accessTerms?.mode === "project_end" ? "Awaiting verified project completion, then 7 days" : "When revoked"]].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>{preview.accessTerms?.mode === "project_end" && <p>Reopening does not renew expired access.</p>}<p>Confirm this recipient and scope. This grants only the reviewed folder access; it never widens an individual to their organization and creates no public link.</p><div className="actions"><button type="button" className="button-orange" disabled={disabled || !creationEnabled} onClick={create}>{restoreTarget ? "Restore authenticated access" : "Grant authenticated access"}</button><button type="button" className="button-ghost" disabled={busy || uncertain} onClick={() => setPreview(null)}>Cancel review</button></div></section>}
       </>}
       {error && <small className="error" role="alert">{error}{portalSetupNeeded && <> <a href="/clients#client-portal-setup">Open Client Hub portal setup</a> to review the exact client account, workspace, and verified membership.</>}</small>}
-      {portalSetupNeeded&&<PrimaryWorkspaceBindingSetup folder={folder} onLinked={()=>{setPortalSetupNeeded(false);setError("");void load();}}/>}
+      {portalSetupNeeded&&creationEnabled&&<PrimaryWorkspaceBindingSetup folder={folder} onLinked={()=>{setPortalSetupNeeded(false);setError("");void load();}}/>}
       {message && <small role="status">{message}</small>}
-      {uncertain && pending.current && <button type="button" className="button-orange" disabled={busy || loading || !context || pending.current.action === "revoke" && !canRevoke} onClick={() => void execute(pending.current!)}>Retry same access operation</button>}
+      {uncertain && pending.current && <button type="button" className="button-orange" disabled={busy || loading || !context || (pending.current.action === "revoke" ? !canRevoke : !creationEnabled)} onClick={() => void execute(pending.current!)}>Retry same access operation</button>}
       {grants.length > 0 && <div className="authenticated-grant-list" aria-label="Authenticated portal grant history">
         {grants.map(grant => {
           const latest = latestVersions.get(grant.grantId) === grant.version;
@@ -5126,7 +5128,7 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, onBusyChang
             <span><strong>{grant.audienceLabel}</strong><small>{grant.workspaceLabel} · {AUTHENTICATED_GRANT_AUDIENCE_LABEL[grant.audience.type]} · {grant.status} · version {grant.version}</small>
               <small>{termsLabel(grant.accessTerms)}</small><small>{grant.dynamicAudience ? "Dynamic current authorized members" : `${grant.recipientCount} exact verified person`} · {grant.effectiveAccessExpiresAt ? `expires ${date(grant.effectiveAccessExpiresAt)}` : grant.accessTerms?.mode === "project_end" ? "awaiting verified project completion, then 7 days" : grant.expiresAt ? `expires ${date(grant.expiresAt)}` : "no fixed expiry"}</small></span>
             {latest && grant.status === "active" && canRevoke && <button type="button" className="button-danger button-small" disabled={disabled} onClick={() => void mutate(grant, "revoke")}>Revoke</button>}
-            {latest && grant.status !== "active" && <button type="button" className="button-ghost button-small" disabled={disabled} onClick={() => void mutate(grant, "restore")}>Restore as new version</button>}
+            {latest && grant.status !== "active" && <button type="button" className="button-ghost button-small" disabled={disabled || !creationEnabled} onClick={() => void mutate(grant, "restore")}>Restore as new version</button>}
             {latest && grant.status === "active" && grant.audience.type === "principal" && !grant.dynamicAudience && grant.recipientCount === 1
               && <AuthenticatedDeliveryNoticePolicyEditor physicalGrantId={grant.id} audienceLabel={grant.audienceLabel} />}
           </section>;
@@ -5154,6 +5156,7 @@ function ShareDialog({
   changed: () => void;
 }) {
   const authenticatedGrantsEnabled = authenticatedGrantCapability?.enabled === true;
+  const authenticatedGrantCreationEnabled = authenticatedGrantCapability?.creationEnabled === true;
   const readinessReasons = authenticatedGrantCapability?.reasons ?? [];
   const unreceiptedCount = authenticatedGrantCapability?.checks?.bindings?.unreceiptedActiveCount;
   const authenticatedGrantReadinessMessage = readinessReasons.includes("unreceipted_bindings")
@@ -5384,7 +5387,7 @@ function ShareDialog({
             </header>
             {authenticatedGrantsEnabled
               ? canManageAuthenticatedGrants
-                ? <AuthenticatedDeliveryGrantPanel folder={folder} canRevoke={canRevoke} embedded />
+                ? <AuthenticatedDeliveryGrantPanel folder={folder} canRevoke={canRevoke} creationEnabled={authenticatedGrantCreationEnabled} embedded />
                 : <div className="notice" role="status">Administrator access is required to manage Client Workspace grants. Existing public-link sharing remains available.</div>
               : <div className="notice" role="status">{authenticatedGrantReadinessMessage} <a href="/clients#client-portal-setup">Open Client Hub portal setup</a> to check readiness.</div>}
             {canProvisionDelegated && <details className="workspace-sharing-advanced">

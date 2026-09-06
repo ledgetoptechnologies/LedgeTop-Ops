@@ -15,7 +15,7 @@ async function mockPrimary(page: Page, override?: (route: Route, call: GrantCall
   const calls: GrantCall[] = []; let grants: ReturnType<typeof primaryGrant>[] = [];
   await page.route("**/api/**", async route => {
     const request = route.request(), url = new URL(request.url()), call = {path: url.pathname, method: request.method(), body: request.postData() ? request.postDataJSON() : null, key: request.headers()["idempotency-key"]}; calls.push(call); const handled = override?.(route, call); if (handled) return handled;
-    if (call.path === "/api/session") return route.fulfill({json: {user, csrfToken: "csrf-primary", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: {deliveryJobsRoot: {enabled: true}, authenticatedDeliveryGrants: {enabled: true}}}});
+    if (call.path === "/api/session") return route.fulfill({json: {user, csrfToken: "csrf-primary", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: {deliveryJobsRoot: {enabled: true}, authenticatedDeliveryGrants: {enabled: true, creationEnabled: true}}}});
     if (call.path === "/api/delivery/folders") return route.fulfill({json: {prefix: url.searchParams.get("prefix") || "Jobs/Clients/", folders: [{id: "folder-acme", prefix: "Jobs/Clients/Acme/", name: "Acme", displayName: "Acme", kind: "folder"}], files: [], nextCursor: null}});
     if (call.path === "/api/delivery/folders/locations") return route.fulfill({json: {points: [], imageCount: 0, truncated: false}});
     if (call.path === "/api/delivery/shares/active") return route.fulfill({json: {share: null}});
@@ -37,7 +37,7 @@ async function latePrimary(route: Route, json: unknown) {try {await route.fulfil
 
 test("nonadministrators retain ordinary sharing without probing authenticated grants or falling back to legacy grants", async ({page}) => {
   const calls = await mockPrimary(page, (route, call) => {
-    if (call.path === "/api/session") return route.fulfill({json: {user: {...user, profileType: "Operator", isAdministrator: false, permissions: ["delivery.browse", "delivery.share.create"]}, csrfToken: "csrf-scoped-share", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: {deliveryJobsRoot: {enabled: true}, authenticatedDeliveryGrants: {enabled: true}}}});
+    if (call.path === "/api/session") return route.fulfill({json: {user: {...user, profileType: "Operator", isAdministrator: false, permissions: ["delivery.browse", "delivery.share.create"]}, csrfToken: "csrf-scoped-share", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: {deliveryJobsRoot: {enabled: true}, authenticatedDeliveryGrants: {enabled: true, creationEnabled: true}}}});
     if (call.path === "/api/delivery/shares" && call.method === "POST") return route.fulfill({status: 201, json: {share: {id: "ordinary-share", shareUrl: "https://delivery.example.test/s/ordinary-share", passwordProtected: false, expiresAt: null}}});
     return undefined;
   });
@@ -67,6 +67,26 @@ test("an unavailable workspace rollout points administrators to safe Client Hub 
   await expect(status).toBeVisible();
   await expect(status.getByRole("link", {name: "Open Client Hub portal setup"})).toHaveAttribute("href", "/clients#client-portal-setup");
   expect(calls.some(call => call.path.startsWith("/api/delivery/authenticated-grants") || call.path.startsWith("/api/delivery/native-grants"))).toBe(false);
+});
+
+test("a creation pause preserves grant history and revoke while disabling new access and restore", async ({page}) => {
+  const active = primaryGrant(), revoked = primaryGrant({id: "grant-old-v1", grantId: "grant-old", status: "revoked", audienceLabel: "Former Client"});
+  const calls = await mockPrimary(page, (route, call) => {
+    if (call.path === "/api/session") return route.fulfill({json: {user, csrfToken: "csrf-creation-paused", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null,
+      capabilities: {deliveryJobsRoot: {enabled: true}, authenticatedDeliveryGrants: {enabled: true, creationEnabled: false, reasons: ["creation_disabled"]}}}});
+    if (call.path === "/api/delivery/authenticated-grants" && call.method === "GET") return route.fulfill({json: {...primaryContext, grants: [active, revoked]}});
+    return undefined;
+  });
+  await openPrimary(page);
+  await expect(page.getByRole("status").filter({hasText: "New Client Workspace access and restores are paused"})).toBeVisible();
+  await expect(page.getByRole("button", {name: "Organization", exact: true})).toBeDisabled();
+  await expect(page.getByRole("button", {name: "Restore as new version"})).toBeDisabled();
+  await expect(page.getByRole("button", {name: "Revoke", exact: true})).toBeEnabled();
+  page.once("dialog", dialog => dialog.accept());
+  await page.getByRole("button", {name: "Revoke", exact: true}).click();
+  await expect(page.getByRole("status").filter({hasText: "Authenticated portal access revoked"})).toBeVisible();
+  expect(calls.some(call => call.path.endsWith("/grant-logical/revoke") && call.method === "POST")).toBe(true);
+  expect(calls.some(call => call.path === "/api/delivery/authenticated-grants" && call.method === "POST")).toBe(false);
 });
 
 test("an unbound folder can be linked only to its exact signed primary workspace without creating access or a public link", async ({page}) => {
@@ -126,7 +146,7 @@ test("an unbound folder can be linked only to its exact signed primary workspace
 test("an administrator without revoke permission can review primary grants but has no forbidden revoke action", async ({page}) => {
   const calls = await mockPrimary(page, (route, call) => {
     // Session permission keys omit a permission when a global explicit deny applies.
-    if (call.path === "/api/session") return route.fulfill({json: {user: {...user, permissions: user.permissions.filter(permission => permission !== "delivery.share.revoke")}, csrfToken: "csrf-revoke-denied", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: {deliveryJobsRoot: {enabled: true}, authenticatedDeliveryGrants: {enabled: true}}}});
+    if (call.path === "/api/session") return route.fulfill({json: {user: {...user, permissions: user.permissions.filter(permission => permission !== "delivery.share.revoke")}, csrfToken: "csrf-revoke-denied", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: {deliveryJobsRoot: {enabled: true}, authenticatedDeliveryGrants: {enabled: true, creationEnabled: true}}}});
     if (call.path === "/api/delivery/authenticated-grants" && call.method === "GET") return route.fulfill({json: {...primaryContext, grants: [primaryGrant()]}});
     return undefined;
   });
@@ -293,7 +313,7 @@ test("creates a distinct authenticated Client Portal grant with keyboard typeahe
   await page.route("**/api/**", async route => {
     const url = new URL(route.request().url());
     if (url.pathname === "/api/session") return route.fulfill({ json: { user, csrfToken: "csrf-grants", timezone: "America/Chicago",
-      mapStyleUrl: null, mapboxPublicToken: null, capabilities: { deliveryJobsRoot: { enabled: true }, authenticatedDeliveryGrants: { enabled: true } } } });
+      mapStyleUrl: null, mapboxPublicToken: null, capabilities: { deliveryJobsRoot: { enabled: true }, authenticatedDeliveryGrants: { enabled: true, creationEnabled: true } } } });
     if (url.pathname === "/api/delivery/folders") return route.fulfill({ json: { prefix: url.searchParams.get("prefix") || "Jobs/Clients/",
       folders: [{ id: "folder-acme", prefix: "Jobs/Clients/Acme/", name: "Acme", displayName: "Acme", kind: "folder" }], files: [], nextCursor: null } });
     if (url.pathname === "/api/delivery/folders/locations") return route.fulfill({ json: { points: [], imageCount: 0, truncated: false } });

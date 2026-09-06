@@ -12,12 +12,31 @@ const operationsMailFlags = Object.freeze([
   "PROJECT_ACCESS_EXPIRY_NOTIFICATIONS_ENABLED",
 ]);
 
+export const authenticatedDeliveryFlags = Object.freeze([
+  "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED",
+  "AUTHENTICATED_DELIVERY_GRANTS_ENABLED",
+  "PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED",
+  "AUTHENTICATED_DELIVERY_CREATION_ENABLED",
+]);
+
+const dormantClientMutations = Object.freeze([
+  "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED",
+  "CLIENT_PORTAL_PEER_ADMIN_ENABLED",
+  "CLIENT_PORTAL_ADDRESS_BOOK_ENABLED",
+]);
+
+const dormantOperationsMutations = Object.freeze([
+  "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED",
+  "PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED",
+  "PROJECT_ALPHA_DELIVERY_GUEST_ENABLED",
+]);
+
 export function validatePortalReleaseProfile(declaration, clientConfig, operationsConfig) {
   if (!declaration || typeof declaration !== "object" || Array.isArray(declaration) ||
       declaration.schemaVersion !== 1 ||
-      !["receiver-only", "default-on-eligibility"].includes(declaration.profile) ||
+      !["receiver-only", "default-on-eligibility", "primary-authenticated-delivery"].includes(declaration.profile) ||
       Object.keys(declaration).some(key => !["schemaVersion", "profile"].includes(key))) {
-    return ["Portal release profile must declare schemaVersion 1 and an explicit receiver-only or default-on-eligibility profile, with no extra fields"];
+    return ["Portal release profile must declare schemaVersion 1 and an explicit receiver-only, default-on-eligibility, or primary-authenticated-delivery profile, with no extra fields"];
   }
   const errors = [];
   const expected = declaration.profile === "receiver-only" ? "false" : "true";
@@ -33,9 +52,23 @@ export function validatePortalReleaseProfile(declaration, clientConfig, operatio
           flag === "CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED" && value === undefined) continue;
       if (value !== expected) errors.push(`${label} ${flag} must be exactly ${expected} for ${declaration.profile}`);
     }
+    const authenticatedExpected = declaration.profile === "primary-authenticated-delivery" ? "true" : "false";
+    for (const flag of authenticatedDeliveryFlags) {
+      // The Client receiver must always ingest the schema-v3 relationship
+      // projection. Operations only consumes those relations when the paired
+      // authenticated-delivery profile is explicitly active.
+      const flagExpected = flag === "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED"
+        ? (label === "Client" || declaration.profile === "primary-authenticated-delivery" ? "true" : "false")
+        : authenticatedExpected;
+      if (config.vars[flag] !== flagExpected) errors.push(`${label} ${flag} must be exactly ${flagExpected} for ${declaration.profile}`);
+    }
     const mailFlags = label === "Client" ? ["CLIENT_PORTAL_INVITATION_EMAIL_ENABLED"] : operationsMailFlags;
     for (const flag of mailFlags) {
       if (config.vars[flag] !== "false") errors.push(`${label} ${flag} must remain exactly false for the no-email portal release`);
+    }
+    const dormantMutations = label === "Client" ? dormantClientMutations : dormantOperationsMutations;
+    for (const flag of dormantMutations) {
+      if (config.vars[flag] !== "false") errors.push(`${label} ${flag} must remain exactly false for this portal release profile`);
     }
   }
   return errors;

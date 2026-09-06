@@ -14,6 +14,7 @@ import { authorizePortalWorkspaceCapability } from '../../../client/src/worker/c
 import {requireProjectAccessAuthorityMutations} from './project-access-mutation-gate';
 import {requireActivePrimaryWorkspaceBindingReceipt} from './primary-delivery-workspace-bindings';
 import { portalRootAccessAllowedSql } from './client-portal-root-access';
+import { requireAuthenticatedDeliveryCreation } from './authenticated-delivery-creation-gate';
 
 const OPAQUE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const IDEMPOTENCY = /^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/;
@@ -786,6 +787,7 @@ export async function createAuthenticatedDeliveryGrant(env: Env, principal: Staf
   idempotencyKey: string): Promise<{ grant: AuthenticatedDeliveryGrantView; replayed: boolean }> {
   requireProjectAccessAuthorityMutations(env);
   requireEnabled(env);
+  requireAuthenticatedDeliveryCreation(env);
   if (!IDEMPOTENCY.test(idempotencyKey) || !OPAQUE.test(input.audiencePublicId) || !REASON.test(input.reasonCode))
     throw new HTTPException(400, { message: "Authenticated grant request is invalid" });
   const context = await bindingContext(env, input.folderBindingId);
@@ -883,6 +885,7 @@ export async function restoreAuthenticatedDeliveryGrant(env: Env, principal: Sta
 ): Promise<{ grant: AuthenticatedDeliveryGrantView; replayed: boolean }> {
   requireProjectAccessAuthorityMutations(env);
   requireEnabled(env);
+  requireAuthenticatedDeliveryCreation(env);
   if (!OPAQUE.test(logicalGrantId) || !Number.isSafeInteger(expectedVersion) || expectedVersion < 1 ||
       !REASON.test(reasonCode) || !IDEMPOTENCY.test(idempotencyKey))
     throw new HTTPException(400, { message: "Grant restoration request is invalid" });

@@ -335,9 +335,16 @@ version after repeating every current check. A descendant client-created
 The staff management API and Client enforcement are independently present but
 ship disabled through `CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED`,
 `CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED`, and
-`AUTHENTICATED_DELIVERY_GRANTS_ENABLED`. They must be enabled together only
-after migration `0137`, Project Alpha projection parity, and end-to-end staging
-grant/revoke/restore/deny evidence are recorded.
+`AUTHENTICATED_DELIVERY_GRANTS_ENABLED`. New grant, restore, and workspace-
+binding writes have the additional independent
+`AUTHENTICATED_DELIVERY_CREATION_ENABLED` kill switch. With creation off,
+existing reads, audits, and revokes remain available under the broader grant
+and mutation flags. The reviewed `primary-authenticated-delivery` profile also
+requires `CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED` parity in Client and
+Operations. It may be selected only after migration `0137`, Project Alpha
+projection parity, and end-to-end staging create/restore/revoke/deny and
+kill-switch evidence are recorded. Notification/email, Project Alpha delivery-
+intent/guest, membership, peer-admin, and address-book mutations remain off.
 
 The requested final post-fix diff rescan workspace
 `039e35dd-7458-4707-98d8-9af6f3a67225` remained at setup awaiting **Start

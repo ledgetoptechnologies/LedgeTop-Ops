@@ -124,6 +124,9 @@ test("production Worker releases use repository-owned deploy wrappers", () => {
   const clientPackage = readJson("apps/client/package.json");
   assert.equal(clientPackage.scripts["deploy:preflight"], "node scripts/project-alpha-portal-receiver-preflight.mjs");
   assert.equal(clientPackage.scripts.deploy, "npm run deploy:preflight && vite build && wrangler deploy");
+  const operationsPackage = readJson("apps/operations/package.json");
+  assert.equal(operationsPackage.scripts["deploy:preflight"], "node ../client/scripts/project-alpha-portal-receiver-preflight.mjs");
+  assert.equal(operationsPackage.scripts.deploy, "npm run deploy:preflight && vite build && wrangler deploy");
 
   const productionDocs = filesUnder(
     "docs",
@@ -142,7 +145,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   // The digest intentionally moved with the reviewed canonical portal hosts
   // and explicit legacy compatibility origin. Keep the field assertions so a future config change
   // cannot hide behind a digest refresh.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "c5672c17326eebe1c36dc694535ebc7afabc9d631043925c7f28b3696aa31ed7");
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "2ac2e4bfa69f8a5e33914ef7bce0b78522df0983a1ef34a965384b2e58ac6b92");
   const config = readJson("apps/client/wrangler.jsonc");
   assert.equal(config.name, "ltds-clients");
   assert.equal(config.main, "src/worker/index.ts");
@@ -191,6 +194,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.equal(config.vars.CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED, "true");
   assert.equal(config.vars.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED, "true");
   assert.equal(config.vars.AUTHENTICATED_DELIVERY_GRANTS_ENABLED, "false");
+  assert.equal(config.vars.AUTHENTICATED_DELIVERY_CREATION_ENABLED, "false");
   assert.equal(config.vars.CLIENT_VIEWER_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED, "true");
   assert.equal(config.vars.CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED, "false");

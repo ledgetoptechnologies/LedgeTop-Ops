@@ -4,6 +4,8 @@ import { requirePermission } from "./acl";
 import { normalizePrefix, resolveDivisionAssociation } from "./delivery";
 import { projectAlphaReadVisibleSql } from "./project-alpha-read-visibility";
 import type { Env, StaffPrincipal } from "./types";
+import { requireAuthenticatedDeliveryCreation } from "./authenticated-delivery-creation-gate";
+import { requireProjectAccessAuthorityMutations } from "./project-access-mutation-gate";
 
 const PRIMARY = "project-alpha:primary" as const;
 const OPAQUE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
@@ -386,7 +388,8 @@ async function replay(env:Env,principal:StaffPrincipal,idempotencyKey:string,act
 }
 
 export async function createPrimaryWorkspaceBinding(env:Env,principal:StaffPrincipal,folderKey:string,inputValue:unknown,idempotencyValue:string){
-  await ready(env);const parsed=primaryWorkspaceBindingInputSchema.safeParse(inputValue);
+  await ready(env);requireProjectAccessAuthorityMutations(env);requireAuthenticatedDeliveryCreation(env);
+  const parsed=primaryWorkspaceBindingInputSchema.safeParse(inputValue);
   const input:PrimaryWorkspaceBindingInput=parsed.success?parsed.data:fail(400,"Workspace folder link is invalid");
   const idempotencyKey=key(idempotencyValue),owner=await opsFolderProof(env,principal,folderKey);
   const projection=await projectionProof(env,owner,input.workspaceId),currentContext=await contextVersion(owner,projection);
@@ -449,7 +452,7 @@ export async function createPrimaryWorkspaceBinding(env:Env,principal:StaffPrinc
 }
 
 export async function revokePrimaryWorkspaceBinding(env:Env,principal:StaffPrincipal,bindingId:string,folderKey:string,inputValue:unknown,idempotencyValue:string){
-  await ready(env);if(!OPAQUE.test(bindingId))fail(404,"Workspace folder link not found");
+  await ready(env);requireProjectAccessAuthorityMutations(env);if(!OPAQUE.test(bindingId))fail(404,"Workspace folder link not found");
   const parsed=primaryWorkspaceBindingRevokeSchema.safeParse(inputValue);
   const input:z.infer<typeof primaryWorkspaceBindingRevokeSchema>=parsed.success?parsed.data:fail(400,"Workspace folder unlink is invalid");
   const idempotencyKey=key(idempotencyValue),owner=await opsFolderProof(env,principal,folderKey);

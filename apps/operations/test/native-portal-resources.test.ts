@@ -118,7 +118,7 @@ describe('source-owned native portal resources with real signed projection and l
     a=fixture('a');b=fixture('b');
     env={DELIVERY_DB:db,CLIENT_PORTAL_ENABLED:'true',CLIENT_PORTAL_HIERARCHY_V2_ENABLED:'true',CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED:'true',
       CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED:'true',CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED:'true',
-      AUTHENTICATED_DELIVERY_GRANTS_ENABLED:'true',CLIENT_PORTAL_ORIGIN:'https://client.test',
+      AUTHENTICATED_DELIVERY_GRANTS_ENABLED:'true',AUTHENTICATED_DELIVERY_CREATION_ENABLED:'true',CLIENT_PORTAL_ORIGIN:'https://client.test',
       CLIENT_PORTAL_NATIVE_FEEDBACK_SOURCE_IDS:`${a.source},${b.source}`,
       PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED:'true',
       PUBLIC_BULK_RATE_LIMITER:{limit:async()=>({success:true})},

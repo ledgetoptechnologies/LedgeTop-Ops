@@ -63,7 +63,7 @@ configuration unless a dated evidence record explicitly says otherwise:
 | Service and contact metadata | `PROJECT_ALPHA_SERVICE_ASSIGNMENT_SYNC_ENABLED`, `CLIENT_PORTAL_SERVICE_ASSIGNMENT_POLICY_ENABLED` | `CLIENT_HUB_PA_CONTACT_ASSIGNMENTS_ENABLED` | Project Alpha producer approved; Client `0168`, `0174`, `0179`–`0181`, `0190`–`0192`; complete selected generation |
 | Membership management | `CLIENT_PORTAL_TEAM_ENABLED`, `CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED`, `CLIENT_PORTAL_ACCESS_ENROLLMENT_READY`, `CLIENT_PORTAL_PEER_ADMIN_ENABLED`, `CLIENT_PORTAL_ADDRESS_BOOK_ENABLED`, `CLIENT_PORTAL_INVITATION_EMAIL_ENABLED` | Matching management and deny-policy flags | Client `0164`–`0176`; Operations `0041`; SMTP only for the email window |
 | Authority mutation and audit | `PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED`, `CLIENT_PORTAL_CONTENT_AUDIT_ENABLED` | `PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED` | Client `0172` and `0187`; frozen/drained old writers; dedicated audit HMAC secret |
-| Authenticated delivery | `AUTHENTICATED_DELIVERY_GRANTS_ENABLED` | `AUTHENTICATED_DELIVERY_GRANTS_ENABLED`, Project Alpha delivery-intent flags | Client through `0189`; Operations `0040`, `0042`, `0049`; unreceipted binding query empty |
+| Authenticated delivery | `CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED`, `AUTHENTICATED_DELIVERY_GRANTS_ENABLED`, `PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED`, `AUTHENTICATED_DELIVERY_CREATION_ENABLED` | The same four flags; Project Alpha delivery-intent/guest flags remain off | Client through `0189`; Operations `0040`, `0042`, `0049`; hierarchy-relation parity; unreceipted binding query empty; create/restore/revoke and kill-switch evidence |
 | Notifications and expiry | Delivery notification and invitation-email flags | `AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED`, `PROJECT_ACCESS_EXPIRY_NOTIFICATIONS_ENABLED` | Client `0169`, `0170`, `0175`, `0177`, `0178`, `0182`, `0183`, `0186`; reviewed SMTP and recipient policy |
 | Feedback and requests | `CLIENT_PORTAL_NATIVE_FEEDBACK_SOURCE_IDS`, request-v2/native-request, catalog, assignment-policy, and attachment flags | Draft-quote and related exact-source flags | Client `0168`, `0174`, `0179`–`0188`; Operations `0035`, `0050`; scanner/R2/CORS last |
 | Delegated links | `CLIENT_DELEGATED_SHARES_ENABLED` | `CLIENT_DELEGATED_SHARE_SIGNER_ENABLED` | Both signer/session secrets, exact issuer, bounded expiry, recovery route |
@@ -139,6 +139,16 @@ rejects partial/mixed bundles and keeps invitation, authenticated-delivery, and
 project-access-expiry mail disabled. It retains all receiver secret, ingress,
 and unrelated Client capability checks. Root Node tests enforce the same
 profile rather than silently removing dormant-flag checks.
+
+Authenticated delivery has its own reviewed `primary-authenticated-delivery`
+profile. It requires the hierarchy-relations, grant-management, authority-
+mutation, and creation switches to match in Client and Operations. Email and
+notification flags, Project Alpha delivery intents/guests, membership, peer-
+admin, and address-book mutations remain off. Roll back creation first by
+setting `AUTHENTICATED_DELIVERY_CREATION_ENABLED=false`; existing reads,
+audits, and revokes remain available while the grant and mutation switches stay
+on. Only disable the broader grant-management switch after active grants have
+been reviewed or revoked.
 
 This verifies local release intent only: migrations, approved artifact, remote
 versions/flags and Operations deny-management readiness require separate

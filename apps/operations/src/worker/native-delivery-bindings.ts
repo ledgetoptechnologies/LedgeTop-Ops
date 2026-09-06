@@ -15,6 +15,7 @@ import { projectAccessAuthorityHistoryReady,projectAccessGrantEvent } from '../.
 import type { Env, StaffPrincipal } from './types';
 import {requireProjectAccessAuthorityMutations} from './project-access-mutation-gate';
 import { portalRootAccessAllowedSql } from './client-portal-root-access';
+import { requireAuthenticatedDeliveryCreation } from './authenticated-delivery-creation-gate';
 
 type Database = Pick<D1Database,'prepare'|'batch'>;
 const opaque = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/);
@@ -403,6 +404,7 @@ async function mayRevoke(env:Env,principal:StaffPrincipal,p:Prepared):Promise<bo
 
 export async function createNativeDeliveryGrant(env:Env,principal:StaffPrincipal,value:unknown,keyValue:string):Promise<{grant:NativeDeliveryGrantView;replayed:boolean}>{
   requireProjectAccessAuthorityMutations(env);
+  requireAuthenticatedDeliveryCreation(env);
   const schema=selectionSchema.extend({expectedContextVersion:z.string().regex(/^[a-f0-9]{64}$/)}).strict(),parsed=schema.safeParse(value);
   if(!parsed.success)return error(400,'native_delivery_invalid');const {expectedContextVersion,...raw}=parsed.data;
   const operation=parse(raw),key=idempotency(keyValue),fingerprint=await digest(['create',operation,expectedContextVersion]);

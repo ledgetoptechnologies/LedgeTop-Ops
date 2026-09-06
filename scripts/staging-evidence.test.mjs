@@ -559,9 +559,6 @@ test("checked-in evidence example stays complete as migrations, flags, gates, an
   const example = JSON.parse(fs.readFileSync(path.join(root, "docs", "staging", "release-evidence.json.example"), "utf8"));
   for (const app of ["delivery", "operations"]) assert.deepEqual(example.migrations[app].expected, [...REQUIRED_STAGING_MIGRATIONS[app]], `migrations.${app}`);
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-12), [
-    "0184_native_client_feedback.sql",
-    "0185_native_service_request_ownership.sql",
-    "0186_delivery_notification_authority_provenance.sql",
     "0187_authenticated_content_audit.sql",
     "0188_native_feedback_completion_notices.sql",
     "0189_primary_staff_folder_bindings.sql",
@@ -571,6 +568,9 @@ test("checked-in evidence example stays complete as migrations, flags, gates, an
     "0193_bulk_download_parts.sql",
     "0194_client_delegated_share_expiry.sql",
     "0195_legacy_workspace_authority_lifecycle.sql",
+    "0196_bulk_download_archive_cache.sql",
+    "0197_portal_root_access_policy.sql",
+    "0198_incoming_upload_owner_notifications.sql",
   ]);
   for (const app of ["delivery", "operations", "ops-sync"]) assert.deepEqual(new Set(example.deployments[app].disabledFeatureFlags), new Set(REQUIRED_DISABLED_FEATURE_FLAGS[app]), `deployments.${app}.disabledFeatureFlags`);
   assert.deepEqual(new Set(Object.keys(example.externalGates)), new Set(REQUIRED_EXTERNAL_GATES));

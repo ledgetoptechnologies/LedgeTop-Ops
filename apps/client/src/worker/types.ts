@@ -79,6 +79,8 @@ export interface Env {
   CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED?: string;
   /** Requires an explicit live authenticated delivery grant in addition to portal-v2 entitlement. */
   AUTHENTICATED_DELIVERY_GRANTS_ENABLED?: string;
+  /** Mirrored release declaration; creation is performed only by Operations. */
+  AUTHENTICATED_DELIVERY_CREATION_ENABLED?: string;
   /** Many-to-many PA directory edges and project-retention authorization. Independent/default-off. */
   CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED?: string;
   /** Client invitation/member mutations. Independent from read-only hierarchy rollout. */
