@@ -32,6 +32,12 @@ R8a of [the rollout manifest](client-portal-rollout-manifest.md).
   the shared flag; later changes only affect test fixtures.
 - Both production builds and maintenance-enabled Wrangler dry runs pass.
   Existing bundle-size/source-map warnings are not hidden.
+- Full Operations Playwright run against maintenance checkout `a80d50e`:
+  1,018 passed in 6.0 minutes, desktop and mobile Edge (session 83861, exit 0).
+  This uses local fixtures, not production authority or live provisioning.
+  Manual screenshot review found the organization-contact editor cramped inside
+  its desktop grid card despite passing tests; responsive editor correction and
+  a stronger layout regression are still required.
 
 Operations uses `--containers-rollout none` for this Worker-only release. No
 container source, package manifest or lockfile differs from the inspected main
