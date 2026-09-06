@@ -374,7 +374,7 @@ test("unavailable or missing collection metadata never invents continuation", as
   expect(collectionCalls).toBe(0);
 });
 
-test("populated detail remains readable on mobile, narrow, laptop and ultrawide layouts", async ({ page }, testInfo) => {
+test("populated detail remains readable on mobile, narrow, laptop and ultrawide layouts", async ({ page }) => {
   const response = detail();
   response.client.display_name = "Acme Construction Services — Regional Property Management";
   response.contacts[0]!.email = "long-business-contact-address@construction-services.example.test";
@@ -402,9 +402,6 @@ test("populated detail remains readable on mobile, narrow, laptop and ultrawide 
       expect(bounds!.x).toBeGreaterThanOrEqual(0);
       expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width + 1);
     }
-    await page.evaluate(() => scrollTo(0, 0));
-    await page.screenshot({ path: testInfo.outputPath(`client-detail-${width}.png`) });
-    await page.screenshot({ path: testInfo.outputPath(`client-detail-${width}-full.png`), fullPage: true });
   }
 });
 
