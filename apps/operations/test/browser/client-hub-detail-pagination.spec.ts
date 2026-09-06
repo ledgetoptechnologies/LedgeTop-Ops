@@ -374,23 +374,23 @@ test("unavailable or missing collection metadata never invents continuation", as
   expect(collectionCalls).toBe(0);
 });
 
-test("populated detail remains readable on mobile, narrow, laptop and ultrawide layouts", async ({ page }, testInfo) => {
-  const response = detail();
-  response.client.display_name = "Acme Construction Services — Regional Property Management";
-  response.contacts[0]!.email = "long-business-contact-address@construction-services.example.test";
-  response.contacts = [response.contacts[0]!, ...[2, 3, 4, 5].map(index => businessContact(`business-${index}`, `Business contact ${index}`))];
-  for (const collection of collections) {
-    response.pages[collection]!.returned = 5;
-    if (collection !== "businessContacts") response[collection] = [1, 2, 3, 4, 5].map(index => item(collection, index));
-  }
-  const longGrant = item("deliveryGrants", 1) as ReturnType<typeof item> & { r2_prefix: string };
-  longGrant.r2_prefix = "clients/acme-construction-services/municipal-projects/2026/edited-originals/final-approved-delivery/";
-  response.deliveryGrants[0] = longGrant;
-  await mock(page, (route, collection) => route.fulfill({ json: reply(collection) }), () => response);
-  await page.goto(canonicalPath);
-  await expect(page.getByRole("heading", { name: response.client.display_name })).toBeVisible();
-  for (const width of [375, 640, 1280, 3440]) {
+for (const width of [375, 640, 1280, 3440]) {
+  test(`populated detail remains readable at ${width}px`, async ({ page }) => {
+    const response = detail();
+    response.client.display_name = "Acme Construction Services — Regional Property Management";
+    response.contacts[0]!.email = "long-business-contact-address@construction-services.example.test";
+    response.contacts = [response.contacts[0]!, ...[2, 3, 4, 5].map(index => businessContact(`business-${index}`, `Business contact ${index}`))];
+    for (const collection of collections) {
+      response.pages[collection]!.returned = 5;
+      if (collection !== "businessContacts") response[collection] = [1, 2, 3, 4, 5].map(index => item(collection, index));
+    }
+    const longGrant = item("deliveryGrants", 1) as ReturnType<typeof item> & { r2_prefix: string };
+    longGrant.r2_prefix = "clients/acme-construction-services/municipal-projects/2026/edited-originals/final-approved-delivery/";
+    response.deliveryGrants[0] = longGrant;
     await page.setViewportSize({ width, height: 960 });
+    await mock(page, (route, collection) => route.fulfill({ json: reply(collection) }), () => response);
+    await page.goto(canonicalPath);
+    await expect(page.getByRole("heading", { name: response.client.display_name })).toBeVisible();
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await expect.poll(() => page.locator(".client-hub-detail-grid").evaluate(element =>
       getComputedStyle(element).gridTemplateColumns.trim().split(/\s+/).length)).toBe(1);
@@ -402,11 +402,8 @@ test("populated detail remains readable on mobile, narrow, laptop and ultrawide 
       expect(bounds!.x).toBeGreaterThanOrEqual(0);
       expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width + 1);
     }
-    await page.evaluate(() => scrollTo(0, 0));
-    await page.screenshot({ path: testInfo.outputPath(`client-detail-${width}.png`) });
-    await page.screenshot({ path: testInfo.outputPath(`client-detail-${width}-full.png`), fullPage: true });
-  }
-});
+  });
+}
 
 test("grant badges respect UTC expiry while preserving revoked or inactive status", async ({ page }) => {
   await page.clock.setFixedTime(new Date("2026-08-25T12:00:00Z"));

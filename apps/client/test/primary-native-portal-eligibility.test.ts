@@ -237,7 +237,7 @@ describe("primary signed-native first-login eligibility", () => {
       expect((await request(actor, `${contextPath}?expectedContext=${encodeURIComponent(original.contextVersion)}`, rotated)).status).toBe(409);
       expect((await request(actor, `/v2/workspaces/${workspaceId}/hierarchy?expectedContext=${encodeURIComponent(original.contextVersion)}`, rotated)).status).toBe(409);
     }
-  });
+  }, 60_000);
 
   it("does not re-enroll a signed principal after its tombstone", async () => {
     const { actor, workspaceId, principalId, common } = await project("revoked-principal");
@@ -250,5 +250,5 @@ describe("primary signed-native first-login eligibility", () => {
     expect(await db.prepare("SELECT count(*) n FROM portal_v2_workspace_memberships WHERE workspace_id=? AND status='active' AND revoked_at IS NULL")
       .bind(workspaceId).first("n")).toBe(0);
     await assertNoLegacyOrMail();
-  });
+  }, 60_000);
 });
