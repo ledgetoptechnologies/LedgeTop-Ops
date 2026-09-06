@@ -494,7 +494,7 @@ function focusFirstTypeaheadOption(event: ReactKeyboardEvent<HTMLInputElement>) 
 function moveTypeaheadOption(event: ReactKeyboardEvent<HTMLButtonElement>, inputId: string) {
   if (!['ArrowDown', 'ArrowUp', 'Escape'].includes(event.key)) return;
   event.preventDefault();
-  if (event.key === "Escape") { document.getElementById(inputId)?.focus(); return; }
+  if (event.key === "Escape") { event.stopPropagation(); document.getElementById(inputId)?.focus(); return; }
   const options = Array.from(event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="option"]') ?? []);
   const index = options.indexOf(event.currentTarget);
   const next = event.key === "ArrowDown" ? Math.min(options.length - 1, index + 1) : Math.max(0, index - 1);

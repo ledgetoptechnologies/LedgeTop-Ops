@@ -1041,6 +1041,12 @@ test("Share dialog selects a scoped directory recipient without presenting it as
   await expect(recipientOption).toBeVisible();
   await recipient.press("ArrowDown");
   await expect(recipientOption).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog", { name: "Share folder" })).toBeVisible();
+  await expect(recipient).toBeFocused();
+  await expect(recipient).toHaveValue("Acme");
+  await recipient.press("ArrowDown");
+  await expect(recipientOption).toBeFocused();
   await page.keyboard.press("Enter");
   await expect(recipient).toHaveValue("Acme Project Lead (lead@acme.example)");
   await expect(recipientOption).toHaveCount(0);
