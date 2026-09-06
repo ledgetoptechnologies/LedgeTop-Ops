@@ -47,6 +47,13 @@ baseline, and no container image is rebuilt or replaced by that invocation.
 
 ## Still required
 
+Additional unchanged-package checks against the frozen candidate:
+Ops Sync session 66273 exited 0 (5 files / 72 tests, 251.33 seconds), and its
+type check passed. Thumbnail renderer exited 0 (27 passed, one native-Bash
+check skipped on Windows), with syntax checks passing. Neither package's
+source differs between the candidate and the current integration commit.
+These are local regressions, not live sync or container-rendering acceptance.
+
 The frozen candidate Client run (session 41232, checkout `3e0ed29`) completed
 with exit 0: 95 files / 1,073 tests passed in 3,798.98 seconds. This does not
 include subsequent maintenance or delivery-history changes. The Operations
