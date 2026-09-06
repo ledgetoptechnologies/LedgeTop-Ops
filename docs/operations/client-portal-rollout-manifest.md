@@ -278,6 +278,18 @@ production draft producer remains separately default-off through
 `PROJECT_ALPHA_DRAFT_QUOTES_ENABLED=false`; it must not be enabled until the
 0201 migration and compatible writer/readback are complete.
 
+For this reviewed worker-only Operations release, where the existing container
+image and stage are intentionally unchanged, use the explicit configuration
+and prevent Wrangler from creating or rolling out a container revision:
+
+```powershell
+& '.\apps\operations\node_modules\.bin\wrangler.cmd' deploy --config apps/operations/wrangler.jsonc --containers-rollout none
+```
+
+This command is only the approved publish invocation after the pause/drain and
+migration gates above; it does not replace them. Do not substitute a container
+build, image update, or a package `deploy` wrapper for this release.
+
 Rollback stops new production/dispatch of this event while preserving receipts
 and queued notices. Keep the expanded schema and a compatible reader; do not
 downgrade the CHECK constraint or delete new-event rows to fit an older schema.
