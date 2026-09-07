@@ -59,10 +59,8 @@ export function incomingPublicRequestDecision(
   if (method.toUpperCase() === "GET" && pathname === "/health") {
     return "health";
   }
-  if (
-    method.toUpperCase() === "POST"
-    && /^\/api\/internal\/uploads\/[^/]+\/accepted$/.test(pathname)
-  ) {
+  if (method.toUpperCase() === "POST"
+    && /^\/api\/internal\/uploads\/[^/]+\/(?:accepted|pickup-status)$/.test(pathname)) {
     return "internal-completion";
   }
   return incomingUploadsCapability(config).enabled ? "enabled" : "disabled";

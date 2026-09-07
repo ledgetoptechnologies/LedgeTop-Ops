@@ -220,8 +220,8 @@ test("requires every portal-v2 and Operations capability to be explicitly false"
   }
 });
 
-test("pins the native portal, root-access, incoming-notification, and bulk-archive migration-first release contract", () => {
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-15), [
+test("pins the native portal, root-access, incoming-notification, pickup lifecycle, and bulk-archive migration-first release contract", () => {
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-16), [
     "0184_native_client_feedback.sql",
     "0185_native_service_request_ownership.sql",
     "0186_delivery_notification_authority_provenance.sql",
@@ -237,6 +237,7 @@ test("pins the native portal, root-access, incoming-notification, and bulk-archi
     "0196_bulk_download_archive_cache.sql",
     "0197_portal_root_access_policy.sql",
     "0198_incoming_upload_owner_notifications.sql",
+    "0199_incoming_upload_pickup_lifecycle.sql",
   ]);
   assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.at(-1), "0052_project_operational_reassignment_recovery.sql");
   assert(REQUIRED_DISABLED_FEATURE_FLAGS.delivery.includes("CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED"));

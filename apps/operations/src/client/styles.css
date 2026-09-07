@@ -2274,6 +2274,14 @@ tbody tr:last-child td { border: 0; }
 .incoming-upload-list > div:nth-child(even) { background: #f7f9fa; }
 .incoming-upload-list > div > div:first-child { display: grid; gap: .2rem; min-width: 0; }
 .incoming-upload-status-detail { color: var(--muted); line-height: 1.35; }
+.incoming-upload-actions { display: grid; justify-items: end; gap: .45rem; flex: 0 0 auto; }
+.incoming-record { display: grid; gap: .85rem; }
+.incoming-record > div:first-child { display: flex; justify-content: space-between; align-items: center; gap: .75rem; }
+.incoming-record dl { display: grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr)); gap: .75rem; margin: 0; }
+.incoming-record dl > div { border: 1px solid var(--line); border-radius: 8px; padding: .65rem .75rem; min-width: 0; }
+.incoming-record dt { color: var(--muted); font-size: .75rem; font-weight: 760; }
+.incoming-record dd { margin: .25rem 0 0; overflow-wrap: anywhere; }
+@media(max-width:700px){.incoming-upload-list > div{align-items:flex-start;flex-direction:column}.incoming-upload-actions{justify-items:start}.incoming-record > div:first-child{align-items:flex-start;flex-direction:column}}
 
 /* ---------------------------------------------------------------------------
    Share management
