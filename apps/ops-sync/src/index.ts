@@ -1,6 +1,6 @@
 import { ZodError } from "zod";
 import { reconcileAccessGroup } from "./access-group";
-import { accessCircuitIsOpen, completeEvent, applyEntitlementEventForSource, applyProjectionEventForSource, recordAccessFailure, recordAccessSuccess, recordEventFailure, routePortalProjectionEventForSource } from "./projection";
+import { accessCircuitIsOpen, completeEvent, applyEntitlementEventForSource, applyProjectionEventForSource, recordAccessFailure, recordAccessSuccess, recordEventFailure, routeDeliveryIntentEventForSource, routePortalProjectionEventForSource } from "./projection";
 import { parseIntegrationEvent } from "./schema";
 import { readWebhookBody, requireAccessSubject, sha256Hex, validateRequestTimestamp, verifyAccessAssertion, verifyWebhookSignature, type AccessEnvironment } from "./security";
 import type { Env } from "./types";
@@ -25,6 +25,9 @@ function errorStatus(error: unknown): number {
   if (message === "event-id-conflict") return 409;
   if (message === "projection-entity-busy" || message === "projection-global-busy") return 503;
   if (message === "client-portal-binding-unavailable" || message === "client-portal-forward-failed") return 503;
+  if (message === "operations-delivery-binding-unavailable" || message === "operations-delivery-forward-failed") return 503;
+  if (message === "operations-delivery-authority-conflict") return 409;
+  if (message === "operations-delivery-intent-rejected") return 422;
   if (message === "client-portal-projection-rejected") return 422;
   if (message.startsWith("access-group-")) return 503;
   if (error instanceof ZodError || message.includes("mismatch")) return 422;
@@ -95,7 +98,7 @@ export async function handleRequest(request: Request, env: Env, accessVerifier: 
     catch { throw new SyntaxError("json-invalid"); }
     const event = parseIntegrationEvent(parsed,eventConfig?.applicationKey ?? env.APPLICATION_KEY);
     if (request.headers.get("X-PA-Event-ID") !== event.event_id) return json(422,{error:"event-id-mismatch"});
-    if (!candidate.source.staffAuthority && event.event_type !== "projection.changed" && event.event_type !== "portal.projection")
+    if (!candidate.source.staffAuthority && event.event_type !== "projection.changed" && event.event_type !== "portal.projection" && event.event_type !== "delivery.intent")
       throw new Error("projection-source-authority-unsupported");
     await assertProjectAlphaConnectorProof(env,candidate.proof);
     source = candidate.source;
@@ -103,6 +106,21 @@ export async function handleRequest(request: Request, env: Env, accessVerifier: 
     proof = candidate.proof;
     eventId = event.event_id;
     const payloadHash=await sha256Hex(rawBody);
+    if(event.event_type==="delivery.intent"){
+      const routed=await routeDeliveryIntentEventForSource(env,source,event,payloadHash,async()=>{
+        if(!env.OPERATIONS_DELIVERY_INTENT_INGRESS)throw new Error("operations-delivery-binding-unavailable");
+        let forwarded:Awaited<ReturnType<NonNullable<typeof env.OPERATIONS_DELIVERY_INTENT_INGRESS>["ingestProjectAlphaDeliveryIntent"]>>;
+        try{forwarded=await env.OPERATIONS_DELIVERY_INTENT_INGRESS.ingestProjectAlphaDeliveryIntent({protocolVersion:1,
+          sourceId:authenticatedSource.sourceId,applicationKey:event.application_key,deliveryId:event.intent.deliveryId as string,
+          intentKind:event.intent_kind,body:JSON.stringify(event.intent),connectorProof:{revision:proof!.revision,version:proof!.version}});}
+        catch{throw new Error("operations-delivery-forward-failed");}
+        if(!forwarded.ok)throw new Error(forwarded.code==="authority_or_state_conflict"?"operations-delivery-authority-conflict":
+          forwarded.retryable?"operations-delivery-forward-failed":"operations-delivery-intent-rejected");
+        return forwarded.result;
+      },proof);
+      if(routed.status==="applied")await completeEvent(env,event,false,source,proof);
+      return json(200,{ok:true,event_id:event.event_id,status:routed.status==="applied"?"completed":"duplicate",result:routed.result});
+    }
     const result = event.event_type === "projection.changed"
       ? await applyProjectionEventForSource(env,source,event,payloadHash,proof)
       : event.event_type === "portal.projection"
