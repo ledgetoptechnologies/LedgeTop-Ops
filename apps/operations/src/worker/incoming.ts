@@ -650,7 +650,8 @@ publicApp.post("/api/public/requests/:publicId/files/:fileId/complete", async (c
   if (object.size !== upload.declared_size) {
     await c.env.INCOMING_BUCKET.delete(upload.object_key);
     await c.env.DELIVERY_DB.prepare(
-      `UPDATE file_request_uploads SET status='rejected',rejection_reason='size_mismatch',
+      `UPDATE file_request_uploads SET status='rejected',pickup_state='rejected',pickup_next_attempt_at=NULL,
+       rejection_reason='size_mismatch',
        completed_at=datetime('now'),updated_at=datetime('now') WHERE id=? AND status='uploading'`,
     ).bind(upload.id).run();
     await releaseReservedQuota(c.env, upload);
@@ -663,7 +664,8 @@ publicApp.post("/api/public/requests/:publicId/files/:fileId/complete", async (c
   if (!probe || hasBlockedIncomingMagic(new Uint8Array(await probe.arrayBuffer()))) {
     await c.env.INCOMING_BUCKET.delete(upload.object_key);
     await c.env.DELIVERY_DB.prepare(
-      `UPDATE file_request_uploads SET status='rejected',rejection_reason='blocked_content',
+      `UPDATE file_request_uploads SET status='rejected',pickup_state='rejected',pickup_next_attempt_at=NULL,
+       rejection_reason='blocked_content',
        completed_at=datetime('now'),updated_at=datetime('now') WHERE id=? AND status='uploading'`,
     ).bind(upload.id).run();
     await releaseReservedQuota(c.env, upload);
@@ -674,7 +676,8 @@ publicApp.post("/api/public/requests/:publicId/files/:fileId/complete", async (c
   try {
     const transitionResults = await c.env.DELIVERY_DB.batch([
       c.env.DELIVERY_DB.prepare(
-        `UPDATE file_request_uploads SET status='quarantined',actual_size=?,etag=?,
+        `UPDATE file_request_uploads SET status='quarantined',pickup_state='awaiting_pickup',
+         pickup_next_attempt_at=NULL,pickup_last_error_code=NULL,actual_size=?,etag=?,
          completed_at=datetime('now'),updated_at=datetime('now')
          WHERE id=? AND status='uploading' AND EXISTS (
            SELECT 1 FROM file_requests WHERE id=file_request_uploads.request_id
@@ -700,7 +703,7 @@ publicApp.post("/api/public/requests/:publicId/files/:fileId/complete", async (c
   return c.json({ ok: true, status: "quarantined", idempotent: false });
 });
 
-publicApp.post("/api/internal/uploads/:uploadId/accepted", async (c) => {
+function requirePickupCredential(c: { env: IncomingEnv; req: { header(name: string): string | undefined } }) {
   const supplied = (c.req.header("Authorization") || "").replace(/^Bearer\s+/i, "");
   if (
     !c.env.INCOMING_PICKUP_SECRET
@@ -709,7 +712,123 @@ publicApp.post("/api/internal/uploads/:uploadId/accepted", async (c) => {
   ) {
     throw new HTTPException(401, { message: "Invalid pickup credential" });
   }
-  const input = await jsonBody(c.req.raw, z.object({ sha256: z.string().regex(/^[a-f0-9]{64}$/i) }));
+}
+
+const pickupStatusSchema = z.discriminatedUnion("state", [
+  z.object({ state: z.literal("scanning"), claimToken: z.string().uuid() }),
+  z.object({ state: z.literal("heartbeat"), claimToken: z.string().uuid() }),
+  z.object({
+    state: z.literal("retry"),
+    claimToken: z.string().uuid(),
+    retryAfterSeconds: z.number().int().min(60).max(24 * 60 * 60),
+    // Keep an operational category only. Raw scanner, transport, and storage
+    // errors can contain private paths and must remain on the pickup server.
+    errorCode: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/i),
+  }),
+]);
+
+const PICKUP_LEASE_SECONDS = 15 * 60;
+
+type PickupUploadRow = {
+  id: string;
+  objectKey: string;
+  status: string;
+  pickupState: string;
+  pickupClaimToken: string | null;
+  pickupLeaseExpiresAt: string | null;
+};
+
+async function activePickupClaim(
+  db: D1Database,
+  uploadId: string,
+  claimToken: string,
+): Promise<PickupUploadRow | null> {
+  return db.withSession("first-primary").prepare(
+    `SELECT id,object_key objectKey,status,pickup_state pickupState,pickup_claim_token pickupClaimToken,
+      pickup_lease_expires_at pickupLeaseExpiresAt
+     FROM file_request_uploads
+     WHERE id=? AND status='quarantined' AND pickup_state='scanning' AND pickup_claim_token=?
+       AND pickup_lease_expires_at IS NOT NULL AND datetime(pickup_lease_expires_at)>datetime('now')`,
+  ).bind(uploadId, claimToken).first<PickupUploadRow>();
+}
+
+publicApp.post("/api/internal/uploads/:uploadId/pickup-status", async (c) => {
+  requirePickupCredential(c);
+  const input = await jsonBody(c.req.raw, pickupStatusSchema);
+  const upload = await c.env.DELIVERY_DB.withSession("first-primary").prepare(
+    `SELECT id,object_key objectKey,status,pickup_state pickupState,pickup_claim_token pickupClaimToken,
+      pickup_lease_expires_at pickupLeaseExpiresAt
+     FROM file_request_uploads WHERE id=?`,
+  ).bind(c.req.param("uploadId")).first<PickupUploadRow>();
+  if (!upload || upload.status !== "quarantined") {
+    throw new HTTPException(404, { message: "Quarantined upload not found" });
+  }
+  if (input.state === "scanning") {
+    // Claim before reading the object.  A caller can replay the same claim
+    // after losing a response, while a competing server cannot claim an
+    // active lease.  Stale leases are intentionally recoverable after a crash.
+    const result = await c.env.DELIVERY_DB.prepare(
+      `UPDATE file_request_uploads SET pickup_state='scanning',pickup_attempt_count=pickup_attempt_count+1,
+       pickup_last_attempt_at=datetime('now'),pickup_next_attempt_at=NULL,pickup_last_error_code=NULL,
+       pickup_claim_token=?,pickup_lease_expires_at=datetime('now','+${PICKUP_LEASE_SECONDS} seconds'),
+       updated_at=datetime('now')
+       WHERE id=? AND status='quarantined' AND (
+         pickup_state='awaiting_pickup'
+         OR (pickup_state='retry' AND pickup_next_attempt_at IS NOT NULL AND datetime(pickup_next_attempt_at)<=datetime('now'))
+         OR (pickup_state='scanning' AND (pickup_lease_expires_at IS NULL OR datetime(pickup_lease_expires_at)<=datetime('now')))
+       )`,
+    ).bind(input.claimToken, upload.id).run();
+    let claim = await activePickupClaim(c.env.DELIVERY_DB, upload.id, input.claimToken);
+    if (result.meta.changes !== 1) {
+      // This exact replay is safe: it received the already-held lease rather
+      // than extending it or incrementing its attempt count.
+      if (!claim) throw new HTTPException(409, { message: "Upload is already claimed or not due for pickup" });
+      return c.json({ ok: true, state: "scanning", claimToken: input.claimToken, leaseExpiresAt: claim.pickupLeaseExpiresAt, replayed: true });
+    }
+    // HEAD is metadata-only and occurs only after the caller owns the lease;
+    // never read bytes through Operations.  Release an empty/missing object as
+    // a bounded retry so a transient R2 listing race cannot strand the row.
+    if (!await c.env.INCOMING_BUCKET.head(upload.objectKey)) {
+      await c.env.DELIVERY_DB.prepare(
+        `UPDATE file_request_uploads SET pickup_state='retry',pickup_next_attempt_at=datetime('now','+60 seconds'),
+         pickup_last_error_code='quarantine_object_missing',pickup_claim_token=NULL,pickup_lease_expires_at=NULL,
+         updated_at=datetime('now')
+         WHERE id=? AND status='quarantined' AND pickup_state='scanning' AND pickup_claim_token=?`,
+      ).bind(upload.id, input.claimToken).run();
+      throw new HTTPException(409, { message: "Quarantined object is not available" });
+    }
+    claim = await activePickupClaim(c.env.DELIVERY_DB, upload.id, input.claimToken);
+    if (!claim) throw new HTTPException(409, { message: "Pickup lease was lost" });
+    return c.json({ ok: true, state: "scanning", claimToken: input.claimToken, leaseExpiresAt: claim.pickupLeaseExpiresAt, replayed: false });
+  }
+  if (input.state === "heartbeat") {
+    const result = await c.env.DELIVERY_DB.prepare(
+      `UPDATE file_request_uploads
+       SET pickup_lease_expires_at=datetime('now','+${PICKUP_LEASE_SECONDS} seconds'),updated_at=datetime('now')
+       WHERE id=? AND status='quarantined' AND pickup_state='scanning' AND pickup_claim_token=?
+         AND pickup_lease_expires_at IS NOT NULL AND datetime(pickup_lease_expires_at)>datetime('now')`,
+    ).bind(upload.id, input.claimToken).run();
+    if (result.meta.changes !== 1) throw new HTTPException(409, { message: "Pickup lease is no longer active" });
+    const claim = await activePickupClaim(c.env.DELIVERY_DB, upload.id, input.claimToken);
+    if (!claim) throw new HTTPException(409, { message: "Pickup lease is no longer active" });
+    return c.json({ ok: true, state: "scanning", claimToken: input.claimToken, leaseExpiresAt: claim.pickupLeaseExpiresAt });
+  }
+  // A retry is only meaningful after this server instance claimed an attempt;
+  // callers must begin the next attempt with the scanning transition above.
+  const result = await c.env.DELIVERY_DB.prepare(
+    `UPDATE file_request_uploads SET pickup_state='retry',pickup_last_attempt_at=datetime('now'),
+     pickup_next_attempt_at=datetime('now','+' || ? || ' seconds'),pickup_last_error_code=?,
+     pickup_claim_token=NULL,pickup_lease_expires_at=NULL,updated_at=datetime('now')
+     WHERE id=? AND status='quarantined' AND pickup_state='scanning' AND pickup_claim_token=?
+       AND pickup_lease_expires_at IS NOT NULL AND datetime(pickup_lease_expires_at)>datetime('now')`,
+  ).bind(input.retryAfterSeconds, input.errorCode.toLowerCase(), upload.id, input.claimToken).run();
+  if (result.meta.changes !== 1) throw new HTTPException(409, { message: "Pickup lease is no longer active" });
+  return c.json({ ok: true, state: "retry" });
+});
+
+publicApp.post("/api/internal/uploads/:uploadId/accepted", async (c) => {
+  requirePickupCredential(c);
+  const input = await jsonBody(c.req.raw, z.object({ sha256: z.string().regex(/^[a-f0-9]{64}$/i), claimToken: z.string().uuid() }));
   const upload = await c.env.DELIVERY_DB.withSession("first-primary").prepare(
     `SELECT id,request_id,object_key,declared_size,status
      FROM file_request_uploads WHERE id=?`,
@@ -721,10 +840,16 @@ publicApp.post("/api/internal/uploads/:uploadId/accepted", async (c) => {
     throw new HTTPException(409, { message: "Remove the quarantined object only after verified local promotion" });
   }
   const result = await c.env.DELIVERY_DB.prepare(
-    `UPDATE file_request_uploads SET status='accepted',verified_sha256=?,updated_at=datetime('now')
-     WHERE id=? AND status='quarantined'`,
-  ).bind(input.sha256.toLowerCase(), upload.id).run();
-  if (result.meta.changes !== 1) throw new HTTPException(409, { message: "Upload status changed" });
+    `UPDATE file_request_uploads SET status='accepted',pickup_state='accepted',verified_sha256=?,
+     pickup_last_attempt_at=COALESCE(pickup_last_attempt_at,datetime('now')),pickup_next_attempt_at=NULL,
+     pickup_last_error_code=NULL,pickup_claim_token=NULL,pickup_lease_expires_at=NULL,updated_at=datetime('now')
+     -- A durable local promotion can survive a worker crash after the R2
+     -- delete but before this receipt.  The exact persisted claim token still
+     -- fences another claimant; do not require a live lease for this narrow
+     -- delete-then-receipt recovery path.
+     WHERE id=? AND status='quarantined' AND pickup_state='scanning' AND pickup_claim_token=?`,
+  ).bind(input.sha256.toLowerCase(), upload.id, input.claimToken).run();
+  if (result.meta.changes !== 1) throw new HTTPException(409, { message: "Pickup lease is no longer active" });
   await releaseReservedQuota(c.env, upload);
   await c.env.DELIVERY_DB.prepare("DELETE FROM file_request_upload_parts WHERE upload_id=?").bind(upload.id).run();
   return c.json({ ok: true, status: "accepted", idempotent: false });
@@ -795,8 +920,10 @@ async function currentLink(env: IncomingEnv): Promise<Record<string, unknown> | 
 
 async function recentUploads(env: IncomingEnv, requestId: string): Promise<unknown[]> {
   const rows = await env.DELIVERY_DB.withSession("first-primary").prepare(
-    `SELECT u.id,u.original_name fileName,u.declared_size size,u.status,
-      COALESCE(u.completed_at,u.created_at) uploadedAt,c.name contributorName
+    `SELECT u.id,u.original_name fileName,u.declared_size size,u.actual_size actualSize,u.content_type contentType,
+      u.status,u.pickup_state pickupState,u.pickup_attempt_count pickupAttemptCount,
+      u.pickup_last_attempt_at pickupLastAttemptAt,u.pickup_next_attempt_at pickupNextAttemptAt,
+      u.rejection_reason rejectionReason,COALESCE(u.completed_at,u.created_at) uploadedAt,c.name contributorName
      FROM file_request_uploads u
      JOIN file_request_contributors c ON c.id=u.contributor_id
      WHERE u.request_id=? ORDER BY u.created_at DESC LIMIT 25`,
@@ -949,13 +1076,58 @@ staffApp.get("/uploads", async (c) => {
   if (!link) return c.json({ uploads: [] });
   const rows = await c.env.DELIVERY_DB.withSession("first-primary").prepare(
     `SELECT u.id,u.original_name originalName,u.declared_size declaredSize,u.actual_size actualSize,
-      u.content_type contentType,u.status,u.rejection_reason rejectionReason,u.created_at createdAt,
-      u.completed_at completedAt,c.name contributorName,c.email contributorEmail
+      u.content_type contentType,u.status,u.pickup_state pickupState,u.pickup_attempt_count pickupAttemptCount,
+      u.pickup_last_attempt_at pickupLastAttemptAt,u.pickup_next_attempt_at pickupNextAttemptAt,
+      u.rejection_reason rejectionReason,u.created_at createdAt,u.completed_at completedAt,c.name contributorName
      FROM file_request_uploads u
      JOIN file_request_contributors c ON c.id=u.contributor_id
      WHERE u.request_id=? ORDER BY u.created_at DESC LIMIT 100`,
   ).bind(String(link.id)).all();
   return c.json({ uploads: rows.results });
+});
+
+staffApp.get("/uploads/:uploadId", async (c) => {
+  await requireIncomingStaff(c, "file_requests.view");
+  const upload = await c.env.DELIVERY_DB.withSession("first-primary").prepare(
+    `SELECT u.id,u.original_name originalName,u.declared_size declaredSize,u.actual_size actualSize,
+      u.content_type contentType,u.status,u.pickup_state pickupState,u.pickup_attempt_count pickupAttemptCount,
+      u.pickup_last_attempt_at pickupLastAttemptAt,u.pickup_next_attempt_at pickupNextAttemptAt,
+      u.rejection_reason rejectionReason,u.created_at createdAt,u.completed_at completedAt,c.name contributorName,
+      u.object_key objectKey
+     FROM file_request_uploads u
+     JOIN file_request_contributors c ON c.id=u.contributor_id
+     WHERE u.id=? LIMIT 1`,
+  ).bind(c.req.param("uploadId")).first<{
+    id: string; originalName: string; declaredSize: number; actualSize: number | null; contentType: string;
+    status: string; pickupState: string; pickupAttemptCount: number; pickupLastAttemptAt: string | null;
+    pickupNextAttemptAt: string | null; rejectionReason: string | null; createdAt: string; completedAt: string | null;
+    contributorName: string; objectKey: string;
+  }>();
+  if (!upload) throw new HTTPException(404, { message: "Incoming upload not found" });
+  // HEAD is deliberately the only R2 operation here. This route never creates
+  // a signed URL, streams bytes, or returns the private object key.
+  const object = upload.status === "quarantined"
+    ? await c.env.INCOMING_BUCKET.head(upload.objectKey)
+    : null;
+  return c.json({ upload: {
+    id: upload.id,
+    fileName: upload.originalName,
+    declaredSize: upload.declaredSize,
+    actualSize: upload.actualSize,
+    contentType: upload.contentType,
+    status: upload.status,
+    pickupState: upload.pickupState,
+    pickupAttemptCount: upload.pickupAttemptCount,
+    pickupLastAttemptAt: upload.pickupLastAttemptAt,
+    pickupNextAttemptAt: upload.pickupNextAttemptAt,
+    rejectionReason: upload.rejectionReason,
+    createdAt: upload.createdAt,
+    completedAt: upload.completedAt,
+    contributorName: upload.contributorName,
+    bucketObject: object
+      ? { state: "present", size: object.size, uploadedAt: object.uploaded.toISOString(), contentType: object.httpMetadata?.contentType || upload.contentType }
+      : { state: "removed" },
+  } });
 });
 
 staffApp.onError((error, c) => {

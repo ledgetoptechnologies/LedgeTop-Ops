@@ -247,6 +247,7 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0196_bulk_download_archive_cache.sql",
     "0197_portal_root_access_policy.sql",
     "0198_incoming_upload_owner_notifications.sql",
+    "0199_incoming_upload_pickup_lifecycle.sql",
   ]),
   operations: Object.freeze([
     "0014_staff_acl_controls.sql",

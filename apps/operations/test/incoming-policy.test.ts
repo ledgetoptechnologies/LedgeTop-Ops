@@ -32,9 +32,15 @@ describe("incoming upload capability policy", () => {
     expect(incomingPublicRequestDecision({}, "GET", "/r/request-id")).toBe("disabled");
   });
 
-  it("exempts only the exact internal TrueNAS completion callback", () => {
+  it("exempts only exact authenticated TrueNAS pickup callbacks", () => {
     expect(incomingPublicRequestDecision({}, "POST", "/api/internal/uploads/upload-id/accepted"))
       .toBe("internal-completion");
+    expect(incomingPublicRequestDecision({}, "POST", "/api/internal/uploads/upload-id/pickup-status"))
+      .toBe("internal-completion");
+    expect(incomingPublicRequestDecision({}, "GET", "/api/internal/uploads/upload-id/pickup-status"))
+      .toBe("disabled");
+    expect(incomingPublicRequestDecision({}, "POST", "/api/internal/uploads/upload-id/object"))
+      .toBe("disabled");
   });
 
   it("identifies the exact read-only health endpoint", () => {

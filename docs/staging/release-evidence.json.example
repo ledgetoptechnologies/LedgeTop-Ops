@@ -438,7 +438,8 @@
         "0195_legacy_workspace_authority_lifecycle.sql",
         "0196_bulk_download_archive_cache.sql",
         "0197_portal_root_access_policy.sql",
-        "0198_incoming_upload_owner_notifications.sql"
+        "0198_incoming_upload_owner_notifications.sql",
+        "0199_incoming_upload_pickup_lifecycle.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
