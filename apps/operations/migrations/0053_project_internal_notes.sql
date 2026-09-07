@@ -161,7 +161,11 @@ WHEN NOT EXISTS(SELECT 1 FROM project_internal_note_live_write_fences fence WHER
 BEGIN SELECT RAISE(ABORT,'project note mutation receipt requires current context'); END;
 CREATE TRIGGER project_internal_note_mutations_write_guard_consume AFTER INSERT ON project_internal_note_mutations
 BEGIN UPDATE project_internal_note_write_fences SET mutation_writes=mutation_writes-1
-  WHERE actor_id=NEW.actor_id AND idempotency_key=NEW.idempotency_key AND mutation_writes>0; END;
+  WHERE actor_id=NEW.actor_id AND idempotency_key=NEW.idempotency_key AND mutation_writes>0;
+  DELETE FROM project_internal_note_write_fences
+  WHERE actor_id=NEW.actor_id AND idempotency_key=NEW.idempotency_key
+    AND note_writes=0 AND revision_writes=0 AND mutation_writes=0;
+END;
 
 CREATE TRIGGER project_internal_note_revisions_immutable_update BEFORE UPDATE ON project_internal_note_revisions BEGIN
   SELECT RAISE(ABORT,'project note revisions are immutable');

@@ -55,6 +55,8 @@ describe("source-qualified project internal notes", () => {
     expect(deleted).toMatchObject({ version: 3, deleted: true });
     expect((await ops.prepare("SELECT version,action FROM project_internal_note_revisions WHERE note_id=? ORDER BY version").bind(saved.noteId).all()).results)
       .toEqual([{ version: 1, action: "created" }, { version: 2, action: "updated" }, { version: 3, action: "deleted" }]);
+    expect(await ops.prepare("SELECT count(*) count FROM project_internal_note_write_fences WHERE project_id=?")
+      .bind(project).first<number>("count")).toBe(0);
     expect(await ops.prepare("SELECT count(*) count FROM client_internal_notes").first<number>("count")).toBe(0);
     await expect(ops.prepare("DELETE FROM project_internal_notes WHERE id=?").bind(saved.noteId).run()).rejects.toThrow();
   }, 40_000);
