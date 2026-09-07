@@ -95,3 +95,31 @@ test("client detail does not expose management actions without server capabiliti
   await expect(page.getByRole("button", { name: "Block portal sign-in" })).toHaveCount(0);
   expect(mutationRequests).toBe(0);
 });
+
+test("authoritative revoked root access controls the client header and portal restoration action", async ({ page }) => {
+  let mutationRequests = 0;
+  const revokedDetail = { ...detail(false, true), portalRootAccess: {
+    available: true, state: "revoked" as const, version: 3, reasonCode: "operator_root_revocation",
+    updatedAt: "2026-09-05T12:00:00.000Z", canRevoke: false, canRestore: true,
+  } };
+  await page.route("**/api/**", async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/session") return route.fulfill({ json: {
+      user: { id: "staff-admin", email: "admin@example.test", displayName: "Administrator", status: "Active",
+        profileType: "Administrator", isAdministrator: true, permissions: ["team.view"], divisions: [] },
+      csrfToken: "csrf-test", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: {},
+    } });
+    if (path === "/api/client-hub/organizations/pa-org") return route.fulfill({ json: revokedDetail });
+    if (route.request().method() !== "GET") mutationRequests += 1;
+    return route.fulfill({ status: 404, json: { error: "Not found" } });
+  });
+
+  await page.goto("/clients/organizations/pa-org");
+  await expect(page.getByRole("heading", { name: "Acme" })).toBeVisible();
+  await expect(page.getByText("Portal access revoked", { exact: true })).toBeVisible();
+  const rootAccess = page.getByRole("region", { name: "Client workspace portal access", exact: true });
+  await expect(rootAccess).toContainText("Current and future people cannot enter this workspace");
+  await expect(rootAccess.getByRole("button", { name: "Restore workspace portal access", exact: true })).toBeVisible();
+  await expect(rootAccess.getByRole("button", { name: "Revoke workspace portal access", exact: true })).toHaveCount(0);
+  expect(mutationRequests).toBe(0);
+});
