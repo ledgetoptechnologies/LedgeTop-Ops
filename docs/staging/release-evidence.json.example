@@ -512,7 +512,8 @@
         "0049_project_alpha_delivery_source_rate_limits.sql",
         "0050_project_alpha_draft_quote_credentials.sql",
         "0051_client_hub_internal_notes.sql",
-        "0052_project_operational_reassignment_recovery.sql"
+        "0052_project_operational_reassignment_recovery.sql",
+        "0053_project_internal_notes.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",

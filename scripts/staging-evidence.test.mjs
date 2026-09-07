@@ -558,6 +558,8 @@ test("checked-in evidence example stays complete as migrations, flags, gates, an
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const example = JSON.parse(fs.readFileSync(path.join(root, "docs", "staging", "release-evidence.json.example"), "utf8"));
   for (const app of ["delivery", "operations"]) assert.deepEqual(example.migrations[app].expected, [...REQUIRED_STAGING_MIGRATIONS[app]], `migrations.${app}`);
+  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.at(-1), "0053_project_internal_notes.sql");
+  assert.equal(fs.existsSync(path.join(root, "apps", "operations", "migrations", "0053_project_internal_notes.sql")), true);
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-17), [
     "0187_authenticated_content_audit.sql",
     "0188_native_feedback_completion_notices.sql",

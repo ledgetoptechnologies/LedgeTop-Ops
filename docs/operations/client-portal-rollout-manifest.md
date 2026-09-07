@@ -104,7 +104,7 @@ emergency operation, not the ordinary rollback for additive migrations.
    has been approved and rebased on current main. Preserve onboarding,
    approvals, projects, contracts, and documents.
 3. For the current default-on release, confirm Client migrations through `0203`
-   and Operations through `0052`, plus Project Alpha `0083`. The populated
+   and Operations through `0053`, plus Project Alpha `0083`. The populated
    `0195` upgrade must prove stale bootstrap authority is invalidated while
    signed native successors and public-link records are preserved. `0197` adds
    the Operations-owned root access overlay. Apply it before either

@@ -293,6 +293,7 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0050_project_alpha_draft_quote_credentials.sql",
     "0051_client_hub_internal_notes.sql",
     "0052_project_operational_reassignment_recovery.sql",
+    "0053_project_internal_notes.sql",
   ]),
 });
 
