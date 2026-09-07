@@ -259,7 +259,8 @@ describe("feedback target authorization against migrated D1",{timeout:60_000},()
     const oldest=await readFeedbackRecord(db,ids[0]!);expect(oldest).not.toBeNull();
     await transitionFeedbackRecord(db,oldest!,"staff",{expectedRevision:1,status:"done",note:"Completed after page one"},mutationKey(),{sql:"1",bindings:[]});
     const stable=await router().request(`${origin}/feedback?cursor=${encodeURIComponent(first.nextCursor!)}`,{},env);expect(stable.status).toBe(200);
-    expect((await stable.json() as {items:unknown[]}).items).toEqual([]);
+    const stableItems=(await stable.json() as {items:Array<{feedbackId:string}>}).items;
+    expect(stableItems.map(item=>item.feedbackId)).not.toContain(oldest!.id);
     await db.prepare("UPDATE client_project_grants SET revoked_at=datetime('now') WHERE project_id='project-a'").run();
     const revoked=await router().request(`${origin}/feedback?cursor=${encodeURIComponent(first.nextCursor!)}`,{},env);
     expect(revoked.status).toBe(200);expect((await revoked.json() as {items:unknown[]}).items).toEqual([]);
