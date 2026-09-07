@@ -1,0 +1,34 @@
+# Reference only: configure secrets in the TrueNAS UI rather than committing
+# values here. Build from this repository root and use the TrueNAS scheduler to
+# start the service at minute zero of every hour.
+services:
+  incoming-quarantine-pickup:
+    build:
+      context: ../..
+      dockerfile: scripts/truenas/incoming-pickup.Dockerfile
+    container_name: ledgetop-incoming-quarantine-pickup
+    restart: "no"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:size=256m,mode=0700
+    volumes:
+      - /mnt/pool/Incoming:/incoming:rw
+      - /mnt/pool/Apps/ledgetop-ops/clamav:/var/lib/clamav:rw
+    environment:
+      AWS_REGION: auto
+      INCOMING_PICKUP_R2_BUCKET: replace-with-private-incoming-bucket
+      INCOMING_PICKUP_R2_ENDPOINT: https://replace-with-account-id.r2.cloudflarestorage.com
+      INCOMING_PICKUP_DESTINATION_DIR: /incoming/quarantine-accepted
+      INCOMING_PICKUP_STAGING_DIR: /incoming/quarantine-accepted/.incoming-staging
+      INCOMING_PICKUP_STATE_DIR: /incoming/quarantine-accepted/.incoming-state
+      INCOMING_PICKUP_MAX_SOURCE_BYTES: "68719476736"
+      INCOMING_PICKUP_SCAN_TIMEOUT_SECONDS: "900"
+      INCOMING_PICKUP_MAX_JOBS: "24"
+      INCOMING_PICKUP_OVERSIZE_RETRY_SECONDS: "86400"
+      INCOMING_PICKUP_REFRESH_SIGNATURES: "1"
+      # Set these four as TrueNAS secrets, not literal compose values:
+      # AWS_ACCESS_KEY_ID:
+      # AWS_SECRET_ACCESS_KEY:
+      # INCOMING_PICKUP_SECRET:
