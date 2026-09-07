@@ -561,7 +561,7 @@ describe("client portal activation hardening", () => {
     expect(updateNotification).not.toHaveBeenCalled();
     const allowed = await app.request("https://client.example/notifications/notice-1", { method: "PATCH", headers: { Origin: "https://client.example", "Content-Type": "application/json" }, body: JSON.stringify({ action: "dismiss" }) }, env("true", "https://client.example"));
     expect(allowed.status).toBe(200);
-    expect(updateNotification).toHaveBeenCalledWith(expect.anything(), session, "notice-1", "dismiss");
+    expect(updateNotification).toHaveBeenCalledWith(expect.anything(), session, "notice-1", "dismiss", undefined);
   });
 
   it("pauses notification-table writers without blocking notification reads", async () => {
