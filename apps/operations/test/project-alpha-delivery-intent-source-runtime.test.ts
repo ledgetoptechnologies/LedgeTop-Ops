@@ -376,8 +376,12 @@ describe("source-owned delivery intent runtime and transaction races", () => {
     expect((await send(base,{...f.payload,deliveryId:"registered-invalid-hmac"},invalidKey)).status).toBe(401);
     expect(await database.prepare(`SELECT request_count FROM project_alpha_delivery_intent_source_rate_limits
       WHERE source_id=? AND scope='attempt_intent' AND window_start=strftime('%Y-%m-%dT%H:%M:00Z','now')`).bind(secondary.sourceId).first("request_count")).toBe(300);
-    expect(await database.prepare(`SELECT request_count FROM project_alpha_delivery_intent_source_rate_limits
-      WHERE source_id=? AND scope='intent' AND window_start=strftime('%Y-%m-%dT%H:%M:00Z','now')`).bind(secondary.sourceId).first("request_count")).toBe(3);
+    // Accepted requests can straddle a UTC minute boundary on a contended CI
+    // runner. Sum the accepted-intent windows instead of assuming the query
+    // executes in the same minute as every accepted request.
+    expect(await database.prepare(`SELECT COALESCE(SUM(request_count),0) AS request_count
+      FROM project_alpha_delivery_intent_source_rate_limits
+      WHERE source_id=? AND scope='intent'`).bind(secondary.sourceId).first("request_count")).toBe(3);
     expect((await send(base,{...f.payload,deliveryId:"registered-attempt-limit"},invalidKey)).status).toBe(429);
 
     expect((await app.request("/api/internal/project-alpha/sources/project-alpha%3Amissing/delivery-intents",{method:"POST",body:"{}"},registeredEnv)).status).toBe(404);

@@ -146,6 +146,10 @@ export function clientPortalStatus(client: ClientSummary): { label: string; tone
   if (client.portal_status === "projection_pending")
     return { label: "Workspace update processing", tone: "warning" as const,
       description: "Client Delivery received this workspace update and is validating it before activation." };
+  if (client.portal_status === "not_provisioned" && client.root_namespace === "business"
+    && client.source_id?.startsWith("project-alpha:"))
+    return { label: "Automatic workspace pending", tone: "warning" as const,
+      description: "Project Alpha synced this client. Its portal workspace is created automatically and has not reached Client Delivery yet; no approval is required." };
   return { label: client.portal_status === "active" ? "Portal ready"
     : client.portal_status === "not_provisioned" ? "Portal not set up" : client.portal_status.replaceAll("_", " "),
     tone: statusTone(client.portal_status) };
