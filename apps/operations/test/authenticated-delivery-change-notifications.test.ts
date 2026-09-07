@@ -33,7 +33,7 @@ describe("exact authenticated delivery change notifications — migrated real D1
       grant: await db.prepare("SELECT * FROM portal_v2_authenticated_delivery_grants WHERE id=?").bind(before.grant).first(),
       recipient: await db.prepare("SELECT * FROM portal_v2_authenticated_delivery_grant_recipients WHERE grant_id=?").bind(before.grant).first(),
     };
-    for (const name of ["0170_authenticated_delivery_change_notifications.sql", "0204_delivery_change_receipts.sql", "0205_authenticated_delivery_change_sequence.sql"])
+    for (const name of ["0170_authenticated_delivery_change_notifications.sql", "0204_delivery_change_receipts.sql", "0205_authenticated_delivery_change_sequence.sql", "0208_authenticated_delivery_change_batch_provider_identity.sql"])
       await db.batch(splitD1MigrationStatements(readFileSync(new URL(`../../client/migrations/${name}`,import.meta.url),"utf8"))
         .map(sql => db.prepare(sql)));
     expect(await db.prepare("SELECT * FROM portal_v2_authenticated_delivery_grants WHERE id=?").bind(before.grant).first()).toEqual(preserved.grant);

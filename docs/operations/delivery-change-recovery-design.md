@@ -1,6 +1,6 @@
 # Accepted delivery-change recovery
 
-Design for the next implementation phase; this is not a deployed capability.
+Design and local implementation checkpoints; this is not a deployed capability.
 The staging race fix does not make accepted file-index changes durable through
 exhausted queue retries. This document refines the bell plan's recovery step.
 
@@ -161,8 +161,104 @@ path to keep updating it. A projector must read sealed receipt targets, pass
 their exact receipt coordinates, and persist bounded retry state; these new
 primitives do not themselves schedule recovery.
 
-This foundation is **not yet wired into the live consumer**. Provider-version
-index writer integration, legacy-row handling, end-to-end accepted sequencing,
-bounded projector leases and diagnostics, scheduler integration, and the bell
-producer still remain. Do not enable receipt capture or call this workflow
-complete merely because the additive schema and primitive tests pass.
+## Consumer and recovery integration checkpoint
+
+The local recovery branch is connecting these primitives to the file-event
+consumer and provider-aware administrative/reconciliation writers. This work
+is not production-enabled. `AUTHENTICATED_DELIVERY_RECOVERY_ENABLED` defaults
+off and additionally requires `AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED`.
+The deployed configuration must not enable capture before the complete path,
+including publication-time upload identity checks, passes acceptance.
+
+Migration 0207 creates a separate mutable projection-job ledger. Inserting a
+receipt seal atomically creates jobs for its saved targets, including no jobs
+for an empty target set. Existing sealed targets are initialized without
+reading the current file index or rediscovering recipients. Readiness checks
+require the fan-out trigger as well as its tables.
+
+The bounded projector claims at most 25 targets by default (50 maximum), uses
+five-minute leases and a three-attempt budget, and orders outstanding work for
+each saved target and object by accepted sequence. Completion and retries are
+lease-token fenced; claims also fence the previously observed attempt count.
+Expired final-attempt leases become terminal failures so a crashed worker
+cannot permanently block later accepted changes. Terminal failure is not
+successful notification delivery. Recovery diagnostics expose aggregate
+counts and fixed reason codes, not object paths or recipient identities.
+
+The existing notification cron awaits this bounded recovery pass before the
+authenticated-change mail dispatcher. Infrastructure failure prevents that
+dispatch pass and emits a sanitized error; it does not erase pending jobs.
+This is still the existing email pipeline, **not** the independent bell
+publication phase described in `authenticated-delivery-bell-plan.md`.
+
+Migration 0208 separately preserves the accepted sequence and provider upload
+identity on each actual batch item. Publication must compare that saved
+identity with the current index and bucket object; looking only at a newer
+object ledger or a matching ETag could validate an obsolete same-content
+upload. Durable staging requires this migration. Legacy unsequenced batches
+remain readable without it, and do not acquire invented provider identities.
+
+Administrative index repair records only a freshly observed provider upload
+version behind a revision CAS. It preserves the last notification observation
+marker and does not create receipts. Stream state is controlled explicitly by
+the caller: a repair/copy must not unexpectedly reset an in-progress upload,
+while a replacement upload must clear the old upload state as its existing
+route requires.
+
+Moved-source cleanup must carry the copied provider identity and exact marker
+identity, then fence its D1 deletion by the pre-HEAD index revision. A later
+same-content upload must not lose its index merely because its ETag matches.
+Check for and repair a replacement after derivative cleanup as well. This does
+not make the storage retirement itself provider-version-conditional: R2's
+ETag condition cannot distinguish identical-byte uploads. A provider HEAD
+check narrows that pre-marker window but is not a distributed transaction or
+a guarantee that no replacement can race the subsequent R2 write.
+
+Remaining release gates include complete consumer fault/replay tests,
+same-content replacement checks at publication, schema/readiness failures,
+all relevant legacy paths, current-migration type/build/QA checks, deployed
+queue retry-identity verification, and an administrator-visible terminal-failure
+surface. The aggregate count helper has no HTTP route or UI yet; logs alone do
+not fulfill that operator-review gate. The independent bell producer, cursor/UI,
+and live acceptance remain separate unfinished requirements. Do not enable
+receipt capture or call the overall workflow complete based on primitive or
+projector tests alone.
+
+### Rollout and pause boundary
+
+Apply the additive Client database migrations first, then deploy the compatible
+consumer, repair writers, projector, and publisher together with capture still
+off. Verify the configured file-event queue name and replay identity behavior
+before enabling capture. Do not infer a live queue's behavior from a local mock.
+Do not send announcements or backfill notices for ordinary existing objects.
+
+Once any object has entered sequenced staging, disabling recovery alone is not
+a safe notification rollback: legacy broad staging deliberately cannot replace
+its sequenced state. Pause both authenticated-notification flags together if
+recovery needs to be stopped. Preserve receipt, target, alias, projection, and
+sequence tables. Resume using compatible code; never drop these records or
+reset sequence counters to make legacy processing appear successful. Files,
+public links, and access grants are not rollback targets.
+
+A paused capture window cannot promise notifications for unobserved historical
+bucket changes. Resume must reconcile current file state without inventing
+past recipients, and any pending accepted receipts remain replayable using
+their originally saved targets. A failed projection requires visible operator
+review and cannot be treated as completed merely to drain a counter.
+
+### Local verification checkpoint
+
+The consumer/projector integration has passed focused local D1 tests for
+post-commit retry, exact saved recipients, zero-target sealing, stale listings,
+publication-time provider identity, claim expiry, and bounded retries. The
+joined consumer/maintenance run passed 14 tests; the staging/provider/projector
+and legacy replay run passed 57 tests. The subsequent move/CRUD/index run
+passed 35 tests, with the final repair fixture independently rerun (11 passing).
+These runs overlap; they are not a full-repository or live acceptance count.
+
+Operations type checking and its production build passed, with the existing
+large-client-chunk warning. The 34 source-layout and rollout-manifest checks
+also passed. Independent code review found the moved-source cleanup race;
+the final fix and its regression cases were reviewed again. No production
+migration, capture enablement, browser acceptance, or live queue retry-identity
+verification is claimed by this checkpoint. The release gates above remain.

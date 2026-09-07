@@ -335,6 +335,30 @@ async function authenticatedDeliveryChangeSequenceReady(env: Env): Promise<boole
   }
 }
 
+/** Migration 0208 retains receipt ordering on the actual publication item.
+ * Keep this separate from the ledger check: legacy staging remains supported
+ * before 0208, while a durable receipt must fail closed without it. */
+export async function authenticatedDeliveryChangeBatchSequenceReady(env: Env): Promise<boolean> {
+  try {
+    await env.DELIVERY_DB.prepare(`SELECT accepted_sequence,provider_object_version
+      FROM portal_authenticated_delivery_change_batch_items LIMIT 0`).all();
+    return true;
+  } catch (error) {
+    if (error instanceof Error && /no such column/i.test(error.message)) return false;
+    throw error;
+  }
+}
+
+async function authenticatedDeliveryChangeIndexProviderReady(env: Env): Promise<boolean> {
+  try {
+    await env.DELIVERY_DB.prepare("SELECT provider_version FROM file_index LIMIT 0").all();
+    return true;
+  } catch (error) {
+    if (error instanceof Error && /no such column/i.test(error.message)) return false;
+    throw error;
+  }
+}
+
 async function settleDuplicateHighWater(db: D1DatabaseSession, candidate: StageCandidate, fingerprint: string,
   present: boolean, version: string | null, observedAt: string, ordering: DurableReceiptOrdering | undefined,
   sequenceReady: boolean): Promise<boolean> {
@@ -377,6 +401,7 @@ async function stageAuthenticatedDeliveryChangeCandidate(
   fingerprint: string,
   ordering?: DurableReceiptOrdering,
   sequenceReady = false,
+  batchSequenceReady = false,
 ): Promise<"staged" | "duplicate"> {
   const kind: ChangeKind = present ? "added" : "removed";
   const state = await db.prepare(`SELECT current_present,current_object_version,observed_event_at${sequenceReady ? ",accepted_sequence,provider_object_version" : ",NULL accepted_sequence,NULL provider_object_version"}
@@ -457,7 +482,16 @@ async function stageAuthenticatedDeliveryChangeCandidate(
           OR portal_authenticated_delivery_change_object_versions.current_object_version IS NOT excluded.current_object_version)`)
       .bind(candidate.grant_id,candidate.grant_version,candidate.identity_id,fingerprint,key,present?1:0,version,observedAt,
         ...(open ? [] : stagingAuthorityBindings(candidate,kind,observedAt,key)));
-  const item = db.prepare(`INSERT INTO portal_authenticated_delivery_change_batch_items
+  const item = ordering && batchSequenceReady ? db.prepare(`INSERT INTO portal_authenticated_delivery_change_batch_items
+      (batch_id,object_fingerprint,r2_key,baseline_present,current_present,baseline_object_version,current_object_version,event_token,
+        accepted_sequence,provider_object_version)
+      SELECT ?,?,?,?,?,?,?,?,?,? WHERE changes()=1 ON CONFLICT(batch_id,object_fingerprint) DO UPDATE SET
+        current_present=excluded.current_present,current_object_version=excluded.current_object_version,
+        event_token=excluded.event_token,accepted_sequence=excluded.accepted_sequence,
+        provider_object_version=excluded.provider_object_version,updated_at=${NOW}`)
+      .bind(batchId,fingerprint,key,baselinePresent,present?1:0,baselineVersion,version,token,
+        ordering.acceptedSequence,ordering.providerObjectVersion)
+    : db.prepare(`INSERT INTO portal_authenticated_delivery_change_batch_items
       (batch_id,object_fingerprint,r2_key,baseline_present,current_present,baseline_object_version,current_object_version,event_token)
       SELECT ?,?,?,?,?,?,?,? WHERE changes()=1 ON CONFLICT(batch_id,object_fingerprint) DO UPDATE SET
         current_present=excluded.current_present,current_object_version=excluded.current_object_version,
@@ -543,6 +577,9 @@ export async function stageAuthenticatedDeliveryChangeForTarget(
   if (ordering === null) return "suppressed";
   const sequenceReady = await authenticatedDeliveryChangeSequenceReady(env);
   if (ordering && !sequenceReady) throw new Error("authenticated-delivery-notification-sequence-schema-unavailable");
+  const batchSequenceReady = ordering ? await authenticatedDeliveryChangeBatchSequenceReady(env) : false;
+  if (ordering && !batchSequenceReady)
+    throw new Error("authenticated-delivery-notification-batch-sequence-schema-unavailable");
   const observedAt = canonicalEventAt(input.eventAt);
   const version = cleanVersion(input.objectVersion);
   if (!observedAt || (input.present && !version)) return "suppressed";
@@ -553,7 +590,7 @@ export async function stageAuthenticatedDeliveryChangeForTarget(
     .bind(...stagingAuthorityBindings(target,kind,observedAt,input.key)).first<number>("authorized");
   if (Number(current) !== 1) return "suppressed";
   const fingerprint = await sha256(`authenticated-delivery-object:v1:${input.key}`);
-  return stageAuthenticatedDeliveryChangeCandidate(db,target,input.key,input.present,version,observedAt,fingerprint,ordering,sequenceReady);
+  return stageAuthenticatedDeliveryChangeCandidate(db,target,input.key,input.present,version,observedAt,fingerprint,ordering,sequenceReady,batchSequenceReady);
 }
 
 /** Called only by the shared R2 consumer after its authoritative HEAD/index
@@ -727,21 +764,43 @@ export async function authorizeAuthenticatedDeliveryChangeBatch(env: Env, batch:
   const authorized = await env.DELIVERY_DB.withSession("first-primary")
     .prepare(authoritySql(env.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED === "true")).bind(batch.id).first<AuthorizedBatch>();
   if (!authorized) return null;
-  const items = await env.DELIVERY_DB.prepare(`SELECT r2_key,current_present,current_object_version
-    FROM portal_authenticated_delivery_change_batch_items WHERE batch_id=? ORDER BY object_fingerprint LIMIT 51`)
-    .bind(batch.id).all<{r2_key:string;current_present:number;current_object_version:string|null}>();
+  const batchSequenceReady = await authenticatedDeliveryChangeBatchSequenceReady(env);
+  const items = batchSequenceReady
+    ? await env.DELIVERY_DB.prepare(`SELECT r2_key,current_present,current_object_version,accepted_sequence,provider_object_version
+      FROM portal_authenticated_delivery_change_batch_items WHERE batch_id=? ORDER BY object_fingerprint LIMIT 51`)
+      .bind(batch.id).all<{r2_key:string;current_present:number;current_object_version:string|null;
+        accepted_sequence:number|null;provider_object_version:string|null}>()
+    : await env.DELIVERY_DB.prepare(`SELECT r2_key,current_present,current_object_version,NULL accepted_sequence,NULL provider_object_version
+      FROM portal_authenticated_delivery_change_batch_items WHERE batch_id=? ORDER BY object_fingerprint LIMIT 51`)
+      .bind(batch.id).all<{r2_key:string;current_present:number;current_object_version:string|null;
+        accepted_sequence:null;provider_object_version:null}>();
   if (!items.results.length || items.results.length > MAX_ITEMS) return null;
+  const needsProviderFence = items.results.some(item => item.accepted_sequence !== null || item.provider_object_version !== null);
+  if (needsProviderFence && !(await authenticatedDeliveryChangeIndexProviderReady(env))) return null;
+  const bucket = (env as Env & {DATA_BUCKET?: R2Bucket}).DATA_BUCKET;
+  // A durable removal also needs a live absence check. Without the bucket, a
+  // replacement object could exist while the index still appears absent.
+  if (needsProviderFence && !bucket) return null;
   for (const item of items.results) {
     if (!item.r2_key.startsWith(batch.r2_prefix)) return null;
-    const indexed = await env.DELIVERY_DB.prepare("SELECT etag FROM file_index WHERE r2_key=?").bind(item.r2_key).first<{etag:string}>();
+    const sequenced = item.accepted_sequence !== null || item.provider_object_version !== null;
+    if (sequenced && (typeof item.accepted_sequence !== "number" || !Number.isSafeInteger(item.accepted_sequence) || item.accepted_sequence < 1
+      || typeof item.provider_object_version !== "string" || !item.provider_object_version
+      || item.provider_object_version.trim() !== item.provider_object_version || item.provider_object_version.length > 512)) return null;
+    const indexed = sequenced
+      ? await env.DELIVERY_DB.prepare("SELECT etag,provider_version FROM file_index WHERE r2_key=?").bind(item.r2_key)
+        .first<{etag:string;provider_version:string|null}>()
+      : await env.DELIVERY_DB.prepare("SELECT etag,NULL provider_version FROM file_index WHERE r2_key=?").bind(item.r2_key)
+        .first<{etag:string;provider_version:null}>();
     if (item.current_present) {
       if (!indexed || cleanVersion(indexed.etag) !== cleanVersion(item.current_object_version)) return null;
-      const bucket = (env as Env & {DATA_BUCKET?: R2Bucket}).DATA_BUCKET;
+      if (sequenced && indexed.provider_version !== item.provider_object_version) return null;
       if (bucket) {
         const head = await bucket.head(item.r2_key);
         if (!head || cleanVersion(head.httpEtag) !== cleanVersion(item.current_object_version)) return null;
+        if (sequenced && head.version !== item.provider_object_version) return null;
       }
-    } else if (indexed || await (env as Env & {DATA_BUCKET?:R2Bucket}).DATA_BUCKET?.head(item.r2_key)) return null;
+    } else if (indexed || await bucket?.head(item.r2_key)) return null;
   }
   return authorized;
 }

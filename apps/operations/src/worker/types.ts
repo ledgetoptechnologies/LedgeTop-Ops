@@ -131,6 +131,8 @@ export type Env = Omit<
   PROJECT_ACCESS_EXPIRY_NOTIFICATIONS_ENABLED?: string;
   /** Default-off exact-principal folder change mail. */
   AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED?: string;
+  /** Migration-first, default-off atomic file-event capture and durable target recovery. */
+  AUTHENTICATED_DELIVERY_RECOVERY_ENABLED?: string;
   /** Default-off explicit authenticated folder-grant management. */
   AUTHENTICATED_DELIVERY_GRANTS_ENABLED?: string;
   /** Independent default-off gate for new grants, restores, and folder bindings. */

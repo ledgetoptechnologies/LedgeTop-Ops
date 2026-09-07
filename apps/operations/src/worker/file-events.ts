@@ -6,7 +6,11 @@ import { canonicalThumbnailSourceKey, enqueueThumbnailJob, handleRemovedPrebuilt
 import { deleteImageLocation, enqueueImageLocationJob } from "./image-locations";
 import { isMovedSourceMarker } from "@ltds/shared";
 import { recordClientFolderFileChange } from "./client-folder-grants";
-import { authenticatedDeliveryNotificationsEnabled, recordAuthenticatedDeliveryObjectChange } from "./authenticated-delivery-change-notifications";
+import { authenticatedDeliveryChangeBatchSequenceReady, authenticatedDeliveryChangeNotificationsReady, authenticatedDeliveryNotificationsEnabled, recordAuthenticatedDeliveryObjectChange } from "./authenticated-delivery-change-notifications";
+import { acceptAuthenticatedDeliveryChangeReceipt, readAcceptedDeliveryChangeReceipt, type AcceptedDeliveryChangeSnapshot } from "./delivery-change-receipts";
+import { deliveryChangeProjectionReady } from "./delivery-change-projector";
+import { deliveryIndexRecoveryEnabled, prepareDeliveryIndexCreateAcceptance, prepareDeliveryIndexDeleteAcceptance, prepareDeliveryIndexRepair, readDeliveryIndexObservation, type DeliveryIndexObservation, type DeliveryIndexStreamState } from "./delivery-index-acceptance";
+import { d1TablesPresent } from "./schema-readiness";
 
 export interface R2Notification {
   action: string;
@@ -83,6 +87,141 @@ function sameObjectVersion(left: string | undefined, right: string): boolean {
 }
 function databaseTimestampMillis(value: string): number {
   return Date.parse(/(?:Z|[+-]\d\d:\d\d)$/i.test(value) ? value : `${value.replace(" ", "T")}Z`);
+}
+
+const DELIVERY_RECOVERY_TABLES = [
+  "delivery_file_index_revisions",
+  "portal_authenticated_delivery_change_receipts",
+  "portal_authenticated_delivery_change_receipt_targets",
+  "portal_authenticated_delivery_change_receipt_seals",
+  "portal_authenticated_delivery_change_receipt_deliveries",
+] as const;
+
+/** Recovery is fail-closed during a partial migration. The old consumer is
+ * retained byte-for-byte behind the disabled flag, while an enabled but
+ * incomplete rollout retries instead of silently creating legacy-only state. */
+async function deliveryIndexRecoveryReady(env: Env): Promise<boolean> {
+  if (!deliveryIndexRecoveryEnabled(env)) return false;
+  if (!(await authenticatedDeliveryChangeNotificationsReady(env))
+    || !(await deliveryChangeProjectionReady(env))
+    || !(await authenticatedDeliveryChangeBatchSequenceReady(env))
+    || !(await d1TablesPresent(env.DELIVERY_DB, DELIVERY_RECOVERY_TABLES)))
+    throw new Error("delivery-index-recovery-schema-unavailable");
+  try {
+    const db = env.DELIVERY_DB.withSession("first-primary");
+    await db.prepare("SELECT provider_version,notification_observation_version FROM file_index LIMIT 0").all();
+    await db.prepare("SELECT revision FROM delivery_file_index_revisions LIMIT 0").all();
+    await db.prepare("SELECT accepted_sequence,provider_object_version FROM portal_authenticated_delivery_change_object_versions LIMIT 0").all();
+    await db.prepare("SELECT accepted_sequence,provider_object_version FROM portal_authenticated_delivery_change_batch_items LIMIT 0").all();
+    const triggerRows = await db.prepare(`SELECT name FROM sqlite_master WHERE type='trigger' AND name IN (
+      'delivery_file_index_revision_insert','delivery_file_index_revision_update','delivery_file_index_revision_delete',
+      'delivery_file_index_legacy_identity_update','delivery_file_index_key_immutable','delivery_file_index_revision_no_delete',
+      'delivery_file_index_revision_monotonic','authenticated_delivery_change_sequence_pair_insert',
+      'authenticated_delivery_change_sequence_pair_update','portal_authenticated_delivery_change_object_version_update',
+      'authenticated_delivery_change_batch_item_sequence_pair_insert','authenticated_delivery_change_batch_item_sequence_pair_update')`).all<{ name: string }>();
+    if (triggerRows.results.length !== 12) throw new Error("delivery-index-recovery-schema-unavailable");
+  } catch (error) {
+    if (error instanceof Error && /delivery-index-recovery-schema-unavailable|no such (table|column)/i.test(error.message))
+      throw new Error("delivery-index-recovery-schema-unavailable");
+    throw error;
+  }
+  return true;
+}
+
+function recoveryDelivery(env: Env, batch: MessageBatch<R2Notification>, message: { id: string }): { queue: string; id: string } {
+  if (typeof batch.queue !== "string" || batch.queue !== env.FILE_EVENTS_QUEUE_NAME || typeof message.id !== "string" || !message.id)
+    throw new Error("delivery-change-receipt-delivery-invalid");
+  return { queue: batch.queue, id: message.id };
+}
+
+function recoveryVersionMatches(head: R2Object | null, receipt: AcceptedDeliveryChangeSnapshot): head is R2Object {
+  return Boolean(head && head.version === receipt.objectVersion && receipt.present
+    && receipt.etag && sameObjectVersion(receipt.etag, head.httpEtag));
+}
+
+async function markDeliveryHealthy(env: Env, key: string): Promise<void> {
+  await env.DELIVERY_DB.prepare(`INSERT INTO delivery_sync_health
+    (source,last_attempt_at,last_success_at,status,details_json) VALUES ('truenas',datetime('now'),datetime('now'),'healthy',?)
+    ON CONFLICT(source) DO UPDATE SET last_attempt_at=datetime('now'),last_success_at=datetime('now'),status='healthy',details_json=excluded.details_json,updated_at=datetime('now')`)
+    .bind(JSON.stringify({ lastKey: key })).run();
+}
+
+async function replayCreatedSideEffects(env: Env, key: string, head: R2Object): Promise<void> {
+  const current = await env.DATA_BUCKET.head(key);
+  if (!current || current.version !== head.version || !sameObjectVersion(current.httpEtag, head.httpEtag)) return;
+  head = current;
+  const indexed = await readDeliveryIndexObservation(env.DELIVERY_DB.withSession("first-primary"), key);
+  if (indexed.current?.providerVersion !== head.version || !sameObjectVersion(indexed.current.etag, head.httpEtag)) return;
+  await markDeliveryHealthy(env, key);
+  await recordClientFolderFileChange(env, key, true);
+  await enqueueCurrentDerivatives(env, key, head);
+}
+
+async function enqueueCurrentDerivatives(env: Env, key: string, head: R2Object): Promise<void> {
+  const current = await env.DATA_BUCKET.head(key);
+  if (!current || current.version !== head.version || isMovedSourceMarker(current)) return;
+  head = current;
+  const kind = mediaKind(key);
+  const thumbnailJob = thumbnailJobForCreatedObject("PutObject", key, kind, head, head.uploaded.toISOString());
+  if (thumbnailJob) await enqueueThumbnailJob(env, thumbnailJob);
+  else if (canonicalThumbnailSourceKey(key)) {
+    const locationJob = imageLocationJobForCreatedObject("PutObject", key, kind, head);
+    if (locationJob) await enqueueImageLocationJob(env, locationJob);
+    await removeThumbnailStateForPath(env, key);
+  }
+}
+
+async function replayRemovedSideEffects(env: Env, receipt: Pick<AcceptedDeliveryChangeSnapshot, "key" | "etag">): Promise<void> {
+  const current = await env.DATA_BUCKET.head(receipt.key);
+  // A replacement (including a replacement with identical bytes/ETag) owns
+  // the key now; an old delete replay must not retire its derivatives or emit
+  // a stale legacy notice.
+  if (current) {
+    await repairCurrentIndexAndDerivatives(env, receipt.key);
+    return;
+  }
+  await removeThumbnailStateForPath(env, receipt.key, false, receipt.etag || undefined);
+  if (receipt.etag) await deleteImageLocation(env, receipt.key, receipt.etag);
+  if (!(await env.DATA_BUCKET.head(receipt.key))) await recordClientFolderFileChange(env, receipt.key, false);
+  await repairCurrentIndexAndDerivatives(env, receipt.key);
+}
+
+/** Repairs only current source metadata/derivatives, never receipt recipients
+ * or a legacy added notice. This closes a removal's resurrection window. */
+async function repairCurrentIndexAndDerivatives(env: Env, key: string): Promise<void> {
+  const db = env.DELIVERY_DB.withSession("first-primary");
+  const snapshot = await readDeliveryIndexObservation(db, key);
+  const current = await env.DATA_BUCKET.head(key);
+  if (!current || isMovedSourceMarker(current)) return;
+  await prepareDeliveryIndexRepair(db, snapshot, current).run();
+  const confirmed = await readDeliveryIndexObservation(db, key);
+  if (confirmed.current?.providerVersion !== current.version || !sameObjectVersion(confirmed.current.etag, current.httpEtag))
+    throw new Error("delivery-index-repair-fence-lost");
+  await enqueueCurrentDerivatives(env, key, current);
+}
+
+async function removeUnknownProviderSource(
+  env: Env, key: string, snapshot: DeliveryIndexObservation, etag?: string,
+): Promise<boolean> {
+  if (await env.DATA_BUCKET.head(key)) return false;
+  const expectedEtag = etag || snapshot.current?.etag;
+  if (!expectedEtag) return false;
+  const deleted = await env.DELIVERY_DB.prepare(`DELETE FROM file_index WHERE r2_key=? AND trim(etag,'\"')=trim(?,'\"')
+      AND COALESCE((SELECT revision FROM delivery_file_index_revisions WHERE r2_key=?),0)=? RETURNING r2_key`)
+    .bind(key, expectedEtag, key, snapshot.revision).first<{ r2_key: string }>();
+  if (!deleted) return false;
+  console.log(JSON.stringify({ event: "delivery_change.legacy_cleanup", reason: "provider-identity-unavailable" }));
+  // Do not emit cleanup/legacy state for a replacement that appeared during
+  // the D1 CAS window. Its create event/reconciliation owns the new version.
+  if (await env.DATA_BUCKET.head(key)) {
+    await repairCurrentIndexAndDerivatives(env, key);
+    return true;
+  }
+  await removeThumbnailStateForPath(env, key, false, expectedEtag);
+  if (expectedEtag) await deleteImageLocation(env, key, expectedEtag);
+  if (!(await env.DATA_BUCKET.head(key))) await recordClientFolderFileChange(env, key, false);
+  await repairCurrentIndexAndDerivatives(env, key);
+  return true;
 }
 
 export function thumbnailJobForCreatedObject(
@@ -305,6 +444,7 @@ async function uploadVideo(env: Env, key: string, size: number, etag: string): P
 }
 
 export async function consumeFileEvents(batch: MessageBatch<R2Notification>, env: Env): Promise<void> {
+  const recovery = await deliveryIndexRecoveryReady(env);
   for (const message of batch.messages) {
     try {
       const event = message.body; const key = event.object?.key;
@@ -323,6 +463,46 @@ export async function consumeFileEvents(batch: MessageBatch<R2Notification>, env
       }
       if (removed(event.action)) {
         if (!hidden(key)) {
+          if (recovery) {
+            // The alias is authoritative and must be read before HEAD/index:
+            // delete acceptance removes the index row, and a retry may run
+            // after the source object has been replaced or deleted.
+            const alias = await readAcceptedDeliveryChangeReceipt(env, {
+              ...recoveryDelivery(env, batch, message), key, present: false,
+            });
+            if (alias) {
+              await replayRemovedSideEffects(env, alias);
+              message.ack(); continue;
+            }
+            const snapshot = await readDeliveryIndexObservation(env.DELIVERY_DB.withSession("first-primary"), key);
+            const firstHead = await env.DATA_BUCKET.head(key);
+            if (firstHead) { message.ack(); continue; }
+            const eventEtag = event.object?.eTag;
+            if (eventEtag && snapshot.current && !sameObjectVersion(eventEtag, snapshot.current.etag)) {
+              message.ack(); continue;
+            }
+            const eventAt = notificationEventTime(event.eventTime, message.timestamp);
+            if (!eventAt) throw new Error("file-event-notification-timestamp-unavailable");
+            // A second check narrows (but cannot make R2/D1 atomic) the
+            // replacement window. The provider-version + revision CAS is the
+            // durable fence for the remaining race.
+            if (await env.DATA_BUCKET.head(key)) { message.ack(); continue; }
+            if (snapshot.current?.providerVersion) {
+              await acceptAuthenticatedDeliveryChangeReceipt(env, {
+                key, present: false, objectVersion: snapshot.current.providerVersion,
+                etag: snapshot.current.etag, eventAt, delivery: recoveryDelivery(env, batch, message),
+              }, prepareDeliveryIndexDeleteAcceptance(env.DELIVERY_DB.withSession("first-primary"), snapshot));
+              await replayRemovedSideEffects(env, {
+                key, etag: snapshot.current.etag,
+              });
+            } else {
+              // Legacy rows have no trustworthy R2 upload identity. They may
+              // be retired only by the revision-fenced cleanup path and never
+              // produce a synthetic native receipt.
+              await removeUnknownProviderSource(env, key, snapshot, eventEtag);
+            }
+            message.ack(); continue;
+          }
           const indexedVersion = await env.DELIVERY_DB.prepare("SELECT etag FROM file_index WHERE r2_key=?")
             .bind(key).first<string>("etag");
           const notificationVersionCurrent = !event.object?.eTag || !indexedVersion || sameObjectVersion(event.object.eTag,indexedVersion);
@@ -346,6 +526,66 @@ export async function consumeFileEvents(batch: MessageBatch<R2Notification>, env
         await env.DELIVERY_DB.prepare("DELETE FROM file_index WHERE r2_key=?").bind(key).run(); message.ack(); continue;
       }
       if (!created(event.action)) { message.ack(); continue; }
+      if (recovery) {
+        // Read the revision tombstone before HEAD. This snapshot, not a
+        // later key-only read, is the input to the atomic index/receipt CAS.
+        const alias = await readAcceptedDeliveryChangeReceipt(env, {
+          ...recoveryDelivery(env, batch, message), key, present: true,
+        });
+        if (alias) {
+          const current = await env.DATA_BUCKET.head(key);
+          if (recoveryVersionMatches(current, alias)) await replayCreatedSideEffects(env, key, current);
+          message.ack(); continue;
+        }
+        const snapshot = await readDeliveryIndexObservation(env.DELIVERY_DB.withSession("first-primary"), key);
+        const suppressed=await env.OPS_DB.prepare("DELETE FROM r2_event_suppressions WHERE object_key=? AND event_kind='create' AND datetime(expires_at)>datetime('now') RETURNING object_key").bind(key).first();
+        if(suppressed){message.ack();continue;}
+        const head = await env.DATA_BUCKET.head(key); if (!head) { message.retry(); continue; }
+        if(isMovedSourceMarker(head)){
+          const movedEtag=head.customMetadata?.ltdsMovedSourceEtag;
+          if(movedEtag){
+            const retired = await env.DELIVERY_DB.prepare(`DELETE FROM file_index WHERE r2_key=? AND trim(etag,'\"')=trim(?,'\"')
+              AND COALESCE((SELECT revision FROM delivery_file_index_revisions WHERE r2_key=?),0)=? RETURNING r2_key`)
+              .bind(key,movedEtag,key,snapshot.revision).first();
+            const current = await env.DATA_BUCKET.head(key);
+            if(retired && current?.version === head.version && isMovedSourceMarker(current)) {
+              await deleteImageLocation(env,key,movedEtag);
+              await removeThumbnailStateForPath(env,key,false,movedEtag);
+            }
+            await repairCurrentIndexAndDerivatives(env,key);
+          }
+          message.ack();continue;
+        }
+        const kind = mediaKind(key);
+        const eventAt = notificationEventTime(event.eventTime, head.uploaded) ?? notificationEventTime(undefined, message.timestamp);
+        if (!eventAt) throw new Error("file-event-notification-timestamp-unavailable");
+        const existing = await env.DELIVERY_DB.prepare("SELECT etag,stream_uid,stream_status,stream_upload_url,stream_upload_offset FROM file_index WHERE r2_key=?").bind(key).first<TusState>();
+        let stream: DeliveryIndexStreamState = { uid: existing?.stream_uid || null, status: existing?.stream_status || null, error: null };
+        // Preserve the pre-existing completed Stream upload fast path. A
+        // matching create must not erase its durable UID while accepting the
+        // provider-aware index row; only new video rows use the disabled state.
+        if (kind === "video" && !(existing?.etag === head.httpEtag && existing.stream_uid && !existing.stream_upload_url))
+          stream = { uid: null, status: "disabled", error: null };
+        const eventCurrent = sameObjectVersion(event.object?.eTag,head.httpEtag);
+        if (eventCurrent) {
+          await acceptAuthenticatedDeliveryChangeReceipt(env, {
+            key, present: true, objectVersion: head.version, etag: head.httpEtag,
+            eventAt, delivery: recoveryDelivery(env, batch, message),
+          }, prepareDeliveryIndexCreateAcceptance(env.DELIVERY_DB.withSession("first-primary"), snapshot, head, stream));
+        } else {
+          // A delayed event cannot authorize a notification for the current
+          // upload. Repair only the provider-aware index identity, without a
+          // receipt or recipient discovery.
+          const repaired = await prepareDeliveryIndexRepair(env.DELIVERY_DB.withSession("first-primary"), snapshot, head, stream).run();
+          if (Number(repaired.meta.changes || 0) !== 1) {
+            const confirmed = await readDeliveryIndexObservation(env.DELIVERY_DB.withSession("first-primary"), key);
+            if (confirmed.current?.providerVersion !== head.version || !sameObjectVersion(confirmed.current.etag, head.httpEtag))
+              throw new Error("delivery-index-repair-fence-lost");
+          }
+        }
+        await replayCreatedSideEffects(env, key, head);
+        message.ack(); continue;
+      }
       const suppressed=await env.OPS_DB.prepare("DELETE FROM r2_event_suppressions WHERE object_key=? AND event_kind='create' AND datetime(expires_at)>datetime('now') RETURNING object_key").bind(key).first();
       if(suppressed){message.ack();continue;}
       const head = await env.DATA_BUCKET.head(key); if (!head) { message.retry(); continue; }
@@ -411,6 +651,7 @@ export async function refreshStreamStatuses(env: Env): Promise<number> {
 }
 
 export async function reconcileFileIndex(env: Env): Promise<number> {
+  const recovery = await deliveryIndexRecoveryReady(env);
   const marker = crypto.randomUUID(); let cursor: string | undefined; let count = 0; let visibleBytes = 0;
   const activeShares = await env.DELIVERY_DB.prepare(`SELECT s.id,COALESCE(s.r2_prefix,p.r2_prefix) r2_prefix,s.unavailable_since FROM shares s JOIN projects p ON p.id=s.project_id WHERE s.revoked_at IS NULL AND p.active=1 AND (s.expires_at IS NULL OR datetime(s.expires_at)>datetime('now'))`).all<{ id:string; r2_prefix:string; unavailable_since:string|null }>();
   const presentShares = new Set<string>();
@@ -419,9 +660,37 @@ export async function reconcileFileIndex(env: Env): Promise<number> {
       const listed = await env.DATA_BUCKET.list({ limit: 1000, cursor, include:["httpMetadata","customMetadata"] }); const statements: D1PreparedStatement[] = [];
       for (const object of listed.objects) {
         if (object.key.endsWith("/") || hidden(object.key) || isMovedSourceMarker(object)) continue;
-        visibleBytes += object.size;
-        for (const share of activeShares.results) if (object.key.startsWith(share.r2_prefix.endsWith("/") ? share.r2_prefix : `${share.r2_prefix}/`)) presentShares.add(share.id);
-        statements.push(env.DELIVERY_DB.prepare(`INSERT INTO file_index (r2_key,etag,size,uploaded_at,content_type,media_kind,last_seen_reconcile) VALUES (?,?,?,?,?,?,?) ON CONFLICT(r2_key) DO UPDATE SET etag=excluded.etag,size=excluded.size,uploaded_at=excluded.uploaded_at,content_type=excluded.content_type,media_kind=excluded.media_kind,last_seen_reconcile=excluded.last_seen_reconcile,updated_at=datetime('now')`).bind(object.key, object.httpEtag, object.size, object.uploaded.toISOString(), mime(object.key), mediaKind(object.key), marker)); count += 1;
+        if (recovery) {
+          const db = env.DELIVERY_DB.withSession("first-primary");
+          const snapshot = await readDeliveryIndexObservation(db, object.key);
+          // An unchanged immutable upload needs no source-metadata write or
+          // extra HEAD. A changed/unknown listing is only a candidate: observe
+          // R2 again after the index snapshot before repairing its metadata.
+          const unchanged = snapshot.current?.providerVersion === object.version;
+          const current = unchanged ? object : await env.DATA_BUCKET.head(object.key);
+          if (!current || isMovedSourceMarker(current)) continue;
+          if (!unchanged) await prepareDeliveryIndexRepair(db, snapshot, current).run();
+          const confirmed = unchanged ? snapshot : await readDeliveryIndexObservation(db, object.key);
+          if (confirmed.current?.providerVersion !== current.version
+            || !sameObjectVersion(confirmed.current.etag, current.httpEtag)) continue;
+          // last_seen_reconcile is bookkeeping only; bind it to the repaired
+          // provider identity so an older list page cannot mark a replacement.
+          await db.prepare(`UPDATE file_index SET last_seen_reconcile=? WHERE r2_key=? AND provider_version=?
+            AND COALESCE((SELECT revision FROM delivery_file_index_revisions WHERE r2_key=?),0)=?`)
+            .bind(marker, object.key, current.version, object.key, confirmed.revision).run();
+          visibleBytes += current.size;
+          for (const share of activeShares.results) if (current.key.startsWith(share.r2_prefix.endsWith("/") ? share.r2_prefix : `${share.r2_prefix}/`)) presentShares.add(share.id);
+          count += 1;
+          if (canonicalThumbnailSourceKey(current.key) && thumbnailSourceEligible(current.key, current.size, current.httpMetadata?.contentType)) {
+            await enqueueThumbnailJob(env, { sourceKey: current.key, sourceEtag: current.httpEtag, sourceSize: current.size, eventTime: current.uploaded.toISOString() });
+          }
+          continue;
+        } else {
+          visibleBytes += object.size;
+          for (const share of activeShares.results) if (object.key.startsWith(share.r2_prefix.endsWith("/") ? share.r2_prefix : `${share.r2_prefix}/`)) presentShares.add(share.id);
+          statements.push(env.DELIVERY_DB.prepare(`INSERT INTO file_index (r2_key,etag,size,uploaded_at,content_type,media_kind,last_seen_reconcile) VALUES (?,?,?,?,?,?,?) ON CONFLICT(r2_key) DO UPDATE SET etag=excluded.etag,size=excluded.size,uploaded_at=excluded.uploaded_at,content_type=excluded.content_type,media_kind=excluded.media_kind,last_seen_reconcile=excluded.last_seen_reconcile,updated_at=datetime('now')`).bind(object.key, object.httpEtag, object.size, object.uploaded.toISOString(), mime(object.key), mediaKind(object.key), marker));
+        }
+        count += 1;
         if (canonicalThumbnailSourceKey(object.key) && thumbnailSourceEligible(object.key, object.size, object.httpMetadata?.contentType)) {
           await enqueueThumbnailJob(env, { sourceKey: object.key, sourceEtag: object.httpEtag, sourceSize: object.size, eventTime: object.uploaded.toISOString() });
         }
