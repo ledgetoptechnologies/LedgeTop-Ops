@@ -1,5 +1,14 @@
 # TrueNAS SCALE to private R2 synchronization
 
+## Incoming quarantine pickup
+
+Inbound file-request uploads are not part of the visible Jobs mirror. They stay
+in the separate Incoming R2 quarantine until the repository-owned
+[incoming pickup worker](incoming-quarantine-pickup.md) has completed a
+time-bounded ClamAV scan, SHA-256 verification, and durable local promotion.
+Use its start-of-hour non-overlapping schedule; do not use a Cloud Sync task to
+copy or delete `quarantine/` directly.
+
 TrueNAS is authoritative only for the server-owned visible Jobs prefixes that
 are explicitly assigned to its mirror. Originals remain private in the
 `client-data` bucket. The supported source tree is:

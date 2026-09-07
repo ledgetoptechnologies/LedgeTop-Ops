@@ -124,8 +124,25 @@ interface IncomingUploadSummary {
   contributorName?: string;
   status?: string;
   size?: number;
+  actualSize?: number | null;
+  contentType?: string;
+  pickupState?: "awaiting_pickup" | "scanning" | "retry" | "accepted" | "rejected";
+  pickupAttemptCount?: number;
+  pickupLastAttemptAt?: string | null;
+  pickupNextAttemptAt?: string | null;
+  rejectionReason?: string | null;
   createdAt?: string;
   uploadedAt?: string;
+}
+interface IncomingUploadRecord extends IncomingUploadSummary {
+  id: string;
+  declaredSize: number;
+  bucketObject: {
+    state: "present" | "removed";
+    size?: number;
+    uploadedAt?: string;
+    contentType?: string;
+  };
 }
 interface IncomingLink {
   id: string;
@@ -142,14 +159,44 @@ interface IncomingLink {
 interface IncomingLinkResponse {
   link: IncomingLink | null;
 }
-function incomingUploadStatus(status?: string) {
-  if (status === "quarantined") return {
-    label: "Pending verification",
-    detail: "Upload completed and remains private while the server checks its integrity and scans it. This status does not mean malware was detected.",
+function incomingUploadStatus(upload: IncomingUploadSummary) {
+  if (upload.status === "accepted") return {
+    label: "Accepted by server",
+    detail: "The server verified and promoted this upload. Its temporary quarantined object has been removed.",
   };
-  if (status === "accepted") return { label: "Ready", detail: null };
-  if (status === "rejected") return { label: "Rejected", detail: "The upload did not pass validation. Review its recorded rejection reason." };
-  return { label: status?.replaceAll("_", " ") || "Uploaded", detail: null };
+  if (upload.status === "rejected") return {
+    label: "Rejected",
+    detail: "The upload did not pass the initial validation checks. Review the recorded reason if one is available.",
+  };
+  if (upload.status === "quarantined" && upload.pickupState === "scanning") return {
+    label: "Server verification in progress",
+    detail: "The server is picking up and scanning this private upload. It cannot be opened or downloaded here.",
+  };
+  if (upload.status === "quarantined" && upload.pickupState === "retry") return {
+    label: "Server pickup will retry",
+    detail: "The last private pickup attempt did not complete. The server will retry on its scheduled run; the file remains quarantined. This does not mean malware was detected.",
+  };
+  if (upload.status === "quarantined") return {
+    label: "Awaiting server pickup",
+    detail: "Upload completed and remains private until the server picks it up, checks integrity, and scans it. This status does not mean malware was detected.",
+  };
+  return { label: upload.status?.replaceAll("_", " ") || "Uploaded", detail: null };
+}
+function incomingUploadTiming(upload: IncomingUploadSummary) {
+  const facts: string[] = [];
+  if (typeof upload.pickupAttemptCount === "number" && upload.pickupAttemptCount > 0)
+    facts.push(`${upload.pickupAttemptCount} server ${upload.pickupAttemptCount === 1 ? "attempt" : "attempts"}`);
+  if (upload.pickupLastAttemptAt) facts.push(`Last attempt ${date(upload.pickupLastAttemptAt)}`);
+  if (upload.pickupNextAttemptAt) facts.push(`Next retry ${date(upload.pickupNextAttemptAt)}`);
+  return facts;
+}
+function incomingRecordBucketText(record: IncomingUploadRecord) {
+  if (record.bucketObject.state === "present") {
+    return `Private quarantine record present · ${bytes(record.bucketObject.size ?? record.declaredSize)}`;
+  }
+  return record.status === "accepted"
+    ? "Temporary quarantine record removed after server promotion"
+    : "No temporary quarantine object is currently available";
 }
 const NAV: Array<{
   page: Page;
@@ -3923,7 +3970,14 @@ function IncomingUploads() {
     [accessCode, setAccessCode] = useState(""),
     [requestTitle, setRequestTitle] = useState("Send files to Ledge Top Drone Services"),
     [maxFiles, setMaxFiles] = useState("500"),
-    [maxBytesGiB, setMaxBytesGiB] = useState("2048");
+    [maxBytesGiB, setMaxBytesGiB] = useState("2048"),
+    [selectedUploadId, setSelectedUploadId] = useState<string | null>(null);
+  const { data: selectedRecord, error: selectedRecordError, loading: selectedRecordLoading } = useLoad<{ upload: IncomingUploadRecord } | null>(
+    () => selectedUploadId
+      ? api<{ upload: IncomingUploadRecord }>(`/api/delivery/incoming-link/uploads/${encodeURIComponent(selectedUploadId)}`)
+      : Promise.resolve(null),
+    [selectedUploadId],
+  );
   const link = data?.link;
   useEffect(() => {
     if (!link) return;
@@ -4142,7 +4196,8 @@ function IncomingUploads() {
             {link.recentUploads.length ? (
               <div className="incoming-upload-list">
                 {link.recentUploads.map((upload, index) => {
-                  const uploadStatus = incomingUploadStatus(upload.status);
+                  const uploadStatus = incomingUploadStatus(upload);
+                  const timing = incomingUploadTiming(upload);
                   return (
                   <div
                     key={
@@ -4164,18 +4219,30 @@ function IncomingUploads() {
                           : ""}
                       </small>
                       {uploadStatus.detail && <small className="incoming-upload-status-detail">{uploadStatus.detail}</small>}
+                      {timing.length > 0 && <small className="incoming-upload-status-detail">{timing.join(" · ")}</small>}
                     </div>
-                    <StatusPill
-                      tone={
-                        upload.status === "accepted"
-                          ? "success"
-                          : upload.status === "rejected"
-                            ? "danger"
-                            : "neutral"
-                      }
-                    >
-                      {uploadStatus.label}
-                    </StatusPill>
+                    <div className="incoming-upload-actions">
+                      <StatusPill
+                        tone={
+                          upload.status === "accepted"
+                            ? "success"
+                            : upload.status === "rejected"
+                              ? "danger"
+                              : upload.pickupState === "retry"
+                                ? "warning"
+                                : "neutral"
+                        }
+                      >
+                        {uploadStatus.label}
+                      </StatusPill>
+                      {upload.id && <button
+                        type="button"
+                        className="button-ghost button-small"
+                        onClick={() => setSelectedUploadId(upload.id || null)}
+                      >
+                        View safe record
+                      </button>}
+                    </div>
                   </div>
                   );
                 })}
@@ -4187,6 +4254,30 @@ function IncomingUploads() {
               />
             )}
           </Card>
+          {selectedUploadId && <Card
+            title="Incoming upload record"
+            action={<button type="button" className="button-ghost button-small" onClick={() => setSelectedUploadId(null)}>Close</button>}
+          >
+            {selectedRecordLoading ? <PanelSkeleton /> : selectedRecordError ? <ErrorLine error={selectedRecordError} /> : selectedRecord?.upload ? (() => {
+              const record = selectedRecord.upload;
+              const status = incomingUploadStatus(record);
+              const timing = incomingUploadTiming(record);
+              return <div className="incoming-record">
+                <div><strong>{record.fileName}</strong><StatusPill tone={record.status === "accepted" ? "success" : record.status === "rejected" ? "danger" : record.pickupState === "retry" ? "warning" : "neutral"}>{status.label}</StatusPill></div>
+                <dl>
+                  <div><dt>Contributor</dt><dd>{record.contributorName || "Contributor"}</dd></div>
+                  <div><dt>Declared size</dt><dd>{bytes(record.declaredSize)}</dd></div>
+                  <div><dt>Content type</dt><dd>{record.contentType || "Not supplied"}</dd></div>
+                  <div><dt>Uploaded</dt><dd>{date(record.uploadedAt || record.createdAt)}</dd></div>
+                  <div><dt>Private object</dt><dd>{incomingRecordBucketText(record)}</dd></div>
+                  {record.rejectionReason && <div><dt>Recorded validation reason</dt><dd>{record.rejectionReason.replaceAll("_", " ")}</dd></div>}
+                </dl>
+                <p className="incoming-upload-status-detail">{status.detail}</p>
+                {timing.length > 0 && <p className="incoming-upload-status-detail">{timing.join(" · ")}</p>}
+                <p className="muted">This record shows private metadata only. Quarantined bytes cannot be opened, previewed, or downloaded from Operations.</p>
+              </div>;
+            })() : null}
+          </Card>}
         </>
       )}
     </section>

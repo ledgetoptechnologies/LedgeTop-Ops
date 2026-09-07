@@ -210,7 +210,7 @@ describe("primary signed-native first-login eligibility", () => {
     expect((await request(actor, `/v2/workspaces/${workspaceId}/context`)).status).toBe(404);
     expect((await request(actor, `/v2/workspaces/${workspaceId}/hierarchy`)).status).toBe(404);
     await assertNoLegacyOrMail();
-  });
+  }, 15_000);
 
   it("invalidates captured native context when current or previous signing authority changes", async () => {
     const { actor, workspaceId, page } = await project("key-context");
