@@ -217,9 +217,9 @@ a guarantee that no replacement can race the subsequent R2 write.
 Remaining release gates include complete consumer fault/replay tests,
 same-content replacement checks at publication, schema/readiness failures,
 all relevant legacy paths, current-migration type/build/QA checks, deployed
-queue retry-identity verification, and an administrator-visible terminal-failure
-surface. The aggregate count helper has no HTTP route or UI yet; logs alone do
-not fulfill that operator-review gate. The independent bell producer, cursor/UI,
+queue retry-identity verification, and live acceptance of the administrator
+terminal-failure surface described below. Logs alone do not fulfill that
+operator-review gate. The independent bell producer, cursor/UI,
 and live acceptance remain separate unfinished requirements. Do not enable
 receipt capture or call the overall workflow complete based on primitive or
 projector tests alone.
@@ -262,3 +262,37 @@ also passed. Independent code review found the moved-source cleanup race;
 the final fix and its regression cases were reviewed again. No production
 migration, capture enablement, browser acceptance, or live queue retry-identity
 verification is claimed by this checkpoint. The release gates above remain.
+
+### Administrator recovery status
+
+`GET /api/admin/delivery-change-recovery` is a read-only, no-store diagnostic
+requiring the existing administrator role and global `integrations.manage`
+permission. It reports aggregate pending, processing, completed, and failed
+projection counts, fixed failure reasons, oldest outstanding time, and latest
+failure time. It returns no receipt, source, workspace, recipient, or path
+identifiers. Missing schema and failed reads return an explicit unavailable
+state with null counts, never a fabricated healthy zero. Disabling recovery
+does not hide accepted pending work or terminal failures.
+
+The Administration card labels completion as processing, not evidence that an
+email was delivered or a bell event was published. Refresh only reads status;
+it cannot enable capture, reset retry budgets, rediscover recipients, or replay
+jobs. Terminal work requires operator investigation using the deployment's
+controlled maintenance process. This surface does not introduce a privileged
+retry API, send announcements, or complete independent bell publication.
+
+#### Recovery-status verification checkpoint
+
+The joined local recovery-status, route-authorization, projector, and scheduled
+maintenance run passed 21 tests. The aggregate uses real local D1 while its
+readiness dependency is isolated; the route tests use real staff ACL tables
+and a stub status reader. These tests do not replace a deployed-schema check.
+
+The recovery-card and existing workflow-readiness browser suites passed 18
+desktop/mobile cases. Coverage includes unavailable versus empty status,
+paused failures, contradictory payload rejection, stale-data clearing,
+non-administrator exclusion, and keyboard refresh. Desktop and mobile fixture
+screenshots were inspected; the mobile counters use two columns and the card
+has a fixed-header scroll offset. Type checking passed. The production build
+retains the pre-existing large-client-chunk warning. This is local verification,
+not a production deployment or live notification-acceptance claim.

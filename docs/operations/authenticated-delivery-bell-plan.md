@@ -145,3 +145,20 @@ Operations type checking, and the production build also passed. These are local
 fixture/build results, not deployment or live
 notification acceptance. The separate bell producer and its UI workflow
 remain planned work.
+
+## Recovery and next implementation checkpoint
+
+The subsequent local recovery implementation adds transactional accepted-change
+receipts, sealed exact targets, provider-identity fencing, and a bounded
+projector. Its rollout constraints and test evidence are recorded in
+`delivery-change-recovery-design.md`, including the administrator recovery
+status card. Capture is not enabled by these local changes.
+
+Steps 3 and 4 above are still unimplemented. The next change must introduce the
+independent immutable bell ledger and coordinate every existing batch-seal path
+(capacity, scheduler, and Send Now), not reinterpret mail `sealed_at` or
+`published_at` as client history. Publication must work with SMTP disabled,
+retain exact original recipients, and survive later email suppression. Follow
+that with the separate history stream, versioned cursor, current-authority
+read/dismiss checks, and a bell for delivery-only client workspaces. Do not
+publish a schema-only slice as completion of this workflow.
