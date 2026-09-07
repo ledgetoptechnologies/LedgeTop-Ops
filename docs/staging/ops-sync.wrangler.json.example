@@ -26,6 +26,7 @@
     { "binding": "DELIVERY_DB", "database_name": "client-data-staging", "database_id": "b6f653ab-9acd-4421-9ad0-207754b59aeb", "migrations_dir": "../client/migrations" }
   ],
   "services": [
-    { "binding": "CLIENT_PORTAL_PROJECTION_INGRESS", "service": "ltds-delivery-staging", "entrypoint": "OpsSyncPortalProjectionIngress" }
+    { "binding": "CLIENT_PORTAL_PROJECTION_INGRESS", "service": "ltds-delivery-staging", "entrypoint": "OpsSyncPortalProjectionIngress" },
+    { "binding": "OPERATIONS_DELIVERY_INTENT_INGRESS", "service": "ltds-ops-staging", "entrypoint": "ProjectAlphaDeliveryIntentIngress" }
   ]
 }

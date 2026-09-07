@@ -248,6 +248,10 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0197_portal_root_access_policy.sql",
     "0198_incoming_upload_owner_notifications.sql",
     "0199_incoming_upload_pickup_lifecycle.sql",
+    "0200_native_feedback_workspace_history.sql",
+    "0201_native_draft_quote_notifications.sql",
+    "0202_native_delivery_recipient_events.sql",
+    "0203_primary_delivery_authority.sql",
   ]),
   operations: Object.freeze([
     "0014_staff_acl_controls.sql",
@@ -875,6 +879,7 @@ export const STAGING_INVENTORY = Object.freeze({
     workflows: [],
     services: [
       { binding: "CLIENT_PORTAL_PROJECTION_INGRESS", service: "ltds-delivery-staging", entrypoint: "OpsSyncPortalProjectionIngress" },
+      { binding: "OPERATIONS_DELIVERY_INTENT_INGRESS", service: "ltds-ops-staging", entrypoint: "ProjectAlphaDeliveryIntentIngress" },
     ],
     queues: [],
     crons: ["*/5 * * * *"],
