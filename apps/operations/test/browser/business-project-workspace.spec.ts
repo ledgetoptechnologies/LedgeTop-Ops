@@ -43,7 +43,8 @@ function operational(status = "completed", projectId = "project-one") {
 }
 async function mock(page: Page, handler: (route: Route, url: URL) => Promise<unknown>, permissions = ["team.view", "projects.view"],
   operationalHandler?: (route: Route, url: URL) => Promise<unknown>,
-  projectItems: Array<{ id: string; name: string; status: string | null; row_key: string; [key: string]: unknown }> = clientDetail().businessProjects) {
+  projectItems: Array<{ id: string; name: string; status: string | null; row_key: string; [key: string]: unknown }> = clientDetail().businessProjects,
+  notesHandler?: (route: Route, url: URL) => Promise<unknown>) {
   const requests: Array<{ url: URL; method: string }> = [];
   await page.route("**/api/**", route => {
     const request = route.request(), url = new URL(request.url()); requests.push({ url, method: request.method() });
@@ -70,6 +71,13 @@ async function mock(page: Page, handler: (route: Route, url: URL) => Promise<unk
     if (url.pathname === `${apiBase}/collections/businessProjects`) return route.fulfill({ json: { items: projectItems,
       page: { ...clientDetail().pages.businessProjects, returned: projectItems.length, limit: Number(url.searchParams.get("limit") || 5) },
       canonicalRoot: detail().canonicalRoot, contextVersion: url.searchParams.get("expectedContextVersion") || "client-context" } });
+    if (url.pathname.endsWith("/internal-notes")) return notesHandler ? notesHandler(route, url) : route.fulfill({ json: {
+      canonicalRoot: detail().canonicalRoot, contextVersion: detail().contextVersion,
+      projectId: decodeURIComponent(url.pathname.split("/").at(-2)!), notes: [],
+      capabilities: { canManageNotes: permissions.includes("client.notes.manage") },
+    } });
+    if (/\/internal-notes\/[0-9a-f-]+$/i.test(url.pathname)) return notesHandler ? notesHandler(route, url)
+      : route.fulfill({ status: 500, json: { error: "Unexpected project note write" } });
     if (url.pathname.endsWith("/operational-workspace")) return operationalHandler ? operationalHandler(route, url)
       : route.fulfill({ json: operational("completed", decodeURIComponent(url.pathname.split("/").at(-2)!)) });
     if (/\/operational-memory\/revisions\/\d+$/.test(url.pathname)) return operationalHandler ? operationalHandler(route, url)
@@ -90,6 +98,33 @@ async function open(page: Page, suffix = "") {
   await page.goto(`${projectPath}${suffix}`);
   await expect(workspace(page).getByRole("heading", { name: "Church survey", exact: true })).toBeVisible();
 }
+
+test("project notes use the source-qualified project route without replacing client notes", async ({ page }) => {
+  const notes: Array<Record<string, unknown>> = [], writes: Array<{ path: string; body: unknown; key: string | null }> = [];
+  await mock(page, route => route.fulfill({ json: detail() }), ["team.view", "projects.view", "client.notes.manage"], undefined, undefined,
+    async (route, url) => {
+      const request = route.request();
+      if (request.method() === "GET") return route.fulfill({ json: { canonicalRoot: detail().canonicalRoot,
+        contextVersion: detail().contextVersion, projectId: "project-one", notes, capabilities: { canManageNotes: true } } });
+      writes.push({ path: url.pathname, body: request.postDataJSON(), key: request.headers()["idempotency-key"] || null });
+      notes.push({ id: "11111111-1111-4111-8111-111111111111", version: 1, title: "Arrival constraint", body: "Call the site lead first.",
+        createdBy: "staff-one", updatedBy: "staff-one", createdAt: "2026-09-02T12:00:00.000Z", updatedAt: "2026-09-02T12:00:00.000Z",
+        revisions: [{ version: 1, action: "created", actorId: "staff-one", createdAt: "2026-09-02T12:00:00.000Z" }] });
+      return route.fulfill({ status: 201, json: { noteId: notes[0]!.id, version: 1, deleted: false, replayed: false } });
+    });
+  await open(page);
+  const notesRegion = workspace(page).getByRole("region", { name: "Internal project notes" });
+  await expect(notesRegion).toContainText("never shown in the client portal or synchronized to Project Alpha");
+  await notesRegion.getByRole("button", { name: "Add note" }).click();
+  await notesRegion.getByLabel("Title").fill("Arrival constraint");
+  await notesRegion.getByLabel("Note").fill("Call the site lead first.");
+  await notesRegion.getByRole("button", { name: "Save note" }).click();
+  await expect(notesRegion.getByRole("heading", { name: "Arrival constraint" })).toBeVisible();
+  expect(writes).toHaveLength(1);
+  expect(writes[0]).toMatchObject({ path: `${apiPath}/internal-notes`, body: {
+    expectedContextVersion: "project-context", title: "Arrival constraint", body: "Call the site lead first." } });
+  expect(writes[0]!.key).toMatch(/^[0-9a-f-]{36}$/i);
+});
 
 test("project role metadata is a separate responsive read-only card", async ({ page }) => {
   const value = detail();
