@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "ltds-ops",
+  "name": "ledgetop-ops",
   "main": "src/worker/index.ts",
   "compatibility_date": "2026-07-22",
   "compatibility_flags": ["nodejs_compat"],
@@ -141,6 +141,7 @@
   },
   "containers": [
     {
+      "name": "ltds-ops-thumbnailrenderercontainer",
       "class_name": "ThumbnailRendererContainer",
       "image": "./containers/thumbnail-renderer/Dockerfile",
       "max_instances": 4,

@@ -63,7 +63,7 @@ describe("incoming upload public routes", () => {
   beforeAll(async () => {
     miniflare = new Miniflare({ compatibilityDate: "2026-08-06", modules: true, script: "export default { fetch() { return new Response('ok'); } };", d1Databases: { DB: "incoming-routes" } });
     db = await miniflare.getD1Database("DB") as unknown as D1Database;
-    for (const name of ["0090_aliases_incoming_requests.sql", "0093_reusable_incoming_uploads.sql", "0116_incoming_upload_hardening.sql", "0198_incoming_upload_owner_notifications.sql"]) {
+    for (const name of ["0090_aliases_incoming_requests.sql", "0093_reusable_incoming_uploads.sql", "0116_incoming_upload_hardening.sql", "0198_incoming_upload_owner_notifications.sql", "0199_incoming_upload_pickup_lifecycle.sql"]) {
       const sql = readFileSync(new URL(`../../client/migrations/${name}`, import.meta.url), "utf8").replace(/^\s*--.*$/gm, "").replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "");
       await db.exec(sql.replace(/\s*\n\s*/g, " "));
     }
