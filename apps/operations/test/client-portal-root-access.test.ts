@@ -17,6 +17,9 @@ const context = { root: { source_id: "project-alpha:primary", root_namespace: "b
   canonicalRoot: { sourceId: "project-alpha:primary", rootNamespace: "business", kind: "organization", publicId: "business-one" },
   access: { directory: true, requests: true, delivery: true, viewer: true } } as unknown as ClientHubCollectionContext;
 const live = async () => {};
+const secondaryContext = { ...context, root: { ...context.root, source_id: "project-alpha:ledge-top-technologies",
+  pa_public_id: "org-ltt" }, canonicalRoot: { sourceId: "project-alpha:ledge-top-technologies",
+  rootNamespace: "business", kind: "organization", publicId: "business-ltt" } } as unknown as ClientHubCollectionContext;
 
 async function fixture() {
   const instance = new Miniflare({ compatibilityDate: "2026-08-06", modules: true,
@@ -61,6 +64,17 @@ describe("Client Hub root portal access", () => {
     await expect(mutatePortalRootAccess(env, actor, context, { action: "revoke",
       expectedContextVersion: "context-one", expectedVersion: 0, reasonCode: "security_hold" }, "root-revoke-key-0002", live))
       .rejects.toMatchObject({ status: 403 });
+  });
+
+  it("keeps a secondary Project Alpha root independent from the primary policy", async () => {
+    const { db, env } = await fixture();
+    expect(await mutatePortalRootAccess(env, actor, secondaryContext, { action: "revoke",
+      expectedContextVersion: "context-one", expectedVersion: 0, reasonCode: "security_hold" }, "root-ltt-revoke-0001", live))
+      .toEqual({ outcome: "root_access_revoked", version: 1, replayed: false });
+    expect(await readPortalRootAccess(env, actor, secondaryContext)).toMatchObject({ available: true, state: "revoked", version: 1 });
+    expect(await readPortalRootAccess(env, actor, context)).toMatchObject({ available: true, state: "active", version: 0 });
+    expect((await db.prepare("SELECT projection_source_id,root_public_id FROM portal_v2_root_access_policies").all()).results)
+      .toMatchObject([{ projection_source_id: "project-alpha:ledge-top-technologies", root_public_id: "org-ltt" }]);
   });
 
   it("allows only one concurrent mutation for the same expected version", async () => {
