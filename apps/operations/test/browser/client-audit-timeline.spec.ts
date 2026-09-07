@@ -70,13 +70,14 @@ function operationalWorkspace() {
     contactPage: { available: false, reason: "permission_required", nextCursor: null, hasMore: false, returned: 0, limit: 25 } };
 }
 type Handler = (route: Route, url: URL) => Promise<unknown>;
-async function fixture(page: Page, timelineHandler: Handler) {
+async function fixture(page: Page, timelineHandler: Handler, options: { feedbackEnabled?: boolean } = {}) {
   const calls: URL[] = [];
   await page.route("**/api/**", route => {
     const url = new URL(route.request().url()); calls.push(url);
     if (url.pathname === "/api/session") return route.fulfill({ json: { user: { id: "staff-one", email: "staff@example.test", displayName: "Staff", status: "Active",
       profileType: "Employee", isAdministrator: false, permissions: ["team.view", "projects.view"], divisions: [] }, csrfToken: "test",
-      timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: {} } });
+      timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null,
+      capabilities: { clientFeedback: { enabled: options.feedbackEnabled ?? false } } } });
     if (url.pathname === clientApi) return route.fulfill({ json: clientDetail() });
     if (url.pathname === projectApi) return route.fulfill({ json: projectDetail() });
     if (url.pathname === `${projectApi}/operational-workspace`) return route.fulfill({ json: operationalWorkspace() });
@@ -90,13 +91,44 @@ async function fixture(page: Page, timelineHandler: Handler) {
     if (url.pathname === `${clientApi}/collections/businessProjects`) return route.fulfill({ json: { canonicalRoot,
       contextVersion: "project-context", items: [{ id: "project-one", name: "Church survey", status: "active", row_key: "business:project-one" }],
       page: { available: true, reason: null, nextCursor: null, hasMore: false, returned: 1, limit: 25 } } });
-    if (url.pathname === `${clientApi}/timeline` || url.pathname === `${projectApi}/timeline`) return timelineHandler(route, url);
+    if (url.pathname === `${clientApi}/timeline` || url.pathname === `${projectApi}/timeline`
+      || url.pathname.endsWith("/feedback-history")) return timelineHandler(route, url);
     return route.fulfill({ status: 404, json: { error: "Unsupported fixture route" } });
   });
   return calls;
 }
 const clientTimeline = (page: Page) => page.getByRole("region", { name: "Client audit timeline", exact: true });
 const projectTimeline = (page: Page) => page.getByRole("region", { name: "Project audit timeline", exact: true });
+
+test("exact-client feedback history is lazy, redacted, and usable on desktop and mobile", async ({ page }) => {
+  let feedbackReads = 0;
+  const calls = await fixture(page, (route, url) => {
+    if (url.pathname.endsWith("/feedback-history")) { feedbackReads += 1; return route.fulfill({ json: {
+      canonicalRoot, contextVersion: "client-context", refreshedAt: asOf, asOf, coverage: "feedback_only",
+      items: [{ feedbackId: "folder-feedback", createdAt: "2026-08-25T12:00:00.000Z", status: "done",
+        target: { kind: "folder", label: "Final deliverables", projectName: "Church survey" },
+        events: [{ revision: 1, action: "submitted", occurredAt: "2026-08-25T12:00:00.000Z" },
+          { revision: 2, action: "completed", occurredAt: "2026-08-25T13:00:00.000Z" }],
+        detailPath: "/clients/feedback/folder-feedback?status=all" }],
+      page: { available: true, reason: null, nextCursor: null, hasMore: false, returned: 1, limit: 5 },
+    } }); }
+    return route.fulfill({ json: timeline(url, []) });
+  }, { feedbackEnabled: true });
+  await page.goto(clientPath);
+  const section = page.getByRole("region", { name: "Client feedback history", exact: true });
+  expect(feedbackReads).toBe(0);
+  await section.getByRole("button", { name: "Show feedback history", exact: true }).click();
+  await expect(section.getByText("Final deliverables", { exact: true })).toBeVisible();
+  await expect(section.getByText("folder · Church survey", { exact: true })).toBeVisible();
+  await expect(section.getByRole("link", { name: "Open folder feedback 1 for Final deliverables" }))
+    .toHaveAttribute("href", "/clients/feedback/folder-feedback?status=all");
+  expect(calls.find(url => url.pathname.endsWith("/feedback-history"))?.searchParams.get("expectedContextVersion")).toBe("client-context");
+  for (const width of [1280, 375]) { await page.setViewportSize({ width, height: 960 });
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    const box = await section.getByRole("link", { name: /Open folder feedback/ }).boundingBox();
+    expect(box!.height).toBeGreaterThanOrEqual(44); expect(box!.x + box!.width).toBeLessThanOrEqual(width + 1);
+  }
+});
 
 test("client timeline applies exact server filters, discloses coverage, and retries one continuation without losing rows", async ({ page }) => {
   let continuation = 0;

@@ -957,6 +957,37 @@ tbody tr:last-child td { border: 0; }
   margin: .05rem 0 0;
   accent-color: var(--orange);
 }
+.staff-access-editor { display: grid; gap: .15rem; width: 100%; margin-top: 1rem; }
+.staff-access-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: .25rem;
+  width: 100%;
+  padding: .25rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #eef2f4;
+}
+.staff-access-tabs button {
+  min-width: 0;
+  min-height: 38px;
+  padding: .45rem .55rem;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: .78rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+.staff-access-tabs button[aria-selected="true"] {
+  background: #fff;
+  color: var(--ink);
+  box-shadow: 0 1px 3px rgb(20 35 45 / 12%);
+}
+.staff-access-tabs button:focus-visible { outline: 3px solid color-mix(in srgb, var(--orange) 38%, transparent); outline-offset: 1px; }
+.staff-access-editor .local-access-toggle { margin-top: .45rem; }
 
 /* ---------------------------------------------------------------------------
    Preview placeholders

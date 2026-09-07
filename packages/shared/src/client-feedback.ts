@@ -86,6 +86,26 @@ export interface ProjectFeedbackHistoryPage {
   };
 }
 
+/** Read-only feedback history for one exact Client Hub root. Message bodies,
+ * completion notes, actors, storage keys and authorization proofs are omitted. */
+export interface ClientFeedbackHistoryItem extends ProjectFeedbackHistoryItem {
+  target: {
+    kind: ClientFeedbackTargetInput["kind"];
+    label: string;
+    projectName: string | null;
+  };
+}
+
+export interface ClientFeedbackHistoryPage {
+  canonicalRoot: { sourceId: string; rootNamespace: string; kind: string; publicId: string };
+  contextVersion: string;
+  refreshedAt: string;
+  asOf: string;
+  coverage: "feedback_only";
+  items: ClientFeedbackHistoryItem[];
+  page: ProjectFeedbackHistoryPage["page"];
+}
+
 export const CLIENT_FEEDBACK_MESSAGE_LIMIT = 5000;
 export const CLIENT_FEEDBACK_NOTE_LIMIT = 2000;
 

@@ -3,6 +3,41 @@
 Status: **staff integration and processing are enabled for pre-production
 validation; public-share and Client Viewer issuance remain separately gated**.
 
+## Reconciled implementation status (September 2026)
+
+The Operations contract has been reconciled against the measurement, sharing,
+and renewal handoff. The handoff described several gaps against an older source
+snapshot; the current implementation status is:
+
+- Individual client measurement persistence is implemented. Operations derives
+  the stable individual subject from the authenticated portal identity and adds
+  `personalMeasurements: true` only on that verified client path. Browser input
+  cannot opt into the attestation, and it does not grant processing authority.
+- Native client-workspace Viewer authorization is implemented. It rechecks the
+  exact source, workspace, individual membership, project public ID and source
+  version, model association/version, explicit native Viewer grant, expiry, and
+  deny state. It does not synthesize legacy IDs or fall back to organization-wide
+  access. Native client resharing remains disabled.
+- Client grant workspace responses include the canonical Viewer model and model
+  version IDs; title matching is not an authority mechanism.
+- A private-ready processing output still cannot be shared as an authenticated
+  client grant in one step. That workflow needs a coordinated, idempotent Viewer
+  activation/status contract before Operations can safely reconcile activation,
+  association, and an exact task grant without creating a public link.
+- Routine renewal works through the authenticated opener channel. A refreshed or
+  openerless Viewer can use the bounded Operations reauthorization bounce, but a
+  fully silent openerless transport and an immediate correlated terminal-failure
+  response require coordinated Viewer support. Do not weaken origin, subject,
+  source, correlation, CSRF, or expiry checks to hide that limitation.
+
+Native client viewing is rollout-gated even though the code exists. Apply Client
+migration `0199_native_viewer_grants.sql`, retain the private
+`VIEWER_SESSION_ISSUER` service binding, and enable both
+`CLIENT_VIEWER_ENABLED` and `CLIENT_VIEWER_SESSION_ISSUER_ENABLED` only after the
+matching Viewer service configuration and HMAC identity have passed joined
+acceptance. Keep `CLIENT_VIEWER_SHARES_ENABLED=false` unless client resharing is
+deliberately designed and reviewed later.
+
 The LTDS side now includes the signed service client, deny-by-default model to
 project associations, explicit staff permissions, private Client-to-Operations
 session issuance, Operations and Client Portal UI, and in-place iframe session

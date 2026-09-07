@@ -73,7 +73,7 @@ export function ProjectFeedbackHistory({root,projectId,contextVersion,contextSig
     return()=>{contextSignal.removeEventListener("abort",abort);abort();};
   },[identity,projectId,contextVersion,contextSignal]);
   const load=async(cursor:string|null)=>{
-    if(contextSignal.aborted||pending.current||root.sourceId!=="project-alpha:primary"||root.rootNamespace!=="business")return;
+    if(contextSignal.aborted||pending.current||root.rootNamespace!=="business")return;
     const controller=new AbortController(),request=++sequence.current;pending.current=controller;
     setRequested(true);setBusy(true);setError("");if(!cursor){setItems([]);setPage(null);}
     try{
@@ -93,7 +93,7 @@ export function ProjectFeedbackHistory({root,projectId,contextVersion,contextSig
       else{setError(message);failedCursor.current=cursor;}
     }finally{if(!contextSignal.aborted&&!controller.signal.aborted&&sequence.current===request){pending.current=null;setBusy(false);}}
   };
-  if(root.sourceId!=="project-alpha:primary"||root.rootNamespace!=="business")return null;
+  if(root.rootNamespace!=="business")return null;
   const canContinue=Boolean(page?.available&&page.hasMore&&page.nextCursor),finished=Boolean(requested&&page&&!canContinue&&!error);
   return <Card title="Project feedback history"><section className="project-feedback-history" aria-label="Project feedback history" aria-busy={busy}>
     <p>Feedback submissions and status changes for this project. This is not a complete project activity or audit history.</p>

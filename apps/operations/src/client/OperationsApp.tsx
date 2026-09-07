@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import { BRAND, type DeliveryLocationCollection, type Permission, type SessionUser, type ViewerAdminSessionGrant, type ViewerModelSummary, type ViewerPlatformOverview, type ViewerPublicShareSummary } from "@ltds/shared";
 import { AccountMenu, Brand, Card, EmptyState, Loading, StatusPill, openViewerShell } from "@ltds/ui";
@@ -6266,6 +6266,96 @@ const STAFF_VIEWER_CONTROLS = new Set<StaffControl>([
   "viewerAccess", "viewerDatasets", "viewerProcessing", "viewerPublish",
   "viewerShareCreate", "viewerShareRevoke", "viewerClientAccess", "viewerStoragePurge",
 ]);
+type StaffAccessSection = "operations" | "viewer";
+
+function StaffAccessEditor({
+  person,
+  busy,
+  update,
+}: {
+  person: any;
+  busy: boolean;
+  update: (person: any, control: StaffControl, enabled: boolean) => void;
+}) {
+  const [section, setSection] = useState<StaffAccessSection>("operations");
+  const id = useId();
+  const sections: Array<{ id: StaffAccessSection; label: string }> = [
+    { id: "operations", label: "Operations" },
+    { id: "viewer", label: "3D Models" },
+  ];
+  const chooseFromKeyboard = (event: ReactKeyboardEvent<HTMLButtonElement>, index: number) => {
+    let next = index;
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") next = (index + 1) % sections.length;
+    else if (event.key === "ArrowLeft" || event.key === "ArrowUp") next = (index - 1 + sections.length) % sections.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = sections.length - 1;
+    else return;
+    event.preventDefault();
+    setSection(sections[next]!.id);
+    event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("[role=tab]")[next]?.focus();
+  };
+  return <div className="staff-access-editor">
+    <div className="staff-access-tabs" role="tablist" aria-label={`${person.display_name} access categories`}>
+      {sections.map((item, index) => <button
+        key={item.id}
+        type="button"
+        role="tab"
+        id={`${id}-${item.id}-tab`}
+        aria-controls={`${id}-${item.id}-panel`}
+        aria-selected={section === item.id}
+        tabIndex={section === item.id ? 0 : -1}
+        onClick={() => setSection(item.id)}
+        onKeyDown={(event) => chooseFromKeyboard(event, index)}
+      >{item.label}</button>)}
+    </div>
+    <div
+      role="tabpanel"
+      id={`${id}-operations-panel`}
+      aria-labelledby={`${id}-operations-tab`}
+      hidden={section !== "operations"}
+    >
+      <fieldset className="local-access-toggle" disabled={busy}>
+        <legend>Operations access</legend>
+        {(Object.keys(STAFF_CONTROL_LABELS) as StaffControl[]).filter(control => !STAFF_VIEWER_CONTROLS.has(control)).map(
+          (control) => <label key={control}>
+            <input
+              type="checkbox"
+              checked={Boolean(person.localControls?.[control])}
+              onChange={(event) => update(person, control, event.target.checked)}
+            />
+            {STAFF_CONTROL_LABELS[control]}
+          </label>,
+        )}
+      </fieldset>
+    </div>
+    <div
+      role="tabpanel"
+      id={`${id}-viewer-panel`}
+      aria-labelledby={`${id}-viewer-tab`}
+      hidden={section !== "viewer"}
+    >
+      <fieldset className="local-access-toggle viewer-access-toggle" disabled={busy}>
+        <legend>3D Models access</legend>
+        {(Object.keys(STAFF_CONTROL_LABELS) as StaffControl[]).filter(control => STAFF_VIEWER_CONTROLS.has(control)).map(
+          (control) => {
+            const ownerOnly = control === "viewerStoragePurge";
+            return <label key={control} className={ownerOnly ? "danger-control" : undefined}>
+              <input
+                type="checkbox"
+                checked={Boolean(person.localControls?.[control])}
+                disabled={ownerOnly && !person.owner_role}
+                onChange={(event) => update(person, control, event.target.checked)}
+              />
+              {STAFF_CONTROL_LABELS[control]}
+            </label>;
+          },
+        )}
+        <small>Turning off model viewing blocks the Models page and new Viewer workspace sessions. Existing Viewer sessions expire within 30 minutes.</small>
+      </fieldset>
+    </div>
+  </div>;
+}
+
 function Team({ session }: { session: Session }) {
   const { data, error, reload } = useLoad(
     () => api<{ staff: any[] }>("/api/team/staff"),
@@ -6324,55 +6414,12 @@ function Team({ session }: { session: Session }) {
               <h3>{person.display_name}</h3>
               <p>{person.email}</p>
               <small>{person.roles || "No Project Alpha role"}</small>
-              {allowed(session.user, "operations.view") && (
-                <TeamAssignedWork staffId={person.id} />
-              )}
               {session.user.isAdministrator &&
               person.id !== session.user.id &&
               !person.sync_protected &&
               person.id !== "staff-beau-koltz" ? (
                 <>
-                  <fieldset
-                    className="local-access-toggle"
-                    disabled={busy === person.id}
-                  >
-                    <legend>Operations access</legend>
-                    {(Object.keys(STAFF_CONTROL_LABELS) as StaffControl[]).filter(control => !STAFF_VIEWER_CONTROLS.has(control)).map(
-                      (control) => (
-                        <label key={control}>
-                          <input
-                            type="checkbox"
-                            checked={Boolean(person.localControls?.[control])}
-                            onChange={(event) =>
-                              void update(person, control, event.target.checked)
-                            }
-                          />
-                          {STAFF_CONTROL_LABELS[control]}
-                        </label>
-                      ),
-                    )}
-                  </fieldset>
-                  <fieldset
-                    className="local-access-toggle viewer-access-toggle"
-                    disabled={busy === person.id}
-                  >
-                    <legend>3D Models access</legend>
-                    {(Object.keys(STAFF_CONTROL_LABELS) as StaffControl[]).filter(control => STAFF_VIEWER_CONTROLS.has(control)).map(
-                      (control) => {
-                        const ownerOnly = control === "viewerStoragePurge";
-                        return <label key={control} className={ownerOnly ? "danger-control" : undefined}>
-                          <input
-                            type="checkbox"
-                            checked={Boolean(person.localControls?.[control])}
-                            disabled={ownerOnly && !person.owner_role}
-                            onChange={(event) => void update(person, control, event.target.checked)}
-                          />
-                          {STAFF_CONTROL_LABELS[control]}
-                        </label>;
-                      },
-                    )}
-                    <small>Turning off model viewing blocks the Models page and Viewer workspace. Action permissions remain separately denyable.</small>
-                  </fieldset>
+                  <StaffAccessEditor person={person} busy={busy === person.id} update={(target, control, enabled) => void update(target, control, enabled)} />
                   {person.status !== "active" && (
                     <small>
                       Saved access will take effect only after Project Alpha
@@ -6382,6 +6429,9 @@ function Team({ session }: { session: Session }) {
                 </>
               ) : (
                 <small>Access is managed by a system administrator.</small>
+              )}
+              {allowed(session.user, "operations.view") && (
+                <TeamAssignedWork staffId={person.id} />
               )}
             </div>
           </Card>

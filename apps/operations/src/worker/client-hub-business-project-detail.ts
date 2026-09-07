@@ -118,6 +118,6 @@ export async function readClientHubBusinessProjectDetail(env: Env, principal: St
     operationalWorkspaceAvailable: true,
     businessActivityAvailable: true,
     auditTimelineAvailable: true,
-    feedbackHistoryAvailable: context.canonicalRoot.sourceId === "project-alpha:primary",
+    feedbackHistoryAvailable: true,
   };
 }

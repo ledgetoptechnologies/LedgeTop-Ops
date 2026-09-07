@@ -236,7 +236,8 @@ public-ID prerequisite and its publication approval remain separate.
 
 After approval and acceptance, back up the Delivery database and apply its
 ordered additive migrations, including `0184` before the paired compatible
-Client/Operations code and `0188` before native feedback is enabled, while
+Client/Operations code, `0188` before native feedback is enabled, and `0200`
+before Operations exposes exact-workspace native feedback history, while
 `CLIENT_PORTAL_NATIVE_FEEDBACK_SOURCE_IDS` remains empty.
 Readiness must show unavailable when the feedback schema is absent, while the
 existing application remains usable. Use a designated test account for the
@@ -250,3 +251,14 @@ feedback or replay receipts to clear an error, reset sent outbox records, or
 rewrite authorization snapshots. Reconcile pending notices before resuming a
 dispatcher. A successful local run is not evidence that a deployed browser or
 mail provider has been verified.
+
+## Exact-client lifecycle history
+
+The Client Hub can lazily read redacted lifecycle metadata for project, folder,
+and file feedback owned by the exact selected business workspace. Primary and
+native sources use source-qualified indexed queries and encrypted, actor-bound
+continuation cursors with an immutable as-of row watermark. Every candidate is
+re-authorized and the client mapping, policy, and context are checked again
+before release. The list response deliberately excludes feedback messages,
+completion notes, actor details, storage keys, and authorization proofs; staff
+must open the existing feedback review route to read permitted content.

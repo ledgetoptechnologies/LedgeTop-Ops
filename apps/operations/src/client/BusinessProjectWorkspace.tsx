@@ -134,7 +134,7 @@ function ProjectWorkspace({ route, feedbackEnabled }: { route: BusinessProjectRo
         contextSignal={pending.current!.signal} onInvalidated={invalidate} />}
       {detail.auditTimelineAvailable === true && <ClientAuditTimeline key={`audit-${revision}`} root={detail.canonicalRoot} projectId={project.id} contextVersion={detail.contextVersion}
         contextSignal={pending.current!.signal} onInvalidated={invalidate} />}
-      {feedbackEnabled && detail.feedbackHistoryAvailable === true && detail.canonicalRoot.sourceId === "project-alpha:primary" && <ProjectFeedbackHistory key={`feedback-${revision}`}
+      {feedbackEnabled && detail.feedbackHistoryAvailable === true && <ProjectFeedbackHistory key={`feedback-${revision}`}
         root={detail.canonicalRoot} projectId={project.id} contextVersion={detail.contextVersion}
         contextSignal={pending.current!.signal} onInvalidated={invalidate} />}
       <p className="business-project-refreshed">Project records refreshed {displayDate(detail.refreshedAt)}. A record refresh does not indicate project activity.</p>
