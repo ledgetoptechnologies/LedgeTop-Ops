@@ -1,7 +1,7 @@
 import { Hono, type Context, type MiddlewareHandler } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import type { ClientFeedbackDetail, ClientFeedbackItem, ClientFeedbackEvent } from "@ltds/shared";
+import type { ClientFeedbackDetail, ClientFeedbackItem, ClientFeedbackEvent, ClientFeedbackHistoryItem, PortalFeedbackHistoryPage } from "@ltds/shared";
 import type { Env } from "../types";
 import type { ClientPortalSession, VerifiedClientPrincipal } from "./types";
 import type { EffectivePortalWorkspaceContext } from "./workspace-v2";
@@ -15,12 +15,14 @@ import {
 } from "./feedback-target";
 import { d1ClientPortalRepository } from "./repository";
 import { clientPortalRequestOriginAllowed } from "../origin-policy";
+import { decodeFeedbackHistoryCursor, encodeFeedbackHistoryCursor, feedbackHistoryScope } from "./feedback-history-cursor";
 
 type Variables = { clientSession: ClientPortalSession; clientPrincipal: VerifiedClientPrincipal; clientWorkspace: EffectivePortalWorkspaceContext | null };
 type FeedbackContext = Context<{ Bindings: Env; Variables: Variables }>;
 const uuid = z.string().uuid();
 const opaqueId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/);
 const PAGE_SIZE = 5;
+const CURSOR_TTL_MS = 15 * 60_000;
 
 export async function clientFeedbackSchemaAvailable(env: Pick<Env, "DELIVERY_DB">): Promise<boolean> {
   const count = await env.DELIVERY_DB.prepare(`SELECT COUNT(*) count FROM sqlite_master WHERE type='table' AND name IN
@@ -100,6 +102,39 @@ function cursor(scope: string, row: { created_at: string; id: string }) {
   return btoa(JSON.stringify({ scope, at: row.created_at, id: row.id })).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
 }
 
+async function primaryHistoryScope(c: FeedbackContext) {
+  const session=c.get("clientSession"), workspace=c.get("clientWorkspace");
+  if(workspace){
+    const row=await c.env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT project_alpha_source_id sourceId,root_type rootType,
+      CASE WHEN root_type='organization' THEN pa_organization_public_id ELSE pa_client_public_id END rootPublicId,status
+      FROM portal_v2_workspaces WHERE id=?`).bind(workspace.workspaceId).first<{sourceId:string;rootType:string;rootPublicId:string;status:string}>();
+    if(!row||row.status!=="active"||row.rootType!==workspace.rootType||row.rootPublicId!==workspace.rootPublicId) return null;
+    return {sourceId:row.sourceId,workspaceId:workspace.workspaceId,rootType:row.rootType,rootPublicId:row.rootPublicId,
+      accountId:session.accountId,identityId:session.identityId,workspaceIdentityId:workspace.identityId};
+  }
+  const row=await c.env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT COALESCE(project_alpha_source_id,'project-alpha:primary') sourceId,
+    CASE WHEN project_alpha_organization_id IS NOT NULL THEN 'organization' ELSE 'standalone_client' END rootType,
+    COALESCE(project_alpha_organization_id,project_alpha_client_id) rootPublicId,status FROM client_accounts WHERE id=?`)
+    .bind(session.accountId).first<{sourceId:string;rootType:string;rootPublicId:string|null;status:string}>();
+  if(!row||row.status!=="active"||!row.rootPublicId)return null;
+  return {...row,workspaceId:null,accountId:session.accountId,identityId:session.identityId,workspaceIdentityId:null};
+}
+const lifecycleAction=(status:string):"submitted"|"started"|"completed"=>status==="new"?"submitted":status==="in_progress"?"started":"completed";
+async function primaryHistoryItem(c:FeedbackContext,record:FeedbackRecord,asOf:string):Promise<ClientFeedbackHistoryItem|null>{
+  if(Date.parse(record.updatedAt)>Date.parse(asOf))return null;
+  const resolved=await authorized(c,record);if(!resolved)return null;
+  const events=await c.env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT revision,status,created_at occurredAt FROM client_feedback_events
+    WHERE feedback_id=? ORDER BY revision`).bind(record.id).all<{revision:number;status:string;occurredAt:string}>();
+  if(events.results.length!==record.revision||events.results.at(-1)?.status!==record.status||events.results.some(event=>Date.parse(event.occurredAt)>Date.parse(asOf)))return null;
+  await current(c,resolved);
+  const released=await readFeedbackRecord(c.env.DELIVERY_DB,record.id);
+  if(!released||released.revision!==record.revision||released.status!==record.status||released.updatedAt!==record.updatedAt||Date.parse(released.updatedAt)>Date.parse(asOf)||!await authorized(c,released))return null;
+  return {feedbackId:record.id,createdAt:record.createdAt,status:record.status,
+    events:events.results.map(event=>({revision:event.revision,action:lifecycleAction(event.status),occurredAt:event.occurredAt})),
+    detailPath:`/portal/feedback/${encodeURIComponent(record.id)}${record.context.workspaceId?`?workspace=${encodeURIComponent(record.context.workspaceId)}`:""}`,
+    target:{kind:record.target.kind,label:record.target.label,projectName:record.target.projectName}};
+}
+
 export function createClientFeedbackRouter(schemaAvailable: (env: Env) => Promise<boolean> = clientFeedbackSchemaAvailable) {
   const router = new Hono<{ Bindings: Env; Variables: Variables }>();
   const requireSchema: MiddlewareHandler<{ Bindings: Env; Variables: Variables }> = async (c,next) => {
@@ -156,21 +191,32 @@ export function createClientFeedbackRouter(schemaAvailable: (env: Env) => Promis
     return c.json({ ...await detail(c,saved.record,authorizedSaved),replayed: saved.replayed },saved.replayed ? 200 : 201);
   });
   router.get("/feedback", async c => {
-    const page = await paging(c,"feedback"), session = c.get("clientSession"), principal = c.get("clientPrincipal");
-    const rows = await c.env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT id,created_at FROM client_feedback
+    const query=c.req.queries();if(Object.keys(query).some(key=>key!=="cursor")||Object.values(query).some(values=>values.length!==1))
+      throw new HTTPException(400,{message:"Feedback query is invalid"});
+    const session=c.get("clientSession"),principal=c.get("clientPrincipal"),scope=await primaryHistoryScope(c);if(!scope)return new Response("Not found",{status:404});
+    const scopeHash=await feedbackHistoryScope(scope),encoded=c.req.query("cursor"),decoded=encoded?await decodeFeedbackHistoryCursor(c.env,principal,encoded):null;
+    if(encoded&&(!decoded||decoded.scope!==scopeHash||decoded.expires<Date.now()))throw new HTTPException(409,{message:"Feedback page changed. Refresh the client workspace."});
+    const asOf=decoded?.asOf??new Date().toISOString();
+    const water=decoded?.water??Number(await c.env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT COALESCE(MAX(rowid),0) water FROM client_feedback
+      WHERE scope_key=? AND account_id=? AND principal_issuer=? AND principal_subject=? AND creator_identity_id=?`).bind(
+        feedbackScopeKey({accountId:session.accountId,workspaceId:scope.workspaceId}),session.accountId,principal.issuer,principal.subject,session.identityId).first("water")??0);
+    const rows = await c.env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT rowid,id,created_at FROM client_feedback
       WHERE scope_key=? AND account_id=? AND principal_issuer=? AND principal_subject=? AND creator_identity_id=?
-        AND (? IS NULL OR created_at<? OR (created_at=? AND id<?)) ORDER BY created_at DESC,id DESC LIMIT ?`)
-      .bind(feedbackScopeKey({accountId:session.accountId,workspaceId:c.get("clientWorkspace")?.workspaceId ?? null}),session.accountId,
-        principal.issuer,principal.subject,session.identityId,page.cursor?.at ?? null,page.cursor?.at ?? null,page.cursor?.at ?? null,page.cursor?.id ?? null,page.limit+1)
-      .all<{ id: string; created_at: string }>();
-    const examined = rows.results.slice(0,page.limit), items: ClientFeedbackItem[] = [], proofs: ResolvedFeedbackTarget[] = [];
+        AND rowid<=? AND created_at<=? AND (? IS NULL OR created_at<? OR (created_at=? AND id<?)) ORDER BY created_at DESC,id DESC LIMIT ?`)
+      .bind(feedbackScopeKey({accountId:session.accountId,workspaceId:scope.workspaceId}),session.accountId,principal.issuer,principal.subject,session.identityId,
+        water,asOf,decoded?.after[0]??null,decoded?.after[0]??null,decoded?.after[0]??null,decoded?.after[1]??null,PAGE_SIZE+1)
+      .all<{rowid:number;id:string;created_at:string}>();
+    const examined=rows.results.slice(0,PAGE_SIZE),items:ClientFeedbackHistoryItem[]=[];
     for (const row of examined) {
       const record = await readFeedbackRecord(c.env.DELIVERY_DB,row.id); if (!record) continue;
-      const resolved = await authorized(c,record); if (!resolved) continue;
-      items.push(await clientFeedbackItem(c.env,record,resolved)); proofs.push(resolved);
+      const item=await primaryHistoryItem(c,record,asOf);if(item)items.push(item);
     }
-    for (const proof of proofs) await current(c,proof);
-    return c.json({ items,nextCursor: rows.results.length>page.limit ? cursor(page.scope,examined.at(-1)!) : null });
+    const currentScope=await primaryHistoryScope(c);if(!currentScope||await feedbackHistoryScope(currentScope)!==scopeHash)
+      throw new HTTPException(409,{message:"Feedback access changed. Refresh the client workspace."});
+    const nextCursor=rows.results.length>PAGE_SIZE&&examined.length?await encodeFeedbackHistoryCursor(c.env,principal,
+      {v:1,scope:scopeHash,asOf,water,after:[examined.at(-1)!.created_at,examined.at(-1)!.id],expires:Date.now()+CURSOR_TTL_MS}):null;
+    const response:PortalFeedbackHistoryPage={scope:{sourceId:scope.sourceId,workspaceId:scope.workspaceId,rootType:scope.rootType,
+      rootPublicId:scope.rootPublicId!},asOf,items,nextCursor};return c.json(response);
   });
   router.get("/feedback/:id", async c => {
     const id = uuid.safeParse(c.req.param("id"));

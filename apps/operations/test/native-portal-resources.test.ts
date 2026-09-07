@@ -238,6 +238,23 @@ describe('source-owned native portal resources with real signed projection and l
     };
     const aIds:string[]=[];for(let index=0;index<6;index++)aIds.push(await create(a,index));
     const bId=await create(b,0);
+    const clientFirstResponse=await request(`${base(a)}/feedback`);expect(clientFirstResponse.status).toBe(200);
+    const clientFirst=await clientFirstResponse.json() as {scope:{sourceId:string;workspaceId:string;rootType:string;rootPublicId:string};
+      items:Array<{feedbackId:string;events:Array<{action:string}>}>;nextCursor:string|null};
+    expect(clientFirst.scope).toEqual({sourceId:a.source,workspaceId:a.workspace,rootType:'organization',rootPublicId:rootId});
+    expect(clientFirst.items.map(item=>item.feedbackId)).toEqual(expect.arrayContaining(aIds.slice(-5)));
+    expect(clientFirst.items.every(item=>item.events[0]?.action==='submitted')).toBe(true);
+    expect(JSON.stringify(clientFirst)).not.toMatch(/Private [ab]|message|completionNote|actor|note/);
+    expect(clientFirst.nextCursor).toMatch(/^fh1_/);
+    const clientPlan=await db.prepare(`EXPLAIN QUERY PLAN SELECT rowid,id,created_at FROM portal_native_feedback INDEXED BY idx_portal_native_feedback_author
+      WHERE source_id=? AND workspace_id=? AND creator_identity_id=? AND principal_issuer=? AND principal_subject=? AND rowid<=? AND created_at<=?
+      ORDER BY created_at DESC,id DESC LIMIT 6`).bind(a.source,a.workspace,'same-person',issuer,principal.subject,Number.MAX_SAFE_INTEGER,new Date().toISOString()).all<{detail:string}>();
+    expect(clientPlan.results.some(row=>row.detail.includes('idx_portal_native_feedback_author'))).toBe(true);
+    expect((await request(`${base(b)}/feedback?cursor=${encodeURIComponent(clientFirst.nextCursor!)}`)).status).toBe(409);
+    await new Promise(resolve=>setTimeout(resolve,5));
+    await transitionStaffFeedback(opsEnv,staff,aIds[0]!,{expectedRevision:1,status:'done',note:'Completed after page one'},`staff-${crypto.randomUUID()}`);
+    const stable=await request(`${base(a)}/feedback?cursor=${encodeURIComponent(clientFirst.nextCursor!)}`);expect(stable.status).toBe(200);
+    expect((await stable.json() as {items:unknown[]}).items).toEqual([]);
     const makeContext=async(f:Fixture):Promise<{context:ClientHubCollectionContext;localProject:string}>=>{
       const localRoot=(await opsDb.prepare(`SELECT id FROM pa_organizations WHERE projection_source_id=?
         AND json_extract(payload_json,'$.public_id')=?`).bind(f.source,rootId).first<string>('id'))!;
@@ -266,6 +283,9 @@ describe('source-owned native portal resources with real signed projection and l
     expect(JSON.stringify(rootPage)).not.toContain(bId);
     await expect(listClientHubFeedbackHistory(historyEnv,staff,bc.context,{limit:5,cursor:rootPage.page.nextCursor!}))
       .rejects.toMatchObject({status:400});
+    await db.prepare("UPDATE portal_v2_workspaces SET status='suspended' WHERE id=?").bind(a.workspace).run();
+    expect((await request(`${base(a)}/feedback?cursor=${encodeURIComponent(clientFirst.nextCursor!)}`)).status).toBe(404);
+    await db.prepare("UPDATE portal_v2_workspaces SET status='active' WHERE id=?").bind(a.workspace).run();
   },120_000);
   it('lists only immediate children, hides internal objects, and returns no raw storage key',async()=>{
     const result=await files(b);expect(result.files.map(f=>f.name)).toEqual(['report.txt']);expect(result.folders?.map(f=>f.name)).toEqual(['child']);

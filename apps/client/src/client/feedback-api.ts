@@ -1,4 +1,4 @@
-import type { ClientFeedbackDetail, ClientFeedbackItem, ClientFeedbackPage, ClientFeedbackTargetInput } from "@ltds/shared";
+import type { ClientFeedbackDetail, ClientFeedbackHistoryItem, ClientFeedbackItem, PortalFeedbackHistoryPage, ClientFeedbackTargetInput } from "@ltds/shared";
 import { requestJson, selectedClientWorkspaceId } from "./bulk-download";
 import type { PortalFile } from "./portal-api";
 
@@ -36,9 +36,27 @@ export function feedbackItemValid(value: unknown): value is ClientFeedbackItem {
 function feedbackEndpoint(nativeWorkspaceId: string | null | undefined, suffix = ""): string {
   return nativeWorkspaceId ? `/api/client/v2/workspaces/${encodeURIComponent(nativeWorkspaceId)}/feedback${suffix}` : `/api/client/feedback${suffix}`;
 }
-export async function loadFeedback(cursor: string | null, signal: AbortSignal, nativeWorkspaceId?: string | null): Promise<ClientFeedbackPage> {
-  const result = await requestJson<ClientFeedbackPage>(`${feedbackEndpoint(nativeWorkspaceId)}${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`, { signal });
-  if (!Array.isArray(result.items) || !result.items.every(feedbackItemValid) || !(result.nextCursor === null || typeof result.nextCursor === "string" && result.nextCursor)) throw new Error("Feedback records could not be verified.");
+function exactKeys(value:object,keys:string[]):boolean{return Object.keys(value).sort().join("\0")===keys.sort().join("\0");}
+function historyItemValid(value:unknown,asOf:string,workspaceId:string|null):value is ClientFeedbackHistoryItem{
+  if(!value||typeof value!=="object"||!exactKeys(value,["feedbackId","createdAt","status","events","detailPath","target"]))return false;
+  const row=value as ClientFeedbackHistoryItem,detail=safeFeedbackTargetPath(row.detailPath),created=Date.parse(row.createdAt);
+  if(typeof row.feedbackId!=="string"||!row.feedbackId||!["new","in_progress","done"].includes(row.status)||!Number.isFinite(created)||created>Date.parse(asOf)
+    ||detail===null||new URL(detail,location.origin).pathname!==`/portal/feedback/${encodeURIComponent(row.feedbackId)}`||!Array.isArray(row.events)||!row.target
+    ||!exactKeys(row.target,["kind","label","projectName"])||!["project","folder","file"].includes(row.target.kind)||typeof row.target.label!=="string"
+    ||!(row.target.projectName===null||typeof row.target.projectName==="string"))return false;
+  const detailWorkspace=new URL(detail,location.origin).searchParams.get("workspace");if(detailWorkspace!==(workspaceId??null))return false;
+  return row.events.length>0&&row.events.every((event,index)=>exactKeys(event,["revision","action","occurredAt"])&&event.revision===index+1
+    &&event.action===(index===0?"submitted":index===row.events.length-1&&row.status==="done"?"completed":"started")
+    &&Number.isFinite(Date.parse(event.occurredAt))&&Date.parse(event.occurredAt)<=Date.parse(asOf));
+}
+export async function loadFeedback(cursor: string | null, signal: AbortSignal, nativeWorkspaceId?: string | null): Promise<PortalFeedbackHistoryPage> {
+  const result = await requestJson<PortalFeedbackHistoryPage>(`${feedbackEndpoint(nativeWorkspaceId)}${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`, { signal });
+  const workspaceId=nativeWorkspaceId??selectedClientWorkspaceId();
+  if(!result||!exactKeys(result,["scope","asOf","items","nextCursor"])||!result.scope||!exactKeys(result.scope,["sourceId","workspaceId","rootType","rootPublicId"])
+    ||typeof result.scope.sourceId!=="string"||result.scope.workspaceId!==(workspaceId??null)||!["organization","standalone_client"].includes(result.scope.rootType)
+    ||typeof result.scope.rootPublicId!=="string"||!Number.isFinite(Date.parse(result.asOf))||!Array.isArray(result.items)
+    ||!result.items.every(item=>historyItemValid(item,result.asOf,result.scope.workspaceId))
+    ||!(result.nextCursor===null||typeof result.nextCursor==="string"&&result.nextCursor))throw new Error("Feedback records could not be verified.");
   return result;
 }
 export async function loadFeedbackDetail(id: string, signal: AbortSignal, nativeWorkspaceId?: string | null): Promise<ClientFeedbackDetail> {

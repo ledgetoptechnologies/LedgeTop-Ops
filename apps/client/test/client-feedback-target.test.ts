@@ -8,7 +8,7 @@ import { createClientPortalRouter } from "../src/worker/client-portal/routes";
 import { createClientPortalFileHandle,encodeProjectFolderHandle,d1ClientPortalRepository } from "../src/worker/client-portal/repository";
 import { resolveEffectivePortalWorkspaceContext } from "../src/worker/client-portal/workspace-v2";
 import { resolveClientFeedbackTarget,reauthorizeFeedbackRecipient,clientFeedbackTargetActionPath,type FeedbackTargetInput } from "../src/worker/client-portal/feedback-target";
-import { createFeedbackRecord,transitionFeedbackRecord } from "../src/worker/client-portal/feedback-store";
+import { createFeedbackRecord,readFeedbackRecord,transitionFeedbackRecord } from "../src/worker/client-portal/feedback-store";
 import { splitD1MigrationStatements } from "./helpers/d1-migrations";
 
 const origin="https://client.test", storageKey="clients/a/north/edited/photo.jpg";
@@ -234,6 +234,36 @@ describe("feedback target authorization against migrated D1",{timeout:60_000},()
     expect((await submit(target,env,key)).status).toBe(200);
     expect((await router().request(`${origin}/feedback/${payload.feedback.id}`,{},env)).status).toBe(200);
     expect((await router({...principal,subject:"feedback-b",email:"b@example.test"}).request(`${origin}/feedback/${payload.feedback.id}`,{},env)).status).toBe(404);
+  });
+  it("lists only redacted exact-creator lifecycle history and binds continuation to actor and current authority",async()=>{
+    const ids:string[]=[];
+    for(let index=0;index<6;index++){
+      const response=await submit({kind:"project",projectId:"project-a"},env,mutationKey());expect(response.status).toBe(201);
+      ids.push((await response.json() as {feedback:{id:string}}).feedback.id);
+    }
+    const firstResponse=await router().request(`${origin}/feedback`,{},env);expect(firstResponse.status).toBe(200);
+    const first=await firstResponse.json() as {scope:{sourceId:string;workspaceId:null;rootType:string;rootPublicId:string};asOf:string;
+      items:Array<{feedbackId:string;events:Array<{action:string}>}>;nextCursor:string|null};
+    expect(first.scope).toEqual({sourceId:"project-alpha:primary",workspaceId:null,rootType:"organization",rootPublicId:"pa-org-a"});
+    expect(first.items.map(row=>row.feedbackId)).toEqual(expect.arrayContaining(ids.slice(-5)));
+    expect(first.items.every(row=>row.events[0]?.action==="submitted")).toBe(true);
+    expect(JSON.stringify(first)).not.toMatch(/Please improve this area|message|completionNote|actor|note/);
+    expect(first.nextCursor).toMatch(/^fh1_/);
+    const plan=await db.prepare(`EXPLAIN QUERY PLAN SELECT rowid,id,created_at FROM client_feedback INDEXED BY idx_client_feedback_author
+      WHERE scope_key=? AND account_id=? AND principal_issuer=? AND principal_subject=? AND creator_identity_id=? AND rowid<=? AND created_at<=?
+      ORDER BY created_at DESC,id DESC LIMIT 6`).bind("account:account-a","account-a",principal.issuer,principal.subject,"identity-a",Number.MAX_SAFE_INTEGER,new Date().toISOString()).all<{detail:string}>();
+    expect(plan.results.some(row=>row.detail.includes("idx_client_feedback_author"))).toBe(true);
+    const other=router({...principal,subject:"feedback-b",email:"b@example.test"});
+    expect((await other.request(`${origin}/feedback?cursor=${encodeURIComponent(first.nextCursor!)}`,{},env)).status).toBe(409);
+    await new Promise(resolve=>setTimeout(resolve,5));
+    const oldest=await readFeedbackRecord(db,ids[0]!);expect(oldest).not.toBeNull();
+    await transitionFeedbackRecord(db,oldest!,"staff",{expectedRevision:1,status:"done",note:"Completed after page one"},mutationKey(),{sql:"1",bindings:[]});
+    const stable=await router().request(`${origin}/feedback?cursor=${encodeURIComponent(first.nextCursor!)}`,{},env);expect(stable.status).toBe(200);
+    const stableItems=(await stable.json() as {items:Array<{feedbackId:string}>}).items;
+    expect(stableItems.map(item=>item.feedbackId)).not.toContain(oldest!.id);
+    await db.prepare("UPDATE client_project_grants SET revoked_at=datetime('now') WHERE project_id='project-a'").run();
+    const revoked=await router().request(`${origin}/feedback?cursor=${encodeURIComponent(first.nextCursor!)}`,{},env);
+    expect(revoked.status).toBe(200);expect((await revoked.json() as {items:unknown[]}).items).toEqual([]);
   });
   it("returns exact file metadata without touching media storage",async()=>{
     const target=await file();if(target.kind!=="file")throw new Error("fixture");

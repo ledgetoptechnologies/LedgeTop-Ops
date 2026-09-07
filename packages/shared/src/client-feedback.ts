@@ -106,6 +106,21 @@ export interface ClientFeedbackHistoryPage {
   page: ProjectFeedbackHistoryPage["page"];
 }
 
+/** Redacted lifecycle history belonging to the exact signed-in portal actor.
+ * Feedback bodies and staff notes remain available only from the separately
+ * authorized detail route. */
+export interface PortalFeedbackHistoryPage {
+  scope: {
+    sourceId: string;
+    workspaceId: string | null;
+    rootType: string;
+    rootPublicId: string;
+  };
+  asOf: string;
+  items: ClientFeedbackHistoryItem[];
+  nextCursor: string | null;
+}
+
 export const CLIENT_FEEDBACK_MESSAGE_LIMIT = 5000;
 export const CLIENT_FEEDBACK_NOTE_LIMIT = 2000;
 

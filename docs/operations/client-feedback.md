@@ -262,3 +262,13 @@ re-authorized and the client mapping, policy, and context are checked again
 before release. The list response deliberately excludes feedback messages,
 completion notes, actor details, storage keys, and authorization proofs; staff
 must open the existing feedback review route to read permitted content.
+
+The signed-in client receives the same deliberately redacted lifecycle shape
+for only feedback they created in the exact current source, workspace, and
+root. Its AES-GCM continuation cursor is bound to the Access issuer/subject and
+scope, carries a fixed as-of row watermark, and expires after 15 minutes.
+Every row is re-authorized before release. Message bodies and completion notes
+remain available only through the separately authorized feedback detail route.
+This read-only surface creates no sharing, membership, notification, or mail
+side effect and uses the existing primary and native feedback author indexes;
+no additional migration is required.
