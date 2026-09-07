@@ -3,11 +3,15 @@ import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import {
+  AUTHENTICATED_DELIVERY_CHANGE_CANDIDATE_LIMIT,
+  authenticatedDeliveryChangeCandidatesSql,
   authenticatedDeliveryChangeNotificationsReady,
   controlAuthenticatedDeliveryChangeBatch,
   dispatchAuthenticatedDeliveryChangeNotifications,
   recordAuthenticatedDeliveryObjectChange,
   saveAuthenticatedDeliveryNotificationPolicy,
+  stageAuthenticatedDeliveryChangeForTarget,
+  type AuthenticatedDeliveryChangeTarget,
 } from "../src/worker/authenticated-delivery-change-notifications";
 import type { Env } from "../src/worker/types";
 
@@ -29,8 +33,9 @@ describe("exact authenticated delivery change notifications — migrated real D1
       grant: await db.prepare("SELECT * FROM portal_v2_authenticated_delivery_grants WHERE id=?").bind(before.grant).first(),
       recipient: await db.prepare("SELECT * FROM portal_v2_authenticated_delivery_grant_recipients WHERE grant_id=?").bind(before.grant).first(),
     };
-    await db.batch(splitD1MigrationStatements(readFileSync(new URL("../../client/migrations/0170_authenticated_delivery_change_notifications.sql",import.meta.url),"utf8"))
-      .map(sql => db.prepare(sql)));
+    for (const name of ["0170_authenticated_delivery_change_notifications.sql", "0204_delivery_change_receipts.sql", "0205_authenticated_delivery_change_sequence.sql"])
+      await db.batch(splitD1MigrationStatements(readFileSync(new URL(`../../client/migrations/${name}`,import.meta.url),"utf8"))
+        .map(sql => db.prepare(sql)));
     expect(await db.prepare("SELECT * FROM portal_v2_authenticated_delivery_grants WHERE id=?").bind(before.grant).first()).toEqual(preserved.grant);
     expect(await db.prepare("SELECT * FROM portal_v2_authenticated_delivery_grant_recipients WHERE grant_id=?").bind(before.grant).first()).toEqual(preserved.recipient);
     expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
@@ -99,6 +104,38 @@ describe("exact authenticated delivery change notifications — migrated real D1
     const key=`${f.prefix}${name}`;
     await db.prepare("DELETE FROM file_index WHERE r2_key=?").bind(key).run();
     return recordAuthenticatedDeliveryObjectChange(env,key,false,version,at);
+  }
+
+  async function savedTarget(f: Awaited<ReturnType<typeof fixture>>, key: string, eventAt: string) {
+    const rows = await db.prepare(authenticatedDeliveryChangeCandidatesSql())
+      .bind(key,"added",eventAt,AUTHENTICATED_DELIVERY_CHANGE_CANDIDATE_LIMIT+1).all<AuthenticatedDeliveryChangeTarget>();
+    expect(rows.results).toHaveLength(1);
+    return rows.results[0]!;
+  }
+
+  async function addMatchingRecipient(f: Awaited<ReturnType<typeof fixture>>) {
+    const suffix=`${f.suffix}-second`,identity=`identity-${suffix}`,principal=`principal-${suffix}`,
+      grant=`grant-${suffix}`,logical=`logical-${suffix}`;
+    await db.batch([
+      db.prepare("INSERT INTO portal_v2_identities(id,issuer,subject,verified_email) VALUES(?,?,?,?)")
+        .bind(identity,"https://access.example.test",`subject-${suffix}`,`${suffix}@example.test`),
+      db.prepare("INSERT INTO portal_v2_workspace_memberships(id,workspace_id,identity_id,source_type,status) VALUES(?,?,?,'operations','active')")
+        .bind(`membership-${suffix}`,f.workspace,identity),
+      db.prepare("INSERT INTO pa_portal_principals(workspace_id,public_id,identity_id,email_hint,display_name,source_version,status) VALUES(?,?,?,?,?,'pv1','active')")
+        .bind(f.workspace,principal,identity,`${suffix}@example.test`,`Person ${suffix}`),
+      db.prepare(`INSERT INTO portal_v2_entitlements(id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,
+        source_type,status) VALUES(?,?,?,'delivery.view','allow','project',?,'operations','active')`)
+        .bind(`entitlement-${suffix}`,f.workspace,identity,f.project),
+      db.prepare(`INSERT INTO portal_v2_authenticated_delivery_grants(id,logical_grant_id,grant_version,workspace_id,folder_binding_id,
+        binding_source_version,audience_type,audience_public_id,audience_source_version,reason_code,created_by_staff_id)
+        VALUES(?,?,1,?,?,'v1','principal',?,'pv1','test','staff-a')`).bind(grant,logical,f.workspace,f.binding,principal),
+      db.prepare(`INSERT INTO portal_v2_authenticated_delivery_grant_recipients
+        (grant_id,workspace_id,principal_public_id,identity_id,principal_source_version) VALUES(?,?,?,?, 'pv1')`)
+        .bind(grant,f.workspace,principal,identity),
+    ]);
+    await saveAuthenticatedDeliveryNotificationPolicy(env,"staff-a",{grantId:grant,identityId:identity,
+      expectedPolicyVersion:null,accessNoticeEnabled:true,changeMode:"added",idempotencyKey:`policy-${suffix}-00000000`});
+    return {identity,grant};
   }
 
   async function batches(f: Awaited<ReturnType<typeof fixture>>) {
@@ -281,6 +318,22 @@ describe("exact authenticated delivery change notifications — migrated real D1
     expect(await batches(f)).toEqual([]);
   });
 
+  it("does not backfill an event that predates a later policy opt-in", async () => {
+    const f=await fixture("pre-opt-in");
+    const [createdAt,eventAt,enabledAt]=eventTimes(),key=`${f.prefix}photo.jpg`;
+    await db.prepare(`INSERT INTO portal_authenticated_delivery_notification_policies
+      (grant_id,grant_version,logical_grant_id,workspace_id,source_id,identity_id,principal_public_id,principal_source_version,
+        access_notice_enabled,change_mode,policy_version,updated_by_staff_id,created_at,updated_at)
+      VALUES(?,1,?,?,'project-alpha:primary',?,?,'pv1',0,'off',1,'staff-a',?,?)`)
+      .bind(f.grant,f.logical,f.workspace,f.identity,f.principal,createdAt,createdAt).run();
+    await db.prepare(`UPDATE portal_authenticated_delivery_notification_policies
+      SET access_notice_enabled=1,change_mode='added',policy_version=2,updated_at=? WHERE grant_id=? AND identity_id=?`)
+      .bind(enabledAt,f.grant,f.identity).run();
+
+    expect(await recordAuthenticatedDeliveryObjectChange(env,key,true,"v1",eventAt)).toBe(0);
+    expect(await batches(f)).toEqual([]);
+  });
+
   it("retries staging when the selected policy version changes at the final authority fence", async () => {
     const f=await fixture("policy-fence");const first=await optIn(f,"added");
     const [eventAt]=eventTimes(),key=`${f.prefix}photo.jpg`;let hookFired=false;
@@ -360,6 +413,121 @@ describe("exact authenticated delivery change notifications — migrated real D1
     expect(hookFired).toBe(true);
     expect(await batches(f)).toHaveLength(1);
     expect((await batches(f))[0]).toMatchObject({status:"processing",added_count:1});
+  });
+
+  it("stages only a saved recipient target when a later policy would otherwise fan out", async () => {
+    const f=await fixture("target-no-fanout");await optIn(f,"added");
+    const key=`${f.prefix}photo.jpg`,eventAt=new Date(Date.now()+60_000).toISOString(),target=await savedTarget(f,key,eventAt);
+    const later=await addMatchingRecipient(f);
+    const candidates=await db.prepare(authenticatedDeliveryChangeCandidatesSql())
+      .bind(key,"added",eventAt,AUTHENTICATED_DELIVERY_CHANGE_CANDIDATE_LIMIT+1).all<AuthenticatedDeliveryChangeTarget>();
+    expect(candidates.results.map(row=>row.identity_id).sort()).toEqual([f.identity,later.identity].sort());
+
+    expect(await stageAuthenticatedDeliveryChangeForTarget(env,target,{key,present:true,objectVersion:"v1",eventAt})).toBe("staged");
+    expect(await batches(f)).toMatchObject([{identity_id:f.identity,grant_id:f.grant,added_count:1}]);
+    expect(await db.prepare("SELECT count(*) count FROM portal_authenticated_delivery_change_batches WHERE grant_id=?")
+      .bind(later.grant).first("count")).toBe(0);
+  });
+
+  it("suppresses a saved target when its policy version is no longer current", async () => {
+    const f=await fixture("target-policy-suppressed");const policy=await optIn(f,"added");
+    const key=`${f.prefix}photo.jpg`,eventAt=new Date(Date.now()+60_000).toISOString(),target=await savedTarget(f,key,eventAt);
+    await saveAuthenticatedDeliveryNotificationPolicy(env,"staff-a",{grantId:f.grant,identityId:f.identity,
+      expectedPolicyVersion:policy.policy_version,accessNoticeEnabled:true,changeMode:"added",
+      idempotencyKey:`target-policy-update-${f.suffix}-000000`});
+
+    expect(await stageAuthenticatedDeliveryChangeForTarget(env,target,{key,present:true,objectVersion:"v1",eventAt})).toBe("suppressed");
+    expect(await batches(f)).toEqual([]);
+  });
+
+  it("stages an unchanged saved target once and reports its replay as duplicate", async () => {
+    const f=await fixture("target-once");await optIn(f,"added");
+    const key=`${f.prefix}photo.jpg`,eventAt=new Date(Date.now()+60_000).toISOString(),target=await savedTarget(f,key,eventAt);
+    const input={key,present:true,objectVersion:"v1",eventAt};
+    expect(await stageAuthenticatedDeliveryChangeForTarget(env,target,input)).toBe("staged");
+    expect(await stageAuthenticatedDeliveryChangeForTarget(env,target,input)).toBe("duplicate");
+    expect(await batches(f)).toMatchObject([{identity_id:f.identity,grant_id:f.grant,added_count:1}]);
+  });
+
+  it("orders equal-timestamp durable receipts by accepted sequence", async () => {
+    const f=await fixture("target-sequence-equal");await optIn(f,"both");
+    const key=`${f.prefix}photo.jpg`,eventAt=new Date(Date.now()+60_000).toISOString(),target=await savedTarget(f,key,eventAt);
+    expect(await stageAuthenticatedDeliveryChangeForTarget(env,target,{
+      key,present:true,objectVersion:"content-v1",eventAt,acceptedSequence:1,providerObjectVersion:"r2-upload-v1",
+    })).toBe("staged");
+    expect(await stageAuthenticatedDeliveryChangeForTarget(env,target,{
+      key,present:false,objectVersion:"content-v1",eventAt,acceptedSequence:2,providerObjectVersion:"r2-upload-v1",
+    })).toBe("staged");
+    expect(await db.prepare(`SELECT current_present,current_object_version,accepted_sequence,provider_object_version,observed_event_at
+      FROM portal_authenticated_delivery_change_object_versions WHERE grant_id=? AND identity_id=?`).bind(f.grant,f.identity).first())
+      .toMatchObject({current_present:0,current_object_version:"content-v1",accepted_sequence:2,provider_object_version:"r2-upload-v1",observed_event_at:eventAt});
+  });
+
+  it("accepts a newer durable sequence despite an older event timestamp, then rejects stale sequence replay", async () => {
+    const f=await fixture("target-sequence-stale");await optIn(f,"both");
+    const key=`${f.prefix}photo.jpg`,earlier=new Date(Date.now()+60_000).toISOString(),later=new Date(Date.now()+120_000).toISOString(),target=await savedTarget(f,key,later);
+    expect(await stageAuthenticatedDeliveryChangeForTarget(env,target,{
+      key,present:true,objectVersion:"content-v1",eventAt:later,acceptedSequence:1,providerObjectVersion:"r2-upload-v1",
+    })).toBe("staged");
+    expect(await stageAuthenticatedDeliveryChangeForTarget(env,target,{
+      key,present:false,objectVersion:"content-v1",eventAt:earlier,acceptedSequence:2,providerObjectVersion:"r2-upload-v1",
+    })).toBe("staged");
+    expect(await stageAuthenticatedDeliveryChangeForTarget(env,target,{
+      key,present:true,objectVersion:"content-v1",eventAt:new Date(Date.now()+180_000).toISOString(),acceptedSequence:1,providerObjectVersion:"r2-upload-v1",
+    })).toBe("duplicate");
+    expect(await db.prepare("SELECT current_present,accepted_sequence,provider_object_version FROM portal_authenticated_delivery_change_object_versions WHERE grant_id=? AND identity_id=?")
+      .bind(f.grant,f.identity).first()).toMatchObject({current_present:0,accepted_sequence:2,provider_object_version:"r2-upload-v1"});
+  });
+
+  it("does not collapse same-ETag uploads with distinct provider versions, but deduplicates the newest receipt", async () => {
+    const f=await fixture("target-provider-version");await optIn(f,"added");
+    const key=`${f.prefix}photo.jpg`,eventAt=new Date(Date.now()+60_000).toISOString(),target=await savedTarget(f,key,eventAt);
+    const first={key,present:true,objectVersion:"same-content-etag",eventAt,acceptedSequence:1,providerObjectVersion:"r2-upload-one"};
+    const newest={...first,acceptedSequence:2,providerObjectVersion:"r2-upload-two"};
+    expect(await stageAuthenticatedDeliveryChangeForTarget(env,target,first)).toBe("staged");
+    expect(await stageAuthenticatedDeliveryChangeForTarget(env,target,newest)).toBe("staged");
+    expect(await stageAuthenticatedDeliveryChangeForTarget(env,target,newest)).toBe("duplicate");
+    expect(await db.prepare("SELECT current_object_version,accepted_sequence,provider_object_version FROM portal_authenticated_delivery_change_object_versions WHERE grant_id=? AND identity_id=?")
+      .bind(f.grant,f.identity).first()).toMatchObject({current_object_version:"same-content-etag",accepted_sequence:2,provider_object_version:"r2-upload-two"});
+  });
+
+  it("advances same-provider sequence only as high-water until a remove/re-add is a new action", async () => {
+    const f=await fixture("target-provider-readd");await optIn(f,"both");
+    const key=`${f.prefix}photo.jpg`,eventAt=new Date(Date.now()+60_000).toISOString(),target=await savedTarget(f,key,eventAt);
+    expect(await stageAuthenticatedDeliveryChangeForTarget(env,target,{
+      key,present:true,objectVersion:"same-content-etag",eventAt,acceptedSequence:1,providerObjectVersion:"r2-upload-one",
+    })).toBe("staged");
+    expect(await stageAuthenticatedDeliveryChangeForTarget(env,target,{
+      key,present:true,objectVersion:"same-content-etag",eventAt,acceptedSequence:2,providerObjectVersion:"r2-upload-one",
+    })).toBe("duplicate");
+    expect(await stageAuthenticatedDeliveryChangeForTarget(env,target,{
+      key,present:false,objectVersion:"same-content-etag",eventAt,acceptedSequence:3,providerObjectVersion:"r2-upload-one",
+    })).toBe("staged");
+    expect(await stageAuthenticatedDeliveryChangeForTarget(env,target,{
+      key,present:true,objectVersion:"same-content-etag",eventAt,acceptedSequence:4,providerObjectVersion:"r2-upload-two",
+    })).toBe("staged");
+    expect(await db.prepare("SELECT current_present,accepted_sequence,provider_object_version FROM portal_authenticated_delivery_change_object_versions WHERE grant_id=? AND identity_id=?")
+      .bind(f.grant,f.identity).first()).toMatchObject({current_present:1,accepted_sequence:4,provider_object_version:"r2-upload-two"});
+  });
+
+  it("rejects partial durable pairs, same-sequence conflicts, and legacy overwrite of a sequenced object", async () => {
+    const f=await fixture("sequence-invariants");await optIn(f,"both");
+    const key=`${f.prefix}photo.jpg`,eventAt=new Date(Date.now()+60_000).toISOString(),target=await savedTarget(f,key,eventAt);
+    const input={key,present:true,objectVersion:"content",eventAt,acceptedSequence:1,providerObjectVersion:"upload-one"};
+    expect(await stageAuthenticatedDeliveryChangeForTarget(env,target,input)).toBe("staged");
+    await expect(stageAuthenticatedDeliveryChangeForTarget(env,target,{...input,present:false})).rejects.toThrow("sequence-conflict");
+    expect(await recordAuthenticatedDeliveryObjectChange(env,key,false,"other-content",new Date(Date.now()+120_000).toISOString())).toBe(0);
+    await expect(db.prepare(`UPDATE portal_authenticated_delivery_change_object_versions
+      SET accepted_sequence=2,provider_object_version=NULL WHERE grant_id=? AND identity_id=?`)
+      .bind(f.grant,f.identity).run()).rejects.toThrow();
+    await expect(db.prepare(`INSERT INTO portal_authenticated_delivery_change_object_versions
+      (grant_id,grant_version,identity_id,object_fingerprint,r2_key,current_present,current_object_version,observed_event_at,accepted_sequence,provider_object_version)
+      SELECT grant_id,grant_version,identity_id,?,r2_key||'.partial',current_present,current_object_version,observed_event_at,NULL,'unpaired'
+      FROM portal_authenticated_delivery_change_object_versions WHERE grant_id=? AND identity_id=?`)
+      .bind("a".repeat(64),f.grant,f.identity).run()).rejects.toThrow("must be paired");
+    expect(await db.prepare(`SELECT accepted_sequence,provider_object_version,current_present,current_object_version
+      FROM portal_authenticated_delivery_change_object_versions WHERE grant_id=? AND identity_id=?`)
+      .bind(f.grant,f.identity).first()).toMatchObject({accepted_sequence:1,provider_object_version:"upload-one",current_present:1,current_object_version:"content"});
   });
 
   it("routes changes after a policy mutation into the current policy-version batch", async () => {

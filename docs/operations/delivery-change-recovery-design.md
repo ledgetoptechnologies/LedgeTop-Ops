@@ -22,6 +22,17 @@ behavior or on different message IDs implying different storage changes.
 Duplicate deliveries must converge on the accepted source-version/action.
 Explicitly verify retry-ID behavior before relying on it operationally.
 
+Persist `(queue name, message ID) -> receipt` in the acceptance transaction.
+Consumer replay must look up this binding **before** observing current HEAD or
+index state. This recovers the original provider version for a committed delete
+even after its index row is gone or a replacement has appeared. A new delivery
+of the same semantic change can add another immutable message binding; it
+cannot change the original recipient set. Conflicting message bindings fail.
+Native events do not contain the provider version, so an accepted create is an
+authoritative current-index observation, not proof of every historical upload
+that occurred before processing. Preserve stale payload/HEAD checks and do not
+promise reconstruction of unseen bucket history.
+
 Use a valid source event time; for a deletion without that value, use the
 queue's original message timestamp, never the current retry/processing time.
 For creation, authoritative HEAD upload time remains the fallback. Invalid
@@ -104,3 +115,54 @@ Required tests before enabling capture:
 The independent bell ledger, sealing, current-authority checks, cursor/UI work,
 and migration-first rollout in `authenticated-delivery-bell-plan.md` remain
 required. This design does not complete those workflows or change their scope.
+
+## Additive implementation checkpoint
+
+Migration 0204 and `delivery-change-receipts.ts` provide an internal acceptance
+primitive: one caller-supplied authoritative index CAS, receipt, recipient
+snapshot, complete-set seal, and message binding commit together. Zero-row or
+multi-row CAS and excess candidate rows abort the transaction. A confirmed
+duplicate does not execute the index mutation again. Seals prevent late target
+insertion, including into an originally empty set.
+
+The internal caller must supply a value-changing index CAS, not merely an
+UPDATE that matches one row. SQLite's affected-row count alone cannot prove
+that the authoritative object state changed. Migration 0206 and
+`delivery-index-acceptance.ts` provide that CAS: a new observation marker is
+written even when an upload route already indexed the same provider version.
+The marker and receipt must be committed together; the helper must never be
+used as a standalone index writer. Repeat observation of the accepted provider
+version cannot mutate the marker. Revisions persist after deletion to fence an
+absent/present/absent race, including identical-content replacements.
+
+Existing index rows retain unknown (`NULL`) provider identity at migration.
+No historical notification is created. Legacy source-metadata changes clear
+a carried provider identity, and all index updates advance the revision.
+Before enablement, current-observation writers in `file-events.ts` and
+`r2-crud.ts` must persist provider versions using pre-observation CAS; repairs
+must not synthesize receipts. Administrative cleanup in those modules and
+`trash.ts` must retain revision tombstones without inventing removals. A delete
+with no known indexed provider version requires explicit no-notice legacy
+cleanup and diagnostics, not a fabricated version. The marker does not replace
+immutable receipt lookup when the index has already been removed.
+
+The existing stager has a separate exact-target entry point for replaying saved
+snapshots without discovering new recipients. Its object-version argument is
+still the existing content ETag; it is not the receipt's provider upload ID.
+Migration 0205 adds separate provider identity and accepted-sequence fields to
+the recipient's object ledger. A durable caller supplies both fields; newer
+accepted sequences take precedence over source timestamp ordering. Legacy
+calls cannot replace a sequenced ledger, and durable staging refuses a missing
+0205 schema. Unsequenced callers can still use the pre-0205 schema.
+
+Capture and projection must be rolled out as one complete path. Do not switch
+an object into sequenced staging and then expect the legacy broad discovery
+path to keep updating it. A projector must read sealed receipt targets, pass
+their exact receipt coordinates, and persist bounded retry state; these new
+primitives do not themselves schedule recovery.
+
+This foundation is **not yet wired into the live consumer**. Provider-version
+index writer integration, legacy-row handling, end-to-end accepted sequencing,
+bounded projector leases and diagnostics, scheduler integration, and the bell
+producer still remain. Do not enable receipt capture or call this workflow
+complete merely because the additive schema and primitive tests pass.
