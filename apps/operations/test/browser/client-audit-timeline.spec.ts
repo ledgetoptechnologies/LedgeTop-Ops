@@ -80,6 +80,9 @@ async function fixture(page: Page, timelineHandler: Handler, options: { feedback
       capabilities: { clientFeedback: { enabled: options.feedbackEnabled ?? false } } } });
     if (url.pathname === clientApi) return route.fulfill({ json: clientDetail() });
     if (url.pathname === projectApi) return route.fulfill({ json: projectDetail() });
+    if (url.pathname === `${projectApi}/internal-notes` && route.request().method() === "GET") return route.fulfill({ json: {
+      canonicalRoot, contextVersion: "project-context", projectId: "project-one", notes: [], capabilities: { canManageNotes: false },
+    } });
     if (url.pathname === `${projectApi}/operational-workspace`) return route.fulfill({ json: operationalWorkspace() });
     if (url.pathname === `${clientApi}/organization-operational-contacts`) return route.fulfill({ json: {
       canonicalRoot, contextVersion: "client-context",

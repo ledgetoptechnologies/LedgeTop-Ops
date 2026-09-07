@@ -30,6 +30,8 @@ async function fixture(pageObject:Page,handler:(route:Route,url:URL)=>Promise<un
       isAdministrator:false,permissions:["team.view","projects.view"],divisions:[]},csrfToken:"test",timezone:"America/Chicago",mapStyleUrl:null,mapboxPublicToken:null,
       capabilities:{clientFeedback:{enabled:options.feedbackEnabled??true}}}});
     if(url.pathname===selectedProjectApi)return route.fulfill({json:project(sourceId)});
+    if(url.pathname===`${selectedProjectApi}/internal-notes`&&request.method()==="GET")return route.fulfill({json:{canonicalRoot:{...root,sourceId},
+      contextVersion:"project-context",projectId:"project-one",notes:[],capabilities:{canManageNotes:false}}});
     return handler(route,url);
   });return calls;
 }
