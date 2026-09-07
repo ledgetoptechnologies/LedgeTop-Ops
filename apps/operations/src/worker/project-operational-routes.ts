@@ -6,6 +6,8 @@ import { PROJECT_OPERATIONAL_RECOVERY_REQUIRED, ProjectOperationalRecoveryRequir
 import { serveProjectMemoryAttachment, uploadProjectMemoryAttachment } from "./project-memory-attachments";
 import { commitRecurringProjectCopy, previewRecurringProjectCopy, RecurringProjectCopyVersionChanged } from "./project-recurring-copy-forward";
 import { canRecoverProjectOperational, commitProjectOperationalRecovery, previewProjectOperationalRecovery } from "./project-operational-recovery";
+import { createProjectInternalNote, deleteProjectInternalNote, readProjectInternalNotes, updateProjectInternalNote } from "./project-internal-notes";
+import { readBoundedJson } from "./bounded-json";
 import type { Env, StaffPrincipal } from "./types";
 
 type AppEnv = { Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } };
@@ -38,6 +40,33 @@ function destinationBoundBody(value: unknown, destinationProjectId: string): unk
 export function registerProjectOperationalRoutes(app: App, resolveContext: ResolveProjectOperationalContext,
   verifyContext: VerifyProjectOperationalContext): void {
   const base = "/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/business-projects/:projectId";
+  app.get(`${base}/internal-notes`, async c => {
+    const clientKind = routeKind(c, "Project notes are unavailable for this source"), principal = c.get("principal");
+    const context = await resolveContext(c.env, principal, clientKind, c.req.param("publicId"), c.req.param("sourceId"), "business");
+    const result = await readProjectInternalNotes(c.env, principal, context, c.req.param("projectId"));
+    await verifyContext(c.env, principal, context); c.header("Cache-Control", "no-store"); return c.json(result);
+  });
+  app.post(`${base}/internal-notes`, async c => {
+    const clientKind = routeKind(c, "Project notes are unavailable for this source"), principal = c.get("principal");
+    const context = await resolveContext(c.env, principal, clientKind, c.req.param("publicId"), c.req.param("sourceId"), "business");
+    const result = await createProjectInternalNote(c.env, principal, context, c.req.param("projectId"),
+      await readBoundedJson(c.req.raw, 16_384, "Project note request"), c.req.header("Idempotency-Key") || "");
+    await verifyContext(c.env, principal, context); c.header("Cache-Control", "no-store"); return c.json(result, result.replayed ? 200 : 201);
+  });
+  app.patch(`${base}/internal-notes/:noteId`, async c => {
+    const clientKind = routeKind(c, "Project notes are unavailable for this source"), principal = c.get("principal");
+    const context = await resolveContext(c.env, principal, clientKind, c.req.param("publicId"), c.req.param("sourceId"), "business");
+    const result = await updateProjectInternalNote(c.env, principal, context, c.req.param("projectId"), c.req.param("noteId"),
+      await readBoundedJson(c.req.raw, 16_384, "Project note request"), c.req.header("Idempotency-Key") || "");
+    await verifyContext(c.env, principal, context); c.header("Cache-Control", "no-store"); return c.json(result);
+  });
+  app.delete(`${base}/internal-notes/:noteId`, async c => {
+    const clientKind = routeKind(c, "Project notes are unavailable for this source"), principal = c.get("principal");
+    const context = await resolveContext(c.env, principal, clientKind, c.req.param("publicId"), c.req.param("sourceId"), "business");
+    const result = await deleteProjectInternalNote(c.env, principal, context, c.req.param("projectId"), c.req.param("noteId"),
+      await readBoundedJson(c.req.raw, 16_384, "Project note request"), c.req.header("Idempotency-Key") || "");
+    await verifyContext(c.env, principal, context); c.header("Cache-Control", "no-store"); return c.json(result);
+  });
   app.get(`${base}/operational-workspace`, async c => {
     const clientKind = routeKind(c, "Project operational details are unavailable for this source"), principal = c.get("principal");
     const context = await resolveContext(c.env, principal, clientKind, c.req.param("publicId"), c.req.param("sourceId"), "business");

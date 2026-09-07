@@ -31,6 +31,13 @@ async function mock(page: Page, directory: DirectoryHandler, permissions = ["tea
     } });
     if (url.pathname === "/api/client-service-requests") return route.fulfill({ json: { requests: serviceRequests } });
     if (url.pathname === "/api/client-hub") return directory(route, url);
+    if (/^\/api\/client-hub\/sources\/[^/]+\/business\/(organizations|standalone)\/[^/]+\/business-projects\/[^/]+\/internal-notes$/.test(url.pathname)
+      && route.request().method() === "GET") {
+      const parts = url.pathname.split("/").filter(Boolean);
+      return route.fulfill({ json: { canonicalRoot: { sourceId: decodeURIComponent(parts[3]!), rootNamespace: "business",
+        kind: parts[5] === "organizations" ? "organization" : "standalone_client", publicId: decodeURIComponent(parts[6]!) },
+      contextVersion: decodeURIComponent(parts[3]!), projectId: decodeURIComponent(parts[8]!), notes: [], capabilities: { canManageNotes: false } } });
+    }
     if (/^\/api\/client-hub\/(sources|organizations|standalone)\//.test(url.pathname)) {
       const parts = url.pathname.split("/").filter(Boolean);
       const source = parts[2] === "sources" ? decodeURIComponent(parts[3]!) : "project-alpha:primary";

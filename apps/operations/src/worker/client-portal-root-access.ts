@@ -2,6 +2,7 @@ import { HTTPException } from "hono/http-exception";
 import { isAdministrator } from "./acl";
 import { portalDenyPolicyManagementEnabled } from "./client-portal-deny-policies";
 import type { ClientHubCollectionContext } from "./client-hub-collections";
+import { isBusinessProjectionSource } from "./client-hub-source";
 import type { Env, StaffPrincipal } from "./types";
 
 const IDEMPOTENCY = /^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/;
@@ -43,7 +44,7 @@ export function portalRootAccessAllowedSql(env: Pick<Env, "CLIENT_PORTAL_ROOT_AC
 
 function tuple(context: ClientHubCollectionContext) {
   if (context.root.root_namespace !== "business" || !context.root.pa_public_id
-    || !context.root.source_id.startsWith("project-alpha:")) return null;
+    || !isBusinessProjectionSource(context.root.source_id)) return null;
   return { sourceId: context.root.source_id, rootType: context.root.kind, rootPublicId: context.root.pa_public_id };
 }
 

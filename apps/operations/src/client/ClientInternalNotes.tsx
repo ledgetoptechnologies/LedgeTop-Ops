@@ -7,7 +7,7 @@ interface Root { sourceId: string; rootNamespace: string; kind: string; publicId
 interface Note { id: string; version: number; title: string; body: string; createdBy: string; updatedBy: string;
   createdAt: string; updatedAt: string; revisions: Array<{ version: number; action: "created" | "updated" | "deleted";
     actorId: string; createdAt: string }> }
-interface Workspace { canonicalRoot: Root; contextVersion: string; notes: Note[]; capabilities: { canManageNotes: boolean } }
+interface Workspace { canonicalRoot: Root; contextVersion: string; projectId?: string; notes: Note[]; capabilities: { canManageNotes: boolean } }
 interface Attempt { fingerprint: string; key: string }
 const rootKey = (root: Root) => JSON.stringify([root.sourceId,root.rootNamespace,root.kind,root.publicId]);
 const displayDate = (value: string) => { const parsed = new Date(value); return Number.isFinite(parsed.valueOf())
@@ -16,10 +16,10 @@ const attemptKey = (attempt: React.MutableRefObject<Attempt | null>, payload: un
   const fingerprint = JSON.stringify(payload); if (attempt.current?.fingerprint === fingerprint) return attempt.current.key;
   const key = crypto.randomUUID(); attempt.current = { fingerprint, key }; return key;
 };
-function valid(value: unknown, root: Root, contextVersion: string): value is Workspace {
+function valid(value: unknown, root: Root, contextVersion: string, projectId?: string): value is Workspace {
   if (!value || typeof value !== "object") return false;
   const item = value as Workspace;
-  return rootKey(item.canonicalRoot) === rootKey(root) && item.contextVersion === contextVersion
+  return rootKey(item.canonicalRoot) === rootKey(root) && item.contextVersion === contextVersion && (!projectId || item.projectId === projectId)
     && typeof item.capabilities?.canManageNotes === "boolean" && Array.isArray(item.notes) && item.notes.length <= 100
     && new Set(item.notes.map(note => note.id)).size === item.notes.length
     && item.notes.every(note => typeof note.id === "string" && Number.isSafeInteger(note.version) && note.version > 0
@@ -30,10 +30,12 @@ function valid(value: unknown, root: Root, contextVersion: string): value is Wor
         && ["created","updated","deleted"].includes(revision.action) && typeof revision.actorId === "string" && typeof revision.createdAt === "string"));
 }
 
-export function ClientInternalNotes({ root, contextVersion, contextSignal, onInvalidated }: {
-  root: Root; contextVersion: string; contextSignal: AbortSignal; onInvalidated: (message: string) => void;
+export function ClientInternalNotes({ root, contextVersion, contextSignal, onInvalidated, projectId }: {
+  root: Root; contextVersion: string; contextSignal: AbortSignal; onInvalidated: (message: string) => void; projectId?: string;
 }) {
-  const endpoint = `/api/client-hub/sources/${encodeURIComponent(root.sourceId)}/${root.rootNamespace}/${root.kind === "organization" ? "organizations" : "standalone"}/${encodeURIComponent(root.publicId)}/internal-notes`;
+  const base = `/api/client-hub/sources/${encodeURIComponent(root.sourceId)}/${root.rootNamespace}/${root.kind === "organization" ? "organizations" : "standalone"}/${encodeURIComponent(root.publicId)}`;
+  const endpoint = projectId ? `${base}/business-projects/${encodeURIComponent(projectId)}/internal-notes` : `${base}/internal-notes`;
+  const subject = projectId ? "project" : "client";
   const [state, setState] = useState<{ data: Workspace | null; busy: boolean; error: string }>({ data: null, busy: true, error: "" });
   const [editor, setEditor] = useState<{ id: string | null; version: number; title: string; body: string } | null>(null);
   const [editorError, setEditorError] = useState(""), [conflict, setConflict] = useState(false);
@@ -43,7 +45,7 @@ export function ClientInternalNotes({ root, contextVersion, contextSignal, onInv
     try {
       const result = await api<unknown>(endpoint, { signal });
       if (!active.current || signal.aborted || request !== sequence.current) return;
-      if (!valid(result, root, contextVersion)) throw new ApiError("Client note context changed. Refresh this workspace.", 409, {});
+      if (!valid(result, root, contextVersion, projectId)) throw new ApiError("Internal-note context changed. Refresh this workspace.", 409, {});
       setState({ data: result, busy: false, error: "" });
       setEditor(current => current?.id ? { ...current, version: result.notes.find(note => note.id === current.id)?.version ?? current.version } : current);
     } catch (error) {
@@ -76,7 +78,7 @@ export function ClientInternalNotes({ root, contextVersion, contextSignal, onInv
         headers: { "Idempotency-Key": key }, body: JSON.stringify(payload), signal: controller.signal });
       if (!active.current || controller.signal.aborted || request !== sequence.current) return;
       const result = await api<unknown>(endpoint, { signal: controller.signal });
-      if (!valid(result, root, contextVersion)) throw new ApiError("Client notes changed before the save could be verified. Refresh this workspace.", 409, {});
+      if (!valid(result, root, contextVersion, projectId)) throw new ApiError("Internal notes changed before the save could be verified. Refresh this workspace.", 409, {});
       attempt.current = null; setState({ data: result, busy: false, error: "" }); setEditor(null);
       setStatus(operation === "delete" ? "Note deleted. Its audit history was retained." : "Internal note saved.");
     } catch (error) {
@@ -89,7 +91,7 @@ export function ClientInternalNotes({ root, contextVersion, contextSignal, onInv
   };
   const data = state.data;
   return <Card title="Internal notes">
-    <section className="client-internal-notes" aria-label="Internal client notes" aria-busy={state.busy}>
+    <section className="client-internal-notes" aria-label={`Internal ${subject} notes`} aria-busy={state.busy}>
       <p className="client-internal-notes-private">Operations staff only. These notes are never shown in the client portal or synchronized to Project Alpha.</p>
       {!data && state.busy && <p role="status">Loading internal notes…</p>}
       {!data && state.error && <><div role="alert"><EmptyState title="Internal notes unavailable" detail={state.error} /></div>
@@ -108,7 +110,7 @@ export function ClientInternalNotes({ root, contextVersion, contextSignal, onInv
           <div><button type="submit" className="button-orange" disabled={state.busy}>{state.busy ? "Saving…" : "Save note"}</button>
             <button type="button" className="button-ghost" disabled={state.busy} onClick={() => { attempt.current = null; setEditor(null); setEditorError(""); }}>Cancel</button></div>
         </form>}
-        {!data.notes.length && !editor && <EmptyState title="No internal notes" detail="Add private context that Operations staff should remember about this client." />}
+        {!data.notes.length && !editor && <EmptyState title="No internal notes" detail={`Add private context that Operations staff should remember about this ${subject}.`} />}
         <div className="client-internal-note-list">{data.notes.map(note => <article key={note.id}>
           <header><div><h3>{note.title}</h3><small>Updated {displayDate(note.updatedAt)} · version {note.version}</small></div>
             {data.capabilities.canManageNotes && !editor && <div><button type="button" className="button-ghost" onClick={() => { attempt.current = null; setEditorError(""); setEditor({ id: note.id, version: note.version, title: note.title, body: note.body }); }}>Edit</button>

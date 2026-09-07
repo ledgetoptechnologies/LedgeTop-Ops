@@ -399,7 +399,11 @@ describe("Client Hub bounded detail collections", () => {
       accounts: [], projects: [], requests: [], deliveryGrants: [], authenticatedDeliveryGrants: [], viewerGrants: [],
       pages: { accounts: { reason: "not_applicable" }, authenticatedDeliveryGrants: { reason: "not_applicable" } },
     });
-    expect((await app.request(path + "/identities/pa-child-login/access", {}, env)).status).toBe(404);
+    expect((await app.request(path + "/identities/pa-child-login/access", {}, env)).status).toBe(200);
+    // The source-qualified public ID cannot be reinterpreted as a primary
+    // client. A similarly shaped route must never borrow another tenant's
+    // workspace or identity collection.
+    expect((await app.request(path.replace("project-alpha%3Asecondary", "project-alpha%3Aprimary"), {}, env)).status).toBe(404);
     await delivery.prepare("UPDATE pa_portal_source_authorities SET state='suspended' WHERE source_id='project-alpha:secondary'").run();
     const suspended = await app.request(path, {}, env);
     expect(suspended.status).toBe(200);

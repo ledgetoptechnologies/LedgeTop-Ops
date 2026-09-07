@@ -11,12 +11,15 @@ their presentation through explicit source-qualified business-party links, but
 must not merge producer records by name, email, or other inferred similarity.
 The 3D Viewer is outside this work while Hermes is changing it.
 
-Current deployment authorization is LTDS only. Checklist references to a second
-configured producer or a live secondary-source exercise do not authorize
-enrolling LTT. Use synthetic secondary-source isolation tests locally, and
-leave any unavailable live-secondary gate explicitly pending until the owner
-configures that instance. Do not substitute a second connection for the existing
-LTDS signed endpoint or enable a source merely to satisfy this checklist.
+The owner explicitly authorized Ledge Top Technologies enrollment on September
+7, 2026. Authorization is not evidence that the source is enrolled or accepted:
+keep LTT pending and hidden until its dedicated Access service token, snapshot
+key, Ed25519 public key, exact-source receipt, and historical snapshot have all
+been verified. Enroll the existing LTDS primary first and preserve its healthy
+legacy route during the staged handoff. Both Project Alpha instances use the
+same Ops Sync application and Worker; LTT uses the source-qualified event path,
+its own immutable producer identity, and its own credentials. Do not create a
+second portal connection or share either producer's keys.
 
 The dated production admission, migration, and provisioning checkpoint is
 recorded in

@@ -3,6 +3,7 @@ import { isAdministrator, sqlScope } from "./acl";
 import { eligibilityBlockManagementEnabled, portalOperationsManagementEnabled } from "./client-identity-eligibility";
 import { portalDenyPolicyManagementEnabled } from "./client-portal-deny-policies";
 import type { ClientHubCollectionContext } from "./client-hub-collections";
+import { isBusinessProjectionSource } from "./client-hub-source";
 import { sha256 } from "./crypto";
 import type { Env, StaffPrincipal } from "./types";
 
@@ -182,11 +183,19 @@ async function policy(env: Env, actor: StaffPrincipal, scope: PortalIdentityScop
   const access = await sqlScope(env, actor, "team.view");
   if (!access.global || access.deniedGlobal) throw new HTTPException(403, { message: "Global team.view permission required" });
   const administrator = await isAdministrator(env, actor);
-  const primaryClientScope = scope.kind === "global" || scope.context.root.source_id === "project-alpha:primary";
-  const capabilities = { canManagePortal: primaryClientScope && administrator && portalOperationsManagementEnabled(env),
-    canManageEligibilityBlocks: primaryClientScope && administrator && eligibilityBlockManagementEnabled(env),
-    canManageWorkspaceAccess: primaryClientScope && administrator && portalDenyPolicyManagementEnabled(env),
-    canReviewIdentityDetails: primaryClientScope };
+  // Client Hub has already resolved this exact source through the registered,
+  // read-visible connector and its active workspace authority. Do not collapse
+  // a secondary source into the primary legacy bridge here: management remains
+  // scoped to the resolved workspace and every later write carries that source.
+  const managedClientScope = scope.kind === "global" || (
+    scope.context.root.root_namespace === "business"
+    && scope.context.root.workspace_id !== null
+    && isBusinessProjectionSource(scope.context.root.source_id)
+  );
+  const capabilities = { canManagePortal: managedClientScope && administrator && portalOperationsManagementEnabled(env),
+    canManageEligibilityBlocks: managedClientScope && administrator && eligibilityBlockManagementEnabled(env),
+    canManageWorkspaceAccess: managedClientScope && administrator && portalDenyPolicyManagementEnabled(env),
+    canReviewIdentityDetails: managedClientScope };
   const hash = await sha256(JSON.stringify([actor.id, access.global, access.deniedGlobal, administrator, capabilities,
     scope.kind === "global" ? "global" : [scope.context.canonicalRoot, scope.context.root.workspace_id, scope.context.contextVersion]]));
   return { hash, contextVersion: scope.kind === "client" ? scope.context.contextVersion : hash, capabilities };
@@ -233,7 +242,8 @@ export async function requirePortalIdentityMutationTarget(env: Env, actor: Staff
   context: ClientHubCollectionContext, publicId: string, expectedContextVersion: string,
   expectedPrincipalContext: string): Promise<PortalIdentitySummary> {
   checkId(publicId);
-  if (!context.root.workspace_id || context.root.source_id !== "project-alpha:primary")
+  if (!context.root.workspace_id || context.root.root_namespace !== "business"
+    || !isBusinessProjectionSource(context.root.source_id))
     throw new HTTPException(404, { message: "Portal workspace access is unavailable for this client" });
   if (context.contextVersion !== expectedContextVersion)
     throw new HTTPException(409, { message: "Client mapping or permissions changed. Refresh the client workspace to continue" });

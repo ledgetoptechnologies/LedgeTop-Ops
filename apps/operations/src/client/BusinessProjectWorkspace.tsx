@@ -8,6 +8,7 @@ import { ClientBusinessActivity } from "./ClientBusinessActivity";
 import { ClientAuditTimeline } from "./ClientAuditTimeline";
 import { ProjectFeedbackHistory } from "./ProjectFeedbackHistory";
 import { ProjectOperationalWorkspace } from "./ProjectOperationalWorkspace";
+import { ClientInternalNotes } from "./ClientInternalNotes";
 import { clientDirectoryReturnPath } from "./ClientDirectory";
 import { businessProjectClientPath, clientWorkspaceFilters, readBusinessProjectRoute, type BusinessProjectRoute } from "./business-project-route";
 import "./BusinessProjectWorkspace.css";
@@ -130,6 +131,8 @@ function ProjectWorkspace({ route, feedbackEnabled }: { route: BusinessProjectRo
         contextVersion={detail.contextVersion} contextSignal={pending.current!.signal} onInvalidated={invalidate} />}
       {detail.operationalWorkspaceAvailable === true && <ProjectOperationalWorkspace key={`operations-${revision}`} root={detail.canonicalRoot} projectId={project.id}
         contextVersion={detail.contextVersion} contextSignal={pending.current!.signal} onInvalidated={invalidate} />}
+      <ClientInternalNotes key={`project-notes-${revision}`} root={detail.canonicalRoot} projectId={project.id}
+        contextVersion={detail.contextVersion} contextSignal={pending.current!.signal} onInvalidated={invalidate} />
       {detail.businessActivityAvailable === true && <ClientBusinessActivity key={revision} root={detail.canonicalRoot} projectId={project.id} contextVersion={detail.contextVersion}
         contextSignal={pending.current!.signal} onInvalidated={invalidate} />}
       {detail.auditTimelineAvailable === true && <ClientAuditTimeline key={`audit-${revision}`} root={detail.canonicalRoot} projectId={project.id} contextVersion={detail.contextVersion}

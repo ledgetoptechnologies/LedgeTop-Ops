@@ -38,6 +38,10 @@ async function fixture(page: Page, directory: Handler, activity?: Handler) {
       project: { id: "project-one", name: "Site inspection", description: null, status: "active", start_date: null, end_date: null, created_at: null, manager: null },
       businessActivityAvailable: true,
       linkedContact: null, availability: { linkedContact: "not_projected", siteContacts: "not_projected", billingContacts: "not_projected", projectMemory: "not_projected" } } });
+    if (url.pathname === `${clientApi}/business-projects/project-one/internal-notes` && route.request().method() === "GET") return route.fulfill({ json: {
+      canonicalRoot: { sourceId: source, rootNamespace: "business", kind: "organization", publicId: "42" },
+      contextVersion: "project-context", projectId: "project-one", notes: [], capabilities: { canManageNotes: false },
+    } });
     return route.fulfill({ status: 404, json: { error: "Unsupported fixture route" } });
   });
   return calls;

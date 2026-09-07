@@ -127,9 +127,14 @@ second business database, or Viewer work as part of this audit.
   sign-in readiness, with 4/4 desktop/mobile wording and revocation cases passed.
   No production access settings or client data were changed during inspection.
 
-- The second Project Alpha producer (Ledge Top Technologies) remains a
-  separately gated enrollment. Do not infer that source-scoped code means the
-  second production source is active.
+- The owner authorized the second Project Alpha producer (Ledge Top
+  Technologies) for staged enrollment on September 7, 2026. A read-only live
+  check that day found the existing Ops Sync Access application still admits
+  one exact LTDS service token and the LTT Project Alpha connection is not yet
+  configured. Keep LTT pending and hidden until its separate service token,
+  snapshot key, Ed25519 key, source-qualified receipt, and historical snapshot
+  pass live acceptance. Do not infer that authorization or source-scoped code
+  means the second production source is active.
 - Default-on portal eligibility/workspace creation has local evidence in parts
   of the Client flow, but production reconciliation, revocation, and both
   domains still require an explicit live acceptance gate. A contact record is

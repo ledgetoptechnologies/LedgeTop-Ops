@@ -104,7 +104,7 @@ describe("bounded portal identity reads", () => {
     await expect(listPortalIdentityPage(env, actor, globalScope)).rejects.toMatchObject({ status: 403 });
   }, 30_000);
 
-  it("shows a shared global login independently in a secondary workspace without enabling primary-only actions", async () => {
+  it("keeps a shared login source-qualified while permitting the same scoped portal controls for an active secondary workspace", async () => {
     const { db, env } = await fixture();
     await link(db, "identity-one", "workspace-one");
     await link(db, "identity-one", "workspace-two");
@@ -116,10 +116,10 @@ describe("bounded portal identity reads", () => {
     expect(primary.items[0]).toMatchObject({ identity_id: "identity-one", binding_status: "linked", has_workspace_access: 1 });
     expect(secondary.items[0]).toMatchObject({ workspace_id: "workspace-two", identity_id: "identity-one",
       binding_status: "linked", has_workspace_access: 1,
-      invitation: null,
-      actions: { canRetryInvitation: false, canCreateEmailBlock: false, canReviewEligibilityBlocks: false } });
-    expect(secondary.capabilities).toEqual({ canManagePortal: false, canManageEligibilityBlocks: false, canManageWorkspaceAccess: false,
-      canReviewIdentityDetails: false });
+      invitation: { id: "secondary-invitation" },
+      actions: { canReviewEligibilityBlocks: true, canSuspendWorkspaceAccess: true } });
+    expect(secondary.capabilities).toEqual({ canManagePortal: true, canManageEligibilityBlocks: true, canManageWorkspaceAccess: true,
+      canReviewIdentityDetails: true });
     expect(await db.prepare("SELECT count(*) n FROM portal_v2_identities").first("n")).toBe(1);
     expect(await db.prepare("SELECT count(*) n FROM portal_v2_workspace_memberships").first("n")).toBe(2);
   }, 30_000);

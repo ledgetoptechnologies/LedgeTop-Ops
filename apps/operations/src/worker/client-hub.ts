@@ -558,7 +558,7 @@ export function registerClientHubRoutes(app: App): void {
     if (!isPortalIdentityCollection(collection)) throw new HTTPException(400, { message: "Portal identity collection is invalid" });
     const principal = c.get("principal");
     const context = await resolveDetailContext(c.env, principal, kind, c.req.param("publicId"), c.req.param("sourceId"), c.req.param("rootNamespace"));
-    if (context.root.source_id !== "project-alpha:primary")
+    if (context.root.root_namespace !== "business" || !isBusinessProjectionSource(context.root.source_id))
       throw new HTTPException(404, { message: "Portal identity details are unavailable for this source" });
     if (!context.root.workspace_id) throw new HTTPException(404, { message: "Client portal workspace is unavailable" });
     const query = portalIdentityQuery(new URL(c.req.url).searchParams);
