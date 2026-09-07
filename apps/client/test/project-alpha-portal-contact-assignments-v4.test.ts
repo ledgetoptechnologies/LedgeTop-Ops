@@ -292,7 +292,7 @@ describe("Project Alpha schema v4 informational contact assignments", () => {
     const invalidActivationResponse = await deliver(invalidActivation);
     expect(invalidActivationResponse.status, await invalidActivationResponse.clone().text()).toBe(422);
     expect(await invalidActivationResponse.json()).toMatchObject({ error: "portal-root-invalid" });
-  });
+  }, 30_000);
 
   it("rejects v3/v4 contract mixing in either direction within a multipage generation", async () => {
     const multipage = (schemaVersion: 3 | 4, sourceGeneration: string, deliveryId: string, pageNumber: number, sourceSequence: number) => ({

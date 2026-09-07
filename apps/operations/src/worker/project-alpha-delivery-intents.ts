@@ -10,6 +10,11 @@ import { projectAlphaDeliveryPrincipalGuard, resolveProjectAlphaDeliveryPrincipa
 import { nativeDeliveryNotificationsReady, stagePortalDeliveryNotificationStatements } from "./portal-delivery-notification-batches";
 import { d1TablesPresent } from "./schema-readiness";
 
+const NATIVE_DELIVERY_RECIPIENT_EVENT_TABLES = [
+  "native_delivery_recipient_events",
+  "native_delivery_recipient_event_state",
+] as const;
+
 const PATH = "/api/internal/project-alpha/delivery-intents";
 const PREFLIGHT_PATH = `${PATH}/preflight`;
 const REVOKE_PATH = `${PATH}/revoke`;
@@ -308,6 +313,11 @@ export async function applyProjectAlphaDeliveryIntent(env: Env, payload: unknown
     if(authorityProof.sourceId!==source.sourceId)throw new HTTPException(409,{message:"Project Alpha delivery authority changed"});
     await assertSourceProof(database,authorityProof);
   }
+  // Deploy migration 0202 before this producer. A successful portal
+  // acceptance without its recipient ledger event is not recoverable from a
+  // later receipt replay, so fail closed rather than silently omitting it.
+  if(parsed.data.accessMode==="portal"&&!await d1TablesPresent(env.DELIVERY_DB,NATIVE_DELIVERY_RECIPIENT_EVENT_TABLES))
+    throw new HTTPException(503,{message:"Native delivery recipient history is unavailable"});
   const prior=await priorReceipt(database,source,auth),authorityFence=authorityProof?sourceFence(database,authorityProof):undefined;
   if (prior) return prior;
   if(parsed.data.accessMode==="portal"&&(env.CLIENT_PORTAL_HIERARCHY_V2_ENABLED!=="true"||env.AUTHENTICATED_DELIVERY_GRANTS_ENABLED!=="true"))
@@ -323,7 +333,7 @@ export async function applyProjectAlphaDeliveryIntent(env: Env, payload: unknown
     if(!Number.isFinite(expiry)||expiry<=Date.now()+5*60*1000||expiry>Date.now()+366*24*60*60*1000)
       throw new HTTPException(400,{message:"Portal delivery expiry is invalid"});
   }
-  const bindings=await database.prepare(`SELECT b.id,b.workspace_id,b.source_version,b.r2_prefix,cp.active_generation_id FROM portal_v2_folder_bindings b
+  const bindings=await database.prepare(`SELECT b.id,b.workspace_id,b.source_version,b.r2_prefix,b.owner_scope_type,b.owner_public_id,cp.active_generation_id FROM portal_v2_folder_bindings b
     JOIN portal_v2_workspaces w ON w.id=b.workspace_id AND w.status='active'
       AND w.project_alpha_source_id=?
     JOIN portal_v2_directory_checkpoints cp ON cp.workspace_id=b.workspace_id
@@ -331,7 +341,7 @@ export async function applyProjectAlphaDeliveryIntent(env: Env, payload: unknown
     JOIN portal_v2_directory_entities e ON e.workspace_id=b.workspace_id AND e.generation_id=cp.active_generation_id
       AND e.entity_type=b.owner_scope_type AND e.public_id=b.owner_public_id AND e.active=1 AND e.source_version=b.source_version
     WHERE b.status='active' AND b.revoked_at IS NULL AND b.owner_scope_type=? AND b.owner_public_id=? LIMIT 2`)
-    .bind(source.sourceId,parsed.data.scope.type,parsed.data.scope.publicId).all<{id:string;workspace_id:string;source_version:string;active_generation_id:string;r2_prefix:string}>();
+    .bind(source.sourceId,parsed.data.scope.type,parsed.data.scope.publicId).all<{id:string;workspace_id:string;source_version:string;active_generation_id:string;r2_prefix:string;owner_scope_type:"organization"|"department"|"client"|"project";owner_public_id:string}>();
   if(bindings.results.length!==1) throw new HTTPException(409,{message:"Delivery scope is not uniquely bound"});
   const binding=bindings.results[0]!;
   const audience=parsed.data.audience.type==="principal"
@@ -393,6 +403,12 @@ export async function applyProjectAlphaDeliveryIntent(env: Env, payload: unknown
     database.prepare(`INSERT INTO project_alpha_delivery_intent_audit(id,receipt_id,action,actor_id,details_json) VALUES(?,?,'portal.accepted',?,?)`).bind(crypto.randomUUID(),receiptId,auth.deliveryId,JSON.stringify({reused:Boolean(exact),scopeType:parsed.data.scope.type,scopePublicId:parsed.data.scope.publicId,audienceType:parsed.data.audience.type,audiencePublicId:parsed.data.audience.publicId})),
     database.prepare(`INSERT INTO project_alpha_delivery_portal_notification_outbox(id,receipt_id,grant_id,principal_public_id,principal_source_version,event_type) VALUES(?,?,?,?,?,'granted')`).bind(outboxId,receiptId,grantId,parsed.data.audience.publicId,audience.source_version),
   );
+  statements.push(database.prepare(`INSERT INTO native_delivery_recipient_events
+    (id,source_id,workspace_id,receipt_id,grant_id,grant_version,folder_binding_id,binding_source_version,
+      owner_scope_type,owner_public_id,r2_prefix,principal_public_id,principal_source_version,event_type)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'grant_accepted')`)
+    .bind(crypto.randomUUID(),source.sourceId,binding.workspace_id,receiptId,grantId,exact?.grant_version??1,binding.id,binding.source_version,
+      binding.owner_scope_type,binding.owner_public_id,binding.r2_prefix,parsed.data.audience.publicId,audience.source_version));
   if(staging)statements.push(...stagePortalDeliveryNotificationStatements(database,outboxId));
   try{await database.batch(statements);}catch{
     const raced=await priorReceipt(database,source,auth);

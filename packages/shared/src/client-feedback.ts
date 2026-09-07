@@ -138,7 +138,9 @@ export interface PortalNotificationHistoryPage {
   coverage: {
     requests: "included" | "omitted_feature_disabled" | "omitted_schema_unavailable";
     feedback: "included" | "omitted_feature_disabled" | "omitted_schema_unavailable";
-    delivery: "included_legacy_portal_notices" | "omitted_no_explicit_grant_authority";
+    /** Native coverage contains PA accepted-grant notices only; it does not claim file-change notices. */
+    delivery: "included_legacy_portal_notices" | "included_project_alpha_grant_notices" |
+      "omitted_no_explicit_grant_authority" | "omitted_schema_unavailable";
   };
   items: PortalNotificationHistoryItem[];
   nextCursor: string | null;

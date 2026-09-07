@@ -117,3 +117,17 @@ test("the bounded joined runner is wired into the root package", () => {
   assert.equal(packageJson.scripts["test:portal:joined"], "node scripts/client-portal-joined-acceptance.mjs");
   assert.equal(exists("scripts/client-portal-joined-acceptance.mjs"), true);
 });
+
+test("native delivery bell has an explicit migration-first acceptance window", () => {
+  assert.equal(exists("apps/client/migrations/0202_native_delivery_recipient_events.sql"), true);
+  assert.match(manifest, /R8b — Native delivery bell/);
+  assert.match(manifest, /0202_native_delivery_recipient_events\.sql/);
+  assert.match(manifest, /missing schema returns 503/);
+  assert.match(manifest, /guest delivery and revocation/);
+  assert.match(manifest, /cursor\s+version 3/);
+  assert.match(manifest, /Rollback preserves the event and per-identity state tables/);
+  const runbook = read("docs/operations/native-delivery-recipient-history.md");
+  assert.match(runbook, /SMTP/);
+  assert.match(runbook, /file-change/);
+  assert.match(runbook, /LTDS-only/);
+});

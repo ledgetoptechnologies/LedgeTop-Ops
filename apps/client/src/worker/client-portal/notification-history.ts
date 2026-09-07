@@ -4,7 +4,7 @@ import type {PortalNotificationHistoryItem,PortalNotificationHistoryPage} from '
 import type {Env} from '../types';
 import type {ClientPortalSession,VerifiedClientPrincipal} from './types';
 import type {EffectivePortalWorkspaceContext,NativePortalReadContext} from './workspace-v2';
-import {authorizeEffectiveWorkspaceNotification,resolveNativePortalWorkspaceReadContext} from './workspace-v2';
+import {authorizeEffectiveWorkspaceNotification,resolveNativePortalWorkspaceReadContext,eligiblePortalShellQuery} from './workspace-v2';
 import {nativeRequestSchemaReady,nativeServiceRequestsEnabled,resolveNativeRequestAuthority} from './native-request-authority';
 import {readFeedbackRecord} from './feedback-store';
 import {reauthorizeFeedbackRecipient} from './feedback-target';
@@ -13,10 +13,16 @@ import {nativeFeedbackSchemaAvailable} from './native-feedback-store';
 import {reauthorizeNativeFeedbackRecipient} from './native-feedback-target';
 import {nativeFeedbackEnabledForContext,nativeFeedbackNotificationsSchemaAvailable} from './native-feedback-authority';
 import {decodeNotificationHistoryCursor,encodeNotificationHistoryCursor,notificationHistoryScope} from './notification-history-cursor';
+import {d1TablesPresent} from '../schema-readiness';
+import {authorizeNativePortalReadTarget} from './workspace-v2';
+import {readNativeTargetScopes,NATIVE_PORTAL_TARGET_SCOPES_SQL} from './native-portal-scopes';
+import {projectAccessTermsSql} from './project-access-terms';
+import {portalProjectionSourceGuard} from '../project-alpha-portal-authority';
+import {portalRootAccessAllowedSql} from './workspace-access-policy';
 
 type Variables={clientSession:ClientPortalSession;clientPrincipal:VerifiedClientPrincipal;clientWorkspace:EffectivePortalWorkspaceContext|null};
 const PAGE=25,TTL=15*60_000;
-type Raw={rowid:number;id:string;kind:'request'|'feedback'|'delivery';title:string;body:string;actionPath:string|null;readAt:string|null;createdAt:string};
+type Raw={rowid:number;id:string;kind:'request'|'feedback'|'delivery'|'native_delivery';title:string;body:string;actionPath:string|null;readAt:string|null;createdAt:string};
 type LedgerCoverage='included'|'omitted_feature_disabled'|'omitted_schema_unavailable';
 type Dependencies={notificationSchemaAvailable:(env:Env)=>Promise<boolean>;feedbackSchemaAvailable:(env:Env)=>Promise<boolean>};
 export function notificationHistoryCoverage(input:{native:boolean;notifications:boolean;primaryFeedback:boolean;nativeRequestsEnabled:boolean;nativeRequestSchema:boolean;nativeFeedbackEnabled:boolean;nativeFeedbackSchema:boolean}):{requests:LedgerCoverage;feedback:LedgerCoverage}{
@@ -24,6 +30,7 @@ export function notificationHistoryCoverage(input:{native:boolean;notifications:
   return {requests:!input.nativeRequestsEnabled?'omitted_feature_disabled':!input.notifications||!input.nativeRequestSchema?'omitted_schema_unavailable':'included',
     feedback:!input.nativeFeedbackEnabled?'omitted_feature_disabled':!input.nativeFeedbackSchema?'omitted_schema_unavailable':'included'};
 }
+async function nativeDeliverySchemaAvailable(env:Env){return d1TablesPresent(env.DELIVERY_DB,['native_delivery_recipient_events','native_delivery_recipient_event_state']);}
 const db=(env:Env)=>env.DELIVERY_DB.withSession('first-primary');
 const key=(row:Raw)=>`${row.kind}:${row.id}`;
 // Timestamps and opaque notification keys are ASCII. Use SQLite BINARY order,
@@ -83,6 +90,128 @@ async function feedbackRows(env:Env,principal:VerifiedClientPrincipal,session:Cl
       AND (? IS NULL OR n.created_at<? OR (n.created_at=? AND 'feedback:'||n.id<?)) ORDER BY n.created_at DESC,n.id DESC LIMIT ?`)
     .bind(water,asOf,session.accountId,session.identityId,session.workspaceId??null,workspaceIdentityId,
       principal.issuer,principal.subject,at,at,at,id,PAGE+1).all<Raw>();
+}
+async function nativeDeliveryRows(env:Env,session:ClientPortalSession,water:number,asOf:string,afterKey:[string,string]|undefined){
+  const [at,id]=before(afterKey);
+  return db(env).prepare(`SELECT event.rowid,event.id,'native_delivery' kind,'Delivery access granted' title,
+    'You have been granted access to a Project Alpha delivery.' body,NULL actionPath,state.read_at readAt,event.created_at createdAt
+    FROM native_delivery_recipient_events event
+    LEFT JOIN native_delivery_recipient_event_state state ON state.event_id=event.id AND state.recipient_identity_id=?
+    WHERE event.rowid<=? AND event.created_at<=? AND event.source_id=? AND event.workspace_id=?
+      AND EXISTS(SELECT 1 FROM pa_portal_principals principal JOIN portal_v2_identities identity ON identity.id=?
+        WHERE principal.workspace_id=event.workspace_id AND principal.public_id=event.principal_public_id AND principal.status='active'
+          AND principal.source_version=event.principal_source_version AND identity.status='active' AND identity.revoked_at IS NULL
+          AND (principal.identity_id=identity.id OR (principal.identity_id IS NULL AND EXISTS(SELECT 1 FROM portal_v2_identity_eligibility_bindings eligibility
+            WHERE eligibility.identity_id=identity.id AND eligibility.workspace_id=event.workspace_id AND eligibility.principal_public_id=event.principal_public_id
+              AND eligibility.principal_source_version=event.principal_source_version AND eligibility.verified_email=identity.verified_email))))
+      AND state.dismissed_at IS NULL
+      AND (? IS NULL OR event.created_at<? OR (event.created_at=? AND 'native_delivery:'||event.id<?))
+    ORDER BY event.created_at DESC,event.id DESC LIMIT ?`).bind(session.nativePortalIdentityId,water,asOf,session.nativeSourceId,session.workspaceId,
+      session.nativePortalIdentityId,at,at,at,id,PAGE+1).all<Raw>();
+}
+async function authorizeNativeDelivery(env:Env,principal:VerifiedClientPrincipal,session:ClientPortalSession,row:Raw,asOf:string){
+  if(!session.nativeSourceId||!session.workspaceId||!session.nativePortalIdentityId)return null;
+  const event=await db(env).prepare(`SELECT event.id,event.grant_id grantId,event.folder_binding_id bindingId,event.created_at createdAt,
+      event.owner_scope_type ownerScopeType,event.owner_public_id ownerPublicId,event.r2_prefix prefix
+    FROM native_delivery_recipient_events event
+    JOIN project_alpha_delivery_portal_grants grant_record ON grant_record.id=event.grant_id AND grant_record.workspace_id=event.workspace_id
+      AND grant_record.grant_version=event.grant_version AND grant_record.folder_binding_id=event.folder_binding_id
+      AND grant_record.binding_source_version=event.binding_source_version
+      AND grant_record.audience_type='principal' AND grant_record.audience_public_id=event.principal_public_id
+      AND grant_record.audience_source_version=event.principal_source_version
+      AND grant_record.status='active' AND grant_record.revoked_at IS NULL
+      AND (grant_record.expires_at IS NULL OR datetime(grant_record.expires_at)>datetime('now'))
+    JOIN project_alpha_delivery_intent_receipts receipt ON receipt.receipt_id=event.receipt_id AND receipt.project_alpha_source_id=event.source_id
+      AND receipt.resource_id=event.grant_id AND receipt.access_mode='portal' AND receipt.status='accepted'
+    JOIN portal_v2_folder_bindings binding ON binding.id=event.folder_binding_id AND binding.workspace_id=event.workspace_id
+      AND binding.source_version=event.binding_source_version AND binding.owner_scope_type=event.owner_scope_type
+      AND binding.owner_public_id=event.owner_public_id AND binding.r2_prefix=event.r2_prefix AND binding.status='active' AND binding.revoked_at IS NULL
+    JOIN pa_portal_principals principal_record ON principal_record.workspace_id=event.workspace_id AND principal_record.public_id=event.principal_public_id
+      AND principal_record.source_version=event.principal_source_version AND principal_record.status='active'
+    JOIN portal_v2_identities current_identity ON current_identity.id=? AND current_identity.status='active' AND current_identity.revoked_at IS NULL
+    LEFT JOIN portal_v2_identity_eligibility_bindings eligibility ON eligibility.identity_id=current_identity.id AND eligibility.workspace_id=event.workspace_id
+      AND eligibility.principal_public_id=event.principal_public_id AND eligibility.principal_source_version=event.principal_source_version AND eligibility.verified_email=current_identity.verified_email
+    WHERE (principal_record.identity_id=current_identity.id
+      OR (principal_record.identity_id IS NULL AND eligibility.identity_id IS NOT NULL))
+      AND lower(principal_record.email_hint)=lower(current_identity.verified_email)
+      AND event.id=? AND event.source_id=? AND event.workspace_id=? AND event.event_type='grant_accepted' AND event.created_at<=?`)
+    .bind(session.nativePortalIdentityId,row.id,session.nativeSourceId,session.workspaceId,asOf).first<{id:string;grantId:string;bindingId:string;createdAt:string;ownerScopeType:string;ownerPublicId:string;prefix:string}>();
+  if(!event||event.createdAt!==row.createdAt)return null;
+  const context=await resolveNativePortalWorkspaceReadContext(env,principal,session.workspaceId);
+  if(!context||context.sourceId!==session.nativeSourceId||context.identityId!==session.nativePortalIdentityId
+    ||!await authorizeNativePortalReadTarget(env,context,'delivery.view',{scopeType:'folder',publicId:event.bindingId}))return null;
+  return event;
+}
+async function nativeDeliveryMutationGuard(env:Env,principal:VerifiedClientPrincipal,session:ClientPortalSession,eventId:string){
+  if(!session.workspaceId||!session.nativePortalIdentityId)return null;
+  const context=await resolveNativePortalWorkspaceReadContext(env,principal,session.workspaceId);if(!context||context.identityId!==session.nativePortalIdentityId||context.sourceId!==session.nativeSourceId)return null;
+  const membership=await db(env).prepare('SELECT id,source_type FROM portal_v2_workspace_memberships WHERE workspace_id=? AND identity_id=? AND source_version=? AND status=\'active\' AND revoked_at IS NULL')
+    .bind(context.workspaceId,context.identityId,context.membershipSourceVersion).first<{id:string;source_type:string}>();if(!membership)return null;
+  const event=await db(env).prepare(`SELECT folder_binding_id bindingId FROM native_delivery_recipient_events WHERE id=? AND workspace_id=? AND source_id=?`).bind(eventId,session.workspaceId,session.nativeSourceId).first<{bindingId:string}>();
+  const target=event?(await readNativeTargetScopes(env,context,[{scopeType:'folder',publicId:event.bindingId}],{retention:'structural'})).get(`folder:${event.bindingId}`):null;if(!target)return null;
+  const authority=portalProjectionSourceGuard(context.authority),parts=[authority.sql],bindings:(string|number|null)[]=[...authority.bindings];
+  const scopes=JSON.stringify([...target.scopes]);
+  const termsProject='(SELECT project_public_id FROM portal_project_access_terms WHERE id=allow_record.access_terms_id)';
+  const expired=JSON.stringify(target.proofRows.filter(row=>row.entity_type==='project'&&row.retained===0).map(row=>row.public_id));
+  const liveAllowTerms=projectAccessTermsSql({termsId:'allow_record.access_terms_id',workspaceId:'allow_record.workspace_id',projectId:termsProject,legacyRetained:'1'});
+  // Re-evaluate the complete canonical lineage in the write, including relation
+  // edges, retention, generation and binding version. Merely checking the old
+  // list of ancestors misses a newly inserted narrower deny scope.
+  const scopeQuery=NATIVE_PORTAL_TARGET_SCOPES_SQL.replace(/\?([1-5])/g,(_match,index:string)=>
+    `(SELECT ${['targets','workspace','generation','relations','maximum'][Number(index)-1]} FROM native_inputs)`);
+  const scopeProof=JSON.stringify(target.proofRows.map(row=>[row.target_type,row.target_id,row.entity_type,row.public_id,
+    row.parent_public_id,row.source_version,row.depth,row.display_name,row.binding_version,row.retained]));
+  parts.push(`EXISTS(WITH native_inputs AS (SELECT ? targets,? workspace,? generation,? relations,? maximum),
+    current_scopes AS (${scopeQuery}) SELECT 1 WHERE (SELECT json_group_array(json_array(target_type,target_id,entity_type,public_id,
+      parent_public_id,source_version,depth,display_name,binding_version,retained)) FROM current_scopes)=?)`);
+  bindings.push(JSON.stringify([{scopeType:'folder',publicId:event!.bindingId}]),context.workspaceId,context.generationId,
+    env.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED==='true'?1:0,66,scopeProof);
+  parts.push(`EXISTS(SELECT 1 FROM portal_v2_workspaces workspace
+    JOIN pa_portal_workspace_sources source ON source.workspace_id=workspace.id AND source.projection_source_id=workspace.project_alpha_source_id
+    JOIN portal_v2_workspace_memberships membership ON membership.workspace_id=workspace.id AND membership.identity_id=?
+      AND membership.status='active' AND membership.revoked_at IS NULL AND (membership.expires_at IS NULL OR datetime(membership.expires_at)>datetime('now'))
+    JOIN portal_v2_identities identity ON identity.id=membership.identity_id AND identity.status='active' AND identity.revoked_at IS NULL
+    WHERE workspace.id=? AND workspace.project_alpha_source_id=? AND workspace.status='active' AND workspace.legacy_account_id IS NULL
+      AND workspace.root_type=? AND COALESCE(workspace.pa_organization_public_id,workspace.pa_client_public_id)=?
+      AND ${portalRootAccessAllowedSql(env.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED==='true','workspace')}
+      AND identity.issuer=? AND identity.subject=? AND identity.verified_email=? AND membership.source_version=? AND membership.id=? AND membership.source_type=?
+      AND (membership.source_type<>'project_alpha' OR EXISTS(SELECT 1 FROM pa_portal_principals member_principal
+        WHERE member_principal.workspace_id=workspace.id AND member_principal.status='active'
+          AND member_principal.source_version=membership.source_version AND lower(member_principal.email_hint)=lower(identity.verified_email)
+          AND (member_principal.identity_id=identity.id OR (member_principal.identity_id IS NULL AND EXISTS(SELECT 1 FROM portal_v2_identity_eligibility_bindings eligibility
+            WHERE eligibility.workspace_id=workspace.id AND eligibility.identity_id=identity.id
+              AND eligibility.principal_public_id=member_principal.public_id AND eligibility.principal_source_version=member_principal.source_version
+              AND eligibility.verified_email=identity.verified_email)))))
+      AND (EXISTS(${eligiblePortalShellQuery(false,'workspace.id','identity.id')}) OR EXISTS(SELECT 1 FROM portal_v2_entitlements allow_record
+        WHERE allow_record.workspace_id=workspace.id AND allow_record.identity_id=identity.id AND allow_record.capability='workspace.view'
+          AND allow_record.effect='allow' AND allow_record.scope_type='workspace' AND allow_record.scope_public_id=workspace.id
+          AND allow_record.status='active' AND allow_record.revoked_at IS NULL AND datetime(allow_record.valid_from)<=datetime('now')
+          AND (allow_record.expires_at IS NULL OR datetime(allow_record.expires_at)>datetime('now')) AND ${liveAllowTerms})))`);
+  bindings.push(context.identityId,context.workspaceId,context.sourceId,context.rootType,context.rootPublicId,
+    principal.issuer,principal.subject,context.verifiedEmail,context.membershipSourceVersion,membership.id,membership.source_type);
+  parts.push(`NOT EXISTS(SELECT 1 FROM portal_v2_identity_denials denial WHERE denial.identity_id=? AND denial.status='active' AND denial.revoked_at IS NULL
+    AND datetime(denial.valid_from)<=datetime('now') AND (denial.expires_at IS NULL OR datetime(denial.expires_at)>datetime('now'))
+    AND (denial.scope_type='global' OR (denial.workspace_id=? AND denial.scope_type||':'||denial.scope_public_id IN (SELECT value FROM json_each(?)))))`);
+  bindings.push(context.identityId,context.workspaceId,scopes);
+  parts.push(`NOT EXISTS(SELECT 1 FROM portal_v2_entitlements denial WHERE denial.workspace_id=? AND denial.identity_id=?
+    AND denial.effect='deny' AND denial.status='active' AND denial.revoked_at IS NULL AND datetime(denial.valid_from)<=datetime('now')
+    AND (denial.expires_at IS NULL OR datetime(denial.expires_at)>datetime('now'))
+    AND ((denial.capability='delivery.view' AND denial.scope_type||':'||denial.scope_public_id IN (SELECT value FROM json_each(?)))
+      OR (denial.capability='workspace.view' AND denial.scope_type='workspace' AND denial.scope_public_id=denial.workspace_id)))`);
+  bindings.push(context.workspaceId,context.identityId,scopes);
+  parts.push(`EXISTS(SELECT 1 FROM portal_v2_entitlements allow_record WHERE allow_record.workspace_id=? AND allow_record.identity_id=?
+    AND allow_record.capability='delivery.view' AND allow_record.effect='allow' AND allow_record.status='active' AND allow_record.revoked_at IS NULL
+    AND datetime(allow_record.valid_from)<=datetime('now') AND (allow_record.expires_at IS NULL OR datetime(allow_record.expires_at)>datetime('now'))
+    AND allow_record.scope_type||':'||allow_record.scope_public_id IN (SELECT value FROM json_each(?)) AND ${liveAllowTerms}
+    AND ((allow_record.access_terms_id IS NULL AND (json_array_length(?)=0 OR (allow_record.scope_type='project' AND allow_record.source_type IN ('project_alpha','legacy'))))
+      OR (allow_record.access_terms_id IS NOT NULL AND 'project:'||${termsProject} IN (SELECT value FROM json_each(?))
+        AND NOT EXISTS(SELECT 1 FROM json_each(?) expired WHERE expired.value<>${termsProject}))))`);
+  bindings.push(context.workspaceId,context.identityId,scopes,expired,scopes,expired);
+  // Materialized guard CTEs remain in the same atomic statement, but keep each
+  // independently bounded expression below D1's expression-depth limit.
+  return {ctes:parts.map((part,index)=>`native_guard_${index} AS MATERIALIZED(SELECT (${part}) ok)`).join(','),
+    from:parts.map((_part,index)=>`CROSS JOIN native_guard_${index}`).join(' '),
+    sql:parts.map((_part,index)=>`native_guard_${index}.ok=1`).join(' AND '),bindings};
 }
 async function authorizeRequest(env:Env,principal:VerifiedClientPrincipal,session:ClientPortalSession,workspace:EffectivePortalWorkspaceContext|null,sourceId:string,row:Raw,asOf:string){
   const record=await db(env).prepare(`SELECT r.id,r.project_id projectId,r.portal_project_public_id portalProjectId,r.catalog_source_id sourceId,
@@ -147,12 +276,12 @@ async function authorizeFeedback(env:Env,principal:VerifiedClientPrincipal,sessi
   return final&&finalResolved&&final.updatedAt<=asOf&&final.updatedAt===feedback.updatedAt&&final.revision===feedback.revision&&final.status===feedback.status?final:null;
 }
 
-async function currentCoverage(env:Env,session:ClientPortalSession,native:NativePortalReadContext|null,deps:Dependencies):Promise<{requests:LedgerCoverage;feedback:LedgerCoverage}>{
+async function currentCoverage(env:Env,session:ClientPortalSession,native:NativePortalReadContext|null,deps:Dependencies):Promise<{requests:LedgerCoverage;feedback:LedgerCoverage;nativeDelivery:LedgerCoverage}>{
   const notifications=await deps.notificationSchemaAvailable(env);
-  if(!session.nativeSourceId)return notificationHistoryCoverage({native:false,notifications,primaryFeedback:await deps.feedbackSchemaAvailable(env),nativeRequestsEnabled:false,nativeRequestSchema:false,nativeFeedbackEnabled:false,nativeFeedbackSchema:false});
+  if(!session.nativeSourceId)return {...notificationHistoryCoverage({native:false,notifications,primaryFeedback:await deps.feedbackSchemaAvailable(env),nativeRequestsEnabled:false,nativeRequestSchema:false,nativeFeedbackEnabled:false,nativeFeedbackSchema:false}),nativeDelivery:'omitted_feature_disabled'};
   const nativeRequestsEnabled=nativeServiceRequestsEnabled(env),nativeFeedbackEnabled=!!native&&nativeFeedbackEnabledForContext(env,native);
-  return notificationHistoryCoverage({native:true,notifications,primaryFeedback:false,nativeRequestsEnabled,nativeRequestSchema:nativeRequestsEnabled&&await nativeRequestSchemaReady(env),nativeFeedbackEnabled,
-    nativeFeedbackSchema:nativeFeedbackEnabled&&await nativeFeedbackSchemaAvailable(env)&&await nativeFeedbackNotificationsSchemaAvailable(env)});
+  return {...notificationHistoryCoverage({native:true,notifications,primaryFeedback:false,nativeRequestsEnabled,nativeRequestSchema:nativeRequestsEnabled&&await nativeRequestSchemaReady(env),nativeFeedbackEnabled,
+    nativeFeedbackSchema:nativeFeedbackEnabled&&await nativeFeedbackSchemaAvailable(env)&&await nativeFeedbackNotificationsSchemaAvailable(env)}),nativeDelivery:await nativeDeliverySchemaAvailable(env)?'included':'omitted_schema_unavailable'};
 }
 export function createClientNotificationHistoryRouter(deps:Dependencies){const router=new Hono<{Bindings:Env;Variables:Variables}>();
   router.get('/notification-history',async c=>{const query=c.req.queries();if(Object.keys(query).some(k=>k!=='cursor')||Object.values(query).some(v=>v.length!==1))throw new HTTPException(400,{message:'Notification query is invalid'});
@@ -162,19 +291,70 @@ export function createClientNotificationHistoryRouter(deps:Dependencies){const r
     const readiness=await currentCoverage(c.env,session,resolved.context,deps),coverage=cursor?.coverage??readiness;
     if(cursor&&coverage.requests==='included'&&readiness.requests!=='included')throw new HTTPException(readiness.requests==='omitted_schema_unavailable'?503:409,{message:'Notification history availability changed. Refresh this workspace.'});
     if(cursor&&coverage.feedback==='included'&&readiness.feedback!=='included')throw new HTTPException(readiness.feedback==='omitted_schema_unavailable'?503:409,{message:'Notification history availability changed. Refresh this workspace.'});
+    if(cursor&&coverage.nativeDelivery==='included'&&readiness.nativeDelivery!=='included')throw new HTTPException(503,{message:'Notification history availability changed. Refresh this workspace.'});
     const asOf=cursor?.asOf??new Date().toISOString(),requestWater=coverage.requests!=='included'?0:cursor?.water.requests??Number(await db(c.env).prepare('SELECT COALESCE(MAX(rowid),0) water FROM client_portal_notifications').first('water')??0),
-      feedbackWater=coverage.feedback!=='included'?0:cursor?.water.feedback??Number(await db(c.env).prepare(session.nativeSourceId?'SELECT COALESCE(MAX(rowid),0) water FROM portal_native_feedback_notifications':'SELECT COALESCE(MAX(rowid),0) water FROM client_feedback_notifications').first('water')??0);
-    const [requests,feedback]=await Promise.all([coverage.requests==='included'?requestRows(c.env,session,requestWater,asOf,cursor?.after):Promise.resolve({results:[]} as {results:Raw[]}),coverage.feedback==='included'?feedbackRows(c.env,principal,session,workspace?.identityId??null,feedbackWater,asOf,cursor?.after):Promise.resolve({results:[]} as {results:Raw[]})]);
-    const raw=[...requests.results,...feedback.results].sort((a,b)=>binaryDescending(a.createdAt,b.createdAt)||binaryDescending(key(a),key(b))),examined=raw.slice(0,PAGE),items:PortalNotificationHistoryItem[]=[];
+      feedbackWater=coverage.feedback!=='included'?0:cursor?.water.feedback??Number(await db(c.env).prepare(session.nativeSourceId?'SELECT COALESCE(MAX(rowid),0) water FROM portal_native_feedback_notifications':'SELECT COALESCE(MAX(rowid),0) water FROM client_feedback_notifications').first('water')??0),
+      nativeDeliveryWater=coverage.nativeDelivery!=='included'?0:cursor?.water.nativeDelivery??Number(await db(c.env).prepare('SELECT COALESCE(MAX(rowid),0) water FROM native_delivery_recipient_events').first('water')??0);
+    const [requests,feedback,nativeDelivery]=await Promise.all([coverage.requests==='included'?requestRows(c.env,session,requestWater,asOf,cursor?.after):Promise.resolve({results:[]} as {results:Raw[]}),coverage.feedback==='included'?feedbackRows(c.env,principal,session,workspace?.identityId??null,feedbackWater,asOf,cursor?.after):Promise.resolve({results:[]} as {results:Raw[]}),coverage.nativeDelivery==='included'?nativeDeliveryRows(c.env,session,nativeDeliveryWater,asOf,cursor?.after):Promise.resolve({results:[]} as {results:Raw[]})]);
+    const raw=[...requests.results,...feedback.results,...nativeDelivery.results].sort((a,b)=>binaryDescending(a.createdAt,b.createdAt)||binaryDescending(key(a),key(b))),examined=raw.slice(0,PAGE),items:PortalNotificationHistoryItem[]=[];
     for(const row of examined){if(row.kind==='request'){const current=await authorizeRequest(c.env,principal,session,workspace,resolved.scope.sourceId,row,asOf);if(!current)continue;
         items.push({id:row.id,kind:'request',title:row.title,body:row.body,actionPath:cleanPath(row.actionPath),readAt:row.readAt,createdAt:row.createdAt,mutationPath:`/api/client/notifications/${encodeURIComponent(row.id)}`});}
       else if(row.kind==='delivery'){const current=await authorizeDelivery(c.env,principal,session,workspace,resolved.scope.sourceId,row,asOf);if(!current)continue;
         items.push({id:row.id,kind:'delivery',title:current.title,body:current.body,actionPath:cleanPath(current.actionPath),readAt:current.readAt,createdAt:current.createdAt,mutationPath:`/api/client/notifications/${encodeURIComponent(row.id)}`});}
+      else if(row.kind==='native_delivery'){const current=await authorizeNativeDelivery(c.env,principal,session,row,asOf);if(!current)continue;
+        items.push({id:row.id,kind:'delivery',title:row.title,body:row.body,actionPath:null,readAt:row.readAt,createdAt:row.createdAt,mutationPath:`/api/client/v2/workspaces/${encodeURIComponent(session.workspaceId!)}/native-delivery-notifications/${encodeURIComponent(row.id)}`});}
       else {const current=await authorizeFeedback(c.env,principal,session,row,resolved.context,asOf);if(!current)continue;
         if(row.body!==(current.completionNote??'Your feedback has been handled.'))continue;
         const suffix=session.nativeSourceId?`/api/client/v2/workspaces/${encodeURIComponent(session.workspaceId!)}/feedback-notifications`:'/api/client/feedback-notifications';
         items.push({id:row.id,kind:'feedback',title:row.title,body:row.body,actionPath:`/portal/feedback/${encodeURIComponent(current.id)}${session.workspaceId?`?workspace=${encodeURIComponent(session.workspaceId)}`:''}`,readAt:row.readAt,createdAt:row.createdAt,mutationPath:`${suffix}/${encodeURIComponent(row.id)}`});}}
     const final=await scopeFor(c.env,principal,session,workspace);if(!final||await notificationHistoryScope({...final.scope,identityId:session.nativePortalIdentityId??session.identityId})!==scopeHash)throw new HTTPException(409,{message:'Notification access changed. Refresh this workspace.'});
-    const last=examined.at(-1),nextCursor=raw.length>PAGE&&last?await encodeNotificationHistoryCursor(c.env,principal,{v:2,scope:scopeHash,asOf,coverage,water:{requests:requestWater,feedback:feedbackWater},after:[last.createdAt,key(last)],expires:Date.now()+TTL}):null;
-    const response:PortalNotificationHistoryPage={scope:resolved.scope,asOf,coverage:{...coverage,delivery:!session.nativeSourceId&&coverage.requests==='included'?'included_legacy_portal_notices':'omitted_no_explicit_grant_authority'},items,nextCursor};return c.json(response);
+    const last=examined.at(-1),nextCursor=raw.length>PAGE&&last?await encodeNotificationHistoryCursor(c.env,principal,{v:3,scope:scopeHash,asOf,coverage,water:{requests:requestWater,feedback:feedbackWater,nativeDelivery:nativeDeliveryWater},after:[last.createdAt,key(last)],expires:Date.now()+TTL}):null;
+    const response:PortalNotificationHistoryPage={scope:resolved.scope,asOf,coverage:{...coverage,delivery:session.nativeSourceId?(coverage.nativeDelivery==='included'?'included_project_alpha_grant_notices':'omitted_schema_unavailable'):coverage.requests==='included'?'included_legacy_portal_notices':'omitted_no_explicit_grant_authority'},items,nextCursor};return c.json(response);
   });return router;}
+
+/** Native delivery state is deliberately separate from the immutable producer
+ * event. This adapter never updates mail, batch, receipt, grant, or event rows. */
+export async function mutateNativeDeliveryNotification(env:Env,principal:VerifiedClientPrincipal,session:ClientPortalSession,eventId:string,action:'read'|'dismiss',beforeWrite?:()=>Promise<void>){
+  if(!session.nativeSourceId||!session.workspaceId||!session.nativePortalIdentityId||!await nativeDeliverySchemaAvailable(env))return false;
+  const row=await db(env).prepare(`SELECT event.rowid,event.id,'native_delivery' kind,'Delivery access granted' title,
+    'You have been granted access to a Project Alpha delivery.' body,NULL actionPath,state.read_at readAt,event.created_at createdAt
+    FROM native_delivery_recipient_events event LEFT JOIN native_delivery_recipient_event_state state
+      ON state.event_id=event.id AND state.recipient_identity_id=? WHERE event.id=? AND event.source_id=? AND event.workspace_id=?`)
+    .bind(session.nativePortalIdentityId,eventId,session.nativeSourceId,session.workspaceId).first<Raw>();
+  if(!row||!await authorizeNativeDelivery(env,principal,session,row,new Date().toISOString()))return false;
+  const guard=await nativeDeliveryMutationGuard(env,principal,session,eventId);if(!guard)return false;
+  // Test-only caller hook establishes that the statement's own guard, rather
+  // than the preceding read, is the authorization boundary.
+  await beforeWrite?.();
+  // The event/grant/binding/principal fence is repeated in the statement that
+  // creates the first identity state row. It prevents a rebinding from
+  // inheriting a prior identity's read state. The materialized guard joins also
+  // re-evaluate entitlement, access terms and lineage in this same statement.
+  const stamp=action==='read'?'read_at=COALESCE(read_at,datetime(\'now\'))':'dismissed_at=COALESCE(dismissed_at,datetime(\'now\'))';
+  const result=await db(env).prepare(`WITH ${guard.ctes},native_event_authority AS MATERIALIZED(SELECT event.id
+    FROM native_delivery_recipient_events event
+    JOIN project_alpha_delivery_portal_grants grant_record ON grant_record.id=event.grant_id AND grant_record.workspace_id=event.workspace_id
+      AND grant_record.grant_version=event.grant_version AND grant_record.folder_binding_id=event.folder_binding_id
+      AND grant_record.binding_source_version=event.binding_source_version
+      AND grant_record.audience_type='principal' AND grant_record.audience_public_id=event.principal_public_id
+      AND grant_record.audience_source_version=event.principal_source_version AND grant_record.status='active' AND grant_record.revoked_at IS NULL
+      AND (grant_record.expires_at IS NULL OR datetime(grant_record.expires_at)>datetime('now'))
+    JOIN project_alpha_delivery_intent_receipts receipt ON receipt.receipt_id=event.receipt_id AND receipt.project_alpha_source_id=event.source_id
+      AND receipt.resource_id=event.grant_id AND receipt.access_mode='portal' AND receipt.status='accepted'
+    JOIN portal_v2_folder_bindings binding ON binding.id=event.folder_binding_id AND binding.workspace_id=event.workspace_id
+      AND binding.source_version=event.binding_source_version AND binding.owner_scope_type=event.owner_scope_type AND binding.owner_public_id=event.owner_public_id
+      AND binding.r2_prefix=event.r2_prefix AND binding.status='active' AND binding.revoked_at IS NULL
+    JOIN pa_portal_principals principal_record ON principal_record.workspace_id=event.workspace_id AND principal_record.public_id=event.principal_public_id
+      AND principal_record.source_version=event.principal_source_version AND principal_record.status='active'
+    JOIN portal_v2_identities current_identity ON current_identity.id=? AND current_identity.issuer=? AND current_identity.subject=? AND current_identity.status='active' AND current_identity.revoked_at IS NULL
+    WHERE event.id=? AND event.source_id=? AND event.workspace_id=? AND event.event_type='grant_accepted'
+      AND lower(principal_record.email_hint)=lower(current_identity.verified_email)
+      AND (principal_record.identity_id=current_identity.id OR (principal_record.identity_id IS NULL AND EXISTS(SELECT 1 FROM portal_v2_identity_eligibility_bindings eligibility WHERE eligibility.identity_id=current_identity.id AND eligibility.workspace_id=event.workspace_id AND eligibility.principal_public_id=event.principal_public_id AND eligibility.principal_source_version=event.principal_source_version AND eligibility.verified_email=current_identity.verified_email)))
+    ) INSERT INTO native_delivery_recipient_event_state(event_id,recipient_identity_id,read_at,dismissed_at)
+    SELECT id,?,CASE WHEN ?='read' THEN datetime('now') END,CASE WHEN ?='dismiss' THEN datetime('now') END
+    FROM native_event_authority ${guard.from} WHERE ${guard.sql}
+    ON CONFLICT(event_id,recipient_identity_id) DO UPDATE SET ${stamp},updated_at=datetime('now')`)
+    .bind(...guard.bindings,session.nativePortalIdentityId,principal.issuer,principal.subject,eventId,session.nativeSourceId,session.workspaceId,
+      session.nativePortalIdentityId,action,action).run();
+  return Boolean(result.meta.changes);
+}

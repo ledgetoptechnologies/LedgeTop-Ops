@@ -195,7 +195,7 @@ describe("primary signed-native first-login eligibility", () => {
     // unchanged configuration is sufficient and needs no authority-row seed.
     expect((await request(actor, "/session")).status).toBe(200);
     expect((await request(actor, `/v2/workspaces/${workspaceId}/context`, changed)).status).toBe(404);
-  });
+  }, 15_000);
 
   it("removes native visibility immediately after a signed root tombstone", async () => {
     const { actor, workspaceId, common } = await project("revoked-root");

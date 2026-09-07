@@ -230,6 +230,25 @@ describe('source-owned native portal resources with real signed projection and l
         entries:expect.arrayContaining([{type:'project',publicId:projectId,parentPublicId:rootId,parentType:'organization',displayName:`Project ${f.name}`,sourceVersion:'project-v1'}])});
     }
   });
+  it('keeps native feedback available to an unbound principal with current exact eligibility',async()=>{
+    const identityId=(await db.prepare(`SELECT identity_id FROM portal_v2_workspace_memberships
+      WHERE workspace_id=? AND status='active'`).bind(a.workspace).first<string>('identity_id'))!;
+    const principalPublicId=(await db.prepare(`SELECT public_id FROM pa_portal_principals
+      WHERE workspace_id=? AND identity_id=?`).bind(a.workspace,identityId).first<string>('public_id'))!;
+    expect(await db.prepare(`SELECT count(*) n FROM portal_v2_identity_eligibility_bindings
+      WHERE workspace_id=? AND identity_id=? AND principal_public_id=?`).bind(a.workspace,identityId,principalPublicId).first('n')).toBe(1);
+    await db.prepare(`UPDATE pa_portal_principals SET identity_id=NULL
+      WHERE workspace_id=? AND public_id=?`).bind(a.workspace,principalPublicId).run();
+    try{
+      const response=await request(`${base(a)}/feedback`,{method:'POST',headers:{Origin:'https://client.test','Content-Type':'application/json',
+        'Idempotency-Key':`eligibility-feedback-${crypto.randomUUID()}`},body:JSON.stringify({
+          target:{kind:'project',projectId},message:'Eligibility-authorized feedback.'})});
+      expect(response.status).toBe(201);
+    }finally{
+      await db.prepare(`UPDATE pa_portal_principals SET identity_id=?
+        WHERE workspace_id=? AND public_id=?`).bind(identityId,a.workspace,principalPublicId).run();
+    }
+  });
   it('keeps unified native notices exact-source/workspace bound and hides them after source revocation',async()=>{
     const created=await request(`${base(a)}/feedback`,{method:'POST',headers:{Origin:'https://client.test','Content-Type':'application/json',
       'Idempotency-Key':`notice-history-${crypto.randomUUID()}`},body:JSON.stringify({target:{kind:'project',projectId},message:'Private native notice fixture.'})});
@@ -386,7 +405,7 @@ describe('source-owned native portal resources with real signed projection and l
         actionPath:`/portal/feedback/${encodeURIComponent(orgFeedback)}?workspace=${encodeURIComponent(a.workspace)}`});
       const historyResponse=await request('/notification-history',{headers:{'X-LTDS-Workspace-Id':a.workspace}});expect(historyResponse.status).toBe(200);
       const history=await historyResponse.json() as {scope:{sourceId:string;workspaceId:string};coverage:{delivery:string};items:Array<{id:string;kind:string;body:string}>};
-      expect(history.scope).toMatchObject({sourceId:a.source,workspaceId:a.workspace});expect(history.coverage.delivery).toBe('omitted_no_explicit_grant_authority');
+      expect(history.scope).toMatchObject({sourceId:a.source,workspaceId:a.workspace});expect(history.coverage.delivery).toBe('omitted_schema_unavailable');
       expect(history.items).toContainEqual(expect.objectContaining({id:notice!.id,kind:'feedback',body:'Reviewed.'}));
       expect(JSON.stringify(history)).not.toMatch(/Please review|recipient_identity|same-person|scopeProof/);
       const collision=await request('/notification-history',{headers:{'X-LTDS-Workspace-Id':b.workspace}});expect(collision.status).toBe(200);

@@ -18,7 +18,7 @@ import {
   NativeNotificationAuthorizationOverflowError,
 } from "./repository";
 import { clientFeedbackSchemaAvailable, createClientFeedbackRouter } from "./feedback-routes";
-import {createClientNotificationHistoryRouter} from './notification-history';
+import {createClientNotificationHistoryRouter,mutateNativeDeliveryNotification} from './notification-history';
 import type {
   ClientPortalRepository,
   ClientPortalSession,
@@ -939,6 +939,27 @@ export function createClientPortalRouter(
     if (!(await repository.updateNotification(c.env, c.get("clientSession"), notificationId.data, value.data.action, mutationGuard)))
       throw new HTTPException(404, { message: "Notification not found" });
     return c.json({ success: true });
+  });
+
+  router.patch("/v2/workspaces/:workspaceId/native-delivery-notifications/:notificationId", async (c) => {
+    requireSameRequestOrigin(c.req.raw, c.env);
+    const workspaceId=opaqueId.safeParse(c.req.param("workspaceId")),notificationId=opaqueId.safeParse(c.req.param("notificationId"));
+    const value=notificationActionBody.safeParse(await readBoundedJson(c.req.raw));
+    if(!workspaceId.success||!notificationId.success||!value.success)
+      throw new HTTPException(404,{message:'Notification not found'});
+    // V2 routes intentionally bypass the legacy/header-selected session adapter.
+    // Resolve this exact route workspace using the verified global person.
+    const principal=c.get('clientPrincipal');
+    const native=await resolveNativePortalWorkspaceReadContext(c.env,principal,workspaceId.data);
+    if(!native)throw new HTTPException(404,{message:'Notification not found'});
+    if(notificationMigrationMaintenanceActive(c.env))return notificationMigrationMaintenanceResponse();
+    const session:ClientPortalSession={accountId:'',identityId:'',workspaceId:native.workspaceId,
+      nativeSourceId:native.sourceId,nativePortalIdentityId:native.identityId,
+      principalIssuer:principal.issuer,principalSubject:principal.subject,principalEmail:principal.email,
+      displayName:native.displayName,role:'member',canViewBilling:false};
+    if(!await mutateNativeDeliveryNotification(c.env,c.get('clientPrincipal'),session,notificationId.data,value.data.action))
+      throw new HTTPException(404,{message:'Notification not found'});
+    return c.json({success:true});
   });
 
   router.get("/projects", async (c) => {

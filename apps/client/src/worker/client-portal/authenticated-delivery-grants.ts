@@ -150,7 +150,8 @@ async function candidates(
           WHERE receipt.receipt_id=grant_record.receipt_id AND receipt.project_alpha_source_id=workspace.project_alpha_source_id
             AND receipt.access_mode='portal' AND receipt.resource_id=grant_record.id AND receipt.status='accepted')` : ''})
       AND principal_record.public_id IS NOT NULL
-      AND (principal_record.identity_id=identity.id OR eligibility.identity_id=identity.id)
+      AND (principal_record.identity_id=identity.id
+        OR (principal_record.identity_id IS NULL AND eligibility.identity_id=identity.id))
       ${native?`AND (? IS NULL OR binding.id IN (SELECT value FROM json_each(?))) AND (? IS NULL OR grant_record.id=?)
         AND (? IS NULL OR (binding.owner_scope_type='project' AND binding.owner_public_id IN (SELECT value FROM json_each(?))))`:''}
       ${!native&&selection?.projectIds?`AND binding.owner_scope_type='project' AND binding.owner_public_id IN(SELECT value FROM json_each(?))`:''}
