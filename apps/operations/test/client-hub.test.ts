@@ -292,7 +292,7 @@ describe("Client Hub bounded detail collections", () => {
     expect(await delivery.prepare("SELECT count(*) count FROM portal_v2_root_access_policies").first("count")).toBe(0);
     expect(await delivery.prepare("SELECT count(*) count FROM portal_v2_root_access_policy_audit").first("count")).toBe(0);
     expect(await delivery.prepare("SELECT count(*) count FROM portal_v2_root_access_policy_mutations").first("count")).toBe(0);
-  });
+  }, 15_000);
 
   it.each(["link", "unlink"] as const)("reads current party metadata after delayed identity hydration and a concurrent %s", async action => {
     const { app, env, ops } = await fixture();

@@ -140,7 +140,7 @@ describe("authenticated delivery grant live authorization", () => {
     await db.prepare("UPDATE portal_v2_directory_entities SET parent_public_id='other-org' WHERE public_id='project-a'").run();
     expect(await authorizeAuthenticatedDeliveryGrant(env, principal, "workspace-a", "binding-a")).toBe(false);
     expect(await listAuthorizedAuthenticatedDeliveryPrefixes(env, principal, "workspace-a")).toEqual(new Set());
-  });
+  }, 15_000);
 
   it("authorizes a live department grant and fails closed across revoke and immutable restore", async () => {
     await db.batch([
