@@ -71,6 +71,10 @@ describe('native delivery staging, exact authority and controls — migrated D1'
       for(const name of readdirSync(directory).filter(n=>/^\d+.*\.sql$/.test(n)&&Number(n.slice(0,4))<=maximum).sort())
         await database.batch(splitD1MigrationStatements(readFileSync(new URL(name,directory),'utf8')).map(sql=>database.prepare(sql)));
     }
+    // The upgrade fixtures create accepted portal intents before the later
+    // native mail-batch migrations are exercised. Apply the required ledger
+    // first so those accepted intents retain their recipient history.
+    await db.batch(splitD1MigrationStatements(readFileSync(new URL('../../client/migrations/0202_native_delivery_recipient_events.sql',import.meta.url),'utf8')).map(sql=>db.prepare(sql)));
     await ops.batch([
       ops.prepare("INSERT INTO staff_users(id,email,display_name,access_subject) VALUES(?,?,?,?)").bind(staff.id,staff.email,staff.displayName,staff.accessSubject),
       ops.prepare("INSERT INTO divisions(id,name,code) VALUES('native-division','Native division','NATIVE')"),
@@ -173,6 +177,26 @@ describe('native delivery staging, exact authority and controls — migrated D1'
     expect(await db.prepare('SELECT count(*) n FROM portal_delivery_notification_items WHERE batch_id=?').bind(first.id).first('n')).toBe(2);
     expect(await db.prepare('SELECT min(grant_version) n FROM portal_delivery_notification_items WHERE batch_id=?').bind(first.id).first('n')).toBe(1);
     expect((await nativeNotificationCandidates(env,'pending')).some(r=>r.workspace_id===f.workspace&&r.deliveryMode==='awaiting_staging')).toBe(false);
+  });
+  it('records one immutable recipient event for an unclaimed principal before any mail attempt',async()=>{
+    const f=await fixture('recipient-ledger');
+    const first=await create(f);
+    const event=await db.prepare(`SELECT source_id,workspace_id,receipt_id,grant_id,grant_version,folder_binding_id,
+      binding_source_version,owner_scope_type,owner_public_id,r2_prefix,principal_public_id,principal_source_version,event_type
+      FROM native_delivery_recipient_events WHERE receipt_id=?`).bind(first.receiptId).first<Record<string,unknown>>();
+    expect(event).toEqual({source_id:f.source.sourceId,workspace_id:f.workspace,receipt_id:first.receiptId,grant_id:expect.any(String),
+      grant_version:1,folder_binding_id:f.binding,binding_source_version:'v1',owner_scope_type:f.ownerType,owner_public_id:f.owner,
+      r2_prefix:f.prefix,principal_public_id:f.principal,principal_source_version:'pv1',event_type:'grant_accepted'});
+    expect(JSON.stringify(event)).not.toContain('@example.test');
+    expect(await db.prepare("SELECT count(*) n FROM native_delivery_recipient_event_state").first('n')).toBe(0);
+    expect(vi.mocked(mailer.sendNotificationMail)).not.toHaveBeenCalled();
+
+    const receipt=await db.prepare('SELECT request_fingerprint FROM project_alpha_delivery_intent_receipts WHERE receipt_id=?')
+      .bind(first.receiptId).first<{request_fingerprint:string}>();
+    const replay={schemaVersion:1,applicationKey:'project-alpha',deliveryId:`${f.name}-first`,occurredAt:new Date().toISOString(),
+      scope:{type:f.ownerType,publicId:f.owner},audience:{type:'principal',publicId:f.principal},accessMode:'portal',expiresAt:null,label:null,notify:true};
+    await applyProjectAlphaDeliveryIntent(env,replay,{deliveryId:replay.deliveryId,fingerprint:receipt!.request_fingerprint},f.source);
+    expect(await db.prepare('SELECT count(*) n FROM native_delivery_recipient_events WHERE receipt_id=?').bind(first.receiptId).first('n')).toBe(1);
   });
   it('adopts only never-attempted granted rows and preserves attempted/inflight/revoked jobs',async()=>{
     await adoptPortalDeliveryNotifications(env);

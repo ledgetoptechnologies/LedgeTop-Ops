@@ -138,6 +138,17 @@ async function prepareGuestDeliveryDatabase(db:D1Database):Promise<void>{
       expires_at TEXT,label TEXT,actor_kind TEXT NOT NULL DEFAULT 'project_alpha_delivery',actor_id TEXT NOT NULL,
       revoked_at TEXT,revoke_reason_code TEXT,created_at TEXT NOT NULL DEFAULT(datetime('now'))
     );
+    CREATE TABLE native_delivery_recipient_events(
+      id TEXT PRIMARY KEY,source_id TEXT NOT NULL,workspace_id TEXT NOT NULL,receipt_id TEXT NOT NULL,grant_id TEXT NOT NULL,
+      grant_version INTEGER NOT NULL,folder_binding_id TEXT NOT NULL,binding_source_version TEXT NOT NULL,owner_scope_type TEXT NOT NULL,
+      owner_public_id TEXT NOT NULL,r2_prefix TEXT NOT NULL,principal_public_id TEXT NOT NULL,principal_source_version TEXT NOT NULL,
+      event_type TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT(datetime('now')),UNIQUE(source_id,receipt_id,event_type)
+    );
+    CREATE TABLE native_delivery_recipient_event_state(
+      event_id TEXT NOT NULL,recipient_identity_id TEXT NOT NULL,read_at TEXT,dismissed_at TEXT,
+      created_at TEXT NOT NULL DEFAULT(datetime('now')),updated_at TEXT NOT NULL DEFAULT(datetime('now')),
+      PRIMARY KEY(event_id,recipient_identity_id)
+    );
     CREATE TABLE project_alpha_delivery_intent_audit(
       id TEXT PRIMARY KEY,receipt_id TEXT NOT NULL,action TEXT NOT NULL,actor_kind TEXT NOT NULL DEFAULT 'project_alpha_delivery',
       actor_id TEXT NOT NULL,details_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL DEFAULT(datetime('now'))
@@ -211,6 +222,27 @@ function guestIntent(deliveryId:string){return{
 };}
 
 describe("Project Alpha delivery-intent boundary", () => {
+  it.each(["native_delivery_recipient_events","native_delivery_recipient_event_state"] as const)("fails portal acceptance closed when %s is missing without blocking guest delivery",async missingTable=>{
+    const {mf,delivery,env,app,secret}=await createGuestHarness(`recipient-ledger-required-${missingTable}`);
+    try{
+      await delivery.prepare(`DROP TABLE ${missingTable}`).run();
+      const path="/api/internal/project-alpha/delivery-intents";
+      const portal={schemaVersion:1,applicationKey:"project-alpha",deliveryId:"portal-without-recipient-ledger",
+        occurredAt:new Date().toISOString(),scope:{type:"project",publicId:"project-one"},
+        audience:{type:"principal",publicId:"principal-one"},accessMode:"portal",expiresAt:null,label:null,notify:true};
+      const rejected=await app.fetch(await signedRequest(path,portal,secret),env);
+      expect(rejected.status).toBe(503);
+      expect(await rejected.text()).toBe("Native delivery recipient history is unavailable");
+      expect(await delivery.prepare("SELECT count(*) n FROM project_alpha_delivery_intent_receipts").first("n")).toBe(0);
+      expect(await delivery.prepare("SELECT count(*) n FROM project_alpha_delivery_portal_grants").first("n")).toBe(0);
+      expect(await delivery.prepare("SELECT count(*) n FROM project_alpha_delivery_portal_notification_outbox").first("n")).toBe(0);
+
+      const guest=await app.fetch(await signedRequest(path,guestIntent("guest-without-recipient-ledger"),secret),env);
+      expect(guest.status,await guest.clone().text()).toBe(202);
+      expect(await delivery.prepare("SELECT count(*) n FROM shares").first("n")).toBe(1);
+    }finally{await mf.dispose();}
+  });
+
   it("collapses concurrent guest creation and revocation retries to one receipt each",async()=>{
     const {mf,delivery,env,app,secret}=await createGuestHarness("concurrent-replay");
     try{
@@ -424,6 +456,8 @@ describe("Project Alpha delivery-intent boundary", () => {
         CREATE TABLE project_alpha_delivery_intent_receipts(receipt_id TEXT PRIMARY KEY,delivery_id TEXT,request_fingerprint TEXT,access_mode TEXT,resource_id TEXT,status TEXT DEFAULT 'accepted',created_at TEXT DEFAULT(datetime('now')),project_alpha_source_id TEXT NOT NULL,write_guard INTEGER NOT NULL DEFAULT 1 CHECK(write_guard=1),UNIQUE(project_alpha_source_id,delivery_id));
         CREATE TABLE project_alpha_delivery_portal_grants(id TEXT PRIMARY KEY,receipt_id TEXT,workspace_id TEXT,folder_binding_id TEXT,binding_source_version TEXT,audience_type TEXT,audience_public_id TEXT,audience_source_version TEXT,grant_version INTEGER DEFAULT 1,status TEXT DEFAULT 'active',expires_at TEXT,label TEXT,actor_kind TEXT DEFAULT 'project_alpha_delivery',actor_id TEXT,revoked_at TEXT,revoke_reason_code TEXT,created_at TEXT DEFAULT(datetime('now')));
         CREATE TABLE project_alpha_delivery_intent_audit(id TEXT PRIMARY KEY,receipt_id TEXT,action TEXT,actor_kind TEXT DEFAULT 'project_alpha_delivery',actor_id TEXT,details_json TEXT,created_at TEXT DEFAULT(datetime('now')));
+        CREATE TABLE native_delivery_recipient_events(id TEXT PRIMARY KEY,source_id TEXT,workspace_id TEXT,receipt_id TEXT,grant_id TEXT,grant_version INTEGER,folder_binding_id TEXT,binding_source_version TEXT,owner_scope_type TEXT,owner_public_id TEXT,r2_prefix TEXT,principal_public_id TEXT,principal_source_version TEXT,event_type TEXT,created_at TEXT DEFAULT(datetime('now')),UNIQUE(source_id,receipt_id,event_type));
+        CREATE TABLE native_delivery_recipient_event_state(event_id TEXT,recipient_identity_id TEXT,read_at TEXT,dismissed_at TEXT,created_at TEXT DEFAULT(datetime('now')),updated_at TEXT DEFAULT(datetime('now')),PRIMARY KEY(event_id,recipient_identity_id));
         CREATE TABLE project_alpha_delivery_portal_notification_outbox(id TEXT PRIMARY KEY,receipt_id TEXT,grant_id TEXT,principal_public_id TEXT,principal_source_version TEXT,event_type TEXT,status TEXT DEFAULT 'pending',attempt_count INTEGER DEFAULT 0,next_attempt_at TEXT DEFAULT(datetime('now')),lease_expires_at TEXT,last_error TEXT,delivered_at TEXT,created_at TEXT DEFAULT(datetime('now')),updated_at TEXT DEFAULT(datetime('now')));
         CREATE TABLE project_alpha_delivery_intent_revocation_receipts(receipt_id TEXT PRIMARY KEY,delivery_id TEXT,original_receipt_id TEXT,request_fingerprint TEXT,created_at TEXT DEFAULT(datetime('now')),project_alpha_source_id TEXT NOT NULL,write_guard INTEGER NOT NULL DEFAULT 1 CHECK(write_guard=1),UNIQUE(project_alpha_source_id,delivery_id));
         INSERT INTO portal_v2_workspaces(id,status) VALUES('workspace-one','active');

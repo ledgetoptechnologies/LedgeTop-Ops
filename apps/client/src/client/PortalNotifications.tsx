@@ -5,10 +5,10 @@ import {safeFeedbackTargetPath} from './feedback-api';
 
 const validPath=(value:string|null)=>value===null||safeFeedbackTargetPath(value)!==null;
 const validMutation=(value:string)=>value.startsWith('/api/client/notifications/')||value.startsWith('/api/client/feedback-notifications/')||
-  /^\/api\/client\/v2\/workspaces\/[A-Za-z0-9_-]+\/feedback-notifications\/[A-Za-z0-9_-]+$/.test(value);
+  /^\/api\/client\/v2\/workspaces\/[A-Za-z0-9_-]+\/(?:feedback-notifications|native-delivery-notifications)\/[A-Za-z0-9_-]+$/.test(value);
 const validLedger=(value:string)=>['included','omitted_feature_disabled','omitted_schema_unavailable'].includes(value);
 function validPage(value:PortalNotificationHistoryPage){return value&&validLedger(value.coverage?.requests)&&validLedger(value.coverage?.feedback)
-  &&['included_legacy_portal_notices','omitted_no_explicit_grant_authority'].includes(value.coverage?.delivery)&&Array.isArray(value.items)&&value.items.every(item=>
+  &&['included_legacy_portal_notices','included_project_alpha_grant_notices','omitted_no_explicit_grant_authority','omitted_schema_unavailable'].includes(value.coverage?.delivery)&&Array.isArray(value.items)&&value.items.every(item=>
     item&&['request','feedback','delivery'].includes(item.kind)&&typeof item.id==='string'&&typeof item.title==='string'&&typeof item.body==='string'
     &&validPath(item.actionPath)&&validMutation(item.mutationPath)&&Number.isFinite(Date.parse(item.createdAt))&&(item.readAt===null||Number.isFinite(Date.parse(item.readAt))))
   &&(value.nextCursor===null||typeof value.nextCursor==='string'&&value.nextCursor.length>0);}
@@ -49,7 +49,7 @@ export function PortalNotifications({feedbackEnabled,requestsEnabled=true}: {fee
         <p>{item.body}</p><small>{item.kind==='feedback'?'Feedback':item.kind==='delivery'?'Delivery':'Request'} · {new Date(item.createdAt).toLocaleString()}</small><div>{!item.readAt&&<button className="button-ghost button-small" disabled={busy.includes(`${item.kind}:${item.id}`)} onClick={()=>void mutate(item,'read')}>Mark read</button>}
           <button className="button-ghost button-small" disabled={busy.includes(`${item.kind}:${item.id}`)} onClick={()=>void mutate(item,'dismiss')}>Dismiss</button></div></article>;})}</div>
       {cursor&&<button className="button-ghost button-small" disabled={loading} onClick={()=>void load(cursor)}>Load more updates</button>}
-      <p className="portal-notification-coverage"><small>{coverage?.requests==='included'?'Request history is shown.':'Request history is currently unavailable.'} {coverage?.feedback==='included'?'Feedback history is shown.':'Feedback history is currently unavailable.'} {coverage?.delivery==='included_legacy_portal_notices'?'Authorized portal delivery notices are shown.':'Staged delivery mail remains in its explicitly authorized delivery workflow.'}</small></p>
+      <p className="portal-notification-coverage"><small>{coverage?.requests==='included'?'Request history is shown.':'Request history is currently unavailable.'} {coverage?.feedback==='included'?'Feedback history is shown.':'Feedback history is currently unavailable.'} {coverage?.delivery==='included_legacy_portal_notices'?'Authorized portal delivery notices are shown.':coverage?.delivery==='included_project_alpha_grant_notices'?'Authorized Project Alpha grant notices are shown; file-change notices are not included.':coverage?.delivery==='omitted_schema_unavailable'?'Project Alpha grant notice history is currently unavailable.':'Staged delivery mail remains in its explicitly authorized delivery workflow.'}</small></p>
     </section>}
   </div>;
 }

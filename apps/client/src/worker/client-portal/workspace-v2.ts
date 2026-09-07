@@ -490,6 +490,7 @@ export function eligiblePortalShellQuery(requireBridge: boolean, workspaceRefere
       JOIN pa_portal_principals principal ON principal.workspace_id=eligibility.workspace_id
         AND principal.public_id=eligibility.principal_public_id AND principal.status='active'
         AND principal.source_version=eligibility.principal_source_version
+        AND (principal.identity_id IS NULL OR principal.identity_id=eligibility.identity_id)
         AND lower(principal.email_hint)=lower(eligibility.verified_email)
       JOIN portal_v2_identities identity ON identity.id=eligibility.identity_id AND identity.status='active'
         AND identity.revoked_at IS NULL AND lower(identity.verified_email)=lower(eligibility.verified_email)
@@ -974,7 +975,13 @@ export async function resolveNativePortalWorkspaceReadContext(
       AND workspace.legacy_account_id IS NULL
       AND ${portalSourceReadableSql('workspace.project_alpha_source_id')} AND lower(person.verified_email)=?
       AND (membership.source_type<>'project_alpha' OR EXISTS(SELECT 1 FROM pa_portal_principals current_principal
-        WHERE current_principal.workspace_id=workspace.id AND current_principal.identity_id=person.id
+        WHERE current_principal.workspace_id=workspace.id
+          AND (current_principal.identity_id=person.id OR (current_principal.identity_id IS NULL AND EXISTS(
+            SELECT 1 FROM portal_v2_identity_eligibility_bindings eligible
+            WHERE eligible.workspace_id=workspace.id AND eligible.identity_id=person.id
+              AND eligible.principal_public_id=current_principal.public_id
+              AND eligible.principal_source_version=current_principal.source_version
+              AND eligible.verified_email=person.verified_email)))
           AND current_principal.status='active' AND current_principal.source_version=membership.source_version
           AND lower(current_principal.email_hint)=lower(person.verified_email)))`)
     .bind(identity.id, workspaceId,canonicalPrincipalEmail(principal.email)??'').first<WorkspaceRow & { project_alpha_source_id: string; generation_id: string;
@@ -999,7 +1006,9 @@ export async function resolveNativePortalWorkspaceReadContext(
       eligibility.identity_id eligible_identity,eligibility.principal_source_version eligible_version,eligibility.verified_email eligible_email
     FROM pa_portal_principals p LEFT JOIN portal_v2_identity_eligibility_bindings eligibility
       ON eligibility.workspace_id=p.workspace_id AND eligibility.principal_public_id=p.public_id AND eligibility.identity_id=?
-    WHERE p.workspace_id=? AND p.status='active' AND (p.identity_id=? OR eligibility.identity_id=?) ORDER BY p.public_id LIMIT 201`)
+    WHERE p.workspace_id=? AND p.status='active'
+      AND (p.identity_id=? OR (p.identity_id IS NULL AND eligibility.identity_id=?))
+    ORDER BY p.public_id LIMIT 201`)
     .bind(identity.id, workspaceId, identity.id, identity.id).all()).results;
   if (principals.length > 200) return null;
   const shellAllowed = allowedByEntitlementRows(grants.results.filter(g => g.capability === "workspace.view"), new Set([`workspace:${workspaceId}`]),[],true);

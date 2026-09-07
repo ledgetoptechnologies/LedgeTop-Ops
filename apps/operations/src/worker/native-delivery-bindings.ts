@@ -229,7 +229,8 @@ WHERE (generation.id=json_extract(v,'$.generationId') AND (${scopeProofSql})=jso
    OR EXISTS(${eligiblePortalShellQuery(false,'w.id','membership.identity_id')})))
  AND ((SELECT count(*) FROM pa_portal_principals p LEFT JOIN portal_v2_identity_eligibility_bindings eligibility
    ON eligibility.workspace_id=p.workspace_id AND eligibility.principal_public_id=p.public_id AND eligibility.identity_id=identity.id
-   WHERE p.workspace_id=w.id AND p.status='active' AND (p.identity_id=identity.id OR eligibility.identity_id=identity.id))<=200
+   WHERE p.workspace_id=w.id AND p.status='active'
+     AND (p.identity_id=identity.id OR (p.identity_id IS NULL AND eligibility.identity_id=identity.id)))<=200
  AND (json_extract(v,'$.denylist')<>1 OR (SELECT count(*) FROM portal_v2_identity_denials denial
    WHERE denial.identity_id=identity.id AND denial.status='active' AND denial.revoked_at IS NULL
      AND datetime(denial.valid_from)<=datetime('now') AND (denial.expires_at IS NULL OR datetime(denial.expires_at)>datetime('now'))

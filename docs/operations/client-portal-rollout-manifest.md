@@ -294,6 +294,32 @@ Rollback stops new production/dispatch of this event while preserving receipts
 and queued notices. Keep the expanded schema and a compatible reader; do not
 downgrade the CHECK constraint or delete new-event rows to fit an older schema.
 
+#### R8b — Native delivery bell (Client migration 0202)
+
+This window is not yet verified or released. Apply
+`0202_native_delivery_recipient_events.sql` after the ordered migration chain,
+including the R8a preserving maintenance barrier when 0201 is still pending.
+See [native recipient history](native-delivery-recipient-history.md).
+
+The Operations portal-intent writer requires the event schema before accepting
+new portal grants: missing schema returns 503, never a successful grant without
+a notice. Verify that failure before publishing; guest delivery and revocation
+must remain independent of bell availability. An exact accepted retry returns
+its existing receipt rather than writing another event.
+
+Publish the coordinated Client reader and Operations writer only after migrated
+database, authorization-race, retry and merged-history tests pass. Client cursor
+version 3 requires older continuations to refresh. Verify an unclaimed principal
+followed by legitimate sign-in, current revocation, independent read state and
+mail-disabled delivery. PA grant notices do not imply authenticated file-change
+history coverage. Do not enroll LTT or send announcement mail.
+
+Rollback preserves the event and per-identity state tables. Pause new portal
+intent acceptance before reverting to a writer that omits these events; never
+delete history or replay email to repair a version mismatch. Existing historical
+receipts without recipient events require a separately verified reconciliation
+policy, not guessed identity or timestamp reconstruction.
+
 ### R9 — Delegated links, expiry, and content audit
 
 Enable the Operations signer and Client delegated-link consumer together. Add

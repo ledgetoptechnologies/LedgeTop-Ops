@@ -47,9 +47,15 @@ function authorizationGuard(env:Env,context:NativePortalReadContext,principal:Ve
     JOIN portal_v2_workspace_memberships membership ON membership.workspace_id=workspace.id AND membership.identity_id=?
       AND membership.status='active' AND membership.revoked_at IS NULL AND (membership.expires_at IS NULL OR datetime(membership.expires_at)>datetime('now'))
     JOIN portal_v2_identities identity ON identity.id=membership.identity_id AND identity.status='active' AND identity.revoked_at IS NULL
-    JOIN pa_portal_principals principal_record ON principal_record.workspace_id=workspace.id AND principal_record.identity_id=identity.id
+    JOIN pa_portal_principals principal_record ON principal_record.workspace_id=workspace.id
       AND principal_record.status='active' AND principal_record.source_version=membership.source_version
       AND lower(principal_record.email_hint)=lower(identity.verified_email)
+      AND (principal_record.identity_id=identity.id OR (principal_record.identity_id IS NULL AND EXISTS(
+        SELECT 1 FROM portal_v2_identity_eligibility_bindings eligibility
+        WHERE eligibility.identity_id=identity.id AND eligibility.workspace_id=principal_record.workspace_id
+          AND eligibility.principal_public_id=principal_record.public_id
+          AND eligibility.principal_source_version=principal_record.source_version
+          AND lower(eligibility.verified_email)=lower(identity.verified_email))))
     JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=workspace.id
     JOIN portal_v2_directory_generations generation ON generation.workspace_id=workspace.id AND generation.id=checkpoint.active_generation_id
       AND generation.status='active' AND generation.complete=1
@@ -119,12 +125,12 @@ function authorizationGuard(env:Env,context:NativePortalReadContext,principal:Ve
         AND principal_record.source_version=? AND principal_record.status='active'
       WHERE current_identity.id=? AND current_identity.issuer=? AND current_identity.subject=?
         AND current_identity.status='active' AND current_identity.revoked_at IS NULL
-        AND (principal_record.identity_id=current_identity.id OR EXISTS(
+        AND (principal_record.identity_id=current_identity.id OR (principal_record.identity_id IS NULL AND EXISTS(
           SELECT 1 FROM portal_v2_identity_eligibility_bindings eligibility
           WHERE eligibility.identity_id=current_identity.id AND eligibility.workspace_id=principal_record.workspace_id
             AND eligibility.principal_public_id=principal_record.public_id
             AND eligibility.principal_source_version=principal_record.source_version
-            AND eligibility.verified_email=current_identity.verified_email)))`);
+            AND eligibility.verified_email=current_identity.verified_email))))`);
     bindings.push(context.workspaceId,grant.audience_public_id,grant.audience_source_version,context.identityId,principal.issuer,principal.subject);
   }
   if(target.kind==='file'&&available&&target.file){parts.push(`EXISTS(SELECT 1 FROM file_index file WHERE file.r2_key=? AND file.etag=? AND file.size=? AND file.uploaded_at=? AND ${visibleFile})`);
