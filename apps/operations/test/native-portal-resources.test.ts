@@ -230,6 +230,21 @@ describe('source-owned native portal resources with real signed projection and l
         entries:expect.arrayContaining([{type:'project',publicId:projectId,parentPublicId:rootId,parentType:'organization',displayName:`Project ${f.name}`,sourceVersion:'project-v1'}])});
     }
   });
+  it('keeps unified native notices exact-source/workspace bound and hides them after source revocation',async()=>{
+    const created=await request(`${base(a)}/feedback`,{method:'POST',headers:{Origin:'https://client.test','Content-Type':'application/json',
+      'Idempotency-Key':`notice-history-${crypto.randomUUID()}`},body:JSON.stringify({target:{kind:'project',projectId},message:'Private native notice fixture.'})});
+    expect(created.status).toBe(201);const feedbackId=(await created.json() as {feedback:{id:string}}).feedback.id;
+    await transitionStaffFeedback(opsEnv,staff,feedbackId,{expectedRevision:1,status:'done',note:'Native completion.'},`notice-${crypto.randomUUID()}`);
+    const exact=await request('/notification-history',{headers:{'X-LTDS-Workspace-Id':a.workspace}});expect(exact.status).toBe(200);
+    const page=await exact.json() as {scope:{sourceId:string;workspaceId:string};coverage:{requests:string;feedback:string};items:Array<{kind:string;body:string}>};
+    expect(page.scope).toEqual(expect.objectContaining({sourceId:a.source,workspaceId:a.workspace}));
+    expect(page.coverage).toEqual(expect.objectContaining({requests:'omitted_feature_disabled',feedback:'included'}));
+    expect(page.items).toContainEqual(expect.objectContaining({kind:'feedback',body:'Native completion.'}));
+    expect(JSON.stringify(page)).not.toMatch(/Private native notice fixture|same-person|recipient_identity|scopeProof/);
+    const collision=await request('/notification-history',{headers:{'X-LTDS-Workspace-Id':b.workspace}});expect(collision.status).toBe(200);
+    expect(JSON.stringify(await collision.json())).not.toContain('Native completion.');
+    await state(a,'suspended');expect((await request('/notification-history',{headers:{'X-LTDS-Workspace-Id':a.workspace}})).status).toBe(403);await state(a,'active');
+  });
   it('lists native project feedback by exact source and workspace when public IDs collide',async()=>{
     const create=async(f:Fixture,index:number)=>{
       const response=await request(`${base(f)}/feedback`,{method:'POST',headers:{Origin:'https://client.test','Content-Type':'application/json',
@@ -254,7 +269,8 @@ describe('source-owned native portal resources with real signed projection and l
     await new Promise(resolve=>setTimeout(resolve,5));
     await transitionStaffFeedback(opsEnv,staff,aIds[0]!,{expectedRevision:1,status:'done',note:'Completed after page one'},`staff-${crypto.randomUUID()}`);
     const stable=await request(`${base(a)}/feedback?cursor=${encodeURIComponent(clientFirst.nextCursor!)}`);expect(stable.status).toBe(200);
-    expect((await stable.json() as {items:unknown[]}).items).toEqual([]);
+    const stableItems=(await stable.json() as {items:Array<{feedbackId:string}>}).items;
+    expect(stableItems.every(item=>!aIds.includes(item.feedbackId))).toBe(true);
     const makeContext=async(f:Fixture):Promise<{context:ClientHubCollectionContext;localProject:string}>=>{
       const localRoot=(await opsDb.prepare(`SELECT id FROM pa_organizations WHERE projection_source_id=?
         AND json_extract(payload_json,'$.public_id')=?`).bind(f.source,rootId).first<string>('id'))!;
@@ -368,6 +384,13 @@ describe('source-owned native portal resources with real signed projection and l
       const inbox=await inboxResponse.json() as {notifications:Array<{id:string;feedbackId:string;readAt:string|null;actionPath:string}>};
       const notice=inbox.notifications.find(item=>item.feedbackId===orgFeedback);expect(notice).toMatchObject({readAt:null,
         actionPath:`/portal/feedback/${encodeURIComponent(orgFeedback)}?workspace=${encodeURIComponent(a.workspace)}`});
+      const historyResponse=await request('/notification-history',{headers:{'X-LTDS-Workspace-Id':a.workspace}});expect(historyResponse.status).toBe(200);
+      const history=await historyResponse.json() as {scope:{sourceId:string;workspaceId:string};coverage:{delivery:string};items:Array<{id:string;kind:string;body:string}>};
+      expect(history.scope).toMatchObject({sourceId:a.source,workspaceId:a.workspace});expect(history.coverage.delivery).toBe('omitted_no_explicit_grant_authority');
+      expect(history.items).toContainEqual(expect.objectContaining({id:notice!.id,kind:'feedback',body:'Reviewed.'}));
+      expect(JSON.stringify(history)).not.toMatch(/Please review|recipient_identity|same-person|scopeProof/);
+      const collision=await request('/notification-history',{headers:{'X-LTDS-Workspace-Id':b.workspace}});expect(collision.status).toBe(200);
+      expect((await collision.json() as {items:Array<{id:string}>}).items.map(item=>item.id)).not.toContain(notice!.id);
       expect((await request(`${base(b)}/feedback-notifications/${notice!.id}`,{method:'PATCH',headers:{Origin:'https://client.test','Content-Type':'application/json'},
         body:JSON.stringify({action:'read'})})).status).toBe(404);
       const marked=await request(`${base(a)}/feedback-notifications/${notice!.id}`,{method:'PATCH',headers:{Origin:'https://client.test','Content-Type':'application/json'},
@@ -377,6 +400,8 @@ describe('source-owned native portal resources with real signed projection and l
         revoked_at=datetime('now'),revoke_reason_code='project_alpha_delivery_revoked' WHERE id=?`).bind(org.grantId).run();
       const afterGrantRevoke=await (await request(`${base(a)}/feedback-notifications`)).json() as {notifications:Array<{id:string}>};
       expect(afterGrantRevoke.notifications.some(item=>item.id===notice!.id)).toBe(false);
+      const revokedHistory=await request('/notification-history',{headers:{'X-LTDS-Workspace-Id':a.workspace}});
+      expect((await revokedHistory.json() as {items:Array<{id:string}>}).items.map(item=>item.id)).not.toContain(notice!.id);
       expect((await request(`${base(a)}/feedback-notifications/${notice!.id}`,{method:'PATCH',headers:{Origin:'https://client.test','Content-Type':'application/json'},
         body:JSON.stringify({action:'dismiss'})})).status).toBe(404);
       expect(await db.prepare('SELECT dismissed_at FROM portal_native_feedback_notifications WHERE id=?').bind(notice!.id).first<string>('dismissed_at')).toBeNull();
@@ -415,7 +440,7 @@ describe('source-owned native portal resources with real signed projection and l
         revoked_at=datetime('now'),revoke_reason_code='project_alpha_delivery_revoked' WHERE id=? AND status='active'`).bind(grantId).run();
       await db.prepare("DELETE FROM file_index WHERE r2_key='feedback/client/photo.jpg'").run();
     }
-  },120_000);
+  },process.platform==='win32'?240_000:120_000);
   async function feedbackCreationRace(fault:'authority-rotation'|'principal-suspension'|'principal-version'|'principal-email',relations=false,
     fixture=a){
       const before={

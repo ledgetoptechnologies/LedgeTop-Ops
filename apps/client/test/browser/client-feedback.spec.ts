@@ -18,6 +18,7 @@ async function mock(page: Page, custom?: (route: Route, url: URL, call: Call) =>
     if (call.path === "/api/client/map-config") return route.fulfill({json: {mapboxPublicToken: null}});
     if (call.path === "/api/client/request-readiness") return route.fulfill({json: {mode: "legacy", workspaceId: call.workspace || null, target: {kind: "root", projectId: null}, canStartRequest: false, reason: "request_not_permitted", root: {canStartRequest: false, reason: "request_not_permitted"}, projectRequestsSupported: false, refreshedAt: date}});
     if (call.path === "/api/client/notifications") return route.fulfill({json: {notifications: [], unreadCount: 0, cursor: null}});
+    if (call.path === "/api/client/notification-history") return route.fulfill({json: {scope:{sourceId:"project-alpha:primary",workspaceId:call.workspace??null,rootType:"organization",rootPublicId:"org-one"},asOf:"2026-08-25T13:00:00Z",coverage:{requests:"included",feedback:"included",delivery:"omitted_no_explicit_grant_authority"},items:[],nextCursor:null}});
     if (call.path === "/api/client/feedback-notifications") return route.fulfill({json: {notifications: [], nextCursor: null}});
     if (call.path.endsWith("file-locations") || call.path.endsWith("past-delivery-locations")) return route.fulfill({json: {points: [], imageCount: 0, truncated: false}});
     if (call.path === "/api/client/projects/project-one/files" || call.path === "/api/client/past-deliveries") return route.fulfill({json: {files: [file()], folders: [], breadcrumbs: [{id: null, name: "Project files"}, ...(call.query.get("folder") ? [{id: "pf2_edited", name: "Edited"}] : [])], folderId: call.query.get("folder"), prefix: "", cursor: null}});
@@ -105,11 +106,16 @@ test("a definite rate limit does not permanently lock the message", async ({page
   await page.goto("/portal/projects/project-one"); await page.getByRole("button", {name: "Leave Feedback"}).click(); await page.getByLabel("Your feedback").fill("First message."); await page.getByRole("button", {name: "Send feedback"}).click(); await expect(page.getByText(/Too many submissions/)).toBeVisible(); await expect(page.getByLabel("Your feedback")).not.toHaveAttribute("readonly", ""); await page.getByLabel("Your feedback").fill("Edited message.");
 });
 
+function unifiedHistory(items: unknown[], nextCursor: string | null = null) {
+  return {scope:{sourceId:'project-alpha:primary',workspaceId:null,rootType:'organization',rootPublicId:'org-one'},
+    asOf:'2026-08-25T13:00:00Z',coverage:{requests:'included',feedback:'included',delivery:'included_legacy_portal_notices'},items,nextCursor};
+}
+
 test("late notification continuation cannot resurrect a dismissed feedback update", async ({page}) => {
   let release!: () => void; const wait = new Promise<void>(resolve => {release = resolve;});
-  const notice = {id: "notice-one", feedbackId: "feedback-one", title: "Feedback completed", body: "Done", actionPath: "/portal/feedback/feedback-one", readAt: null, createdAt: date};
-  await mock(page, (route, _url, call) => call.path === "/api/client/feedback-notifications" ? call.query.has("cursor") ? wait.then(() => late(route, {notifications: [notice], nextCursor: null})) : route.fulfill({json: {notifications: [notice], nextCursor: "next"}}) : call.path === "/api/client/feedback-notifications/notice-one" ? route.fulfill({json: {success: true}}) : undefined);
-  await page.goto("/portal"); await page.getByRole("button", {name: /^Notifications/}).click(); const group = page.getByRole("region", {name: "Feedback updates", exact: true}); await group.getByRole("button", {name: "Load more feedback updates"}).click(); await group.getByRole("button", {name: "Dismiss"}).click(); await expect(group.getByText("Feedback completed")).toHaveCount(0); release(); await expect(group.getByText("Loading notifications…")).toHaveCount(0); await expect(group.getByText("Feedback completed")).toHaveCount(0);
+  const notice = {id: "notice-one", kind:'feedback', mutationPath:'/api/client/feedback-notifications/notice-one', title: "Feedback completed", body: "Done", actionPath: "/portal/feedback/feedback-one", readAt: null, createdAt: date};
+  await mock(page, (route, _url, call) => call.path === "/api/client/notification-history" ? call.query.has("cursor") ? wait.then(() => late(route, unifiedHistory([notice]))) : route.fulfill({json: unifiedHistory([notice], 'next')}) : call.path === "/api/client/feedback-notifications/notice-one" ? route.fulfill({json: {success: true}}) : undefined);
+  await page.goto("/portal"); await page.getByRole("button", {name: /^Notifications/}).click(); const group = page.getByRole("region", {name: "Notifications", exact: true}); await group.getByRole("button", {name: "Load more updates"}).click(); await group.getByRole("button", {name: "Dismiss"}).click(); await expect(group.getByText("Feedback completed")).toHaveCount(0); release(); await expect(group.getByText("Loading notifications…")).toHaveCount(0); await expect(group.getByText("Feedback completed")).toHaveCount(0);
 });
 
 test("empty creator list pages with a continuation do not claim feedback is absent", async ({page}) => {
@@ -132,10 +138,10 @@ test("feedback history rejects bodies on the redacted list contract",async({page
   await page.goto("/portal/feedback");await expect(page.getByRole("alert")).toBeVisible();await expect(page.getByText("private body")).toHaveCount(0);
 });
 
-test("feedback notifications stay in one bell with separate paging and explicit read actions", async ({page}) => {
-  const calls = await mock(page, (route, _url, call) => call.path === "/api/client/feedback-notifications" ? route.fulfill({json: {notifications: [{id: "notice-one", feedbackId: "feedback-one", title: "Feedback completed", body: "Your photo feedback was completed.", actionPath: "/portal/feedback/feedback-one", readAt: null, createdAt: date}], nextCursor: null}}) : call.path === "/api/client/feedback-notifications/notice-one" ? route.fulfill({json: {success: true}}) : undefined);
+test("feedback notifications stay in one bell with explicit read actions", async ({page}) => {
+  const calls = await mock(page, (route, _url, call) => call.path === "/api/client/notification-history" ? route.fulfill({json: unifiedHistory([{id: "notice-one", kind:'feedback', mutationPath:'/api/client/feedback-notifications/notice-one', title: "Feedback completed", body: "Your photo feedback was completed.", actionPath: "/portal/feedback/feedback-one", readAt: null, createdAt: date}])}) : call.path === "/api/client/feedback-notifications/notice-one" ? route.fulfill({json: {success: true}}) : undefined);
   await page.goto("/portal"); const bell = page.getByRole("button", {name: /^Notifications/}); await expect(bell).toHaveCount(1); await bell.click();
-  const group = page.getByRole("region", {name: "Feedback updates", exact: true}); await expect(group.getByRole("link", {name: "Feedback completed"})).toHaveAttribute("href", "/portal/feedback/feedback-one");
+  const group = page.getByRole("region", {name: "Notifications", exact: true}); await expect(group.getByRole("link", {name: "Feedback completed"})).toHaveAttribute("href", "/portal/feedback/feedback-one");
   await group.getByRole("button", {name: "Mark read"}).click(); await expect(group.getByRole("button", {name: "Mark read"})).toHaveCount(0); expect(calls.find(call => call.method === "PATCH")?.body).toEqual({action: "read"});
 });
 
@@ -166,4 +172,29 @@ for(const width of [375,1280])test(`redacted feedback history is usable at ${wid
   await expect(page.getByRole("heading",{name:"North edge photo.jpg"})).toBeVisible();await expect(page.getByText("Please check the north edge.")).toHaveCount(0);
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1)).toBe(true);
   expect(await page.getByRole("link",{name:"View details"}).evaluate(link=>link.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44);
+});
+
+for(const width of [375,1280])test(`unified notification history is usable at ${width}px`,async({page},info)=>{
+  test.skip(info.project.name!=="desktop-edge","Explicit viewport coverage");await page.setViewportSize({width,height:900});
+  const calls=await mock(page,(route,_url,call)=>call.path==="/api/client/notification-history"?route.fulfill({json:{scope:{sourceId:"project-alpha:primary",workspaceId:null,rootType:"organization",rootPublicId:"org-one"},asOf:"2026-08-25T13:00:00Z",coverage:{requests:"included",feedback:"included",delivery:"included_legacy_portal_notices"},items:[
+    {id:"request-notice",kind:"request",title:"Request accepted",body:"Your request was accepted.",actionPath:"/portal/requests",readAt:null,createdAt:date,mutationPath:"/api/client/notifications/request-notice"},
+    {id:"feedback-notice",kind:"feedback",title:"Feedback completed",body:"Review complete.",actionPath:"/portal/feedback/feedback-one",readAt:null,createdAt:date,mutationPath:"/api/client/feedback-notifications/feedback-notice"},
+    {id:"delivery-notice",kind:"delivery",title:"Files available",body:"New files are ready.",actionPath:"/portal/projects/project-one",readAt:null,createdAt:date,mutationPath:"/api/client/notifications/delivery-notice"}],nextCursor:null}}):
+    call.path==="/api/client/notifications/request-notice"&&call.method==="PATCH"||call.path==="/api/client/notifications/delivery-notice"&&call.method==="PATCH"?route.fulfill({json:{success:true}}):undefined);
+  await page.goto("/portal");const bell=page.getByRole("button",{name:/Notifications, 3 unread updates/});await expect(bell).toBeVisible();await bell.click();
+  const panel=page.getByRole("region",{name:"Notifications"});await expect(panel.getByText("Request accepted")).toBeVisible();await expect(panel.getByText("Feedback completed")).toBeVisible();await expect(panel.getByText("Files available")).toBeVisible();
+  await expect(panel.getByText(/Authorized portal delivery notices are shown/)).toBeVisible();expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1)).toBe(true);
+  expect(await panel.getByRole("button",{name:"Mark read"}).first().evaluate(button=>button.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44);
+  await panel.getByRole("button",{name:"Mark read"}).first().click();expect(calls.some(call=>call.path==="/api/client/notifications/request-notice"&&call.method==="PATCH")).toBe(true);
+  const delivery = panel.locator('article').filter({hasText: 'Files available'});
+  await delivery.getByRole('button', {name: 'Mark read'}).click();
+  await expect(delivery.getByRole('button', {name: 'Mark read'})).toHaveCount(0);
+  expect(calls.some(call=>call.path==="/api/client/notifications/delivery-notice"&&call.method==="PATCH")).toBe(true);
+  await delivery.getByRole('button', {name: 'Dismiss', exact: true}).click();
+  await expect(delivery).toHaveCount(0);
+  // The fixture reload restores the notice so opening it can be tested separately.
+  await page.reload();
+  await page.getByRole('button', {name: /Notifications, 3 unread updates/}).click();
+  await page.getByRole('region', {name: 'Notifications'}).getByRole('link', {name: 'Files available'}).click();
+  await expect(page).toHaveURL(/\/portal\/projects\/project-one$/);
 });

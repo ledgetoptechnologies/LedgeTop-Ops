@@ -638,15 +638,23 @@ describe("verified Project Alpha quote linkage", () => {
         expect(values[5]).toBe(journal.command?.payload_hash);
         expect(values[14]).toBe(1);
         const columns = ["id", "request_id", "request_revision", "area_revision", "idempotency_key", "payload_hash", "project_alpha_receipt_id", "project_alpha_artifact_public_id", "document_number", "artifact_version", "editor_path", "created_by", "source_id", "command_id"];
-        journal.receipt = {
+        const pendingReceipt: Record<string, unknown> = {
           ...Object.fromEntries(columns.map((column, index) => [column, values[index]])),
           artifact_status: "draft", scope_stale_at: null, created_at: "2026-08-13T12:00:00Z",
         };
-        expect(statements).toHaveLength(3);
+        expect(statements).toHaveLength(4);
         expect(statements[1]?.sql).toContain("INSERT INTO request_admin_audit");
         expect(statements[2]?.sql).toContain("INSERT INTO audit_log");
-        expect(statements[1]?.values?.at(-1)).toBe(journal.receipt.id);
-        expect(statements[2]?.values?.at(-1)).toBe(journal.receipt.id);
+        expect(statements[1]?.values?.at(-1)).toBe(pendingReceipt.id);
+        expect(statements[2]?.values?.at(-1)).toBe(pendingReceipt.id);
+        expect(statements[3]?.sql).toContain("INSERT INTO client_portal_notification_outbox");
+        expect(statements[3]?.sql).toContain("scope_stale_at IS NULL");
+        expect(statements[3]?.sql).toContain("ON CONFLICT(request_id,dedupe_key) DO NOTHING");
+        expect(statements[3]?.values?.[1]).toBe("client_requester");
+        expect(statements[3]?.values?.[2]).toBe(`pa_draft_quote_created:${pendingReceipt.id}:client_requester`);
+        expect(statements[3]?.values?.[4]).toBe(pendingReceipt.id);
+        // A rejected batch must not leave a fake committed receipt for replay.
+        journal.receipt = pendingReceipt;
         sequence.push("receipt-persisted");
       },
     };

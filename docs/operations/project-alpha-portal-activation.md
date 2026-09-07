@@ -1,7 +1,7 @@
 # Project Alpha portal projection activation
 
 This is the production operator runbook for Project Alpha hierarchy events
-received by `ltds-ops-sync` and internally projected to `ltds-clients`. It does
+received by `ledgetop-ops-sync` and internally projected to `ledgetop-clients`. It does
 not authorize a deployment or a
 flag, secret, Access, DNS, or producer change. Record every readback and obtain
 the normal production approvals before performing a write.
@@ -60,6 +60,48 @@ acknowledging the Project Alpha event.
 
 ## Runtime gates
 
+### September 6 primary-instance readback
+
+The signed-in LTDS Project Alpha settings page reported release `fdf8520`,
+the unchanged `ops-sync.ledgetopdroneservices.com/v1/project-alpha/events`
+destination, and an enabled/Ready ordinary connection. Its separate producer
+status was Paused, with zero active workspaces, zero historical roots, and
+zero queued/failed events. The explicit prerequisite was "portal producer
+saved for this connection." This readback involved no settings writes.
+
+This is evidence of an unactivated producer, not proof of invalid credentials,
+a Client receiver rejection, or completion of the historical backfill. Zero
+historical roots before activation must not be interpreted as all clients
+having been provisioned. In the displayed release, `send-now` invokes
+`ExternalOpsSyncOrchestrator`, which calls `activateConfiguredConnection`
+before reconciliation and delivery. Trace that activation or its diagnostic
+failure before changing endpoints or requiring individual invitations.
+The reported diagnostic `54ad8e9a26c6` was subsequently matched exactly to
+the handler's SHA-256 truncation of this exception identity:
+`PDOException:SQLSTATE[HY000]: General error: 1366 Incorrect integer value: '' for column 'contact_assignment_projection_enabled' at row 1`.
+The profile INSERT/UPDATE passes PHP boolean flags directly in PDO's execute
+array; false becomes an empty string rather than an integer zero. This
+explains why permissive SQLite fixtures passed while strict production MySQL
+rejected the default-off flag. Serialize profile flags explicitly as 0/1 and
+verify the actual bound values, then perform live activation acceptance after
+release. Do not change the endpoint, credentials, or default-off optional
+contact/service capabilities to work around this storage error. LTT remains
+unconfigured and outside this activation.
+
+The local `PortalClientProvisioningTest.php` passed 37 tests / 222 assertions
+at PA `636f1d27` using PHP 8.2.12. Its SQLite fixtures cover activation and
+revocation preservation; they do not establish the production MySQL schema,
+successful activation on `fdf8520`, or receiver acceptance. Keep those live
+acceptance requirements open even when this focused test is green.
+
+The signed-in diagnostics page also confirms the same integration failure
+code in `error_log.txt` at September 6 14:47:06 UTC; that deployed handler logs
+only the hash, not the exception class or SQLSTATE. The recent cron view
+repeats provisioning `Ready no` with zero considered roots and no delivered
+projection events. Do not attribute unrelated historical log errors to this
+activation. Preserve sanitized exception class/code diagnostics in future
+releases rather than logging request values or secrets.
+
 | Gate | Role |
 | --- | --- |
 | `PROJECT_ALPHA_PORTAL_SYNC_ENABLED` | Enables private portal projection dispatch inside Client. |
@@ -85,7 +127,7 @@ for the signed outer wrapper, then Client rechecks the exact inner limit.
    private projection gates, and
    `PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED=false`.
 5. Verify Ops Sync has the `CLIENT_PORTAL_PROJECTION_INGRESS` named service
-   binding targeting `ltds-clients#OpsSyncPortalProjectionIngress`.
+   binding targeting `ledgetop-clients#OpsSyncPortalProjectionIngress`.
 6. Verify the existing Ops Sync Access application, audience, and Project Alpha
    HMAC secret are unchanged. Client no longer requires a copied Project Alpha
    portal HMAC secret or portal-specific Access audience.
@@ -95,6 +137,24 @@ for the signed outer wrapper, then Client rechecks the exact inner limit.
    work. Never record cookies, tokens, link fragments, or secret values.
 
 ## Deployment order
+
+### Read the release profile first
+
+The numbered procedure below describes the historical receiver-only rollout.
+In particular, its `CLIENT_PORTAL_HIERARCHY_V2_ENABLED=false` checks and
+adjacent-flag false assertions are **not** the current default-on eligibility
+configuration. Do not copy those values into a live default-on installation.
+For the current release, use `scripts/client-portal-release-profile.json` and
+the profile-aware release preflight as the exact configuration contract,
+preserving enabled deny enforcement and eligibility. Retain the ordering,
+schema, private-ingress, replay and compatibility checks below. Read back the
+deployed state separately; a checked-in profile is intent, not live evidence.
+
+When diagnosing missing workspaces, record the existing primary producer's
+routing status and queued/failed event diagnostic, the Ops Sync receipt status,
+and the Client receipt/checkpoint status. A healthy business snapshot or active
+eligibility policy does not prove a portal event was produced or applied. Do
+not enroll the secondary source or change the primary URL as a diagnostic fix.
 
 1. Identify the reviewed commit and Worker artifact/version intended for
    deployment. Confirm the worktree is clean and the artifact is built from that
@@ -114,7 +174,7 @@ for the signed outer wrapper, then Client rechecks the exact inner limit.
 4. Read back Worker custom domains/routes. Confirm Project Alpha's only ingress
    is the existing Ops Sync route and its Access application/audience are
    unchanged. Confirm the canonical
-   `portal.ledgetopdroneservices.com` custom domain reaches `ltds-clients`, the
+   `portal.ledgetopdroneservices.com` custom domain reaches `ledgetop-clients`, the
    legacy `client.ledgetopdroneservices.com` compatibility domain still reaches
    the same Worker, and no unrelated hostname routes to the internal namespace.
 5. Read back the Operations-owned internal route/binding and confirm only Ops
@@ -148,9 +208,9 @@ for the signed outer wrapper, then Client rechecks the exact inner limit.
      or legacy origin receive no projection-handler response; and
    - an existing legacy public share loads, and its same-origin session request
      remains admitted. Do not include share fragments or cookies in evidence.
-9. Deploy `ltds-clients` first. Confirm the named entrypoint is exported and
+9. Deploy `ledgetop-clients` first. Confirm the named entrypoint is exported and
    direct portal-v2 POSTs remain 404.
-10. Deploy `ltds-ops-sync` second. Confirm the service binding resolves.
+10. Deploy `ledgetop-ops-sync` second. Confirm the service binding resolves.
 11. Send one signed portal projection through the existing Project Alpha event
     URL. Confirm both the source-qualified Ops receipt and the Client delivery
     receipt complete, then replay it and confirm duplicate acknowledgement with
@@ -176,7 +236,7 @@ for the signed outer wrapper, then Client rechecks the exact inner limit.
    producer route is enabled, and all adjacent authority and workflow flags
    remain false. Confirm the release diff contains no unrelated configuration
    change.
-2. Activate the paired reviewed versions on `ltds-clients` and `ltds-ops-sync`
+2. Activate the paired reviewed versions on `ledgetop-clients` and `ledgetop-ops-sync`
    and read back the private binding/entrypoint. Repeat the external internal-route
    rejection and legacy public-share/session checks before sending a valid
    projection.
@@ -294,3 +354,19 @@ signing keys while Project Alpha can still retry.
 Production evidence must include redacted version IDs, configuration readback,
 the direct-route 404 probes, one successful event, one exact duplicate, and one
 retryable Client-unavailable case.
+
+### September 6 signed-in recheck — activation still pending
+
+After the operator renewed the browser session, the LTDS production page still
+reported `vfdf8520`. The existing Ops Sync connection was Ready, but workspace
+event routing remained Paused with zero active workspaces and zero queued or
+failed workspace events. The page still required the producer to be saved for
+this connection. No settings, credentials, or sync actions were changed during
+this read-only recheck; LTT was not enrolled.
+
+This is not evidence that the activation fix failed: the observed revision
+predates merged PA fix `80fb0cc028655d885be37d798797da280d92aeb8`.
+Pull/recreate the published LTDS PA containers, verify the running revision,
+then perform and inspect activation through the existing connection. Do not
+substitute a new endpoint or claim automatic provisioning is live until the
+resulting workspaces and preserved revocations are verified end to end.

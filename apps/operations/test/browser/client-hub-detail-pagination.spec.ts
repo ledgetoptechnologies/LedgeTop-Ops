@@ -412,8 +412,17 @@ for (const width of [375, 640, 1280, 3440]) {
     await page.goto(canonicalPath);
     await expect(page.getByRole("heading", { name: response.client.display_name })).toBeVisible();
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    const expectedColumns = width < 640 ? 1 : width < 1120 ? 2 : width < 1800 ? 3 : 4;
     await expect.poll(() => page.locator(".client-hub-detail-grid").evaluate(element =>
-      getComputedStyle(element).gridTemplateColumns.trim().split(/\s+/).length)).toBe(1);
+      getComputedStyle(element).gridTemplateColumns.trim().split(/\s+/).length)).toBe(expectedColumns);
+    const danger = page.getByRole("region", { name: "Portal access controls", exact: true });
+    await expect(danger).toBeVisible();
+    await expect(danger.getByRole("heading", { name: "Portal logins", exact: true })).toBeVisible();
+    expect(await page.locator(".client-hub-detail-grid > *").last().getAttribute("class")).toContain("client-hub-danger-zone");
+    const dangerStyle = await danger.evaluate(element => {
+      const style = getComputedStyle(element); return { start: style.gridColumnStart, end: style.gridColumnEnd };
+    });
+    expect(dangerStyle).toEqual({ start: "1", end: "-1" });
     for (const collection of collections) {
       const button = loadButton(page, collection);
       await button.scrollIntoViewIfNeeded();

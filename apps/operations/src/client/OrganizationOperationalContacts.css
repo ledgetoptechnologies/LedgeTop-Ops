@@ -1,4 +1,4 @@
-.organization-operational-contacts { min-width: 0; overflow-wrap: anywhere; }
+.organization-operational-contacts { container-type: inline-size; min-width: 0; overflow-wrap: anywhere; }
 .organization-operational-contacts button,
 .organization-operational-contacts select,
 .organization-operational-contacts summary { min-height: 44px; }
@@ -26,6 +26,10 @@
 .organization-operational-contacts summary { display: flex; align-items: center; cursor: pointer; color: var(--accent); }
 .organization-operational-contacts ol { margin: .35rem 0 0; padding-left: 1.4rem; }
 @media (max-width: 800px) {
+  .organization-operational-groups,
+  .organization-operational-editor { grid-template-columns: minmax(0, 1fr); }
+}
+@container (max-width: 560px) {
   .organization-operational-groups,
   .organization-operational-editor { grid-template-columns: minmax(0, 1fr); }
 }

@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "ltds-clients",
+  "name": "ledgetop-clients",
   "main": "src/worker/index.ts",
   "compatibility_date": "2026-07-16",
   "compatibility_flags": ["nodejs_compat"],
@@ -40,6 +40,7 @@
     "ENVIRONMENT": "production",
     "CLIENT_PORTAL_ENABLED": "true",
     "CLIENT_PORTAL_CONTENT_AUDIT_ENABLED": "false",
+    "CLIENT_PORTAL_NOTIFICATION_MIGRATION_MAINTENANCE": "false",
     "CLIENT_PORTAL_REQUEST_V2_ENABLED": "false",
     "CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED": "false",
     "CLIENT_PORTAL_NATIVE_FEEDBACK_SOURCE_IDS": "",
@@ -156,12 +157,12 @@
   "services": [
     {
       "binding": "CLIENT_DELEGATED_SHARE_SIGNER",
-      "service": "ltds-ops",
+      "service": "ledgetop-ops",
       "entrypoint": "ClientDelegatedShareSigner"
     },
     {
       "binding": "VIEWER_SESSION_ISSUER",
-      "service": "ltds-ops",
+      "service": "ledgetop-ops",
       "entrypoint": "ViewerSessionIssuer"
     }
   ],

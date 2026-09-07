@@ -187,6 +187,45 @@ test("invalid dates and malformed responses fail locally without inventing event
   await expect(section.getByText("No matching events are available within the reported coverage.", { exact: true })).toBeVisible();
 });
 
+test("restored direct-link and browser-history filters retry their initial transient timeline reads", async ({ page }) => {
+  let attempts = 0;
+  const calls = await fixture(page, (route, url) => {
+    attempts += 1;
+    if (attempts === 1 || attempts === 4) return route.fulfill({ status: 503, json: { error: "Audit storage is temporarily unavailable." } });
+    return route.fulfill({ json: timeline(url, [item(`restored-${attempts}`)]) });
+  });
+  const direct = `${clientPath}?panel=delivery&audit.active=1&audit.category=access&audit.actor=staff&audit.result=denied&audit.from=2026-08-01&audit.to=2026-08-26`;
+  await page.goto(direct);
+  let section = clientTimeline(page);
+  await expect(section.getByRole("alert")).toContainText("temporarily unavailable");
+  await section.getByRole("button", { name: "Retry audit timeline" }).click();
+  await expect(section.getByText("Alex Client", { exact: true })).toBeVisible();
+
+  await page.goto(`${clientPath}?panel=delivery`);
+  section = clientTimeline(page);
+  await section.getByRole("button", { name: "View access history" }).click();
+  await expect(section.getByText("Alex Client", { exact: true })).toBeVisible();
+  await page.goBack();
+  await expect(section.getByText("Apply filters to load the timeline.", { exact: true })).toBeVisible();
+  await page.goForward();
+  section = clientTimeline(page);
+  await expect(section.getByRole("alert")).toContainText("temporarily unavailable");
+  await section.getByRole("button", { name: "Retry audit timeline" }).click();
+  await expect(section.getByText("Alex Client", { exact: true })).toBeVisible();
+
+  const timelineCalls = calls.filter(url => url.pathname.endsWith("/timeline"));
+  expect(timelineCalls).toHaveLength(5);
+  expect(timelineCalls.slice(0, 2).every(url => url.searchParams.get("category") === "access"
+    && url.searchParams.get("actorType") === "staff" && url.searchParams.get("result") === "denied"
+    && url.searchParams.get("from") === "2026-08-01T00:00:00.000Z"
+    && url.searchParams.get("to") === "2026-08-26T23:59:59.999Z"
+    && url.searchParams.get("expectedContextVersion") === "client-context")).toBe(true);
+  expect(timelineCalls.slice(2).every(url => url.searchParams.get("category") === "access"
+    && url.searchParams.get("actorType") === "all" && url.searchParams.get("result") === "all"
+    && !url.searchParams.has("from") && !url.searchParams.has("to")
+    && url.searchParams.get("expectedContextVersion") === "client-context")).toBe(true);
+});
+
 test("project timeline uses the child route, invalidates stale context, and parent refresh cancels a pending page", async ({ page }) => {
   const pending: Route[] = [];
   let mode: "pending" | "mismatch" = "pending";

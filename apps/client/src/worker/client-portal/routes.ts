@@ -1,6 +1,6 @@
 import { Hono, type Context } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { isMovedSourceMarker } from "@ltds/shared";
+import { isMovedSourceMarker, notificationMigrationMaintenanceActive, notificationMigrationMaintenanceResponse } from "@ltds/shared";
 import type {
   ClientDelegatedShareSignerRequestV1,
   ClientViewerSessionRequestV1,
@@ -18,6 +18,7 @@ import {
   NativeNotificationAuthorizationOverflowError,
 } from "./repository";
 import { clientFeedbackSchemaAvailable, createClientFeedbackRouter } from "./feedback-routes";
+import {createClientNotificationHistoryRouter} from './notification-history';
 import type {
   ClientPortalRepository,
   ClientPortalSession,
@@ -60,12 +61,14 @@ import {
   authorizeEffectiveWorkspaceProject,
   authorizeEffectiveWorkspaceRequest,
   authorizeEffectiveWorkspaceRoot,
+  effectiveWorkspaceNotificationMutationGuardSql,
   type EffectivePortalWorkspaceContext,
   listPortalWorkspaceHierarchy,
   listPortalWorkspaces,
   PORTAL_WORKSPACE_HEADER,
   portalHierarchyV2Enabled,
   portalIdentityAccepted,
+  readEffectiveWorkspaceNotificationMutationProof,
   resolveEffectivePortalWorkspaceContext,
   resolveNativePortalWorkspaceReadContext,
 } from "./workspace-v2";
@@ -96,6 +99,8 @@ import {
   type ProjectAlphaPricingAuthorizationContextResolver,
 } from "./project-alpha-pricing-hint";
 import { clientPortalNotificationsAvailable } from "./schema-readiness";
+import { readEffectiveWorkspaceIdentityMutationGuard } from "./effective-workspace-identity-mutation-guard";
+import { readEffectiveWorkspaceVisibilityMutationGuard } from "./effective-workspace-visibility-mutation-guard";
 import { readClientRequestReadiness } from "./request-readiness";
 import { createNativePortalWorkspaceRouter } from "./native-portal-resources";
 import {createWorkspaceAddressContact,deleteWorkspaceAddressContact,listWorkspaceAddressContacts,readWorkspaceAddressContact,
@@ -444,13 +449,14 @@ export function createClientPortalRouter(
             canViewBilling: workspace.canViewBilling,
           };
         } else {
-          const nativeRequestPath = /^\/(?:request-readiness|service-catalog(?:\/page)?|service-request-drafts|service-requests|notifications)(?:\/|$)/
+          const nativeRequestPath = /^(?:\/api\/client)?\/(?:request-readiness|service-catalog(?:\/page)?|service-request-drafts|service-requests|notifications|notification-history)(?:\/|$)/
             .test(c.req.path);
-          const native = selectedWorkspace && nativeRequestPath && nativeServiceRequestsEnabled(c.env)
+          const notificationHistoryRequest=/^(?:\/api\/client)?\/notification-history$/.test(c.req.path);
+          const native = selectedWorkspace && nativeRequestPath && (notificationHistoryRequest||nativeServiceRequestsEnabled(c.env))
             ? await resolveNativePortalWorkspaceReadContext(c.env, principal, selectedWorkspace)
             : null;
           if (!native) throw new HTTPException(403, { message: "Select an authorized client workspace" });
-          if (!await nativeRequestSchemaReady(c.env) && !c.req.path.endsWith("/request-readiness"))
+          if (!notificationHistoryRequest&&!await nativeRequestSchemaReady(c.env) && !c.req.path.endsWith("/request-readiness"))
             throw new HTTPException(503, { res: Response.json({
               error: "Native service requests are temporarily unavailable until storage migration is ready.",
               code: "request_unavailable",
@@ -484,6 +490,9 @@ export function createClientPortalRouter(
     });
     c.set("clientPrincipal", principal);
     c.set("clientWorkspace", workspace);
+    if (notificationMigrationMaintenanceActive(c.env) && ["POST", "PUT", "PATCH", "DELETE"].includes(c.req.method) &&
+      (/^(?:\/api\/client)?\/(?:service-request-drafts|service-requests)(?:\/|$)/.test(c.req.path) || /^(?:\/api\/client)?\/notifications\//.test(c.req.path)))
+      return notificationMigrationMaintenanceResponse();
     await next();
   });
 
@@ -916,10 +925,18 @@ export function createClientPortalRouter(
         code: "capability_unavailable",
       }, 503);
     const workspace = selectedWorkspace(c);
-    if (workspace && !(await authorizeEffectiveWorkspaceNotification(
+    const mutationProof = workspace ? await readEffectiveWorkspaceNotificationMutationProof(
       c.env, c.get("clientPrincipal"), workspace, notificationId.data,
-    ))) throw new HTTPException(404, { message: "Notification not found" });
-    if (!(await repository.updateNotification(c.env, c.get("clientSession"), notificationId.data, value.data.action)))
+    ) : null;
+    if (workspace && !mutationProof) throw new HTTPException(404, { message: "Notification not found" });
+    const guard = mutationProof ? effectiveWorkspaceNotificationMutationGuardSql(mutationProof) : undefined;
+    const identityGuard = workspace ? await readEffectiveWorkspaceIdentityMutationGuard(c.env, c.get("clientPrincipal"), workspace) : null;
+    const visibilityGuard = workspace ? await readEffectiveWorkspaceVisibilityMutationGuard(c.env, workspace) : null;
+    const mutationGuard = guard && identityGuard && visibilityGuard ? {
+      sql: `(${identityGuard.sql}) AND (${visibilityGuard.sql}) AND (${guard.sql})`,
+      bindings: [...identityGuard.bindings, ...visibilityGuard.bindings, ...guard.bindings],
+    } : guard;
+    if (!(await repository.updateNotification(c.env, c.get("clientSession"), notificationId.data, value.data.action, mutationGuard)))
       throw new HTTPException(404, { message: "Notification not found" });
     return c.json({ success: true });
   });
@@ -2241,6 +2258,7 @@ export function createClientPortalRouter(
   });
 
   router.route("/",createClientFeedbackRouter(feedbackSchemaAvailable));
+  router.route("/",createClientNotificationHistoryRouter({notificationSchemaAvailable,feedbackSchemaAvailable}));
   return router;
 }
 type ClientFileRange = { offset: number; length: number };

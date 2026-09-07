@@ -816,6 +816,7 @@
 .portal-notification-list article.is-unread { border-left: 4px solid #ee5007; background: #fff8f4; }
 .portal-notification-list article p { margin: 6px 0; }
 .portal-notification-list article > div { display: flex; justify-content: flex-end; gap: 6px; margin-top: 7px; }
+.portal-notification-list article > div button { min-height: 44px; }
 .portal-notification-empty { padding: 24px 8px; text-align: center; color: #66717c; }
 
 .portal-account-name {
@@ -1187,6 +1188,16 @@
 }
 .portal-work-area-update span { color: #3d4650; }
 .portal-work-area-update small { color: #6d737a; }
+.portal-pa-draft-created {
+  display: grid;
+  gap: .2rem;
+  padding: .7rem .85rem;
+  border: 1px solid #acd8c1;
+  border-radius: .55rem;
+  background: #f1fbf5;
+  color: #174d2e;
+}
+.portal-pa-draft-created span { color: #315f45; }
 
 /* ---------------------------------------------------------------------------
    Portal request form

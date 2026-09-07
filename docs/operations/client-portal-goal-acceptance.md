@@ -11,6 +11,13 @@ their presentation through explicit source-qualified business-party links, but
 must not merge producer records by name, email, or other inferred similarity.
 The 3D Viewer is outside this work while Hermes is changing it.
 
+Current deployment authorization is LTDS only. Checklist references to a second
+configured producer or a live secondary-source exercise do not authorize
+enrolling LTT. Use synthetic secondary-source isolation tests locally, and
+leave any unavailable live-secondary gate explicitly pending until the owner
+configures that instance. Do not substitute a second connection for the existing
+LTDS signed endpoint or enable a source merely to satisfy this checklist.
+
 The dated production admission, migration, and provisioning checkpoint is
 recorded in
 [client-portal-production-evidence-2026-09-01.md](client-portal-production-evidence-2026-09-01.md).
@@ -69,11 +76,17 @@ background batches. An administrator's person/root revocation must survive
 every subsequent sync, reconciliation, and sign-in. Source-qualified records
 from separate Project Alpha instances must never merge by email or name.
 
-Current rollout gates are the historical producer backfill, primary signed
+Remaining live acceptance gates are the historical producer backfill, primary signed
 native workspace enrollment/listing/resource routing, and regression coverage
 for legacy client reparenting and member revocation. These are not yet live
-accepted. Keep coordinated automatic-eligibility flags disabled until the
-joined producer/consumer proof and revocation gates pass. A successful business
+accepted. The current checked-in release profile is `default-on-eligibility`;
+the earlier receiver-only disabled-flag checkpoint is historical, not an
+instruction to turn off the current coordinated configuration. Follow
+[the activation runbook](project-alpha-portal-activation.md) and its profile-aware
+preflight, and distinguish deployed flags from successful workspace creation.
+PA's strict-MySQL activation fix is merged in `80fb0cc` (PR #174), but image
+publication, production recreation, and successful reconciliation still require
+verification. A successful business
 directory sync or a green isolated membership test is not sufficient evidence.
 
 | Requirement | Current evidence | State | Remaining acceptance |
@@ -154,3 +167,37 @@ case only; never add an automatic retry around a commit-ambiguous mutation.
 The exact migration, flag, test-file, dependency, and rollback mapping for J1–J7
 is in the rollout manifest. Production evidence belongs only in the dated
 production-evidence record; do not mark a row live accepted from fixtures.
+
+### J6 follow-up — confirmed draft visibility and notification
+
+The September 6 joined audit found that confirmed PA draft receipts were saved
+with request/admin audit records but without a client notification outbox
+intent. A derived draft-created label alone does not complete J6. Track both:
+
+- Exact-source, current request/area revision, non-stale receipt visibility in
+  primary/native client request readers, without financial/editor details or
+  a request lifecycle change.
+- An atomic, receipt-deduplicated informational notification intent; dispatch
+  must recheck current recipient authority. Native delivery must not acquire
+  email authority merely because a receipt exists. No notice may imply quote
+  acceptance, payment, or access to an unshared resource.
+
+These slices are in isolated implementation branches and remain unverified for
+production. The broader primary/native browser rerun passed 184/184 cases after
+the 12 old split-notification fixtures were updated to the unified history
+contract. The focused D1 receipt rerun initially passed four cases and failed two
+because wrong-source fixtures violated the composite request/source foreign key.
+The fixtures now use valid distinct-source requests and both focused cases passed;
+a complete three-file database regression rerun then completed 80 passed/14
+failed because receipt fixtures outlived a DELETE-based catalog test cleanup.
+Receipt-reader tests now have a dedicated migrated database; the reader/catalog
+rerun passed 60/60. The native policy and repository cases passed separately
+(23 and 17): all 100 cases passed across runs, not one combined run. Database
+immutability constraints were preserved. Browser checks do not prove live
+provisioning. Notification checks now pass: producer 51, native D1 dispatcher 8,
+unit 19, populated migration 3, and primary history/revocation 2. Native client
+history readback and the combined release gates remain open.
+The review additionally requires root-workspace requests (without a project),
+current receipt/revision checks at dispatch, exact claim/attempt/lease fences,
+and idempotent success for an already-created matching inbox record. Typechecks
+and mocked notification cases alone do not close these requirements.

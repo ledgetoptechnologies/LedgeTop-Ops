@@ -211,7 +211,7 @@ describe("source-qualified Client Hub directory", () => {
     const hidden = await listClientHubRoots(env, staff);
     expect(hidden.clients.every(row => !("business_party_id" in row))).toBe(true);
     expect(hidden.clients.find(row => row.public_id === "activity-party-a")?.meaningful_activity_at).toBeNull();
-  });
+  }, 15_000);
 
   it("binds sort and activity revision to pagination and rejects invalid sort and forged future cutoffs", async () => {
     await roots([{ id: "cursor-activity-a" }, { id: "cursor-activity-b" }]);

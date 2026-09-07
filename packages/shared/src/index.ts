@@ -58,8 +58,10 @@ export const PERMISSIONS = [
 
 export * from "./viewer-service";
 export * from "./client-feedback";
+export * from "./notification-migration-maintenance";
 export * from "./client-audit-timeline";
 export * from "./service-assignments";
+export * from "./native-portal-scopes";
 
 export type Permission = (typeof PERMISSIONS)[number];
 export type PermissionScope = "global" | "division" | "assigned" | "own";

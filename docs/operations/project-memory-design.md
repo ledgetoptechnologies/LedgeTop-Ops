@@ -195,6 +195,24 @@ current authority and make historical versus current revision selection explicit
 
 ## Product decisions still open
 
+### September 6 workflow audit follow-up
+
+The previous-project selector now offers an in-place retry after a transient
+collection failure and preserves selected copy sections. The focused desktop
+and mobile copy-forward browser gate passed 10/10 after this change.
+
+Starting another preview now clears the previous preview and confirmation even
+when the new request fails. The same 10/10 browser gate verifies failed preview
+refresh, retained selections, fresh confirmation, and stable commit retry keys.
+
+Ordinary contacts/memory version conflicts now return a narrow typed code only
+after live pair and context revalidation. The UI retains selections but removes
+the preview and confirmation. Unknown, ownership, and authorization conflicts
+still invalidate protected workspace data. The focused backend gate passed
+40/40, TypeScript passed, and rebuilt desktop/mobile recovery cases passed 2/2.
+An injected project-change race verifies that revalidation does not classify it
+as a recoverable overlay conflict. These remain local, not deployment, results.
+
 1. **Crew contributions:** may assigned staff append their own observations, or
    are all edits manager-only? If staff can contribute, can they edit another
    person's observations or the original plan? An optional question is pending;

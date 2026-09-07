@@ -319,3 +319,124 @@ source-record, request, portal-access, delivery-link and notification ledgers;
 primary-source feedback lifecycle history, authenticated content-read production, global filters,
 client visibility and common retention are now distinct: the feedback adapter is locally verified, while the latter items still remain. No production migration,
 flag change, deployment or push is included in either checkpoint.
+
+### September 6 release verification follow-up
+
+The full Operations run reported an obsolete delegated-signer configuration
+assertion for `ltds-ops`. The checked-in Worker and Client service binding both
+use `ledgetop-ops`; only the test expectation was corrected. Its focused test
+passed (1 passed, 6 unselected). The already-running full suite is still pending;
+the focused result does not establish a full-suite pass.
+
+The older run subsequently finished: 184 files passed and one file failed;
+1,898 tests passed and one failed, in 7,395.27 seconds. Its sole failure is the
+old Worker-name assertion above. This is baseline evidence, not a full test
+result for the joined candidate `61a59ec`. On that candidate, both app type
+checks and all 33 source-layout/release-profile/manifest tests pass. Focused
+Client D1 tests passed 31/31 (131.22 seconds), and Operations receipt/notification
+tests passed 60/60 (171.34 seconds). Both production builds pass, with bundle-size
+warnings retained. All 184 desktop/mobile portal browser tests passed (2.6 minutes).
+The 375px delivery and 1280px directory screenshots were inspected: controls
+and long labels remain contained and readable. The source identifier remains
+technical customer-facing copy and may warrant later UX refinement.
+These candidate checks do not replace the full package gates or live acceptance.
+
+PR #26 remains at `d448137`, open with failed checks. GitHub's Client check
+annotation explicitly says the job did not start because recent account payments
+failed or the spending limit needs increasing. Billing changes and bypassing
+required CI are not authorized; the owner was asked to restore Actions capacity.
+
+The isolated PA draft notification/status range `f8e8641..b93734e` has completed
+source review of all 12 changed files with no plausible security candidates.
+The security scan remains unfinalized because its required Markdown artifact
+directory denied filesystem access. The canonical model and partial review
+checkpoint are saved through the scan service. Limited user-approved elevated
+access subsequently saved the required Markdown file, but scan finalization
+failed in `workbench_db.py complete-scan`; no completion retry was made and the
+scan is not claimed complete. Live PA synchronization and
+default-on workspace provisioning remain unverified; no release is claimed.
+
+### September 6 direct-release authorization and live readback
+
+The owner confirmed exhausted build minutes and authorized a local-gated Wrangler
+release with repository synchronization. This supersedes waiting for Actions
+capacity; it does not authorize bypassing branch protections or skipping tests.
+PR #26 was subsequently pushed to `521583c`. Both complete candidate package
+suites remain live; the focused and browser results above remain separate evidence.
+
+Read-only production checks found no pending Operations migrations and Client
+migrations 0200/0201 pending. The notification outbox contains 13 sent and two
+failed rows, with no pending/processing rows at observation time; the inbox is
+empty and foreign-key checks are clean. Do not retry the failed mail as a side
+effect of deployment. R8a still needs a verified writer/dispatcher pause and drain
+mechanism before its preserving table rebuild; an empty queue alone is not one.
+
+The primary-source Ops receipt ledger contains business/entitlement events but
+no portal.projection receipts. Client portal projection receipts and generations
+are also empty, as are portal workspaces. This proves no accepted provisioning
+state exists in those ledgers, not why upstream delivery is missing or rejected.
+Continue tracing the unchanged LTDS signed endpoint and producer status; do not
+create a parallel connection or enroll LTT. No production writes or deployment
+were performed for these checks.
+
+The renewed in-app PA session subsequently confirmed the connection is Ready,
+but portal routing is Paused, queued/failed is 0/0, and active workspaces is 0.
+The prerequisite warning is `portal producer saved for this connection`.
+Only navigation and aggregate synchronization status were inspected; credentials
+and client rosters were not read. The served panel still says `Client portal
+provisioning`, unlike current PA main's `Connected workspace synchronization`.
+PA main `80fb0cc028655d885be37d798797da280d92aeb8` includes the strict-MySQL
+boolean serialization fix; its Docker run `34050403843` completed successfully.
+The owner was asked to recreate LTDS web/cron from that release while preserving
+database volumes. This is a served-version mismatch, not proof of the exact
+container digest or permission to retry activation on the older served code.
+
+Live Operations type-to-search was also exercised without pressing Enter:
+an existing standalone-client name narrowed 22 displayed entries to exactly one
+and updated the URL query. This verifies that production interaction, not
+large-directory pagination, all search fields, or portal access provisioning.
+
+### September 6 notification follow-up verification
+
+The frozen candidate full suites have now both terminated. Client passed
+1,073 tests; Operations passed 1,913 with two failures: the subsequently
+corrected PA draft test fixture and a Miniflare `EADDRINUSE` connection failure
+in the notification cursor test. This is not a green full Operations run.
+Detailed handles and focused reruns are recorded in
+`notification-migration-maintenance-verification.md`.
+
+The current working increment adds legacy delivery notices to the unified bell,
+fixes binary cursor ordering and late UI responses, and is still under
+authorization verification. The identity-only atomic predicate passes its
+focused D1 regression and Client type checking. Integrated selected-workspace
+write checks must retain delivery visibility without imposing request-creation
+permissions, and must preserve checks for unselected legacy sessions too.
+Native delivery still requires a recipient-facing ledger independent of email
+dispatch state; it remains part of the goal, not a completed feature.
+
+The latest in-app PA retry returned to login. No connection settings, LTT
+enrollment, announcement emails, production migrations or deployments occurred
+in this follow-up. The goal remains active.
+
+### Current checkpoint and next native notification increment
+
+Checkpoint `51c951f` now passes the corrected complete local browser partitions:
+392 base tests passed, eight skipped, and all 16 two-domain tests passed. All
+33 source-layout/release-profile/rollout tests and 43 staging-contract tests
+also pass. Full Client session 44811 remains running; these results are not a
+substitute for its terminal result or for live provisioning acceptance.
+
+The selected-workspace notification mutation now includes current identity,
+workspace visibility and delivery authority predicates, with migrated-D1
+revocation tests. The earlier identity-only description above is historical.
+
+Native delivery bell implementation is isolated on `codex/native-delivery-bell`
+so it cannot change the checkpoint under test. Its accepted-grant event ledger
+must retain exact source/workspace/principal/version and grant/binding authority
+even when identity binding occurs later. Per-person read state remains separate
+from email dispatch. Client history and mutation integration are in progress,
+not complete. Authenticated file-change event projection is a distinct remaining
+requirement; PA grant-accepted notices alone do not satisfy that requirement.
+
+No additional source has been enrolled, no announcement mail has been sent,
+and no production release is implied by these local checks.

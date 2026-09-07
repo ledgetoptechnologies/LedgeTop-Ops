@@ -28,12 +28,12 @@ current production pilot until its release gates pass.
 The cross-feature, conversation-level acceptance record is the
 [locked release scope](docs/locked-release-scope.md).
 
-LTDS Ops is the operating and client-delivery platform for Ledge Top Drone Services. It contains three independently deployed Cloudflare Workers in one repository:
+LedgeTop Ops is the shared operating and client-delivery platform for Ledge Top's service businesses. It contains three independently deployed Cloudflare Workers in one repository:
 
-- `ltds-ops` at `ops.ledgetopdroneservices.com` and `ops.ledgetoptechnologies.com` — private staff operations, projects, tasks, airspace awareness, ACL, delivery administration, and Dropbox import.
-- `ltds-delivery` at `portal.ledgetopdroneservices.com`, `portal.ledgetoptechnologies.com`, and the legacy `client.ledgetopdroneservices.com` compatibility host — Access-protected client workspaces plus grant-controlled public delivery, same-origin media activation, downloads, and cloud transfers to Dropbox or Google Drive.
+- `ledgetop-ops` at `ops.ledgetopdroneservices.com` and `ops.ledgetoptechnologies.com` — private staff operations, projects, tasks, airspace awareness, ACL, delivery administration, and Dropbox import.
+- `ledgetop-clients` at `portal.ledgetopdroneservices.com`, `portal.ledgetoptechnologies.com`, and the legacy `client.ledgetopdroneservices.com` compatibility host — Access-protected client workspaces plus grant-controlled public delivery, same-origin media activation, downloads, and cloud transfers to Dropbox or Google Drive.
 
-- `ltds-ops-sync` at `ops-sync.ledgetopdroneservices.com` receives signed Project Alpha entitlement webhooks and reconciles the Cloudflare Access group.
+- `ledgetop-ops-sync` at `ops-sync.ledgetopdroneservices.com` receives signed Project Alpha entitlement webhooks and reconciles the Cloudflare Access group.
 
 Project Alpha is authoritative for explicitly selected users, Project Managers and teams, Business Units as Project metadata, operations, tasks, and calendar data. LTDS Ops keeps a last-known-good read-only projection and owns airspace matching, R2 folder associations, delivery shares, and its protected break-glass Owner.
 
@@ -56,9 +56,9 @@ Each app intentionally has its own `package.json`, lockfile, `wrangler.jsonc`, m
 
 | Worker | Build root | Deploy command |
 |---|---|---|
-| `ltds-ops` | `/apps/operations` | `npm run deploy` |
-| `ltds-delivery` | `/apps/client` | `npm run deploy` |
-| `ltds-ops-sync` | `/apps/ops-sync` | `npm run deploy` |
+| `ledgetop-ops` | `/apps/operations` | `npm run deploy` |
+| `ledgetop-clients` | `/apps/client` | `npm run deploy` |
+| `ledgetop-ops-sync` | `/apps/ops-sync` | `npm run deploy` |
 
 ## Local verification
 

@@ -134,6 +134,8 @@ export interface PortalServiceRequest {
     changeSummary: string;
     updatedAt: string;
   } | null;
+  /** A current Project Alpha draft exists; no commercial artifact is exposed. */
+  projectAlphaDraftCreated?: boolean;
   acceptedQuote?: PortalAcceptedQuote | null;
   operationalEstimate?: PortalOperationalEstimate | null;
   status: PortalServiceRequestStatus;
@@ -155,7 +157,7 @@ export interface PortalBootstrap {
 
 export interface PortalNotification {
   id: string;
-  eventType: "files_added" | "files_removed" | "request_status" | "request_reply" | "estimate_ready" | "request_completed" | "work_area_changed";
+  eventType: "files_added" | "files_removed" | "request_status" | "request_reply" | "estimate_ready" | "request_completed" | "work_area_changed" | "pa_draft_quote_created";
   title: string;
   body: string;
   actionPath: string | null;

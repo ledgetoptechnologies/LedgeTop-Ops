@@ -144,6 +144,7 @@ interface ServiceRequestRow {
   work_area_revision_number: number | null;
   work_area_change_summary: string | null;
   work_area_updated_at: string | null;
+  project_alpha_draft_created: number | null;
   status: ClientServiceRequest["status"];
   created_at: string;
   updated_at: string;
@@ -507,6 +508,7 @@ function mapServiceRequest(
             changeSummary: row.work_area_change_summary!,
             updatedAt: row.work_area_updated_at!,
           } }),
+    ...(row.project_alpha_draft_created === 1 ? { projectAlphaDraftCreated: true } : {}),
     status: row.status,
     acceptedQuote:
       includeBilling && row.quote_status
@@ -591,7 +593,17 @@ const baseServiceRequestColumns = `r.id,r.project_id,r.parent_request_id,r.reque
    r.service_category,r.deliverables_text,r.site_contact_name,r.site_contact_email,r.site_contact_phone,
    r.desired_completion_at,r.latitude,r.longitude`;
 
-const currentServiceRequestColumns = `${baseServiceRequestColumns},
+function currentDraftReceiptColumn(areaRevision: string, enabled: boolean): string {
+  if (!enabled) return "0 project_alpha_draft_created";
+  return `EXISTS(SELECT 1 FROM request_pa_draft_quote_receipts receipt
+    WHERE receipt.request_id=r.id AND receipt.source_id=r.catalog_source_id
+      AND receipt.scope_stale_at IS NULL
+      AND receipt.request_revision=COALESCE((SELECT MAX(revision.revision_number)
+        FROM request_revisions revision WHERE revision.request_id=r.id),0)
+      AND receipt.area_revision=${areaRevision}) project_alpha_draft_created`;
+}
+
+function currentServiceRequestColumns(includeDraftReceipt: boolean) { return `${baseServiceRequestColumns},
    CASE WHEN effective_area.id IS NULL THEN r.area_geojson ELSE effective_area.area_geojson END area_geojson,
    CASE WHEN effective_area.id IS NULL THEN r.poi_points_json ELSE effective_area.poi_points_json END poi_points_json,
    effective_area.revision_number work_area_revision_number,
@@ -602,9 +614,10 @@ const currentServiceRequestColumns = `${baseServiceRequestColumns},
    estimate.id estimate_id,estimate.version estimate_version,estimate.scope_text estimate_scope,
    estimate.estimate_amount_minor,estimate.currency estimate_currency,estimate.status estimate_status,
    estimate.proposed_fields_json estimate_proposed_fields_json,estimate.client_response_note estimate_client_response_note,
-   estimate.updated_at estimate_updated_at`;
+   estimate.updated_at estimate_updated_at,
+   ${currentDraftReceiptColumn("COALESCE(effective_area.revision_number,0)", includeDraftReceipt)}`; }
 
-const legacyServiceRequestColumns = `${baseServiceRequestColumns},
+function legacyServiceRequestColumns(includeDraftReceipt: boolean) { return `${baseServiceRequestColumns},
    r.area_geojson,r.poi_points_json,
    NULL work_area_revision_number,NULL work_area_change_summary,NULL work_area_updated_at,
    r.status,r.created_at,r.updated_at,
@@ -613,7 +626,8 @@ const legacyServiceRequestColumns = `${baseServiceRequestColumns},
    estimate.id estimate_id,estimate.version estimate_version,estimate.scope_text estimate_scope,
    estimate.estimate_amount_minor,estimate.currency estimate_currency,estimate.status estimate_status,
    estimate.proposed_fields_json estimate_proposed_fields_json,estimate.client_response_note estimate_client_response_note,
-   estimate.updated_at estimate_updated_at`;
+   estimate.updated_at estimate_updated_at,
+   ${currentDraftReceiptColumn("0", includeDraftReceipt)}`; }
 
 const currentAcceptedQuoteJoin = `LEFT JOIN request_pa_artifacts quote ON quote.request_id=r.id
   AND quote.artifact_type='quote' AND quote.superseded_at IS NULL AND quote.scope_stale_at IS NULL
@@ -636,19 +650,25 @@ function missingStaffWorkAreaSchema(error: unknown): boolean {
     /no such column:\s*(?:quote\.)?scope_stale_at\b/i.test(message);
 }
 
-function serviceRequestReadSql(legacy: boolean): {
+function missingDraftReceiptSchema(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /no such table:\s*request_pa_draft_quote_receipts\b/i.test(message) ||
+    /no such column:\s*(?:receipt\.)?(?:scope_stale_at|source_id)\b/i.test(message);
+}
+
+function serviceRequestReadSql(legacy: boolean, includeDraftReceipt: boolean): {
   columns: string;
   quoteJoin: string;
   areaJoin: string;
 } {
   return legacy
     ? {
-        columns: legacyServiceRequestColumns,
+        columns: legacyServiceRequestColumns(includeDraftReceipt),
         quoteJoin: legacyAcceptedQuoteJoin,
         areaJoin: "",
       }
     : {
-        columns: currentServiceRequestColumns,
+        columns: currentServiceRequestColumns(includeDraftReceipt),
         quoteJoin: currentAcceptedQuoteJoin,
         areaJoin: effectiveAreaJoin,
       };
@@ -660,10 +680,23 @@ async function serviceRequestRead<T>(
 ): Promise<T> {
   const database = portalDb(env);
   try {
-    return await run(database, serviceRequestReadSql(false));
+    return await run(database, serviceRequestReadSql(false, true));
   } catch (error) {
+    if (missingDraftReceiptSchema(error)) {
+      try {
+        return await run(database, serviceRequestReadSql(false, false));
+      } catch (currentError) {
+        if (!missingStaffWorkAreaSchema(currentError)) throw currentError;
+        return run(database, serviceRequestReadSql(true, false));
+      }
+    }
     if (!missingStaffWorkAreaSchema(error)) throw error;
-    return run(database, serviceRequestReadSql(true));
+    try {
+      return await run(database, serviceRequestReadSql(true, true));
+    } catch (legacyError) {
+      if (!missingDraftReceiptSchema(legacyError)) throw legacyError;
+      return run(database, serviceRequestReadSql(true, false));
+    }
   }
 }
 
@@ -1482,16 +1515,34 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
     };
   },
 
-  async updateNotification(env: Env, session: ClientPortalSession, notificationId: string, action: "read" | "dismiss"): Promise<boolean> {
+  async updateNotification(env: Env, session: ClientPortalSession, notificationId: string, action: "read" | "dismiss", guard?: { sql: string; bindings: unknown[] }): Promise<boolean> {
     if (session.nativeSourceId) return updateNativeNotification(env, session, notificationId, action);
+    const mutationGuard = guard ? `AND ${guard.sql}` : "";
+    const legacyDeliveryGuard = `AND (source_type<>'folder_grant' OR EXISTS(SELECT 1 FROM client_folder_associations association
+            JOIN client_accounts account ON account.id=client_portal_notifications.account_id AND account.status='active'
+            JOIN client_identity_links identity ON identity.id=client_portal_notifications.recipient_identity_id
+              AND identity.account_id=account.id AND identity.revoked_at IS NULL
+            JOIN client_account_members member ON member.account_id=account.id AND member.identity_id=identity.id AND member.revoked_at IS NULL
+            WHERE association.logical_grant_id=client_portal_notifications.source_id AND association.account_id=account.id
+              AND association.revoked_at IS NULL AND COALESCE(account.project_alpha_source_id,'project-alpha:primary')=?
+              AND ((association.scope_type='client' AND association.project_id IS NULL) OR (association.scope_type='project' AND association.project_id IS NOT NULL
+                AND EXISTS(SELECT 1 FROM projects project JOIN client_project_grants project_grant
+                  ON project_grant.project_id=project.id AND project_grant.account_id=account.id AND project_grant.revoked_at IS NULL
+                  WHERE project.id=association.project_id AND project.active=1 AND (member.role='manager' OR EXISTS(
+                    SELECT 1 FROM client_member_project_grants member_grant WHERE member_grant.account_id=account.id
+                      AND member_grant.identity_id=identity.id AND member_grant.project_id=project.id AND member_grant.revoked_at IS NULL)))))))`;
     const result = await portalDb(env).prepare(action === "read"
       ? `UPDATE client_portal_notifications SET read_at=COALESCE(read_at,datetime('now')) WHERE id=? AND account_id=? AND recipient_identity_id=? AND dismissed_at IS NULL
           AND EXISTS (SELECT 1 FROM client_accounts a JOIN client_identity_links i ON i.id=? AND i.account_id=a.id AND i.revoked_at IS NULL
-            JOIN client_account_members m ON m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL WHERE a.id=? AND a.status='active')`
+            JOIN client_account_members m ON m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL WHERE a.id=? AND a.status='active')
+          ${legacyDeliveryGuard}
+          ${mutationGuard}`
       : `UPDATE client_portal_notifications SET dismissed_at=COALESCE(dismissed_at,datetime('now')) WHERE id=? AND account_id=? AND recipient_identity_id=? AND dismissed_at IS NULL
           AND EXISTS (SELECT 1 FROM client_accounts a JOIN client_identity_links i ON i.id=? AND i.account_id=a.id AND i.revoked_at IS NULL
-            JOIN client_account_members m ON m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL WHERE a.id=? AND a.status='active')`)
-      .bind(notificationId, session.accountId, session.identityId, session.identityId, session.accountId).run();
+            JOIN client_account_members m ON m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL WHERE a.id=? AND a.status='active')
+          ${legacyDeliveryGuard}
+          ${mutationGuard}`)
+      .bind(notificationId, session.accountId, session.identityId, session.identityId, session.accountId, PRIMARY_ALPHA_SOURCE_ID, ...(guard?.bindings ?? [])).run();
     return Boolean(result.meta.changes);
   },
 

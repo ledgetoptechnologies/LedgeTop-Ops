@@ -88,6 +88,21 @@ test("an administrator can revoke the whole client workspace and sees the durabl
   expect(state.details()).toBe(2);
 });
 
+test("enabled eligibility does not claim sign-in readiness before a workspace is linked", async ({ page }) => {
+  await mock(page, route => route.fulfill({ status: 404 }), () => {
+    const identities = identityPage([], false);
+    identities.page = { ...metadata(false, "", 5, 0), available: false, reason: "workspace_unavailable" };
+    const value = detail(identities, { available: true, state: "active", version: 0, reasonCode: null,
+      updatedAt: null, canRevoke: true, canRestore: false });
+    return { ...value, client: { ...value.client, workspace_id: null, portal_status: "mapping_unavailable" } };
+  });
+  await open(page);
+  await expect(panel(page).getByText("Portal eligibility enabled — workspace not linked", { exact: true })).toBeVisible();
+  await expect(panel(page).getByText(/Eligibility alone does not confirm sign-in readiness/)).toBeVisible();
+  await expect(panel(page).getByText("Portal access enabled for this client workspace", { exact: true })).toHaveCount(0);
+  await expect(panel(page).getByRole("button", { name: "Revoke workspace portal access" })).toBeVisible();
+});
+
 test("portal summaries are bounded and identity records load only when opened", async ({ page }) => {
   const state = await mock(page, (route, url) => {
     if (url.pathname === `${base}/identities`) return route.fulfill({ json: identityPage([identity("frank", "Frank Client")], false) });

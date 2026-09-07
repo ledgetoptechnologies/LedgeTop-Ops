@@ -3,6 +3,7 @@ import { readBusinessParty, type BusinessPartyMember } from "./business-parties"
 import { listClientHubBusinessProjects } from "./client-hub-business-projects";
 import { listClientHubCollection } from "./client-hub-collections";
 import { resolveClientHubDetailContext, verifyClientHubDetailContext } from "./client-hub";
+import { listClientServiceAssignments } from "./client-service-assignments";
 import type { Env, StaffPrincipal } from "./types";
 
 function changed(): never {
@@ -35,9 +36,12 @@ export async function readBusinessPartySourceWorkspace(env: Env, principal: Staf
     member.root.sourceId, "business");
   if (context.canonicalRoot.sourceId !== member.root.sourceId || context.canonicalRoot.rootNamespace !== "business"
     || context.canonicalRoot.kind !== member.root.kind || context.canonicalRoot.publicId !== member.root.recordId) changed();
-  const [projects, contacts] = await Promise.all([
+  const [projects, contacts, serviceAssignments] = await Promise.all([
     listClientHubBusinessProjects(env, principal, context, { initial: true, limit: 5 }),
     listClientHubCollection(env, context, "businessContacts", { initial: true, limit: 5 }),
+    // This remains an exact source/root read. A linked-customer party never
+    // combines service facts or turns them into a portal entitlement.
+    listClientServiceAssignments(env, principal, context, { initial: true, limit: 5 }),
   ]);
   await verifyClientHubDetailContext(env, principal, context);
   const currentParty = await readBusinessParty(env, principal, partyId);
@@ -62,10 +66,12 @@ export async function readBusinessPartySourceWorkspace(env: Env, principal: Staf
     },
     projects,
     contacts,
+    serviceAssignments,
     entryPoints: {
       source: sourcePath,
       projects: `${sourcePath}#client-business-projects`,
       contacts: `${sourcePath}#client-business-contacts`,
+      serviceAssignments: `${sourcePath}#client-service-assignments`,
       access: `${sourcePath}#client-portal-access`,
       delivery: `${sourcePath}#client-delivery-access`,
       audit: `${sourcePath}#client-audit`,

@@ -227,6 +227,28 @@ describe("source-bound private quote real-D1 routes", () => {
     ]);
     return { commands, receipts, audits, logs };
   }
+  async function draftNotices(f: Fixture) {
+    return (await delivery.prepare(`SELECT notice.id,notice.event_type,notice.recipient_kind,notice.dedupe_key,
+      notice.payload_json,notice.status,receipt.id receipt_id,
+      notice.dedupe_key=('pa_draft_quote_created:' || receipt.id || ':' || notice.recipient_kind) dedupe_exact
+      FROM client_portal_notification_outbox notice
+      JOIN request_pa_draft_quote_receipts receipt ON receipt.request_id=notice.request_id
+      WHERE notice.request_id=? AND notice.event_type='pa_draft_quote_created' ORDER BY notice.id`)
+      .bind(f.requestId).all<Record<string, unknown>>()).results;
+  }
+  async function rebuildPre0201Outbox(directory: URL) {
+    // Reuse the exact last pre-0201 outbox definition instead of approximating
+    // CHECK behavior with a trigger. Existing 0201-only rows cannot be copied
+    // into that historical schema, so remove only this suite's prior notices.
+    await delivery.prepare("DELETE FROM client_portal_notification_outbox WHERE event_type='pa_draft_quote_created'").run();
+    const statements = splitD1MigrationStatements(
+      readFileSync(new URL("0118_staff_work_area_revisions.sql", directory), "utf8"),
+    );
+    const start = statements.findIndex(sql => sql.includes("CREATE TABLE client_portal_notification_outbox_next"));
+    const end = statements.findIndex((sql, index) => index > start && sql.includes("CREATE TABLE client_portal_notifications_next"));
+    if (start < 0 || end < 0) throw new Error("0118 outbox rebuild fixture is unavailable");
+    await delivery.batch(statements.slice(start, end).map(sql => delivery.prepare(sql)));
+  }
 
   beforeAll(async () => {
     runtime = new Miniflare({ compatibilityDate: "2026-07-22", modules: true,
@@ -268,6 +290,8 @@ describe("source-bound private quote real-D1 routes", () => {
     ]);
     await delivery.batch(splitD1MigrationStatements(readFileSync(new URL("0162_portal_source_authorities.sql", directory), "utf8"))
       .map(sql => delivery.prepare(sql)));
+    await delivery.batch(splitD1MigrationStatements(readFileSync(new URL("0201_native_draft_quote_notifications.sql", directory), "utf8"))
+      .map(sql => delivery.prepare(sql)));
     await applyConnectorSchema(operations);
     environment = { DELIVERY_DB: delivery, OPS_DB: operations, PROJECT_ALPHA_BASE_URL: "https://alpha.example",
       PROJECT_ALPHA_DRAFT_QUOTES_ENABLED: "true", PROJECT_ALPHA_DRAFT_QUOTE_API_KEY: "quote-only-key-original",
@@ -297,11 +321,19 @@ describe("source-bound private quote real-D1 routes", () => {
     expect(response.status).toBe(201);
     expect(await response.json()).toMatchObject({ idempotentReplay: false, sourceId: primary, editorUrl: "https://alpha.example/quotes/alpha-quote/edit" });
     expect(await counts(f)).toEqual({ commands: 1, receipts: 1, audits: 1, logs: 1 });
+    const firstNotices = await draftNotices(f);
+    expect(firstNotices).toHaveLength(1);
+    expect(firstNotices[0]).toMatchObject({ event_type: "pa_draft_quote_created", recipient_kind: "client_requester",
+      status: "pending", dedupe_exact: 1, receipt_id: expect.any(String) });
+    expect(JSON.parse(String(firstNotices[0]?.payload_json))).toEqual({ lifecycle: "accepted_linked",
+      action: "open_client_portal", title: "Original title", projectId: null, projectName: null,
+      serviceCategory: null, locationLabel: null });
     const replay = await call(f, { PROJECT_ALPHA_BASE_URL: "https://changed.example", APPLICATION_KEY: "changed-app" });
     expect(replay.status).toBe(200);
     expect(await replay.json()).toMatchObject({ idempotentReplay: true, editorUrl: "https://alpha.example/quotes/alpha-quote/edit" });
     expect(sender).toHaveBeenCalledTimes(1);
     expect(await counts(f)).toEqual({ commands: 1, receipts: 1, audits: 1, logs: 1 });
+    expect(await draftNotices(f)).toEqual(firstNotices);
   }, 30_000);
 
   it("retries an uncertain upstream outcome using the identical saved body and idempotency key", async () => {
@@ -409,6 +441,7 @@ describe("source-bound private quote real-D1 routes", () => {
     expect(recorded).toMatchObject({ scope_stale_at: expect.any(String), command_id: expect.any(String), project_alpha_receipt_id: "alpha-receipt" });
     expect(await delivery.prepare("SELECT action FROM request_admin_audit WHERE request_id=?").bind(f.requestId).first("action")).toBe("pa_draft_quote_scope_stale");
     expect(await counts(f)).toEqual({ commands: 1, receipts: 1, audits: 1, logs: 1 });
+    expect(await draftNotices(f)).toEqual([]);
   }, 30_000);
 
   it("uses the final Delivery SQL proof when scope changes after the post-fetch JavaScript checks", async () => {
@@ -452,6 +485,10 @@ describe("source-bound private quote real-D1 routes", () => {
     expect(response.status).toBe(201);
     expect(await response.json()).toMatchObject({ sourceId: secondary, editorUrl: "https://secondary.example.test/quotes/alpha-quote/edit" });
     expect(await counts(f)).toEqual({ commands: 1, receipts: 1, audits: 1, logs: 1 });
+    expect(await draftNotices(f)).toEqual([
+      expect.objectContaining({ event_type: "pa_draft_quote_created", recipient_kind: "native_request_owner",
+        status: "pending", dedupe_exact: 1 }),
+    ]);
   }, 30_000);
 
   it.each(["generation", "project", "client_projection", "credential", "workspace"])(
@@ -611,6 +648,43 @@ describe("source-bound private quote real-D1 routes", () => {
     expect(sender).toHaveBeenCalledTimes(2);
     expect(sender.mock.calls[0]?.[1]?.body).toBe(sender.mock.calls[1]?.[1]?.body);
     expect(await counts(f)).toEqual({ commands: 1, receipts: 1, audits: 1, logs: 1 });
+  }, 30_000);
+
+  it("does not suppress the actual pre-0201 event CHECK and rolls back the receipt transaction", async () => {
+    const f = await fixture("pre0201-check");
+    const directory = new URL("../../client/migrations/", import.meta.url);
+    await rebuildPre0201Outbox(directory);
+    const schema = await delivery.prepare("SELECT sql FROM sqlite_schema WHERE type='table' AND name='client_portal_notification_outbox'").first<string>("sql");
+    expect(schema).toContain("'request_work_area_changed'");
+    expect(schema).not.toContain("'pa_draft_quote_created'");
+
+    // This is the former producer statement's exact failure mode: SQLite's
+    // broad OR IGNORE conflict policy suppresses the genuine CHECK violation.
+    const ignored = await delivery.prepare(`INSERT OR IGNORE INTO client_portal_notification_outbox
+      (id,request_id,event_type,recipient_kind,dedupe_key,payload_json)
+      VALUES('legacy-ignore-probe',?,'pa_draft_quote_created','client_requester','legacy-ignore-probe','{}')`)
+      .bind(f.requestId).run();
+    expect(ignored.meta.changes).toBe(0);
+    expect(await draftNotices(f)).toEqual([]);
+
+    const failed = await call(f);
+    expect(failed.status).toBe(503);
+    expect(await failed.json()).toMatchObject({ code: "receipt_unconfirmed" });
+    expect(await counts(f)).toEqual({ commands: 1, receipts: 0, audits: 0, logs: 0 });
+    expect(await draftNotices(f)).toEqual([]);
+
+    const upgrade = splitD1MigrationStatements(
+      readFileSync(new URL("0201_native_draft_quote_notifications.sql", directory), "utf8"),
+    );
+    await delivery.batch(upgrade.map(sql => delivery.prepare(sql)));
+    expect((await call(f)).status).toBe(201);
+    expect(sender).toHaveBeenCalledTimes(2);
+    expect(sender.mock.calls[0]?.[1]?.body).toBe(sender.mock.calls[1]?.[1]?.body);
+    expect(await counts(f)).toEqual({ commands: 1, receipts: 1, audits: 1, logs: 1 });
+    expect(await draftNotices(f)).toEqual([
+      expect.objectContaining({ event_type: "pa_draft_quote_created", recipient_kind: "client_requester",
+        status: "pending", dedupe_exact: 1 }),
+    ]);
   }, 30_000);
 
   it("enforces the staff permission before reserving or sending anything", async () => {

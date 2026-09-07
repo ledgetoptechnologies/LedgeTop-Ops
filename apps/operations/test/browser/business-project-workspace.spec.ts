@@ -645,7 +645,7 @@ test("project workspace layout supports mobile, narrow, laptop and ultrawide wit
 });
 
 test("recurring project copy previews explicit selections and retries commit with one stable operation key", async ({ page }) => {
-  const writes: Array<{ action: string; body: Record<string, unknown> }> = []; let commits = 0;
+  const writes: Array<{ action: string; body: Record<string, unknown> }> = []; let commits = 0, previews = 0;
   const projects = [
     { ...detail().project, row_key: "destination", manager_name: "Morgan Manager" },
     { ...detail("project-zero", "Previous church survey").project, status: "completed", row_key: "source", manager_name: "Morgan Manager" },
@@ -660,6 +660,8 @@ test("recurring project copy previews explicit selections and retries commit wit
     const body = route.request().postDataJSON() as Record<string, unknown>;
     if (url.pathname.endsWith("/recurring-copy/preview")) {
       writes.push({ action: "preview", body });
+      previews += 1;
+      if (previews === 2) return route.fulfill({ status: 503, json: { error: "Temporary preview interruption" } });
       return route.fulfill({ json: { fingerprint: "f".repeat(64),
         source: { projectId: "project-zero", projectRevision: "project-zero-revision", contactsVersion: 1, memoryVersion: 1 },
         destination: { projectId: "project-one", projectRevision: "project-one-revision", contactsVersion: 1, memoryVersion: 1 },
@@ -687,18 +689,96 @@ test("recurring project copy previews explicit selections and retries commit wit
   await expect(copy.getByRole("region", { name: "Copy preview", exact: true })).toContainText("1 contact assignment will be added or updated");
   await expect(copy.getByRole("button", { name: "Apply copy to this project", exact: true })).toBeDisabled();
   await copy.getByRole("checkbox", { name: /I reviewed this preview/ }).check();
+  await copy.getByRole("button", { name: "Preview copy", exact: true }).click();
+  await expect(copy.getByRole("alert")).toContainText("Temporary preview interruption");
+  await expect(copy.getByRole("button", { name: "Apply copy to this project", exact: true })).toHaveCount(0);
+  await expect(copy.getByRole("checkbox", { name: "Plan", exact: true })).toBeChecked();
+  await expect(copy.getByRole("combobox", { name: "Previous project", exact: true })).toHaveValue("project-zero");
+  await copy.getByRole("button", { name: "Preview copy", exact: true }).click();
+  await expect(copy.getByRole("button", { name: "Apply copy to this project", exact: true })).toBeDisabled();
+  await copy.getByRole("checkbox", { name: /I reviewed this preview/ }).check();
   await copy.getByRole("button", { name: "Apply copy to this project", exact: true }).click();
   await expect(copy.getByRole("alert")).toContainText("Temporary copy interruption");
   await copy.getByRole("button", { name: "Apply copy to this project", exact: true }).click();
   await expect(copy.getByText("Selected operational details copied. Operational details are refreshing.", { exact: true })).toBeVisible();
-  expect(writes.map(item => item.action)).toEqual(["preview", "commit", "commit"]);
+  expect(writes.map(item => item.action)).toEqual(["preview", "preview", "preview", "commit", "commit"]);
   expect(writes[0]!.body).toMatchObject({ expectedContextVersion: "project-context", sourceProjectId: "project-zero", destinationProjectId: "project-one",
     selectedContactRoles: ["project_contact"], selectedMemorySections: ["plan"], conflictPolicy: "keep_destination",
     expected: { sourceProjectRevision: "project-zero-revision", destinationProjectRevision: "project-one-revision",
       sourceContactsVersion: 1, destinationContactsVersion: 1, sourceMemoryVersion: 1, destinationMemoryVersion: 1 } });
-  expect(writes[1]!.body.idempotencyKey).toBe(writes[2]!.body.idempotencyKey);
-  expect(writes[1]!.body.previewFingerprint).toBe("f".repeat(64));
+  expect(writes[3]!.body.idempotencyKey).toBe(writes[4]!.body.idempotencyKey);
+  expect(writes[3]!.body.previewFingerprint).toBe("f".repeat(64));
   for (const item of writes) expect(JSON.stringify(item.body)).not.toMatch(/portal|grant|billing|invitation|notification|attachment/i);
+});
+
+test("recurring copy retains selections but requires a new preview after the typed overlay-version conflict", async ({ page }) => {
+  const projects = [{ ...detail("project-zero", "Previous project").project, status: "completed", row_key: "source" }];
+  let previews = 0;
+  await mock(page, route => { const value = detail(); value.project.status = "active"; return route.fulfill({ json: value }); },
+    ["team.view", "projects.view", "project.contacts.manage", "project.memory.manage"], async (route, url) => {
+      if (url.pathname.endsWith("/operational-workspace")) {
+        const id = decodeURIComponent(url.pathname.split("/").at(-2)!);
+        return route.fulfill({ json: operational(id === "project-one" ? "active" : "completed", id) });
+      }
+      if (url.pathname.endsWith("/recurring-copy/preview") && ++previews > 1) return route.fulfill({ status: 409, json: {
+        error: "Operational contacts or project memory changed. Re-preview the copy before applying it.",
+        code: "recurring_project_copy_version_changed",
+      } });
+      if (url.pathname.endsWith("/recurring-copy/preview")) return route.fulfill({ json: { fingerprint: "f".repeat(64),
+        source: { projectId: "project-zero", projectRevision: "project-zero-revision", contactsVersion: 1, memoryVersion: 1 },
+        destination: { projectId: "project-one", projectRevision: "project-one-revision", contactsVersion: 1, memoryVersion: 1 },
+        selection: { contactRoles: ["project_contact"], memorySections: ["plan"], conflictPolicy: "keep_destination" },
+        changes: { contactsChanged: true, memoryChanged: true, copiedContacts: 1, copiedMemorySections: ["plan"], contactConflicts: 0, memoryConflicts: [] } } });
+      if (url.pathname.endsWith("/recurring-copy/commit")) return route.fulfill({ status: 409, json: {
+        error: "Operational contacts or project memory changed. Re-preview the copy before applying it.",
+        code: "recurring_project_copy_version_changed",
+      } });
+      return route.fulfill({ status: 500, json: { error: "Unexpected operational request" } });
+    }, projects);
+  await open(page);
+  const copy = workspace(page).getByRole("region", { name: "Copy from a previous project", exact: true });
+  await copy.getByRole("combobox", { name: "Previous project", exact: true }).selectOption("project-zero");
+  await copy.getByRole("checkbox", { name: "Project contacts", exact: true }).check();
+  await copy.getByRole("checkbox", { name: "Plan", exact: true }).check();
+  await copy.getByRole("button", { name: "Preview copy", exact: true }).click();
+  await copy.getByRole("checkbox", { name: /I reviewed this preview/ }).check();
+  await copy.getByRole("button", { name: "Apply copy to this project", exact: true }).click();
+  await expect(copy.getByRole("alert")).toContainText("Re-preview the copy");
+  await expect(copy.getByText("The selected source and sections are still available. Preview the copy again.", { exact: true })).toBeVisible();
+  await expect(copy.getByRole("region", { name: "Copy preview", exact: true })).toHaveCount(0);
+  await expect(copy.getByRole("combobox", { name: "Previous project", exact: true })).toHaveValue("project-zero");
+  await expect(copy.getByRole("checkbox", { name: "Project contacts", exact: true })).toBeChecked();
+  await expect(copy.getByRole("checkbox", { name: "Plan", exact: true })).toBeChecked();
+  await expect(workspace(page).getByRole("heading", { name: "Church survey", exact: true })).toBeVisible();
+  await copy.getByRole("button", { name: "Preview copy", exact: true }).click();
+  await expect(copy.getByRole("alert")).toContainText("Re-preview the copy");
+  await expect(copy.getByRole("combobox", { name: "Previous project", exact: true })).toHaveValue("project-zero");
+  await expect(copy.getByRole("checkbox", { name: "Project contacts", exact: true })).toBeChecked();
+  await expect(copy.getByRole("checkbox", { name: "Plan", exact: true })).toBeChecked();
+});
+
+test("recurring copy retries a failed previous-project list without losing selections", async ({ page }) => {
+  const projects = [{ ...detail("project-zero", "Previous project").project, row_key: "source" }];
+  const requests = await mock(page, route => { const value = detail(); value.project.status = "active"; return route.fulfill({ json: value }); },
+    ["team.view", "projects.view", "project.memory.manage"],
+    route => route.fulfill({ json: operational("active") }), projects);
+  let attempts = 0;
+  await page.route("**/collections/businessProjects?**", route => {
+    attempts += 1;
+    if (attempts === 1) return route.fulfill({ status: 503, json: { error: "Previous projects temporarily unavailable" } });
+    return route.fallback();
+  });
+  await open(page);
+  const copy = workspace(page).getByRole("region", { name: "Copy from a previous project", exact: true });
+  await expect(copy.getByRole("alert")).toContainText("Previous projects temporarily unavailable");
+  await copy.getByRole("checkbox", { name: "Recommendations", exact: true }).check();
+  await copy.getByRole("button", { name: "Retry loading previous projects" }).click();
+  await expect(copy.getByRole("combobox").getByRole("option", { name: "Previous project · completed" })).toHaveCount(1);
+  await expect(copy.getByRole("checkbox", { name: "Recommendations", exact: true })).toBeChecked();
+  await expect(copy.getByRole("button", { name: "Retry loading previous projects" })).toHaveCount(0);
+  await expect(copy.getByRole("alert")).toHaveCount(0);
+  expect(attempts).toBe(2);
+  expect(requests.filter(request => request.method !== "GET")).toEqual([]);
 });
 
 test("recurring copy renders a non-actionable empty state when no previous project exists", async ({ page }) => {

@@ -2,6 +2,9 @@ import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({
   testDir: "./test/browser",
+  // Hostname/Access simulations require playwright.j7.config.ts's two-domain
+  // resolver and base URLs; localhost cannot satisfy their host assertions.
+  testIgnore: ["**/dual-domain-daily-use.spec.ts"],
   fullyParallel: true,
   retries: 0,
   reporter: "line",

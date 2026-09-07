@@ -20,7 +20,8 @@ const summary = (root: Root) => ({ workspace_id: null, kind: root.kind, route_ki
 type Call = { path: string; query: URLSearchParams; method: string; body: Record<string, unknown> | null; csrf?: string };
 type Handler = (route: Route, call: Call) => Promise<boolean>;
 async function fixture(page: Page, options: { linked?: number; manage?: boolean; handler?: Handler; label?: string; rootCount?: number;
-  contactsPage?: boolean; projectsUnavailableSource?: string; archived?: "source_unavailable" | "operator_closed" } = {}) {
+  contactsPage?: boolean; projectsUnavailableSource?: string; invalidServiceSource?: string;
+  archived?: "source_unavailable" | "operator_closed" } = {}) {
   const state = { members: roots.slice(0, options.linked || 0).map(root => member(root)), version: 1,
     name: options.label || "Acme combined customer", status: options.archived ? "archived" : "active",
     archiveCause: options.archived ?? null as "source_unavailable" | "operator_closed" | null, calls: [] as Call[] };
@@ -54,7 +55,19 @@ async function fixture(page: Page, options: { linked?: number; manage?: boolean;
         contacts: { items: [{ row_key: `contact:${sourceMember.root.sourceId}`, public_id: `contact-${sourceMember.root.sourceId}`,
           display_name: `${sourceName(sourceMember.root.sourceId)} contact`, email: `${sourceMember.root.sourceId.split(":").at(-1)}@example.test`, phone: null }],
           page: { available: true, reason: null, nextCursor: null, hasMore: false, returned: 1, limit: 5 } },
+        serviceAssignments: { items: [{ row_key: `assignment:${sourceMember.root.sourceId}`, assignment_public_id: `assignment-${sourceMember.root.sourceId}`,
+          service_public_id: `service-${sourceMember.root.sourceId}`, service_name: null, service_label: `${sourceName(sourceMember.root.sourceId)} mapping`,
+          service_source_version: "service-v1", assignment_source_version: "assignment-v1", subject_type: "organization",
+          subject_public_id: sourceMember.root.recordId, subject_name: recordName(sourceMember.root.sourceId), effective_status: "effective",
+          effective_from: null, effective_until: null, source_id: options.invalidServiceSource === sourceMember.root.sourceId ? primary : sourceMember.root.sourceId,
+          source_name: sourceName(sourceMember.root.sourceId),
+          source_generation: "generation-1", source_sequence: 1, source_updated_at: "2026-08-30T00:00:00Z" }],
+          page: { available: true, reason: null, nextCursor: null, hasMore: false, returned: 1, limit: 5 },
+          readiness: { tables: "ready", receiver: "ready", source: "observed", directory: "ready", projection: "ready", catalog: "ready" },
+          canonicalRoot: { sourceId: sourceMember.root.sourceId, rootNamespace: "business", kind: sourceMember.root.kind, publicId: sourceMember.root.recordId },
+          contextVersion: `source-${sourceMember.root.sourceId}`, refreshedAt: "2026-08-30T00:00:00Z" },
         entryPoints: { source: base, projects: `${base}#client-business-projects`, contacts: `${base}#client-business-contacts`,
+          serviceAssignments: `${base}#client-service-assignments`,
           access: `${base}#client-portal-access`, delivery: `${base}#client-delivery-access`, audit: `${base}#client-audit` },
       } });
     }
@@ -195,7 +208,7 @@ test("source workspaces, party links and directory filters survive refresh and b
   await page.goForward(); await expect(page.getByRole("heading", { name: "Acme combined customer", exact: true })).toBeVisible();
 });
 
-test("linked customer progressively combines exact-source projects and contacts with refresh-safe section links", async ({ page }) => {
+test("linked customer progressively combines exact-source projects, contacts, and service facts with refresh-safe section links", async ({ page }) => {
   const state = await fixture(page, { linked: 2 });
   await page.goto(`/clients/parties/${partyId}?q=acme&kind=organization#customer-projects`);
   await expect(page.getByRole("heading", { name: "Projects", exact: true })).toBeVisible();
@@ -203,9 +216,13 @@ test("linked customer progressively combines exact-source projects and contacts 
   await expect(page.getByText("Technologies project", { exact: true })).toBeVisible();
   await expect(page.getByText("Drone Services contact", { exact: true })).toBeVisible();
   await expect(page.getByText("Technologies contact", { exact: true })).toBeVisible();
+  await expect(page.getByText("Drone Services mapping", { exact: true })).toBeVisible();
+  await expect(page.getByText("Technologies mapping", { exact: true })).toBeVisible();
   await expect(page.getByRole("link", { name: "Open Technologies projects" })).toHaveAttribute("href",
     `${sourcePath(roots[1]!)}?q=acme&kind=organization#client-business-projects`);
   await expect(page.getByRole("link", { name: "Activity and audit" })).toHaveCount(2);
+  await expect(page.getByRole("link", { name: "Open Technologies service assignments" })).toHaveAttribute("href",
+    `${sourcePath(roots[1]!)}?q=acme&kind=organization#client-service-assignments`);
   const sourceCalls = state.calls.filter(call => call.path.includes(`${apiBase}/${partyId}/sources/`));
   expect(sourceCalls).toHaveLength(2);
   expect(sourceCalls.map(call => call.query.get("expectedVersion"))).toEqual(["1", "1"]);
@@ -223,6 +240,14 @@ test("an unavailable source project page is not mislabeled as an empty project h
   await expect(projects.getByText("No projects are visible from this source.", { exact: true })).toHaveCount(0);
   await expect(projects.getByRole("link", { name: "Open Technologies projects" })).toHaveCount(0);
   await expect(projects.getByRole("link", { name: "Open Drone Services projects" })).toBeVisible();
+});
+
+test("rejects a source service-assignment row that does not match its reviewed source", async ({ page }) => {
+  await fixture(page, { linked: 2, invalidServiceSource: secondary });
+  await page.goto(`/clients/parties/${partyId}#customer-services`);
+  await expect(page.getByRole("region", { name: "Service assignments", exact: true })
+    .getByText("This source workspace response could not be verified. Refresh to try again.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Technologies mapping", { exact: true })).toHaveCount(0);
 });
 
 test("add and unlink each require a fresh preview while keeping all source records", async ({ page }) => {

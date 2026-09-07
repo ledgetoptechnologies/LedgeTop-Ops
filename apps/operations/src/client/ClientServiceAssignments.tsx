@@ -183,7 +183,8 @@ export function ClientServiceAssignments({ initialPage, basePath, contextVersion
           <div><dt>Service version</dt><dd>{row.service_source_version}</dd></div>
           <div><dt>Projection</dt><dd>{row.source_generation} · sequence {row.source_sequence.toLocaleString()}</dd></div></dl>
       </article>)}</div>
-      <div className="client-service-assignment-actions"><p role="status">{value ? `${value.items.length.toLocaleString()} service ${value.items.length === 1 ? "assignment" : "assignments"} shown${state.busy ? " · Loading more…" : ""}` : ""}</p>
+    </>}
+      <div className="client-service-assignment-actions"><p role="status">{state.busy && !value?.page.available ? "Checking service assignments…" : value?.page.available ? `${value.items.length.toLocaleString()} service ${value.items.length === 1 ? "assignment" : "assignments"} shown${state.busy ? " · Loading more…" : ""}` : ""}</p>
         {value?.readiness.catalog === "unavailable" && <p className="muted">Current catalog labels are unavailable; service IDs are shown instead.</p>}
         {value?.readiness.source === "unobserved" && <p className="muted">The source capability has not been observed; stored projection facts remain read-only.</p>}
         {state.error && <p role="alert" className="client-service-assignment-error">{state.error}</p>}
@@ -196,6 +197,5 @@ export function ClientServiceAssignments({ initialPage, basePath, contextVersion
           onClick={() => { if (!state.busy) void load(false); }}>Refresh service assignments</button>
         {value?.refreshedAt && <small>Service assignments refreshed {date(value.refreshedAt, "recently")}.</small>}
       </div>
-    </>}
   </section></Card>;
 }

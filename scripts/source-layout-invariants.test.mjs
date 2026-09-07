@@ -145,9 +145,10 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   // The digest intentionally moved with the reviewed canonical portal hosts
   // and explicit legacy compatibility origin. Keep the field assertions so a future config change
   // cannot hide behind a digest refresh.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "2ac2e4bfa69f8a5e33914ef7bce0b78522df0983a1ef34a965384b2e58ac6b92");
+  // Reviewed addition: the notification migration maintenance switch is off by default.
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "936b0b8960e24ecc0fb0f7a2adc11b1f0c447abd8ff49d7a4d5871c58e476151");
   const config = readJson("apps/client/wrangler.jsonc");
-  assert.equal(config.name, "ltds-clients");
+  assert.equal(config.name, "ledgetop-clients");
   assert.equal(config.main, "src/worker/index.ts");
   assert.deepEqual(config.routes, [
     { pattern: "client.ledgetopdroneservices.com", custom_domain: true },
@@ -174,6 +175,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.equal(config.vars.CLIENT_ACCESS_AUDS, `${config.vars.CLIENT_ACCESS_AUD},3bc9637846ccf4e1343b969cc8f14ed2cb0628956293463cf164c4080fa47e57`);
   assert.equal(config.vars.CLIENT_PORTAL_ENABLED, "true");
   assert.equal(config.vars.CLIENT_PORTAL_CONTENT_AUDIT_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_NOTIFICATION_MIGRATION_MAINTENANCE, "false");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_HMAC_KEY_ID, "");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_KEY_ID, "");
   assert.equal(config.vars.PROJECT_ALPHA_PORTAL_APPLICATION_KEY, "ltds_ops");
@@ -225,12 +227,12 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.deepEqual(config.services, [
     {
       binding: "CLIENT_DELEGATED_SHARE_SIGNER",
-      service: "ltds-ops",
+      service: "ledgetop-ops",
       entrypoint: "ClientDelegatedShareSigner",
     },
     {
       binding: "VIEWER_SESSION_ISSUER",
-      service: "ltds-ops",
+      service: "ledgetop-ops",
       entrypoint: "ViewerSessionIssuer",
     },
   ]);
@@ -286,7 +288,7 @@ test("the Operations business-party lifecycle migration stays LF-only for D1 tri
 test("the Project Alpha handoff stays pinned to the reviewed compatibility corpus", () => {
   const prompt = read("docs/project-alpha-client-portal-agent-prompt.md").replaceAll("\r\n", "\n");
   assert(prompt.includes("Project Alpha commit `60e735265e0d50ef880fde33e058d213a8b70c4b`"));
-  assert(prompt.includes("LTDS-Ops.git` commit\n`b1ee064d8e9a78ff1fbc43c671bff4c2c58d4c38`"));
+  assert(prompt.includes("LedgeTop-Ops.git` commit\n`b1ee064d8e9a78ff1fbc43c671bff4c2c58d4c38`"));
 
   for (const fixture of projectAlphaCompatibilityFixtures) {
     const fixtureName = path.basename(fixture);

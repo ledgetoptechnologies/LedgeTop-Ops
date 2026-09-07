@@ -1068,6 +1068,7 @@ export interface EffectiveWorkspaceRequestProof {
 }
 
 export interface EffectiveWorkspaceRequestMutationProof {
+  capability?: "delivery.view" | "request.create";
   workspaceId: string;
   identityId: string;
   issuer: string;
@@ -1076,6 +1077,12 @@ export interface EffectiveWorkspaceRequestMutationProof {
   legacyIdentityId: string;
   localProjectId: string | null;
   projectPublicId: string | null;
+  targetScopeType?: PortalWorkspaceScopeType;
+  targetPublicId?: string;
+  targetLineageScopeType?: Exclude<PortalWorkspaceScopeType, "workspace" | "folder"> | null;
+  targetLineagePublicId?: string | null;
+  targetBindingSourceVersion?: string | null;
+  requireLocalRequestGrant?: boolean;
   rootType: "organization" | "standalone_client";
   rootPublicId: string;
   activeGenerationId: string;
@@ -1088,6 +1095,7 @@ export interface EffectiveWorkspaceRequestMutationProof {
   rootAccessPolicyEnabled: boolean;
   projectAccessTermsReady: boolean;
   allowedRequestEntitlementIds: string[];
+  allowedEntitlementIds?: string[];
   evaluatedAt: string;
   expiresAt: string;
 }
@@ -1108,6 +1116,7 @@ export async function readEffectiveWorkspaceRequestProof(
   principal: VerifiedClientPrincipal,
   workspaceId: string,
   localProjectId: string | null,
+  options: { requireLocalRequestGrant?: boolean } = {},
 ): Promise<EffectiveWorkspaceRequestProof | null> {
   const evaluatedAt = new Date().toISOString();
   const expiresAt = new Date(Date.parse(evaluatedAt) + 30_000).toISOString();
@@ -1190,7 +1199,8 @@ export async function readEffectiveWorkspaceRequestProof(
       CASE WHEN ?6 IS NULL THEN 1 ELSE EXISTS (
         SELECT 1 FROM client_project_grants grant_record
         WHERE grant_record.account_id=account.id AND grant_record.project_id=project.id
-          AND project.active=1 AND ${primaryAlphaReference("project")} AND grant_record.revoked_at IS NULL AND grant_record.can_request_service=1
+          AND project.active=1 AND ${primaryAlphaReference("project")} AND grant_record.revoked_at IS NULL
+          ${options.requireLocalRequestGrant === false ? "" : "AND grant_record.can_request_service=1"}
           AND (member.role='manager' OR EXISTS(SELECT 1 FROM client_member_project_grants member_grant
             WHERE member_grant.account_id=account.id AND member_grant.identity_id=identity.id
               AND member_grant.project_id=project.id AND member_grant.revoked_at IS NULL))
@@ -1282,6 +1292,12 @@ export async function readEffectiveWorkspaceRequestProof(
       legacyIdentityId: local.legacy_identity_id,
       localProjectId,
       projectPublicId: localProjectId ? local.project_public_id : null,
+      targetScopeType: localProjectId ? "project" : "workspace",
+      targetPublicId: localProjectId ? local.project_public_id! : workspaceId,
+      targetLineageScopeType: localProjectId ? "project" : null,
+      targetLineagePublicId: localProjectId ? local.project_public_id : null,
+      targetBindingSourceVersion: null,
+      requireLocalRequestGrant: options.requireLocalRequestGrant !== false,
       rootType: state.root_type,
       rootPublicId: state.pa_organization_public_id ?? state.pa_client_public_id!,
       activeGenerationId: state.active_generation_id,
@@ -1297,9 +1313,179 @@ export async function readEffectiveWorkspaceRequestProof(
         && rule.effect === "allow" && targetScopesForMutation.has(`${rule.scope_type}:${rule.scope_public_id}`)
         && projectAccessRowAllows(rule, targetScopesForMutation, localProjectId ? expiredRequestProjects : []))
         .map(rule => rule.id!),
+      allowedEntitlementIds: rules.results.filter(rule => rule.id && rule.capability === "request.create"
+        && rule.effect === "allow" && targetScopesForMutation.has(`${rule.scope_type}:${rule.scope_public_id}`)
+        && projectAccessRowAllows(rule, targetScopesForMutation, localProjectId ? expiredRequestProjects : []))
+        .map(rule => rule.id!),
       evaluatedAt,
       expiresAt,
     },
+  };
+}
+
+export async function readEffectiveWorkspaceNotificationMutationProof(
+  env: Env,
+  principal: VerifiedClientPrincipal,
+  context: EffectivePortalWorkspaceContext,
+  notificationId: string,
+): Promise<EffectiveWorkspaceRequestMutationProof | null> {
+  if (!portalHierarchyV2Enabled(env)) return null;
+  const notification = await portalDb(env).prepare(`SELECT notification.source_type,request.project_id,
+      association.scope_type folder_scope_type,association.project_id folder_project_id,
+      binding.id folder_binding_id,binding.owner_scope_type,binding.owner_public_id,binding.source_version binding_source_version
+    FROM client_portal_notifications notification
+    LEFT JOIN client_service_requests request
+      ON notification.source_type='service_request' AND request.id=notification.source_id
+        AND request.account_id=notification.account_id
+    LEFT JOIN client_folder_associations association
+      ON notification.source_type='folder_grant' AND association.logical_grant_id=notification.source_id
+        AND association.account_id=notification.account_id AND association.revoked_at IS NULL
+    LEFT JOIN portal_v2_folder_bindings binding
+      ON binding.workspace_id=?
+        AND binding.r2_prefix=association.r2_prefix AND binding.status='active' AND binding.revoked_at IS NULL
+    WHERE notification.id=? AND notification.account_id=? AND notification.recipient_identity_id=?
+      AND notification.dismissed_at IS NULL
+    ORDER BY association.grant_version DESC LIMIT 1`)
+    .bind(context.workspaceId, notificationId, context.legacyAccountId, context.legacyIdentityId)
+    .first<{
+      source_type: "service_request" | "folder_grant";
+      project_id: string | null;
+      folder_scope_type: "project" | "client" | null;
+      folder_project_id: string | null;
+      folder_binding_id: string | null;
+      owner_scope_type: Exclude<PortalWorkspaceScopeType, "workspace" | "folder"> | null;
+      owner_public_id: string | null;
+      binding_source_version: string | null;
+    }>();
+  if (!notification) return null;
+  if (notification.source_type === "service_request") {
+    const proof = await readEffectiveWorkspaceRequestProof(
+      env, principal, context.workspaceId, notification.project_id, { requireLocalRequestGrant: false },
+    );
+    if (!proof || proof.workspace.legacyAccountId !== context.legacyAccountId ||
+      proof.workspace.legacyIdentityId !== context.legacyIdentityId ||
+      (notification.project_id === null ? !proof.rootAllowed : !proof.projectAllowed)) return null;
+    return proof.mutationProof;
+  }
+  if (!notification.folder_binding_id || !notification.owner_scope_type || !notification.owner_public_id) return null;
+
+  const evaluatedAt = new Date().toISOString();
+  const expiresAt = new Date(Date.parse(evaluatedAt) + 30_000).toISOString();
+  if (!validPrincipalPart(principal.issuer) || !validPrincipalPart(principal.subject)) return null;
+  const database = env.DELIVERY_DB.withSession("first-primary");
+  const identity = await resolveGlobalIdentity(env, principal, false);
+  if (!identity) return null;
+  const workspace = await activeWorkspace(env, identity.id, context.workspaceId);
+  if (!workspace || workspace.legacy_account_id !== context.legacyAccountId || !(await activeRootExists(env, workspace))) return null;
+  let compatibilityTables: Set<string> | null = null;
+  const hasTable = (name: string) => compatibilityTables === null || compatibilityTables.has(name);
+  async function inspectOptionalTables() {
+    if (compatibilityTables !== null) return;
+    const tables = await database.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name IN (
+      'portal_v2_identity_eligibility_legacy_bridges','portal_v2_legacy_member_bridges'
+    )`).all<{ name: string }>();
+    compatibilityTables = new Set(tables.results.map(table => table.name));
+  }
+  const readLocal = () => database.prepare(`WITH candidates(identity_id,priority) AS (
+      ${hasTable("portal_v2_legacy_member_bridges") ? `SELECT legacy_identity_id,0 FROM portal_v2_legacy_member_bridges
+        WHERE workspace_id=?1 AND identity_id=?2 AND legacy_account_id=?3 AND status='active' AND revoked_at IS NULL UNION ALL` : ""}
+      ${hasTable("portal_v2_identity_eligibility_legacy_bridges") ? `SELECT legacy_identity_id,1 FROM portal_v2_identity_eligibility_legacy_bridges
+        WHERE workspace_id=?1 AND identity_id=?2 AND legacy_account_id=?3 AND status='active' AND revoked_at IS NULL UNION ALL` : ""}
+      SELECT id,2 FROM client_identity_links
+        WHERE account_id=?3 AND issuer=?4 AND subject=?5 AND revoked_at IS NULL
+    ) SELECT identity.id legacy_identity_id
+    FROM candidates
+    JOIN client_accounts account ON account.id=?3 AND account.status='active' AND ${localOrPrimaryAlphaReference("account")}
+    JOIN client_identity_links identity ON identity.id=candidates.identity_id
+      AND identity.account_id=account.id AND identity.revoked_at IS NULL
+    JOIN client_account_members member ON member.account_id=account.id AND member.identity_id=identity.id
+      AND member.revoked_at IS NULL
+    ORDER BY candidates.priority,identity.id LIMIT 1`)
+    .bind(context.workspaceId, identity.id, context.legacyAccountId, principal.issuer, principal.subject)
+    .first<{ legacy_identity_id: string }>();
+  let local: Awaited<ReturnType<typeof readLocal>>;
+  try {
+    local = await readLocal();
+  } catch (error) {
+    if (!/no such table:\s*(?:main\.)?(?:portal_v2_legacy_member_bridges|portal_v2_identity_eligibility_legacy_bridges)\b/i.test(
+      error instanceof Error ? error.message : String(error),
+    )) throw error;
+    await inspectOptionalTables();
+    local = await readLocal();
+  }
+  if (!local || local.legacy_identity_id !== context.legacyIdentityId) return null;
+  const checkpoint = await database.prepare(`SELECT checkpoint.active_generation_id,generation.source_sequence,
+      root.source_version root_source_version,membership.source_version membership_source_version
+    FROM portal_v2_directory_checkpoints checkpoint
+    JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id
+      AND generation.workspace_id=checkpoint.workspace_id AND generation.status='active' AND generation.complete=1
+    JOIN portal_v2_directory_entities root ON root.workspace_id=checkpoint.workspace_id
+      AND root.generation_id=checkpoint.active_generation_id AND root.entity_type=?
+      AND root.public_id=? AND root.active=1
+    JOIN portal_v2_workspace_memberships membership ON membership.workspace_id=checkpoint.workspace_id
+      AND membership.identity_id=? AND membership.status='active' AND membership.revoked_at IS NULL
+      AND (membership.expires_at IS NULL OR datetime(membership.expires_at)>datetime('now'))
+    WHERE checkpoint.workspace_id=?`)
+    .bind(workspace.root_type, workspace.pa_organization_public_id ?? workspace.pa_client_public_id!, identity.id, context.workspaceId)
+    .first<{ active_generation_id: string; source_sequence: number; root_source_version: string; membership_source_version: string | null }>();
+  if (!checkpoint) return null;
+  const termsReady = await projectAccessTermsReady(database);
+  const scopes = await targetScopes(env, workspace, { scopeType: "folder", publicId: notification.folder_binding_id },
+    database, false, termsReady ? { retention: "structural" } : undefined);
+  if (!scopes) return null;
+  const denials = portalIdentityDenylistEnabled(env) ? (await database.prepare(`SELECT workspace_id,scope_type,scope_public_id FROM portal_v2_identity_denials
+    WHERE identity_id=? AND status='active' AND revoked_at IS NULL
+      AND datetime(valid_from)<=datetime('now') AND (expires_at IS NULL OR datetime(expires_at)>datetime('now'))
+      AND (scope_type='global' OR workspace_id=?) ORDER BY id LIMIT 201`)
+    .bind(identity.id, context.workspaceId).all<IdentityDenialRow>()).results : [];
+  if (deniedByIdentityRows(denials, context.workspaceId, scopes)) return null;
+  const rules = await database.prepare(`SELECT id,capability,effect,scope_type,scope_public_id,source_type,${projectAccessReadColumns('entitlement',termsReady)}
+    FROM portal_v2_entitlements entitlement
+    WHERE workspace_id=? AND identity_id=? AND capability='delivery.view'
+      AND status='active' AND revoked_at IS NULL AND datetime(valid_from)<=datetime('now')
+      AND (expires_at IS NULL OR datetime(expires_at)>datetime('now'))
+      AND ${projectAccessCapacitySql('entitlement',termsReady)}
+    ORDER BY entitlement_version DESC,id LIMIT 201`).bind(context.workspaceId, identity.id)
+    .all<EntitlementRow & { capability: "delivery.view" }>();
+  const expired = termsReady ? await readExpiredScopeProjects(database, context.workspaceId, scopes, portalHierarchyRelationsEnabled(env)) : [];
+  if (!allowedByEntitlementRows(rules.results, scopes, expired, false, true)) return null;
+  const allowedEntitlementIds = rules.results.filter(rule => rule.id && rule.effect === "allow"
+    && scopes.has(`${rule.scope_type}:${rule.scope_public_id}`) && projectAccessRowAllows(rule, scopes, expired, false,
+      { preserveOrdinaryHistory: true })).map(rule => rule.id!);
+  return {
+    capability: "delivery.view",
+    workspaceId: context.workspaceId,
+    identityId: identity.id,
+    issuer: principal.issuer,
+    subject: principal.subject,
+    legacyAccountId: context.legacyAccountId,
+    legacyIdentityId: context.legacyIdentityId,
+    // Delivery is bound to its folder association and directory lineage below,
+    // not to the separate Project Alpha service-request project mapping.
+    // The repository still enforces local project visibility for this notice.
+    localProjectId: null,
+    projectPublicId: null,
+    targetScopeType: "folder",
+    targetPublicId: notification.folder_binding_id,
+    targetLineageScopeType: notification.owner_scope_type,
+    targetLineagePublicId: notification.owner_public_id,
+    targetBindingSourceVersion: notification.binding_source_version,
+    requireLocalRequestGrant: false,
+    rootType: workspace.root_type,
+    rootPublicId: workspace.pa_organization_public_id ?? workspace.pa_client_public_id!,
+    activeGenerationId: checkpoint.active_generation_id,
+    sourceSequence: checkpoint.source_sequence,
+    rootSourceVersion: checkpoint.root_source_version,
+    membershipSourceVersion: checkpoint.membership_source_version,
+    targetScopes: [...scopes].sort(),
+    relationsEnabled: portalHierarchyRelationsEnabled(env),
+    denylistEnabled: portalIdentityDenylistEnabled(env),
+    rootAccessPolicyEnabled: env.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED === 'true',
+    projectAccessTermsReady: termsReady,
+    allowedRequestEntitlementIds: [],
+    allowedEntitlementIds,
+    evaluatedAt,
+    expiresAt,
   };
 }
 
@@ -1313,17 +1499,29 @@ export function effectiveWorkspaceRequestMutationGuardSql(
   proof: EffectiveWorkspaceRequestMutationProof,
 ): EffectiveWorkspaceRequestMutationGuard {
   const scopesJson = JSON.stringify(proof.targetScopes);
-  const allowedEntitlementIdsJson = JSON.stringify(proof.allowedRequestEntitlementIds);
+  const capability = proof.capability ?? "request.create";
+  const allowedEntitlementIdsJson = JSON.stringify(proof.allowedEntitlementIds ?? proof.allowedRequestEntitlementIds);
   const lineageBindings: unknown[] = [];
   let lineageSql = "1=1";
-  if (proof.localProjectId !== null && proof.projectPublicId !== null) {
+  const targetScopeType = proof.targetScopeType ?? (proof.localProjectId === null ? "workspace" : "project");
+  const targetPublicId = proof.targetPublicId ?? (proof.localProjectId === null ? proof.workspaceId : proof.projectPublicId);
+  const targetLineageScopeType = proof.targetLineageScopeType ?? (targetScopeType === "project" ? "project" : null);
+  const targetLineagePublicId = proof.targetLineagePublicId ?? (targetScopeType === "project" ? proof.projectPublicId : null);
+  if (targetScopeType !== "workspace" && targetLineageScopeType !== null && targetLineagePublicId !== null) {
+    const folderJoin = targetScopeType === "folder"
+      ? `JOIN portal_v2_folder_bindings binding ON binding.workspace_id=? AND binding.id=?
+          AND binding.owner_scope_type=? AND binding.owner_public_id=? AND binding.status='active'
+          AND binding.revoked_at IS NULL AND binding.source_version IS ?`
+      : "";
+    const folderEntityVersion = targetScopeType === "folder" ? "AND entity.source_version=binding.source_version" : "";
     if (proof.relationsEnabled) {
       lineageSql = `EXISTS (
         WITH RECURSIVE lineage(entity_type,public_id,depth) AS (
           SELECT entity.entity_type,entity.public_id,0
           FROM portal_v2_directory_entities entity
+          ${folderJoin}
           WHERE entity.workspace_id=? AND entity.generation_id=?
-            AND entity.entity_type='project' AND entity.public_id=? AND entity.active=1
+            AND entity.entity_type=? AND entity.public_id=? AND entity.active=1 ${folderEntityVersion}
           UNION
           SELECT relation.from_type,relation.from_public_id,lineage.depth+1
           FROM lineage
@@ -1340,21 +1538,25 @@ export function effectiveWorkspaceRequestMutationGuardSql(
           AND NOT EXISTS(SELECT 1 FROM lineage WHERE (entity_type || ':' || public_id)
             NOT IN (SELECT value FROM json_each(?)))
           AND NOT EXISTS(SELECT 1 FROM json_each(?) expected
-            WHERE expected.value<>? AND NOT EXISTS(SELECT 1 FROM lineage
+            WHERE expected.value<>? AND expected.value<>? AND NOT EXISTS(SELECT 1 FROM lineage
               WHERE (entity_type || ':' || public_id)=expected.value))
       )`;
       lineageBindings.push(
-        proof.workspaceId, proof.activeGenerationId, proof.projectPublicId,
+        ...(targetScopeType === "folder"
+          ? [proof.workspaceId, targetPublicId, targetLineageScopeType, targetLineagePublicId, proof.targetBindingSourceVersion ?? null] : []),
+        proof.workspaceId, proof.activeGenerationId, targetLineageScopeType, targetLineagePublicId,
         proof.workspaceId, proof.activeGenerationId, proof.rootType, proof.rootPublicId,
         scopesJson, scopesJson, `workspace:${proof.workspaceId}`,
+        targetScopeType === "folder" ? `folder:${targetPublicId}` : `workspace:${proof.workspaceId}`,
       );
     } else {
       lineageSql = `EXISTS (
         WITH RECURSIVE lineage(entity_type,public_id,parent_public_id,depth) AS (
           SELECT entity.entity_type,entity.public_id,entity.parent_public_id,0
           FROM portal_v2_directory_entities entity
+          ${folderJoin}
           WHERE entity.workspace_id=? AND entity.generation_id=?
-            AND entity.entity_type='project' AND entity.public_id=? AND entity.active=1
+            AND entity.entity_type=? AND entity.public_id=? AND entity.active=1 ${folderEntityVersion}
           UNION ALL
           SELECT parent.entity_type,parent.public_id,parent.parent_public_id,lineage.depth+1
           FROM lineage JOIN portal_v2_directory_entities parent
@@ -1367,13 +1569,16 @@ export function effectiveWorkspaceRequestMutationGuardSql(
           AND NOT EXISTS(SELECT 1 FROM lineage WHERE (entity_type || ':' || public_id)
             NOT IN (SELECT value FROM json_each(?)))
           AND NOT EXISTS(SELECT 1 FROM json_each(?) expected
-            WHERE expected.value<>? AND NOT EXISTS(SELECT 1 FROM lineage
+            WHERE expected.value<>? AND expected.value<>? AND NOT EXISTS(SELECT 1 FROM lineage
               WHERE (entity_type || ':' || public_id)=expected.value))
       )`;
       lineageBindings.push(
-        proof.workspaceId, proof.activeGenerationId, proof.projectPublicId,
+        ...(targetScopeType === "folder"
+          ? [proof.workspaceId, targetPublicId, targetLineageScopeType, targetLineagePublicId, proof.targetBindingSourceVersion ?? null] : []),
+        proof.workspaceId, proof.activeGenerationId, targetLineageScopeType, targetLineagePublicId,
         proof.workspaceId, proof.activeGenerationId, proof.rootType, proof.rootPublicId,
         scopesJson, scopesJson, `workspace:${proof.workspaceId}`,
+        targetScopeType === "folder" ? `folder:${targetPublicId}` : `workspace:${proof.workspaceId}`,
       );
     }
   }
@@ -1400,10 +1605,11 @@ export function effectiveWorkspaceRequestMutationGuardSql(
   ))` : "";
   const termsBindings = proof.projectAccessTermsReady ? [scopesJson] : [];
   const entitlementBase = `entitlement.workspace_id=workspace.id AND entitlement.identity_id=identity.id
-    AND entitlement.capability='request.create' AND entitlement.status='active' AND entitlement.revoked_at IS NULL
+    AND entitlement.capability=? AND entitlement.status='active' AND entitlement.revoked_at IS NULL
     AND datetime(entitlement.valid_from)<=datetime('now')
     AND (entitlement.expires_at IS NULL OR datetime(entitlement.expires_at)>datetime('now'))
     AND (entitlement.scope_type || ':' || entitlement.scope_public_id) IN (SELECT value FROM json_each(?))`;
+  const localRequestGrantSql = proof.requireLocalRequestGrant === false ? "" : "AND local_grant.can_request_service=1";
 
   return {
     sql: `EXISTS (
@@ -1432,7 +1638,7 @@ export function effectiveWorkspaceRequestMutationGuardSql(
           SELECT 1 FROM projects local_project
           JOIN client_project_grants local_grant ON local_grant.project_id=local_project.id
             AND local_grant.account_id=workspace.legacy_account_id AND local_grant.revoked_at IS NULL
-            AND local_grant.can_request_service=1
+            ${localRequestGrantSql}
           WHERE local_project.id=? AND local_project.active=1
             AND ${primaryAlphaReference("local_project")}
             AND local_project.project_alpha_project_id=?
@@ -1440,7 +1646,7 @@ export function effectiveWorkspaceRequestMutationGuardSql(
         ${denialSql}
         AND (SELECT COUNT(*) FROM portal_v2_entitlements counted
           WHERE counted.workspace_id=workspace.id AND counted.identity_id=identity.id
-            AND counted.capability='request.create' AND counted.status='active' AND counted.revoked_at IS NULL
+            AND counted.capability=? AND counted.status='active' AND counted.revoked_at IS NULL
             AND datetime(counted.valid_from)<=datetime('now')
             AND (counted.expires_at IS NULL OR datetime(counted.expires_at)>datetime('now')))<=200
         AND NOT EXISTS(SELECT 1 FROM portal_v2_entitlements entitlement
@@ -1457,9 +1663,43 @@ export function effectiveWorkspaceRequestMutationGuardSql(
       ...lineageBindings,
       proof.localProjectId, proof.localProjectId, proof.projectPublicId,
       ...denialBindings,
-      scopesJson,
-      scopesJson, allowedEntitlementIdsJson, ...termsBindings,
+      capability,
+      capability, scopesJson, capability, scopesJson, allowedEntitlementIdsJson, ...termsBindings,
     ],
+  };
+}
+
+export function effectiveWorkspaceNotificationMutationGuardSql(
+  proof: EffectiveWorkspaceRequestMutationProof,
+): EffectiveWorkspaceRequestMutationGuard {
+  const guard = effectiveWorkspaceRequestMutationGuardSql(proof);
+  if (proof.capability === "delivery.view") {
+    return {
+      sql: `client_portal_notifications.source_type='folder_grant'
+        AND EXISTS(SELECT 1 FROM client_folder_associations association
+          JOIN portal_v2_folder_bindings binding ON binding.id=? AND binding.workspace_id=?
+            AND binding.r2_prefix=association.r2_prefix AND binding.owner_scope_type=?
+            AND binding.owner_public_id=? AND binding.status='active' AND binding.revoked_at IS NULL
+            AND binding.source_version IS ?
+          WHERE association.logical_grant_id=client_portal_notifications.source_id
+            AND association.account_id=client_portal_notifications.account_id
+            AND association.revoked_at IS NULL)
+        AND ${guard.sql}`,
+      bindings: [
+        proof.targetPublicId, proof.workspaceId, proof.targetLineageScopeType,
+        proof.targetLineagePublicId, proof.targetBindingSourceVersion ?? null,
+        ...guard.bindings,
+      ],
+    };
+  }
+  return {
+    sql: `client_portal_notifications.source_type='service_request'
+      AND EXISTS(SELECT 1 FROM client_service_requests request
+        WHERE request.id=client_portal_notifications.source_id
+          AND request.account_id=client_portal_notifications.account_id
+          AND request.project_id IS ?)
+      AND ${guard.sql}`,
+    bindings: [proof.localProjectId, ...guard.bindings],
   };
 }
 

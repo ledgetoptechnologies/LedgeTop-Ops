@@ -1117,6 +1117,14 @@ export function registerProjectAlphaDraftQuoteRoutes(app: App): void {
              ELSE 'client.service_request.pa_draft_quote_scope_stale' END,'client_service_request',request_id,?
            FROM request_pa_draft_quote_receipts WHERE id=?`,
         ).bind(principal.id, details, receiptId),
+        db.prepare(
+          `INSERT INTO client_portal_notification_outbox
+            (id,request_id,event_type,status_value,recipient_kind,dedupe_key,payload_json)
+           SELECT ?,request_id,'pa_draft_quote_created',NULL,?,?,?
+             FROM request_pa_draft_quote_receipts WHERE id=? AND scope_stale_at IS NULL
+               AND EXISTS(${proof.sql})
+           ON CONFLICT(request_id,dedupe_key) DO NOTHING`,
+        ).bind(crypto.randomUUID(),native?'native_request_owner':'client_requester',`pa_draft_quote_created:${receiptId}:${native?'native_request_owner':'client_requester'}`,JSON.stringify({ lifecycle:'accepted_linked',action:'open_client_portal',title:request.title,projectId:null,projectName:null,serviceCategory:null,locationLabel:null }),receiptId,...proof.bindings),
       ]);
       saved = await exactReceipt(c.env, requestId, request.catalog_source_id,
         request.request_revision, areaRevision);
