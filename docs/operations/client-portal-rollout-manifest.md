@@ -103,7 +103,7 @@ emergency operation, not the ordinary rollback for additive migrations.
 2. Apply Project Alpha producer migrations only after the Project Alpha branch
    has been approved and rebased on current main. Preserve onboarding,
    approvals, projects, contracts, and documents.
-3. For the current default-on release, confirm Client migrations through `0198`
+3. For the current default-on release, confirm Client migrations through `0199`
    and Operations through `0052`, plus Project Alpha `0083`. The populated
    `0195` upgrade must prove stale bootstrap authority is invalidated while
    signed native successors and public-link records are preserved. `0197` adds
@@ -112,8 +112,10 @@ emergency operation, not the ordinary rollback for additive migrations.
    administrator revoke an organization or standalone-client workspace without
    deleting projected memberships, and later Project Alpha sync cannot clear it.
    `0198` adds the incoming-upload owner-notification outbox required by the
-   upload completion transaction. Apply it before deploying the Operations
-   Worker so a completed upload cannot fail while recording its notification.
+   upload completion transaction. `0199` adds the private Incoming pickup
+   lifecycle and its fenced server claim lease. Apply both before deploying the
+   dependent Worker so a completed upload cannot fail while recording its
+   notification and a pickup server cannot race another claimant.
 4. Preserve the exact Project Alpha-to-Ops-Sync connector envelope. Configure
    the private Ops-Sync-to-Client Worker binding and named entrypoint on the
    Operations side only. Do not add another Project Alpha destination, a second
