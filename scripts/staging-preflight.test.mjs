@@ -220,8 +220,8 @@ test("requires every portal-v2 and Operations capability to be explicitly false"
   }
 });
 
-test("pins the native portal, root-access, incoming-notification, pickup lifecycle, and bulk-archive migration-first release contract", () => {
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-16), [
+test("pins the native portal, root-access, incoming-notification, pickup lifecycle, and 0200-0203 migration-first release contract", () => {
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-20), [
     "0184_native_client_feedback.sql",
     "0185_native_service_request_ownership.sql",
     "0186_delivery_notification_authority_provenance.sql",
@@ -238,8 +238,12 @@ test("pins the native portal, root-access, incoming-notification, pickup lifecyc
     "0197_portal_root_access_policy.sql",
     "0198_incoming_upload_owner_notifications.sql",
     "0199_incoming_upload_pickup_lifecycle.sql",
+    "0200_native_feedback_workspace_history.sql",
+    "0201_native_draft_quote_notifications.sql",
+    "0202_native_delivery_recipient_events.sql",
+    "0203_primary_delivery_authority.sql",
   ]);
-  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.at(-1), "0052_project_operational_reassignment_recovery.sql");
+  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.at(-1), "0053_project_internal_notes.sql");
   assert(REQUIRED_DISABLED_FEATURE_FLAGS.delivery.includes("CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED"));
   assert(REQUIRED_DISABLED_FEATURE_FLAGS.delivery.includes("CLIENT_PORTAL_CONTENT_AUDIT_ENABLED"));
   assert.equal(STAGING_STATIC_VARS.delivery.CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED, "false");
@@ -258,6 +262,7 @@ test("pins the native portal, root-access, incoming-notification, pickup lifecyc
   assert.match(FEATURE_FLAG_ACTIVATION_POLICIES.delivery.PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED.prohibitedReason, /private Client service binding/);
   assert.deepEqual(STAGING_INVENTORY["ops-sync"].services, [
     { binding: "CLIENT_PORTAL_PROJECTION_INGRESS", service: "ltds-delivery-staging", entrypoint: "OpsSyncPortalProjectionIngress" },
+    { binding: "OPERATIONS_DELIVERY_INTENT_INGRESS", service: "ltds-ops-staging", entrypoint: "ProjectAlphaDeliveryIntentIngress" },
   ]);
   assert.equal(STAGING_INVENTORY.delivery.workflows.find(({ binding }) => binding === "BULK_DOWNLOAD_WORKFLOW").limits.steps, 25000);
   assert.deepEqual(FEATURE_FLAG_ACTIVATION_POLICIES.delivery.CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED.gates, [

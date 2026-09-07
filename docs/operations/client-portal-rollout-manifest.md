@@ -103,8 +103,8 @@ emergency operation, not the ordinary rollback for additive migrations.
 2. Apply Project Alpha producer migrations only after the Project Alpha branch
    has been approved and rebased on current main. Preserve onboarding,
    approvals, projects, contracts, and documents.
-3. For the current default-on release, confirm Client migrations through `0199`
-   and Operations through `0052`, plus Project Alpha `0083`. The populated
+3. For the current default-on release, confirm Client migrations through `0203`
+   and Operations through `0053`, plus Project Alpha `0083`. The populated
    `0195` upgrade must prove stale bootstrap authority is invalidated while
    signed native successors and public-link records are preserved. `0197` adds
    the Operations-owned root access overlay. Apply it before either
@@ -115,7 +115,13 @@ emergency operation, not the ordinary rollback for additive migrations.
    upload completion transaction. `0199` adds the private Incoming pickup
    lifecycle and its fenced server claim lease. Apply both before deploying the
    dependent Worker so a completed upload cannot fail while recording its
-   notification and a pickup server cannot race another claimant.
+   notification and a pickup server cannot race another claimant. `0200`–`0203`
+   extend the ordered Client chain for workspace feedback history, preserving
+   draft-quote notices, native delivery recipient events, and primary delivery
+   authority. Apply the full sequence before deploying dependent Workers;
+   preserve the R8a maintenance/drain/readback evidence while 0201 is pending
+   and retain the default-off gates until compatible readers and writers are
+   accepted.
 4. Preserve the exact Project Alpha-to-Ops-Sync connector envelope. Configure
    the private Ops-Sync-to-Client Worker binding and named entrypoint on the
    Operations side only. Do not add another Project Alpha destination, a second

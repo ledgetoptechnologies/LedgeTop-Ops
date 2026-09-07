@@ -402,7 +402,8 @@ hoc, edit the migration ledger, or execute these files as raw SQL.
    state is still unset and its retention-delete gate is closed. Before the
    Operations upload, prove the 0189 unreceipted-active-binding query returns
    zero. Then apply Operations through
-   `0052_project_operational_reassignment_recovery.sql` and deploy the paired final
+   `0052_project_operational_reassignment_recovery.sql`, then
+   `0053_project_internal_notes.sql`, and deploy the paired final
    applications with every user-facing portal capability still default-off,
    receiver sync true, direct portal HTTP false, and the private Ops Sync to
    Client binding verified.
@@ -427,7 +428,8 @@ expand step. Apply `0180`-`0183` only after the compatible-writer drain above,
 then apply `0184`-`0195` migration-first before the paired final applications.
 Confirm Operations
 `0014_staff_acl_controls.sql` through
-`0052_project_operational_reassignment_recovery.sql`. Migration `0100` removes
+`0052_project_operational_reassignment_recovery.sql` and
+`0053_project_internal_notes.sql`. Migration `0100` removes
 `share_version` from the delivery-grant parent key so existing share
 rotation/revocation updates cannot be blocked by a portal grant; the grant
 still records the approved version for authorization checks. Reject any

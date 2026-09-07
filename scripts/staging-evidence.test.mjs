@@ -408,7 +408,7 @@ test("requires native portal migration-first, default-off, and rollback-drain ev
   evidence.migrations.delivery.nativePortalRollbackDrainReviewed = false;
   evidence.migrations.delivery.nativePortalReleaseEvidenceRef = "";
   const errors = validateEvidence(evidence, { base, head: evidence.releaseCommit, configs, configHashes, now, sourceControlVerified: true });
-  for (const expected of ["nativePortalMigrationsAppliedBeforeFinalWorkers", "nativePortalCapabilitiesDefaultOffAtDeploy", "nativePortalRollbackDrainReviewed", "0184-0195/0052"]) {
+  for (const expected of ["nativePortalMigrationsAppliedBeforeFinalWorkers", "nativePortalCapabilitiesDefaultOffAtDeploy", "nativePortalRollbackDrainReviewed", "0184-0203/0052"]) {
     assert(errors.some((error) => error.includes(expected)), `${expected}: ${errors.join(" | ")}`);
   }
 });
@@ -558,7 +558,9 @@ test("checked-in evidence example stays complete as migrations, flags, gates, an
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const example = JSON.parse(fs.readFileSync(path.join(root, "docs", "staging", "release-evidence.json.example"), "utf8"));
   for (const app of ["delivery", "operations"]) assert.deepEqual(example.migrations[app].expected, [...REQUIRED_STAGING_MIGRATIONS[app]], `migrations.${app}`);
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-13), [
+  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.at(-1), "0053_project_internal_notes.sql");
+  assert.equal(fs.existsSync(path.join(root, "apps", "operations", "migrations", "0053_project_internal_notes.sql")), true);
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-17), [
     "0187_authenticated_content_audit.sql",
     "0188_native_feedback_completion_notices.sql",
     "0189_primary_staff_folder_bindings.sql",
@@ -572,6 +574,10 @@ test("checked-in evidence example stays complete as migrations, flags, gates, an
     "0197_portal_root_access_policy.sql",
     "0198_incoming_upload_owner_notifications.sql",
     "0199_incoming_upload_pickup_lifecycle.sql",
+    "0200_native_feedback_workspace_history.sql",
+    "0201_native_draft_quote_notifications.sql",
+    "0202_native_delivery_recipient_events.sql",
+    "0203_primary_delivery_authority.sql",
   ]);
   for (const app of ["delivery", "operations", "ops-sync"]) assert.deepEqual(new Set(example.deployments[app].disabledFeatureFlags), new Set(REQUIRED_DISABLED_FEATURE_FLAGS[app]), `deployments.${app}.disabledFeatureFlags`);
   assert.deepEqual(new Set(Object.keys(example.externalGates)), new Set(REQUIRED_EXTERNAL_GATES));
@@ -628,4 +634,20 @@ test("migration reapply evidence uses Wrangler's ledger instead of replaying raw
     assert.match(document, /(?:raw SQL files a second time|migration SQL files directly)/i);
     assert.match(document, /(?:Do not|Never)/);
   }
+});
+
+test("pins the ordered Client 0200-0203 migration suffix in the release contract", () => {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const suffix = [
+    "0200_native_feedback_workspace_history.sql",
+    "0201_native_draft_quote_notifications.sql",
+    "0202_native_delivery_recipient_events.sql",
+    "0203_primary_delivery_authority.sql",
+  ];
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-suffix.length), suffix);
+  const migrationDirectory = path.join(root, "apps", "client", "migrations");
+  assert.deepEqual(
+    fs.readdirSync(migrationDirectory).filter((name) => suffix.includes(name)).sort(),
+    suffix,
+  );
 });

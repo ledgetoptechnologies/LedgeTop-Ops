@@ -439,7 +439,11 @@
         "0196_bulk_download_archive_cache.sql",
         "0197_portal_root_access_policy.sql",
         "0198_incoming_upload_owner_notifications.sql",
-        "0199_incoming_upload_pickup_lifecycle.sql"
+        "0199_incoming_upload_pickup_lifecycle.sql",
+        "0200_native_feedback_workspace_history.sql",
+        "0201_native_draft_quote_notifications.sql",
+        "0202_native_delivery_recipient_events.sql",
+        "0203_primary_delivery_authority.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
@@ -508,7 +512,8 @@
         "0049_project_alpha_delivery_source_rate_limits.sql",
         "0050_project_alpha_draft_quote_credentials.sql",
         "0051_client_hub_internal_notes.sql",
-        "0052_project_operational_reassignment_recovery.sql"
+        "0052_project_operational_reassignment_recovery.sql",
+        "0053_project_internal_notes.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
