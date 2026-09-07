@@ -5,6 +5,7 @@ import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createCatalogSourceContext, PRIMARY_CATALOG_SOURCE, type CatalogSourceContext } from "@ltds/shared";
 import { applyProjectAlphaDeliveryIntent } from "../src/worker/project-alpha-delivery-intents";
+import { primaryDeliveryAuthorityProof } from "../src/worker/project-alpha-primary-delivery-authority";
 import type { Env as OperationsEnv } from "../src/worker/types";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import { reservePrimaryPortalSigningKeys } from "../../client/src/worker/project-alpha-portal-authority";
@@ -30,6 +31,8 @@ type NativeFixture = {
   alternateIdentityId: string;
 };
 const fingerprint = (payload: unknown) => createHash("sha256").update(JSON.stringify(payload)).digest("hex");
+const primaryProof = primaryDeliveryAuthorityProof({ mode: "legacy_primary", sourceId: primary.sourceId,
+  revision: 0, version: 0, profile: "primary_legacy" });
 
 describe("Operations delivery acceptance to Client native notification history â€” migrated D1", { timeout: 240_000 }, () => {
   let runtime: Miniflare;
@@ -45,7 +48,7 @@ describe("Operations delivery acceptance to Client native notification history â
     });
     db = await runtime.getD1Database("DELIVERY_DB") as unknown as D1Database;
     const migrations = new URL("../../client/migrations/", import.meta.url);
-    for (const name of readdirSync(migrations).filter(name => /^\d+.*\.sql$/.test(name) && name <= "0202_native_delivery_recipient_events.sql").sort()) {
+    for (const name of readdirSync(migrations).filter(name => /^\d+.*\.sql$/.test(name) && name <= "0203_primary_delivery_authority.sql").sort()) {
       const statements = splitD1MigrationStatements(readFileSync(new URL(name, migrations), "utf8"));
       if (statements.length) await db.batch(statements.map(sql => db.prepare(sql)));
     }
@@ -162,7 +165,11 @@ describe("Operations delivery acceptance to Client native notification history â
         scope: { type: "organization", publicId: fixture.rootId }, audience: { type: "principal", publicId: fixture.principalId },
         accessMode: "portal", expiresAt: null, label: null, notify: true,
       };
-      return applyProjectAlphaDeliveryIntent(env, payload, { deliveryId, fingerprint: fingerprint(payload) }, fixture.source);
+      const proof = fixture.source.sourceId === primary.sourceId ? primaryProof : {
+        sourceId: fixture.source.sourceId, revision: 1, version: 2, connectorRevision: 1, connectorVersion: 1,
+      };
+      return applyProjectAlphaDeliveryIntent(env, payload, { deliveryId, fingerprint: fingerprint(payload) },
+        fixture.source, env.PROJECT_ALPHA_PORTAL_APPLICATION_KEY, proof);
     };
 
     const primaryAccepted = await accept(primaryFixture, "primary-cross-app-delivery");

@@ -58,6 +58,15 @@ export interface ProjectAlphaConnectorSummary {
 export interface ProjectAlphaConnectorRevisionInput {
   credentialRef: string; snapshotBasePath: string; accessIssuer: string; accessAudience: string; accessSubject: string;
 }
+/** Pending is the initial enrollment state only; enrolled connections never
+ * return to it because that would revive the deployment-wide scalar adapter. */
+export function assertProjectAlphaConnectorStateTransition(current: ProjectAlphaConnectorState,
+  next: ProjectAlphaConnectorState): void {
+  if (current === "retired" && next !== "retired")
+    fail("conflict", "A retired connector cannot be reactivated");
+  if (next === "pending" && current !== "pending")
+    fail("conflict", "An enrolled connector cannot return to pending");
+}
 export interface RegisterProjectAlphaConnectorInput {
   sourceId: string; producerBindingId: string; snapshotOrigin: string; applicationKey: string;
   profile: ProjectAlphaConnectorProfile; displayName: string; revision: ProjectAlphaConnectorRevisionInput;
@@ -541,6 +550,7 @@ export async function setProjectAlphaConnectorState(env: ProjectAlphaConnectorEn
   if (!parsed.success) return fail("invalid", "Connector state change is invalid");
   const value = parsed.data, id = sourceId(requestedSource), author = actor(actorId), db = database(env), row = await read(db, id);
   if (!row) return fail("unavailable", "Connector is not registered");
+  assertProjectAlphaConnectorStateTransition(row.state, value.state);
   if (id === PRIMARY_ALPHA_SOURCE_ID && value.readVisible === false) return fail("invalid", "Primary business visibility cannot be disabled here");
   if (value.state === "active") await verifiedConfiguration(env, row);
   try {

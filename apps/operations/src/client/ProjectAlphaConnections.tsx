@@ -31,7 +31,7 @@ function CredentialFields() {
     <label>Credential reference<input name="credentialRef" required maxLength={64} autoComplete="off" placeholder="Deployed secret reference, not the secret" /></label>
     <label>Access issuer<input name="accessIssuer" type="url" required maxLength={2048} placeholder="https://team.cloudflareaccess.com" /></label>
     <label>Access audience<input name="accessAudience" required maxLength={512} /></label>
-    <label>Producer Access subject<input name="accessSubject" required maxLength={512} /></label>
+    <label>Producer Access service-token Client ID (JWT common_name)<input name="accessSubject" required maxLength={512} /></label>
   </>;
 }
 function date(value: string | null) { return value ? new Date(value.includes("T") ? value : `${value.replace(" ", "T")}Z`).toLocaleString() : "Not yet"; }

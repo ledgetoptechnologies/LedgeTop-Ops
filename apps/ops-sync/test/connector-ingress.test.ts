@@ -45,11 +45,11 @@ async function sha256(value:string):Promise<string>{
   const digest=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(value));
   return [...new Uint8Array(digest)].map(byte=>byte.toString(16).padStart(2,"0")).join("");
 }
-async function request(source:string,payload:unknown,options:{key?:string;subject?:string;issuer?:string;audience?:string;legacy?:boolean;hmac?:boolean}={}):Promise<Request> {
+async function request(source:string,payload:unknown,options:{key?:string;commonName?:string;subject?:string;type?:string;issuer?:string;audience?:string;legacy?:boolean;hmac?:boolean}={}):Promise<Request> {
   const body=JSON.stringify(payload),timestamp=new Date().toISOString();
-  const token=await new SignJWT({type:"service_token"}).setProtectedHeader({alg:"RS256",kid:"access-key"})
+  const token=await new SignJWT({type:options.type??"app",common_name:options.commonName??`subject-${source}`}).setProtectedHeader({alg:"RS256",kid:"access-key"})
     .setIssuer(options.issuer??accessIssuer(source)).setAudience(options.audience??`aud-${source}`)
-    .setSubject(options.subject??`subject-${source}`).setIssuedAt().setExpirationTime("5m").sign(accessKeys.privateKey);
+    .setSubject(options.subject??"").setIssuedAt().setExpirationTime("5m").sign(accessKeys.privateKey);
   const signed=new TextEncoder().encode(`${timestamp}.${body}`);
   const signature=b64(new Uint8Array(await crypto.subtle.sign("Ed25519",keys.get(options.key??source)!.privateKey,signed)));
   const headers:Record<string,string>={"Content-Type":"application/json","Cf-Access-Jwt-Assertion":token,"X-PA-Timestamp":timestamp,
@@ -167,8 +167,25 @@ describe("authenticated connector business ingress",{timeout:30_000},()=>{
     expect((await handleRequest(await request(secondary,event(),{key:"previous-secondary"}),environment)).status).toBe(200);
     expect((await handleRequest(await request(primary,event(),{key:"previous-secondary"}),environment)).status).toBe(401);
   });
-  it.each([{key:primary},{subject:`subject-${primary}`},{issuer:accessIssuer(primary)},{audience:`aud-${primary}`},{hmac:true}])("rejects a cross-source credential or HMAC without reserving a receipt: %j",async(options)=>{
+  it("accepts a registered source's exact service-token common_name", async () => {
+    const item = event();
+    expect((await handleRequest(await request(secondary, item, { commonName: `subject-${secondary}` }), environment)).status).toBe(200);
+    expect(await db.prepare("SELECT status FROM integration_event_receipts WHERE projection_source_id=? AND event_id=?")
+      .bind(secondary, item.event_id).first("status")).toBe("completed");
+  });
+  it.each([{key:primary},{commonName:`subject-${primary}`},{issuer:accessIssuer(primary)},{audience:`aud-${primary}`},{hmac:true}])("rejects a cross-source credential or HMAC without reserving a receipt: %j",async(options)=>{
     const item=event();const response=await handleRequest(await request(secondary,item,options),environment);
+    expect(response.status).toBe(401);
+    expect(await db.prepare("SELECT count(*) total FROM integration_event_receipts WHERE event_id=?").bind(item.event_id).first("total")).toBe(0);
+  });
+  it.each([
+    ["wrong common_name", { commonName: `subject-${primary}` }],
+    ["empty sub without the exact common_name", { commonName: "another-service-token" }],
+    ["identity-user claim", { type: "user", subject: "human-subject" }],
+    ["non-service app claim", { subject: "human-subject" }],
+  ])("requires the exact service-token identity for a registered source: %s", async (_label, options) => {
+    const item = event();
+    const response = await handleRequest(await request(secondary, item, options), environment);
     expect(response.status).toBe(401);
     expect(await db.prepare("SELECT count(*) total FROM integration_event_receipts WHERE event_id=?").bind(item.event_id).first("total")).toBe(0);
   });

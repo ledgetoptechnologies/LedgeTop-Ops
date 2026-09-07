@@ -11,8 +11,10 @@ inventory](goal-remaining-acceptance.md) still applies.
    primary controls staff access. Business customer grouping does not combine
    accounts, identities, memberships or grants.
 2. Use the Client portal controls on that same connection. Configuration reuses
-   its current credential reference, producer Access issuer/audience/subject and
-   immutable producer identity; there is no second browser credential form.
+   its current credential reference, producer Access issuer/audience and
+   service-token Client ID (`common_name`) and immutable producer identity;
+   the persisted `accessSubject` field retains that Client ID for compatibility.
+   There is no second browser credential form.
 3. Configuration stages a pending purpose. Explicit activation requires the
    primary and selected connection to be active and the configured portal
    revision to match the current connector revision. This enables authenticated

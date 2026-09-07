@@ -570,7 +570,7 @@ export async function createProjectAlphaDeliveryGuestShare(env:Env,input:{
   deliveryId:string;receiptId:string;fingerprint:string;r2Prefix:string;label:string|null;expiresAt:string;
   audience:{type:AudienceType;publicId:string;sourceVersion:string};
   expectedBinding:{workspaceId:string;folderBindingId:string;bindingSourceVersion:string;directoryGenerationId:string};
-},source:CatalogSourceContext=PRIMARY_CATALOG_SOURCE,sourceFence?:D1PreparedStatement):Promise<{shareId:string;reused:boolean;receiptId:string}>{
+},source:CatalogSourceContext,sourceFence:D1PreparedStatement):Promise<{shareId:string;reused:boolean;receiptId:string}>{
   source=createCatalogSourceContext(source?.sourceId);
   const replay=async()=>{
     const prior=await env.DELIVERY_DB.prepare(`SELECT receipt_id,resource_id,request_fingerprint,access_mode
@@ -618,7 +618,7 @@ export async function createProjectAlphaDeliveryGuestShare(env:Env,input:{
       current.audiencePublicId===selected.audiencePublicId);
     if(!compatible)throw new HTTPException(409,{message:"An active share already exists for this delivery"});
     const statements:D1PreparedStatement[]=[
-      ...(sourceFence?[sourceFence]:[]),
+      sourceFence,
       env.DELIVERY_DB.prepare(`INSERT INTO project_alpha_delivery_intent_receipts(receipt_id,delivery_id,request_fingerprint,access_mode,resource_id,project_alpha_source_id,write_guard)
         SELECT ?,?,?,'guest',?,?,CASE WHEN (${guard.sql}) AND ${projectGuard} AND EXISTS(
           SELECT 1 FROM shares s JOIN project_alpha_delivery_guest_authority a ON a.share_id=s.id
@@ -651,7 +651,7 @@ export async function createProjectAlphaDeliveryGuestShare(env:Env,input:{
   if(liveBindingSource.results.length!==1)throw new HTTPException(409,{message:"Delivery folder authority is no longer live"});
   const shareId=crypto.randomUUID(),publicId=randomToken(16),secret=randomToken(32),encrypted=await encryptDeliveryToken(secret,env.DELIVERY_TOKEN_SECRET,shareId);
   try{await env.DELIVERY_DB.batch([
-    ...(sourceFence?[sourceFence]:[]),
+    sourceFence,
     env.DELIVERY_DB.prepare(`INSERT INTO project_alpha_delivery_intent_receipts(receipt_id,delivery_id,request_fingerprint,access_mode,resource_id,project_alpha_source_id,write_guard)
       SELECT ?,?,?,'guest',?,?,CASE WHEN (${guard.sql}) AND ${projectGuard} THEN 1 ELSE 0 END`)
       .bind(input.receiptId,input.deliveryId,input.fingerprint,shareId,source.sourceId,...guard.bindings,...projectGuardValues),
@@ -685,8 +685,8 @@ export async function createProjectAlphaDeliveryGuestShare(env:Env,input:{
 }
 
 export async function revokeProjectAlphaDeliveryGuestShare(env:Env,input:{shareId:string;deliveryId:string;
-  revokeReceiptId:string;originalReceiptId:string;fingerprint:string},source:CatalogSourceContext=PRIMARY_CATALOG_SOURCE,
-  sourceFence?:D1PreparedStatement):Promise<{receiptId:string}>{
+  revokeReceiptId:string;originalReceiptId:string;fingerprint:string},source:CatalogSourceContext,
+  sourceFence:D1PreparedStatement):Promise<{receiptId:string}>{
   source=createCatalogSourceContext(source?.sourceId);
   const replay=async()=>{
     const prior=await env.DELIVERY_DB.prepare(`SELECT receipt_id,original_receipt_id,request_fingerprint
@@ -707,7 +707,7 @@ export async function revokeProjectAlphaDeliveryGuestShare(env:Env,input:{shareI
   const audience=await latestShareAudienceSnapshot(env,share.id);
   if(!audience){const raced=await replay();if(raced)return raced;throw new HTTPException(409,{message:"Delivery share audience is unavailable"});}
   try{await env.DELIVERY_DB.batch([
-    ...(sourceFence?[sourceFence]:[]),
+    sourceFence,
     env.DELIVERY_DB.prepare(`INSERT INTO project_alpha_delivery_intent_revocation_receipts
       (receipt_id,delivery_id,original_receipt_id,request_fingerprint,project_alpha_source_id,write_guard)
       SELECT ?,?,?,?,?,CASE WHEN EXISTS(

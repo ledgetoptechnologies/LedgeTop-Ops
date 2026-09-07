@@ -85,7 +85,7 @@ async function fillRegistration(page: Page, sourceId = secondary) {
   await form.getByLabel("Credential reference").fill("PA_REGISTERED");
   await form.getByLabel("Access issuer").fill("https://team.cloudflareaccess.com");
   await form.getByLabel("Access audience").fill("audience-registered");
-  await form.getByLabel("Producer Access subject").fill("producer-subject");
+  await form.getByLabel("Producer Access service-token Client ID (JWT common_name)").fill("producer-subject");
   return form;
 }
 
@@ -336,7 +336,7 @@ test("revision confirmation preserves immutable destination and uses the chosen 
   await form.getByLabel("Credential reference").fill("BUSINESS_B_ROTATED");
   await form.getByLabel("Access issuer").fill("https://team.cloudflareaccess.com");
   await form.getByLabel("Access audience").fill("new-audience");
-  await form.getByLabel("Producer Access subject").fill("same-producer");
+  await form.getByLabel("Producer Access service-token Client ID (JWT common_name)").fill("same-producer");
   await confirmation(page, () => form.getByRole("button", { name: "Apply new revision" }).click(), /old-revision syncs will stop before further writes/, true);
   await expect(page.getByRole("status").filter({ hasText: "Connection revision updated." })).toBeVisible();
   expect(requests.find(row => row.path.endsWith("/revisions"))).toMatchObject({ path: `${endpoint}/project-alpha%3Abusiness-b/revisions`,

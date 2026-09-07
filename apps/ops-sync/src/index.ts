@@ -2,7 +2,7 @@ import { ZodError } from "zod";
 import { reconcileAccessGroup } from "./access-group";
 import { accessCircuitIsOpen, completeEvent, applyEntitlementEventForSource, applyProjectionEventForSource, recordAccessFailure, recordAccessSuccess, recordEventFailure, routeDeliveryIntentEventForSource, routePortalProjectionEventForSource } from "./projection";
 import { parseIntegrationEvent } from "./schema";
-import { readWebhookBody, requireAccessSubject, sha256Hex, validateRequestTimestamp, verifyAccessAssertion, verifyWebhookSignature, type AccessEnvironment } from "./security";
+import { readWebhookBody, requireAccessServiceTokenIdentity, sha256Hex, validateRequestTimestamp, verifyAccessAssertion, verifyWebhookSignature, type AccessEnvironment } from "./security";
 import type { Env } from "./types";
 import { PRIMARY_PROJECT_ALPHA_SOURCE, type ProjectAlphaSourceContext } from "../../operations/src/worker/project-alpha-source";
 import { assertProjectAlphaConnectorProof, ProjectAlphaConnectorError, resolveProjectAlphaConnector, type ProjectAlphaConnectorProof } from "../../operations/src/worker/project-alpha-connectors";
@@ -63,7 +63,7 @@ export async function handleRequest(request: Request, env: Env, accessVerifier: 
     if (candidate.proof.mode === "registry" && !eventConfig) throw new Error("project-alpha-connector-events-unavailable");
     const claims = await accessVerifier(request,eventConfig
       ? {TEAM_DOMAIN:eventConfig.accessIssuer,CF_ACCESS_AUD:eventConfig.accessAudience} : env);
-    if (candidate.proof.mode === "registry") requireAccessSubject(claims,eventConfig?.accessSubject ?? "");
+    if (candidate.proof.mode === "registry") requireAccessServiceTokenIdentity(claims,eventConfig?.accessSubject ?? "");
     if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) return json(415,{error:"content-type-required"});
     const rawBody = await readWebhookBody(request);
     const timestamp = validateRequestTimestamp(request.headers.get("X-PA-Timestamp"));

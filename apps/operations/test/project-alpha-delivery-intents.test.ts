@@ -43,7 +43,9 @@ async function applyMigration(db:D1Database,url:URL){const sql=readFileSync(url,
   for(const statement of sql.split(/;\s*(?:\n|$)/).map(value=>value.trim()).filter(Boolean))await db.prepare(statement).run();}
 async function applyRateMigrations(db:D1Database){
   await applyMigration(db,new URL("../migrations/0031_project_alpha_delivery_intent_rate_limits.sql",import.meta.url));
+  await applyMigration(db,new URL("../migrations/0035_project_alpha_connectors.sql",import.meta.url));
   await applyMigration(db,new URL("../migrations/0049_project_alpha_delivery_source_rate_limits.sql",import.meta.url));
+  await applyMigration(db,new URL("../migrations/0050_project_alpha_draft_quote_credentials.sql",import.meta.url));
 }
 async function runSqlStatements(db:D1Database,sql:string):Promise<void>{
   for(const statement of sql.split(";").map(value=>value.trim()).filter(Boolean))await db.prepare(statement).run();
@@ -190,6 +192,7 @@ async function createGuestHarness(suffix:string){
   const delivery=await mf.getD1Database("DELIVERY_DB") as unknown as D1Database;
   await applyRateMigrations(ops);
   await prepareGuestDeliveryDatabase(delivery);
+  await applyMigration(delivery,new URL("../../client/migrations/0203_primary_delivery_authority.sql",import.meta.url));
   const secret="0123456789abcdef0123456789abcdef";
   const env={OPS_DB:ops,DELIVERY_DB:delivery,PROJECT_ALPHA_PORTAL_APPLICATION_KEY:"project-alpha",PROJECT_ALPHA_PORTAL_HMAC_KEY_ID:"ops-v1",
     PROJECT_ALPHA_PORTAL_HMAC_SECRET:secret,PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED:"true",PROJECT_ALPHA_DELIVERY_GUEST_ENABLED:"true",
@@ -473,6 +476,7 @@ describe("Project Alpha delivery-intent boundary", () => {
         INSERT INTO portal_v2_directory_generations VALUES('generation-one','workspace-one','active',1);
         INSERT INTO portal_v2_directory_entities VALUES('workspace-one','generation-one','project','project-one',NULL,'Project One','binding-v1',1);
         INSERT INTO pa_portal_principals VALUES('workspace-one','principal-one',NULL,'Client@Example.test','Client','principal-v1','active');`);
+      await applyMigration(delivery,new URL("../../client/migrations/0203_primary_delivery_authority.sql",import.meta.url));
       const secret="0123456789abcdef0123456789abcdef";
       const env={OPS_DB:ops,DELIVERY_DB:delivery,PROJECT_ALPHA_PORTAL_APPLICATION_KEY:"project-alpha",PROJECT_ALPHA_PORTAL_HMAC_KEY_ID:"ops-v1",
         PROJECT_ALPHA_PORTAL_HMAC_SECRET:secret,PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED:"true",PROJECT_ALPHA_DELIVERY_GUEST_ENABLED:"false",
