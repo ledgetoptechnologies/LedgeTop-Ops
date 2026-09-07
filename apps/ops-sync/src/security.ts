@@ -44,8 +44,19 @@ export async function readWebhookBody(request: Request, timeoutMs = 10_000): Pro
   }
 }
 
-export function requireAccessSubject(claims: unknown, expected: string): void {
-  if (!expected || !claims || typeof claims !== "object" || !("sub" in claims) || claims.sub !== expected) {
+/**
+ * Require the Cloudflare Access service-token identity for one connector.
+ *
+ * Access application JWTs identify service tokens with type=app, an empty
+ * subject, and common_name equal to the service-token client ID. Keeping all
+ * three checks here prevents a human/user assertion or a different connector
+ * from satisfying this connector's exact ingress binding.
+ */
+export function requireAccessServiceTokenIdentity(claims: unknown, expectedClientId: string): void {
+  if (!expectedClientId || !claims || typeof claims !== "object"
+    || !("type" in claims) || claims.type !== "app"
+    || !("sub" in claims) || claims.sub !== ""
+    || !("common_name" in claims) || claims.common_name !== expectedClientId) {
     throw new Error("access-subject-invalid");
   }
 }

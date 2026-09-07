@@ -34,8 +34,11 @@ activation have been changed. This document is not a release announcement.
   signing keys are reserved even before enrollment.
 - Business snapshots resolve their own destination and credential. Signed events
   use `/v1/project-alpha/sources/:sourceId/events`; the URL only selects a candidate.
-  Exact Access issuer/audience/subject, application, and producer signature still
-  have to verify. Secondary sources require Ed25519.
+  Exact Access issuer/audience and service-token Client ID (`common_name`),
+  application, and producer signature still have to verify. The registered
+  `accessSubject` field stores that Client ID for schema/API compatibility;
+  ingress requires the service-token JWT tuple `type=app`, empty `sub`, and
+  matching `common_name`. Secondary sources require Ed25519.
 - Existing `/v1/project-alpha/events` remains primary-bound. A registered but
   suspended/misconfigured primary never falls back to legacy scalar credentials.
 - Source/revision/profile/version guards share every Operations projection write

@@ -5,6 +5,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { PRIMARY_CATALOG_SOURCE, createCatalogSourceContext } from '@ltds/shared';
 import { splitD1MigrationStatements } from '../../client/test/helpers/d1-migrations';
 import { applyProjectAlphaDeliveryIntent, applyProjectAlphaDeliveryIntentRevoke } from '../src/worker/project-alpha-delivery-intents';
+import { primaryDeliveryAuthorityProof } from '../src/worker/project-alpha-primary-delivery-authority';
 import { adoptPortalDeliveryNotifications, authorizePortalDeliveryNotificationBatch, nativeDeliveryNotificationsReady,
   processPortalDeliveryNotificationBatches, stagePortalDeliveryNotificationStatements, type NativeBatch } from '../src/worker/portal-delivery-notification-batches';
 import { authorizeNativeDeliveryNotification, controlNativeDeliveryNotification, nativeNotificationCandidates,
@@ -16,6 +17,8 @@ import type { Env, StaffPrincipal } from '../src/worker/types';
 const staff:StaffPrincipal={id:'native-staff',email:'native-staff@example.test',displayName:'Native staff',accessSubject:'native-staff-access',projectAlphaUserId:null};
 const publicId=(name:string)=>createHash('sha256').update(name).digest('hex').slice(0,32);
 const fingerprint=(payload:unknown)=>createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+const primaryProof=primaryDeliveryAuthorityProof({mode:'legacy_primary',sourceId:PRIMARY_CATALOG_SOURCE.sourceId,
+  revision:0,version:0,profile:'primary_legacy'});
 function intercept(db:D1Database,predicate:(sql:string)=>boolean,action:()=>Promise<unknown>):D1Database{
   let fired=false;let proxy:D1Database;
   proxy=new Proxy(db,{get(target,key){
@@ -75,6 +78,7 @@ describe('native delivery staging, exact authority and controls — migrated D1'
     // native mail-batch migrations are exercised. Apply the required ledger
     // first so those accepted intents retain their recipient history.
     await db.batch(splitD1MigrationStatements(readFileSync(new URL('../../client/migrations/0202_native_delivery_recipient_events.sql',import.meta.url),'utf8')).map(sql=>db.prepare(sql)));
+    await db.batch(splitD1MigrationStatements(readFileSync(new URL('../../client/migrations/0203_primary_delivery_authority.sql',import.meta.url),'utf8')).map(sql=>db.prepare(sql)));
     await ops.batch([
       ops.prepare("INSERT INTO staff_users(id,email,display_name,access_subject) VALUES(?,?,?,?)").bind(staff.id,staff.email,staff.displayName,staff.accessSubject),
       ops.prepare("INSERT INTO divisions(id,name,code) VALUES('native-division','Native division','NATIVE')"),
@@ -148,15 +152,25 @@ describe('native delivery staging, exact authority and controls — migrated D1'
     return {name,workspace,owner,ownerType,principal,binding,prefix,source};
   }
   type Fixture=Awaited<ReturnType<typeof fixture>>;
+  async function proof(f:Fixture){
+    if(f.source.sourceId===PRIMARY_CATALOG_SOURCE.sourceId)return primaryProof;
+    const row=await db.prepare(`SELECT active_revision revision,version,connector_revision connectorRevision,
+      connector_version connectorVersion FROM pa_portal_source_authorities WHERE source_id=?`).bind(f.source.sourceId)
+      .first<{revision:number;version:number;connectorRevision:number;connectorVersion:number}>();
+    if(!row)throw new Error('missing fixture delivery authority');
+    return{sourceId:f.source.sourceId,...row};
+  }
   async function create(f:Fixture,suffix='first',environment=env){
     const payload={schemaVersion:1,applicationKey:'project-alpha',deliveryId:`${f.name}-${suffix}`,occurredAt:new Date().toISOString(),
       scope:{type:f.ownerType,publicId:f.owner},audience:{type:'principal',publicId:f.principal},accessMode:'portal',expiresAt:null,label:null,notify:true};
-    return applyProjectAlphaDeliveryIntent(environment,payload,{deliveryId:payload.deliveryId,fingerprint:fingerprint(payload)},f.source);
+    return applyProjectAlphaDeliveryIntent(environment,payload,{deliveryId:payload.deliveryId,fingerprint:fingerprint(payload)},
+      f.source,environment.PROJECT_ALPHA_PORTAL_APPLICATION_KEY,await proof(f));
   }
   async function batch(f:Fixture){return (await db.prepare('SELECT * FROM portal_delivery_notification_batches WHERE workspace_id=? ORDER BY created_at DESC,id DESC LIMIT 1').bind(f.workspace).first<NativeBatch>())!;}
   async function due(f:Fixture){await db.prepare("UPDATE portal_delivery_notification_batches SET eligible_at=datetime('now','-1 second') WHERE workspace_id=? AND status='pending'").bind(f.workspace).run();}
   async function revoke(f:Fixture,receiptId:string){const payload={schemaVersion:1,applicationKey:'project-alpha',deliveryId:`${f.name}-revoke`,occurredAt:new Date().toISOString(),receiptId,reasonCode:'project_alpha_delivery_revoked'};
-    return applyProjectAlphaDeliveryIntentRevoke(env,payload,{deliveryId:payload.deliveryId,fingerprint:fingerprint(payload)},f.source);}
+    return applyProjectAlphaDeliveryIntentRevoke(env,payload,{deliveryId:payload.deliveryId,fingerprint:fingerprint(payload)},
+      f.source,env.PROJECT_ALPHA_PORTAL_APPLICATION_KEY,await proof(f));}
   async function publicRow(f:Fixture){const row=await batch(f);return (await nativeNotificationCandidates(env,row.status==='pending'||row.status==='processing'?'pending':'history')).find(r=>r.id===`nb_${row.id}`)!;}
 
   it('preserves all populated old receipt/grant/audit/outbox bytes and foreign keys; absent schema is explicit',async()=>{
@@ -171,7 +185,8 @@ describe('native delivery staging, exact authority and controls — migrated D1'
     // Reuse the accepted wire fingerprint, not a newly generated occurredAt.
     const receipt=await db.prepare('SELECT * FROM project_alpha_delivery_intent_receipts WHERE delivery_id=?').bind('stage-first').first<any>();
     const replay={schemaVersion:1,applicationKey:'project-alpha',deliveryId:'stage-first',occurredAt:new Date().toISOString(),scope:{type:'project',publicId:f.owner},audience:{type:'principal',publicId:f.principal},accessMode:'portal',expiresAt:null,label:null,notify:true};
-    await applyProjectAlphaDeliveryIntent(env,replay,{deliveryId:'stage-first',fingerprint:receipt.request_fingerprint});
+    await applyProjectAlphaDeliveryIntent(env,replay,{deliveryId:'stage-first',fingerprint:receipt.request_fingerprint},
+      PRIMARY_CATALOG_SOURCE,env.PROJECT_ALPHA_PORTAL_APPLICATION_KEY,primaryProof);
     expect((await batch(f)).eligible_at).toBe('2999-01-01 00:00:00');
     await create(f,'second');const current=await batch(f);expect(current.id).toBe(first.id);expect(current.eligible_at).not.toBe('2999-01-01 00:00:00');
     expect(await db.prepare('SELECT count(*) n FROM portal_delivery_notification_items WHERE batch_id=?').bind(first.id).first('n')).toBe(2);
@@ -195,7 +210,8 @@ describe('native delivery staging, exact authority and controls — migrated D1'
       .bind(first.receiptId).first<{request_fingerprint:string}>();
     const replay={schemaVersion:1,applicationKey:'project-alpha',deliveryId:`${f.name}-first`,occurredAt:new Date().toISOString(),
       scope:{type:f.ownerType,publicId:f.owner},audience:{type:'principal',publicId:f.principal},accessMode:'portal',expiresAt:null,label:null,notify:true};
-    await applyProjectAlphaDeliveryIntent(env,replay,{deliveryId:replay.deliveryId,fingerprint:receipt!.request_fingerprint},f.source);
+    await applyProjectAlphaDeliveryIntent(env,replay,{deliveryId:replay.deliveryId,fingerprint:receipt!.request_fingerprint},
+      f.source,env.PROJECT_ALPHA_PORTAL_APPLICATION_KEY,await proof(f));
     expect(await db.prepare('SELECT count(*) n FROM native_delivery_recipient_events WHERE receipt_id=?').bind(first.receiptId).first('n')).toBe(1);
   });
   it('adopts only never-attempted granted rows and preserves attempted/inflight/revoked jobs',async()=>{

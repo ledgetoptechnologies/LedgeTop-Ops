@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { parseEntitlementEvent, parseIntegrationEvent } from "../src/schema";
-import { MAX_BODY_BYTES, readWebhookBody, requireAccessSubject, validateRequestTimestamp, verifyAccessAssertion, verifyWebhookHmac, verifyWebhookSignature } from "../src/security";
+import { MAX_BODY_BYTES, readWebhookBody, requireAccessServiceTokenIdentity, validateRequestTimestamp, verifyAccessAssertion, verifyWebhookHmac, verifyWebhookSignature } from "../src/security";
 
 const baseEvent = {
   event_id: "0d80755c-2945-4d7e-94cd-288d341d501d",
@@ -41,10 +41,13 @@ describe("Project Alpha webhook validation", () => {
     expect(() => validateRequestTimestamp("2026-07-17T19:54:59Z",now)).toThrow("timestamp-invalid");
   });
 
-  it("requires the exact verified Access subject, never an unrelated identity claim", () => {
-    expect(() => requireAccessSubject({sub:"connector-b"},"connector-b")).not.toThrow();
-    expect(() => requireAccessSubject({sub:"connector-a",email:"connector-b"},"connector-b")).toThrow("access-subject-invalid");
-    expect(() => requireAccessSubject(undefined,"connector-b")).toThrow("access-subject-invalid");
+  it("requires the exact Cloudflare service-token common_name identity", () => {
+    expect(() => requireAccessServiceTokenIdentity({type:"app",sub:"",common_name:"connector-b"},"connector-b")).not.toThrow();
+    expect(() => requireAccessServiceTokenIdentity({type:"app",sub:"",common_name:"connector-a"},"connector-b")).toThrow("access-subject-invalid");
+    expect(() => requireAccessServiceTokenIdentity({type:"app",sub:"human-subject",common_name:"connector-b"},"connector-b")).toThrow("access-subject-invalid");
+    expect(() => requireAccessServiceTokenIdentity({type:"user",sub:"",common_name:"connector-b"},"connector-b")).toThrow("access-subject-invalid");
+    expect(() => requireAccessServiceTokenIdentity({type:"app",sub:"",email:"connector-b"},"connector-b")).toThrow("access-subject-invalid");
+    expect(() => requireAccessServiceTokenIdentity(undefined,"connector-b")).toThrow("access-subject-invalid");
   });
 
   it("bounds streamed unknown-length webhook bodies and cancels oversized input", async () => {
@@ -124,9 +127,9 @@ describe("Project Alpha webhook validation", () => {
     const jwk=await exportJWK(publicKey); jwk.kid="test-key"; jwk.alg="RS256";
     vi.stubGlobal("fetch",vi.fn(async()=>Response.json({keys:[jwk]})));
     const issuer="https://team.cloudflareaccess.com";
-    const token=await new SignJWT({type:"service_token"}).setProtectedHeader({alg:"RS256",kid:"test-key"}).setIssuer(issuer).setAudience("expected-aud").setSubject("service-token").setIssuedAt().setExpirationTime("5m").sign(privateKey);
+    const token=await new SignJWT({type:"app",common_name:"service-token-client-id"}).setProtectedHeader({alg:"RS256",kid:"test-key"}).setIssuer(issuer).setAudience("expected-aud").setSubject("").setIssuedAt().setExpirationTime("5m").sign(privateKey);
     const env={TEAM_DOMAIN:issuer,CF_ACCESS_AUD:"expected-aud"};
-    await expect(verifyAccessAssertion(new Request("https://example.test",{headers:{"Cf-Access-Jwt-Assertion":token}}),env)).resolves.toMatchObject({sub:"service-token"});
+    await expect(verifyAccessAssertion(new Request("https://example.test",{headers:{"Cf-Access-Jwt-Assertion":token}}),env)).resolves.toMatchObject({type:"app",common_name:"service-token-client-id",sub:""});
     const wrongAudience={...env,CF_ACCESS_AUD:"wrong"};
     await expect(verifyAccessAssertion(new Request("https://example.test",{headers:{"Cf-Access-Jwt-Assertion":token}}),wrongAudience)).rejects.toThrow("access-assertion-invalid");
   });

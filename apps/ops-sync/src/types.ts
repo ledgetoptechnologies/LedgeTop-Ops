@@ -1,7 +1,7 @@
 // Replace Wrangler's generic Service shape with the entrypoint's typed RPC
 // contract. Keep it optional so a staged deployment fails retryably instead of
 // making local fixtures invent unrelated fetch/connect methods.
-export type Env = Omit<Cloudflare.Env, "CLIENT_PORTAL_PROJECTION_INGRESS"> & {
+export type Env = Omit<Cloudflare.Env, "CLIENT_PORTAL_PROJECTION_INGRESS"|"OPERATIONS_DELIVERY_INTENT_INGRESS"> & {
   CF_ACCESS_GROUP_API_TOKEN: string;
   CF_ACCESS_GROUP_NAME?: string;
   PROJECT_ALPHA_WEBHOOK_HMAC_SECRET: string;
@@ -10,6 +10,7 @@ export type Env = Omit<Cloudflare.Env, "CLIENT_PORTAL_PROJECTION_INGRESS"> & {
   PROJECT_ALPHA_ALLOW_LEGACY_HMAC?: string;
   PROJECT_ALPHA_CONNECTOR_CREDENTIALS?: string;
   CLIENT_PORTAL_PROJECTION_INGRESS?: PortalProjectionIngressBinding;
+  OPERATIONS_DELIVERY_INTENT_INGRESS?: DeliveryIntentIngressBinding;
 };
 
 export const SUPPORTED_ROLES = [
@@ -70,6 +71,27 @@ export interface PortalProjectionEvent {
   projection: unknown;
 }
 
+export type DeliveryIntentKind="preflight"|"provision"|"revoke";
+export interface DeliveryIntentEvent {
+  event_id:string;
+  event_type:"delivery.intent";
+  occurred_at:string;
+  schema_version:1;
+  application_key:string;
+  intent_kind:DeliveryIntentKind;
+  intent:Record<string,unknown>;
+}
+
+export interface DeliveryIntentIngressBinding {
+  ingestProjectAlphaDeliveryIntent(input:{
+    protocolVersion:1; sourceId:string; applicationKey:string; deliveryId:string;
+    intentKind:DeliveryIntentKind; body:string; connectorProof:{revision:number;version:number};
+  }):Promise<
+    |{ok:true;protocolVersion:1;result:Record<string,unknown>}
+    |{ok:false;protocolVersion:1;code:string;retryable:boolean}
+  >;
+}
+
 export interface PortalProjectionIngressBinding {
   ingestProjectAlphaPortalProjection(input: {
     protocolVersion: 1;
@@ -84,4 +106,4 @@ export interface PortalProjectionIngressBinding {
   >;
 }
 
-export type IntegrationEvent = EntitlementEvent | ProjectionEvent | PortalProjectionEvent;
+export type IntegrationEvent = EntitlementEvent | ProjectionEvent | PortalProjectionEvent | DeliveryIntentEvent;

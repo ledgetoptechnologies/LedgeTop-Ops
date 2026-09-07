@@ -9,7 +9,7 @@ vi.mock("cloudflare:workers",()=>({WorkflowEntrypoint:class{},WorkerEntrypoint:c
 vi.mock("../src/worker/auth",()=>({authenticateStaff:mocks.authenticateStaff}));
 import worker from "../src/worker/index";
 import { csrfToken } from "../src/worker/request-security";
-import { registerProjectAlphaConnector, type RegisterProjectAlphaConnectorInput } from "../src/worker/project-alpha-connectors";
+import { assertProjectAlphaConnectorStateTransition, registerProjectAlphaConnector, type RegisterProjectAlphaConnectorInput } from "../src/worker/project-alpha-connectors";
 import type { Env, StaffPrincipal } from "../src/worker/types";
 
 const ROOT="/api/admin/integrations/project-alpha/connectors";
@@ -46,6 +46,7 @@ async function upgradePortal(){
   const delivery=await runtime.getD1Database("DELIVERY_DB") as D1Database;
   await db.batch(splitD1MigrationStatements(readFileSync(new URL("../migrations/0039_portal_connector_coordination.sql",import.meta.url),"utf8")).map(sql=>db.prepare(sql)));
   await delivery.batch(splitD1MigrationStatements(readFileSync(new URL("../../client/migrations/0162_portal_source_authorities.sql",import.meta.url),"utf8")).map(sql=>delivery.prepare(sql)));
+  await delivery.batch(splitD1MigrationStatements(readFileSync(new URL("../../client/migrations/0203_primary_delivery_authority.sql",import.meta.url),"utf8")).map(sql=>delivery.prepare(sql)));
   env.DELIVERY_DB=delivery;
   env.PROJECT_ALPHA_PORTAL_HMAC_SECRET="primary-portal-fixture-signing-key-at-least-thirty-two-characters";
   portalUpgraded=true;
@@ -85,6 +86,13 @@ describe("Project Alpha connector administration HTTP boundary",{timeout:60_000,
     ]);
   },60_000);
   afterAll(async()=>{await runtime?.dispose();},60_000);
+
+  it("keeps retired connectors terminal and permits only same-state metadata updates",()=>{
+    expect(() => assertProjectAlphaConnectorStateTransition("retired", "active")).toThrow(/retired/i);
+    expect(() => assertProjectAlphaConnectorStateTransition("retired", "suspended")).toThrow(/retired/i);
+    expect(() => assertProjectAlphaConnectorStateTransition("retired", "pending")).toThrow(/retired/i);
+    expect(() => assertProjectAlphaConnectorStateTransition("retired", "retired")).not.toThrow();
+  });
 
   it("rejects an unauthenticated caller before reading or changing the registry",async()=>{
     mocks.authenticateStaff.mockRejectedValue(new HTTPException(401,{message:"Authentication required"}));

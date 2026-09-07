@@ -40,6 +40,18 @@ an accepted receipt into a false failure. Current and previous HMAC keys remain
 one source authority's rotation pair. The request reader enforces its 16 KiB
 limit on actual streamed bytes as well as declared length.
 
+Client migration `0203_primary_delivery_authority.sql` gives the established
+primary connection the same commit-time property without enrolling it as a
+secondary portal source. Its fixed Delivery-side mirror records either the
+legacy `0/0` authority or the exact active registry revision/version. Every
+primary portal grant, guest share, compatible guest-share reuse, and revoke
+prepends that mirror fence to its final Delivery transaction. The existing
+cross-D1 connector coordinator stages the future or suspended mirror before an
+Operations connector mutation; interrupted administration therefore fails
+closed, and explicit recovery projects the connector state that actually
+committed. Project Alpha still uses the one existing Ops Sync endpoint—this is
+not another external connection or credential profile.
+
 An exact accepted request returns its original receipt before relative expiry
 checks. Conflicting payloads under the same source/replay key fail; another
 source may use the same external delivery ID without sharing its result.
@@ -102,9 +114,12 @@ acceptance remain separate release gates.
    authority choice and approve each producer/consumer release separately.
 2. Back up the target database and record its migration/code checkpoint using
    the established release procedure. Rehearse the populated upgrade locally.
-3. Apply the full pending migration sequence and paired Operations/Client code
+3. Apply the full pending migration sequence, including Client migration 0203,
+   before the paired Operations/Client code
    in a controlled release window. Old intent writers omit the now-required
    source field; do not roll back only the application after this migration.
+   Keep delivery-intent rollout flags disabled until the migration readback
+   confirms both primary-authority tables and the coordinated worker version.
 4. Verify primary and registered-source preflight/create/replay/revoke,
    current/previous key overlap, recipient suppression, existing receipt
    URLs/history, fair queue progress and retry exhaustion before activation.

@@ -60,6 +60,8 @@ describe("coordinated client-portal purposes on existing Alpha connections", { t
       await db.batch(splitD1MigrationStatements(readFileSync(new URL(name, migrations), "utf8")).map(sql => db.prepare(sql)));
     await delivery.batch(splitD1MigrationStatements(readFileSync(new URL("../../client/migrations/0162_portal_source_authorities.sql", import.meta.url), "utf8"))
       .map(sql => delivery.prepare(sql)));
+    await delivery.batch(splitD1MigrationStatements(readFileSync(new URL("../../client/migrations/0203_primary_delivery_authority.sql", import.meta.url), "utf8"))
+      .map(sql => delivery.prepare(sql)));
     env = { OPS_DB: db, DELIVERY_DB: delivery, PROJECT_ALPHA_BASE_URL: "https://primary.example.test/",
       PROJECT_ALPHA_API_KEY: primaryCredential.snapshotApiKey, APPLICATION_KEY: "ltds_ops",
       PROJECT_ALPHA_WEBHOOK_ED25519_PUBLIC_KEY: publicKey(1), PROJECT_ALPHA_PORTAL_HMAC_SECRET: "scalar-primary-portal-secret-thirty-two-characters" };
@@ -91,6 +93,23 @@ describe("coordinated client-portal purposes on existing Alpha connections", { t
     expect(await db.prepare("SELECT count(*) n FROM pa_connector_portal_sources WHERE source_id=?").bind(fixture.id).first("n")).toBe(1);
   });
 
+  it("rejects returning an active primary to pending without mutating its mirror or coordination state", async () => {
+    const current = await connector(PRIMARY);
+    const mirrorBefore = await delivery.prepare(`SELECT mode,connector_revision connectorRevision,connector_version connectorVersion,state
+      FROM pa_primary_delivery_authority WHERE source_id=?`).bind(PRIMARY).first();
+    const statusBefore = await getConnectorPortalStatus(env);
+    const auditBefore = await db.prepare("SELECT count(*) n FROM pa_connector_portal_coordination_audit").first<number>("n");
+
+    await expect(setCoordinatedProjectAlphaConnectorState(env, PRIMARY,
+      { expectedVersion: current.version, state: "pending" }, actor)).rejects.toMatchObject({ code: "conflict" });
+
+    expect(await connector(PRIMARY)).toEqual(current);
+    expect(await delivery.prepare(`SELECT mode,connector_revision connectorRevision,connector_version connectorVersion,state
+      FROM pa_primary_delivery_authority WHERE source_id=?`).bind(PRIMARY).first()).toEqual(mirrorBefore);
+    expect(await getConnectorPortalStatus(env)).toEqual(statusBefore);
+    expect(await db.prepare("SELECT count(*) n FROM pa_connector_portal_coordination_audit").first<number>("n")).toBe(auditBefore);
+  });
+
   it("pauses delivery before source suspension and never automatically resumes it", async () => {
     const fixture = await active();
     const suspended = await setCoordinatedProjectAlphaConnectorState(env, fixture.id,
@@ -113,7 +132,26 @@ describe("coordinated client-portal purposes on existing Alpha connections", { t
     const primary = await connector(PRIMARY);
     await setCoordinatedProjectAlphaConnectorState(env, PRIMARY, { expectedVersion: primary.version, state: "suspended" }, actor);
     expect((await getConnectorPortalStatus(env)).authorities.every(row => row.state !== "active")).toBe(true);
-    expect((await connector(PRIMARY)).state).toBe("suspended");
+    const current=await connector(PRIMARY);
+    expect(current.state).toBe("suspended");
+    expect(await delivery.prepare(`SELECT mode,connector_revision connectorRevision,connector_version connectorVersion,state
+      FROM pa_primary_delivery_authority WHERE source_id=?`).bind(PRIMARY).first()).toEqual({
+        mode:"registry",connectorRevision:current.activeRevision,connectorVersion:current.version,state:"suspended",
+      });
+  });
+
+  it("recovers the primary Delivery mirror after an uncertain OPS transition",async()=>{
+    const primary=await connector(PRIMARY);
+    vi.spyOn(connectors,"setProjectAlphaConnectorState").mockRejectedValueOnce(new Error("simulated primary Ops failure"));
+    await expect(setCoordinatedProjectAlphaConnectorState(env,PRIMARY,
+      {expectedVersion:primary.version,state:"suspended"},actor)).rejects.toThrow("simulated primary Ops failure");
+    expect(await delivery.prepare("SELECT connector_version version,state FROM pa_primary_delivery_authority WHERE source_id=?")
+      .bind(PRIMARY).first()).toEqual({version:primary.version+1,state:"suspended"});
+    const pending=(await getConnectorPortalStatus(env)).recovery;
+    await recoverConnectorPortalCoordination(env,pending!.version,actor);
+    expect(await connector(PRIMARY)).toEqual(primary);
+    expect(await delivery.prepare("SELECT connector_revision revision,connector_version version,state FROM pa_primary_delivery_authority WHERE source_id=?")
+      .bind(PRIMARY).first()).toEqual({revision:primary.activeRevision,version:primary.version,state:"active"});
   });
 
   it("requires renewed portal configuration after a connection credential revision", async () => {

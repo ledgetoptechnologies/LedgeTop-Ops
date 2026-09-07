@@ -6,9 +6,13 @@ import {
 } from "../../../client/src/worker/project-alpha-portal-authority";
 import {
   listProjectAlphaConnectors, ProjectAlphaConnectorError, reviseProjectAlphaConnector,
-  setProjectAlphaConnectorState, type ProjectAlphaConnectorRevisionInput,
-  type ProjectAlphaConnectorState, type ProjectAlphaConnectorSummary, type ProjectAlphaConnectorEnvironment,
+  assertProjectAlphaConnectorStateTransition, setProjectAlphaConnectorState, type ProjectAlphaConnectorRevisionInput,
+  type ProjectAlphaConnectorProof, type ProjectAlphaConnectorState, type ProjectAlphaConnectorSummary, type ProjectAlphaConnectorEnvironment,
 } from "./project-alpha-connectors";
+import {
+  PrimaryDeliveryAuthorityError, primaryDeliveryAuthorityProof, primaryDeliveryAuthorityReady,
+  reconcilePrimaryDeliveryAuthority, stagePrimaryDeliveryAuthority,
+} from "./project-alpha-primary-delivery-authority";
 export type ConnectorPortalEnvironment = ProjectAlphaConnectorEnvironment & PortalSourceAuthorityEnvironment;
 type Env = ConnectorPortalEnvironment;
 
@@ -32,7 +36,8 @@ async function ready(env: Env): Promise<boolean> {
     ('pa_connector_portal_coordination','pa_connector_portal_coordination_audit','pa_connector_portal_coordination_fences',
       'pa_connector_portal_sources','pa_connector_portal_write_permits')`)
     .first<number>("n");
-  return count === 5 && Boolean(env.DELIVERY_DB) && await portalSourceAuthoritiesReady(env.DELIVERY_DB);
+  return count === 5 && Boolean(env.DELIVERY_DB) && await portalSourceAuthoritiesReady(env.DELIVERY_DB)
+    && await primaryDeliveryAuthorityReady(env.DELIVERY_DB);
 }
 async function requireReady(env: Env): Promise<void> {
   if (!await ready(env)) unavailable("Client portal connection support requires the coordinated database upgrade");
@@ -55,6 +60,12 @@ async function requireUnusedPortalSchema(env: Env): Promise<void> {
   if (deliveryTables !== 0 && deliveryTables !== 5) return unavailable("Portal authority schema is incomplete; finish the coordinated upgrade before changing connections");
   if (deliveryTables === 5 && await delivery.prepare("SELECT 1 enrolled FROM pa_portal_source_authorities LIMIT 1").first())
     return unavailable("Portal connections are enrolled; restore the paired database support before changing connections");
+  const primaryTables = await delivery.prepare(`SELECT count(*) n FROM sqlite_master WHERE type='table' AND name IN
+    ('pa_primary_delivery_authority','pa_primary_delivery_authority_write_fences')`).first<number>("n");
+  if (primaryTables !== 0)
+    return unavailable(primaryTables === 2
+      ? "Primary delivery authority is enrolled; restore the paired coordination support before changing connections"
+      : "Primary delivery authority schema is incomplete; finish the coordinated upgrade before changing connections");
 }
 async function source(env: Env, sourceId: string): Promise<ProjectAlphaConnectorSummary> {
   const connector = (await listProjectAlphaConnectors(env)).find(row => row.sourceId === sourceId);
@@ -101,9 +112,29 @@ function audit(env: Env, operation: Coordination, phase: "started" | "completed"
 }
 function writeFailure(error: unknown): never {
   if (error instanceof ProjectAlphaConnectorError || error instanceof PortalSourceAuthorityError) throw error;
+  if(error instanceof PrimaryDeliveryAuthorityError)
+    return error.code==="changed"?conflict("Primary delivery authority changed during connection administration")
+      :unavailable("Primary delivery authority could not be coordinated");
   if (error instanceof Error && /pa_connector_portal_coordination_guard|portal coordination version conflicts/.test(error.message))
     return conflict("Another connection update changed this operation. Refresh connection status");
   return unavailable("The connection update could not be confirmed. Refresh status and recover the unfinished update if shown");
+}
+
+function primaryProof(connector:ProjectAlphaConnectorSummary):ReturnType<typeof primaryDeliveryAuthorityProof>{
+  const proof:ProjectAlphaConnectorProof=connector.state==="pending"
+    ?{mode:"legacy_primary",sourceId:PRIMARY_ALPHA_SOURCE_ID,revision:0,version:0,profile:"primary_legacy"}
+    :{mode:"registry",sourceId:PRIMARY_ALPHA_SOURCE_ID,revision:connector.activeRevision,version:connector.version,profile:"primary_legacy"};
+  return primaryDeliveryAuthorityProof(proof);
+}
+function primaryState(connector:ProjectAlphaConnectorSummary):"active"|"suspended"{
+  return connector.state==="active"||connector.state==="pending"?"active":"suspended";
+}
+async function stagePrimaryTransition(env:Env,current:ProjectAlphaConnectorSummary,next:ProjectAlphaConnectorSummary):Promise<void>{
+  if(current.sourceId!==PRIMARY_ALPHA_SOURCE_ID)return;
+  try{
+    await reconcilePrimaryDeliveryAuthority(env.DELIVERY_DB,primaryProof(current),primaryState(current));
+    await stagePrimaryDeliveryAuthority(env.DELIVERY_DB,primaryProof(next),primaryState(next));
+  }catch(error){writeFailure(error);}
 }
 async function begin(env: Env, connector: ProjectAlphaConnectorSummary, expectedVersion: number,
   action: Action, actorId: string): Promise<Coordination> {
@@ -231,8 +262,11 @@ export async function setCoordinatedProjectAlphaConnectorState(env: Env, sourceI
     return setProjectAlphaConnectorState(env, sourceId, input, actorId);
   }
   const connector = await source(env, sourceId);
+  assertProjectAlphaConnectorStateTransition(connector.state, input.state);
   const operation = await begin(env, connector, input.expectedVersion, "state", actorId);
   if (input.state !== connector.state && input.state !== "active") await disableAffected(env, sourceId, operation);
+  await stagePrimaryTransition(env,connector,{...connector,state:input.state,version:input.expectedVersion+1,
+    readVisible:input.readVisible??connector.readVisible,displayName:input.displayName??connector.displayName});
   // Label/visibility changes do not revoke client access. Resuming business sync
   // deliberately does not reactivate a portal purpose that was paused earlier.
   const result = await setProjectAlphaConnectorState(env, sourceId, input, actorId, sourceMutationPermit(env, operation, input.expectedVersion));
@@ -248,6 +282,7 @@ export async function reviseCoordinatedProjectAlphaConnector(env: Env, sourceId:
   const connector = await source(env, sourceId);
   const operation = await begin(env, connector, expectedVersion, "revision", actorId);
   await disableAffected(env, sourceId, operation);
+  await stagePrimaryTransition(env,connector,{...connector,activeRevision:connector.activeRevision+1,version:expectedVersion+1});
   const result = await reviseProjectAlphaConnector(env, sourceId, expectedVersion, input, actorId, sourceMutationPermit(env, operation, expectedVersion));
   await finish(env, operation);
   return result;
@@ -272,5 +307,10 @@ export async function recoverConnectorPortalCoordination(env: Env, expectedVersi
     ]);
   } catch (error) { writeFailure(error); }
   for (const authority of await authorities(env)) await disable(env, authority.sourceId, operation);
+  if(operation.sourceId===PRIMARY_ALPHA_SOURCE_ID){
+    const connector=await source(env,PRIMARY_ALPHA_SOURCE_ID);
+    try{await reconcilePrimaryDeliveryAuthority(env.DELIVERY_DB,primaryProof(connector),primaryState(connector));}
+    catch(error){writeFailure(error);}
+  }
   await finish(env, operation);
 }

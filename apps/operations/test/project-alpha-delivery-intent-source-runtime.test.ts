@@ -9,12 +9,15 @@ import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrati
 import { applyProjectAlphaDeliveryIntent, applyProjectAlphaDeliveryIntentRevoke, handleProjectAlphaDeliveryIntent,
   handleRegisteredProjectAlphaDeliveryIntent, handleRegisteredProjectAlphaDeliveryIntentRevoke,
   handleRegisteredProjectAlphaDeliveryPreflight, verifyRegisteredDeliveryAccess } from "../src/worker/project-alpha-delivery-intents";
+import { primaryDeliveryAuthorityProof, stagePrimaryDeliveryAuthority } from "../src/worker/project-alpha-primary-delivery-authority";
 import type { Env } from "../src/worker/types";
 
 const secondary = createCatalogSourceContext("project-alpha:secondary");
 const secret = "source-runtime-secret-at-least-thirty-two-bytes";
 const path = "/api/internal/project-alpha/delivery-intents";
 const auth = (payload: { deliveryId: string }) => ({ deliveryId: payload.deliveryId, fingerprint: createHash("sha256").update(JSON.stringify(payload)).digest("hex") });
+const primaryProof = primaryDeliveryAuthorityProof({ mode: "legacy_primary", sourceId: PRIMARY_CATALOG_SOURCE.sourceId,
+  revision: 0, version: 0, profile: "primary_legacy" });
 
 function interleaveBeforeBatch(database: D1Database, action: () => Promise<unknown>): D1Database {
   let invoked = false;
@@ -44,6 +47,17 @@ function interleaveAfterBatch(database:D1Database,action:()=>Promise<unknown>):D
   }});
   return proxy;
 }
+function interleaveBeforeBatchNumber(database:D1Database,targetBatch:number,action:()=>Promise<unknown>):D1Database{
+  let batches=0;let proxy:D1Database;
+  proxy=new Proxy(database,{get(target,property){
+    if(property==="withSession")return()=>proxy;
+    if(property==="batch")return async(statements:D1PreparedStatement[])=>{
+      batches+=1;if(batches===targetBatch)await action();return target.batch(statements);
+    };
+    const value=target[property as keyof D1Database];
+    return typeof value==="function"?value.bind(target):value;
+  }});return proxy;
+}
 
 describe("source-owned delivery intent runtime and transaction races", () => {
   let runtime: Miniflare;
@@ -59,7 +73,8 @@ describe("source-owned delivery intent runtime and transaction races", () => {
     for (const name of readdirSync(directory).filter(value => /^\d+.*\.sql$/.test(value)).sort()) {
       await database.batch(splitD1MigrationStatements(readFileSync(new URL(name, directory), "utf8")).map(sql => database.prepare(sql)));
     }
-    for(const name of ["0031_project_alpha_delivery_intent_rate_limits.sql","0049_project_alpha_delivery_source_rate_limits.sql"]){
+    for(const name of ["0031_project_alpha_delivery_intent_rate_limits.sql","0035_project_alpha_connectors.sql",
+      "0049_project_alpha_delivery_source_rate_limits.sql","0050_project_alpha_draft_quote_credentials.sql"]){
       await database.batch(splitD1MigrationStatements(readFileSync(new URL(`../migrations/${name}`,import.meta.url),"utf8")).map(sql=>database.prepare(sql)));
     }
     env = { DELIVERY_DB: database, OPS_DB: database, PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED: "true", PROJECT_ALPHA_PORTAL_APPLICATION_KEY: "project-alpha",
@@ -76,6 +91,19 @@ describe("source-owned delivery intent runtime and transaction races", () => {
 
   async function fixture(name: string, guestProjects = false) {
     const workspace = `${name}-workspace`, otherWorkspace = `${name}-workspace-b`, owner = `${name}-project`, principal = `${name}-principal`;
+    if(!await database.prepare("SELECT 1 ok FROM pa_portal_source_authorities WHERE source_id=?").bind(secondary.sourceId).first("ok")){
+      await database.batch([
+        database.prepare(`INSERT INTO pa_portal_source_authorities(source_id,producer_binding_id,snapshot_origin,snapshot_base_path,
+          application_key,state,active_revision,version,connector_revision,connector_version)
+          VALUES(?,'secondary-delivery','https://secondary.example.test','/','project-alpha','active',1,1,1,1)`).bind(secondary.sourceId),
+        database.prepare(`INSERT INTO pa_portal_source_authority_revisions(source_id,revision,credential_ref,access_issuer,
+          access_audience,access_subject,current_key_id,current_key_fingerprint,previous_key_id,previous_key_fingerprint,created_by)
+          VALUES(?,1,'secondary','https://secondary-access.example.test','secondary-audience','secondary-producer',
+            'secondary.current:key',?,'secondary.previous:key',?,'fixture')`).bind(secondary.sourceId,
+              createHash("sha256").update("secondary-current-delivery-secret-at-least-thirty-two-bytes").digest("hex"),
+              createHash("sha256").update("secondary-previous-delivery-secret-at-least-thirty-two-bytes").digest("hex")),
+      ]);
+    }
     for (const [local, source] of [[workspace, PRIMARY_CATALOG_SOURCE], [otherWorkspace, secondary]] as const) {
       const prefix = guestProjects ? `delivery/${name}/${local}/` : `delivery/${name}/folder/`;
       await database.batch([
@@ -95,21 +123,39 @@ describe("source-owned delivery intent runtime and transaction races", () => {
       scope: { type: "project", publicId: owner }, audience: { type: "principal", publicId: principal }, accessMode: "portal", expiresAt: null, label: null, notify: true };
     return { workspace, otherWorkspace, owner, principal, payload };
   }
-  function create<T extends { deliveryId: string }>(payload: T, source = PRIMARY_CATALOG_SOURCE, environment = env) {
-    return applyProjectAlphaDeliveryIntent(environment,payload,auth(payload),source);
+  async function proof(source=PRIMARY_CATALOG_SOURCE){
+    if(source.sourceId===PRIMARY_CATALOG_SOURCE.sourceId)return primaryProof;
+    const row=await database.prepare(`SELECT active_revision revision,version,connector_revision connectorRevision,
+      connector_version connectorVersion FROM pa_portal_source_authorities WHERE source_id=?`).bind(source.sourceId)
+      .first<{revision:number;version:number;connectorRevision:number;connectorVersion:number}>();
+    if(!row)throw new Error("missing fixture delivery authority");
+    return{sourceId:source.sourceId,...row};
+  }
+  async function create<T extends { deliveryId: string }>(payload: T, source = PRIMARY_CATALOG_SOURCE, environment = env) {
+    return applyProjectAlphaDeliveryIntent(environment,payload,auth(payload),source,
+      environment.PROJECT_ALPHA_PORTAL_APPLICATION_KEY,await proof(source));
   }
   function revokePayload(deliveryId: string, receiptId: string) { return { schemaVersion: 1, applicationKey: "project-alpha", deliveryId, occurredAt: "2026-08-26T12:00:00.000Z", receiptId, reasonCode: "project_alpha_delivery_revoked" }; }
-  function revoke(payload: ReturnType<typeof revokePayload>, source = PRIMARY_CATALOG_SOURCE, environment = env) { return applyProjectAlphaDeliveryIntentRevoke(environment,payload,auth(payload),source); }
+  async function revoke(payload: ReturnType<typeof revokePayload>, source = PRIMARY_CATALOG_SOURCE, environment = env) {
+    return applyProjectAlphaDeliveryIntentRevoke(environment,payload,auth(payload),source,
+      environment.PROJECT_ALPHA_PORTAL_APPLICATION_KEY,await proof(source));
+  }
   const accessIssuer="https://secondary-access.example.test";
   const accessAudience="secondary-audience";
   const accessSubject="secondary-producer";
   function accessPayload(overrides:Partial<JWTPayload>={}):JWTPayload{return{
-    iss:accessIssuer,aud:accessAudience,sub:accessSubject,exp:Math.floor(Date.now()/1000)+300,...overrides,
+    iss:accessIssuer,aud:accessAudience,type:"app",common_name:accessSubject,sub:"",exp:Math.floor(Date.now()/1000)+300,...overrides,
   };}
   async function accessToken(payload:JWTPayload=accessPayload(),key=accessPrivateKey,kid="registered-delivery-access"):Promise<string>{
     return new SignJWT(payload).setProtectedHeader({alg:"RS256",kid,typ:"JWT"}).sign(key);
   }
   const accessAuthority={accessIssuer,accessAudience,accessSubject} as Parameters<typeof verifyRegisteredDeliveryAccess>[1];
+  const futurePrimaryProof=primaryDeliveryAuthorityProof({mode:"registry",sourceId:PRIMARY_CATALOG_SOURCE.sourceId,
+    revision:99,version:99,profile:"primary_legacy"});
+  async function primaryTransitionRace<T>(run:(raced:D1Database)=>Promise<T>){
+    const raced=interleaveBeforeBatchNumber(database,2,()=>stagePrimaryDeliveryAuthority(database,futurePrimaryProof,"suspended"));
+    try{return await run(raced);}finally{await stagePrimaryDeliveryAuthority(database,primaryProof,"active");}
+  }
 
   it("accepts colliding producer delivery IDs independently and rejects cross-source original receipts", async () => {
     const f = await fixture("collision"), a = await create(f.payload), b = await create(f.payload,secondary);
@@ -157,6 +203,48 @@ describe("source-owned delivery intent runtime and transaction races", () => {
     }
   },60_000);
 
+  it("rejects primary portal provision and revoke when authority changes at the final Delivery commit",async()=>{
+    const f=await fixture("primary-portal-fence"),provision={...f.payload,deliveryId:"primary-portal-fence-provision"};
+    await expect(primaryTransitionRace(raced=>create(provision,PRIMARY_CATALOG_SOURCE,{...env,DELIVERY_DB:raced})))
+      .rejects.toMatchObject({status:409});
+    expect(await database.prepare("SELECT count(*) count FROM project_alpha_delivery_intent_receipts WHERE delivery_id=?")
+      .bind(provision.deliveryId).first("count")).toBe(0);
+
+    const accepted=await create({...f.payload,deliveryId:"primary-portal-fence-original"});
+    const undo=revokePayload("primary-portal-fence-revoke",accepted.receiptId);
+    await expect(primaryTransitionRace(raced=>revoke(undo,PRIMARY_CATALOG_SOURCE,{...env,DELIVERY_DB:raced})))
+      .rejects.toMatchObject({status:409});
+    expect(await database.prepare("SELECT count(*) count FROM project_alpha_delivery_intent_revocation_receipts WHERE delivery_id=?")
+      .bind(undo.deliveryId).first("count")).toBe(0);
+    expect(await database.prepare("SELECT status FROM project_alpha_delivery_portal_grants WHERE receipt_id=?")
+      .bind(accepted.receiptId).first("status")).toBe("active");
+  },60_000);
+
+  it("rejects primary guest create, compatible reuse and revoke when authority changes at commit",async()=>{
+    const f=await fixture("primary-guest-fence",true),guestEnv={...env,PROJECT_ALPHA_DELIVERY_GUEST_ENABLED:"true",
+      DELIVERY_BASE_URL:"https://client.example.test",PUBLIC_SHARE_ORIGIN:"https://delivery.example.test",DELIVERY_TOKEN_SECRET:secret};
+    const first={...f.payload,deliveryId:"primary-guest-fence-new",accessMode:"guest"};
+    await expect(primaryTransitionRace(raced=>create(first,PRIMARY_CATALOG_SOURCE,{...guestEnv,DELIVERY_DB:raced})))
+      .rejects.toMatchObject({status:409});
+    expect(await database.prepare("SELECT count(*) count FROM project_alpha_delivery_intent_receipts WHERE delivery_id=?")
+      .bind(first.deliveryId).first("count")).toBe(0);
+
+    const original=await create({...first,deliveryId:"primary-guest-fence-original"},PRIMARY_CATALOG_SOURCE,guestEnv);
+    const reuse={...first,deliveryId:"primary-guest-fence-reuse"};
+    await expect(primaryTransitionRace(raced=>create(reuse,PRIMARY_CATALOG_SOURCE,{...guestEnv,DELIVERY_DB:raced})))
+      .rejects.toMatchObject({status:409});
+    expect(await database.prepare("SELECT count(*) count FROM project_alpha_delivery_intent_receipts WHERE delivery_id=?")
+      .bind(reuse.deliveryId).first("count")).toBe(0);
+
+    const undo=revokePayload("primary-guest-fence-revoke",original.receiptId);
+    await expect(primaryTransitionRace(raced=>revoke(undo,PRIMARY_CATALOG_SOURCE,{...guestEnv,DELIVERY_DB:raced})))
+      .rejects.toMatchObject({status:409});
+    expect(await database.prepare("SELECT count(*) count FROM project_alpha_delivery_intent_revocation_receipts WHERE delivery_id=?")
+      .bind(undo.deliveryId).first("count")).toBe(0);
+    expect(await database.prepare("SELECT revoked_at FROM shares WHERE id=(SELECT resource_id FROM project_alpha_delivery_intent_receipts WHERE receipt_id=?)")
+      .bind(original.receiptId).first("revoked_at")).toBeNull();
+  },60_000);
+
   it("returns one secondary guest share and receipt when exact creation retries race", async () => {
     const f=await fixture("guest-retry-race",true);
     const guestEnv={...env,PROJECT_ALPHA_DELIVERY_GUEST_ENABLED:"true",DELIVERY_BASE_URL:"https://client.example.test",PUBLIC_SHARE_ORIGIN:"https://delivery.example.test",DELIVERY_TOKEN_SECRET:secret};
@@ -171,7 +259,7 @@ describe("source-owned delivery intent runtime and transaction races", () => {
 
   it.each(["binding", "generation", "principal", "owner_version", "email_block"])("rolls back receipt, grant, audit and notice when %s changes before commit", async change => {
     const f = await fixture(`race-${change}`);
-    const raced = interleaveBeforeBatch(database, async () => {
+    const raced = interleaveBeforeBatchNumber(database,2,async () => {
       if (change === "binding") return database.prepare("UPDATE portal_v2_folder_bindings SET status='revoked',revoked_at=datetime('now') WHERE id=?").bind(`${f.workspace}-binding`).run();
       if (change === "generation") return database.prepare("UPDATE portal_v2_directory_generations SET status='superseded' WHERE id=?").bind(`${f.workspace}-generation`).run();
       if (change === "principal") return database.prepare("UPDATE pa_portal_principals SET status='suspended' WHERE workspace_id=?").bind(f.workspace).run();
@@ -186,7 +274,7 @@ describe("source-owned delivery intent runtime and transaction races", () => {
 
   it("does not reuse a grant revoked between selection and receipt insertion", async () => {
     const f=await fixture("reuse"),original=await create(f.payload),next={...f.payload,deliveryId:"reuse-next"};
-    const raced=interleaveBeforeBatch(database,()=>revoke(revokePayload("reuse-revoke",original.receiptId)));
+    const raced=interleaveBeforeBatchNumber(database,2,()=>revoke(revokePayload("reuse-revoke",original.receiptId)));
     await expect(create(next,PRIMARY_CATALOG_SOURCE,{...env,DELIVERY_DB:raced})).rejects.toMatchObject({status:409});
     expect(await database.prepare("SELECT COUNT(*) count FROM project_alpha_delivery_intent_receipts WHERE delivery_id='reuse-next'").first("count")).toBe(0);
     expect(await database.prepare("SELECT COUNT(*) count FROM project_alpha_delivery_portal_notification_outbox WHERE grant_id=(SELECT resource_id FROM project_alpha_delivery_intent_receipts WHERE receipt_id=?)").bind(original.receiptId).first("count")).toBe(2);
@@ -225,7 +313,7 @@ describe("source-owned delivery intent runtime and transaction races", () => {
     expect(await database.prepare("SELECT project_alpha_source_id FROM project_alpha_delivery_intent_receipts WHERE delivery_id=?").bind(f.payload.deliveryId).first("project_alpha_source_id")).toBe(PRIMARY_CATALOG_SOURCE.sourceId);
   }, 60_000);
 
-  it("accepts only a valid RS256 assertion at the registered delivery access boundary",async()=>{
+  it("accepts only the exact service-token identity at the registered delivery access boundary",async()=>{
     await expect(verifyRegisteredDeliveryAccess(new Request("https://ops.example.test/registered",{headers:{
       "Cf-Access-Jwt-Assertion":await accessToken(),
     }}),accessAuthority,accessJwks)).resolves.toBeUndefined();
@@ -286,7 +374,9 @@ describe("source-owned delivery intent runtime and transaction races", () => {
   it.each([
     ["issuer",{iss:"https://other-access.example.test"}],
     ["audience",{aud:"other-audience"}],
-    ["subject",{sub:"other-producer"}],
+    ["common_name",{common_name:"other-producer"}],
+    ["type",{type:"user"}],
+    ["subject",{sub:"human-subject"}],
   ] as const)("rejects a registered delivery assertion with the wrong %s",async(_label,overrides)=>{
     const request=new Request("https://ops.example.test/registered",{headers:{"Cf-Access-Jwt-Assertion":await accessToken(accessPayload(overrides))}});
     await expect(verifyRegisteredDeliveryAccess(request,accessAuthority,accessJwks)).rejects.toMatchObject({status:401});
@@ -329,15 +419,8 @@ describe("source-owned delivery intent runtime and transaction races", () => {
     const current={keyId:"secondary.current:key",value:"secondary-current-delivery-secret-at-least-thirty-two-bytes"};
     const previous={keyId:"secondary.previous:key",value:"secondary-previous-delivery-secret-at-least-thirty-two-bytes"};
     const digest=(value:string)=>createHash("sha256").update(value).digest("hex");
-    await database.batch([
-      database.prepare(`INSERT INTO pa_portal_source_authorities(source_id,producer_binding_id,snapshot_origin,snapshot_base_path,
-        application_key,state,active_revision,version,connector_revision,connector_version)
-        VALUES(?,'secondary-delivery','https://secondary.example.test','/','project-alpha','active',1,1,1,1)`).bind(secondary.sourceId),
-      database.prepare(`INSERT INTO pa_portal_source_authority_revisions(source_id,revision,credential_ref,access_issuer,
-        access_audience,access_subject,current_key_id,current_key_fingerprint,previous_key_id,previous_key_fingerprint,created_by)
-        VALUES(?,1,'secondary','https://secondary-access.example.test','secondary-audience','secondary-producer',?,?,?,?, 'fixture')`)
-        .bind(secondary.sourceId,current.keyId,digest(current.value),previous.keyId,digest(previous.value)),
-    ]);
+    await database.prepare(`UPDATE pa_portal_source_authorities SET state='active',version=version+1,updated_at=datetime('now') WHERE source_id=?`)
+      .bind(secondary.sourceId).run();
     const registeredEnv={...env,PROJECT_ALPHA_CONNECTOR_CREDENTIALS:JSON.stringify({version:1,sets:{secondary:{portalCurrent:current,portalPrevious:previous}}})};
     const assertion=await accessToken();
     const verifyAccess=(request:Request,authority:Parameters<typeof verifyRegisteredDeliveryAccess>[1])=>
