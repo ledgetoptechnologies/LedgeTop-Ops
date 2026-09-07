@@ -125,6 +125,22 @@ Current delivery-history increment (working tree following `c94e834`):
   two expected hostname-configuration failures (desktop and mobile), 7.3 minutes.
   The partition regression itself passes two unit tests, and diff checking is
   clean. Correctly configured runtime verification follows this terminal run.
+  The complete service-assignment policy run 23379 exited 0: all 28 tests
+  passed in 1,003.97 seconds. It began before the visibility addition, so the
+  newer targeted visibility/notification tests remain the evidence for that
+  addition. Checkpoint 51c951f is pushed to draft PR #26 (base remains the
+  existing feedback-history integration branch, not main). No merge/deployment
+  is implied by that checkpoint push. Full Client verification is now running
+  against that saved source, alongside sequential browser run 48231.
+  Sequential browser run 48231 is now terminal with exit 0: the base suite
+  passed 392 tests with eight skips (7.1 minutes), followed by all 16 J7
+  two-domain tests passing (24.1 seconds). This verifies checkpoint 51c951f
+  against local browser fixtures, not production Access or PA provisioning.
+  Full Client session 44811 was polled and remains running; do not restart it.
+  Root source-layout, rollout-manifest and release-profile tests also pass:
+  33 tests, exit 0. These assert repository release contracts, including
+  disabled notification mail and preserved public routing; they do not prove
+  the deployed configuration matches them.
 - D1 and cursor regression run 51198 exited 0: 21 tests passed, including
   current delivery revocation, mixed-kind pagination and rejection of a valid
   legacy cursor envelope. Client type check and build 97972 exited 0.

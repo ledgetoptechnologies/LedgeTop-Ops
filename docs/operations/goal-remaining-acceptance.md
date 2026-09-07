@@ -417,3 +417,26 @@ dispatch state; it remains part of the goal, not a completed feature.
 The latest in-app PA retry returned to login. No connection settings, LTT
 enrollment, announcement emails, production migrations or deployments occurred
 in this follow-up. The goal remains active.
+
+### Current checkpoint and next native notification increment
+
+Checkpoint `51c951f` now passes the corrected complete local browser partitions:
+392 base tests passed, eight skipped, and all 16 two-domain tests passed. All
+33 source-layout/release-profile/rollout tests and 43 staging-contract tests
+also pass. Full Client session 44811 remains running; these results are not a
+substitute for its terminal result or for live provisioning acceptance.
+
+The selected-workspace notification mutation now includes current identity,
+workspace visibility and delivery authority predicates, with migrated-D1
+revocation tests. The earlier identity-only description above is historical.
+
+Native delivery bell implementation is isolated on `codex/native-delivery-bell`
+so it cannot change the checkpoint under test. Its accepted-grant event ledger
+must retain exact source/workspace/principal/version and grant/binding authority
+even when identity binding occurs later. Per-person read state remains separate
+from email dispatch. Client history and mutation integration are in progress,
+not complete. Authenticated file-change event projection is a distinct remaining
+requirement; PA grant-accepted notices alone do not satisfy that requirement.
+
+No additional source has been enrolled, no announcement mail has been sent,
+and no production release is implied by these local checks.
