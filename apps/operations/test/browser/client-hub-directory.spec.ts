@@ -76,6 +76,19 @@ test("a synced Project Alpha client explains that its automatic workspace is sti
   await expect(page.getByText("Client ID sync incomplete", { exact: true })).toHaveCount(0);
 });
 
+test("a Project Alpha business root awaiting its first projection does not imply manual setup", async ({ page }) => {
+  await mock(page, route => route.fulfill({ json: {
+    clients: [{ ...client("org-new", "New workspace"), pa_public_id: "d".repeat(32) }],
+    nextCursor: null,
+    capabilities,
+  } }), ["team.view", "operations.manage"], []);
+
+  await page.goto("/clients");
+  await expect(page.getByText("Automatic workspace pending", { exact: true })).toBeVisible();
+  await expect(page.getByText(/workspace is created automatically.*no approval is required/i)).toBeVisible();
+  await expect(page.getByText("Portal not set up", { exact: true })).toHaveCount(0);
+});
+
 test("a revoked client root is prominent in the directory", async ({ page }) => {
   const revoked = { ...client("org-revoked", "Revoked client"), pa_public_id: "c".repeat(32),
     workspace_id: "workspace-revoked", portal_status: "active", portal_access_state: "revoked" };
