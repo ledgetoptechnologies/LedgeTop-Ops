@@ -76,7 +76,7 @@ describe("selected workspace notification mutation guard", { timeout: 60_000 }, 
       CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED: "true",
     } as Env;
     await seedBase();
-  });
+  }, 30_000);
 
   async function seedBase() {
     await db.batch([

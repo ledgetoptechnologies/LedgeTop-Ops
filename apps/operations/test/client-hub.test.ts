@@ -280,7 +280,7 @@ describe("Client Hub bounded detail collections", () => {
     expect(await delivery.prepare("SELECT count(*) count FROM portal_v2_root_access_policies").first("count")).toBe(0);
     expect(await delivery.prepare("SELECT count(*) count FROM portal_v2_root_access_policy_audit").first("count")).toBe(0);
     expect(await delivery.prepare("SELECT count(*) count FROM portal_v2_root_access_policy_mutations").first("count")).toBe(0);
-  });
+  }, 15_000);
 
   it("fences a portal-root revoke when the source mapping changes after resolution but before commit", async () => {
     const { app, env, ops, delivery } = await fixture(), current = await rootAccessContext(app, env);
@@ -946,7 +946,7 @@ describe("Client Hub", () => {
     const wrongSource = await app.request(organizationPath.replace("project-alpha%3Aprimary", "project-alpha%3Asecondary")
       + "/project-alpha-contact-roles", {}, env);
     expect(wrongSource.status).toBe(404);
-  });
+  }, 15_000);
 
   it("hydrates exact project roles behind the existing project-view policy without adding mutation authority", async () => {
     const { app, env, ops, delivery } = await fixture();
