@@ -115,8 +115,9 @@ function cleanVersion(value: string | undefined | null): string | null {
   return result ? result.slice(0, 512) : null;
 }
 
-function validEventAt(value: string): boolean {
-  return Number.isFinite(Date.parse(value));
+function canonicalEventAt(value: string): string | null {
+  const milliseconds = Date.parse(value);
+  return Number.isFinite(milliseconds) ? new Date(milliseconds).toISOString() : null;
 }
 
 function modeIncludes(mode: AuthenticatedDeliveryChangeMode, kind: ChangeKind): boolean {
@@ -246,9 +247,55 @@ function stagingCandidatesSql(): string {
     JOIN portal_v2_folder_bindings binding ON binding.id=grant_record.folder_binding_id AND binding.workspace_id=policy.workspace_id
       AND binding.source_version=grant_record.binding_source_version AND binding.status='active' AND binding.revoked_at IS NULL
     WHERE policy.access_notice_enabled=1 AND policy.change_mode IN (?2,'both')
-      AND datetime(policy.created_at)<=datetime(?3) AND datetime(grant_record.created_at)<=datetime(?3)
+      AND julianday(policy.created_at)<=julianday(?3) AND julianday(grant_record.created_at)<=julianday(?3)
       AND substr(?1,1,length(binding.r2_prefix))=binding.r2_prefix
     ORDER BY policy.identity_id,length(binding.r2_prefix) DESC,policy.grant_id LIMIT ?4`;
+}
+
+function stagingAuthoritySql(): string {
+  return `EXISTS(SELECT 1 FROM portal_authenticated_delivery_notification_policies policy
+    JOIN portal_v2_authenticated_delivery_grants grant_record ON grant_record.id=policy.grant_id
+      AND grant_record.grant_version=policy.grant_version AND grant_record.logical_grant_id=policy.logical_grant_id
+      AND grant_record.workspace_id=policy.workspace_id AND grant_record.audience_type='principal'
+      AND grant_record.audience_public_id=policy.principal_public_id
+      AND grant_record.audience_source_version=policy.principal_source_version
+      AND grant_record.status='active' AND grant_record.revoked_at IS NULL
+      AND (grant_record.expires_at IS NULL OR datetime(grant_record.expires_at)>datetime('now'))
+    JOIN portal_v2_authenticated_delivery_grant_recipients recipient ON recipient.grant_id=grant_record.id
+      AND recipient.workspace_id=policy.workspace_id AND recipient.identity_id=policy.identity_id
+      AND recipient.principal_public_id=policy.principal_public_id
+      AND recipient.principal_source_version=policy.principal_source_version
+    JOIN portal_v2_workspaces workspace ON workspace.id=policy.workspace_id AND workspace.project_alpha_source_id=policy.source_id
+      AND workspace.status='active'
+    JOIN pa_portal_workspace_sources source ON source.workspace_id=workspace.id AND source.projection_source_id=policy.source_id
+    JOIN portal_v2_folder_bindings binding ON binding.id=grant_record.folder_binding_id AND binding.workspace_id=policy.workspace_id
+      AND binding.source_version=grant_record.binding_source_version AND binding.status='active' AND binding.revoked_at IS NULL
+    WHERE policy.grant_id=? AND policy.grant_version=? AND policy.logical_grant_id=? AND policy.workspace_id=?
+      AND policy.source_id=? AND policy.identity_id=? AND policy.principal_public_id=? AND policy.principal_source_version=?
+      AND policy.policy_version=? AND policy.access_notice_enabled=1 AND policy.change_mode IN (?,'both')
+      AND julianday(policy.created_at)<=julianday(?) AND julianday(grant_record.created_at)<=julianday(?)
+      AND substr(?,1,length(binding.r2_prefix))=binding.r2_prefix
+      AND binding.id=? AND binding.source_version=? AND binding.owner_scope_type=? AND binding.owner_public_id=? AND binding.r2_prefix=?)`;
+}
+
+function stagingAuthorityBindings(candidate: StageCandidate, kind: ChangeKind, eventAt: string, key: string): (string | number)[] {
+  return [candidate.grant_id,candidate.grant_version,candidate.logical_grant_id,candidate.workspace_id,candidate.source_id,
+    candidate.identity_id,candidate.principal_public_id,candidate.principal_source_version,candidate.policy_version,
+    kind,eventAt,eventAt,key,candidate.folder_binding_id,candidate.binding_source_version,candidate.owner_scope_type,
+    candidate.owner_public_id,candidate.r2_prefix];
+}
+
+async function settleDuplicateHighWater(db: D1DatabaseSession, candidate: StageCandidate, fingerprint: string,
+  present: boolean, version: string | null, observedAt: string): Promise<boolean> {
+  const advanced = await db.prepare(`UPDATE portal_authenticated_delivery_change_object_versions SET observed_event_at=?,updated_at=${NOW}
+    WHERE grant_id=? AND grant_version=? AND identity_id=? AND object_fingerprint=? AND current_present=?
+      AND current_object_version IS ? AND julianday(?)>julianday(observed_event_at)`)
+    .bind(observedAt,candidate.grant_id,candidate.grant_version,candidate.identity_id,fingerprint,present?1:0,version,observedAt).run();
+  if (Number(advanced.meta.changes) === 1) return true;
+  const current = await db.prepare(`SELECT current_present,current_object_version,observed_event_at
+    FROM portal_authenticated_delivery_change_object_versions WHERE grant_id=? AND grant_version=? AND identity_id=? AND object_fingerprint=?`)
+    .bind(candidate.grant_id,candidate.grant_version,candidate.identity_id,fingerprint).first<ObjectState>();
+  return !!current && Date.parse(current.observed_event_at) >= Date.parse(observedAt);
 }
 
 /** Called only by the shared R2 consumer after its authoritative HEAD/index
@@ -262,12 +309,13 @@ export async function recordAuthenticatedDeliveryObjectChange(
 ): Promise<number> {
   if (!authenticatedDeliveryNotificationsEnabled(env)) return 0;
   if (!(await authenticatedDeliveryChangeNotificationsReady(env))) throw new Error("authenticated-delivery-notifications-schema-unavailable");
-  if (!key || !validEventAt(eventAt)) return 0;
+  const observedAt = canonicalEventAt(eventAt);
+  if (!key || !observedAt) return 0;
   const version = cleanVersion(objectVersion);
   if (present && !version) return 0;
   const kind: ChangeKind = present ? "added" : "removed";
   const db = env.DELIVERY_DB.withSession("first-primary");
-  const rows = await db.prepare(stagingCandidatesSql()).bind(key,kind,eventAt,MAX_RECIPIENTS+1).all<StageCandidate>();
+  const rows = await db.prepare(stagingCandidatesSql()).bind(key,kind,observedAt,MAX_RECIPIENTS+1).all<StageCandidate>();
   if (rows.results.length > MAX_RECIPIENTS) throw new Error("authenticated-delivery-notification-recipient-capacity");
   const selected: StageCandidate[] = [];
   for (const identity of new Set(rows.results.map(row => row.identity_id))) {
@@ -285,8 +333,13 @@ export async function recordAuthenticatedDeliveryObjectChange(
     const state = await db.prepare(`SELECT current_present,current_object_version,observed_event_at
       FROM portal_authenticated_delivery_change_object_versions WHERE grant_id=? AND grant_version=?
         AND identity_id=? AND object_fingerprint=?`).bind(candidate.grant_id,candidate.grant_version,candidate.identity_id,fingerprint).first<ObjectState>();
-    if (state && Date.parse(eventAt) < Date.parse(state.observed_event_at)) continue;
-    if (state && state.current_present === (present?1:0) && state.current_object_version === version) continue;
+    if (state && Date.parse(observedAt) < Date.parse(state.observed_event_at)) continue;
+    if (state && state.current_present === (present?1:0) && state.current_object_version === version) {
+      if (Date.parse(observedAt) > Date.parse(state.observed_event_at)
+        && !(await settleDuplicateHighWater(db,candidate,fingerprint,present,version,observedAt)))
+        throw new Error("authenticated-delivery-notification-staging-fence-lost");
+      continue;
+    }
 
     let open = await db.prepare(`SELECT batch.*,COUNT(item.object_fingerprint) item_count
       FROM portal_authenticated_delivery_change_batches batch LEFT JOIN portal_authenticated_delivery_change_batch_items item ON item.batch_id=batch.id
@@ -303,65 +356,77 @@ export async function recordAuthenticatedDeliveryObjectChange(
         WHERE id=? AND status='pending' AND sealed_at IS NULL`).bind(open.id).run();
       open = null;
     }
-    if (!open) {
-      const batchId = crypto.randomUUID();
-      await db.prepare(`INSERT INTO portal_authenticated_delivery_change_batches
-        (id,grant_id,grant_version,logical_grant_id,workspace_id,source_id,folder_binding_id,binding_source_version,
-          owner_scope_type,owner_public_id,r2_prefix,identity_id,principal_public_id,principal_source_version,policy_version)
-        SELECT ?,policy.grant_id,policy.grant_version,policy.logical_grant_id,policy.workspace_id,policy.source_id,
-          grant_record.folder_binding_id,grant_record.binding_source_version,binding.owner_scope_type,binding.owner_public_id,binding.r2_prefix,
-          policy.identity_id,policy.principal_public_id,policy.principal_source_version,policy.policy_version
-        FROM portal_authenticated_delivery_notification_policies policy
-        JOIN portal_v2_authenticated_delivery_grants grant_record ON grant_record.id=policy.grant_id AND grant_record.grant_version=policy.grant_version
-          AND grant_record.status='active' AND grant_record.revoked_at IS NULL
-        JOIN portal_v2_folder_bindings binding ON binding.id=grant_record.folder_binding_id AND binding.workspace_id=policy.workspace_id
-          AND binding.status='active' AND binding.revoked_at IS NULL AND binding.source_version=grant_record.binding_source_version
-        WHERE policy.grant_id=? AND policy.identity_id=? AND policy.policy_version=? AND policy.access_notice_enabled=1
-          AND policy.change_mode IN (?,'both') AND substr(?,1,length(binding.r2_prefix))=binding.r2_prefix`)
-        .bind(batchId,candidate.grant_id,candidate.identity_id,candidate.policy_version,kind,key).run();
-      open = await db.prepare(`SELECT batch.*,0 item_count FROM portal_authenticated_delivery_change_batches batch
-        WHERE id=?`).bind(batchId).first<BatchRow & {item_count:number}>();
-      if (!open) continue;
-    }
+    const batchId = open?.id ?? crypto.randomUUID();
     const token = crypto.randomUUID();
     const baselinePresent = existingItem?.baseline_present ?? (present ? 0 : 1);
     const baselineVersion = existingItem?.baseline_object_version ?? (present ? null : (state?.current_object_version ?? version));
-    const stagedAuditId = await sha256(`authenticated-delivery-change-audit:v1:${open.id}:batch.staged:${token}`);
-    await db.batch([
-      db.prepare(`INSERT INTO portal_authenticated_delivery_change_batch_items
+    const stagedAuditId = await sha256(`authenticated-delivery-change-audit:v1:${batchId}:batch.staged:${token}`);
+    const ledger = db.prepare(`INSERT INTO portal_authenticated_delivery_change_object_versions
+      (grant_id,grant_version,identity_id,object_fingerprint,r2_key,current_present,current_object_version,observed_event_at)
+      SELECT ?,?,?,?,?,?,?,? WHERE ${open ? "changes()=1" : stagingAuthoritySql()}
+      ON CONFLICT(grant_id,grant_version,identity_id,object_fingerprint) DO UPDATE SET
+        r2_key=excluded.r2_key,current_present=excluded.current_present,current_object_version=excluded.current_object_version,
+        observed_event_at=excluded.observed_event_at,updated_at=${NOW}
+      WHERE julianday(excluded.observed_event_at)>=julianday(portal_authenticated_delivery_change_object_versions.observed_event_at)
+        AND (portal_authenticated_delivery_change_object_versions.current_present<>excluded.current_present
+          OR portal_authenticated_delivery_change_object_versions.current_object_version IS NOT excluded.current_object_version)`)
+      .bind(candidate.grant_id,candidate.grant_version,candidate.identity_id,fingerprint,key,present?1:0,version,observedAt,
+        ...(open ? [] : stagingAuthorityBindings(candidate,kind,observedAt,key)));
+    const item = db.prepare(`INSERT INTO portal_authenticated_delivery_change_batch_items
         (batch_id,object_fingerprint,r2_key,baseline_present,current_present,baseline_object_version,current_object_version,event_token)
-        VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(batch_id,object_fingerprint) DO UPDATE SET
+        SELECT ?,?,?,?,?,?,?,? WHERE changes()=1 ON CONFLICT(batch_id,object_fingerprint) DO UPDATE SET
           current_present=excluded.current_present,current_object_version=excluded.current_object_version,
           event_token=excluded.event_token,updated_at=${NOW}
         WHERE portal_authenticated_delivery_change_batch_items.current_present<>excluded.current_present
           OR portal_authenticated_delivery_change_batch_items.current_object_version IS NOT excluded.current_object_version`)
-        .bind(open.id,fingerprint,key,baselinePresent,present?1:0,baselineVersion,version,token),
-      db.prepare(`INSERT INTO portal_authenticated_delivery_change_object_versions
-        (grant_id,grant_version,identity_id,object_fingerprint,r2_key,current_present,current_object_version,observed_event_at)
-        VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(grant_id,grant_version,identity_id,object_fingerprint) DO UPDATE SET
-          r2_key=excluded.r2_key,current_present=excluded.current_present,current_object_version=excluded.current_object_version,
-          observed_event_at=excluded.observed_event_at,updated_at=${NOW}
-        WHERE datetime(excluded.observed_event_at)>=datetime(portal_authenticated_delivery_change_object_versions.observed_event_at)`)
-        .bind(candidate.grant_id,candidate.grant_version,candidate.identity_id,fingerprint,key,present?1:0,version,eventAt),
+        .bind(batchId,fingerprint,key,baselinePresent,present?1:0,baselineVersion,version,token);
+    const statements = open ? [
+      db.prepare(`UPDATE portal_authenticated_delivery_change_batches SET updated_at=updated_at WHERE id=? AND status='pending' AND sealed_at IS NULL
+        AND (EXISTS(SELECT 1 FROM portal_authenticated_delivery_change_batch_items item WHERE item.batch_id=? AND item.object_fingerprint=?)
+          OR (SELECT count(*) FROM portal_authenticated_delivery_change_batch_items item WHERE item.batch_id=portal_authenticated_delivery_change_batches.id)<?)
+        AND ${stagingAuthoritySql()}`).bind(batchId,batchId,fingerprint,MAX_ITEMS,...stagingAuthorityBindings(candidate,kind,observedAt,key)),
+      ledger,item,
+    ] : [
+      ledger,
+      db.prepare(`INSERT INTO portal_authenticated_delivery_change_batches
+        (id,grant_id,grant_version,logical_grant_id,workspace_id,source_id,folder_binding_id,binding_source_version,
+          owner_scope_type,owner_public_id,r2_prefix,identity_id,principal_public_id,principal_source_version,policy_version)
+        SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE changes()=1 AND ${stagingAuthoritySql()}`)
+        .bind(batchId,candidate.grant_id,candidate.grant_version,candidate.logical_grant_id,candidate.workspace_id,candidate.source_id,
+          candidate.folder_binding_id,candidate.binding_source_version,candidate.owner_scope_type,candidate.owner_public_id,candidate.r2_prefix,
+          candidate.identity_id,candidate.principal_public_id,candidate.principal_source_version,candidate.policy_version,
+          ...stagingAuthorityBindings(candidate,kind,observedAt,key)),
+      item,
+    ];
+    const result = await db.batch([
+      ...statements,
       db.prepare(`UPDATE portal_authenticated_delivery_change_batches SET revision=revision+1,
         added_count=(SELECT count(*) FROM portal_authenticated_delivery_change_batch_items item WHERE item.batch_id=id AND item.baseline_present=0 AND item.current_present=1),
         removed_count=(SELECT count(*) FROM portal_authenticated_delivery_change_batch_items item WHERE item.batch_id=id AND item.baseline_present=1 AND item.current_present=0),
         eligible_at=strftime('%Y-%m-%dT%H:%M:%fZ','now','+5 minutes'),updated_at=${NOW}
         WHERE id=? AND status='pending' AND sealed_at IS NULL
           AND EXISTS(SELECT 1 FROM portal_authenticated_delivery_change_batch_items item WHERE item.batch_id=id AND item.event_token=?)`)
-        .bind(open.id,token),
+        .bind(batchId,token),
       db.prepare(`UPDATE portal_authenticated_delivery_change_batches SET status='cancelled',sealed_at=${NOW},
         revision=revision+1,last_error='net-change-empty',updated_at=${NOW}
-        WHERE id=? AND status='pending' AND sealed_at IS NULL AND added_count=0 AND removed_count=0`).bind(open.id),
+        WHERE id=? AND status='pending' AND sealed_at IS NULL AND added_count=0 AND removed_count=0`).bind(batchId),
       db.prepare(`INSERT OR IGNORE INTO portal_authenticated_delivery_change_audit
         (id,batch_id,action,attempt_count,reason_code) SELECT ?,id,'batch.staged',attempt_count,NULL
         FROM portal_authenticated_delivery_change_batches WHERE id=?
           AND EXISTS(SELECT 1 FROM portal_authenticated_delivery_change_batch_items item WHERE item.batch_id=id AND item.event_token=?)`)
-        .bind(stagedAuditId,open.id,token),
+        .bind(stagedAuditId,batchId,token),
     ]);
-    const changed = await db.prepare(`SELECT 1 ok FROM portal_authenticated_delivery_change_batch_items
-      WHERE batch_id=? AND object_fingerprint=? AND event_token=?`).bind(open.id,fingerprint,token).first("ok");
-    if (changed !== null) staged++;
+    const fenceOffset = open ? 1 : 0;
+    if (open && Number(result[0]?.meta.changes) !== 1)
+      throw new Error("authenticated-delivery-notification-staging-fence-lost");
+    if (Number(result[fenceOffset]?.meta.changes) !== 1) {
+      if (!(await settleDuplicateHighWater(db,candidate,fingerprint,present,version,observedAt)))
+        throw new Error("authenticated-delivery-notification-staging-fence-lost");
+      continue;
+    }
+    if (!open && Number(result[1]?.meta.changes) !== 1)
+      throw new Error("authenticated-delivery-notification-staging-fence-lost");
+    if (Number(result[2]?.meta.changes) === 1) staged++;
   }
   return staged;
 }

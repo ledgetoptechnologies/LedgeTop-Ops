@@ -106,6 +106,66 @@ describe("exact authenticated delivery change notifications — migrated real D1
       .bind(f.workspace).all<Record<string,unknown>>()).results;
   }
 
+  function envWithStagingBatchHook(hook: () => Promise<void>): Env {
+    const sql = new WeakMap<object,string>();
+    let fired = false;
+    let proxy: D1Database;
+    const wrap = (statement: D1PreparedStatement, text: string): D1PreparedStatement => {
+      const wrapped = new Proxy(statement, { get(target, key) {
+        if (key === "bind") return (...bindings: unknown[]) => wrap(target.bind(...bindings), text);
+        const member = target[key as keyof D1PreparedStatement];
+        return typeof member === "function" ? member.bind(target) : member;
+      } });
+      sql.set(wrapped, text);
+      return wrapped;
+    };
+    proxy = new Proxy(db, { get(target, key) {
+      if (key === "withSession") return () => proxy;
+      if (key === "prepare") return (text: string) => wrap(target.prepare(text), text);
+      if (key === "batch") return async (statements: D1PreparedStatement[]) => {
+        if (!fired && statements.some(statement => (sql.get(statement) ?? "").includes("portal_authenticated_delivery_change_batch_items"))) {
+          fired = true;
+          await hook();
+        }
+        return target.batch(statements);
+      };
+      const member = target[key as keyof D1Database];
+      return typeof member === "function" ? member.bind(target) : member;
+    } });
+    return {...env,DELIVERY_DB:proxy} as Env;
+  }
+
+  function envWithDuplicateHighWaterHook(hook: () => Promise<void>): Env {
+    const sql = new WeakMap<object,string>();
+    let fired = false;
+    let proxy: D1Database;
+    const wrap = (statement: D1PreparedStatement, text: string): D1PreparedStatement => {
+      const wrapped = new Proxy(statement, { get(target, key) {
+        if (key === "bind") return (...bindings: unknown[]) => wrap(target.bind(...bindings), text);
+        if (key === "run") return async () => {
+          if (!fired && text.includes("SET observed_event_at=?")) { fired=true; await hook(); }
+          return target.run();
+        };
+        const member = target[key as keyof D1PreparedStatement];
+        return typeof member === "function" ? member.bind(target) : member;
+      } });
+      sql.set(wrapped, text);
+      return wrapped;
+    };
+    proxy = new Proxy(db, { get(target, key) {
+      if (key === "withSession") return () => proxy;
+      if (key === "prepare") return (text: string) => wrap(target.prepare(text), text);
+      const member = target[key as keyof D1Database];
+      return typeof member === "function" ? member.bind(target) : member;
+    } });
+    return {...env,DELIVERY_DB:proxy} as Env;
+  }
+
+  function eventTimes() {
+    const second=Math.floor((Date.now()+60_000)/1_000)*1_000;
+    return [100,200,300].map(milliseconds=>new Date(second+milliseconds).toISOString()) as [string,string,string];
+  }
+
   it("is migration-default-off, actor-idempotent and rejects conflicting policy replay", async () => {
     const f=await fixture("policy");
     expect(await authenticatedDeliveryChangeNotificationsReady(env)).toBe(true);
@@ -144,6 +204,162 @@ describe("exact authenticated delivery change notifications — migrated real D1
     expect(await add(f,"photo.jpg","v1",old)).toBe(0);
     expect(await remove(f,"photo.jpg","v2",new Date(Date.now()+1_000).toISOString())).toBe(1);
     expect(await batches(f)).toMatchObject([{status:"cancelled",added_count:0,removed_count:0}]);
+  });
+
+  it("fences a stale event behind a newer object-version winner before it can mutate the batch item", async () => {
+    const f=await fixture("stale-fence");await optIn(f);
+    const key=`${f.prefix}photo.jpg`,[old,,newer]=eventTimes();let hookFired=false;
+    const raced=envWithStagingBatchHook(async()=>{
+      hookFired=true;
+      expect(await recordAuthenticatedDeliveryObjectChange(env,key,true,"v2",newer)).toBe(1);
+    });
+    expect(await recordAuthenticatedDeliveryObjectChange(raced,key,true,"v1",old)).toBe(0);
+    expect(hookFired).toBe(true);
+    const fingerprint=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(`authenticated-delivery-object:v1:${key}`));
+    const hash=[...new Uint8Array(fingerprint)].map(value=>value.toString(16).padStart(2,"0")).join("");
+    expect(await db.prepare(`SELECT current_object_version,observed_event_at FROM portal_authenticated_delivery_change_object_versions
+      WHERE grant_id=? AND grant_version=1 AND identity_id=? AND object_fingerprint=?`).bind(f.grant,f.identity,hash).first())
+      .toMatchObject({current_object_version:"v2",observed_event_at:newer});
+    expect(await db.prepare(`SELECT current_object_version FROM portal_authenticated_delivery_change_batch_items WHERE object_fingerprint=?`)
+      .bind(hash).first("current_object_version")).toBe("v2");
+  });
+
+  it("throws a retryable staging fence loss instead of mutating an already claimed publication", async () => {
+    const f=await fixture("sealed-fence");await optIn(f);
+    const [existingAt,eventAt]=eventTimes();
+    expect(await add(f,"existing.jpg","existing-v1",existingAt)).toBe(1);
+    const key=`${f.prefix}photo.jpg`;let hookFired=false;
+    let before: {items:number;states:number;audit:number}|undefined;
+    const raced=envWithStagingBatchHook(async()=>{
+      hookFired=true;
+      await db.prepare(`UPDATE portal_authenticated_delivery_change_batches SET status='processing',sealed_at=datetime('now'),revision=revision+1
+        WHERE workspace_id=?`).bind(f.workspace).run();
+      before={
+        items:Number(await db.prepare(`SELECT count(*) count FROM portal_authenticated_delivery_change_batch_items item
+          JOIN portal_authenticated_delivery_change_batches batch ON batch.id=item.batch_id WHERE batch.workspace_id=?`).bind(f.workspace).first("count")),
+        states:Number(await db.prepare("SELECT count(*) count FROM portal_authenticated_delivery_change_object_versions WHERE grant_id=?").bind(f.grant).first("count")),
+        audit:Number(await db.prepare(`SELECT count(*) count FROM portal_authenticated_delivery_change_audit audit
+          JOIN portal_authenticated_delivery_change_batches batch ON batch.id=audit.batch_id WHERE batch.workspace_id=?`).bind(f.workspace).first("count")),
+      };
+    });
+    await expect(recordAuthenticatedDeliveryObjectChange(raced,key,true,"v1",eventAt))
+      .rejects.toThrow("authenticated-delivery-notification-staging-fence-lost");
+    expect(hookFired).toBe(true);
+    expect(before).toEqual({items:1,states:1,audit:1});
+    expect({
+      items:Number(await db.prepare(`SELECT count(*) count FROM portal_authenticated_delivery_change_batch_items item
+        JOIN portal_authenticated_delivery_change_batches batch ON batch.id=item.batch_id WHERE batch.workspace_id=?`).bind(f.workspace).first("count")),
+      states:Number(await db.prepare("SELECT count(*) count FROM portal_authenticated_delivery_change_object_versions WHERE grant_id=?").bind(f.grant).first("count")),
+      audit:Number(await db.prepare(`SELECT count(*) count FROM portal_authenticated_delivery_change_audit audit
+        JOIN portal_authenticated_delivery_change_batches batch ON batch.id=audit.batch_id WHERE batch.workspace_id=?`).bind(f.workspace).first("count")),
+    }).toEqual(before);
+    expect(await recordAuthenticatedDeliveryObjectChange(env,key,true,"v1",eventAt)).toBe(1);
+    expect(await batches(f)).toHaveLength(2);
+  });
+
+  it("advances duplicate object-version high-water marks at millisecond precision", async () => {
+    const f=await fixture("millisecond-high-water");await optIn(f);
+    const [added,delayedRemoval,duplicate]=eventTimes();
+    expect(await add(f,"photo.jpg","v1",added)).toBe(1);
+    expect(await add(f,"photo.jpg","v1",duplicate)).toBe(0);
+    expect(await remove(f,"photo.jpg","v1",delayedRemoval)).toBe(0);
+    expect((await batches(f))[0]).toMatchObject({status:"pending",added_count:1,removed_count:0});
+    expect(await db.prepare(`SELECT observed_event_at,current_present,current_object_version
+      FROM portal_authenticated_delivery_change_object_versions WHERE grant_id=? AND identity_id=?`).bind(f.grant,f.identity).first())
+      .toMatchObject({observed_event_at:duplicate,current_present:1,current_object_version:"v1"});
+  });
+
+  it("rejects a delayed event from before an enabled policy created in the same UTC second", async () => {
+    const f=await fixture("same-second-prepolicy");
+    const [eventAt,,policyAt]=eventTimes(),key=`${f.prefix}photo.jpg`;
+    await db.prepare(`INSERT INTO portal_authenticated_delivery_notification_policies
+      (grant_id,grant_version,logical_grant_id,workspace_id,source_id,identity_id,principal_public_id,principal_source_version,
+        access_notice_enabled,change_mode,policy_version,updated_by_staff_id,created_at,updated_at)
+      VALUES(?,1,?,?,'project-alpha:primary',?,?,'pv1',1,'added',1,'staff-a',?,?)`)
+      .bind(f.grant,f.logical,f.workspace,f.identity,f.principal,policyAt,policyAt).run();
+    expect(await recordAuthenticatedDeliveryObjectChange(env,key,true,"v1",eventAt)).toBe(0);
+    expect(await batches(f)).toEqual([]);
+  });
+
+  it("retries staging when the selected policy version changes at the final authority fence", async () => {
+    const f=await fixture("policy-fence");const first=await optIn(f,"added");
+    const [eventAt]=eventTimes(),key=`${f.prefix}photo.jpg`;let hookFired=false;
+    const raced=envWithStagingBatchHook(async()=>{
+      hookFired=true;
+      await saveAuthenticatedDeliveryNotificationPolicy(env,"staff-a",{grantId:f.grant,identityId:f.identity,
+        expectedPolicyVersion:first.policy_version,accessNoticeEnabled:true,changeMode:"added",
+        idempotencyKey:`policy-fence-${f.suffix}-000000`});
+    });
+    await expect(recordAuthenticatedDeliveryObjectChange(raced,key,true,"v1",eventAt))
+      .rejects.toThrow("authenticated-delivery-notification-staging-fence-lost");
+    expect(hookFired).toBe(true);
+    expect(await db.prepare("SELECT count(*) count FROM portal_authenticated_delivery_change_object_versions WHERE grant_id=?").bind(f.grant).first("count")).toBe(0);
+    expect(await batches(f)).toEqual([]);
+    expect(await recordAuthenticatedDeliveryObjectChange(env,key,true,"v1",eventAt)).toBe(1);
+    expect((await batches(f))[0]).toMatchObject({policy_version:2,added_count:1});
+  });
+
+  it("rejects a legacy binding whose owner or prefix changed after candidate selection", async () => {
+    const f=await fixture("binding-snapshot");await optIn(f,"added");
+    const [eventAt]=eventTimes(),key=`${f.prefix}photo.jpg`,movedPrefix=`${f.prefix}moved/`;let hookFired=false;
+    const raced=envWithStagingBatchHook(async()=>{
+      hookFired=true;
+      await db.prepare("UPDATE portal_v2_folder_bindings SET r2_prefix=? WHERE id=?").bind(movedPrefix,f.binding).run();
+    });
+    await expect(recordAuthenticatedDeliveryObjectChange(raced,key,true,"v1",eventAt))
+      .rejects.toThrow("authenticated-delivery-notification-staging-fence-lost");
+    expect(hookFired).toBe(true);
+    expect(await db.prepare("SELECT count(*) count FROM portal_authenticated_delivery_change_object_versions WHERE grant_id=?").bind(f.grant).first("count")).toBe(0);
+    expect(await batches(f)).toEqual([]);
+    expect(await recordAuthenticatedDeliveryObjectChange(env,key,true,"v1",eventAt)).toBe(0);
+    await db.prepare("UPDATE portal_v2_folder_bindings SET r2_prefix=? WHERE id=?").bind(f.prefix,f.binding).run();
+    expect(await recordAuthenticatedDeliveryObjectChange(env,key,true,"v1",eventAt)).toBe(1);
+  });
+
+  it("retries a 49-to-50 capacity fence loss and stages the replay in a successor", async () => {
+    const f=await fixture("capacity-fence");await optIn(f,"added");
+    for(let index=0;index<49;index++)expect(await add(f,`${index}.jpg`)).toBe(1);
+    const [outerAt,innerAt]=eventTimes(),outerKey=`${f.prefix}outer.jpg`;let hookFired=false;
+    const raced=envWithStagingBatchHook(async()=>{
+      hookFired=true;
+      expect(await add(f,"fiftieth.jpg","fiftieth-v1",innerAt)).toBe(1);
+    });
+    await expect(recordAuthenticatedDeliveryObjectChange(raced,outerKey,true,"outer-v1",outerAt))
+      .rejects.toThrow("authenticated-delivery-notification-staging-fence-lost");
+    expect(hookFired).toBe(true);
+    expect(await recordAuthenticatedDeliveryObjectChange(env,outerKey,true,"outer-v1",outerAt)).toBe(1);
+    const rows=await batches(f);
+    expect(rows.map(row=>row.added_count)).toEqual([50,1]);
+    expect(rows[0]).toMatchObject({sealed_at:expect.any(String)});
+  },180_000);
+
+  it("retries a duplicate high-water CAS loss when an intervening newer state makes the event a transition", async () => {
+    const f=await fixture("duplicate-cas");await optIn(f);
+    const [first,removed,readded]=eventTimes(),key=`${f.prefix}photo.jpg`;
+    expect(await add(f,"photo.jpg","v1",first)).toBe(1);let hookFired=false;
+    const raced=envWithDuplicateHighWaterHook(async()=>{
+      hookFired=true;
+      expect(await remove(f,"photo.jpg","v1",removed)).toBe(1);
+    });
+    await expect(recordAuthenticatedDeliveryObjectChange(raced,key,true,"v1",readded))
+      .rejects.toThrow("authenticated-delivery-notification-staging-fence-lost");
+    expect(hookFired).toBe(true);
+    expect(await recordAuthenticatedDeliveryObjectChange(env,key,true,"v1",readded)).toBe(1);
+  });
+
+  it("does not create a second notification when a concurrent same-state observation already claimed the first batch", async () => {
+    const f=await fixture("same-state-claim");await optIn(f);
+    const [eventAt]=eventTimes(),key=`${f.prefix}photo.jpg`;let hookFired=false;
+    const raced=envWithStagingBatchHook(async()=>{
+      hookFired=true;
+      expect(await recordAuthenticatedDeliveryObjectChange(env,key,true,"v1",eventAt)).toBe(1);
+      await db.prepare(`UPDATE portal_authenticated_delivery_change_batches SET status='processing',sealed_at=datetime('now'),revision=revision+1
+        WHERE workspace_id=?`).bind(f.workspace).run();
+    });
+    expect(await recordAuthenticatedDeliveryObjectChange(raced,key,true,"v1",eventAt)).toBe(0);
+    expect(hookFired).toBe(true);
+    expect(await batches(f)).toHaveLength(1);
+    expect((await batches(f))[0]).toMatchObject({status:"processing",added_count:1});
   });
 
   it("routes changes after a policy mutation into the current policy-version batch", async () => {
