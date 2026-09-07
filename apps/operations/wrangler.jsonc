@@ -141,6 +141,7 @@
   },
   "containers": [
     {
+      "name": "ltds-ops-thumbnailrenderercontainer",
       "class_name": "ThumbnailRendererContainer",
       "image": "./containers/thumbnail-renderer/Dockerfile",
       "max_instances": 4,
