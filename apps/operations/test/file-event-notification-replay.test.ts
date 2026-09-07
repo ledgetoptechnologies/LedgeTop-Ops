@@ -23,6 +23,7 @@ vi.mock("../src/worker/image-locations", () => ({
 
 import { consumeFileEvents, type R2Notification } from "../src/worker/file-events";
 import { saveAuthenticatedDeliveryNotificationPolicy } from "../src/worker/authenticated-delivery-change-notifications";
+import { recordClientFolderFileChange } from "../src/worker/client-folder-grants";
 import type { Env } from "../src/worker/types";
 
 interface StoredObject { etag: string; uploaded: Date; }
@@ -131,9 +132,9 @@ describe("file-event authenticated-change staging replay — migrated real D1", 
     return { action, object: { key, eTag: etag }, eventTime: at };
   }
 
-  async function deliver(runEnv: Env, body: R2Notification) {
+  async function deliver(runEnv: Env, body: R2Notification, timestamp = new Date()) {
     const ack = vi.fn(), retry = vi.fn();
-    await consumeFileEvents({ messages: [{ body, ack, retry }] } as unknown as MessageBatch<R2Notification>, runEnv);
+    await consumeFileEvents({ messages: [{ id: "file-event", timestamp, attempts: 1, body, ack, retry }] } as unknown as MessageBatch<R2Notification>, runEnv);
     return { ack, retry };
   }
 
@@ -254,6 +255,118 @@ describe("file-event authenticated-change staging replay — migrated real D1", 
     expect(delivery.ack).toHaveBeenCalledTimes(1);
     expect(delivery.retry).not.toHaveBeenCalled();
     expect(await db.prepare("SELECT etag FROM file_index WHERE r2_key=?").bind(key).first("etag")).toBe("v2");
+    expect(await stagedCount(f.workspace)).toBe(0);
+  });
+
+  it("uses the original queue timestamp for a delete without eventTime, so a later policy cannot backfill it", async () => {
+    const f = await fixture("delete-queue-time");
+    const key = `${f.prefix}receipt.bin`, queuedAt = new Date(Date.now() - 60_000);
+    await db.prepare("INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES(?,?,12,?,'application/octet-stream','other')")
+      .bind(key, "v1", queuedAt.toISOString()).run();
+    objects.delete(key);
+    const body = event("DeleteObject", key, "v1");
+    delete body.eventTime;
+
+    const delivery = await deliver(env, body, queuedAt);
+    expect(delivery.ack).toHaveBeenCalledTimes(1);
+    expect(delivery.retry).not.toHaveBeenCalled();
+    expect(await stagedCount(f.workspace)).toBe(0);
+  });
+
+  it("retries before delete side effects when neither payload nor queue time is usable", async () => {
+    const f = await fixture("delete-invalid-queue-time");
+    const key = `${f.prefix}receipt.bin`, uploaded = new Date().toISOString();
+    await db.prepare("INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES(?,?,12,?,'application/octet-stream','other')")
+      .bind(key, "v1", uploaded).run();
+    objects.delete(key);
+    const body = event("DeleteObject", key, "v1");
+    delete body.eventTime;
+    const legacyNotice = vi.mocked(recordClientFolderFileChange);
+    legacyNotice.mockClear();
+
+    const delivery = await deliver(env, body, new Date("invalid"));
+    expect(delivery.retry).toHaveBeenCalledTimes(1);
+    expect(delivery.ack).not.toHaveBeenCalled();
+    expect(await db.prepare("SELECT etag FROM file_index WHERE r2_key=?").bind(key).first("etag")).toBe("v1");
+    expect(legacyNotice).not.toHaveBeenCalled();
+    expect(await stagedCount(f.workspace)).toBe(0);
+  });
+
+  it("retries a delete without eventTime using its fixed queue timestamp", async () => {
+    const f = await fixture("delete-queue-time-retry");
+    const key = `${f.prefix}receipt.bin`, queuedAt = new Date(Date.now() + 1_000);
+    await db.prepare("INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES(?,?,12,?,'application/octet-stream','other')")
+      .bind(key, "v1", queuedAt.toISOString()).run();
+    objects.delete(key);
+    const body = event("DeleteObject", key, "v1");
+    delete body.eventTime;
+    const retrying = envWithStageFailures(1);
+
+    const first = await deliver(retrying, body, queuedAt);
+    expect(first.retry).toHaveBeenCalledTimes(1);
+    expect(first.ack).not.toHaveBeenCalled();
+    const replay = await deliver(retrying, body, queuedAt);
+    expect(replay.ack).toHaveBeenCalledTimes(1);
+    expect(replay.retry).not.toHaveBeenCalled();
+    expect(await db.prepare(`SELECT observed_event_at FROM portal_authenticated_delivery_change_object_versions
+      WHERE grant_id LIKE ?`).bind("grant-delete-queue-time-retry-%").first("observed_event_at")).toBe(queuedAt.toISOString());
+  });
+
+  it("uses the queue timestamp for a delete with malformed eventTime", async () => {
+    const f = await fixture("delete-malformed-time");
+    const key = `${f.prefix}receipt.bin`, queuedAt = new Date(Date.now() + 1_000);
+    await db.prepare("INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES(?,?,12,?,'application/octet-stream','other')")
+      .bind(key, "v1", queuedAt.toISOString()).run();
+    objects.delete(key);
+    const body = event("DeleteObject", key, "v1");
+    body.eventTime = "not-a-timestamp";
+
+    const delivery = await deliver(env, body, queuedAt);
+    expect(delivery.ack).toHaveBeenCalledTimes(1);
+    expect(delivery.retry).not.toHaveBeenCalled();
+    expect(await db.prepare(`SELECT observed_event_at FROM portal_authenticated_delivery_change_object_versions
+      WHERE grant_id LIKE ?`).bind("grant-delete-malformed-time-%").first("observed_event_at")).toBe(queuedAt.toISOString());
+  });
+
+  it("uses head.uploaded when a create eventTime is malformed instead of silently skipping staging", async () => {
+    const f = await fixture("create-malformed-time");
+    const key = `${f.prefix}receipt.bin`, uploaded = new Date(Date.now() + 1_000);
+    objects.set(key, { etag: "v1", uploaded });
+    const body = event("PutObject", key, "v1");
+    body.eventTime = "not-a-timestamp";
+
+    const delivery = await deliver(env, body, new Date(uploaded.getTime() + 1_000));
+    expect(delivery.ack).toHaveBeenCalledTimes(1);
+    expect(delivery.retry).not.toHaveBeenCalled();
+    expect(await stagedCount(f.workspace)).toBe(1);
+  });
+
+  it("indexes the current HEAD for a stale create with invalid transport time without staging a notice", async () => {
+    const f = await fixture("stale-create-invalid-time");
+    const key = `${f.prefix}replacement.bin`, uploaded = new Date(Date.now() + 1_000);
+    objects.set(key, { etag: "v2", uploaded });
+    const body = event("PutObject", key, "v1", "invalid-source-time");
+
+    const delivery = await deliver(env, body, new Date("invalid"));
+    expect(delivery.ack).toHaveBeenCalledTimes(1);
+    expect(delivery.retry).not.toHaveBeenCalled();
+    expect(await db.prepare("SELECT etag FROM file_index WHERE r2_key=?").bind(key).first("etag")).toBe("v2");
+    expect(await stagedCount(f.workspace)).toBe(0);
+  });
+
+  it("does not require notification time for ordinary deletion when authenticated notices are disabled", async () => {
+    const f = await fixture("disabled-delete-time");
+    const key = `${f.prefix}receipt.bin`, uploaded = new Date().toISOString();
+    await db.prepare("INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES(?,?,12,?,'application/octet-stream','other')")
+      .bind(key, "v1", uploaded).run();
+    const body = event("DeleteObject", key, "v1", "invalid-source-time");
+    vi.mocked(recordClientFolderFileChange).mockClear();
+
+    const delivery = await deliver({ ...env, AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED: "false" }, body, new Date("invalid"));
+    expect(delivery.ack).toHaveBeenCalledTimes(1);
+    expect(delivery.retry).not.toHaveBeenCalled();
+    expect(await db.prepare("SELECT etag FROM file_index WHERE r2_key=?").bind(key).first("etag")).toBeNull();
+    expect(recordClientFolderFileChange).toHaveBeenCalledWith(expect.anything(), key, false);
     expect(await stagedCount(f.workspace)).toBe(0);
   });
 });

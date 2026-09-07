@@ -6,13 +6,21 @@ import { canonicalThumbnailSourceKey, enqueueThumbnailJob, handleRemovedPrebuilt
 import { deleteImageLocation, enqueueImageLocationJob } from "./image-locations";
 import { isMovedSourceMarker } from "@ltds/shared";
 import { recordClientFolderFileChange } from "./client-folder-grants";
-import { recordAuthenticatedDeliveryObjectChange } from "./authenticated-delivery-change-notifications";
+import { authenticatedDeliveryNotificationsEnabled, recordAuthenticatedDeliveryObjectChange } from "./authenticated-delivery-change-notifications";
 
 export interface R2Notification {
   action: string;
   object?: { key?: string; size?: number; eTag?: string };
   bucket?: string;
   eventTime?: string;
+}
+
+function notificationEventTime(eventTime: unknown, fallback: unknown): string | null {
+  const supplied = typeof eventTime === "string" ? Date.parse(eventTime) : Number.NaN;
+  if (Number.isFinite(supplied)) return new Date(supplied).toISOString();
+  if (!(fallback instanceof Date)) return null;
+  const fallbackTime = fallback.getTime();
+  return Number.isFinite(fallbackTime) ? fallback.toISOString() : null;
 }
 
 interface TusState { etag: string; stream_uid: string | null; stream_status: string | null; stream_upload_url: string | null; stream_upload_offset: number | null }
@@ -318,11 +326,17 @@ export async function consumeFileEvents(batch: MessageBatch<R2Notification>, env
           const indexedVersion = await env.DELIVERY_DB.prepare("SELECT etag FROM file_index WHERE r2_key=?")
             .bind(key).first<string>("etag");
           const notificationVersionCurrent = !event.object?.eTag || !indexedVersion || sameObjectVersion(event.object.eTag,indexedVersion);
+          const needsNotificationTime = notificationVersionCurrent && authenticatedDeliveryNotificationsEnabled(env);
+          // A current delete may mutate the shared index before its notification
+          // stage. Refuse it before either mutation if neither the R2 payload nor
+          // the immutable queue message supplies a usable event time.
+          const eventAt = needsNotificationTime ? notificationEventTime(event.eventTime, message.timestamp) : null;
+          if (needsNotificationTime && !eventAt) throw new Error("file-event-notification-timestamp-unavailable");
           const removal = await handleRemovedSource(env, key, event.object?.eTag);
           if (removal === "removed") {
             await recordClientFolderFileChange(env, key, false);
-            if (notificationVersionCurrent)
-              await recordAuthenticatedDeliveryObjectChange(env,key,false,indexedVersion || event.object?.eTag,event.eventTime || new Date().toISOString());
+            if (notificationVersionCurrent && eventAt)
+              await recordAuthenticatedDeliveryObjectChange(env,key,false,indexedVersion || event.object?.eTag,eventAt);
           }
         }
         else await env.DELIVERY_DB.prepare("DELETE FROM file_index WHERE r2_key=?").bind(key).run();
@@ -345,12 +359,14 @@ export async function consumeFileEvents(batch: MessageBatch<R2Notification>, env
         message.ack();continue;
       }
       const kind = mediaKind(key);
+      const eventAt = notificationEventTime(event.eventTime, head.uploaded) ?? notificationEventTime(undefined, message.timestamp);
+      if (!eventAt) throw new Error("file-event-notification-timestamp-unavailable");
       const existing = await env.DELIVERY_DB.prepare("SELECT etag,stream_uid,stream_status,stream_upload_url,stream_upload_offset FROM file_index WHERE r2_key=?").bind(key).first<TusState>();
       if (existing?.etag === head.httpEtag && existing.stream_uid && !existing.stream_upload_url) {
         const thumbnailJob = thumbnailJobForCreatedObject(event.action, key, kind, head, event.eventTime);
         if (thumbnailJob) await enqueueThumbnailJob(env, thumbnailJob);
         if (sameObjectVersion(event.object?.eTag,head.httpEtag))
-          await recordAuthenticatedDeliveryObjectChange(env,key,true,head.httpEtag,event.eventTime || head.uploaded.toISOString());
+          await recordAuthenticatedDeliveryObjectChange(env,key,true,head.httpEtag,eventAt);
         message.ack(); continue;
       }
       let stream = { uid: existing?.stream_uid || null, status: existing?.stream_status || null, error: null as string | null };
@@ -363,7 +379,7 @@ export async function consumeFileEvents(batch: MessageBatch<R2Notification>, env
       ]);
       await recordClientFolderFileChange(env, key, true);
       if (sameObjectVersion(event.object?.eTag,head.httpEtag))
-        await recordAuthenticatedDeliveryObjectChange(env,key,true,head.httpEtag,event.eventTime || head.uploaded.toISOString());
+        await recordAuthenticatedDeliveryObjectChange(env,key,true,head.httpEtag,eventAt);
       const thumbnailJob = thumbnailJobForCreatedObject(event.action, key, kind, head, event.eventTime);
       if (thumbnailJob) await enqueueThumbnailJob(env, thumbnailJob);
       else if (canonicalThumbnailSourceKey(key)) {
