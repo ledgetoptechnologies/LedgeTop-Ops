@@ -485,7 +485,8 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess }: { route
     <SourceBusinessParty key={revision} client={data.client} party={data.businessParty} canManage={data.canManageBusinessParties}
       contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} onRefresh={refresh} />
     <p className="client-hub-inventory-note">{data.businessProjects ? "Business projects are separate from the work shared with this client and their portal access." : "These sections show work shared with this client. Full business project history is separate."}</p>
-    <div className="dashboard-grid client-hub-detail-grid" key={revision}>
+    <div className="client-hub-detail-stack" key={revision}>
+      <div className="dashboard-grid client-hub-detail-grid client-hub-overview-band" aria-label="Client overview">
       <div id="client-business-contacts" className="client-hub-primary-panel">
       <Card title="Business contacts">
         <ClientCollection {...collectionProps} collection="businessContacts" label="Business contacts" initial={data.contacts.filter(contact => contact.record_type === "business_contact")} page={data.pages?.businessContacts}
@@ -504,6 +505,8 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess }: { route
           contextVersion={data.contextVersion} contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} /></div>}
       {data.businessProjects && <div id="client-business-projects" className="client-hub-primary-panel"><BusinessProjects {...collectionProps} initial={data.businessProjects} page={data.pages?.businessProjects}
         onWorkspaceRefresh={refresh} projectManagementAvailable={data.projectManagementAvailable} /></div>}
+      </div>
+      <div className="dashboard-grid client-hub-detail-grid client-hub-work-band" aria-label="Client work and delivery">
       <Card title="Shared projects" className="client-hub-primary-panel"><ClientCollection {...collectionProps} collection="projects" label="Shared projects" initial={data.projects} page={data.pages?.projects}
         emptyTitle="No project access" emptyDetail="Projects remain unavailable until explicitly granted.">
         {items => <div className="simple-rows">{items.map(project => <div key={collectionKey("projects", project)}><div><strong>{project.project_name}</strong><small>{project.client_name} · {project.can_request_service ? "Requests allowed" : "View access only"}</small></div><StatusPill tone={project.active ? "success" : "neutral"}>{project.active ? "active" : "inactive"}</StatusPill></div>)}</div>}
@@ -541,6 +544,8 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess }: { route
         root={{ sourceId: data.client.source_id, rootNamespace: "business", kind: data.client.kind, publicId: data.client.public_id }}
         contextVersion={data.contextVersion} contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} />}
       {data.client.workspace_id && data.client.source_id === "project-alpha:primary" && (invitationAccess?.enabled && invitationAccess.canManagePolicy ? <ClientInvitationPolicy key={`${data.client.source_id}:${data.client.workspace_id}:${revision}`} workspaceId={data.client.workspace_id} sourceId={data.client.source_id} contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} /> : invitationAccess?.error ? <Card title="Invitation policy"><p role="alert">{invitationAccess.error}</p></Card> : null)}
+      </div>
+      <div className="dashboard-grid client-hub-detail-grid client-hub-audit-band" aria-label="Client history and administration">
       {data.externalAccess && portalBasePath && data.client.source_id && data.client.root_namespace && <div className="client-hub-audit-panel">
         <ClientExternalAccessRoster initialPage={data.externalAccess} basePath={portalBasePath}
           contextVersion={data.contextVersion || data.externalAccess.contextVersion}
@@ -560,6 +565,7 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess }: { route
       {data.auditTimelineAvailable === true && data.client.source_id && data.client.root_namespace && data.contextVersion && <div id="client-audit" className="client-hub-audit-panel"><ClientAuditTimeline
         root={{ sourceId: data.client.source_id, rootNamespace: data.client.root_namespace, kind: data.client.kind, publicId: data.client.public_id }}
         contextVersion={data.contextVersion} contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} /></div>}
+      </div>
       <section id="client-portal-access" className="client-hub-danger-zone" aria-labelledby="client-hub-danger-heading">
         <header><p className="eyebrow">Access and security</p><h3 id="client-hub-danger-heading">Portal access controls</h3>
           <p>Review or restrict sign-in only when needed. Revocation controls stay at the end of the workspace to reduce accidental changes.</p></header>

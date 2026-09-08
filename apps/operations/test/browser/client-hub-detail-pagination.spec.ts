@@ -37,8 +37,13 @@ function detail(revision = 1) {
     client: { workspace_id: "workspace-one", public_id: "42", kind: "organization", route_kind: "organizations", source_id: sourceId,
       root_namespace: "business", pa_public_id: "a".repeat(32), detail_path: canonicalPath, display_name: revision === 1 ? "Acme Construction" : "Acme refreshed",
       status: "active", portal_status: "active", account_count: 1, project_count: 1, request_count: 1, contact_count: 2 },
-    contextVersion: `context-${revision}`, pages: Object.fromEntries(collections.map(collection => [collection, metadata(collection, true, 5)])),
+    contextVersion: `context-${revision}`, pages: {
+      ...Object.fromEntries(collections.map(collection => [collection, metadata(collection, true, 5)])),
+      businessProjects: { available: true, reason: null, nextCursor: null, hasMore: false, returned: 1, limit: 5 },
+    },
     contacts: [businessContact("business-one", "Business Bailey")],
+    businessProjects: [{ row_key: "business:project-one", id: "project-one", name: "Business project 1", status: "active",
+      manager_name: "Morgan Manager", start_date: "2026-08-01", end_date: "2026-09-30", created_at: "2026-07-15T12:00:00Z" }],
     accounts: [item("accounts", 1)], projects: [item("projects", 1)], requests: [item("requests", 1)],
     deliveryGrants: [item("deliveryGrants", 1)], authenticatedDeliveryGrants: [item("authenticatedDeliveryGrants", 1)], viewerGrants: [item("viewerGrants", 1)],
     portalIdentities: { items: [{ ...contact("portal-one", "Portal Alex"), binding_status: "linked", principalContextVersion: `principal-${revision}`,
@@ -205,7 +210,7 @@ test("detail pages each non-identity collection independently using the canonica
   await expect(page.getByRole("heading", { name: "Business contacts", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Portal logins", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Block portal sign-in" })).toHaveCount(1);
-  await expect(page.getByText("These sections show work shared with this client. Full business project history is separate.")).toBeVisible();
+  await expect(page.getByText("Business projects are separate from the work shared with this client and their portal access.")).toBeVisible();
   for (const collection of collections) {
     await loadButton(page, collection).click();
     await expect(region(page, collection).getByRole("status")).toHaveText("2 shown");
@@ -413,16 +418,16 @@ for (const width of [375, 640, 1280, 3440]) {
     await expect(page.getByRole("heading", { name: response.client.display_name })).toBeVisible();
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     const expectedColumns = width < 640 ? 1 : width < 1120 ? 2 : width < 1800 ? 3 : 4;
-    await expect.poll(() => page.locator(".client-hub-detail-grid").evaluate(element =>
+    const bands = page.locator(".client-hub-detail-grid");
+    await expect(bands).toHaveCount(3);
+    for (const band of await bands.all()) await expect.poll(() => band.evaluate(element =>
       getComputedStyle(element).gridTemplateColumns.trim().split(/\s+/).length)).toBe(expectedColumns);
     const danger = page.getByRole("region", { name: "Portal access controls", exact: true });
     await expect(danger).toBeVisible();
     await expect(danger.getByRole("heading", { name: "Portal logins", exact: true })).toBeVisible();
-    expect(await page.locator(".client-hub-detail-grid > *").last().getAttribute("class")).toContain("client-hub-danger-zone");
-    const dangerStyle = await danger.evaluate(element => {
-      const style = getComputedStyle(element); return { start: style.gridColumnStart, end: style.gridColumnEnd };
-    });
-    expect(dangerStyle).toEqual({ start: "1", end: "-1" });
+    expect(await page.locator(".client-hub-detail-stack > *").last().getAttribute("class")).toContain("client-hub-danger-zone");
+    const [stackBox, dangerBox] = await Promise.all([page.locator(".client-hub-detail-stack").boundingBox(), danger.boundingBox()]);
+    expect(dangerBox!.width).toBeCloseTo(stackBox!.width, 0);
     await page.goto(`${canonicalPath}#client-business-contacts`);
     await expect(page.getByRole("heading", { name: "Business contacts", exact: true })).toBeVisible();
     const anchorTop = await page.locator("#client-business-contacts").evaluate(element => element.getBoundingClientRect().top);
