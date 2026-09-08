@@ -7,8 +7,10 @@ import {
   listClientAccountRootActivation,
   reconcilePrimaryClientPortalWorkspaces,
 } from "../src/worker/client-account-root-activation";
+import { mutatePortalRootAccess, readPortalRootAccess } from "../src/worker/client-portal-root-access";
+import type { ClientHubCollectionContext } from "../src/worker/client-hub-collections";
 import type { Env, StaffPrincipal } from "../src/worker/types";
-import { authorizePortalWorkspaceCapability } from "../../client/src/worker/client-portal/workspace-v2";
+import { authorizePortalWorkspaceCapability, listPortalWorkspaces } from "../../client/src/worker/client-portal/workspace-v2";
 
 describe("legacy client account Project Alpha root activation", () => {
   let miniflare: Miniflare;
@@ -417,6 +419,80 @@ describe("post-0121 client account root activation on the real Client migration 
       skippedInactive: 0, skippedManualReview: 0, skippedAlreadyProjected: 0,
       conflicts: 0, truncated: false,
     });
+  }, 60_000);
+
+  it("keeps a revoked exact primary root closed across reconciliation replays without creating invitations", async () => {
+    await deliveryDb.batch([
+      deliveryDb.prepare(`INSERT INTO client_accounts
+        (id,display_name,status,project_alpha_client_id,project_alpha_source_id,updated_at)
+        VALUES ('revoked-root-account','Revoked root','active','pa-linked','project-alpha:primary','revoked-root-v1')`),
+      deliveryDb.prepare(`INSERT INTO client_identity_links(id,account_id,issuer,subject,email)
+        VALUES ('revoked-root-member','revoked-root-account','https://issuer.test','revoked-root-subject','member@example.test')`),
+      deliveryDb.prepare(`INSERT INTO client_account_members(account_id,identity_id,role)
+        VALUES ('revoked-root-account','revoked-root-member','member')`),
+    ]);
+    await opsDb.exec(`CREATE TABLE staff_role_assignments(staff_id TEXT,role_id TEXT,scope TEXT);
+      INSERT INTO staff_role_assignments VALUES('staff-admin','role-admin','global');`);
+    Object.assign(env, {
+      CLIENT_PORTAL_PRIMARY_WORKSPACE_RECONCILIATION_ENABLED: "true",
+      CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true",
+      CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED: "true",
+      CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: "true",
+      CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED: "true",
+      CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED: "true",
+    });
+    const rootContext = {
+      root: { source_id: "project-alpha:primary", root_namespace: "business", kind: "standalone_client",
+        public_id: "business-pa-linked", pa_public_id: "pa-linked" },
+      contextVersion: "revoked-primary-root-v1",
+      canonicalRoot: { sourceId: "project-alpha:primary", rootNamespace: "business",
+        kind: "standalone_client", publicId: "business-pa-linked" },
+      access: { directory: true, requests: true, delivery: true, viewer: false },
+    } as unknown as ClientHubCollectionContext;
+    const countsBefore = await Promise.all([
+      deliveryDb.prepare("SELECT COUNT(*) count FROM portal_v2_invitations").first<number>("count"),
+      deliveryDb.prepare("SELECT COUNT(*) count FROM portal_v2_invitation_email_outbox").first<number>("count"),
+      deliveryDb.prepare("SELECT COUNT(*) count FROM client_portal_notification_outbox").first<number>("count"),
+    ]);
+
+    await expect(mutatePortalRootAccess(env, principal, rootContext, {
+      action: "revoke", expectedContextVersion: "revoked-primary-root-v1", expectedVersion: 0,
+      reasonCode: "security_hold",
+    }, "revoked-root-policy-0001", async () => {})).resolves.toMatchObject({
+      outcome: "root_access_revoked", version: 1, replayed: false,
+    });
+    const first = await reconcilePrimaryClientPortalWorkspaces(env);
+    const second = await reconcilePrimaryClientPortalWorkspaces(env);
+    expect(first.projected).toBe(1);
+    expect(second.projected).toBe(0);
+    expect(second.skippedAlreadyProjected).toBeGreaterThanOrEqual(1);
+    expect(await readPortalRootAccess(env, principal, rootContext)).toMatchObject({ state: "revoked", version: 1 });
+    expect(await listPortalWorkspaces(env, {
+      issuer: "https://issuer.test", subject: "revoked-root-subject", email: "member@example.test",
+    })).toEqual([]);
+    expect(await Promise.all([
+      deliveryDb.prepare("SELECT COUNT(*) count FROM portal_v2_invitations").first<number>("count"),
+      deliveryDb.prepare("SELECT COUNT(*) count FROM portal_v2_invitation_email_outbox").first<number>("count"),
+      deliveryDb.prepare("SELECT COUNT(*) count FROM client_portal_notification_outbox").first<number>("count"),
+    ])).toEqual(countsBefore);
+    expect(await deliveryDb.prepare(`SELECT COUNT(*) count FROM client_account_members
+      WHERE account_id='revoked-root-account'`).first<number>("count")).toBe(1);
+
+    await expect(mutatePortalRootAccess(env, principal, rootContext, {
+      action: "restore", expectedContextVersion: "revoked-primary-root-v1", expectedVersion: 1,
+      reasonCode: "operator_restore",
+    }, "restored-root-policy-0001", async () => {})).resolves.toMatchObject({
+      outcome: "root_access_restored", version: 2, replayed: false,
+    });
+    await expect(listPortalWorkspaces(env, {
+      issuer: "https://issuer.test", subject: "revoked-root-subject", email: "member@example.test",
+    })).resolves.toEqual([{
+      id: "workspace-revoked-root-account", rootType: "standalone_client", rootPublicId: "pa-linked",
+      displayName: "Revoked root",
+    }]);
+    await expect(listPortalWorkspaces(env, {
+      issuer: "https://issuer.test", subject: "not-a-member", email: "not-a-member@example.test",
+    })).resolves.toEqual([]);
   }, 60_000);
 
   it("creates, repairs, replays, rejects conflicts, rolls back, and remains race-safe", async () => {
