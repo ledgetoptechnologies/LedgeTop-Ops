@@ -1954,6 +1954,13 @@
 .portal-viewer-share-created strong { grid-column: 1 / -1; }
 .portal-viewer-share-created input { width: 100%; min-width: 0; }
 @media (max-width: 360px) {
+  .portal-workspace-tabs {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: .25rem .75rem;
+    overflow-x: visible;
+  }
+  .portal-workspace-tabs button { width: 100%; min-width: 0; }
   .portal-viewer-shares li { grid-template-columns: minmax(0, 1fr); align-items: stretch; }
   .portal-viewer-shares li button { width: 100%; }
   .portal-viewer-share-created { grid-template-columns: minmax(0, 1fr); }
