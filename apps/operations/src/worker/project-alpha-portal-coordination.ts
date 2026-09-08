@@ -223,11 +223,21 @@ export async function configureConnectorPortal(env: Env, sourceId: string, expec
     ops(env).prepare("INSERT OR IGNORE INTO pa_connector_portal_sources(source_id,created_by) VALUES(?,?)").bind(sourceId, actorId),
   ]);
   const revision = await ops(env).prepare(`SELECT credential_ref credentialRef,access_issuer accessIssuer,
-    access_audience accessAudience,access_subject accessSubject FROM pa_connector_revisions WHERE source_id=? AND revision=?`)
-    .bind(sourceId, connector.activeRevision).first<{ credentialRef: string; accessIssuer: string; accessAudience: string; accessSubject: string }>();
+    access_audience accessAudience,access_subject accessSubject,current_key_id currentKeyId,
+    current_key_fingerprint currentKeyFingerprint,previous_key_id previousKeyId,
+    previous_key_fingerprint previousKeyFingerprint FROM pa_connector_revisions WHERE source_id=? AND revision=?`)
+    .bind(sourceId, connector.activeRevision).first<{ credentialRef: string; accessIssuer: string; accessAudience: string; accessSubject: string;
+      currentKeyId: string; currentKeyFingerprint: string; previousKeyId: string | null; previousKeyFingerprint: string | null }>();
   if (!revision) return unavailable("The current connection authentication revision is unavailable");
+  if ((revision.previousKeyId === null) !== (revision.previousKeyFingerprint === null))
+    return unavailable("The current connection event commitment is unavailable");
   await assertCurrent(env, operation);
-  const result = await provisionPortalSourceAuthority(env, trusted, revision, expectedPortalVersion, actorId);
+  const result = await provisionPortalSourceAuthority(env, trusted, {
+    credentialRef: revision.credentialRef, accessIssuer: revision.accessIssuer,
+    accessAudience: revision.accessAudience, accessSubject: revision.accessSubject,
+    eventCurrent: { keyId: revision.currentKeyId, fingerprint: revision.currentKeyFingerprint },
+    eventPrevious: revision.previousKeyId === null ? null : { keyId: revision.previousKeyId, fingerprint: revision.previousKeyFingerprint! },
+  }, expectedPortalVersion, actorId);
   await finish(env, operation);
   return result;
 }
@@ -242,7 +252,32 @@ export async function changeConnectorPortal(env: Env, sourceId: string, expected
     const primary = await source(env, PRIMARY_ALPHA_SOURCE_ID);
     if (connector.state !== "active" || primary.state !== "active")
       return conflict("Activate the primary and this connection before enabling its client portal");
-    if (previous.connectorRevision !== connector.activeRevision) throw new PortalSourceAuthorityError("conflict");
+    if (previous.connectorRevision !== connector.activeRevision || previous.connectorVersion !== connector.version)
+      throw new PortalSourceAuthorityError("conflict");
+    // Private Ops Sync forwarding has no secondary HMAC secret in Operations
+    // or Client.  It instead relies on the immutable event-key commitment that
+    // was captured from this exact connector revision during configuration.
+    // Re-read both records before taking the coordination lease so a key
+    // rotation cannot reactivate a stale authority.
+    const connectorKeys = await ops(env).prepare(`SELECT current_key_id currentKeyId,current_key_fingerprint currentKeyFingerprint,
+      previous_key_id previousKeyId,previous_key_fingerprint previousKeyFingerprint FROM pa_connector_revisions
+      WHERE source_id=? AND revision=?`).bind(sourceId, connector.activeRevision).first<{
+        currentKeyId: string; currentKeyFingerprint: string; previousKeyId: string | null; previousKeyFingerprint: string | null;
+      }>();
+    const authorityKeys = await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT current_key_id currentKeyId,
+      current_key_fingerprint currentKeyFingerprint,previous_key_id previousKeyId,previous_key_fingerprint previousKeyFingerprint
+      FROM pa_portal_source_authority_revisions WHERE source_id=? AND revision=?`).bind(sourceId, previous.activeRevision).first<{
+        currentKeyId: string; currentKeyFingerprint: string; previousKeyId: string | null; previousKeyFingerprint: string | null;
+      }>();
+    if (!connectorKeys || !authorityKeys
+      || (connectorKeys.previousKeyId === null) !== (connectorKeys.previousKeyFingerprint === null)
+      || (authorityKeys.previousKeyId === null) !== (authorityKeys.previousKeyFingerprint === null))
+      throw new PortalSourceAuthorityError("unavailable");
+    if (connectorKeys.currentKeyId !== authorityKeys.currentKeyId
+      || connectorKeys.currentKeyFingerprint !== authorityKeys.currentKeyFingerprint
+      || connectorKeys.previousKeyId !== authorityKeys.previousKeyId
+      || connectorKeys.previousKeyFingerprint !== authorityKeys.previousKeyFingerprint)
+      throw new PortalSourceAuthorityError("conflict");
   }
   // Obvious stale/invalid requests above perform no write and need no recovery.
   // A later race still fails the Delivery CAS and retains the durable barrier.

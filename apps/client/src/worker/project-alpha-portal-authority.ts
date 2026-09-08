@@ -17,6 +17,10 @@ export interface PortalAuthorityConnectorIdentity {
 }
 export interface PortalAuthorityRevisionInput {
   credentialRef: string; accessIssuer: string; accessAudience: string; accessSubject: string;
+  /** Public commitment to the existing Ops Sync event verifier.  The private
+   * service-binding path needs this immutable identity, never its key value. */
+  eventCurrent?: { keyId: string; fingerprint: string };
+  eventPrevious?: { keyId: string; fingerprint: string } | null;
 }
 export interface PortalSourceAuthoritySummary {
   sourceId: string; producerBindingId: string; applicationKey: string;
@@ -41,7 +45,10 @@ const invalid = (): never => { throw new PortalSourceAuthorityError("invalid"); 
 const scalar = (max: number) => z.string().min(1).max(max).regex(/^[^\u0000-\u001f\u007f]+$/);
 const credentialRef = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/);
 const signingKey = z.object({ keyId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/), value: scalar(8192).min(32) }).strict();
-const revisionInput = z.object({ credentialRef, accessIssuer: scalar(2048), accessAudience: scalar(512), accessSubject: scalar(512) }).strict();
+const keyCommitment = z.object({ keyId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/),
+  fingerprint: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
+const revisionInput = z.object({ credentialRef, accessIssuer: scalar(2048), accessAudience: scalar(512), accessSubject: scalar(512),
+  eventCurrent: keyCommitment.optional(), eventPrevious: keyCommitment.nullable().optional() }).strict();
 const envelopeSchema = z.object({ version: z.literal(1), sets: z.record(credentialRef, z.unknown()) }).strict();
 interface Row {
   source_id: string; producer_binding_id: string; snapshot_origin: string; snapshot_base_path: string; application_key: string;
@@ -95,6 +102,19 @@ async function configuredKeys(env: PortalSourceAuthorityEnvironment, ref: string
     return { current: { ...current, fingerprint: await hash(current.value) },
       previous: previous ? { ...previous, fingerprint: await hash(previous.value) } : null };
   } catch { throw new PortalSourceAuthorityError("credentials_unavailable"); }
+}
+type PinnedKey = { keyId: string; fingerprint: string };
+async function provisionKeys(env: PortalSourceAuthorityEnvironment, input: z.infer<typeof revisionInput>): Promise<{ current: PinnedKey; previous: PinnedKey | null }> {
+  if (input.eventCurrent) {
+    const previous = input.eventPrevious ?? null;
+    if (previous && (previous.keyId === input.eventCurrent.keyId || previous.fingerprint === input.eventCurrent.fingerprint)) return invalid();
+    return { current: input.eventCurrent, previous };
+  }
+  // Compatibility only for pre-Ops-Sync direct HTTP deployments. New
+  // deployment-owned connectors always pin their event commitment above.
+  const legacy = await configuredKeys(env, input.credentialRef);
+  return { current: { keyId: legacy.current.keyId, fingerprint: legacy.current.fingerprint },
+    previous: legacy.previous ? { keyId: legacy.previous.keyId, fingerprint: legacy.previous.fingerprint } : null };
 }
 function summary(row: Row): PortalSourceAuthoritySummary {
   return { sourceId: row.source_id, producerBindingId: row.producer_binding_id, applicationKey: row.application_key,
@@ -239,7 +259,7 @@ export async function provisionPortalSourceAuthority(env: PortalSourceAuthorityE
   const parsed = revisionInput.safeParse(inputValue); if (!parsed.success) return invalid();
   const input = parsed.data; exactOrigin(input.accessIssuer);
   if (connector.state === "retired" || (expectedVersion !== null && (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1))) return invalid();
-  const keys = await configuredKeys(env, input.credentialRef);
+  const keys = await provisionKeys(env, input);
   const db = database(env), old = await readRow(db, connector.sourceId);
   if ((old?.version ?? null) !== expectedVersion || (old && (!sameIdentity(old, connector) || old.state === "retired")))
     throw new PortalSourceAuthorityError("conflict");
@@ -282,7 +302,9 @@ export async function setPortalSourceAuthorityState(env: PortalSourceAuthorityEn
   if (state === "active") {
     if (connector.state !== "active") throw new PortalSourceAuthorityError("unavailable");
     if (old.connector_revision !== connector.revision) throw new PortalSourceAuthorityError("conflict");
-    await resolveConfiguredRevision(env, db, old);
+    const revision = await db.prepare("SELECT 1 FROM pa_portal_source_authority_revisions WHERE source_id=? AND revision=?")
+      .bind(old.source_id, old.active_revision).first();
+    if (!revision) throw new PortalSourceAuthorityError("unavailable");
   }
   const version = old.version + 1;
   try { await db.batch([

@@ -12,7 +12,12 @@ import {
   ensureDeploymentConfiguredProjectAlphaConnectors, listProjectAlphaConnectors, ProjectAlphaConnectorError,
 } from "./project-alpha-connectors";
 import { PortalSourceAuthorityError } from "../../../client/src/worker/project-alpha-portal-authority";
-import { getConnectorPortalStatus } from "./project-alpha-portal-coordination";
+import {
+  changeConnectorPortal,
+  configureConnectorPortal,
+  getConnectorPortalStatus,
+  recoverConnectorPortalCoordination,
+} from "./project-alpha-portal-coordination";
 import type { Env, StaffPrincipal } from "./types";
 import {
   listProjectAlphaProjectManagementRoutes, ProjectAlphaProjectManagementError,
@@ -35,7 +40,7 @@ export function portalAuthorityErrorResponse(error: PortalSourceAuthorityError):
   return {
     status: error.code === "invalid" ? 400 : error.code === "conflict" || error.code === "changed" ? 409 : 503,
     error: error.code === "credentials_unavailable"
-      ? "Deploy this connection's portal signing credentials to Operations and Client before configuring client access"
+      ? "This connection's deployed event-key commitment is unavailable. Refresh its deployment configuration before configuring client access"
       : error.code === "invalid" ? "Portal connection request is invalid"
       : error.code === "conflict" || error.code === "changed" ? "Portal connection changed. Refresh its status before continuing"
       : "Portal connection is unavailable. Refresh status and recover any unfinished connection update",
@@ -125,6 +130,34 @@ export function registerProjectAlphaConnectorAdminRoutes(app: App): void {
     const projectManagement = await listProjectAlphaProjectManagementRoutes(c.env);
     return c.json({ connectors, health: safeHealth, recovery, portal, projectManagement,
       legacyPrimary: !registeredPrimary || registeredPrimary.state === "pending" });
+  });
+  // This controls the portal purpose of an already deployment-owned source.
+  // It deliberately accepts no source identity, destination, credential, or
+  // signing material from the browser; those stay in the connector manifest.
+  app.post(`${ROOT}/:sourceId/portal`, async c => {
+    await ensureDeploymentConfiguredProjectAlphaConnectors(c.env);
+    const sourceId = c.req.param("sourceId");
+    if (!(await listProjectAlphaConnectors(c.env)).some(row => row.sourceId === sourceId))
+      throw new HTTPException(404, { message: "Project Alpha source is not configured for this deployment" });
+    const value = await json(c.req.raw, z.object({
+      expectedVersion: z.number().int().positive(),
+      expectedPortalVersion: z.number().int().positive().nullable(),
+      action: z.enum(["configure", "activate", "suspend"]),
+    }).strict());
+    if (value.action !== "configure" && value.expectedPortalVersion === null)
+      throw new HTTPException(400, { message: "Configure this connection's client portal before changing its state" });
+    const authority = value.action === "configure"
+      ? await configureConnectorPortal(c.env, sourceId, value.expectedVersion, value.expectedPortalVersion, c.get("principal").id)
+      : await changeConnectorPortal(c.env, sourceId, value.expectedVersion, value.expectedPortalVersion!,
+        value.action === "activate" ? "active" : "suspended", c.get("principal").id);
+    return c.json({ authority });
+  });
+  // Recovery is the bounded counterpart to portal-purpose coordination. It
+  // never registers a source or retries a stale activation.
+  app.post(`${ROOT}/recover-portal-update`, async c => {
+    const value = await json(c.req.raw, z.object({ expectedVersion: z.number().int().positive() }).strict());
+    await recoverConnectorPortalCoordination(c.env, value.expectedVersion, c.get("principal").id);
+    return c.json({ recovered: true });
   });
   app.post(`${ROOT}/:sourceId/sync`, async c => {
     await json(c.req.raw, z.object({}).strict());

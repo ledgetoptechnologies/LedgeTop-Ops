@@ -12,8 +12,9 @@ type Connector = {
 type Health = { sourceId: string; status: string; lastAttemptAt: string | null; lastSuccessAt: string | null; lastErrorCode: string | null };
 type Recovery = { sourceId: string; lastAttemptAt: string | null; lastSuccessAt: string | null; nextAttemptAt: string | null;
   status: "never" | "running" | "success" | "failed" | "deferred"; errorCode: string | null; failureCount: number };
-type PortalStatus = { available: boolean; authorities: Array<{ sourceId: string; state: Connector["state"]; connectorRevision: number }>;
-  recovery: { sourceId: string; action: string; startedAt: string } | null };
+type PortalAuthority = { sourceId: string; state: Connector["state"]; version: number; connectorRevision: number };
+type PortalStatus = { available: boolean; authorities: PortalAuthority[];
+  recovery: { version: number; sourceId: string; action: string; startedAt: string } | null };
 type ProjectManagementRoute = { sourceId: string; version: number; revision: number; enabled: boolean; reviewedUrlTemplate: string | null };
 type Directory = { connectors: Connector[]; health: Health[]; legacyPrimary: boolean; recovery?: Recovery[] | null;
   portal?: PortalStatus; projectManagement?: ProjectManagementRoute[] };
@@ -95,6 +96,30 @@ function ProjectManagement({ connector, route, disabled, onRefresh }: { connecto
     </form>}
   </div>;
 }
+function PortalPurpose({ connector, status, primaryActive, disabled, onAction }: {
+  connector: Connector; status?: PortalStatus; primaryActive: boolean; disabled: boolean;
+  onAction: (action: "configure" | "activate" | "suspend") => void;
+}) {
+  const authority = status?.authorities.find(row => row.sourceId === connector.sourceId);
+  const current = authority?.connectorRevision === connector.activeRevision;
+  const canActivate = connector.state === "active" && primaryActive && current;
+  if (connector.profile !== "business_data") return null;
+  return <div className="alpha-portal-purpose" role="group" aria-label="Client portal connection">
+    <p><strong>Client portal</strong> · {!status?.available ? "Requires coordinated database upgrade" : authority?.state ?? "Not configured"}</p>
+    {status?.available && <>
+      <p>Uses this connection's deployed event-key commitment. It does not register a source or grant client access by itself.</p>
+      {authority && !current && <p className="notice">Refresh portal configuration after the deployed connection revision changes.</p>}
+      {(!primaryActive || connector.state !== "active") && <p>Both this connection and the primary must be active before portal activation.</p>}
+      <div className="alpha-connection-actions">
+        <button type="button" disabled={disabled || connector.state === "retired" || authority?.state === "retired"}
+          onClick={() => onAction("configure")}>{authority ? "Refresh portal configuration" : "Configure client portal"}</button>
+        {authority && authority.state !== "retired" && <button type="button"
+          disabled={disabled || (authority.state !== "active" && !canActivate)}
+          onClick={() => onAction(authority.state === "active" ? "suspend" : "activate")}>{authority.state === "active" ? "Pause client portal" : "Activate client portal"}</button>}
+      </div>
+    </>}
+  </div>;
+}
 
 /** The connector registry is deployment-owned. This is a status/sync surface,
  * never a browser form for source authority or credentials. */
@@ -120,6 +145,35 @@ export function ProjectAlphaConnections() {
     } catch (caught) { if (live.current) setError(caught instanceof Error ? caught.message : "Synchronization could not be completed."); }
     finally { if (live.current) setSyncing(null); }
   };
+  const portalAction = async (connector: Connector, action: "configure" | "activate" | "suspend") => {
+    if (syncing) return;
+    const authority = data?.portal?.authorities.find(row => row.sourceId === connector.sourceId);
+    const warning = action === "configure"
+      ? "Stage this connection's deployed event-key commitment? This does not register the source or grant client access."
+      : action === "activate"
+        ? "Activate this connection's client portal for independently authorized workspaces?"
+        : "Pause this connection's client portal? Existing records and grants are retained.";
+    if (!window.confirm(warning)) return;
+    setSyncing(connector.sourceId); setError(""); setMessage("");
+    try {
+      await api(`${ENDPOINT}/${encodeURIComponent(connector.sourceId)}/portal`, { method: "POST", body: JSON.stringify({
+        expectedVersion: connector.version, expectedPortalVersion: authority?.version ?? null, action,
+      }) });
+      if (live.current) { setMessage(action === "configure" ? "Client portal configuration staged." : action === "activate" ? "Client portal activated." : "Client portal paused."); setRevision(value => value + 1); }
+    } catch (caught) { if (live.current) setError(caught instanceof Error ? caught.message : "Client portal could not be updated."); }
+    finally { if (live.current) setSyncing(null); }
+  };
+  const recoverPortalUpdate = async () => {
+    const recovery = data?.portal?.recovery;
+    if (syncing || !recovery) return;
+    if (!window.confirm("Cancel the unfinished portal configuration update and leave affected client portals paused? You can review and activate each connection afterward.")) return;
+    setSyncing("portal-recovery"); setError(""); setMessage("");
+    try {
+      await api(`${ENDPOINT}/recover-portal-update`, { method: "POST", body: JSON.stringify({ expectedVersion: recovery.version }) });
+      if (live.current) { setMessage("Unfinished portal update recovered. Review each portal before activating it."); setRevision(value => value + 1); }
+    } catch (caught) { if (live.current) setError(caught instanceof Error ? caught.message : "Portal recovery could not be completed."); }
+    finally { if (live.current) setSyncing(null); }
+  };
   const legacy: Connector = { sourceId: PRIMARY, displayName: "Primary connection", producerBindingId: "legacy", snapshotOrigin: "", snapshotBasePath: "", applicationKey: "", profile: "primary_legacy", state: "active", readVisible: true, activeRevision: 0, version: 0 };
   return <Card title="Project Alpha connections"><div className="alpha-connections">
     <p>Connection identities, destinations, and credentials are managed as deployment configuration. Operations can show status and request a sync, but cannot register, alter, or retire a source from the browser.</p>
@@ -127,16 +181,18 @@ export function ProjectAlphaConnections() {
     <button type="button" className="button-ghost button-small" disabled={loading || Boolean(syncing)} onClick={refresh}>Refresh connection status</button>
     {data?.legacyPrimary && <section className="alpha-connection" aria-label="Primary connection"><h3>Primary connection</h3><p><strong>Business record sync</strong> · Using the original deployment configuration. Add it to the deployment source manifest to migrate it to the same exact-source registry as additional Project Alpha instances.</p><SyncHealth health={data.health.find(row => row.sourceId === PRIMARY)} /><button type="button" disabled={loading || Boolean(syncing)} onClick={() => void sync(legacy)}>{syncing === PRIMARY ? "Synchronizing…" : "Sync primary now"}</button></section>}
     {data?.connectors.map(connector => {
-      const authority = data.portal?.authorities.find(row => row.sourceId === connector.sourceId), management = data.projectManagement?.find(row => row.sourceId === connector.sourceId);
+      const management = data.projectManagement?.find(row => row.sourceId === connector.sourceId);
       return <section key={connector.sourceId} className="alpha-connection" aria-label={`${connector.displayName} connection`}><h3>{connector.displayName}</h3>
         <p><strong>{connector.state}</strong> · {connector.profile === "primary_legacy" ? "Primary staff authority" : "Business data only"} · {connector.readVisible ? "Business records visible" : "Business records hidden"}</p>
         <SyncHealth health={data.health.find(row => row.sourceId === connector.sourceId)} /><RecoveryStatus connector={connector} recovery={data.recovery?.find(row => row.sourceId === connector.sourceId)} />
-        <p><strong>Client portal</strong> · {!data.portal?.available ? "Requires coordinated database upgrade" : authority?.state ?? "Not configured"}{authority && authority.connectorRevision !== connector.activeRevision && <> · deployment configuration revision needs coordinated portal review</>}</p>
+        <PortalPurpose connector={connector} status={data.portal}
+          primaryActive={data.legacyPrimary || data.connectors.some(row => row.sourceId === PRIMARY && row.state === "active")}
+          disabled={loading || Boolean(syncing)} onAction={action => void portalAction(connector, action)} />
         <ProjectManagement connector={connector} route={management} disabled={loading || Boolean(syncing)} onRefresh={() => setRevision(value => value + 1)} />
         <button type="button" disabled={loading || Boolean(syncing) || connector.state !== "active"} onClick={() => void sync(connector)}>{syncing === connector.sourceId ? "Synchronizing…" : "Sync now"}</button>
         <details><summary>Connection details</summary><dl><dt>Source</dt><dd>{connector.sourceId}</dd><dt>Producer</dt><dd>{connector.producerBindingId}</dd><dt>Destination</dt><dd>{connector.snapshotOrigin}{connector.snapshotBasePath}</dd><dt>Application</dt><dd>{connector.applicationKey}</dd><dt>Revision</dt><dd>{connector.activeRevision}</dd></dl><p>These values are read-only here. Change the reviewed deployment source manifest and deploy Operations; do not paste credentials into this page.</p></details>
       </section>;
     })}
-    {data?.portal?.recovery && <p className="notice" role="status">A prior portal coordination operation is unfinished. It remains read-only here; recover it through the reviewed deployment runbook before changing any portal-enabled source.</p>}
+    {data?.portal?.recovery && <div className="notice" role="status"><p>A prior portal coordination operation is unfinished. Recovery cancels that uncertain update and pauses affected client portals; it never registers a source or retries activation.</p><button type="button" disabled={loading || Boolean(syncing)} onClick={() => void recoverPortalUpdate()}>Recover unfinished portal update</button></div>}
   </div></Card>;
 }

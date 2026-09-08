@@ -19,7 +19,8 @@ const revision = (ref: string) => ({ credentialRef: ref, snapshotBasePath: "/", 
   accessAudience: "shared-producer-audience", accessSubject: "verified-producer-subject" });
 let runtime: Miniflare, db: D1Database, delivery: D1Database, env: ConnectorPortalEnvironment, sequence = 1;
 const primaryCredential = credential(1);
-const credentials: Record<string, ReturnType<typeof credential>> = { primary: primaryCredential };
+type ConnectorCredentialSet = Omit<ReturnType<typeof credential>, "portalCurrent"> & { portalCurrent?: ReturnType<typeof credential>["portalCurrent"] };
+const credentials: Record<string, ConnectorCredentialSet> = { primary: primaryCredential };
 function setCredentials() { env.PROJECT_ALPHA_CONNECTOR_CREDENTIALS = JSON.stringify({ version: 1, sets: credentials }); }
 async function connector(id: string) { return (await connectors.listProjectAlphaConnectors(env)).find(row => row.sourceId === id)!; }
 async function configured() {
@@ -91,6 +92,23 @@ describe("coordinated client-portal purposes on existing Alpha connections", { t
     expect(JSON.stringify(status)).not.toContain("signing-secret"); expect(JSON.stringify(status)).not.toContain("credential_ref");
     expect((await authority.readPortalSourceAuthorityProof(delivery, fixture.id))).toBeNull();
     expect(await db.prepare("SELECT count(*) n FROM pa_connector_portal_sources WHERE source_id=?").bind(fixture.id).first("n")).toBe(1);
+  });
+
+  it("activates a private Ops Sync authority from the exact event commitment without portal credentials", async () => {
+    const id = `project-alpha:commitment-${++sequence}`, ref = `commitment-${sequence}`;
+    credentials[ref] = { snapshotApiKey: `snapshot-key-${sequence}`,
+      eventCurrent: { keyId: `event-${sequence}`, algorithm: "ed25519", value: publicKey(sequence) } };
+    setCredentials();
+    let current = await connectors.registerProjectAlphaConnector(env, { sourceId: id, producerBindingId: `producer-${sequence}`,
+      snapshotOrigin: `https://producer-${sequence}.example.test`, applicationKey: "ltds_ops", profile: "business_data",
+      displayName: `Committed source ${sequence}`, revision: revision(ref) }, actor);
+    current = await setCoordinatedProjectAlphaConnectorState(env, id, { expectedVersion: current.version, state: "active" }, actor);
+    const privateForwardingOnly = { ...env };
+    delete privateForwardingOnly.PROJECT_ALPHA_CONNECTOR_CREDENTIALS;
+    const staged = await configureConnectorPortal(privateForwardingOnly, id, current.version, null, actor);
+    expect((await changeConnectorPortal(privateForwardingOnly, id, current.version, staged.version, "active", actor)).state).toBe("active");
+    await expect(authority.resolvePortalSourceAuthority(privateForwardingOnly, id)).rejects.toMatchObject({ code: "credentials_unavailable" });
+    expect(await authority.readPortalSourceAuthorityProof(delivery, id)).toMatchObject({ sourceId: id });
   });
 
   it("rejects returning an active primary to pending without mutating its mirror or coordination state", async () => {

@@ -123,6 +123,19 @@ describe("registered secondary portal authority and authenticated projection", {
     expect(await readPortalSourceAuthorityProof(db, f.connector.sourceId)).toBeNull();
     expect(await db.prepare("SELECT count(*) n FROM pa_portal_workspace_sources WHERE projection_source_id=?").bind(f.connector.sourceId).first("n")).toBe(0);
   });
+  it("pins the Ops Sync event commitment without a portal secret, while direct HTTP remains unavailable", async () => {
+    const f = candidate();
+    const privateForwardingOnly = { ...f.env };
+    delete privateForwardingOnly.PROJECT_ALPHA_CONNECTOR_CREDENTIALS;
+    const pinned: PortalAuthorityRevisionInput = { ...revision, eventCurrent: { keyId: f.keyId, fingerprint: await hash(f.secret) } };
+    const pending = await provisionPortalSourceAuthority(privateForwardingOnly, f.connector, pinned, null, "admin");
+    const active = await setPortalSourceAuthorityState(privateForwardingOnly, f.connector, pending.version, "active", "admin");
+    expect(await readPortalSourceAuthorityProof(db, f.connector.sourceId)).toMatchObject({ sourceId: f.connector.sourceId, version: active.version });
+    // Only the private service-binding ingress consumes this authority. The
+    // legacy direct HTTP path still needs the actual configured HMAC key.
+    await expect(resolvePortalSourceAuthority(privateForwardingOnly, f.connector.sourceId)).rejects.toMatchObject({ code: "credentials_unavailable" });
+    expect((await receive({ ...f, env: privateForwardingOnly })).status).toBe(503);
+  });
   it("projects two real authenticated same-ID producers independently and replays once", async () => {
     const a = candidate(), b = candidate(); await configure(a); await configure(b);
     for (const f of [a, b]) {

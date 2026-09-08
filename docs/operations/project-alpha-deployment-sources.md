@@ -3,9 +3,12 @@
 Operations has one Project Alpha inbound destination: the existing Ops Sync
 endpoint. Source authority is deployment configuration, not a browser form.
 The Administration page is intentionally limited to connection status, manual
-snapshot synchronization, and the separately reviewed project-creation link.
-It cannot register a source, paste a credential, rotate a key, suspend a
-source, or change portal authority.
+snapshot synchronization, a separately reviewed project-creation link, and a
+portal-purpose action for an already deployment-owned business-data source.
+It cannot register a source, paste a credential, rotate a key, or suspend a
+source. The portal-purpose action can only configure, activate, or pause the
+Client-side authority bound to that source's current deployed revision; it
+does not alter the source connection itself.
 
 ## Required deployment bindings
 
@@ -107,6 +110,25 @@ commitment written by Operations before accepting an event. If
 every source. Installations that deliberately leave that guard false retain the
 original scalar/registry compatibility path while upgrading. An invalid
 manifest or identity mismatch never falls back to another source.
+
+## Portal-purpose activation
+
+After the paired Operations and Client migrations are installed, an
+`integrations.manage` administrator can configure the portal purpose for a
+deployment-owned `business_data` source from its status card. Configuration
+copies only the current and optional previous **event key commitments** from
+the exact durable connector revision into Client authority metadata. It never
+reads, stores, or asks the browser for an event key or a portal HMAC secret.
+Activation rechecks that the authority's connector revision, connector
+version, and both key ID/fingerprint commitments still exactly match the
+current Operations revision. A rotation therefore requires a fresh configure
+action before the authority can be activated.
+
+This authority is consumed solely by Ops Sync's private service-binding
+projection ingress. It does not enable the legacy direct-HTTP portal path:
+that compatibility path continues to require its configured HMAC secret and
+fails closed when the secret is absent. This keeps the one existing Project
+Alpha-to-Ops Sync endpoint as the only external connection.
 
 ## Safe rollout
 

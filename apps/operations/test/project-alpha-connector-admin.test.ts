@@ -14,6 +14,7 @@ import type { Env, StaffPrincipal } from "../src/worker/types";
 
 const ROOT = "/api/admin/integrations/project-alpha/connectors";
 const primary = "project-alpha:primary";
+const secondary = "project-alpha:ltt";
 const principal: StaffPrincipal = { id: "registry-route-admin", email: "registry-admin@example.test", displayName: "Registry administrator", accessSubject: "verified-admin-subject", projectAlphaUserId: null };
 const executionCtx = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
 const publicKey = (seed: number) => btoa(String.fromCharCode(...new Uint8Array(32).fill(seed))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
@@ -54,6 +55,8 @@ describe("Project Alpha deployment-owned connector administration boundary", { t
     await registerProjectAlphaConnector(env, { sourceId: primary, producerBindingId: "primary-producer", snapshotOrigin: "https://primary.example.test",
       applicationKey: "ltds_ops", profile: "primary_legacy", displayName: "Primary", revision }, principal.id);
     await db.prepare("UPDATE pa_connectors SET state='active',version=version+1 WHERE source_id=?").bind(primary).run();
+    await registerProjectAlphaConnector(env, { sourceId: secondary, producerBindingId: "ltt-producer", snapshotOrigin: "https://ltt.example.test",
+      applicationKey: "ltds_ops", profile: "business_data", displayName: "LTT", revision: { ...revision, credentialRef: "primary" } }, principal.id);
   });
   beforeEach(async () => {
     mocks.authenticateStaff.mockReset().mockResolvedValue(principal);
@@ -102,22 +105,44 @@ describe("Project Alpha deployment-owned connector administration boundary", { t
     expect((await send(ROOT)).status).toBe(403);
   });
 
-  it("honors a global deny for status, sync, and reviewed project routing", async () => {
+  it("honors a global deny for status, sync, reviewed project routing, and portal-purpose actions", async () => {
     await db.prepare("INSERT INTO staff_permission_overrides(id,staff_id,permission_key,effect,scope,scope_key,created_by) VALUES('registry-deny',?,'integrations.manage','deny','global','global',?)").bind(principal.id, principal.id).run();
     expect((await send(ROOT)).status).toBe(403);
     expect((await send(`${ROOT}/${encodeURIComponent(primary)}/sync`, "POST", {})).status).toBe(403);
     expect((await send(`${ROOT}/${encodeURIComponent(primary)}/project-management`, "PUT", {})).status).toBe(403);
+    expect((await send(`${ROOT}/${encodeURIComponent(secondary)}/portal`, "POST", {
+      expectedVersion: 1, expectedPortalVersion: null, action: "configure",
+    })).status).toBe(403);
+    expect((await send(`${ROOT}/recover-portal-update`, "POST", { expectedVersion: 1 })).status).toBe(403);
   });
 
-  it("does not expose browser source-registration, revision, state, portal, or recovery mutations", async () => {
+  it("does not expose browser source-registration, revision, or state mutations", async () => {
     const before = await counts();
     const removed: Array<[string, string, unknown]> = [
       [ROOT, "POST", {}], [`${ROOT}/primary-preflight`, "POST", {}], [`${ROOT}/${encodeURIComponent(primary)}`, "PATCH", {}],
-      [`${ROOT}/${encodeURIComponent(primary)}/revisions`, "POST", {}], [`${ROOT}/${encodeURIComponent(primary)}/portal`, "POST", {}],
-      [`${ROOT}/recover-portal-update`, "POST", {}],
+      [`${ROOT}/${encodeURIComponent(primary)}/revisions`, "POST", {}],
     ];
     for (const [path, method, body] of removed) expect((await send(path, method, body)).status).toBe(404);
     expect(await counts()).toEqual(before);
+  });
+
+  it("exposes only the strict portal-purpose action for a deployment-owned source", async () => {
+    const path = `${ROOT}/${encodeURIComponent(secondary)}/portal`;
+    // The fixture intentionally lacks the paired Delivery schema, so a valid
+    // configure request must fail closed as unavailable—not as an unguarded
+    // source-registration mutation or a route miss.
+    expect((await send(path, "POST", {
+      expectedVersion: 1, expectedPortalVersion: null, action: "configure",
+    })).status).toBe(503);
+    for (const body of [
+      { expectedVersion: 1, expectedPortalVersion: null, action: "activate" },
+      { expectedVersion: 1, expectedPortalVersion: null, action: "configure", credentialRef: "browser-secret" },
+      { expectedVersion: 1, expectedPortalVersion: null, action: "configure", sourceId: "project-alpha:other" },
+    ]) expect((await send(path, "POST", body)).status).toBe(400);
+    expect((await send(`${ROOT}/${encodeURIComponent("project-alpha:unconfigured")}/portal`, "POST", {
+      expectedVersion: 1, expectedPortalVersion: null, action: "configure",
+    })).status).toBe(404);
+    expect((await send(`${ROOT}/recover-portal-update`, "POST", { expectedVersion: 1, actorId: "spoofed" })).status).toBe(400);
   });
 
   it("returns a bounded no-store status summary without credentials", async () => {
