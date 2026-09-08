@@ -1916,10 +1916,16 @@
 .portal-viewer-shares, .portal-viewer-shares > div, .portal-viewer-shares form, .portal-viewer-shares form label { min-width: 0; }
 .portal-viewer-shares form label { display: grid; gap: .35rem; }
 .portal-viewer-shares form input, .portal-viewer-shares form select { width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box; }
+.portal-viewer-shares ul { display: grid; gap: .65rem; margin: 0; padding: 0; list-style: none; min-width: 0; }
+.portal-viewer-shares li { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: .65rem; min-width: 0; }
+.portal-viewer-shares li span { min-width: 0; overflow-wrap: anywhere; }
+.portal-viewer-shares li button { max-width: 100%; }
 .portal-viewer-share-created { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: .5rem; overflow-wrap: anywhere; }
 .portal-viewer-share-created strong { grid-column: 1 / -1; }
 .portal-viewer-share-created input { width: 100%; min-width: 0; }
 @media (max-width: 360px) {
+  .portal-viewer-shares li { grid-template-columns: minmax(0, 1fr); align-items: stretch; }
+  .portal-viewer-shares li button { width: 100%; }
   .portal-viewer-share-created { grid-template-columns: minmax(0, 1fr); }
   .portal-viewer-share-created button { width: 100%; }
 }
