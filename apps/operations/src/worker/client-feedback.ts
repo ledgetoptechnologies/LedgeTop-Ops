@@ -55,6 +55,21 @@ function projectScope(grants: GrantRow[]): SqlScope {
     deniedGlobal: rows.some(row => row.effect === "deny" && row.source === "override" && row.scope === "global") };
 }
 
+const clientHubId = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+
+/**
+ * Primary feedback retains legacy Delivery storage metadata, but staff
+ * navigation must never expose that key or prefix. The Client Hub project
+ * route is the canonical, source-qualified Operations destination.
+ */
+function primaryFeedbackActionPath(available: boolean, local: { client_id: string | null; org_id: string | null }, source: SourceScope): string | null {
+  if (!available || !clientHubId.test(source.project_id)) return null;
+  const rootId = local.org_id ?? local.client_id;
+  if (!rootId || !clientHubId.test(rootId)) return null;
+  const rootKind = local.org_id ? "organizations" : "standalone";
+  return `/clients/sources/${encodeURIComponent("project-alpha:primary")}/business/${rootKind}/${encodeURIComponent(rootId)}/business-projects/${encodeURIComponent(source.project_id)}`;
+}
+
 /** Staff history does not impersonate the author. It requires the same current
  * source owner, active delivery association and staff resource permission, but
  * can still acknowledge a report after its image disappeared or author left. */
@@ -142,7 +157,8 @@ export async function readStaffFeedbackScope(env: Env, actor: StaffPrincipal, re
   // independently prevents delivery-side reassignment inside the write batch.
   const guard = { sql: `EXISTS(${localSql})`, bindings: [values] };
   return { accountName: local.account_name, divisionId: source.division_id, projectId: source.project_id, available,
-    proof: await sha256(JSON.stringify([local,source,auth.proof])), guard,actionPath:null };
+    proof: await sha256(JSON.stringify([local,source,auth.proof])), guard,
+    actionPath: primaryFeedbackActionPath(available, local, source) };
 }
 
 /** Secondary feedback is authorized from the source-owned native workspace and
