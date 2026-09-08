@@ -1836,8 +1836,8 @@
 }
 
 @media (max-width: 680px) {
-  .client-portal-main:has(.portal-request-card) { width: min(100% - 1.25rem, 1360px); }
-  .client-portal-main { width: min(100% - 1.25rem, 1160px); padding: 2rem 0 5rem; }
+  .client-portal-main:has(.portal-request-card) { width: min(100% - 1.5rem, 1360px); }
+  .client-portal-main { width: min(100% - 1.5rem, 1160px); padding: 2rem 0 5rem; }
   .portal-page-heading-action { align-items: stretch; flex-direction: column; gap: 1rem; }
   .portal-page-heading-action button { width: 100%; }
   .portal-stat-grid, .portal-form-grid, .portal-account-grid { grid-template-columns: 1fr; }
