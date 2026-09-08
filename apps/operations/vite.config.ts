@@ -13,6 +13,7 @@ export default defineConfig({
     // imports inside those sibling sources must resolve from this app's
     // declared dependencies rather than an incidental monorepo node_modules.
     alias: {
+      "@ltds/shared/authenticated-delivery-authority": localDependency("@ltds/shared/src/authenticated-delivery-authority.ts"),
       "@ltds/shared": localDependency("@ltds/shared/src/index.ts"),
       "hono/http-exception": localDependency("hono/dist/http-exception.js"),
       "hono/secure-headers": localDependency("hono/dist/middleware/secure-headers/index.js"),

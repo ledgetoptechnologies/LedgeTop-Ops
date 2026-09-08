@@ -154,11 +154,188 @@ projector. Its rollout constraints and test evidence are recorded in
 `delivery-change-recovery-design.md`, including the administrator recovery
 status card. Capture is not enabled by these local changes.
 
-Steps 3 and 4 above are still unimplemented. The next change must introduce the
-independent immutable bell ledger and coordinate every existing batch-seal path
-(capacity, scheduler, and Send Now), not reinterpret mail `sealed_at` or
-`published_at` as client history. Publication must work with SMTP disabled,
-retain exact original recipients, and survive later email suppression. Follow
-that with the separate history stream, versioned cursor, current-authority
-read/dismiss checks, and a bell for delivery-only client workspaces. Do not
-publish a schema-only slice as completion of this workflow.
+Steps 3 and 4 now have a local implementation under verification; they are not
+release or live-acceptance evidence. Migration 0209 introduces a separate
+immutable exact-recipient event ledger, mutable individual read/dismiss state,
+and an audited email-only suppression control. The publisher is independent of
+SMTP and integrated with maintenance and Send Now. A version-4 cursor adds the
+new history stream, and delivery-only workspaces can display the bell.
+
+The local UI checks passed 78 Operations browser cases and six new client cases
+across desktop/mobile, including failed read actions that must not navigate.
+Both production builds passed, with the existing large-chunk warnings. Six
+cursor checks passed. These runs do not replace backend acceptance: migrated-D1
+tests exposed an expression-depth limit in publication and native history, and
+fixtures needed to respect automatically created immutable source mappings.
+Those corrections and their joined reruns remain release gates. Source
+authority must also be rechecked before SMTP dispatch, not only when the bell
+is first published.
+
+Native delivery actions use exact encrypted folder handles. Bridged/legacy
+root delivery actions remain deliberately non-linking until an exact scoped
+navigation contract is implemented; never substitute a broad archive link.
+Combined-stream pagination, publication rollback/interleavings, recovery
+regressions, migration-first rollout and actual end-to-end delivery still need
+their complete acceptance evidence. Do not publish a schema-only or UI-only
+slice as completion of this workflow. No production migration, notification
+backfill or announcement email is authorized by this checkpoint itself.
+
+### Continued local verification
+
+The complete Operations notification browser suite passed again after removing
+the duplicate section heading and distinguishing staff email suppression from
+an eligibility failure. The six Operations notification-control tests passed.
+Seven recovery/provider/index/replay suites passed 53 checks, including atomic
+receipt rollback, immutable target replay, and safe scheduler error reporting.
+
+The native query depth correction passed its initial three history tests, but
+a subsequent fixture audit found an unrelated PA grant with the same ID could
+mask the authenticated staff-grant path. That fixture is now being replaced
+with a genuine native staff publication, and candidate matching explicitly
+requires the staff grant family. The secondary native publication receipt must
+also be enforced at candidate staging, final staging CAS, publication, history
+mutation and final email authorization. Its implementation and complete rerun
+remain pending; the earlier passes are not acceptance of that newer fence.
+
+### Exact-folder workflow for existing bridged workspaces
+
+Do not extend native `np1_` handles to legacy-adapter workspaces: their native
+context proof does not exist there. Do not use `pf2_` or the past-deliveries
+archive as a substitute: those paths authorize a different, broader selection.
+
+An isolated `ad1_` codec now provides a strict, encrypted, short-lived resource
+coordinate with a separate key purpose. It binds source, workspace, global
+identity, recipient event, grant/version and binding/version, plus a relative
+path. Decoding is not an access grant. The initial four codec tests passed;
+current-workspace authorization and browser/resource integration are still
+required before any bridge bell item may use it.
+
+Remaining implementation order:
+
+1. Reuse one current-event authorizer for history/state and exact resource
+   requests; retain the same-statement source, recipient and authority checks.
+2. Add exact folder, continuation and file resource routes fenced to that
+   event's binding prefix. Recheck before emitting private data. Reject stale
+   or revoked handles; never fall back to an archive or an unrelated grant.
+3. Route the bridge bell action to that exact folder in the client FileBrowser.
+   Descendant navigation and file requests must retain the same scope. Native
+   navigation stays native; ordinary archive navigation stays unchanged.
+4. Verify crossed sources/identities, replacement grant IDs/versions, receipt
+   revocation, prefix changes, pagination, failed read actions and mobile UX
+   through the actual resource route, not just mocked link strings.
+
+### Exact-folder implementation checkpoint (not released)
+
+The shared batch authority query now materializes only the selected batch's
+native publication proof, rather than an unbounded grant ledger. Its focused
+Operations publication suite passes four tests. The joined client run passes
+13 of 14 checks: effective-workspace history, receipt enforcement, handle
+validation and cursors pass; the true native staff-grant fixture still fails
+candidate discovery and remains a release blocker.
+
+The subsequent four-suite regression run passes 48 tests covering existing
+content auditing, notification mutation fences, native PA-draft/delivery
+history, and AD1 codec behavior. This protects existing producers; it is not
+evidence for the new AD1 resource/audit path, whose positive and denial tests
+are still being added.
+
+The AD1 resource router and client navigation are implemented locally. A bridge
+notice opens its exact folder; children, breadcrumbs and continuation handles
+retain the event/source/workspace/global-identity/grant/binding coordinates.
+Invalid or revoked inputs never fall back to the archive. File GET/HEAD uses
+conditional R2 reads and byte ranges, checks indexed versions and tombstones,
+and rechecks current authority before returning metadata or content. Existing
+public links and native NP1 navigation are unchanged.
+
+After tightening response validation (including rejecting broad media URLs
+inside an otherwise valid AD1 folder response), the client build and 12 focused
+desktop/mobile browser checks pass. Desktop and mobile screenshots show the
+scoped shared-folder view without horizontal overflow. The browser fixtures
+cannot prove database authorization or R2 behavior: the mounted Worker tests
+remain required. Headerless browser media requests select a workspace only
+from a decoded AD1 coordinate, reject conflicting workspace headers, then run
+the same live identity resolver and exact resource authorization.
+
+These v2-grant content starts use the existing `native_delivery` audit ledger
+shape (workspace/global identity/folder binding/grant), even when the shell has
+a legacy adapter. The new authenticated-delivery producer proves the exact
+recipient event and current batch authority instead of inventing an account
+association. This does not change existing native grant producer semantics.
+Content release fails closed if required auditing is unavailable. Map, bulk,
+feedback and delegated-share controls are not routed through broad legacy
+authorizers from the new exact-folder view; their future integration must
+retain the same scope.
+
+The focused history suite subsequently passes all six tests. The native
+fixture now supplies its required directory `contains` relation and proves a
+real staff grant without a same-ID PA grant masking authorization. Coverage
+includes native read/dismiss behavior and paginated authenticated events with
+backdated insert fencing, no duplicates/loss, and cross-source cursor denial.
+This is not yet multi-kind pagination coverage. Operations TypeScript checking
+also passes on the current local implementation.
+
+Pending acceptance: actual migrated-D1 resource and audit tests, true multi-page
+mixed-stream coverage, complete regression runs, and final joined browser
+verification. This checkpoint is implementation progress only, not a claim that
+the workflow or overall goal is finished.
+
+### Publication retry fairness (local, acceptance pending)
+
+The bounded publisher previously selected the same first 20 eligible batches
+when their source connection proof was unavailable. That could delay ready
+batches from another source indefinitely. Migration 0209 now includes a
+publication retry deadline; an unchanged pending batch that is not ready is
+deferred by one minute without cancelling it, changing its quiet-period time,
+or granting access. Candidate ordering uses the retry deadline when present,
+so fairness does not depend on cron running more often than once per minute.
+Successful publication clears the deadline. A concurrent revision change wins
+over this scheduling-only update. Real-D1 fairness regression is required before
+release, including an already elapsed retry delay.
+
+### Resource acceptance findings (local)
+
+The migrated-D1/R2 route tests confirm scoped folder navigation, headerless
+media downloads, byte ranges, conditional responses, and cross-actor/workspace
+denials. Required auditing exposed a real D1 expression-depth failure before
+content release. Its correction keeps the batch-authority and event/file proof
+in independent materialized CTEs, required by both the audit insert and replay
+read in the same transaction. It does not replace authorization with a pre-read
+or make auditing optional. Focused positive audit/replay and deliberate audit
+failure tests must pass before releasing this correction. The first refactor
+preserved 11 existing audit/handle regression tests but was not sufficient to
+fix the new path; do not treat that earlier green run as acceptance.
+
+The new multi-kind native history pagination case passes in isolation, covering
+both existing delivery notices and authenticated-change notices on page one,
+continuation without loss/duplication, and a backdated late insert. The entire
+seven-case history suite is being rerun together to check fixture interactions.
+
+The second audit-query refactor passes its focused mounted-resource case:
+required auditing permits an authorized download, replay keeps one audit row,
+and an intentionally rejected audit insert still prevents preview content.
+The six-case resource suite remains a separate combined gate.
+
+Publication fairness also passes its real-D1 regression: 20 source-unavailable
+native batches remain pending, a later ready primary batch publishes, and
+already elapsed retry deadlines do not move those unavailable batches ahead
+of older never-attempted ready work. The seven-suite Operations center/recovery
+group passes 55 tests. A clean final full notification suite is still required;
+the earlier 32/33 run plus targeted fixes is not counted as one green full run.
+
+### Combined history and resource acceptance (local)
+
+The combined seven-case history run reproduced two failures after the new
+mixed-kind pagination case. That case left its additional native notices in
+the shared migrated database, moving the original native notice off the first
+page used by later cases. Test teardown now dismisses only the pagination
+case's extra notices for its exact fixture workspace and recipient; immutable
+events, baseline notices, and all pagination assertions remain unchanged.
+The corrected combined run passes 13 tests: all seven history cases and all six
+migrated-D1/R2 resource cases. That includes the current-authority audit and
+replay proof, deliberate audit failure, byte ranges, conditional requests,
+Unicode folder navigation, policy revision and grant revocation during R2
+metadata lookup. Client TypeScript checking and tracked-diff whitespace
+checking also pass. Generated Worker bindings were refreshed for the two apps
+whose committed declarations were stale, and the complete generated-type gate
+now passes. These changes remain local pending the remaining Operations,
+Ops Sync, browser, build, and deployment-safety gates.

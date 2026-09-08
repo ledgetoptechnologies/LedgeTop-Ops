@@ -19,6 +19,8 @@ import {
   completePortalRequestAttachment,
   initializePortalRequestAttachment,
   loadPortalBootstrap,
+  isAuthenticatedDeliveryFolderHandle,
+  loadPortalAuthenticatedDeliveryFiles,
   loadPortalPastDeliveries,
   loadPortalPastDeliveryLocations,
   loadPortalProjectFileLocations,
@@ -126,6 +128,15 @@ const navigation: Array<{ page: TopPage; label: string }> = [
   { page: "requests", label: "Requests" },
   { page: "feedback", label: "Feedback" },
 ];
+
+type DeliveryFolderLocation = { folderId: string | null; invalid: boolean };
+function readAuthenticatedDeliveryFolderLocation(): DeliveryFolderLocation {
+  const folders = new URLSearchParams(location.search).getAll("folder");
+  if (!folders.length) return { folderId: null, invalid: false };
+  return folders.length === 1 && isAuthenticatedDeliveryFolderHandle(folders[0])
+    ? { folderId: folders[0]!, invalid: false }
+    : { folderId: null, invalid: true };
+}
 
 function blockedPortal(
   caught: unknown,
@@ -2659,6 +2670,7 @@ export function ClientPortalApp({
     initialRoute.projectId,
   );
   const [feedbackId, setFeedbackId] = useState<string | null>(initialRoute.feedbackId ?? null);
+  const [authenticatedDeliveryFolder, setAuthenticatedDeliveryFolder] = useState<DeliveryFolderLocation>(readAuthenticatedDeliveryFolderLocation);
   const [requests, setRequests] = useState<PortalServiceRequest[]>([]);
   const [drafts, setDrafts] = useState<PortalServiceDraftSummary[]>([]);
   const [requestDraftId, setRequestDraftId] = useState<string | null>(
@@ -2689,6 +2701,14 @@ export function ClientPortalApp({
   );
   const pastDeliveryLocationLoader = useMemo(
     () => () => loadPortalPastDeliveryLocations(),
+    [],
+  );
+  const authenticatedDeliveryLoader = useMemo(
+    () => (folderId: string | null, cursor: string | null, signal: AbortSignal) => {
+      if (!folderId || !isAuthenticatedDeliveryFolderHandle(folderId))
+        return Promise.reject(Object.assign(new Error("This shared delivery folder is unavailable."), { status: 404 }));
+      return loadPortalAuthenticatedDeliveryFiles(folderId, cursor, signal);
+    },
     [],
   );
 
@@ -2742,6 +2762,7 @@ export function ClientPortalApp({
         setPage(route.page);
         setProjectId(route.projectId);
         setFeedbackId(route.feedbackId ?? null);
+        setAuthenticatedDeliveryFolder(readAuthenticatedDeliveryFolderLocation());
         setRequestDraftId(new URL(window.location.href).searchParams.get("draft"));
         setMobileNavOpen(false);
       }
@@ -2779,6 +2800,7 @@ export function ClientPortalApp({
     window.history.pushState({}, "", withPortalWorkspace(clientPortalPath(nextPage)));
     setFeedbackId(null);
     setProjectId(null);
+    setAuthenticatedDeliveryFolder({ folderId: null, invalid: false });
     setPage(nextPage);
     setRequestDraftId(null);
     setEditing(null);
@@ -2788,6 +2810,18 @@ export function ClientPortalApp({
     window.history.pushState({}, "", withPortalWorkspace(clientProjectPath(id)));
     setProjectId(id);
     setPage("project");
+  }
+  function navigateAuthenticatedDeliveryFolder(folderId: string | null) {
+    if (!folderId || !isAuthenticatedDeliveryFolderHandle(folderId)) {
+      setAuthenticatedDeliveryFolder({ folderId: null, invalid: true });
+      return;
+    }
+    const url = new URL(clientPortalPath("deliveries"), window.location.origin);
+    url.searchParams.set("folder", folderId);
+    window.history.pushState({}, "", withPortalWorkspace(`${url.pathname}${url.search}`));
+    setPage("deliveries");
+    setProjectId(null);
+    setAuthenticatedDeliveryFolder({ folderId, invalid: false });
   }
   function openNewRequest(draftId?: string) {
     const url = new URL(clientRequestNewPath(), window.location.origin);
@@ -2854,6 +2888,7 @@ export function ClientPortalApp({
       setPage("dashboard");
       setRequestDraftId(null);
       setFeedbackId(null);
+      setAuthenticatedDeliveryFolder({ folderId: null, invalid: false });
       window.history.pushState({}, "", withPortalWorkspace(clientPortalPath("dashboard")));
       setGate({ status: "ready", data });
     } catch (caught) {
@@ -3175,27 +3210,38 @@ export function ClientPortalApp({
     content = (
       <>
         <section className="portal-page-heading">
-          <span className="eyebrow">Client archive</span>
-          <h1>Past deliveries</h1>
-          <p>
-            Secure files granted to your client account across completed and
-            historical work.
-          </p>
+          <span className="eyebrow">{authenticatedDeliveryFolder.folderId || authenticatedDeliveryFolder.invalid ? "Shared delivery" : "Client archive"}</span>
+          <h1>{authenticatedDeliveryFolder.folderId || authenticatedDeliveryFolder.invalid ? "Shared delivery" : "Past deliveries"}</h1>
+          <p>{authenticatedDeliveryFolder.folderId || authenticatedDeliveryFolder.invalid
+            ? "Files in this specific shared delivery folder."
+            : "Secure files granted to your client account across completed and historical work."}</p>
         </section>
-        <Card title="Delivery archive">
-          <FileBrowser
-            key={requestContextKey}
-            feedback={capabilities.feedback}
-            workspaceId={selectedWorkspaceId}
-            load={pastDeliveryLoader}
-            loadLocations={pastDeliveryLocationLoader}
-            mapToken={mapboxPublicToken}
-            locationScopeLabel="your available delivery files"
-            emptyTitle="No past deliveries"
-            emptyDetail="Files published to your client archive will appear here."
-          />
-        </Card>
-        {capabilities.delegatedShares && selectedWorkspaceId && (
+        {authenticatedDeliveryFolder.invalid ? <Card title="Shared delivery unavailable"><p>This shared delivery folder is invalid or no longer available.</p></Card>
+          : authenticatedDeliveryFolder.folderId ? <Card title="Shared delivery folder">
+            <FileBrowser
+              key={`authenticated-delivery:${authenticatedDeliveryFolder.folderId}`}
+              folderId={authenticatedDeliveryFolder.folderId}
+              onFolderChange={navigateAuthenticatedDeliveryFolder}
+              load={authenticatedDeliveryLoader}
+              mapToken={null}
+              locationScopeLabel=""
+              emptyTitle="No files shown"
+              emptyDetail="This shared delivery folder has no files on this page."
+            />
+          </Card> : <Card title="Delivery archive">
+            <FileBrowser
+              key={requestContextKey}
+              feedback={capabilities.feedback}
+              workspaceId={selectedWorkspaceId}
+              load={pastDeliveryLoader}
+              loadLocations={pastDeliveryLocationLoader}
+              mapToken={mapboxPublicToken}
+              locationScopeLabel="your available delivery files"
+              emptyTitle="No past deliveries"
+              emptyDetail="Files published to your client archive will appear here."
+            />
+          </Card>}
+        {!authenticatedDeliveryFolder.folderId && !authenticatedDeliveryFolder.invalid && capabilities.delegatedShares && selectedWorkspaceId && (
           <DelegatedSharePanel workspaceId={selectedWorkspaceId} />
         )}
       </>
@@ -3382,9 +3428,7 @@ export function ClientPortalApp({
             </a>
           ))}
         </nav>
-        {!switchingWorkspace && (!native || capabilities.requestV2 || capabilities.feedback) &&
-          <PortalNotifications key={requestContextKey} feedbackEnabled={capabilities.feedback}
-            requestsEnabled={!native || capabilities.requestV2} nativeWorkspaceId={native?.workspace.id ?? null} />}
+        {!switchingWorkspace && <PortalNotifications key={requestContextKey} />}
         <button ref={mobileNavTrigger} className="portal-nav-trigger" type="button" aria-label="Open navigation" aria-expanded={mobileNavOpen} aria-controls="portal-mobile-navigation" onClick={() => setMobileNavOpen(true)}><span className="nav-hamburger" aria-hidden="true"><i /><i /><i /></span></button>
         <AccountMenu className="portal-account-menu" displayName={shellDisplayName}
           avatar={shellDisplayName.slice(0, 2).toUpperCase()} accountHref={withPortalWorkspace(clientPortalPath("account"))}

@@ -1,4 +1,11 @@
 import { sendNotificationMail, type OutboundMail } from "./mailer";
+import { authenticatedDeliveryChangeAuthoritySql, authenticatedDeliveryNativeStaffPublicationSql } from "@ltds/shared/authenticated-delivery-authority";
+import {
+  authenticatedDeliveryBellReady,
+  publishAuthenticatedDeliveryChangeBellBatch,
+  publishAuthenticatedDeliveryChangeBells,
+  readAuthenticatedDeliveryBellSourceProof,
+} from "./authenticated-delivery-bell";
 import { d1TablesPresent } from "./schema-readiness";
 import type { Env } from "./types";
 
@@ -18,6 +25,9 @@ const TABLES = [
   "portal_authenticated_delivery_change_object_versions",
   "portal_authenticated_delivery_change_controls",
   "portal_authenticated_delivery_change_audit",
+  "authenticated_delivery_recipient_events",
+  "authenticated_delivery_recipient_event_state",
+  "authenticated_delivery_recipient_event_email_controls",
 ] as const;
 
 export type AuthenticatedDeliveryChangeMode = "off" | "added" | "removed" | "both";
@@ -128,7 +138,7 @@ export function authenticatedDeliveryNotificationsEnabled(env: Env): boolean {
 }
 
 export async function authenticatedDeliveryChangeNotificationsReady(env: Env): Promise<boolean> {
-  return d1TablesPresent(env.DELIVERY_DB, TABLES);
+  return (await d1TablesPresent(env.DELIVERY_DB, TABLES)) && await authenticatedDeliveryBellReady(env);
 }
 
 async function sha256(value: string): Promise<string> {
@@ -274,6 +284,7 @@ export function authenticatedDeliveryChangeCandidatesSql(): string {
     JOIN portal_v2_folder_bindings binding ON binding.id=grant_record.folder_binding_id AND binding.workspace_id=policy.workspace_id
       AND binding.source_version=grant_record.binding_source_version AND binding.status='active' AND binding.revoked_at IS NULL
     WHERE policy.access_notice_enabled=1 AND policy.change_mode IN (?2,'both')
+      AND ${authenticatedDeliveryNativeStaffPublicationSql("workspace", "policy.source_id", "grant_record", "binding")}
       AND julianday(policy.created_at)<=julianday(?3) AND julianday(policy.updated_at)<=julianday(?3)
       AND julianday(grant_record.created_at)<=julianday(?3)
       AND substr(?1,1,length(binding.r2_prefix))=binding.r2_prefix
@@ -301,6 +312,7 @@ function stagingAuthoritySql(): string {
     WHERE policy.grant_id=? AND policy.grant_version=? AND policy.logical_grant_id=? AND policy.workspace_id=?
       AND policy.source_id=? AND policy.identity_id=? AND policy.principal_public_id=? AND policy.principal_source_version=?
       AND policy.policy_version=? AND policy.access_notice_enabled=1 AND policy.change_mode IN (?,'both')
+      AND ${authenticatedDeliveryNativeStaffPublicationSql("workspace", "policy.source_id", "grant_record", "binding")}
       AND julianday(policy.created_at)<=julianday(?) AND julianday(policy.updated_at)<=julianday(?)
       AND julianday(grant_record.created_at)<=julianday(?)
       AND substr(?,1,length(binding.r2_prefix))=binding.r2_prefix
@@ -633,136 +645,25 @@ export async function recordAuthenticatedDeliveryObjectChange(
   return staged;
 }
 
-function accessTermsSql(grant = "grant_record"): string {
-  return `(${grant}.access_terms_id IS NULL OR EXISTS(SELECT 1 FROM portal_project_access_terms terms
-    LEFT JOIN portal_project_access_deadlines deadline ON deadline.access_terms_id=terms.id
-    WHERE terms.id=${grant}.access_terms_id AND terms.workspace_id=${grant}.workspace_id
-      AND EXISTS(SELECT 1 FROM lineage term_project WHERE term_project.entity_type='project'
-        AND term_project.public_id=terms.project_public_id)
-      AND ((terms.mode='until_revoked') OR (terms.mode='specific_date' AND datetime(terms.expires_at)>datetime('now'))
-        OR (terms.mode='project_end' AND ((deadline.access_terms_id IS NOT NULL AND datetime(deadline.deadline_at)>datetime('now'))
-          OR (deadline.access_terms_id IS NULL AND EXISTS(SELECT 1 FROM portal_project_access_current_lifecycle lifecycle
-            WHERE lifecycle.workspace_id=terms.workspace_id AND lifecycle.source_id=terms.source_id
-              AND lifecycle.project_public_id=terms.project_public_id AND lifecycle.lifecycle_status='active')))))))`;
-}
-
-function authoritySql(relationsEnabled = false): string {
-  return `WITH RECURSIVE lineage(entity_type,public_id,parent_public_id,depth) AS (
-      SELECT owner.entity_type,owner.public_id,owner.parent_public_id,0
-      FROM portal_v2_directory_entities owner
-      WHERE owner.workspace_id=batch.workspace_id AND owner.generation_id=checkpoint.active_generation_id
-        AND owner.entity_type=batch.owner_scope_type AND owner.public_id=batch.owner_public_id
-        AND owner.active=1 AND owner.source_version=binding.source_version
-      UNION
-      SELECT parent.entity_type,parent.public_id,parent.parent_public_id,lineage.depth+1 FROM lineage
-      JOIN portal_v2_directory_entities parent ON parent.workspace_id=batch.workspace_id
-        AND parent.generation_id=checkpoint.active_generation_id AND parent.public_id=lineage.parent_public_id AND parent.active=1
-      WHERE lineage.parent_public_id IS NOT NULL AND lineage.depth<12
-      ${relationsEnabled ? `UNION
-      SELECT parent.entity_type,parent.public_id,parent.parent_public_id,lineage.depth+1 FROM lineage
-      JOIN portal_v2_directory_relations relation ON relation.workspace_id=batch.workspace_id
-        AND relation.generation_id=checkpoint.active_generation_id AND relation.to_type=lineage.entity_type
-        AND relation.to_public_id=lineage.public_id AND relation.relation_type='contains' AND relation.active=1
-      JOIN portal_v2_directory_entities parent ON parent.workspace_id=relation.workspace_id
-        AND parent.generation_id=relation.generation_id AND parent.entity_type=relation.from_type
-        AND parent.public_id=relation.from_public_id AND parent.active=1
-      WHERE lineage.depth<12` : ""}
-    ) SELECT identity.verified_email recipient_email,workspace.display_name workspace_name
-    FROM portal_authenticated_delivery_change_batches batch
-    JOIN portal_authenticated_delivery_notification_policies policy ON policy.grant_id=batch.grant_id AND policy.identity_id=batch.identity_id
-      AND policy.grant_version=batch.grant_version AND policy.logical_grant_id=batch.logical_grant_id
-      AND policy.workspace_id=batch.workspace_id AND policy.source_id=batch.source_id
-      AND policy.principal_public_id=batch.principal_public_id AND policy.principal_source_version=batch.principal_source_version
-      AND policy.policy_version=batch.policy_version AND policy.access_notice_enabled=1 AND policy.change_mode<>'off'
-    JOIN portal_v2_authenticated_delivery_grants grant_record ON grant_record.id=batch.grant_id
-      AND grant_record.grant_version=batch.grant_version AND grant_record.logical_grant_id=batch.logical_grant_id
-      AND grant_record.workspace_id=batch.workspace_id AND grant_record.folder_binding_id=batch.folder_binding_id
-      AND grant_record.binding_source_version=batch.binding_source_version AND grant_record.audience_type='principal'
-      AND grant_record.audience_public_id=batch.principal_public_id AND grant_record.audience_source_version=batch.principal_source_version
-      AND grant_record.status='active' AND grant_record.revoked_at IS NULL
-      AND (grant_record.expires_at IS NULL OR datetime(grant_record.expires_at)>datetime('now'))
-    JOIN portal_v2_authenticated_delivery_grant_recipients recipient ON recipient.grant_id=batch.grant_id
-      AND recipient.workspace_id=batch.workspace_id AND recipient.identity_id=batch.identity_id
-      AND recipient.principal_public_id=batch.principal_public_id AND recipient.principal_source_version=batch.principal_source_version
-    JOIN portal_v2_workspaces workspace ON workspace.id=batch.workspace_id AND workspace.project_alpha_source_id=batch.source_id
-      AND workspace.status='active'
-    JOIN pa_portal_workspace_sources source ON source.workspace_id=workspace.id AND source.projection_source_id=batch.source_id
-    JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=workspace.id
-    JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id
-      AND generation.workspace_id=workspace.id AND generation.status='active' AND generation.complete=1
-    JOIN portal_v2_folder_bindings binding ON binding.id=batch.folder_binding_id AND binding.workspace_id=batch.workspace_id
-      AND binding.source_version=batch.binding_source_version AND binding.owner_scope_type=batch.owner_scope_type
-      AND binding.owner_public_id=batch.owner_public_id AND binding.r2_prefix=batch.r2_prefix
-      AND binding.status='active' AND binding.revoked_at IS NULL
-    JOIN pa_portal_principals principal ON principal.workspace_id=batch.workspace_id AND principal.public_id=batch.principal_public_id
-      AND principal.identity_id=batch.identity_id AND principal.source_version=batch.principal_source_version AND principal.status='active'
-    JOIN portal_v2_identities identity ON identity.id=batch.identity_id AND identity.status='active'
-      AND identity.revoked_at IS NULL AND identity.verified_email IS NOT NULL
-    JOIN portal_v2_workspace_memberships membership ON membership.workspace_id=batch.workspace_id AND membership.identity_id=batch.identity_id
-      AND membership.status='active' AND membership.revoked_at IS NULL
-      AND (membership.expires_at IS NULL OR datetime(membership.expires_at)>datetime('now'))
-    WHERE batch.id=? AND ${accessTermsSql()}
-      AND (batch.added_count=0 OR policy.change_mode IN ('added','both'))
-      AND (batch.removed_count=0 OR policy.change_mode IN ('removed','both'))
-      AND batch.added_count+batch.removed_count>0
-      AND EXISTS(SELECT 1 FROM lineage WHERE entity_type=batch.owner_scope_type AND public_id=batch.owner_public_id)
-      AND EXISTS(SELECT 1 FROM portal_v2_entitlements allow_record WHERE allow_record.workspace_id=batch.workspace_id
-        AND allow_record.identity_id=batch.identity_id AND allow_record.capability='delivery.view' AND allow_record.effect='allow'
-        AND allow_record.status='active' AND allow_record.revoked_at IS NULL AND datetime(allow_record.valid_from)<=datetime('now')
-        AND (allow_record.expires_at IS NULL OR datetime(allow_record.expires_at)>datetime('now'))
-        AND (allow_record.access_terms_id IS NULL OR EXISTS(SELECT 1 FROM lineage allow_term_project
-          JOIN portal_project_access_terms allow_terms ON allow_terms.id=allow_record.access_terms_id
-            AND allow_terms.workspace_id=batch.workspace_id AND allow_terms.project_public_id=allow_term_project.public_id
-          LEFT JOIN portal_project_access_deadlines allow_deadline ON allow_deadline.access_terms_id=allow_terms.id
-          WHERE allow_term_project.entity_type='project' AND (allow_terms.mode='until_revoked'
-            OR allow_terms.mode='specific_date' AND datetime(allow_terms.expires_at)>datetime('now')
-            OR allow_terms.mode='project_end' AND (allow_deadline.access_terms_id IS NOT NULL
-              AND datetime(allow_deadline.deadline_at)>datetime('now') OR allow_deadline.access_terms_id IS NULL
-              AND EXISTS(SELECT 1 FROM portal_project_access_current_lifecycle allow_lifecycle
-                WHERE allow_lifecycle.workspace_id=allow_terms.workspace_id AND allow_lifecycle.source_id=allow_terms.source_id
-                  AND allow_lifecycle.project_public_id=allow_terms.project_public_id AND allow_lifecycle.lifecycle_status='active')))))
-        AND (allow_record.scope_type='workspace' AND allow_record.scope_public_id=batch.workspace_id
-          OR allow_record.scope_type='folder' AND allow_record.scope_public_id=batch.folder_binding_id
-          OR EXISTS(SELECT 1 FROM lineage WHERE entity_type=allow_record.scope_type AND public_id=allow_record.scope_public_id)))
-      AND NOT EXISTS(SELECT 1 FROM portal_v2_entitlements deny_record WHERE deny_record.workspace_id=batch.workspace_id
-        AND deny_record.identity_id=batch.identity_id AND deny_record.capability='delivery.view' AND deny_record.effect='deny'
-        AND deny_record.status='active' AND deny_record.revoked_at IS NULL AND datetime(deny_record.valid_from)<=datetime('now')
-        AND (deny_record.expires_at IS NULL OR datetime(deny_record.expires_at)>datetime('now'))
-        AND (deny_record.scope_type='workspace' AND deny_record.scope_public_id=batch.workspace_id
-          OR deny_record.scope_type='folder' AND deny_record.scope_public_id=batch.folder_binding_id
-          OR EXISTS(SELECT 1 FROM lineage WHERE entity_type=deny_record.scope_type AND public_id=deny_record.scope_public_id)))
-      AND NOT EXISTS(SELECT 1 FROM portal_v2_identity_denials denial WHERE denial.identity_id=batch.identity_id
-        AND denial.status='active' AND denial.revoked_at IS NULL AND datetime(denial.valid_from)<=datetime('now')
-        AND (denial.expires_at IS NULL OR datetime(denial.expires_at)>datetime('now'))
-        AND (denial.scope_type='global' OR denial.workspace_id=batch.workspace_id AND
-          (denial.scope_type='workspace' AND denial.scope_public_id=batch.workspace_id
-            OR denial.scope_type='folder' AND denial.scope_public_id=batch.folder_binding_id
-            OR EXISTS(SELECT 1 FROM lineage WHERE entity_type=denial.scope_type AND public_id=denial.scope_public_id))))
-      AND NOT EXISTS(SELECT 1 FROM portal_authenticated_delivery_notification_policies other_policy
-        JOIN portal_v2_authenticated_delivery_grants other_grant ON other_grant.id=other_policy.grant_id
-          AND other_grant.grant_version=other_policy.grant_version AND other_grant.logical_grant_id=other_policy.logical_grant_id
-          AND other_grant.workspace_id=other_policy.workspace_id AND other_grant.audience_type='principal'
-          AND other_grant.audience_public_id=other_policy.principal_public_id
-          AND other_grant.audience_source_version=other_policy.principal_source_version
-          AND other_grant.status='active' AND other_grant.revoked_at IS NULL
-          AND (other_grant.expires_at IS NULL OR datetime(other_grant.expires_at)>datetime('now'))
-        JOIN portal_v2_authenticated_delivery_grant_recipients other_recipient ON other_recipient.grant_id=other_grant.id
-          AND other_recipient.workspace_id=other_policy.workspace_id AND other_recipient.identity_id=other_policy.identity_id
-          AND other_recipient.principal_public_id=other_policy.principal_public_id
-          AND other_recipient.principal_source_version=other_policy.principal_source_version
-        JOIN portal_v2_folder_bindings other_binding ON other_binding.id=other_grant.folder_binding_id
-          AND other_binding.workspace_id=other_policy.workspace_id AND other_binding.source_version=other_grant.binding_source_version
-          AND other_binding.status='active' AND other_binding.revoked_at IS NULL
-        WHERE other_policy.workspace_id=batch.workspace_id AND other_policy.identity_id=batch.identity_id
-          AND other_policy.access_notice_enabled=1 AND other_policy.grant_id<>batch.grant_id
-          AND substr((SELECT r2_key FROM portal_authenticated_delivery_change_batch_items WHERE batch_id=batch.id LIMIT 1),1,length(other_binding.r2_prefix))=other_binding.r2_prefix
-          AND length(other_binding.r2_prefix)>=length(batch.r2_prefix))
-    LIMIT 1`;
+function authoritySql(relationsEnabled = false, rootAccessPolicyEnabled = false): string {
+  // Notification readiness now requires the 0209 bell schema and its 0189
+  // primary-Operations receipt dependency, so this final mail fence can use
+  // the same receipt-aware authority as publication.
+  return authenticatedDeliveryChangeAuthoritySql(relationsEnabled,rootAccessPolicyEnabled,true);
 }
 
 export async function authorizeAuthenticatedDeliveryChangeBatch(env: Env, batch: BatchRow): Promise<AuthorizedBatch | null> {
-  const authorized = await env.DELIVERY_DB.withSession("first-primary")
-    .prepare(authoritySql(env.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED === "true")).bind(batch.id).first<AuthorizedBatch>();
+  const db = env.DELIVERY_DB.withSession("first-primary");
+  // A bell is durable once published, but SMTP remains a current-access side
+  // effect. Recheck the same configured-primary/secondary source proof in the
+  // authorization statement; this read never reserves or rotates a key.
+  const source = await readAuthenticatedDeliveryBellSourceProof(env,batch.id);
+  if (!source) return null;
+  const authorized = await db.prepare(`WITH authenticated_batch_authority AS MATERIALIZED(
+      ${authoritySql(env.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED === "true",
+        env.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED === "true")}
+    ) SELECT recipient_email,workspace_name FROM authenticated_batch_authority WHERE ${source.sql} LIMIT 1`)
+    .bind(batch.id,...source.bindings).first<AuthorizedBatch>();
   if (!authorized) return null;
   const batchSequenceReady = await authenticatedDeliveryChangeBatchSequenceReady(env);
   const items = batchSequenceReady
@@ -846,7 +747,7 @@ async function finish(env: Env, batch: BatchRow, token: string, status: Exclude<
 
 export async function controlAuthenticatedDeliveryChangeBatch(env: Env, actorStaffId: string, input: {
   batchId: string; action: "send-now" | "cancel"; expectedRevision: number; idempotencyKey: string;
-},includeReplay=false): Promise<{status:"pending"|"cancelled";revision:number;replayed?:boolean}> {
+},includeReplay=false): Promise<{status:"pending"|"cancelled";revision:number;replayed?:boolean;bellPublished?:boolean}> {
   if (!authenticatedDeliveryNotificationsEnabled(env)) throw new Error("authenticated-delivery-notifications-disabled");
   if (!(await authenticatedDeliveryChangeNotificationsReady(env))) throw new Error("authenticated-delivery-notifications-schema-unavailable");
   if (!actorStaffId || !/^[A-Za-z0-9_-]{1,128}$/.test(input.batchId)
@@ -855,12 +756,16 @@ export async function controlAuthenticatedDeliveryChangeBatch(env: Env, actorSta
     throw new Error("authenticated-delivery-notification-control-invalid");
   const fingerprint = await sha256(JSON.stringify([input.batchId,input.action,input.expectedRevision]));
   const db = env.DELIVERY_DB.withSession("first-primary");
-  const replay = await db.prepare(`SELECT request_fingerprint,result_status,result_revision FROM portal_authenticated_delivery_change_controls
+  const replay = await db.prepare(`SELECT request_fingerprint,action,result_status,result_revision FROM portal_authenticated_delivery_change_controls
     WHERE actor_staff_id=? AND idempotency_key=?`).bind(actorStaffId,input.idempotencyKey)
-    .first<{request_fingerprint:string;result_status:"pending"|"cancelled";result_revision:number}>();
+    .first<{request_fingerprint:string;action:"send-now"|"cancel";result_status:"pending"|"cancelled";result_revision:number}>();
   if (replay) {
     if (replay.request_fingerprint !== fingerprint) throw new Error("authenticated-delivery-notification-control-idempotency-conflict");
-    return {...(includeReplay?{replayed:true}:{}),status:replay.result_status,revision:replay.result_revision};
+    const bell = replay.action === "send-now"
+      ? await publishAuthenticatedDeliveryChangeBellBatch(env,{id:input.batchId,revision:replay.result_revision})
+      : null;
+    return {...(includeReplay?{replayed:true}:{}),status:replay.result_status,
+      revision:replay.result_revision,...(bell?{bellPublished:bell.disposition==="published"||bell.disposition==="duplicate"}: {})};
   }
   const status = input.action === "cancel" ? "cancelled" : "pending";
   const revision = input.expectedRevision + 1;
@@ -868,10 +773,11 @@ export async function controlAuthenticatedDeliveryChangeBatch(env: Env, actorSta
   const audit = await sha256(`authenticated-delivery-change-audit:v1:${input.batchId}:${auditAction}:${actorStaffId}:${input.idempotencyKey}`);
   const result = await db.batch([
     db.prepare(`UPDATE portal_authenticated_delivery_change_batches SET status=?,revision=revision+1,
-      sealed_at=CASE WHEN ?='cancelled' THEN ${NOW} ELSE sealed_at END,
+      sealed_at=COALESCE(sealed_at,${NOW}),
       eligible_at=CASE WHEN ?='pending' THEN ${NOW} ELSE eligible_at END,
       last_error=CASE WHEN ?='cancelled' THEN 'staff-cancelled' ELSE last_error END,updated_at=${NOW}
-      WHERE id=? AND status='pending' AND revision=?`).bind(status,status,status,status,input.batchId,input.expectedRevision),
+      WHERE id=? AND status='pending' AND revision=?
+        AND (?<>'cancelled' OR bell_published_at IS NULL)`).bind(status,status,status,input.batchId,input.expectedRevision,status),
     db.prepare(`INSERT INTO portal_authenticated_delivery_change_controls
       (actor_staff_id,idempotency_key,request_fingerprint,batch_id,action,expected_revision,result_revision,result_status)
       SELECT ?,?,?,?,?,?,?,? WHERE changes()=1`).bind(actorStaffId,input.idempotencyKey,fingerprint,input.batchId,input.action,
@@ -883,7 +789,14 @@ export async function controlAuthenticatedDeliveryChangeBatch(env: Env, actorSta
   ]);
   if (Number(result[0]?.meta.changes) !== 1 || Number(result[1]?.meta.changes) !== 1)
     throw new Error("authenticated-delivery-notification-control-conflict");
-  return {...(includeReplay?{replayed:false}:{}),status,revision};
+  // Send Now never bypasses the client-event seal.  The bell publisher owns
+  // the same pending revision CAS used by the scheduler and is safe to retry
+  // after an ambiguous response because event.batch_id is unique.
+  const bell = input.action === "send-now"
+    ? await publishAuthenticatedDeliveryChangeBellBatch(env,{id:input.batchId,revision})
+    : null;
+  return {...(includeReplay?{replayed:false}:{}),status,
+    revision,...(bell?{bellPublished:bell.disposition==="published"||bell.disposition==="duplicate"}: {})};
 }
 
 export async function dispatchAuthenticatedDeliveryChangeNotifications(
@@ -892,9 +805,11 @@ export async function dispatchAuthenticatedDeliveryChangeNotifications(
 ): Promise<number> {
   if (!authenticatedDeliveryNotificationsEnabled(env)) return 0;
   if (!(await authenticatedDeliveryChangeNotificationsReady(env))) throw new Error("authenticated-delivery-notifications-schema-unavailable");
+  await publishAuthenticatedDeliveryChangeBells(env);
   const db = env.DELIVERY_DB.withSession("first-primary");
   const exhausted = await db.prepare(`SELECT * FROM portal_authenticated_delivery_change_batches
-    WHERE attempt_count>=? AND ((status='processing' AND lease_expires_at<=${NOW}) OR status='pending')
+    WHERE bell_published_at IS NOT NULL AND email_suppressed_at IS NULL AND attempt_count>=?
+      AND ((status='processing' AND lease_expires_at<=${NOW}) OR status='pending')
     ORDER BY id LIMIT ?`).bind(MAX_ATTEMPTS,DISPATCH_LIMIT).all<BatchRow>();
   for (const batch of exhausted.results) {
     const id = await auditId(batch,"batch.failed","attempts-exhausted");
@@ -909,7 +824,8 @@ export async function dispatchAuthenticatedDeliveryChangeNotifications(
     ]);
   }
   const candidates = await db.prepare(`SELECT * FROM portal_authenticated_delivery_change_batches
-    WHERE attempt_count<? AND ((status='pending' AND eligible_at<=${NOW}) OR (status='processing' AND lease_expires_at<=${NOW}))
+    WHERE bell_published_at IS NOT NULL AND email_suppressed_at IS NULL AND attempt_count<?
+      AND ((status='pending' AND eligible_at<=${NOW}) OR (status='processing' AND lease_expires_at<=${NOW}))
     ORDER BY eligible_at,id LIMIT ?`).bind(MAX_ATTEMPTS,DISPATCH_LIMIT).all<BatchRow>();
   let processed = 0;
   for (const candidate of candidates.results) {
@@ -957,7 +873,7 @@ export async function dispatchAuthenticatedDeliveryChangeNotifications(
         await finish(env,batch,token,"suppressed","authority-changed"); continue;
       }
       const liveLease = await db.prepare(`SELECT 1 ok FROM portal_authenticated_delivery_change_batches
-        WHERE id=? AND status='processing' AND lease_token=? AND lease_expires_at>${NOW}`).bind(batch.id,token).first("ok");
+        WHERE id=? AND status='processing' AND email_suppressed_at IS NULL AND lease_token=? AND lease_expires_at>${NOW}`).bind(batch.id,token).first("ok");
       if (liveLease === null) continue;
       await dependencies.send(env,mail);
       await finish(env,batch,token,"sent",null);

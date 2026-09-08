@@ -201,8 +201,7 @@ Delivery:
 - `CLIENT_REQUEST_ATTACHMENT_R2_SECRET_ACCESS_KEY`
 - `CLIENT_DELEGATED_SHARE_SESSION_SECRET`
 - `CLIENT_PORTAL_CONTENT_AUDIT_HMAC_SECRET`
-- `PROJECT_ALPHA_CONNECTOR_CREDENTIALS` (the same reviewed source-key envelope
-  provisioned independently to Delivery, Operations, and Ops Sync)
+- `PROJECT_ALPHA_CONNECTOR_CREDENTIALS` (portal-purpose values only)
 
 Operations:
 
@@ -225,13 +224,15 @@ Operations:
 - `THUMBNAIL_INGEST_SECRET`
 - `VIEWER_SERVICE_HMAC_SECRET`
 - `VIEWER_EVENT_HMAC_SECRET`
-- `PROJECT_ALPHA_CONNECTOR_CREDENTIALS`
+- `PROJECT_ALPHA_CONNECTOR_SNAPSHOT_CREDENTIALS`
+- `PROJECT_ALPHA_CONNECTOR_SOURCES` (credential-free exact-source manifest)
 
 Ops Sync:
 
 - `CF_ACCESS_GROUP_API_TOKEN`
 - `PROJECT_ALPHA_WEBHOOK_HMAC_SECRET`
-- `PROJECT_ALPHA_CONNECTOR_CREDENTIALS`
+- `PROJECT_ALPHA_CONNECTOR_EVENT_CREDENTIALS`
+- `PROJECT_ALPHA_CONNECTOR_SOURCES` (must exactly match Operations)
 
 Self-hosted Viewer (record names in `viewer.configuration.secretNames`, not in
 the Wrangler manifest):

@@ -9,13 +9,10 @@ import { syncRegisteredProjectAlpha } from "./project-alpha";
 import { reconcilePrimaryClientPortalWorkspaces } from "./client-account-root-activation";
 import { getProjectAlphaSnapshotRecoveryStatus } from "./project-alpha-snapshot-recovery";
 import {
-  listProjectAlphaConnectors, preflightPrimaryProjectAlphaConnector, ProjectAlphaConnectorError, registerProjectAlphaConnector,
+  ensureDeploymentConfiguredProjectAlphaConnectors, listProjectAlphaConnectors, ProjectAlphaConnectorError,
 } from "./project-alpha-connectors";
 import { PortalSourceAuthorityError } from "../../../client/src/worker/project-alpha-portal-authority";
-import {
-  getConnectorPortalStatus, configureConnectorPortal, changeConnectorPortal, recoverConnectorPortalCoordination,
-  reviseCoordinatedProjectAlphaConnector, setCoordinatedProjectAlphaConnectorState,
-} from "./project-alpha-portal-coordination";
+import { getConnectorPortalStatus } from "./project-alpha-portal-coordination";
 import type { Env, StaffPrincipal } from "./types";
 import {
   listProjectAlphaProjectManagementRoutes, ProjectAlphaProjectManagementError,
@@ -24,6 +21,16 @@ import {
 
 type App = Hono<{ Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } }>;
 const ROOT = "/api/admin/integrations/project-alpha/connectors";
+function projectManagementHttpError(error: unknown): never {
+  if (error instanceof ProjectAlphaProjectManagementError || (error instanceof Error
+    && error.name === "ProjectAlphaProjectManagementError"
+    && ["invalid", "conflict", "changed", "unavailable"].includes(String((error as { code?: unknown }).code)))) {
+    const code = (error as ProjectAlphaProjectManagementError).code;
+    throw new HTTPException(code === "invalid" ? 400 : code === "conflict" || code === "changed" ? 409 : 503,
+      { message: (error as Error).message });
+  }
+  throw error;
+}
 export function portalAuthorityErrorResponse(error: PortalSourceAuthorityError): { status: 400 | 409 | 503; error: string; code: string } {
   return {
     status: error.code === "invalid" ? 400 : error.code === "conflict" || error.code === "changed" ? 409 : 503,
@@ -35,23 +42,6 @@ export function portalAuthorityErrorResponse(error: PortalSourceAuthorityError):
     code: `PROJECT_ALPHA_PORTAL_${error.code.toUpperCase()}`,
   };
 }
-function projectManagementHttpError(error: unknown): never {
-  if (error instanceof ProjectAlphaProjectManagementError || (error instanceof Error
-    && error.name === "ProjectAlphaProjectManagementError"
-    && ["invalid", "conflict", "changed", "unavailable"].includes(String((error as { code?: unknown }).code)))) {
-    const code = (error as ProjectAlphaProjectManagementError).code;
-    throw new HTTPException(code === "invalid" ? 400 : code === "conflict" || code === "changed" ? 409 : 503,
-      { message: (error as Error).message });
-  }
-  throw error;
-}
-const revision = z.object({ credentialRef: z.string().min(1).max(64), snapshotBasePath: z.string().min(1).max(1024),
-  accessIssuer: z.string().min(1).max(2048), accessAudience: z.string().min(1).max(512), accessSubject: z.string().min(1).max(512) }).strict();
-const registration = z.object({ sourceId: z.string().min(1).max(78), producerBindingId: z.string().min(1).max(128),
-  snapshotOrigin: z.string().min(1).max(2048), applicationKey: z.string().min(1).max(64),
-  profile: z.enum(["primary_legacy", "business_data"]), displayName: z.string().min(1).max(160), revision }).strict();
-const state = z.object({ expectedVersion: z.number().int().positive(), state: z.enum(["pending", "active", "suspended", "retired"]),
-  readVisible: z.boolean().optional(), displayName: z.string().min(1).max(160).optional() }).strict();
 async function json<T>(request: Request, schema: z.ZodType<T>): Promise<T> {
   if (request.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() !== "application/json")
     throw new HTTPException(415, { message: "Connection request must use application/json" });
@@ -120,6 +110,7 @@ export function registerProjectAlphaConnectorAdminRoutes(app: App): void {
     }
   });
   app.get(ROOT, async c => {
+    await ensureDeploymentConfiguredProjectAlphaConnectors(c.env);
     const connectors = await listProjectAlphaConnectors(c.env);
     const registeredPrimary = connectors.find(row => row.sourceId === "project-alpha:primary");
     const ids = ["project-alpha:primary", ...connectors.map(row => row.sourceId).filter(id => id !== "project-alpha:primary")];
@@ -135,37 +126,14 @@ export function registerProjectAlphaConnectorAdminRoutes(app: App): void {
     return c.json({ connectors, health: safeHealth, recovery, portal, projectManagement,
       legacyPrimary: !registeredPrimary || registeredPrimary.state === "pending" });
   });
-  app.post(ROOT, async c => c.json({ connector: await registerProjectAlphaConnector(c.env,
-    await json(c.req.raw, registration), c.get("principal").id) }, 201));
-  app.post(`${ROOT}/primary-preflight`, async c => c.json({ preflight: await preflightPrimaryProjectAlphaConnector(c.env,
-    await json(c.req.raw, registration)) }));
-  app.post(`${ROOT}/:sourceId/revisions`, async c => {
-    const value = await json(c.req.raw, z.object({ expectedVersion: z.number().int().positive(), revision }).strict());
-    return c.json({ connector: await reviseCoordinatedProjectAlphaConnector(c.env, c.req.param("sourceId"), value.expectedVersion, value.revision, c.get("principal").id) });
-  });
-  app.patch(`${ROOT}/:sourceId`, async c => c.json({ connector: await setCoordinatedProjectAlphaConnectorState(c.env,
-    c.req.param("sourceId"), await json(c.req.raw, state), c.get("principal").id) }));
-  app.post(`${ROOT}/:sourceId/portal`, async c => {
-    const value = await json(c.req.raw, z.object({
-      expectedVersion: z.number().int().positive(), expectedPortalVersion: z.number().int().positive().nullable(),
-      action: z.enum(["configure", "activate", "suspend"]),
-    }).strict());
-    if (value.action !== "configure" && value.expectedPortalVersion === null)
-      throw new HTTPException(400, { message: "Configure this connection's client portal before changing its state" });
-    const authority = value.action === "configure"
-      ? await configureConnectorPortal(c.env, c.req.param("sourceId"), value.expectedVersion, value.expectedPortalVersion, c.get("principal").id)
-      : await changeConnectorPortal(c.env, c.req.param("sourceId"), value.expectedVersion, value.expectedPortalVersion!,
-        value.action === "activate" ? "active" : "suspended", c.get("principal").id);
-    return c.json({ authority });
-  });
-  app.post(`${ROOT}/recover-portal-update`, async c => {
-    const value = await json(c.req.raw, z.object({ expectedVersion: z.number().int().positive() }).strict());
-    await recoverConnectorPortalCoordination(c.env, value.expectedVersion, c.get("principal").id);
-    return c.json({ recovered: true });
-  });
   app.post(`${ROOT}/:sourceId/sync`, async c => {
     await json(c.req.raw, z.object({}).strict());
     const sourceId = c.req.param("sourceId");
+    await ensureDeploymentConfiguredProjectAlphaConnectors(c.env);
+    const connector = (await listProjectAlphaConnectors(c.env)).find(row => row.sourceId === sourceId);
+    const legacyPrimary = sourceId === PRIMARY_ALPHA_SOURCE_ID && !connector;
+    if (!legacyPrimary && !connector) throw new HTTPException(404, { message: "Project Alpha source is not configured for this deployment" });
+    if (connector && connector.state !== "active") throw new HTTPException(409, { message: "Project Alpha source is not active" });
     await c.env.OPS_DB.batch([await auditStatement(c.env, c.req.raw, c.get("principal"), "integration.sync_requested", "integration", sourceId, null, { sourceId })]);
     const result = await syncRegisteredProjectAlpha(c.env, sourceId);
     if (result.changedCollections.some(name => name === "operations" || name === "service_locations")) await rebuildOperationAirspaceMatches(c.env);
@@ -178,7 +146,13 @@ export function registerProjectAlphaConnectorAdminRoutes(app: App): void {
     }));
     return c.json({ sourceId, ...result, ...(clientPortalReconciliation ? { clientPortalReconciliation } : {}) });
   });
+  // This controls a reviewed outward link only.  It never registers a source,
+  // selects credentials, or alters the source's synchronization authority.
   app.put(`${ROOT}/:sourceId/project-management`, async c => {
+    await ensureDeploymentConfiguredProjectAlphaConnectors(c.env);
+    const requestedSource = c.req.param("sourceId");
+    if (!(await listProjectAlphaConnectors(c.env)).some(row => row.sourceId === requestedSource))
+      throw new HTTPException(404, { message: "Project Alpha source is not configured for this deployment" });
     const value = await json(c.req.raw, z.object({
       expectedConnectorVersion: z.number().int().positive(), expectedVersion: z.number().int().positive().nullable(),
       idempotencyKey: z.string().min(16).max(128).regex(/^[A-Za-z0-9_-]+$/),
@@ -186,7 +160,7 @@ export function registerProjectAlphaConnectorAdminRoutes(app: App): void {
     }).strict());
     try {
       return c.json({ projectManagement: await setProjectAlphaProjectManagementRoute(c.env,
-        c.req.param("sourceId"), value, c.get("principal").id) });
+        requestedSource, value, c.get("principal").id) });
     } catch (error) { return projectManagementHttpError(error); }
   });
 }

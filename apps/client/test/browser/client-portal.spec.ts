@@ -33,7 +33,7 @@ const serviceCatalog = [{
 const notificationHistory = (items: unknown[] = []) => ({
   scope: { sourceId: "project-alpha:primary", workspaceId: null, rootType: "organization", rootPublicId: "org-a" },
   asOf: "2026-08-25T12:00:00.000Z",
-  coverage: { requests: "included", feedback: "included", delivery: "omitted_no_explicit_grant_authority" },
+  coverage: { requests: "included", feedback: "included", authenticatedDelivery: "omitted_feature_disabled", delivery: "omitted_no_explicit_grant_authority" },
   items,
   nextCursor: null,
 });
@@ -161,6 +161,101 @@ async function mockAuthorizedPortal(
     }
   });
 }
+
+const effectiveWorkspace = { id: "workspace-effective", rootType: "organization" as const, rootPublicId: "org-effective", displayName: "Effective customer" };
+const otherEffectiveWorkspace = { id: "workspace-other", rootType: "organization" as const, rootPublicId: "org-other", displayName: "Other customer" };
+const ad1Root = "ad1_effective_root", ad1Child = "ad1_effective_child", ad1Stale = "ad1_effective_stale", ad1File = "ad1_effective_file";
+
+async function mockEffectiveDeliveryPortal(page: Page, options: { notification?: boolean; rejectFolder?: string | null; malformedBreadcrumb?: boolean; broadFileUrl?: boolean } = {}) {
+  const calls: Array<{ path: string; query: URLSearchParams; workspace: string | undefined; method: string }> = [];
+  await page.route("**/api/client/**", async route => {
+    const request = route.request(), url = new URL(request.url()), path = url.pathname;
+    const call = { path, query: url.searchParams, workspace: request.headers()["x-ltds-workspace-id"], method: request.method() };
+    calls.push(call);
+    if (path === "/api/client/session") return route.fulfill({ json: { account, capabilities: { workspaceHierarchyV2: true, requestV2: false, feedback: false } } });
+    if (path === "/api/client/v2/workspaces") return route.fulfill({ json: { workspaces: [effectiveWorkspace, otherEffectiveWorkspace] } });
+    if (path === "/api/client/projects") return route.fulfill({ json: { projects: [] } });
+    if (path === "/api/client/service-requests") return route.fulfill({ json: { requests: [] } });
+    if (path === "/api/client/map-config") return route.fulfill({ json: { mapboxPublicToken: null } });
+    if (path === "/api/client/request-readiness") return route.fulfill({ json: { mode: "legacy", workspaceId: call.workspace ?? null, target: { kind: "root", projectId: null }, canStartRequest: false, reason: "request_not_permitted", root: { canStartRequest: false, reason: "request_not_permitted" }, projectRequestsSupported: false, refreshedAt: "2026-08-25T12:00:00.000Z" } });
+    if (path === "/api/client/notification-history") {
+      const item = options.notification ? [{ id: "effective-delivery-notice", kind: "authenticated_delivery", title: "Files changed in your delivery", body: "1 file added",
+        actionPath: `/portal/deliveries?workspace=${effectiveWorkspace.id}&folder=${ad1Root}`, mutationPath: "/api/client/notification-history/authenticated-delivery/effective-delivery-notice", readAt: null, createdAt: "2026-08-25T12:00:00.000Z" }] : [];
+      return route.fulfill({ json: { scope: { sourceId: "project-alpha:primary", workspaceId: call.workspace ?? null, rootType: "organization", rootPublicId: call.workspace === otherEffectiveWorkspace.id ? "org-other" : "org-effective" }, asOf: "2026-08-25T12:00:00.000Z",
+        coverage: { requests: "included", feedback: "included", authenticatedDelivery: "included", delivery: "omitted_no_explicit_grant_authority" }, items: item, nextCursor: null } });
+    }
+    if (path === "/api/client/notification-history/authenticated-delivery/effective-delivery-notice" && request.method() === "PATCH") return route.fulfill({ status: 503, json: { error: "retry" } });
+    if (path === "/api/client/authenticated-deliveries/files") {
+      const folder = url.searchParams.get("folder");
+      if ((folder !== ad1Root && folder !== ad1Child) || folder === options.rejectFolder) return route.fulfill({ status: 409, json: { error: "stale" } });
+      const child = folder === ad1Child;
+      const files = options.broadFileUrl ? [{id: ad1File, name: "Outside route.jpg", size: 12, uploadedAt: "2026-08-25T12:00:00.000Z", contentType: "image/jpeg", kind: "image", thumbnailPath: null,
+        previewPath: "/api/client/past-deliveries/preview?file=outside", downloadPath: "/api/client/past-deliveries/download?file=outside"}] : [];
+      return route.fulfill({ json: { files, folders: child ? [] : [{ id: ad1Child, name: "Edited photographs" }],
+        breadcrumbs: options.malformedBreadcrumb ? [{ id: null, name: "Effective deliverables" }] : [{ id: ad1Root, name: "Effective deliverables" }, ...(child ? [{ id: ad1Child, name: "Edited photographs" }] : [])], folderId: folder, prefix: "", cursor: null } });
+    }
+    if (path === "/api/client/past-deliveries" || path === "/api/client/past-delivery-locations") return route.fulfill({ status: 500, json: { error: "Broad archive must not be used" } });
+    return route.fulfill({ status: 404, json: { error: "Not found" } });
+  });
+  return calls;
+}
+
+test("effective authenticated-delivery folders use only AD1 scoped reads and preserve child, breadcrumb, and workspace navigation", async ({page}, testInfo) => {
+  const calls = await mockEffectiveDeliveryPortal(page);
+  await page.goto(`/portal/deliveries?workspace=${effectiveWorkspace.id}&folder=${ad1Root}`);
+  await expect(page.getByText("Effective deliverables", {exact: true})).toBeVisible();
+  await page.screenshot({path: testInfo.outputPath("authenticated-delivery-ad1-desktop.png"), fullPage: true});
+  await page.setViewportSize({width: 375, height: 812});
+  await page.screenshot({path: testInfo.outputPath("authenticated-delivery-ad1-mobile.png"), fullPage: true});
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.setViewportSize({width: 1280, height: 720});
+  await page.getByRole("button", {name: "Edited photographs"}).click();
+  await expect.poll(() => new URL(page.url()).searchParams.get("folder")).toBe(ad1Child);
+  await page.getByRole("button", {name: "Effective deliverables"}).click();
+  await expect.poll(() => new URL(page.url()).searchParams.get("folder")).toBe(ad1Root);
+  await page.getByRole("combobox", {name: "Client workspace"}).selectOption(otherEffectiveWorkspace.id);
+  await expect(page).toHaveURL(new RegExp(`/portal\\?workspace=${otherEffectiveWorkspace.id}$`));
+  await expect(page.getByRole("heading", {name: "Shared delivery folder"})).toHaveCount(0);
+  expect(calls.filter(call => call.path === "/api/client/authenticated-deliveries/files").map(call => call.query.get("folder"))).toEqual([ad1Root, ad1Child, ad1Root]);
+  expect(calls.some(call => call.path === "/api/client/past-deliveries" || call.path === "/api/client/past-delivery-locations")).toBe(false);
+});
+
+test("invalid, tampered, and stale AD1 delivery folders never fall back to the broad archive", async ({page}) => {
+  const calls = await mockEffectiveDeliveryPortal(page, {rejectFolder: ad1Stale});
+  await page.goto(`/portal/deliveries?workspace=${effectiveWorkspace.id}&folder=not-an-ad1-handle`);
+  await expect(page.getByRole("heading", {name: "Shared delivery unavailable"})).toBeVisible();
+  expect(calls.some(call => call.path === "/api/client/authenticated-deliveries/files" || call.path === "/api/client/past-deliveries")).toBe(false);
+  await page.goto(`/portal/deliveries?workspace=${effectiveWorkspace.id}&folder=${ad1Stale}`);
+  await expect(page.getByText("Files could not be loaded. Your access may have changed; try again.")).toBeVisible();
+  expect(calls.some(call => call.path === "/api/client/authenticated-deliveries/files" && call.query.get("folder") === ad1Stale)).toBe(true);
+  expect(calls.some(call => call.path === "/api/client/past-deliveries" || call.path === "/api/client/past-delivery-locations")).toBe(false);
+});
+
+test("malformed authenticated-delivery breadcrumbs cannot return a shared folder to the broad archive", async ({page}) => {
+  const calls = await mockEffectiveDeliveryPortal(page, {malformedBreadcrumb: true});
+  await page.goto(`/portal/deliveries?workspace=${effectiveWorkspace.id}&folder=${ad1Root}`);
+  await expect(page.getByText("Files could not be loaded. Your access may have changed; try again.")).toBeVisible();
+  expect(calls.some(call => call.path === "/api/client/past-deliveries" || call.path === "/api/client/past-delivery-locations")).toBe(false);
+});
+
+test("a broad media URL in an AD1 folder response is rejected before it can render", async ({page}) => {
+  const calls = await mockEffectiveDeliveryPortal(page, {broadFileUrl: true});
+  await page.goto(`/portal/deliveries?workspace=${effectiveWorkspace.id}&folder=${ad1Root}`);
+  await expect(page.getByText("Files could not be loaded. Your access may have changed; try again.")).toBeVisible();
+  await expect(page.getByText("Outside route.jpg")).toHaveCount(0);
+  expect(calls.some(call => call.path === "/api/client/past-deliveries" || call.path === "/api/client/past-delivery-locations")).toBe(false);
+});
+
+test("an effective authenticated-delivery bell action stays put when marking it read fails", async ({page}) => {
+  const calls = await mockEffectiveDeliveryPortal(page, {notification: true});
+  await page.goto(`/portal?workspace=${effectiveWorkspace.id}`);
+  await page.getByRole("button", {name: /Notifications, 1 unread update/}).click();
+  await page.getByRole("link", {name: "Files changed in your delivery"}).click();
+  await expect(page).toHaveURL(new RegExp(`/portal\\?workspace=${effectiveWorkspace.id}$`));
+  await expect(page.getByRole("alert")).toContainText("The notification update could not be confirmed.");
+  expect(calls.filter(call => call.path === "/api/client/notification-history/authenticated-delivery/effective-delivery-notice" && call.method === "PATCH")).toHaveLength(1);
+  expect(calls.some(call => call.path === "/api/client/authenticated-deliveries/files" || call.path === "/api/client/past-deliveries")).toBe(false);
+});
 
 async function startNewRequest(page: Page, context = "general") {
   await page.getByLabel("Request context", { exact: true }).selectOption(context);

@@ -1,7 +1,9 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { Miniflare } from "miniflare";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
+import { provisionPortalSourceAuthority, reservePrimaryPortalSigningKeys, setPortalSourceAuthorityState,
+  type PortalAuthorityConnectorIdentity } from "../../client/src/worker/project-alpha-portal-authority";
 import {
   AUTHENTICATED_DELIVERY_CHANGE_CANDIDATE_LIMIT,
   authenticatedDeliveryChangeCandidatesSql,
@@ -13,6 +15,11 @@ import {
   stageAuthenticatedDeliveryChangeForTarget,
   type AuthenticatedDeliveryChangeTarget,
 } from "../src/worker/authenticated-delivery-change-notifications";
+import {
+  publishAuthenticatedDeliveryChangeBellBatch,
+  publishAuthenticatedDeliveryChangeBells,
+  suppressAuthenticatedDeliveryChangeEmail,
+} from "../src/worker/authenticated-delivery-bell";
 import type { Env } from "../src/worker/types";
 
 describe("exact authenticated delivery change notifications — migrated real D1", {timeout: 240_000}, () => {
@@ -20,6 +27,7 @@ describe("exact authenticated delivery change notifications — migrated real D1
   let db: D1Database;
   let env: Env;
   let counter = 0;
+  let primaryReceiptsInstalled = false;
 
   beforeAll(async () => {
     runtime = new Miniflare({compatibilityDate:"2026-07-22",modules:true,
@@ -33,9 +41,10 @@ describe("exact authenticated delivery change notifications — migrated real D1
       grant: await db.prepare("SELECT * FROM portal_v2_authenticated_delivery_grants WHERE id=?").bind(before.grant).first(),
       recipient: await db.prepare("SELECT * FROM portal_v2_authenticated_delivery_grant_recipients WHERE grant_id=?").bind(before.grant).first(),
     };
-    for (const name of ["0170_authenticated_delivery_change_notifications.sql", "0204_delivery_change_receipts.sql", "0205_authenticated_delivery_change_sequence.sql", "0208_authenticated_delivery_change_batch_provider_identity.sql"])
+    for (const name of ["0170_authenticated_delivery_change_notifications.sql", "0189_primary_staff_folder_bindings.sql", "0204_delivery_change_receipts.sql", "0205_authenticated_delivery_change_sequence.sql", "0208_authenticated_delivery_change_batch_provider_identity.sql", "0209_authenticated_delivery_change_recipient_events.sql"])
       await db.batch(splitD1MigrationStatements(readFileSync(new URL(`../../client/migrations/${name}`,import.meta.url),"utf8"))
         .map(sql => db.prepare(sql)));
+    primaryReceiptsInstalled = true;
     expect(await db.prepare("SELECT * FROM portal_v2_authenticated_delivery_grants WHERE id=?").bind(before.grant).first()).toEqual(preserved.grant);
     expect(await db.prepare("SELECT * FROM portal_v2_authenticated_delivery_grant_recipients WHERE grant_id=?").bind(before.grant).first()).toEqual(preserved.recipient);
     expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
@@ -45,11 +54,21 @@ describe("exact authenticated delivery change notifications — migrated real D1
       .bind(before.workspace).run()).rejects.toThrow();
     await expect(db.prepare("UPDATE portal_v2_authenticated_delivery_grants SET grant_version=2 WHERE id=?")
       .bind(before.grant).run()).rejects.toThrow();
-    env = {DELIVERY_DB:db,AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED:"true",DELIVERY_BASE_URL:"https://client.example.test"} as Env;
+    env = {DELIVERY_DB:db,AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED:"true",DELIVERY_BASE_URL:"https://client.example.test",
+      PROJECT_ALPHA_PORTAL_HMAC_SECRET:"primary-portal-hmac-test-key-material-at-least-thirty-two-bytes",
+      PROJECT_ALPHA_CONNECTOR_CREDENTIALS:JSON.stringify({version:1,sets:{bell_secondary:{portalCurrent:{keyId:"bell-secondary-current",
+        value:"bell-secondary-portal-key-material-at-least-thirty-two-bytes"}}}})} as Env;
+    await reservePrimaryPortalSigningKeys(env);
   },180_000);
+  beforeEach(async () => {
+    // Keep independent cases from dispatching an earlier fixture merely
+    // because the complete migrated-D1 run takes longer than the quiet period.
+    // Each dispatch case explicitly makes only its own batches eligible.
+    await db.prepare("UPDATE portal_authenticated_delivery_change_batches SET eligible_at=datetime('now','+1 day') WHERE status='pending'").run();
+  });
   afterAll(async () => runtime?.dispose());
 
-  async function fixture(label: string, prefix?: string) {
+  async function fixture(label: string, prefix?: string, bindingSourceType: "operations"|"legacy" = "operations") {
     counter++;
     const suffix=`${label}-${counter}`,workspace=`workspace-${suffix}`,identity=`identity-${suffix}`,
       principal=`principal-${suffix}`,organization=`organization-${suffix}`,project=`project-${suffix}`,
@@ -60,6 +79,11 @@ describe("exact authenticated delivery change notifications — migrated real D1
         .bind(identity,"https://access.example.test",`subject-${suffix}`,`${suffix}@example.test`),
       db.prepare("INSERT INTO portal_v2_workspaces(id,root_type,pa_organization_public_id,display_name,status,project_alpha_source_id) VALUES(?,'organization',?,?,'active','project-alpha:primary')")
         .bind(workspace,organization,`Workspace ${suffix}`),
+      db.prepare(`INSERT INTO pa_portal_projection_generations
+        (id,workspace_id,source_generation,source_sequence,snapshot_hash,page_count,record_count,workspace_root_type,
+          workspace_root_public_id,workspace_display_name,workspace_source_version,workspace_active,status,complete,projection_source_id)
+        VALUES(?,?,?,1,?,1,2,'organization',?,?,'v1',1,'active',1,'project-alpha:primary')`)
+        .bind(`snapshot-${suffix}`,workspace,generation,"a".repeat(64),organization,`Workspace ${suffix}`),
       db.prepare("INSERT INTO portal_v2_workspace_memberships(id,workspace_id,identity_id,source_type,status) VALUES(?,?,?,'operations','active')")
         .bind(`membership-${suffix}`,workspace,identity),
       db.prepare("INSERT INTO portal_v2_directory_generations(id,workspace_id,source_generation,source_sequence,status,complete) VALUES(?,?,?,1,'active',1)")
@@ -70,8 +94,16 @@ describe("exact authenticated delivery change notifications — migrated real D1
         .bind(workspace,generation,project,organization,`Project ${suffix}`),
       db.prepare("INSERT INTO portal_v2_directory_checkpoints(workspace_id,active_generation_id,source_sequence) VALUES(?,?,1)")
         .bind(workspace,generation),
-      db.prepare("INSERT INTO portal_v2_folder_bindings(id,workspace_id,owner_scope_type,owner_public_id,r2_prefix,source_type,source_version) VALUES(?,?,'project',?,?,'operations','v1')")
-        .bind(binding,workspace,project,r2Prefix),
+      db.prepare("INSERT INTO pa_portal_projection_checkpoints(workspace_id,source_generation,source_sequence,snapshot_generation_id) VALUES(?,?,1,?)")
+        .bind(workspace,generation,`snapshot-${suffix}`),
+      db.prepare("INSERT INTO portal_v2_folder_bindings(id,workspace_id,owner_scope_type,owner_public_id,r2_prefix,source_type,source_version) VALUES(?,?,'project',?,? ,?,'v1')")
+        .bind(binding,workspace,project,r2Prefix,bindingSourceType),
+      ...(primaryReceiptsInstalled&&bindingSourceType==="operations" ? [db.prepare(`INSERT INTO portal_primary_staff_bindings
+        (binding_id,workspace_id,source_id,root_type,root_public_id,owner_scope_type,owner_public_id,project_public_id,
+          directory_generation_id,snapshot_generation_id,source_sequence,root_source_version,project_source_version,r2_prefix,
+          ops_project_id,ops_context_version,created_by_staff_id,reason_code,state)
+        VALUES(?,?,'project-alpha:primary','organization',?,'project',?,?,?, ?,1,'v1','v1',?, ?,?,?, 'migration_0189_legacy_compat','active')`)
+        .bind(binding,workspace,organization,project,project,generation,`snapshot-${suffix}`,r2Prefix,project,"0".repeat(64),"staff-a")] : []),
       db.prepare("INSERT INTO pa_portal_principals(workspace_id,public_id,identity_id,email_hint,display_name,source_version,status) VALUES(?,?,?,?,?,'pv1','active')")
         .bind(workspace,principal,identity,`${suffix}@example.test`,`Person ${suffix}`),
       db.prepare(`INSERT INTO portal_v2_entitlements(id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,
@@ -104,6 +136,75 @@ describe("exact authenticated delivery change notifications — migrated real D1
     const key=`${f.prefix}${name}`;
     await db.prepare("DELETE FROM file_index WHERE r2_key=?").bind(key).run();
     return recordAuthenticatedDeliveryObjectChange(env,key,false,version,at);
+  }
+
+  async function secondaryFixture(label: string, nativeState: "pending"|"active" = "active") {
+    counter++;
+    const suffix=`${label}-${counter}`,sourceId=`project-alpha:bell${counter}`,workspace=`workspace-${suffix}`,
+      identity=`identity-${suffix}`,principal=`principal-${suffix}`,organization=`organization-${suffix}`,
+      project=`project-${suffix}`,generation=`generation-${suffix}`,binding=`binding-${suffix}`,
+      grant=`grant-${suffix}`,logical=`logical-${suffix}`,prefix=`Jobs/Clients/${suffix}/`;
+    const connector: PortalAuthorityConnectorIdentity={sourceId,producerBindingId:`binding-${suffix}`,
+      snapshotOrigin:"https://secondary.example.test",snapshotBasePath:"/portal",applicationKey:`bell${counter}`,
+      profile:"business_data",revision:1,version:1,state:"active"};
+    // Source authorities reserve signing fingerprints globally. Give every
+    // synthetic source its own configured test key, while retaining prior
+    // entries so earlier source proofs remain resolvable in this shared D1.
+    const credentialRef=`bell_secondary_${counter}`;
+    const credentials=JSON.parse(env.PROJECT_ALPHA_CONNECTOR_CREDENTIALS ?? "{}") as {version?:number;sets?:Record<string,unknown>};
+    credentials.version=1;credentials.sets ??={};
+    credentials.sets[credentialRef]={portalCurrent:{keyId:`bell-secondary-current-${counter}`,
+      value:`bell-secondary-${counter}-portal-key-material-at-least-thirty-two-bytes`}};
+    env.PROJECT_ALPHA_CONNECTOR_CREDENTIALS=JSON.stringify(credentials);
+    await provisionPortalSourceAuthority(env,connector,{credentialRef,accessIssuer:"https://secondary.example.test",
+      accessAudience:"bell-secondary",accessSubject:"bell-secondary-subject"},null,"staff-a");
+    await setPortalSourceAuthorityState(env,connector,1,"active","staff-a");
+    await db.batch([
+      db.prepare("INSERT INTO pa_portal_workspace_sources(workspace_id,projection_source_id,source_workspace_id) VALUES(?,?,?)")
+        .bind(workspace,sourceId,`source-${suffix}`),
+      db.prepare("INSERT INTO portal_v2_identities(id,issuer,subject,verified_email) VALUES(?,?,?,?)")
+        .bind(identity,"https://access.example.test",`subject-${suffix}`,`${suffix}@example.test`),
+      db.prepare("INSERT INTO portal_v2_workspaces(id,root_type,pa_organization_public_id,display_name,status,project_alpha_source_id) VALUES(?,'organization',?,?,'active',?)")
+        .bind(workspace,organization,`Workspace ${suffix}`,sourceId),
+      db.prepare("INSERT INTO portal_v2_workspace_memberships(id,workspace_id,identity_id,source_type,status) VALUES(?,?,?,'operations','active')")
+        .bind(`membership-${suffix}`,workspace,identity),
+      db.prepare("INSERT INTO portal_v2_directory_generations(id,workspace_id,source_generation,source_sequence,status,complete) VALUES(?,?,?,1,'active',1)")
+        .bind(generation,workspace,generation),
+      db.prepare("INSERT INTO portal_v2_directory_entities(workspace_id,generation_id,entity_type,public_id,display_name,source_version) VALUES(?,?,'organization',?,?,'v1')")
+        .bind(workspace,generation,organization,`Organization ${suffix}`),
+      db.prepare("INSERT INTO portal_v2_directory_entities(workspace_id,generation_id,entity_type,public_id,parent_public_id,display_name,source_version) VALUES(?,?,'project',?,?,?,'v1')")
+        .bind(workspace,generation,project,organization,`Project ${suffix}`),
+      db.prepare("INSERT INTO portal_v2_directory_checkpoints(workspace_id,active_generation_id,source_sequence) VALUES(?,?,1)")
+        .bind(workspace,generation),
+      db.prepare("INSERT INTO portal_v2_folder_bindings(id,workspace_id,owner_scope_type,owner_public_id,r2_prefix,source_type,source_version) VALUES(?,?,'project',?,?,'operations','v1')")
+        .bind(binding,workspace,project,prefix),
+      db.prepare(`INSERT INTO portal_native_staff_bindings
+        (binding_id,source_id,workspace_id,project_id,project_public_id,r2_prefix,division_id)
+        VALUES(?,?,?,?,?,?,?)`).bind(binding,sourceId,workspace,`ops-project-${suffix}`,project,prefix,`division-${suffix}`),
+      db.prepare("INSERT INTO pa_portal_principals(workspace_id,public_id,identity_id,email_hint,display_name,source_version,status) VALUES(?,?,?,?,?,'pv1','active')")
+        .bind(workspace,principal,identity,`${suffix}@example.test`,`Person ${suffix}`),
+      db.prepare("INSERT INTO portal_v2_entitlements(id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,source_type,status) VALUES(?,?,?,'delivery.view','allow','project',?,'operations','active')")
+        .bind(`entitlement-${suffix}`,workspace,identity,project),
+      db.prepare(`INSERT INTO portal_v2_authenticated_delivery_grants(id,logical_grant_id,grant_version,workspace_id,folder_binding_id,
+        binding_source_version,audience_type,audience_public_id,audience_source_version,reason_code,created_by_staff_id)
+        VALUES(?,?,1,?,?,'v1','principal',?,'pv1','test','staff-a')`).bind(grant,logical,workspace,binding,principal),
+      db.prepare("INSERT INTO portal_v2_authenticated_delivery_grant_recipients(grant_id,workspace_id,principal_public_id,identity_id,principal_source_version) VALUES(?,?,?,?, 'pv1')")
+        .bind(grant,workspace,principal,identity),
+      db.prepare(`INSERT INTO portal_native_staff_grants
+        (grant_id,binding_id,source_id,authorization_id,actor_id,idempotency_key,fingerprint,state,publication_deadline)
+        VALUES(?,?,?,?,?,?,?,'pending',datetime('now','+1 hour'))`)
+        .bind(grant,binding,sourceId,`authorization-${suffix}`,"staff-a",`native-${suffix}-00000000`,"f".repeat(64)),
+      ...(nativeState==="active"?[db.prepare("UPDATE portal_native_staff_grants SET state='active' WHERE grant_id=? AND state='pending'")
+        .bind(grant)]:[]),
+    ]);
+    // Policy mutation is deliberately primary-only today. Seed the exact
+    // existing opt-in snapshot so these tests isolate native receipt fencing.
+    await db.prepare(`INSERT INTO portal_authenticated_delivery_notification_policies
+      (grant_id,grant_version,logical_grant_id,workspace_id,source_id,identity_id,principal_public_id,principal_source_version,
+        access_notice_enabled,change_mode,policy_version,updated_by_staff_id)
+      VALUES(?,1,?,?,?,?,?,?,1,'both',1,'staff-a')`)
+      .bind(grant,logical,workspace,sourceId,identity,principal,"pv1").run();
+    return {suffix,workspace,identity,principal,organization,project,generation,binding,grant,logical,prefix,connector};
   }
 
   async function savedTarget(f: Awaited<ReturnType<typeof fixture>>, key: string, eventAt: string) {
@@ -353,7 +454,7 @@ describe("exact authenticated delivery change notifications — migrated real D1
   });
 
   it("rejects a legacy binding whose owner or prefix changed after candidate selection", async () => {
-    const f=await fixture("binding-snapshot");await optIn(f,"added");
+    const f=await fixture("binding-snapshot",undefined,"legacy");await optIn(f,"added");
     const [eventAt]=eventTimes(),key=`${f.prefix}photo.jpg`,movedPrefix=`${f.prefix}moved/`;let hookFired=false;
     const raced=envWithStagingBatchHook(async()=>{
       hookFired=true;
@@ -565,7 +666,7 @@ describe("exact authenticated delivery change notifications — migrated real D1
     const nested=await fixture("nested");await optIn(nested);
     const nestedBinding=`${nested.binding}-child`,nestedGrant=`${nested.grant}-child`,nestedPrefix=`${nested.prefix}Final/`;
     await db.batch([
-      db.prepare("INSERT INTO portal_v2_folder_bindings(id,workspace_id,owner_scope_type,owner_public_id,r2_prefix,source_type,source_version) VALUES(?,?,'project',?,?,'operations','v1')")
+      db.prepare("INSERT INTO portal_v2_folder_bindings(id,workspace_id,owner_scope_type,owner_public_id,r2_prefix,source_type,source_version) VALUES(?,?,'project',?,?,'legacy','v1')")
         .bind(nestedBinding,nested.workspace,nested.project,nestedPrefix),
       db.prepare(`INSERT INTO portal_v2_authenticated_delivery_grants(id,logical_grant_id,grant_version,workspace_id,folder_binding_id,binding_source_version,
         audience_type,audience_public_id,audience_source_version,reason_code,created_by_staff_id)
@@ -596,7 +697,7 @@ describe("exact authenticated delivery change notifications — migrated real D1
     expect(await dispatchAuthenticatedDeliveryChangeNotifications(env,{send})).toBe(0);
 
     for(const failure of ["revoked","denied","expired","binding","binding-version","generation","owner","principal","identity","policy","missing"] as const){
-      const f=await fixture(`failure-${failure}`);const policy=await optIn(f);await add(f,"photo.jpg");
+      const f=await fixture(`failure-${failure}`,undefined,failure==="binding"||failure==="binding-version"?"legacy":"operations");const policy=await optIn(f);await add(f,"photo.jpg");
       await db.prepare("UPDATE portal_authenticated_delivery_change_batches SET eligible_at=datetime('now','-1 second') WHERE workspace_id=?").bind(f.workspace).run();
       if(failure==="revoked")await db.prepare("UPDATE portal_v2_authenticated_delivery_grants SET status='revoked',revoked_at=datetime('now'),revoked_by_staff_id='staff-a',revoke_reason_code='test' WHERE id=?").bind(f.grant).run();
       if(failure==="denied")await db.prepare(`INSERT INTO portal_v2_entitlements(id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,source_type,status)
@@ -656,6 +757,180 @@ describe("exact authenticated delivery change notifications — migrated real D1
     expect(await db.prepare(`SELECT count(*) n FROM portal_authenticated_delivery_change_audit
       WHERE batch_id=? AND action='batch.cancelled'`).bind(batch.id).first("n")).toBe(1);
     await expect(controlAuthenticatedDeliveryChangeBatch(env,"staff-b",{batchId:batch.id,action:"send-now",expectedRevision:batch.revision,idempotencyKey:`other-${f.suffix}-00000000`})).rejects.toThrow("control-conflict");
+  });
+
+  it("publishes one immutable exact-recipient bell before SMTP and never backfills finished batches", async () => {
+    const f=await fixture("bell");await optIn(f);await add(f,"photo.jpg");
+    const batch=(await batches(f))[0] as {id:string;revision:number};
+    await db.prepare("UPDATE portal_authenticated_delivery_change_batches SET eligible_at=datetime('now','-1 second') WHERE id=?").bind(batch.id).run();
+    expect(await publishAuthenticatedDeliveryChangeBells(env)).toBe(1);
+    const event=await db.prepare(`SELECT id,batch_id,workspace_id,identity_id,folder_binding_id,added_count,removed_count
+      FROM authenticated_delivery_recipient_events WHERE batch_id=?`).bind(batch.id).first<Record<string,unknown>>();
+    expect(event).toMatchObject({batch_id:batch.id,workspace_id:f.workspace,identity_id:f.identity,folder_binding_id:f.binding,added_count:1,removed_count:0});
+    expect((await db.prepare("SELECT bell_published_at,sealed_at FROM portal_authenticated_delivery_change_batches WHERE id=?").bind(batch.id).first())
+      ).toMatchObject({bell_published_at:expect.any(String),sealed_at:expect.any(String)});
+    expect(await publishAuthenticatedDeliveryChangeBells(env)).toBe(0);
+    await expect(db.prepare("UPDATE authenticated_delivery_recipient_events SET added_count=2 WHERE batch_id=?").bind(batch.id).run()).rejects.toThrow();
+    await expect(db.prepare(`INSERT OR REPLACE INTO authenticated_delivery_recipient_events
+      SELECT id,batch_id,grant_id,grant_version,logical_grant_id,source_id,workspace_id,folder_binding_id,binding_source_version,
+        owner_scope_type,owner_public_id,r2_prefix,identity_id,principal_public_id,principal_source_version,policy_version,added_count,removed_count,created_at
+      FROM authenticated_delivery_recipient_events WHERE id=?`).bind(event!.id).run()).rejects.toThrow();
+    await expect(db.prepare(`INSERT OR REPLACE INTO authenticated_delivery_recipient_events
+      SELECT 'replacement-event',batch_id,grant_id,grant_version,logical_grant_id,source_id,workspace_id,folder_binding_id,binding_source_version,
+        owner_scope_type,owner_public_id,r2_prefix,identity_id,principal_public_id,principal_source_version,policy_version,added_count,removed_count,created_at
+      FROM authenticated_delivery_recipient_events WHERE id=?`).bind(event!.id).run()).rejects.toThrow();
+    await expect(db.prepare("INSERT INTO authenticated_delivery_recipient_event_state(event_id,recipient_identity_id) VALUES(?,?)")
+      .bind((await db.prepare("SELECT id FROM authenticated_delivery_recipient_events WHERE batch_id=?").bind(batch.id).first("id")),"other-identity").run()).rejects.toThrow();
+  });
+
+  it("rolls back the bell seal when the immutable event insert aborts, then publishes exactly once on retry", async () => {
+    const f=await fixture("bell-event-atomicity");await optIn(f);await add(f,"photo.jpg");
+    const batch=(await batches(f))[0] as {id:string;revision:number};
+    await db.prepare("UPDATE portal_authenticated_delivery_change_batches SET eligible_at=datetime('now','-1 second') WHERE id=?").bind(batch.id).run();
+    const trigger="test_bell_event_insert_abort";
+    // The fixture controls the generated batch id; quote it anyway so this
+    // temporary test-only DDL cannot broaden the abort condition.
+    const quotedBatchId=batch.id.replaceAll("'","''");
+    await db.prepare(`CREATE TRIGGER ${trigger} BEFORE INSERT ON authenticated_delivery_recipient_events
+      WHEN NEW.batch_id='${quotedBatchId}' BEGIN SELECT RAISE(ABORT,'test bell event insert unavailable'); END`).run();
+    try {
+      await expect(publishAuthenticatedDeliveryChangeBellBatch(env,batch)).rejects.toThrow("test bell event insert unavailable");
+      expect(await db.prepare("SELECT bell_published_at,revision FROM portal_authenticated_delivery_change_batches WHERE id=?")
+        .bind(batch.id).first()).toEqual({bell_published_at:null,revision:batch.revision});
+      expect(await db.prepare("SELECT count(*) n FROM authenticated_delivery_recipient_events WHERE batch_id=?").bind(batch.id).first("n")).toBe(0);
+    } finally {
+      await db.prepare(`DROP TRIGGER ${trigger}`).run();
+    }
+
+    expect(await publishAuthenticatedDeliveryChangeBellBatch(env,batch)).toEqual({disposition:"published",revision:batch.revision+1});
+    expect(await db.prepare("SELECT count(*) n FROM authenticated_delivery_recipient_events WHERE batch_id=?").bind(batch.id).first("n")).toBe(1);
+  });
+
+  it("requires an exact active native staff publication for secondary staged changes", async () => {
+    const active=await secondaryFixture("native-publication-active");
+    expect(await add(active,"photo.jpg")).toBe(1);
+    expect(await db.prepare("SELECT count(*) n FROM portal_authenticated_delivery_change_batches WHERE grant_id=?")
+      .bind(active.grant).first("n")).toBe(1);
+
+    const pending=await secondaryFixture("native-publication-pending","pending");
+    const pendingRows=await db.prepare(authenticatedDeliveryChangeCandidatesSql())
+      .bind(`${pending.prefix}photo.jpg`,"added",new Date().toISOString(),AUTHENTICATED_DELIVERY_CHANGE_CANDIDATE_LIMIT+1)
+      .all<AuthenticatedDeliveryChangeTarget>();
+    expect(pendingRows.results).toEqual([]);
+
+    for (const state of ["suspended","revoked"] as const) {
+      const f=await secondaryFixture(`native-publication-${state}`);
+      const eventAt=new Date().toISOString(),key=`${f.prefix}photo.jpg`,target=await savedTarget(f,key,eventAt);
+      await db.prepare("UPDATE portal_native_staff_grants SET state=? WHERE grant_id=? AND state='active'").bind(state,f.grant).run();
+      expect(await stageAuthenticatedDeliveryChangeForTarget(env,target,{key,present:true,objectVersion:"etag-photo",eventAt})).toBe("suppressed");
+      expect(await db.prepare("SELECT count(*) n FROM portal_authenticated_delivery_change_batches WHERE grant_id=?").bind(f.grant).first("n")).toBe(0);
+    }
+
+    // A publication for another valid secondary source/binding cannot repair a
+    // suspended target: the fence must correlate all grant, source and binding coordinates.
+    const targetFixture=await secondaryFixture("native-publication-source-mismatch");
+    const decoy=await secondaryFixture("native-publication-decoy");
+    const eventAt=new Date().toISOString(),key=`${targetFixture.prefix}photo.jpg`,target=await savedTarget(targetFixture,key,eventAt);
+    await db.prepare("UPDATE portal_native_staff_grants SET state='suspended' WHERE grant_id=? AND state='active'")
+      .bind(targetFixture.grant).run();
+    expect(await db.prepare("SELECT state FROM portal_native_staff_grants WHERE grant_id=?").bind(decoy.grant).first("state")).toBe("active");
+    expect(await stageAuthenticatedDeliveryChangeForTarget(env,target,{key,present:true,objectVersion:"etag-photo",eventAt})).toBe("suppressed");
+    expect(await db.prepare("SELECT count(*) n FROM portal_authenticated_delivery_change_batches WHERE grant_id=?")
+      .bind(targetFixture.grant).first("n")).toBe(0);
+  });
+
+  it("defers unavailable source bells without suppressing them or starving later ready batches", async () => {
+    const ready=await fixture("bell-fair-ready");await optIn(ready);await add(ready,"photo.jpg");
+    const readyBatch=(await batches(ready))[0] as {id:string};
+    const blocked:Array<{id:string;grant:string;connector:PortalAuthorityConnectorIdentity}>=[];
+    for(let index=0;index<20;index++) {
+      const f=await secondaryFixture(`bell-fair-blocked-${index}`);expect(await add(f,"photo.jpg")).toBe(1);
+      const batch=(await db.prepare("SELECT id FROM portal_authenticated_delivery_change_batches WHERE grant_id=?").bind(f.grant).first<{id:string}>())!;
+      blocked.push({id:batch.id,grant:f.grant,connector:f.connector});
+    }
+    await db.batch([
+      db.prepare("UPDATE portal_authenticated_delivery_change_batches SET eligible_at=datetime('now','-3 seconds') WHERE id IN (SELECT value FROM json_each(?))")
+        .bind(JSON.stringify(blocked.map(batch=>batch.id))),
+      db.prepare("UPDATE portal_authenticated_delivery_change_batches SET eligible_at=datetime('now','-2 seconds') WHERE id=?").bind(readyBatch.id),
+    ]);
+    for (const batch of blocked) await setPortalSourceAuthorityState(env,batch.connector,2,"suspended","staff-a");
+    expect(await publishAuthenticatedDeliveryChangeBells(env)).toBe(0);
+    const firstPass=await db.prepare(`SELECT status,bell_published_at,bell_retry_after FROM portal_authenticated_delivery_change_batches
+      WHERE id IN (SELECT value FROM json_each(?))`).bind(JSON.stringify(blocked.map(batch=>batch.id))).all<{status:string;bell_published_at:string|null;bell_retry_after:string|null}>();
+    expect(firstPass.results).toHaveLength(20);
+    expect(firstPass.results).toEqual(expect.arrayContaining(Array.from({length:20},()=>({status:"pending",bell_published_at:null,bell_retry_after:expect.any(String)}))));
+    expect(await db.prepare("SELECT count(*) n FROM authenticated_delivery_recipient_events WHERE batch_id IN (SELECT value FROM json_each(?))")
+      .bind(JSON.stringify(blocked.map(batch=>batch.id))).first("n")).toBe(0);
+
+    expect(await publishAuthenticatedDeliveryChangeBells(env)).toBe(1);
+    expect(await db.prepare("SELECT bell_published_at FROM portal_authenticated_delivery_change_batches WHERE id=?").bind(readyBatch.id).first("bell_published_at"))
+      .toEqual(expect.any(String));
+    expect(await db.prepare("SELECT count(*) n FROM authenticated_delivery_recipient_events WHERE batch_id=?").bind(readyBatch.id).first("n")).toBe(1);
+
+    const olderReady=await fixture("bell-fair-expired-retry");await optIn(olderReady);await add(olderReady,"photo.jpg");
+    const olderReadyBatch=(await batches(olderReady))[0] as {id:string};
+    await db.batch([
+      db.prepare("UPDATE portal_authenticated_delivery_change_batches SET bell_retry_after=datetime('now','-1 second') WHERE id IN (SELECT value FROM json_each(?))")
+        .bind(JSON.stringify(blocked.map(batch=>batch.id))),
+      db.prepare("UPDATE portal_authenticated_delivery_change_batches SET eligible_at=datetime('now','-2 minutes') WHERE id=?").bind(olderReadyBatch.id),
+    ]);
+    expect(await publishAuthenticatedDeliveryChangeBells(env)).toBe(1);
+    expect(await db.prepare("SELECT bell_published_at FROM portal_authenticated_delivery_change_batches WHERE id=?").bind(olderReadyBatch.id).first("bell_published_at"))
+      .toEqual(expect.any(String));
+    expect(await db.prepare("SELECT count(*) n FROM authenticated_delivery_recipient_events WHERE batch_id=?").bind(olderReadyBatch.id).first("n")).toBe(1);
+  });
+
+  it("suppresses publication on a final authority loss and keeps post-publication email suppression separate", async () => {
+    const denied=await fixture("bell-denied");await optIn(denied);await add(denied,"photo.jpg");
+    const deniedBatch=(await batches(denied))[0] as {id:string;revision:number};
+    await db.prepare("UPDATE portal_authenticated_delivery_change_batches SET eligible_at=datetime('now','-1 second') WHERE id=?").bind(deniedBatch.id).run();
+    const result=await publishAuthenticatedDeliveryChangeBellBatch(env,deniedBatch,{beforeBellCommit:async()=>{
+      await db.prepare("UPDATE portal_v2_workspace_memberships SET status='revoked',revoked_at=datetime('now') WHERE identity_id=?").bind(denied.identity).run();
+    }});
+    expect(result.disposition).toBe("suppressed");
+    expect(await db.prepare("SELECT count(*) n FROM authenticated_delivery_recipient_events WHERE batch_id=?").bind(deniedBatch.id).first("n")).toBe(0);
+
+    const secondary=await secondaryFixture("bell-secondary-revoked");
+    await add(secondary,"photo.jpg");
+    const secondaryBatch=(await db.prepare("SELECT id,revision FROM portal_authenticated_delivery_change_batches WHERE grant_id=?")
+      .bind(secondary.grant).first<{id:string;revision:number}>())!;
+    await db.prepare("UPDATE portal_authenticated_delivery_change_batches SET eligible_at=datetime('now','-1 second') WHERE id=?").bind(secondaryBatch.id).run();
+    const secondaryResult=await publishAuthenticatedDeliveryChangeBellBatch(env,secondaryBatch,{beforeBellCommit:async()=>{
+      await setPortalSourceAuthorityState(env,secondary.connector,2,"suspended","staff-a");
+    }});
+    expect(secondaryResult.disposition).toBe("suppressed");
+    expect(await db.prepare("SELECT count(*) n FROM authenticated_delivery_recipient_events WHERE batch_id=?").bind(secondaryBatch.id).first("n")).toBe(0);
+
+    const postPublication=await fixture("bell-post-publication-source-loss");await optIn(postPublication);await add(postPublication,"photo.jpg");
+    const postPublicationBatch=(await batches(postPublication))[0] as {id:string;revision:number};
+    await db.prepare("UPDATE portal_authenticated_delivery_change_batches SET eligible_at=datetime('now','-1 second') WHERE id=?").bind(postPublicationBatch.id).run();
+    expect(await publishAuthenticatedDeliveryChangeBellBatch(env,postPublicationBatch)).toMatchObject({disposition:"published"});
+    const blockedSend=vi.fn();
+    const unreservedPrimary={...env,PROJECT_ALPHA_PORTAL_HMAC_SECRET:"unreserved-primary-portal-key-material-at-least-thirty-two-bytes"} as Env;
+    expect(await dispatchAuthenticatedDeliveryChangeNotifications(unreservedPrimary,{send:blockedSend})).toBe(1);
+    expect(blockedSend).not.toHaveBeenCalled();
+    expect(await db.prepare("SELECT count(*) n FROM authenticated_delivery_recipient_events WHERE batch_id=?").bind(postPublicationBatch.id).first("n")).toBe(1);
+    expect(await db.prepare("SELECT status FROM portal_authenticated_delivery_change_batches WHERE id=?").bind(postPublicationBatch.id).first("status")).toBe("suppressed");
+
+    const f=await fixture("bell-email-only");await optIn(f);await add(f,"photo.jpg");
+    const batch=(await batches(f))[0] as {id:string;revision:number};
+    await db.prepare("UPDATE portal_authenticated_delivery_change_batches SET eligible_at=datetime('now','-1 second') WHERE id=?").bind(batch.id).run();
+    const published=await publishAuthenticatedDeliveryChangeBellBatch(env,batch);
+    expect(published).toMatchObject({disposition:"published",revision:batch.revision+1});
+    await db.prepare("UPDATE portal_authenticated_delivery_change_batches SET status='processing' WHERE id=?").bind(batch.id).run();
+    await expect(suppressAuthenticatedDeliveryChangeEmail(env,"staff-a",{batchId:batch.id,expectedRevision:published.revision!,idempotencyKey:`bell-processing-${f.suffix}-000`}))
+      .rejects.toThrow("suppression-conflict");
+    expect(await db.prepare("SELECT count(*) n FROM authenticated_delivery_recipient_events WHERE batch_id=?").bind(batch.id).first("n")).toBe(1);
+    await db.prepare("UPDATE portal_authenticated_delivery_change_batches SET status='pending' WHERE id=?").bind(batch.id).run();
+    const control=await suppressAuthenticatedDeliveryChangeEmail(env,"staff-a",{batchId:batch.id,expectedRevision:published.revision!,idempotencyKey:`bell-email-${f.suffix}-00000`});
+    expect(control).toEqual({revision:published.revision!+1,replayed:false});
+    await expect(db.prepare(`INSERT OR REPLACE INTO authenticated_delivery_recipient_event_email_controls
+      SELECT actor_staff_id,idempotency_key,request_fingerprint,batch_id,expected_revision,result_revision,created_at
+      FROM authenticated_delivery_recipient_event_email_controls WHERE actor_staff_id='staff-a' AND batch_id=?`).bind(batch.id).run()).rejects.toThrow();
+    await expect(controlAuthenticatedDeliveryChangeBatch(env,"staff-a",{batchId:batch.id,action:"cancel",expectedRevision:control.revision,idempotencyKey:`bell-cancel-${f.suffix}-00000`}))
+      .rejects.toThrow("control-conflict");
+    const send=vi.fn();expect(await dispatchAuthenticatedDeliveryChangeNotifications(env,{send})).toBe(0);expect(send).not.toHaveBeenCalled();
+    expect(await db.prepare("SELECT count(*) n FROM authenticated_delivery_recipient_events WHERE batch_id=?").bind(batch.id).first("n")).toBe(1);
   });
 
   it("suppresses expired entitlement terms and relation-scoped entitlement or identity denials", async () => {

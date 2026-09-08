@@ -7,6 +7,19 @@ export interface ProjectAlphaConnectorEnvironment {
   OPS_DB: D1Database;
   /** Deploy-managed secret JSON. Never accepted in an administration request. */
   PROJECT_ALPHA_CONNECTOR_CREDENTIALS?: string;
+  /** Operations-only outbound credentials. Never deploy to Ops Sync. */
+  PROJECT_ALPHA_CONNECTOR_SNAPSHOT_CREDENTIALS?: string;
+  /** Ops-Sync-only inbound verifier credentials. Never deploy to Operations. */
+  PROJECT_ALPHA_CONNECTOR_EVENT_CREDENTIALS?: string;
+  /**
+   * Deploy-managed source metadata.  This is deliberately separate from the
+   * credential envelope: it selects one already-deployed credential set, but
+   * never carries the credential itself and is never accepted from an admin
+   * request.
+   */
+  PROJECT_ALPHA_CONNECTOR_SOURCES?: string;
+  /** Production guard: without a manifest, no source is usable. */
+  PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED?: string;
   PROJECT_ALPHA_BASE_URL?: string;
   PROJECT_ALPHA_API_KEY?: string;
   PROJECT_ALPHA_DRAFT_QUOTE_API_KEY?: string;
@@ -102,12 +115,25 @@ const draftQuoteSchema = z.object({ apiKey: scalar(8192), hmacSecret: scalar(819
 const credentialSchema = z.object({ snapshotApiKey: scalar(8192), eventCurrent: signingSchema, eventPrevious: signingSchema.optional(),
   portalCurrent: z.unknown().optional(), portalPrevious: z.unknown().optional(), draftQuote: draftQuoteSchema.optional() }).strict();
 const credentialsSchema = z.object({ version: z.literal(1), sets: z.record(z.string().regex(/^[A-Za-z0-9_-]{1,64}$/), z.unknown()) }).strict();
+const snapshotCredentialSchema = z.object({ snapshotApiKey: scalar(8192), draftQuote: draftQuoteSchema.optional() }).strict();
+const eventCredentialSchema = z.object({ eventCurrent: signingSchema, eventPrevious: signingSchema.optional() }).strict();
+const keyCommitmentSchema = z.object({ keyId: safeId, algorithm: z.enum(["ed25519", "hmac-sha256"]),
+  fingerprint: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
 type KeyInput = z.infer<typeof signingSchema>;
 const revisionSchema = z.object({ credentialRef: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/), snapshotBasePath: scalar(1024),
   accessIssuer: scalar(2048), accessAudience: scalar(512), accessSubject: scalar(512) }).strict();
 const registrationSchema = z.object({ sourceId: scalar(78), producerBindingId: safeId, snapshotOrigin: scalar(2048),
   applicationKey: z.string().regex(/^[a-z0-9][a-z0-9_-]{1,63}$/), profile: z.enum(["primary_legacy", "business_data"]),
   displayName: scalar(160).refine(value => value.trim() === value), revision: revisionSchema }).strict();
+const deploymentRevisionSchema = revisionSchema.extend({ eventCurrent: keyCommitmentSchema,
+  eventPrevious: keyCommitmentSchema.optional() }).strict();
+const deploymentSourceSchema = registrationSchema.omit({ revision: true }).extend({ revision: deploymentRevisionSchema,
+  /** A source is live only when the deployed manifest says it is enabled. */
+  enabled: z.boolean(),
+  /** Visibility is explicit so adding a source cannot silently broaden access. */
+  readVisible: z.boolean(),
+}).strict();
+const deploymentSourcesSchema = z.object({ version: z.literal(1), sources: z.array(deploymentSourceSchema).min(1).max(MAX_CONNECTORS) }).strict();
 
 interface ConnectorRow {
   source_id: string; producer_binding_id: string; snapshot_origin: string; snapshot_base_path: string; application_key: string;
@@ -119,6 +145,18 @@ interface RevisionRow {
   access_issuer: string; access_audience: string; access_subject: string;
   current_key_id: string; current_key_fingerprint: string; previous_key_id: string | null; previous_key_fingerprint: string | null;
   draft_quote_api_key_fingerprint: string | null; draft_quote_hmac_fingerprint: string | null;
+}
+interface ConnectorKeyCommitment {
+  readonly keyId: string;
+  readonly algorithm: "ed25519" | "hmac-sha256";
+  readonly fingerprint: string;
+}
+interface DeploymentConfiguredSource {
+  readonly registration: RegisterProjectAlphaConnectorInput;
+  readonly eventCurrent: ConnectorKeyCommitment;
+  readonly eventPrevious: ConnectorKeyCommitment | null;
+  readonly enabled: boolean;
+  readonly readVisible: boolean;
 }
 function database(env: ProjectAlphaConnectorEnvironment): RegistryDatabase { return env.OPS_DB.withSession("first-primary"); }
 function sourceId(value: unknown): string {
@@ -149,14 +187,93 @@ function parseRevision(value: ProjectAlphaConnectorRevisionInput): ProjectAlphaC
   if (!parsed.success) return fail("invalid", "Connector revision is invalid");
   return { ...parsed.data, snapshotBasePath: basePath(parsed.data.snapshotBasePath), accessIssuer: origin(parsed.data.accessIssuer) };
 }
-function secrets(env: ProjectAlphaConnectorEnvironment): Record<string, unknown> {
-  const raw = env.PROJECT_ALPHA_CONNECTOR_CREDENTIALS;
+
+/**
+ * Parse the deployment-owned source manifest.  The result is intentionally
+ * strict: an invalid, duplicate, or partial manifest never turns a request
+ * into a different source.  Omitting the manifest preserves the original
+ * scalar primary adapter while an installation is being upgraded.
+ */
+function deploymentSources(env: ProjectAlphaConnectorEnvironment): DeploymentConfiguredSource[] {
+  const raw = env.PROJECT_ALPHA_CONNECTOR_SOURCES;
+  if (raw === undefined || raw.trim() === "") return [];
+  if (new TextEncoder().encode(raw).byteLength > 256 * 1024)
+    return fail("credentials_unavailable", "Deployment source configuration is too large");
+  let parsed: z.infer<typeof deploymentSourcesSchema>;
+  try {
+    const result = deploymentSourcesSchema.safeParse(JSON.parse(raw) as unknown);
+    if (!result.success) throw new Error();
+    parsed = result.data;
+  } catch { return fail("credentials_unavailable", "Deployment source configuration is invalid"); }
+  const seenSources = new Set<string>(), seenProducers = new Set<string>(), seenDestinations = new Set<string>();
+  const result: DeploymentConfiguredSource[] = [];
+  for (const entry of parsed.sources) {
+    let id: string, snapshotOrigin: string, revision: ProjectAlphaConnectorRevisionInput;
+    try {
+      id = sourceId(entry.sourceId); snapshotOrigin = origin(entry.snapshotOrigin); revision = parseRevision({
+        credentialRef: entry.revision.credentialRef, snapshotBasePath: entry.revision.snapshotBasePath,
+        accessIssuer: entry.revision.accessIssuer, accessAudience: entry.revision.accessAudience,
+        accessSubject: entry.revision.accessSubject,
+      });
+    } catch { return fail("credentials_unavailable", "Deployment source configuration is invalid"); }
+    if ((id === PRIMARY_ALPHA_SOURCE_ID) !== (entry.profile === "primary_legacy"))
+      return fail("credentials_unavailable", "Deployment source authority profile is invalid");
+    const destination = `${snapshotOrigin}\u0000${revision.snapshotBasePath}\u0000${entry.applicationKey}`;
+    if (seenSources.has(id) || seenProducers.has(entry.producerBindingId) || seenDestinations.has(destination))
+      return fail("credentials_unavailable", "Deployment sources must have unique identities and destinations");
+    seenSources.add(id); seenProducers.add(entry.producerBindingId); seenDestinations.add(destination);
+    if (id === PRIMARY_ALPHA_SOURCE_ID && !entry.readVisible)
+      return fail("credentials_unavailable", "The primary deployment source must remain visible");
+    if (entry.profile === "business_data" && (entry.revision.eventCurrent.algorithm !== "ed25519"
+      || (entry.revision.eventPrevious && entry.revision.eventPrevious.algorithm !== "ed25519")))
+      return fail("credentials_unavailable", "Business connectors require Ed25519 signing keys");
+    if (entry.revision.eventPrevious && (entry.revision.eventCurrent.keyId === entry.revision.eventPrevious.keyId
+      || entry.revision.eventCurrent.fingerprint === entry.revision.eventPrevious.fingerprint))
+      return fail("credentials_unavailable", "Connector rotation keys must be distinct");
+    result.push(Object.freeze({ registration: Object.freeze({ sourceId: id, producerBindingId: entry.producerBindingId,
+      snapshotOrigin, applicationKey: entry.applicationKey, profile: entry.profile, displayName: entry.displayName, revision }),
+    eventCurrent: entry.revision.eventCurrent, eventPrevious: entry.revision.eventPrevious ?? null,
+    enabled: entry.enabled, readVisible: entry.readVisible }));
+  }
+  const primary = result.find(entry => entry.registration.sourceId === PRIMARY_ALPHA_SOURCE_ID);
+  if (result.some(entry => entry.registration.sourceId !== PRIMARY_ALPHA_SOURCE_ID) && !primary)
+    return fail("credentials_unavailable", "A secondary deployment source requires the primary source configuration");
+  if (result.some(entry => entry.registration.sourceId !== PRIMARY_ALPHA_SOURCE_ID && entry.enabled) && !primary?.enabled)
+    return fail("credentials_unavailable", "An enabled secondary deployment source requires an enabled primary source");
+  return result.sort((left, right) => left.registration.sourceId === PRIMARY_ALPHA_SOURCE_ID ? -1 : right.registration.sourceId === PRIMARY_ALPHA_SOURCE_ID ? 1
+    : left.registration.sourceId.localeCompare(right.registration.sourceId));
+}
+
+function matchesDeploymentIdentity(row: ConnectorRow, entry: DeploymentConfiguredSource): boolean {
+  const value = entry.registration;
+  return row.source_id === value.sourceId && row.producer_binding_id === value.producerBindingId
+    && row.snapshot_origin === value.snapshotOrigin && row.snapshot_base_path === value.revision.snapshotBasePath
+    && row.application_key === value.applicationKey && row.profile === value.profile;
+}
+function revisionMatchesDeployment(row: RevisionRow | null, entry: DeploymentConfiguredSource): boolean {
+  const value = entry.registration.revision;
+  return Boolean(row && row.credential_ref === value.credentialRef && row.snapshot_base_path === value.snapshotBasePath
+    && row.access_issuer === value.accessIssuer && row.access_audience === value.accessAudience && row.access_subject === value.accessSubject
+    && row.current_key_id === entry.eventCurrent.keyId && row.current_key_fingerprint === entry.eventCurrent.fingerprint
+    && row.previous_key_id === (entry.eventPrevious?.keyId ?? null)
+    && row.previous_key_fingerprint === (entry.eventPrevious?.fingerprint ?? null));
+}
+async function portalEnrolled(db: RegistryDatabase, id: string): Promise<boolean> {
+  // Older installations may not yet have the paired portal migration.  In that
+  // case there cannot be a portal enrollment to coordinate.
+  const exists = await db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='pa_connector_portal_sources'").first();
+  return Boolean(exists && await db.prepare("SELECT 1 FROM pa_connector_portal_sources WHERE source_id=?").bind(id).first());
+}
+function credentialSets(raw: string | undefined, label: string): Record<string, unknown> {
   if (typeof raw !== "string" || !raw || new TextEncoder().encode(raw).byteLength > 256 * 1024) return fail("credentials_unavailable", "Connector credentials are not configured");
   try {
     const parsed = credentialsSchema.safeParse(JSON.parse(raw) as unknown);
     if (!parsed.success || Object.keys(parsed.data.sets).length > MAX_CREDENTIAL_REFERENCES) throw new Error();
     return parsed.data.sets;
-  } catch { return fail("credentials_unavailable", "Connector credential configuration is invalid"); }
+  } catch { return fail("credentials_unavailable", `${label} credential configuration is invalid`); }
+}
+function secrets(env: ProjectAlphaConnectorEnvironment): Record<string, unknown> {
+  return credentialSets(env.PROJECT_ALPHA_CONNECTOR_CREDENTIALS, "Connector");
 }
 function keyBytes(value: KeyInput, legacy = false): Uint8Array {
   if (value.algorithm === "hmac-sha256") {
@@ -236,7 +353,7 @@ async function configuredKeys(env: ProjectAlphaConnectorEnvironment, ref: string
   return { set, current, previous, draftQuoteFingerprints, draftQuoteReservations };
 }
 async function pinPrimaryEnrollment(env: ProjectAlphaConnectorEnvironment, value: RegisterProjectAlphaConnectorInput,
-  current: ConnectorSigningKey, previous: ConnectorSigningKey | null): Promise<void> {
+  current: ConnectorKeyCommitment, previous: ConnectorKeyCommitment | null): Promise<void> {
   let url: URL;
   try {
     if (!env.PROJECT_ALPHA_BASE_URL || !env.APPLICATION_KEY || !env.PROJECT_ALPHA_API_KEY?.trim()) throw new Error();
@@ -312,6 +429,195 @@ function summary(row: ConnectorRow): ProjectAlphaConnectorSummary {
 async function read(db: RegistryDatabase, id: string): Promise<ConnectorRow | null> {
   return db.prepare("SELECT * FROM pa_connectors WHERE source_id=?").bind(id).first<ConnectorRow>();
 }
+
+async function configuredSnapshotCredentials(env: ProjectAlphaConnectorEnvironment, ref: string) {
+  const configured = credentialSets(env.PROJECT_ALPHA_CONNECTOR_SNAPSHOT_CREDENTIALS, "Snapshot");
+  if (!Object.hasOwn(configured, ref)) return fail("credentials_unavailable", "The connector snapshot credential set is missing");
+  const parsed = snapshotCredentialSchema.safeParse(configured[ref]);
+  if (!parsed.success) return fail("credentials_unavailable", "The connector snapshot credential set is invalid");
+  const set = parsed.data;
+  if (set.draftQuote && (set.draftQuote.apiKey === set.draftQuote.hmacSecret
+    || set.draftQuote.apiKey === set.snapshotApiKey || set.draftQuote.hmacSecret === set.snapshotApiKey))
+    return fail("credentials_unavailable", "Draft quote credentials must be dedicated to that purpose");
+  if (set.draftQuote && [env.PROJECT_ALPHA_API_KEY, env.PROJECT_ALPHA_DRAFT_QUOTE_API_KEY,
+    env.PROJECT_ALPHA_DRAFT_QUOTE_HMAC_SECRET].some(value => typeof value === "string"
+      && (value === set.draftQuote!.apiKey || value === set.draftQuote!.hmacSecret)))
+    return fail("conflict", "A draft quote credential belongs to the primary connection");
+  const draftQuoteFingerprints = set.draftQuote ? {
+    apiKey: await credentialFingerprint("draft-quote-api-key", set.draftQuote.apiKey),
+    hmac: await credentialFingerprint("draft-quote-hmac", set.draftQuote.hmacSecret),
+  } : null;
+  const draftQuoteReservations: DraftQuoteCredentialReservation[] = set.draftQuote && draftQuoteFingerprints ? [
+    { purpose: "api_key", purposeFingerprint: draftQuoteFingerprints.apiKey,
+      ownershipFingerprint: await credentialFingerprint("draft-quote-credential", set.draftQuote.apiKey) },
+    { purpose: "hmac", purposeFingerprint: draftQuoteFingerprints.hmac,
+      ownershipFingerprint: await credentialFingerprint("draft-quote-credential", set.draftQuote.hmacSecret) },
+  ] : [];
+  return { set, draftQuoteFingerprints, draftQuoteReservations };
+}
+
+async function configuredEventKeys(env: ProjectAlphaConnectorEnvironment, ref: string,
+  profile: ProjectAlphaConnectorProfile) {
+  const configured = credentialSets(env.PROJECT_ALPHA_CONNECTOR_EVENT_CREDENTIALS, "Event verifier");
+  if (!Object.hasOwn(configured, ref)) return fail("credentials_unavailable", "The connector event verifier set is missing");
+  const parsed = eventCredentialSchema.safeParse(configured[ref]);
+  if (!parsed.success) return fail("credentials_unavailable", "The connector event verifier set is invalid");
+  const current = await signingKey(parsed.data.eventCurrent);
+  const previous = parsed.data.eventPrevious ? await signingKey(parsed.data.eventPrevious) : null;
+  if (previous && (current.keyId === previous.keyId || current.fingerprint === previous.fingerprint))
+    return fail("credentials_unavailable", "Connector rotation keys must be distinct");
+  if (profile === "business_data" && (current.algorithm !== "ed25519" || (previous && previous.algorithm !== "ed25519")))
+    return fail("credentials_unavailable", "Business connectors require Ed25519 signing keys");
+  return { current, previous };
+}
+
+const DEPLOYMENT_ACTOR = "deployment-configuration";
+
+/** A non-empty deployment manifest is the source allow-list. */
+export function deploymentAllowsProjectAlphaSource(env: ProjectAlphaConnectorEnvironment, requestedSource: string): boolean {
+  const configured = deploymentSources(env);
+  // Absence is the backwards-compatible registry/scalar-primary mode. Once a
+  // manifest is present it becomes the authoritative allow-list.
+  if (!configured.length) return env.PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED !== "true";
+  const id = sourceId(requestedSource);
+  return configured.some(entry => entry.registration.sourceId === id && entry.enabled);
+}
+
+/**
+ * Materialize the reviewed deployment manifest into the durable registry.
+ *
+ * The registry remains the fence used by event ingestion and snapshots; this
+ * function merely makes deployment configuration its sole writer.  Operators
+ * cannot supply source URLs, producer IDs, credential references, or signing
+ * identities through the Operations UI/API.  Immutable identity drift fails
+ * closed.  A credential/state change is applied only while that source has no
+ * separately coordinated portal authority; portal-enabled changes continue to
+ * require their paired release instead of silently changing client access.
+ */
+export async function ensureDeploymentConfiguredProjectAlphaConnectors(env: ProjectAlphaConnectorEnvironment): Promise<void> {
+  const configured = deploymentSources(env);
+  if (!configured.length) {
+    if (env.PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED === "true") {
+      return fail("credentials_unavailable", "Deployment source manifest is required");
+    }
+    return;
+  }
+  const db = database(env);
+
+  // Validate the complete manifest before the first durable mutation. This
+  // prevents a malformed or unusable later source from partially enrolling an
+  // earlier one. The writes below remain idempotent and re-check every CAS.
+  const prepared: Array<{ entry: DeploymentConfiguredSource; row: ConnectorRow | null; credentials: PreparedConnectorCredentials }> = [];
+  const configuredKeyOwners = new Map<string, string>();
+  const reservedKeys = (await db.prepare("SELECT fingerprint,source_id FROM pa_connector_signing_keys LIMIT ?")
+    .bind(MAX_CONNECTORS * 4 + 8).all<{ fingerprint: string; source_id: string }>()).results;
+  for (const item of reservedKeys) configuredKeyOwners.set(item.fingerprint, item.source_id);
+  const existingRows = (await db.prepare("SELECT * FROM pa_connectors ORDER BY source_id LIMIT ?")
+    .bind(MAX_CONNECTORS + 1).all<ConnectorRow>()).results;
+  if (existingRows.length > MAX_CONNECTORS) return fail("capacity", "The connector registry exceeds its supported limit");
+  const existingCount = existingRows.length;
+  const declared = new Set(configured.map(entry => entry.registration.sourceId));
+  const staleRows = existingRows.filter(row => row.state !== "retired" && !declared.has(row.source_id));
+  for (const row of staleRows) {
+    if ((row.state !== "suspended" || row.read_visible !== 0) && await portalEnrolled(db, row.source_id))
+      return fail("changed", "Remove portal authority before removing a deployment source");
+  }
+  let missingCount = 0;
+  for (const entry of configured) {
+    const id = entry.registration.sourceId;
+    const row = await read(db, id);
+    if (!row) missingCount += 1;
+    else {
+      if (!matchesDeploymentIdentity(row, entry))
+        return fail("changed", "Deployment source identity does not match its registered connection");
+      if (row.state === "retired") return fail("changed", "A retired source cannot be restored by deployment configuration");
+    }
+    const snapshot = await configuredSnapshotCredentials(env, entry.registration.revision.credentialRef);
+    const keys: PreparedConnectorCredentials = { current: entry.eventCurrent, previous: entry.eventPrevious,
+      draftQuoteFingerprints: snapshot.draftQuoteFingerprints, draftQuoteReservations: snapshot.draftQuoteReservations };
+    for (const key of [keys.current, ...(keys.previous ? [keys.previous] : [])]) {
+      const owner = configuredKeyOwners.get(key.fingerprint);
+      if (owner && owner !== id) return fail("conflict", "A signing key belongs to another connection");
+      configuredKeyOwners.set(key.fingerprint, id);
+    }
+    if (!row && id === PRIMARY_ALPHA_SOURCE_ID)
+      await pinPrimaryEnrollment(env, entry.registration, keys.current, keys.previous);
+    if (row) {
+      const revision = await db.prepare("SELECT * FROM pa_connector_revisions WHERE source_id=? AND revision=?")
+        .bind(id, row.active_revision).first<RevisionRow>();
+      const targetState: ProjectAlphaConnectorState = entry.enabled ? "active" : "suspended";
+      const changesRevision = !revisionMatchesDeployment(revision, entry);
+      const changesState = row.state !== targetState || row.read_visible !== Number(entry.readVisible)
+        || row.display_name !== entry.registration.displayName;
+      if ((changesRevision || changesState) && await portalEnrolled(db, id))
+        return fail("changed", "Deployment configuration changed for a portal-enabled source; complete its coordinated portal release first");
+    }
+    prepared.push({ entry, row, credentials: keys });
+  }
+  if (existingCount + missingCount > MAX_CONNECTORS)
+    return fail("capacity", "The connector registry has reached its configured limit");
+
+  for (const { entry, credentials } of prepared) {
+    const id = entry.registration.sourceId;
+    let row = await read(db, id);
+    if (!row) {
+      try {
+        await registerProjectAlphaConnector(env, entry.registration, DEPLOYMENT_ACTOR, credentials);
+      } catch (error) {
+        // Concurrent requests may bootstrap the exact same source.  Re-read
+        // below and retain all identity/revision checks rather than accepting
+        // a generic conflict as success.
+        if (!(error instanceof ProjectAlphaConnectorError) || error.code !== "conflict") throw error;
+      }
+      row = await read(db, id);
+      if (!row) return fail("unavailable", "Deployment source registration could not be verified");
+    }
+    if (!matchesDeploymentIdentity(row, entry))
+      return fail("changed", "Deployment source identity does not match its registered connection");
+
+    let currentRevision = await db.prepare("SELECT * FROM pa_connector_revisions WHERE source_id=? AND revision=?")
+      .bind(id, row.active_revision).first<RevisionRow>();
+    if (!revisionMatchesDeployment(currentRevision, entry)) {
+      await reviseProjectAlphaConnector(env, id, row.version, entry.registration.revision, DEPLOYMENT_ACTOR, undefined, credentials);
+      row = await read(db, id);
+      if (!row) return fail("unavailable", "Deployment source revision could not be verified");
+      currentRevision = await db.prepare("SELECT * FROM pa_connector_revisions WHERE source_id=? AND revision=?")
+        .bind(id, row.active_revision).first<RevisionRow>();
+      if (!revisionMatchesDeployment(currentRevision, entry)) return fail("changed", "Deployment source revision does not match its registered connection");
+    }
+
+    // Registration and revision staging for every source completes before any
+    // newly registered source is activated in the second pass below.
+    await verifiedDeploymentConfiguration(env, row, entry);
+  }
+
+  for (const { entry } of prepared) {
+    const id = entry.registration.sourceId;
+    let row = await read(db, id);
+    if (!row) return fail("unavailable", "Deployment source registration could not be verified");
+    const targetState: ProjectAlphaConnectorState = entry.enabled ? "active" : "suspended";
+    if (row.state !== targetState || row.read_visible !== Number(entry.readVisible) || row.display_name !== entry.registration.displayName) {
+      await setProjectAlphaConnectorState(env, id, { expectedVersion: row.version, state: targetState,
+        readVisible: entry.readVisible, displayName: entry.registration.displayName }, DEPLOYMENT_ACTOR, undefined, entry);
+      row = await read(db, id);
+      if (!row || row.state !== targetState || row.read_visible !== Number(entry.readVisible)
+        || row.display_name !== entry.registration.displayName)
+        return fail("unavailable", "Deployment source state could not be verified");
+    }
+    // Re-read the active configuration after every possible CAS mutation.  A
+    // manifest never makes a malformed or drifted credential usable.
+    await verifiedDeploymentConfiguration(env, row, entry);
+  }
+
+  // A successful manifest reconciliation hides and suspends undeclared rows so
+  // direct source-qualified reads cannot keep serving a removed source. Portal
+  // authority must already be removed; otherwise preflight above fails closed.
+  for (const stale of staleRows) {
+    if (stale.state === "suspended" && stale.read_visible === 0) continue;
+    await setProjectAlphaConnectorState(env, stale.source_id, { expectedVersion: stale.version,
+      state: "suspended", readVisible: false }, DEPLOYMENT_ACTOR);
+  }
+}
 function proof(row: ConnectorRow): ProjectAlphaConnectorProof {
   return Object.freeze({ mode: "registry", sourceId: row.source_id, profile: row.profile, revision: row.active_revision, version: row.version });
 }
@@ -371,6 +677,7 @@ export function connectorFenceStatement(db: RegistryDatabase, value: ProjectAlph
   const guard = connectorFenceSql(value); return fence(db, value.sourceId, guard.sql, guard.bindings);
 }
 export async function assertProjectAlphaConnectorProof(env: ProjectAlphaConnectorEnvironment, value: ProjectAlphaConnectorProof): Promise<void> {
+  if (!deploymentAllowsProjectAlphaSource(env, value.sourceId)) fail("changed", "Connector is not configured for this deployment");
   const guard = connectorFenceSql(value);
   if (!await database(env).prepare(`SELECT 1 ok WHERE ${guard.sql}`).bind(...guard.bindings).first()) fail("changed", "Connector configuration changed");
 }
@@ -399,9 +706,26 @@ async function verifiedConfiguration(env: ProjectAlphaConnectorEnvironment, row:
 /** A source hint selects configuration only. Ingress MUST verify its Access
  * subject and payload signature before using this configuration's write proof. */
 export async function resolveProjectAlphaConnector(env: ProjectAlphaConnectorEnvironment, requestedSource: string,
-  purpose: "snapshot" | "events" | "draft_quote"): Promise<ResolvedProjectAlphaConnector> {
-  const id = sourceId(requestedSource), db = database(env), row = await read(db, id);
+  purpose: "snapshot" | "events" | "draft_quote" | "proof"): Promise<ResolvedProjectAlphaConnector> {
+  // Source selection is deployment-owned.  Bootstrap before selecting a
+  // registry row so a newly deployed LTT source can use the same Ops Sync
+  // endpoint without an administrator registering it through the browser.
+  const id = sourceId(requestedSource);
+  const deployed = deploymentSources(env);
+  const deploymentEntry = deployed.find(entry => entry.registration.sourceId === id);
+  if (deployed.length) {
+    if (!deploymentEntry || !deploymentEntry.enabled) return fail("unavailable", "Connector is not enabled for this deployment");
+    // Ops Sync is deliberately read-only. It checks its exact local source
+    // declaration against the registry materialized by Operations.
+    if (purpose !== "events") await ensureDeploymentConfiguredProjectAlphaConnectors(env);
+  } else {
+    if (env.PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED === "true")
+      return fail("credentials_unavailable", "Deployment source manifest is required");
+    if (purpose !== "events") await ensureDeploymentConfiguredProjectAlphaConnectors(env);
+  }
+  const db = database(env), row = await read(db, id);
   if (!row || (id === PRIMARY_ALPHA_SOURCE_ID && row.state === "pending")) {
+    if (deploymentEntry) return fail("unavailable", "Connector registry materialization is incomplete");
     if (id !== PRIMARY_ALPHA_SOURCE_ID) return fail("unavailable", "Connector is not registered");
     // Trusted deployment configuration, not caller authentication: retain old
     // key ownership even if it is rotated away before explicit enrollment.
@@ -420,21 +744,49 @@ export async function resolveProjectAlphaConnector(env: ProjectAlphaConnectorEnv
   }
   const currentProof = proof(row);
   await assertProjectAlphaConnectorProof(env, currentProof);
-  const config = await verifiedConfiguration(env, row);
+  let snapshotConfig: Awaited<ReturnType<typeof configuredSnapshotCredentials>> | null = null;
+  let eventConfig: Awaited<ReturnType<typeof configuredEventKeys>> | null = null;
+  let legacyConfig: Awaited<ReturnType<typeof verifiedConfiguration>> | null = null;
+  if (deploymentEntry) {
+    if (!matchesDeploymentIdentity(row, deploymentEntry))
+      return fail("changed", "Connector identity does not match the local deployment manifest");
+    const revision = await db.prepare("SELECT * FROM pa_connector_revisions WHERE source_id=? AND revision=?")
+      .bind(row.source_id, row.active_revision).first<RevisionRow>();
+    if (!revisionMatchesDeployment(revision, deploymentEntry))
+      return fail("changed", "Connector revision does not match the local deployment manifest");
+    if (purpose === "events") {
+      eventConfig = await configuredEventKeys(env, deploymentEntry.registration.revision.credentialRef, row.profile);
+      if (eventConfig.current.keyId !== deploymentEntry.eventCurrent.keyId
+        || eventConfig.current.fingerprint !== deploymentEntry.eventCurrent.fingerprint
+        || (eventConfig.previous?.keyId ?? null) !== (deploymentEntry.eventPrevious?.keyId ?? null)
+        || (eventConfig.previous?.fingerprint ?? null) !== (deploymentEntry.eventPrevious?.fingerprint ?? null))
+        return fail("credentials_unavailable", "Connector event verifier does not match the deployment manifest");
+    } else {
+      const verified = await verifiedDeploymentConfiguration(env, row, deploymentEntry);
+      snapshotConfig = verified.snapshot;
+    }
+  } else {
+    legacyConfig = await verifiedConfiguration(env, row);
+  }
   await assertProjectAlphaConnectorProof(env, currentProof);
   return { source: createProjectAlphaSourceContext(id), proof: currentProof,
-    snapshot: { baseUrl: `${row.snapshot_origin}${row.snapshot_base_path === "/" ? "" : row.snapshot_base_path}`,
-      apiKey: config.set.snapshotApiKey, applicationKey: row.application_key },
-    event: { applicationKey: row.application_key, accessIssuer: config.revision.access_issuer, accessAudience: config.revision.access_audience,
-      accessSubject: config.revision.access_subject, current: config.current, previous: config.previous },
-    draftQuote: purpose === "draft_quote" && config.set.draftQuote ? {
+    snapshot: purpose === "snapshot" ? { baseUrl: `${row.snapshot_origin}${row.snapshot_base_path === "/" ? "" : row.snapshot_base_path}`,
+      apiKey: (snapshotConfig?.set ?? legacyConfig!.set).snapshotApiKey, applicationKey: row.application_key } : null,
+    event: purpose === "events" ? { applicationKey: row.application_key,
+      accessIssuer: deploymentEntry?.registration.revision.accessIssuer ?? legacyConfig!.revision.access_issuer,
+      accessAudience: deploymentEntry?.registration.revision.accessAudience ?? legacyConfig!.revision.access_audience,
+      accessSubject: deploymentEntry?.registration.revision.accessSubject ?? legacyConfig!.revision.access_subject,
+      current: eventConfig ? eventConfig.current : legacyConfig!.current,
+      previous: eventConfig ? eventConfig.previous : legacyConfig!.previous } : null,
+    draftQuote: purpose === "draft_quote" && (snapshotConfig?.set ?? legacyConfig!.set).draftQuote ? {
       baseUrl: row.snapshot_origin, applicationKey: row.application_key,
-      apiKey: config.set.draftQuote.apiKey, hmacSecret: config.set.draftQuote.hmacSecret,
+      apiKey: (snapshotConfig?.set ?? legacyConfig!.set).draftQuote!.apiKey,
+      hmacSecret: (snapshotConfig?.set ?? legacyConfig!.set).draftQuote!.hmacSecret,
     } : null };
 }
 
-async function keyReservations(env: ProjectAlphaConnectorEnvironment, id: string, current: ConnectorSigningKey, previous: ConnectorSigningKey | null) {
-  const rows = new Map<string, { key: ConnectorSigningKey; owner: string }>();
+async function keyReservations(env: ProjectAlphaConnectorEnvironment, id: string, current: ConnectorKeyCommitment, previous: ConnectorKeyCommitment | null) {
+  const rows = new Map<string, { key: ConnectorKeyCommitment; owner: string }>();
   for (const key of await legacyKeys(env)) rows.set(key.fingerprint, { key, owner: PRIMARY_ALPHA_SOURCE_ID });
   for (const key of [current, ...(previous ? [previous] : [])]) {
     const prior = rows.get(key.fingerprint);
@@ -443,7 +795,7 @@ async function keyReservations(env: ProjectAlphaConnectorEnvironment, id: string
   }
   return reservationStatements(database(env), [...rows.values()]);
 }
-function reservationStatements(db: RegistryDatabase, rows: { key: ConnectorSigningKey; owner: string }[]): D1PreparedStatement[] {
+function reservationStatements(db: RegistryDatabase, rows: { key: ConnectorKeyCommitment; owner: string }[]): D1PreparedStatement[] {
   const statements: D1PreparedStatement[] = [];
   for (const { key, owner } of new Map(rows.map(row => [row.key.fingerprint, row])).values()) {
     // Exact existing reservations produce no INSERT (outer UPSERT policies can
@@ -455,7 +807,7 @@ function reservationStatements(db: RegistryDatabase, rows: { key: ConnectorSigni
   return statements;
 }
 function revisionStatement(db: RegistryDatabase, id: string, revision: number, value: ProjectAlphaConnectorRevisionInput,
-  current: ConnectorSigningKey, previous: ConnectorSigningKey | null, actorId: string,
+  current: ConnectorKeyCommitment, previous: ConnectorKeyCommitment | null, actorId: string,
   draftQuoteFingerprints: { apiKey: string; hmac: string } | null) {
   // Ordered migration verification exercises the connector registry before
   // migration 0050 adds the optional quote-purpose columns. Omit them only
@@ -498,13 +850,34 @@ function writeError(error: unknown): never {
 }
 /** Internal administration primitives. Callers enforce current integrations.manage
  * and origin/CSRF policy; these functions never infer authority from actor IDs. */
+interface PreparedConnectorCredentials {
+  current: ConnectorKeyCommitment;
+  previous: ConnectorKeyCommitment | null;
+  draftQuoteFingerprints: { apiKey: string; hmac: string } | null;
+  draftQuoteReservations: DraftQuoteCredentialReservation[];
+}
+
+async function verifiedDeploymentConfiguration(env: ProjectAlphaConnectorEnvironment, row: ConnectorRow,
+  entry: DeploymentConfiguredSource) {
+  const db = database(env);
+  const revision = await db.prepare("SELECT * FROM pa_connector_revisions WHERE source_id=? AND revision=?")
+    .bind(row.source_id, row.active_revision).first<RevisionRow>();
+  if (!revision || !revisionMatchesDeployment(revision, entry))
+    return fail("credentials_unavailable", "Connector event key commitment does not match its deployed revision");
+  const snapshot = await configuredSnapshotCredentials(env, revision.credential_ref);
+  if ((snapshot.draftQuoteFingerprints?.apiKey ?? null) !== (revision.draft_quote_api_key_fingerprint ?? null)
+    || (snapshot.draftQuoteFingerprints?.hmac ?? null) !== (revision.draft_quote_hmac_fingerprint ?? null))
+    return fail("credentials_unavailable", "Connector draft quote configuration does not match its enrolled revision");
+  return { revision, snapshot };
+}
 export async function registerProjectAlphaConnector(env: ProjectAlphaConnectorEnvironment, input: RegisterProjectAlphaConnectorInput,
-  actorId: string): Promise<ProjectAlphaConnectorSummary> {
+  actorId: string, preparedCredentials?: PreparedConnectorCredentials): Promise<ProjectAlphaConnectorSummary> {
   const parsed = registrationSchema.safeParse(input);
   if (!parsed.success) return fail("invalid", "Connector registration is invalid");
   const value = parsed.data, id = sourceId(value.sourceId), author = actor(actorId), revision = parseRevision(value.revision);
   if ((id === PRIMARY_ALPHA_SOURCE_ID) !== (value.profile === "primary_legacy")) fail("invalid", "Connector authority profile is invalid");
-  const snapshotOrigin = origin(value.snapshotOrigin), keys = await configuredKeys(env, revision.credentialRef, value.profile), db = database(env);
+  const snapshotOrigin = origin(value.snapshotOrigin), keys = preparedCredentials
+    ?? await configuredKeys(env, revision.credentialRef, value.profile), db = database(env);
   if (id === PRIMARY_ALPHA_SOURCE_ID) await pinPrimaryEnrollment(env, { ...value, snapshotOrigin, revision }, keys.current, keys.previous);
   const count = await db.prepare("SELECT count(*) count FROM pa_connectors").first<number>("count");
   if ((count ?? 0) >= MAX_CONNECTORS) fail("capacity", "The connector registry has reached its configured limit");
@@ -523,11 +896,12 @@ export async function registerProjectAlphaConnector(env: ProjectAlphaConnectorEn
   return summary(saved);
 }
 export async function reviseProjectAlphaConnector(env: ProjectAlphaConnectorEnvironment, requestedSource: string, expectedVersion: number,
-  input: ProjectAlphaConnectorRevisionInput, actorId: string, administrationFence?: D1PreparedStatement): Promise<ProjectAlphaConnectorSummary> {
+  input: ProjectAlphaConnectorRevisionInput, actorId: string, administrationFence?: D1PreparedStatement,
+  preparedCredentials?: PreparedConnectorCredentials): Promise<ProjectAlphaConnectorSummary> {
   const id = sourceId(requestedSource), author = actor(actorId), value = parseRevision(input), db = database(env), row = await read(db, id);
   if (!row) return fail("unavailable", "Connector is not registered");
   if (row.state === "retired" || row.snapshot_base_path !== value.snapshotBasePath) return fail("conflict", "Connector destination ownership cannot change");
-  const keys = await configuredKeys(env, value.credentialRef, row.profile), revision = row.active_revision + 1;
+  const keys = preparedCredentials ?? await configuredKeys(env, value.credentialRef, row.profile), revision = row.active_revision + 1;
   try {
     await db.batch([
       ...(administrationFence ? [administrationFence] : []),
@@ -544,7 +918,7 @@ export async function reviseProjectAlphaConnector(env: ProjectAlphaConnectorEnvi
 }
 export async function setProjectAlphaConnectorState(env: ProjectAlphaConnectorEnvironment, requestedSource: string,
   input: { expectedVersion: number; state: ProjectAlphaConnectorState; readVisible?: boolean; displayName?: string }, actorId: string,
-  administrationFence?: D1PreparedStatement): Promise<ProjectAlphaConnectorSummary> {
+  administrationFence?: D1PreparedStatement, deploymentEntry?: DeploymentConfiguredSource): Promise<ProjectAlphaConnectorSummary> {
   const parsed = z.object({ expectedVersion: z.number().int().positive(), state: z.enum(["pending", "active", "suspended", "retired"]),
     readVisible: z.boolean().optional(), displayName: scalar(160).refine(value => value.trim() === value).optional() }).strict().safeParse(input);
   if (!parsed.success) return fail("invalid", "Connector state change is invalid");
@@ -552,7 +926,10 @@ export async function setProjectAlphaConnectorState(env: ProjectAlphaConnectorEn
   if (!row) return fail("unavailable", "Connector is not registered");
   assertProjectAlphaConnectorStateTransition(row.state, value.state);
   if (id === PRIMARY_ALPHA_SOURCE_ID && value.readVisible === false) return fail("invalid", "Primary business visibility cannot be disabled here");
-  if (value.state === "active") await verifiedConfiguration(env, row);
+  if (value.state === "active") {
+    if (deploymentEntry) await verifiedDeploymentConfiguration(env, row, deploymentEntry);
+    else await verifiedConfiguration(env, row);
+  }
   try {
     await db.batch([
       ...(administrationFence ? [administrationFence] : []),
@@ -569,5 +946,12 @@ export async function setProjectAlphaConnectorState(env: ProjectAlphaConnectorEn
 export async function listProjectAlphaConnectors(env: ProjectAlphaConnectorEnvironment): Promise<ProjectAlphaConnectorSummary[]> {
   const rows = (await database(env).prepare("SELECT * FROM pa_connectors ORDER BY source_id LIMIT ?").bind(MAX_CONNECTORS + 1).all<ConnectorRow>()).results;
   if (rows.length > MAX_CONNECTORS) return fail("capacity", "The connector registry exceeds its supported limit");
-  return rows.map(summary);
+  const configured = deploymentSources(env);
+  if (!configured.length) {
+    if (env.PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED === "true")
+      return fail("credentials_unavailable", "Deployment source manifest is required");
+    return rows.map(summary);
+  }
+  const allowed = new Set(configured.map(entry => entry.registration.sourceId));
+  return rows.filter(row => allowed.has(row.source_id)).map(summary);
 }

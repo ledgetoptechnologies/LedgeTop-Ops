@@ -20,7 +20,7 @@ describe("authenticated delivery pilot readiness", { timeout: 180_000, concurren
     db = await runtime.getD1Database("DELIVERY_DB") as unknown as D1Database;
     emptyDb = await runtime.getD1Database("EMPTY_DB") as unknown as D1Database;
     const directory = new URL("../../client/migrations/", import.meta.url);
-    for (const name of readdirSync(directory).filter(name => /^\d{4}_.*\.sql$/.test(name) && name.slice(0, 4) <= "0189").sort())
+    for (const name of readdirSync(directory).filter(name => /^\d{4}_.*\.sql$/.test(name) && name.slice(0, 4) <= "0209").sort())
       await db.batch(splitD1MigrationStatements(readFileSync(new URL(name, directory), "utf8")).map(sql => db.prepare(sql)));
     env = { DELIVERY_DB: db } as Env;
   });

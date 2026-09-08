@@ -2,6 +2,8 @@ import { readFileSync, readdirSync } from "node:fs";
 import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
+import { reservePrimaryPortalSigningKeys } from "../../client/src/worker/project-alpha-portal-authority";
+import { primaryProjectionCheckpointStatement, primaryProjectionSourceStatements, primaryStaffReceiptStatement } from "./helpers/primary-delivery-fixture";
 import {
   authenticatedDeliveryChangeCandidatesSql,
   saveAuthenticatedDeliveryNotificationPolicy,
@@ -33,17 +35,21 @@ describe("authenticated delivery receipt projection — migrated real D1", { tim
       await db.batch(splitD1MigrationStatements(readFileSync(new URL(name, directory), "utf8")).map(sql => db.prepare(sql)));
     for (const name of [
       "0170_authenticated_delivery_change_notifications.sql",
+      "0189_primary_staff_folder_bindings.sql",
       "0204_delivery_change_receipts.sql",
       "0205_authenticated_delivery_change_sequence.sql",
       "0207_delivery_change_projection.sql",
       "0208_authenticated_delivery_change_batch_provider_identity.sql",
+      "0209_authenticated_delivery_change_recipient_events.sql",
     ]) await db.batch(splitD1MigrationStatements(readFileSync(new URL(`../../client/migrations/${name}`, import.meta.url), "utf8"))
       .map(sql => db.prepare(sql)));
     env = {
       DELIVERY_DB: db,
       AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED: "true",
       AUTHENTICATED_DELIVERY_RECOVERY_ENABLED: "true",
+      PROJECT_ALPHA_PORTAL_HMAC_SECRET: "primary-portal-hmac-test-key-material-at-least-thirty-two-bytes",
     } as RecoveryEnv;
+    await reservePrimaryPortalSigningKeys(env);
   }, 180_000);
 
   afterAll(async () => runtime?.dispose());
@@ -59,6 +65,8 @@ describe("authenticated delivery receipt projection — migrated real D1", { tim
         .bind(identity, "https://access.example.test", `subject-${suffix}`, `${suffix}@example.test`),
       db.prepare("INSERT INTO portal_v2_workspaces(id,root_type,pa_organization_public_id,display_name,status,project_alpha_source_id) VALUES(?,'organization',?,?,'active','project-alpha:primary')")
         .bind(workspace, organization, `Workspace ${suffix}`),
+      ...primaryProjectionSourceStatements(db,{workspace,snapshot:`snapshot-${suffix}`,
+        generation,organization,displayName:`Workspace ${suffix}`}),
       db.prepare("INSERT INTO portal_v2_workspace_memberships(id,workspace_id,identity_id,source_type,status) VALUES(?,?,?,'operations','active')")
         .bind(`membership-${suffix}`, workspace, identity),
       db.prepare("INSERT INTO portal_v2_directory_generations(id,workspace_id,source_generation,source_sequence,status,complete) VALUES(?,?,?,1,'active',1)")
@@ -69,8 +77,10 @@ describe("authenticated delivery receipt projection — migrated real D1", { tim
         .bind(workspace, generation, project, organization, `Project ${suffix}`),
       db.prepare("INSERT INTO portal_v2_directory_checkpoints(workspace_id,active_generation_id,source_sequence) VALUES(?,?,1)")
         .bind(workspace, generation),
+      primaryProjectionCheckpointStatement(db,{workspace,generation,snapshot:`snapshot-${suffix}`}),
       db.prepare("INSERT INTO portal_v2_folder_bindings(id,workspace_id,owner_scope_type,owner_public_id,r2_prefix,source_type,source_version) VALUES(?,?,'project',?,?,'operations','v1')")
         .bind(binding, workspace, project, prefix),
+      primaryStaffReceiptStatement(db,{binding,workspace,organization,project,generation,snapshot:`snapshot-${suffix}`,prefix}),
       db.prepare("INSERT INTO pa_portal_principals(workspace_id,public_id,identity_id,email_hint,display_name,source_version,status) VALUES(?,?,?,?,?,'pv1','active')")
         .bind(workspace, principal, identity, `${suffix}@example.test`, `Person ${suffix}`),
       db.prepare("INSERT INTO portal_v2_entitlements(id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,source_type,status) VALUES(?,?,?,'delivery.view','allow','project',?,'operations','active')")

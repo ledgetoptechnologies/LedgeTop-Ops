@@ -20,6 +20,10 @@ See [Project Alpha portal activation](project-alpha-portal-activation.md) for th
 canonical machine endpoint, Access and secret presence checks, schema-v3
 ingest-only sequence, independent client-read cutover, and drain-first rollback.
 
+See [Project Alpha deployment-configured sources](project-alpha-deployment-sources.md)
+for the single Ops Sync endpoint, LTDS primary/LTT secondary source manifest,
+read-only Operations status surface, and safe credential/configuration rollout.
+
 See [Client portal rollout manifest](client-portal-rollout-manifest.md) for the
 joined acceptance matrix, current default-off capability families, ordered
 activation windows, rollback requirements, and dual-domain live evidence gate.
@@ -61,7 +65,7 @@ delete could race a later upload at the same key.
 
 ## Key rotation
 
-Inventory and version every secret: Access audience/configuration, session signing key, delivery token encryption key, access-code pepper, audit HMAC secret, Stream/API credentials, Project Alpha credentials, webhook signing keys, and TrueNAS/R2 credentials. Delivery accepts `SESSION_KEY_ID` plus `PREVIOUS_SESSION_KEY_ID` and their two secrets during a 24-hour overlap. Access codes and encrypted share-link secrets support current/previous secrets with lazy re-encryption or rehashing. The legacy primary Project Alpha path remains HMAC-compatible, so `PROJECT_ALPHA_ALLOW_LEGACY_HMAC=true` is required with `PROJECT_ALPHA_WEBHOOK_HMAC_SECRET` until a coordinated Ed25519 rollout is proven. Registered business sources use their exact source-owned event authority instead of inheriting that legacy fallback. Portal projection is an outer `portal.projection` event on the same source connection; it does not add portal HMAC or Access credentials. Ops Sync privately invokes the Client Worker named entrypoint after source verification. Provision the same reviewed `PROJECT_ALPHA_CONNECTOR_CREDENTIALS` envelope independently to Delivery, Operations, and Ops Sync; never store it in Wrangler `vars` or logs. Rotate R2 signing credentials at least every 90 days; their issued URLs live only two minutes.
+Inventory and version every secret: Access audience/configuration, session signing key, delivery token encryption key, access-code pepper, audit HMAC secret, Stream/API credentials, Project Alpha credentials, webhook signing keys, and TrueNAS/R2 credentials. Delivery accepts `SESSION_KEY_ID` plus `PREVIOUS_SESSION_KEY_ID` and their two secrets during a 24-hour overlap. Access codes and encrypted share-link secrets support current/previous secrets with lazy re-encryption or rehashing. The legacy primary Project Alpha path remains HMAC-compatible, so `PROJECT_ALPHA_ALLOW_LEGACY_HMAC=true` is required with `PROJECT_ALPHA_WEBHOOK_HMAC_SECRET` until a coordinated Ed25519 rollout is proven. Registered business sources use their exact source-owned event authority instead of inheriting that legacy fallback. Portal projection is an outer `portal.projection` event on the same source connection; it does not add portal HMAC or Access credentials. Ops Sync privately invokes the Client Worker named entrypoint after source verification. Delivery keeps only its portal-purpose connector envelope; provision `PROJECT_ALPHA_CONNECTOR_SNAPSHOT_CREDENTIALS` only to Operations and `PROJECT_ALPHA_CONNECTOR_EVENT_CREDENTIALS` only to Ops Sync, with the same credential-free source manifest on both Workers. Never store these values in Wrangler `vars` or logs. Rotate R2 signing credentials at least every 90 days; their issued URLs live only two minutes.
 
 ## Alerts
 

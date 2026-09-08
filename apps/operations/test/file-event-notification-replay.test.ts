@@ -2,6 +2,8 @@ import { readFileSync, readdirSync } from "node:fs";
 import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
+import { reservePrimaryPortalSigningKeys } from "../../client/src/worker/project-alpha-portal-authority";
+import { primaryProjectionCheckpointStatement, primaryProjectionSourceStatements, primaryStaffReceiptStatement } from "./helpers/primary-delivery-fixture";
 
 vi.mock("../src/worker/client-folder-grants", () => ({
   recordClientFolderFileChange: vi.fn(async () => undefined),
@@ -61,13 +63,19 @@ describe("file-event authenticated-change staging replay — migrated real D1", 
       await db.batch(splitD1MigrationStatements(readFileSync(new URL(name, directory), "utf8")).map(sql => db.prepare(sql)));
     await db.batch(splitD1MigrationStatements(readFileSync(new URL("../../client/migrations/0170_authenticated_delivery_change_notifications.sql", import.meta.url), "utf8"))
       .map(sql => db.prepare(sql)));
+    await db.batch(splitD1MigrationStatements(readFileSync(new URL("../../client/migrations/0189_primary_staff_folder_bindings.sql", import.meta.url), "utf8"))
+      .map(sql => db.prepare(sql)));
+    await db.batch(splitD1MigrationStatements(readFileSync(new URL("../../client/migrations/0209_authenticated_delivery_change_recipient_events.sql", import.meta.url), "utf8"))
+      .map(sql => db.prepare(sql)));
     env = {
       DELIVERY_DB: db,
       OPS_DB: opsDb,
       DATA_BUCKET: bucket(),
       AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED: "true",
       DELIVERY_BASE_URL: "https://client.example.test",
+      PROJECT_ALPHA_PORTAL_HMAC_SECRET: "primary-portal-hmac-test-key-material-at-least-thirty-two-bytes",
     } as Env;
+    await reservePrimaryPortalSigningKeys(env);
     consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
   }, 180_000);
 
@@ -99,6 +107,8 @@ describe("file-event authenticated-change staging replay — migrated real D1", 
         .bind(identity, "https://access.example.test", `subject-${suffix}`, `${suffix}@example.test`),
       db.prepare("INSERT INTO portal_v2_workspaces(id,root_type,pa_organization_public_id,display_name,status,project_alpha_source_id) VALUES(?,'organization',?,?,'active','project-alpha:primary')")
         .bind(workspace, organization, `Workspace ${suffix}`),
+      ...primaryProjectionSourceStatements(db,{workspace,snapshot:`snapshot-${suffix}`,
+        generation,organization,displayName:`Workspace ${suffix}`}),
       db.prepare("INSERT INTO portal_v2_workspace_memberships(id,workspace_id,identity_id,source_type,status) VALUES(?,?,?,'operations','active')")
         .bind(`membership-${suffix}`, workspace, identity),
       db.prepare("INSERT INTO portal_v2_directory_generations(id,workspace_id,source_generation,source_sequence,status,complete) VALUES(?,?,?,1,'active',1)")
@@ -109,8 +119,10 @@ describe("file-event authenticated-change staging replay — migrated real D1", 
         .bind(workspace, generation, project, organization, `Project ${suffix}`),
       db.prepare("INSERT INTO portal_v2_directory_checkpoints(workspace_id,active_generation_id,source_sequence) VALUES(?,?,1)")
         .bind(workspace, generation),
+      primaryProjectionCheckpointStatement(db,{workspace,generation,snapshot:`snapshot-${suffix}`}),
       db.prepare("INSERT INTO portal_v2_folder_bindings(id,workspace_id,owner_scope_type,owner_public_id,r2_prefix,source_type,source_version) VALUES(?,?,'project',?,?,'operations','v1')")
         .bind(binding, workspace, project, prefix),
+      primaryStaffReceiptStatement(db,{binding,workspace,organization,project,generation,snapshot:`snapshot-${suffix}`,prefix}),
       db.prepare("INSERT INTO pa_portal_principals(workspace_id,public_id,identity_id,email_hint,display_name,source_version,status) VALUES(?,?,?,?,?,'pv1','active')")
         .bind(workspace, principal, identity, `${suffix}@example.test`, `Person ${suffix}`),
       db.prepare("INSERT INTO portal_v2_entitlements(id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,source_type,status) VALUES(?,?,?,'delivery.view','allow','project',?,'operations','active')")

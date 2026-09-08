@@ -17,7 +17,8 @@ function nativeNotice(id = "nb_one", overrides: Record<string, unknown> = {}) {
 }
 function authenticatedNotice(id = "exact_one", overrides: Record<string, unknown> = {}) {
   const { accountName: _accountName, ...common } = batch(id);
-  return { ...common, kind: "authenticated_delivery", addedCount: 3, removedCount: 1, ...overrides };
+  return { ...common, kind: "authenticated_delivery", addedCount: 3, removedCount: 1,
+    bellPublishedAt: null, emailSuppressedAt: null, canSuppressEmail: false, ...overrides };
 }
 const nativeArticle = (page: Page) => center(page).locator('article[data-notification-kind="portal_delivery"]');
 const authenticatedArticle = (page: Page) => center(page).locator('article[data-notification-kind="authenticated_delivery"]');
@@ -55,7 +56,7 @@ async function expectNotificationSpacing(page: Page) {
 async function late(route: Route, json: unknown) { try { await route.fulfill({ json }); } catch { /* A cancelled browser request is an expected outcome. */ } }
 async function open(page: Page, suffix = "") {
   await page.goto(`${centerPath}${suffix}`);
-  await expect(center(page).getByRole("heading", { name: "Notifications", exact: true })).toBeVisible();
+  await expect(center(page).getByRole("heading", { name: "Delivery activity", exact: true })).toBeVisible();
 }
 
 test("audit-only staff land in the dedicated notification center without operation or mutation access", async ({ page }) => {
@@ -93,6 +94,42 @@ test("exact authenticated change notices use a distinct deep link and action rou
   const action = calls.find(call => call.path.endsWith("/authenticated_delivery/exact-one/send-now"));
   expect(action?.method).toBe("POST");
   expect(action?.body).toEqual({expectedRevision: 1});
+  expect(action?.key).toMatch(/^[0-9a-f-]{36}$/);
+});
+
+test("published authenticated bells retain their portal notice while staff suppress only the pending email", async ({page}, testInfo) => {
+  let suppressed = false;
+  const row = authenticatedNotice("published-one", {bellPublishedAt: now, canSuppressEmail: true, canSendNow: false, canCancel: false});
+  const pageResult = {...result([row]), availability: {folderChanges: true, nativeDeliveries: true, authenticatedDeliveries: true}};
+  const calls = await mock(page, (route, url) => {
+    if (url.pathname === `${endpoint}/authenticated_delivery/published-one/suppress-email`) {
+      suppressed = true;
+      return route.fulfill({json: {ok: true, kind: "authenticated_delivery", id: "published-one", action: "suppress-email", revision: 2, status: "suppressed", replayed: false}});
+    }
+    if (url.pathname === `${endpoint}/authenticated_delivery/published-one`) return route.fulfill({json: {item: suppressed ? {
+      ...row, revision: 2, status: "suppressed", emailSuppressedAt: now, canSuppressEmail: false,
+    } : row, serverNow: now, coverage: "delivery_notifications_v2", availability: pageResult.availability}});
+    return route.fulfill({json: suppressed ? {...pageResult, items: []} : pageResult});
+  });
+  await open(page, "?kind=authenticated_delivery&batchId=published-one");
+  const rowArticle = authenticatedArticle(page);
+  await expect(rowArticle).toContainText("Bell"); await expect(rowArticle).toContainText("Published");
+  await expect(rowArticle).toContainText("Email"); await expect(rowArticle).toContainText("Pending");
+  await expect(rowArticle.getByRole("button", {name: "Send now", exact: true})).toHaveCount(0);
+  await expect(rowArticle.getByRole("button", {name: "Cancel notification", exact: true})).toHaveCount(0);
+  for (const width of [375, 1280]) { await page.setViewportSize({width, height: 900}); await page.evaluate(() => scrollTo(0, 0));
+    await page.screenshot({path: testInfo.outputPath(`authenticated-bell-pending-email-${width}.png`), fullPage: true}); }
+  page.once("dialog", dialog => { expect(dialog.message()).toContain("does not change access"); expect(dialog.message()).toContain("does not recall the bell notification"); return dialog.accept(); });
+  await rowArticle.getByRole("button", {name: "Suppress email", exact: true}).click();
+  await expect(center(page).getByText("Email suppressed. Files and access are unchanged, and an already published bell notification cannot be recalled.", {exact: true})).toBeVisible();
+  await expect(rowArticle).toContainText("Published"); await expect(rowArticle).toContainText("Suppressed");
+  await expect(rowArticle).toContainText("Email suppressed by staff. The published bell notice remains subject to current client access.");
+  await expect(rowArticle).not.toContainText("Not sent after eligibility checks.");
+  await expect(rowArticle.getByRole("button", {name: "Suppress email", exact: true})).toHaveCount(0);
+  for (const width of [375, 1280]) { await page.setViewportSize({width, height: 900}); await page.evaluate(() => scrollTo(0, 0));
+    await page.screenshot({path: testInfo.outputPath(`authenticated-bell-email-suppressed-${width}.png`), fullPage: true}); }
+  const action = calls.find(call => call.path === `${endpoint}/authenticated_delivery/published-one/suppress-email`);
+  expect(action?.method).toBe("POST"); expect(action?.body).toEqual({expectedRevision: 1});
   expect(action?.key).toMatch(/^[0-9a-f-]{36}$/);
 });
 
@@ -404,7 +441,7 @@ test("notification cards and actions remain readable at mobile, narrow, laptop a
     await expect(center(page).getByRole("heading", { name: longName })).toBeVisible();
     await expectNotificationSpacing(page);
     await expect(page.getByRole("heading", { level: 1 })).toHaveCount(1);
-    await expect(center(page).getByRole("heading", { name: "Notifications", exact: true, level: 2 })).toBeVisible();
+    await expect(center(page).getByRole("heading", { name: "Delivery activity", exact: true, level: 2 })).toBeVisible();
     for (const control of await center(page).getByRole("button").all()) {
       if (await control.isVisible()) expect((await control.boundingBox())!.height).toBeGreaterThanOrEqual(44);
     }

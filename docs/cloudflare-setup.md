@@ -26,9 +26,12 @@ Configure the Git repository `ledgetoptechnologies/LedgeTop-Ops` three times:
 The Delivery Worker Builds root must change from `/apps/delivery` to
 `/apps/client` before the first build from a commit containing the source move.
 That separately approved dashboard change is the only Cloudflare configuration
-required by the source-layout refactor. It must not rename `ltds-delivery` or
-change its routes, custom domains, Access applications, variables, secrets, D1,
-R2, Queue, Workflow, Images, Stream, or rate-limit bindings.
+required by the source-layout refactor. The current checked-in Worker target is
+`ledgetop-clients`; an existing production resource may still have the legacy
+physical name `ltds-delivery` until an operator deliberately renames or
+recreates it. Do not silently rename a live resource or change its routes,
+custom domains, Access applications, variables, secrets, D1, R2, Queue,
+Workflow, Images, Stream, or rate-limit bindings as part of this source move.
 
 The source-layout move is complete. Current domain changes remain a separate,
 reversible configuration step: keep the legacy client hostname attached until
@@ -163,7 +166,7 @@ No dashboard configuration change is authorized by this documentation.
 
 Do not add runtime secrets to Build variables. The application secrets are Worker runtime secrets.
 
-Delivery access codes use a shared HMAC pepper. Generate one cryptographically random value of at least 32 bytes and store the exact same value as the `DELIVERY_ACCESS_CODE_PEPPER` runtime secret on both `ltds-ops` and `ltds-delivery`. The value must never be committed, printed in logs, or placed in build variables. Ops hashes new codes and Delivery verifies them; neither Worker stores a plaintext code.
+Delivery access codes use a shared HMAC pepper. Generate one cryptographically random value of at least 32 bytes and store the exact same value as the `DELIVERY_ACCESS_CODE_PEPPER` runtime secret on the current `ledgetop-ops` and `ledgetop-clients` Workers. If a live deployment still uses the legacy physical Worker names `ltds-ops` or `ltds-delivery`, apply the secret to those actual targets until the resource rename is separately planned and verified. The value must never be committed, printed in logs, or placed in build variables. Ops hashes new codes and Delivery verifies them; neither Worker stores a plaintext code.
 
 `DELIVERY_TOKEN_SECRET` remains an Ops-only runtime secret. It encrypts recoverable link fragments for authorized staff; the public Delivery Worker authenticates only the link hash and does not receive this secret.
 
@@ -401,6 +404,24 @@ npx.cmd wrangler secret put PROJECT_ALPHA_WEBHOOK_HMAC_SECRET --name ledgetop-op
 ```
 
 The current Project Alpha contract is HMAC-only, so production explicitly sets `PROJECT_ALPHA_ALLOW_LEGACY_HMAC=true`. LTDS verifies `sha256=<hex>` over the exact `${timestamp}.${rawBody}` bytes. Ed25519 remains preferred if its header and public key are introduced later; an invalid Ed25519 signature never falls back to HMAC. Use `PROJECT_ALPHA_WEBHOOK_ED25519_PREVIOUS_PUBLIC_KEY` only during a coordinated future rotation. The Access Groups API token belongs only on the sync Worker, never in Project Alpha.
+
+Multiple Project Alpha instances remain deployment-owned. Put the same reviewed
+credential-free `PROJECT_ALPHA_CONNECTOR_SOURCES` manifest on both Workers.
+Keep outbound and inbound credentials purpose-scoped; never register a source
+from the Operations browser:
+
+```powershell
+npx.cmd wrangler secret put PROJECT_ALPHA_CONNECTOR_SNAPSHOT_CREDENTIALS --name ledgetop-ops
+npx.cmd wrangler secret put PROJECT_ALPHA_CONNECTOR_SOURCES --name ledgetop-ops
+npx.cmd wrangler secret put PROJECT_ALPHA_CONNECTOR_EVENT_CREDENTIALS --name ledgetop-ops-sync
+npx.cmd wrangler secret put PROJECT_ALPHA_CONNECTOR_SOURCES --name ledgetop-ops-sync
+```
+
+The LTDS producer keeps the legacy `/v1/project-alpha/events` route. Additional
+instances use the same Worker at the source-qualified route documented in
+`docs/operations/project-alpha-deployment-sources.md`, with distinct Access and
+signing identities. Adding a source to only one Worker is an incomplete release
+and must not be treated as an active connection.
 
 The sanitized Service Library projection uses the same Project Alpha Ops Sync
 Access application, service token, application key, and event signature. Send

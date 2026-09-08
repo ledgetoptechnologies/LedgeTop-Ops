@@ -23,7 +23,7 @@ describe("delivery index provider-identity acceptance — migrated real D1", { t
     const directory = new URL("../../client/migrations/", import.meta.url);
     for (const name of readdirSync(directory).filter(name => /^\d+.*\.sql$/.test(name) && Number(name.slice(0, 4)) <= 169).sort())
       await db.batch(splitD1MigrationStatements(readFileSync(new URL(name, directory), "utf8")).map(sql => db.prepare(sql)));
-    for (const name of ["0170_authenticated_delivery_change_notifications.sql", "0204_delivery_change_receipts.sql", "0206_delivery_index_provider_identity.sql"])
+    for (const name of ["0170_authenticated_delivery_change_notifications.sql", "0189_primary_staff_folder_bindings.sql", "0204_delivery_change_receipts.sql", "0206_delivery_index_provider_identity.sql", "0209_authenticated_delivery_change_recipient_events.sql"])
       await db.batch(splitD1MigrationStatements(readFileSync(new URL(`../../client/migrations/${name}`, import.meta.url), "utf8")).map(sql => db.prepare(sql)));
     env = { DELIVERY_DB: db, AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED: "true" } as Env;
   }, 180_000);

@@ -187,7 +187,8 @@ describe("durable authenticated connector registry", () => {
     expect(resolved.source).toEqual({ sourceId: value.sourceId, staffAuthority: false });
     expect(resolved.proof).toMatchObject({ mode: "registry", revision: 1, version: 2, profile: "business_data" });
     expect(resolved.event).toMatchObject({ accessSubject: "service-token-subject", current: { keyId: "current", algorithm: "ed25519", value: key(3) } });
-    expect(resolved.snapshot?.baseUrl).toBe("https://secondary.example.test");
+    // Purpose-scoped event resolution never returns outbound snapshot credentials.
+    expect(resolved.snapshot).toBeNull();
   });
 
   it("keeps producer, source, origin, base path and application ownership immutable including REPLACE", async () => {

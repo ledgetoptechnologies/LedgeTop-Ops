@@ -101,7 +101,7 @@ email remains pending and must not be claimed or inferred from the legacy outbox
 ## Connector credential shape
 
 For a registered source that accepts draft quotes, the selected
-`PROJECT_ALPHA_CONNECTOR_CREDENTIALS` set contains a dedicated `draftQuote`
+`PROJECT_ALPHA_CONNECTOR_SNAPSHOT_CREDENTIALS` set contains a dedicated `draftQuote`
 object with two required secret fields:
 
 | Field | Purpose |

@@ -12,6 +12,7 @@ import {saveAuthenticatedDeliveryNotificationPolicy} from "../src/worker/authent
 import {listCombinedDeliveryNotifications,registerNotificationCenterRoutes} from "../src/worker/notification-center";
 import {requiresAdministratorForMutation} from "../src/worker/r2-crud-validation";
 import type {Env,StaffPrincipal} from "../src/worker/types";
+import {reservePrimaryPortalSigningKeys} from "../../client/src/worker/project-alpha-portal-authority";
 
 const staff:StaffPrincipal={id:"staff-notify",email:"staff-notify@example.test",displayName:"Notify Staff",accessSubject:"staff-subject",projectAlphaUserId:null};
 let runtime:Miniflare,delivery:D1Database,ops:D1Database,env:Env;
@@ -72,7 +73,9 @@ beforeAll(async()=>{
   ]);
   env={OPS_DB:ops,DELIVERY_DB:delivery,AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED:"true",AUTHENTICATED_DELIVERY_GRANTS_ENABLED:"true",
     CLIENT_PORTAL_HIERARCHY_V2_ENABLED:"true",CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED:"false",CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED:"true",
-    OPERATIONS_SESSION_SECRET:"authenticated-notification-center-secret",DELIVERY_BASE_URL:"https://client.example.test"} as Env;
+    OPERATIONS_SESSION_SECRET:"authenticated-notification-center-secret",DELIVERY_BASE_URL:"https://client.example.test",
+    PROJECT_ALPHA_PORTAL_HMAC_SECRET:"synthetic-notification-center-signing-key-at-least-32-bytes"} as Env;
+  await reservePrimaryPortalSigningKeys(env);
 },180_000);
 afterAll(async()=>runtime?.dispose());
 
@@ -154,8 +157,19 @@ describe("authenticated delivery staff notification integration",{timeout:60_000
     expect(send).toMatchObject({revision:2,status:"pending",replayed:false});
     expect(await controlAuthenticatedDeliveryNotification(env,staff,ids.batch,"send-now",1,"control-staff-notify-01"))
       .toMatchObject({revision:2,status:"pending",replayed:true});
-    expect(await controlAuthenticatedDeliveryNotification(env,staff,ids.batch,"cancel",2,"control-staff-notify-02"))
-      .toMatchObject({revision:3,status:"cancelled",replayed:false});
+    const published=await readAuthenticatedDeliveryNotification(env,ids.batch,staff);
+    expect(published.item).toMatchObject({canCancel:false,canSendNow:false,canSuppressEmail:true});
+    expect(published.item.bellPublishedAt).toBeTruthy();
+    await expect(controlAuthenticatedDeliveryNotification(env,staff,ids.batch,"cancel",published.item.revision,"control-staff-notify-02"))
+      .rejects.toMatchObject({status:409});
+    const suppression=await controlAuthenticatedDeliveryNotification(env,staff,ids.batch,"suppress-email",published.item.revision,"suppress-staff-notify-01");
+    expect(suppression).toMatchObject({revision:published.item.revision+1,status:"suppressed",replayed:false});
+    expect(await controlAuthenticatedDeliveryNotification(env,staff,ids.batch,"suppress-email",published.item.revision,"suppress-staff-notify-01"))
+      .toMatchObject({revision:published.item.revision+1,status:"suppressed",replayed:true});
+    const retained=await readAuthenticatedDeliveryNotification(env,ids.batch,staff);
+    expect(retained.item).toMatchObject({bellPublishedAt:published.item.bellPublishedAt,canCancel:false,canSuppressEmail:false,errorCode:"email-suppressed"});
+    expect(retained.item.emailSuppressedAt).toBeTruthy();
+    expect(await delivery.prepare("SELECT count(*) count FROM authenticated_delivery_recipient_events WHERE batch_id=?").bind(ids.batch).first("count")).toBe(1);
   });
 
   it("CAS-disables enabled policies when recipient or staff authority changes after the write",async()=>{
@@ -181,6 +195,9 @@ describe("authenticated delivery staff notification integration",{timeout:60_000
   it("registers only the reviewed delegated policy and typed action routes",async()=>{
     expect(requiresAdministratorForMutation("PUT",`/api/delivery/authenticated-grants/${ids.grant}/notification-policy`)).toBe(false);
     expect(requiresAdministratorForMutation("POST",`/api/notifications/deliveries/authenticated_delivery/${ids.batch}/cancel`)).toBe(false);
+    expect(requiresAdministratorForMutation("POST",`/api/notifications/deliveries/authenticated_delivery/${ids.batch}/suppress-email`)).toBe(false);
+    expect(requiresAdministratorForMutation("PUT",`/api/notifications/deliveries/authenticated_delivery/${ids.batch}/suppress-email`)).toBe(true);
+    expect(requiresAdministratorForMutation("POST",`/api/notifications/deliveries/${ids.batch}/suppress-email`)).toBe(true);
     expect(requiresAdministratorForMutation("PUT",`/api/delivery/authenticated-grants/${ids.grant}/other`)).toBe(true);
     const app=new Hono<{Bindings:Env;Variables:{principal:StaffPrincipal;administrator:boolean}}>();
     app.use("/api/*",async(c,next)=>{c.set("principal",staff);c.set("administrator",false);await next();});registerNotificationCenterRoutes(app);

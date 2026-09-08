@@ -19,10 +19,17 @@ import {readNativeTargetScopes,NATIVE_PORTAL_TARGET_SCOPES_SQL} from './native-p
 import {projectAccessTermsSql} from './project-access-terms';
 import {portalProjectionSourceGuard} from '../project-alpha-portal-authority';
 import {portalRootAccessAllowedSql} from './workspace-access-policy';
+import {authenticatedDeliveryChangeAuthoritySql} from '@ltds/shared/authenticated-delivery-authority';
+import {readPortalProjectionSourceProof} from '../project-alpha-portal-authority';
+import {readEffectiveWorkspaceIdentityMutationGuard} from './effective-workspace-identity-mutation-guard';
+import {readEffectiveWorkspaceVisibilityMutationGuard} from './effective-workspace-visibility-mutation-guard';
+import {authorizeAuthenticatedDeliveryGrant,readNativeAuthenticatedDeliveryGrants} from './authenticated-delivery-grants';
+import {encodeNativePortalHandle} from './native-portal-handles';
+import {encodeAuthenticatedDeliveryHandle} from './authenticated-delivery-handles';
 
 type Variables={clientSession:ClientPortalSession;clientPrincipal:VerifiedClientPrincipal;clientWorkspace:EffectivePortalWorkspaceContext|null};
 const PAGE=25,TTL=15*60_000;
-type Raw={rowid:number;id:string;kind:'request'|'feedback'|'delivery'|'native_delivery';title:string;body:string;actionPath:string|null;readAt:string|null;createdAt:string};
+type Raw={rowid:number;id:string;kind:'request'|'feedback'|'delivery'|'native_delivery'|'authenticated_delivery';title:string;body:string;actionPath:string|null;readAt:string|null;createdAt:string};
 type LedgerCoverage='included'|'omitted_feature_disabled'|'omitted_schema_unavailable';
 type Dependencies={notificationSchemaAvailable:(env:Env)=>Promise<boolean>;feedbackSchemaAvailable:(env:Env)=>Promise<boolean>};
 export function notificationHistoryCoverage(input:{native:boolean;notifications:boolean;primaryFeedback:boolean;nativeRequestsEnabled:boolean;nativeRequestSchema:boolean;nativeFeedbackEnabled:boolean;nativeFeedbackSchema:boolean}):{requests:LedgerCoverage;feedback:LedgerCoverage}{
@@ -31,6 +38,12 @@ export function notificationHistoryCoverage(input:{native:boolean;notifications:
     feedback:!input.nativeFeedbackEnabled?'omitted_feature_disabled':!input.nativeFeedbackSchema?'omitted_schema_unavailable':'included'};
 }
 async function nativeDeliverySchemaAvailable(env:Env){return d1TablesPresent(env.DELIVERY_DB,['native_delivery_recipient_events','native_delivery_recipient_event_state']);}
+async function authenticatedDeliverySchemaAvailable(env:Env){return d1TablesPresent(env.DELIVERY_DB,[
+  'authenticated_delivery_recipient_events','authenticated_delivery_recipient_event_state',
+  'portal_authenticated_delivery_change_batches','portal_authenticated_delivery_change_batch_items',
+  'portal_authenticated_delivery_notification_policies','portal_primary_staff_bindings','portal_v2_identity_eligibility_blocks',
+  'portal_native_staff_bindings','portal_native_staff_grants',
+]);}
 const db=(env:Env)=>env.DELIVERY_DB.withSession('first-primary');
 const key=(row:Raw)=>`${row.kind}:${row.id}`;
 // Timestamps and opaque notification keys are ASCII. Use SQLite BINARY order,
@@ -142,12 +155,13 @@ async function authorizeNativeDelivery(env:Env,principal:VerifiedClientPrincipal
     ||!await authorizeNativePortalReadTarget(env,context,'delivery.view',{scopeType:'folder',publicId:event.bindingId}))return null;
   return event;
 }
-async function nativeDeliveryMutationGuard(env:Env,principal:VerifiedClientPrincipal,session:ClientPortalSession,eventId:string){
+async function nativeDeliveryMutationGuard(env:Env,principal:VerifiedClientPrincipal,session:ClientPortalSession,eventId:string,
+  eventTable:'native_delivery_recipient_events'|'authenticated_delivery_recipient_events'='native_delivery_recipient_events'){
   if(!session.workspaceId||!session.nativePortalIdentityId)return null;
   const context=await resolveNativePortalWorkspaceReadContext(env,principal,session.workspaceId);if(!context||context.identityId!==session.nativePortalIdentityId||context.sourceId!==session.nativeSourceId)return null;
   const membership=await db(env).prepare('SELECT id,source_type FROM portal_v2_workspace_memberships WHERE workspace_id=? AND identity_id=? AND source_version=? AND status=\'active\' AND revoked_at IS NULL')
     .bind(context.workspaceId,context.identityId,context.membershipSourceVersion).first<{id:string;source_type:string}>();if(!membership)return null;
-  const event=await db(env).prepare(`SELECT folder_binding_id bindingId FROM native_delivery_recipient_events WHERE id=? AND workspace_id=? AND source_id=?`).bind(eventId,session.workspaceId,session.nativeSourceId).first<{bindingId:string}>();
+  const event=await db(env).prepare(`SELECT folder_binding_id bindingId FROM ${eventTable} WHERE id=? AND workspace_id=? AND source_id=?`).bind(eventId,session.workspaceId,session.nativeSourceId).first<{bindingId:string}>();
   const target=event?(await readNativeTargetScopes(env,context,[{scopeType:'folder',publicId:event.bindingId}],{retention:'structural'})).get(`folder:${event.bindingId}`):null;if(!target)return null;
   const authority=portalProjectionSourceGuard(context.authority),parts=[authority.sql],bindings:(string|number|null)[]=[...authority.bindings];
   const scopes=JSON.stringify([...target.scopes]);
@@ -161,9 +175,17 @@ async function nativeDeliveryMutationGuard(env:Env,principal:VerifiedClientPrinc
     `(SELECT ${['targets','workspace','generation','relations','maximum'][Number(index)-1]} FROM native_inputs)`);
   const scopeProof=JSON.stringify(target.proofRows.map(row=>[row.target_type,row.target_id,row.entity_type,row.public_id,
     row.parent_public_id,row.source_version,row.depth,row.display_name,row.binding_version,row.retained]));
-  parts.push(`EXISTS(WITH native_inputs AS (SELECT ? targets,? workspace,? generation,? relations,? maximum),
-    current_scopes AS (${scopeQuery}) SELECT 1 WHERE (SELECT json_group_array(json_array(target_type,target_id,entity_type,public_id,
-      parent_public_id,source_version,depth,display_name,binding_version,retained)) FROM current_scopes)=?)`);
+  // Keep the recursive scope proof and its aggregate in separate top-level
+  // materialized CTEs.  Nesting the recursive query inside the boolean guard
+  // makes the final readback/state statement exceed D1's expression-depth
+  // limit, even though each logical authorization check is independently
+  // bounded. `native_inputs` remains in this same statement, so the
+  // proof is still tied to the exact snapshot selected above.
+  parts.push(`native_inputs AS MATERIALIZED(SELECT ? targets,? workspace,? generation,? relations,? maximum),
+    native_scope_rows AS MATERIALIZED(${scopeQuery}),
+    native_scope_proof AS MATERIALIZED(SELECT json_group_array(json_array(target_type,target_id,entity_type,public_id,
+      parent_public_id,source_version,depth,display_name,binding_version,retained)) proof FROM native_scope_rows),
+    native_scope_guard AS MATERIALIZED(SELECT 1 ok FROM native_scope_proof WHERE native_scope_proof.proof=?)`);
   bindings.push(JSON.stringify([{scopeType:'folder',publicId:event!.bindingId}]),context.workspaceId,context.generationId,
     env.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED==='true'?1:0,66,scopeProof);
   parts.push(`EXISTS(SELECT 1 FROM portal_v2_workspaces workspace
@@ -209,9 +231,12 @@ async function nativeDeliveryMutationGuard(env:Env,principal:VerifiedClientPrinc
   bindings.push(context.workspaceId,context.identityId,scopes,expired,scopes,expired);
   // Materialized guard CTEs remain in the same atomic statement, but keep each
   // independently bounded expression below D1's expression-depth limit.
-  return {ctes:parts.map((part,index)=>`native_guard_${index} AS MATERIALIZED(SELECT (${part}) ok)`).join(','),
-    from:parts.map((_part,index)=>`CROSS JOIN native_guard_${index}`).join(' '),
-    sql:parts.map((_part,index)=>`native_guard_${index}.ok=1`).join(' AND '),bindings};
+  // Make each guard relation empty on failure. This keeps the final mutation
+  // and readback predicates flat: the CTE cross joins enforce every check,
+  // without rebuilding a large AND expression at the statement root.
+  return {ctes:parts.map((part,index)=>index===1?part:`native_guard_${index} AS MATERIALIZED(SELECT 1 ok WHERE (${part}))`).join(','),
+    from:parts.map((_part,index)=>`CROSS JOIN ${index===1?'native_scope_guard':`native_guard_${index}`}`).join(' '),
+    sql:'1=1',bindings};
 }
 async function authorizeRequest(env:Env,principal:VerifiedClientPrincipal,session:ClientPortalSession,workspace:EffectivePortalWorkspaceContext|null,sourceId:string,row:Raw,asOf:string){
   const record=await db(env).prepare(`SELECT r.id,r.project_id projectId,r.portal_project_public_id portalProjectId,r.catalog_source_id sourceId,
@@ -276,39 +301,187 @@ async function authorizeFeedback(env:Env,principal:VerifiedClientPrincipal,sessi
   return final&&finalResolved&&final.updatedAt<=asOf&&final.updatedAt===feedback.updatedAt&&final.revision===feedback.revision&&final.status===feedback.status?final:null;
 }
 
-async function currentCoverage(env:Env,session:ClientPortalSession,native:NativePortalReadContext|null,deps:Dependencies):Promise<{requests:LedgerCoverage;feedback:LedgerCoverage;nativeDelivery:LedgerCoverage}>{
+type AuthenticatedEvent={id:string;batch_id:string;source_id:string;workspace_id:string;identity_id:string;
+  folder_binding_id:string;grant_id:string;grant_version:number;binding_source_version:string;
+  r2_prefix:string;owner_scope_type:'organization'|'department'|'client'|'project';owner_public_id:string;
+  added_count:number;removed_count:number;created_at:string};
+type NotificationGuard={ctes:string;from:string;sql:string;bindings:(string|number|null)[]};
+const portalIdentity=(session:ClientPortalSession,workspace:EffectivePortalWorkspaceContext|null)=>session.nativePortalIdentityId??workspace?.identityId??session.identityId;
+
+async function authenticatedDeliveryRows(env:Env,session:ClientPortalSession,workspace:EffectivePortalWorkspaceContext|null,
+  sourceId:string,water:number,asOf:string,afterKey:[string,string]|undefined){
+  const [at,id]=before(afterKey);
+  return db(env).prepare(`SELECT event.rowid,event.id,'authenticated_delivery' kind,'Files changed in your delivery' title,
+      '' body,NULL actionPath,state.read_at readAt,event.created_at createdAt
+    FROM authenticated_delivery_recipient_events event
+    LEFT JOIN authenticated_delivery_recipient_event_state state ON state.event_id=event.id AND state.recipient_identity_id=event.identity_id
+    WHERE event.rowid<=? AND event.created_at<=? AND event.source_id=? AND event.workspace_id=? AND event.identity_id=?
+      AND state.dismissed_at IS NULL
+      AND (? IS NULL OR event.created_at<? OR (event.created_at=? AND 'authenticated_delivery:'||event.id<?))
+    ORDER BY event.created_at DESC,event.id DESC LIMIT ?`)
+    .bind(water,asOf,sourceId,session.workspaceId,portalIdentity(session,workspace),at,at,at,id,PAGE+1).all<Raw>();
+}
+
+/** Build the same current-authority boundary for read and state mutation. The
+ * immutable batch/event supplies recipients; never infer them from email. */
+async function authenticatedDeliveryGuard(env:Env,principal:VerifiedClientPrincipal,session:ClientPortalSession,
+  workspace:EffectivePortalWorkspaceContext|null,eventId:string):Promise<{event:AuthenticatedEvent;guard:NotificationGuard;native:NativePortalReadContext|null}|null>{
+  if(!session.workspaceId||env.AUTHENTICATED_DELIVERY_GRANTS_ENABLED!=='true')return null;
+  const resolved=await scopeFor(env,principal,session,workspace);if(!resolved)return null;
+  const identity=portalIdentity(session,workspace);
+  const event=await db(env).prepare(`SELECT id,batch_id,source_id,workspace_id,identity_id,folder_binding_id,
+      grant_id,grant_version,binding_source_version,r2_prefix,owner_scope_type,owner_public_id,added_count,removed_count,created_at
+    FROM authenticated_delivery_recipient_events WHERE id=? AND source_id=? AND workspace_id=? AND identity_id=?`)
+    .bind(eventId,resolved.scope.sourceId,session.workspaceId,identity).first<AuthenticatedEvent>();
+  if(!event||!Number.isSafeInteger(event.added_count)||!Number.isSafeInteger(event.removed_count)
+    ||event.added_count<0||event.removed_count<0||event.added_count+event.removed_count<1||event.added_count+event.removed_count>50)return null;
+  let base:NotificationGuard;
+  if(resolved.context){
+    const native=await nativeDeliveryMutationGuard(env,principal,session,eventId,'authenticated_delivery_recipient_events');
+    if(!native)return null;base=native;
+  }else{
+    if(!workspace||!await authorizeAuthenticatedDeliveryGrant(env,principal,workspace.workspaceId,event.folder_binding_id))return null;
+    const source=await readPortalProjectionSourceProof(env,db(env),resolved.scope.sourceId);if(!source)return null;
+    const sourceGuard=portalProjectionSourceGuard(source);
+    const identityGuard=await readEffectiveWorkspaceIdentityMutationGuard(env,principal,workspace);
+    const visibility=await readEffectiveWorkspaceVisibilityMutationGuard(env,workspace);
+    const parts=[sourceGuard,identityGuard,visibility,{
+      sql:`EXISTS(SELECT 1 FROM portal_v2_workspaces workspace JOIN portal_v2_identities identity ON identity.id=?
+        WHERE workspace.id=? AND workspace.project_alpha_source_id=? AND workspace.status='active'
+          AND identity.issuer=? AND identity.subject=? AND lower(identity.verified_email)=?
+          AND ${portalRootAccessAllowedSql(env.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED==='true','workspace')}
+          AND NOT EXISTS(SELECT 1 FROM portal_v2_entitlements denial WHERE denial.workspace_id=workspace.id
+            AND denial.identity_id=identity.id AND denial.capability='workspace.view' AND denial.effect='deny'
+            AND denial.scope_type='workspace' AND denial.scope_public_id=workspace.id AND denial.status='active'
+            AND denial.revoked_at IS NULL AND datetime(denial.valid_from)<=datetime('now')
+            AND (denial.expires_at IS NULL OR datetime(denial.expires_at)>datetime('now'))))`,
+      bindings:[identity,workspace.workspaceId,resolved.scope.sourceId,principal.issuer,principal.subject,principal.email.trim().toLowerCase()],
+    }];
+    base={ctes:parts.map((part,index)=>`authenticated_guard_${index} AS MATERIALIZED(SELECT (${part.sql}) ok)`).join(','),
+      from:parts.map((_part,index)=>`CROSS JOIN authenticated_guard_${index}`).join(' '),
+      sql:parts.map((_part,index)=>`authenticated_guard_${index}.ok=1`).join(' AND '),bindings:parts.flatMap(part=>part.bindings)};
+  }
+  // The reusable authority query re-evaluates grant/policy/principal versions,
+  // membership, lineage, access terms and denies in the statement itself.
+  const primaryStaffReceiptsReady=await d1TablesPresent(env.DELIVERY_DB,['portal_primary_staff_bindings']);
+  if(!primaryStaffReceiptsReady)return null;
+  return {event,native:resolved.context,guard:{
+    ctes:`${base.ctes},authenticated_batch_authority AS MATERIALIZED(${authenticatedDeliveryChangeAuthoritySql(env.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED==='true',env.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED==='true',primaryStaffReceiptsReady)}),
+      authenticated_current_recipient AS MATERIALIZED(SELECT 1 FROM authenticated_delivery_recipient_events event
+        JOIN portal_v2_folder_bindings binding ON binding.id=event.folder_binding_id AND binding.workspace_id=event.workspace_id
+        JOIN portal_v2_identities identity ON identity.id=event.identity_id
+        WHERE event.id=? AND (event.source_id<>'project-alpha:primary' OR binding.source_type<>'operations' OR EXISTS(
+          SELECT 1 FROM portal_primary_staff_bindings receipt WHERE receipt.binding_id=binding.id
+            AND receipt.workspace_id=binding.workspace_id AND receipt.r2_prefix=binding.r2_prefix AND receipt.state='active'))
+          AND NOT EXISTS(SELECT 1 FROM portal_v2_identity_eligibility_blocks block WHERE block.status='active'
+            AND datetime(block.valid_from)<=datetime('now') AND (block.expires_at IS NULL OR datetime(block.expires_at)>datetime('now'))
+            AND (block.match_type='issuer_subject' AND block.issuer=identity.issuer AND block.subject=identity.subject
+              OR block.match_type='email' AND block.normalized_email=lower(identity.verified_email))))`,
+    from:base.from,sql:`(${base.sql}) AND EXISTS(SELECT 1 FROM authenticated_batch_authority) AND EXISTS(SELECT 1 FROM authenticated_current_recipient)`,
+    bindings:[...base.bindings,event.batch_id,event.id],
+  }};
+}
+
+/** Exact, current authority for a notification's folder resource. A dismissal
+ * hides the notice, not its independently authorized resource. Never infer a
+ * broader legacy association or replace a revoked grant with another one. */
+export async function readAuthenticatedDeliveryResource(env:Env,principal:VerifiedClientPrincipal,session:ClientPortalSession,
+  workspace:EffectivePortalWorkspaceContext|null,eventId:string):Promise<AuthenticatedEvent|null>{
+  if(!await authenticatedDeliverySchemaAvailable(env))return null;
+  const proof=await authenticatedDeliveryGuard(env,principal,session,workspace,eventId);if(!proof)return null;
+  const {event,guard}=proof;
+  const current=await db(env).prepare(`WITH ${guard.ctes} SELECT event.id
+    FROM authenticated_delivery_recipient_events event ${guard.from}
+    WHERE event.id=? AND event.identity_id=? AND ${guard.sql}`)
+    .bind(...guard.bindings,event.id,event.identity_id).first<{id:string}>();
+  return current?event:null;
+}
+
+async function authorizeAuthenticatedDelivery(env:Env,principal:VerifiedClientPrincipal,session:ClientPortalSession,
+  workspace:EffectivePortalWorkspaceContext|null,row:Raw,asOf:string){
+  const proof=await authenticatedDeliveryGuard(env,principal,session,workspace,row.id);if(!proof||proof.event.created_at!==row.createdAt||proof.event.created_at>asOf)return null;
+  const {event,guard,native}=proof;
+  let actionPath:string|null=null;
+  if(native){
+    const grants=await readNativeAuthenticatedDeliveryGrants(env,principal,native,event.folder_binding_id,{grantId:event.grant_id});
+    const grant=grants.find(value=>value.source==='staff'&&value.grant_id===event.grant_id&&value.grant_version===event.grant_version&&value.binding_source_version===event.binding_source_version);
+    if(!grant)return null;
+    const folder=await encodeNativePortalHandle(env,{v:1,kind:'folder',sourceId:native.sourceId,workspaceId:native.workspaceId,
+      identityId:native.identityId,contextVersion:native.contextVersion,bindingId:grant.folder_binding_id,bindingVersion:grant.binding_source_version,
+      grantId:grant.grant_id,grantVersion:grant.grant_version,bindingProof:grant.binding_fingerprint,path:'',expires:Date.now()+60*60_000});
+    actionPath=`/portal/deliveries?${new URLSearchParams({workspace:native.workspaceId,folder})}`;
+  }else{
+    const folder=await encodeAuthenticatedDeliveryHandle(env,{v:1,kind:'folder',sourceId:event.source_id,
+      workspaceId:event.workspace_id,identityId:event.identity_id,eventId:event.id,grantId:event.grant_id,
+      grantVersion:event.grant_version,bindingId:event.folder_binding_id,bindingSourceVersion:event.binding_source_version,
+      path:'',expires:Date.now()+60*60_000});
+    actionPath=`/portal/deliveries?${new URLSearchParams({workspace:event.workspace_id,folder})}`;
+  }
+  const current=await db(env).prepare(`WITH ${guard.ctes} SELECT event.id,state.read_at readAt
+    FROM authenticated_delivery_recipient_events event LEFT JOIN authenticated_delivery_recipient_event_state state
+      ON state.event_id=event.id AND state.recipient_identity_id=event.identity_id ${guard.from}
+    WHERE event.id=? AND event.identity_id=? AND state.dismissed_at IS NULL AND ${guard.sql}`)
+    .bind(...guard.bindings,event.id,event.identity_id).first<{id:string;readAt:string|null}>();
+  if(!current)return null;
+  const parts=[event.added_count?`${event.added_count} added`:'',event.removed_count?`${event.removed_count} removed`:''].filter(Boolean);
+  return {body:`${parts.join(' and ')} in your shared delivery.`,actionPath,readAt:current.readAt};
+}
+
+export async function mutateAuthenticatedDeliveryNotification(env:Env,principal:VerifiedClientPrincipal,session:ClientPortalSession,
+  workspace:EffectivePortalWorkspaceContext|null,eventId:string,action:'read'|'dismiss',beforeWrite?:()=>Promise<void>){
+  if(!await authenticatedDeliverySchemaAvailable(env))return false;
+  const proof=await authenticatedDeliveryGuard(env,principal,session,workspace,eventId);if(!proof)return false;
+  const {event,guard}=proof;
+  await beforeWrite?.();
+  const stamp=action==='read'?"read_at=COALESCE(read_at,datetime('now'))":"dismissed_at=COALESCE(dismissed_at,datetime('now'))";
+  const result=await db(env).prepare(`WITH ${guard.ctes}
+    INSERT INTO authenticated_delivery_recipient_event_state(event_id,recipient_identity_id,read_at,dismissed_at)
+    SELECT event.id,event.identity_id,CASE WHEN ?='read' THEN datetime('now') END,CASE WHEN ?='dismiss' THEN datetime('now') END
+    FROM authenticated_delivery_recipient_events event ${guard.from}
+    WHERE event.id=? AND event.identity_id=? AND ${guard.sql}
+    ON CONFLICT(event_id,recipient_identity_id) DO UPDATE SET ${stamp},updated_at=datetime('now')`)
+    .bind(...guard.bindings,action,action,event.id,event.identity_id).run();
+  return Boolean(result.meta.changes);
+}
+
+async function currentCoverage(env:Env,session:ClientPortalSession,native:NativePortalReadContext|null,deps:Dependencies):Promise<{requests:LedgerCoverage;feedback:LedgerCoverage;nativeDelivery:LedgerCoverage;authenticatedDelivery:LedgerCoverage}>{
   const notifications=await deps.notificationSchemaAvailable(env);
-  if(!session.nativeSourceId)return {...notificationHistoryCoverage({native:false,notifications,primaryFeedback:await deps.feedbackSchemaAvailable(env),nativeRequestsEnabled:false,nativeRequestSchema:false,nativeFeedbackEnabled:false,nativeFeedbackSchema:false}),nativeDelivery:'omitted_feature_disabled'};
+  const authenticatedDelivery:LedgerCoverage=!session.workspaceId||env.AUTHENTICATED_DELIVERY_GRANTS_ENABLED!=='true'?'omitted_feature_disabled':await authenticatedDeliverySchemaAvailable(env)?'included':'omitted_schema_unavailable';
+  if(!session.nativeSourceId)return {...notificationHistoryCoverage({native:false,notifications,primaryFeedback:await deps.feedbackSchemaAvailable(env),nativeRequestsEnabled:false,nativeRequestSchema:false,nativeFeedbackEnabled:false,nativeFeedbackSchema:false}),nativeDelivery:'omitted_feature_disabled',authenticatedDelivery};
   const nativeRequestsEnabled=nativeServiceRequestsEnabled(env),nativeFeedbackEnabled=!!native&&nativeFeedbackEnabledForContext(env,native);
   return {...notificationHistoryCoverage({native:true,notifications,primaryFeedback:false,nativeRequestsEnabled,nativeRequestSchema:nativeRequestsEnabled&&await nativeRequestSchemaReady(env),nativeFeedbackEnabled,
-    nativeFeedbackSchema:nativeFeedbackEnabled&&await nativeFeedbackSchemaAvailable(env)&&await nativeFeedbackNotificationsSchemaAvailable(env)}),nativeDelivery:await nativeDeliverySchemaAvailable(env)?'included':'omitted_schema_unavailable'};
+    nativeFeedbackSchema:nativeFeedbackEnabled&&await nativeFeedbackSchemaAvailable(env)&&await nativeFeedbackNotificationsSchemaAvailable(env)}),nativeDelivery:await nativeDeliverySchemaAvailable(env)?'included':'omitted_schema_unavailable',authenticatedDelivery};
 }
 export function createClientNotificationHistoryRouter(deps:Dependencies){const router=new Hono<{Bindings:Env;Variables:Variables}>();
   router.get('/notification-history',async c=>{const query=c.req.queries();if(Object.keys(query).some(k=>k!=='cursor')||Object.values(query).some(v=>v.length!==1))throw new HTTPException(400,{message:'Notification query is invalid'});
     const principal=c.get('clientPrincipal'),session=c.get('clientSession'),workspace=c.get('clientWorkspace'),resolved=await scopeFor(c.env,principal,session,workspace);if(!resolved)throw new HTTPException(404,{message:'Notifications not found'});
-    const scopeHash=await notificationHistoryScope({...resolved.scope,identityId:session.nativePortalIdentityId??session.identityId}),encoded=c.req.query('cursor'),cursor=encoded?await decodeNotificationHistoryCursor(c.env,principal,encoded):null;
+    const scopeHash=await notificationHistoryScope({...resolved.scope,identityId:portalIdentity(session,workspace)}),encoded=c.req.query('cursor'),cursor=encoded?await decodeNotificationHistoryCursor(c.env,principal,encoded):null;
     if(encoded&&(!cursor||cursor.scope!==scopeHash||cursor.expires<Date.now()))throw new HTTPException(409,{message:'Notification page changed. Refresh this workspace.'});
     const readiness=await currentCoverage(c.env,session,resolved.context,deps),coverage=cursor?.coverage??readiness;
     if(cursor&&coverage.requests==='included'&&readiness.requests!=='included')throw new HTTPException(readiness.requests==='omitted_schema_unavailable'?503:409,{message:'Notification history availability changed. Refresh this workspace.'});
     if(cursor&&coverage.feedback==='included'&&readiness.feedback!=='included')throw new HTTPException(readiness.feedback==='omitted_schema_unavailable'?503:409,{message:'Notification history availability changed. Refresh this workspace.'});
     if(cursor&&coverage.nativeDelivery==='included'&&readiness.nativeDelivery!=='included')throw new HTTPException(503,{message:'Notification history availability changed. Refresh this workspace.'});
+    if(cursor&&coverage.authenticatedDelivery==='included'&&readiness.authenticatedDelivery!=='included')throw new HTTPException(readiness.authenticatedDelivery==='omitted_schema_unavailable'?503:409,{message:'Notification history availability changed. Refresh this workspace.'});
     const asOf=cursor?.asOf??new Date().toISOString(),requestWater=coverage.requests!=='included'?0:cursor?.water.requests??Number(await db(c.env).prepare('SELECT COALESCE(MAX(rowid),0) water FROM client_portal_notifications').first('water')??0),
       feedbackWater=coverage.feedback!=='included'?0:cursor?.water.feedback??Number(await db(c.env).prepare(session.nativeSourceId?'SELECT COALESCE(MAX(rowid),0) water FROM portal_native_feedback_notifications':'SELECT COALESCE(MAX(rowid),0) water FROM client_feedback_notifications').first('water')??0),
-      nativeDeliveryWater=coverage.nativeDelivery!=='included'?0:cursor?.water.nativeDelivery??Number(await db(c.env).prepare('SELECT COALESCE(MAX(rowid),0) water FROM native_delivery_recipient_events').first('water')??0);
-    const [requests,feedback,nativeDelivery]=await Promise.all([coverage.requests==='included'?requestRows(c.env,session,requestWater,asOf,cursor?.after):Promise.resolve({results:[]} as {results:Raw[]}),coverage.feedback==='included'?feedbackRows(c.env,principal,session,workspace?.identityId??null,feedbackWater,asOf,cursor?.after):Promise.resolve({results:[]} as {results:Raw[]}),coverage.nativeDelivery==='included'?nativeDeliveryRows(c.env,session,nativeDeliveryWater,asOf,cursor?.after):Promise.resolve({results:[]} as {results:Raw[]})]);
-    const raw=[...requests.results,...feedback.results,...nativeDelivery.results].sort((a,b)=>binaryDescending(a.createdAt,b.createdAt)||binaryDescending(key(a),key(b))),examined=raw.slice(0,PAGE),items:PortalNotificationHistoryItem[]=[];
+      nativeDeliveryWater=coverage.nativeDelivery!=='included'?0:cursor?.water.nativeDelivery??Number(await db(c.env).prepare('SELECT COALESCE(MAX(rowid),0) water FROM native_delivery_recipient_events').first('water')??0),
+      authenticatedDeliveryWater=coverage.authenticatedDelivery!=='included'?0:cursor?.water.authenticatedDelivery??Number(await db(c.env).prepare('SELECT COALESCE(MAX(rowid),0) water FROM authenticated_delivery_recipient_events').first('water')??0);
+    const [requests,feedback,nativeDelivery,authenticatedDelivery]=await Promise.all([coverage.requests==='included'?requestRows(c.env,session,requestWater,asOf,cursor?.after):Promise.resolve({results:[]} as {results:Raw[]}),coverage.feedback==='included'?feedbackRows(c.env,principal,session,workspace?.identityId??null,feedbackWater,asOf,cursor?.after):Promise.resolve({results:[]} as {results:Raw[]}),coverage.nativeDelivery==='included'?nativeDeliveryRows(c.env,session,nativeDeliveryWater,asOf,cursor?.after):Promise.resolve({results:[]} as {results:Raw[]}),coverage.authenticatedDelivery==='included'?authenticatedDeliveryRows(c.env,session,workspace,resolved.scope.sourceId,authenticatedDeliveryWater,asOf,cursor?.after):Promise.resolve({results:[]} as {results:Raw[]})]);
+    const raw=[...requests.results,...feedback.results,...nativeDelivery.results,...authenticatedDelivery.results].sort((a,b)=>binaryDescending(a.createdAt,b.createdAt)||binaryDescending(key(a),key(b))),examined=raw.slice(0,PAGE),items:PortalNotificationHistoryItem[]=[];
     for(const row of examined){if(row.kind==='request'){const current=await authorizeRequest(c.env,principal,session,workspace,resolved.scope.sourceId,row,asOf);if(!current)continue;
         items.push({id:row.id,kind:'request',title:row.title,body:row.body,actionPath:cleanPath(row.actionPath),readAt:row.readAt,createdAt:row.createdAt,mutationPath:`/api/client/notifications/${encodeURIComponent(row.id)}`});}
       else if(row.kind==='delivery'){const current=await authorizeDelivery(c.env,principal,session,workspace,resolved.scope.sourceId,row,asOf);if(!current)continue;
         items.push({id:row.id,kind:'delivery',title:current.title,body:current.body,actionPath:cleanPath(current.actionPath),readAt:current.readAt,createdAt:current.createdAt,mutationPath:`/api/client/notifications/${encodeURIComponent(row.id)}`});}
       else if(row.kind==='native_delivery'){const current=await authorizeNativeDelivery(c.env,principal,session,row,asOf);if(!current)continue;
         items.push({id:row.id,kind:'delivery',title:row.title,body:row.body,actionPath:null,readAt:row.readAt,createdAt:row.createdAt,mutationPath:`/api/client/v2/workspaces/${encodeURIComponent(session.workspaceId!)}/native-delivery-notifications/${encodeURIComponent(row.id)}`});}
+      else if(row.kind==='authenticated_delivery'){const current=await authorizeAuthenticatedDelivery(c.env,principal,session,workspace,row,asOf);if(!current)continue;
+        items.push({id:row.id,kind:'authenticated_delivery',title:row.title,body:current.body,actionPath:current.actionPath,readAt:current.readAt,createdAt:row.createdAt,mutationPath:`/api/client/notification-history/authenticated-delivery/${encodeURIComponent(row.id)}`});}
       else {const current=await authorizeFeedback(c.env,principal,session,row,resolved.context,asOf);if(!current)continue;
         if(row.body!==(current.completionNote??'Your feedback has been handled.'))continue;
         const suffix=session.nativeSourceId?`/api/client/v2/workspaces/${encodeURIComponent(session.workspaceId!)}/feedback-notifications`:'/api/client/feedback-notifications';
         items.push({id:row.id,kind:'feedback',title:row.title,body:row.body,actionPath:`/portal/feedback/${encodeURIComponent(current.id)}${session.workspaceId?`?workspace=${encodeURIComponent(session.workspaceId)}`:''}`,readAt:row.readAt,createdAt:row.createdAt,mutationPath:`${suffix}/${encodeURIComponent(row.id)}`});}}
-    const final=await scopeFor(c.env,principal,session,workspace);if(!final||await notificationHistoryScope({...final.scope,identityId:session.nativePortalIdentityId??session.identityId})!==scopeHash)throw new HTTPException(409,{message:'Notification access changed. Refresh this workspace.'});
-    const last=examined.at(-1),nextCursor=raw.length>PAGE&&last?await encodeNotificationHistoryCursor(c.env,principal,{v:3,scope:scopeHash,asOf,coverage,water:{requests:requestWater,feedback:feedbackWater,nativeDelivery:nativeDeliveryWater},after:[last.createdAt,key(last)],expires:Date.now()+TTL}):null;
+    const final=await scopeFor(c.env,principal,session,workspace);if(!final||await notificationHistoryScope({...final.scope,identityId:portalIdentity(session,workspace)})!==scopeHash)throw new HTTPException(409,{message:'Notification access changed. Refresh this workspace.'});
+    const last=examined.at(-1),nextCursor=raw.length>PAGE&&last?await encodeNotificationHistoryCursor(c.env,principal,{v:4,scope:scopeHash,asOf,coverage,water:{requests:requestWater,feedback:feedbackWater,nativeDelivery:nativeDeliveryWater,authenticatedDelivery:authenticatedDeliveryWater},after:[last.createdAt,key(last)],expires:Date.now()+TTL}):null;
     const response:PortalNotificationHistoryPage={scope:resolved.scope,asOf,coverage:{...coverage,delivery:session.nativeSourceId?(coverage.nativeDelivery==='included'?'included_project_alpha_grant_notices':'omitted_schema_unavailable'):coverage.requests==='included'?'included_legacy_portal_notices':'omitted_no_explicit_grant_authority'},items,nextCursor};return c.json(response);
   });return router;}
 

@@ -61,7 +61,7 @@ import { syncProjectAlpha } from "./project-alpha";
 import { runProjectAlphaSnapshotRecovery } from "./project-alpha-snapshot-recovery";
 import { registerProjectAlphaConnectorAdminRoutes, portalAuthorityErrorResponse } from "./project-alpha-connector-admin";
 import { PortalSourceAuthorityError } from "../../../client/src/worker/project-alpha-portal-authority";
-import { ProjectAlphaConnectorError } from "./project-alpha-connectors";
+import { ensureDeploymentConfiguredProjectAlphaConnectors, ProjectAlphaConnectorError } from "./project-alpha-connectors";
 import { ClientHubSourcesChangedError } from "./client-hub-directory";
 import { buildConnectionSummaries, projectAlphaHealthIsStale } from "./integration-health";
 import {
@@ -241,9 +241,6 @@ import {
   handleProjectAlphaDeliveryIntent,
   handleProjectAlphaDeliveryIntentRevoke,
   handleProjectAlphaDeliveryPreflight,
-  handleRegisteredProjectAlphaDeliveryIntent,
-  handleRegisteredProjectAlphaDeliveryIntentRevoke,
-  handleRegisteredProjectAlphaDeliveryPreflight,
   pruneProjectAlphaDeliveryIntentRateLimits,
   projectAlphaDeliveryMachineHostRequest,
   projectAlphaDeliveryMachineRequest,
@@ -312,6 +309,30 @@ async function requestNotificationSnapshot(
     lifecycle,
     action,
   });
+}
+
+const PROJECT_ALPHA_PROJECTION_API_ROOTS = Object.freeze([
+  "/api/dashboard",
+  "/api/projects",
+  "/api/operations",
+  "/api/tasks",
+  "/api/calendar",
+  "/api/client-hub",
+  "/api/business-parties",
+  "/api/client-portal",
+  "/api/viewer",
+  "/api/team/clients",
+  "/api/delivery/authenticated-grants",
+  "/api/delivery/native-grants",
+  "/api/admin/client-account-activation",
+  "/api/admin/client-delegated-shares",
+  "/api/admin/client-workspaces",
+  "/api/admin/integrations/project-alpha",
+] as const);
+
+export function projectAlphaProjectionApiRequest(path: string): boolean {
+  return PROJECT_ALPHA_PROJECTION_API_ROOTS.some(root => path === root || path.startsWith(`${root}/`))
+    || /^\/api\/team\/staff\/[^/]+\/assigned-work(?:\/|$)/.test(path);
 }
 
 const lockedSecurityHeaders = secureHeaders({
@@ -395,6 +416,12 @@ app.use("/api/*", async (c, next) => {
     administrator = await isAdministrator(c.env, principal);
   c.set("principal", principal);
   c.set("administrator", administrator);
+  // Reconcile only workflows that can expose Project Alpha projections. A
+  // malformed connector deployment must fail those reads closed without
+  // taking down unrelated Operations APIs such as session, airspace, raw file
+  // delivery, diagnostics, or staff administration.
+  if (projectAlphaProjectionApiRequest(c.req.path))
+    await ensureDeploymentConfiguredProjectAlphaConnectors(c.env);
   if (["POST", "PUT", "PATCH", "DELETE"].includes(c.req.method)) {
     if (
       requiresAdministratorForMutation(c.req.method, c.req.path) &&
@@ -1495,12 +1522,6 @@ registerViewerProcessingRoutes(app);
 app.post("/api/internal/project-alpha/delivery-intents/preflight", handleProjectAlphaDeliveryPreflight);
 app.post("/api/internal/project-alpha/delivery-intents", handleProjectAlphaDeliveryIntent);
 app.post("/api/internal/project-alpha/delivery-intents/revoke",handleProjectAlphaDeliveryIntentRevoke);
-app.post("/api/internal/project-alpha/sources/:sourceId/delivery-intents/preflight",c=>
-  handleRegisteredProjectAlphaDeliveryPreflight(c,c.req.param("sourceId")));
-app.post("/api/internal/project-alpha/sources/:sourceId/delivery-intents",c=>
-  handleRegisteredProjectAlphaDeliveryIntent(c,c.req.param("sourceId")));
-app.post("/api/internal/project-alpha/sources/:sourceId/delivery-intents/revoke",c=>
-  handleRegisteredProjectAlphaDeliveryIntentRevoke(c,c.req.param("sourceId")));
 
 app.get("/api/tasks", async (c) => {
   const principal = c.get("principal");

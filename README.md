@@ -76,7 +76,8 @@ Run each app locally with `npm.cmd --prefix apps/<app> run dev`. Copy its `.dev.
 ## Cloudflare resources
 
 - D1 `client-data` (`7f40a7b7-c3ec-470e-a626-e798867f71f8`)
-- D1 `ltds-ops` (`6ebf7514-d306-4615-ae56-ad869c874dbd`)
+- D1 `ltds-ops` (`6ebf7514-d306-4615-ae56-ad869c874dbd`) (legacy physical
+  database name; the current Worker target is `ledgetop-ops`)
 - private R2 bucket `client-data`
 - queue `ltds-file-events`, with R2 create and delete notifications
 - configured thumbnail queue/DLQ names `ltds-thumbnail-jobs` and

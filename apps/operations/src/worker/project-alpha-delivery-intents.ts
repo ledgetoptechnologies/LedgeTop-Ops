@@ -269,8 +269,10 @@ async function authenticate(request: Request, raw: Uint8Array, path: string, aut
 }
 
 export function projectAlphaDeliveryMachineRequest(method:string,path:string): boolean {
-  return method.toUpperCase()==="POST" && ((path===PATH || path===PREFLIGHT_PATH || path===REVOKE_PATH)
-    || /^\/api\/internal\/project-alpha\/sources\/[^/]+\/delivery-intents(?:\/preflight|\/revoke)?$/.test(path));
+  // Project Alpha has one public outbound connection: Ops Sync. Registered
+  // source variants are accepted only through its authenticated service
+  // binding, never as a second direct Operations HTTP receiver.
+  return method.toUpperCase()==="POST" && (path===PATH || path===PREFLIGHT_PATH || path===REVOKE_PATH);
 }
 export function projectAlphaDeliveryMachineHostRequest(urlValue:string,method:string,
   env:Partial<Pick<Env,"INCOMING_EXPECTED_HOST"|"PROJECT_ALPHA_DELIVERY_DIRECT_COMPAT_ENABLED"|"PROJECT_ALPHA_DELIVERY_DIRECT_COMPAT_UNTIL">>,
@@ -348,7 +350,7 @@ export async function handleProjectAlphaDeliveryIntent(c: IntentContext) {
   if (c.env.PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED!=="true") throw new HTTPException(404,{message:"Not found"});
   const authority=legacyAuthority(c.env),raw=await body(c.req.raw),auth=await authenticate(c.req.raw,raw,PATH,authority);
   await rate(c.env,PRIMARY_CATALOG_SOURCE,"intent",60);
-  const connector=await resolveProjectAlphaConnector(c.env,PRIMARY_ALPHA_SOURCE_ID,"events");
+  const connector=await resolveProjectAlphaConnector(c.env,PRIMARY_ALPHA_SOURCE_ID,"proof");
   const resolved=await resolveProjectAlphaDeliverySourceProof(c.env,PRIMARY_ALPHA_SOURCE_ID,authority.applicationKey,
     {revision:connector.proof.revision,version:connector.proof.version});
   return c.json(await applyProjectAlphaDeliveryIntent(c.env,decode(raw),auth,resolved.source,authority.applicationKey,resolved.proof),202);
@@ -517,7 +519,7 @@ export async function applyProjectAlphaDeliveryIntent(env: Env, payload: unknown
 export async function handleProjectAlphaDeliveryIntentRevoke(c:IntentContext){
   if(c.env.PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED!=="true")throw new HTTPException(404,{message:"Not found"});
   const authority=legacyAuthority(c.env),raw=await body(c.req.raw),auth=await authenticate(c.req.raw,raw,REVOKE_PATH,authority);await rate(c.env,PRIMARY_CATALOG_SOURCE,"intent",60);
-  const connector=await resolveProjectAlphaConnector(c.env,PRIMARY_ALPHA_SOURCE_ID,"events");
+  const connector=await resolveProjectAlphaConnector(c.env,PRIMARY_ALPHA_SOURCE_ID,"proof");
   const resolved=await resolveProjectAlphaDeliverySourceProof(c.env,PRIMARY_ALPHA_SOURCE_ID,authority.applicationKey,
     {revision:connector.proof.revision,version:connector.proof.version});
   return c.json(await applyProjectAlphaDeliveryIntentRevoke(c.env,decode(raw),auth,resolved.source,authority.applicationKey,resolved.proof),202);
