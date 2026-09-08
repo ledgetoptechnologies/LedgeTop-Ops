@@ -50,11 +50,12 @@ activation have been changed. This document is not a release announcement.
 ## Staff-facing behavior
 
 Administration shows a compact connection list with per-source sync status,
-manual sync, explicit activation/suspension, and business visibility. Registration
-and credential rotation are collapsed details. All routes require an
-administrator and deny-aware global `integrations.manage`; writes also use the
-existing same-origin/CSRF controls and bounded JSON bodies. Version conflicts are
-visible and require a fresh operator action, not a silent retry.
+manual sync, and the separately scoped reviewed Project Alpha project-creation
+link. Source registration, activation/suspension, visibility, credential
+rotation, and portal-authority controls are not browser controls. They are
+deployment-owned configuration so an internal Operations page cannot become an
+alternate source-authority plane. See [deployment-configured sources](project-alpha-deployment-sources.md)
+for the manifest and safe rollout.
 
 Client Hub's source selector preserves search/history in the URL. Hidden sources
 are excluded before pagination and denied on direct business reads. Visibility
@@ -68,15 +69,28 @@ not configurable in this increment.
 
 ## Deployment contract and limits
 
-`PROJECT_ALPHA_CONNECTOR_CREDENTIALS` is an optional secret JSON object with
-`version: 1` and a `sets` map keyed by credential reference. Each set contains
-`snapshotApiKey`, an `eventCurrent` object (`keyId`, `algorithm`, `value`), and an
-optional `eventPrevious` of the same shape. Never put live values in this file,
-source control, an admin request, or logs. Provision matching references in both
-Operations and ops-sync before an audited revision/activation. First primary
-enrollment additionally needs the known legacy signing configuration available
-to Operations; existing scalar settings alone must not be guessed or copied
-from unrelated credentials.
+Deployment credentials are purpose-scoped JSON envelopes with `version: 1` and
+a `sets` map keyed by credential reference.
+`PROJECT_ALPHA_CONNECTOR_SNAPSHOT_CREDENTIALS` exists only on Operations and
+contains `snapshotApiKey` plus optional `draftQuote` values.
+`PROJECT_ALPHA_CONNECTOR_EVENT_CREDENTIALS` exists only on Ops Sync and contains
+`eventCurrent` plus optional `eventPrevious` verifier values. Never put live
+values in this file, source control, an admin request, logs, or the other
+Worker. First primary enrollment additionally needs its previously attested
+signing fingerprint in the registry; Operations does not receive the legacy
+HMAC secret.
+
+`PROJECT_ALPHA_CONNECTOR_SOURCES` is a separate deploy-managed secret JSON
+manifest containing non-secret exact source metadata, each selected credential
+reference, and event key ID/algorithm/fingerprint commitments. Operations alone
+materializes a missing source
+into this durable registry, then activates/suspends it according to the
+manifest. It cannot retarget an existing identity, and a portal-enabled source
+still requires the paired portal release before its state or credential revision
+may change. Ops Sync is read-only and accepts an event only when its enabled
+local manifest entry and event verifier match that exact durable revision. A
+missing manifest rejects all sources when the production-required guard is on;
+legacy compatibility remains only when that guard is deliberately false.
 
 A source that accepts staff-created draft quotes adds a `draftQuote` object to
 its selected set with `apiKey` and `hmacSecret`. Both values are dedicated to

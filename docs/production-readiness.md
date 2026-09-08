@@ -179,9 +179,11 @@ rewriting historical v1 evidence; `0180` closes new v1 writes only after the
 writer drain; `0181` adds immutable source-qualified policy review; and
 `0182`/`0183` add source-fair, bounded notification scheduling. Operations
 `0048` adds recoverable business-party lifecycle and `0049` adds registered
-delivery-source rate limits. Delivery, Operations, and Ops Sync require the same
-reviewed `PROJECT_ALPHA_CONNECTOR_CREDENTIALS` envelope as independently
-provisioned secrets; source activation remains separately approved.
+delivery-source rate limits. Delivery retains a portal-only connector envelope.
+Operations requires only `PROJECT_ALPHA_CONNECTOR_SNAPSHOT_CREDENTIALS`; Ops
+Sync requires only `PROJECT_ALPHA_CONNECTOR_EVENT_CREDENTIALS`; both require
+the same credential-free `PROJECT_ALPHA_CONNECTOR_SOURCES` manifest. Source
+activation remains separately approved.
 These migrations are not rolled back with Worker code. The Project
 Alpha payment/billing contract is a blocking dependency, never an exception to
 local staff, client-team, account, project, delivery, request, or billing ACLs.

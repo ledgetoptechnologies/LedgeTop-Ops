@@ -1,0 +1,16 @@
+.delivery-change-recovery { display: grid; gap: .8rem; min-width: 0; }
+.delivery-change-recovery p, .delivery-change-recovery h3 { margin: 0; overflow-wrap: anywhere; }
+.delivery-change-recovery-summary { display: flex; gap: .55rem; align-items: center; flex-wrap: wrap; min-width: 0; }
+.delivery-change-recovery-counts, .delivery-change-recovery-times { display: grid; gap: .6rem; margin: 0; min-width: 0; }
+.delivery-change-recovery-counts { grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr)); }
+.delivery-change-recovery-times { grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); }
+.delivery-change-recovery-counts div, .delivery-change-recovery-times div { min-width: 0; padding: .65rem; border: 1px solid var(--border, #d6d9df); border-radius: .45rem; }
+.delivery-change-recovery-counts dt, .delivery-change-recovery-times dt { font-size: .82rem; color: var(--muted, #59636f); }
+.delivery-change-recovery-counts dd, .delivery-change-recovery-times dd { margin: .2rem 0 0; overflow-wrap: anywhere; }
+.delivery-change-recovery-counts dd { font-size: 1.2rem; font-weight: 700; }
+.delivery-change-recovery ul { margin: .35rem 0 0; padding-left: 1.2rem; overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  .delivery-change-recovery-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .delivery-change-recovery-times { grid-template-columns: 1fr; }
+}
+.delivery-change-recovery-card { scroll-margin-top: 6rem; }

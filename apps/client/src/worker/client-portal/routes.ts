@@ -18,7 +18,9 @@ import {
   NativeNotificationAuthorizationOverflowError,
 } from "./repository";
 import { clientFeedbackSchemaAvailable, createClientFeedbackRouter } from "./feedback-routes";
-import {createClientNotificationHistoryRouter,mutateNativeDeliveryNotification} from './notification-history';
+import {createClientNotificationHistoryRouter,mutateNativeDeliveryNotification,mutateAuthenticatedDeliveryNotification} from './notification-history';
+import {createAuthenticatedDeliveryResourceRouter} from './authenticated-delivery-resources';
+import {decodeAuthenticatedDeliveryHandle} from './authenticated-delivery-handles';
 import type {
   ClientPortalRepository,
   ClientPortalSession,
@@ -430,7 +432,19 @@ export function createClientPortalRouter(
     const workspaceV2Request = /\/v2\/(?:workspaces|invitations)(?:\/|$)/.test(c.req.path);
     let workspace: EffectivePortalWorkspaceContext | null = null;
     if (portalHierarchyV2Enabled(c.env) && !workspaceV2Request) {
-      const selectedWorkspace = c.req.header(PORTAL_WORKSPACE_HEADER);
+      let selectedWorkspace = c.req.header(PORTAL_WORKSPACE_HEADER);
+      // Browser image/iframe/download requests cannot carry the JSON client's
+      // workspace header. The encrypted coordinate selects a workspace only;
+      // the normal live identity resolver and resource grant checks still run.
+      const deliveryResource=/^(?:\/api\/client)?\/authenticated-deliveries\/(files|preview|download)$/.exec(c.req.path);
+      if(deliveryResource&&['GET','HEAD'].includes(c.req.method)){
+        const expectedKind=deliveryResource[1]==='files'?'folder':'file';
+        const raw=c.req.query(expectedKind==='folder'?'folder':'file');
+        const coordinate=raw?await decodeAuthenticatedDeliveryHandle(c.env,raw):null;
+        if(!coordinate||coordinate.kind!==expectedKind||(selectedWorkspace&&selectedWorkspace!==coordinate.workspaceId))
+          throw new HTTPException(404,{message:'Shared delivery is unavailable'});
+        selectedWorkspace=coordinate.workspaceId;
+      }
       const sessionBootstrap = c.req.path.endsWith("/session") && !selectedWorkspace;
       if (!sessionBootstrap) {
         workspace = selectedWorkspace
@@ -451,7 +465,7 @@ export function createClientPortalRouter(
         } else {
           const nativeRequestPath = /^(?:\/api\/client)?\/(?:request-readiness|service-catalog(?:\/page)?|service-request-drafts|service-requests|notifications|notification-history)(?:\/|$)/
             .test(c.req.path);
-          const notificationHistoryRequest=/^(?:\/api\/client)?\/notification-history$/.test(c.req.path);
+          const notificationHistoryRequest=/^(?:\/api\/client)?\/notification-history(?:\/authenticated-delivery\/[A-Za-z0-9_-]+)?$/.test(c.req.path);
           const native = selectedWorkspace && nativeRequestPath && (notificationHistoryRequest||nativeServiceRequestsEnabled(c.env))
             ? await resolveNativePortalWorkspaceReadContext(c.env, principal, selectedWorkspace)
             : null;
@@ -499,6 +513,7 @@ export function createClientPortalRouter(
   // Native resources use the verified global principal and their own exact
   // workspace context. They must never manufacture a legacy account session.
   router.route("/v2/workspaces", createNativePortalWorkspaceRouter());
+  router.route("/authenticated-deliveries",createAuthenticatedDeliveryResourceRouter());
 
   router.get("/session", async (c) => {
     const session = c.get("clientSession");
@@ -939,6 +954,17 @@ export function createClientPortalRouter(
     if (!(await repository.updateNotification(c.env, c.get("clientSession"), notificationId.data, value.data.action, mutationGuard)))
       throw new HTTPException(404, { message: "Notification not found" });
     return c.json({ success: true });
+  });
+
+  router.patch("/notification-history/authenticated-delivery/:notificationId", async (c) => {
+    requireSameRequestOrigin(c.req.raw, c.env);
+    const notificationId=opaqueId.safeParse(c.req.param("notificationId"));
+    const value=notificationActionBody.safeParse(await readBoundedJson(c.req.raw));
+    if(!notificationId.success||!value.success)throw new HTTPException(404,{message:'Notification not found'});
+    if(notificationMigrationMaintenanceActive(c.env))return notificationMigrationMaintenanceResponse();
+    if(!await mutateAuthenticatedDeliveryNotification(c.env,c.get('clientPrincipal'),c.get('clientSession'),c.get('clientWorkspace'),notificationId.data,value.data.action))
+      throw new HTTPException(404,{message:'Notification not found'});
+    return c.json({success:true});
   });
 
   router.patch("/v2/workspaces/:workspaceId/native-delivery-notifications/:notificationId", async (c) => {

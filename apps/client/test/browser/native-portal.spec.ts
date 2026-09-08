@@ -25,9 +25,15 @@ function feedbackNotification(id: string, feedbackId: string, title: string, rea
   id, kind: "feedback", title, body: `${title} details`, actionPath: `/portal/feedback/${feedbackId}?workspace=workspace-b`,
   mutationPath: `/api/client/v2/workspaces/workspace-b/feedback-notifications/${id}`, readAt, createdAt: date,
 }; }
-function notificationHistory(items: unknown[] = [], coverage = {requests: "included", feedback: "included"}, workspaceId = "workspace-b") { return {
+function authenticatedDeliveryNotification(id: string, binding = "np1_opaque-folder-handle", readAt: string | null = null) { return {
+  id, kind: "authenticated_delivery", title: "Files changed in your delivery", body: "2 files added · 1 file removed",
+  actionPath: `/portal/deliveries?workspace=workspace-b&folder=${binding}`,
+  mutationPath: `/api/client/notification-history/authenticated-delivery/${id}`, readAt, createdAt: date,
+}; }
+type NotificationCoverage = {requests: string; feedback: string; authenticatedDelivery: string; delivery: string};
+function notificationHistory(items: unknown[] = [], coverage: Partial<NotificationCoverage> = {}, workspaceId = "workspace-b") { return {
   scope: {sourceId: workspace(workspaceId).sourceId, workspaceId, rootType: "organization", rootPublicId: "org-shared"}, asOf: date,
-  coverage: {...coverage, delivery: "omitted_no_explicit_grant_authority"}, items, nextCursor: null,
+  coverage: {requests: "included", feedback: "included", authenticatedDelivery: "omitted_feature_disabled", delivery: "omitted_no_explicit_grant_authority", ...coverage}, items, nextCursor: null,
 }; }
 function hierarchy(id = "workspace-b") { return {...envelope(id), page: {nextCursor: null}, entries: [
   {type: "organization", publicId: "org-shared", parentType: null, parentPublicId: null, displayName: workspace(id).displayName, sourceVersion: "1"},
@@ -70,7 +76,7 @@ async function mock(page: Page, override?: Override) {
 }
 async function late(route: Route, json: unknown) { try { await route.fulfill({json}); } catch { /* The old workspace request was cancelled. */ } }
 function nativeCallsOnly(calls: Call[]) {
-  expect(calls.filter(call => call.path !== "/api/client/session" && !call.path.startsWith("/api/client/v2/"))).toEqual([]);
+  expect(calls.filter(call => call.path !== "/api/client/session" && call.path !== "/api/client/notification-history" && !call.path.startsWith("/api/client/v2/"))).toEqual([]);
   expect(calls.every(call => call.method === "GET")).toBe(true);
   expect(calls.filter(call => call.path === "/api/client/session").every(call => call.workspace === undefined)).toBe(true);
 }
@@ -81,7 +87,7 @@ test("native refresh discovers identity without the selected workspace header an
   await expect(page.getByText("Coastal seawall construction documentation", {exact: true})).toBeVisible();
   await page.reload(); await expect(page.getByText("Coastal seawall construction documentation", {exact: true})).toBeVisible();
   nativeCallsOnly(calls); expect(calls.filter(call => call.path.endsWith("/hierarchy")).every(call => call.query.get("expectedContext") === "context-workspace-b")).toBe(true);
-  await expect(page.getByRole("button", {name: /notifications/i})).toHaveCount(0);
+  await expect(page.getByRole("button", {name: /notifications/i})).toHaveCount(1);
 });
 
 test("primary compatibility and native workspace switching preserve independent projects and Back/Forward", async ({page}) => {
@@ -406,6 +412,62 @@ test("native feedback-only workspaces show the bell without probing request noti
   await expect(panel).toContainText("Feedback-only update");
   expect(calls.some(call => call.path === "/api/client/notification-history")).toBe(true);
   expect(calls.some(call => call.path.includes("feedback-notifications"))).toBe(false);
+});
+
+test("native delivery-only workspaces show authenticated delivery summaries with their exact mutation and folder action", async ({page}) => {
+  const notice = authenticatedDeliveryNotification("delivery-change-one");
+  const mutations: Array<{action: string; workspace?: string}> = [];
+  const calls = await mock(page, (route, call) => {
+    if (call.path === "/api/client/notification-history" && call.method === "GET") return route.fulfill({json: notificationHistory([notice], {
+      requests: "omitted_feature_disabled", feedback: "omitted_feature_disabled", authenticatedDelivery: "included",
+    })});
+    if (call.path === "/api/client/notification-history/authenticated-delivery/delivery-change-one" && call.method === "PATCH") {
+      mutations.push({action: (route.request().postDataJSON() as {action: string}).action, workspace: call.workspace});
+      return route.fulfill({json: {success: true}});
+    }
+    return undefined;
+  });
+  await page.goto("/portal?workspace=workspace-b");
+  const bell = page.getByRole("button", {name: /Notifications, 1 unread update/}); await expect(bell).toBeVisible(); await bell.click();
+  const item = page.getByRole("region", {name: "Notifications"}).locator("article", {hasText: "Files changed in your delivery"});
+  await expect(item).toContainText("2 files added · 1 file removed");
+  await expect(item.getByRole("link", {name: "Files changed in your delivery"})).toHaveAttribute("href", "/portal/deliveries?workspace=workspace-b&folder=np1_opaque-folder-handle");
+  await expect(item).toContainText("Delivery");
+  await item.getByRole("button", {name: "Mark read"}).click();
+  await item.getByRole("button", {name: "Dismiss"}).click();
+  await expect(item).toHaveCount(0);
+  expect(mutations).toEqual([{action: "read", workspace: "workspace-b"}, {action: "dismiss", workspace: "workspace-b"}]);
+  expect(calls.some(call => call.path === "/api/client/notification-history" && call.workspace === "workspace-b")).toBe(true);
+});
+
+test("authenticated delivery summaries without an exact folder action stay visible but non-linkable", async ({page}) => {
+  const notice = {...authenticatedDeliveryNotification("delivery-change-no-action"), actionPath: null};
+  await mock(page, (route, call) => call.path === "/api/client/notification-history" && call.method === "GET" ? route.fulfill({json: notificationHistory([notice], {
+    requests: "omitted_feature_disabled", feedback: "omitted_feature_disabled", authenticatedDelivery: "included",
+  })}) : undefined);
+  await page.goto("/portal?workspace=workspace-b");
+  await page.getByRole("button", {name: /Notifications, 1 unread update/}).click();
+  const item = page.getByRole("region", {name: "Notifications"}).locator("article", {hasText: "Files changed in your delivery"});
+  await expect(item).toContainText("2 files added · 1 file removed");
+  await expect(item.getByRole("link", {name: "Files changed in your delivery"})).toHaveCount(0);
+});
+
+test("an authenticated delivery link stays put when its mark-read update cannot be confirmed", async ({page}) => {
+  const notice = authenticatedDeliveryNotification("delivery-change-read-failed");
+  const calls = await mock(page, (route, call) => {
+    if (call.path === "/api/client/notification-history") return route.fulfill({json: notificationHistory([notice], {
+      requests: "omitted_feature_disabled", feedback: "omitted_feature_disabled", authenticatedDelivery: "included",
+    })});
+    if (call.path === "/api/client/notification-history/authenticated-delivery/delivery-change-read-failed" && call.method === "PATCH") return route.fulfill({status: 503, json: {error: "Retry"}});
+    return undefined;
+  });
+  await page.goto("/portal?workspace=workspace-b");
+  await page.getByRole("button", {name: /Notifications, 1 unread update/}).click();
+  const panel = page.getByRole("region", {name: "Notifications"});
+  await panel.getByRole("link", {name: "Files changed in your delivery"}).click();
+  await expect(page).toHaveURL(/\/portal\?workspace=workspace-b$/);
+  await expect(panel.getByRole("alert")).toContainText("The notification update could not be confirmed.");
+  expect(calls.filter(call => call.path.endsWith("/delivery-change-read-failed") && call.method === "PATCH")).toHaveLength(1);
 });
 
 test("switching native sources aborts stale notifications and resets the bell to the selected workspace", async ({page}) => {

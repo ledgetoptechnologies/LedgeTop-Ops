@@ -401,6 +401,58 @@ export async function loadPortalPastDeliveries(
   return request<PortalFilePage>(`/api/client/past-deliveries${query}`, signal ? { signal } : undefined);
 }
 
+const authenticatedDeliveryHandle = /^ad1_[A-Za-z0-9_-]+$/;
+
+/** An AD1 handle names one current, server-authorized delivery folder. It is
+ * intentionally distinct from legacy archive and native NP1 handles. */
+export function isAuthenticatedDeliveryFolderHandle(value: string | null | undefined): value is string {
+  return typeof value === "string" && value.length <= 8192 && authenticatedDeliveryHandle.test(value);
+}
+
+function invalidAuthenticatedDeliveryHandle(): never {
+  throw Object.assign(new Error("This shared delivery folder is unavailable."), { status: 404 });
+}
+
+function authenticatedDeliveryMediaPath(value:unknown,kind:"preview"|"download",id:string):boolean {
+  return value===`/api/client/authenticated-deliveries/${kind}?${new URLSearchParams({file:id})}`;
+}
+function authenticatedDeliveryFile(value:unknown):value is PortalFile {
+  if(!value||typeof value!=="object")return false;
+  const file=value as PortalFile;
+  return isAuthenticatedDeliveryFolderHandle(file.id)&&typeof file.name==='string'&&file.name.length>0
+    &&!/[\u0000-\u001f\u007f]/.test(file.name)&&Number.isSafeInteger(file.size)&&file.size>=0
+    &&typeof file.uploadedAt==='string'&&Number.isFinite(Date.parse(file.uploadedAt))
+    &&(file.contentType===null||typeof file.contentType==='string')
+    &&['image','video','audio','pdf','text','other'].includes(file.kind)&&file.thumbnailPath===null
+    &&authenticatedDeliveryMediaPath(file.downloadPath,'download',file.id)
+    &&(file.previewPath===null||authenticatedDeliveryMediaPath(file.previewPath,'preview',file.id));
+}
+
+export async function loadPortalAuthenticatedDeliveryFiles(
+  folder: string,
+  cursor: string | null = null,
+  signal?: AbortSignal,
+  request: PortalRequest = requestJson,
+): Promise<PortalFilePage> {
+  if (!isAuthenticatedDeliveryFolderHandle(folder) || (cursor !== null && !isAuthenticatedDeliveryFolderHandle(cursor)))
+    return invalidAuthenticatedDeliveryHandle();
+  const params = new URLSearchParams({ folder });
+  if (cursor) params.set("cursor", cursor);
+  const page = await request<PortalFilePage>(`/api/client/authenticated-deliveries/files?${params}`, signal ? { signal } : undefined);
+  if (
+    !page || page.prefix !== "" ||
+    page.folderId !== folder ||
+    !Array.isArray(page.files) ||
+    !page.files.every(authenticatedDeliveryFile) ||
+    !Array.isArray(page.folders) ||
+    !Array.isArray(page.breadcrumbs) ||
+    !page.folders.every(value => value && isAuthenticatedDeliveryFolderHandle(value.id) && typeof value.name === 'string') ||
+    !page.breadcrumbs.every(value => value && isAuthenticatedDeliveryFolderHandle(value.id) && typeof value.name === 'string') ||
+    (page.cursor !== null && !isAuthenticatedDeliveryFolderHandle(page.cursor))
+  ) return invalidAuthenticatedDeliveryHandle();
+  return page;
+}
+
 export async function loadPortalProjectFileLocations(
   projectId: string,
   request: PortalRequest = requestJson,

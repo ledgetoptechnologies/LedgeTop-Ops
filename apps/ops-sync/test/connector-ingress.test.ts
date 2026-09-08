@@ -113,6 +113,7 @@ describe("authenticated connector business ingress",{timeout:30_000},()=>{
     sets.secondary!.eventPrevious=sets.previous!.eventCurrent;delete sets.previous;
     environment={OPS_DB:db,DELIVERY_DB:db,EXPECTED_HOST:"ops-sync.example",TEAM_DOMAIN:accessIssuer(primary),CF_ACCESS_AUD:`aud-${primary}`,
       APPLICATION_KEY:"ltds_ops",CF_ACCOUNT_ID:"fixture-account",CF_ACCESS_GROUP_ID:"fixture-group",CF_ACCESS_GROUP_NAME:"Fixture group",
+      PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED:"false",
       CF_ACCESS_GROUP_API_TOKEN:"fixture-token",PROJECT_ALPHA_ALLOW_LEGACY_HMAC:"true",PROJECT_ALPHA_WEBHOOK_HMAC_SECRET:"fixture-primary-hmac-secret-at-least-32-bytes",
       PROJECT_ALPHA_CONNECTOR_CREDENTIALS:JSON.stringify({version:1,sets}),PROJECT_ALPHA_BASE_URL:"https://primary.example",PROJECT_ALPHA_API_KEY:"fixture-snapshot-secret",
       PROJECT_ALPHA_WEBHOOK_ED25519_PUBLIC_KEY:sets.primary!.eventCurrent.value};
@@ -149,6 +150,32 @@ describe("authenticated connector business ingress",{timeout:30_000},()=>{
 
   it("attests a valid legacy HMAC event before Operations stages the primary connector",()=>{
     expect(legacyAttestation).toEqual({status:200,algorithms:["ed25519","hmac-sha256"]});
+  });
+
+  it("uses only the event-verifier envelope and never materializes deployment sources",async()=>{
+    const rows=(await db.prepare(`SELECT connector.*,revision.credential_ref,revision.access_issuer,revision.access_audience,
+      revision.access_subject,revision.current_key_id,revision.current_key_fingerprint,revision.previous_key_id,
+      revision.previous_key_fingerprint FROM pa_connectors connector JOIN pa_connector_revisions revision
+      ON revision.source_id=connector.source_id AND revision.revision=connector.active_revision ORDER BY connector.source_id`)
+      .all<Record<string, string | number | null>>()).results;
+    const manifest={version:1,sources:rows.map(row=>({sourceId:row.source_id,producerBindingId:row.producer_binding_id,
+      displayName:row.display_name,snapshotOrigin:row.snapshot_origin,applicationKey:row.application_key,profile:row.profile,
+      enabled:true,readVisible:true,revision:{credentialRef:row.credential_ref,snapshotBasePath:row.snapshot_base_path,
+        accessIssuer:row.access_issuer,accessAudience:row.access_audience,accessSubject:row.access_subject,
+        eventCurrent:{keyId:row.current_key_id,algorithm:"ed25519",fingerprint:row.current_key_fingerprint},
+        ...(row.previous_key_id?{eventPrevious:{keyId:row.previous_key_id,algorithm:"ed25519",fingerprint:row.previous_key_fingerprint}}:{})}}))};
+    const publicValue=async(source:string)=>b64(new Uint8Array(await crypto.subtle.exportKey("raw",keys.get(source)!.publicKey)));
+    const eventCredentials={version:1,sets:{
+      primary:{eventCurrent:{keyId:`key-${primary.replace(/:/g,"-")}`,algorithm:"ed25519",value:await publicValue(primary)}},
+      secondary:{eventCurrent:{keyId:`key-${secondary.replace(/:/g,"-")}`,algorithm:"ed25519",value:await publicValue(secondary)},
+        eventPrevious:{keyId:"key-previous-secondary",algorithm:"ed25519",value:await publicValue("previous-secondary")}},
+    }};
+    const scoped={...environment,PROJECT_ALPHA_CONNECTOR_CREDENTIALS:undefined,
+      PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED:"true",PROJECT_ALPHA_CONNECTOR_SOURCES:JSON.stringify(manifest),
+      PROJECT_ALPHA_CONNECTOR_EVENT_CREDENTIALS:JSON.stringify(eventCredentials)};
+    const auditsBefore=await db.prepare("SELECT count(*) total FROM pa_connector_audit").first<number>("total");
+    expect((await handleRequest(await request(secondary,event()),scoped)).status).toBe(200);
+    expect(await db.prepare("SELECT count(*) total FROM pa_connector_audit").first<number>("total")).toBe(auditsBefore);
   });
 
   it("isolates equal external event and entity IDs, retries, versions, and health by authenticated source",async()=>{

@@ -443,7 +443,13 @@
         "0200_native_feedback_workspace_history.sql",
         "0201_native_draft_quote_notifications.sql",
         "0202_native_delivery_recipient_events.sql",
-        "0203_primary_delivery_authority.sql"
+        "0203_primary_delivery_authority.sql",
+        "0204_delivery_change_receipts.sql",
+        "0205_authenticated_delivery_change_sequence.sql",
+        "0206_delivery_index_provider_identity.sql",
+        "0207_delivery_change_projection.sql",
+        "0208_authenticated_delivery_change_batch_provider_identity.sql",
+        "0209_authenticated_delivery_change_recipient_events.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
@@ -469,6 +475,10 @@
       "authenticatedContentSecretProvisioned": false,
       "authenticatedContentDefaultOffAtDeploy": false,
       "authenticatedContentReleaseEvidenceRef": "<EVIDENCE_REFERENCE>",
+      "authenticatedDeliveryRecoveryBellMigrationsApplied": false,
+      "authenticatedDeliveryRecoveryBellSchemaReady": false,
+      "authenticatedDeliveryRecoveryBellNoHistoricalBackfill": false,
+      "authenticatedDeliveryRecoveryBellReleaseEvidenceRef": "<EVIDENCE_REFERENCE>",
       "verifiedAt": "<ISO_8601_TIMESTAMP>",
       "verificationEvidenceRef": "<EVIDENCE_REFERENCE>"
     },
@@ -619,7 +629,8 @@
         "THUMBNAIL_INGEST_SECRET",
         "VIEWER_SERVICE_HMAC_SECRET",
         "VIEWER_EVENT_HMAC_SECRET",
-        "PROJECT_ALPHA_CONNECTOR_CREDENTIALS"
+        "PROJECT_ALPHA_CONNECTOR_SNAPSHOT_CREDENTIALS",
+        "PROJECT_ALPHA_CONNECTOR_SOURCES"
       ],
       "verifiedAt": "<ISO_8601_TIMESTAMP>",
       "source": "<wrangler-secret-list|reviewed-secrets-file>",
@@ -631,7 +642,8 @@
       "names": [
         "CF_ACCESS_GROUP_API_TOKEN",
         "PROJECT_ALPHA_WEBHOOK_HMAC_SECRET",
-        "PROJECT_ALPHA_CONNECTOR_CREDENTIALS"
+        "PROJECT_ALPHA_CONNECTOR_EVENT_CREDENTIALS",
+        "PROJECT_ALPHA_CONNECTOR_SOURCES"
       ],
       "verifiedAt": "<ISO_8601_TIMESTAMP>",
       "source": "<wrangler-secret-list|reviewed-secrets-file>",

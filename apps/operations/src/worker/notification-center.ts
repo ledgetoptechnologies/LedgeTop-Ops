@@ -448,7 +448,7 @@ export function registerNotificationCenterRoutes(app: App): void {
       availability:{folderChanges:true,nativeDeliveries:nativeReady,authenticatedDeliveries:authenticatedReady}});
   });
   app.post("/api/notifications/deliveries/authenticated_delivery/:id/:action",async c=>{
-    const action=c.req.param("action");if(action!=="send-now"&&action!=="cancel")throw new HTTPException(404,{message:"Notification action not found"});
+    const action=c.req.param("action");if(action!=="send-now"&&action!=="cancel"&&action!=="suppress-email")throw new HTTPException(404,{message:"Notification action not found"});
     if(new URL(c.req.url).searchParams.size)throw new HTTPException(400,{message:"Notification action query is invalid"});
     const parsed=await actionBody(c.req.raw);c.header("Cache-Control","no-store");
     return c.json({...await controlAuthenticatedDeliveryNotification(c.env,c.get("principal"),c.req.param("id"),action,parsed.expectedRevision,

@@ -1,6 +1,7 @@
 import { d1TablesPresent } from "../schema-readiness";
 import { hmac, sha256 } from "../security";
 import type { Env } from "../types";
+import { authenticatedDeliveryChangeAuthoritySql } from "@ltds/shared/authenticated-delivery-authority";
 
 const TABLES = [
   "portal_authenticated_content_history_state",
@@ -18,7 +19,8 @@ const SCHEMA_OBJECTS = [
 const WINDOW_MS = 10 * 60 * 1000;
 const CANONICAL_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
-type AuditEnv = Pick<Env, "DELIVERY_DB" | "CLIENT_PORTAL_CONTENT_AUDIT_ENABLED" | "CLIENT_PORTAL_CONTENT_AUDIT_HMAC_SECRET">;
+type AuditEnv = Pick<Env, "DELIVERY_DB" | "CLIENT_PORTAL_CONTENT_AUDIT_ENABLED" | "CLIENT_PORTAL_CONTENT_AUDIT_HMAC_SECRET">
+  & Partial<Pick<Env,"CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED"|"CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED">>;
 type ContentAction = "file.preview_requested" | "file.download_requested";
 
 interface CommonContentStart {
@@ -51,7 +53,16 @@ export interface NativeContentStart extends CommonContentStart {
   ownerPublicId: string;
 }
 
-export type AuthenticatedContentStart = LegacyContentStart | NativeContentStart;
+/** The existing native_delivery ledger stores workspace/global-identity/grant
+ * coordinates, including v2 grants accessed from a legacy-compatible shell.
+ * No legacy account/association is fabricated for this exact-grant path. */
+export interface AuthenticatedDeliveryContentStart extends Omit<NativeContentStart,"grantSource"> {
+  grantSource: "authenticated_delivery";
+  recipientEventId: string;
+  batchId: string;
+}
+
+export type AuthenticatedContentStart = LegacyContentStart | NativeContentStart | AuthenticatedDeliveryContentStart;
 
 export class AuthenticatedContentAuditUnavailableError extends Error {
   readonly code = "AUTHENTICATED_CONTENT_AUDIT_UNAVAILABLE";
@@ -87,9 +98,15 @@ export async function authenticatedContentAuditRequired(env: AuditEnv): Promise<
   throw new AuthenticatedContentAuditUnavailableError("disabled");
 }
 
-interface AuthorityFence { sql: string; bindings: Array<string | number | null> }
+interface AuthorityFence {
+  sql: string;
+  bindings: Array<string | number | null>;
+  ctes?: string;
+  cteBindings?: Array<string | number | null>;
+  tables?: string[];
+}
 
-function authorityFence(input: AuthenticatedContentStart): AuthorityFence {
+function authorityFence(input: AuthenticatedContentStart,env:AuditEnv): AuthorityFence {
   if (input.authorityMode === "legacy_delivery") {
     const projectId = bounded(input.projectId, "projectId");
     return {
@@ -116,6 +133,26 @@ function authorityFence(input: AuthenticatedContentStart): AuthorityFence {
         input.associationId, input.sourceId, projectId, projectId, projectId, projectId],
     };
   }
+  if(input.grantSource==="authenticated_delivery")return {
+    // Keep the complete current-authority query at statement level. Nesting
+    // its recursive guards inside EXISTS exceeds D1's expression-depth limit.
+    // Materialization is still within each INSERT/SELECT, not a pre-read proof.
+    ctes:`current_batch_authority AS MATERIALIZED(
+      ${authenticatedDeliveryChangeAuthoritySql(env.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED==='true',env.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED==='true',true)}),
+      current_content_event_authority AS MATERIALIZED(SELECT 1 ok FROM authenticated_delivery_recipient_events event
+      JOIN file_index file ON file.r2_key=? AND file.etag=? AND substr(file.r2_key,1,length(event.r2_prefix))=event.r2_prefix
+      WHERE event.id=? AND event.batch_id=? AND event.source_id=? AND event.workspace_id=? AND event.identity_id=?
+        AND event.folder_binding_id=? AND event.binding_source_version=? AND event.grant_id=? AND event.grant_version=?
+        AND event.owner_scope_type=? AND event.owner_public_id=?
+        AND NOT EXISTS(SELECT 1 FROM delivery_tombstones tombstone WHERE tombstone.restored_at IS NULL AND
+          (tombstone.physical_key=file.r2_key OR (tombstone.tombstone_kind='prefix'
+            AND substr(file.r2_key,1,length(tombstone.physical_key))=tombstone.physical_key))))`,
+    cteBindings:[input.batchId,input.storageKey,input.contentVersion,input.recipientEventId,input.batchId,input.sourceId,input.workspaceId,input.identityId,
+      input.folderBindingId,input.bindingSourceVersion,input.grantId,input.grantVersion,input.ownerScopeType,input.ownerPublicId],
+    tables:["current_batch_authority","current_content_event_authority"],
+    sql:"1=1",
+    bindings:[],
+  };
   const grantTable = input.grantSource === "staff"
     ? "portal_v2_authenticated_delivery_grants"
     : "project_alpha_delivery_portal_grants";
@@ -236,17 +273,21 @@ export async function appendAuthenticatedContentStart(
 
   const legacy = input.authorityMode === "legacy_delivery" ? input : null;
   const native = input.authorityMode === "native_delivery" ? input : null;
-  const authority = authorityFence(input);
+  const authority = authorityFence(input,env);
+  const prefix = authority.ctes ? `WITH ${authority.ctes} ` : "";
+  const prefixBindings = authority.cteBindings ?? [];
+  const insertFrom = authority.tables?.length ? ` FROM ${authority.tables.join(" CROSS JOIN ")}` : "";
+  const selectJoins = (authority.tables ?? []).map(table => ` CROSS JOIN ${table}`).join("");
   // Keep the conditional insert and replay read in one transaction and on one
   // first-primary session. Both statements repeat the current authority fence:
   // an existing dedupe row cannot turn a newly revoked request into success.
   const database = env.DELIVERY_DB.withSession("first-primary");
-  const insert = database.prepare(`INSERT OR IGNORE INTO portal_authenticated_content_events(
+  const insert = database.prepare(`${prefix}INSERT OR IGNORE INTO portal_authenticated_content_events(
     id,dedupe_key,dedupe_window,authority_mode,source_id,workspace_id,account_id,identity_id,project_id,
     project_public_id,association_id,folder_binding_id,grant_id,action,resource_fingerprint,
     content_version_fingerprint,resource_label,occurred_at
-  ) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE ${authority.sql}`).bind(
-    id, dedupeKey, dedupeWindow, input.authorityMode, sourceId,
+  ) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?${insertFrom} WHERE ${authority.sql}`).bind(
+    ...prefixBindings, id, dedupeKey, dedupeWindow, input.authorityMode, sourceId,
     bounded(input.workspaceId, "workspaceId"), legacy ? bounded(legacy.accountId, "accountId") : null,
     identityId, legacy ? bounded(legacy.projectId, "projectId") : null,
     native ? bounded(native.projectPublicId, "projectPublicId") : null,
@@ -256,8 +297,8 @@ export async function appendAuthenticatedContentStart(
     input.action, resourceFingerprint, contentVersionFingerprint, resourceLabel, occurredAt, ...authority.bindings,
   );
   const select = database.prepare(
-    `SELECT id,occurred_at occurredAt FROM portal_authenticated_content_events WHERE dedupe_key=? AND ${authority.sql}`,
-  ).bind(dedupeKey, ...authority.bindings);
+    `${prefix}SELECT id,occurred_at occurredAt FROM portal_authenticated_content_events${selectJoins} WHERE dedupe_key=? AND ${authority.sql}`,
+  ).bind(...prefixBindings, dedupeKey, ...authority.bindings);
   const [result, selected] = await database.batch([insert, select]);
   if (!result || !selected) throw new AuthenticatedContentAuditUnavailableError("state_invalid");
   const stored = (selected.results as Array<{ id: string; occurredAt: string }>)[0];

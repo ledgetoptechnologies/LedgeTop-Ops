@@ -31,6 +31,7 @@
     "CLIENT_PORTAL_ORIGINS": "https://portal.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com,https://client.ledgetopdroneservices.com",
     "PUBLIC_SHARE_ORIGIN": "https://portal.ledgetopdroneservices.com",
     "PROJECT_ALPHA_BASE_URL": "https://project-alpha.ledgetopdroneservices.com",
+    "PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED": "true",
     "LEGACY_CLIENT_REQUEST_PA_QUOTE_LINK_ENABLED": "false",
     "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED": "false",
     "CLIENT_PORTAL_NOTIFICATION_MIGRATION_MAINTENANCE": "false",

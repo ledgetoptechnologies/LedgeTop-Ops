@@ -93,9 +93,11 @@ export const REQUIRED_STAGING_SECRETS = Object.freeze({
     "R2_DELIVERY_UPLOAD_ACCESS_KEY_ID", "R2_DELIVERY_UPLOAD_SECRET_ACCESS_KEY",
     "TURNSTILE_SITE_KEY", "TURNSTILE_SECRET", "INCOMING_SESSION_SECRET",
     "INCOMING_ACCESS_CODE_PEPPER", "INCOMING_PICKUP_SECRET", "THUMBNAIL_INGEST_SECRET",
-    "VIEWER_SERVICE_HMAC_SECRET", "VIEWER_EVENT_HMAC_SECRET", "PROJECT_ALPHA_CONNECTOR_CREDENTIALS",
+    "VIEWER_SERVICE_HMAC_SECRET", "VIEWER_EVENT_HMAC_SECRET", "PROJECT_ALPHA_CONNECTOR_SNAPSHOT_CREDENTIALS",
+    "PROJECT_ALPHA_CONNECTOR_SOURCES",
   ]),
-  "ops-sync": Object.freeze(["CF_ACCESS_GROUP_API_TOKEN", "PROJECT_ALPHA_WEBHOOK_HMAC_SECRET", "PROJECT_ALPHA_CONNECTOR_CREDENTIALS"]),
+  "ops-sync": Object.freeze(["CF_ACCESS_GROUP_API_TOKEN", "PROJECT_ALPHA_WEBHOOK_HMAC_SECRET",
+    "PROJECT_ALPHA_CONNECTOR_EVENT_CREDENTIALS", "PROJECT_ALPHA_CONNECTOR_SOURCES"]),
 });
 
 export const STAGING_HOSTS = Object.freeze({
@@ -252,6 +254,12 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0201_native_draft_quote_notifications.sql",
     "0202_native_delivery_recipient_events.sql",
     "0203_primary_delivery_authority.sql",
+    "0204_delivery_change_receipts.sql",
+    "0205_authenticated_delivery_change_sequence.sql",
+    "0206_delivery_index_provider_identity.sql",
+    "0207_delivery_change_projection.sql",
+    "0208_authenticated_delivery_change_batch_provider_identity.sql",
+    "0209_authenticated_delivery_change_recipient_events.sql",
   ]),
   operations: Object.freeze([
     "0014_staff_acl_controls.sql",

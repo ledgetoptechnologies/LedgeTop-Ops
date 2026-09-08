@@ -28,6 +28,7 @@ import {
   DIRECT_DELIVERY_UPLOADS_DISABLED_MESSAGE,
   directDeliveryUploadsCapability,
 } from "./direct-upload-policy";
+import { deliveryIndexRecoveryEnabled, deliveryIndexStoredUtcTime, prepareDeliveryIndexRepair, readDeliveryIndexObservation, type DeliveryIndexStreamState } from "./delivery-index-acceptance";
 type App = Hono<{ Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } }>;
 type ConflictPolicy = "fail" | "skip" | "replace" | "rename";
 type CrudPermission = Permission;
@@ -113,13 +114,45 @@ async function targetFolderName(env:Env,target:string,conflict:ConflictPolicy):P
   throw new HTTPException(409,{message:"Could not find an available destination folder name"});
 }
 
-async function copyObject(env: Env, source: string, target: string, conflict: ConflictPolicy,roots?:{source:string;target:string},allowRecovery=true,moving=false,operationId?:string): Promise<{ target: string | null; skipped: boolean; sourceEtag: string; alreadyRetired?: boolean }> {
+async function repairProviderAwareFileIndex(
+  env: Pick<Env, "DATA_BUCKET" | "DELIVERY_DB">,
+  expected: R2Object,
+  stream?: DeliveryIndexStreamState,
+): Promise<R2Object> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const db = env.DELIVERY_DB.withSession("first-primary");
+    const snapshot = await readDeliveryIndexObservation(db, expected.key);
+    const current = await env.DATA_BUCKET.head(expected.key);
+    // A later upload won after this CRUD write. Never index its metadata under
+    // the expected upload identity; the caller's retry will observe it anew.
+    if (!current || current.version !== expected.version) throw new Error("delivery-index-repair-object-replaced");
+    await prepareDeliveryIndexRepair(db, snapshot, current, stream).run();
+    const confirmed = await readDeliveryIndexObservation(db, expected.key);
+    if (confirmed.current?.providerVersion === current.version
+      && confirmed.current.etag === current.httpEtag && confirmed.current.size === current.size
+      && deliveryIndexStoredUtcTime(confirmed.current.uploadedAt) === current.uploaded.getTime()) return current;
+  }
+  throw new Error("delivery-index-repair-raced");
+}
+
+type CopiedObject = {
+  target: string | null;
+  skipped: boolean;
+  sourceEtag: string;
+  sourceProviderVersion?: string;
+  retiredMarkerVersion?: string;
+  alreadyRetired?: boolean;
+};
+
+async function copyObject(env: Env, source: string, target: string, conflict: ConflictPolicy,roots?:{source:string;target:string},allowRecovery=true,moving=false,operationId?:string): Promise<CopiedObject> {
   const sourceHead = await env.DATA_BUCKET.head(source); if (!sourceHead) throw new Error("source-disappeared");
   if(isMovedSourceMarker(sourceHead)){
     const priorEtag=sourceHead.customMetadata?.ltdsMovedSourceEtag,priorTarget=sourceHead.customMetadata?.ltdsMoveTargetKey;
     const priorCopy=priorTarget===target?await env.DATA_BUCKET.head(target):null;
     if(moving&&priorEtag&&priorCopy?.customMetadata?.ltdsMoveSourceKey===source&&priorCopy.customMetadata?.ltdsMoveSourceEtag===priorEtag){
-      return{target,skipped:false,sourceEtag:priorEtag,alreadyRetired:true};
+      return { target, skipped: false, sourceEtag: priorEtag,
+        sourceProviderVersion: sourceHead.customMetadata?.ltdsMovedSourceProviderVersion,
+        retiredMarkerVersion: sourceHead.version, alreadyRetired: true };
     }
     throw new Error("source-moved");
   }
@@ -176,37 +209,118 @@ async function copyObject(env: Env, source: string, target: string, conflict: Co
     throw error;
   }
   if (!written) throw new Error("replacement-write-missing");
-  if(indexed)await env.DELIVERY_DB.prepare(`INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind,stream_uid,stream_status,stream_error)
+  let indexedObject = written;
+  if(indexed&&deliveryIndexRecoveryEnabled(env)) indexedObject = await repairProviderAwareFileIndex(env,written,{
+    uid:indexed.stream_uid,status:indexed.stream_status,error:indexed.stream_error,
+  });
+  else if(indexed) await env.DELIVERY_DB.prepare(`INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind,stream_uid,stream_status,stream_error)
     VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(r2_key) DO UPDATE SET etag=excluded.etag,size=excluded.size,uploaded_at=excluded.uploaded_at,content_type=excluded.content_type,media_kind=excluded.media_kind,stream_uid=excluded.stream_uid,stream_status=excluded.stream_status,stream_error=excluded.stream_error,updated_at=datetime('now')`)
     .bind(resolved,written.httpEtag,written.size,written.uploaded.toISOString(),indexed.content_type,indexed.media_kind,indexed.stream_uid,indexed.stream_status,indexed.stream_error).run();
-  if(indexed&&thumbnailSourceEligible(resolved,written.size,written.httpMetadata?.contentType||indexed.content_type||undefined)){
-    try{await enqueueThumbnailJob(env,{sourceKey:resolved,sourceEtag:written.httpEtag,sourceSize:written.size});}
+  if(indexed&&thumbnailSourceEligible(resolved,indexedObject.size,indexedObject.httpMetadata?.contentType||indexed.content_type||undefined)){
+    try{await enqueueThumbnailJob(env,{sourceKey:resolved,sourceEtag:indexedObject.httpEtag,sourceSize:indexedObject.size});}
     catch(error){console.error(JSON.stringify({event:"thumbnail.copy-enqueue-failed",key:resolved,error:error instanceof Error?error.message:"unknown"}));}
   }
-  return { target: resolved, skipped: false, sourceEtag };
+  return { target: resolved, skipped: false, sourceEtag,
+    sourceProviderVersion: deliveryIndexRecoveryEnabled(env) ? sourceHead.version : undefined };
 }
 
-async function cleanupMovedSourceState(env:Pick<Env,"DELIVERY_DB">,sourceKey:string,sourceEtag:string):Promise<void>{
-  const etag=sourceEtag.trim().replace(/^"|"$/g,"");
-  await env.DELIVERY_DB.prepare("DELETE FROM image_asset_locations WHERE source_key=? AND source_etag=?").bind(sourceKey,etag).run();
-  await env.DELIVERY_DB.prepare("DELETE FROM file_index WHERE r2_key=? AND trim(etag,'\"')=?").bind(sourceKey,etag).run();
+type MovedSourceState = {
+  providerVersion?: string;
+  markerVersion?: string;
+  targetKey?: string;
+};
+
+function cleanMovedSourceEtag(value: string): string {
+  return value.trim().replace(/^"|"$/g, "");
 }
 
-async function retireMovedSource(env:Pick<Env,"DATA_BUCKET">,sourceKey:string,sourceEtag:string,targetKey:string):Promise<void>{
+function isExpectedMovedSourceMarker(object: R2Object | null, sourceEtag: string, expected: MovedSourceState): object is R2Object {
+  return Boolean(object && expected.markerVersion && expected.providerVersion && expected.targetKey
+    && isMovedSourceMarker(object) && object.version === expected.markerVersion
+    && cleanMovedSourceEtag(object.customMetadata?.ltdsMovedSourceEtag || "") === sourceEtag
+    && object.customMetadata?.ltdsMovedSourceProviderVersion === expected.providerVersion
+    && object.customMetadata?.ltdsMoveTargetKey === expected.targetKey);
+}
+
+async function repairMovedSourceReplacement(env: Env, object: R2Object): Promise<void> {
+  const repaired = await repairProviderAwareFileIndex(env, object);
+  if (thumbnailSourceEligible(repaired.key, repaired.size, repaired.httpMetadata?.contentType)) {
+    await enqueueThumbnailJob(env, {
+      sourceKey: repaired.key, sourceEtag: repaired.httpEtag, sourceSize: repaired.size,
+      eventTime: repaired.uploaded.toISOString(),
+    });
+  }
+}
+
+/** Remove only the provider version that was copied into the move marker.
+ * D1's revision tombstone fences an indexed replacement with identical bytes;
+ * the final HEAD repairs an R2 replacement that wins after our first marker
+ * observation. The legacy path deliberately retains its historical ETag-only
+ * cleanup until recovery has explicitly been enabled. */
+async function cleanupMovedSourceState(env: Env, sourceKey: string, sourceEtag: string, expected?: MovedSourceState): Promise<void> {
   const etag=sourceEtag.trim().replace(/^"|"$/g,"");
-  // R2 has no conditional delete. Atomically replace only the exact copied
-  // version with a private zero-byte marker; a concurrent replacement makes
-  // this CAS fail and is never deleted. A later upload can safely overwrite
-  // the marker and normal object-create processing resumes.
+  if (!deliveryIndexRecoveryEnabled(env)) {
+    await env.DELIVERY_DB.prepare("DELETE FROM image_asset_locations WHERE source_key=? AND source_etag=?").bind(sourceKey,etag).run();
+    await env.DELIVERY_DB.prepare("DELETE FROM file_index WHERE r2_key=? AND trim(etag,'\"')=?").bind(sourceKey,etag).run();
+    await removeThumbnailStateForPath(env,sourceKey,false,etag);
+    return;
+  }
+  if (!expected?.providerVersion || !expected.markerVersion) return;
+  const db = env.DELIVERY_DB.withSession("first-primary");
+  const before = await readDeliveryIndexObservation(db, sourceKey);
+  const marker = await env.DATA_BUCKET.head(sourceKey);
+  if (!isExpectedMovedSourceMarker(marker, etag, expected)) {
+    if (marker && !isMovedSourceMarker(marker)) await repairMovedSourceReplacement(env, marker);
+    return;
+  }
+  const results = await db.batch([
+    db.prepare(`DELETE FROM image_asset_locations WHERE source_key=? AND source_etag=?
+      AND EXISTS(SELECT 1 FROM file_index WHERE r2_key=? AND provider_version=?
+        AND COALESCE((SELECT revision FROM delivery_file_index_revisions WHERE r2_key=?),0)=?)`)
+      .bind(sourceKey, etag, sourceKey, expected.providerVersion, sourceKey, before.revision),
+    db.prepare(`DELETE FROM file_index WHERE r2_key=? AND provider_version=?
+      AND COALESCE((SELECT revision FROM delivery_file_index_revisions WHERE r2_key=?),0)=?
+      RETURNING r2_key`)
+      .bind(sourceKey, expected.providerVersion, sourceKey, before.revision),
+  ]);
+  const removed = results[1]?.results.length === 1;
+  const after = await env.DATA_BUCKET.head(sourceKey);
+  if (!isExpectedMovedSourceMarker(after, etag, expected)) {
+    if (after && !isMovedSourceMarker(after)) await repairMovedSourceReplacement(env, after);
+    return;
+  }
+  if (!removed) return;
+  await removeThumbnailStateForPath(env,sourceKey,false,etag);
+  // Thumbnail cleanup is another asynchronous boundary. A replacement can
+  // land while its old derivative state is being removed, so observe once
+  // more and restore the current provider identity and thumbnail work.
+  const final = await env.DATA_BUCKET.head(sourceKey);
+  if (!isExpectedMovedSourceMarker(final, etag, expected) && final && !isMovedSourceMarker(final))
+    await repairMovedSourceReplacement(env, final);
+}
+
+async function retireMovedSource(env:Pick<Env,"DATA_BUCKET">,sourceKey:string,sourceEtag:string,targetKey:string,sourceProviderVersion?:string):Promise<R2Object>{
+  const etag=sourceEtag.trim().replace(/^"|"$/g,"");
+  if (sourceProviderVersion) {
+    const current = await env.DATA_BUCKET.head(sourceKey);
+    if (!current || current.version !== sourceProviderVersion) throw new Error("source-provider-changed-before-move-retire");
+  }
+  // R2 has no conditional delete or write by provider version. Recovery does
+  // a provider preflight, then records that version in the private marker;
+  // the ETag CAS still stops ordinary changed-byte replacements. A later
+  // upload can overwrite the marker and normal object-create processing
+  // resumes, while cleanup below fences its index revision/provider identity.
   const marker=await env.DATA_BUCKET.put(sourceKey,null,{
     onlyIf:{etagMatches:etag},
     httpMetadata:{contentType:"application/x-ltds-moved-source",cacheControl:"private, no-store"},
-    customMetadata:{ltdsMoveMarker:MOVED_SOURCE_MARKER,ltdsMovedSourceEtag:etag,ltdsMoveTargetKey:targetKey},
+    customMetadata:{ltdsMoveMarker:MOVED_SOURCE_MARKER,ltdsMovedSourceEtag:etag,ltdsMoveTargetKey:targetKey,
+      ...(sourceProviderVersion ? { ltdsMovedSourceProviderVersion: sourceProviderVersion } : {})},
   });
   if(!marker)throw new Error("source-changed-before-move-retire");
+  return marker;
 }
 
-async function copyPreparedArtifacts(env:Env,source:string,target:string,move:boolean,operationId:string):Promise<void>{const sourcePrefix=await artifactDirectory(source),targetPrefix=await artifactDirectory(target);let cursor:string|undefined;do{const page=await env.DATA_BUCKET.list({prefix:sourcePrefix,limit:100,cursor,include:["customMetadata"]});for(const object of page.objects){if(isMovedSourceMarker(object))continue;const destination=`${targetPrefix}${object.key.slice(sourcePrefix.length)}`;const result=await copyObject(env,object.key,destination,"replace",{source,target},false,move,`${operationId}:artifact:${object.etag}`);if(move&&!result.skipped&&!result.alreadyRetired)await retireMovedSource(env,object.key,result.sourceEtag,destination);}cursor=page.truncated?page.cursor:undefined;}while(cursor);}
+async function copyPreparedArtifacts(env:Env,source:string,target:string,move:boolean,operationId:string):Promise<void>{const sourcePrefix=await artifactDirectory(source),targetPrefix=await artifactDirectory(target);let cursor:string|undefined;do{const page=await env.DATA_BUCKET.list({prefix:sourcePrefix,limit:100,cursor,include:["customMetadata"]});for(const object of page.objects){if(isMovedSourceMarker(object))continue;const destination=`${targetPrefix}${object.key.slice(sourcePrefix.length)}`;const result=await copyObject(env,object.key,destination,"replace",{source,target},false,move,`${operationId}:artifact:${object.etag}`);if(move&&!result.skipped&&!result.alreadyRetired)await retireMovedSource(env,object.key,result.sourceEtag,destination,deliveryIndexRecoveryEnabled(env)?result.sourceProviderVersion:undefined);}cursor=page.truncated?page.cursor:undefined;}while(cursor);}
 
 async function revokeImpactedShares(env: Env, actorId: string, key: string): Promise<number> {
   const prefix = prefixFor(key);
@@ -266,13 +380,13 @@ async function processJob(env: Env, id: string): Promise<void> {
     if (job.kind === "batch") {
       const operations = JSON.parse(job.payload_json) as Array<{ kind: "copy" | "move"; sourceKey: string; targetKey: string; conflict: ConflictPolicy;sharePolicy?:"keep"|"revoke" }>;
       const start = Number(job.cursor || 0); const end = Math.min(operations.length, start + MAX_JOB_OBJECTS_PER_TURN);
-      for (let index = start; index < end; index += 1) { const op = operations[index]!; const source = normalizeCrudKey(op.sourceKey, op.sourceKey.endsWith("/")); const target = normalizeCrudKey(op.targetKey, op.targetKey.endsWith("/")); const found = await ensureSource(env, source,true); if (found.folder) throw new Error("batch-folder-operation-requires-dedicated-job"); assertSafeCrudDestination(source,target,false);const operationId=`${id}:${index}`,result = await copyObject(env, source, target, op.conflict,undefined,true,op.kind==="move",operationId);if(result.target&&!result.skipped)await copyPreparedArtifacts(env,source,result.target,op.kind==="move",operationId); if (op.kind === "move" && !result.skipped&&result.target) {if(!result.alreadyRetired)await retireMovedSource(env,source,result.sourceEtag,result.target);await cleanupMovedSourceState(env,source,result.sourceEtag);await removeThumbnailStateForPath(env,source,false,result.sourceEtag);if(op.sharePolicy==="keep")await keepImpactedShares(env,source,result.target);else await revokeImpactedShares(env,job.requested_by,source);} }
+      for (let index = start; index < end; index += 1) { const op = operations[index]!; const source = normalizeCrudKey(op.sourceKey, op.sourceKey.endsWith("/")); const target = normalizeCrudKey(op.targetKey, op.targetKey.endsWith("/")); const found = await ensureSource(env, source,true); if (found.folder) throw new Error("batch-folder-operation-requires-dedicated-job"); assertSafeCrudDestination(source,target,false);const operationId=`${id}:${index}`,result = await copyObject(env, source, target, op.conflict,undefined,true,op.kind==="move",operationId);if(result.target&&!result.skipped)await copyPreparedArtifacts(env,source,result.target,op.kind==="move",operationId); if (op.kind === "move" && !result.skipped&&result.target) {const recovery=deliveryIndexRecoveryEnabled(env),providerVersion=recovery?result.sourceProviderVersion:undefined,marker=result.alreadyRetired?undefined:await retireMovedSource(env,source,result.sourceEtag,result.target,providerVersion);await cleanupMovedSourceState(env,source,result.sourceEtag,{providerVersion,markerVersion:result.retiredMarkerVersion??marker?.version,targetKey:result.target});if(op.sharePolicy==="keep")await keepImpactedShares(env,source,result.target);else await revokeImpactedShares(env,job.requested_by,source);} }
       if (end >= operations.length) await env.OPS_DB.prepare("UPDATE r2_operation_jobs SET status='completed',processed_items=?,total_items=?,attempt_count=0,error_code=NULL,error_message=NULL,next_attempt_at=NULL,claim_token=NULL,completed_at=datetime('now'),updated_at=datetime('now'),lease_until=NULL WHERE id=? AND status='running' AND claim_token=?").bind(end, operations.length, id,claimToken).run();
       else await env.OPS_DB.prepare("UPDATE r2_operation_jobs SET cursor=?,processed_items=?,total_items=?,attempt_count=0,error_code=NULL,error_message=NULL,next_attempt_at=NULL,claim_token=NULL,updated_at=datetime('now'),lease_until=NULL WHERE id=? AND status='running' AND claim_token=?").bind(end, end, operations.length, id,claimToken).run();
       return;
     }
     const source = normalizeCrudKey(job.source_key, true); const target = normalizeCrudKey(job.target_key, true); assertSafeCrudDestination(source,target,true);const page=await env.DATA_BUCKET.list({prefix:source,limit:MAX_JOB_OBJECTS_PER_TURN,include:["customMetadata"],...(job.cursor?{startAfter:String(job.cursor)}:{})});const batch=page.objects;
-    for (const object of batch) { const relative = object.key.slice(source.length),destination=`${target}${relative}`,operationId=`${id}:${object.etag}`; const result = await copyObject(env, object.key, destination, job.conflict_policy,{source,target},true,job.kind==="move",operationId); if (job.kind === "move" && !result.skipped) {if(!result.alreadyRetired)await retireMovedSource(env,object.key,result.sourceEtag,destination);await cleanupMovedSourceState(env,object.key,result.sourceEtag);await removeThumbnailStateForPath(env,object.key,false,result.sourceEtag); } }
+    for (const object of batch) { const relative = object.key.slice(source.length),destination=`${target}${relative}`,operationId=`${id}:${object.etag}`; const result = await copyObject(env, object.key, destination, job.conflict_policy,{source,target},true,job.kind==="move",operationId); if (job.kind === "move" && !result.skipped) {const recovery=deliveryIndexRecoveryEnabled(env),providerVersion=recovery?result.sourceProviderVersion:undefined,marker=result.alreadyRetired?undefined:await retireMovedSource(env,object.key,result.sourceEtag,destination,providerVersion);await cleanupMovedSourceState(env,object.key,result.sourceEtag,{providerVersion,markerVersion:result.retiredMarkerVersion??marker?.version,targetKey:destination}); } }
     const processed = Number(job.processed_items || 0) + batch.length;
     if (!page.truncated) {const active=await env.OPS_DB.prepare("SELECT status,claim_token FROM r2_operation_jobs WHERE id=?").bind(id).first<{status:string;claim_token:string|null}>();if(active?.status!=="running"||active.claim_token!==claimToken)return;if(job.kind==="move"){const payload=JSON.parse(job.payload_json||"{}");if(payload.sharePolicy==="keep")await keepImpactedShares(env,source,target);else await revokeImpactedShares(env,job.requested_by,source);}await env.OPS_DB.prepare("UPDATE r2_operation_jobs SET status='completed',processed_items=?,total_items=MAX(COALESCE(total_items,0),?),attempt_count=0,error_code=NULL,error_message=NULL,next_attempt_at=NULL,claim_token=NULL,completed_at=datetime('now'),updated_at=datetime('now'),lease_until=NULL WHERE id=? AND status='running' AND claim_token=?").bind(processed, processed, id,claimToken).run();}
     else await env.OPS_DB.prepare("UPDATE r2_operation_jobs SET cursor=?,processed_items=?,total_items=MAX(COALESCE(total_items,0),?),attempt_count=0,error_code=NULL,error_message=NULL,next_attempt_at=NULL,claim_token=NULL,updated_at=datetime('now'),lease_until=NULL WHERE id=? AND status='running' AND claim_token=?").bind(page.objects[page.objects.length - 1]!.key, processed, processed + 1, id,claimToken).run();
@@ -282,6 +396,7 @@ async function processJob(env: Env, id: string): Promise<void> {
       "batch-folder-operation-requires-dedicated-job",
       "source-changed-before-copy",
       "source-changed-before-move-retire",
+      "source-provider-changed-before-move-retire",
       "source-disappeared",
       "source-moved",
     ].includes(message);
@@ -409,21 +524,29 @@ async function uploadSession(env: Env, sessionId: string, principalId: string): 
 }
 
 async function refreshFileIndexAndThumbnail(env: Env, object: R2Object, contentType: string): Promise<void> {
-  await env.DELIVERY_DB.prepare(`INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind)
+  let indexedObject = object;
+  let indexedContentType = contentType;
+  if (deliveryIndexRecoveryEnabled(env)) {
+    indexedObject = await repairProviderAwareFileIndex(env, object, {
+      uid: null, status: mediaKind(object.key) === "video" ? "disabled" : null, error: null,
+      uploadUrl: null, uploadOffset: 0,
+    });
+    indexedContentType = indexedObject.httpMetadata?.contentType || contentType;
+  } else await env.DELIVERY_DB.prepare(`INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind)
     VALUES(?,?,?,?,?,?) ON CONFLICT(r2_key) DO UPDATE SET etag=excluded.etag,size=excluded.size,
     uploaded_at=excluded.uploaded_at,content_type=excluded.content_type,media_kind=excluded.media_kind,
     stream_uid=NULL,stream_status=CASE WHEN excluded.media_kind='video' THEN 'disabled' ELSE NULL END,
     stream_upload_url=NULL,stream_upload_offset=0,stream_error=NULL,updated_at=datetime('now')`)
     .bind(object.key, object.httpEtag, object.size, object.uploaded.toISOString(), contentType, mediaKind(object.key)).run();
-  if (canonicalThumbnailSourceKey(object.key) && supportedThumbnailSource(object.key, contentType)) {
+  if (canonicalThumbnailSourceKey(indexedObject.key) && supportedThumbnailSource(indexedObject.key, indexedContentType)) {
     await enqueueThumbnailJob(env, {
-      sourceKey: object.key,
-      sourceEtag: object.httpEtag,
-      sourceSize: object.size,
-      eventTime: object.uploaded.toISOString(),
+      sourceKey: indexedObject.key,
+      sourceEtag: indexedObject.httpEtag,
+      sourceSize: indexedObject.size,
+      eventTime: indexedObject.uploaded.toISOString(),
     });
-  } else if (canonicalThumbnailSourceKey(object.key)) {
-    await removeThumbnailStateForPath(env, object.key);
+  } else if (canonicalThumbnailSourceKey(indexedObject.key)) {
+    await removeThumbnailStateForPath(env, indexedObject.key);
   }
 }
 

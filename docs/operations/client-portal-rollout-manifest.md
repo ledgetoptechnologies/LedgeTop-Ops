@@ -74,8 +74,8 @@ empty unless a dated evidence record explicitly says otherwise:
 | Service and contact metadata | `PROJECT_ALPHA_SERVICE_ASSIGNMENT_SYNC_ENABLED`, `CLIENT_PORTAL_SERVICE_ASSIGNMENT_POLICY_ENABLED` | `CLIENT_HUB_PA_CONTACT_ASSIGNMENTS_ENABLED` | Project Alpha producer approved; Client `0168`, `0174`, `0179`–`0181`, `0190`–`0192`; complete selected generation |
 | Membership management | `CLIENT_PORTAL_TEAM_ENABLED`, `CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED`, `CLIENT_PORTAL_ACCESS_ENROLLMENT_READY`, `CLIENT_PORTAL_PEER_ADMIN_ENABLED`, `CLIENT_PORTAL_ADDRESS_BOOK_ENABLED`, `CLIENT_PORTAL_INVITATION_EMAIL_ENABLED` | Matching management and deny-policy flags | Client `0164`–`0176`; Operations `0041`; SMTP only for the email window |
 | Authority mutation and audit | `PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED`, `CLIENT_PORTAL_CONTENT_AUDIT_ENABLED` | `PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED` | Client `0172` and `0187`; frozen/drained old writers; dedicated audit HMAC secret |
-| Authenticated delivery | `CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED`, `AUTHENTICATED_DELIVERY_GRANTS_ENABLED`, `PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED`, `AUTHENTICATED_DELIVERY_CREATION_ENABLED` | The same four flags; Project Alpha delivery-intent/guest flags remain off | Client through `0189`; Operations `0040`, `0042`, `0049`; hierarchy-relation parity; unreceipted binding query empty; create/restore/revoke and kill-switch evidence |
-| Notifications and expiry | Delivery notification and invitation-email flags | `AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED`, `PROJECT_ACCESS_EXPIRY_NOTIFICATIONS_ENABLED` | Client `0169`, `0170`, `0175`, `0177`, `0178`, `0182`, `0183`, `0186`; reviewed SMTP and recipient policy |
+| Authenticated delivery | `CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED`, `AUTHENTICATED_DELIVERY_GRANTS_ENABLED`, `PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED`, `AUTHENTICATED_DELIVERY_CREATION_ENABLED` | The same four flags; Project Alpha delivery-intent/guest flags remain off | Client through `0208`; Operations `0040`, `0042`, `0049`; hierarchy-relation parity; unreceipted binding query empty; create/restore/revoke and kill-switch evidence |
+| Notifications and expiry | Delivery notification and invitation-email flags | `AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED`, `PROJECT_ACCESS_EXPIRY_NOTIFICATIONS_ENABLED` | Client `0169`, `0170`, `0175`, `0177`, `0178`, `0182`, `0183`, `0186`, `0209`; reviewed SMTP, recipient policy, and exact-recipient bell evidence |
 | Feedback and requests | `CLIENT_PORTAL_NATIVE_FEEDBACK_SOURCE_IDS`, request-v2/native-request, catalog, assignment-policy, and attachment flags | Draft-quote and related exact-source flags | Client `0168`, `0174`, `0179`–`0188`; Operations `0035`, `0050`; scanner/R2/CORS last |
 | Delegated links | `CLIENT_DELEGATED_SHARES_ENABLED` | `CLIENT_DELEGATED_SHARE_SIGNER_ENABLED` | Both signer/session secrets, exact issuer, bounded expiry, recovery route |
 
@@ -103,7 +103,7 @@ emergency operation, not the ordinary rollback for additive migrations.
 2. Apply Project Alpha producer migrations only after the Project Alpha branch
    has been approved and rebased on current main. Preserve onboarding,
    approvals, projects, contracts, and documents.
-3. For the current default-on release, confirm Client migrations through `0203`
+3. For the current default-on release, confirm Client migrations through `0209`
    and Operations through `0053`, plus Project Alpha `0083`. The populated
    `0195` upgrade must prove stale bootstrap authority is invalidated while
    signed native successors and public-link records are preserved. `0197` adds
@@ -121,7 +121,17 @@ emergency operation, not the ordinary rollback for additive migrations.
    authority. Apply the full sequence before deploying dependent Workers;
    preserve the R8a maintenance/drain/readback evidence while 0201 is pending
    and retain the default-off gates until compatible readers and writers are
-   accepted.
+   accepted. `0204`–`0208` add receipt capture, accepted sequencing,
+   provider-identity fencing, bounded projection, and batch-item provenance;
+   `0209` adds the immutable exact-recipient bell ledger and individual
+   read/dismiss state. Apply `0204` through `0209` strictly in filename order
+   through the D1 migration ledger, never as copied raw SQL. Before applying,
+   capture a current Delivery backup and record the full remote migration list.
+   After applying, record the exact applied names, `PRAGMA foreign_key_check`,
+   schema-readiness results, and a second `migrations apply` result of `No
+   migrations to apply`. Keep recovery and notification flags false until the
+   compatible Client and Operations readers/writers, queue identity, retry,
+   revocation, and exact-recipient tests have separate acceptance evidence.
 4. Preserve the exact Project Alpha-to-Ops-Sync connector envelope. Configure
    the private Ops-Sync-to-Client Worker binding and named entrypoint on the
    Operations side only. Do not add another Project Alpha destination, a second
@@ -327,6 +337,33 @@ intent acceptance before reverting to a writer that omits these events; never
 delete history or replay email to repair a version mismatch. Existing historical
 receipts without recipient events require a separately verified reconciliation
 policy, not guessed identity or timestamp reconstruction.
+
+#### R8c — Authenticated delivery recovery and bell (Client migrations 0204–0209)
+
+This window is additive and remains default-off until separately accepted. It
+requires every predecessor through `0203`, then ledger-managed application of
+`0204_delivery_change_receipts.sql`,
+`0205_authenticated_delivery_change_sequence.sql`,
+`0206_delivery_index_provider_identity.sql`,
+`0207_delivery_change_projection.sql`,
+`0208_authenticated_delivery_change_batch_provider_identity.sql`, and
+`0209_authenticated_delivery_change_recipient_events.sql` in that order.
+Do not run any file directly or edit `d1_migrations`; the files intentionally
+are not raw-SQL reapply safe.
+
+Before the apply, pause the affected capture/dispatch schedulers, drain active
+leases and record a recoverable Delivery backup, migration list, receipt/job
+counts, and disabled flag values. Apply Client schema before deploying the
+compatible Operations consumer, projector, publisher, and Client reader; keep
+`AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED` and recovery/capture flags
+false throughout this compatibility deployment. Verify foreign keys,
+schema-readiness, one idempotent ledger reapply (`No migrations to apply`),
+and that no historical object or recipient event was synthesized.
+
+Rollback is code and flag rollback only: stop new capture and dispatch together,
+preserve receipts, sequences, projection jobs, bell events, and recipient state,
+and resume only with a compatible reader/writer. Never drop or replay the
+additive records to emulate an older schema.
 
 ### R9 — Delegated links, expiry, and content audit
 

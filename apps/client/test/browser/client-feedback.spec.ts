@@ -18,7 +18,7 @@ async function mock(page: Page, custom?: (route: Route, url: URL, call: Call) =>
     if (call.path === "/api/client/map-config") return route.fulfill({json: {mapboxPublicToken: null}});
     if (call.path === "/api/client/request-readiness") return route.fulfill({json: {mode: "legacy", workspaceId: call.workspace || null, target: {kind: "root", projectId: null}, canStartRequest: false, reason: "request_not_permitted", root: {canStartRequest: false, reason: "request_not_permitted"}, projectRequestsSupported: false, refreshedAt: date}});
     if (call.path === "/api/client/notifications") return route.fulfill({json: {notifications: [], unreadCount: 0, cursor: null}});
-    if (call.path === "/api/client/notification-history") return route.fulfill({json: {scope:{sourceId:"project-alpha:primary",workspaceId:call.workspace??null,rootType:"organization",rootPublicId:"org-one"},asOf:"2026-08-25T13:00:00Z",coverage:{requests:"included",feedback:"included",delivery:"omitted_no_explicit_grant_authority"},items:[],nextCursor:null}});
+    if (call.path === "/api/client/notification-history") return route.fulfill({json: {scope:{sourceId:"project-alpha:primary",workspaceId:call.workspace??null,rootType:"organization",rootPublicId:"org-one"},asOf:"2026-08-25T13:00:00Z",coverage:{requests:"included",feedback:"included",authenticatedDelivery:"omitted_feature_disabled",delivery:"omitted_no_explicit_grant_authority"},items:[],nextCursor:null}});
     if (call.path === "/api/client/feedback-notifications") return route.fulfill({json: {notifications: [], nextCursor: null}});
     if (call.path.endsWith("file-locations") || call.path.endsWith("past-delivery-locations")) return route.fulfill({json: {points: [], imageCount: 0, truncated: false}});
     if (call.path === "/api/client/projects/project-one/files" || call.path === "/api/client/past-deliveries") return route.fulfill({json: {files: [file()], folders: [], breadcrumbs: [{id: null, name: "Project files"}, ...(call.query.get("folder") ? [{id: "pf2_edited", name: "Edited"}] : [])], folderId: call.query.get("folder"), prefix: "", cursor: null}});
@@ -108,7 +108,7 @@ test("a definite rate limit does not permanently lock the message", async ({page
 
 function unifiedHistory(items: unknown[], nextCursor: string | null = null) {
   return {scope:{sourceId:'project-alpha:primary',workspaceId:null,rootType:'organization',rootPublicId:'org-one'},
-    asOf:'2026-08-25T13:00:00Z',coverage:{requests:'included',feedback:'included',delivery:'included_legacy_portal_notices'},items,nextCursor};
+    asOf:'2026-08-25T13:00:00Z',coverage:{requests:'included',feedback:'included',authenticatedDelivery:'omitted_feature_disabled',delivery:'included_legacy_portal_notices'},items,nextCursor};
 }
 
 test("late notification continuation cannot resurrect a dismissed feedback update", async ({page}) => {
@@ -176,7 +176,7 @@ for(const width of [375,1280])test(`redacted feedback history is usable at ${wid
 
 for(const width of [375,1280])test(`unified notification history is usable at ${width}px`,async({page},info)=>{
   test.skip(info.project.name!=="desktop-edge","Explicit viewport coverage");await page.setViewportSize({width,height:900});
-  const calls=await mock(page,(route,_url,call)=>call.path==="/api/client/notification-history"?route.fulfill({json:{scope:{sourceId:"project-alpha:primary",workspaceId:null,rootType:"organization",rootPublicId:"org-one"},asOf:"2026-08-25T13:00:00Z",coverage:{requests:"included",feedback:"included",delivery:"included_legacy_portal_notices"},items:[
+  const calls=await mock(page,(route,_url,call)=>call.path==="/api/client/notification-history"?route.fulfill({json:{scope:{sourceId:"project-alpha:primary",workspaceId:null,rootType:"organization",rootPublicId:"org-one"},asOf:"2026-08-25T13:00:00Z",coverage:{requests:"included",feedback:"included",authenticatedDelivery:"omitted_feature_disabled",delivery:"included_legacy_portal_notices"},items:[
     {id:"request-notice",kind:"request",title:"Request accepted",body:"Your request was accepted.",actionPath:"/portal/requests",readAt:null,createdAt:date,mutationPath:"/api/client/notifications/request-notice"},
     {id:"feedback-notice",kind:"feedback",title:"Feedback completed",body:"Review complete.",actionPath:"/portal/feedback/feedback-one",readAt:null,createdAt:date,mutationPath:"/api/client/feedback-notifications/feedback-notice"},
     {id:"delivery-notice",kind:"delivery",title:"Files available",body:"New files are ready.",actionPath:"/portal/projects/project-one",readAt:null,createdAt:date,mutationPath:"/api/client/notifications/delivery-notice"}],nextCursor:null}}):

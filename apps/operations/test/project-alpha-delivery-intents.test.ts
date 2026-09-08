@@ -328,6 +328,7 @@ describe("Project Alpha delivery-intent boundary", () => {
     expect(projectAlphaDeliveryMachineRequest("POST", "/api/internal/project-alpha/delivery-intents")).toBe(true);
     expect(projectAlphaDeliveryMachineRequest("POST", "/api/internal/project-alpha/delivery-intents/preflight")).toBe(true);
     expect(projectAlphaDeliveryMachineRequest("POST", "/api/internal/project-alpha/delivery-intents/revoke")).toBe(true);
+    expect(projectAlphaDeliveryMachineRequest("POST", "/api/internal/project-alpha/sources/project-alpha%3Asecondary/delivery-intents")).toBe(false);
     expect(projectAlphaDeliveryMachineRequest("GET", "/api/internal/project-alpha/delivery-intents")).toBe(false);
     expect(projectAlphaDeliveryMachineRequest("POST", "/api/internal/project-alpha/delivery-intents/extra")).toBe(false);
   });

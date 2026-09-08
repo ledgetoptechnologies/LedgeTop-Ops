@@ -16,10 +16,11 @@ import {
   type AuthenticatedDeliveryGrantNotificationTarget,
 } from "./authenticated-delivery-grants";
 import { sha256 } from "./crypto";
+import { suppressAuthenticatedDeliveryChangeEmail } from "./authenticated-delivery-bell";
 import type { Env, GrantRow, StaffPrincipal } from "./types";
 
 type View = "pending" | "history";
-type Action = "send-now" | "cancel";
+type Action = "send-now" | "cancel" | "suppress-email";
 type PolicyRow = {
   grant_id:string; grant_version:number; logical_grant_id:string; workspace_id:string; source_id:string;
   identity_id:string; principal_public_id:string; principal_source_version:string; access_notice_enabled:number;
@@ -37,6 +38,8 @@ export interface AuthenticatedDeliveryNotificationRow extends AuthenticatedDeliv
   updated_at:string;
   delivered_at:string|null;
   last_error:string|null;
+  bell_published_at:string|null;
+  email_suppressed_at:string|null;
   createdAt:string;
   scopeKey:string;
 }
@@ -243,9 +246,12 @@ export function presentAuthenticatedDeliveryNotification(row:AuthenticatedDelive
   return {kind:"authenticated_delivery" as const,id:row.id,revision:row.revision,status:row.status,workspaceName:scope.workspaceName,folderLabel:scope.folderLabel,
     recipientEmail:scope.recipientEmail,addedCount:row.added_count,removedCount:row.removed_count,eligibleAt:iso(row.eligible_at),
     createdAt:row.createdAt,updatedAt:iso(row.updated_at),deliveredAt:row.delivered_at?iso(row.delivered_at):null,
-    errorCode:row.last_error?(row.status==="suppressed"?"no-longer-eligible":row.status==="failed"||row.status==="pending"?"delivery-attempt-failed":null):null,
-    canSendNow:row.status==="pending"&&row.attempt_count<3&&sendable&&allowed(grants,principal,"delivery.share.create",scope.divisionId),
-    canCancel:row.status==="pending"&&allowed(grants,principal,"delivery.share.revoke",scope.divisionId)};
+    bellPublishedAt:row.bell_published_at?iso(row.bell_published_at):null,
+    emailSuppressedAt:row.email_suppressed_at?iso(row.email_suppressed_at):null,
+    errorCode:row.email_suppressed_at?"email-suppressed":row.last_error?(row.status==="suppressed"?"no-longer-eligible":row.status==="failed"||row.status==="pending"?"delivery-attempt-failed":null):null,
+    canSendNow:row.status==="pending"&&!row.bell_published_at&&row.attempt_count<3&&sendable&&allowed(grants,principal,"delivery.share.create",scope.divisionId),
+    canCancel:row.status==="pending"&&!row.bell_published_at&&allowed(grants,principal,"delivery.share.revoke",scope.divisionId),
+    canSuppressEmail:row.status==="pending"&&Boolean(row.bell_published_at)&&!row.email_suppressed_at&&allowed(grants,principal,"delivery.share.revoke",scope.divisionId)};
 }
 
 export async function readAuthenticatedDeliveryNotification(env:Env,id:string,principal:StaffPrincipal){
@@ -266,7 +272,7 @@ function mapControlError(error:unknown):never{
   const message=error instanceof Error?error.message:"";
   if(message.endsWith("-invalid"))throw new HTTPException(400,{message:"Notification action identifiers are invalid"});
   if(message.includes("idempotency-conflict"))throw new HTTPException(409,{message:"This request key was already used for a different notification action"});
-  if(message.includes("control-conflict"))changed();
+  if(message.includes("control-conflict")||message.includes("suppression-conflict"))changed();
   if(message.endsWith("-disabled")||message.endsWith("-schema-unavailable"))
     throw new HTTPException(503,{message:"Authenticated delivery notifications are not ready"});
   throw error;
@@ -274,7 +280,7 @@ function mapControlError(error:unknown):never{
 
 export async function controlAuthenticatedDeliveryNotification(env:Env,principal:StaffPrincipal,id:string,action:Action,
   expectedRevision:number,key:string){
-  if(!OPAQUE.test(id)||!IDEMPOTENCY.test(key)||!["send-now","cancel"].includes(action)
+  if(!OPAQUE.test(id)||!IDEMPOTENCY.test(key)||!["send-now","cancel","suppress-email"].includes(action)
     ||!Number.isSafeInteger(expectedRevision)||expectedRevision<1||expectedRevision>=Number.MAX_SAFE_INTEGER)
     throw new HTTPException(400,{message:"Notification action identifiers are invalid"});
   if(!await authenticatedDeliveryNotificationCenterReady(env))unavailable();
@@ -284,13 +290,20 @@ export async function controlAuthenticatedDeliveryNotification(env:Env,principal
   const recheck=async()=>{const [currentScope,currentAccess]=await Promise.all([readAuthenticatedDeliveryNotificationScope(env,row),staffPolicy(env,principal)]);
     if(currentScope?.contextProof!==scope.contextProof||currentAccess.proof!==access.proof)changed();};
   await recheck();
+  if(action==="suppress-email"){
+    let result:{revision:number;replayed:boolean};
+    try{result=await suppressAuthenticatedDeliveryChangeEmail(env,principal.id,{batchId:id,expectedRevision,idempotencyKey:key});}
+    catch(error){mapControlError(error);}
+    await recheck();
+    return {ok:true as const,id,action,revision:result.revision,status:"suppressed" as const,replayed:result.replayed};
+  }
   const invoke=()=>controlAuthenticatedDeliveryChangeBatch(env,principal.id,{batchId:id,action,expectedRevision,idempotencyKey:key},true);
   const prior=await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT 1 ok FROM portal_authenticated_delivery_change_controls
     WHERE actor_staff_id=? AND idempotency_key=?`).bind(principal.id,key).first("ok");
   if(prior!==null){let replayed:{status:"pending"|"cancelled";revision:number;replayed?:boolean};
     try{replayed=await invoke();}catch(error){mapControlError(error);}await recheck();
     return {ok:true as const,id,action,revision:replayed.revision,status:replayed.status,replayed:replayed.replayed===true};}
-  if(row.status!=="pending"||row.revision!==expectedRevision||action==="send-now"&&row.attempt_count>=3)changed();
+  if(row.status!=="pending"||row.bell_published_at||row.revision!==expectedRevision||action==="send-now"&&row.attempt_count>=3)changed();
   if(action==="send-now"&&!await authorizeAuthenticatedDeliveryChangeBatch(env,row))changed();
   let result:{status:"pending"|"cancelled";revision:number;replayed?:boolean};
   try{result=await invoke();}

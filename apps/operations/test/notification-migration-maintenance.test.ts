@@ -19,7 +19,10 @@ vi.mock("../src/worker/incoming-upload-notifications", () => ({ processIncomingU
 vi.mock("../src/worker/client-feedback-notifications", () => ({ processClientFeedbackNotifications: mocks.clientFeedback }));
 vi.mock("../src/worker/viewer-processing", async importOriginal => ({ ...await importOriginal<typeof import("../src/worker/viewer-processing")>(), processViewerProcessingNotifications: mocks.viewerProcessing }));
 vi.mock("../src/worker/project-access-expiry-notifications", () => ({ processProjectAccessExpiryNotifications: mocks.accessExpiry }));
-vi.mock("../src/worker/authenticated-delivery-change-notifications", () => ({ processAuthenticatedDeliveryChangeNotifications: mocks.authenticatedDelivery }));
+vi.mock("../src/worker/authenticated-delivery-change-notifications", async importOriginal => ({
+  ...await importOriginal<typeof import("../src/worker/authenticated-delivery-change-notifications")>(),
+  processAuthenticatedDeliveryChangeNotifications: mocks.authenticatedDelivery,
+}));
 vi.mock("../src/worker/viewer-integration", async importOriginal => ({ ...await importOriginal<typeof import("../src/worker/viewer-integration")>(), drainViewerSessionRevocations: mocks.revokeViewerSessions }));
 vi.mock("../src/worker/thumbnail-backfill", () => ({ processThumbnailBackfills: mocks.thumbnailBackfill }));
 vi.mock("../src/worker/video-thumbnail-recovery", () => ({ processLegacyVideoThumbnailRecovery: mocks.legacyThumbnailRecovery }));

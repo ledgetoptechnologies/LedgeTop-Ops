@@ -4,7 +4,7 @@ import { api, ApiError } from "./api";
 import "./OperationsNotifications.css";
 
 type BatchStatus = "pending" | "processing" | "sent" | "cancelled" | "suppressed" | "failed";
-type BatchAction = "send-now" | "cancel";
+type BatchAction = "send-now" | "cancel" | "suppress-email";
 type NotificationKind = "folder_changes" | "portal_delivery" | "authenticated_delivery";
 interface NotificationBase {
   id: string; revision: number; status: BatchStatus; folderLabel: string; recipientEmail: string | null;
@@ -13,7 +13,8 @@ interface NotificationBase {
 }
 type NotificationBatch = NotificationBase & ({ kind: "folder_changes"; accountName: string; addedCount: number; removedCount: number }
   | { kind: "portal_delivery"; sourceName: string; workspaceName: string; eventLabel: string; deliveryMode: "staged" | "direct_legacy" | "awaiting_staging" }
-  | { kind: "authenticated_delivery"; workspaceName?: string; addedCount: number; removedCount: number });
+  | { kind: "authenticated_delivery"; workspaceName?: string; addedCount: number; removedCount: number;
+    bellPublishedAt: string | null; emailSuppressedAt: string | null; canSuppressEmail: boolean });
 interface NotificationPage { items: NotificationBatch[]; nextCursor: string | null; serverNow: string; coverage: "delivery_notifications_v2";
   availability: { folderChanges: true; nativeDeliveries: boolean; authenticatedDeliveries?: boolean } }
 type NotificationRoute = { view: "pending" | "history"; q: string; batchId: string | null; kind: NotificationKind; invalid: boolean };
@@ -51,7 +52,13 @@ function pageValid(value: unknown, requested: NotificationRoute): value is Notif
           && (item.deliveryMode === "staged" || item.canSendNow === false && item.canCancel === false)
         : item.kind === "authenticated_delivery" && (value.availability as Record<string, unknown>).authenticatedDeliveries === true
           && (item.workspaceName === undefined || boundedText(item.workspaceName))
-          && [item.addedCount, item.removedCount].every(count => Number.isSafeInteger(count) && Number(count) >= 0))
+          && [item.addedCount, item.removedCount].every(count => Number.isSafeInteger(count) && Number(count) >= 0)
+          && (item.bellPublishedAt === null || isoTime(item.bellPublishedAt))
+          && (item.emailSuppressedAt === null || isoTime(item.emailSuppressedAt))
+          && typeof item.canSuppressEmail === "boolean"
+          && (!item.canSuppressEmail || item.status === "pending" && item.bellPublishedAt !== null && item.emailSuppressedAt === null && item.canSendNow === false && item.canCancel === false)
+          && (item.emailSuppressedAt === null || item.status === "suppressed" && item.bellPublishedAt !== null && item.canSuppressEmail === false)
+          && (item.bellPublishedAt === null || item.canSendNow === false && item.canCancel === false))
       && [item.eligibleAt, item.createdAt, item.updatedAt].every(isoTime) && (item.deliveredAt === null || isoTime(item.deliveredAt))
       && textOrNull(item.errorCode) && typeof item.canSendNow === "boolean" && typeof item.canCancel === "boolean");
 }
@@ -66,6 +73,13 @@ function eligibility(row: NotificationBatch, now: number): string {
 }
 function statusLabel(status: BatchStatus): string {
   return status === "suppressed" ? "Not sent" : status[0]!.toUpperCase() + status.slice(1);
+}
+function authenticatedEmailStatus(row: Extract<NotificationBatch, { kind: "authenticated_delivery" }>): string {
+  if (row.emailSuppressedAt) return `Suppressed ${shownTime(row.emailSuppressedAt)}`;
+  if (row.status === "sent") return row.deliveredAt ? `Sent ${shownTime(row.deliveredAt)}` : "Sent";
+  if (row.status === "failed") return "Failed";
+  if (row.status === "suppressed") return "Suppressed before email dispatch";
+  return row.status === "processing" ? "Sending" : "Pending";
 }
 
 export function OperationsNotifications() {
@@ -216,12 +230,13 @@ export function OperationsNotifications() {
       if (!record(result) || result.ok !== true || result.id !== active.id || result.action !== active.action
         || (active.kind === "folder_changes" ? result.kind !== undefined && result.kind !== "folder_changes" : result.kind !== active.kind)
         || result.revision !== active.revision + 1
-        || result.status !== (active.action === "cancel" ? "cancelled" : "pending")
+        || result.status !== (active.action === "cancel" ? "cancelled" : active.action === "suppress-email" ? "suppressed" : "pending")
         || typeof result.replayed !== "boolean") throw new Error("The action outcome could not be confirmed.");
       confirmed.current.set(notificationKey(active), { revision: Number(result.revision), status: result.status as BatchStatus });
       updateMutation(null);
       setRows(previous => previous.filter(row => notificationKey(row) !== notificationKey(active)));
-      setMessage(active.action === "cancel" ? `Notification cancelled. Files and access are unchanged; ${active.kind === "folder_changes" ? "later file changes can create a new notification" : active.kind === "authenticated_delivery" ? "later eligible file changes can create a new notification while the exact-person policy remains enabled" : "this does not revoke the delivery or recall earlier notices"}. Email already accepted for delivery and published inbox notices cannot be recalled.`
+      setMessage(active.action === "suppress-email" ? "Email suppressed. Files and access are unchanged, and an already published bell notification cannot be recalled."
+        : active.action === "cancel" ? `Notification cancelled. Files and access are unchanged; ${active.kind === "folder_changes" ? "later file changes can create a new notification" : active.kind === "authenticated_delivery" ? "later eligible file changes can create a new notification while the exact-person policy remains enabled" : "this does not revoke the delivery or recall earlier notices"}. Email already accepted for delivery and published inbox notices cannot be recalled.`
         : active.kind === "folder_changes" ? "Notification made eligible for dispatch. This does not confirm delivery; a new file change before dispatch can restart the waiting period."
           : "Notification made eligible for dispatch. This does not confirm delivery or change recipient access. Eligibility is checked again before dispatch.");
       void load();
@@ -238,14 +253,17 @@ export function OperationsNotifications() {
     } finally { if (mutationController.current === controller) mutationController.current = null; }
   };
   const begin = (row: NotificationBatch, action: BatchAction) => {
-    if (mutationRef.current || row.status !== "pending" || !(action === "send-now" ? row.canSendNow : row.canCancel)) return;
+    const permitted = action === "send-now" ? row.canSendNow : action === "cancel" ? row.canCancel
+      : row.kind === "authenticated_delivery" && row.canSuppressEmail;
+    if (mutationRef.current || row.status !== "pending" || !permitted) return;
     const label = `${notificationName(row)} · ${row.folderLabel}${row.kind === "portal_delivery" ? ` · ${row.sourceName} · ${row.recipientEmail || "Recipient unavailable"}` : ""}`;
     if (action === "cancel" && !confirm(`Cancel the notification for ${label}? This stops remaining attempts. It does not remove files or change access. Email already accepted for delivery and published inbox notices cannot be recalled.${row.kind === "folder_changes" ? " Later file changes can create a new notification." : " The delivery itself is not revoked."}`)) return;
+    if (action === "suppress-email" && !confirm(`Suppress the pending email for ${label}? This does not change access and does not recall the bell notification already published to the client portal.`)) return;
     void perform({ id: row.id, kind: row.kind, label, action, revision: row.revision, key: crypto.randomUUID(), busy: false, error: "" });
   };
 
   return <section className="page-stack operations-notifications" aria-label="Delivery notification center">
-    <div className="page-heading"><div><h2>Notifications</h2>
+    <div className="page-heading"><div><h2>Delivery activity</h2>
       <p>{route.batchId ? "Review this exact notification and its current delivery status." : "Review pending delivery notifications and their history."}</p></div>
       <button className="button-ghost" type="button" aria-disabled={loading || loadingMore || mutation?.busy} onClick={() => {
         if (!pending.current && !mutationRef.current?.busy) void load();
@@ -270,7 +288,7 @@ export function OperationsNotifications() {
       {(draft || route.q) && <button type="button" className="button-ghost" onClick={() => navigate({ ...route, q: "" })}>Clear search</button>}
     </form>}
     {mutation && <div className="notification-action-status" role={mutation.error ? "alert" : "status"}>
-      <strong>{mutation.action === "cancel" ? "Cancel notification" : "Send now"}: {mutation.label}</strong>
+      <strong>{mutation.action === "cancel" ? "Cancel notification" : mutation.action === "suppress-email" ? "Suppress email" : "Send now"}: {mutation.label}</strong>
       <p>{mutation.busy ? "Checking the action with the server…" : mutation.error}</p>
       {!mutation.busy && <button type="button" className="button-ghost" onClick={() => { if (mutationRef.current) void perform(mutationRef.current); }}>Retry action</button>}
     </div>}
@@ -284,21 +302,27 @@ export function OperationsNotifications() {
       <div className="notification-batch-list">
         {rows.map(row => <article key={notificationKey(row)} className="notification-batch" aria-label={`${notificationName(row)} · ${row.folderLabel}`} data-notification-kind={row.kind}>
           <header><div><h3>{notificationName(row)}</h3><p>{row.folderLabel}</p><small className="notification-kind">{row.kind === "folder_changes" ? "Folder changes" : row.kind === "portal_delivery" ? "Portal delivery" : "Authenticated recipient changes"}</small></div>
-            <StatusPill tone={row.status === "failed" ? "danger" : row.status === "sent" ? "success" : row.status === "pending" ? "warning" : "neutral"}>{statusLabel(row.status)}</StatusPill></header>
+            <StatusPill tone={row.status === "failed" ? "danger" : row.status === "sent" ? "success" : row.status === "pending" ? "warning" : "neutral"}>{row.kind === "authenticated_delivery" && row.emailSuppressedAt ? "Email suppressed" : statusLabel(row.status)}</StatusPill></header>
           <dl><div><dt>Recipient</dt><dd>{row.recipientEmail || "Recipient unavailable"}</dd></div>
             {row.kind === "folder_changes" || row.kind === "authenticated_delivery" ? <div><dt>Net changes</dt><dd>{row.addedCount.toLocaleString()} added · {row.removedCount.toLocaleString()} removed</dd></div>
               : <><div><dt>Source</dt><dd>{row.sourceName}</dd></div><div><dt>Workspace</dt><dd>{row.workspaceName}</dd></div><div><dt>Event</dt><dd>{row.eventLabel}</dd></div></>}
+            {row.kind === "authenticated_delivery" && <><div><dt>Bell</dt><dd>{row.bellPublishedAt ? `Published ${shownTime(row.bellPublishedAt)}` : "Not published"}</dd></div><div><dt>Email</dt><dd>{authenticatedEmailStatus(row)}</dd></div></>}
             <div><dt>Created</dt><dd>{shownTime(row.createdAt)}</dd></div>
             <div><dt>{row.deliveredAt ? "Sent" : "Last updated"}</dt><dd>{shownTime(row.deliveredAt || row.updatedAt)}</dd></div></dl>
           {(row.status === "pending" || row.status === "processing") && <p className="notification-countdown" aria-live="off">{eligibility(row, clock)}</p>}
           {row.kind === "portal_delivery" && row.deliveryMode !== "staged" && <p>{row.deliveryMode === "awaiting_staging" ? "Awaiting staging. Actions are not available for this notice yet." : "Earlier direct-dispatch notice. This record is read-only."}</p>}
           {row.status === "processing" && <p>Dispatch has started and can no longer be cancelled here.</p>}
           {row.status === "pending" && row.errorCode === "delivery-attempt-failed" && <p>A delivery attempt failed. This batch is waiting for another attempt. An earlier email may already have been accepted, or an inbox notice published; cancellation cannot recall either.</p>}
-          {row.status === "suppressed" && <p>Not sent after eligibility checks.</p>}
+          {row.status === "suppressed" && <p>{row.kind === "authenticated_delivery" && row.emailSuppressedAt
+            ? "Email suppressed by staff. The published bell notice remains subject to current client access."
+            : "Not sent after eligibility checks."}</p>}
           {row.status === "failed" && <p>This notification could not be delivered.</p>}
           {row.status === "pending" && (row.canSendNow || row.canCancel) && <div className="notification-batch-actions">
             {row.canSendNow && <button type="button" className="button-orange" disabled={Boolean(mutation)} onClick={() => begin(row, "send-now")}>Send now</button>}
             {row.canCancel && <button type="button" className="button-danger" disabled={Boolean(mutation)} onClick={() => begin(row, "cancel")}>Cancel notification</button>}
+          </div>}
+          {row.kind === "authenticated_delivery" && row.status === "pending" && row.canSuppressEmail && <div className="notification-batch-actions">
+            <button type="button" className="button-danger" disabled={Boolean(mutation)} onClick={() => begin(row, "suppress-email")}>Suppress email</button>
           </div>}
         </article>)}
       </div>

@@ -30,6 +30,7 @@ import { ClientHubWorkspaceRouter } from "./BusinessProjectWorkspace";
 import { DeliveryLinksPage } from "./DeliveryLinksPage";
 import { ProjectAlphaConnections } from "./ProjectAlphaConnections";
 import { PortalWorkflowReadiness } from "./PortalWorkflowReadiness";
+import { DeliveryChangeRecoveryStatus } from "./DeliveryChangeRecoveryStatus";
 import { AdminAuditHistory } from "./AdminAuditHistory";
 import { RecentDeliveryLinks } from "./RecentDeliveryLinks";
 import { NativeDeliveryGrantPanel } from "./NativeDeliveryGrantPanel";
@@ -7138,6 +7139,7 @@ function Administration({ session }: { session: Session }) {
       <div className="dashboard-grid">
         {canManageConnections && <div id="project-alpha-connections"><ProjectAlphaConnections /></div>}
         {canManageConnections && <PortalWorkflowReadiness />}
+        {canManageConnections && <DeliveryChangeRecoveryStatus />}
         {!canManageConnections && <Card title="Project Alpha"><p>Connection management requires an administrator with global integration-management permission.</p></Card>}
         <Card title="Security model">
           <p>

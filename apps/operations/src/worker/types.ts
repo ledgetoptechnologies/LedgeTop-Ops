@@ -27,6 +27,11 @@ export type Env = Omit<
   CLIENT_PORTAL_NOTIFICATION_MIGRATION_MAINTENANCE?: string;
   /** Deploy-managed connector credential sets; never returned by registry APIs. */
   PROJECT_ALPHA_CONNECTOR_CREDENTIALS?: string;
+  PROJECT_ALPHA_CONNECTOR_SNAPSHOT_CREDENTIALS?: string;
+  PROJECT_ALPHA_CONNECTOR_EVENT_CREDENTIALS?: string;
+  /** Deploy-managed source manifest; selects configured credential references and is never browser-administered. */
+  PROJECT_ALPHA_CONNECTOR_SOURCES?: string;
+  PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED?: string;
   /** Temporary, default-off gate for numeric quote linkage on pre-catalog requests only. */
   LEGACY_CLIENT_REQUEST_PA_QUOTE_LINK_ENABLED?: string;
   /** Enables the separately scoped, staff-triggered private draft command. */
@@ -131,6 +136,8 @@ export type Env = Omit<
   PROJECT_ACCESS_EXPIRY_NOTIFICATIONS_ENABLED?: string;
   /** Default-off exact-principal folder change mail. */
   AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED?: string;
+  /** Migration-first, default-off atomic file-event capture and durable target recovery. */
+  AUTHENTICATED_DELIVERY_RECOVERY_ENABLED?: string;
   /** Default-off explicit authenticated folder-grant management. */
   AUTHENTICATED_DELIVERY_GRANTS_ENABLED?: string;
   /** Independent default-off gate for new grants, restores, and folder bindings. */
