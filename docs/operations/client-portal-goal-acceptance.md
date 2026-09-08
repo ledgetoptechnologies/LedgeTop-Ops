@@ -137,6 +137,10 @@ Before marking the overall goal complete:
    resolve source-layout or migration ordering conflicts.
 2. Run populated migration upgrades, focused D1 tests, full unit/type/build
    gates, and supported desktop/mobile browser suites from pinned dependencies.
+   Required GitHub CI runs the Client Portal and Operations browser suites on
+   desktop and mobile Microsoft Edge. The Client Portal jobs also run the J7
+   dual-domain cases for both portal hostnames; local browser evidence alone
+   does not replace those required checks.
 3. Complete security review for every new mutation or cross-database reader.
 4. Publish only after explicit approval, apply migrations before enabling flags,
    and retain a rollback path.

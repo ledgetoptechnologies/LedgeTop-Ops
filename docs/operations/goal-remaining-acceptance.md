@@ -3,10 +3,12 @@
 Original audit date: August 26, 2026. Original audit base: `ccba9c0` on
 `codex/client-workspace-foundation`. Reconciled through August 28 local
 checkpoint `31f86e4`. **The overall goal is not complete.**
-This is a remaining-work inventory, not a new authorization policy or release
-approval. It supersedes neither the [roadmap](client-workspace-roadmap.md) nor
-the narrower implementation runbooks. Historical passing gates verify their
-tested increments, not every workflow in the original handoff.
+This file is retained as a historical remaining-work inventory, not a current
+status authority, new authorization policy, or release approval. Its status
+claims are superseded by the current
+[goal acceptance checklist](client-portal-goal-acceptance.md) and dated
+production-evidence records. Historical passing gates verify their tested
+increments, not every workflow in the original handoff.
 
 > The first acceptance table below is preserved as the August 26 baseline.
 > Subsequent local increments now implement organization contacts, project

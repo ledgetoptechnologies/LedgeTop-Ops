@@ -36,6 +36,17 @@ test("Operations browser acceptance remains a required CI job", () => {
   assert(workflow.includes("apps/operations/test-results"));
 });
 
+test("Client Portal browser acceptance remains a required CI job", () => {
+  const workflow = read(".github/workflows/ci.yml");
+  assert(workflow.includes("client-browser:"));
+  assert(workflow.includes("project: desktop-edge"));
+  assert(workflow.includes("project: mobile-edge"));
+  assert(workflow.includes("playwright.config.ts --project=${{ matrix.project }} --workers=2"));
+  assert(workflow.includes("playwright.j7.config.ts --project=drone-${{ matrix.form-factor }} --project=technology-${{ matrix.form-factor }} --workers=2"));
+  assert(workflow.includes("playwright install --with-deps msedge"));
+  assert(workflow.includes("apps/client/test-results"));
+});
+
 const projectAlphaCompatibilityFixtures = [
   "packages/shared/fixtures/project-alpha-portal-v2.json",
   "packages/shared/fixtures/project-alpha-portal-relations-v3.json",
