@@ -1912,3 +1912,11 @@
 }
 .portal-viewer-units { display: grid; gap: .35rem; max-width: 220px; margin: 0 0 1rem; color: var(--muted); font-size: .8rem; font-weight: 800; }
 .portal-viewer-units select { min-height: 44px; padding: .65rem; border: 1px solid var(--line); border-radius: 8px; background: #fff; color: var(--ink); }
+.portal-viewer-shares, .portal-viewer-shares > div { min-width: 0; }
+.portal-viewer-share-created { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: .5rem; overflow-wrap: anywhere; }
+.portal-viewer-share-created strong { grid-column: 1 / -1; }
+.portal-viewer-share-created input { width: 100%; min-width: 0; }
+@media (max-width: 360px) {
+  .portal-viewer-share-created { grid-template-columns: minmax(0, 1fr); }
+  .portal-viewer-share-created button { width: 100%; }
+}

@@ -51,12 +51,13 @@ describe("Project Alpha deployment-owned connector administration boundary", { t
       PROJECT_ALPHA_BASE_URL: "https://primary.example.test", PROJECT_ALPHA_API_KEY: "private-primary-snapshot-key",
       PROJECT_ALPHA_WEBHOOK_ED25519_PUBLIC_KEY: publicKey(1), PROJECT_ALPHA_CONNECTOR_CREDENTIALS: JSON.stringify({ version: 1, sets: {
         primary: { snapshotApiKey: "private-primary-snapshot-key", eventCurrent: { keyId: "primary", algorithm: "ed25519", value: publicKey(1) } },
+        ltt: { snapshotApiKey: "private-ltt-snapshot-key", eventCurrent: { keyId: "ltt", algorithm: "ed25519", value: publicKey(2) } },
       } }) } as unknown as Env;
     await registerProjectAlphaConnector(env, { sourceId: primary, producerBindingId: "primary-producer", snapshotOrigin: "https://primary.example.test",
       applicationKey: "ltds_ops", profile: "primary_legacy", displayName: "Primary", revision }, principal.id);
     await db.prepare("UPDATE pa_connectors SET state='active',version=version+1 WHERE source_id=?").bind(primary).run();
     await registerProjectAlphaConnector(env, { sourceId: secondary, producerBindingId: "ltt-producer", snapshotOrigin: "https://ltt.example.test",
-      applicationKey: "ltds_ops", profile: "business_data", displayName: "LTT", revision: { ...revision, credentialRef: "primary" } }, principal.id);
+      applicationKey: "ltds_ops", profile: "business_data", displayName: "LTT", revision: { ...revision, credentialRef: "ltt" } }, principal.id);
   });
   beforeEach(async () => {
     mocks.authenticateStaff.mockReset().mockResolvedValue(principal);

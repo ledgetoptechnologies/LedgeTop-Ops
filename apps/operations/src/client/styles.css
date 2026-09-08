@@ -1647,7 +1647,7 @@ tbody tr:last-child td { border: 0; }
 .business-party-preview-list li > div { display: grid; gap: .25rem; min-width: 0; }
 .business-party-preview-list small { color: var(--muted); overflow-wrap: anywhere; }
 .business-party-access-status { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .75rem; margin-bottom: .8rem; }
-.client-hub-primary-panel, .client-hub-wide-panel, .client-hub-audit-panel { min-width: 0; }
+.client-hub-primary-panel, .client-hub-wide-panel, .client-hub-audit-panel, .client-hub-danger-zone { min-width: 0; scroll-margin-top: 5rem; }
 .client-hub-primary-panel > .ltds-card, .client-hub-wide-panel > .ltds-card, .client-hub-audit-panel > .ltds-card { height: 100%; }
 @media (max-width: 640px) {
   .business-party-actions { flex-direction: column; align-items: stretch; }

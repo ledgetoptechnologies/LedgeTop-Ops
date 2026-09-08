@@ -2001,7 +2001,7 @@ function PortalViewerShares({
     {open && <div>
       <p className="muted">Only this published model is shared. Source photos and processing files stay private.</p>
       {error && <div className="notice error" role="alert">{error}</div>}
-      {createdUrl && <div className="notice" role="status"><strong>Copy this link now.</strong><input readOnly value={createdUrl} aria-label="New public 3D model link" /><button type="button" className="button-ghost" onClick={() => {
+      {createdUrl && <div className="notice portal-viewer-share-created" role="status"><strong>Copy this link now.</strong><input readOnly value={createdUrl} aria-label="New public 3D model link" /><button type="button" className="button-ghost" onClick={() => {
         void navigator.clipboard.writeText(createdUrl).then(() => setCopyStatus("Link copied."), () => setCopyStatus("Copy failed. Select and copy the link manually."));
       }}>Copy</button>{copyStatus && <span>{copyStatus}</span>}</div>}
       <form onSubmit={event => void create(event)}>
@@ -2796,8 +2796,8 @@ export function ClientPortalApp({
     };
   }, [mobileNavOpen]);
 
-  function navigate(nextPage: TopPage) {
-    window.history.pushState({}, "", withPortalWorkspace(clientPortalPath(nextPage)));
+  function navigate(nextPage: TopPage, replace = false) {
+    window.history[replace ? "replaceState" : "pushState"]({}, "", withPortalWorkspace(clientPortalPath(nextPage)));
     setFeedbackId(null);
     setProjectId(null);
     setAuthenticatedDeliveryFolder({ folderId: null, invalid: false });
@@ -2807,9 +2807,16 @@ export function ClientPortalApp({
     setMobileNavOpen(false);
   }
   function openProject(id: string) {
-    window.history.pushState({}, "", withPortalWorkspace(clientProjectPath(id)));
+    window.history.pushState({ portalProjectOrigin: page }, "", withPortalWorkspace(clientProjectPath(id)));
     setProjectId(id);
     setPage("project");
+  }
+  function leaveProject() {
+    if (window.history.state?.portalProjectOrigin === "projects") {
+      window.history.back();
+      return;
+    }
+    navigate("projects", true);
   }
   function navigateAuthenticatedDeliveryFolder(folderId: string | null) {
     if (!folderId || !isAuthenticatedDeliveryFolderHandle(folderId)) {
@@ -3056,7 +3063,7 @@ export function ClientPortalApp({
         onCancelRequest={onCancelRequest}
         cancellingRequestId={cancellingRequestId}
         retryingCancellationRequestIds={retryingCancellationRequestIds}
-        onBack={() => navigate("projects")}
+        onBack={leaveProject}
       />
     ) : (
       <Card>

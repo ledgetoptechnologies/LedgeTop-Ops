@@ -423,6 +423,11 @@ for (const width of [375, 640, 1280, 3440]) {
       const style = getComputedStyle(element); return { start: style.gridColumnStart, end: style.gridColumnEnd };
     });
     expect(dangerStyle).toEqual({ start: "1", end: "-1" });
+    await page.goto(`${canonicalPath}#client-business-contacts`);
+    await expect(page.getByRole("heading", { name: "Business contacts", exact: true })).toBeVisible();
+    const anchorTop = await page.locator("#client-business-contacts").evaluate(element => element.getBoundingClientRect().top);
+    const headerBottom = await page.locator(".ops-header").evaluate(element => element.getBoundingClientRect().bottom);
+    expect(anchorTop).toBeGreaterThanOrEqual(headerBottom);
     for (const collection of collections) {
       const button = loadButton(page, collection);
       await button.scrollIntoViewIfNeeded();

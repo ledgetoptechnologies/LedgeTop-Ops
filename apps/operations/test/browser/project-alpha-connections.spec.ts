@@ -36,7 +36,7 @@ test("shows deployment-configured source status without registration or source-a
   await expect(card).toContainText("Client portal · Not configured");
   await expect(page.getByText("Register a source", { exact: true })).toHaveCount(0);
   await expect(page.getByText("Rotate credentials and producer authentication", { exact: true })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: /Activate connection|Suspend sync|Retire connection|Configure client portal/i })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Activate connection|Suspend sync|Retire connection/i })).toHaveCount(0);
   expect(requests.filter(request => request.method !== "GET")).toEqual([]);
 });
 

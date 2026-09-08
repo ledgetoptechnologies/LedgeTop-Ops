@@ -809,6 +809,20 @@ test("desktop portal navigation uses the client IA and restores routes with brow
   await expect(page).toHaveURL(/\/portal\/account$/);
 });
 
+test("project workspace back returns through history without reopening the project", async ({ page }) => {
+  await mockAuthorizedPortal(page);
+  await page.goto("/portal");
+  await page.getByRole("navigation", { name: "Client portal" }).getByRole("link", { name: "Projects" }).click();
+  await page.getByRole("button", { name: /North Site/ }).click();
+  await expect(page).toHaveURL(/\/portal\/projects\/project-a$/);
+  await page.getByRole("button", { name: "All projects" }).click();
+  await expect(page).toHaveURL(/\/portal\/projects$/);
+  await page.goBack();
+  await expect(page).toHaveURL(/\/portal$/);
+  await page.goForward();
+  await expect(page).toHaveURL(/\/portal\/projects$/);
+});
+
 test("account identity menu provides same-origin Access logout on desktop and mobile", async ({ page }) => {
   await mockAuthorizedPortal(page);
   await page.setViewportSize({ width: 1280, height: 800 });
