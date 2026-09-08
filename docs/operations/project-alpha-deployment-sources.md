@@ -149,3 +149,26 @@ Alpha-to-Ops Sync endpoint as the only external connection.
    adding a source.
 5. Before rotating credentials for a portal-enabled source, use the paired
    portal change runbook; never paste a replacement into Operations.
+
+## Producer worker readiness
+
+An External Operations connection reported as `Ready` by Project Alpha proves
+the web process can read the saved connection. It does not prove that a
+separate scheduled/cron process can decrypt and deliver the same outbox.
+
+If Operations shows a healthy source but no source-owned clients arrive, check
+the Project Alpha synchronization diagnostics before changing the receiver or
+rotating credentials. A producer-side `prerequisites_missing` or
+`external-operations-delivery-unavailable` result with no corresponding Ops
+Sync request means the event was rejected locally by Project Alpha. In the
+standard container deployment, the web and cron services must run the same
+release, mount the same persistent `/var/www/config` volume, and use the same
+effective `APP_ENCRYPTION_KEY`. Recreate only the misconfigured cron service
+after correcting that shared deployment contract. Preserve queued outbox rows,
+delivery IDs, signing keys, and the existing endpoint; bounded retries will
+deliver them after the prerequisite is restored.
+
+This diagnostic is provider-neutral. Operations does not depend on Project
+Alpha's container names or installation layout, and Project Alpha remains free
+to implement an equivalent shared-secret/configuration contract on any
+supported deployment platform.
