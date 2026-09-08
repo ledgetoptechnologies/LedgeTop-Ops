@@ -811,6 +811,7 @@ test("desktop portal navigation uses the client IA and restores routes with brow
 
 test("project workspace back returns through history without reopening the project", async ({ page }) => {
   await mockAuthorizedPortal(page);
+  await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto("/portal");
   await page.getByRole("navigation", { name: "Client portal" }).getByRole("link", { name: "Projects" }).click();
   await page.getByRole("button", { name: /North Site/ }).click();
