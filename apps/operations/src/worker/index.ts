@@ -204,6 +204,7 @@ import {
 import { authenticatedDeliveryPilotReadiness } from "./authenticated-delivery-pilot-readiness";
 import { portalWorkflowReadiness } from "./portal-workflow-readiness";
 import { deliveryChangeRecoveryStatus } from "./delivery-change-recovery-status";
+import { projectAlphaAccessTokenExpiryDiagnostic } from "./project-alpha-access-token-expiry";
 import {
   compareAndSwapProjectFolderAssociation,
   createPrimaryWorkspaceBinding,
@@ -3093,6 +3094,11 @@ app.get("/api/admin/portal-workflow-readiness", async (c) => {
   await requireGlobal(c.env, c.get("principal"), "integrations.manage");
   c.header("Cache-Control", "no-store");
   return c.json(await portalWorkflowReadiness(c.env));
+});
+app.get("/api/admin/project-alpha-access-token-expiry", async (c) => {
+  await requireGlobal(c.env, c.get("principal"), "integrations.manage");
+  c.header("Cache-Control", "no-store");
+  return c.json(projectAlphaAccessTokenExpiryDiagnostic(c.env));
 });
 app.get("/api/admin/delivery-change-recovery", async (c) => {
   await requireGlobal(c.env, c.get("principal"), "integrations.manage");

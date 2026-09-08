@@ -32,6 +32,9 @@ export type Env = Omit<
   /** Deploy-managed source manifest; selects configured credential references and is never browser-administered. */
   PROJECT_ALPHA_CONNECTOR_SOURCES?: string;
   PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED?: string;
+  /** Non-secret Cloudflare Access service-token expiry timestamps for connector operations diagnostics. */
+  PROJECT_ALPHA_LTDS_ACCESS_SERVICE_TOKEN_EXPIRES_AT?: string;
+  PROJECT_ALPHA_LTT_ACCESS_SERVICE_TOKEN_EXPIRES_AT?: string;
   /** Temporary, default-off gate for numeric quote linkage on pre-catalog requests only. */
   LEGACY_CLIENT_REQUEST_PA_QUOTE_LINK_ENABLED?: string;
   /** Enables the separately scoped, staff-triggered private draft command. */
