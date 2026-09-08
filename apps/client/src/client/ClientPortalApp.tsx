@@ -238,10 +238,15 @@ function projectStatusLabel(status: string | null): string {
 
 function PortalBrand({ product, sourceId }: { product: string; sourceId?: string | null }) {
   const context: PortalBrandContext = resolvePortalBrand(window.location.hostname, sourceId);
-  return <div className={`ltds-brand portal-brand portal-brand-${context.key}`} data-portal-division={context.key}>
+  const mark = context.shortName === "Ledge Top" ? "LT" : context.shortName;
+  return <div
+    className={`ltds-brand portal-brand portal-brand-${context.key}`}
+    data-portal-division={context.key}
+    aria-label={`${context.name} ${context.division} ${product}`}
+  >
     {context.key === "drone-services"
       ? <img src={BRAND.logoUrl} alt="" />
-      : <span className="portal-brand-mark" aria-hidden="true">LT</span>}
+      : <span className="portal-brand-mark" aria-hidden="true">{mark}</span>}
     <span className="portal-brand-copy"><strong>{context.name}</strong><small>{context.division} · {product}</small></span>
   </div>;
 }

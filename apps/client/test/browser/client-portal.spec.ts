@@ -532,18 +532,26 @@ test("native workspace branding identifies the selected source across compact vi
     return route.fulfill({ status: 404, json: { error: "Not found" } });
   });
 
-  for (const width of [375, 1024]) {
+  for (const width of [320, 375, 1024]) {
     await page.setViewportSize({ width, height: 812 });
     await page.goto("/portal");
     const brand = page.locator(".client-portal-header .portal-brand");
     await expect(brand).toBeVisible();
     await expect(brand).toHaveAttribute("data-portal-division", "technologies");
+    await expect(brand).toHaveAttribute("aria-label", "Ledge Top Technologies Client portal");
     await expect(brand).toContainText("Ledge Top");
     await expect(brand).toContainText("Technologies · Client portal");
     await expect(brand.locator("img")).toHaveCount(0);
-    await expect(brand.locator(".portal-brand-mark")).toHaveText("LT");
+    await expect(brand.locator(".portal-brand-mark")).toHaveText("LTT");
     const box = await brand.boundingBox();
     expect(box && box.x >= 0 && box.x + box.width <= width).toBeTruthy();
+    expect(await page.evaluate(() => ({
+      documentFits: document.documentElement.scrollWidth <= window.innerWidth,
+      outside: [...document.querySelectorAll<HTMLElement>("body *")]
+        .map(element => element.getBoundingClientRect())
+        .filter(rect => rect.left < -0.5 || rect.right > window.innerWidth + 0.5)
+        .length,
+    }))).toEqual({ documentFits: true, outside: 0 });
 
     if (width >= 961) {
       await expect(page.getByRole("combobox", { name: "Client workspace" })).toBeVisible();
