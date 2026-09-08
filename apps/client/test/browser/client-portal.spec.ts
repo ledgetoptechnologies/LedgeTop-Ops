@@ -1331,10 +1331,18 @@ test("client Viewer sharing is opt-in, owner-scoped, and responsive at 390 and 3
   await expect(page.getByLabel("Access code")).toHaveValue("");
   for (const width of [390, 320]) {
     await page.setViewportSize({ width, height: 844 });
-    await expect.poll(() => page.evaluate(expectedWidth => ({
-      viewportWidth: window.innerWidth,
-      fits: document.documentElement.scrollWidth <= window.innerWidth,
-    }), width)).toEqual({ viewportWidth: width, fits: true });
+    await expect.poll(() => page.evaluate(() => {
+      const viewportWidth = window.innerWidth;
+      const documentWidth = document.documentElement.scrollWidth;
+      const overflowing = [...document.querySelectorAll<HTMLElement>("body *")]
+        .map(element => {
+          const rect = element.getBoundingClientRect();
+          return { tag: element.tagName.toLowerCase(), className: element.className, left: rect.left, right: rect.right };
+        })
+        .filter(rect => rect.left < -0.5 || rect.right > viewportWidth + 0.5)
+        .slice(0, 8);
+      return { viewportWidth, documentWidth, fits: documentWidth <= viewportWidth, overflowing };
+    })).toMatchObject({ fits: true, overflowing: [] });
   }
   await page.getByRole("button", { name: "Revoke" }).click();
   await expect(page.getByText("No active links.")).toBeVisible();
