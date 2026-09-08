@@ -61,8 +61,17 @@ prove that a specific workspace has been provisioned.
 `CLIENT_PORTAL_ENABLED=true`, `PROJECT_ALPHA_PORTAL_SYNC_ENABLED=true`, and
 `CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED=true` are receiver foundations, not
 proof that a client has access. Operations also keeps
-`CLIENT_PORTAL_PRIMARY_WORKSPACE_RECONCILIATION_ENABLED=true` for the reviewed
-primary reconciliation path.
+`CLIENT_PORTAL_WORKSPACE_RECONCILIATION_ENABLED=true` enables exact-source
+workspace reconciliation for every read-visible Project Alpha source. The
+older `CLIENT_PORTAL_PRIMARY_WORKSPACE_RECONCILIATION_ENABLED=true` remains a
+compatibility alias for the legacy LTDS account repair. Secondary sources are
+never fabricated from names, emails, or business snapshots: their Project
+Alpha producer must emit the signed portal snapshot through the existing Ops
+Sync connection. Operations reports a missing exact-source projection as
+pending, preserves any administrator root revocation, and never turns that
+status check into portal authority. This check is therefore safe to repeat,
+but a pending secondary source must be backfilled by its Project Alpha
+producer rather than by Operations.
 
 The following table lists capability dependencies. Except for the coordinated
 hierarchy/eligibility family described above, these families remain off or

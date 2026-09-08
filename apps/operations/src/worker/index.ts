@@ -175,8 +175,8 @@ import {
 import {
   activateClientAccountRoot,
   listClientAccountRootActivation,
-  reconcilePrimaryClientPortalWorkspaces,
 } from "./client-account-root-activation";
+import { reconcileClientPortalWorkspaces } from "./client-portal-workspace-reconciliation";
 import { requestAreaKml, requestAreaKmlFilename } from "./request-area-kml";
 import {
   createPortalIdentityDenial,
@@ -1000,8 +1000,8 @@ app.get("/api/admin/client-account-activation", async (c) => {
 });
 app.post("/api/admin/client-account-activation/reconcile", async (c) => {
   await requireGlobal(c.env, c.get("principal"), "operations.manage");
-  const result = await reconcilePrimaryClientPortalWorkspaces(c.env);
-  console.log(JSON.stringify({ event: "client_portal.primary_workspace_reconciliation", ...result }));
+  const result = await reconcileClientPortalWorkspaces(c.env);
+  console.log(JSON.stringify({ event: "client_portal.workspace_reconciliation", ...result }));
   return c.json(result);
 });
 app.post("/api/admin/client-account-activation/:accountId", async (c) => {
@@ -3111,10 +3111,10 @@ app.post("/api/admin/integrations/project-alpha/sync", async (c) => {
   await requireGlobal(c.env, principal, "integrations.manage");
   const result = await syncProjectAlpha(c.env);
   const clientPortalReconciliation = result.status === "success"
-    ? await reconcilePrimaryClientPortalWorkspaces(c.env)
+    ? await reconcileClientPortalWorkspaces(c.env, "project-alpha:primary")
     : undefined;
   if (clientPortalReconciliation) console.log(JSON.stringify({
-      event: "client_portal.primary_workspace_reconciliation",
+      event: "client_portal.workspace_reconciliation",
       ...clientPortalReconciliation,
     }));
   if (
@@ -3185,9 +3185,9 @@ const NATIVE_DELIVERY_NOTIFICATION_CRON = "4-59/15 * * * *";
 export async function runScheduledPrimaryProjectAlphaSync(env: Env) {
   const result = await syncProjectAlpha(env);
   if (result.status === "success") {
-    const clientPortalReconciliation = await reconcilePrimaryClientPortalWorkspaces(env);
+    const clientPortalReconciliation = await reconcileClientPortalWorkspaces(env, "project-alpha:primary");
     console.log(JSON.stringify({
-      event: "client_portal.primary_workspace_reconciliation",
+      event: "client_portal.workspace_reconciliation",
       ...clientPortalReconciliation,
     }));
   }

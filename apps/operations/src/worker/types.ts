@@ -54,7 +54,9 @@ export type Env = Omit<
   PROJECT_ALPHA_DELIVERY_DIRECT_COMPAT_UNTIL?: string;
   PROJECT_ALPHA_DELIVERY_GUEST_ENABLED?: string;
   CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED?: string;
-  /** Repairs only exact-linked primary legacy workspaces after a successful PA sync. */
+  /** Enables exact-source portal-workspace reconciliation for every visible source. */
+  CLIENT_PORTAL_WORKSPACE_RECONCILIATION_ENABLED?: string;
+  /** @deprecated Compatibility alias for CLIENT_PORTAL_WORKSPACE_RECONCILIATION_ENABLED. */
   CLIENT_PORTAL_PRIMARY_WORKSPACE_RECONCILIATION_ENABLED?: string;
   /** Default-off, read-only Client Hub display of selected schema-v4 Project Alpha contact roles. */
   CLIENT_HUB_PA_CONTACT_ASSIGNMENTS_ENABLED?: string;

@@ -6,7 +6,7 @@ import { sqlScope } from "./acl";
 import { rebuildOperationAirspaceMatches } from "./airspace";
 import { auditStatement } from "./request-security";
 import { syncRegisteredProjectAlpha } from "./project-alpha";
-import { reconcilePrimaryClientPortalWorkspaces } from "./client-account-root-activation";
+import { reconcileClientPortalWorkspaces } from "./client-portal-workspace-reconciliation";
 import { getProjectAlphaSnapshotRecoveryStatus } from "./project-alpha-snapshot-recovery";
 import {
   ensureDeploymentConfiguredProjectAlphaConnectors, listProjectAlphaConnectors, ProjectAlphaConnectorError,
@@ -137,11 +137,11 @@ export function registerProjectAlphaConnectorAdminRoutes(app: App): void {
     await c.env.OPS_DB.batch([await auditStatement(c.env, c.req.raw, c.get("principal"), "integration.sync_requested", "integration", sourceId, null, { sourceId })]);
     const result = await syncRegisteredProjectAlpha(c.env, sourceId);
     if (result.changedCollections.some(name => name === "operations" || name === "service_locations")) await rebuildOperationAirspaceMatches(c.env);
-    const clientPortalReconciliation = sourceId === PRIMARY_ALPHA_SOURCE_ID && result.status === "success"
-      ? await reconcilePrimaryClientPortalWorkspaces(c.env)
+    const clientPortalReconciliation = result.status === "success"
+      ? await reconcileClientPortalWorkspaces(c.env, sourceId)
       : undefined;
     if (clientPortalReconciliation) console.log(JSON.stringify({
-      event: "client_portal.primary_workspace_reconciliation",
+      event: "client_portal.workspace_reconciliation",
       ...clientPortalReconciliation,
     }));
     return c.json({ sourceId, ...result, ...(clientPortalReconciliation ? { clientPortalReconciliation } : {}) });

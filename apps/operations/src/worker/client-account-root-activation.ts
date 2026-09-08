@@ -75,6 +75,18 @@ export interface PrimaryClientPortalReconciliationResult {
   truncated: boolean;
 }
 
+/**
+ * The former primary-only flag remains an alias during rollout. The generic
+ * flag controls the source-qualified reconciliation coordinator, while this
+ * legacy-account repair is necessarily still primary-owned: legacy Delivery
+ * accounts have no safe secondary-source provenance.
+ */
+export function clientPortalWorkspaceReconciliationEnabled(env: Pick<Env,
+  "CLIENT_PORTAL_WORKSPACE_RECONCILIATION_ENABLED" | "CLIENT_PORTAL_PRIMARY_WORKSPACE_RECONCILIATION_ENABLED">): boolean {
+  return env.CLIENT_PORTAL_WORKSPACE_RECONCILIATION_ENABLED === "true"
+    || env.CLIENT_PORTAL_PRIMARY_WORKSPACE_RECONCILIATION_ENABLED === "true";
+}
+
 function deliveryDatabase(env: Env): D1DatabaseSession {
   return env.DELIVERY_DB.withSession("first-primary");
 }
@@ -943,7 +955,7 @@ function emptyReconciliation(enabled: boolean): PrimaryClientPortalReconciliatio
 export async function reconcilePrimaryClientPortalWorkspaces(
   env: Env,
 ): Promise<PrimaryClientPortalReconciliationResult> {
-  if (env.CLIENT_PORTAL_PRIMARY_WORKSPACE_RECONCILIATION_ENABLED !== "true")
+  if (!clientPortalWorkspaceReconciliationEnabled(env))
     return emptyReconciliation(false);
   const result = emptyReconciliation(true);
   const state = await listClientAccountRootActivation(env);
