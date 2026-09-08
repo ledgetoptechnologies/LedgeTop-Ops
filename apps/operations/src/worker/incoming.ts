@@ -141,7 +141,7 @@ async function jsonBody<T extends z.ZodType>(
 }
 
 function safeName(value: string): string {
-  return value.normalize("NFC").replace(/[\\/\0-\x1f\x7f]/g, "_").replace(/^\.+/, "_").slice(0, 255);
+  return value.normalize("NFC").replace(/[\\/\0-\x1f\x7f]/g, "_").replace(/^\.+/, "_");
 }
 
 async function activeRequest(env: IncomingEnv, publicId: string): Promise<RequestRow> {
@@ -399,6 +399,10 @@ publicApp.post("/api/public/requests/:publicId/files/init", async (c) => {
     throw new HTTPException(413, { message: "This request has reached its file or size limit" });
   }
 
+  // Keep bytes in a dedicated staging namespace until the server has checked
+  // and durably promoted them. This prefix must never be part of a generic
+  // server mirror: its opaque key deliberately avoids treating untrusted
+  // browser input as a user-facing local hierarchy.
   const key = `quarantine/${row.id}/${fileId}/object`;
   const pendingUploadId = `pending:${randomToken(12)}`;
   let multipart: R2MultipartUpload | undefined;

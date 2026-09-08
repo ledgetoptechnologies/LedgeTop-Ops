@@ -99,6 +99,9 @@ describe("incoming upload public routes", () => {
     const initResponse = await request("/api/public/requests/public-a/files/init", "POST", { clientUploadId: "upload-client-0001", name: "photo.jpg", size: 4, contentType: "image/jpeg", resumeFingerprint: "b".repeat(64) });
     expect(initResponse.status).toBe(200);
     const init = await initResponse.json() as { fileId: string };
+    const initialized = await db.prepare("SELECT object_key,upload_id FROM file_request_uploads WHERE id=?").bind(init.fileId).first<{ object_key: string; upload_id: string }>();
+    expect(initialized?.object_key).toBe(`quarantine/request-a/${init.fileId}/object`);
+    expect(bucket.uploads.get(initialized!.upload_id)?.key).toBe(`quarantine/request-a/${init.fileId}/object`);
     expect(await db.prepare("SELECT reserved_files,reserved_bytes FROM file_requests WHERE id='request-a'").first()).toEqual({ reserved_files: 1, reserved_bytes: 4 });
 
     const otherCookie = (await createIncomingSession(env.INCOMING_SESSION_SECRET, "request-a", "contributor-b", 1, Date.now() + 60_000)).split(";")[0]!;

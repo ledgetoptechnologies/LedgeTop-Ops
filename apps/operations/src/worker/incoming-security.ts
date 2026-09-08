@@ -135,7 +135,7 @@ const blockedExtensions = new Set([
 
 export function validateIncomingFile(name: string, contentType: string, size: number): string {
   const normalized = name.normalize("NFC").trim();
-  if (!normalized || normalized.length > 255 || /[\\/\0-\x1f\x7f]/.test(normalized) || normalized === "." || normalized === "..") {
+  if (!normalized || new TextEncoder().encode(normalized).byteLength > 255 || /[\\/\0-\x1f\x7f]/.test(normalized) || normalized === "." || normalized === "..") {
     throw new HTTPException(400, { message: "Invalid file name" });
   }
   const extension = normalized.includes(".") ? normalized.split(".").pop()!.toLowerCase() : "";
