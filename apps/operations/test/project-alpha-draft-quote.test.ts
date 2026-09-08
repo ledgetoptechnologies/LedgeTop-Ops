@@ -36,9 +36,11 @@ async function expectedHmac(secret: string, value: string): Promise<string> {
 
 describe("Project Alpha private draft command", () => {
   it("accepts and rejects the shared versioned command corpus exactly", () => {
-    expect(draftQuoteFixture.contract).toBe("ltds-project-alpha-draft-quote-v1");
+    expect(draftQuoteFixture.contract).toBe("operations-project-alpha-draft-quote-v1");
     expect(draftQuoteFixture.endpoint).toBe("/api/v2/integrations/ltds/draft-quotes");
     expect(parseProjectAlphaDraftQuotePayload(draftQuoteFixture.valid.request)).toEqual(payload);
+    const lttPayload = { ...payload, source: draftQuoteFixture.sourceExamples.secondary };
+    expect(parseProjectAlphaDraftQuotePayload(lttPayload)).toEqual(lttPayload);
     expect(parseProjectAlphaDraftQuoteResult(draftQuoteFixture.valid.response)).toEqual(draftQuoteFixture.valid.response);
     for (const specimen of draftQuoteFixture.invalidRequests)
       expect(parseProjectAlphaDraftQuotePayload(specimen.request), specimen.name).toBeNull();
@@ -143,8 +145,16 @@ describe("Project Alpha private draft command", () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
+  it("rejects a well-formed quote payload whose configured source identity belongs to another PA", async () => {
+    const fetcher = vi.fn();
+    await expect(sendProjectAlphaDraftQuoteCommand(
+      environment(), { ...payload, source: draftQuoteFixture.sourceExamples.secondary }, "saved-command-key", { fetcher },
+    )).rejects.toMatchObject({ status: 409, code: "scope_denied" });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
   it("pins the whole destination while permitting credentials to rotate at that destination", async () => {
-    const target = { sourceId: "project-alpha:primary", commandEndpoint: "https://project-alpha.example/api/v2/integrations/ltds_ops/draft-quotes",
+    const target = { sourceId: "project-alpha:primary", draftQuoteSource: "ltds-operations", commandEndpoint: "https://project-alpha.example/api/v2/integrations/ltds_ops/draft-quotes",
       applicationKey: "ltds_ops", editorOrigin: "https://project-alpha.example" };
     const destination = { ...target, destinationFingerprint: await sha256Hex(canonicalProjectAlphaJson(target)) };
     const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json(draftQuoteFixture.valid.response));

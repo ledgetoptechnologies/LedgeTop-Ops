@@ -39,7 +39,7 @@ fixture files below as normative. Verify these SHA-256 values before editing:
 - `packages/shared/fixtures/project-alpha-pricing-hint-v1.json`:
   `6354ad8fb2439e4463202290516a05198ec03cf0a966fbfb4bd83fcf18449d6b`
 - `packages/shared/fixtures/project-alpha-draft-quote-v1.json`:
-  `fc47be82960b11ab6cb705e2dcaa11f76f39ef9c5c3199ff6861e8a787034f90`
+  `79417f38bc51af011e9ebf32d8bd63798b981ab7131c2358a2b78f3036088815`
 
 This prompt is the complete handoff; no companion message supplies missing
 contract details. If that exact commit or those exact fixture bytes are

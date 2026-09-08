@@ -3,7 +3,7 @@
 The approved next-generation ownership, service-catalog, pricing-hint, and
 draft-quote command contract is documented in
 [the locked client portal v2 compatibility contract](client-portal-v2-architecture.md).
-The LTDS caller, Project Alpha write endpoint, and immutable receipt ledger are
+The configured Operations caller, Project Alpha write endpoint, and immutable receipt ledger are
 implemented behind `PROJECT_ALPHA_DRAFT_QUOTES_ENABLED=false`. The integration
 must remain disabled until the byte-pinned neutral wire corpus and the staging
 replay, conflict, stale-catalog, scope, timeout, and no-side-effect gates pass.
@@ -436,7 +436,8 @@ reuse the read-only `PROJECT_ALPHA_API_KEY` or webhook verification secret.
 `PROJECT_ALPHA_DRAFT_QUOTES_ENABLED` is checked for the exact value `true` and
 is committed as `false`.
 
-LTDS emits canonical JSON (recursively sorted object keys), capped at 96 KiB:
+Operations emits canonical JSON (recursively sorted object keys), capped at 96 KiB. The `source`
+is the deployment-owned, exact connector identity; legacy primary remains `ltds-operations`:
 
 ```json
 {
@@ -535,7 +536,7 @@ are rejected:
 `editorPath` must equal
 `/quotes/{encodeURIComponent(draftQuote.publicId)}/edit`. Project Alpha
 resolves that opaque public ID to its internal row. Numeric query-string routes,
-absolute URLs, and a path for a different quote public ID are rejected. LTDS
+absolute URLs, and a path for a different quote public ID are rejected. Operations
 persists the result in
 the immutable `request_pa_draft_quote_receipts` ledger with the payload hash,
 request/area revisions, staff actor, and public result identifiers. A changed

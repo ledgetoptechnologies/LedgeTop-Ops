@@ -230,6 +230,7 @@ describe("durable authenticated connector registry", () => {
     expect((await resolveProjectAlphaConnector(env, id, "events")).event).toMatchObject({ current: { value: key(4) }, previous: { value: key(3) } });
     expect((await resolveProjectAlphaConnector(env, id, "draft_quote")).draftQuote).toEqual({
       baseUrl: "https://secondary.example.test", applicationKey: "ltds_ops", apiKey: draftQuote.apiKey, hmacSecret: draftQuote.hmacSecret,
+      source: "ltds-operations",
     });
     await expect(registerProjectAlphaConnector(env, input("steal-old", "secondary"), author)).rejects.toMatchObject({ code: "conflict" });
     await expect(registerProjectAlphaConnector(env, input("steal-current", "rotated"), author)).rejects.toMatchObject({ code: "conflict" });

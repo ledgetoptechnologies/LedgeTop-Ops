@@ -92,8 +92,13 @@ local manifest entry and event verifier match that exact durable revision. A
 missing manifest rejects all sources when the production-required guard is on;
 legacy compatibility remains only when that guard is deliberately false.
 
-A source that accepts staff-created draft quotes adds a `draftQuote` object to
-its selected set with `apiKey` and `hmacSecret`. Both values are dedicated to
+A source that accepts staff-created draft quotes adds a `draftQuoteSource` to
+its manifest entry and a `draftQuote` object to its selected credential set
+with `apiKey` and `hmacSecret`. `draftQuoteSource` is a stable, non-secret,
+lowercase integration identity accepted by that source's Project Alpha
+profile; it must be unique across manifest entries. The primary source retains
+`ltds-operations` if omitted for compatibility. A secondary source without an
+explicit value cannot create draft quotes. Both credential values are dedicated to
 `portal.quote-draft.create`: they may not equal the snapshot API key, event or
 portal signing material, either primary draft scalar, or each other. Operations
 stores only domain-separated fingerprints on the immutable connector revision.

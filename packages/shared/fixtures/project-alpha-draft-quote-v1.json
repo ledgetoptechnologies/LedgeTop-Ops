@@ -1,8 +1,12 @@
 {
-  "contract": "ltds-project-alpha-draft-quote-v1",
+  "contract": "operations-project-alpha-draft-quote-v1",
   "endpoint": "/api/v2/integrations/ltds/draft-quotes",
   "scope": "portal.quote-draft.create",
   "schemaVersion": 1,
+  "sourceExamples": {
+    "legacyPrimary": "ltds-operations",
+    "secondary": "ltt-operations"
+  },
   "editorPathContract": "/quotes/{encodeURIComponent(draftQuote.publicId)}/edit",
   "valid": {
     "request": {

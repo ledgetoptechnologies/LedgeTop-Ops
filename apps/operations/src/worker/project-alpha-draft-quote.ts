@@ -7,7 +7,7 @@ import { auditStatement } from "./request-security";
 import { parseStoredWorkArea, type StaffRequestArea } from "./request-area-revision";
 import type { Env, StaffPrincipal } from "./types";
 import { provePrimaryBusinessReferences } from "./project-alpha-primary-references";
-import { assertProjectAlphaConnectorProof, ProjectAlphaConnectorError, resolveProjectAlphaConnector,
+import { assertProjectAlphaConnectorProof, LEGACY_PRIMARY_DRAFT_QUOTE_SOURCE, ProjectAlphaConnectorError, resolveProjectAlphaConnector,
   type ProjectAlphaConnectorProof } from "./project-alpha-connectors";
 import { projectAlphaReadVisibleSql } from "./project-alpha-read-visibility";
 import { validatedUniquePublicIdExpression } from "./client-hub-source";
@@ -71,7 +71,8 @@ interface AttachmentRow {
 
 export interface ProjectAlphaDraftQuotePayload {
   schemaVersion: 1;
-  source: "ltds-operations";
+  /** Deployment-owned, exact Project Alpha integration profile identity. */
+  source: string;
   request: {
     publicId: string;
     revision: number;
@@ -115,9 +116,10 @@ export interface ProjectAlphaDraftQuoteResult {
 }
 
 const opaquePublicId = z.string().trim().min(1).max(128).regex(OPAQUE_PUBLIC_ID);
+const draftQuoteSourceSchema = z.string().min(1).max(100).regex(/^[a-z][a-z0-9._:-]{0,99}$/);
 const projectAlphaDraftQuotePayloadSchema = z.object({
   schemaVersion: z.literal(1),
-  source: z.literal("ltds-operations"),
+  source: draftQuoteSourceSchema,
   request: z.object({
     publicId: opaquePublicId,
     revision: z.number().int().positive(),
@@ -385,6 +387,7 @@ function receiptResponse(row: ReceiptRow) {
 
 interface QuoteDestination {
   sourceId: string;
+  draftQuoteSource: string;
   commandEndpoint: string;
   applicationKey: string;
   editorOrigin: string;
@@ -395,18 +398,22 @@ interface QuoteRuntime {
   destination: QuoteDestination;
   apiKey: string;
   signingSecret: string;
+  draftQuoteSource: string;
   connectorProof: ProjectAlphaConnectorProof | null;
 }
 
 async function quoteRuntime(env: Env, sourceId: string): Promise<QuoteRuntime> {
-  if (sourceId === PRIMARY_ALPHA_SOURCE_ID) {
+  // The no-manifest primary adapter remains compatible while an installation
+  // upgrades. Once a manifest is present, every PA—including primary—uses its
+  // deployment-owned source identity rather than an Operations scalar.
+  if (sourceId === PRIMARY_ALPHA_SOURCE_ID && !env.PROJECT_ALPHA_CONNECTOR_SOURCES?.trim()) {
     // Preserve the established primary scalar integration exactly. Registry
     // credentials are not allowed to silently take ownership of this route.
     const config = integrationConfiguration(env);
     if (!config) throw new ProjectAlphaDraftQuoteError(503, "integration_disabled", "Project Alpha draft creation is not available");
-    const target = { sourceId, commandEndpoint: config.url.toString(), applicationKey: config.applicationKey, editorOrigin: config.url.origin };
+    const target = { sourceId, draftQuoteSource: LEGACY_PRIMARY_DRAFT_QUOTE_SOURCE, commandEndpoint: config.url.toString(), applicationKey: config.applicationKey, editorOrigin: config.url.origin };
     return { destination: { ...target, destinationFingerprint: await sha256Hex(canonicalProjectAlphaJson(target)) },
-      apiKey: config.apiKey, signingSecret: config.signingSecret, connectorProof: null };
+      apiKey: config.apiKey, signingSecret: config.signingSecret, draftQuoteSource: LEGACY_PRIMARY_DRAFT_QUOTE_SOURCE, connectorProof: null };
   }
   if (env.PROJECT_ALPHA_DRAFT_QUOTES_ENABLED !== "true")
     throw new ProjectAlphaDraftQuoteError(503, "integration_disabled", "Project Alpha draft creation is not enabled");
@@ -420,9 +427,10 @@ async function quoteRuntime(env: Env, sourceId: string): Promise<QuoteRuntime> {
     const endpoint = new URL(commandPath(connector.draftQuote.applicationKey), base);
     if (endpoint.origin !== base.origin)
       throw new ProjectAlphaDraftQuoteError(503, "integration_disabled", "The draft quote destination is invalid");
-    const target = { sourceId, commandEndpoint: endpoint.toString(), applicationKey: connector.draftQuote.applicationKey, editorOrigin: endpoint.origin };
+    const target = { sourceId, draftQuoteSource: connector.draftQuote.source, commandEndpoint: endpoint.toString(), applicationKey: connector.draftQuote.applicationKey, editorOrigin: endpoint.origin };
     return { destination: { ...target, destinationFingerprint: await sha256Hex(canonicalProjectAlphaJson(target)) },
-      apiKey: connector.draftQuote.apiKey, signingSecret: connector.draftQuote.hmacSecret, connectorProof: connector.proof };
+      apiKey: connector.draftQuote.apiKey, signingSecret: connector.draftQuote.hmacSecret,
+      draftQuoteSource: connector.draftQuote.source, connectorProof: connector.proof };
   } catch (error) {
     if (error instanceof ProjectAlphaDraftQuoteError) throw error;
     if (error instanceof ProjectAlphaConnectorError) {
@@ -496,6 +504,8 @@ export async function sendProjectAlphaDraftQuoteCommand(
   const validatedPayload = parseProjectAlphaDraftQuotePayload(payload);
   if (!validatedPayload)
     throw new ProjectAlphaDraftQuoteError(409, "invalid_response", "The Project Alpha draft command is invalid");
+  if (validatedPayload.source !== runtime.draftQuoteSource)
+    throw new ProjectAlphaDraftQuoteError(409, "scope_denied", "The Project Alpha draft command does not match this source's configured identity");
   const rawBody = canonicalProjectAlphaJson(validatedPayload);
   if (new TextEncoder().encode(rawBody).byteLength > MAX_COMMAND_BYTES)
     throw new ProjectAlphaDraftQuoteError(409, "invalid_response", "The Project Alpha draft command is too large");
@@ -844,7 +854,7 @@ async function reserveQuoteCommand(env: Env, row: RequestRow, target: QuoteDesti
   return validate(saved);
 }
 
-async function buildPayload(env: Env, row: RequestRow, native?: NativeDraftAuthority): Promise<ProjectAlphaDraftQuotePayload> {
+async function buildPayload(env: Env, row: RequestRow, draftQuoteSource: string, native?: NativeDraftAuthority): Promise<ProjectAlphaDraftQuotePayload> {
   if (!OPAQUE_PUBLIC_ID.test(row.id))
     throw new HTTPException(409, { message: "This request has an invalid public identifier" });
   const clientPublicId = native?.clientPublicId ?? row.project_alpha_client_id;
@@ -909,7 +919,7 @@ async function buildPayload(env: Env, row: RequestRow, native?: NativeDraftAutho
   const squareMeters = polygonSquareMeters(workArea.areaGeoJson);
   const payload: ProjectAlphaDraftQuotePayload = {
     schemaVersion: 1,
-    source: "ltds-operations",
+    source: draftQuoteSource,
     request: {
       publicId: row.id,
       revision: row.request_revision,
@@ -974,7 +984,7 @@ export function registerProjectAlphaDraftQuoteRoutes(app: App): void {
       try {
         const runtime = await quoteRuntime(c.env, request.catalog_source_id);
         const native = runtime.connectorProof ? await resolveNativeDraftAuthority(c.env, request, runtime.connectorProof) : undefined;
-        await buildPayload(c.env, request, native);
+        await buildPayload(c.env, request, runtime.draftQuoteSource, native);
         receiptAuthorityProven = true;
         if (!["under_review", "accepted_pending_pa_linkage"].includes(request.status))
           capability = { enabled: false, reason: "Review or accept the request before creating a Project Alpha draft" };
@@ -1019,7 +1029,7 @@ export function registerProjectAlphaDraftQuoteRoutes(app: App): void {
         return c.json({ error: error.message, code: error.code }, error.status);
       throw error;
     }
-    const payload = await buildPayload(c.env, request, native);
+    const payload = await buildPayload(c.env, request, runtime.draftQuoteSource, native);
     const rawPayload = canonicalProjectAlphaJson(payload);
     const payloadHash = await sha256Hex(rawPayload);
     const areaRevision = request.area_revision || 0;
@@ -1059,7 +1069,7 @@ export function registerProjectAlphaDraftQuoteRoutes(app: App): void {
         ? await resolveNativeDraftAuthority(c.env, current, currentRuntime.connectorProof) : undefined;
       if (!current || !["under_review", "accepted_pending_pa_linkage"].includes(current.status) ||
         canonicalProjectAlphaJson(currentRequestProof(current,currentNative).bindings) !== canonicalProjectAlphaJson(currentRequestProof(request,native).bindings) ||
-        canonicalProjectAlphaJson(await buildPayload(c.env, current,currentNative)) !== rawPayload)
+        canonicalProjectAlphaJson(await buildPayload(c.env, current,currentRuntime.draftQuoteSource,currentNative)) !== rawPayload)
         throw new ProjectAlphaDraftQuoteError(409, "scope_denied", "The request changed before the saved quote command could be sent");
       result = await sendProjectAlphaDraftQuoteCommand(c.env, payload, idempotencyKey, {
         sourceId: request.catalog_source_id, destination,
@@ -1083,7 +1093,7 @@ export function registerProjectAlphaDraftQuoteRoutes(app: App): void {
         canonicalProjectAlphaJson(currentRuntime.destination) === canonicalProjectAlphaJson(runtime.destination) &&
         canonicalProjectAlphaJson(currentRuntime.connectorProof) === canonicalProjectAlphaJson(runtime.connectorProof) &&
         canonicalProjectAlphaJson(currentRequestProof(current,currentNative).bindings) === canonicalProjectAlphaJson(currentRequestProof(request,native).bindings) &&
-        canonicalProjectAlphaJson(await buildPayload(c.env, current,currentNative)) === rawPayload;
+        canonicalProjectAlphaJson(await buildPayload(c.env, current,currentRuntime.draftQuoteSource,currentNative)) === rawPayload;
     } catch { /* Unverifiable authority is stale, never permission to use a quote. */ }
     const receiptId = crypto.randomUUID(), proof = currentRequestProof(request,native);
     const details = JSON.stringify({ sourceId: command.source_id, commandId: command.id,

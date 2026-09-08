@@ -61,7 +61,7 @@ export interface ResolvedProjectAlphaConnector {
     current: ConnectorSigningKey; previous: ConnectorSigningKey | null } | null;
   /** Outbound draft creation has its own credential pair. Snapshot, event and
    * portal credentials are deliberately not valid substitutes. */
-  readonly draftQuote: { baseUrl: string; applicationKey: string; apiKey: string; hmacSecret: string } | null;
+  readonly draftQuote: { baseUrl: string; applicationKey: string; apiKey: string; hmacSecret: string; source: string } | null;
 }
 export interface ProjectAlphaConnectorSummary {
   sourceId: string; producerBindingId: string; snapshotOrigin: string; snapshotBasePath: string;
@@ -109,6 +109,13 @@ const MAX_CONNECTORS = 32;
 const MAX_CREDENTIAL_REFERENCES = MAX_CONNECTORS * 2;
 const safeId = z.string().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/);
 const scalar = (max: number) => z.string().min(1).max(max).regex(/^[^\u0000-\u001f\u007f]+$/);
+/**
+ * This is a public integration assertion, not a credential.  Keep it stable
+ * per PA instance: Project Alpha binds its draft-command profile to it.
+ */
+const draftQuoteSourceSchema = z.string().min(1).max(100).regex(/^[a-z][a-z0-9._:-]{0,99}$/);
+/** Compatibility only for installations that have not enrolled a source manifest. */
+export const LEGACY_PRIMARY_DRAFT_QUOTE_SOURCE = "ltds-operations";
 const signingSchema = z.object({ keyId: safeId, algorithm: z.enum(["ed25519", "hmac-sha256"]), value: scalar(8192) }).strict();
 const draftQuoteSchema = z.object({ apiKey: scalar(8192), hmacSecret: scalar(8192).refine(value => value.length >= 32) }).strict();
 // Portal keys are validated only by the separately enabled portal purpose.
@@ -132,6 +139,9 @@ const deploymentSourceSchema = registrationSchema.omit({ revision: true }).exten
   enabled: z.boolean(),
   /** Visibility is explicit so adding a source cannot silently broaden access. */
   readVisible: z.boolean(),
+  /** Exact PA draft-command source for this configured connector. Secondary
+   * sources must opt in explicitly; primary preserves the established value. */
+  draftQuoteSource: draftQuoteSourceSchema.optional(),
 }).strict();
 const deploymentSourcesSchema = z.object({ version: z.literal(1), sources: z.array(deploymentSourceSchema).min(1).max(MAX_CONNECTORS) }).strict();
 
@@ -157,6 +167,7 @@ interface DeploymentConfiguredSource {
   readonly eventPrevious: ConnectorKeyCommitment | null;
   readonly enabled: boolean;
   readonly readVisible: boolean;
+  readonly draftQuoteSource: string | null;
 }
 function database(env: ProjectAlphaConnectorEnvironment): RegistryDatabase { return env.OPS_DB.withSession("first-primary"); }
 function sourceId(value: unknown): string {
@@ -205,7 +216,7 @@ function deploymentSources(env: ProjectAlphaConnectorEnvironment): DeploymentCon
     if (!result.success) throw new Error();
     parsed = result.data;
   } catch { return fail("credentials_unavailable", "Deployment source configuration is invalid"); }
-  const seenSources = new Set<string>(), seenProducers = new Set<string>(), seenDestinations = new Set<string>();
+  const seenSources = new Set<string>(), seenProducers = new Set<string>(), seenDestinations = new Set<string>(), seenDraftQuoteSources = new Set<string>();
   const result: DeploymentConfiguredSource[] = [];
   for (const entry of parsed.sources) {
     let id: string, snapshotOrigin: string, revision: ProjectAlphaConnectorRevisionInput;
@@ -230,10 +241,16 @@ function deploymentSources(env: ProjectAlphaConnectorEnvironment): DeploymentCon
     if (entry.revision.eventPrevious && (entry.revision.eventCurrent.keyId === entry.revision.eventPrevious.keyId
       || entry.revision.eventCurrent.fingerprint === entry.revision.eventPrevious.fingerprint))
       return fail("credentials_unavailable", "Connector rotation keys must be distinct");
+    // A secondary must never inherit the primary's PA command identity merely
+    // because both are routed through the same Operations receiver.
+    const draftQuoteSource = entry.draftQuoteSource ?? (id === PRIMARY_ALPHA_SOURCE_ID ? LEGACY_PRIMARY_DRAFT_QUOTE_SOURCE : null);
+    if (draftQuoteSource !== null && seenDraftQuoteSources.has(draftQuoteSource))
+      return fail("credentials_unavailable", "Deployment sources must have unique draft quote identities");
+    if (draftQuoteSource !== null) seenDraftQuoteSources.add(draftQuoteSource);
     result.push(Object.freeze({ registration: Object.freeze({ sourceId: id, producerBindingId: entry.producerBindingId,
       snapshotOrigin, applicationKey: entry.applicationKey, profile: entry.profile, displayName: entry.displayName, revision }),
     eventCurrent: entry.revision.eventCurrent, eventPrevious: entry.revision.eventPrevious ?? null,
-    enabled: entry.enabled, readVisible: entry.readVisible }));
+    enabled: entry.enabled, readVisible: entry.readVisible, draftQuoteSource }));
   }
   const primary = result.find(entry => entry.registration.sourceId === PRIMARY_ALPHA_SOURCE_ID);
   if (result.some(entry => entry.registration.sourceId !== PRIMARY_ALPHA_SOURCE_ID) && !primary)
@@ -778,10 +795,12 @@ export async function resolveProjectAlphaConnector(env: ProjectAlphaConnectorEnv
       accessSubject: deploymentEntry?.registration.revision.accessSubject ?? legacyConfig!.revision.access_subject,
       current: eventConfig ? eventConfig.current : legacyConfig!.current,
       previous: eventConfig ? eventConfig.previous : legacyConfig!.previous } : null,
-    draftQuote: purpose === "draft_quote" && (snapshotConfig?.set ?? legacyConfig!.set).draftQuote ? {
+    draftQuote: purpose === "draft_quote" && (snapshotConfig?.set ?? legacyConfig!.set).draftQuote
+      && (deploymentEntry?.draftQuoteSource ?? (!deploymentEntry ? LEGACY_PRIMARY_DRAFT_QUOTE_SOURCE : null)) ? {
       baseUrl: row.snapshot_origin, applicationKey: row.application_key,
       apiKey: (snapshotConfig?.set ?? legacyConfig!.set).draftQuote!.apiKey,
       hmacSecret: (snapshotConfig?.set ?? legacyConfig!.set).draftQuote!.hmacSecret,
+      source: deploymentEntry?.draftQuoteSource ?? LEGACY_PRIMARY_DRAFT_QUOTE_SOURCE,
     } : null };
 }
 

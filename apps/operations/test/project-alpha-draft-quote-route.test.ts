@@ -199,7 +199,7 @@ describe("source-bound private quote real-D1 routes", () => {
   }
   async function insertUnresolvedOriginalCommand(f: Fixture) {
     const payload = canonicalProjectAlphaJson(await expectedPayload(f));
-    const destination = { sourceId: primary, commandEndpoint: "https://alpha.example/api/v2/integrations/ltds/draft-quotes",
+    const destination = { sourceId: primary, draftQuoteSource: "ltds-operations", commandEndpoint: "https://alpha.example/api/v2/integrations/ltds/draft-quotes",
       applicationKey: "ltds", editorOrigin: "https://alpha.example" };
     await delivery.prepare(`INSERT INTO request_pa_draft_quote_commands
       (id,request_id,request_revision,area_revision,source_id,command_endpoint,application_key,editor_origin,
