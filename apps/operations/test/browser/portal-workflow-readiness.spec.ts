@@ -21,6 +21,10 @@ test("Administration presents redacted portal workflow readiness and refreshes i
         delegatedSharing: { state: "unverified", reasons: ["client_runtime_unverified"] }, expiryNotices: { state: "blocked", reasons: ["notification_transport_unavailable"] },
       } } });
     }
+    if (path === "/api/admin/project-alpha-access-token-expiry") return route.fulfill({ json: { healthy: false, connectors: [
+      { connector: "ltds", label: "Ledge Top Drone Services", state: "healthy", expiresAt: "2036-07-14T00:00:00.000Z", daysRemaining: 3595 },
+      { connector: "ltt", label: "Ledge Top Technologies", state: "unconfigured", expiresAt: null, daysRemaining: null },
+    ] } });
     return route.fulfill({ status: 404, json: { error: "not found" } });
   });
   await page.goto("/administration");
@@ -29,7 +33,9 @@ test("Administration presents redacted portal workflow readiness and refreshes i
   await expect(page.getByText("Client runtime gate must be verified in the Client deployment", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("Notification transport is unavailable", { exact: true })).toBeVisible();
   await expect(page.getByText(/credential details/)).toBeVisible();
-  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await expect(page.getByText("Project Alpha connector token expiry", { exact: true })).toBeVisible();
+  await expect(page.getByText(/No token, client ID, secret, or credential fingerprint is shown\./)).toBeVisible();
+  await card.getByRole("button", { name: "Refresh", exact: true }).click();
   await expect(page.getByText("Refreshing portal workflows…", { exact: true })).toBeVisible();
   await expect(page.getByText("Service requests", { exact: true })).toHaveCount(0);
   releaseRefresh();

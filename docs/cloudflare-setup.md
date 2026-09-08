@@ -394,6 +394,8 @@ running these commands during a read-only validation.
 
 Create a separate self-hosted Access application named **LedgeTop Ops Sync** for `ops-sync.ledgetopdroneservices.com/*`. Add a Service Auth policy whose include rule is the Project Alpha service token. Copy that application's AUD into `CF_ACCESS_AUD` on `ledgetop-ops-sync`. Its service-token client ID and secret belong only in Project Alpha.
 
+For Operations-only rotation reminders, set the non-secret UTC RFC 3339 deployment variables `PROJECT_ALPHA_LTDS_ACCESS_SERVICE_TOKEN_EXPIRES_AT` and `PROJECT_ALPHA_LTT_ACCESS_SERVICE_TOKEN_EXPIRES_AT` on `ledgetop-ops`. They contain only the respective service-token expiration timestamps, never a token, client ID, secret, or fingerprint. Administration reports a warning at one year, an urgent warning at 90 days, and an expired state after the timestamp. These reminders do not grant access, validate a token, or replace Cloudflare policy review.
+
 Set `CF_ACCOUNT_ID`, `CF_ACCESS_GROUP_ID`, the exact deployment-specific `CF_ACCESS_GROUP_NAME`, and a deployment-specific `APPLICATION_KEY` (for example, `field_operations`) on the provisioning Worker. Configure the same application key on the Operations snapshot importer and in Project Alpha. The group name lets reconciliation safely recover when a configured group identifier has been replaced. Bind `OPS_DB` to the deployment's Operations D1 database and add these Worker secrets:
 
 The checked-in LTDS production configuration uses `ltds_ops`; this is not a Project Alpha convention or a default for other deployments.
