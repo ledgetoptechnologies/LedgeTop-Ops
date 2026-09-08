@@ -162,6 +162,6 @@ describe("client account root activation routes", () => {
       status: "success",
       clientPortalReconciliation: { enabled: true, sources: [] },
     });
-    expect(mocks.reconcileWorkspaces).toHaveBeenCalledOnceWith(expect.anything(), "project-alpha:primary");
+    expect(mocks.reconcileWorkspaces).toHaveBeenCalledExactlyOnceWith(expect.anything(), "project-alpha:primary");
   });
 });

@@ -247,6 +247,7 @@ describe("exact-source portal workspace reconciliation", () => {
   let env: Env;
   const secondary = "project-alpha:secondary";
   const tertiary = "project-alpha:tertiary";
+  const revokedSource = "project-alpha:revoked";
   const root = "a".repeat(32);
 
   beforeEach(async () => {
@@ -258,16 +259,18 @@ describe("exact-source portal workspace reconciliation", () => {
     await opsDb.exec(`CREATE TABLE pa_connectors(source_id TEXT PRIMARY KEY,state TEXT NOT NULL,read_visible INTEGER NOT NULL);
       CREATE TABLE pa_organizations(id TEXT PRIMARY KEY,name TEXT,active INTEGER,projection_source_id TEXT,payload_json TEXT);
       CREATE TABLE pa_clients(id TEXT PRIMARY KEY,name TEXT,organization_id TEXT,active INTEGER,projection_source_id TEXT,payload_json TEXT);
-      INSERT INTO pa_connectors VALUES('${secondary}','active',1),('${tertiary}','active',1);
+      INSERT INTO pa_connectors VALUES('${secondary}','active',1),('${tertiary}','active',1),('${revokedSource}','active',1);
       INSERT INTO pa_organizations VALUES('secondary-local','Secondary',1,'${secondary}','{"public_id":"${root}"}'),
-        ('tertiary-local','Tertiary',1,'${tertiary}','{"public_id":"${root}"}');`.replace(/\s*\n\s*/g, " "));
+        ('tertiary-local','Tertiary',1,'${tertiary}','{"public_id":"${root}"}'),
+        ('revoked-local','Revoked',1,'${revokedSource}','{"public_id":"${root}"}');`.replace(/\s*\n\s*/g, " "));
     await deliveryDb.exec(`CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,root_type TEXT,pa_organization_public_id TEXT,
       pa_client_public_id TEXT,status TEXT,project_alpha_source_id TEXT);
       CREATE TABLE pa_portal_workspace_sources(workspace_id TEXT,projection_source_id TEXT,source_workspace_id TEXT);
       CREATE TABLE portal_v2_root_access_policies(projection_source_id TEXT,root_type TEXT,root_public_id TEXT,state TEXT);
       INSERT INTO portal_v2_workspaces VALUES('secondary-workspace','organization','${root}',NULL,'active','${secondary}');
       INSERT INTO pa_portal_workspace_sources VALUES('secondary-workspace','${secondary}','pa-secondary-workspace');
-      INSERT INTO portal_v2_root_access_policies VALUES('${secondary}','organization','${root}','revoked');`.replace(/\s*\n\s*/g, " "));
+      INSERT INTO portal_v2_root_access_policies VALUES('${secondary}','organization','${root}','revoked'),
+        ('${revokedSource}','organization','${root}','revoked');`.replace(/\s*\n\s*/g, " "));
     env = { OPS_DB: opsDb, DELIVERY_DB: deliveryDb,
       CLIENT_PORTAL_WORKSPACE_RECONCILIATION_ENABLED: "true" } as Env;
   });
@@ -279,11 +282,14 @@ describe("exact-source portal workspace reconciliation", () => {
     const first = await reconcileClientPortalWorkspaces(env, secondary);
     const replay = await reconcileClientPortalWorkspaces(env, secondary);
     const other = await reconcileClientPortalWorkspaces(env, tertiary);
+    const revokedOnly = await reconcileClientPortalWorkspaces(env, revokedSource);
     expect(first).toEqual({ enabled: true, sources: [{ sourceId: secondary, mode: "signed_projection", enabled: true,
       scanned: 1, projected: 1, pending: 0, revoked: 1, unchanged: 1 }] });
     expect(replay).toEqual(first);
     expect(other).toEqual({ enabled: true, sources: [{ sourceId: tertiary, mode: "signed_projection", enabled: true,
       scanned: 1, projected: 0, pending: 1, revoked: 0, unchanged: 0 }] });
+    expect(revokedOnly).toEqual({ enabled: true, sources: [{ sourceId: revokedSource, mode: "signed_projection", enabled: true,
+      scanned: 1, projected: 0, pending: 0, revoked: 1, unchanged: 0 }] });
     expect(await deliveryDb.prepare("SELECT count(*) count FROM portal_v2_workspaces").first<number>("count")).toBe(before);
     expect(await deliveryDb.prepare("SELECT state FROM portal_v2_root_access_policies WHERE projection_source_id=?")
       .bind(secondary).first("state")).toBe("revoked");

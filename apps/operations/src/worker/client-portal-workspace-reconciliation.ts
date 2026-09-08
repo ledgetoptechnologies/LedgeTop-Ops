@@ -31,7 +31,9 @@ export interface ClientPortalWorkspaceReconciliationResult {
 }
 
 interface ConnectorRow { source_id: string; }
-interface NativeCounts { scanned: number; projected: number; revoked: number; }
+interface NativeCounts { scanned: number; projected: number; revoked: number; pending: number; }
+interface NativeRoot { root_type: "organization" | "standalone_client"; root_public_id: string; }
+interface NativeBatchCounts { projected: number; revoked: number; settled: number; }
 
 function validSourceId(value: string): boolean {
   return /^project-alpha:[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value);
@@ -75,15 +77,23 @@ async function sourcesToReconcile(env: Env, requested?: string): Promise<string[
 async function nativeCounts(env: Env, sourceId: string): Promise<NativeCounts> {
   const organizationPublicId = validatedUniquePublicIdExpression("pa_organizations", "organization");
   const clientPublicId = validatedUniquePublicIdExpression("pa_clients", "client");
-  const row = await env.DELIVERY_DB.withSession("first-primary").prepare(`WITH roots(root_type,root_public_id) AS (
-      SELECT 'organization',${organizationPublicId} FROM pa_organizations organization
+  const roots = await env.OPS_DB.withSession("first-primary").prepare(`
+      SELECT 'organization' root_type,${organizationPublicId} root_public_id FROM pa_organizations organization
         WHERE organization.projection_source_id=? AND organization.active=1
           AND ${organizationPublicId} IS NOT NULL
       UNION ALL
-      SELECT 'standalone_client',${clientPublicId} FROM pa_clients client
+      SELECT 'standalone_client' root_type,${clientPublicId} root_public_id FROM pa_clients client
         WHERE client.projection_source_id=? AND client.active=1 AND client.organization_id IS NULL
           AND ${clientPublicId} IS NOT NULL
-    ) SELECT count(*) scanned,
+    `).bind(sourceId, sourceId).all<NativeRoot>();
+  let projected = 0;
+  let revoked = 0;
+  let settled = 0;
+  const delivery = env.DELIVERY_DB.withSession("first-primary");
+  for (let offset = 0; offset < roots.results.length; offset += 50) {
+    const batch = roots.results.slice(offset, offset + 50);
+    const values = batch.map(() => "SELECT ? root_type,? root_public_id").join(" UNION ALL ");
+    const row = await delivery.prepare(`WITH roots(root_type,root_public_id) AS (${values}) SELECT
       COALESCE(sum(CASE WHEN EXISTS(
         SELECT 1 FROM portal_v2_workspaces workspace
         JOIN pa_portal_workspace_sources owner ON owner.workspace_id=workspace.id
@@ -98,8 +108,29 @@ async function nativeCounts(env: Env, sourceId: string): Promise<NativeCounts> {
           AND policy.root_type=roots.root_type AND policy.root_public_id=roots.root_public_id
           AND policy.state='revoked'
       ) THEN 1 ELSE 0 END),0) revoked
-    FROM roots`).bind(sourceId, sourceId, sourceId, sourceId).first<NativeCounts>();
-  return { scanned: Number(row?.scanned ?? 0), projected: Number(row?.projected ?? 0), revoked: Number(row?.revoked ?? 0) };
+      ,COALESCE(sum(CASE WHEN EXISTS(
+        SELECT 1 FROM portal_v2_workspaces workspace
+        JOIN pa_portal_workspace_sources owner ON owner.workspace_id=workspace.id
+          AND owner.projection_source_id=workspace.project_alpha_source_id
+        WHERE workspace.project_alpha_source_id=? AND workspace.status='active'
+          AND workspace.root_type=roots.root_type
+          AND CASE roots.root_type WHEN 'organization' THEN workspace.pa_organization_public_id
+            ELSE workspace.pa_client_public_id END=roots.root_public_id
+      ) OR EXISTS(
+        SELECT 1 FROM portal_v2_root_access_policies policy WHERE policy.projection_source_id=?
+          AND policy.root_type=roots.root_type AND policy.root_public_id=roots.root_public_id
+          AND policy.state='revoked'
+      ) THEN 1 ELSE 0 END),0) settled
+    FROM roots`).bind(
+      ...batch.flatMap(root => [root.root_type, root.root_public_id]),
+      sourceId, sourceId, sourceId, sourceId,
+    ).first<NativeBatchCounts>();
+    projected += Number(row?.projected ?? 0);
+    revoked += Number(row?.revoked ?? 0);
+    settled += Number(row?.settled ?? 0);
+  }
+  return { scanned: roots.results.length, projected, revoked,
+    pending: Math.max(0, roots.results.length - settled) };
 }
 
 export async function reconcileClientPortalWorkspaces(env: Env, requestedSourceId?: string): Promise<ClientPortalWorkspaceReconciliationResult> {
@@ -117,7 +148,7 @@ export async function reconcileClientPortalWorkspaces(env: Env, requestedSourceI
     const counts = await nativeCounts(env, sourceId);
     sources.push({ sourceId, mode: "signed_projection", enabled: true,
       scanned: counts.scanned, projected: counts.projected,
-      pending: counts.scanned - counts.projected, revoked: counts.revoked,
+      pending: counts.pending, revoked: counts.revoked,
       unchanged: counts.projected });
   }
   return { enabled: true, sources };
