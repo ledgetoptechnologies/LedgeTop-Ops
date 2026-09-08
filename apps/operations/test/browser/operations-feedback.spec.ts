@@ -79,6 +79,16 @@ test("secondary feedback uses only its source-qualified Client Hub deep link", a
   await expect(queue(page).locator('a[href^="/portal"]')).toHaveCount(0);
 });
 
+test("primary feedback uses its canonical Client Hub project link", async ({page}) => {
+  const actionPath = "/clients/sources/project-alpha%3Aprimary/business/standalone/legacy-client-1/business-projects/legacy-project-1";
+  await mock(page, (route, _url, call) => call.path === `${endpoint}/feedback-one` ? route.fulfill({json: detail({target: {...item().target, actionPath}})}) : undefined);
+  await page.goto("/clients/feedback/feedback-one");
+  const link = queue(page).getByRole("link", {name: "Open original item"});
+  await expect(link).toHaveAttribute("href", actionPath);
+  await expect(queue(page).locator('a[href*="/clients/sources/project-alpha%3Aprimary/"]')).toHaveCount(1);
+  await expect(queue(page).locator('a[href^="/delivery"], a[href^="/jobs"], a[href^="/portal"]')).toHaveCount(0);
+});
+
 test("late continuation from a prior filter cannot replace the current queue", async ({page}) => {
   let captured = false, release!: () => void; const wait = new Promise<void>(resolve => {release = resolve;});
   const calls = await mock(page, (route, _url, call) => call.path === endpoint ? call.query.has("cursor") ? (captured = true, wait.then(() => late(route, {items: [item({message: "Stale protected row"})], nextCursor: null}))) : route.fulfill({json: {items: [item({message: call.query.get("status") === "done" ? "Completed view" : "Original view"})], nextCursor: call.query.get("status") === "done" ? null : "next"}}) : undefined);

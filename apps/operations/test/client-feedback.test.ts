@@ -15,8 +15,32 @@ describe("staff feedback current-owner authority and transitions",{timeout:30_00
     const owner=await f.seed(),record=await owner.create();
     const page=await listStaffFeedback(f.env,feedbackStaff,{accountId:owner.id});
     expect(page.items).toMatchObject([{id:record.id,status:"new",canStart:true,canComplete:true}]);
-    expect(JSON.stringify(page)).not.toMatch(/sourceOwner|storageKey|principalIssuer|identityId|targetFingerprint|pa-/);
+    expect(JSON.stringify(page)).not.toMatch(/sourceOwner|storageKey|principalIssuer|identityId|targetFingerprint/);
     expect((await getStaffFeedback(f.env,feedbackStaff,record.id)).events).toEqual([expect.objectContaining({revision:1,actor:"client",status:"new"})]);
+  });
+  it.each(["project", "file"] as const)("uses a canonical primary Client Hub project route for an available %s target without leaking storage paths",async kind=>{
+    const owner=await f.seed(kind);
+    if(kind==="file") await f.db.prepare("INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES(?,?,?,?,?,?)")
+      .bind(`${owner.prefix}photo.jpg`,`etag`,100,"2026-08-25T00:00:00Z","image/jpeg","image").run();
+    const record=await owner.create(),feedback=(await getStaffFeedback(f.env,feedbackStaff,record.id)).feedback;
+    const expected=`/clients/sources/project-alpha%3Aprimary/business/standalone/${encodeURIComponent(owner.pa)}/business-projects/${encodeURIComponent(owner.pa)}`;
+    expect(feedback.target).toMatchObject({available:true,actionPath:expected});
+    expect(feedback.target.actionPath).not.toContain(owner.prefix);
+    expect(feedback.target.actionPath).not.toContain("photo.jpg");
+  });
+  it("uses the same source-qualified project route for an available primary folder target",async()=>{
+    const owner=await f.seed();
+    await f.db.batch([
+      f.db.prepare("UPDATE client_folder_associations SET scope_type='project',project_id=? WHERE id=?").bind(owner.id,owner.id),
+      f.db.prepare("INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES(?,?,?,?,?,?)")
+        .bind(`${owner.prefix}feedback/photo.jpg`,`etag-folder`,100,"2026-08-25T00:00:00Z","image/jpeg","image"),
+    ]);
+    owner.authorization.target = {...owner.authorization.target,kind:"folder",associationId:owner.id,relativePath:"feedback/",storageKey:null,label:"feedback",
+      projectName:"North site",sourceOwner:{...owner.authorization.target.sourceOwner,association:{prefix:owner.prefix}}};
+    const record=await owner.create(),feedback=(await getStaffFeedback(f.env,feedbackStaff,record.id)).feedback;
+    expect(feedback.target).toMatchObject({available:true,
+      actionPath:`/clients/sources/project-alpha%3Aprimary/business/standalone/${encodeURIComponent(owner.pa)}/business-projects/${encodeURIComponent(owner.pa)}`});
+    expect(feedback.target.actionPath).not.toContain("feedback");
   });
   it("exposes feature readiness without expanding employee permissions or row scope",async()=>{
     const owner=await f.seed(),record=await owner.create();
@@ -95,7 +119,8 @@ describe("staff feedback current-owner authority and transitions",{timeout:30_00
     await f.db.prepare("UPDATE client_accounts SET project_alpha_client_id=NULL,project_alpha_organization_id=? WHERE id=?").bind(org,owner.id).run();
     owner.authorization.target.sourceOwner.account={projectAlphaClientId:null,projectAlphaOrganizationId:org};
     const record=await owner.create();
-    expect((await getStaffFeedback(f.env,feedbackStaff,record.id)).feedback.target.available).toBe(true);
+    expect((await getStaffFeedback(f.env,feedbackStaff,record.id)).feedback.target).toMatchObject({available:true,
+      actionPath:`/clients/sources/project-alpha%3Aprimary/business/organizations/${encodeURIComponent(org)}/business-projects/${encodeURIComponent(owner.pa)}`});
     await f.ops.prepare("UPDATE pa_projects SET organization_id='different-org' WHERE id=?").bind(owner.pa).run();
     await expect(action(record.id)).rejects.toMatchObject({status:404});
   });

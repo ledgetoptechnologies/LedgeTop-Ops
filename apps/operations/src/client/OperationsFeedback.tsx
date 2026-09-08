@@ -43,8 +43,14 @@ function safeClientHubTargetPath(value: string | null): string | null {
     const url = new URL(value, location.origin), match = url.pathname.match(/^\/clients\/sources\/([^/]+)\/business\/(organizations|standalone)\/([^/]+)\/business-projects\/([^/]+)$/);
     if (url.origin !== location.origin || url.search || url.hash || !match) return null;
     const [source, root, project] = [match[1], match[3], match[4]].map(part => decodeURIComponent(part!));
-    return /^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/.test(source!) && /^[a-f0-9]{32}$/.test(root!)
-      && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(project!) ? url.pathname : null;
+    const validProject = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(project!);
+    // Primary legacy IDs are canonical Client Hub IDs but not necessarily
+    // 32-character native public IDs. Neither accepted form carries a
+    // Delivery storage key or prefix.
+    const validRoot = source === "project-alpha:primary"
+      ? /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(root!)
+      : /^[a-f0-9]{32}$/.test(root!);
+    return /^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/.test(source!) && validRoot && validProject ? url.pathname : null;
   } catch { return null; }
 }
 
