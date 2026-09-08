@@ -33,14 +33,15 @@ function metadata(collection: Collection, more = true, limit = 25) {
   return { available: true, reason: null as string | null, nextCursor: more ? `${collection}-page-2` : null, hasMore: more, returned: 1, limit };
 }
 function detail(revision = 1) {
+  const pages: Record<string, ReturnType<typeof metadata>> = {
+    ...Object.fromEntries(collections.map(collection => [collection, metadata(collection, true, 5)])),
+    businessProjects: metadata("projects", false, 5),
+  };
   return {
     client: { workspace_id: "workspace-one", public_id: "42", kind: "organization", route_kind: "organizations", source_id: sourceId,
       root_namespace: "business", pa_public_id: "a".repeat(32), detail_path: canonicalPath, display_name: revision === 1 ? "Acme Construction" : "Acme refreshed",
       status: "active", portal_status: "active", account_count: 1, project_count: 1, request_count: 1, contact_count: 2 },
-    contextVersion: `context-${revision}`, pages: {
-      ...Object.fromEntries(collections.map(collection => [collection, metadata(collection, true, 5)])),
-      businessProjects: { available: true, reason: null, nextCursor: null, hasMore: false, returned: 1, limit: 5 },
-    },
+    contextVersion: `context-${revision}`, pages,
     contacts: [businessContact("business-one", "Business Bailey")],
     businessProjects: [{ row_key: "business:project-one", id: "project-one", name: "Business project 1", status: "active",
       manager_name: "Morgan Manager", start_date: "2026-08-01", end_date: "2026-09-30", created_at: "2026-07-15T12:00:00Z" }],
