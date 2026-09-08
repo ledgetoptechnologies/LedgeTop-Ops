@@ -177,6 +177,58 @@
   margin-bottom: 1rem;
 }
 
+/* Administration is a control surface rather than a generic card list. Keep
+   the connection and recovery panels readable at desktop widths, while the
+   smaller status panels can share a row. Every child is constrained so long
+   source identifiers and diagnostic text cannot widen the page. */
+.administration-configurations { margin-bottom: 1.25rem; }
+.administration-panels {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+  align-items: start;
+  min-width: 0;
+}
+.administration-panel { min-width: 0; }
+.administration-panel-wide { grid-column: 1 / -1; }
+.administration-panel > .ltds-card { height: 100%; min-width: 0; box-sizing: border-box; }
+.administration-panel :is(p, li, dd, small, code) { overflow-wrap: anywhere; }
+.administration-panel > .ltds-card > header { flex-wrap: wrap; }
+.administration-panel > .ltds-card > header > * { min-width: 0; }
+.administration-panel > .ltds-card > header :is(button, a.button) { min-height: 44px; white-space: normal; }
+
+.alpha-connections details {
+  padding: .1rem .75rem .75rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-soft);
+}
+.alpha-connections details[open] { padding-top: .35rem; }
+.alpha-connections details summary { padding: .55rem 0; font-weight: 760; }
+.alpha-connections details dl {
+  display: grid;
+  grid-template-columns: minmax(7rem, auto) minmax(0, 1fr);
+  gap: .45rem .8rem;
+  margin: .35rem 0 .7rem;
+}
+.alpha-connections details dt { color: var(--muted); font-size: .8rem; font-weight: 760; }
+.alpha-connections details dd { margin: 0; min-width: 0; }
+.alpha-connections details code { white-space: pre-wrap; }
+
+.portal-workflow-readiness { display: grid; gap: .65rem; min-width: 0; }
+.portal-workflow-readiness > p { margin: 0; }
+.portal-workflow-readiness > div {
+  display: grid;
+  gap: .2rem;
+  min-width: 0;
+  padding: .65rem .75rem;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-soft);
+}
+.portal-workflow-readiness > div p { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: .45rem; }
+.portal-workflow-readiness > div small { color: var(--muted); }
+
 /* ---------------------------------------------------------------------------
    Simple rows (lists inside cards)
    --------------------------------------------------------------------------- */
@@ -2747,6 +2799,13 @@ ul { color: var(--muted); }
 @media (min-width: 640px) {
   .dashboard-grid.client-hub-detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .client-hub-wide-panel { grid-column: span 2; }
+}
+
+@media (max-width: 760px) {
+  .administration-panels { grid-template-columns: minmax(0, 1fr); }
+  .administration-panel-wide { grid-column: auto; }
+  .alpha-connections details dl { grid-template-columns: minmax(0, 1fr); gap: .2rem; }
+  .alpha-connections details dd { margin-bottom: .35rem; }
 }
 @media (min-width: 1120px) {
   .dashboard-grid.client-hub-detail-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }

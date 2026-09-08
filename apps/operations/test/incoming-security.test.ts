@@ -13,6 +13,8 @@ describe("incoming upload security", () => {
     expect(() => validateIncomingFile("payload.exe", "application/octet-stream", 10)).toThrow();
     expect(() => validateIncomingFile("photo.svg", "image/svg+xml", 10)).toThrow();
     expect(() => validateIncomingFile("../photo.jpg", "image/jpeg", 10)).toThrow();
+    expect(validateIncomingFile("é".repeat(127), "image/jpeg", 10)).toBe("é".repeat(127));
+    expect(() => validateIncomingFile("é".repeat(128), "image/jpeg", 10)).toThrow();
     expect(validateIncomingFile("ground photo.jpg", "image/jpeg", 200 * 1024 ** 2)).toBe("ground photo.jpg");
   });
 

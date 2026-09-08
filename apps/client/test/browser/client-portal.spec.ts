@@ -480,6 +480,90 @@ test("authorized portal supports project, delivery, and request workflows", asyn
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
+test("native workspace branding identifies the selected source across compact viewports", async ({ page }) => {
+  const workspace = {
+    id: "workspace-ltt",
+    rootType: "organization",
+    rootPublicId: "org-ltt",
+    displayName: "LTT Client",
+    resourceMode: "native",
+    sourceId: "project-alpha:secondary",
+  };
+  const otherWorkspace = {
+    id: "workspace-ltds",
+    rootType: "organization",
+    rootPublicId: "org-ltds",
+    displayName: "LTDS Client",
+    resourceMode: "native",
+    sourceId: "project-alpha:primary",
+  };
+  await page.route("**/api/client/**", async route => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (path === "/api/client/session") {
+      return route.fulfill({ json: {
+        account,
+        capabilities: { workspaceHierarchyV2: true, requestV2: false, feedback: false },
+      } });
+    }
+    if (path === "/api/client/v2/workspaces") return route.fulfill({ json: { workspaces: [workspace, otherWorkspace] } });
+    if (path === "/api/client/v2/workspaces/workspace-ltt/context") {
+      return route.fulfill({ json: {
+        workspace,
+        contextVersion: "ctx-ltt-1",
+        capabilities: { directoryRead: false, deliveryView: false, requestV2: false, requestAttachments: false, feedback: false, viewer: false },
+        features: {
+          directory: { state: "not_in_access", reason: "capability_not_granted" },
+          deliveries: { state: "temporarily_unavailable", reason: "backend_unavailable" },
+          serviceRequests: { state: "not_supported", reason: "source_not_supported" },
+          feedback: { state: "not_in_access", reason: "capability_not_granted" },
+          models: { state: "not_supported", reason: "source_not_supported" },
+          team: { state: "not_supported", reason: "source_not_supported" },
+          billing: { state: "not_supported", reason: "source_not_supported" },
+        },
+      } });
+    }
+    if (path === "/api/client/notification-history") return route.fulfill({ json: {
+      scope: { sourceId: "project-alpha:secondary", workspaceId: workspace.id, rootType: "organization", rootPublicId: workspace.rootPublicId },
+      asOf: "2026-08-25T12:00:00.000Z",
+      coverage: { requests: "omitted_feature_disabled", feedback: "omitted_feature_disabled", authenticatedDelivery: "omitted_feature_disabled", delivery: "omitted_no_explicit_grant_authority" },
+      items: [], nextCursor: null,
+    } });
+    return route.fulfill({ status: 404, json: { error: "Not found" } });
+  });
+
+  for (const width of [320, 375, 1024]) {
+    await page.setViewportSize({ width, height: 812 });
+    await page.goto("/portal");
+    const brand = page.locator(".client-portal-header .portal-brand");
+    await expect(brand).toBeVisible();
+    await expect(brand).toHaveAttribute("data-portal-division", "technologies");
+    await expect(brand).toHaveAttribute("aria-label", "Ledge Top Technologies Client portal");
+    await expect(brand).toContainText("Ledge Top");
+    await expect(brand).toContainText("Technologies · Client portal");
+    await expect(brand.locator("img")).toHaveCount(0);
+    await expect(brand.locator(".portal-brand-mark")).toHaveText("LTT");
+    const box = await brand.boundingBox();
+    expect(box && box.x >= 0 && box.x + box.width <= width).toBeTruthy();
+    expect(await page.evaluate(() => ({
+      documentFits: document.documentElement.scrollWidth <= window.innerWidth,
+      outside: [...document.querySelectorAll<HTMLElement>("body *")]
+        .map(element => element.getBoundingClientRect())
+        .filter(rect => rect.left < -0.5 || rect.right > window.innerWidth + 0.5)
+        .length,
+    }))).toEqual({ documentFits: true, outside: 0 });
+
+    if (width >= 961) {
+      await expect(page.getByRole("combobox", { name: "Client workspace" })).toBeVisible();
+      const labelStyles = await brand.locator("small").evaluate(element => {
+        const style = getComputedStyle(element);
+        return { whiteSpace: style.whiteSpace, textOverflow: style.textOverflow, overflow: style.overflow };
+      });
+      expect(labelStyles).toEqual({ whiteSpace: "nowrap", textOverflow: "ellipsis", overflow: "hidden" });
+    }
+  }
+});
+
 test("authenticated video preview uses native controls and supports seeking with range delivery", async ({ page }) => {
   const videoFile = {
     ...filePage.files[0]!,

@@ -46,7 +46,15 @@ The five-minute Operations notification drain resolves the captured `file_reques
 
 ## Pickup and promotion
 
-TrueNAS/Hermes polls the quarantine prefix on its normal interval. It downloads completed objects into a central local Incoming area, verifies them, and leaves final sorting to Operations staff. Pickup should be idempotent and retain the request id/upload id in a sidecar manifest or local job log.
+Only the repository-owned TrueNAS/Hermes pickup worker polls the private
+`quarantine/` prefix on its normal interval. A generic R2 mirror, Cloud Sync
+task, rclone job, or Windows copy job must exclude that whole prefix: copying
+it creates an opaque `quarantine/.../object` tree locally and bypasses the
+scan/receipt lifecycle. The pickup worker downloads completed objects into a
+central local Incoming area, verifies them, and promotes them under its
+request-id/upload-id/payload/original-name hierarchy, with `receipt.json`
+beside the fixed `payload/` directory. Pickup must be idempotent and
+retain the request id/upload id in a sidecar manifest or local job log.
 
 Claim a quarantined object first with `POST /api/internal/uploads/:uploadId/pickup-status`, `Authorization: Bearer <INCOMING_PICKUP_SECRET>`, and JSON `{ "state": "scanning", "claimToken": "<uuid>" }`. The Worker atomically accepts only an awaiting, due-retry, or expired-lease claim, returning the same claim token and a short lease expiry. Persist that token privately. Renew active work before lease expiry with `{ "state": "heartbeat", "claimToken": "<uuid>" }`; retry with `{ "state": "retry", "claimToken": "<uuid>", "retryAfterSeconds": 60, "errorCode": "safe_category" }`. Never put raw scanner/transport errors in this API.
 

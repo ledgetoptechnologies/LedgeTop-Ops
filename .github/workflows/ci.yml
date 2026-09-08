@@ -29,6 +29,37 @@ jobs:
       - name: Verify repository contracts
         run: node --test scripts/source-layout-invariants.test.mjs scripts/client-portal-rollout-manifest.test.mjs scripts/client-portal-release-profile.test.mjs
 
+  incoming-pickup:
+    name: incoming-pickup-alpine
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the exact commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Use the supported Node runtime
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 24
+
+      - name: Verify pickup source and Linux fixtures
+        run: |
+          bash -n scripts/truenas/incoming-pickup-worker.sh
+          bash -n scripts/truenas/incoming-pickup-alpine.test.sh
+          node --test scripts/truenas/incoming-pickup-worker.test.mjs
+
+      - name: Build the pinned TrueNAS pickup image
+        run: docker build -f scripts/truenas/incoming-pickup.Dockerfile -t ledgetop-incoming-pickup:ci .
+
+      - name: Verify Alpine musl no-replace promotion
+        run: >-
+          docker run --rm
+          -v "$PWD/scripts/truenas/incoming-pickup-alpine.test.sh:/tmp/incoming-pickup-alpine.test.sh:ro"
+          --entrypoint /bin/bash
+          ledgetop-incoming-pickup:ci
+          /tmp/incoming-pickup-alpine.test.sh
+
   packages:
     name: ${{ matrix.package }}
     runs-on: ubuntu-24.04

@@ -7,7 +7,11 @@ in the separate Incoming R2 quarantine until the repository-owned
 [incoming pickup worker](incoming-quarantine-pickup.md) has completed a
 time-bounded ClamAV scan, SHA-256 verification, and durable local promotion.
 Use its start-of-hour non-overlapping schedule; do not use a Cloud Sync task to
-copy or delete `quarantine/` directly.
+copy or delete `quarantine/` directly. Treat a generic mirror that includes
+that prefix as misconfigured: stop it, exclude the whole prefix, and use the
+pickup worker's `<request-id>/<upload-id>/payload/<original-name>` local promotion
+instead. The raw `quarantine/.../object` form is never a valid local incoming
+destination.
 
 TrueNAS is authoritative only for the server-owned visible Jobs prefixes that
 are explicitly assigned to its mirror. Originals remain private in the

@@ -1,9 +1,16 @@
 # TrueNAS Incoming quarantine pickup
 
-This worker handles **only** completed inbound-file-request objects stored in
-the private Incoming R2 bucket. It is not a Client Delivery sync, does not
-share or preview uploads, and does not expose incoming content before the scan
+This worker handles completed inbound-file-request objects stored in the
+private Incoming R2 bucket. It is not a Client Delivery sync, does not share
+or preview uploads, and does not expose incoming content before the scan
 passes.
+
+Uploads remain under the private `quarantine/<request-id>/<upload-id>/object`
+staging prefix until the server has completed its checks. That opaque key is
+an implementation detail, not a destination hierarchy. Do not configure any
+generic server mirror, Cloud Sync task, rclone task, or Windows copy job to
+list, copy, or delete `quarantine/`. The repository-owned pickup worker is
+the only supported reader of that prefix.
 
 The repository-owned worker is
 [`scripts/truenas/incoming-pickup-worker.sh`](../../scripts/truenas/incoming-pickup-worker.sh).
@@ -45,7 +52,13 @@ For each object the worker:
    or publication happens here.
 3. Runs a time-bounded `clamscan`, calculates SHA-256, re-HEADs the object to
    prove its ETag and byte count did not change, and atomically renames the
-   staged payload and minimal receipt into the local Incoming dataset.
+   staged payload and minimal receipt into the local Incoming dataset as
+   `<request-id>/<upload-id>/payload/<original-name>`, with a receipt sidecar
+   at `<request-id>/<upload-id>/receipt.json`. The fixed `payload/` directory
+   prevents ordinary names such as `receipt.json` from colliding with pickup
+   state. The local name comes only from Worker-written, revalidated metadata;
+   never from the R2 staging key. Names are limited to 255 UTF-8 bytes on both
+   the upload and pickup boundaries.
 4. Deletes the exact R2 key only after the durable local promotion succeeds.
 5. Posts the existing idempotent receipt with the verified SHA-256 and same
    private claim token. The Operations Worker itself rejects the receipt while
@@ -89,9 +102,9 @@ in an image, compose file, repository, or shell history:
 | `INCOMING_PICKUP_R2_ENDPOINT` | Exact account R2 S3 endpoint, e.g. `https://<account-id>.r2.cloudflarestorage.com`. |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | Bucket-scoped pickup identity, never the Worker credential. |
 | `INCOMING_PICKUP_SECRET` | Receipt-only secret configured in Operations. |
-| `INCOMING_PICKUP_DESTINATION_DIR` | Restrictive local ZFS Incoming dataset, not a public/share mount. |
-| `INCOMING_PICKUP_STAGING_DIR` | Optional staging directory on the **same filesystem** as destination; defaults beneath it. |
-| `INCOMING_PICKUP_STATE_DIR` | Optional private lock/state directory; defaults beneath destination. |
+| `INCOMING_PICKUP_DESTINATION_DIR` | Restrictive local ZFS Incoming dataset, not a public/share mount and not a path segment named `quarantine`. Startup rejects a symlinked or non-canonical destination. |
+| `INCOMING_PICKUP_STAGING_DIR` | Optional staging directory on the **same filesystem** as destination; defaults beneath it. Startup rejects symlinked or quarantine-resolving paths. |
+| `INCOMING_PICKUP_STATE_DIR` | Optional private lock/state directory; defaults beneath destination. Startup rejects symlinked or quarantine-resolving paths. |
 | `INCOMING_PICKUP_API_BASE` | Optional; defaults to the LTDS Incoming acceptance origin. It must remain an approved Incoming host. |
 | `INCOMING_PICKUP_MAX_SOURCE_BYTES` | Optional bound; defaults to 64 GiB. Raise deliberately for larger trusted capacity, never remove. |
 | `INCOMING_PICKUP_SCAN_TIMEOUT_SECONDS` | Optional ClamAV limit; defaults to 900 seconds. |
@@ -122,8 +135,11 @@ rename.
 
 ## Operational checks
 
-- A **pending verification** upload means Operations has not received the
+- An **awaiting server pickup** upload means Operations has not received the
   receipt yet. It is intentionally not downloadable.
+- If a local directory contains `quarantine/<id>/<id>/object`, stop the
+  generic bucket mirror that wrote it. It bypassed the pickup worker and must
+  exclude the complete `quarantine/` prefix before it is restarted.
 - On healthy pickup, the worker logs only a bounded clean-promotion result; it
   never logs names, keys, local paths, content, signed URLs, or secrets.
 - If ClamAV fails, times out, or reports malware, the object remains in R2

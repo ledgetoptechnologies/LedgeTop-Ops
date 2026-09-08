@@ -51,6 +51,44 @@ valid_integer() { [[ "$1" =~ ^[0-9]+$ ]]; }
 
 valid_absolute_dir() { [[ "$1" == /* && "$1" != "/" ]]; }
 
+# Resolve each configured private directory after creating it, rejecting a
+# symlink at any component.  Checking only the configured spelling is not
+# sufficient: `/incoming/final` could otherwise resolve through a symlink to
+# a quarantine mount.  The returned path is canonical and safe to compose
+# with server-generated request/upload IDs.
+canonical_private_dir() {
+  PICKUP_DIRECTORY="$1" python3 - <<'PY'
+import os
+import sys
+
+raw = os.environ.get("PICKUP_DIRECTORY", "")
+if not raw.startswith("/") or raw == "/":
+    raise SystemExit(1)
+normalized = os.path.normpath(raw)
+if normalized == "/" or not normalized.startswith("/"):
+    raise SystemExit(1)
+
+current = "/"
+for component in normalized.split("/")[1:]:
+    if not component or component in (".", ".."):
+        raise SystemExit(1)
+    current = os.path.join(current, component)
+    # Do this before and after creation.  The second check catches a local
+    # configuration race instead of silently following a link.
+    if os.path.lexists(current) and os.path.islink(current):
+        raise SystemExit(1)
+    if not os.path.lexists(current):
+        os.mkdir(current, 0o700)
+    if os.path.islink(current) or not os.path.isdir(current):
+        raise SystemExit(1)
+
+resolved = os.path.realpath(normalized)
+if resolved != normalized or any(part.casefold() == "quarantine" for part in resolved.split("/") if part):
+    raise SystemExit(1)
+print(resolved)
+PY
+}
+
 valid_api_base() {
   [[ "$1" =~ ^https://incoming\.(ledgetopdroneservices|ledgetoptechnologies)\.com/api/internal/uploads$ ]]
 }
@@ -63,9 +101,28 @@ valid_bucket() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{2,62}$ ]]; }
 
 valid_upload_id() { [[ "$1" =~ ^[A-Za-z0-9_-]{8,200}$ ]]; }
 
+# R2 metadata is not a pathname authority.  The Worker writes this basename
+# only after its own filename validation; validate it again before it becomes a
+# local filename or receipt field.
+valid_payload_name() {
+  PAYLOAD_NAME="$1" python3 - <<'PY'
+import os
+name = os.environ.get("PAYLOAD_NAME", "")
+valid = (
+    bool(name)
+    and len(name.encode("utf-8")) <= 255
+    and name not in (".", "..")
+    and "/" not in name
+    and "\\" not in name
+    and not any(ord(character) < 32 or ord(character) == 127 for character in name)
+)
+raise SystemExit(0 if valid else 1)
+PY
+}
+
 valid_claim_token() { [[ "$1" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]]; }
 
-for dependency in aws curl clamscan sha256sum timeout flock python3 stat mktemp mkdir mv rm find dirname awk sleep; do
+for dependency in aws curl clamscan sha256sum timeout flock python3 stat mktemp mkdir rm find dirname awk sleep; do
   require_command "$dependency"
 done
 
@@ -83,11 +140,10 @@ valid_integer "$INCOMING_PICKUP_MAX_JOBS" && (( INCOMING_PICKUP_MAX_JOBS >= 1 &&
   die "INCOMING_PICKUP_MAX_JOBS must be an integer from 1 through 1000"
 valid_integer "$INCOMING_PICKUP_OVERSIZE_RETRY_SECONDS" && (( INCOMING_PICKUP_OVERSIZE_RETRY_SECONDS >= 60 && INCOMING_PICKUP_OVERSIZE_RETRY_SECONDS <= 86400 )) ||
   die "INCOMING_PICKUP_OVERSIZE_RETRY_SECONDS must be an integer from 60 through 86400"
-valid_absolute_dir "$INCOMING_PICKUP_DESTINATION_DIR" || die "INCOMING_PICKUP_DESTINATION_DIR must be an absolute non-root path"
-valid_absolute_dir "$INCOMING_PICKUP_STAGING_DIR" || die "INCOMING_PICKUP_STAGING_DIR must be an absolute non-root path"
-valid_absolute_dir "$INCOMING_PICKUP_STATE_DIR" || die "INCOMING_PICKUP_STATE_DIR must be an absolute non-root path"
+INCOMING_PICKUP_DESTINATION_DIR=$(canonical_private_dir "$INCOMING_PICKUP_DESTINATION_DIR") || die "INCOMING_PICKUP_DESTINATION_DIR must be a canonical private directory outside a quarantine segment"
+INCOMING_PICKUP_STAGING_DIR=$(canonical_private_dir "$INCOMING_PICKUP_STAGING_DIR") || die "INCOMING_PICKUP_STAGING_DIR must be a canonical private directory outside a quarantine segment"
+INCOMING_PICKUP_STATE_DIR=$(canonical_private_dir "$INCOMING_PICKUP_STATE_DIR") || die "INCOMING_PICKUP_STATE_DIR must be a canonical private directory outside a quarantine segment"
 
-mkdir -p -- "$INCOMING_PICKUP_DESTINATION_DIR" "$INCOMING_PICKUP_STAGING_DIR" "$INCOMING_PICKUP_STATE_DIR"
 chmod 700 -- "$INCOMING_PICKUP_DESTINATION_DIR" "$INCOMING_PICKUP_STAGING_DIR" "$INCOMING_PICKUP_STATE_DIR" 2>/dev/null || true
 
 destination_device=$(stat -c '%d' -- "$INCOMING_PICKUP_DESTINATION_DIR")
@@ -155,20 +211,89 @@ finally:
 PY
 }
 
+# `mv -T` still replaces an empty destination directory on GNU coreutils, so
+# it is not sufficient for a durable no-overwrite promotion.  The TrueNAS
+# worker requires Linux renameat2 with RENAME_NOREPLACE: if the kernel or libc
+# cannot provide it, fail closed, keep the source object in R2 for retry, and
+# discard the private local staging directory.
+atomic_promote_dir() {
+  python3 - "$1" "$2" <<'PY'
+import ctypes
+import errno
+import os
+import platform
+import sys
+
+source, destination = sys.argv[1:]
+libc = ctypes.CDLL(None, use_errno=True)
+renameat2 = getattr(libc, "renameat2", None)
+AT_FDCWD = -100
+RENAME_NOREPLACE = 1
+source_bytes = os.fsencode(source)
+destination_bytes = os.fsencode(destination)
+
+if renameat2 is not None:
+    renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(AT_FDCWD, source_bytes, AT_FDCWD, destination_bytes, RENAME_NOREPLACE)
+else:
+    # musl's libc in the pinned Alpine image does not export renameat2 even
+    # though the Linux kernel exposes it.  The syscall fallback is intentionally
+    # limited to known 64-bit Linux ABI numbers; an unknown platform fails closed.
+    syscall_numbers = {
+        "x86_64": 316, "amd64": 316,
+        "aarch64": 276, "arm64": 276,
+        "riscv64": 276,
+    }
+    syscall_number = syscall_numbers.get(platform.machine().lower()) if platform.system() == "Linux" else None
+    syscall = getattr(libc, "syscall", None)
+    if syscall_number is None or syscall is None:
+        raise SystemExit(1)
+    syscall.restype = ctypes.c_long
+    result = syscall(
+        ctypes.c_long(syscall_number),
+        ctypes.c_int(AT_FDCWD), ctypes.c_char_p(source_bytes),
+        ctypes.c_int(AT_FDCWD), ctypes.c_char_p(destination_bytes),
+        ctypes.c_uint(RENAME_NOREPLACE),
+    )
+
+if result == 0:
+    raise SystemExit(0)
+error = ctypes.get_errno()
+# A concurrent/local destination is expected and retryable.  Do not fall back
+# to a replacing rename for any error, including an unsupported kernel.
+if error in (errno.EEXIST, errno.ENOTEMPTY):
+    raise SystemExit(2)
+raise SystemExit(1)
+PY
+}
+
+# A successful rename adds the promoted directory beneath the per-request
+# parent, and may also add that parent beneath the destination root.  Both
+# directory entries must be durable before recovery is allowed to delete R2.
+durable_promotion_parent() {
+  local final_dir="$1" final_parent
+  final_parent=$(dirname -- "$final_dir") || return 1
+  fsync_path "$final_parent" && fsync_path "$INCOMING_PICKUP_DESTINATION_DIR"
+}
+
 write_receipt() {
-  local receipt_path="$1" state="$2" upload_id="$3" request_id="$4" object_etag="$5" object_bytes="$6" sha256="$7" claim_token="$8"
-  PICKUP_CLAIM_TOKEN="$claim_token" python3 - "$receipt_path" "$state" "$upload_id" "$request_id" "$object_etag" "$object_bytes" "$sha256" <<'PY'
+  local receipt_path="$1" state="$2" upload_id="$3" request_id="$4" object_etag="$5" object_bytes="$6" sha256="$7" claim_token="$8" payload_name="${9:-payload}" schema_version="${10:-3}"
+  valid_payload_name "$payload_name" || return 1
+  [[ "$schema_version" =~ ^[123]$ ]] || return 1
+  PICKUP_CLAIM_TOKEN="$claim_token" python3 - "$receipt_path" "$state" "$upload_id" "$request_id" "$object_etag" "$object_bytes" "$sha256" "$payload_name" "$schema_version" <<'PY'
 import json, os, sys, tempfile
-path, state, upload_id, request_id, etag, size, digest = sys.argv[1:]
+path, state, upload_id, request_id, etag, size, digest, payload_name, schema_version = sys.argv[1:]
 claim_token = os.environ["PICKUP_CLAIM_TOKEN"]
 record = {
-    "schemaVersion": 1,
+    "schemaVersion": int(schema_version),
     "state": state,
     "uploadId": upload_id,
     "requestId": request_id,
     "objectEtag": etag,
     "objectBytes": int(size),
     "sha256": digest,
+    "payloadName": payload_name,
     "pickupClaimToken": claim_token,
 }
 parent = os.path.dirname(path)
@@ -386,7 +511,19 @@ start_claim_heartbeat() {
   printf 'active\n' >"$HEARTBEAT_STATE_FILE"
   chmod 600 -- "$HEARTBEAT_STATE_FILE"
   (
-    while sleep 300; do
+    heartbeat_sleep_pid=""
+    stop_heartbeat_sleep() {
+      if [[ -n "$heartbeat_sleep_pid" ]]; then
+        kill "$heartbeat_sleep_pid" 2>/dev/null || true
+      fi
+      exit 0
+    }
+    trap stop_heartbeat_sleep TERM INT
+    while :; do
+      sleep 300 &
+      heartbeat_sleep_pid=$!
+      wait "$heartbeat_sleep_pid" || exit 0
+      heartbeat_sleep_pid=""
       if ! post_pickup_status "$upload_id" heartbeat "$claim_token"; then
         printf 'lost\n' >"$HEARTBEAT_STATE_FILE"
         exit 0
@@ -399,6 +536,8 @@ start_claim_heartbeat() {
 stop_claim_heartbeat() {
   if [[ -n "$HEARTBEAT_PID" ]]; then
     kill "$HEARTBEAT_PID" 2>/dev/null || true
+    # The heartbeat's TERM trap also stops its child sleep, so this reaps the
+    # whole local callback loop without delaying the pickup for five minutes.
     wait "$HEARTBEAT_PID" 2>/dev/null || true
   fi
   HEARTBEAT_PID=""
@@ -422,6 +561,7 @@ try:
     etag = source["ETag"].strip("\\\"")
     metadata = source.get("Metadata") or {}
     request_id = metadata["requestid"]
+    original_name = metadata["originalname"]
 except (KeyError, AttributeError, TypeError, ValueError):
     raise SystemExit(1)
 if isinstance(size, bool) or not isinstance(size, int) or size < 1:
@@ -430,7 +570,11 @@ if not re.fullmatch(r"[0-9a-fA-F-]{1,128}", etag):
     raise SystemExit(1)
 if not re.fullmatch(r"[A-Za-z0-9_-]{8,200}", request_id):
     raise SystemExit(1)
-print(json.dumps({"bytes":size,"etag":etag.lower(),"requestId":request_id}, separators=(",", ":")))
+if (not isinstance(original_name, str) or not original_name or len(original_name.encode("utf-8")) > 255
+        or original_name in (".", "..") or "/" in original_name or "\\" in original_name
+        or any(ord(character) < 32 or ord(character) == 127 for character in original_name)):
+    raise SystemExit(1)
+print(json.dumps({"bytes":size,"etag":etag.lower(),"requestId":request_id,"originalName":original_name}, separators=(",", ":")))
 '
 }
 
@@ -458,10 +602,12 @@ local_digest() { sha256sum -- "$1" | awk '{print tolower($1)}'; }
 
 promote_and_accept() {
   local upload_id="$1" request_id="$2" key="$3" identity="$4"
-  local object_etag object_bytes stage_file digest final_dir receipt claim_token
+  local object_etag object_bytes original_name stage_file digest final_dir receipt claim_token
   PICKUP_ATTEMPTED=0
   object_etag=$(json_field "$identity" etag) || return 1
   object_bytes=$(json_field "$identity" bytes) || return 1
+  original_name=$(json_field "$identity" originalName) || return 1
+  valid_payload_name "$original_name" || return 1
   [[ "$object_bytes" =~ ^[0-9]+$ ]] && (( object_bytes <= INCOMING_PICKUP_MAX_SOURCE_BYTES )) || {
     log "job deferred because the configured source-byte bound was exceeded"
     # The API permits a retry transition only after scanning has claimed the
@@ -478,8 +624,25 @@ promote_and_accept() {
     return 0
   }
 
-  final_dir="$INCOMING_PICKUP_DESTINATION_DIR/$upload_id"
+  # The only user-visible local hierarchy is constructed from server-shaped
+  # IDs plus the Worker-validated original basename.  Never use the R2
+  # quarantine key as a local path.
+  local final_parent
+  final_parent="$INCOMING_PICKUP_DESTINATION_DIR/$request_id"
+  # The IDs are server-shaped, but still refuse a locally injected symlink
+  # rather than letting a misconfigured/malicious local path redirect a
+  # promoted file outside the canonical destination root.
+  if ! mkdir --mode=700 -- "$final_parent" 2>/dev/null && [[ ! -d "$final_parent" ]]; then
+    log "local promotion parent could not be prepared; object left for retry"
+    return 0
+  fi
+  [[ ! -L "$final_parent" ]] || { log "local promotion parent is unsafe; object left for retry"; return 0; }
+  final_dir="$final_parent/$upload_id"
   receipt="$final_dir/receipt.json"
+  if [[ -L "$final_dir" ]]; then
+    log "local promotion destination is unsafe; object left for retry"
+    return 0
+  fi
   if [[ -e "$final_dir" ]]; then
     # A prior run may have completed the durable local promotion but stopped
     # before deleting R2 or posting its idempotent receipt.  Do not re-scan,
@@ -504,7 +667,11 @@ promote_and_accept() {
 
   CURRENT_STAGE=$(mktemp -d "$INCOMING_PICKUP_STAGING_DIR/job.XXXXXXXX")
   chmod 700 -- "$CURRENT_STAGE"
-  stage_file="$CURRENT_STAGE/payload"
+  # Keep the receipt sidecar in the job root and every user-supplied basename
+  # beneath a fixed payload directory.  This preserves names such as
+  # `receipt.json` without ever colliding with pickup state.
+  mkdir --mode=700 -- "$CURRENT_STAGE/payload"
+  stage_file="$CURRENT_STAGE/payload/$original_name"
   start_claim_heartbeat "$upload_id" "$claim_token"
   # This cap intentionally counts source transfer starts, rather than listing
   # slots. Deferred, malformed, or not-yet-due keys must not block later keys.
@@ -546,7 +713,7 @@ promote_and_accept() {
     report_retry "$upload_id" "$object_etag" "$object_bytes" "$claim_token" 300 local_durability_failed
     return 0
   fi
-  if ! write_receipt "$CURRENT_STAGE/receipt.json" "promoted" "$upload_id" "$request_id" "$object_etag" "$object_bytes" "$digest" "$claim_token"; then
+  if ! write_receipt "$CURRENT_STAGE/receipt.json" "promoted" "$upload_id" "$request_id" "$object_etag" "$object_bytes" "$digest" "$claim_token" "$original_name" 3; then
     log "local receipt could not be written; object left for retry"
     stop_claim_heartbeat
     report_retry "$upload_id" "$object_etag" "$object_bytes" "$claim_token" 300 local_receipt_failed
@@ -575,33 +742,65 @@ promote_and_accept() {
   rm -f -- "$HEARTBEAT_STATE_FILE"
   HEARTBEAT_STATE_FILE=""
 
-  if ! mv -- "$CURRENT_STAGE" "$final_dir"; then
+  # Linux renameat2(RENAME_NOREPLACE) preserves no-overwrite promotion
+  # semantics even if local state appears after the earlier existence check.
+  # Never fall back to `mv`: it can replace an empty destination directory.
+  if ! atomic_promote_dir "$CURRENT_STAGE" "$final_dir"; then
     log "local promotion could not be completed; object left for retry"
+    rm -rf -- "$CURRENT_STAGE"
+    CURRENT_STAGE=""
     report_retry "$upload_id" "$object_etag" "$object_bytes" "$claim_token" 300 local_promotion_failed
     return 0
   fi
   CURRENT_STAGE=""
-  fsync_path "$INCOMING_PICKUP_DESTINATION_DIR"
+  if ! durable_promotion_parent "$final_dir"; then
+    log "local promotion directory could not be made durable; object left for retry"
+    return 0
+  fi
   recover_one "$final_dir" "$key" "$after_scan"
 }
 
 recover_one() {
-  local final_dir="$1" key="$2" listed_identity="${3:-}" receipt payload upload_id request_id object_etag object_bytes digest claim_token current
+  local final_dir="$1" key="$2" listed_identity="${3:-}" receipt payload payload_name schema_version expected_dir upload_id request_id object_etag object_bytes digest claim_token current
   receipt="$final_dir/receipt.json"
-  payload="$final_dir/payload"
-  [[ -f "$receipt" && -f "$payload" ]] || { log "local promotion state is incomplete; object left quarantined"; return 0; }
+  [[ -f "$receipt" ]] || { log "local promotion state is incomplete; object left quarantined"; return 0; }
+  schema_version=$(receipt_field "$receipt" schemaVersion 2>/dev/null || true)
   upload_id=$(receipt_field "$receipt" uploadId 2>/dev/null || true)
   request_id=$(receipt_field "$receipt" requestId 2>/dev/null || true)
   object_etag=$(receipt_field "$receipt" objectEtag 2>/dev/null || true)
   object_bytes=$(receipt_field "$receipt" objectBytes 2>/dev/null || true)
   digest=$(receipt_field "$receipt" sha256 2>/dev/null || true)
   claim_token=$(receipt_field "$receipt" pickupClaimToken 2>/dev/null || true)
-  [[ $(receipt_field "$receipt" state 2>/dev/null || true) == "promoted" ]] || return 0
+  payload_name=$(receipt_field "$receipt" payloadName 2>/dev/null || printf 'payload')
   valid_upload_id "$upload_id" && valid_upload_id "$request_id" && [[ "$object_etag" =~ ^[0-9a-f-]{1,128}$ ]] &&
     [[ "$object_bytes" =~ ^[0-9]+$ ]] && [[ "$digest" =~ ^[a-f0-9]{64}$ ]] && valid_claim_token "$claim_token" || {
       log "local promotion receipt is invalid; object left quarantined"
       return 0
     }
+  valid_payload_name "$payload_name" || { log "local promotion receipt is invalid; object left quarantined"; return 0; }
+  case "$schema_version" in
+    1)
+      expected_dir="$INCOMING_PICKUP_DESTINATION_DIR/$upload_id"
+      payload="$final_dir/payload"
+      ;;
+    2)
+      expected_dir="$INCOMING_PICKUP_DESTINATION_DIR/$request_id/$upload_id"
+      payload="$final_dir/$payload_name"
+      ;;
+    3)
+      expected_dir="$INCOMING_PICKUP_DESTINATION_DIR/$request_id/$upload_id"
+      payload="$final_dir/payload/$payload_name"
+      ;;
+    *)
+      log "local promotion receipt has an unsupported schema; object left quarantined"
+      return 0
+      ;;
+  esac
+  # A receipt is not authority to recover arbitrary directories. In particular,
+  # never let a staged job beneath .incoming-staging pass this point.
+  [[ "$final_dir" == "$expected_dir" ]] || { log "local promotion receipt is outside the accepted hierarchy; object left quarantined"; return 0; }
+  [[ -f "$payload" ]] || { log "local promotion state is incomplete; object left quarantined"; return 0; }
+  [[ $(receipt_field "$receipt" state 2>/dev/null || true) == "promoted" ]] || return 0
   # Recovery scans local promotion receipts too.  Reconstruct only the
   # server-owned key format from separately validated receipt fields; never
   # accept a key read from local input or ask Operations to waive its R2 check.
@@ -632,7 +831,7 @@ recover_one() {
   fi
 
   if post_acceptance "$upload_id" "$digest" "$claim_token"; then
-    write_receipt "$receipt" "accepted" "$upload_id" "$request_id" "$object_etag" "$object_bytes" "$digest" "$claim_token"
+    write_receipt "$receipt" "accepted" "$upload_id" "$request_id" "$object_etag" "$object_bytes" "$digest" "$claim_token" "$payload_name" "$schema_version"
     rm -f -- "$(retry_marker_path "$upload_id")"
     rm -f -- "$(claim_marker_path "$upload_id")"
     log "upload accepted after clean verified promotion"
@@ -649,8 +848,9 @@ recover_promotions() {
     local final_dir
     final_dir=$(dirname -- "$receipt")
     [[ $(receipt_field "$receipt" state 2>/dev/null || true) == "promoted" ]] || continue
+    durable_promotion_parent "$final_dir" || { log "local promotion directory could not be made durable; object left for retry"; continue; }
     recover_one "$final_dir" "" ""
-  done < <(find "$INCOMING_PICKUP_DESTINATION_DIR" -mindepth 2 -maxdepth 2 -type f -name receipt.json -print0)
+  done < <(find "$INCOMING_PICKUP_DESTINATION_DIR" -mindepth 2 -maxdepth 3 -type f -name receipt.json -print0)
 }
 
 list_candidates_page() {

@@ -719,6 +719,28 @@
 
 .client-portal, .client-portal-boundary { min-height: 100vh; background: #f4f6f8; }
 
+/* The portal is a shared Ledge Top surface, but its selected PA source still
+   needs an unambiguous division label. Keep that distinction in the brand
+   lockup instead of implying that the two legal entities are one company. */
+.portal-brand-copy { display: grid; gap: .12rem; }
+.portal-brand-copy > strong { color: #fff; font: inherit; }
+.portal-brand-mark {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  flex: 0 0 48px;
+  border: 1px solid color-mix(in srgb, var(--orange), #fff 22%);
+  border-radius: 12px;
+  background: linear-gradient(145deg, #1d2632, #0b0d11);
+  color: #fff;
+  font-size: .9rem;
+  font-weight: 850;
+  letter-spacing: .05em;
+}
+.portal-brand[data-portal-division="technologies"] small { color: #8bc7ff; }
+.portal-brand[data-portal-division="generic"] small { color: #d6a98f; }
+
 .client-portal-header,
 .client-portal-gate-header {
   position: sticky;
@@ -963,10 +985,15 @@
 .portal-workspace-tabs {
   display: flex;
   gap: 1.5rem;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
   border-bottom: 1px solid var(--line);
   margin-bottom: 1.25rem;
 }
 .portal-workspace-tabs button {
+  flex: 0 0 auto;
   position: relative;
   padding: .8rem .1rem;
   background: transparent;
@@ -1831,7 +1858,10 @@
   .client-portal-header .ltds-brand { gap: .45rem; font-size: .84rem; }
   .client-portal-header .ltds-brand img { width: 40px; height: 40px; }
   .client-portal-header .ltds-brand small { font-size: .58rem; letter-spacing: .09em; }
-  .client-portal-header .ltds-brand > span { display: none; }
+  /* The source-aware mark remains visible and the full accessible name stays
+     on the lockup, while the redundant copy yields space to header actions. */
+  .client-portal-header .portal-brand-copy { display: none; }
+  .client-portal-header .portal-brand-mark { width: 40px; height: 40px; flex-basis: 40px; }
   .portal-workspace-switcher > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 }
 
@@ -1924,6 +1954,13 @@
 .portal-viewer-share-created strong { grid-column: 1 / -1; }
 .portal-viewer-share-created input { width: 100%; min-width: 0; }
 @media (max-width: 360px) {
+  .portal-workspace-tabs {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: .25rem .75rem;
+    overflow-x: visible;
+  }
+  .portal-workspace-tabs button { width: 100%; min-width: 0; }
   .portal-viewer-shares li { grid-template-columns: minmax(0, 1fr); align-items: stretch; }
   .portal-viewer-shares li button { width: 100%; }
   .portal-viewer-share-created { grid-template-columns: minmax(0, 1fr); }

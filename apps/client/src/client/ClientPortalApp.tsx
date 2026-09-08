@@ -7,7 +7,7 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
-import { AccountMenu, Brand, Card, EmptyState, Loading, StatusPill, openViewerShell } from "@ltds/ui";
+import { AccountMenu, Card, EmptyState, Loading, StatusPill, openViewerShell } from "@ltds/ui";
 import type { DeliveryLocationCollection } from "@ltds/shared";
 import type { RequestError } from "./bulk-download";
 import {
@@ -87,6 +87,7 @@ import {
   type PortalDelegatedShareCreated,
   type PortalDelegatedShareTarget,
 } from "./portal-api";
+import { BRAND } from "@ltds/shared";
 import { readClientViewerUnits, writeClientViewerUnits } from "./viewer-units-preference";
 import { clientViewerShellPath, nativeClientViewerShellPath } from "./ClientViewerShell";
 import {
@@ -110,6 +111,7 @@ import { invitationCapabilitiesLabel, invitationRequestSchema } from "./invitati
 import { PortalInvitationRequests } from "./PortalInvitationRequests";
 import { PortalAddressBook, PortalAddressBookPicker } from "./PortalAddressBook";
 import type { AddressBookContact } from "./address-book-api";
+import { resolvePortalBrand, type PortalBrandContext } from "./portal-brand";
 
 const PORTAL_FILE_RENDER_WINDOW = 450;
 const PORTAL_FILE_RENDER_STEP = 150;
@@ -234,11 +236,26 @@ function projectStatusLabel(status: string | null): string {
     .replace(/\b\w/g, (character) => character.toUpperCase());
 }
 
+function PortalBrand({ product, sourceId }: { product: string; sourceId?: string | null }) {
+  const context: PortalBrandContext = resolvePortalBrand(window.location.hostname, sourceId);
+  const mark = context.shortName === "Ledge Top" ? "LT" : context.shortName;
+  return <div
+    className={`ltds-brand portal-brand portal-brand-${context.key}`}
+    data-portal-division={context.key}
+    aria-label={`${context.name} ${context.division} ${product}`}
+  >
+    {context.key === "drone-services"
+      ? <img src={BRAND.logoUrl} alt="" />
+      : <span className="portal-brand-mark" aria-hidden="true">{mark}</span>}
+    <span className="portal-brand-copy"><strong>{context.name}</strong><small>{context.division} · {product}</small></span>
+  </div>;
+}
+
 function PortalBoundary({ children }: { children: ReactNode }) {
   return (
     <div className="client-portal-boundary">
       <header className="client-portal-gate-header">
-        <Brand product="Client portal" />
+        <PortalBrand product="Client portal" />
       </header>
       <main className="client-portal-gate-main">{children}</main>
     </div>
@@ -2882,6 +2899,9 @@ export function ClientPortalApp({
   const shellDisplayName = native ? native.workspace.displayName : account!.displayName;
   const workspaces = gate.data.workspaces ?? [];
   const selectedWorkspaceId = gate.data.selectedWorkspaceId ?? null;
+  const selectedWorkspaceSourceId = native?.workspace.sourceId
+    ?? workspaces.find(workspace => workspace.id === selectedWorkspaceId)?.sourceId
+    ?? null;
   const switchWorkspace = async (workspaceId: string) => {
     if (workspaceId === selectedWorkspaceId) return;
     bootstrapController.current?.abort(); const controller = new AbortController(); bootstrapController.current = controller;
@@ -3400,7 +3420,7 @@ export function ClientPortalApp({
   return (
     <div className="client-portal">
       <header className="client-portal-header">
-        <Brand product="Client portal" />
+        <PortalBrand product="Client portal" sourceId={selectedWorkspaceSourceId} />
         {capabilities.workspaceHierarchyV2 && workspaces.length > 1 && (
           <label className="portal-workspace-switcher">
             <span>Workspace</span>

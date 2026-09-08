@@ -33,7 +33,7 @@ test("incoming uploads describe quarantine as pending verification rather than a
   await expect(uploads).toContainText("Server pickup will retry");
   await expect(uploads).toContainText("Next retry");
   await expect(uploads).toContainText("does not mean malware was detected");
-  await uploads.getByRole("button", { name: "View safe record" }).click();
-  await expect(page.getByText("Private quarantine record present", { exact: false })).toBeVisible();
-  await expect(page.getByText("Quarantined bytes cannot be opened, previewed, or downloaded from Operations.")).toBeVisible();
+  await uploads.getByRole("button", { name: "Inspect upload" }).click();
+  await expect(page.getByText("Private incoming object present", { exact: false })).toBeVisible();
+  await expect(page.getByText("safe, per-file browse view", { exact: false })).toBeVisible();
 });

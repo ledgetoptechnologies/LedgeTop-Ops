@@ -15,7 +15,26 @@
 }
 @media(min-width:961px) and (max-width:1200px) {
   .client-portal-header { gap: 1rem; }
-  .client-portal-header:has(.portal-workspace-switcher) .ltds-brand > span { display: none; }
+  /* Keep the selected source visible when the workspace switcher is present.
+     The old rule removed the entire label to make this compact header fit,
+     which made the shared portal ambiguous for users with multiple sources.
+     Bound the lockup and ellipsize its two lines instead so the switcher and
+     the account controls retain their usable hit areas. */
+  .client-portal-header:has(.portal-workspace-switcher) .portal-brand-copy {
+    display: grid;
+    min-width: 0;
+    max-width: clamp(7rem, 12vw, 9.5rem);
+  }
+  .client-portal-header:has(.portal-workspace-switcher) .portal-brand-copy > strong,
+  .client-portal-header:has(.portal-workspace-switcher) .portal-brand small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .client-portal-header:has(.portal-workspace-switcher) .portal-brand small {
+    font-size: .58rem;
+    letter-spacing: .06em;
+  }
 }
 .portal-file-preview .portal-feedback-composer { max-height: 45vh; overflow: auto; }
 .portal-file-preview:has(> .portal-feedback-entry) { grid-template-rows: auto auto minmax(0, 1fr); }

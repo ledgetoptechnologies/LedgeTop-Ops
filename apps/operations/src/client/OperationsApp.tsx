@@ -194,11 +194,11 @@ function incomingUploadTiming(upload: IncomingUploadSummary) {
 }
 function incomingRecordBucketText(record: IncomingUploadRecord) {
   if (record.bucketObject.state === "present") {
-    return `Private quarantine record present · ${bytes(record.bucketObject.size ?? record.declaredSize)}`;
+    return `Private incoming object present · ${bytes(record.bucketObject.size ?? record.declaredSize)}`;
   }
   return record.status === "accepted"
-    ? "Temporary quarantine record removed after server promotion"
-    : "No temporary quarantine object is currently available";
+    ? "Private source object removed after server promotion"
+    : "No private incoming object is currently available";
 }
 const NAV: Array<{
   page: Page;
@@ -4207,7 +4207,7 @@ function IncomingUploads() {
                         className="button-ghost button-small"
                         onClick={() => setSelectedUploadId(upload.id || null)}
                       >
-                        View safe record
+                        Inspect upload
                       </button>}
                     </div>
                   </div>
@@ -4241,7 +4241,7 @@ function IncomingUploads() {
                 </dl>
                 <p className="incoming-upload-status-detail">{status.detail}</p>
                 {timing.length > 0 && <p className="incoming-upload-status-detail">{timing.join(" · ")}</p>}
-                <p className="muted">This record shows private metadata only. Quarantined bytes cannot be opened, previewed, or downloaded from Operations.</p>
+                <p className="muted">This is the safe, per-file browse view. Operations shows metadata and pickup state only; it never opens, previews, extracts, or downloads private incoming bytes.</p>
               </div>;
             })() : null}
           </Card>}
@@ -7133,17 +7133,17 @@ function Administration({ session }: { session: Session }) {
   const canManageConnections = session.user.isAdministrator && allowed(session.user, "integrations.manage");
   return (
     <>
-      <section aria-labelledby="administration-configurations-heading">
+      <section className="administration-configurations" aria-labelledby="administration-configurations-heading">
         <div className="client-hub-section-heading"><div><h2 id="administration-configurations-heading">Configurations</h2><p>Connected applications and services used by Operations.</p></div></div>
         <Configurations session={session} />
       </section>
-      <div className="dashboard-grid">
-        {canManageConnections && <div id="project-alpha-connections"><ProjectAlphaConnections /></div>}
-        {canManageConnections && <PortalWorkflowReadiness />}
-        {canManageConnections && <ProjectAlphaAccessTokenExpiry />}
-        {canManageConnections && <DeliveryChangeRecoveryStatus />}
-        {!canManageConnections && <Card title="Project Alpha"><p>Connection management requires an administrator with global integration-management permission.</p></Card>}
-        <Card title="Security model">
+      <div className="administration-panels">
+        {canManageConnections && <section id="project-alpha-connections" className="administration-panel administration-panel-wide"><ProjectAlphaConnections /></section>}
+        {canManageConnections && <section className="administration-panel"><PortalWorkflowReadiness /></section>}
+        {canManageConnections && <section className="administration-panel"><ProjectAlphaAccessTokenExpiry /></section>}
+        {canManageConnections && <section className="administration-panel administration-panel-wide"><DeliveryChangeRecoveryStatus /></section>}
+        {!canManageConnections && <section className="administration-panel administration-panel-wide"><Card title="Project Alpha"><p>Connection management requires an administrator with global integration-management permission.</p></Card></section>}
+        <section className="administration-panel administration-panel-wide"><Card title="Security model">
           <p>
             Cloudflare Access authenticates staff. LTDS roles, explicit grants,
             resource scopes, and explicit denies authorize every API request.
@@ -7155,7 +7155,7 @@ function Administration({ session }: { session: Session }) {
             </li>
             <li>Privileged mutations are audited.</li>
           </ul>
-        </Card>
+        </Card></section>
       </div>
       {session.capabilities?.clientWorkspaceManagerRecovery?.enabled === true && allowed(session.user, "operations.manage") && <ClientWorkspaceManagerRecovery />}
       {session.capabilities?.delegatedShareProvisioning?.enabled === true && session.user.isAdministrator && allowed(session.user, "delivery.share.audit") && <DelegatedShareAdministration />}
