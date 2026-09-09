@@ -203,7 +203,7 @@ describe("delegated-share expiry reconciliation", () => {
   it("wires the reconciler only into the hourly maintenance window", () => {
     const source = readFileSync(new URL("../src/worker/index.ts", import.meta.url), "utf8");
     const hourly = source.match(/if \(event\.cron === "15 \* \* \* \*"\) tasks\.push\(([\s\S]*?)\n  \);/);
-    expect(hourly?.[1]).toContain("reconcileExpiredClientDelegatedShares(env)");
-    expect(source.match(/reconcileExpiredClientDelegatedShares\(env\)/g)).toHaveLength(1);
+    expect(hourly?.[1]).toContain("runClientDelegatedShareExpiryReconciliation(env)");
+    expect(source.match(/runClientDelegatedShareExpiryReconciliation\(env\)/g)).toHaveLength(1);
   });
 });
