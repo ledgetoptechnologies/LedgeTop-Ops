@@ -186,6 +186,35 @@ an overlap a harmless skipped run if a large upload is still scanning.
 0 * * * * /usr/local/libexec/incoming-pickup-worker.sh --once
 ```
 
+### Two-stage verification and pickup after rollout
+
+To separate ClamAV verification from the later local delivery, create two
+TrueNAS scheduled tasks using the same image, destination dataset, staging
+directory, state directory, bucket credentials, and claim secret. Set the
+verifier cap to one transfer and run it frequently; run pickup at minute zero.
+Do not also schedule `--once`, because it would create a competing combined
+workflow (the shared flock prevents overlap but does not make the workflows
+equivalent).
+
+```cron
+# Verify at most one pending object per minute; source remains in R2.
+* * * * * INCOMING_PICKUP_MAX_JOBS=1 /usr/local/libexec/incoming-pickup-entrypoint.sh --verify-only
+# Download only server-verified objects, then durably promote/delete/accept.
+0 * * * * /usr/local/libexec/incoming-pickup-entrypoint.sh --pickup-only
+```
+
+These are in-container command examples, not paths available on the TrueNAS
+host. Configure the scheduler to run the image with the corresponding mode
+argument and mounts; do not rely on `docker exec` into the legacy one-shot
+container after it has exited. Keep the image entrypoint so verification
+refreshes signatures before scanning; pickup deliberately skips that refresh.
+
+For the verifier task set `INCOMING_PICKUP_MAX_JOBS=1` and retain the bounded
+scan timeout. For the pickup task, keep the same state and destination paths;
+its candidate listing is server-filtered to verified, due uploads. The two
+tasks are an operator scheduling configuration only: this repository does not
+update an existing TrueNAS scheduler or deploy credentials.
+
 Build [`scripts/truenas/incoming-pickup.Dockerfile`](../../scripts/truenas/incoming-pickup.Dockerfile)
 and start it using the accompanying
 [`scripts/truenas/incoming-pickup.compose.example.yaml`](../../scripts/truenas/incoming-pickup.compose.example.yaml).
