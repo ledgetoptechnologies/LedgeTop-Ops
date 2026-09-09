@@ -174,5 +174,24 @@ the root of `ltds-incoming` in PULL/MOVE mode. A temporary pause was requested;
 no pause or `ready/` cutover has been confirmed. Do not enable publication
 based on this screenshot, and do not delete previously downloaded staging data.
 
+## Migration and exact-head follow-up
+
+A fresh private Client D1 export was hash-verified and restored to in-memory
+SQLite. The exact 0213 migration preserved row counts in all 267 existing
+tables, with successful integrity checks and zero foreign-key violations before
+and after. Restore deferred foreign-key enforcement until export indexes were
+present, then reenabled and checked it. No private SQL or database contents were
+published. Production migration 0213 then applied successfully; readback found
+its migration record and three empty new tables. This does not enable upload
+publication or establish the external ready-prefix policy/cutover.
+
+CI at `5f517d4` exposed a browser-test timing race: the operational-contact save
+acknowledgement can render before the subsequent revision-effect refresh reaches
+the mock server. The exact two-read assertion now waits for that separate request;
+no runtime behavior or expected request count changed. Ten repetitions on each
+desktop/mobile project passed (20 total); the complete business-project workspace
+browser suite then passed 88 tests. Release remains held for fresh exact-head
+CI; the earlier `86c5658` pass does not override this failure.
+
 The full [goal acceptance checklist](client-portal-goal-acceptance.md) remains
 authoritative for scope. These observations do not accept its joined workflows.
