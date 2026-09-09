@@ -23,7 +23,7 @@ export function IncomingArchiveBrowser({ uploadId, active, loader }: { uploadId:
   if (!active || page.status === "unavailable") return <section aria-label="Incoming archive"><p role="status">Archive unavailable.</p></section>;
   const crumbs = path ? path.split("/").filter(Boolean) : [];
   return <section aria-label="Incoming archive" className="incoming-archive-browser">
-    <h3>Archive contents</h3><p className="muted">Names and sizes only. Download the verified archive to open its files.</p>
+    <h3>Archive contents</h3><p className="muted">Names and sizes only. Download the archive to open its files. Listing contents is not a malware scan.</p>
     <nav aria-label="Archive breadcrumb"><button type="button" className="button-ghost button-small" onClick={() => setPath("")}>Root</button>{crumbs.map((crumb, index) => <span key={`${crumb}-${index}`}> / <button type="button" className="button-ghost button-small" onClick={() => setPath(crumbs.slice(0, index + 1).join("/"))}>{crumb}</button></span>)}</nav>
     <label style={{ display: "grid", gap: "0.5rem", marginBlock: "1rem" }}>Search archive names <input value={query} maxLength={100} onChange={event => setQuery(event.target.value)} /></label>
     {page.status === "pending" && <p role="status">Loading archive…</p>}{page.status === "failed" && <p role="alert">Archive could not be loaded.</p>}
