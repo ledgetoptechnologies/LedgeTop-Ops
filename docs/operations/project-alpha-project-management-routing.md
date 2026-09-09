@@ -22,7 +22,7 @@ permission configures it with:
   "expectedConnectorVersion": 4,
   "expectedVersion": null,
   "idempotencyKey": "a-unique-operation-key",
-  "reviewedUrlTemplate": "https://alpha.example.com/customers/{recordId}/projects/new"
+  "reviewedUrlTemplate": "https://alpha.example.com/projects"
 }
 ```
 
@@ -36,6 +36,20 @@ a fragment. It may contain one `{recordId}` placeholder only as a complete path
 segment. A static HTTPS project-management URL is also accepted. The audit
 records only whether the route is enabled and whether it is a base URL or a
 record-path template; it does not duplicate the URL.
+
+### Project Alpha route compatibility
+
+Use the static `/projects` destination only after the PA release providing that
+clean alias is installed and verified. Older PA releases expose project
+management through `/?page=project/projects-list`, which this validator rejects.
+Do not substitute a fictional client-specific path or loosen query validation
+to make the example pass. The generic alias opens PA's existing project list;
+the user selects Create and the appropriate client inside PA under its normal
+permissions. Operations does not preselect or authorize a client there.
+
+The optional `{recordId}` contract remains available for a separately verified
+producer route, but is not evidence that PA implements such a route. Browser
+fixtures exercise Operations link behavior only, not the destination server.
 
 Connector administration reads include a separate `projectManagement` array.
 An absent array means the application/database contract is not coordinated;

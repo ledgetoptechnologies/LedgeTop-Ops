@@ -10,6 +10,14 @@ records displayed **Automatic workspace pending**; secondary-source records
 displayed **Portal unavailable for this source**. Business-directory visibility
 does not establish portal provisioning or successful source delivery.
 
+A primary organization detail page was also inspected in the live browser.
+At the current desktop width its overview rendered in three columns, with
+business contacts, operational contacts and business projects together. Portal
+revocation controls appeared after the history/administration sections. The
+organization contact editor opened with its two existing business contacts as
+options, and Cancel returned to read mode without saving. This is read-only
+desktop smoke coverage, not mobile, persistence or authorization acceptance.
+
 Both Project Alpha integration tabs retained their previously rendered status
 but displayed **Session expired**. Those retained status values are not a fresh
 server check. Reauthentication is required before verifying current readiness,
@@ -31,7 +39,13 @@ precedence on that assumption.
 
 A local, narrowly scoped diagnostic reports fixed categories for runtime-key
 presence and encrypted-credential readability only. Its test/release review is
-still in progress; it is not deployed evidence or a confirmed cause. Do not
+recorded in local PA commit `b3ddd813`: 84 focused integration, Ed25519 and
+provisioning tests passed with 573 assertions and no skips, using PHP 8.2.12
+with the available Sodium extension enabled for that invocation. The full PA
+run subsequently completed successfully: 804 tests, 6,510 assertions, with 91
+skipped tests. Those skips are unverified coverage, not passing acceptance;
+the run does not establish full production parity. This is not deployed
+evidence or a confirmed cause. Do not
 record key values, fingerprints, ciphertext or credential fields in reports.
 
 ## Remaining gates
