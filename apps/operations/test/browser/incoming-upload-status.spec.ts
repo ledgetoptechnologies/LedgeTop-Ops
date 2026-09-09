@@ -28,6 +28,14 @@ test(`incoming upload download gating: ${scenario}`, async ({ page }) => {
       csrfToken: "csrf-incoming", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null,
       capabilities: { incomingUploads: { enabled: true, reason: "available" } },
     } });
+    if (path === "/api/delivery/incoming-link/uploads") {
+      const params = new URL(route.request().url()).searchParams;
+      const q = params.get("q"), next = params.get("cursor");
+      const uploads = q === "missing" ? [] : next
+        ? [{ id: "older-two", originalName: "Older second.jpg", contributorName: "Example contributor", status: "accepted" }]
+        : [{ id: "upload-one", originalName: "iCloud Photos.zip", contributorName: "Example contributor", status: "quarantined", verificationState: "verified" }];
+      return route.fulfill({ json: { uploads, nextCursor: !q && !next ? "older-page" : null } });
+    }
     if (path === "/api/delivery/incoming-link") return route.fulfill({ json: { link: {
       id: "incoming-one", url: "https://incoming.example.test/request", title: "Send project files", maxFiles: 10,
       maxBytes: 2_000_000_000, accessCodeProtected: false, createdAt: "2026-09-05T12:00:00.000Z",
@@ -53,6 +61,23 @@ test(`incoming upload download gating: ${scenario}`, async ({ page }) => {
   await expect(uploads).toContainText("Server pickup will retry");
   await expect(uploads).toContainText("Next retry");
   await expect(uploads).toContainText("does not mean malware was detected");
+  if (scenario === "legacy") {
+    await uploads.getByRole("button", { name: "Browse all uploads" }).click();
+    const browser = page.getByRole("region", { name: "Browse incoming uploads" });
+    await expect(browser.getByText("1 uploads shown · more available", { exact: true })).toBeVisible();
+    await browser.getByRole("button", { name: "Load more uploads" }).click();
+    await expect(browser.getByText("Older second.jpg", { exact: true })).toBeVisible();
+    await browser.getByLabel("Search files or contributors").fill("missing");
+    await expect(browser.getByText("No matching uploads.", { exact: true })).toBeVisible();
+    await expect(browser.getByText("Older second.jpg", { exact: true })).toHaveCount(0);
+    await browser.getByLabel("Search files or contributors").fill("");
+    await expect(browser.getByRole("button", { name: "Inspect upload" })).toHaveCount(1);
+    await browser.getByRole("button", { name: "Inspect upload" }).click();
+    await expect(page.getByRole("heading", { name: "Incoming upload record" })).toBeVisible();
+    expect(downloadRequests).toBe(0);
+    await uploads.getByRole("button", { name: "Close upload browser" }).click();
+    await expect(browser).toHaveCount(0);
+  }
   await uploads.getByRole("button", { name: "Inspect upload" }).click();
   if (scenario !== "removed") await expect(page.getByText("Private incoming object present", { exact: false })).toBeVisible();
   await expect(page.getByText("Archive listings contain metadata only", { exact: false })).toBeVisible();

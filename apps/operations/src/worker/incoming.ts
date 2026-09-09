@@ -1104,7 +1104,25 @@ staffApp.delete("/", async (c) => {
 staffApp.get("/uploads", async (c) => {
   await requireIncomingStaff(c, "file_requests.view");
   const link = await currentLink(c.env);
-  if (!link) return c.json({ uploads: [] });
+  const query = (c.req.query("q") || "").trim().toLowerCase();
+  if (query.length > 100) throw new HTTPException(400, { message: "Invalid upload search" });
+  const decode = (value: string | undefined): { createdAt: string; id: string } | null => {
+    if (!value) return null;
+    try {
+      if (value.length > 1024 || !/^[A-Za-z0-9_-]+$/.test(value)) throw new Error();
+      const base = value.replace(/-/g, "+").replace(/_/g, "/");
+      const binary = atob(base + "=".repeat((4 - base.length % 4) % 4));
+      const parsed = JSON.parse(new TextDecoder().decode(Uint8Array.from(binary, character => character.charCodeAt(0)))) as Record<string, unknown>;
+      if (!link || parsed.requestId !== String(link.id) || parsed.query !== query || typeof parsed.createdAt !== "string" || typeof parsed.id !== "string" || !parsed.createdAt || !parsed.id) throw new Error();
+      return { createdAt: parsed.createdAt, id: parsed.id };
+    } catch { throw new HTTPException(400, { message: "Invalid upload cursor" }); }
+  };
+  if (!link) {
+    if (c.req.query("cursor")) throw new HTTPException(400, { message: "Invalid upload cursor" });
+    return c.json({ uploads: [], nextCursor: null });
+  }
+  const cursor = decode(c.req.query("cursor"));
+  const literalQuery = query.replace(/[\\%_]/g, "\\$&");
   const rows = await c.env.DELIVERY_DB.withSession("first-primary").prepare(
     `SELECT u.id,u.original_name originalName,u.declared_size declaredSize,u.actual_size actualSize,
       u.content_type contentType,u.status,u.pickup_state pickupState,u.verification_state verificationState,u.verified_at verifiedAt,u.pickup_attempt_count pickupAttemptCount,
@@ -1112,9 +1130,15 @@ staffApp.get("/uploads", async (c) => {
       u.rejection_reason rejectionReason,u.created_at createdAt,u.completed_at completedAt,c.name contributorName
      FROM file_request_uploads u
      JOIN file_request_contributors c ON c.id=u.contributor_id
-     WHERE u.request_id=? ORDER BY u.created_at DESC LIMIT 100`,
-  ).bind(String(link.id)).all();
-  return c.json({ uploads: rows.results });
+     WHERE u.request_id=? AND (?='' OR lower(u.original_name) LIKE '%' || ? || '%' ESCAPE '\\' OR lower(c.name) LIKE '%' || ? || '%' ESCAPE '\\')
+       AND (? IS NULL OR u.created_at<? OR (u.created_at=? AND u.id<?))
+     ORDER BY u.created_at DESC,u.id DESC LIMIT 51`,
+  ).bind(String(link.id), query, literalQuery, literalQuery, cursor?.createdAt ?? null, cursor?.createdAt ?? null, cursor?.createdAt ?? null, cursor?.id ?? null).all();
+  const page = rows.results.slice(0, 50), more = rows.results[50] as { createdAt: string; id: string } | undefined;
+  const uploads = page.map(row => ({ ...row, fileName: (row as { originalName: string }).originalName, size: (row as { actualSize: number | null; declaredSize: number }).actualSize ?? (row as { declaredSize: number }).declaredSize, uploadedAt: (row as { completedAt: string | null; createdAt: string }).completedAt ?? (row as { createdAt: string }).createdAt }));
+  const last = page.at(-1) as { createdAt: string; id: string } | undefined;
+  const nextCursor = more && last ? (() => { const bytes = new TextEncoder().encode(JSON.stringify({ requestId: String(link.id), query, createdAt: last.createdAt, id: last.id })); let binary = ""; for (const byte of bytes) binary += String.fromCharCode(byte); return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, ""); })() : null;
+  return c.json({ uploads, nextCursor });
 });
 
 staffApp.get("/uploads/:uploadId", async (c) => {

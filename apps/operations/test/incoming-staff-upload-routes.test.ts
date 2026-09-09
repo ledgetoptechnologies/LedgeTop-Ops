@@ -157,6 +157,37 @@ describe("incoming upload staff records and pickup lifecycle", () => {
       .toMatchObject({ pickup_state: "scanning", pickup_attempt_count: 1, pickup_claim_token: winner, pickup_lease_expires_at: expect.any(String) });
   });
 
+  it("pages a scoped upload collection with literal search and bound cursors", async () => {
+    const statements = Array.from({ length: 105 }, (_, index) => database.prepare(`INSERT INTO file_request_uploads(id,request_id,contributor_id,object_key,upload_id,original_name,declared_size,content_type,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`).bind(
+      `page-${String(index).padStart(3, "0")}`, "request-one", "contributor-one", `private-key-${index}`, `multipart-page-${index}`, index === 0 ? "100%_literal.txt" : `item-${index}.txt`, 1, "text/plain", "quarantined", "2026-09-08 12:00:00"));
+    await database.batch(statements);
+    const first = await staffRequest("/api/delivery/incoming-link/uploads");
+    expect(first.status).toBe(200);
+    const one = await first.json() as { uploads: Array<{ id: string }>; nextCursor: string | null };
+    expect(one.uploads).toHaveLength(50); expect(one.nextCursor).toEqual(expect.any(String));
+    const second = await staffRequest(`/api/delivery/incoming-link/uploads?cursor=${encodeURIComponent(one.nextCursor!)}`);
+    const two = await second.json() as typeof one;
+    const third = await staffRequest(`/api/delivery/incoming-link/uploads?cursor=${encodeURIComponent(two.nextCursor!)}`);
+    const three = await third.json() as typeof one;
+    expect([...one.uploads, ...two.uploads, ...three.uploads]).toHaveLength(106);
+    expect(new Set([...one.uploads, ...two.uploads, ...three.uploads].map(row => row.id)).size).toBe(106);
+    const literal = await staffRequest("/api/delivery/incoming-link/uploads?q=%25_");
+    expect((await literal.json() as typeof one).uploads.map(row => row.id)).toEqual(["page-000"]);
+    const contributor = await staffRequest("/api/delivery/incoming-link/uploads?q=joe");
+    expect((await contributor.json() as typeof one).uploads).toHaveLength(50);
+    await database.prepare("UPDATE file_request_uploads SET original_name='报告.txt' WHERE id IN (SELECT id FROM file_request_uploads WHERE id LIKE 'page-%' ORDER BY id LIMIT 51)").run();
+    const unicode = await staffRequest(`/api/delivery/incoming-link/uploads?q=${encodeURIComponent("报告")}`);
+    const unicodePage = await unicode.json() as typeof one;
+    expect(unicodePage.uploads).toHaveLength(50); expect(unicodePage.nextCursor).toEqual(expect.any(String));
+    expect((await staffRequest(`/api/delivery/incoming-link/uploads?q=${encodeURIComponent("报告")}&cursor=${encodeURIComponent(unicodePage.nextCursor!)}`)).status).toBe(200);
+    expect((await staffRequest(`/api/delivery/incoming-link/uploads?q=other&cursor=${encodeURIComponent(one.nextCursor!)}`)).status).toBe(400);
+    expect((await staffRequest("/api/delivery/incoming-link/uploads?cursor=not*a-cursor")).status).toBe(400);
+    await database.batch([database.prepare("INSERT INTO file_requests(id,public_id,title,created_by,expires_at,max_files,max_bytes,session_version) VALUES('request-two','public-two','Other','staff-incoming',datetime('now','+1 day'),10,999999,1)"), database.prepare("UPDATE incoming_link_state SET active_request_id='request-two' WHERE slot='default'")]);
+    expect((await staffRequest(`/api/delivery/incoming-link/uploads?cursor=${encodeURIComponent(one.nextCursor!)}`)).status).toBe(400);
+    const payload = JSON.stringify(one);
+    expect(payload).not.toContain("private-key-"); expect(payload).not.toContain("pickup-receipt-secret");
+  });
+
   it("records only a live, exact R2 verification proof and exposes no proof material to staff", async () => {
     const started = await pickupRequest("/api/internal/uploads/upload-one/verification-status", { state: "scanning", claimToken: claimOne });
     expect(started.status).toBe(200);

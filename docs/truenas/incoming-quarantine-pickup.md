@@ -93,6 +93,15 @@ scan receipts for old records.
 
 ### Release acceptance checklist
 
+The staff Incoming page keeps a short Recent uploads summary. **Browse all
+uploads** opens a type-to-search collection for the current incoming link,
+with 50 records per page and explicit Load more. Search matches filenames or
+contributor names, not private storage keys. Inspecting a row opens the same
+verification-aware detail used by Recent uploads; collection browsing never
+downloads source bytes. Link rotation resets this collection's scope and old
+cursors are rejected. This is not a historical cross-link archive or a folder
+upload feature: ordinary uploads still retain basenames only.
+
 - Apply the additive database migration before publishing code that queries
   the new columns. Back up and use the migration ledger; do not recreate tables.
 - Deploy the Operations verification, listing, and download routes together.
