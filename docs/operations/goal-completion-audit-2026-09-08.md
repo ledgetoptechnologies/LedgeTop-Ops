@@ -9,6 +9,50 @@ security and rollout documents linked below.
 
 ## Current conclusion
 
+### September 8 maintenance-release follow-up
+
+PR #41 was merged into Operations `main` as
+`2fa63bdadfca69b97ea7b9212a0e8c2f7fa3ffd6`. All ten PR and main CI jobs
+passed, including both Client and Operations desktop/mobile browser suites.
+The table's original Client CI gap below is therefore closed. Main evidence:
+https://github.com/ledgetoptechnologies/LedgeTop-Ops/actions/runs/34291302236.
+Cloudflare deployment readback confirmed 100% traffic on Operations version
+`8d46c0f4-8679-411e-848a-c07a3315e590`, Client version
+`bf068857-9762-4787-8a01-2e1477782597`, and Ops Sync version
+`a79827e1-c76b-4265-8c7a-ecee9d5d7b0d`.
+
+A subsequent fresh browser reload of the LTDS organization workspace still
+reported `Automatic workspace pending` and `Portal eligibility enabled —
+workspace not linked`. Business synchronization reported healthy, with its
+last success at September 8, 08:21 local time. This is direct evidence that
+healthy business ingestion does not yet prove default-on portal provisioning.
+Both Project Alpha browser tabs were at login; their current producer recovery
+status could not be inspected. Sign-in was requested without changing access.
+
+The fetched Project Alpha `origin/main` is now `14b304d7`, containing the
+TrueNAS managed-key permissions fix after the startup repair in `c019cc32`.
+Repository presence does not prove either production container has adopted it.
+Existing encryption keys must be preserved; deleting them is not a recovery
+step. Durable expiry-scheduler health remains in implementation and must not
+be marked deployed from this checkpoint.
+
+After the owner signed in, both live PA footers confirmed `v14b304d` and both
+existing connections showed enabled Ed25519 signing and web-process readiness.
+LTDS had 21 active producer workspaces and 41 terminal workspace events; LTT
+had three active producer workspaces, four retrying events, and four terminal
+events. Both scheduled reconciliation statuses were `Preflight not ready`.
+Failure summaries showed `external-operations-delivery-unavailable` with no
+HTTP status. The LTDS cron log independently reported `prerequisites_missing`.
+Manual Sync now completed bounded passes without recovering terminal records.
+
+The current sender throws that code before HTTP when delivery configuration
+is unavailable. This narrows the next check to cron configuration/readiness;
+it does not establish which prerequisite is missing or prove a receiver fault.
+The owner was asked whether both cron containers were recreated with the web
+update. Preserve credentials, key files, and failed-event history while checking
+the shared config mount and effective key. Replacement snapshot recovery remains
+pending until sender readiness and receiver acceptance can be verified.
+
 The core architecture and most requested workflows are implemented and covered
 locally. The overall goal is **not rollout-complete**. Several higher-authority
 Client workflows remain deliberately default-off, LTT Project Alpha has not
