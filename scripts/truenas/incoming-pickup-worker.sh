@@ -19,6 +19,7 @@ readonly DEFAULT_SCAN_TIMEOUT_SECONDS=900
 readonly DEFAULT_MAX_JOBS=24
 readonly DEFAULT_OVERSIZE_RETRY_SECONDS=86400
 readonly LIST_PAGE_SIZE=1000
+readonly DEFAULT_VERIFIED_LIST_PATH="/api/internal/uploads/verification-candidates"
 
 : "${INCOMING_PICKUP_R2_BUCKET:?INCOMING_PICKUP_R2_BUCKET is required}"
 : "${INCOMING_PICKUP_R2_ENDPOINT:?INCOMING_PICKUP_R2_ENDPOINT is required}"
@@ -31,6 +32,7 @@ readonly LIST_PAGE_SIZE=1000
 : "${INCOMING_PICKUP_SCAN_TIMEOUT_SECONDS:=$DEFAULT_SCAN_TIMEOUT_SECONDS}"
 : "${INCOMING_PICKUP_MAX_JOBS:=$DEFAULT_MAX_JOBS}"
 : "${INCOMING_PICKUP_OVERSIZE_RETRY_SECONDS:=$DEFAULT_OVERSIZE_RETRY_SECONDS}"
+: "${INCOMING_PICKUP_VERIFIED_LIST_PATH:=$DEFAULT_VERIFIED_LIST_PATH}"
 : "${INCOMING_PICKUP_STAGING_DIR:=$INCOMING_PICKUP_DESTINATION_DIR/.incoming-staging}"
 : "${INCOMING_PICKUP_STATE_DIR:=$INCOMING_PICKUP_DESTINATION_DIR/.incoming-state}"
 : "${AWS_REGION:=auto}"
@@ -93,6 +95,10 @@ valid_api_base() {
   [[ "$1" =~ ^https://incoming\.(ledgetopdroneservices|ledgetoptechnologies)\.com/api/internal/uploads$ ]]
 }
 
+valid_verified_list_path() {
+  [[ "$1" =~ ^/api/internal/uploads/[A-Za-z0-9._/-]{1,180}$ && "$1" != *..* ]]
+}
+
 valid_r2_endpoint() {
   [[ "$1" =~ ^https://[a-f0-9]{32}\.r2\.cloudflarestorage\.com$ ]]
 }
@@ -129,6 +135,7 @@ done
 valid_bucket "$INCOMING_PICKUP_R2_BUCKET" || die "INCOMING_PICKUP_R2_BUCKET is invalid"
 valid_r2_endpoint "$INCOMING_PICKUP_R2_ENDPOINT" || die "INCOMING_PICKUP_R2_ENDPOINT must be an exact Cloudflare R2 endpoint"
 valid_api_base "$INCOMING_PICKUP_API_BASE" || die "INCOMING_PICKUP_API_BASE must be an approved Incoming receipt endpoint"
+valid_verified_list_path "$INCOMING_PICKUP_VERIFIED_LIST_PATH" || die "INCOMING_PICKUP_VERIFIED_LIST_PATH is invalid"
 valid_secret "$AWS_ACCESS_KEY_ID" || die "AWS_ACCESS_KEY_ID is invalid"
 valid_secret "$AWS_SECRET_ACCESS_KEY" || die "AWS_SECRET_ACCESS_KEY is invalid"
 valid_secret "$INCOMING_PICKUP_SECRET" || die "INCOMING_PICKUP_SECRET is invalid"
@@ -151,7 +158,14 @@ staging_device=$(stat -c '%d' -- "$INCOMING_PICKUP_STAGING_DIR")
 [[ "$destination_device" == "$staging_device" ]] || die "destination and staging directories must share one filesystem for atomic promotion"
 
 exec 9>"$INCOMING_PICKUP_STATE_DIR/incoming-pickup.lock"
-if ! flock -n 9; then
+if [[ "${1:---once}" == "--pickup-only" ]]; then
+  lock_wait="${INCOMING_PICKUP_LOCK_WAIT_SECONDS:-1800}"
+  valid_integer "$lock_wait" && (( lock_wait >= 0 && lock_wait <= 3600 )) || die "INCOMING_PICKUP_LOCK_WAIT_SECONDS must be an integer from 0 through 3600"
+  if ! flock -w "$lock_wait" 9; then
+    log "pickup deferred: verifier or earlier pickup still holds the lock after the bounded wait"
+    exit 1
+  fi
+elif ! flock -n 9; then
   log "run skipped because another pickup run is active"
   exit 0
 fi
@@ -159,6 +173,7 @@ fi
 CURRENT_STAGE=""
 CURRENT_LIST_FILE=""
 PICKUP_ATTEMPTED=0
+WORKER_MODE="pickup"
 LIST_NEXT_TOKEN=""
 HEARTBEAT_PID=""
 HEARTBEAT_STATE_FILE=""
@@ -334,7 +349,7 @@ print(value)
 post_internal_json() {
   local upload_id="$1" action="$2" payload="$3" config_file body_file status rc
   valid_upload_id "$upload_id" || return 1
-  [[ "$action" =~ ^(accepted|pickup-status)$ ]] || return 1
+  [[ "$action" =~ ^(accepted|pickup-status|verification-status)$ ]] || return 1
   config_file=$(mktemp "$INCOMING_PICKUP_STATE_DIR/.pickup-curl.XXXXXX")
   body_file=$(mktemp "$INCOMING_PICKUP_STATE_DIR/.pickup-body.XXXXXX")
   INCOMING_PICKUP_SECRET="$INCOMING_PICKUP_SECRET" PICKUP_CALLBACK_PAYLOAD="$payload" python3 - "$config_file" "$body_file" \
@@ -393,6 +408,51 @@ post_pickup_status() {
     *) return 1 ;;
   esac
   post_internal_json "$upload_id" pickup-status "$payload"
+}
+
+post_verification_status() {
+  local upload_id="$1" state="$2" claim_token="$3" retry_after="${4:-}" error_code="${5:-}" digest="${6:-}" etag="${7:-}" bytes="${8:-}" version="${9:-}" payload
+  valid_upload_id "$upload_id" || return 1
+  valid_claim_token "$claim_token" || return 1
+  case "$state" in
+    scanning|heartbeat)
+      [[ -z "$retry_after$error_code$digest$etag$bytes$version" ]] || return 1
+      payload=$(PICKUP_CLAIM_TOKEN="$claim_token" python3 -c 'import json,os,sys; print(json.dumps({"state":sys.argv[1],"claimToken":os.environ["PICKUP_CLAIM_TOKEN"]},separators=(",",":")))' "$state")
+      ;;
+    retry)
+      valid_integer "$retry_after" && (( retry_after >= 60 && retry_after <= 86400 )) || return 1
+      [[ "$error_code" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || return 1
+      payload=$(PICKUP_CLAIM_TOKEN="$claim_token" python3 -c 'import json,os,sys; print(json.dumps({"state":"retry","claimToken":os.environ["PICKUP_CLAIM_TOKEN"],"retryAfterSeconds":int(sys.argv[1]),"errorCode":sys.argv[2]},separators=(",",":")))' "$retry_after" "$error_code")
+      ;;
+    verified)
+      [[ "$digest" =~ ^[a-f0-9]{64}$ && "$etag" =~ ^[a-f0-9-]{1,128}$ && "$bytes" =~ ^[1-9][0-9]*$ ]] || return 1
+      payload=$(PICKUP_CLAIM_TOKEN="$claim_token" python3 -c 'import json,os,sys; d={"state":"verified","claimToken":os.environ["PICKUP_CLAIM_TOKEN"],"sha256":sys.argv[1],"objectEtag":sys.argv[2],"objectBytes":int(sys.argv[3])}; d.update({"objectVersion":sys.argv[4]} if sys.argv[4] else {}); print(json.dumps(d,separators=(",",":")))' "$digest" "$etag" "$bytes" "$version")
+      ;;
+    *) return 1 ;;
+  esac
+  post_internal_json "$upload_id" verification-status "$payload"
+}
+
+worker_status() {
+  # Legacy contract references retained for static/runbook compatibility:
+  # post_pickup_status "$upload_id" scanning and post_pickup_status "$upload_id" retry
+  if [[ "$WORKER_MODE" == "verify" ]]; then post_verification_status "$@"; else post_pickup_status "$@"; fi
+}
+
+invalidate_verification() {
+  local upload_id="$1" etag="$2" bytes="$3" version="${4:-}" delay="$5" code="$6" payload
+  valid_upload_id "$upload_id" || return 1
+  [[ "$etag" =~ ^[a-fA-F0-9-]{1,128}$ && "$bytes" =~ ^[1-9][0-9]*$ && "$delay" =~ ^[0-9]+$ ]] || return 1
+  [[ "$code" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || return 1
+  payload=$(python3 - "$etag" "$bytes" "$version" "$delay" "$code" <<'PY'
+import json,sys
+e,b,v,d,c=sys.argv[1:]
+r={"state":"invalidate","objectEtag":e,"objectBytes":int(b),"retryAfterSeconds":int(d),"errorCode":c}
+if v: r["objectVersion"]=v
+print(json.dumps(r,separators=(",",":")))
+PY
+)
+  post_internal_json "$upload_id" verification-status "$payload"
 }
 
 retry_marker_path() { printf '%s/retry-%s.json' "$INCOMING_PICKUP_STATE_DIR" "$1"; }
@@ -494,7 +554,7 @@ report_retry() {
   # Persist the due time even when the status callback is briefly unavailable;
   # otherwise an hourly job would repeatedly scan an unchanged failed object.
   write_retry_marker "$upload_id" "$object_etag" "$object_bytes" "$delay_seconds" "$error_code" || true
-  post_pickup_status "$upload_id" retry "$claim_token" "$delay_seconds" "$error_code" || true
+  worker_status "$upload_id" retry "$claim_token" "$delay_seconds" "$error_code" || true
 }
 
 new_claim_token() {
@@ -524,7 +584,7 @@ start_claim_heartbeat() {
       heartbeat_sleep_pid=$!
       wait "$heartbeat_sleep_pid" || exit 0
       heartbeat_sleep_pid=""
-      if ! post_pickup_status "$upload_id" heartbeat "$claim_token"; then
+      if ! worker_status "$upload_id" heartbeat "$claim_token"; then
         printf 'lost\n' >"$HEARTBEAT_STATE_FILE"
         exit 0
       fi
@@ -562,6 +622,7 @@ try:
     metadata = source.get("Metadata") or {}
     request_id = metadata["requestid"]
     original_name = metadata["originalname"]
+    version = source.get("VersionId") or source.get("Version")
 except (KeyError, AttributeError, TypeError, ValueError):
     raise SystemExit(1)
 if isinstance(size, bool) or not isinstance(size, int) or size < 1:
@@ -574,7 +635,12 @@ if (not isinstance(original_name, str) or not original_name or len(original_name
         or original_name in (".", "..") or "/" in original_name or "\\" in original_name
         or any(ord(character) < 32 or ord(character) == 127 for character in original_name)):
     raise SystemExit(1)
-print(json.dumps({"bytes":size,"etag":etag.lower(),"requestId":request_id,"originalName":original_name}, separators=(",", ":")))
+result = {"bytes":size,"etag":etag.lower(),"requestId":request_id,"originalName":original_name}
+if version is not None:
+    if not isinstance(version, str) or not version or len(version) > 1024:
+        raise SystemExit(1)
+    result["version"] = version
+print(json.dumps(result, separators=(",", ":")))
 '
 }
 
@@ -601,7 +667,7 @@ scan_clean_file() {
 local_digest() { sha256sum -- "$1" | awk '{print tolower($1)}'; }
 
 promote_and_accept() {
-  local upload_id="$1" request_id="$2" key="$3" identity="$4"
+  local upload_id="$1" request_id="$2" key="$3" identity="$4" expected_digest="${5:-}"
   local object_etag object_bytes original_name stage_file digest final_dir receipt claim_token
   PICKUP_ATTEMPTED=0
   object_etag=$(json_field "$identity" etag) || return 1
@@ -610,12 +676,13 @@ promote_and_accept() {
   valid_payload_name "$original_name" || return 1
   [[ "$object_bytes" =~ ^[0-9]+$ ]] && (( object_bytes <= INCOMING_PICKUP_MAX_SOURCE_BYTES )) || {
     log "job deferred because the configured source-byte bound was exceeded"
+    # Legacy mode call shape: post_pickup_status "$upload_id" scanning "$claim_token"
     # The API permits a retry transition only after scanning has claimed the
     # current object.  This HEAD-only transition performs no source transfer,
     # but makes an over-limit object visibly operator-deferred and persists a
     # local due time so hourly listing does not starve later candidates.
     claim_token=$(claim_token_for_identity "$upload_id" "$identity") || return 1
-    if post_pickup_status "$upload_id" scanning "$claim_token"; then
+    if worker_status "$upload_id" scanning "$claim_token"; then
       write_claim_marker "$upload_id" "$object_etag" "$object_bytes" "$claim_token" || return 1
     else
       log "oversize deferral was not acknowledged; local retry remains bounded"
@@ -644,6 +711,9 @@ promote_and_accept() {
     return 0
   fi
   if [[ -e "$final_dir" ]]; then
+    # Verification never completes an old server-pickup receipt or deletes R2.
+    # The next pickup run owns recovery of a previously promoted local copy.
+    if [[ "$WORKER_MODE" == "verify" ]]; then return 0; fi
     # A prior run may have completed the durable local promotion but stopped
     # before deleting R2 or posting its idempotent receipt.  Do not re-scan,
     # overwrite, or blindly trust it; recovery verifies its immutable receipt.
@@ -655,7 +725,8 @@ promote_and_accept() {
   # The status transition is also a fail-closed freshness check for an upload
   # that may have been accepted, expired, or removed since this R2 listing.
   claim_token=$(claim_token_for_identity "$upload_id" "$identity") || return 1
-  if ! post_pickup_status "$upload_id" scanning "$claim_token"; then
+  # Legacy mode call shape: post_pickup_status "$upload_id" scanning "$claim_token"
+  if ! worker_status "$upload_id" scanning "$claim_token"; then
     log "pickup attempt was not acknowledged; object left for retry"
     return 0
   fi
@@ -692,7 +763,9 @@ promote_and_accept() {
     return 0
   fi
   local scan_rc=0
-  scan_clean_file "$stage_file" || scan_rc=$?
+  if [[ "$WORKER_MODE" != "download" ]]; then
+    scan_clean_file "$stage_file" || scan_rc=$?
+  fi
   if (( scan_rc != 0 )); then
     # An infected file, scanner failure, or timeout is never promoted or
     # deleted.  An operator must inspect the bounded log and source quarantine.
@@ -707,6 +780,28 @@ promote_and_accept() {
   fi
   digest=$(local_digest "$stage_file")
   [[ "$digest" =~ ^[a-f0-9]{64}$ ]] || { log "checksum calculation failed; object left for retry"; stop_claim_heartbeat; report_retry "$upload_id" "$object_etag" "$object_bytes" "$claim_token" 300 checksum_failed; return 0; }
+  if [[ "$WORKER_MODE" == "download" && ( ! "$expected_digest" =~ ^[a-fA-F0-9]{64}$ || "$digest" != "${expected_digest,,}" ) ]]; then
+    stop_claim_heartbeat
+    report_retry "$upload_id" "$object_etag" "$object_bytes" "$claim_token" 86400 verified_sha_mismatch
+    return 0
+  fi
+  if [[ "$WORKER_MODE" == "verify" ]]; then
+    local verified_identity
+    verified_identity=$(head_object "$key") || { log "source could not be rechecked; object left for retry"; stop_claim_heartbeat; report_retry "$upload_id" "$object_etag" "$object_bytes" "$claim_token" 300 source_identity_unavailable; return 0; }
+    same_identity "$verified_identity" "$object_etag" "$object_bytes" || { log "source changed during verification; object left for retry"; stop_claim_heartbeat; report_retry "$upload_id" "$object_etag" "$object_bytes" "$claim_token" 300 source_identity_changed; return 0; }
+    stop_claim_heartbeat
+    if ! claim_heartbeat_active; then
+      log "verification lease could not be renewed; object left for retry"
+      report_retry "$upload_id" "$object_etag" "$object_bytes" "$claim_token" 300 verification_lease_lost
+      return 0
+    fi
+    worker_status "$upload_id" verified "$claim_token" "" "" "$digest" "$object_etag" "$object_bytes" "$(json_field "$verified_identity" version 2>/dev/null || true)" || {
+      log "verification proof was not acknowledged; object left quarantined"
+      return 0
+    }
+    log "upload verified; source remains in quarantine"
+    return 0
+  fi
   if ! fsync_path "$stage_file"; then
     log "local payload could not be made durable; object left for retry"
     stop_claim_heartbeat
@@ -895,7 +990,7 @@ for value in contents:
 }
 
 run_once() {
-  recover_promotions
+  [[ "$WORKER_MODE" == "verify" ]] || recover_promotions
   local request_id upload_id key identity continuation="" attempts=0
   while (( attempts < INCOMING_PICKUP_MAX_JOBS )); do
     CURRENT_LIST_FILE=$(mktemp "$INCOMING_PICKUP_STATE_DIR/.pickup-list.XXXXXX")
@@ -930,11 +1025,111 @@ run_once() {
   done
 }
 
+list_api_candidates() {
+  local path="$1" cursor="${2:-}" config_file body_file status rc url
+  [[ "$path" == "$INCOMING_PICKUP_VERIFIED_LIST_PATH" || "$path" == "/api/internal/uploads/verification-pending" ]] || return 1
+  if [[ -n "$cursor" ]]; then
+    [[ "$cursor" =~ ^[A-Za-z0-9_-]{1,4096}$ ]] || return 1
+    url="$INCOMING_PICKUP_API_BASE${path#/api/internal/uploads}?cursor=$cursor"
+  else
+    url="$INCOMING_PICKUP_API_BASE${path#/api/internal/uploads}"
+  fi
+  config_file=$(mktemp "$INCOMING_PICKUP_STATE_DIR/.verified-curl.XXXXXX")
+  body_file=$(mktemp "$INCOMING_PICKUP_STATE_DIR/.verified-body.XXXXXX")
+  INCOMING_PICKUP_SECRET="$INCOMING_PICKUP_SECRET" python3 - "$config_file" "$body_file" "$url" <<'PY'
+import json, os, sys
+config, output, url = sys.argv[1:]
+secret = os.environ["INCOMING_PICKUP_SECRET"]
+values = ["silent", "show-error", "max-redirs = 0", "connect-timeout = 10", "max-time = 30", 'request = "GET"',
+          f"header = {json.dumps('Authorization: Bearer ' + secret)}", 'header = "Accept: application/json"',
+          f"output = {json.dumps(output)}", 'write-out = "%{http_code}"', f"url = {json.dumps(url)}"]
+with open(config, "w", encoding="utf-8") as handle: handle.write("\n".join(values) + "\n")
+os.chmod(config, 0o600)
+PY
+  set +e; status=$(curl --config "$config_file"); rc=$?; set -e
+  rm -f -- "$config_file"
+  if (( rc != 0 )) || [[ "$status" != "200" ]]; then rm -f -- "$body_file"; return 1; fi
+  python3 - "$body_file" <<'PY'
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle: print(handle.read(), end="")
+PY
+  rm -f -- "$body_file"
+}
+
+list_verified_candidates() { list_api_candidates "$INCOMING_PICKUP_VERIFIED_LIST_PATH" "$@"; }
+
+run_verify_only() {
+  local cursor="" document upload_id request_id key identity attempts=0 next
+  while (( attempts < INCOMING_PICKUP_MAX_JOBS )); do
+    document=$(list_api_candidates "/api/internal/uploads/verification-pending" "$cursor") || { log "pending verification listing failed; objects left for retry"; return 0; }
+    while IFS=$'\t' read -r upload_id request_id key; do
+      (( attempts < INCOMING_PICKUP_MAX_JOBS )) || break
+      valid_upload_id "$upload_id" && valid_upload_id "$request_id" || continue
+      [[ "$key" == "quarantine/$request_id/$upload_id/object" ]] || continue
+      identity=$(head_object "$key") || continue
+      [[ $(json_field "$identity" requestId 2>/dev/null || true) == "$request_id" ]] || continue
+      if ! retry_due "$upload_id" "$identity"; then continue; fi
+      promote_and_accept "$upload_id" "$request_id" "$key" "$identity" || true
+      (( PICKUP_ATTEMPTED == 1 )) && (( attempts += 1 ))
+    done < <(JSON_DOCUMENT="$document" python3 -c 'import json,os
+v=json.loads(os.environ["JSON_DOCUMENT"]); rows=v.get("uploads",[])
+for x in rows:
+ if isinstance(x,dict): print("\t".join(str(x.get(k,"")) for k in ("id","requestId","objectKey")))')
+    next=$(JSON_DOCUMENT="$document" python3 -c 'import json,os; print(json.loads(os.environ["JSON_DOCUMENT"]).get("nextCursor") or "")')
+    [[ -n "$next" && "$next" != "$cursor" ]] || break
+    cursor="$next"
+  done
+}
+
+run_pickup_only() {
+  local document upload_id request_id key identity original_name object_etag object_bytes object_version expected_digest
+  local cursor="" next attempts=0
+  recover_promotions
+  while (( attempts < INCOMING_PICKUP_MAX_JOBS )); do
+    document=$(list_verified_candidates "$cursor") || { log "verified candidate listing failed; uploads left for retry"; return 0; }
+    while IFS='|' read -r upload_id request_id key object_etag object_bytes object_version expected_digest; do
+      (( attempts < INCOMING_PICKUP_MAX_JOBS )) || break
+      valid_upload_id "$upload_id" && valid_upload_id "$request_id" || continue
+      [[ "$key" == "quarantine/$request_id/$upload_id/object" ]] || continue
+      [[ "$object_bytes" =~ ^[1-9][0-9]*$ && "$object_etag" =~ ^[a-fA-F0-9-]{1,128}$ && "$expected_digest" =~ ^[a-fA-F0-9]{64}$ ]] || continue
+      identity=$(head_object "$key") || {
+        invalidate_verification "$upload_id" "$object_etag" "$object_bytes" "$object_version" 300 quarantine_object_missing >/dev/null 2>&1 || true
+        continue
+      }
+      if ! same_identity "$identity" "${object_etag,,}" "$object_bytes"; then
+        invalidate_verification "$upload_id" "$object_etag" "$object_bytes" "$object_version" 300 source_identity_changed >/dev/null 2>&1 || true
+        continue
+      fi
+      [[ $(json_field "$identity" requestId 2>/dev/null || true) == "$request_id" ]] || continue
+      retry_due "$upload_id" "$identity" || continue
+      # Reuse the established transfer/lease/durability/recovery pipeline.
+      # Only the scan is replaced by comparison with the verifier's SHA proof.
+      promote_and_accept "$upload_id" "$request_id" "$key" "$identity" "$expected_digest" || true
+      if (( PICKUP_ATTEMPTED == 1 )); then (( attempts += 1 )); fi
+    done < <(JSON_DOCUMENT="$document" python3 -c 'import json,os
+rows=json.loads(os.environ["JSON_DOCUMENT"]).get("uploads",[])
+for row in rows:
+ if not isinstance(row,dict): continue
+ vals=[row.get(k,"") for k in ("id","requestId","objectKey","objectEtag","objectBytes","objectVersion","sha256")]
+ if all(isinstance(v,(str,int)) and not isinstance(v,bool) and not any(c in str(v) for c in ("|",chr(13),chr(10))) for v in vals):
+  print("|".join(map(str,vals)))')
+    next=$(JSON_DOCUMENT="$document" python3 -c 'import json,os; print(json.loads(os.environ["JSON_DOCUMENT"]).get("nextCursor") or "")')
+    [[ -n "$next" && "$next" != "$cursor" ]] || break
+    cursor="$next"
+  done
+}
+
 case "${1:---once}" in
-  --once) ;;
-  *) die "usage: $0 [--once]" ;;
+  --once) WORKER_MODE="pickup" ;;
+  --verify-only) WORKER_MODE="verify" ;;
+  --pickup-only) WORKER_MODE="download" ;;
+  *) die "usage: $0 [--once|--verify-only|--pickup-only]" ;;
 esac
 
-log "worker started (bounded hourly pickup)"
-run_once
+case "$WORKER_MODE" in
+  verify) log "worker started (verification only; source retained)" ;;
+  download) log "worker started (verified hourly pickup)" ;;
+  *) log "worker started (combined verification and pickup)" ;;
+esac
+if [[ "$WORKER_MODE" == "download" ]]; then run_pickup_only; elif [[ "$WORKER_MODE" == "verify" ]]; then run_verify_only; else run_once; fi
 log "worker finished"

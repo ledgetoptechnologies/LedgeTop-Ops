@@ -5,6 +5,7 @@ import { AccountMenu, Brand, Card, EmptyState, Loading, StatusPill, openViewerSh
 import { ApiError, api, setCsrf } from "./api";
 import { operationsViewerShellPath } from "./OperationsViewerShell";
 import { generateSecureAccessCode } from "./access-code";
+import { incomingUploadStatus, type IncomingStatusFacts } from "./incoming-upload-status";
 import {
   DELIVERY_JOBS_PREFIX,
   DELIVERY_ROOT_PREFIX,
@@ -129,6 +130,8 @@ interface IncomingUploadSummary {
   actualSize?: number | null;
   contentType?: string;
   pickupState?: "awaiting_pickup" | "scanning" | "retry" | "accepted" | "rejected";
+  verificationState?: IncomingStatusFacts["verificationState"];
+  verifiedAt?: string | null;
   pickupAttemptCount?: number;
   pickupLastAttemptAt?: string | null;
   pickupNextAttemptAt?: string | null;
@@ -139,6 +142,7 @@ interface IncomingUploadSummary {
 interface IncomingUploadRecord extends IncomingUploadSummary {
   id: string;
   declaredSize: number;
+  downloadAvailable?: boolean;
   bucketObject: {
     state: "present" | "removed";
     size?: number;
@@ -161,31 +165,9 @@ interface IncomingLink {
 interface IncomingLinkResponse {
   link: IncomingLink | null;
 }
-function incomingUploadStatus(upload: IncomingUploadSummary) {
-  if (upload.status === "accepted") return {
-    label: "Accepted by server",
-    detail: "The server verified and promoted this upload. Its temporary quarantined object has been removed.",
-  };
-  if (upload.status === "rejected") return {
-    label: "Rejected",
-    detail: "The upload did not pass the initial validation checks. Review the recorded reason if one is available.",
-  };
-  if (upload.status === "quarantined" && upload.pickupState === "scanning") return {
-    label: "Server verification in progress",
-    detail: "The server is picking up and scanning this private upload. It cannot be opened or downloaded here.",
-  };
-  if (upload.status === "quarantined" && upload.pickupState === "retry") return {
-    label: "Server pickup will retry",
-    detail: "The last private pickup attempt did not complete. The server will retry on its scheduled run; the file remains quarantined. This does not mean malware was detected.",
-  };
-  if (upload.status === "quarantined") return {
-    label: "Awaiting server pickup",
-    detail: "Upload completed and remains private until the server picks it up, checks integrity, and scans it. This status does not mean malware was detected.",
-  };
-  return { label: upload.status?.replaceAll("_", " ") || "Uploaded", detail: null };
-}
 function incomingUploadTiming(upload: IncomingUploadSummary) {
   const facts: string[] = [];
+  if (upload.verificationState === "verified" && upload.verifiedAt) facts.push(`Verified ${date(upload.verifiedAt)}`);
   if (typeof upload.pickupAttemptCount === "number" && upload.pickupAttemptCount > 0)
     facts.push(`${upload.pickupAttemptCount} server ${upload.pickupAttemptCount === 1 ? "attempt" : "attempts"}`);
   if (upload.pickupLastAttemptAt) facts.push(`Last attempt ${date(upload.pickupLastAttemptAt)}`);
@@ -3939,7 +3921,7 @@ function IncomingUploads() {
     [maxFiles, setMaxFiles] = useState("500"),
     [maxBytesGiB, setMaxBytesGiB] = useState("2048"),
     [selectedUploadId, setSelectedUploadId] = useState<string | null>(null);
-  const { data: selectedRecord, error: selectedRecordError, loading: selectedRecordLoading } = useLoad<{ upload: IncomingUploadRecord } | null>(
+  const { data: selectedRecord, error: selectedRecordError, loading: selectedRecordLoading, reload: reloadSelectedRecord } = useLoad<{ upload: IncomingUploadRecord } | null>(
     () => selectedUploadId
       ? api<{ upload: IncomingUploadRecord }>(`/api/delivery/incoming-link/uploads/${encodeURIComponent(selectedUploadId)}`)
       : Promise.resolve(null),
@@ -4154,7 +4136,7 @@ function IncomingUploads() {
               <button
                 className="button-ghost button-small"
                 disabled={busy}
-                onClick={() => void reload()}
+                onClick={() => { void reload(); if (selectedUploadId) void reloadSelectedRecord(); }}
               >
                 Refresh
               </button>
@@ -4241,7 +4223,14 @@ function IncomingUploads() {
                 </dl>
                 <p className="incoming-upload-status-detail">{status.detail}</p>
                 {timing.length > 0 && <p className="incoming-upload-status-detail">{timing.join(" · ")}</p>}
-                <p className="muted">This is the safe, per-file browse view. Operations shows metadata and pickup state only; it never opens, previews, extracts, or downloads private incoming bytes.</p>
+                {record.downloadAvailable === true && record.verificationState === "verified" && record.bucketObject.state === "present" ? <a
+                  className="button-orange"
+                  href={`/api/delivery/incoming-link/uploads/${encodeURIComponent(record.id)}/download`}
+                  download
+                >Download verified file</a> : <p className="muted">{record.bucketObject.state === "removed"
+                  ? "This file is no longer in the incoming bucket. Check the server pickup destination for the downloaded copy."
+                  : "Download becomes available after verification passes and while the file remains in the incoming bucket."}</p>}
+                <p className="muted">This record shows file details and verification separately from server pickup. ZIP contents are not expanded here.</p>
               </div>;
             })() : null}
           </Card>}
