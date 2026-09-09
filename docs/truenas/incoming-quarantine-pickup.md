@@ -50,7 +50,40 @@ verified object remains in R2. The download route rechecks object identity and
 returns an attachment, not an inline preview or public storage URL. Byte ranges
 are supported while that object remains available. Once hourly pickup removes
 it, a new browser download or resume cannot read it from R2; use the server copy.
-ZIP member browsing is not implemented by this per-file download feature.
+Per-file download alone does not provide ZIP inventory browsing. The separate
+inventory increment below requires its own migration, application, and worker
+update.
+
+### Verified ZIP inventory increment
+
+After migration `0212_incoming_upload_archive_inventory.sql` and the matching
+Operations and TrueNAS updates, a verified ZIP can show folder and file names
+inside its upload record. This is a bounded central-directory inventory, not
+an extracted preview or a member-download endpoint. The only content download
+remains the explicit verified archive attachment.
+
+The verifier generates inventory from the already scanned local file and sends
+bounded, sequential pages against the exact verification receipt. Operations
+stores its own verified object version, including when S3 metadata does not
+provide that version to the worker. A listing must match the current proof and
+R2 object; changed objects and completed server pickup make it unavailable.
+
+Unsupported, encrypted, malformed, or over-limit inventories remain unavailable
+without blocking verified archive download or pickup. Default inventory limits
+are 10,000 rows including inferred folders, 4 MiB of central-directory data,
+1 MiB of listing metadata, and depth 32. These are listing limits, not a new
+file-transfer size limit. Failed inventory callbacks retain private metadata
+receipts in the shared state directory, not another copy of the uploaded file.
+Verification runs replay at most `INCOMING_PICKUP_INVENTORY_REPLAY_MAX_JOBS`
+(default one) before checking new uploads. Round-robin selection and a bounded
+retry delay prevent one failed callback from monopolizing later previews.
+Replays do not download or scan the source again. A stale-proof conflict retires
+the obsolete receipt; it does not override the current verification decision.
+Keep this state directory persistent and private across container updates.
+
+This does not recover a folder hierarchy for ordinary uploads: the existing
+upload contract stores basenames rather than source-relative paths. Do not
+interpret the opaque R2 quarantine prefix as a user folder tree.
 
 Verification receipts bind the SHA-256 scan result to the server-observed
 ETag, size, and object version. Listing metadata, a previous file with the same
@@ -80,6 +113,11 @@ scan receipts for old records.
 - Verify browser refresh removes unavailable download controls after pickup.
   ZIP inventory browsing and the broader client-folder browsing workflow need
   their own acceptance; metadata and attachment download alone do not prove them.
+- For the ZIP increment, apply migration 0212 after 0211, then test nested
+  folder navigation, literal name search, and pagination on a verified archive.
+  Interrupt a metadata callback and verify that another queued inventory can
+  proceed and the interrupted one recovers without another source transfer.
+  Confirm pickup still succeeds when ZIP metadata is unsupported or unavailable.
 
 ## Legacy combined worker security boundary
 

@@ -6,6 +6,7 @@ import { ApiError, api, setCsrf } from "./api";
 import { operationsViewerShellPath } from "./OperationsViewerShell";
 import { generateSecureAccessCode } from "./access-code";
 import { incomingUploadStatus, type IncomingStatusFacts } from "./incoming-upload-status";
+import { IncomingArchiveBrowser, type ArchiveEntry, type ArchiveLoader } from "./IncomingArchiveBrowser";
 import {
   DELIVERY_JOBS_PREFIX,
   DELIVERY_ROOT_PREFIX,
@@ -3927,6 +3928,14 @@ function IncomingUploads() {
       : Promise.resolve(null),
     [selectedUploadId],
   );
+  const loadArchive = useCallback<ArchiveLoader>(async ({ path, query, cursor, signal }) => {
+    if (!selectedUploadId) return { status: "unavailable", entries: [] };
+    const params = new URLSearchParams({ path, q: query });
+    if (cursor) params.set("cursor", cursor);
+    const result = await api<{ status: "ready" | "unavailable"; items: ArchiveEntry[]; nextCursor: string | null }>(
+      `/api/delivery/incoming-link/uploads/${encodeURIComponent(selectedUploadId)}/archive-inventory?${params}`, { signal });
+    return { status: result.status, entries: result.items, nextCursor: result.nextCursor || undefined };
+  }, [selectedUploadId]);
   const link = data?.link;
   useEffect(() => {
     if (!link) return;
@@ -4230,7 +4239,10 @@ function IncomingUploads() {
                 >Download verified file</a> : <p className="muted">{record.bucketObject.state === "removed"
                   ? "This file is no longer in the incoming bucket. Check the server pickup destination for the downloaded copy."
                   : "Download becomes available after verification passes and while the file remains in the incoming bucket."}</p>}
-                <p className="muted">This record shows file details and verification separately from server pickup. ZIP contents are not expanded here.</p>
+                <p className="muted">This record shows verification separately from server pickup. Archive listings contain metadata only, not file previews.</p>
+                {record.fileName?.toLowerCase().endsWith(".zip") && <IncomingArchiveBrowser key={record.id} uploadId={record.id}
+                  active={record.downloadAvailable === true && record.verificationState === "verified" && record.bucketObject.state === "present"}
+                  loader={loadArchive} />}
               </div>;
             })() : null}
           </Card>}
