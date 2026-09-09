@@ -94,6 +94,14 @@ It also changes the manual sync message to report a producer preflight pause
 instead of success. This is a local, unpublished fix, not proof that either
 production source is repaired. It does not reset existing dead letters.
 
+The independent full PA run at `246a6ac3` completed with exit 0: 808 tests,
+6,540 assertions, 91 skipped. Its private JUnit report identifies skipped
+cases but emits empty `<skipped />` elements rather than reasons. The skipped
+classes include MySQL-backed account/security/payment/session/notification
+workflows, three explicitly gated workforce-database cases, one Linux-only
+log-rotation case, and one tax-fixture case. Their prerequisites remain
+unverified by this run; do not describe it as full MySQL/Linux acceptance.
+
 Both Project Alpha integration tabs retained their previously rendered status
 but displayed **Session expired**. Those retained status values are not a fresh
 server check. Reauthentication is required before verifying current readiness,

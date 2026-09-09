@@ -11,6 +11,23 @@ their presentation through explicit source-qualified business-party links, but
 must not merge producer records by name, email, or other inferred similarity.
 The 3D Viewer is outside this work while Hermes is changing it.
 
+## Current production acceptance warning — September 9, 2026
+
+Use the [September 9 checkpoint](client-portal-checkpoint-2026-09-09.md)
+for the newest inspected production state. Both PA business directories are
+visible, but neither source has a native portal workspace in Client D1.
+Primary has a staged page without activation; secondary has pending Ops
+forwarding receipts whose projection family still needs diagnosis. Source
+enrollment and healthy business synchronization are not native-portal
+acceptance. Historical implementation and deployment claims below must not
+override that direct evidence.
+
+Incoming pickup is the operator's existing hourly TrueNAS rclone PULL/MOVE
+task, not a new server worker. The [rclone-native rollout](../truenas/incoming-rclone.md)
+requires coordinated ready-prefix selection, basic-check publication, and
+browse/download verification before resuming that task. Never infer a pickup
+receipt solely from R2 object absence.
+
 The owner explicitly authorized Ledge Top Technologies enrollment on September
 7, 2026. Authorization is not evidence that the source is enrolled or accepted:
 keep LTT pending and hidden until its dedicated Access service token, snapshot
