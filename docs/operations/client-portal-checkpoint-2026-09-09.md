@@ -91,8 +91,12 @@ preserves the same queued activation while credentials are unreadable and
 while the connection is disabled, then delivers it after configuration is
 restored. Independent focused verification passed 76 tests / 804 assertions.
 It also changes the manual sync message to report a producer preflight pause
-instead of success. This is a local, unpublished fix, not proof that either
-production source is repaired. It does not reset existing dead letters.
+instead of success. This fix was published in PA PR #183, merged to main as
+`51e333fb2ca2e26248b3f96588b8c126f4a2832b` on September 9 at 11:26:50 UTC.
+All PR checks passed, including the Linux smoke test. The Docker publication
+run `34345596920` was still running at this checkpoint; production recreation
+and source-specific recovery remain unverified. It does not reset existing
+dead letters.
 
 The independent full PA run at `246a6ac3` completed with exit 0: 808 tests,
 6,540 assertions, 91 skipped. Its private JUnit report identifies skipped
@@ -141,8 +145,14 @@ record key values, fingerprints, ciphertext or credential fields in reports.
   identified clients; do not infer access from directory or producer counts.
 - Complete the Incoming full suite and coordinated retention/migration/path
   rollout before enabling its publication gate.
-- GitHub CLI currently reports its configured login invalid; publishing awaits
-  restored authentication. No alternate credentials were extracted.
+- GitHub authentication was rechecked outside the restricted sandbox and is
+  valid. The earlier invalid-login report was a restricted-environment result,
+  not a credential blocker. No alternate credentials were extracted. PA PR
+  #183 is merged; Operations draft PR #47 is pushed with Incoming publication
+  still disabled. Its Client Portal desktop/mobile browser checks, Ops Sync,
+  source invariants, thumbnail renderer and pickup compatibility checks passed;
+  Operations browser and full package unit checks were still running. Recheck
+  the exact PR head and all required checks before releasing Operations.
 
 The full [goal acceptance checklist](client-portal-goal-acceptance.md) remains
 authoritative for scope. These observations do not accept its joined workflows.
