@@ -119,6 +119,21 @@ display metadata. Do not invent organization folders from contributor names.
 
 ## TrueNAS task
 
+### Confirmed existing task (September 9, 2026)
+
+The operator's screenshot shows bucket `ltds-incoming`, remote folder `/`,
+PULL/MOVE, enabled hourly at the start of each hour, and local destination
+`/mnt/L.T.D.S./Drone_Jobs/Incoming Job Data`. There is no server-side scanner
+or pickup callback. This root selection explains how internal quarantine keys
+can reach local storage before the application finishes verification.
+
+Keep the destination, schedule and transfer direction/mode. Coordinate changing
+only the remote selection to `ready/` before enabling the application gate.
+An already downloaded opaque object may be the original upload, not disposable
+temporary data; do not delete it based on its name. Once MOVE removes it from
+R2, the application cannot recover or verify the local copy without separate
+operator confirmation.
+
 The intended task remains **PULL**, **MOVE**, at the start of each hour, using
 the existing local destination. Once rollout is verified, select the remote
 `ready/` folder instead of the bucket root. Never pull the staging/quarantine
