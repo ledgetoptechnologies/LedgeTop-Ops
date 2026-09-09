@@ -457,6 +457,18 @@ application, application key, key ID, or HMAC secret to provision in Project
 Alpha or on the Client Worker for this hop. Replay protection and ordered
 receipts remain part of the validated event and projection contracts.
 
+### Portal-projection forwarding diagnostics
+
+For an authenticated `portal.projection` failure, inspect the bounded
+`ops_sync_client_portal_projection_failed` log record alongside the source
+receipt. It contains only `projectionKind`, `sourceId`, `eventId`, fixed
+`phase` (`transport` or `receiver`), an allowlisted `receiverCode` (otherwise
+`unknown`), and `retryable`. `transport` means the binding was unavailable or
+the private call threw; `receiver` means Client returned a classified result.
+The public HTTP error and
+receipt state remain unchanged. Do not add exception text, response bodies,
+request payloads, headers, URLs, or credentials to logs while investigating.
+
 Configure the private Worker-to-Worker hop in `apps/ops-sync/wrangler.jsonc`:
 
 ```jsonc
