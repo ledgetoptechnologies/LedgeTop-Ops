@@ -114,10 +114,11 @@ test("actual projection processing remains distinct from an unlinked workspace",
   await expect(page.getByText("Portal workspace not linked", { exact: true })).toHaveCount(0);
 });
 
-test("a revoked client root is prominent in the directory", async ({ page }) => {
+for (const linked of [false, true]) {
+test(`a revoked client root remains prominent with ${linked ? "an active linked" : "no linked"} workspace`, async ({ page }) => {
   const revoked = { ...client("org-revoked", "Revoked client"), pa_public_id: "c".repeat(32),
-    source_id: "project-alpha:secondary", source_name: "Secondary business", workspace_id: null,
-    portal_status: "not_supported", portal_access_state: "revoked" };
+    source_id: "project-alpha:secondary", source_name: "Secondary business", workspace_id: linked ? "workspace-revoked" : null,
+    portal_status: linked ? "active" : "not_supported", portal_access_state: "revoked" };
   await mock(page, route => route.fulfill({ json: { clients: [revoked], nextCursor: null, capabilities } }),
     ["team.view", "operations.manage"], []);
   await page.goto("/clients");
@@ -126,6 +127,7 @@ test("a revoked client root is prominent in the directory", async ({ page }) => 
   await expect(card).toContainText("An administrator disabled this client's portal root");
   await expect(card.getByText("Portal workspace not linked", { exact: true })).toHaveCount(0);
 });
+}
 
 test("a Project Alpha business root without an exact client ID remains distinct from missing workspace proof", async ({ page }) => {
   const incomplete = { ...client("org-id", "Incomplete ID"), portal_status: "mapping_unavailable" };

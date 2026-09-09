@@ -135,6 +135,55 @@ describe("incoming upload staff records and pickup lifecycle", () => {
     expect(await database.prepare("SELECT verified_object_etag FROM file_request_uploads WHERE id='upload-one'").first()).toEqual({ verified_object_etag: null });
   });
 
+  it("keeps basic-checked ready uploads behind the staff ACL and out of public routes", async () => {
+    environment.INCOMING_RCLONE_PROMOTION_ENABLED = "true";
+    const sourceKey = "quarantine/request-one/upload-one/object";
+    const readyKey = "ready/request-one/upload-one/photos.zip";
+    const bytes = new TextEncoder().encode("verified object bytes").length;
+    await database.batch([
+      database.prepare("UPDATE file_request_uploads SET etag='abcdef',actual_size=?,declared_size=? WHERE id='upload-one'").bind(bytes, bytes),
+      database.prepare("INSERT INTO file_request_upload_basic_checks(upload_id,object_etag,object_bytes,object_version,check_version) VALUES('upload-one','abcdef',?,'r2-v1','basic-v1')").bind(bytes),
+      database.prepare(`INSERT INTO file_request_upload_promotion_journal(upload_id,source_identity,source_key,destination_key,state,destination_etag,destination_bytes,destination_version)
+        VALUES('upload-one',?,?,?,'ready','fedcba',?,'ready-v1')`).bind(JSON.stringify({ version: 1, etag: "abcdef", bytes, objectVersion: "r2-v1" }), sourceKey, readyKey, bytes),
+    ]);
+    bucket.objects.set(readyKey, { size: bytes, etag: "fedcba", version: "ready-v1", uploaded: new Date() });
+
+    // Count attempts to enter the real D1 binding, rather than merely checking
+    // that the permission mock was called. All three routes must fail before
+    // they can inspect upload metadata or touch the promoted R2 object.
+    let deliveryReadAttempts = 0;
+    const deliveryDb = environment.DELIVERY_DB as object;
+    environment.DELIVERY_DB = new Proxy(deliveryDb, {
+      get(target, property, receiver) {
+        if (property === "prepare" || property === "withSession") deliveryReadAttempts += 1;
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    for (const path of [
+      "/api/delivery/incoming-link/uploads/upload-one",
+      "/api/delivery/incoming-link/uploads/upload-one/download",
+      "/api/delivery/incoming-link/uploads/upload-one/archive-inventory",
+    ]) {
+      mocks.requirePermission.mockRejectedValueOnce(new HTTPException(403, { message: "Forbidden" }));
+      expect((await staffRequest(path)).status).toBe(403);
+    }
+    expect(deliveryReadAttempts).toBe(0);
+    expect(bucket.headCalls).toBe(0);
+    expect(bucket.getCalls).toBe(0);
+
+    // The public contributor dispatcher has no matching reads at all: a ready
+    // promotion cannot turn these staff-only endpoints into a public surface.
+    for (const path of [
+      "/api/delivery/incoming-link/uploads/upload-one",
+      "/api/delivery/incoming-link/uploads/upload-one/download",
+      "/api/delivery/incoming-link/uploads/upload-one/archive-inventory",
+    ]) expect((await pickupGet(path, false)).status).toBe(404);
+    expect(deliveryReadAttempts).toBe(0);
+    expect(bucket.headCalls).toBe(0);
+    expect(bucket.getCalls).toBe(0);
+  });
+
   it("accepts a server inventory after verification without a supplied R2 version and denies unauthorized readers", async () => {
     expect((await pickupRequest("/api/internal/uploads/upload-one/verification-status", { state: "scanning", claimToken: claimOne })).status).toBe(200);
     expect((await pickupRequest("/api/internal/uploads/upload-one/verification-status", { state: "verified", claimToken: claimOne,

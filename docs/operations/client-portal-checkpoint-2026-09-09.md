@@ -94,7 +94,8 @@ It also changes the manual sync message to report a producer preflight pause
 instead of success. This fix was published in PA PR #183, merged to main as
 `51e333fb2ca2e26248b3f96588b8c126f4a2832b` on September 9 at 11:26:50 UTC.
 All PR checks passed, including the Linux smoke test. The Docker publication
-run `34345596920` was still running at this checkpoint; production recreation
+run `34345596920` subsequently completed successfully at merge revision
+`51e333fb2ca2e26248b3f96588b8c126f4a2832b`; production recreation
 and source-specific recovery remain unverified. It does not reset existing
 dead letters.
 
@@ -149,10 +150,29 @@ record key values, fingerprints, ciphertext or credential fields in reports.
   valid. The earlier invalid-login report was a restricted-environment result,
   not a credential blocker. No alternate credentials were extracted. PA PR
   #183 is merged; Operations draft PR #47 is pushed with Incoming publication
-  still disabled. Its Client Portal desktop/mobile browser checks, Ops Sync,
-  source invariants, thumbnail renderer and pickup compatibility checks passed;
-  Operations browser and full package unit checks were still running. Recheck
-  the exact PR head and all required checks before releasing Operations.
+  still disabled. All ten CI jobs passed at PR head `86c5658`, including both
+  applications' desktop/mobile browser checks and full package unit checks.
+  New test-only regressions still require exact-head verification before merge.
+
+## Incremental release review
+
+Security scan `90f18d62-6750-472c-858c-949d21f14843` completed for immutable
+diff `ce6b9b0..cdec71e`: 23 changed source files and 25 supporting artifacts
+reviewed, with no confirmed vulnerabilities. This is scoped review evidence,
+not proof of production configuration or complete goal acceptance. The review
+identified two additional regression cases to preserve: revoked clients with
+an active linked workspace, and unauthorized reads of basic-checked ready
+uploads. Linked and unlinked revocation browser cases passed on desktop and
+mobile (four tests); the full Client Hub directory browser file then passed
+52 tests across desktop and mobile. The incoming staff route suite passed
+16 tests, including ready-upload detail/download/archive denials before D1
+or R2 reads and public-dispatch rejection. Source/rollout invariants passed
+35 tests. These added tests and documentation do not modify runtime behavior.
+
+The operator's screenshot confirms the enabled hourly task currently selects
+the root of `ltds-incoming` in PULL/MOVE mode. A temporary pause was requested;
+no pause or `ready/` cutover has been confirmed. Do not enable publication
+based on this screenshot, and do not delete previously downloaded staging data.
 
 The full [goal acceptance checklist](client-portal-goal-acceptance.md) remains
 authoritative for scope. These observations do not accept its joined workflows.
