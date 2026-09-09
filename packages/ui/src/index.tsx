@@ -4,8 +4,8 @@ import type { ViewerSessionGrant, ViewerShellSessionGrant } from "@ltds/shared";
 import { CLOUDFLARE_ACCESS_LOGOUT_PATH } from "./access";
 export { CLOUDFLARE_ACCESS_LOGOUT_PATH } from "./access";
 
-export function Brand({ product }: { product: string }) {
-  return <div className="ltds-brand"><img src={BRAND.logoUrl} alt="" /><span>{BRAND.name}<small>{product}</small></span></div>;
+export function Brand({ product, name = BRAND.name }: { product: string; name?: string }) {
+  return <div className="ltds-brand"><img src={BRAND.logoUrl} alt="" /><span>{name}<small>{product}</small></span></div>;
 }
 
 export function Card({ title, action, children, className = "" }: PropsWithChildren<{ title?: string; action?: ReactNode; className?: string }>) {

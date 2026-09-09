@@ -399,7 +399,7 @@ export function OperationsApp() {
   return (
     <div className="ops-shell">
       <header className="ops-header">
-        <Brand product="Operations" />
+        <Brand product="Operations" name="Ledge Top" />
         <nav className="ops-desktop-nav" aria-label="Primary navigation">
           {primaryNavigation.map((item) => navigationLink(item))}
           {!!manageNavigation.length && <div className="ops-manage-menu" ref={manageMenu}>
@@ -495,7 +495,7 @@ function PageHeading({ page }: { page: Page }) {
   };
   return (
     <div className="page-heading">
-      <span className="eyebrow">LTDS Operations</span>
+      <span className="eyebrow">Ledge Top Operations</span>
       <h1>{copy[page][0]}</h1>
       <p>{copy[page][1]}</p>
     </div>
@@ -1138,7 +1138,7 @@ function Operations({ session }: { session: Session }) {
   }, [briefDirty]);
   return (
     <>
-      <ManagedNotice detail="Project Alpha manages operation identity, schedule, and assignment. LTDS Operations owns the versioned execution brief shown to assigned pilots." />
+      <ManagedNotice detail="Project Alpha manages operation identity, schedule, and assignment. Ledge Top Operations owns the versioned execution brief shown to assigned pilots." />
       <ErrorLine error={error} />
       <Card className="table-card">
         {data?.operations.length ? (
@@ -3928,7 +3928,7 @@ function IncomingUploads() {
     [actionError, setActionError] = useState(""),
     [message, setMessage] = useState(""),
     [accessCode, setAccessCode] = useState(""),
-    [requestTitle, setRequestTitle] = useState("Send files to Ledge Top Drone Services"),
+    [requestTitle, setRequestTitle] = useState("Send files to Ledge Top"),
     [maxFiles, setMaxFiles] = useState("500"),
     [maxBytesGiB, setMaxBytesGiB] = useState("2048"),
     [selectedUploadId, setSelectedUploadId] = useState<string | null>(null);
