@@ -35,7 +35,7 @@ beforeEach(async () => {
   instances.push(instance);
   delivery = await instance.getD1Database("DELIVERY_DB") as unknown as D1Database;
   ops = await instance.getD1Database("OPS_DB") as unknown as D1Database;
-  for (const name of ["0090_aliases_incoming_requests.sql", "0093_reusable_incoming_uploads.sql", "0116_incoming_upload_hardening.sql", "0198_incoming_upload_owner_notifications.sql", "0199_incoming_upload_pickup_lifecycle.sql"]) {
+  for (const name of ["0090_aliases_incoming_requests.sql", "0093_reusable_incoming_uploads.sql", "0116_incoming_upload_hardening.sql", "0198_incoming_upload_owner_notifications.sql", "0199_incoming_upload_pickup_lifecycle.sql", "0211_incoming_upload_verification_lifecycle.sql"]) {
     const sql = readFileSync(new URL(`../../client/migrations/${name}`, import.meta.url), "utf8")
       .replace(/^\s*--.*$/gm, "").replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "");
     await delivery.exec(sql.replace(/\s*\n\s*/g, " "));

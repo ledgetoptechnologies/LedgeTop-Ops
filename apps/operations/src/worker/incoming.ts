@@ -16,6 +16,7 @@ import {
 } from "./incoming-security";
 import { incomingRequestPage } from "./incoming-page";
 import { incomingUploadReceivedDigestStatement } from "./incoming-upload-notifications";
+import { applyVerificationStatus, serveVerifiedIncomingObject, verificationCandidates, verificationPending, verificationStatusSchema, verifiedObjectAvailable } from "./incoming-verification";
 import { canonicalMultipartEtag } from "./multipart-etag";
 import {
   incomingPublicRequestDecision,
@@ -681,7 +682,8 @@ publicApp.post("/api/public/requests/:publicId/files/:fileId/complete", async (c
     const transitionResults = await c.env.DELIVERY_DB.batch([
       c.env.DELIVERY_DB.prepare(
         `UPDATE file_request_uploads SET status='quarantined',pickup_state='awaiting_pickup',
-         pickup_next_attempt_at=NULL,pickup_last_error_code=NULL,actual_size=?,etag=?,
+         pickup_next_attempt_at=NULL,pickup_last_error_code=NULL,verification_state='awaiting_verification',
+         verification_next_attempt_at=NULL,verification_last_error_code=NULL,actual_size=?,etag=?,
          completed_at=datetime('now'),updated_at=datetime('now')
          WHERE id=? AND status='uploading' AND EXISTS (
            SELECT 1 FROM file_requests WHERE id=file_request_uploads.request_id
@@ -717,6 +719,22 @@ function requirePickupCredential(c: { env: IncomingEnv; req: { header(name: stri
     throw new HTTPException(401, { message: "Invalid pickup credential" });
   }
 }
+
+publicApp.post("/api/internal/uploads/:uploadId/verification-status", async (c) => {
+  requirePickupCredential(c);
+  const input = await jsonBody(c.req.raw, verificationStatusSchema);
+  return c.json(await applyVerificationStatus(c.env, c.req.param("uploadId"), input));
+});
+
+publicApp.get("/api/internal/uploads/verification-candidates", async (c) => {
+  requirePickupCredential(c);
+  return c.json(await verificationCandidates(c.env, c.req.query("cursor") || null));
+});
+
+publicApp.get("/api/internal/uploads/verification-pending", async (c) => {
+  requirePickupCredential(c);
+  return c.json(await verificationPending(c.env, c.req.query("cursor") || null));
+});
 
 const pickupStatusSchema = z.discriminatedUnion("state", [
   z.object({ state: z.literal("scanning"), claimToken: z.string().uuid() }),
@@ -925,7 +943,7 @@ async function currentLink(env: IncomingEnv): Promise<Record<string, unknown> | 
 async function recentUploads(env: IncomingEnv, requestId: string): Promise<unknown[]> {
   const rows = await env.DELIVERY_DB.withSession("first-primary").prepare(
     `SELECT u.id,u.original_name fileName,u.declared_size size,u.actual_size actualSize,u.content_type contentType,
-      u.status,u.pickup_state pickupState,u.pickup_attempt_count pickupAttemptCount,
+      u.status,u.pickup_state pickupState,u.verification_state verificationState,u.verified_at verifiedAt,u.pickup_attempt_count pickupAttemptCount,
       u.pickup_last_attempt_at pickupLastAttemptAt,u.pickup_next_attempt_at pickupNextAttemptAt,
       u.rejection_reason rejectionReason,COALESCE(u.completed_at,u.created_at) uploadedAt,c.name contributorName
      FROM file_request_uploads u
@@ -1080,7 +1098,7 @@ staffApp.get("/uploads", async (c) => {
   if (!link) return c.json({ uploads: [] });
   const rows = await c.env.DELIVERY_DB.withSession("first-primary").prepare(
     `SELECT u.id,u.original_name originalName,u.declared_size declaredSize,u.actual_size actualSize,
-      u.content_type contentType,u.status,u.pickup_state pickupState,u.pickup_attempt_count pickupAttemptCount,
+      u.content_type contentType,u.status,u.pickup_state pickupState,u.verification_state verificationState,u.verified_at verifiedAt,u.pickup_attempt_count pickupAttemptCount,
       u.pickup_last_attempt_at pickupLastAttemptAt,u.pickup_next_attempt_at pickupNextAttemptAt,
       u.rejection_reason rejectionReason,u.created_at createdAt,u.completed_at completedAt,c.name contributorName
      FROM file_request_uploads u
@@ -1094,18 +1112,19 @@ staffApp.get("/uploads/:uploadId", async (c) => {
   await requireIncomingStaff(c, "file_requests.view");
   const upload = await c.env.DELIVERY_DB.withSession("first-primary").prepare(
     `SELECT u.id,u.original_name originalName,u.declared_size declaredSize,u.actual_size actualSize,
-      u.content_type contentType,u.status,u.pickup_state pickupState,u.pickup_attempt_count pickupAttemptCount,
+      u.content_type contentType,u.status,u.pickup_state pickupState,u.verification_state verificationState,u.verified_at verifiedAt,u.pickup_attempt_count pickupAttemptCount,
       u.pickup_last_attempt_at pickupLastAttemptAt,u.pickup_next_attempt_at pickupNextAttemptAt,
       u.rejection_reason rejectionReason,u.created_at createdAt,u.completed_at completedAt,c.name contributorName,
-      u.object_key objectKey
+      u.object_key objectKey,u.verified_object_etag verifiedObjectEtag,u.verified_object_bytes verifiedObjectBytes,
+      u.verified_object_version verifiedObjectVersion
      FROM file_request_uploads u
      JOIN file_request_contributors c ON c.id=u.contributor_id
      WHERE u.id=? LIMIT 1`,
   ).bind(c.req.param("uploadId")).first<{
     id: string; originalName: string; declaredSize: number; actualSize: number | null; contentType: string;
-    status: string; pickupState: string; pickupAttemptCount: number; pickupLastAttemptAt: string | null;
+    status: string; pickupState: string; verificationState: string; verifiedAt: string | null; pickupAttemptCount: number; pickupLastAttemptAt: string | null;
     pickupNextAttemptAt: string | null; rejectionReason: string | null; createdAt: string; completedAt: string | null;
-    contributorName: string; objectKey: string;
+    contributorName: string; objectKey: string; verifiedObjectEtag: string | null; verifiedObjectBytes: number | null; verifiedObjectVersion: string | null;
   }>();
   if (!upload) throw new HTTPException(404, { message: "Incoming upload not found" });
   // HEAD is deliberately the only R2 operation here. This route never creates
@@ -1121,6 +1140,9 @@ staffApp.get("/uploads/:uploadId", async (c) => {
     contentType: upload.contentType,
     status: upload.status,
     pickupState: upload.pickupState,
+    verificationState: upload.verificationState,
+    verifiedAt: upload.verifiedAt,
+    downloadAvailable: verifiedObjectAvailable(upload, object),
     pickupAttemptCount: upload.pickupAttemptCount,
     pickupLastAttemptAt: upload.pickupLastAttemptAt,
     pickupNextAttemptAt: upload.pickupNextAttemptAt,
@@ -1132,6 +1154,18 @@ staffApp.get("/uploads/:uploadId", async (c) => {
       ? { state: "present", size: object.size, uploadedAt: object.uploaded.toISOString(), contentType: object.httpMetadata?.contentType || upload.contentType }
       : { state: "removed" },
   } });
+});
+
+staffApp.get("/uploads/:uploadId/download", async (c) => {
+  await requireIncomingStaff(c, "file_requests.view");
+  const upload = await c.env.DELIVERY_DB.withSession("first-primary").prepare(
+    `SELECT u.id,u.object_key objectKey,u.original_name originalName,u.content_type contentType,u.status,
+      u.verification_state verificationState,u.verified_object_etag verifiedObjectEtag,u.verified_object_bytes verifiedObjectBytes,
+      u.verified_object_version verifiedObjectVersion
+     FROM file_request_uploads u WHERE u.id=? LIMIT 1`,
+  ).bind(c.req.param("uploadId")).first<import("./incoming-verification").VerifiedObjectRow>();
+  if (!upload) throw new HTTPException(404, { message: "Verified upload is unavailable" });
+  return serveVerifiedIncomingObject(c.env, { ...upload, id: c.req.param("uploadId") }, c.req.raw);
 });
 
 staffApp.onError((error, c) => {

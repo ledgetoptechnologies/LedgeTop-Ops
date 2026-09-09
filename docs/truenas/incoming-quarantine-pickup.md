@@ -19,7 +19,69 @@ callback; no new public list or download endpoint is needed or enabled.
 Deploy the corresponding Operations migration
 `0199_incoming_upload_pickup_lifecycle.sql` before scheduling this worker.
 
-## Security boundary
+## Separate verification and pickup rollout
+
+The next worker revision separates verification from moving the file to the
+server. Apply `0211_incoming_upload_verification_lifecycle.sql` before using
+the new verification callbacks. The existing `--once` pickup path remains
+compatible during rollout; it does not create a reusable verification proof
+for browser access.
+
+After release acceptance, schedule `--verify-only` frequently with
+`INCOMING_PICKUP_MAX_JOBS=1`, and `--pickup-only` at minute zero each hour.
+Pickup waits up to `INCOMING_PICKUP_LOCK_WAIT_SECONDS` (default 1,800 seconds,
+configurable from 0 to 3,600) for the shared lock rather than silently skipping
+an hour. A timeout exits unsuccessfully with a bounded diagnostic. The schedule
+starts pickup at the hour; a busy verifier can delay the actual transfer. Do
+not run the legacy combined job alongside this two-stage schedule.
+
+The intended two-stage schedule is frequent verification followed by
+start-of-hour pickup. Verification must leave the original object in R2.
+Pickup must use the original filename and remove the exact source object only
+after a durable, integrity-checked local copy exists. Do not enable new script
+modes until their end-to-end tests and deployment checks are complete.
+
+Operations distinguishes **awaiting verification**, **verifying**, **verified —
+awaiting server pickup**, and **downloaded by server**. A retry is not a malware
+verdict. A failed or timed-out scan never authorizes a download.
+
+Authorized staff can explicitly download a verified file while the exact
+verified object remains in R2. The download route rechecks object identity and
+returns an attachment, not an inline preview or public storage URL. Byte ranges
+are supported while that object remains available. Once hourly pickup removes
+it, a new browser download or resume cannot read it from R2; use the server copy.
+ZIP member browsing is not implemented by this per-file download feature.
+
+Verification receipts bind the SHA-256 scan result to the server-observed
+ETag, size, and object version. Listing metadata, a previous file with the same
+name, or a UI status is not authorization to read incoming bytes. Existing
+accepted records remain server-only; the migration does not invent successful
+scan receipts for old records.
+
+### Release acceptance checklist
+
+- Apply the additive database migration before publishing code that queries
+  the new columns. Back up and use the migration ledger; do not recreate tables.
+- Deploy the Operations verification, listing, and download routes together.
+  A Cloudflare-only update cannot make an older TrueNAS script run the new
+  verification phase.
+- Update the server script/image before selecting its new modes. Verify the
+  existing configured API base works without duplicating path segments.
+- Test a synthetic upload through verification while leaving it in R2; its
+  staff download should become available without waiting for hourly pickup.
+- Run verification again: the unchanged verified upload must not be rescanned.
+- Run pickup: verify original filename, matching bytes, durable local receipt,
+  exact source removal, and final accepted state. Run again to prove no duplicate.
+- Exercise interruption after local promotion and after source removal. A
+  retry must recover from its receipt, not lose the copy or claim false success.
+- Reject mismatched source identity or digest, unverified staff downloads,
+  expired claims, and unauthorized listing. A scan timeout remains a retry.
+- Confirm upload notification delivery remains separate from scan completion.
+- Verify browser refresh removes unavailable download controls after pickup.
+  ZIP inventory browsing and the broader client-folder browsing workflow need
+  their own acceptance; metadata and attachment download alone do not prove them.
+
+## Legacy combined worker security boundary
 
 Give the TrueNAS service identity only these permissions for the dedicated
 Incoming R2 bucket:
@@ -124,6 +186,35 @@ an overlap a harmless skipped run if a large upload is still scanning.
 0 * * * * /usr/local/libexec/incoming-pickup-worker.sh --once
 ```
 
+### Two-stage verification and pickup after rollout
+
+To separate ClamAV verification from the later local delivery, create two
+TrueNAS scheduled tasks using the same image, destination dataset, staging
+directory, state directory, bucket credentials, and claim secret. Set the
+verifier cap to one transfer and run it frequently; run pickup at minute zero.
+Do not also schedule `--once`, because it would create a competing combined
+workflow (the shared flock prevents overlap but does not make the workflows
+equivalent).
+
+```cron
+# Verify at most one pending object per minute; source remains in R2.
+* * * * * INCOMING_PICKUP_MAX_JOBS=1 /usr/local/libexec/incoming-pickup-entrypoint.sh --verify-only
+# Download only server-verified objects, then durably promote/delete/accept.
+0 * * * * /usr/local/libexec/incoming-pickup-entrypoint.sh --pickup-only
+```
+
+These are in-container command examples, not paths available on the TrueNAS
+host. Configure the scheduler to run the image with the corresponding mode
+argument and mounts; do not rely on `docker exec` into the legacy one-shot
+container after it has exited. Keep the image entrypoint so verification
+refreshes signatures before scanning; pickup deliberately skips that refresh.
+
+For the verifier task set `INCOMING_PICKUP_MAX_JOBS=1` and retain the bounded
+scan timeout. For the pickup task, keep the same state and destination paths;
+its candidate listing is server-filtered to verified, due uploads. The two
+tasks are an operator scheduling configuration only: this repository does not
+update an existing TrueNAS scheduler or deploy credentials.
+
 Build [`scripts/truenas/incoming-pickup.Dockerfile`](../../scripts/truenas/incoming-pickup.Dockerfile)
 and start it using the accompanying
 [`scripts/truenas/incoming-pickup.compose.example.yaml`](../../scripts/truenas/incoming-pickup.compose.example.yaml).
@@ -135,8 +226,10 @@ rename.
 
 ## Operational checks
 
-- An **awaiting server pickup** upload means Operations has not received the
-  receipt yet. It is intentionally not downloadable.
+- In legacy combined mode, **awaiting server pickup** means Operations has not
+  received the receipt yet and there is no separate download proof. In the new
+  mode, **verified — awaiting server pickup** can be downloaded by authorized
+  staff while the exact verified object remains present.
 - If a local directory contains `quarantine/<id>/<id>/object`, stop the
   generic bucket mirror that wrote it. It bypassed the pickup worker and must
   exclude the complete `quarantine/` prefix before it is restarted.

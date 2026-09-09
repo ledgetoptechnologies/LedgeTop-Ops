@@ -43,8 +43,20 @@ case " $* " in
   *) exit 1 ;;
 esac
 `);
-  await executable(join(bin, "curl"), "#!/usr/bin/env bash\nprintf '200'\n");
-  await executable(join(bin, "flock"), "#!/usr/bin/env bash\nexit 0\n");
+  await executable(join(bin, "curl"), `#!/usr/bin/env bash
+set -eu
+config="$2"
+output=$(sed -n 's/^output = "//p' "$config" | sed 's/"$//')
+${options.apiLog ? `cat "$config" >> '${options.apiLog.replaceAll("'", "'\\''")}'` : ":"}
+if grep -q 'request = "GET"' "$config"; then
+  ${options.verifiedBodyByCursor ? `if grep -q 'cursor=page2' "$config"; then printf '%s' '${options.verifiedBodyByCursor.page2.replaceAll("'", "'\\''")}' > "$output"; else printf '%s' '${options.verifiedBodyByCursor.first.replaceAll("'", "'\\''")}' > "$output"; fi` : (options.apiBody ?? options.pendingBody ?? options.verifiedBody) ? `printf '%s' '${(options.apiBody ?? options.pendingBody ?? options.verifiedBody).replaceAll("'", "'\\''")}' > "$output"` : ":"}
+fi
+printf '200'
+`);
+  await executable(join(bin, "flock"), `#!/usr/bin/env bash
+${options.flockLog ? `printf '%s\\n' "$*" >> '${options.flockLog.replaceAll("'", "'\\''")}'` : ":"}
+${options.failFlock ? "exit 1" : "exit 0"}
+`);
   await executable(join(bin, "clamscan"), `#!/usr/bin/env bash
 ${options.raceDestination ? `mkdir -p '${options.raceDestination.replaceAll("'", "'\\''")}'` : ":"}
 exit 0
@@ -65,11 +77,11 @@ exit 0
     INCOMING_PICKUP_API_BASE: "https://incoming.ledgetopdroneservices.com/api/internal/uploads",
     INCOMING_PICKUP_MAX_JOBS: "1",
   };
-  return { root, destination, staging, state, env };
+  return { root, bin, destination, staging, state, env };
 }
 
-function runWorker(env) {
-  const result = spawnSync("bash", [worker, "--once"], { env, encoding: "utf8" });
+function runWorker(env, mode = "--once", trace = false) {
+  const result = spawnSync("bash", trace ? ["-x", worker, mode] : [worker, mode], { env, encoding: "utf8" });
   return { status: result.status, stdout: result.stdout, stderr: result.stderr };
 }
 
@@ -187,6 +199,109 @@ test("incoming pickup worker constrains its endpoints and logs", () => {
   assert.match(source, /PICKUP_CALLBACK_PAYLOAD/);
   assert.match(source, /PICKUP_CLAIM_TOKEN/);
   assert.doesNotMatch(source, /\$payload" <<'PY'/);
+});
+
+test("incoming worker exposes bounded verification and verified-download modes", () => {
+  assert.match(source, /--verify-only/);
+  assert.match(source, /--pickup-only/);
+  assert.match(source, /post_verification_status/);
+  assert.match(source, /state":"verified/);
+  const verify = source.indexOf('if [[ "$WORKER_MODE" == "verify" ]]');
+  assert.ok(verify >= 0);
+  assert.ok(source.indexOf('delete_exact_object "$key"', verify) > source.indexOf('if ! fsync_path "$stage_file"', verify),
+    "verification branch must not delete the quarantine object");
+  assert.match(source, /verification-candidates/);
+});
+
+test("verify-only proves bytes without promoting or deleting", async (t) => {
+  if (!canRunWorkerFixtures) return t.skip("POSIX runtime required");
+  const deleteLog = join((await mkdtemp(join(tmpdir(), "incoming-verify-"))), "delete.log");
+  const digest = createHash("sha256").update("data").digest("hex");
+  const value = await fixture({ deleteLog, pendingBody: JSON.stringify({ uploads: [{ id: uploadId, requestId, objectKey, originalName: "photo.jpg", objectEtag: "abcd", objectBytes: 4 }], nextCursor: null }) });
+  t.after(() => rm(value.root, { recursive: true, force: true }));
+  const result = runWorker(value.env, "--verify-only");
+  assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
+  await assert.rejects(readFile(deleteLog));
+  assert.equal(result.stderr.includes("source remains in quarantine"), true, `${result.stderr}\n${result.stdout}`);
+  assert.equal(digest.length, 64);
+});
+
+test("verify-only never recovers or accepts a preexisting promoted receipt", async (t) => {
+  if (!canRunWorkerFixtures) return t.skip("POSIX runtime required");
+  const root = await mkdtemp(join(tmpdir(), "incoming-verify-receipt-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const deleteLog = join(root, "delete.log"), apiLog = join(root, "api.log");
+  const value = await fixture({ deleteLog, apiLog, pendingBody: JSON.stringify({ uploads: [{ id: uploadId, requestId, objectKey }], nextCursor: null }) });
+  t.after(() => rm(value.root, { recursive: true, force: true }));
+  const finalDir = join(value.destination, requestId, uploadId), payload = Buffer.from("data");
+  await mkdir(join(finalDir, "payload"), { recursive: true });
+  await writeFile(join(finalDir, "payload", "photo.jpg"), payload);
+  await writeFile(join(finalDir, "receipt.json"), JSON.stringify({ schemaVersion: 3, state: "promoted", uploadId, requestId, objectEtag: "abcd", objectBytes: 4, sha256: createHash("sha256").update(payload).digest("hex"), pickupClaimToken: claimToken, payloadName: "photo.jpg" }));
+  const result = runWorker(value.env, "--verify-only");
+  assert.equal(result.status, 0, result.stderr);
+  await assert.rejects(readFile(deleteLog));
+  const calls = await readFile(apiLog, "utf8").catch(() => "");
+  assert.doesNotMatch(calls, /\/accepted/);
+  assert.equal(JSON.parse(await readFile(join(finalDir, "receipt.json"), "utf8")).state, "promoted");
+});
+
+test("pickup-only rejects a verifier SHA mismatch without promotion or R2 deletion", async (t) => {
+  if (!canRunWorkerFixtures) return t.skip("POSIX runtime required");
+  const root = await mkdtemp(join(tmpdir(), "incoming-pickup-mismatch-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const deleteLog = join(root, "delete.log");
+  const value = await fixture({ deleteLog, verifiedBody: JSON.stringify({ uploads: [{ id: uploadId, requestId, objectKey, objectEtag: "abcd", objectBytes: 4, objectVersion: "r2-v1", sha256: "b".repeat(64) }], nextCursor: null }) });
+  t.after(() => rm(value.root, { recursive: true, force: true }));
+  const result = runWorker(value.env, "--pickup-only");
+  assert.equal(result.status, 0, result.stderr);
+  await assert.rejects(readFile(deleteLog), "a mismatched verifier hash must retain R2");
+  await assert.rejects(readFile(join(value.destination, requestId, uploadId, "receipt.json")), "a mismatched verifier hash must not promote");
+});
+
+test("pickup-only promotes, deletes, and posts acceptance only after matching verifier SHA", async (t) => {
+  if (!canRunWorkerFixtures) return t.skip("POSIX runtime required");
+  const root = await mkdtemp(join(tmpdir(), "incoming-pickup-matching-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const deleteLog = join(root, "delete.log"), apiLog = join(root, "api.log"), getLog = join(root, "get.log");
+  const digest = createHash("sha256").update("data").digest("hex");
+  const value = await fixture({ deleteLog, apiLog, getLog, verifiedBody: JSON.stringify({ uploads: [{ id: uploadId, requestId, objectKey, objectEtag: "abcd", objectBytes: 4, objectVersion: "r2-v1", sha256: digest }], nextCursor: null }) });
+  t.after(() => rm(value.root, { recursive: true, force: true }));
+  const result = runWorker(value.env, "--pickup-only");
+  assert.equal(result.status, 0, result.stderr);
+  await readFile(getLog, "utf8").catch(async () => assert.fail(`${result.stderr}\n${await readFile(apiLog, "utf8").catch(() => "no API calls")}\n${await readFile(join(value.bin, "curl"), "utf8")}`));
+  assert.equal(await readFile(deleteLog, "utf8"), "deleted\n");
+  assert.match(await readFile(apiLog, "utf8"), /\/accepted/);
+  assert.deepEqual(await readFile(join(value.destination, requestId, uploadId, "payload", "photo.jpg")), Buffer.from("data"));
+});
+
+test("pickup-only follows verified candidate pagination without skipping a second due upload", async (t) => {
+  if (!canRunWorkerFixtures) return t.skip("POSIX runtime required");
+  const root = await mkdtemp(join(tmpdir(), "incoming-pickup-pages-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const secondUpload = "upload-0002", secondKey = `quarantine/${requestId}/${secondUpload}/object`;
+  const digest = createHash("sha256").update("data").digest("hex"), deleteLog = join(root, "delete.log");
+  const value = await fixture({ deleteLog, verifiedBodyByCursor: {
+    first: JSON.stringify({ uploads: [{ id: uploadId, requestId, objectKey, objectEtag: "abcd", objectBytes: 4, objectVersion: "r2-v1", sha256: digest }], nextCursor: "page2" }),
+    page2: JSON.stringify({ uploads: [{ id: secondUpload, requestId, objectKey: secondKey, objectEtag: "abcd", objectBytes: 4, objectVersion: "r2-v1", sha256: digest }], nextCursor: null }),
+  } });
+  t.after(() => rm(value.root, { recursive: true, force: true }));
+  const result = runWorker({ ...value.env, INCOMING_PICKUP_MAX_JOBS: "2" }, "--pickup-only");
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal((await readFile(deleteLog, "utf8")).trim().split("\n").length, 2);
+  assert.deepEqual(await readFile(join(value.destination, requestId, secondUpload, "payload", "photo.jpg")), Buffer.from("data"));
+});
+
+test("pickup-only uses a bounded lock wait and fails without listing when the lock cannot be acquired", async (t) => {
+  if (!canRunWorkerFixtures) return t.skip("POSIX runtime required");
+  const root = await mkdtemp(join(tmpdir(), "incoming-pickup-lock-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const flockLog = join(root, "flock.log"), apiLog = join(root, "api.log");
+  const value = await fixture({ flockLog, apiLog, failFlock: true, verifiedBody: JSON.stringify({ uploads: [], nextCursor: null }) });
+  t.after(() => rm(value.root, { recursive: true, force: true }));
+  const result = runWorker({ ...value.env, INCOMING_PICKUP_LOCK_WAIT_SECONDS: "0" }, "--pickup-only");
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(await readFile(flockLog, "utf8"), /-w 0 9/);
+  await assert.rejects(readFile(apiLog), "failed lock acquisition must not query candidates");
 });
 
 test("incoming pickup refuses hostile R2 basename metadata before downloading or promoting", async (t) => {

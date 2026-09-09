@@ -42,6 +42,24 @@ describe("incoming upload route gate", () => {
     expect(await response!.json()).toEqual({ message: "Invalid pickup credential" });
   });
 
+  it("keeps the authenticated verification-status route outside the public-upload gate", async () => {
+    const response = await dispatchIncomingPublicRequest(
+      new Request("https://incoming.test/api/internal/uploads/upload-id/verification-status", { method: "POST" }),
+      { ...incomingEnv, INCOMING_PICKUP_SECRET: "pickup-secret" } as never,
+      {} as ExecutionContext,
+    );
+    expect(response?.status).toBe(401);
+  });
+
+  it("keeps internal verification listings outside the public-upload gate", async () => {
+    const response = await dispatchIncomingPublicRequest(
+      new Request("https://incoming.test/api/internal/uploads/verification-candidates"),
+      { ...incomingEnv, INCOMING_PICKUP_SECRET: "pickup-secret" } as never,
+      {} as ExecutionContext,
+    );
+    expect(response?.status).toBe(401);
+  });
+
   it("reports the quarantined incoming workflow as available", async () => {
     const response = await dispatchIncomingPublicRequest(
       new Request("https://incoming.test/health"),
