@@ -45,6 +45,55 @@ No flags, reminders, source settings or client permissions were changed during
 these read-only checks. Disabled components require their coordinated release
 gates, not blind activation to clear the status text.
 
+A subsequent read-only production Client D1 aggregate query confirmed the
+secondary source authority is active at revision 1, with **zero** workspace
+reservations, workspaces, and complete active directory generations. The API
+reported zero rows written. This establishes missing secondary workspace
+delivery, not merely a Client Hub label problem; it does not identify the
+producer-side cause. No primary authority row was returned by this query;
+primary legacy-path health must be checked separately rather than inferred
+from that absence. Do not manually synthesize workspaces or weaken ownership
+checks to hide the missing delivery.
+
+A follow-up aggregate query independent of the authority table found primary
+has one reservation and one receipt, but zero workspaces or complete active
+directory generations. Its sole receipt is a completed `snapshot_page` dated
+2026-09-07 20:26:59 UTC. The sole projection generation is still `staging`,
+`complete=0`, with one expected page and one received page; there is no
+activation receipt. Secondary has no receipts. These reads also wrote zero
+rows. Investigate the producer's page-to-activation outbox progression and
+cron prerequisites next; do not force activation or treat receipt of a page
+as proof of a complete authorized workspace.
+
+Operations D1 receipt aggregates refine the secondary diagnosis: four
+`portal.projection` events reached Ops Sync but remain pending with
+`client-portal-forward-failed` (latest receipt 2026-09-08 17:00:36 UTC).
+Primary has one completed portal event matching the page receipt timestamp.
+The secondary problem is therefore at the internal forward/receiver boundary,
+not proven absence of PA emission. The current aggregate error conflates RPC
+transport failure and retryable receiver responses; inspect bounded receiver
+reason/configuration evidence before changing any source authority or replaying.
+
+Read-only deployed Worker settings confirmed Ops Sync's private ingress binding
+targets `ledgetop-clients` / `OpsSyncPortalProjectionIngress`, and both Workers
+bind the expected Client D1 database. Workspace sync and hierarchy relations
+are enabled; catalog sync and service-assignment sync are disabled, matching
+the checked-in settings. Since all three families use `portal.projection`,
+pending aggregate receipts do not prove that workspace events specifically
+failed. A disabled family currently returns a retryable receiver result that
+Ops collapses into `client-portal-forward-failed`. Determine the event family
+and bounded receiver reason before attributing those four failures to transport
+or enabling additional feature gates.
+
+PA commit `246a6ac3` prevents shared-transport configuration failures from
+claiming queued projection deliveries and consuming attempts. Its regression
+preserves the same queued activation while credentials are unreadable and
+while the connection is disabled, then delivers it after configuration is
+restored. Independent focused verification passed 76 tests / 804 assertions.
+It also changes the manual sync message to report a producer preflight pause
+instead of success. This is a local, unpublished fix, not proof that either
+production source is repaired. It does not reset existing dead letters.
+
 Both Project Alpha integration tabs retained their previously rendered status
 but displayed **Session expired**. Those retained status values are not a fresh
 server check. Reauthentication is required before verifying current readiness,
