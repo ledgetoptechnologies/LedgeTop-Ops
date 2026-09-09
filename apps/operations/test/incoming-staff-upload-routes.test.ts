@@ -73,7 +73,7 @@ describe("incoming upload staff records and pickup lifecycle", () => {
       d1Databases: { DB: "incoming-staff-detail" },
     });
     database = await runtime.getD1Database("DB") as unknown as D1Database;
-    for (const name of ["0090_aliases_incoming_requests.sql", "0093_reusable_incoming_uploads.sql", "0116_incoming_upload_hardening.sql", "0198_incoming_upload_owner_notifications.sql", "0199_incoming_upload_pickup_lifecycle.sql", "0211_incoming_upload_verification_lifecycle.sql"]) {
+    for (const name of ["0090_aliases_incoming_requests.sql", "0093_reusable_incoming_uploads.sql", "0116_incoming_upload_hardening.sql", "0198_incoming_upload_owner_notifications.sql", "0199_incoming_upload_pickup_lifecycle.sql", "0211_incoming_upload_verification_lifecycle.sql", "0212_incoming_upload_archive_inventory.sql"]) {
       const sql = readFileSync(new URL(`../../client/migrations/${name}`, import.meta.url), "utf8")
         .replace(/^\s*--.*$/gm, "").replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "");
       await database.exec(sql.replace(/\s*\n\s*/g, " "));
@@ -104,6 +104,26 @@ describe("incoming upload staff records and pickup lifecycle", () => {
   });
 
   afterAll(async () => { await runtime.dispose(); });
+
+  it("accepts a server inventory after verification without a supplied R2 version and denies unauthorized readers", async () => {
+    expect((await pickupRequest("/api/internal/uploads/upload-one/verification-status", { state: "scanning", claimToken: claimOne })).status).toBe(200);
+    expect((await pickupRequest("/api/internal/uploads/upload-one/verification-status", { state: "verified", claimToken: claimOne,
+      sha256: "a".repeat(64), objectEtag: "abcdef", objectBytes: 893398388 })).status).toBe(200);
+    const receipt = { claimToken: claimOne, sha256: "a".repeat(64), objectEtag: "abcdef", objectBytes: 893398388,
+      inventoryId: claimTwo, page: 0, complete: true, entries: [{ path: "empty.txt", name: "empty.txt", kind: "file", size: 0 }] };
+    const path = "/api/internal/uploads/upload-one/archive-inventory";
+    const denied = await dispatchIncomingPublicRequest(new Request(`https://incoming.example${path}`, { method: "POST",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify(receipt) }), environment as never, context);
+    expect(denied?.status).toBe(401);
+    expect((await pickupRequest(path, receipt)).status).toBe(200);
+    const response = await staffRequest("/api/delivery/incoming-link/uploads/upload-one/archive-inventory");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ status: "ready", items: [{ name: "empty.txt", size: 0 }] });
+    mocks.requirePermission.mockRejectedValueOnce(new HTTPException(403, { message: "Forbidden" }));
+    expect((await staffRequest("/api/delivery/incoming-link/uploads/upload-one/archive-inventory")).status).toBe(403);
+    await bucket.delete("quarantine/request-one/upload-one/object");
+    expect(await (await staffRequest("/api/delivery/incoming-link/uploads/upload-one/archive-inventory")).json()).toMatchObject({ status: "unavailable", items: [] });
+  });
 
   it("shows staff lifecycle metadata without returning a private object key or bytes", async () => {
     const response = await staffRequest("/api/delivery/incoming-link/uploads/upload-one");

@@ -33,6 +33,10 @@ describe("incoming upload capability policy", () => {
   });
 
   it("exempts only exact authenticated TrueNAS pickup callbacks", () => {
+    for (const action of ["archive-inventory", "archive-inventory-unavailable"]) {
+      expect(incomingPublicRequestDecision({}, "POST", `/api/internal/uploads/upload-id/${action}`)).toBe("internal-completion");
+      expect(incomingPublicRequestDecision({}, "GET", `/api/internal/uploads/upload-id/${action}`)).toBe("disabled");
+    }
     expect(incomingPublicRequestDecision({}, "POST", "/api/internal/uploads/upload-id/accepted"))
       .toBe("internal-completion");
     expect(incomingPublicRequestDecision({}, "POST", "/api/internal/uploads/upload-id/pickup-status"))

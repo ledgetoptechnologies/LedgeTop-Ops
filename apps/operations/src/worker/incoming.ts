@@ -17,6 +17,7 @@ import {
 import { incomingRequestPage } from "./incoming-page";
 import { incomingUploadReceivedDigestStatement } from "./incoming-upload-notifications";
 import { applyVerificationStatus, serveVerifiedIncomingObject, verificationCandidates, verificationPending, verificationStatusSchema, verifiedObjectAvailable } from "./incoming-verification";
+import { archiveInventoryReceiptSchema, archiveInventoryUnavailableSchema, listArchiveInventory, markArchiveInventoryUnavailable, recordArchiveInventory } from "./incoming-archive-inventory";
 import { canonicalMultipartEtag } from "./multipart-etag";
 import {
   incomingPublicRequestDecision,
@@ -735,6 +736,14 @@ publicApp.get("/api/internal/uploads/verification-pending", async (c) => {
   requirePickupCredential(c);
   return c.json(await verificationPending(c.env, c.req.query("cursor") || null));
 });
+publicApp.post("/api/internal/uploads/:uploadId/archive-inventory", async (c) => {
+  requirePickupCredential(c);
+  return c.json(await recordArchiveInventory(c.env, c.req.param("uploadId"), await jsonBody(c.req.raw, archiveInventoryReceiptSchema)));
+});
+publicApp.post("/api/internal/uploads/:uploadId/archive-inventory-unavailable", async (c) => {
+  requirePickupCredential(c);
+  return c.json(await markArchiveInventoryUnavailable(c.env, c.req.param("uploadId"), await jsonBody(c.req.raw, archiveInventoryUnavailableSchema)));
+});
 
 const pickupStatusSchema = z.discriminatedUnion("state", [
   z.object({ state: z.literal("scanning"), claimToken: z.string().uuid() }),
@@ -1166,6 +1175,10 @@ staffApp.get("/uploads/:uploadId/download", async (c) => {
   ).bind(c.req.param("uploadId")).first<import("./incoming-verification").VerifiedObjectRow>();
   if (!upload) throw new HTTPException(404, { message: "Verified upload is unavailable" });
   return serveVerifiedIncomingObject(c.env, { ...upload, id: c.req.param("uploadId") }, c.req.raw);
+});
+staffApp.get("/uploads/:uploadId/archive-inventory", async (c) => {
+  await requireIncomingStaff(c, "file_requests.view");
+  return c.json(await listArchiveInventory(c.env, c.req.param("uploadId"), c.req.query("path") || null, c.req.query("q") || null, c.req.query("cursor") || null));
 });
 
 staffApp.onError((error, c) => {

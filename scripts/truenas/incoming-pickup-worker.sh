@@ -32,6 +32,7 @@ readonly DEFAULT_VERIFIED_LIST_PATH="/api/internal/uploads/verification-candidat
 : "${INCOMING_PICKUP_SCAN_TIMEOUT_SECONDS:=$DEFAULT_SCAN_TIMEOUT_SECONDS}"
 : "${INCOMING_PICKUP_MAX_JOBS:=$DEFAULT_MAX_JOBS}"
 : "${INCOMING_PICKUP_OVERSIZE_RETRY_SECONDS:=$DEFAULT_OVERSIZE_RETRY_SECONDS}"
+: "${INCOMING_PICKUP_INVENTORY_REPLAY_MAX_JOBS:=1}"
 : "${INCOMING_PICKUP_VERIFIED_LIST_PATH:=$DEFAULT_VERIFIED_LIST_PATH}"
 : "${INCOMING_PICKUP_STAGING_DIR:=$INCOMING_PICKUP_DESTINATION_DIR/.incoming-staging}"
 : "${INCOMING_PICKUP_STATE_DIR:=$INCOMING_PICKUP_DESTINATION_DIR/.incoming-state}"
@@ -147,6 +148,7 @@ valid_integer "$INCOMING_PICKUP_MAX_JOBS" && (( INCOMING_PICKUP_MAX_JOBS >= 1 &&
   die "INCOMING_PICKUP_MAX_JOBS must be an integer from 1 through 1000"
 valid_integer "$INCOMING_PICKUP_OVERSIZE_RETRY_SECONDS" && (( INCOMING_PICKUP_OVERSIZE_RETRY_SECONDS >= 60 && INCOMING_PICKUP_OVERSIZE_RETRY_SECONDS <= 86400 )) ||
   die "INCOMING_PICKUP_OVERSIZE_RETRY_SECONDS must be an integer from 60 through 86400"
+valid_integer "$INCOMING_PICKUP_INVENTORY_REPLAY_MAX_JOBS" && (( INCOMING_PICKUP_INVENTORY_REPLAY_MAX_JOBS >= 1 && INCOMING_PICKUP_INVENTORY_REPLAY_MAX_JOBS <= 100 )) || die "INCOMING_PICKUP_INVENTORY_REPLAY_MAX_JOBS must be an integer from 1 through 100"
 INCOMING_PICKUP_DESTINATION_DIR=$(canonical_private_dir "$INCOMING_PICKUP_DESTINATION_DIR") || die "INCOMING_PICKUP_DESTINATION_DIR must be a canonical private directory outside a quarantine segment"
 INCOMING_PICKUP_STAGING_DIR=$(canonical_private_dir "$INCOMING_PICKUP_STAGING_DIR") || die "INCOMING_PICKUP_STAGING_DIR must be a canonical private directory outside a quarantine segment"
 INCOMING_PICKUP_STATE_DIR=$(canonical_private_dir "$INCOMING_PICKUP_STATE_DIR") || die "INCOMING_PICKUP_STATE_DIR must be a canonical private directory outside a quarantine segment"
@@ -348,8 +350,9 @@ print(value)
 
 post_internal_json() {
   local upload_id="$1" action="$2" payload="$3" config_file body_file status rc
+  POST_HTTP_STATUS=""
   valid_upload_id "$upload_id" || return 1
-  [[ "$action" =~ ^(accepted|pickup-status|verification-status)$ ]] || return 1
+  [[ "$action" =~ ^(accepted|pickup-status|verification-status|archive-inventory|archive-inventory-unavailable)$ ]] || return 1
   config_file=$(mktemp "$INCOMING_PICKUP_STATE_DIR/.pickup-curl.XXXXXX")
   body_file=$(mktemp "$INCOMING_PICKUP_STATE_DIR/.pickup-body.XXXXXX")
   INCOMING_PICKUP_SECRET="$INCOMING_PICKUP_SECRET" PICKUP_CALLBACK_PAYLOAD="$payload" python3 - "$config_file" "$body_file" \
@@ -375,7 +378,102 @@ PY
   rc=$?
   set -e
   rm -f -- "$config_file" "$body_file"
+  POST_HTTP_STATUS="$status"
   (( rc == 0 )) && [[ "$status" == "200" ]]
+}
+
+publish_prepared_inventory_receipts() {
+  local receipt_dir="$1" upload_id="$2" receipt action payload
+  valid_upload_id "$upload_id" || return 1
+  [[ -d "$receipt_dir" && ! -L "$receipt_dir" && -f "$receipt_dir/ready" && ! -L "$receipt_dir/ready" ]] || return 1
+  while IFS= read -r -d '' receipt; do
+    [[ -f "$receipt" && ! -L "$receipt" ]] || return 1
+    action="${receipt##*/}"; action="${action#*.}"; action="${action%.json}"
+    [[ "$action" =~ ^(archive-inventory|archive-inventory-unavailable)$ ]] || return 1
+    payload=$(<"$receipt")
+    if ! post_internal_json "$upload_id" "$action" "$payload"; then
+      [[ "$POST_HTTP_STATUS" == "409" ]] && return 2
+      return 1
+    fi
+  done < <(find "$receipt_dir" -mindepth 1 -maxdepth 1 -type f -name '[0-9][0-9][0-9][0-9].*.json' -print0 | sort -z)
+}
+
+replay_archive_inventory_receipts() {
+  local dir upload_id attempted=0 result retry_at now retry_file cursor_file cursor_name
+  cursor_file="$INCOMING_PICKUP_STATE_DIR/.inventory-cursor"
+  cursor_name=""
+  [[ -f "$cursor_file" && ! -L "$cursor_file" ]] && cursor_name=$(<"$cursor_file")
+  [[ "$cursor_name" =~ ^\.inventory\.[A-Za-z0-9]+$ ]] || cursor_name=""
+  while IFS= read -r -d '' dir && (( attempted < INCOMING_PICKUP_INVENTORY_REPLAY_MAX_JOBS )); do
+    [[ -d "$dir" && ! -L "$dir" && -f "$dir/upload-id" && ! -L "$dir/upload-id" ]] || continue
+    # An incomplete directory has no ready marker and is never counted.  Pages
+    # are moved before this marker; the fsync below makes publication atomic to
+    # a later replay even though individual receipt files are moved first.
+    [[ -f "$dir/ready" && ! -L "$dir/ready" ]] || continue
+    retry_file="$dir/retry-at"
+    if [[ -f "$retry_file" && ! -L "$retry_file" ]]; then
+      retry_at=$(<"$retry_file")
+      now=$(date +%s)
+      valid_integer "$retry_at" || continue
+      (( now >= retry_at )) || continue
+    fi
+    upload_id=$(<"$dir/upload-id")
+    valid_upload_id "$upload_id" || continue
+    (( attempted += 1 ))
+    # Persist round-robin position before the network call.  A callback that
+    # fails exactly at each cron boundary therefore cannot starve its sorted
+    # successor on the next invocation.
+    printf '%s\n' "${dir##*/}" >"$INCOMING_PICKUP_STATE_DIR/.inventory-cursor.tmp" && chmod 600 -- "$INCOMING_PICKUP_STATE_DIR/.inventory-cursor.tmp" && fsync_path "$INCOMING_PICKUP_STATE_DIR/.inventory-cursor.tmp" && mv -f -- "$INCOMING_PICKUP_STATE_DIR/.inventory-cursor.tmp" "$cursor_file" && fsync_path "$INCOMING_PICKUP_STATE_DIR" || true
+    result=0; publish_prepared_inventory_receipts "$dir" "$upload_id" || result=$?
+    if (( result == 0 || result == 2 )); then
+      # This path is composed only by mktemp below and is checked as an owned,
+      # non-symlink child before removal; never recurse over a configured root.
+      [[ "$dir" == "$INCOMING_PICKUP_STATE_DIR"/.inventory.* && ! -L "$dir" ]] && rm -rf -- "$dir"
+    else
+      # Keep a short, durable bounded delay.  A permanently unavailable
+      # callback cannot monopolize the default single replay slot.
+      printf '%s\n' "$(( $(date +%s) + 60 ))" >"$dir/.retry-at.tmp" && chmod 600 -- "$dir/.retry-at.tmp" && fsync_path "$dir/.retry-at.tmp" && mv -f -- "$dir/.retry-at.tmp" "$retry_file" && fsync_path "$dir" || true
+    fi
+  done < <(INVENTORY_STATE="$INCOMING_PICKUP_STATE_DIR" INVENTORY_CURSOR="$cursor_name" python3 - <<'PY'
+import os
+root=os.environ["INVENTORY_STATE"]
+cursor=os.environ["INVENTORY_CURSOR"]
+names=sorted(name for name in os.listdir(root) if name.startswith(".inventory.") and os.path.isdir(os.path.join(root,name)) and not os.path.islink(os.path.join(root,name)))
+if cursor in names:
+    pivot=names.index(cursor)+1
+    names=names[pivot:]+names[:pivot]
+for name in names:
+    print(os.path.join(root,name), end="\0")
+PY
+)
+}
+
+publish_archive_inventory() {
+  local source_file="$1" upload_id="$2" token="$3" digest="$4" etag="$5" bytes="$6"
+  local helpers inventory_file receipt_dir durable_dir proof parse_rc=0 result=0
+  helpers=$(dirname -- "${BASH_SOURCE[0]}")
+  # Missing helper or unsupported input must never block verified pickup.
+  [[ -f "$helpers/incoming-zip-inventory.py" && -f "$helpers/incoming-zip-receipts.py" ]] || return 1
+  inventory_file="$CURRENT_STAGE/inventory.json"
+  receipt_dir="$CURRENT_STAGE/inventory-receipts"
+  timeout --signal=TERM --kill-after=5s 30 python3 "$helpers/incoming-zip-inventory.py" "$source_file" > "$inventory_file" 2>/dev/null || parse_rc=$?
+  [[ "$parse_rc" == "0" || "$parse_rc" == "2" ]] || return 1
+  proof=$(PICKUP_CLAIM_TOKEN="$token" python3 -c 'import os,json,sys; print(json.dumps({"claimToken":os.environ["PICKUP_CLAIM_TOKEN"],"sha256":sys.argv[1],"objectEtag":sys.argv[2],"objectBytes":int(sys.argv[3])},separators=(",",":")))' "$digest" "$etag" "$bytes") || return 1
+  INCOMING_INVENTORY_PROOF="$proof" timeout --signal=TERM --kill-after=5s 30 python3 "$helpers/incoming-zip-receipts.py" "$inventory_file" "$receipt_dir" >/dev/null 2>&1 || return 1
+  durable_dir=$(mktemp -d "$INCOMING_PICKUP_STATE_DIR/.inventory.XXXXXXXX") || return 1
+  chmod 700 -- "$durable_dir"
+  printf '%s\n' "$upload_id" >"$durable_dir/upload-id" || { rm -rf -- "$durable_dir"; return 1; }
+  chmod 600 -- "$durable_dir/upload-id"; fsync_path "$durable_dir/upload-id" || { rm -rf -- "$durable_dir"; return 1; }
+  mv -- "$receipt_dir"/* "$durable_dir"/ || { rm -rf -- "$durable_dir"; return 1; }
+  fsync_path "$durable_dir" && fsync_path "$INCOMING_PICKUP_STATE_DIR" || { rm -rf -- "$durable_dir"; return 1; }
+  : >"$durable_dir/ready"; chmod 600 -- "$durable_dir/ready"; fsync_path "$durable_dir/ready" && fsync_path "$durable_dir" && fsync_path "$INCOMING_PICKUP_STATE_DIR" || return 1
+  # Count the initial attempt in the same durable round-robin order as a
+  # replay.  Otherwise a first transport failure could still win the next
+  # cron pass before the cursor is established.
+  printf '%s\n' "${durable_dir##*/}" >"$INCOMING_PICKUP_STATE_DIR/.inventory-cursor.tmp" && chmod 600 -- "$INCOMING_PICKUP_STATE_DIR/.inventory-cursor.tmp" && fsync_path "$INCOMING_PICKUP_STATE_DIR/.inventory-cursor.tmp" && mv -f -- "$INCOMING_PICKUP_STATE_DIR/.inventory-cursor.tmp" "$INCOMING_PICKUP_STATE_DIR/.inventory-cursor" && fsync_path "$INCOMING_PICKUP_STATE_DIR" || true
+  publish_prepared_inventory_receipts "$durable_dir" "$upload_id" || result=$?
+  if (( result == 0 || result == 2 )); then rm -rf -- "$durable_dir"; return 0; fi
+  return 1
 }
 
 post_acceptance() {
@@ -799,6 +897,9 @@ promote_and_accept() {
       log "verification proof was not acknowledged; object left quarantined"
       return 0
     }
+    if ! publish_archive_inventory "$stage_file" "$upload_id" "$claim_token" "$digest" "$object_etag" "$object_bytes"; then
+      log "archive inventory unavailable; verified download and pickup remain eligible"
+    fi
     log "upload verified; source remains in quarantine"
     return 0
   fi
@@ -1060,6 +1161,7 @@ list_verified_candidates() { list_api_candidates "$INCOMING_PICKUP_VERIFIED_LIST
 
 run_verify_only() {
   local cursor="" document upload_id request_id key identity attempts=0 next
+  replay_archive_inventory_receipts
   while (( attempts < INCOMING_PICKUP_MAX_JOBS )); do
     document=$(list_api_candidates "/api/internal/uploads/verification-pending" "$cursor") || { log "pending verification listing failed; objects left for retry"; return 0; }
     while IFS=$'\t' read -r upload_id request_id key; do

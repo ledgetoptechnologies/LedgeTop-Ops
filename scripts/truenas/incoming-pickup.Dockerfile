@@ -9,6 +9,7 @@ RUN apk add --no-cache bash aws-cli clamav clamav-libunrar curl python3 coreutil
 
 COPY scripts/truenas/incoming-pickup-worker.sh /usr/local/libexec/incoming-pickup-worker.sh
 COPY scripts/truenas/incoming-pickup-entrypoint.sh /usr/local/libexec/incoming-pickup-entrypoint.sh
+COPY scripts/truenas/incoming-zip-inventory.py scripts/truenas/incoming-zip-receipts.py /usr/local/libexec/
 RUN chmod 0755 /usr/local/libexec/incoming-pickup-worker.sh /usr/local/libexec/incoming-pickup-entrypoint.sh
 
 ENTRYPOINT ["/usr/local/libexec/incoming-pickup-entrypoint.sh"]

@@ -49,8 +49,12 @@ config="$2"
 output=$(sed -n 's/^output = "//p' "$config" | sed 's/"$//')
 ${options.apiLog ? `cat "$config" >> '${options.apiLog.replaceAll("'", "'\\''")}'` : ":"}
 if grep -q 'request = "GET"' "$config"; then
+  ${options.pendingEmptyAfter ? `if grep -q 'verification-pending' "$config" && [ -e '${options.pendingEmptyAfter.replaceAll("'", "'\\''")}' ]; then printf '%s' '{"uploads":[],"nextCursor":null}' > "$output"; else` : ":"}
   ${options.verifiedBodyByCursor ? `if grep -q 'cursor=page2' "$config"; then printf '%s' '${options.verifiedBodyByCursor.page2.replaceAll("'", "'\\''")}' > "$output"; else printf '%s' '${options.verifiedBodyByCursor.first.replaceAll("'", "'\\''")}' > "$output"; fi` : (options.apiBody ?? options.pendingBody ?? options.verifiedBody) ? `printf '%s' '${(options.apiBody ?? options.pendingBody ?? options.verifiedBody).replaceAll("'", "'\\''")}' > "$output"` : ":"}
+  ${options.pendingEmptyAfter ? "fi" : ":"}
 fi
+${options.failInventoryOnce ? `if grep -q 'archive-inventory' "$config" && [ ! -e '${options.failInventoryOnce.replaceAll("'", "'\\''")}' ]; then : > '${options.failInventoryOnce.replaceAll("'", "'\\''")}'; exit 7; fi` : ":"}
+${options.inventoryStatus ? `if grep -q 'archive-inventory' "$config"; then printf '${options.inventoryStatus}'; exit 0; fi` : ":"}
 printf '200'
 `);
   await executable(join(bin, "flock"), `#!/usr/bin/env bash
@@ -224,6 +228,52 @@ test("verify-only proves bytes without promoting or deleting", async (t) => {
   await assert.rejects(readFile(deleteLog));
   assert.equal(result.stderr.includes("source remains in quarantine"), true, `${result.stderr}\n${result.stdout}`);
   assert.equal(digest.length, 64);
+});
+
+test("verify-only persists failed inventory callbacks and replays without a second source read", async (t) => {
+  if (!canRunWorkerFixtures) return t.skip("POSIX runtime required");
+  const root = await mkdtemp(join(tmpdir(), "incoming-inventory-retry-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const getLog = join(root, "get.log"), failed = join(root, "failed.marker");
+  const value = await fixture({ getLog, failInventoryOnce: failed, pendingEmptyAfter: failed, pendingBody: JSON.stringify({ uploads: [{ id: uploadId, requestId, objectKey, originalName: "photo.jpg", objectEtag: "abcd", objectBytes: 4 }], nextCursor: null }) });
+  t.after(() => rm(value.root, { recursive: true, force: true }));
+  assert.equal(runWorker(value.env, "--verify-only").status, 0);
+  assert.equal((await readdir(value.state)).some(name => name.startsWith(".inventory.")), true);
+  const firstReads = (await readFile(getLog, "utf8")).trim().split("\n").length;
+  value.env.INCOMING_PICKUP_MAX_JOBS = "1";
+  const result = runWorker(value.env, "--verify-only");
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal((await readFile(getLog, "utf8")).trim().split("\n").length, firstReads);
+  assert.equal((await readdir(value.state)).some(name => name.startsWith(".inventory.")), false);
+});
+
+test("inventory replay rotates past a repeatedly failing first receipt and skips non-ready state", async (t) => {
+  if (!canRunWorkerFixtures) return t.skip("POSIX runtime required");
+  const root = await mkdtemp(join(tmpdir(), "incoming-inventory-fair-")), failed = join(root, "failed.marker");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const value = await fixture({ failInventoryOnce: failed, pendingEmptyAfter: failed, pendingBody: JSON.stringify({ uploads: [{ id: uploadId, requestId, objectKey, originalName: "photo.jpg", objectEtag: "abcd", objectBytes: 4 }], nextCursor: null }) });
+  t.after(() => rm(value.root, { recursive: true, force: true }));
+  runWorker(value.env, "--verify-only");
+  const first = (await readdir(value.state)).find(name => name.startsWith(".inventory."));
+  assert.ok(first);
+  const nonReady = join(value.state, ".inventory.00000000"), second = join(value.state, ".inventory.zzzzzzzz");
+  await mkdir(nonReady); await writeFile(join(nonReady, "upload-id"), uploadId);
+  await mkdir(second); await writeFile(join(second, "upload-id"), "upload-0002"); await writeFile(join(second, "0000.archive-inventory-unavailable.json"), JSON.stringify({ claimToken, sha256: "a".repeat(64), objectEtag: "abcd", objectBytes: 4, inventoryId: "22222222-2222-4222-8222-222222222222", reason: "not_zip" })); await writeFile(join(second, "ready"), "");
+  await writeFile(join(value.state, first, "retry-at"), "0\n");
+  const result = runWorker(value.env, "--verify-only");
+  assert.equal(result.status, 0, result.stderr);
+  const remaining = await readdir(value.state);
+  assert.equal(remaining.includes(".inventory.zzzzzzzz"), false, `rotated successor must be attempted: ${result.stderr} / ${remaining.join(",")}`);
+  assert.equal(remaining.includes(".inventory.00000000"), true, "non-ready directory must not be published or consumed");
+});
+
+test("verify-only discards a stale inventory receipt acknowledged with 409", async (t) => {
+  if (!canRunWorkerFixtures) return t.skip("POSIX runtime required");
+  const value = await fixture({ inventoryStatus: "409", pendingBody: JSON.stringify({ uploads: [{ id: uploadId, requestId, objectKey, originalName: "photo.jpg", objectEtag: "abcd", objectBytes: 4 }], nextCursor: null }) });
+  t.after(() => rm(value.root, { recursive: true, force: true }));
+  const result = runWorker(value.env, "--verify-only");
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal((await readdir(value.state)).some(name => name.startsWith(".inventory.")), false);
 });
 
 test("verify-only never recovers or accepts a preexisting promoted receipt", async (t) => {

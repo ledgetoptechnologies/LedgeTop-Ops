@@ -59,7 +59,7 @@ export function incomingPublicRequestDecision(
   if (method.toUpperCase() === "GET" && pathname === "/health") {
     return "health";
   }
-  if ((method.toUpperCase() === "POST" && /^\/api\/internal\/uploads\/[^/]+\/(?:accepted|pickup-status|verification-status)$/.test(pathname))
+  if ((method.toUpperCase() === "POST" && /^\/api\/internal\/uploads\/[^/]+\/(?:accepted|pickup-status|verification-status|archive-inventory|archive-inventory-unavailable)$/.test(pathname))
     || (method.toUpperCase() === "GET" && /^\/api\/internal\/uploads\/verification-(?:candidates|pending)$/.test(pathname))) {
     return "internal-completion";
   }
