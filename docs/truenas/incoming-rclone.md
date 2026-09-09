@@ -129,6 +129,12 @@ can reach local storage before the application finishes verification.
 
 Keep the destination, schedule and transfer direction/mode. Coordinate changing
 only the remote selection to `ready/` before enabling the application gate.
+While waiting for that rollout, ask the operator to temporarily disable this
+one root-level Incoming task, preserving its configuration and local files.
+Leaving root MOVE scheduled can remove newly completed staging objects before
+publication. This is a temporary pickup pause, not permission to delete files
+or disable unrelated TrueNAS tasks. Re-enable the hourly task only after its
+ready-prefix selection and the application publication path are verified.
 An already downloaded opaque object may be the original upload, not disposable
 temporary data; do not delete it based on its name. Once MOVE removes it from
 R2, the application cannot recover or verify the local copy without separate

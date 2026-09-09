@@ -10,6 +10,13 @@ records displayed **Automatic workspace pending**; secondary-source records
 displayed **Portal unavailable for this source**. Business-directory visibility
 does not establish portal provisioning or successful source delivery.
 
+Type-to-search was exercised without Enter or the Search button using the
+operator-identified business present in both sources. The directory returned
+two separately labeled, source-qualified records. Selecting the LTT source
+reduced the result to its single secondary record, and the detail URL preserved
+the search and source parameters. This accepts that read-only staff discovery
+interaction, not cross-source linking or client portal identity/access.
+
 A primary organization detail page was also inspected in the live browser.
 At the current desktop width its overview rendered in three columns, with
 business contacts, operational contacts and business projects together. Portal
@@ -17,6 +24,26 @@ revocation controls appeared after the history/administration sections. The
 organization contact editor opened with its two existing business contacts as
 options, and Cancel returned to read mode without saving. This is read-only
 desktop smoke coverage, not mobile, persistence or authorization acceptance.
+
+The live Administration page rendered configuration cards in a spaced two-column
+grid at the current desktop width. Its source summary showed both business
+connections active/healthy and the secondary portal connection active. That
+does not resolve Client Hub's secondary-source portal-unavailable state; the
+source admission and actual workspace delivery still need joined verification.
+The following visible statuses remain open, not accepted:
+
+- Both source token-expiry reminders: **not configured**. Obtain actual token
+  expiry dates before configuring reminders; do not invent a ten-year deadline.
+- Feedback, service requests and request attachments: Client runtime gates
+  **unverified** in this Operations view.
+- Delegated sharing/signer: Operations companion **disabled**, Client runtime
+  gate **unverified**.
+- Access-expiry notices: Operations companion **disabled**.
+- Delivery notification recovery: **paused**, with zero displayed jobs.
+
+No flags, reminders, source settings or client permissions were changed during
+these read-only checks. Disabled components require their coordinated release
+gates, not blind activation to clear the status text.
 
 Both Project Alpha integration tabs retained their previously rendered status
 but displayed **Session expired**. Those retained status values are not a fresh
