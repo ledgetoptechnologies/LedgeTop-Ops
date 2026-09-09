@@ -7,6 +7,7 @@ import { operationsViewerShellPath } from "./OperationsViewerShell";
 import { generateSecureAccessCode } from "./access-code";
 import { incomingUploadStatus, type IncomingStatusFacts } from "./incoming-upload-status";
 import { IncomingArchiveBrowser, type ArchiveEntry, type ArchiveLoader } from "./IncomingArchiveBrowser";
+import { IncomingUploadBrowser, type IncomingBrowseLoader } from "./IncomingUploadBrowser";
 import {
   DELIVERY_JOBS_PREFIX,
   DELIVERY_ROOT_PREFIX,
@@ -3910,6 +3911,15 @@ function DeliveryHub({ session }: { session: Session }) {
   );
 }
 function IncomingUploads() {
+  const [browseUploads, setBrowseUploads] = useState(false);
+  const loadUploads = useCallback<IncomingBrowseLoader>(async (query, cursor, signal) => {
+    const params = new URLSearchParams({ q: query });
+    if (cursor) params.set("cursor", cursor);
+    const result = await api<{ uploads: (IncomingUploadSummary & { id: string; originalName: string })[]; nextCursor?: string | null }>(
+      `/api/delivery/incoming-link/uploads?${params}`, { signal });
+    return { items: result.uploads.map(upload => ({ id: upload.id, name: upload.originalName,
+      contributor: upload.contributorName || "Contributor", status: incomingUploadStatus(upload).label })), nextCursor: result.nextCursor || undefined };
+  }, []);
   const { data, error, reload } = useLoad<IncomingLinkResponse>(
     () => api("/api/delivery/incoming-link"),
     [],
@@ -4142,6 +4152,10 @@ function IncomingUploads() {
           <Card
             title="Recent uploads"
             action={
+              <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+              <button type="button" className="button-ghost button-small" onClick={() => setBrowseUploads(value => !value)}>
+                {browseUploads ? "Close upload browser" : "Browse all uploads"}
+              </button>
               <button
                 className="button-ghost button-small"
                 disabled={busy}
@@ -4149,6 +4163,7 @@ function IncomingUploads() {
               >
                 Refresh
               </button>
+              </div>
             }
           >
             {link.recentUploads.length ? (
@@ -4212,6 +4227,7 @@ function IncomingUploads() {
               />
             )}
           </Card>
+          {browseUploads && <Card><IncomingUploadBrowser key={link.id} load={loadUploads} onInspect={setSelectedUploadId} /></Card>}
           {selectedUploadId && <Card
             title="Incoming upload record"
             action={<button type="button" className="button-ghost button-small" onClick={() => setSelectedUploadId(null)}>Close</button>}
