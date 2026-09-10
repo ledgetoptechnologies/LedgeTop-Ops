@@ -25,4 +25,23 @@ describe("independent Incoming verification and pickup labels", () => {
     expect(incomingUploadStatus({ status: "quarantined", pickupState: "scanning" }).label).toBe("Server verification in progress");
     expect(incomingUploadStatus({ status: "quarantined", pickupState: "retry" }).detail).toContain("does not mean malware");
   });
+  it("distinguishes basic-check publication from scanner results", () => {
+    const result = incomingUploadStatus({ status: "quarantined", verificationState: "awaiting_verification", promotion: { state: "ready", objectAvailability: "present" } });
+    expect(result.label).toBe("Ready for server pickup");
+    expect(result.detail).toContain("not an antivirus scan");
+    expect(incomingUploadStatus({ status: "quarantined", promotion: { state: "ready" } }).label).toBe("Published for server pickup");
+  });
+  it("does not equate a missing object or uncertain publication with local delivery", () => {
+    const missing = incomingUploadStatus({ status: "quarantined", promotion: { state: "ready", objectAvailability: "missing" } });
+    expect(missing.label).toBe("No longer in R2");
+    expect(missing.detail).toContain("no server download receipt");
+    expect(incomingUploadStatus({ status: "quarantined", promotion: { state: "publishing" } }).label).toBe("Publication needs confirmation");
+    expect(incomingUploadStatus({ status: "quarantined", promotion: { state: "ready", objectAvailability: "changed" } }).label).toBe("Published file needs review");
+  });
+  it("never allows publication metadata to override rejection or expiry", () => {
+    for (const status of ["rejected", "expired"] as const) {
+      expect(incomingUploadStatus({ status, promotion: { state: "ready", objectAvailability: "present" } }).label).toBe(status === "rejected" ? "Rejected" : "Expired");
+    }
+    expect(incomingUploadStatus({ status: "quarantined", verificationState: "rejected", promotion: { state: "ready" } }).label).toBe("Verification needs review");
+  });
 });

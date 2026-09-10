@@ -133,6 +133,7 @@ interface IncomingUploadSummary {
   contentType?: string;
   pickupState?: "awaiting_pickup" | "scanning" | "retry" | "accepted" | "rejected";
   verificationState?: IncomingStatusFacts["verificationState"];
+  promotion?: IncomingStatusFacts["promotion"];
   verifiedAt?: string | null;
   pickupAttemptCount?: number;
   pickupLastAttemptAt?: string | null;
@@ -4248,16 +4249,17 @@ function IncomingUploads() {
                 </dl>
                 <p className="incoming-upload-status-detail">{status.detail}</p>
                 {timing.length > 0 && <p className="incoming-upload-status-detail">{timing.join(" · ")}</p>}
-                {record.downloadAvailable === true && record.verificationState === "verified" && record.bucketObject.state === "present" ? <a
+                {record.downloadAvailable === true && (record.verificationState === "verified" || record.promotion?.state === "ready") && record.bucketObject.state === "present" ? <a
                   className="button-orange"
                   href={`/api/delivery/incoming-link/uploads/${encodeURIComponent(record.id)}/download`}
                   download
-                >Download verified file</a> : <p className="muted">{record.bucketObject.state === "removed"
-                  ? "This file is no longer in the incoming bucket. Check the server pickup destination for the downloaded copy."
+                >{record.promotion ? "Download file" : "Download verified file"}</a> : <p className="muted">{record.bucketObject.state === "removed"
+                  ? "This file is no longer in the incoming bucket. Check the server pickup task and local destination; a local copy is not confirmed here."
+                  : record.promotion ? "Download is available once pickup preparation finishes and while the published file remains in the incoming bucket."
                   : "Download becomes available after verification passes and while the file remains in the incoming bucket."}</p>}
                 <p className="muted">This record shows verification separately from server pickup. Archive listings contain metadata only, not file previews.</p>
                 {record.fileName?.toLowerCase().endsWith(".zip") && <IncomingArchiveBrowser key={record.id} uploadId={record.id}
-                  active={record.downloadAvailable === true && record.verificationState === "verified" && record.bucketObject.state === "present"}
+                  active={record.downloadAvailable === true && (record.verificationState === "verified" || record.promotion?.state === "ready") && record.bucketObject.state === "present"}
                   loader={loadArchive} />}
               </div>;
             })() : null}

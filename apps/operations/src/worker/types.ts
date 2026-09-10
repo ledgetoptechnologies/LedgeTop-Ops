@@ -98,6 +98,9 @@ export type Env = Omit<
   INCOMING_EXPECTED_HOST: string;
   INCOMING_BUCKET: R2Bucket;
   INCOMING_LIFECYCLE_WORKFLOW: Workflow;
+  /** Enable only after the ready-prefix TrueNAS cutover and migration. */
+  INCOMING_RCLONE_PROMOTION_ENABLED?: string;
+  INCOMING_RCLONE_PROMOTION_WORKFLOW?: Workflow<import("./incoming-rclone-dispatch").IncomingPromotionSegment>;
   TURNSTILE_SITE_KEY: string;
   TURNSTILE_SECRET: string;
   INCOMING_SESSION_SECRET: string;

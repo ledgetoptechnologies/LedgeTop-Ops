@@ -553,7 +553,9 @@ test("an assigned exact-root contact beyond the first 25 is selected and saves w
   await operations.getByRole("button", { name: "Save contacts", exact: true }).click();
   await expect(operations.getByText("Operational contacts saved.", { exact: true })).toBeVisible();
   expect(writes[0]).toMatchObject({ assignments: [expect.objectContaining({ contactId: "assigned-26" })] });
-  expect(workspaceReads).toBe(2); // Initial read plus the post-save refresh; no contact-page request.
+  // The verified save acknowledgement renders before the revision effect's
+  // refresh reaches the server. Await that separate request, not just the toast.
+  await expect.poll(() => workspaceReads).toBe(2); // Initial read plus refresh; no contact-page request.
 });
 
 test("malformed contact-page metadata fails closed without rendering project data", async ({ page }) => {

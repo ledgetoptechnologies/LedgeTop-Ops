@@ -65,7 +65,7 @@ test("empty pending review stays out of the way when the client directory is ava
   await expect(page.getByRole("link", { name: "Open Acme client workspace" })).toBeVisible();
 });
 
-test("a synced Project Alpha client explains that its automatic workspace is still pending", async ({ page }) => {
+test("a Project Alpha client without an exact workspace link does not imply a queued delivery", async ({ page }) => {
   const pending = {
     ...client("org-pending", "Pending workspace"),
     pa_public_id: "b".repeat(32),
@@ -75,36 +75,68 @@ test("a synced Project Alpha client explains that its automatic workspace is sti
     ["team.view", "operations.manage"], []);
 
   await page.goto("/clients");
-  await expect(page.getByText("Workspace sync pending", { exact: true })).toBeVisible();
+  await expect(page.getByText("Portal workspace not linked", { exact: true })).toBeVisible();
   await expect(page.getByText(
-    "Project Alpha synced this client, but its automatic portal workspace has not reached Client Delivery yet. No approval is required.",
+    "No exact source-owned portal workspace is linked to this Project Alpha client. Eligible Project Alpha clients are provisioned automatically; no manual invitation is needed. Check Project Alpha synchronization status.",
     { exact: true },
   )).toBeVisible();
   await expect(page.getByText("Client ID sync incomplete", { exact: true })).toHaveCount(0);
 });
 
-test("a Project Alpha business root awaiting its first projection does not imply manual setup", async ({ page }) => {
+test("primary and secondary Project Alpha business roots use the factual missing-workspace status", async ({ page }) => {
   await mock(page, route => route.fulfill({ json: {
-    clients: [{ ...client("org-new", "New workspace"), pa_public_id: "d".repeat(32) }],
+    clients: [
+      { ...client("org-primary", "Primary workspace"), pa_public_id: "d".repeat(32) },
+      { ...client("org-secondary", "Secondary workspace", "organization", "project-alpha:secondary"),
+        pa_public_id: "e".repeat(32), portal_status: "not_supported" },
+    ],
     nextCursor: null,
     capabilities,
   } }), ["team.view", "operations.manage"], []);
 
   await page.goto("/clients");
-  await expect(page.getByText("Automatic workspace pending", { exact: true })).toBeVisible();
-  await expect(page.getByText(/workspace is created automatically.*no approval is required/i)).toBeVisible();
+  await expect(page.getByText("Portal workspace not linked", { exact: true })).toHaveCount(2);
+  await expect(page.getByText(/Eligible Project Alpha clients are provisioned automatically; no manual invitation is needed\. Check Project Alpha synchronization status\./)).toHaveCount(2);
+  await expect(page.getByText("Portal unavailable for this source", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Automatic workspace pending", { exact: true })).toHaveCount(0);
   await expect(page.getByText("Portal not set up", { exact: true })).toHaveCount(0);
 });
 
-test("a revoked client root is prominent in the directory", async ({ page }) => {
+test("actual projection processing remains distinct from an unlinked workspace", async ({ page }) => {
+  const processing = { ...client("org-processing", "Processing workspace"), pa_public_id: "f".repeat(32),
+    portal_status: "projection_pending" };
+  await mock(page, route => route.fulfill({ json: { clients: [processing], nextCursor: null, capabilities } }),
+    ["team.view", "operations.manage"], []);
+
+  await page.goto("/clients");
+  await expect(page.getByText("Workspace update processing", { exact: true })).toBeVisible();
+  await expect(page.getByText("Client Delivery received this workspace update and is validating it before activation.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Portal workspace not linked", { exact: true })).toHaveCount(0);
+});
+
+for (const linked of [false, true]) {
+test(`a revoked client root remains prominent with ${linked ? "an active linked" : "no linked"} workspace`, async ({ page }) => {
   const revoked = { ...client("org-revoked", "Revoked client"), pa_public_id: "c".repeat(32),
-    workspace_id: "workspace-revoked", portal_status: "active", portal_access_state: "revoked" };
+    source_id: "project-alpha:secondary", source_name: "Secondary business", workspace_id: linked ? "workspace-revoked" : null,
+    portal_status: linked ? "active" : "not_supported", portal_access_state: "revoked" };
   await mock(page, route => route.fulfill({ json: { clients: [revoked], nextCursor: null, capabilities } }),
     ["team.view", "operations.manage"], []);
   await page.goto("/clients");
   const card = page.getByRole("link", { name: "Open Revoked client client workspace" });
   await expect(card.getByText("Portal access revoked", { exact: true })).toBeVisible();
   await expect(card).toContainText("An administrator disabled this client's portal root");
+  await expect(card.getByText("Portal workspace not linked", { exact: true })).toHaveCount(0);
+});
+}
+
+test("a Project Alpha business root without an exact client ID remains distinct from missing workspace proof", async ({ page }) => {
+  const incomplete = { ...client("org-id", "Incomplete ID"), portal_status: "mapping_unavailable" };
+  await mock(page, route => route.fulfill({ json: { clients: [incomplete], nextCursor: null, capabilities } }),
+    ["team.view", "operations.manage"], []);
+
+  await page.goto("/clients");
+  await expect(page.getByText("Client ID sync incomplete", { exact: true })).toBeVisible();
+  await expect(page.getByText("Portal workspace not linked", { exact: true })).toHaveCount(0);
 });
 
 test("matching business IDs from two producers retain source labels, contacts and project navigation without borrowing portal access", async ({ page }, testInfo) => {

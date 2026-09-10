@@ -59,17 +59,20 @@ describe("incoming upload public routes", () => {
   let bucket: IncomingBucket;
   let env: any;
   let cookie: string;
+  let background: Promise<unknown>[];
 
   beforeAll(async () => {
     miniflare = new Miniflare({ compatibilityDate: "2026-08-06", modules: true, script: "export default { fetch() { return new Response('ok'); } };", d1Databases: { DB: "incoming-routes" } });
     db = await miniflare.getD1Database("DB") as unknown as D1Database;
-    for (const name of ["0090_aliases_incoming_requests.sql", "0093_reusable_incoming_uploads.sql", "0116_incoming_upload_hardening.sql", "0198_incoming_upload_owner_notifications.sql", "0199_incoming_upload_pickup_lifecycle.sql", "0211_incoming_upload_verification_lifecycle.sql"]) {
+    for (const name of ["0090_aliases_incoming_requests.sql", "0093_reusable_incoming_uploads.sql", "0116_incoming_upload_hardening.sql", "0198_incoming_upload_owner_notifications.sql", "0199_incoming_upload_pickup_lifecycle.sql", "0211_incoming_upload_verification_lifecycle.sql", "0213_incoming_rclone_promotion.sql"]) {
       const sql = readFileSync(new URL(`../../client/migrations/${name}`, import.meta.url), "utf8").replace(/^\s*--.*$/gm, "").replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "");
       await db.exec(sql.replace(/\s*\n\s*/g, " "));
     }
   });
 
   beforeEach(async () => {
+    background = [];
+    await db.exec("DELETE FROM file_request_upload_promotion_outbox;");
     await db.exec("DELETE FROM public_rate_limits; DELETE FROM incoming_upload_notification_digest_items; DELETE FROM incoming_upload_notification_digests; DELETE FROM file_request_upload_parts; DELETE FROM file_request_uploads; DELETE FROM file_request_contributors; DELETE FROM file_requests;");
     await db.batch([
       db.prepare("INSERT INTO file_requests(id,public_id,title,created_by,expires_at,max_files,max_bytes,session_version) VALUES('request-a','public-a','Upload','staff',datetime('now','+1 day'),10,1000,1)"),
@@ -93,9 +96,12 @@ describe("incoming upload public routes", () => {
     method,
     headers: { Origin: "https://incoming.test", Cookie: suppliedCookie, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
     body: body === undefined ? undefined : JSON.stringify(body),
-  }), env, {} as ExecutionContext) as Promise<Response>;
+  }), env, { waitUntil(promise: Promise<unknown>) { background.push(promise); } } as ExecutionContext) as Promise<Response>;
 
-  it("initializes, scopes a direct ticket, checkpoints, completes, and cleans parts", async () => {
+  it.each(["false", "true"])("initializes, scopes, completes and cleans parts with promotion gate %s", async gate => {
+    env.INCOMING_RCLONE_PROMOTION_ENABLED = gate;
+    const create = vi.fn().mockResolvedValue({ id: "workflow-instance" });
+    env.INCOMING_RCLONE_PROMOTION_WORKFLOW = { create, get: vi.fn() };
     const initResponse = await request("/api/public/requests/public-a/files/init", "POST", { clientUploadId: "upload-client-0001", name: "photo.jpg", size: 4, contentType: "image/jpeg", resumeFingerprint: "b".repeat(64) });
     expect(initResponse.status).toBe(200);
     const init = await initResponse.json() as { fileId: string };
@@ -126,6 +132,10 @@ describe("incoming upload public routes", () => {
     expect(await (await request(`/api/public/requests/public-a/files/${init.fileId}/complete`, "POST", { parts: [{ partNumber: 1, etag }] })).json()).toMatchObject({ status: "quarantined", idempotent: true });
     expect(await db.prepare("SELECT COUNT(*) count FROM incoming_upload_notification_digest_items WHERE upload_id=?").bind(init.fileId).first()).toEqual({ count: 1 });
     expect(await db.prepare("SELECT file_count,total_bytes FROM incoming_upload_notification_digests").first()).toEqual({ file_count: 1, total_bytes: 4 });
+    await Promise.all(background);
+    const intents = await db.prepare("SELECT segment,state FROM file_request_upload_promotion_outbox WHERE upload_id=?").bind(init.fileId).all();
+    expect(intents.results).toEqual(gate === "true" ? [{ segment: 0, state: "dispatched" }] : []);
+    expect(create).toHaveBeenCalledTimes(gate === "true" ? 1 : 0);
   });
 
   it("accepts a legitimate multipart completion body above the small-route JSON limit", async () => {

@@ -19,6 +19,9 @@ import { incomingUploadReceivedDigestStatement } from "./incoming-upload-notific
 import { applyVerificationStatus, serveVerifiedIncomingObject, verificationCandidates, verificationPending, verificationStatusSchema, verifiedObjectAvailable } from "./incoming-verification";
 import { archiveInventoryReceiptSchema, archiveInventoryUnavailableSchema, listArchiveInventory, markArchiveInventoryUnavailable, recordArchiveInventory } from "./incoming-archive-inventory";
 import { canonicalMultipartEtag } from "./multipart-etag";
+import { readIncomingRcloneReadyFacts, downloadIncomingRcloneReadyObject, listIncomingRcloneReadyArchive } from "./incoming-rclone-read";
+import { enqueueIncomingRcloneSegment, drainIncomingRcloneOutbox } from "./incoming-rclone-outbox";
+import { summarizeIncomingRclonePromotions } from "./incoming-rclone-summary";
 import {
   incomingPublicRequestDecision,
   incomingUploadsCapability,
@@ -610,6 +613,10 @@ publicApp.post("/api/public/requests/:publicId/files/:fileId/complete", async (c
   c.header("Set-Cookie", current.cookie);
   const upload = await ownedUpload(c.env, row.id, current.contributorId, c.req.param("fileId"));
   if (upload.status === "quarantined" || upload.status === "accepted") {
+    if (upload.status === "quarantined" && c.env.INCOMING_RCLONE_PROMOTION_ENABLED === "true") {
+      await enqueueIncomingRcloneSegment(c.env, { uploadId: upload.id, segment: 0, consecutiveFailures: 0 });
+      c.executionCtx.waitUntil(drainIncomingRcloneOutbox(c.env));
+    }
     return c.json({ ok: true, status: upload.status, idempotent: true });
   }
   if (upload.status !== "uploading") throw new HTTPException(409, { message: "Upload is not awaiting completion" });
@@ -707,6 +714,10 @@ publicApp.post("/api/public/requests/:publicId/files/:fileId/complete", async (c
     throw new HTTPException(410, { message: "This file request is no longer accepting uploads" });
   }
   await c.env.DELIVERY_DB.prepare("DELETE FROM file_request_upload_parts WHERE upload_id=?").bind(upload.id).run();
+  if (c.env.INCOMING_RCLONE_PROMOTION_ENABLED === "true") {
+    await enqueueIncomingRcloneSegment(c.env, { uploadId: upload.id, segment: 0, consecutiveFailures: 0 });
+    c.executionCtx.waitUntil(drainIncomingRcloneOutbox(c.env));
+  }
   return c.json({ ok: true, status: "quarantined", idempotent: false });
 });
 
@@ -959,7 +970,8 @@ async function recentUploads(env: IncomingEnv, requestId: string): Promise<unkno
      JOIN file_request_contributors c ON c.id=u.contributor_id
      WHERE u.request_id=? ORDER BY u.created_at DESC LIMIT 25`,
   ).bind(requestId).all();
-  return rows.results;
+  const promotions = await summarizeIncomingRclonePromotions(env, rows.results.map(row => String(row.id)));
+  return rows.results.map(row => ({ ...row, ...(promotions.has(String(row.id)) ? { promotion: { state: promotions.get(String(row.id)) } } : {}) }));
 }
 
 async function createReusableLink(
@@ -1138,7 +1150,10 @@ staffApp.get("/uploads", async (c) => {
   const uploads = page.map(row => ({ ...row, fileName: (row as { originalName: string }).originalName, size: (row as { actualSize: number | null; declaredSize: number }).actualSize ?? (row as { declaredSize: number }).declaredSize, uploadedAt: (row as { completedAt: string | null; createdAt: string }).completedAt ?? (row as { createdAt: string }).createdAt }));
   const last = page.at(-1) as { createdAt: string; id: string } | undefined;
   const nextCursor = more && last ? (() => { const bytes = new TextEncoder().encode(JSON.stringify({ requestId: String(link.id), query, createdAt: last.createdAt, id: last.id })); let binary = ""; for (const byte of bytes) binary += String.fromCharCode(byte); return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, ""); })() : null;
-  return c.json({ uploads, nextCursor });
+  const promotions = await summarizeIncomingRclonePromotions(c.env, page.map(row => String(row.id)));
+  return c.json({ uploads: uploads.map((upload, index) => ({ ...upload,
+    ...(promotions.has(String(page[index]!.id)) ? { promotion: { state: promotions.get(String(page[index]!.id)) } } : {}),
+  })), nextCursor });
 });
 
 staffApp.get("/uploads/:uploadId", async (c) => {
@@ -1160,9 +1175,17 @@ staffApp.get("/uploads/:uploadId", async (c) => {
     contributorName: string; objectKey: string; verifiedObjectEtag: string | null; verifiedObjectBytes: number | null; verifiedObjectVersion: string | null;
   }>();
   if (!upload) throw new HTTPException(404, { message: "Incoming upload not found" });
+  const readyFacts = c.env.INCOMING_RCLONE_PROMOTION_ENABLED === "true"
+    ? await readIncomingRcloneReadyFacts(c.env, upload.id) : null;
+  const summary = (await summarizeIncomingRclonePromotions(c.env, [upload.id])).get(upload.id);
+  const promotionState = summary ?? (readyFacts?.promotionState !== "not_started" ? readyFacts?.promotionState : null);
+  const promotion = promotionState ? {
+    state: promotionState,
+    ...(readyFacts?.objectAvailability ? { objectAvailability: readyFacts.objectAvailability } : {}),
+  } : null;
   // HEAD is deliberately the only R2 operation here. This route never creates
   // a signed URL, streams bytes, or returns the private object key.
-  const object = upload.status === "quarantined"
+  const object = upload.status === "quarantined" && !readyFacts?.objectAvailability
     ? await c.env.INCOMING_BUCKET.head(upload.objectKey)
     : null;
   return c.json({ upload: {
@@ -1175,7 +1198,8 @@ staffApp.get("/uploads/:uploadId", async (c) => {
     pickupState: upload.pickupState,
     verificationState: upload.verificationState,
     verifiedAt: upload.verifiedAt,
-    downloadAvailable: verifiedObjectAvailable(upload, object),
+    promotion,
+    downloadAvailable: promotion ? Boolean(readyFacts?.downloadAvailable) : verifiedObjectAvailable(upload, object),
     pickupAttemptCount: upload.pickupAttemptCount,
     pickupLastAttemptAt: upload.pickupLastAttemptAt,
     pickupNextAttemptAt: upload.pickupNextAttemptAt,
@@ -1183,7 +1207,9 @@ staffApp.get("/uploads/:uploadId", async (c) => {
     createdAt: upload.createdAt,
     completedAt: upload.completedAt,
     contributorName: upload.contributorName,
-    bucketObject: object
+    bucketObject: readyFacts?.objectAvailability
+      ? { state: readyFacts.objectAvailability === "missing" ? "removed" : "present", size: upload.actualSize, contentType: upload.contentType }
+      : object
       ? { state: "present", size: object.size, uploadedAt: object.uploaded.toISOString(), contentType: object.httpMetadata?.contentType || upload.contentType }
       : { state: "removed" },
   } });
@@ -1191,6 +1217,10 @@ staffApp.get("/uploads/:uploadId", async (c) => {
 
 staffApp.get("/uploads/:uploadId/download", async (c) => {
   await requireIncomingStaff(c, "file_requests.view");
+  if (c.env.INCOMING_RCLONE_PROMOTION_ENABLED === "true") {
+    const facts = await readIncomingRcloneReadyFacts(c.env, c.req.param("uploadId"));
+    if (facts.promotionState !== "not_started") return downloadIncomingRcloneReadyObject(c.env, c.req.param("uploadId"), c.req.raw);
+  }
   const upload = await c.env.DELIVERY_DB.withSession("first-primary").prepare(
     `SELECT u.id,u.object_key objectKey,u.original_name originalName,u.content_type contentType,u.status,
       u.verification_state verificationState,u.verified_object_etag verifiedObjectEtag,u.verified_object_bytes verifiedObjectBytes,
@@ -1202,6 +1232,11 @@ staffApp.get("/uploads/:uploadId/download", async (c) => {
 });
 staffApp.get("/uploads/:uploadId/archive-inventory", async (c) => {
   await requireIncomingStaff(c, "file_requests.view");
+  if (c.env.INCOMING_RCLONE_PROMOTION_ENABLED === "true") {
+    const facts = await readIncomingRcloneReadyFacts(c.env, c.req.param("uploadId"));
+    if (facts.promotionState !== "not_started") return c.json(await listIncomingRcloneReadyArchive(c.env,
+      c.req.param("uploadId"), c.req.query("path") || "", c.req.query("q") || "", c.req.query("cursor") || null));
+  }
   return c.json(await listArchiveInventory(c.env, c.req.param("uploadId"), c.req.query("path") || null, c.req.query("q") || null, c.req.query("cursor") || null));
 });
 

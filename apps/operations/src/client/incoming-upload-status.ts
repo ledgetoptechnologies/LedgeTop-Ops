@@ -2,6 +2,11 @@ export interface IncomingStatusFacts {
   status?: string;
   pickupState?: string;
   verificationState?: "awaiting_verification" | "scanning" | "verified" | "retry" | "rejected" | "server_only";
+  /** Server-supplied publication facts, never an inferred rclone receipt. */
+  promotion?: {
+    state: "pending" | "copying" | "publishing" | "ready" | "unavailable" | "failed";
+    objectAvailability?: "present" | "missing" | "changed";
+  } | null;
 }
 
 /** Display facts only; download authority must be checked by the server. */
@@ -14,6 +19,39 @@ export function incomingUploadStatus(upload: IncomingStatusFacts) {
     label: "Rejected",
     detail: "The upload did not pass the initial validation checks. Review the recorded reason if one is available.",
   };
+  if (upload.status === "expired") return {
+    label: "Expired",
+    detail: "The temporary upload retention period ended. This is not confirmation that the server downloaded it.",
+  };
+  if (upload.status === "quarantined" && upload.verificationState !== "rejected" && upload.promotion) {
+    const promotion = upload.promotion;
+    if (promotion.state === "ready") {
+      if (promotion.objectAvailability === "missing") return {
+        label: "No longer in R2",
+        detail: "The published file is no longer available in the bucket. Check the TrueNAS task and local destination; Operations has no server download receipt.",
+      };
+      if (promotion.objectAvailability === "changed") return {
+        label: "Published file needs review",
+        detail: "The bucket object no longer matches the published upload. It is not available to download here.",
+      };
+      return {
+        label: promotion.objectAvailability === "present" ? "Ready for server pickup" : "Published for server pickup",
+        detail: "Basic upload checks passed, not an antivirus scan. TrueNAS collects published files on its hourly schedule; current availability is checked when you open this record.",
+      };
+    }
+    if (promotion.state === "publishing") return {
+      label: "Publication needs confirmation",
+      detail: "Publication was started but its outcome is not confirmed. Operations will not create another copy automatically; check the bucket and TrueNAS destination.",
+    };
+    if (promotion.state === "pending" || promotion.state === "copying") return {
+      label: promotion.state === "pending" ? "Preparing server pickup" : "Preparing pickup files",
+      detail: "Basic upload checks passed. Operations is preparing the file for the hourly TrueNAS task; no separate server verifier is required.",
+    };
+    return {
+      label: "Pickup preparation needs attention",
+      detail: "The file could not be published for pickup. Check its current availability and recorded reason; this is not a malware verdict or a server download confirmation.",
+    };
+  }
   if (upload.status === "quarantined" && upload.verificationState) {
     if (upload.verificationState === "verified") return {
       label: upload.pickupState === "scanning" ? "Server pickup in progress"

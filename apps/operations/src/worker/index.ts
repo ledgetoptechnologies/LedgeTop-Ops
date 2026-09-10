@@ -1,4 +1,7 @@
 import { Hono } from "hono";
+import { backfillIncomingRcloneOutbox, drainIncomingRcloneOutbox } from "./incoming-rclone-outbox";
+import { reconcileIncomingRcloneDispatched } from "./incoming-rclone-reconcile";
+import { runIncomingRcloneRetention } from "./incoming-rclone-retention";
 import { HTTPException } from "hono/http-exception";
 import { notificationMigrationMaintenanceActive, notificationMigrationMaintenanceResponse } from "@ltds/shared";
 import { secureHeaders } from "hono/secure-headers";
@@ -3273,6 +3276,21 @@ async function scheduled(
   }
   if (event.cron !== CONSOLIDATED_CRON) return;
 
+  if (env.INCOMING_RCLONE_PROMOTION_ENABLED === "true") {
+    ctx.waitUntil((async () => {
+      try {
+        const retention = await runIncomingRcloneRetention(env);
+        const discovered = await backfillIncomingRcloneOutbox(env);
+        const result = await drainIncomingRcloneOutbox(env);
+        const reconciliation = await reconcileIncomingRcloneDispatched(env);
+        console.log(JSON.stringify({ event: "incoming.promotion.tick", discovered, ...result, reconciliation, retention }));
+      } catch {
+        console.error(JSON.stringify({ event: "incoming.promotion.error" }));
+        throw new Error("Incoming upload preparation failed");
+      }
+    })());
+  }
+
   ctx.waitUntil(refreshStreamStatuses(env));
   const scheduledAt = new Date(event.scheduledTime);
   const minute = scheduledAt.getUTCMinutes();
@@ -3356,6 +3374,7 @@ export default {
 } satisfies ExportedHandler<Env, R2Notification | ThumbnailJobMessage>;
 export { R2CrudWorkflow } from "./r2-crud";
 export { IncomingUploadLifecycleWorkflow } from "./incoming";
+export { IncomingRclonePromotionWorkflow } from "./incoming-rclone-workflow";
 export { DropboxImportWorkflow } from "./dropbox-import";
 export { ThumbnailRendererContainer } from "./thumbnail-renderer-container";
 export { dispatchThumbnailRendererApi } from "./thumbnail-renderer-api";

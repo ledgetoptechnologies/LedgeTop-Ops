@@ -5,6 +5,7 @@ import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { Miniflare } from "miniflare";
 import { unstable_splitSqlQuery } from "wrangler";
 import { handleRequest, reconcileScheduledAccess } from "../src/index";
+import { clientPortalProjectionFailureDiagnostic } from "../src/client-portal-projection-diagnostic";
 import type { Env, ProjectionEvent } from "../src/types";
 import { registerProjectAlphaConnector, reviseProjectAlphaConnector, setProjectAlphaConnectorState, type ProjectAlphaConnectorEnvironment } from "../../operations/src/worker/project-alpha-connectors";
 import contractFixture from "../../../packages/shared/fixtures/project-alpha-ops-sync-portal-projection-v1.json";
@@ -150,6 +151,14 @@ describe("authenticated connector business ingress",{timeout:30_000},()=>{
 
   it("attests a valid legacy HMAC event before Operations stages the primary connector",()=>{
     expect(legacyAttestation).toEqual({status:200,algorithms:["ed25519","hmac-sha256"]});
+  });
+  it("normalizes hostile runtime receiver diagnostics without serializing their values",()=>{
+    const secret="diagnostic-secret-must-not-log";
+    const diagnostic=clientPortalProjectionFailureDiagnostic({projectionKind:"portal",sourceId:secondary,eventId:"portal-safe-event",
+      phase:"receiver",receiverCode:{toString:()=>secret},retryable:secret as unknown as boolean});
+    expect(diagnostic).toEqual({event:"ops_sync_client_portal_projection_failed",projectionKind:"portal",sourceId:secondary,
+      eventId:"portal-safe-event",phase:"receiver",receiverCode:"unknown",retryable:false});
+    expect(JSON.stringify(diagnostic)).not.toContain(secret);
   });
 
   it("uses only the event-verifier envelope and never materializes deployment sources",async()=>{
@@ -299,6 +308,51 @@ describe("authenticated connector business ingress",{timeout:30_000},()=>{
     expect(ingestProjectAlphaPortalProjection).toHaveBeenCalledTimes(2);
     expect(await db.prepare("SELECT status FROM integration_event_receipts WHERE projection_source_id=? AND event_id=?")
       .bind(primary,item.event_id).first("status")).toBe("completed");
+  });
+  it("logs a bounded transport diagnostic without exposing thrown receiver data",async()=>{
+    const item=portalEvent(),secret="transport-secret-must-not-log",logs:string[]=[];
+    const error=vi.spyOn(console,"error").mockImplementation((...values:unknown[])=>{logs.push(values.join(" "));});
+    environment.CLIENT_PORTAL_PROJECTION_INGRESS={ingestProjectAlphaPortalProjection:vi.fn(async()=>{
+      throw new Error(`${secret} ${JSON.stringify(item.projection)}`);
+    })};
+    try{
+      const response=await handleRequest(await request(secondary,item),environment);
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({error:"client-portal-forward-failed"});
+      expect(await db.prepare("SELECT status,last_error FROM integration_event_receipts WHERE projection_source_id=? AND event_id=?")
+        .bind(secondary,item.event_id).first()).toEqual({status:"pending",last_error:"client-portal-forward-failed"});
+      expect(logs).toContain(JSON.stringify({event:"ops_sync_client_portal_projection_failed",projectionKind:"portal",
+        sourceId:secondary,eventId:item.event_id,phase:"transport",receiverCode:"unknown",retryable:true}));
+      expect(logs.join("\n")).not.toContain(secret);
+      expect(logs.join("\n")).not.toContain(JSON.stringify(item.projection));
+    }finally{error.mockRestore();}
+  });
+  it("allowlists receiver diagnostics and preserves unknown codes as unknown",async()=>{
+    const item=portalEvent("catalog"),secret="receiver-secret-must-not-log",logs:string[]=[];
+    const error=vi.spyOn(console,"error").mockImplementation((...values:unknown[])=>{logs.push(values.join(" "));});
+    environment.CLIENT_PORTAL_PROJECTION_INGRESS={ingestProjectAlphaPortalProjection:vi.fn(async()=>
+      ({ok:false as const,protocolVersion:1 as const,code:secret,retryable:true}))};
+    try{
+      const response=await handleRequest(await request(secondary,item),environment);
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({error:"client-portal-forward-failed"});
+      expect(await db.prepare("SELECT status,last_error FROM integration_event_receipts WHERE projection_source_id=? AND event_id=?")
+        .bind(secondary,item.event_id).first()).toEqual({status:"pending",last_error:"client-portal-forward-failed"});
+      expect(logs).toContain(JSON.stringify({event:"ops_sync_client_portal_projection_failed",projectionKind:"catalog",
+        sourceId:secondary,eventId:item.event_id,phase:"receiver",receiverCode:"unknown",retryable:true}));
+      expect(logs.join("\n")).not.toContain(secret);
+      expect(logs.join("\n")).not.toContain(JSON.stringify(item.projection));
+      const disabled=portalEvent();
+      environment.CLIENT_PORTAL_PROJECTION_INGRESS={ingestProjectAlphaPortalProjection:vi.fn(async()=>
+        ({ok:false as const,protocolVersion:1 as const,code:"disabled",retryable:false}))};
+      const disabledResponse=await handleRequest(await request(secondary,disabled),environment);
+      expect(disabledResponse.status).toBe(422);
+      expect(await disabledResponse.json()).toEqual({error:"client-portal-projection-rejected"});
+      expect(await db.prepare("SELECT status,last_error FROM integration_event_receipts WHERE projection_source_id=? AND event_id=?")
+        .bind(secondary,disabled.event_id).first()).toEqual({status:"pending",last_error:"client-portal-projection-rejected"});
+      expect(logs).toContain(JSON.stringify({event:"ops_sync_client_portal_projection_failed",projectionKind:"portal",
+        sourceId:secondary,eventId:disabled.event_id,phase:"receiver",receiverCode:"disabled",retryable:false}));
+    }finally{error.mockRestore();}
   });
   it("rejects another application or body source selector before any source write",async()=>{
     for(const payload of [{...event(),application_key:"another_app"},{...event(),sourceId:primary}]){

@@ -23,7 +23,7 @@ function detail(projects: ReturnType<typeof project>[] = []) {
 function status(overrides: Record<string, unknown> = {}) {
   return { canonicalRoot: root, contextVersion, source: { sourceId, displayName: "Business B", state: "active" },
     availability: { available: true, reason: "available", explanation: "Create the authoritative project in Business B." },
-    action: { label: "Create project in Project Alpha", href: "https://alpha-business-b.example.test/clients/external-org-42/projects/create", external: true },
+    action: { label: "Create project in Project Alpha", href: "https://alpha-business-b.example.test/projects", external: true },
     sync: { status: "healthy", lastAttemptAt: "2026-08-28T12:00:00Z", lastSuccessAt: "2026-08-28T12:00:00Z",
       explanation: "The latest Business B synchronization completed successfully.",
       refresh: { label: "Refresh synchronization status", href: management, method: "GET" }, requestSync: null }, ...overrides };
@@ -54,7 +54,7 @@ test("exact-source project creation opens only the reviewed external URL and ref
   }, { detail: () => detail(refreshed ? [project("created-after-sync")] : []) });
   await page.goto(`${path}?q=Acme&kind=organization&source=${encodeURIComponent(sourceId)}`);
   const region = businessProjectsCard(page), link = region.getByRole("link", { name: /Create project in Project Alpha/ });
-  await expect(link).toHaveAttribute("href", "https://alpha-business-b.example.test/clients/external-org-42/projects/create");
+  await expect(link).toHaveAttribute("href", "https://alpha-business-b.example.test/projects");
   await expect(link).toHaveAttribute("target", "_blank"); await expect(link).toHaveAttribute("rel", "noopener noreferrer");
   await expect(link).toHaveAccessibleName("Create project in Project Alpha (opens in a new tab)");
   await expect(region).toContainText("It will appear here after Project Alpha synchronizes");

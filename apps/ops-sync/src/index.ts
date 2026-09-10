@@ -4,6 +4,7 @@ import { accessCircuitIsOpen, completeEvent, applyEntitlementEventForSource, app
 import { parseIntegrationEvent } from "./schema";
 import { readWebhookBody, requireAccessServiceTokenIdentity, sha256Hex, validateRequestTimestamp, verifyAccessAssertion, verifyWebhookSignature, type AccessEnvironment } from "./security";
 import type { Env } from "./types";
+import { clientPortalProjectionFailureDiagnostic } from "./client-portal-projection-diagnostic";
 import { PRIMARY_PROJECT_ALPHA_SOURCE, type ProjectAlphaSourceContext } from "../../operations/src/worker/project-alpha-source";
 import { assertProjectAlphaConnectorProof, ProjectAlphaConnectorError, resolveProjectAlphaConnector, type ProjectAlphaConnectorProof } from "../../operations/src/worker/project-alpha-connectors";
 
@@ -125,7 +126,11 @@ export async function handleRequest(request: Request, env: Env, accessVerifier: 
       ? await applyProjectionEventForSource(env,source,event,payloadHash,proof)
       : event.event_type === "portal.projection"
         ? await routePortalProjectionEventForSource(env,source,event,payloadHash,async()=>{
-          if(!env.CLIENT_PORTAL_PROJECTION_INGRESS)throw new Error("client-portal-binding-unavailable");
+          if(!env.CLIENT_PORTAL_PROJECTION_INGRESS){
+            console.error(JSON.stringify(clientPortalProjectionFailureDiagnostic({projectionKind:event.projection_kind,
+              sourceId:authenticatedSource.sourceId,eventId:event.event_id,phase:"transport",retryable:true})));
+            throw new Error("client-portal-binding-unavailable");
+          }
           const body=JSON.stringify(event.projection);
           if(typeof body!=="string")throw new Error("client-portal-projection-rejected");
           const deliveryId=event.projection&&typeof event.projection==="object"&&"deliveryId" in event.projection
@@ -134,8 +139,17 @@ export async function handleRequest(request: Request, env: Env, accessVerifier: 
           let forwarded:Awaited<ReturnType<NonNullable<typeof env.CLIENT_PORTAL_PROJECTION_INGRESS>["ingestProjectAlphaPortalProjection"]>>;
           try{forwarded=await env.CLIENT_PORTAL_PROJECTION_INGRESS.ingestProjectAlphaPortalProjection({protocolVersion:1,
             sourceId:authenticatedSource.sourceId,applicationKey:event.application_key,deliveryId,projectionKind:event.projection_kind,body});}
-          catch{throw new Error("client-portal-forward-failed");}
-          if(!forwarded.ok)throw new Error(forwarded.retryable?"client-portal-forward-failed":"client-portal-projection-rejected");
+          catch{
+            console.error(JSON.stringify(clientPortalProjectionFailureDiagnostic({projectionKind:event.projection_kind,
+              sourceId:authenticatedSource.sourceId,eventId:event.event_id,phase:"transport",retryable:true})));
+            throw new Error("client-portal-forward-failed");
+          }
+          if(!forwarded.ok){
+            console.error(JSON.stringify(clientPortalProjectionFailureDiagnostic({projectionKind:event.projection_kind,
+              sourceId:authenticatedSource.sourceId,eventId:event.event_id,phase:"receiver",receiverCode:forwarded.code,
+              retryable:forwarded.retryable})));
+            throw new Error(forwarded.retryable?"client-portal-forward-failed":"client-portal-projection-rejected");
+          }
         },proof)
         : await applyEntitlementEventForSource(env,source,event,payloadHash,proof);
     if (result === "duplicate" || result === "ignored") {

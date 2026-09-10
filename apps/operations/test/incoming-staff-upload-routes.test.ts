@@ -23,6 +23,7 @@ import { dispatchIncomingPublicRequest } from "../src/worker/incoming";
 class MetadataOnlyIncomingBucket {
   objects = new Map<string, { size: number; etag: string; version: string; uploaded: Date; httpMetadata?: { contentType?: string } }>();
   headCalls = 0;
+  getCalls = 0;
 
   async head(key: string) {
     this.headCalls += 1;
@@ -30,6 +31,7 @@ class MetadataOnlyIncomingBucket {
   }
 
   async get(key: string, options?: { range?: { offset: number; length: number } }) {
+    this.getCalls += 1;
     const object = this.objects.get(key);
     if (!object) return null;
     const bytes = new TextEncoder().encode("verified object bytes");
@@ -73,7 +75,7 @@ describe("incoming upload staff records and pickup lifecycle", () => {
       d1Databases: { DB: "incoming-staff-detail" },
     });
     database = await runtime.getD1Database("DB") as unknown as D1Database;
-    for (const name of ["0090_aliases_incoming_requests.sql", "0093_reusable_incoming_uploads.sql", "0116_incoming_upload_hardening.sql", "0198_incoming_upload_owner_notifications.sql", "0199_incoming_upload_pickup_lifecycle.sql", "0211_incoming_upload_verification_lifecycle.sql", "0212_incoming_upload_archive_inventory.sql"]) {
+    for (const name of ["0090_aliases_incoming_requests.sql", "0093_reusable_incoming_uploads.sql", "0116_incoming_upload_hardening.sql", "0198_incoming_upload_owner_notifications.sql", "0199_incoming_upload_pickup_lifecycle.sql", "0211_incoming_upload_verification_lifecycle.sql", "0212_incoming_upload_archive_inventory.sql", "0213_incoming_rclone_promotion.sql"]) {
       const sql = readFileSync(new URL(`../../client/migrations/${name}`, import.meta.url), "utf8")
         .replace(/^\s*--.*$/gm, "").replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "");
       await database.exec(sql.replace(/\s*\n\s*/g, " "));
@@ -104,6 +106,83 @@ describe("incoming upload staff records and pickup lifecycle", () => {
   });
 
   afterAll(async () => { await runtime.dispose(); });
+
+  it("offers a basic-checked ready file without scanner proof and stops after MOVE", async () => {
+    environment.INCOMING_RCLONE_PROMOTION_ENABLED = "true";
+    const sourceKey = "quarantine/request-one/upload-one/object";
+    const readyKey = "ready/request-one/upload-one/photos.zip";
+    const bytes = new TextEncoder().encode("verified object bytes").length;
+    await database.batch([
+      database.prepare("UPDATE file_request_uploads SET etag='abcdef',actual_size=?,declared_size=? WHERE id='upload-one'").bind(bytes, bytes),
+      database.prepare("INSERT INTO file_request_upload_basic_checks(upload_id,object_etag,object_bytes,object_version,check_version) VALUES('upload-one','abcdef',?,'r2-v1','basic-v1')").bind(bytes),
+      database.prepare(`INSERT INTO file_request_upload_promotion_journal(upload_id,source_identity,source_key,destination_key,state,destination_etag,destination_bytes,destination_version)
+        VALUES('upload-one',?,?,?,'ready','fedcba',?,'ready-v1')`).bind(JSON.stringify({ version: 1, etag: "abcdef", bytes, objectVersion: "r2-v1" }), sourceKey, readyKey, bytes),
+    ]);
+    bucket.objects.set(readyKey, { size: bytes, etag: "fedcba", version: "ready-v1", uploaded: new Date() });
+    const detail = await staffRequest("/api/delivery/incoming-link/uploads/upload-one");
+    expect(detail.status).toBe(200);
+    const payload = await detail.json() as { upload: { downloadAvailable: boolean; promotion: { state: string; objectAvailability: string }; verificationState: string } };
+    expect(payload.upload).toMatchObject({ downloadAvailable: true, verificationState: "awaiting_verification", promotion: { state: "ready", objectAvailability: "present" } });
+    expect(JSON.stringify(payload)).not.toContain(readyKey);
+    expect(bucket.getCalls).toBe(0);
+    const download = await staffDownload("/api/delivery/incoming-link/uploads/upload-one/download");
+    expect(download.status).toBe(200);
+    expect(await download.text()).toBe("verified object bytes");
+    bucket.objects.delete(readyKey);
+    expect((await staffDownload("/api/delivery/incoming-link/uploads/upload-one/download")).status).toBe(404);
+    const missing = await (await staffRequest("/api/delivery/incoming-link/uploads/upload-one")).json() as { upload: { downloadAvailable: boolean; promotion: { objectAvailability: string } } };
+    expect(missing.upload).toMatchObject({ downloadAvailable: false, promotion: { objectAvailability: "missing" } });
+    expect(await database.prepare("SELECT verified_object_etag FROM file_request_uploads WHERE id='upload-one'").first()).toEqual({ verified_object_etag: null });
+  });
+
+  it("keeps basic-checked ready uploads behind the staff ACL and out of public routes", async () => {
+    environment.INCOMING_RCLONE_PROMOTION_ENABLED = "true";
+    const sourceKey = "quarantine/request-one/upload-one/object";
+    const readyKey = "ready/request-one/upload-one/photos.zip";
+    const bytes = new TextEncoder().encode("verified object bytes").length;
+    await database.batch([
+      database.prepare("UPDATE file_request_uploads SET etag='abcdef',actual_size=?,declared_size=? WHERE id='upload-one'").bind(bytes, bytes),
+      database.prepare("INSERT INTO file_request_upload_basic_checks(upload_id,object_etag,object_bytes,object_version,check_version) VALUES('upload-one','abcdef',?,'r2-v1','basic-v1')").bind(bytes),
+      database.prepare(`INSERT INTO file_request_upload_promotion_journal(upload_id,source_identity,source_key,destination_key,state,destination_etag,destination_bytes,destination_version)
+        VALUES('upload-one',?,?,?,'ready','fedcba',?,'ready-v1')`).bind(JSON.stringify({ version: 1, etag: "abcdef", bytes, objectVersion: "r2-v1" }), sourceKey, readyKey, bytes),
+    ]);
+    bucket.objects.set(readyKey, { size: bytes, etag: "fedcba", version: "ready-v1", uploaded: new Date() });
+
+    // Count attempts to enter the real D1 binding, rather than merely checking
+    // that the permission mock was called. All three routes must fail before
+    // they can inspect upload metadata or touch the promoted R2 object.
+    let deliveryReadAttempts = 0;
+    const deliveryDb = environment.DELIVERY_DB as object;
+    environment.DELIVERY_DB = new Proxy(deliveryDb, {
+      get(target, property, receiver) {
+        if (property === "prepare" || property === "withSession") deliveryReadAttempts += 1;
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    for (const path of [
+      "/api/delivery/incoming-link/uploads/upload-one",
+      "/api/delivery/incoming-link/uploads/upload-one/download",
+      "/api/delivery/incoming-link/uploads/upload-one/archive-inventory",
+    ]) {
+      mocks.requirePermission.mockRejectedValueOnce(new HTTPException(403, { message: "Forbidden" }));
+      expect((await staffRequest(path)).status).toBe(403);
+    }
+    expect(deliveryReadAttempts).toBe(0);
+    expect(bucket.headCalls).toBe(0);
+    expect(bucket.getCalls).toBe(0);
+
+    // The public contributor dispatcher has no matching reads at all: a ready
+    // promotion cannot turn these staff-only endpoints into a public surface.
+    for (const path of [
+      "/api/delivery/incoming-link/uploads/upload-one",
+      "/api/delivery/incoming-link/uploads/upload-one/download",
+      "/api/delivery/incoming-link/uploads/upload-one/archive-inventory",
+    ]) expect((await pickupGet(path, false)).status).toBe(404);
+    expect(deliveryReadAttempts).toBe(0);
+    expect(bucket.headCalls).toBe(0);
+    expect(bucket.getCalls).toBe(0);
+  });
 
   it("accepts a server inventory after verification without a supplied R2 version and denies unauthorized readers", async () => {
     expect((await pickupRequest("/api/internal/uploads/upload-one/verification-status", { state: "scanning", claimToken: claimOne })).status).toBe(200);

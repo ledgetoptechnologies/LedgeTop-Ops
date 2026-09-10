@@ -1,9 +1,10 @@
 import { expect, test } from "@playwright/test";
 
-for (const scenario of ["legacy", "verifying", "verified", "removed", "changed"] as const) {
+for (const scenario of ["legacy", "verifying", "verified", "basic_ready", "removed", "changed"] as const) {
 test(`incoming upload download gating: ${scenario}`, async ({ page }) => {
   const verificationState = scenario === "legacy" ? undefined : scenario === "verifying" ? "scanning" : "verified";
-  let downloadAvailable = scenario === "verified";
+  let downloadAvailable = scenario === "verified" || scenario === "basic_ready";
+  const promotion = scenario === "basic_ready" ? { state: "ready", objectAvailability: "present" } : undefined;
   let downloadRequests = 0;
   let holdNext = false;
   let releaseNext: (() => void) | undefined;
@@ -48,7 +49,7 @@ test(`incoming upload download gating: ${scenario}`, async ({ page }) => {
     if (path === "/api/delivery/incoming-link/uploads/upload-one") return route.fulfill({ json: { upload: {
       id: "upload-one", fileName: "iCloud Photos.zip", contributorName: "Joe Gaworecki", declaredSize: 893_398_388,
       contentType: "application/zip", status: "quarantined", pickupState: "retry", pickupAttemptCount: 1,
-      verificationState, downloadAvailable,
+      verificationState: scenario === "basic_ready" ? "awaiting_verification" : verificationState, promotion, downloadAvailable,
       pickupLastAttemptAt: "2026-09-05T13:00:00.000Z", pickupNextAttemptAt: "2026-09-05T14:00:00.000Z",
       createdAt: "2026-09-05T12:10:00.000Z", bucketObject: { state: scenario === "removed" ? "removed" : "present", size: 893_398_388, contentType: "application/zip" },
     } } });
@@ -81,7 +82,7 @@ test(`incoming upload download gating: ${scenario}`, async ({ page }) => {
   await uploads.getByRole("button", { name: "Inspect upload" }).click();
   if (scenario !== "removed") await expect(page.getByText("Private incoming object present", { exact: false })).toBeVisible();
   await expect(page.getByText("Archive listings contain metadata only", { exact: false })).toBeVisible();
-  const download = page.getByRole("link", { name: "Download verified file" });
+  const download = page.getByRole("link", { name: scenario === "basic_ready" ? "Download file" : "Download verified file" });
   if (downloadAvailable) {
     await expect(download).toHaveAttribute("href", "/api/delivery/incoming-link/uploads/upload-one/download");
     await expect(download).toHaveAttribute("download", "");

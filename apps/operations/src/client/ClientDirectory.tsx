@@ -130,9 +130,16 @@ function statusTone(status: string): "neutral" | "success" | "warning" | "danger
 }
 
 export function clientPortalStatus(client: ClientSummary): { label: string; tone: "neutral" | "success" | "warning" | "danger"; description?: string } {
+  const isProjectAlphaBusiness = client.root_namespace === "business" && client.source_id?.startsWith("project-alpha:");
+  const unlinkedProjectAlphaWorkspace = {
+    label: "Portal workspace not linked", tone: "warning" as const,
+    description: "No exact source-owned portal workspace is linked to this Project Alpha client. Eligible Project Alpha clients are provisioned automatically; no manual invitation is needed. Check Project Alpha synchronization status.",
+  };
   if (client.portal_access_state === "revoked")
     return { label: "Portal access revoked", tone: "danger" as const,
       description: "An administrator disabled this client's portal root. Workspace records and sharing history are preserved for a controlled restore." };
+  if (client.portal_status === "not_supported" && isProjectAlphaBusiness)
+    return unlinkedProjectAlphaWorkspace;
   if (client.portal_status === "not_supported")
     return { label: "Portal unavailable for this source", tone: "neutral" as const };
   if (client.portal_status === "mapping_conflict")
@@ -140,16 +147,16 @@ export function clientPortalStatus(client: ClientSummary): { label: string; tone
   if (client.root_namespace === "business" && !client.pa_public_id && !client.workspace_id)
     return { label: "Client ID sync incomplete", tone: "warning" as const,
       description: "Operations has not received an exact Project Alpha client identifier yet. Refresh the Project Alpha business sync." };
+  if (client.portal_status === "mapping_unavailable" && isProjectAlphaBusiness)
+    return unlinkedProjectAlphaWorkspace;
   if (client.portal_status === "mapping_unavailable")
     return { label: "Workspace sync pending", tone: "warning" as const,
       description: "Project Alpha synced this client, but its automatic portal workspace has not reached Client Delivery yet. No approval is required." };
   if (client.portal_status === "projection_pending")
     return { label: "Workspace update processing", tone: "warning" as const,
       description: "Client Delivery received this workspace update and is validating it before activation." };
-  if (client.portal_status === "not_provisioned" && client.root_namespace === "business"
-    && client.source_id?.startsWith("project-alpha:"))
-    return { label: "Automatic workspace pending", tone: "warning" as const,
-      description: "Project Alpha synced this client. Its portal workspace is created automatically and has not reached Client Delivery yet; no approval is required." };
+  if (client.portal_status === "not_provisioned" && isProjectAlphaBusiness)
+    return unlinkedProjectAlphaWorkspace;
   return { label: client.portal_status === "active" ? "Portal ready"
     : client.portal_status === "not_provisioned" ? "Portal not set up" : client.portal_status.replaceAll("_", " "),
     tone: statusTone(client.portal_status) };
