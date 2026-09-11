@@ -63,21 +63,25 @@ validation ahead of archive byte reads. A fresh full Operations suite is in
 progress, not yet a passing release gate. Bucket ready-prefix expiry setup and
 production acceptance remain outstanding.
 
-## Retention rollout requirement
+## Activation evidence — September 10, 2026
 
-Keep application access bounded by the existing 14-day upload deadline. Before
-activation, verify an automatic R2 expiry policy for the exclusive `ready/`
-prefix (14 days from object publication), preserving any other bucket rules.
-Rclone MOVE remains the normal cleanup mechanism. Object-age expiry is the
-fallback when the server is offline; it is not a pickup receipt. This avoids
-an application-level HEAD/delete race and indefinite retained ready objects.
-Only the promotion service may publish this prefix; no other writer may replace
-an upload's ready key. Preserve staging until accounted for under its existing
-retention policy, and abort known multipart work after a durable expiry fence.
+Release candidate `6752ee2` has migration `0213_incoming_rclone_promotion.sql`
+present in production. Cloudflare active version `1feb9d5c` has the
+`INCOMING_RCLONE_PROMOTION_WORKFLOW` binding. The operator selected `ready/`
+for the existing Incoming Cloud Sync PULL/MOVE task and resumed its hourly
+schedule. The native Incoming acceptance set passed 109 tests across 13 files.
 
-`INCOMING_RCLONE_PROMOTION_ENABLED` remains `false` in checked-in configuration.
-Do not enable it solely because the Workflow binding exists or its unit tests
-pass. Regenerate Worker types whenever the binding/configuration changes.
+This release enables only `INCOMING_RCLONE_PROMOTION_ENABLED`. It does not
+change public links or add a ready-prefix lifecycle rule. Keep application
+access bounded by the existing 14-day upload deadline; rclone MOVE remains the
+normal ready-object cleanup mechanism. The owner has not authorized automatic
+physical expiry for uncollected ready objects, and no application-level
+HEAD/delete fallback is added. Preserve staging under its existing retention
+policy and abort known multipart work after a durable expiry fence.
+
+Roll back by setting the same flag to `false` and deploying the reviewed
+rollback configuration. Do not change the TrueNAS selector or delete ready
+objects as part of rollback.
 
 The publishing journal must distinguish an attempted publication from a
 confirmed ready object. A failed or lost completion response must not be
