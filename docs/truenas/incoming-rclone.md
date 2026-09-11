@@ -109,17 +109,27 @@ historical uploads. Database changes must be additive.
 3. Publish a collision-isolated ready object using bounded, retryable multipart
    work. Never buffer a whole large upload or perform an unbounded post-response
    copy. Preserve the staging object until publication is accounted for.
-4. Expose only `ready/<request-id>/<upload-id>/<safe-original-basename>` to the
-   TrueNAS task. A display name is not an authorization or storage-path key.
+4. Expose only newly journaled `ready/<safe-submitted-name>/<upload-created-UTC-date>--<20-hex-stable-upload-discriminator>/<safe-original-basename>` objects to the
+   TrueNAS task. The submitted name is a sanitized label, not an identity or
+   authorization boundary. The date is the UTC `created_at` date persisted by
+   D1, whose stored datetime format is the naming helper's input contract.
 5. Record publication durably. A retry must not recreate a ready object that
    rclone has already moved, including after an ambiguous completion response.
    If publication cannot be distinguished from removal, show an actionable
    uncertain state rather than blindly republishing or deleting the source.
 
 Names must be compatible with Windows consumers, including reserved names,
-control characters, separators, trailing spaces/dots and Unicode length.
-Separate upload IDs isolate repeated filenames. Preserve the original name in
-display metadata. Do not invent organization folders from contributor names.
+control characters, separators, trailing spaces/dots and Unicode length. The
+newly journaled relative destination path (excluding `ready/`) is capped at
+220 UTF-8 bytes, preserving the safe original extension when it fits after the
+submitted-name/date directory. This leaves room for the current `Y:\Incoming
+Job Data\` and `/mnt/L.T.D.S./Drone_Jobs/Incoming Job Data/` roots; it does not
+guarantee a Windows-safe full path for an arbitrarily deeper local root.
+The truncated SHA-256 discriminator over request and upload IDs makes repeated
+filenames collision-resistant but is not claimed to be absolutely unique; the
+journal's unique destination constraint fails closed. Preserve the original
+name in display metadata. Existing journal keys win in every state and are
+never renamed when a contributor label changes.
 
 ## TrueNAS task
 

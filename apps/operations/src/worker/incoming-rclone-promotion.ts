@@ -3,7 +3,7 @@
  * TrueNAS rclone-ready prefix.  A ready journal entry records publication, not
  * a local pickup receipt: rclone MOVE is expected to remove that object.
  */
-import { buildIncomingRcloneReadyPlan, type MultipartCopyPlan } from "./incoming-rclone-plan";
+import { buildNamedIncomingRcloneReadyPlan, planIncomingMultipartCopy, type MultipartCopyPlan } from "./incoming-rclone-plan";
 import { validateIncomingBasicSample } from "./incoming-basic-validation";
 import type { IncomingEnv } from "./incoming";
 
@@ -22,6 +22,7 @@ type JournalRow = {
 type EligibleUpload = {
   id: string; requestId: string; objectKey: string; originalName: string; contentType: string;
   status: string; verificationState: string; declaredBytes: number; actualEtag: string | null; actualBytes: number | null; revokedAt: string | null; expiresAt: string; retained: number;
+  contributorName: string | null; createdAt: string;
 };
 
 export type IncomingPromotionStatus = {
@@ -135,8 +136,11 @@ async function basicCheck(db: D1Database, uploadId: string): Promise<SourceIdent
 async function eligible(db: D1Database, uploadId: string): Promise<EligibleUpload | null> {
   return db.withSession("first-primary").prepare(`SELECT u.id,u.request_id requestId,u.object_key objectKey,u.original_name originalName,u.content_type contentType,
     u.status,u.verification_state verificationState,u.declared_size declaredBytes,u.etag actualEtag,u.actual_size actualBytes,r.revoked_at revokedAt,r.expires_at expiresAt,
+    c.name contributorName,u.created_at createdAt,
     CASE WHEN datetime(u.created_at,'+14 days')>datetime('now') THEN 1 ELSE 0 END retained
-    FROM file_request_uploads u JOIN file_requests r ON r.id=u.request_id WHERE u.id=?`).bind(uploadId).first<EligibleUpload>();
+    FROM file_request_uploads u JOIN file_requests r ON r.id=u.request_id
+    LEFT JOIN file_request_contributors c ON c.id=u.contributor_id AND c.request_id=u.request_id
+    WHERE u.id=?`).bind(uploadId).first<EligibleUpload>();
 }
 async function noteRetry(env: IncomingEnv, uploadId: string, code: string): Promise<void> {
   await env.DELIVERY_DB.prepare(`UPDATE file_request_upload_promotion_journal SET error_code=?,updated_at=datetime('now')
@@ -185,7 +189,8 @@ export async function beginIncomingRclonePromotion(env: IncomingEnv, uploadId: s
   const object = await env.INCOMING_BUCKET.head(upload.objectKey);
   const source = { ...basicIdentity, objectVersion: object?.version ?? "" };
   if (!object || !source.objectVersion || !sameObject(object, source) || upload.declaredBytes !== source.bytes) throw new Error("quarantine_object_changed");
-  const plan = buildIncomingRcloneReadyPlan({ requestId: upload.requestId, uploadId: upload.id, originalName: upload.originalName, sourceBytes: source.bytes, transferMode: "move" });
+  const plan = await buildNamedIncomingRcloneReadyPlan({ requestId: upload.requestId, uploadId: upload.id, originalName: upload.originalName,
+    sourceBytes: source.bytes, transferMode: "move", contributorName: upload.contributorName, uploadCreatedAt: upload.createdAt });
   if (upload.objectKey !== plan.sourceKey) throw new Error("quarantine_key_noncanonical");
   const sampleLength = Math.min(4096, source.bytes);
   const sampleObject = r2Body(await env.INCOMING_BUCKET.get(upload.objectKey, { range: { offset: 0, length: sampleLength }, onlyIf: { etagMatches: source.etag } }));
@@ -223,7 +228,7 @@ export async function resumeIncomingRclonePromotionStep(env: IncomingEnv, upload
   if (row.state === "ready" || row.state === "unavailable" || row.state === "failed") return status(row);
   const checked = await guard(env, row);
   if (!checked) return status((await journal(env.DELIVERY_DB, uploadId))!);
-  const plan = buildIncomingRcloneReadyPlan({ requestId: checked.row.requestId, uploadId, originalName: checked.row.originalName, sourceBytes: checked.identity.bytes, transferMode: "move" });
+  const multipartCopy = planIncomingMultipartCopy(checked.identity.bytes);
   if (row.state === "pending") {
     try {
       const multipart = await env.INCOMING_BUCKET.createMultipartUpload(row.destinationKey, { httpMetadata: { contentType: checked.row.contentType }, customMetadata: {
@@ -236,10 +241,10 @@ export async function resumeIncomingRclonePromotionStep(env: IncomingEnv, upload
     return status((await journal(env.DELIVERY_DB, uploadId))!);
   }
   const parts = decodeParts(row.partsJson);
-  if (parts.length < plan.multipartCopy.partCount) {
+  if (parts.length < multipartCopy.partCount) {
     const partNumber = parts.length + 1;
-    const offset = (partNumber - 1) * plan.multipartCopy.partBytes;
-    const length = partNumber === plan.multipartCopy.partCount ? plan.multipartCopy.lastPartBytes : plan.multipartCopy.partBytes;
+    const offset = (partNumber - 1) * multipartCopy.partBytes;
+    const length = partNumber === multipartCopy.partCount ? multipartCopy.lastPartBytes : multipartCopy.partBytes;
     try {
       const source = r2Body(await env.INCOMING_BUCKET.get(row.sourceKey, { range: { offset, length }, onlyIf: { etagMatches: checked.identity.etag } }));
       if (!source || !sameObject(source, checked.identity) || !hasExactRange(source.range, offset, length)) throw new Error("quarantine_object_changed");
@@ -293,5 +298,5 @@ export async function markIncomingRclonePromotionExhausted(env: IncomingEnv, upl
 }
 
 export function incomingPromotionMultipartPlanForTest(sourceBytes: number): MultipartCopyPlan {
-  return buildIncomingRcloneReadyPlan({ requestId: "request_123", uploadId: "upload_456", originalName: "file.bin", sourceBytes, transferMode: "move" }).multipartCopy;
+  return planIncomingMultipartCopy(sourceBytes);
 }
