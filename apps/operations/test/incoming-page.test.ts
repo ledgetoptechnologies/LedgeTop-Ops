@@ -6,6 +6,7 @@ describe("incoming request page", () => {
     publicId: "request-id",
     title: "Project files",
     turnstileSiteKey: "site-key",
+    requiresAccessCode: false,
   });
 
   it("renders required identity fields and an accessible file picker", () => {
@@ -13,8 +14,22 @@ describe("incoming request page", () => {
     expect(page).toContain('id="email" type="email" maxlength="254" autocomplete="email" required');
     expect(page).toContain('id="files" type="file" multiple');
     expect(page).toContain(".drop:focus-within");
-    expect(page).toContain("Your files are quarantined for LTDS processing");
+    expect(page).toContain('class="drop" id="drop" for="files" tabindex="0" role="button"');
+    expect(page).toContain("Choose files or drop them here");
+    expect(page).toContain("drop.addEventListener(\"keydown\"");
+    expect(page).toContain("Files are checked before they can be delivered.");
+    expect(page).toContain('data-size="compact"');
+    expect(page).toContain(".cf-turnstile{width:150px;min-height:140px;max-width:100%}");
     expect(page).toContain('id="website" type="text" tabindex="-1" autocomplete="off"');
+  });
+
+  it("renders an access-code control only when the resolved request requires one", () => {
+    expect(page).not.toContain('id="code"');
+    const protectedPage = incomingRequestPage({ publicId: "request-id", title: "Project files", requiresAccessCode: true });
+    expect(protectedPage).toContain('<label for="code">Access code</label><input id="code" type="password" maxlength="128" required');
+    expect(protectedPage).toContain('accessCode:accessCode?.value||""');
+    expect(protectedPage).not.toContain("access_code_hash");
+    expect(protectedPage).toContain("accessCode&&!accessCode.reportValidity()");
   });
 
   it("never reports zero successful uploads as success", () => {
