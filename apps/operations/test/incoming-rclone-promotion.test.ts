@@ -16,6 +16,7 @@ function object(identity: ObjectIdentity, range?: { offset: number; length: numb
 function fakeBucket() {
   let sourcePresent = true;
   let completeCalls = 0;
+  let createCalls = 0;
   const uploaded: Array<{ partNumber: number; size: number }> = [];
   const bucket = {
     async head(key: string) { return key === source.key && sourcePresent ? object(source) : null; },
@@ -23,7 +24,7 @@ function fakeBucket() {
       if (key !== source.key || !sourcePresent) return null;
       return object(source, options.range);
     },
-    async createMultipartUpload(key: string) { return { key, uploadId: "multipart-one" }; },
+    async createMultipartUpload(key: string) { createCalls += 1; return { key, uploadId: "multipart-one" }; },
     resumeMultipartUpload(key: string, uploadId: string) {
       return { key, uploadId,
         async uploadPart(partNumber: number, body: ReadableStream<Uint8Array>) {
@@ -34,7 +35,7 @@ function fakeBucket() {
         async complete() { completeCalls += 1; return object({ key, size: source.size, etag: "dest-etag", version: "dest-version" }); },
       };
     },
-    get completeCalls() { return completeCalls; }, get uploaded() { return uploaded; }, removeSource() { sourcePresent = false; },
+    get completeCalls() { return completeCalls; }, get createCalls() { return createCalls; }, get uploaded() { return uploaded; }, removeSource() { sourcePresent = false; },
   };
   return bucket;
 }
@@ -43,8 +44,8 @@ async function insertUpload(identity = source) {
   await db.batch([
     db.prepare("INSERT INTO file_requests(id,public_id,title,created_by,expires_at,max_files,max_bytes,session_version) VALUES('request-one','public-one','Receive','staff',datetime('now','+1 day'),500,999999,1)"),
     db.prepare("INSERT INTO file_request_contributors(id,request_id,name,email,client_address_hash) VALUES('contributor-one','request-one','Contributor','c@example.test','hash')"),
-    db.prepare(`INSERT INTO file_request_uploads(id,request_id,contributor_id,object_key,upload_id,original_name,declared_size,actual_size,content_type,status,etag,pickup_state,verification_state)
-      VALUES('upload-one','request-one','contributor-one',?,'r2-multipart','report.pdf',?,?,'application/pdf','quarantined',?,'awaiting_pickup','awaiting_verification')`).bind(identity.key, identity.size, identity.size, identity.etag),
+    db.prepare(`INSERT INTO file_request_uploads(id,request_id,contributor_id,object_key,upload_id,original_name,declared_size,actual_size,content_type,status,etag,pickup_state,verification_state,created_at)
+      VALUES('upload-one','request-one','contributor-one',?,'r2-multipart','report.pdf',?,?,'application/pdf','quarantined',?,'awaiting_pickup','awaiting_verification',datetime('now'))`).bind(identity.key, identity.size, identity.size, identity.etag),
   ]);
 }
 
@@ -66,7 +67,11 @@ describe("incoming rclone promotion journal", () => {
 
   it("streams exactly one bounded range per step and does not infer local delivery", async () => {
     const bucket = fakeBucket(); const env = { DELIVERY_DB: db, INCOMING_BUCKET: bucket };
-    expect((await beginIncomingRclonePromotion(env as never, "upload-one")).state).toBe("pending");
+    const persisted = await db.prepare("SELECT substr(created_at,1,10) createdDate FROM file_request_uploads WHERE id='upload-one'").first<{ createdDate: string }>();
+    expect(persisted?.createdDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    const begun = await beginIncomingRclonePromotion(env as never, "upload-one");
+    expect(begun.state).toBe("pending");
+    expect(begun.destinationKey).toMatch(new RegExp(`^ready/Contributor/${persisted!.createdDate}--[a-f0-9]{20}/report\\.pdf$`));
     expect((await resumeIncomingRclonePromotionStep(env as never, "upload-one")).state).toBe("copying");
     expect((await resumeIncomingRclonePromotionStep(env as never, "upload-one")).completedParts).toBe(1);
     const final = await resumeIncomingRclonePromotionStep(env as never, "upload-one");
@@ -75,6 +80,39 @@ describe("incoming rclone promotion journal", () => {
     // a status read makes no assertion about a local copy.
     expect((await resumeIncomingRclonePromotionStep(env as never, "upload-one")).state).toBe("ready");
     expect(bucket.completeCalls).toBe(1);
+  });
+
+  it("preserves every preexisting journal destination despite contributor changes", async () => {
+    const bucket = fakeBucket(); const env = { DELIVERY_DB: db, INCOMING_BUCKET: bucket };
+    await db.prepare("INSERT INTO file_request_upload_basic_checks(upload_id,object_etag,object_bytes,object_version,check_version) VALUES('upload-one',?,?,?,'basic-v1')")
+      .bind(source.etag, source.size, source.version).run();
+    await db.prepare("UPDATE file_request_contributors SET name='Renamed contributor' WHERE id='contributor-one'").run();
+    const oldKey = "ready/request-one/upload-one/report.pdf";
+    const sourceIdentity = JSON.stringify({ version: 1, etag: source.etag, bytes: source.size, objectVersion: source.version });
+    for (const state of ["pending", "copying", "publishing", "ready"] as const) {
+      await db.prepare("DELETE FROM file_request_upload_promotion_journal WHERE upload_id='upload-one'").run();
+      await db.prepare(`INSERT INTO file_request_upload_promotion_journal(upload_id,source_identity,source_key,destination_key,state,multipart_upload_id,publication_started_at,published_at)
+        VALUES('upload-one',?,?,?, ?, CASE WHEN ?='copying' THEN 'legacy-multipart' END,
+          CASE WHEN ?='publishing' THEN datetime('now') END, CASE WHEN ?='ready' THEN datetime('now') END)`)
+        .bind(sourceIdentity, source.key, oldKey, state, state, state, state).run();
+      expect((await beginIncomingRclonePromotion(env as never, "upload-one")).destinationKey).toBe(oldKey);
+      expect((await resumeIncomingRclonePromotionStep(env as never, "upload-one")).destinationKey).toBe(oldKey);
+      expect((await readIncomingRclonePromotionStatus(env as never, "upload-one"))?.destinationKey).toBe(oldKey);
+    }
+  });
+
+  it("fails closed on the journal destination uniqueness constraint before R2 publication", async () => {
+    const bucket = fakeBucket(); const env = { DELIVERY_DB: db, INCOMING_BUCKET: bucket };
+    const planned = await beginIncomingRclonePromotion(env as never, "upload-one");
+    await db.prepare("DELETE FROM file_request_upload_promotion_journal WHERE upload_id='upload-one'").run();
+    await db.prepare(`INSERT INTO file_request_uploads(id,request_id,contributor_id,object_key,upload_id,original_name,declared_size,actual_size,content_type,status,etag,pickup_state,verification_state,created_at)
+      VALUES('upload-two','request-one','contributor-one','quarantine/request-one/upload-two/object','r2-two','other.pdf',10,10,'application/pdf','quarantined','abcdef','awaiting_pickup','awaiting_verification',datetime('now'))`).run();
+    await db.prepare(`INSERT INTO file_request_upload_promotion_journal(upload_id,source_identity,source_key,destination_key,state)
+      VALUES('upload-two',?,?,?,'pending')`).bind(JSON.stringify({ version: 1, etag: source.etag, bytes: source.size, objectVersion: source.version }), source.key, planned.destinationKey).run();
+    await expect(beginIncomingRclonePromotion(env as never, "upload-one")).rejects.toThrow("promotion_journal_create_failed");
+    expect(await db.prepare("SELECT destination_key FROM file_request_upload_promotion_journal WHERE upload_id='upload-one'").first()).toBeNull();
+    expect(bucket.createCalls).toBe(0);
+    expect(bucket.completeCalls).toBe(0);
   });
 
   it("marks a changed source unavailable before multipart bytes are read", async () => {
