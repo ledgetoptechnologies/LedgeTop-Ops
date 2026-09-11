@@ -31,6 +31,14 @@ describe("independent Incoming verification and pickup labels", () => {
     expect(result.detail).toContain("not an antivirus scan");
     expect(incomingUploadStatus({ status: "quarantined", promotion: { state: "ready" } }).label).toBe("Published for server pickup");
   });
+  it("does not infer basic checks from a queued promotion intent", () => {
+    for (const state of ["pending", "copying"] as const) {
+      const result = incomingUploadStatus({ status: "quarantined", verificationState: "awaiting_verification", promotion: { state } });
+      expect(result.label).toBe(state === "pending" ? "Server pickup preparation queued" : "Preparing pickup files");
+      expect(result.detail).toContain("not confirmed");
+      expect(result.detail).not.toContain("Basic upload checks passed");
+    }
+  });
   it("does not equate a missing object or uncertain publication with local delivery", () => {
     const missing = incomingUploadStatus({ status: "quarantined", promotion: { state: "ready", objectAvailability: "missing" } });
     expect(missing.label).toBe("No longer in R2");

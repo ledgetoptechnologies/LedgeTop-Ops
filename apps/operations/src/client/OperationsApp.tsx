@@ -4143,13 +4143,14 @@ function IncomingUploads() {
           <div className="incoming-stats">
             <Card>
               <strong>{link.outstandingFiles}</strong>
-              <span>Files awaiting pickup</span>
+              <span>Reserved upload files</span>
             </Card>
             <Card>
               <strong>{bytes(link.outstandingBytes)}</strong>
-              <span>Awaiting pickup</span>
+              <span>Reserved upload space</span>
             </Card>
           </div>
+          <small className="incoming-upload-status-detail">These are link capacity reservations and can include uploads awaiting checks or unavailable files. They are not current bucket contents or a server receipt.</small>
           <Card
             title="Recent uploads"
             action={
