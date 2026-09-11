@@ -44,8 +44,8 @@ export function incomingUploadStatus(upload: IncomingStatusFacts) {
       detail: "Publication was started but its outcome is not confirmed. Operations will not create another copy automatically; check the bucket and TrueNAS destination.",
     };
     if (promotion.state === "pending" || promotion.state === "copying") return {
-      label: promotion.state === "pending" ? "Preparing server pickup" : "Preparing pickup files",
-      detail: "Basic upload checks passed. Operations is preparing the file for the hourly TrueNAS task; no separate server verifier is required.",
+      label: promotion.state === "pending" ? "Server pickup preparation queued" : "Preparing pickup files",
+      detail: "Operations has queued or is preparing publication for the hourly TrueNAS task. Basic upload checks are not confirmed by this status; no server download is implied.",
     };
     return {
       label: "Pickup preparation needs attention",

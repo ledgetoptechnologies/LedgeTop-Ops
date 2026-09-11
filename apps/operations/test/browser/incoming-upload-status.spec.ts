@@ -57,6 +57,10 @@ test(`incoming upload download gating: ${scenario}`, async ({ page }) => {
   });
 
   await page.goto("/delivery/incoming");
+  await expect(page.getByText("Reserved upload files", { exact: true })).toBeVisible();
+  await expect(page.getByText("Reserved upload space", { exact: true })).toBeVisible();
+  await expect(page.getByText("They are not current bucket contents or a server receipt.", { exact: false })).toBeVisible();
+  await expect(page.getByText("Files awaiting pickup", { exact: true })).toHaveCount(0);
   const uploads = page.getByRole("heading", { name: "Recent uploads" }).locator("..").locator("..");
   await expect(uploads).toContainText("iCloud Photos.zip");
   await expect(uploads).toContainText("Server pickup will retry");
