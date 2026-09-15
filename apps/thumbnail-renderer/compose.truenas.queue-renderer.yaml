@@ -1,0 +1,40 @@
+# Standalone TrueNAS SCALE app for the Operations claim queue.
+#
+# Use a digest-qualified queue-worker image from the publish workflow. Replace
+# the two REPLACE_* values before installing this YAML. Cloudflare Access
+# credentials are optional and should remain empty unless the renderer API is
+# protected by an Access service-token policy.
+name: ledgetop-thumbnail-queue
+
+services:
+  queue-renderer:
+    image: ghcr.io/ledgetoptechnologies/ltds-thumbnail-queue-worker@sha256:REPLACE_WITH_PUBLISHED_DIGEST
+    container_name: ledgetop-thumbnail-queue-renderer
+    user: "568:568"
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 256
+    cpus: "4.0"
+    mem_limit: 5g
+    stop_grace_period: 30s
+    environment:
+      LTDSTHUMB_API_BASE: https://incoming.ledgetopdroneservices.com/api/internal/thumbnail-renderer/v1
+      LTDSTHUMB_API_TOKEN: REPLACE_WITH_RENDERER_TOKEN
+      CF_ACCESS_CLIENT_ID: ""
+      CF_ACCESS_CLIENT_SECRET: ""
+      LTDSTHUMB_WORKER_CONCURRENCY: "4"
+      LTDSTHUMB_IDLE_SECONDS: "5"
+      LTDSTHUMB_RENDER_TIMEOUT_SECONDS: "600"
+      LTDSTHUMB_RENDERER_VERSION: truenas-0.2.0
+    tmpfs:
+      - /scratch:rw,nosuid,nodev,noexec,size=4g,mode=0700,uid=568,gid=568
+      - /cache:rw,nosuid,nodev,noexec,size=256m,mode=0700,uid=568,gid=568
+      - /tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

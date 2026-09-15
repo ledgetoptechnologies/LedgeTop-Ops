@@ -15,11 +15,13 @@ export const THUMBNAIL_MAX_DELIVERY_ATTEMPTS = 6;
 export const THUMBNAIL_MAX_RECOVERY_ATTEMPTS = THUMBNAIL_MAX_DELIVERY_ATTEMPTS * 2;
 export const THUMBNAIL_SIDECAR_GRACE_SECONDS = 30;
 export const THUMBNAIL_PREBUILT_GRACE_SECONDS = 15 * 60;
+/** Cloudflare may render only after TrueNAS had this long to claim the job. */
+export const THUMBNAIL_FALLBACK_GRACE_SECONDS = 5 * 60;
 export const THUMBNAIL_RENDERER_SHARDS = 4;
 
 const THUMBNAIL_LEASE_MINUTES = 5;
-const THUMBNAIL_PRIMARY_HEALTH_SOURCE = "thumbnail-renderer-queue";
-const THUMBNAIL_PRIMARY_HEALTH_MAX_AGE_MINUTES = 2;
+/** Application-selected cap for a single delayed retry. */
+const THUMBNAIL_QUEUE_MAX_DELAY_SECONDS = 12 * 60 * 60;
 const THUMBNAIL_FALLBACK_RECONCILER_SOURCE = "thumbnail-fallback-republisher";
 const SUPPORTED_IMAGE_EXTENSIONS = new Set(["avif", "gif", "heic", "heif", "jpeg", "jpg", "png", "webp"]);
 const SUPPORTED_IMAGE_CONTENT_TYPES = new Set([
@@ -94,6 +96,8 @@ export interface ThumbnailEnqueueInput {
 export type ThumbnailJobOutcome =
   | { outcome: "ready"; thumbnailKey: string }
   | { outcome: "pending"; thumbnailKey: string }
+  /** Re-deliver at the durable fallback deadline without losing the only signal. */
+  | { outcome: "deferred"; thumbnailKey: string; retryAfterSeconds: number }
   | { outcome: "duplicate"; thumbnailKey: string }
   | { outcome: "obsolete" }
   | { outcome: "failed"; errorCode: string }
@@ -127,6 +131,10 @@ export interface ThumbnailJobRow {
   error_code: string | null;
   queue_published_at?: string | null;
   lease_active?: number;
+  /** Computed by D1 from render_not_before; never trust queue delivery time. */
+  fallback_due?: number;
+  /** Seconds until fallback_due, computed by D1 for an early queue delivery. */
+  fallback_delay_seconds?: number;
 }
 
 export type ThumbnailQueueBatchKind = "jobs" | "dead_letters" | "other" | "mixed";
@@ -268,7 +276,14 @@ async function currentJob(env: Pick<Env, "DELIVERY_DB">, sourceKey: string): Pro
   return env.DELIVERY_DB.prepare(`/* thumbnail.current-row */
     SELECT source_etag,thumbnail_key,thumbnail_etag,thumbnail_manifest_key,thumbnail_manifest_etag,
       status,error_code,queue_published_at,
-      CASE WHEN status='processing' AND lease_until IS NOT NULL AND datetime(lease_until)>datetime('now') THEN 1 ELSE 0 END AS lease_active
+      CASE WHEN status='processing' AND lease_until IS NOT NULL AND datetime(lease_until)>datetime('now') THEN 1 ELSE 0 END AS lease_active,
+      CASE WHEN (status='pending' OR (status='processing' AND (lease_until IS NULL OR datetime(lease_until)<=datetime('now'))))
+        AND (render_not_before IS NULL OR datetime(render_not_before,'+${THUMBNAIL_FALLBACK_GRACE_SECONDS} seconds')<=datetime('now'))
+        THEN 1 ELSE 0 END AS fallback_due
+      ,CASE WHEN render_not_before IS NULL OR datetime(render_not_before,'+${THUMBNAIL_FALLBACK_GRACE_SECONDS} seconds')<=datetime('now')
+        THEN 0
+        ELSE MAX(1,CAST((julianday(render_not_before,'+${THUMBNAIL_FALLBACK_GRACE_SECONDS} seconds')-julianday('now'))*86400+0.999 AS INTEGER))
+        END AS fallback_delay_seconds
       FROM image_thumbnail_jobs WHERE source_key=?`)
     .bind(sourceKey)
     .first<ThumbnailJobRow>();
@@ -347,7 +362,14 @@ export async function drainThumbnailCleanup(env: Env, limit = 100): Promise<numb
           WHERE source_key=? AND source_etag=? AND thumbnail_key=? AND status<>'failed'`)
           .bind(revived.source_key, revived.source_etag, cleanup.thumbnail_key).run();
         try {
-          await env.THUMBNAIL_QUEUE.send({ kind: THUMBNAIL_JOB_KIND, sourceKey: revived.source_key, sourceEtag: cleanEtag(revived.source_etag) });
+          await env.THUMBNAIL_QUEUE.send(
+            { kind: THUMBNAIL_JOB_KIND, sourceKey: revived.source_key, sourceEtag: cleanEtag(revived.source_etag) },
+            { delaySeconds: THUMBNAIL_FALLBACK_GRACE_SECONDS },
+          );
+          await env.DELIVERY_DB.prepare(`/* thumbnail.cleanup-regenerate-published */
+            UPDATE image_thumbnail_jobs SET queue_published_at=datetime('now'),updated_at=datetime('now')
+            WHERE source_key=? AND source_etag=? AND status='pending'`)
+            .bind(revived.source_key, revived.source_etag).run();
         } catch (error) {
           await env.DELIVERY_DB.prepare(`/* thumbnail.cleanup-regenerate-failed */
             UPDATE image_thumbnail_jobs SET status='failed',error_code='queue_publish_failed',error_message=?,
@@ -505,7 +527,9 @@ export async function enqueueThumbnailJob(
   try {
     await env.THUMBNAIL_QUEUE.send(
       { kind: THUMBNAIL_JOB_KIND, sourceKey: input.sourceKey, sourceEtag },
-      { delaySeconds },
+      // The queue delay matches the durable gate below. Delivery timing is an
+      // optimization only; the consumer still checks render_not_before in D1.
+      { delaySeconds: delaySeconds + THUMBNAIL_FALLBACK_GRACE_SECONDS },
     );
   } catch (error) {
     await env.DELIVERY_DB.prepare(`/* thumbnail.enqueue-fail */
@@ -542,7 +566,8 @@ async function claimJob(env: Env, sourceKey: string, sourceEtag: string): Promis
       lease_until=datetime('now',?),updated_at=datetime('now')
     WHERE source_key=? AND source_etag=? AND (
       status='pending' OR (status='processing' AND (lease_until IS NULL OR datetime(lease_until)<=datetime('now')))
-    ) RETURNING attempt_count`)
+    ) AND (render_not_before IS NULL OR datetime(render_not_before,'+${THUMBNAIL_FALLBACK_GRACE_SECONDS} seconds')<=datetime('now'))
+    RETURNING attempt_count`)
     .bind(`+${THUMBNAIL_LEASE_MINUTES} minutes`, sourceKey, sourceEtag)
     .first<{ attempt_count: number }>();
   return claim?.attempt_count ?? null;
@@ -695,7 +720,10 @@ export async function recoverTransientThumbnailFailures(env: Env, limit = 25): P
       .bind(row.source_key, cleanEtag(row.source_etag), THUMBNAIL_MAX_RECOVERY_ATTEMPTS).run();
     if (claimed.meta.changes !== 1) continue;
     try {
-      await env.THUMBNAIL_QUEUE.send({ kind: THUMBNAIL_JOB_KIND, sourceKey: row.source_key, sourceEtag: cleanEtag(row.source_etag) });
+      await env.THUMBNAIL_QUEUE.send(
+        { kind: THUMBNAIL_JOB_KIND, sourceKey: row.source_key, sourceEtag: cleanEtag(row.source_etag) },
+        { delaySeconds: THUMBNAIL_FALLBACK_GRACE_SECONDS },
+      );
       await env.DELIVERY_DB.prepare(`/* thumbnail.recovery-published */
         UPDATE image_thumbnail_jobs SET queue_published_at=datetime('now'),updated_at=datetime('now')
         WHERE source_key=? AND source_etag=? AND status='pending'`)
@@ -718,7 +746,9 @@ export async function recoverTransientThumbnailFailures(env: Env, limit = 25): P
  * lost. Every candidate is re-authorized against the exact current file-index
  * and R2 metadata before a CAS changes it back to pending. The scheduler never
  * opens the original body, never touches a fresh lease, and cannot publish the
- * same expired lease twice.
+ * same expired lease twice. A missed lease has already lasted at least the
+ * primary lease period, so its original five-minute Cloudflare fallback gate is
+ * necessarily elapsed; recovery retains that original gate and republishes now.
  */
 export async function recoverExpiredThumbnailLeases(
   env: Env,
@@ -776,7 +806,7 @@ export async function recoverExpiredThumbnailLeases(
     const claimed = await env.DELIVERY_DB.prepare(`/* thumbnail.expired-claim */
       UPDATE image_thumbnail_jobs SET status='pending',error_code=NULL,error_message=NULL,
         lease_until=NULL,failed_at=NULL,dead_lettered_at=NULL,queue_published_at=NULL,
-        render_not_before=datetime('now'),updated_at=datetime('now')
+        updated_at=datetime('now')
       WHERE source_key=? AND source_etag=? AND source_size=? AND status='processing'
         AND (lease_until IS NULL OR datetime(lease_until)<=datetime('now')) AND attempt_count<?
         AND EXISTS (SELECT 1 FROM file_index f WHERE f.r2_key=image_thumbnail_jobs.source_key
@@ -789,7 +819,9 @@ export async function recoverExpiredThumbnailLeases(
     if (claimed.meta.changes !== 1) continue;
 
     try {
-      await env.THUMBNAIL_QUEUE.send({ kind: THUMBNAIL_JOB_KIND, sourceKey: row.source_key, sourceEtag });
+      await env.THUMBNAIL_QUEUE.send(
+        { kind: THUMBNAIL_JOB_KIND, sourceKey: row.source_key, sourceEtag },
+      );
       await env.DELIVERY_DB.prepare(`/* thumbnail.expired-published */
         UPDATE image_thumbnail_jobs SET queue_published_at=datetime('now'),updated_at=datetime('now')
         WHERE source_key=? AND source_etag=? AND status='pending'`)
@@ -1011,36 +1043,6 @@ interface ThumbnailProcessingAttempt {
   claimAttempt: number | null;
 }
 
-/**
- * The unified TrueNAS renderer is primary while either an idle slot is polling
- * or a busy slot is sending authenticated attempt heartbeats. A short bounded
- * freshness window detects an offline server without letting a healthy, full
- * worker pool lose its durable backlog to the Cloudflare fallback.
- */
-export async function unifiedThumbnailRendererIsHealthy(
-  env: Pick<Env, "DELIVERY_DB">,
-): Promise<boolean> {
-  const health = await env.DELIVERY_DB.prepare(`/* thumbnail.primary-health */
-    SELECT CASE WHEN status='healthy' AND last_success_at IS NOT NULL
-      AND datetime(last_success_at)>datetime('now','-${THUMBNAIL_PRIMARY_HEALTH_MAX_AGE_MINUTES} minutes')
-      THEN 1 ELSE 0 END AS fresh
-    FROM delivery_sync_health WHERE source=?`)
-    .bind(THUMBNAIL_PRIMARY_HEALTH_SOURCE)
-    .first<{ fresh: number }>();
-  return health?.fresh === 1;
-}
-
-async function deferPendingThumbnailToPrimary(
-  env: Pick<Env, "DELIVERY_DB">,
-  sourceKey: string,
-  sourceEtag: string,
-): Promise<void> {
-  await env.DELIVERY_DB.prepare(`/* thumbnail.primary-deferred */
-    UPDATE image_thumbnail_jobs SET queue_published_at=NULL,updated_at=datetime('now')
-    WHERE source_key=? AND source_etag=? AND status='pending'`)
-    .bind(sourceKey, sourceEtag).run();
-}
-
 async function returnContainerLimitedThumbnailToPrimary(
   env: Pick<Env, "DELIVERY_DB">,
   sourceKey: string,
@@ -1058,16 +1060,15 @@ async function returnContainerLimitedThumbnailToPrimary(
 }
 
 /**
- * Re-publish work acknowledged while the server was primary only after its
- * independent presence/heartbeat signal becomes stale. The null publication
- * marker is the durable handoff record: queue send happens before the CAS
- * marker, so a crash can create a safe duplicate but cannot lose exact work.
+ * Re-publish exact work whose queue marker is absent after its durable fallback
+ * deadline. The null publication marker is the durable handoff record: queue
+ * send happens before the CAS marker, so a crash can create a safe duplicate
+ * but cannot lose exact work.
  */
 export async function republishPendingThumbnailFallbacks(
   env: Env,
   limit = 25,
 ): Promise<number> {
-  const primaryHealthy = await unifiedThumbnailRendererIsHealthy(env);
   // Both configured cron expressions can fire at the same minute. This D1 CAS
   // is an advisory four-minute run lock so they cannot both publish the same
   // null-marked row. A crashed invocation becomes eligible on the next pass.
@@ -1087,12 +1088,11 @@ export async function republishPendingThumbnailFallbacks(
     INNER JOIN file_index AS source ON source.r2_key=job.source_key
       AND trim(source.etag,'"')=job.source_etag AND source.size=job.source_size
     WHERE job.status='pending' AND job.queue_published_at IS NULL
-      AND (job.render_not_before IS NULL OR datetime(job.render_not_before)<=datetime('now'))
+      AND (job.render_not_before IS NULL OR datetime(job.render_not_before,'+${THUMBNAIL_FALLBACK_GRACE_SECONDS} seconds')<=datetime('now'))
       AND source.media_kind IN ('image','pdf','video')
       AND (job.error_code IS NULL OR job.error_code<>'pixel_limit_exceeded')
-      AND (?=0 OR job.error_code IS NOT NULL)
     ORDER BY job.updated_at,job.source_key LIMIT ?`)
-    .bind(primaryHealthy ? 1 : 0, boundedLimit).all<PendingThumbnailFallbackRow>();
+    .bind(boundedLimit).all<PendingThumbnailFallbackRow>();
   let published = 0;
   for (const row of rows.results) {
     const sourceEtag = cleanEtag(row.source_etag);
@@ -1150,6 +1150,24 @@ async function processThumbnailJobAttempt(
     : null;
   if (!currentThumbnail && !currentLocation) return { outcome: "obsolete" };
 
+  // A queue message is only a wake-up signal. The deadline is stored in D1 so
+  // a redelivery, direct publish, or scheduler bug cannot make Cloudflare read
+  // an original before TrueNAS had five full minutes after render_not_before to
+  // claim it. An active TrueNAS lease is authoritative regardless of timing.
+  if (currentThumbnail?.status === "processing" && currentThumbnail.lease_active === 1) {
+    return { outcome: "pending", thumbnailKey: currentThumbnail.thumbnail_key };
+  }
+  if (currentThumbnail && currentThumbnail.fallback_due !== 1) {
+    return {
+      outcome: "deferred",
+      thumbnailKey: currentThumbnail.thumbnail_key,
+      retryAfterSeconds: Math.max(1, Math.min(
+        THUMBNAIL_QUEUE_MAX_DELAY_SECONDS,
+        currentThumbnail.fallback_delay_seconds || THUMBNAIL_FALLBACK_GRACE_SECONDS,
+      )),
+    };
+  }
+
   const sourceHead = await env.DATA_BUCKET.head(message.sourceKey);
   if (!sourceHead) {
     const claimAttempt = currentThumbnail ? await claimJob(env, message.sourceKey, sourceEtag) : null;
@@ -1201,22 +1219,6 @@ async function processThumbnailJobAttempt(
 
   if (!currentThumbnail) return { outcome: "obsolete" };
   const thumbnailKey = currentThumbnail.thumbnail_key;
-  // A live external TrueNAS lease already owns this exact source attempt. The
-  // queue delivery has still completed best-effort image-location extraction
-  // above, so acknowledge it instead of burning Cloudflare retry deliveries.
-  // Expired-lease reconciliation republishes the durable job if the server
-  // disappears before completion.
-  if (currentThumbnail.status === "processing" && currentThumbnail.lease_active === 1) {
-    return { outcome: "pending", thumbnailKey };
-  }
-  // An unfailed still/PDF remains owned by a healthy unified renderer even if
-  // all slots are busy beyond the original queue delay. A renderer-reported
-  // retryable failure deliberately bypasses this guard once so Cloudflare can
-  // provide the documented still/PDF fallback.
-  if (!currentThumbnail.error_code && await unifiedThumbnailRendererIsHealthy(env)) {
-    await deferPendingThumbnailToPrimary(env, message.sourceKey, sourceEtag);
-    return { outcome: "pending", thumbnailKey };
-  }
   if (!sourceKind || !thumbnailSourceWithinInputLimit(sourceKind, sourceHead.size)) {
     const claimAttempt = await claimJob(env, message.sourceKey, sourceEtag);
     if (claimAttempt !== null) {
@@ -1238,6 +1240,8 @@ async function processThumbnailJobAttempt(
     const raced = await currentJob(env, message.sourceKey);
     return raced?.status === "ready" && cleanEtag(raced.source_etag) === sourceEtag
       ? { outcome: "duplicate", thumbnailKey: raced.thumbnail_key }
+      : raced?.status === "processing" && raced.lease_active === 1
+      ? { outcome: "pending", thumbnailKey: raced.thumbnail_key }
       : { outcome: "retry", errorCode: "renderer_busy" };
   }
   processing.claimAttempt = claimAttempt;
@@ -1384,7 +1388,11 @@ export async function consumeThumbnailJobs(batch: MessageBatch<unknown>, env: En
     try {
       const finalAttempt = queueMessage.attempts >= THUMBNAIL_MAX_DELIVERY_ATTEMPTS;
       const result = await processThumbnailJob(env, queueMessage.body, { finalAttempt });
-      if (result.outcome === "retry" || (result.outcome === "failed" && finalAttempt)) {
+      if (result.outcome === "deferred") {
+        // This is not a render failure: retain the signal until the durable
+        // deadline, even if a duplicate message was delivered early.
+        queueMessage.retry({ delaySeconds: result.retryAfterSeconds });
+      } else if (result.outcome === "retry" || (result.outcome === "failed" && finalAttempt)) {
         queueMessage.retry({ delaySeconds: retryDelay(queueMessage.attempts) });
       } else {
         queueMessage.ack();

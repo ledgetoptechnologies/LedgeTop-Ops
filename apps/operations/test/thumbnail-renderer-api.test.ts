@@ -354,7 +354,7 @@ describe("private TrueNAS thumbnail renderer API", () => {
       kind: "image-thumbnail.v1",
       sourceKey: value.job.source_key,
       sourceEtag: value.job.source_etag,
-    });
+    }, { delaySeconds: 300 });
     expect(value.job).toMatchObject({
       status: "pending",
       error_code: "decode_failed",

@@ -2,6 +2,7 @@ import { base64Url, hmac, timingSafeEqual } from "./crypto";
 import { presignR2Get } from "./r2-signing";
 import {
   THUMBNAIL_HEIGHT,
+  THUMBNAIL_FALLBACK_GRACE_SECONDS,
   THUMBNAIL_MAX_OUTPUT_BYTES,
   THUMBNAIL_WIDTH,
   canonicalThumbnailSourceKey,
@@ -635,7 +636,7 @@ async function handleFail(request: Request, env: Env): Promise<Response> {
         kind: "image-thumbnail.v1",
         sourceKey,
         sourceEtag: cleanThumbnailEtag(job.source_etag),
-      });
+      }, { delaySeconds: THUMBNAIL_FALLBACK_GRACE_SECONDS });
       await env.DELIVERY_DB.prepare(`UPDATE image_thumbnail_jobs
         SET queue_published_at=datetime('now'),updated_at=datetime('now')
         WHERE source_key=? AND source_etag=? AND status='pending'`)
