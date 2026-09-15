@@ -18,6 +18,7 @@ function entry(sourceId: string, value: typeof ids.first, baseUrl: string, enabl
 function environment(instances: Record<string, unknown>) {
   return { PROJECT_ALPHA_API_V2_CONNECTIONS: JSON.stringify({ version: 1, instances }) };
 }
+function rawEnvironment(raw: string) { return { PROJECT_ALPHA_API_V2_CONNECTIONS: raw }; }
 function metadata(value: typeof ids.first) {
   return { apiVersion: "2", sourceInstanceId: value.source, applicationId: value.application, historyEpoch: value.epoch,
     requestId: "11111111-1111-4111-8111-111111111111", grantedCapabilities: [{ name: "api.capabilities.read" }],
@@ -31,6 +32,8 @@ describe("deployment-owned Project Alpha API-v2 connections", () => {
     const two = resolveProjectAlphaApiV2Connection(env, second);
     expect(one).toMatchObject({ sourceId: first, enabled: false, connection: { baseUrl: "https://source-a.example.test", expectedSourceInstanceId: ids.first.source } });
     expect(two).toMatchObject({ sourceId: second, enabled: true, connection: { baseUrl: "https://source-b.example.test", expectedSourceInstanceId: ids.second.source } });
+    expect(one.connection).not.toHaveProperty("apiKey");
+    expect(JSON.stringify(one)).not.toContain(`secret-for-${first}`);
     expect(one.connection).not.toEqual(two.connection);
   });
 
@@ -51,6 +54,48 @@ describe("deployment-owned Project Alpha API-v2 connections", () => {
   });
 
   it.each([
+    " leading", "trailing ", "internal space", "tab\tinside", "line\nbreak", "carriage\rreturn", "nul\0byte", "delete\u007fbyte", "caf\u00e9",
+  ])("rejects header-unsafe API-key values", value => {
+    expect(() => resolveProjectAlphaApiV2Connection(environment({ [first]: { ...entry(first, ids.first, "https://source-a.example.test"), apiKey: value } }), first))
+      .toThrow(ProjectAlphaApiV2ConnectionConfigurationError);
+  });
+
+  it("rejects duplicate JSON members before JSON.parse can retain a last value", () => {
+    const item = JSON.stringify(entry(first, ids.first, "https://source-a.example.test"));
+    const complete = environment({ [first]: entry(first, ids.first, "https://source-a.example.test") }).PROJECT_ALPHA_API_V2_CONNECTIONS!;
+    const duplicateRootInstances = complete.replace('"instances":', '"instances":{},"instances":');
+    const duplicateAlias = `{"version":1,"instances":{"${first}":${item},"${first}":${item}}}`;
+    const duplicateApiKey = item.replace('"apiKey":', String.raw`"\u0061piKey":"shadow","apiKey":`);
+    const duplicateBaseUrl = item.replace('"baseUrl":', '"baseUrl":"https://shadow.example.test","baseUrl":');
+    const duplicateHistoryEpoch = item.replace('"historyEpoch":', '"historyEpoch":"11111111-1111-4111-8111-111111111111","historyEpoch":');
+    for (const raw of [
+      duplicateRootInstances,
+      duplicateAlias,
+      `{"version":1,"instances":{"${first}":${duplicateApiKey}}}`,
+      `{"version":1,"instances":{"${first}":${duplicateBaseUrl}}}`,
+      `{"version":1,"instances":{"${first}":${duplicateHistoryEpoch}}}`,
+    ]) expect(() => resolveProjectAlphaApiV2Connection(rawEnvironment(raw), first)).toThrow(ProjectAlphaApiV2ConnectionConfigurationError);
+  });
+
+  it("sanitizes throwing environment, proxy, and parsed-object traps", () => {
+    const secret = "trap-detail-must-not-escape";
+    const accessor = Object.create(null, { PROJECT_ALPHA_API_V2_CONNECTIONS: { enumerable: true, get() { throw new Error(secret); } } });
+    const proxy = new Proxy({}, { get() { throw new Error(secret); } });
+    for (const env of [accessor, proxy]) {
+      try { resolveProjectAlphaApiV2Connection(env as never, first); throw new Error("expected rejection"); }
+      catch (error) { expect(error).toBeInstanceOf(ProjectAlphaApiV2ConnectionConfigurationError); expect(String(error)).not.toContain(secret); }
+    }
+    const configured = environment({ [first]: entry(first, ids.first, "https://source-a.example.test") });
+    const raw = configured.PROJECT_ALPHA_API_V2_CONNECTIONS!;
+    const parse = JSON.parse;
+    const spy = vi.spyOn(JSON, "parse").mockImplementation(((value: string) => value === raw
+      ? new Proxy({}, { getPrototypeOf() { throw new Error(secret); } }) : parse(value)) as typeof JSON.parse);
+    try {
+      expect(() => resolveProjectAlphaApiV2Connection(configured, first)).toThrow(ProjectAlphaApiV2ConnectionConfigurationError);
+    } finally { spy.mockRestore(); }
+  });
+
+  it.each([
     () => ({ version: 2, instances: {} }),
     () => ({ version: 1, instances: { [first]: { ...entry(first, ids.first, "https://source-a.example.test"), extra: true } } }),
     () => ({ version: 1, instances: { [first]: entry(first, ids.first, "http://source-a.example.test") } }),
@@ -63,6 +108,10 @@ describe("deployment-owned Project Alpha API-v2 connections", () => {
     () => ({ version: 1, instances: { [first]: { ...entry(first, ids.first, "https://source-a.example.test"), applicationId: "not-a-uuid" } } }),
     () => ({ version: 1, instances: { [first]: { ...entry(first, ids.first, "https://source-a.example.test"), historyEpoch: "not-a-uuid" } } }),
     () => ({ version: 1, instances: { [first]: { ...entry(first, ids.first, "https://source-a.example.test"), apiKey: " \t" } } }),
+    () => ({ version: 1, instances: { "project-alpha:": entry("project-alpha:", ids.first, "https://source-a.example.test") } }),
+    () => ({ version: 1, instances: { "wrong:source": entry("wrong:source", ids.first, "https://source-a.example.test") } }),
+    () => ({ version: 1, instances: { "project-alpha:repeated:colon": entry("project-alpha:repeated:colon", ids.first, "https://source-a.example.test") } }),
+    () => ({ version: 1, instances: { [`project-alpha:${"a".repeat(65)}`]: entry(`project-alpha:${"a".repeat(65)}`, ids.first, "https://source-a.example.test") } }),
     () => ({ version: 1, instances: { [first]: entry(first, ids.first, "https://source-a.example.test"), [second]: entry(second, ids.second, "https://source-a.example.test") } }),
     () => ({ version: 1, instances: { [first]: entry(first, ids.first, "https://source-a.example.test"), [second]: entry(second, { ...ids.second, source: ids.first.source }, "https://source-b.example.test") } }),
     () => ({ version: 1, instances: { [first]: entry(first, ids.first, "https://source-a.example.test"), [second]: entry(second, { ...ids.second, application: ids.first.application }, "https://source-b.example.test") } }),
