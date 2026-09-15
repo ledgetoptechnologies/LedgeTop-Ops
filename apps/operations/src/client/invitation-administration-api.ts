@@ -1,12 +1,36 @@
 import { z } from "zod";
 import { api } from "./api";
-import { invitationRequestSchema, type PortalInvitationRequest } from "../../../client/src/client/invitation-request-api";
 
-export { invitationRequestSchema };
-export type InvitationRequest = PortalInvitationRequest;
+// This is an Operations-owned copy of the client-portal wire contract.  Do not
+// import the Client application's Zod schema here: each application resolves
+// its own Zod package, and combining schemas from different Zod minors makes
+// Zod's internal type metadata incompatible.
+const id = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/);
+const timestamp = z.string().max(64).refine(value => /^\d{4}-\d{2}-\d{2}[T ]/.test(value) && Number.isFinite(Date.parse(value)));
+export const invitationRequestSchema = z.object({
+  id, sourceId: z.string().regex(/^project-alpha:[A-Za-z0-9_-]+$/), sourceName: z.string().max(1000),
+  workspaceId: id, workspaceName: z.string().max(1000), requesterIdentityId: id, requesterEmail: z.string().max(320).nullable(),
+  version: z.number().int().positive(), status: z.enum(["pending", "approving", "approved", "rejected", "cancelled", "stale"]),
+  email: z.string().max(320), scope: z.object({type: z.enum(["workspace", "organization", "department", "client", "project"]), publicId: id}),
+  capabilities: z.array(z.enum(["workspace.view", "delivery.view", "request.create"])).max(3),
+  accessTerms: z.object({id: z.string().min(1).max(200), kind: z.enum(["customer", "collaborator"]), mode: z.enum(["specific_date", "project_end", "until_revoked"]),
+    expiresAt: timestamp.nullable(), effectiveExpiresAt: timestamp.nullable(), completionPending: z.boolean(), expired: z.boolean()}).nullable(),
+  policyVersion: z.number().int().nonnegative(), createdAt: timestamp, updatedAt: timestamp,
+  invitationId: id.nullable(), reasonCode: z.string().max(2000).nullable(), canCancel: z.boolean(),
+});
+export type InvitationRequest = z.infer<typeof invitationRequestSchema>;
+export const invitationRequestStatus = (status: InvitationRequest["status"]) => ({pending: "Pending approval", approving: "Approval in progress — not issued", approved: "Approved", rejected: "Rejected", cancelled: "Cancelled", stale: "Needs a new request"})[status];
+const capabilityLabels: Record<string, string> = {"workspace.view": "Workspace viewing", "delivery.view": "Delivery viewing", "request.create": "Service requests"};
+export const invitationCapabilitiesLabel = (capabilities: readonly string[]) => capabilities.map(value => capabilityLabels[value] ?? "Unsupported capability").join(" · ");
+export function invitationTermsLabel(terms: InvitationRequest["accessTerms"]): string {
+  if (!terms) return "Existing scope rules — unclassified";
+  if (terms.mode === "project_end") return "Collaborator — first verified project completion + 7 days";
+  if (terms.mode === "specific_date") return `Collaborator — until ${new Date(terms.expiresAt!).toLocaleString()}`;
+  return `${terms.kind === "customer" ? "Customer" : "Collaborator"} — until revoked`;
+}
 export interface InvitationAdministrationAccess { enabled: boolean; canReview: boolean; canManagePolicy: boolean; error?: string }
 export const invitationAdministrationPath = "/clients/invitation-requests";
-const id = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/), source = z.string().regex(/^project-alpha:[A-Za-z0-9_-]+$/);
+const source = z.string().regex(/^project-alpha:[A-Za-z0-9_-]+$/);
 export const invitationPolicySchema = z.object({workspaceId: id, sourceId: source, workspaceName: z.string().max(1000),
   policy: z.enum(["allowed", "disabled", "require_approval"]), version: z.number().int().nonnegative(), contextVersion: z.string().min(1).max(512), capabilities: z.object({canManagePolicy: z.boolean()})});
 export type InvitationPolicy = z.infer<typeof invitationPolicySchema>;

@@ -1,8 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { decideInvitationRequest, invitationRequestDetail, invitationRequestHref, loadInvitationPolicy, loadInvitationRequestDetail, saveInvitationPolicy, type InvitationPolicy } from "../src/client/invitation-administration-api";
+import { decideInvitationRequest, invitationRequestDetail, invitationRequestHref, invitationRequestSchema, loadInvitationPolicy, loadInvitationRequestDetail, saveInvitationPolicy, type InvitationPolicy } from "../src/client/invitation-administration-api";
 import { readInvitationApprovalRoute } from "../src/client/InvitationApprovals";
 import { inboxEndpoint, inboxSources, parseInboxPage } from "../src/client/staff-inbox";
-import { invitationRequestSchema } from "../../client/src/client/invitation-request-api";
 
 const sourceId = "project-alpha:primary", workspaceId = "workspace-one";
 const row = {id: "request-one", sourceId, sourceName: "Project Alpha", workspaceId, workspaceName: "Acme", requesterIdentityId: "identity-one", requesterEmail: null, version: 1, status: "pending", email: "guest@example.test", scope: {type: "project", publicId: "project-one"}, capabilities: ["workspace.view", "delivery.view", "request.create"], accessTerms: null, policyVersion: 1, createdAt: "2026-08-26T12:00:00Z", updatedAt: "2026-08-26T12:00:00Z", invitationId: null, reasonCode: null, canCancel: true};

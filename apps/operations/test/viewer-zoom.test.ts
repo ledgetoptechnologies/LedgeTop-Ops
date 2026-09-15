@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { constrainViewerOffset, pointerAnchoredOffset } from "../src/client/viewer-zoom";
 
@@ -18,5 +19,13 @@ describe("pointer anchored viewer zoom", () => {
       .toEqual({ x: 400, y: -300 });
     expect(constrainViewerOffset(1, { x: 20, y: -20 }, { width: 800, height: 600 }))
       .toEqual({ x: 0, y: 0 });
+  });
+
+  it("does not retain React events across deferred pan updates", () => {
+    const source = readFileSync(new URL("../src/client/OperationsApp.tsx", import.meta.url), "utf8");
+    const viewer = source.slice(source.indexOf("function ZoomableOperationsImage"), source.indexOf("function OperationsPreviewPlaceholder"));
+    expect(viewer).toContain('addEventListener("wheel", wheel, { passive: false })');
+    expect(viewer).toContain("const bounds = event.currentTarget.getBoundingClientRect();");
+    expect(viewer).not.toMatch(/setOffset\([^;]+event\.currentTarget/s);
   });
 });

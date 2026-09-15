@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Card } from "@ltds/ui";
 import { api, ApiError } from "./api";
-import { decideInvitationRequest, invitationAdministrationPath, invitationRequestHref, invitationRequestPage, loadInvitationRequestDetail, type InvitationAdministrationAccess, type InvitationRequest, type InvitationRequestDetail } from "./invitation-administration-api";
-import { invitationCapabilitiesLabel, invitationRequestStatus, invitationTermsLabel } from "../../../client/src/client/invitation-request-api";
+import { decideInvitationRequest, invitationAdministrationPath, invitationCapabilitiesLabel, invitationRequestHref, invitationRequestPage, invitationRequestStatus, invitationTermsLabel, loadInvitationRequestDetail, type InvitationAdministrationAccess, type InvitationRequest, type InvitationRequestDetail } from "./invitation-administration-api";
 import "./InvitationAdministration.css";
 
 interface Route {id: string | null; sourceId: string; workspaceId: string; status: string; q: string; invalid: boolean}
