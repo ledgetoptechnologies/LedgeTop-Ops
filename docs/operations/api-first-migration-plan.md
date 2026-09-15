@@ -1,6 +1,6 @@
 # API-first migration — current implementation objective and work register
 
-Updated September 15, 2026. The owner approved implementation and resumption after confirming the [decision record](api-first-decisions-2026-09-10.md). This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+Updated September 15, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
 
 ### September 15 — API-first transport and ownership checkpoint
 
@@ -70,37 +70,46 @@ Updated September 15, 2026. The owner approved implementation and resumption aft
 - This Operations documentation branch also remains local: pushing internal
   architecture documentation was denied pending explicit user approval.
 
-### September 15 follow-up — dormant Operations project transport
+### September 15 follow-up — dormant Operations project transport and persistence
 
-- Operations local commits `ed346a8` and `2d1e6af` add the unmounted,
-  default-off consumer transport for PA's project read, create, update,
-  explicit one-to-one bind, binding-status, bounded inventory, lifecycle and
-  binding-revision-refresh routes. No production router, scheduled task,
-  public-link resolver, legacy integration path or thumbnail path imports the
-  new modules. A disabled configured source performs no network request.
-- The first independent contract review found two release blockers: caller
-  object order could violate PA's strict command parser, and an unfenced bare
-  404 could be mistaken for an absent binding. `2d1e6af` rebuilds every command
-  envelope and nested profile/relationship object in PA's canonical order and
-  requires the PA no-store/request-ID/no-cookie response fence before mapping
-  a 404 to `not_found`. Re-review passed. Focused Vitest passes **7/7**,
-  TypeScript `--noEmit`, `git diff --check` and the production Vite build pass.
-- Publication is still blocked pending explicit approval to export these two
-  source commits to the potentially public
-  `ledgetoptechnologies/LedgeTop-Ops` GitHub repository. The clean local branch
-  is `codex/api-v2-project-transport`, two commits ahead of Ops main
-  `ad58c22`. No push, PR, merge, deployment or live request has occurred.
-- Reconciliation must extend or deliberately supersede the existing dormant
-  project foundation in migrations 0062–0064 and 0086; it must not create a
-  second competing project identity system. Those migrations already reserve
-  an immutable destination, durable outbox/mapping history, history epoch,
-  native authority proof and shared-project revisions, but their transport
-  ledger predates the final v2 response contract. Before mounting a writer,
-  reconcile its mutable lease/outcome state and leased-command mapping gate
-  with append-only pending/uncertain/acknowledged evidence, exact projection
-  hash, authorization generation, request receipt and conflict state. Treat
-  all historical rows as collision/provenance evidence; never infer current
-  authority, retarget an instance, or activate portal/public-link behavior.
+- Operations PR59 merged to `main` at `5286460`. It adds the unmounted,
+  default-off consumer transport for PA project read/create/update, explicit
+  one-to-one bind, binding status, bounded inventory, lifecycle and
+  binding-revision refresh. Canonical command ordering and trusted 404 response
+  fencing were independently reviewed; all ten PR-head and all ten post-merge
+  checks passed.
+- Operations PR60 merged to `main` at `e89364e`. Additive migration 0119 now
+  supplies native-only immutable request fingerprints, append-only
+  pending/uncertain/conflict/rejected/acknowledged events, transport-validated
+  acknowledgement provenance, and exact create/bind/update success receipts.
+  It revalidates live authority and fences command, source, application,
+  history epoch, destination origin, public ID, revision, projection hash and
+  authorization generation. SQLite null-bypass, mutable-evidence,
+  destination-provenance and update-contract gaps found during review were
+  fixed before publication.
+- Final local evidence for PR60 was TypeScript, production build, **21/21**
+  focused transport/D1/populated migration-chain tests and an independent
+  no-findings review. All ten PR-head CI jobs and all ten jobs in post-merge
+  main run `35015527961` passed.
+- These changes remain dormant. No production router, scheduled task,
+  persistence adapter, mapping reader, public-link resolver, legacy integration
+  path or thumbnail path imports them. Migration 0119 has not been applied to
+  remote D1 by this work. The next slice is the private adapter that atomically
+  converts only transport-minted evidence into ledger events/receipts, followed
+  by reviewed canonical shared-project settlement. Historical rows remain
+  collision/provenance evidence and never imply current authority.
+- The older M05 joined HTTP/MySQL evidence predates PR59/PR60 and does not prove
+  this new project transport or persistence path end to end. Runtime settlement,
+  real PA/MySQL integration and both-instance acceptance remain open gates.
+- Before implementing that adapter, extend the transport's private provenance
+  to retain the exact canonical request-byte hash and exact bounded response-byte
+  hash, and privately brand the rehydrated evidence so structural clones cannot
+  settle D1 state. Reserve the request before network dispatch; then write the
+  acknowledged event, validated acknowledgement and receipt in one D1 batch.
+  Refresh remains outside migration 0119. Lost-response retries must reuse the
+  same command ID/body/destination, and an exact existing receipt is the only
+  replay success. This adapter remains unmounted until its rollback, concurrency,
+  stale-authority and byte-for-byte no-public-link-mutation tests pass.
 - Thumbnail optimization remains explicitly deferred at the owner's request;
   the currently functional thumbnail path is outside this migration slice.
 
@@ -647,8 +656,8 @@ acceptance requirements.
   explicit native project scopes/grants and captured current staff authority.
   Existing client/org grants cannot be treated as project rights. No automatic
   grants, inferred historical authority, or portal publication are permitted.
-  See [project synchronization](project-synchronization-contract.md) for the
-  required joined tests. Implementation and independent review remain in progress.
+  The required joined project-synchronization tests are recorded in this work
+  register. Implementation and independent review remain in progress.
 - No production migration, PA release, Ops deployment or authority cutover is
   established by these local results. Public-link compatibility, release flag
   reconciliation, both-instance acceptance and the full remaining register stay
@@ -1283,7 +1292,7 @@ broader client navigation, service journeys and live acceptance remain open.
 
 ### M01: immediate Incoming rollout
 
-- Completed evidence: PR47 merged into `main` at `6752ee2cf8f69bdb8221f7b02a6a68962eb3f28d`; exact PR-head pre-merge CI and post-merge run 34537003386 both passed all ten checks. Fresh focused local Incoming tests passed 39/39 across four files. See the [decision record](api-first-decisions-2026-09-10.md) for dated limits.
+- Completed evidence: PR47 merged into `main` at `6752ee2cf8f69bdb8221f7b02a6a68962eb3f28d`; exact PR-head pre-merge CI and post-merge run 34537003386 both passed all ten checks. Fresh focused local Incoming tests passed 39/39 across four files. Dated limits remain recorded in this work register.
 - Current owner-confirmed state: TrueNAS selects `ready/` and its hourly PULL/MOVE task is resumed. Preserve the current destination; no extra server scanner/agent. Earlier paused-task instructions were superseded by this confirmation.
 - Verify Cloudflare's deployed revision before claiming a release is live. Initial publication was default-off; the active checkpoint below now records the approved PR48 activation and exact deployed bindings.
 - Confirm private staging and exclusive ready publishing, the unchanged retention policy, migration state and the original pending-upload object identity. Never label an absent object "downloaded" without independent evidence.
@@ -2487,8 +2496,7 @@ broader client navigation, service journeys and live acceptance remain open.
   Runner cleanup and parent filtered Docker readback confirmed no test container
   remains. This uses migrations 0090–0093 over a partial domain fixture, not a
   full-baseline migration or completed two-way synchronization rehearsal.
-- Remaining project integration is specified in
-  [project-synchronization-contract.md](project-synchronization-contract.md):
+- Remaining project integration is specified below in this work register:
   PA-local writer composition, canonical Ops project
   maps/outbox/inbox, generic reads/feed, conflict-aware consumption and UI.
 - Atomic project event provenance implemented locally with migration 0095,
@@ -4923,7 +4931,7 @@ pending; this requirement does not claim a deployed UI change.
   validated-acknowledgement evidence. Focused Ops Vitest passes **8 tests**
   and TypeScript `--noEmit` passes. This is transport only: it sends nothing
   until called, persists no D1 refresh ledger, and changes no mapping or link.
-  A dormant, untracked Ops migration 0118 now adds append-only refresh
+  Tracked Ops migration 0118 adds append-only refresh
   commands, transitions, and exact success receipts. It pins the acquired
   native-owner claim, local version, source/application/history identity,
   external and PA public IDs, revisions, generation and request hash. A unique
