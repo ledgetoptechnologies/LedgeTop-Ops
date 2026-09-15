@@ -27,6 +27,8 @@ export type Env = Omit<
   CLIENT_PORTAL_NOTIFICATION_MIGRATION_MAINTENANCE?: string;
   /** Deploy-managed connector credential sets; never returned by registry APIs. */
   PROJECT_ALPHA_CONNECTOR_CREDENTIALS?: string;
+  /** Versioned, deployment-owned API-v2 connections. Never accepted from a browser or connector registry request. */
+  PROJECT_ALPHA_API_V2_CONNECTIONS?: string;
   PROJECT_ALPHA_CONNECTOR_SNAPSHOT_CREDENTIALS?: string;
   PROJECT_ALPHA_CONNECTOR_EVENT_CREDENTIALS?: string;
   /** Deploy-managed source manifest; selects configured credential references and is never browser-administered. */
