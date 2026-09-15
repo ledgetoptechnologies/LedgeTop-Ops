@@ -34,6 +34,22 @@ Updated September 15, 2026. The owner approved implementation and resumption aft
   production/public links and legacy integration remain protected. No live or
   staging deployment, cutover, or acceptance is claimed by this checkpoint.
 
+### September 15 follow-up — PA archive/restore publication remediation
+
+- PA local commit `b2ad3f83` (parent `a1db652`) closes the previously recorded
+  restore-exposure blocker. Archive transactionally clears public and portal
+  publication, stops pending managed deliveries and queues accepted revoke
+  intents; restore stays dark. Migration `0101` and its backfill harden
+  existing rows. The implementation focused run passed **60 tests / 868
+  assertions**, the full suite passed **915 tests / 7,407 assertions / 94
+  skipped**, and disposable MySQL passed **4 tests / 28 assertions**.
+- Independent QA passed the remediation: lint plus **51 focused tests / 815
+  assertions** verified transactional public/portal disable, managed-delivery
+  stop/revoke, dark restore, and explicit CSRF/ownership-gated republish.
+  This closes the `a1db652` blocker; the PA change remains local and unpushed,
+  with no staging or production deployment, public-link change, or cutover
+  acceptance claimed.
+
 September 15 migration-safety checkpoint: Operations PR 54 restored the exact
 0054–0118 migration chain and strengthened the staging release gate to require
 remote-ledger order, quiescent/compatible writers, closed migration fences, and
