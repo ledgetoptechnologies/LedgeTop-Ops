@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { sendConfiguredProjectAlphaProjectCreateCommand, sendProjectAlphaProjectCreateCommand, sendProjectAlphaProjectUpdateCommand, sendProjectAlphaProjectBindingCommand, sendProjectAlphaProjectRefreshCommand, validatedProjectAlphaProjectAcknowledgement, type ProjectAlphaProjectCreateCommand, type ProjectAlphaProjectOutcome, type ProjectAlphaProjectUpdateCommand, type ProjectAlphaProjectBindCommand, type ProjectAlphaProjectRefreshCommand } from "../src/worker/project-alpha-project-api-v2";
+import { createHash } from "node:crypto";
+import { privateProjectAlphaProjectSettlementEvidence, sendConfiguredProjectAlphaProjectCreateCommand, sendProjectAlphaProjectCreateCommand, sendProjectAlphaProjectUpdateCommand, sendProjectAlphaProjectBindingCommand, sendProjectAlphaProjectRefreshCommand, validatedProjectAlphaProjectAcknowledgement, type ProjectAlphaProjectCreateCommand, type ProjectAlphaProjectOutcome, type ProjectAlphaProjectUpdateCommand, type ProjectAlphaProjectBindCommand, type ProjectAlphaProjectRefreshCommand } from "../src/worker/project-alpha-project-api-v2";
 import { readProjectAlphaProject } from "../src/worker/project-alpha-project-read-api-v2";
 import { readProjectAlphaProjectInventory } from "../src/worker/project-alpha-project-inventory-api-v2";
 import { readProjectAlphaProjectBindingStatus } from "../src/worker/project-alpha-project-binding-status-api-v2";
@@ -11,6 +12,7 @@ const create: ProjectAlphaProjectCreateCommand = { commandId: request, externalI
 function metadata(route: Record<string, unknown>, capabilities = ["api.capabilities.read", route.requiredCapability as string]) { return { apiVersion: "2", sourceInstanceId: source, applicationId: application, historyEpoch: epoch, requestId: request, grantedCapabilities: capabilities.map(name => ({ name })), implementedEndpoints: [{ method: "GET", path: "/api/v2/capabilities", requiredCapability: "api.capabilities.read" }, route] }; }
 function json(value: unknown, status = 200, headers: Record<string, string> = {}) { return new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", "X-Request-ID": request, ...headers } }); }
 function syncReceipt() { return { apiVersion: "2", sourceInstanceId: source, applicationId: application, historyEpoch: epoch, requestId: request, replayed: false, result: { resource: { type: "project", id: create.externalId, publicId: project, revision: "1", projectionSha256: "a".repeat(64) }, authorizationGeneration: "1", presentation: { portalPublished: false, publicLinkEnabled: false } } }; }
+const sha256 = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
 
 describe("dormant PA project v2 transport", () => {
   it("is default-off before any capability or command fetch", async () => {
@@ -31,7 +33,10 @@ describe("dormant PA project v2 transport", () => {
     const send = vi.fn<typeof fetch>(async (_url, init) => init?.method === "GET" ? json(metadata(route)) : json(syncReceipt(), 201));
     const outcome = await sendProjectAlphaProjectCreateCommand(connection, create, send);
     const evidence = validatedProjectAlphaProjectAcknowledgement(outcome);
-    expect(evidence).toEqual({ type: "create", command: create, response: syncReceipt(), destinationOrigin: "https://alpha.example.test" });
+    expect(evidence).toEqual({ type: "create", command: create, response: syncReceipt(), destinationOrigin: "https://alpha.example.test", requestSha256: sha256(JSON.stringify(create)), responseSha256: sha256(JSON.stringify(syncReceipt())) });
+    expect(Object.isFrozen(evidence)).toBe(true);
+    expect(privateProjectAlphaProjectSettlementEvidence(evidence)).toBe(evidence);
+    expect(privateProjectAlphaProjectSettlementEvidence(JSON.parse(JSON.stringify(evidence)))).toBeNull();
 
     const fabricated = { status: "acknowledged", httpStatus: 201, response: syncReceipt() } as ProjectAlphaProjectOutcome;
     expect(validatedProjectAlphaProjectAcknowledgement(fabricated)).toBeNull();
@@ -42,7 +47,7 @@ describe("dormant PA project v2 transport", () => {
     expect(() => { (evidence!.command as { externalId: string }).externalId = "mutated"; }).toThrow(TypeError);
     expect(() => { (evidence!.response.result.resource as { publicId: string }).publicId = "f".repeat(32); }).toThrow(TypeError);
     expect(validatedProjectAlphaProjectAcknowledgement(outcome)).toEqual({
-      type: "create", command: create, response: syncReceipt(), destinationOrigin: "https://alpha.example.test",
+      type: "create", command: create, response: syncReceipt(), destinationOrigin: "https://alpha.example.test", requestSha256: sha256(JSON.stringify(create)), responseSha256: sha256(JSON.stringify(syncReceipt())),
     });
   });
   it("does not post when capability identity or route shape drifts", async () => {

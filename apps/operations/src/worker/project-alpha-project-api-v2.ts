@@ -1,5 +1,5 @@
 import {
-  authHeaders, advances, boundedJson, canonicalConnection, decimal, endpoint, externalId, exact, get, hash, isFailure, post, preflightFailure, profile, publicId, relation, runPreflight, trusted, uuid,
+  authHeaders, advances, boundedJson, boundedJsonWithBytes, canonicalConnection, decimal, endpoint, externalId, exact, get, hash, isFailure, post, preflightFailure, profile, publicId, relation, runPreflight, trusted, uuid,
   PROJECT_ALPHA_PROJECT_REQUEST_LIMIT, type ProjectAlphaProjectFailure, type ProjectAlphaProjectProfile, type ProjectAlphaProjectRelationProof,
 } from "./project-alpha-project-transport";
 import { withEnabledConfiguredProjectAlphaApiV2Connection, type ProjectAlphaApiV2ConnectionEnvironment } from "./project-alpha-api-v2-connections";
@@ -18,6 +18,8 @@ export type ValidatedProjectAlphaProjectAcknowledgement = Readonly<{
   command: ProjectAlphaProjectCommand;
   response: ProjectAlphaProjectSuccess;
   destinationOrigin: string;
+  requestSha256: string;
+  responseSha256: string;
 }>;
 
 // Only the bounded transport can mint settlement evidence. A JSON-shaped
@@ -27,7 +29,10 @@ const validatedAcknowledgements = new WeakMap<object, Readonly<{
   commandJson: string;
   responseJson: string;
   destinationOrigin: string;
+  requestSha256: string;
+  responseSha256: string;
 }>>();
+const settlementEvidence = new WeakSet<object>();
 
 function deepFreezeJson<T>(value: T): T {
   if (value && typeof value === "object" && !Object.isFrozen(value)) {
@@ -37,17 +42,35 @@ function deepFreezeJson<T>(value: T): T {
   return value;
 }
 
+async function sha256(bytes: Uint8Array): Promise<string> {
+  // `slice` gives Web Crypto an exact, non-shared view even under newer TS
+  // typed-array generics where Uint8Array may be backed by SharedArrayBuffer.
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes.slice().buffer as ArrayBuffer));
+  return Array.from(digest, byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
 export function validatedProjectAlphaProjectAcknowledgement(
   outcome: ProjectAlphaProjectOutcome,
 ): ValidatedProjectAlphaProjectAcknowledgement | null {
   if (!outcome || typeof outcome !== "object") return null;
   const snapshot = validatedAcknowledgements.get(outcome);
-  return snapshot ? Object.freeze({
+  if (!snapshot) return null;
+  const evidence: ValidatedProjectAlphaProjectAcknowledgement = Object.freeze({
     type: snapshot.type,
     command: deepFreezeJson(JSON.parse(snapshot.commandJson) as ProjectAlphaProjectCommand),
     response: deepFreezeJson(JSON.parse(snapshot.responseJson) as ProjectAlphaProjectSuccess),
     destinationOrigin: snapshot.destinationOrigin,
-  }) : null;
+    requestSha256: snapshot.requestSha256,
+    responseSha256: snapshot.responseSha256,
+  });
+  settlementEvidence.add(evidence);
+  return evidence;
+}
+
+/** Private handoff for the unmounted settlement adapter.  A structural clone
+ * of the public evidence deliberately fails this identity check. */
+export function privateProjectAlphaProjectSettlementEvidence(value: unknown): ValidatedProjectAlphaProjectAcknowledgement | null {
+  return !!value && typeof value === "object" && settlementEvidence.has(value) ? value as ValidatedProjectAlphaProjectAcknowledgement : null;
 }
 
 const routes: Record<ProjectAlphaProjectCommandType, ProjectAlphaApiV2Endpoint> = {
@@ -65,6 +88,16 @@ function canonicalCommand(type: ProjectAlphaProjectCommandType, value: ProjectAl
   if (type === "update") { const command = value as ProjectAlphaProjectUpdateCommand; return { commandId: command.commandId, externalId: command.externalId, expectedRevision: command.expectedRevision, expectedProjectionSha256: command.expectedProjectionSha256, expectedAuthorizationGeneration: command.expectedAuthorizationGeneration, project: canonicalProject(command.project) }; }
   if (type === "bind") { const command = value as ProjectAlphaProjectBindCommand; return { commandId: command.commandId, externalId: command.externalId, expectedPublicId: command.expectedPublicId, expectedRevision: command.expectedRevision, expectedProjectionSha256: command.expectedProjectionSha256, expectedAuthorizationGeneration: command.expectedAuthorizationGeneration }; }
   const command = value as ProjectAlphaProjectRefreshCommand; return { commandId: command.commandId, externalId: command.externalId, expectedPublicId: command.expectedPublicId, expectedPriorRevision: command.expectedPriorRevision, expectedRevision: command.expectedRevision, expectedProjectionSha256: command.expectedProjectionSha256, expectedAuthorizationGeneration: command.expectedAuthorizationGeneration };
+}
+/** The one canonical JSON form used for both PA dispatch and the durable v2
+ * request fingerprint.  This contains no connection secrets. */
+export function canonicalProjectAlphaProjectRequest(type: ProjectAlphaProjectCommandType, value: unknown): Readonly<{ command: ProjectAlphaProjectCommand; body: string }> | null {
+  if (!isProjectAlphaProjectCommand(type, value)) return null;
+  try {
+    const command = canonicalCommand(type, value), body = JSON.stringify(command);
+    return new TextEncoder().encode(body).byteLength <= PROJECT_ALPHA_PROJECT_REQUEST_LIMIT
+      && isProjectAlphaProjectCommand(type, JSON.parse(body)) ? Object.freeze({ command, body }) : null;
+  } catch { return null; }
 }
 export function isProjectAlphaProjectCreateCommand(value: unknown): value is ProjectAlphaProjectCreateCommand {
   return validBase(value, ["commandId", "externalId", "expectedAuthorizationGeneration", "project", "organization", "client"]) && profile(value.project) && relation(value.organization, true) && relation(value.client, false);
@@ -103,14 +136,14 @@ export function isProjectAlphaProjectRefreshAcknowledgement(value: unknown, comm
 async function send(type: ProjectAlphaProjectCommandType, inputConnection: ProjectAlphaApiV2Connection, inputCommand: ProjectAlphaProjectCommand, fetcher: typeof fetch): Promise<ProjectAlphaProjectOutcome> {
   const connection = canonicalConnection(inputConnection);
   if (!connection || !isProjectAlphaProjectCommand(type, inputCommand)) return { status: "rejected", reason: "invalid_command" };
-  let body: string; let command: ProjectAlphaProjectCommand;
-  try { command = canonicalCommand(type, inputCommand); body = JSON.stringify(command); if (new TextEncoder().encode(body).byteLength > PROJECT_ALPHA_PROJECT_REQUEST_LIMIT) return { status: "rejected", reason: "request_limit" }; command = JSON.parse(body) as ProjectAlphaProjectCommand; if (!isProjectAlphaProjectCommand(type, command)) return { status: "rejected", reason: "invalid_command" }; }
-  catch { return { status: "rejected", reason: "invalid_command" }; }
+  const canonical = canonicalProjectAlphaProjectRequest(type, inputCommand);
+  if (!canonical) return { status: "rejected", reason: "invalid_command" };
+  const { body } = canonical; const command = canonical.command;
   const preflight = await runPreflight(connection, routes[type], fetcher); if (preflight) return preflight;
   const response = await post(connection, routes[type], body, fetcher, type === "create" ? [201, 200] : [200]);
   if (isFailure(response)) return response;
   try {
-    const parsed = await boundedJson(response);
+    const decoded = await boundedJsonWithBytes(response), parsed = decoded.value;
     if (!success(parsed, type, command, connection, response.status, response.headers.get("X-Request-ID")))
       return { status: "uncertain", reason: "invalid_contract", ...diagnostic(response) };
     const acknowledged: ProjectAlphaProjectOutcome = {
@@ -123,6 +156,8 @@ async function send(type: ProjectAlphaProjectCommandType, inputConnection: Proje
       commandJson: body,
       responseJson: JSON.stringify(parsed),
       destinationOrigin: new URL(connection.baseUrl).origin,
+      requestSha256: await sha256(new TextEncoder().encode(body)),
+      responseSha256: await sha256(decoded.bytes),
     }));
     return acknowledged;
   }
