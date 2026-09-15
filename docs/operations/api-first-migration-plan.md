@@ -2,6 +2,50 @@
 
 Updated September 15, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
 
+### September 15 authoritative checkpoint — Operations PR62 and release boundaries
+
+- Operations PR62 merged to `main` at `a58a406`. The merge is source history,
+  not approval to publish a potentially public Operations route or capability.
+  A specific owner approval is still required before any Operations publication
+  that could expose public data or a public endpoint.
+- PA candidate `33eae4b0` remains unpublished and undeployed. Current tracking
+  estimates are approximately **85% source alignment**, **20% production
+  readiness** and **25% joined end-to-end evidence**; these percentages are
+  planning estimates, not release or live-acceptance evidence. PA publication,
+  deployment to both instances, sign-in and production readiness remain
+  unproven.
+- The PA/Ops directory-create capability mismatch is fixed locally in
+  `a65d765`, but publication approval is pending. The fix has not been
+  published, deployed or used to authorize a runtime cutover.
+- Dormant private read-evidence recovery is fixed locally in `43e9ab9` using
+  forward-only migration `0121`. Focused recovery evidence is **32/32**;
+  migration/read evidence is **15/15**; source invariants are **14/14**; and
+  TypeScript passes. Full-suite, CI and publication evidence remain pending.
+  Migration `0120` is immutable and must not be rewritten or backfilled.
+- These local fixes remain dormant: no runtime mount, canonical mapping or
+  public-ID/link mutation occurred, and existing public links are preserved.
+  No production migration, deployment, publication or authority cutover is
+  claimed by this checkpoint.
+
+#### Remaining risks and next gates
+
+- Obtain the specific owner approval for potentially public Operations
+  publication, then review the exact candidate and complete full-suite, CI and
+  release checks before publishing anything. PR62’s merge alone does not
+  satisfy that gate.
+- Keep PA `33eae4b0`, directory-create fix `a65d765` and recovery fix
+  `43e9ab9` at the owner-review boundary until publication is authorized.
+  After approval, publish and deploy both PA instances, verify sign-in and
+  configuration, and record migration, backup/restore, staging and live
+  acceptance evidence before considering production readiness.
+- Preserve the forward-only `0121` path and immutable `0120`; do not apply a
+  remote migration, mount a route, or change canonical mappings/public links
+  as a substitute for the governed release sequence.
+- Complete joined PA/Ops directory-create and private-read recovery acceptance,
+  including stale/uncertain/replay behavior and public-link preservation. Keep
+  the legacy integration and all replacement paths dormant until those gates,
+  CI and coordinated deployment evidence pass.
+
 ### September 15 — API-first transport and ownership checkpoint
 
 - Operations PR57 merged to `main` at `e8bbfab`. Its dormant Project Alpha
