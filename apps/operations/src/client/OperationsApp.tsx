@@ -6162,6 +6162,7 @@ function OperationsMedia({
 function ZoomableOperationsImage({ src, alt, loading, loaded, failed }: { src?: string; alt: string; loading: boolean; loaded: () => void; failed: () => void }) {
   const [scale, setScale] = useState(1), [offset, setOffset] = useState({ x: 0, y: 0 });
   const pointers = useRef(new Map<number, { x: number; y: number }>()), gesture = useRef<{ distance: number; scale: number } | null>(null);
+  const viewport = useRef<HTMLDivElement>(null);
   const fit = () => { setScale(1); setOffset({ x: 0, y: 0 }); };
   useEffect(fit, [src]);
   // Orthomosaics often need inspection far beyond a normal photo viewer.  Keep
@@ -6171,30 +6172,42 @@ function ZoomableOperationsImage({ src, alt, loading, loaded, failed }: { src?: 
     const [first, second] = [...pointers.current.values()];
     return first && second ? Math.hypot(first.x - second.x, first.y - second.y) : 0;
   };
-  return <div
-    className={`zoomable-operations-image ${scale > 1 ? "zoomed" : ""}${loading ? " loading" : ""}`}
-    onWheel={(event) => {
+  useEffect(() => {
+    const element = viewport.current;
+    if (!element) return;
+    // React delegates wheel events passively. Use a native non-passive listener
+    // so zooming the image does not also scroll the page.
+    const wheel = (event: WheelEvent) => {
       event.preventDefault();
       const next = constrain(scale * (event.deltaY < 0 ? 1.18 : 1 / 1.18));
-      const bounds = event.currentTarget.getBoundingClientRect();
+      const bounds = element.getBoundingClientRect();
       const point = { x: event.clientX - bounds.left - bounds.width / 2, y: event.clientY - bounds.top - bounds.height / 2 };
       setScale(next);
       setOffset((value) => constrainViewerOffset(next, pointerAnchoredOffset(scale, next, value, point), bounds));
-    }}
+    };
+    element.addEventListener("wheel", wheel, { passive: false });
+    return () => element.removeEventListener("wheel", wheel);
+  }, [scale]);
+  return <div
+    ref={viewport}
+    className={`zoomable-operations-image ${scale > 1 ? "zoomed" : ""}${loading ? " loading" : ""}`}
     onDoubleClick={fit}
     onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); pointers.current.set(event.pointerId, { x: event.clientX, y: event.clientY }); if (pointers.current.size === 2) gesture.current = { distance: pointDistance(), scale }; }}
     onPointerMove={(event) => {
       const previous = pointers.current.get(event.pointerId); if (!previous) return;
       const current = { x: event.clientX, y: event.clientY }; pointers.current.set(event.pointerId, current);
+      // React clears SyntheticEvent.currentTarget after this callback. Capture
+      // geometry now rather than dereferencing the event in a deferred updater.
+      const bounds = event.currentTarget.getBoundingClientRect();
       if (pointers.current.size === 2 && gesture.current) {
         const distance = pointDistance();
         if (gesture.current.distance) {
           const next = constrain(gesture.current.scale * distance / gesture.current.distance);
           setScale(next);
-          setOffset((value) => constrainViewerOffset(next, value, event.currentTarget.getBoundingClientRect()));
+          setOffset((value) => constrainViewerOffset(next, value, bounds));
         }
       } else if (scale > 1) {
-        setOffset((value) => constrainViewerOffset(scale, { x: value.x + current.x - previous.x, y: value.y + current.y - previous.y }, event.currentTarget.getBoundingClientRect()));
+        setOffset((value) => constrainViewerOffset(scale, { x: value.x + current.x - previous.x, y: value.y + current.y - previous.y }, bounds));
       }
     }}
     onPointerUp={(event) => { pointers.current.delete(event.pointerId); if (pointers.current.size < 2) gesture.current = null; }}
