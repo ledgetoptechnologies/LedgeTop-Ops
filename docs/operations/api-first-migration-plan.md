@@ -70,6 +70,40 @@ Updated September 15, 2026. The owner approved implementation and resumption aft
 - This Operations documentation branch also remains local: pushing internal
   architecture documentation was denied pending explicit user approval.
 
+### September 15 follow-up — dormant Operations project transport
+
+- Operations local commits `ed346a8` and `2d1e6af` add the unmounted,
+  default-off consumer transport for PA's project read, create, update,
+  explicit one-to-one bind, binding-status, bounded inventory, lifecycle and
+  binding-revision-refresh routes. No production router, scheduled task,
+  public-link resolver, legacy integration path or thumbnail path imports the
+  new modules. A disabled configured source performs no network request.
+- The first independent contract review found two release blockers: caller
+  object order could violate PA's strict command parser, and an unfenced bare
+  404 could be mistaken for an absent binding. `2d1e6af` rebuilds every command
+  envelope and nested profile/relationship object in PA's canonical order and
+  requires the PA no-store/request-ID/no-cookie response fence before mapping
+  a 404 to `not_found`. Re-review passed. Focused Vitest passes **7/7**,
+  TypeScript `--noEmit`, `git diff --check` and the production Vite build pass.
+- Publication is still blocked pending explicit approval to export these two
+  source commits to the potentially public
+  `ledgetoptechnologies/LedgeTop-Ops` GitHub repository. The clean local branch
+  is `codex/api-v2-project-transport`, two commits ahead of Ops main
+  `ad58c22`. No push, PR, merge, deployment or live request has occurred.
+- Reconciliation must extend or deliberately supersede the existing dormant
+  project foundation in migrations 0062–0064 and 0086; it must not create a
+  second competing project identity system. Those migrations already reserve
+  an immutable destination, durable outbox/mapping history, history epoch,
+  native authority proof and shared-project revisions, but their transport
+  ledger predates the final v2 response contract. Before mounting a writer,
+  reconcile its mutable lease/outcome state and leased-command mapping gate
+  with append-only pending/uncertain/acknowledged evidence, exact projection
+  hash, authorization generation, request receipt and conflict state. Treat
+  all historical rows as collision/provenance evidence; never infer current
+  authority, retarget an instance, or activate portal/public-link behavior.
+- Thumbnail optimization remains explicitly deferred at the owner's request;
+  the currently functional thumbnail path is outside this migration slice.
+
 September 15 migration-safety checkpoint: Operations PR 54 restored the exact
 0054–0118 migration chain and strengthened the staging release gate to require
 remote-ledger order, quiescent/compatible writers, closed migration fences, and
