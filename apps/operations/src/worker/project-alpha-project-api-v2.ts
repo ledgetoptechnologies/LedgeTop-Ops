@@ -22,6 +22,14 @@ const routes: Record<ProjectAlphaProjectCommandType, ProjectAlphaApiV2Endpoint> 
 };
 function validBase(value: unknown, fields: readonly string[]): value is Record<string, unknown> { return !!value && plain(value) && exact(value, fields) && uuid(value.commandId) && externalId(value.externalId) && decimal(value.expectedAuthorizationGeneration); }
 function plain(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value)) && Reflect.ownKeys(value).every(key => typeof key === "string" && Object.getOwnPropertyDescriptor(value, key)?.enumerable === true && "value" in Object.getOwnPropertyDescriptor(value, key)!); }
+function canonicalProject(value: ProjectAlphaProjectProfile): ProjectAlphaProjectProfile { return { name: value.name, description: value.description, estimatedStart: value.estimatedStart, estimatedEnd: value.estimatedEnd }; }
+function canonicalRelation(value: ProjectAlphaProjectRelationProof | null): ProjectAlphaProjectRelationProof | null { return value === null ? null : { externalId: value.externalId, expectedPublicId: value.expectedPublicId, expectedRevision: value.expectedRevision, expectedProjectionSha256: value.expectedProjectionSha256 }; }
+function canonicalCommand(type: ProjectAlphaProjectCommandType, value: ProjectAlphaProjectCommand): ProjectAlphaProjectCommand {
+  if (type === "create") { const command = value as ProjectAlphaProjectCreateCommand; return { commandId: command.commandId, externalId: command.externalId, expectedAuthorizationGeneration: command.expectedAuthorizationGeneration, project: canonicalProject(command.project), organization: canonicalRelation(command.organization)!, client: canonicalRelation(command.client) }; }
+  if (type === "update") { const command = value as ProjectAlphaProjectUpdateCommand; return { commandId: command.commandId, externalId: command.externalId, expectedRevision: command.expectedRevision, expectedProjectionSha256: command.expectedProjectionSha256, expectedAuthorizationGeneration: command.expectedAuthorizationGeneration, project: canonicalProject(command.project) }; }
+  if (type === "bind") { const command = value as ProjectAlphaProjectBindCommand; return { commandId: command.commandId, externalId: command.externalId, expectedPublicId: command.expectedPublicId, expectedRevision: command.expectedRevision, expectedProjectionSha256: command.expectedProjectionSha256, expectedAuthorizationGeneration: command.expectedAuthorizationGeneration }; }
+  const command = value as ProjectAlphaProjectRefreshCommand; return { commandId: command.commandId, externalId: command.externalId, expectedPublicId: command.expectedPublicId, expectedPriorRevision: command.expectedPriorRevision, expectedRevision: command.expectedRevision, expectedProjectionSha256: command.expectedProjectionSha256, expectedAuthorizationGeneration: command.expectedAuthorizationGeneration };
+}
 export function isProjectAlphaProjectCreateCommand(value: unknown): value is ProjectAlphaProjectCreateCommand {
   return validBase(value, ["commandId", "externalId", "expectedAuthorizationGeneration", "project", "organization", "client"]) && profile(value.project) && relation(value.organization, true) && relation(value.client, false);
 }
@@ -60,7 +68,7 @@ async function send(type: ProjectAlphaProjectCommandType, inputConnection: Proje
   const connection = canonicalConnection(inputConnection);
   if (!connection || !isProjectAlphaProjectCommand(type, inputCommand)) return { status: "rejected", reason: "invalid_command" };
   let body: string; let command: ProjectAlphaProjectCommand;
-  try { body = JSON.stringify(inputCommand); if (new TextEncoder().encode(body).byteLength > PROJECT_ALPHA_PROJECT_REQUEST_LIMIT) return { status: "rejected", reason: "request_limit" }; command = JSON.parse(body) as ProjectAlphaProjectCommand; if (!isProjectAlphaProjectCommand(type, command)) return { status: "rejected", reason: "invalid_command" }; }
+  try { command = canonicalCommand(type, inputCommand); body = JSON.stringify(command); if (new TextEncoder().encode(body).byteLength > PROJECT_ALPHA_PROJECT_REQUEST_LIMIT) return { status: "rejected", reason: "request_limit" }; command = JSON.parse(body) as ProjectAlphaProjectCommand; if (!isProjectAlphaProjectCommand(type, command)) return { status: "rejected", reason: "invalid_command" }; }
   catch { return { status: "rejected", reason: "invalid_command" }; }
   const preflight = await runPreflight(connection, routes[type], fetcher); if (preflight) return preflight;
   const response = await post(connection, routes[type], body, fetcher, type === "create" ? [201, 200] : [200]);

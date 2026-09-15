@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { sendConfiguredProjectAlphaProjectCreateCommand, sendProjectAlphaProjectCreateCommand, type ProjectAlphaProjectCreateCommand } from "../src/worker/project-alpha-project-api-v2";
+import { sendConfiguredProjectAlphaProjectCreateCommand, sendProjectAlphaProjectCreateCommand, sendProjectAlphaProjectUpdateCommand, sendProjectAlphaProjectBindingCommand, sendProjectAlphaProjectRefreshCommand, type ProjectAlphaProjectCreateCommand, type ProjectAlphaProjectUpdateCommand, type ProjectAlphaProjectBindCommand, type ProjectAlphaProjectRefreshCommand } from "../src/worker/project-alpha-project-api-v2";
 import { readProjectAlphaProject } from "../src/worker/project-alpha-project-read-api-v2";
 import { readProjectAlphaProjectInventory } from "../src/worker/project-alpha-project-inventory-api-v2";
+import { readProjectAlphaProjectBindingStatus } from "../src/worker/project-alpha-project-binding-status-api-v2";
 import { sendProjectAlphaProjectLifecycleCommand } from "../src/worker/project-alpha-project-lifecycle-api-v2";
 
 const source = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", application = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", epoch = "cccccccc-cccc-4ccc-8ccc-cccccccccccc", request = "dddddddd-dddd-4ddd-8ddd-dddddddddddd", org = "1".repeat(32), project = "2".repeat(32);
@@ -44,5 +45,27 @@ describe("dormant PA project v2 transport", () => {
     const body = { apiVersion: "2", sourceInstanceId: source, applicationId: application, historyEpoch: epoch, requestId: request, replayed: false, accepted: true, resource: { type: "project", id: project, revision: "2" }, result: { status: "active", completedAt: null, archived: true, archivedAt: "2026-09-15T00:00:00.000Z", presentation: { portalPublished: false, publicLinkEnabled: false } } };
     const send = vi.fn<typeof fetch>(async (_url, init) => init?.method === "GET" ? json(metadata(route)) : json(body));
     await expect(sendProjectAlphaProjectLifecycleCommand(connection, project, "archive", { commandId: request, expectedRevision: "1" }, send)).resolves.toMatchObject({ status: "acknowledged", response: { result: { archived: true } } });
+  });
+  it("canonicalizes reordered PA command envelopes before serialization", async () => {
+    const commands: Array<[string, object, object, number, string[]]> = [
+      ["create", { client: null, organization: create.organization, project: create.project, expectedAuthorizationGeneration: "0", externalId: create.externalId, commandId: create.commandId }, create, 201, ["commandId", "externalId", "expectedAuthorizationGeneration", "project", "organization", "client"]],
+      ["update", { project: create.project, expectedAuthorizationGeneration: "1", expectedProjectionSha256: "a".repeat(64), expectedRevision: "1", externalId: create.externalId, commandId: create.commandId }, { commandId: create.commandId, externalId: create.externalId, expectedRevision: "1", expectedProjectionSha256: "a".repeat(64), expectedAuthorizationGeneration: "1", project: create.project } as ProjectAlphaProjectUpdateCommand, 200, ["commandId", "externalId", "expectedRevision", "expectedProjectionSha256", "expectedAuthorizationGeneration", "project"]],
+      ["bind", { expectedAuthorizationGeneration: "0", expectedProjectionSha256: "a".repeat(64), expectedRevision: "1", expectedPublicId: project, externalId: create.externalId, commandId: create.commandId }, { commandId: create.commandId, externalId: create.externalId, expectedPublicId: project, expectedRevision: "1", expectedProjectionSha256: "a".repeat(64), expectedAuthorizationGeneration: "0" } as ProjectAlphaProjectBindCommand, 200, ["commandId", "externalId", "expectedPublicId", "expectedRevision", "expectedProjectionSha256", "expectedAuthorizationGeneration"]],
+      ["refresh", { expectedAuthorizationGeneration: "1", expectedProjectionSha256: "a".repeat(64), expectedRevision: "2", expectedPriorRevision: "1", expectedPublicId: project, externalId: create.externalId, commandId: create.commandId }, { commandId: create.commandId, externalId: create.externalId, expectedPublicId: project, expectedPriorRevision: "1", expectedRevision: "2", expectedProjectionSha256: "a".repeat(64), expectedAuthorizationGeneration: "1" } as ProjectAlphaProjectRefreshCommand, 200, ["commandId", "externalId", "expectedPublicId", "expectedPriorRevision", "expectedRevision", "expectedProjectionSha256", "expectedAuthorizationGeneration"]],
+    ];
+    for (const [kind, reordered, canonical, status, fields] of commands) {
+      const route = kind === "create" ? { method: "POST", path: "/api/v2/projects/commands", requiredCapability: "projects.create", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true } : kind === "update" ? { method: "POST", path: "/api/v2/projects/profile/commands", requiredCapability: "projects.write", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true } : kind === "bind" ? { method: "POST", path: "/api/v2/projects/bindings/commands", requiredCapability: "projects.bind", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true } : { method: "POST", path: "/api/v2/projects/bindings/revisions/commands", requiredCapability: "projects.binding.revision.refresh", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true };
+      const response = syncReceipt(); if (kind === "update") { response.result.resource.revision = "2"; response.result.authorizationGeneration = "1"; } if (kind === "refresh") { response.result.resource.revision = "2"; response.result.authorizationGeneration = "2"; }
+      const send = vi.fn<typeof fetch>(async (_url, init) => init?.method === "GET" ? json(metadata(route)) : json(response, status));
+      const outcome = kind === "create" ? await sendProjectAlphaProjectCreateCommand(connection, reordered as ProjectAlphaProjectCreateCommand, send) : kind === "update" ? await sendProjectAlphaProjectUpdateCommand(connection, reordered as ProjectAlphaProjectUpdateCommand, send) : kind === "bind" ? await sendProjectAlphaProjectBindingCommand(connection, reordered as ProjectAlphaProjectBindCommand, send) : await sendProjectAlphaProjectRefreshCommand(connection, reordered as ProjectAlphaProjectRefreshCommand, send);
+      expect(outcome.status).toBe("acknowledged"); expect(Object.keys(JSON.parse(String(send.mock.calls[1]![1]!.body)))).toEqual(fields); expect(JSON.parse(String(send.mock.calls[1]![1]!.body))).toEqual(canonical);
+    }
+  });
+  it("requires a trusted response fence before mapping binding 404 to not_found", async () => {
+    const route = { method: "GET", path: "/api/v2/projects/bindings/status/{base64urlExternalId}", requiredCapability: "projects.binding_status.read", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true };
+    const bare = vi.fn<typeof fetch>(async url => String(url).endsWith("capabilities") ? json(metadata(route)) : new Response("private", { status: 404 }));
+    await expect(readProjectAlphaProjectBindingStatus(connection, "ops/project-1", bare)).resolves.toMatchObject({ status: "uncertain", reason: "invalid_contract" });
+    const trusted404 = vi.fn<typeof fetch>(async url => String(url).endsWith("capabilities") ? json(metadata(route)) : json({}, 404));
+    await expect(readProjectAlphaProjectBindingStatus(connection, "ops/project-1", trusted404)).resolves.toEqual({ status: "not_found" });
   });
 });

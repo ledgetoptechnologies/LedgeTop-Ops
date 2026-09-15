@@ -20,7 +20,7 @@ export async function readProjectAlphaProjectBindingStatus(connectionInput: Proj
   const connection = canonicalConnection(connectionInput); if (!connection) return { status: "blocked", reason: "preflight", preflight: { status: "misconfigured", reason: "configuration" } };
   const preflight = await runPreflight(connection, ROUTE, fetcher); if (preflight) return preflight;
   const response = await get(connection, `/api/v2/projects/bindings/status/${b64(requestedExternalId)}`, fetcher); if (isFailure(response)) return response; const info = diagnostic(response);
-  if (response.status === 404) { await response.body?.cancel(); return { status: "not_found" }; }
+  if (response.status === 404) { if (!trusted(response, false)) { await response.body?.cancel(); return { status: "uncertain", reason: "invalid_contract", ...info }; } await response.body?.cancel(); return { status: "not_found" }; }
   if (response.status !== 200) { await response.body?.cancel(); return { status: response.status === 409 ? "conflict" : response.status >= 500 ? "uncertain" : "blocked", reason: "http_status", ...info }; }
   if (!trusted(response, true)) { await response.body?.cancel(); return { status: "uncertain", reason: "invalid_contract", ...info }; }
   try { const parsed = await boundedJson(response); return valid(parsed, requestedExternalId, connection, response.headers.get("X-Request-ID")) ? { status: "observed", httpStatus: 200, response: parsed } : { status: "uncertain", reason: "invalid_contract", ...info }; }
