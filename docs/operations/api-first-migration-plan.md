@@ -91,6 +91,15 @@ Updated September 15, 2026. The owner approved implementation and resumption aft
   focused transport/D1/populated migration-chain tests and an independent
   no-findings review. All ten PR-head CI jobs and all ten jobs in post-merge
   main run `35015527961` passed.
+- Operations PR61 merged to `main` at `e85f0dc7bf3dcf520584a5e328c634a882aceda4`.
+  Its PR-head CI run `35022737853` passed all ten jobs. The private adapter
+  remains unmounted and dormant: it retains exact canonical request-byte and
+  raw-response-byte hashes, privately brands rehydrated evidence, reserves
+  before dispatch, rechecks authority and destination after reservation, and
+  settles the acknowledged event, validated acknowledgement and receipt
+  atomically. Refresh remains unsupported. No mapping, shared-project,
+  Delivery, or public-link behavior changed. Post-merge main run
+  `35024108141` is still in progress and is not counted as passed.
 - These changes remain dormant. No production router, scheduled task,
   persistence adapter, mapping reader, public-link resolver, legacy integration
   path or thumbnail path imports them. Migration 0119 has not been applied to
