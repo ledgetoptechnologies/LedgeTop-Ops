@@ -1,6 +1,32 @@
 # API-first migration — current implementation objective and work register
 
-Updated September 14, 2026. The owner approved implementation and resumption after confirming the [decision record](api-first-decisions-2026-09-10.md). This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+Updated September 15, 2026. The owner approved implementation and resumption after confirming the [decision record](api-first-decisions-2026-09-10.md). This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+
+September 15 migration-safety checkpoint: Operations PR 54 restored the exact
+0054–0118 migration chain and strengthened the staging release gate to require
+remote-ledger order, quiescent/compatible writers, closed migration fences, and
+populated backup plus time-travel recovery evidence. It is merged on `main` at
+`ce43e1c`; the post-merge run passed every Operations, Client, Ops Sync,
+source-invariant, TrueNAS pickup, and desktop/mobile browser job after one
+timing-sensitive Client test passed on its failed-job rerun. This does **not**
+mean the migrations were applied remotely or that a native route was enabled.
+
+The corresponding Project Alpha branch is still local and unpushed. Through
+local commit `22ca3f85`, its generic API v2 foundation now has app-bound,
+default-off client and organization profile commands, immutable receipts,
+revision/generation/identity fences, aligned browser/API lock ordering,
+delete/restore binding lifecycle repair, explicit same-external-ID rebind after
+restore, and retry-safe legacy-ledger validation. Commits `e80fbe90` and
+`d8fd73e9` add a persisted full-directory backfill attestation, per-resource
+coverage digests, contiguous-history checks, global 0096 schema health, and a
+machine-checked inventory of all client/organization SQL writers. Independent
+reviews found no remaining source-visible blocker in these slices. The combined
+Project Alpha suite passed 882 tests / 7,028 assertions with 94 intentional
+skips; focused disposable-MySQL gates also passed. Create commands,
+externally-managed read-only enforcement, Operations write adapters, project
+identity, and coordinated staging/owner acceptance remain required before a
+cutover. No production Project Alpha instance, public link, route, key, or
+database was changed by this checkpoint.
 
 Later September 14 onboarding checkpoint: the existing-client invitation panel
 now offers an explicit, default-off staff choice for client-only or
