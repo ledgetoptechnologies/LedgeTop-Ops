@@ -37,6 +37,9 @@ const sameSet = (left, right) => Array.isArray(left) && Array.isArray(right)
   && left.length === right.length
   && left.every((item) => right.includes(item))
   && right.every((item) => left.includes(item));
+const sameSequence = (left, right) => Array.isArray(left) && Array.isArray(right)
+  && left.length === right.length
+  && left.every((item, index) => item === right[index]);
 
 export function validateActivationPlan(plan, evidence, options = {}) {
   const now = options.now ?? Date.now();
@@ -310,12 +313,19 @@ export function validateEvidence(evidence, options = {}) {
   const migrations = evidence.migrations ?? {};
   for (const app of ["delivery", "operations"]) {
     const migration = migrations[app] ?? {};
-    if (!sameSet(migration.expected, REQUIRED_STAGING_MIGRATIONS[app])) errors.push(`${app} portal/ACL migration set must exactly match the release contract`);
+    if (!sameSequence(migration.expected, REQUIRED_STAGING_MIGRATIONS[app])) errors.push(`${app} migration sequence must exactly match the ordered release contract`);
     if (migration.appliedToStaging !== true || !populated(migration.listEvidenceRef) || !populated(migration.applyEvidenceRef)) errors.push(`${app} staging migrations must be applied and evidenced`);
     for (const proof of ["secondListEmpty", "foreignKeyCheckPassed", "idempotentReapplyPassed"]) {
       if (migration[proof] !== true) errors.push(`${app} staging migrations must prove ${proof}`);
     }
     if (!recentDate(migration.verifiedAt, now) || !populated(migration.verificationEvidenceRef)) errors.push(`${app} migration verification must be current and referenced`);
+  }
+  const operationsMigration = migrations.operations ?? {};
+  for (const proof of ["remoteLedgerOrderVerified", "openFencesChecked", "writerAndSchedulerQuiescent", "compatibleWritersOrdered"]) {
+    if (operationsMigration[proof] !== true) errors.push(`operations 0054-0118 release gate must prove ${proof}`);
+  }
+  for (const field of ["remoteLedgerEvidenceRef", "preMigrationFenceEvidenceRef", "compatibleWriterVersionId", "compatibleWriterOrderingEvidenceRef"]) {
+    if (!populated(operationsMigration[field])) errors.push(`operations 0054-0118 release gate needs ${field}`);
   }
   const deliveryMigration = migrations.delivery ?? {};
   for (const proof of ["videoRecoveryCompleted", "videoRowsPendingForTrueNas", "legacyBridgeAcceptanceMatrixPassed"]) {
@@ -398,8 +408,12 @@ export function validateEvidence(evidence, options = {}) {
       if (Math.abs(stat.mtimeMs - generatedAt) > 5 * 60 * 1000) errors.push(`${app} backup generatedAt must match file modification time`);
       if (!recentDate(new Date(stat.mtimeMs).toISOString(), now)) errors.push(`${app} backup file modification time must be fresh`);
       if (backup.bytes !== bytes) errors.push(`${app} backup byte count does not match`);
-      if (bytes < 256 && backup.confirmedIntentionallyEmpty !== true) errors.push(`${app} small/empty backup requires explicit confirmation`);
+      if (bytes < 256) errors.push(`${app} backup must be a populated D1 export, not an empty/small export`);
       if (!/^[A-F0-9]{64}$/i.test(backup.sha256 ?? "") || sha256(file) !== backup.sha256.toUpperCase()) errors.push(`${app} backup SHA-256 does not match`);
+    }
+    if (backup.populatedExportVerified !== true) errors.push(`${app} backup must prove populatedExportVerified`);
+    if (backup.timeTravelRecoveryVerified !== true || !populated(backup.timeTravelRecoveryEvidenceRef)) {
+      errors.push(`${app} backup must prove and reference time-travel recovery`);
     }
   }
 

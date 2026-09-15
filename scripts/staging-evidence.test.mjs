@@ -208,7 +208,7 @@ function fixture(base) {
     },
     migrations: {
       delivery: { expected: [...REQUIRED_STAGING_MIGRATIONS.delivery], appliedToStaging: true, listEvidenceRef: "ticket:migrations:delivery:list", applyEvidenceRef: "ticket:migrations:delivery:apply", secondListEmpty: true, foreignKeyCheckPassed: true, idempotentReapplyPassed: true, videoRecoveryCompleted: true, videoRowsPendingForTrueNas: true, legacyBridgeAcceptanceMatrixPassed: true, serviceAssignmentV2ExpandApplied: true, serviceAssignmentCompatibleWriterVersionId: "delivery-staging-compatible-writer-version", serviceAssignmentOldWritersDrained: true, serviceAssignmentContractMigrationsApplied: true, serviceAssignmentBarrierEvidenceRef: "ticket:migrations:delivery:service-assignment-barrier", nativePortalMigrationsAppliedBeforeFinalWorkers: true, nativePortalCapabilitiesDefaultOffAtDeploy: true, nativePortalRollbackDrainReviewed: true, nativePortalReleaseEvidenceRef: "ticket:migrations:native-portal-release", authenticatedContentMigrationAppliedBeforeFinalWorkers: true, authenticatedContentCollectionNotStarted: true, authenticatedContentRetentionGateClosed: true, authenticatedContentSecretProvisioned: true, authenticatedContentDefaultOffAtDeploy: true, authenticatedContentReleaseEvidenceRef: "ticket:migrations:authenticated-content-release", verifiedAt: "2026-07-30T12:00:00Z", verificationEvidenceRef: "ticket:migrations:delivery:verify" },
-      operations: { expected: [...REQUIRED_STAGING_MIGRATIONS.operations], appliedToStaging: true, listEvidenceRef: "ticket:migrations:operations:list", applyEvidenceRef: "ticket:migrations:operations:apply", secondListEmpty: true, foreignKeyCheckPassed: true, idempotentReapplyPassed: true, verifiedAt: "2026-07-30T12:00:00Z", verificationEvidenceRef: "ticket:migrations:operations:verify" },
+      operations: { expected: [...REQUIRED_STAGING_MIGRATIONS.operations], appliedToStaging: true, listEvidenceRef: "ticket:migrations:operations:list", applyEvidenceRef: "ticket:migrations:operations:apply", secondListEmpty: true, foreignKeyCheckPassed: true, idempotentReapplyPassed: true, remoteLedgerOrderVerified: true, remoteLedgerEvidenceRef: "ticket:migrations:operations:ordered-ledger", openFencesChecked: true, writerAndSchedulerQuiescent: true, preMigrationFenceEvidenceRef: "ticket:migrations:operations:quiescence", compatibleWritersOrdered: true, compatibleWriterVersionId: "operations-staging-compatible-writer-version", compatibleWriterOrderingEvidenceRef: "ticket:migrations:operations:writer-order", verifiedAt: "2026-07-30T12:00:00Z", verificationEvidenceRef: "ticket:migrations:operations:verify" },
       productionUnchanged: true,
     },
     externalGates: Object.fromEntries(REQUIRED_EXTERNAL_GATES.map((gate) => [gate, {
@@ -219,8 +219,8 @@ function fixture(base) {
     }])),
     secrets: Object.fromEntries(Object.entries(REQUIRED_STAGING_SECRETS).map(([app, names]) => [app, { names: [...names], verifiedAt: "2026-07-30T12:00:00Z", source: "reviewed-secrets-file", workerIsNew: true, remoteNames: [], evidenceRef: `ticket:secrets:${app}` }])),
     backups: {
-      delivery: { path: ".backups/delivery.sql", databaseName: STAGING_INVENTORY.delivery.d1_databases[0].database_name, databaseId: STAGING_INVENTORY.delivery.d1_databases[0].database_id, generatedAt: "2026-07-30T12:00:00Z", bytes: backupBody.length, sha256: digest(backupBody), confirmedIntentionallyEmpty: false },
-      operations: { path: ".backups/operations.sql", databaseName: STAGING_INVENTORY.operations.d1_databases[0].database_name, databaseId: STAGING_INVENTORY.operations.d1_databases[0].database_id, generatedAt: "2026-07-30T12:00:00Z", bytes: backupBody.length, sha256: digest(backupBody), confirmedIntentionallyEmpty: false },
+      delivery: { path: ".backups/delivery.sql", databaseName: STAGING_INVENTORY.delivery.d1_databases[0].database_name, databaseId: STAGING_INVENTORY.delivery.d1_databases[0].database_id, generatedAt: "2026-07-30T12:00:00Z", bytes: backupBody.length, sha256: digest(backupBody), populatedExportVerified: true, timeTravelRecoveryVerified: true, timeTravelRecoveryEvidenceRef: "ticket:recovery:delivery" },
+      operations: { path: ".backups/operations.sql", databaseName: STAGING_INVENTORY.operations.d1_databases[0].database_name, databaseId: STAGING_INVENTORY.operations.d1_databases[0].database_id, generatedAt: "2026-07-30T12:00:00Z", bytes: backupBody.length, sha256: digest(backupBody), populatedExportVerified: true, timeTravelRecoveryVerified: true, timeTravelRecoveryEvidenceRef: "ticket:recovery:operations" },
     },
     deployments: Object.fromEntries(["delivery", "operations", "ops-sync"].map((app) => [app, {
       versionId: `staging-version-${app}`,
@@ -346,7 +346,7 @@ test("fails closed on client Access reuse, public-share bypass drift, and missin
   evidence.migrations.delivery.expected = [];
   evidence.projectAlpha.authorizationBypassUsed = true;
   const errors = validateEvidence(evidence, { base, head: evidence.releaseCommit, configs, configHashes: evidence.configSha256, now, sourceControlVerified: true });
-  for (const expected of ["must not reuse", "public paths", "migration set", "must not bypass"]) {
+  for (const expected of ["must not reuse", "public paths", "migration sequence", "must not bypass"]) {
     assert(errors.some((error) => error.includes(expected)), `${expected}: ${errors.join(" | ")}`);
   }
 });
@@ -397,6 +397,32 @@ test("requires evidence for the 0179 compatible-writer drain before 0180-0186", 
   evidence.migrations.delivery.serviceAssignmentBarrierEvidenceRef = "";
   const errors = validateEvidence(evidence, { base, head: evidence.releaseCommit, configs, configHashes, now, sourceControlVerified: true });
   for (const expected of ["serviceAssignmentOldWritersDrained", "compatible-writer version", "0179/deploy/drain/0180-0186"]) {
+    assert(errors.some((error) => error.includes(expected)), `${expected}: ${errors.join(" | ")}`);
+  }
+});
+test("requires an ordered 0054-0118 remote ledger, a quiescent open-fence check, and compatible Operations writers", () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-evidence-operations-migration-gate-"));
+  const { evidence, configs, configHashes } = fixture(base);
+  [evidence.migrations.operations.expected[40], evidence.migrations.operations.expected[41]] =
+    [evidence.migrations.operations.expected[41], evidence.migrations.operations.expected[40]];
+  evidence.migrations.operations.remoteLedgerOrderVerified = false;
+  evidence.migrations.operations.openFencesChecked = false;
+  evidence.migrations.operations.writerAndSchedulerQuiescent = false;
+  evidence.migrations.operations.compatibleWritersOrdered = false;
+  evidence.migrations.operations.compatibleWriterVersionId = "";
+  const errors = validateEvidence(evidence, { base, head: evidence.releaseCommit, configs, configHashes, now, sourceControlVerified: true });
+  for (const expected of ["migration sequence", "remoteLedgerOrderVerified", "openFencesChecked", "writerAndSchedulerQuiescent", "compatibleWritersOrdered", "compatibleWriterVersionId"]) {
+    assert(errors.some((error) => error.includes(expected)), `${expected}: ${errors.join(" | ")}`);
+  }
+});
+test("requires populated export and time-travel recovery evidence for each staged D1 database", () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-evidence-d1-recovery-gate-"));
+  const { evidence, configs, configHashes } = fixture(base);
+  evidence.backups.delivery.populatedExportVerified = false;
+  evidence.backups.operations.timeTravelRecoveryVerified = false;
+  evidence.backups.operations.timeTravelRecoveryEvidenceRef = "";
+  const errors = validateEvidence(evidence, { base, head: evidence.releaseCommit, configs, configHashes, now, sourceControlVerified: true });
+  for (const expected of ["delivery backup must prove populatedExportVerified", "operations backup must prove and reference time-travel recovery"]) {
     assert(errors.some((error) => error.includes(expected)), `${expected}: ${errors.join(" | ")}`);
   }
 });
@@ -558,8 +584,13 @@ test("checked-in evidence example stays complete as migrations, flags, gates, an
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const example = JSON.parse(fs.readFileSync(path.join(root, "docs", "staging", "release-evidence.json.example"), "utf8"));
   for (const app of ["delivery", "operations"]) assert.deepEqual(example.migrations[app].expected, [...REQUIRED_STAGING_MIGRATIONS[app]], `migrations.${app}`);
-  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.at(-1), "0053_project_internal_notes.sql");
-  assert.equal(fs.existsSync(path.join(root, "apps", "operations", "migrations", "0053_project_internal_notes.sql")), true);
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(-65), [
+    "0054_project_alpha_directory_outbox.sql", "0055_operations_directory_authority.sql", "0056_operations_directory_materialization.sql", "0057_native_directory_permissions.sql", "0058_operations_directory_write_authority.sql", "0059_native_staff_profiles.sql", "0060_native_staff_bootstrap.sql", "0061_native_staff_administration.sql", "0062_project_alpha_project_outbox.sql", "0063_project_alpha_project_adoption.sql", "0064_project_alpha_project_history_epoch.sql", "0065_project_alpha_directory_history_epoch.sql", "0066_operations_directory_original_actor_subject.sql", "0067_native_staff_management_authority.sql", "0068_native_staff_control_plane.sql", "0069_native_staff_management_commands.sql", "0070_native_staff_pending_onboarding.sql", "0071_native_staff_management_targets.sql", "0072_native_staff_onboarding_cancel.sql", "0073_native_staff_onboarding_create.sql", "0074_native_staff_onboarding_approve.sql", "0075_native_staff_onboarding_rate_limits.sql", "0076_native_staff_onboarding_handoff.sql", "0077_client_onboarding_submissions.sql", "0078_client_onboarding_issuance.sql", "0079_client_onboarding_rate_limits.sql", "0080_client_onboarding_handoffs.sql", "0081_operations_directory_relationships.sql", "0082_operations_directory_intent_relationship_dependencies.sql", "0083_client_onboarding_decisions.sql", "0084_operations_directory_delivery_checkpoint.sql", "0085_operations_directory_admission_version.sql", "0086_native_shared_projects.sql", "0087_project_alpha_api_v2_incidents.sql", "0088_project_alpha_api_v2_incident_alerts.sql", "0089_project_alpha_api_v2_monitor_lifecycle.sql", "0090_project_alpha_api_v2_monitor_retirement.sql", "0091_native_integration_control.sql", "0092_native_integration_grant_management.sql", "0093_native_integration_alert_reconciliation.sql", "0094_client_onboarding_submission_notifications.sql", "0095_client_onboarding_notification_scan.sql", "0096_native_workforce_foundation.sql", "0097_native_workforce_authority.sql", "0098_native_workforce_time_record_receipts.sql", "0099_native_workforce_time_submit_review_receipts.sql", "0100_native_workforce_authority_grant_change_receipts.sql", "0101_native_workforce_grant_issuer.sql", "0102_native_workforce_grant_issuance.sql", "0103_client_onboarding_recipient_identity_bindings.sql", "0104_client_onboarding_prefill_disclosures.sql", "0105_client_onboarding_disclosure_recipient.sql", "0106_client_onboarding_prefill_binding_commands.sql", "0107_client_onboarding_prefill_authorization_intents.sql", "0108_native_workforce_time_beneficiary_selection.sql", "0109_native_workforce_time_beneficiary_selection_issuance.sql", "0110_native_workforce_time_beneficiary_selection_lifecycle.sql", "0111_project_alpha_existing_directory_binding_review_evidence.sql", "0112_project_alpha_existing_directory_binding_acquisition_ledger.sql", "0113_project_alpha_existing_directory_binding_acquired_mapping_receipts.sql", "0114_project_alpha_existing_directory_binding_acquisition_response_receipts.sql", "0115_project_alpha_existing_directory_binding_review_local_revision_fence.sql", "0116_project_alpha_acquired_canonical_mapping_activation.sql", "0117_project_alpha_native_owner_epoch_claims.sql", "0118_project_alpha_existing_directory_binding_revision_refresh_ledger.sql",
+  ]);
+  assert.deepEqual(
+    fs.readdirSync(path.join(root, "apps", "operations", "migrations")).filter((name) => REQUIRED_STAGING_MIGRATIONS.operations.includes(name)).sort().slice(-65),
+    REQUIRED_STAGING_MIGRATIONS.operations.slice(-65),
+  );
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-23), [
     "0187_authenticated_content_audit.sql",
     "0188_native_feedback_completion_notices.sql",

@@ -280,6 +280,8 @@ Ops-Sync-to-Client private projection dependency in `REQUIRED_EXTERNAL_GATES` ar
 mark future or inferred results true.
 
 It also requires the pushed source ref, exact deployed version/config hashes,
+an ordered remote migration-ledger readback, a pre-migration open-fence and
+writer/scheduler-quiescence check, compatible-writer ordering evidence,
 second-empty migration lists, foreign-key and reapply checks, live resource and
 entitlement inventory, rollback targets/drill, referenced production-unchanged
 proof, and the complete disabled-flag set for each deployed Worker. A generic
@@ -309,8 +311,10 @@ packet.
 After identity, exact config/resource inventory, and branch-control checks pass,
 create fresh exports before requesting mutation approval. Bind each export to
 its exact staging D1 name/ID, timestamp, byte count, and SHA-256 in evidence.
-A very small export is not useful recovery evidence unless the database is
-reviewed and explicitly confirmed intentionally empty:
+A very small or intentionally empty export is not release recovery evidence.
+Each export must be populated, and the packet must reference a successful,
+non-destructive D1 time-travel recovery rehearsal for that exact staging
+database before any migration approval:
 
 ```powershell
 & '.\apps\client\node_modules\.bin\wrangler.cmd' d1 export client-data-staging --remote --config apps/client/wrangler.staging.json --output .backups/client-data-staging-pre-release.sql --skip-confirmation
@@ -348,6 +352,23 @@ If the Delivery list includes
 apply time and is the explicit exception to this packet's normal
 migration-first order. Confirm every predecessor is already applied; otherwise
 resolve those predecessors in a separately reviewed release.
+
+For Operations, preserve the full ordered `0054` through `0118` suffix in the
+remote Wrangler ledger. Attach the list output that proves every filename is in
+the exact checked-in order, with no duplicate, renamed, skipped, or unexpected
+row. A local migration-chain run, a directory listing, or a successful raw SQL
+parse is not remote-ledger evidence.
+
+Before the first Operations migration action, inspect and record every open
+directory/outbox/onboarding/native-integration/reconciliation fence. Stop unless
+all are terminal or deliberately cancelled, then close mutation ingress and
+drain HTTP requests, queue consumers, leases, schedulers, and reconciliation
+batches. The evidence must prove this quiescent state and name the compatible
+Operations writer version already handling all traffic. Do not apply `0054`-
+`0118` while an old writer, an in-flight fence, or a scheduled/retry worker can
+commit a pre-migration assumption. Keep the compatible writer in place through
+the final ledger readback; use a compatible fix forward, never a pre-suffix
+writer rollback.
 
 Writer-first alone is not a sufficient barrier. Freeze request/invitation
 create, approve/publish, accept and revoke; authenticated-grant create/publish,
@@ -430,7 +451,9 @@ then apply `0184`-`0195` migration-first before the paired final applications.
 Confirm Operations
 `0014_staff_acl_controls.sql` through
 `0052_project_operational_reassignment_recovery.sql` and
-`0053_project_internal_notes.sql`. Migration `0100` removes
+`0053_project_internal_notes.sql`, then Operations `0054` through
+`0118_project_alpha_existing_directory_binding_revision_refresh_ledger.sql` in
+that exact ledger order. Migration `0100` removes
 `share_version` from the delivery-grant parent key so existing share
 rotation/revocation updates cannot be blocked by a portal grant; the grant
 still records the approved version for authorization checks. Reject any
