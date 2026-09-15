@@ -23,9 +23,9 @@ export type ProjectAlphaApiV2Endpoint = {
 };
 
 const DIRECTORY_ENDPOINTS: readonly ProjectAlphaApiV2Endpoint[] = [
-  { method: "POST", path: "/api/v2/directory/organizations/commands", requiredCapability: "directory.organizations.write",
+  { method: "POST", path: "/api/v2/directory/organizations/commands", requiredCapability: "directory.organizations.create",
     requiresSourceInstanceId: true, requiresApplicationId: true, requiresUpdatePublicId: true, requiresHistoryEpoch: true },
-  { method: "POST", path: "/api/v2/directory/clients/commands", requiredCapability: "directory.clients.write",
+  { method: "POST", path: "/api/v2/directory/clients/commands", requiredCapability: "directory.clients.create",
     requiresSourceInstanceId: true, requiresApplicationId: true, requiresUpdatePublicId: true, requiresHistoryEpoch: true },
 ];
 
