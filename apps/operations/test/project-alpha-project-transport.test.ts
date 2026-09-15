@@ -28,6 +28,19 @@ describe("dormant PA project v2 transport", () => {
     const init = send.mock.calls[1]![1]!; expect(String(send.mock.calls[1]![0])).toBe("https://alpha.example.test/api/v2/projects/commands"); expect(JSON.parse(String(init.body))).toEqual(create);
     const headers = new Headers(init.headers); expect(headers.get("Authorization")).toBe("Bearer test-secret"); expect(headers.get("X-PA-Source-Instance-ID")).toBe(source); expect(headers.get("X-PA-Application-ID")).toBe(application); expect(headers.get("X-PA-History-Epoch")).toBe(epoch);
   });
+  it("rejects a create acknowledgement that implicitly publishes the project", async () => {
+    const route = { method: "POST", path: "/api/v2/projects/commands", requiredCapability: "projects.create", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true };
+    for (const presentation of [
+      { portalPublished: true, publicLinkEnabled: false },
+      { portalPublished: false, publicLinkEnabled: true },
+    ]) {
+      const receipt = syncReceipt(); receipt.result.presentation = presentation;
+      const send = vi.fn<typeof fetch>(async (_url, init) => init?.method === "GET" ? json(metadata(route)) : json(receipt, 201));
+      const outcome = await sendProjectAlphaProjectCreateCommand(connection, create, send);
+      expect(outcome).toMatchObject({ status: "uncertain", reason: "invalid_contract" });
+      expect(validatedProjectAlphaProjectAcknowledgement(outcome)).toBeNull();
+    }
+  });
   it("mints detached settlement evidence only for a validated transport acknowledgement", async () => {
     const route = { method: "POST", path: "/api/v2/projects/commands", requiredCapability: "projects.create", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true };
     const send = vi.fn<typeof fetch>(async (_url, init) => init?.method === "GET" ? json(metadata(route)) : json(syncReceipt(), 201));
