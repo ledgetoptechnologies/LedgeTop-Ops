@@ -102,6 +102,9 @@ export function trusted(response: Response, json: boolean): boolean {
     && !response.headers.has("Set-Cookie") && !response.headers.has("Location") && (!json || /^application\/json(?:\s*;|$)/i.test(response.headers.get("Content-Type") ?? ""));
 }
 export async function boundedJson(response: Response, maximum = PROJECT_ALPHA_PROJECT_RESPONSE_LIMIT): Promise<unknown> {
+  return (await boundedJsonWithBytes(response, maximum)).value;
+}
+export async function boundedJsonWithBytes(response: Response, maximum = PROJECT_ALPHA_PROJECT_RESPONSE_LIMIT): Promise<Readonly<{ value: unknown; bytes: Uint8Array }>> {
   const declared = response.headers.get("Content-Length");
   if (declared !== null && (!/^\d+$/.test(declared) || !Number.isSafeInteger(Number(declared)) || Number(declared) > maximum)) { await response.body?.cancel(); throw new Error("response_limit"); }
   const reader = response.body?.getReader(); if (!reader) throw new Error("invalid_contract");
@@ -109,7 +112,7 @@ export async function boundedJson(response: Response, maximum = PROJECT_ALPHA_PR
   try { for (;;) { const part = await reader.read().catch(() => { throw new Error("transport"); }); if (part.done) break; size += part.value.byteLength; if (size > maximum) { await reader.cancel(); throw new Error("response_limit"); } chunks.push(part.value); } }
   finally { reader.releaseLock(); }
   const bytes = new Uint8Array(size); let offset = 0; for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
-  try { return parseDuplicateFreeJson(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); } catch { throw new Error("invalid_contract"); }
+  try { return Object.freeze({ value: parseDuplicateFreeJson(new TextDecoder("utf-8", { fatal: true }).decode(bytes)), bytes }); } catch { throw new Error("invalid_contract"); }
 }
 export function authHeaders(connection: ProjectAlphaApiV2Connection, contentType = false): Headers {
   const headers = new Headers({ Accept: "application/json", Authorization: `Bearer ${connection.apiKey}`, "X-PA-Source-Instance-ID": connection.expectedSourceInstanceId, "X-PA-Application-ID": connection.expectedApplicationId, "X-PA-History-Epoch": connection.expectedHistoryEpoch! });
