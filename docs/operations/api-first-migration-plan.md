@@ -50,6 +50,26 @@ Updated September 15, 2026. The owner approved implementation and resumption aft
   with no staging or production deployment, public-link change, or cutover
   acceptance claimed.
 
+### September 15 final local checkpoint — PA project synchronization candidate
+
+- PA's local, unpushed project-sync chain begins with `9028ea0`, adding
+  create/update, permanent binding, status, inventory and revision-refresh
+  surfaces. QA found portal-outbox and attestation gaps. `27a7088` fixes the
+  zero-portal-projection/outbox case while preserving the internal schedule,
+  fresh source versions and no-op behavior, fail-closed schema/current-receipt
+  checks, checksum portability and an explicit CI MySQL gate. `11e0654` then
+  closes exact PK, unique, supporting-index and FK attestation. Independent
+  final QA passed.
+- Exact evidence is: full **919 tests / 7,462 assertions / 94 skipped**;
+  focused **15 tests / 118 assertions**; disposable MySQL **9 tests / 67
+  assertions**; and the QA workflow **10 tests / 68 assertions** plus MySQL
+  **9 tests / 67 assertions**. This coherent candidate has reached the PA
+  owner gate, not release: no push, deploy, staging or live acceptance has
+  occurred. The owner must authorize PA publication, deploy both instances,
+  and sign in before any authority cutover.
+- This Operations documentation branch also remains local: pushing internal
+  architecture documentation was denied pending explicit user approval.
+
 September 15 migration-safety checkpoint: Operations PR 54 restored the exact
 0054–0118 migration chain and strengthened the staging release gate to require
 remote-ledger order, quiescent/compatible writers, closed migration fences, and
