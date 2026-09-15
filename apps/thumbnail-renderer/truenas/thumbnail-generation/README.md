@@ -41,6 +41,15 @@ or grant R2 credentials. It needs only the dedicated renderer bearer and,
 when using the Access-protected Operations host, the paired Cloudflare Access
 service-token fields.
 
+For a server that needs only the claim worker, use
+[`compose.truenas.queue-renderer.yaml`](../../compose.truenas.queue-renderer.yaml).
+It is the supported replacement for the legacy `jrottenberg/ffmpeg:latest`
+standalone YAML: it runs as TrueNAS uid/gid 568, contains the exact decoder
+dependencies at image-build time, uses four isolated slots, and keeps source
+scratch entirely in bounded tmpfs. Replace the image digest and renderer token
+before installing it. Do not copy a loose worker script into that container or
+install packages during startup.
+
 The normal API base is
 `https://incoming.ledgetopdroneservices.com/api/internal/thumbnail-renderer/v1`.
 The worker emits bounded startup, claim-kind/size, completion, and safe error

@@ -31,11 +31,17 @@ The source lifecycle is:
    case-sensitive `Jobs/` source boundary enter `ltds-file-events`.
 2. Operations updates `file_index`, records an ETag/size-bound D1 job, and
    publishes `image-thumbnail.v1` to `ltds-thumbnail-jobs`. At-least-once event
-   and queue delivery converge on the same current-version job. Queue delivery
-   starts with a 30-second delay so TrueNAS can claim first. A live TrueNAS lease
-   makes the Cloudflare delivery acknowledge without a thumbnail-body or
-   Container read; independent bounded image-location/EXIF work may still run.
-   Expired lease reconciliation republishes the exact-version job.
+    and queue delivery converge on the same current-version job. TrueNAS may
+    claim at the durable `render_not_before` boundary (30 seconds for direct
+    uploads; 15 minutes for raw/prebuilt work). The Cloudflare queue signal is
+    delayed for an additional five minutes, and its consumer independently
+    rechecks the same D1 deadline before even reading source metadata. A live
+    TrueNAS lease makes the Cloudflare delivery acknowledge without a
+    thumbnail-body or Container read. An accidental early or duplicate delivery
+    is retried for the D1-computed remaining interval, without source R2 access.
+    Expired-lease reconciliation republishes immediately: a TrueNAS claim that
+    missed its five-minute (or longer video) lease has already consumed the
+    original fallback window.
 3. The `queue-renderer` polls
    `https://incoming.ledgetopdroneservices.com/api/internal/thumbnail-renderer/v1/claim?includeKind=all`.
    A claim is bound to the exact source key, source ETag, source size, derivative
@@ -209,13 +215,15 @@ Installing or updating it cannot repair a queue renderer that fails to post
 ## Cloudflare Container fallback
 
 The private RPC-only Cloudflare Container renders still images and first-page
-PDFs only when the unified renderer presence is stale or after a retryable
-TrueNAS still/PDF failure. The 30-second direct-upload delay is the initial
-ownership window, not permission to drain a healthy busy server's backlog. It
-does not render video. If TrueNAS owns the work, the Cloudflare consumer
-acknowledges without a thumbnail-body/Container read or second claim; independent
-bounded image-location/EXIF work may still run. The 15-minute raw/prebuilt grace
-remains separate and must not be shortened to the direct-upload value.
+PDFs only when an exact job remains unclaimed for five full minutes after its
+durable `render_not_before` time. Queue delivery timing is only an optimization:
+the consumer performs the D1 deadline check before any source R2 read. It does
+not render video. If TrueNAS owns the work, the Cloudflare consumer acknowledges
+without a thumbnail-body/Container read or second claim; independent bounded
+image-location/EXIF work may still run. A retryable TrueNAS failure resets the
+pending job and publishes a new queue signal with the same five-minute fallback
+window. The 15-minute raw/prebuilt grace remains separate and must not be
+shortened to the direct-upload value.
 
 The fallback currently uses four deterministic `ThumbnailRendererContainer`
 shards, a Cloudflare Queue batch size of one, and maximum queue concurrency four.
@@ -289,15 +297,11 @@ The following are release-blocking invariants, not optional diagnostics:
    create a persistent or full-size source copy.
 4. Ownership tests prove the production queue renderer calls
    `claim?includeKind=all`; no release may narrow that runtime call to
-   `includeKind=video`. The 30-second delay is only the first delivery window:
-   fresh unified-worker polls and signed active-job heartbeats keep an unfailed
-   still/PDF backlog owned by TrueNAS even while every slot is busy. Cloudflare
-   then performs zero thumbnail-body/Container reads, although independent
-   bounded location/EXIF work may run. When that presence signal becomes stale,
-   a bounded scheduler republishes exact pending work; Cloudflare renders only
-   a still or PDF and leaves video pending. A retryable TrueNAS still/PDF failure
-   also hands that exact attempt to the Cloudflare fallback without waiting for
-   server health to become stale.
+   `includeKind=video`. TrueNAS may claim at `render_not_before`; Cloudflare may
+   read or claim only an unleased image/PDF after the durable five-minute
+   fallback interval. This guard must hold even for early, duplicate, or
+   scheduler-published Queue messages. A retryable TrueNAS failure publishes a
+   new delayed fallback signal, while video remains pending for TrueNAS.
 5. Configuration tests prove `queue-renderer` uses the digest-pinned
    `queue-worker` image, `/scratch` and `/cache` are tmpfs, worker concurrency is
    in the 1-through-8 contract, and the private Cloudflare fallback remains

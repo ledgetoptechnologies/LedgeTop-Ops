@@ -7,6 +7,7 @@ const supervisor = await readFile(new URL(
   import.meta.url,
 ), "utf8");
 const compose = await readFile(new URL("../compose.truenas.yaml", import.meta.url), "utf8");
+const queueCompose = await readFile(new URL("../compose.truenas.queue-renderer.yaml", import.meta.url), "utf8");
 const dockerfile = await readFile(new URL("../Dockerfile", import.meta.url), "utf8");
 const publishWorkflow = await readFile(new URL("../../../.github/workflows/publish-thumbnail-renderer.yml", import.meta.url), "utf8");
 
@@ -35,6 +36,31 @@ test("TrueNAS service has no source mount and uses bounded tmpfs", () => {
   assert.match(service, /\/scratch:rw,nosuid,nodev,noexec,size=/);
   assert.doesNotMatch(service, /volumes:/);
   assert.doesNotMatch(service, /R2_ACCESS_KEY|R2_SECRET/);
+});
+
+test("standalone queue renderer is pinned and hardened", () => {
+  const service = queueCompose.slice(queueCompose.indexOf("  queue-renderer:"));
+  assert.match(service, /image: ghcr\.io\/ledgetoptechnologies\/ltds-thumbnail-queue-worker@sha256:REPLACE_WITH_PUBLISHED_DIGEST/);
+  assert.doesNotMatch(service, /:latest\b/);
+  assert.match(service, /user: "568:568"/);
+  assert.match(service, /init: true/);
+  assert.match(service, /read_only: true/);
+  assert.match(service, /cap_drop: \[ALL\]/);
+  assert.match(service, /security_opt: \[no-new-privileges:true\]/);
+  assert.match(service, /pids_limit: 256/);
+});
+
+test("standalone queue renderer bounds concurrency and RAM scratch without source or R2 mounts", () => {
+  assert.match(queueCompose, /LTDSTHUMB_WORKER_CONCURRENCY: "4"/);
+  assert.match(queueCompose, /mem_limit: 5g/);
+  assert.match(queueCompose, /cpus: "4\.0"/);
+  assert.match(queueCompose, /\/scratch:rw,nosuid,nodev,noexec,size=4g,mode=0700,uid=568,gid=568/);
+  assert.match(queueCompose, /\/cache:rw,nosuid,nodev,noexec,size=256m,mode=0700,uid=568,gid=568/);
+  assert.match(queueCompose, /\/tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777/);
+  assert.doesNotMatch(queueCompose, /\bvolumes:\s*$/m);
+  assert.doesNotMatch(queueCompose, /JOBS_HOST_PATH|ARTIFACTS_HOST_PATH|WORK_HOST_PATH|STATE_HOST_PATH|\/data\/jobs/);
+  assert.doesNotMatch(queueCompose, /R2_ACCESS_KEY|R2_SECRET|LTDSTHUMB_R2_/);
+  assert.doesNotMatch(queueCompose, /apt-get/);
 });
 
 test("publish is blocked on source checks and proves the exact published all-media digest", () => {

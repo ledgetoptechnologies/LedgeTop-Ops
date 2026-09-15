@@ -278,8 +278,9 @@ describe("thumbnail lifecycle cleanup", () => {
         .bind(sourceKey, sourceEtag, 4096, thumbnailKey, '"revived"').run();
     };
     await removeThumbnailStateForPath(env, sourceKey);
-    const revived = await db.prepare("SELECT status,thumbnail_etag FROM image_thumbnail_jobs WHERE source_key=?").bind(sourceKey).first<{ status: string; thumbnail_etag: string | null }>();
-    expect(revived).toEqual({ status: "pending", thumbnail_etag: null });
+    const revived = await db.prepare("SELECT status,thumbnail_etag,queue_published_at FROM image_thumbnail_jobs WHERE source_key=?")
+      .bind(sourceKey).first<{ status: string; thumbnail_etag: string | null; queue_published_at: string | null }>();
+    expect(revived).toEqual({ status: "pending", thumbnail_etag: null, queue_published_at: expect.any(String) });
     expect(sends).toContainEqual({ kind: THUMBNAIL_JOB_KIND, sourceKey, sourceEtag });
   });
 

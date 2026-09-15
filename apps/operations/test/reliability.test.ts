@@ -95,7 +95,7 @@ describe("delivery reliability controls", () => {
     expect(queries.some(query => query.includes("INSERT INTO file_index"))).toBe(true);
     expect(send).toHaveBeenCalledWith(
       { kind: "image-thumbnail.v1", sourceKey: "Jobs/Clients/Synthetic/source.tiff", sourceEtag: "new" },
-      { delaySeconds: 30 },
+      { delaySeconds: 330 },
     );
   });
   it("rejects reserved segments everywhere in Operations paths", () => {
