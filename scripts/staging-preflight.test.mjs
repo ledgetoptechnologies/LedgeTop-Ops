@@ -220,7 +220,7 @@ test("requires every portal-v2 and Operations capability to be explicitly false"
   }
 });
 
-test("pins the native portal, root-access, incoming-notification, pickup lifecycle, and 0200-0209 migration-first release contract", () => {
+test("pins the native portal, root-access, Operations 0054-0118, incoming-notification, pickup lifecycle, and 0200-0209 migration-first release contract", () => {
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-26), [
     "0184_native_client_feedback.sql",
     "0185_native_service_request_ownership.sql",
@@ -249,7 +249,12 @@ test("pins the native portal, root-access, incoming-notification, pickup lifecyc
     "0208_authenticated_delivery_change_batch_provider_identity.sql",
     "0209_authenticated_delivery_change_recipient_events.sql",
   ]);
-  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.at(-1), "0053_project_internal_notes.sql");
+  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.at(-1), "0118_project_alpha_existing_directory_binding_revision_refresh_ledger.sql");
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(-65, -62), [
+    "0054_project_alpha_directory_outbox.sql",
+    "0055_operations_directory_authority.sql",
+    "0056_operations_directory_materialization.sql",
+  ]);
   assert(REQUIRED_DISABLED_FEATURE_FLAGS.delivery.includes("CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED"));
   assert(REQUIRED_DISABLED_FEATURE_FLAGS.delivery.includes("CLIENT_PORTAL_CONTENT_AUDIT_ENABLED"));
   assert.equal(STAGING_STATIC_VARS.delivery.CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED, "false");

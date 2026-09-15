@@ -121,9 +121,13 @@ The separately mounted Worker routing now passes three focused cases (`150717`)
 and the post-test TypeScript check (`d444e4`); it does not read PA connection
 secrets or invoke legacy sign-in for unsupported descendants.
 
-Latest release-inventory checkpoint: local Operations migrations through 0102
-are included in the expected staging inventory and evidence example. The
-release-profile/preflight/evidence/acceptance run passed 82/82 with the
+Current release-inventory gate: the expected staging sequence includes the
+complete Operations `0054`-`0118` suffix, including the existing append-only
+revision-refresh ledger. Inclusion is not approval to apply it: release
+evidence must prove the exact remote ledger order, no open migration-relevant
+fences, quiescent writers/schedulers, a populated export plus time-travel
+recovery rehearsal, and compatible-writer ordering before any remote action.
+The release-profile/preflight/evidence/acceptance run passed 82/82 with the
 default-off workforce issuer route guard. The 0096
 focused schema and 0097 full-chain authority suites each pass four D1 tests,
 with 0098 time-record 13/13, 0099 submit/review 9/9, 0100 issuer-only grant
@@ -243,9 +247,10 @@ off. This completes the pending test runs referenced in older checkpoints below.
 September 13 release-inventory guard: staging preflight now compares actual
 Client/Operations SQL files against the explicit approved post-baseline
 inventory, rejecting missing, unlisted or non-regular SQL entries. All 17 Node
-tests passed independently (`3714fa`). The current inventory is intentionally
-still blocked by unreviewed Operations 0054–0090 and Client 0210–0213; this
-guard does not approve those migrations or finalize the release contract.
+tests passed independently (`3714fa`). The guard now requires the complete
+Operations 0054–0118 suffix and Client 0210–0213 where applicable; it does not
+approve those migrations, finalize the release contract, or authorize a remote
+action.
 The SMTP/uncertain-alert patches are now locally implemented and type-checked;
 their new runtime acceptance remains in progress (store run session 50985).
 
