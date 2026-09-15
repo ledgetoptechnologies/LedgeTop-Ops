@@ -142,6 +142,22 @@ beforeEach(async () => {
 afterEach(async () => runtime.dispose());
 
 describe("0120 dormant PA project v2 canonical settlement schema", () => {
+  it("applies the forward proof-expiry fence over populated 0120 evidence without rewriting it", async () => {
+    await migrate("0120_project_alpha_project_v2_canonical_settlement.sql");
+    await seedAcknowledgedCommand(); await intent().run(); await settlement().run();
+    const beforeIntent = await db.prepare("SELECT * FROM project_alpha_project_v2_canonical_intents").first();
+    const beforeSettlement = await db.prepare("SELECT * FROM project_alpha_project_v2_canonical_settlement_receipts").first();
+    await migrate("0121_project_alpha_project_v2_settlement_proof_expiry.sql");
+    expect(await db.prepare("SELECT * FROM project_alpha_project_v2_canonical_intents").first()).toEqual(beforeIntent);
+    expect(await db.prepare("SELECT * FROM project_alpha_project_v2_canonical_settlement_receipts").first()).toEqual(beforeSettlement);
+    const triggers = await db.prepare(`SELECT name,sql FROM sqlite_master WHERE type='trigger'
+      AND name IN ('project_alpha_project_v2_canonical_intents_exact','project_alpha_project_v2_canonical_settlement_receipts_exact') ORDER BY name`).all<{name:string;sql:string}>();
+    expect(triggers.results).toHaveLength(2);
+    expect(triggers.results.every(row => row.sql.includes("proof.verified_until>strftime('%Y-%m-%dT%H:%M:%fZ','now')"))).toBe(true);
+    await expect(db.prepare("UPDATE project_alpha_project_v2_canonical_intents SET expected_local_version=1").run()).rejects.toThrow(/immutable/);
+    await expect(db.prepare("DELETE FROM project_alpha_project_v2_canonical_settlement_receipts").run()).rejects.toThrow(/durable/);
+  });
+
   it("preserves a populated 0086 head and adds the current shared-project domain fields", async () => {
     await db.batch(splitD1MigrationStatements(`
       CREATE TABLE delivery_public_shares(id TEXT PRIMARY KEY,url TEXT);
