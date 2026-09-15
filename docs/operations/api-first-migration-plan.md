@@ -2,6 +2,38 @@
 
 Updated September 15, 2026. The owner approved implementation and resumption after confirming the [decision record](api-first-decisions-2026-09-10.md). This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
 
+### September 15 — API-first transport and ownership checkpoint
+
+- Operations PR57 merged to `main` at `e8bbfab`. Its dormant Project Alpha
+  read/binding-status transport passed the exact ten PR-head pre-merge checks
+  and the exact ten post-merge checks (all green). Operations PR58 then merged
+  at `ad58c22`; its dormant lifecycle, relationship, revoke and inventory
+  transport passed independent QA and the full suite, plus the exact ten
+  pre-merge and ten post-merge checks (all green). These are transport
+  additions only; they do not authorize a route, flag, key or migration.
+- Project Alpha (PA) remains generic/open source and local/unpushed. Local
+  commit `0579187f` supplies the external-management framework, which cannot
+  be activated until its replacement routes exist. `d5a7cef` supplies the
+  lifecycle, relationship and inventory surface with no hard-delete behavior,
+  supported by full-suite and MySQL evidence. `a1db652` supplies the project
+  lifecycle/read foundation, including derived overdue state and a
+  destructive-delete retention guard, with full-suite and MySQL evidence.
+  Project create/update, binding, inventory and generation work remain
+  explicitly outstanding; the PA owner deployment/sign-in gate remains in
+  force. Independent QA also found that restore can revive preserved
+  `portal_publish_enabled`/public-token state; a narrow follow-up fix is in
+  progress, so `a1db652` is not release-ready.
+- The workforce/time audit confirms the staged ownership split: Operations
+  owns time capture and work review, while PA owns financial processing. Stage
+  the native operational ledger/review independently; employee attestation is
+  not independent approval, and approval is not invoicing or payment. Existing
+  legacy integration remains in service until its reviewed replacement is
+  ready.
+- Thumbnail work is explicitly deferred: the current thumbnail path is
+  functional and is not on the active API-first migration path. Existing
+  production/public links and legacy integration remain protected. No live or
+  staging deployment, cutover, or acceptance is claimed by this checkpoint.
+
 September 15 migration-safety checkpoint: Operations PR 54 restored the exact
 0054–0118 migration chain and strengthened the staging release gate to require
 remote-ledger order, quiescent/compatible writers, closed migration fences, and
