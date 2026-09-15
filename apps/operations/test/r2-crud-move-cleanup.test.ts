@@ -5,6 +5,7 @@ import thumbnailCleanupMigration from "../../client/migrations/0107_thumbnail_cl
 import thumbnailBackfillMigration from "../../client/migrations/0108_thumbnail_backfill_runs.sql?raw";
 import locationMigration from "../../client/migrations/0109_image_asset_locations.sql?raw";
 import thumbnailProvenanceMigration from "../../client/migrations/0111_thumbnail_render_provenance.sql?raw";
+import thumbnailRenderNotBeforeMigration from "../../client/migrations/0151_thumbnail_render_not_before.sql?raw";
 
 vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {}, DurableObject: class {} }));
 vi.mock("../src/worker/delivery", async importOriginal => ({
@@ -91,6 +92,7 @@ describe("R2 move location cleanup", () => {
     await applyTriggerMigration(deliveryDb, thumbnailCleanupMigration);
     await applySql(deliveryDb, thumbnailBackfillMigration);
     await applyTriggerMigration(deliveryDb, thumbnailProvenanceMigration);
+    await applySql(deliveryDb, thumbnailRenderNotBeforeMigration);
     await applySql(deliveryDb, locationMigration);
     await deliveryDb.prepare("PRAGMA foreign_keys = ON").run();
     await applySql(opsDb, `

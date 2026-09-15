@@ -471,7 +471,7 @@ describe("authenticated browser delivery uploads", () => {
     expect(queueSend).toHaveBeenCalledOnce();
     expect(queueSend).toHaveBeenCalledWith(expect.objectContaining({
       kind: "image-thumbnail.v1", sourceKey: "Jobs/Clients/Acme/Delivery/photo.jpg",
-    }), { delaySeconds: 30 });
+    }), { delaySeconds: 330 });
     expect(await deliveryDb.prepare("SELECT status,queue_published_at FROM image_thumbnail_jobs WHERE source_key=?")
       .bind("Jobs/Clients/Acme/Delivery/photo.jpg").first()).toMatchObject({ status: "pending", queue_published_at: expect.any(String) });
 
@@ -584,7 +584,7 @@ describe("authenticated browser delivery uploads", () => {
     expect(bucket.objects.get(key)?.customMetadata.ltdsMoveMarker).toBeUndefined();
     expect(await opsDb.prepare("SELECT COUNT(*) count FROM r2_replacement_recovery").first()).toEqual({ count: 0 });
     expect(queueSend).toHaveBeenCalledOnce();
-    expect(queueSend).toHaveBeenCalledWith(expect.objectContaining({ sourceKey: key }), { delaySeconds: 30 });
+    expect(queueSend).toHaveBeenCalledWith(expect.objectContaining({ sourceKey: key }), { delaySeconds: 330 });
   });
 
   it("pauses only on a real collision and idempotently applies skip or safe rename", async () => {
@@ -649,7 +649,7 @@ describe("authenticated browser delivery uploads", () => {
       .toEqual(Uint8Array.from([1, 2, 3, 4]));
     expect(await opsDb.prepare("SELECT COUNT(*) count FROM r2_upload_parts WHERE session_id=?").bind(session.sessionId).first()).toEqual({ count: 1 });
     expect(queueSend).toHaveBeenCalledOnce();
-    expect(queueSend).toHaveBeenCalledWith(expect.objectContaining({ sourceKey: "Jobs/Clients/Acme/Delivery/completion-race (2).jpg" }), { delaySeconds: 30 });
+    expect(queueSend).toHaveBeenCalledWith(expect.objectContaining({ sourceKey: "Jobs/Clients/Acme/Delivery/completion-race (2).jpg" }), { delaySeconds: 330 });
   });
 
   it("atomically admits only one of two concurrent requests for the tenth owner slot", async () => {
@@ -757,7 +757,7 @@ describe("authenticated browser delivery uploads", () => {
     expect(await deliveryDb.prepare("SELECT etag,size,content_type,media_kind FROM file_index WHERE r2_key=?").bind(key).first())
       .toEqual({ etag: restored.httpEtag, size: 1, content_type: "image/jpeg", media_kind: "image" });
     expect(queueSend).toHaveBeenCalledOnce();
-    expect(queueSend).toHaveBeenCalledWith(expect.objectContaining({ sourceKey: key, sourceEtag: restored.etag }), { delaySeconds: 30 });
+    expect(queueSend).toHaveBeenCalledWith(expect.objectContaining({ sourceKey: key, sourceEtag: restored.etag }), { delaySeconds: 330 });
   });
 
   it("preserves recovery when a newer writer wins before restore", async () => {
