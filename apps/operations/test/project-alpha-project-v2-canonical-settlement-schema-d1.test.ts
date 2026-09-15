@@ -217,6 +217,24 @@ describe("0120 dormant PA project v2 canonical settlement schema", () => {
     await expect(settlement().run()).rejects.toThrow(/not exact/);
   });
 
+  it("rejects settlement when a mapping appears after the absent mapping intent", async () => {
+    await migrate("0120_project_alpha_project_v2_canonical_settlement.sql");
+    await seedAcknowledgedCommand();
+    await intent().run();
+    await db.prepare(`UPDATE project_alpha_project_outbox
+      SET state='leased',lease_token='mapping-race',lease_expires_at=1
+      WHERE command_id=?`).bind(commandId).run();
+    await db.prepare(`INSERT INTO project_alpha_project_mappings(
+      external_project_id,source_id,source_instance_id,application_id,project_alpha_public_id,
+      establishment_kind,establishment_command_id,create_command_id,history_epoch_id)
+      VALUES(?,'project-alpha:primary',?,?,?,'create',?,?,?)`)
+      .bind(externalProjectId, sourceInstanceId, applicationId, projectAlphaPublicId,
+        commandId, commandId, historyEpochId).run();
+    await expect(settlement().run()).rejects.toThrow(/not exact/);
+    expect(await db.prepare("SELECT count(*) FROM project_alpha_project_v2_canonical_settlement_receipts")
+      .first("count(*)")).toBe(0);
+  });
+
   it("keeps mapping, head updates, and v2 history settlement deferred", async () => {
     await migrate("0120_project_alpha_project_v2_canonical_settlement.sql");
     await seedAcknowledgedCommand();

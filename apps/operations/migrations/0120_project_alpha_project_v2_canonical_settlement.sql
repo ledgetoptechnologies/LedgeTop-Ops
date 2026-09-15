@@ -180,6 +180,17 @@ WHEN NOT EXISTS (
         WHERE project.external_project_id=intent.external_project_id
           AND project.current_version=intent.expected_local_version
           AND project.canonical_projection_sha256=intent.expected_local_projection_sha256)))
+    AND ((intent.expected_mapping_state='absent' AND NOT EXISTS (
+        SELECT 1 FROM project_alpha_project_mappings mapping
+        WHERE mapping.external_project_id=intent.external_project_id))
+      OR (intent.expected_mapping_state='exact' AND EXISTS (
+        SELECT 1 FROM project_alpha_project_mappings mapping
+        WHERE mapping.external_project_id=intent.external_project_id
+          AND mapping.source_id=intent.source_id
+          AND mapping.source_instance_id=intent.source_instance_id
+          AND mapping.application_id=intent.application_id
+          AND mapping.history_epoch_id=intent.history_epoch_id
+          AND mapping.project_alpha_public_id=intent.expected_project_alpha_public_id)))
 )
 BEGIN SELECT RAISE(ABORT,'project v2 canonical settlement receipt is not exact'); END;
 
