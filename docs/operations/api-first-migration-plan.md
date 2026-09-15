@@ -70,6 +70,24 @@ Updated September 15, 2026. The owner approved implementation and resumption aft
 - This Operations documentation branch also remains local: pushing internal
   architecture documentation was denied pending explicit user approval.
 
+### September 15 PA release-readiness audit
+
+- PA branch `codex/api-first-portal-binding-status` is at HEAD
+  `33eae4b0`, 32 commits ahead of its PA `origin/main` base `51e333fb`.
+  It is publishable as a review PR only after owner authorization; it is not
+  safe to deploy or cut over now. Fresh evidence is the full suite **919 tests
+  / 7,462 assertions / 94 skipped**, focused SecurityHardening **19 tests /
+  386 assertions / 3 skipped**, passing `php -l` for the scoped files and
+  `git diff --check`. Reviewed fixes include lifecycle body wording and the
+  legacy broad-scope label.
+- Release blockers remain: there is no remote PR CI; automatic migrations
+  `0088`–`0102` include material `0095`/`0100`/`0101` changes and have no down
+  migration; external backup-and-restore rehearsal, staging, backfill,
+  attestation, false flags, and configuration reconciliation are outstanding.
+  Ops migration `0119` is unapplied and its adapters remain dormant. Broader
+  M05/M06/M07/M08 requirements are incomplete. The legacy custom integration
+  is intentionally retained until joined acceptance is complete.
+
 ### September 15 follow-up — dormant Operations project transport and persistence
 
 - Operations PR59 merged to `main` at `5286460`. It adds the unmounted,
