@@ -10,7 +10,7 @@ export const PROJECT_ALPHA_PROJECT_RESPONSE_LIMIT = 64 * 1024;
 export const PROJECT_ALPHA_PROJECT_REQUEST_LIMIT = 32 * 1024;
 export const PROJECT_ALPHA_PROJECT_MAX_INTEGER = "9223372036854775807";
 export const PROJECT_ALPHA_PROJECT_MAX_GENERATION = "9223372036854775807";
-export const PROJECT_ALPHA_PROJECT_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+export const PROJECT_ALPHA_PROJECT_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 export const PROJECT_ALPHA_PROJECT_PUBLIC_ID = /^[0-9a-f]{32}$/;
 export const PROJECT_ALPHA_PROJECT_HASH = /^[0-9a-f]{64}$/;
 
