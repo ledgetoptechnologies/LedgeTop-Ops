@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { sendConfiguredProjectAlphaProjectCreateCommand, sendProjectAlphaProjectCreateCommand, sendProjectAlphaProjectUpdateCommand, sendProjectAlphaProjectBindingCommand, sendProjectAlphaProjectRefreshCommand, type ProjectAlphaProjectCreateCommand, type ProjectAlphaProjectUpdateCommand, type ProjectAlphaProjectBindCommand, type ProjectAlphaProjectRefreshCommand } from "../src/worker/project-alpha-project-api-v2";
+import { sendConfiguredProjectAlphaProjectCreateCommand, sendProjectAlphaProjectCreateCommand, sendProjectAlphaProjectUpdateCommand, sendProjectAlphaProjectBindingCommand, sendProjectAlphaProjectRefreshCommand, validatedProjectAlphaProjectAcknowledgement, type ProjectAlphaProjectCreateCommand, type ProjectAlphaProjectOutcome, type ProjectAlphaProjectUpdateCommand, type ProjectAlphaProjectBindCommand, type ProjectAlphaProjectRefreshCommand } from "../src/worker/project-alpha-project-api-v2";
 import { readProjectAlphaProject } from "../src/worker/project-alpha-project-read-api-v2";
 import { readProjectAlphaProjectInventory } from "../src/worker/project-alpha-project-inventory-api-v2";
 import { readProjectAlphaProjectBindingStatus } from "../src/worker/project-alpha-project-binding-status-api-v2";
@@ -26,10 +26,39 @@ describe("dormant PA project v2 transport", () => {
     const init = send.mock.calls[1]![1]!; expect(String(send.mock.calls[1]![0])).toBe("https://alpha.example.test/api/v2/projects/commands"); expect(JSON.parse(String(init.body))).toEqual(create);
     const headers = new Headers(init.headers); expect(headers.get("Authorization")).toBe("Bearer test-secret"); expect(headers.get("X-PA-Source-Instance-ID")).toBe(source); expect(headers.get("X-PA-Application-ID")).toBe(application); expect(headers.get("X-PA-History-Epoch")).toBe(epoch);
   });
+  it("mints detached settlement evidence only for a validated transport acknowledgement", async () => {
+    const route = { method: "POST", path: "/api/v2/projects/commands", requiredCapability: "projects.create", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true };
+    const send = vi.fn<typeof fetch>(async (_url, init) => init?.method === "GET" ? json(metadata(route)) : json(syncReceipt(), 201));
+    const outcome = await sendProjectAlphaProjectCreateCommand(connection, create, send);
+    const evidence = validatedProjectAlphaProjectAcknowledgement(outcome);
+    expect(evidence).toEqual({ type: "create", command: create, response: syncReceipt(), destinationOrigin: "https://alpha.example.test" });
+
+    const fabricated = { status: "acknowledged", httpStatus: 201, response: syncReceipt() } as ProjectAlphaProjectOutcome;
+    expect(validatedProjectAlphaProjectAcknowledgement(fabricated)).toBeNull();
+
+    if (outcome.status === "acknowledged") {
+      (outcome.response.result.resource as { publicId: string }).publicId = "f".repeat(32);
+    }
+    expect(() => { (evidence!.command as { externalId: string }).externalId = "mutated"; }).toThrow(TypeError);
+    expect(() => { (evidence!.response.result.resource as { publicId: string }).publicId = "f".repeat(32); }).toThrow(TypeError);
+    expect(validatedProjectAlphaProjectAcknowledgement(outcome)).toEqual({
+      type: "create", command: create, response: syncReceipt(), destinationOrigin: "https://alpha.example.test",
+    });
+  });
   it("does not post when capability identity or route shape drifts", async () => {
     const route = { method: "POST", path: "/api/v2/projects/commands", requiredCapability: "projects.create", requiresSourceInstanceId: false, requiresApplicationId: true, requiresHistoryEpoch: true };
     const send = vi.fn<typeof fetch>(async () => json(metadata(route)));
     await expect(sendProjectAlphaProjectCreateCommand(connection, create, send)).resolves.toMatchObject({ status: "blocked", reason: "preflight" }); expect(send).toHaveBeenCalledTimes(1);
+  });
+  it("requires canonical lowercase UUIDs in commands and response correlation", async () => {
+    const route = { method: "POST", path: "/api/v2/projects/commands", requiredCapability: "projects.create", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true };
+    const unused = vi.fn<typeof fetch>();
+    await expect(sendProjectAlphaProjectCreateCommand(connection, { ...create, commandId: request.toUpperCase() }, unused)).resolves.toEqual({ status: "rejected", reason: "invalid_command" });
+    expect(unused).not.toHaveBeenCalled();
+    const uppercaseRequest = request.toUpperCase();
+    const send = vi.fn<typeof fetch>(async (_url, init) => init?.method === "GET" ? json(metadata(route)) : json({ ...syncReceipt(), requestId: uppercaseRequest }, 201, { "X-Request-ID": uppercaseRequest }));
+    await expect(sendProjectAlphaProjectCreateCommand(connection, create, send)).resolves.toMatchObject({ status: "uncertain", reason: "invalid_contract" });
+    expect(validatedProjectAlphaProjectAcknowledgement(await sendProjectAlphaProjectCreateCommand(connection, create, send))).toBeNull();
   });
   it("keeps reads and inventory non-authoritative and bounded", async () => {
     const readRoute = { method: "GET", path: "/api/v2/projects/{publicId}", requiredCapability: "projects.v2.read", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true };

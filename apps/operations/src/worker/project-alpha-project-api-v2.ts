@@ -13,6 +13,42 @@ export type ProjectAlphaProjectCommand = ProjectAlphaProjectCreateCommand | Proj
 export type ProjectAlphaProjectCommandType = "create" | "update" | "bind" | "refresh";
 export type ProjectAlphaProjectSuccess = Readonly<{ apiVersion: "2"; sourceInstanceId: string; applicationId: string; historyEpoch: string; requestId: string; replayed: boolean; result: Readonly<{ resource: Readonly<{ type: "project"; id: string; publicId: string; revision: string; projectionSha256: string }>; authorizationGeneration: string; presentation: Readonly<{ portalPublished: boolean; publicLinkEnabled: boolean }> }> }>;
 export type ProjectAlphaProjectOutcome = Readonly<{ status: "acknowledged"; httpStatus: 200 | 201; response: ProjectAlphaProjectSuccess }> | ProjectAlphaProjectFailure;
+export type ValidatedProjectAlphaProjectAcknowledgement = Readonly<{
+  type: ProjectAlphaProjectCommandType;
+  command: ProjectAlphaProjectCommand;
+  response: ProjectAlphaProjectSuccess;
+  destinationOrigin: string;
+}>;
+
+// Only the bounded transport can mint settlement evidence. A JSON-shaped
+// acknowledgement supplied by a caller cannot be used to authorize D1 state.
+const validatedAcknowledgements = new WeakMap<object, Readonly<{
+  type: ProjectAlphaProjectCommandType;
+  commandJson: string;
+  responseJson: string;
+  destinationOrigin: string;
+}>>();
+
+function deepFreezeJson<T>(value: T): T {
+  if (value && typeof value === "object" && !Object.isFrozen(value)) {
+    for (const child of Object.values(value as Record<string, unknown>)) deepFreezeJson(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+export function validatedProjectAlphaProjectAcknowledgement(
+  outcome: ProjectAlphaProjectOutcome,
+): ValidatedProjectAlphaProjectAcknowledgement | null {
+  if (!outcome || typeof outcome !== "object") return null;
+  const snapshot = validatedAcknowledgements.get(outcome);
+  return snapshot ? Object.freeze({
+    type: snapshot.type,
+    command: deepFreezeJson(JSON.parse(snapshot.commandJson) as ProjectAlphaProjectCommand),
+    response: deepFreezeJson(JSON.parse(snapshot.responseJson) as ProjectAlphaProjectSuccess),
+    destinationOrigin: snapshot.destinationOrigin,
+  }) : null;
+}
 
 const routes: Record<ProjectAlphaProjectCommandType, ProjectAlphaApiV2Endpoint> = {
   create: endpoint("POST", "/api/v2/projects/commands", "projects.create"),
@@ -73,7 +109,23 @@ async function send(type: ProjectAlphaProjectCommandType, inputConnection: Proje
   const preflight = await runPreflight(connection, routes[type], fetcher); if (preflight) return preflight;
   const response = await post(connection, routes[type], body, fetcher, type === "create" ? [201, 200] : [200]);
   if (isFailure(response)) return response;
-  try { const parsed = await boundedJson(response); return success(parsed, type, command, connection, response.status, response.headers.get("X-Request-ID")) ? { status: "acknowledged", httpStatus: response.status as 200 | 201, response: parsed } : { status: "uncertain", reason: "invalid_contract", ...diagnostic(response) }; }
+  try {
+    const parsed = await boundedJson(response);
+    if (!success(parsed, type, command, connection, response.status, response.headers.get("X-Request-ID")))
+      return { status: "uncertain", reason: "invalid_contract", ...diagnostic(response) };
+    const acknowledged: ProjectAlphaProjectOutcome = {
+      status: "acknowledged",
+      httpStatus: response.status as 200 | 201,
+      response: parsed,
+    };
+    validatedAcknowledgements.set(acknowledged, Object.freeze({
+      type,
+      commandJson: body,
+      responseJson: JSON.stringify(parsed),
+      destinationOrigin: new URL(connection.baseUrl).origin,
+    }));
+    return acknowledged;
+  }
   catch (error) { return { status: "uncertain", reason: error instanceof Error && error.message === "response_limit" ? "response_limit" : error instanceof Error && error.message === "transport" ? "transport" : "invalid_contract", ...diagnostic(response) }; }
 }
 function diagnostic(response: Response): { httpStatus: number; requestId?: string } { const value = response.headers.get("X-Request-ID"); return { httpStatus: response.status, ...(value && uuid(value) ? { requestId: value } : {}) }; }
