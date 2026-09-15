@@ -4800,8 +4800,11 @@ pending; this requirement does not claim a deployed UI change.
   **11 tests / 2 files**. The real D1 migration-chain suite through 0118 now
   passes **2 tests / 1 file**, including populated canonical history and a
   noncolliding acquired chain that remains inactive.
-  A fresh full Ops TypeScript check also fails in unrelated invitation-client
-  Zod/Hono typings, so the overall worktree is not type-clean. Runtime
+  The invitation-client Zod/Hono type mismatch discovered by a fresh Ops
+  check is corrected in local commit `4146cbf` without dependency changes:
+  Operations now validates its copy of the shared wire shape using its own
+  Zod runtime, and the cross-app test invokes the Client router directly.
+  `npm run check` passes and the two focused suites pass **13 tests**. Runtime
   settlement, uncertain-response recovery, staging proof, and public-link
   acceptance remain open. A 409, malformed response, timeout or changed
   owner/local version must pause reconciliation; no receipt may rewrite the
@@ -4815,6 +4818,12 @@ pending; this requirement does not claim a deployed UI change.
   receipt and real-MySQL rollback/concurrency proof. Focused existing PA v2
   directory tests pass **26 tests / 161 assertions**; this proves the current
   read/bind path, not the missing write capability.
+  Local PA commit `717dadd9` now extracts the shared non-upload organization
+  mutation boundary. Browser edits delegate to it, while it keeps the source
+  row/version, reusable billing address, API v2 revision, and portal projection
+  in one transaction; tax-file paths are unchanged. Relevant PA workflow
+  tests pass **42 tests / 804 assertions**. The scoped conditional API command,
+  durable receipt, and real-MySQL concurrency proof remain to be added.
 - Authorization-generation review found that PA key scope/IP edits and key
   revocation did not advance the application watermark, although routes already
   denied revoked keys. Local PA commit `f23c8155` now atomically advances it
