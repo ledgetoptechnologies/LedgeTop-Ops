@@ -46,6 +46,47 @@ Updated September 15, 2026. The owner approved implementation and resumption aft
   the legacy integration and all replacement paths dormant until those gates,
   CI and coordinated deployment evidence pass.
 
+### September 15 approved design checkpoint — forward-only canonical activation
+
+This is an approved design, not an implementation or release claim. The next
+increment is additive Operations migration `0122` plus an unmounted adapter.
+It must preserve the legacy `0063` adoption and `0086` native-shared-project
+branches and their immutable history; it must not rewrite or reinterpret those
+rows.
+
+- Before any PA POST, reserve one intent with its canonical request
+  fingerprint and a pending event. The reservation is the retry identity and
+  must exist before network dispatch; a missing, changed or duplicate
+  fingerprint fails closed. The supported command semantics are create, bind
+  and update only. This design has no refresh operation.
+- After dispatch, activation requires fresh live PA proof for the exact
+  source, instance, application, resource, revision and owner/history fence,
+  even when a stored response or settlement appears successful. A cached
+  response, old receipt or overdue state cannot authorize activation.
+  `overdue_warning` is an explicit pending/age signal for operator recovery,
+  never an authority grant.
+- Once fresh proof passes, one immutable activation-receipt insert is the
+  authority for a single D1 transaction that advances the canonical mapping,
+  head/history and outbox together. PA and D1 are not treated as one atomic
+  transaction: an uncertain cross-system outcome is recovered by the same
+  intent/fingerprint and a fresh proof, never by guessing.
+- A crash before PA dispatch leaves the intent pending. A crash after dispatch
+  but before acknowledgement leaves an uncertain intent that retries the same
+  command and body. Stale revision/epoch, changed owner, revoked authority,
+  PA denial or unavailable proof leaves canonical state untouched and pauses or
+  rejects the intent. No duplicate receipt, head, history or outbox mutation
+  is permitted.
+- Mounting the adapter and applying `0122` require owner approval for both PA
+  instances, a disposable MySQL/D1 migration and recovery rehearsal, and
+  fresh live proof from each instance. The release packet must also prove
+  dark-create behavior, preserved legacy/public links, no public-link rewrite,
+  and rollback/fix-forward handling before any route, flag or scheduler is
+  enabled.
+
+No `0122` migration or adapter is implemented by this checkpoint. No runtime
+mount, canonical mutation, remote migration, deployment or publication is
+claimed.
+
 ### September 15 — API-first transport and ownership checkpoint
 
 - Operations PR57 merged to `main` at `e8bbfab`. Its dormant Project Alpha
