@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import { readFileSync, readdirSync } from "node:fs";
-import { Hono } from "hono";
 import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createCatalogSourceContext, PRIMARY_CATALOG_SOURCE, type CatalogSourceContext } from "@ltds/shared";
@@ -142,15 +141,18 @@ describe("Operations delivery acceptance to Client native notification history â
     return { source, workspaceId, rootId, bindingId, principalId, owner, alternate, ownerIdentityId, alternateIdentityId };
   }
 
-  const appFor = (principal: VerifiedClientPrincipal) => new Hono().route("/api/client", createClientPortalRouter({
+  // Exercise the Client router directly.  Operations and Client currently
+  // resolve different Hono minors, so mounting this router through the
+  // Operations Hono instance is not type-compatible.
+  const appFor = (principal: VerifiedClientPrincipal) => createClientPortalRouter({
     resolvePrincipal: async () => principal,
     repository: d1ClientPortalRepository,
-  }));
-  const history = (principal: VerifiedClientPrincipal, workspaceId: string) => appFor(principal).request(`${origin}/api/client/notification-history`, {
+  });
+  const history = (principal: VerifiedClientPrincipal, workspaceId: string) => appFor(principal).request(`${origin}/notification-history`, {
     headers: { "X-LTDS-Workspace-Id": workspaceId },
   }, env);
   const mutate = (principal: VerifiedClientPrincipal, workspaceId: string, eventId: string, action: "read" | "dismiss") => appFor(principal)
-    .request(`${origin}/api/client/v2/workspaces/${workspaceId}/native-delivery-notifications/${eventId}`, {
+    .request(`${origin}/v2/workspaces/${workspaceId}/native-delivery-notifications/${eventId}`, {
       method: "PATCH",
       headers: { Origin: origin, "Content-Type": "application/json" },
       body: JSON.stringify({ action }),

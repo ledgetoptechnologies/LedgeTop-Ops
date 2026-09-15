@@ -1,6 +1,5 @@
 import { z } from "zod";
-import { invitationRequestHref, invitationRequestPage } from "./invitation-administration-api";
-import { invitationRequestStatus } from "../../../client/src/client/invitation-request-api";
+import { invitationRequestHref, invitationRequestPage, invitationRequestStatus } from "./invitation-administration-api";
 
 export type InboxSource = "requests" | "feedback" | "deliveries" | "connections" | "invitations";
 export interface InboxAccess { permissions: readonly string[]; isAdministrator: boolean; feedbackEnabled: boolean; invitationReview?: boolean; invitationError?: string }
