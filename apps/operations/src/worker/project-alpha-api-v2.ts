@@ -1,3 +1,5 @@
+import { parseDuplicateFreeJson } from "./bounded-json";
+
 /** Replacement-connection preflight. This does not enable synchronization,
  * change source ownership, or treat a successful probe as resource authority. */
 const CAPABILITIES_PATH = "/api/v2/capabilities";
@@ -99,7 +101,7 @@ async function readMetadata(response: Response): Promise<unknown> {
   const bytes = new Uint8Array(size);
   let offset = 0;
   for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
-  return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  return parseDuplicateFreeJson(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
 }
 
 /** Credentials go only to the configured HTTPS origin; never follow redirects.
@@ -133,6 +135,10 @@ export async function probeProjectAlphaApiV2(
     response = await send(url, { method: "GET", headers, redirect: "error", credentials: "omit", cache: "no-store", signal: controller.signal });
     const candidateId = response.headers.get("X-Request-ID");
     const diagnostic = { httpStatus: response.status, ...(candidateId && UUID.test(candidateId) ? { requestId: candidateId } : {}) };
+    if (!candidateId || !UUID.test(candidateId)) {
+      await response.body?.cancel();
+      return { status: "incompatible", reason: "invalid_contract", ...diagnostic };
+    }
     if (response.status !== 200) {
       await response.body?.cancel();
       if (response.status === 401 || response.status === 403) return { status: "unauthorized", reason: "credentials_or_scope", ...diagnostic };
@@ -140,7 +146,8 @@ export async function probeProjectAlphaApiV2(
       return { status: response.status >= 500 ? "unavailable" : "incompatible", reason: "http_status", ...diagnostic };
     }
     if (!/^application\/json(?:\s*;|$)/i.test(response.headers.get("Content-Type") ?? "")
-      || !(response.headers.get("Cache-Control") ?? "").split(",").some(value => value.trim().toLowerCase() === "no-store")) {
+      || !(response.headers.get("Cache-Control") ?? "").split(",").some(value => value.trim().toLowerCase() === "no-store")
+      || response.headers.has("Set-Cookie") || response.headers.has("Location")) {
       await response.body?.cancel();
       return { status: "incompatible", reason: "invalid_contract", ...diagnostic };
     }
@@ -148,7 +155,7 @@ export async function probeProjectAlphaApiV2(
     if (!record(data) || data.apiVersion !== "2" || typeof data.sourceInstanceId !== "string" || !UUID.test(data.sourceInstanceId)
       || typeof data.applicationId !== "string" || !UUID.test(data.applicationId)
       || typeof data.historyEpoch !== "string" || !HISTORY_EPOCH.test(data.historyEpoch)
-      || typeof data.requestId !== "string" || !UUID.test(data.requestId) || (candidateId !== null && candidateId !== data.requestId)
+      || typeof data.requestId !== "string" || !UUID.test(data.requestId) || candidateId !== data.requestId
       || !Array.isArray(data.grantedCapabilities) || data.grantedCapabilities.length > 128
       || !Array.isArray(data.implementedEndpoints) || data.implementedEndpoints.length > 128
       || !data.implementedEndpoints.some(endpoint => record(endpoint) && endpoint.method === "GET" && endpoint.path === CAPABILITIES_PATH

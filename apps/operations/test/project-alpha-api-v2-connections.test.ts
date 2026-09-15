@@ -53,6 +53,14 @@ describe("deployment-owned Project Alpha API-v2 connections", () => {
     expect(String(send.mock.calls[0]![0])).toBe("https://source-a.example.test/api/v2/capabilities");
   });
 
+  it.each([{ "Set-Cookie": "session=forbidden" }, { Location: "https://elsewhere.example.test" }])("rejects a credentialed capability response with redirect or cookie headers", async headers => {
+    const responseHeaders = new Headers({ "Content-Type": "application/json", "Cache-Control": "no-store", "X-Request-ID": "11111111-1111-4111-8111-111111111111" });
+    for (const [name, value] of Object.entries(headers)) if (typeof value === "string") responseHeaders.set(name, value);
+    const send = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(metadata(ids.first)), { headers: responseHeaders }));
+    await expect(probeConfiguredProjectAlphaApiV2Connection(environment({ [first]: entry(first, ids.first, "https://source-a.example.test", true) }), first, [], send))
+      .resolves.toMatchObject({ status: "incompatible", reason: "invalid_contract" });
+  });
+
   it.each([
     " leading", "trailing ", "internal space", "tab\tinside", "line\nbreak", "carriage\rreturn", "nul\0byte", "delete\u007fbyte", "caf\u00e9",
   ])("rejects header-unsafe API-key values", value => {

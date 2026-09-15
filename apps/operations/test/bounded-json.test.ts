@@ -30,4 +30,10 @@ describe("bounded JSON mutation bodies", () => {
       headers: { "Content-Type": "application/json" }, body: "{" });
     await expect(readBoundedJson(request, 1024)).rejects.toMatchObject({ status: 400 });
   });
+
+  it("rejects duplicate members, including escaped aliases", async () => {
+    const request = new Request("https://ops.test/mutation", { method: "POST",
+      headers: { "Content-Type": "application/json" }, body: String.raw`{"value":"first","\u0076alue":"shadow"}` });
+    await expect(readBoundedJson(request, 1024)).rejects.toMatchObject({ status: 400 });
+  });
 });
