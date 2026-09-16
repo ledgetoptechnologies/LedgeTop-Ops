@@ -1,6 +1,304 @@
 # API-first migration — current implementation objective and work register
 
-Updated September 15, 2026. The owner approved implementation and resumption after confirming the [decision record](api-first-decisions-2026-09-10.md). This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+Updated September 15, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+
+### September 15, 2026 PA review-branch readiness checkpoint — combined directory CI
+
+- The combined local PA review branch `codex/api-first-directory-ci` is at
+  `e353e0ad` (its base includes `b13cb259`). The reviewed fixes are `0b727a39`
+  (directory MySQL CI), `bd6de7f5` (MySQL 8.4 reserved alias), `f88608a7`
+  (CRLF test portability), and `e353e0ad` (DNS-label runner fix).
+- Evidence is **102 migration files valid**, a fresh MySQL 8.4 baseline plus
+  migrations `0001`–`0102`, changed-file PHP lint **135/135**, and a focused
+  run of **24 files / 195 tests / 2,292 assertions**. Real-runner coverage is
+  **project 9/67, client 2/18, directory 4/37, organization 9/63**, with zero
+  leftovers. The audit found no code-security blocker.
+- This branch is ready only for PA review-branch publication and repository CI;
+  it is not ready for production cutover. The branch remains unpushed and all
+  related flags remain false. Per-instance backfill, attestation, scoped-key,
+  public-link, rollback, and legacy-retirement evidence, plus owner deployment,
+  remain outstanding. No secrets are included.
+- The Operations branch remains local at `fce6c9c`, with **6 files / 33 tests**.
+  No push, deployment, migration, route mount, flag enablement or cutover is
+  claimed by this checkpoint.
+
+### September 15 authoritative checkpoint — Operations PR62 and release boundaries
+
+- Operations PR62 merged to `main` at `a58a406`. The merge is source history,
+  not approval to publish a potentially public Operations route or capability.
+  A specific owner approval is still required before any Operations publication
+  that could expose public data or a public endpoint.
+- PA candidate `33eae4b0` remains unpublished and undeployed. Current tracking
+  estimates are approximately **85% source alignment**, **20% production
+  readiness** and **25% joined end-to-end evidence**; these percentages are
+  planning estimates, not release or live-acceptance evidence. PA publication,
+  deployment to both instances, sign-in and production readiness remain
+  unproven.
+- The PA/Ops directory-create capability mismatch is fixed locally in
+  `a65d765`, but publication approval is pending. The fix has not been
+  published, deployed or used to authorize a runtime cutover.
+- Dormant private read-evidence recovery is fixed locally in `43e9ab9` using
+  forward-only migration `0121`. Focused recovery evidence is **32/32**;
+  migration/read evidence is **15/15**; source invariants are **14/14**; and
+  TypeScript passes. Full-suite, CI and publication evidence remain pending.
+  Migration `0120` is immutable and must not be rewritten or backfilled.
+- These local fixes remain dormant: no runtime mount, canonical mapping or
+  public-ID/link mutation occurred, and existing public links are preserved.
+  No production migration, deployment, publication or authority cutover is
+  claimed by this checkpoint.
+
+#### Remaining risks and next gates
+
+- Obtain the specific owner approval for potentially public Operations
+  publication, then review the exact candidate and complete full-suite, CI and
+  release checks before publishing anything. PR62’s merge alone does not
+  satisfy that gate.
+- Keep PA `33eae4b0`, directory-create fix `a65d765` and recovery fix
+  `43e9ab9` at the owner-review boundary until publication is authorized.
+  After approval, publish and deploy both PA instances, verify sign-in and
+  configuration, and record migration, backup/restore, staging and live
+  acceptance evidence before considering production readiness.
+- Preserve the forward-only `0121` path and immutable `0120`; do not apply a
+  remote migration, mount a route, or change canonical mappings/public links
+  as a substitute for the governed release sequence.
+- Complete joined PA/Ops directory-create and private-read recovery acceptance,
+  including stale/uncertain/replay behavior and public-link preservation. Keep
+  the legacy integration and all replacement paths dormant until those gates,
+  CI and coordinated deployment evidence pass.
+
+### September 15, 2026 PA cutover audit checkpoint — candidate `33eae4b`
+
+- Generic PA directory and Project APIs exist, and directory externally-managed
+  mode exists, but the related flags remain default-off. Projects intentionally
+  remain dual-editor: the owner requires edits in either PA or Operations, with
+  one-to-one synchronization and explicit conflict handling. No Project
+  ownership lock is desired.
+- Per-instance staging/LTT/LTDS non-secret cutover manifests and their evidence
+  are missing. Legacy custom-integration retirement criteria and its kill-switch
+  are not complete. Public-link compatibility is present at code level but is
+  not deployment-verified. The PA migration README also contains documented
+  drift stating that lifecycle and relations are unimplemented; reconcile that
+  documentation against the candidate before treating the APIs as ready.
+
+#### Next safe actions
+
+- Keep PA unpublished, undeployed and default-off pending explicit owner
+  approval; after approval, deploy and sign in to both instances before any
+  authority cutover.
+- Reconcile the README and candidate route/flag inventory, then produce a
+  per-instance non-secret cutover manifest and LTT/LTDS staging evidence for
+  synchronization, conflicts, rollback and preserved public links.
+- Define and test legacy-retirement gates and a reversible kill-switch, and
+  verify public-link compatibility on both deployed instances. Do not add a
+  Project ownership lock or retire the legacy integration until joined evidence
+  and owner acceptance are complete.
+
+### September 15 approved design checkpoint — forward-only canonical activation
+
+This is an approved design, not an implementation or release claim. The next
+increment is additive Operations migration `0122` plus an unmounted adapter.
+It must preserve the legacy `0063` adoption and `0086` native-shared-project
+branches and their immutable history; it must not rewrite or reinterpret those
+rows.
+
+- Before any PA POST, reserve one intent with its canonical request
+  fingerprint and a pending event. The reservation is the retry identity and
+  must exist before network dispatch; a missing, changed or duplicate
+  fingerprint fails closed. The supported command semantics are create, bind
+  and update only. This design has no refresh operation.
+- After dispatch, activation requires fresh live PA proof for the exact
+  source, instance, application, resource, revision and owner/history fence,
+  even when a stored response or settlement appears successful. A cached
+  response, old receipt or overdue state cannot authorize activation.
+  `overdue_warning` is an explicit pending/age signal for operator recovery,
+  never an authority grant.
+- Once fresh proof passes, one immutable activation-receipt insert is the
+  authority for a single D1 transaction that advances the canonical mapping,
+  head/history and outbox together. PA and D1 are not treated as one atomic
+  transaction: an uncertain cross-system outcome is recovered by the same
+  intent/fingerprint and a fresh proof, never by guessing.
+- A crash before PA dispatch leaves the intent pending. A crash after dispatch
+  but before acknowledgement leaves an uncertain intent that retries the same
+  command and body. Stale revision/epoch, changed owner, revoked authority,
+  PA denial or unavailable proof leaves canonical state untouched and pauses or
+  rejects the intent. No duplicate receipt, head, history or outbox mutation
+  is permitted.
+- Mounting the adapter and applying `0122` require owner approval for both PA
+  instances, a disposable MySQL/D1 migration and recovery rehearsal, and
+  fresh live proof from each instance. The release packet must also prove
+  dark-create behavior, preserved legacy/public links, no public-link rewrite,
+  and rollback/fix-forward handling before any route, flag or scheduler is
+  enabled.
+
+No `0122` migration or adapter is implemented by this checkpoint. No runtime
+mount, canonical mutation, remote migration, deployment or publication is
+claimed.
+
+### September 15 implementation evidence — local Operations commit `e1190f2`
+
+Local Operations commit `e1190f2c762a9b991af244f64cda81edacdcea55` implements
+the forward-only `0122` migration and the unmounted canonical-activation
+adapter. The supported command set is create, update and bind only; refresh is
+not supported. The adapter reserves the canonical fingerprint, intent and
+pending event before the PA POST. Activation then rechecks live authority,
+the project head, canonical mapping, outbox state and directory mappings before
+atomically advancing mapping, head, history and outbox state with one immutable
+activation receipt. `overdue_warning` is included in the activated project
+projection. Existing Delivery behavior and public-link bytes are untouched.
+
+The focused five-file evidence is **31/31**; the activation-specific suite is
+**13/13**; an isolated strict TypeScript pass completed; and independent review
+found no blocker. The full package TypeScript check is non-actionable because
+of stale parent-junction dependencies, not because of this change. The
+worktree is clean and the commit remains local only: no runtime mount, push,
+deployment or publication occurred.
+
+Remaining gates are CI and publication approval, a populated D1 migration and
+recovery rehearsal, a per-instance PA cutover manifest and deployment, live
+public-link proof, and coordinated owner acceptance.
+
+Composition note: verified directory-capability fix `a65d765` was cherry-picked
+after `e1190f2` into the local activation branch as `fce6c9c`. The combined
+focused regression passed **6 files / 33 tests**. No push or deployment occurred;
+the source and dependency tree are clean after restoration.
+
+### September 15 — API-first transport and ownership checkpoint
+
+- Operations PR57 merged to `main` at `e8bbfab`. Its dormant Project Alpha
+  read/binding-status transport passed the exact ten PR-head pre-merge checks
+  and the exact ten post-merge checks (all green). Operations PR58 then merged
+  at `ad58c22`; its dormant lifecycle, relationship, revoke and inventory
+  transport passed independent QA and the full suite, plus the exact ten
+  pre-merge and ten post-merge checks (all green). These are transport
+  additions only; they do not authorize a route, flag, key or migration.
+- Project Alpha (PA) remains generic/open source and local/unpushed. Local
+  commit `0579187f` supplies the external-management framework, which cannot
+  be activated until its replacement routes exist. `d5a7cef` supplies the
+  lifecycle, relationship and inventory surface with no hard-delete behavior,
+  supported by full-suite and MySQL evidence. `a1db652` supplies the project
+  lifecycle/read foundation, including derived overdue state and a
+  destructive-delete retention guard, with full-suite and MySQL evidence.
+  Project create/update, binding, inventory and generation work remain
+  explicitly outstanding; the PA owner deployment/sign-in gate remains in
+  force. Independent QA also found that restore can revive preserved
+  `portal_publish_enabled`/public-token state; a narrow follow-up fix is in
+  progress, so `a1db652` is not release-ready.
+- The workforce/time audit confirms the staged ownership split: Operations
+  owns time capture and work review, while PA owns financial processing. Stage
+  the native operational ledger/review independently; employee attestation is
+  not independent approval, and approval is not invoicing or payment. Existing
+  legacy integration remains in service until its reviewed replacement is
+  ready.
+- Thumbnail work is explicitly deferred: the current thumbnail path is
+  functional and is not on the active API-first migration path. Existing
+  production/public links and legacy integration remain protected. No live or
+  staging deployment, cutover, or acceptance is claimed by this checkpoint.
+
+### September 15 follow-up — PA archive/restore publication remediation
+
+- PA local commit `b2ad3f83` (parent `a1db652`) closes the previously recorded
+  restore-exposure blocker. Archive transactionally clears public and portal
+  publication, stops pending managed deliveries and queues accepted revoke
+  intents; restore stays dark. Migration `0101` and its backfill harden
+  existing rows. The implementation focused run passed **60 tests / 868
+  assertions**, the full suite passed **915 tests / 7,407 assertions / 94
+  skipped**, and disposable MySQL passed **4 tests / 28 assertions**.
+- Independent QA passed the remediation: lint plus **51 focused tests / 815
+  assertions** verified transactional public/portal disable, managed-delivery
+  stop/revoke, dark restore, and explicit CSRF/ownership-gated republish.
+  This closes the `a1db652` blocker; the PA change remains local and unpushed,
+  with no staging or production deployment, public-link change, or cutover
+  acceptance claimed.
+
+### September 15 final local checkpoint — PA project synchronization candidate
+
+- PA's local, unpushed project-sync chain begins with `9028ea0`, adding
+  create/update, permanent binding, status, inventory and revision-refresh
+  surfaces. QA found portal-outbox and attestation gaps. `27a7088` fixes the
+  zero-portal-projection/outbox case while preserving the internal schedule,
+  fresh source versions and no-op behavior, fail-closed schema/current-receipt
+  checks, checksum portability and an explicit CI MySQL gate. `11e0654` then
+  closes exact PK, unique, supporting-index and FK attestation. Independent
+  final QA passed.
+- Exact evidence is: full **919 tests / 7,462 assertions / 94 skipped**;
+  focused **15 tests / 118 assertions**; disposable MySQL **9 tests / 67
+  assertions**; and the QA workflow **10 tests / 68 assertions** plus MySQL
+  **9 tests / 67 assertions**. This coherent candidate has reached the PA
+  owner gate, not release: no push, deploy, staging or live acceptance has
+  occurred. The owner must authorize PA publication, deploy both instances,
+  and sign in before any authority cutover.
+- This Operations documentation branch also remains local: pushing internal
+  architecture documentation was denied pending explicit user approval.
+
+### September 15 PA release-readiness audit
+
+- PA branch `codex/api-first-portal-binding-status` is at HEAD
+  `33eae4b0`, 32 commits ahead of its PA `origin/main` base `51e333fb`.
+  It is publishable as a review PR only after owner authorization; it is not
+  safe to deploy or cut over now. Fresh evidence is the full suite **919 tests
+  / 7,462 assertions / 94 skipped**, focused SecurityHardening **19 tests /
+  386 assertions / 3 skipped**, passing `php -l` for the scoped files and
+  `git diff --check`. Reviewed fixes include lifecycle body wording and the
+  legacy broad-scope label.
+- Release blockers remain: there is no remote PR CI; automatic migrations
+  `0088`–`0102` include material `0095`/`0100`/`0101` changes and have no down
+  migration; external backup-and-restore rehearsal, staging, backfill,
+  attestation, false flags, and configuration reconciliation are outstanding.
+  Ops migration `0119` is unapplied and its adapters remain dormant. Broader
+  M05/M06/M07/M08 requirements are incomplete. The legacy custom integration
+  is intentionally retained until joined acceptance is complete.
+
+### September 15 follow-up — dormant Operations project transport and persistence
+
+- Operations PR59 merged to `main` at `5286460`. It adds the unmounted,
+  default-off consumer transport for PA project read/create/update, explicit
+  one-to-one bind, binding status, bounded inventory, lifecycle and
+  binding-revision refresh. Canonical command ordering and trusted 404 response
+  fencing were independently reviewed; all ten PR-head and all ten post-merge
+  checks passed.
+- Operations PR60 merged to `main` at `e89364e`. Additive migration 0119 now
+  supplies native-only immutable request fingerprints, append-only
+  pending/uncertain/conflict/rejected/acknowledged events, transport-validated
+  acknowledgement provenance, and exact create/bind/update success receipts.
+  It revalidates live authority and fences command, source, application,
+  history epoch, destination origin, public ID, revision, projection hash and
+  authorization generation. SQLite null-bypass, mutable-evidence,
+  destination-provenance and update-contract gaps found during review were
+  fixed before publication.
+- Final local evidence for PR60 was TypeScript, production build, **21/21**
+  focused transport/D1/populated migration-chain tests and an independent
+  no-findings review. All ten PR-head CI jobs and all ten jobs in post-merge
+  main run `35015527961` passed.
+- Operations PR61 merged to `main` at `e85f0dc7bf3dcf520584a5e328c634a882aceda4`.
+  Its PR-head CI run `35022737853` passed all ten jobs. The private adapter
+  remains unmounted and dormant: it retains exact canonical request-byte and
+  raw-response-byte hashes, privately brands rehydrated evidence, reserves
+  before dispatch, rechecks authority and destination after reservation, and
+  settles the acknowledged event, validated acknowledgement and receipt
+  atomically. Refresh remains unsupported. No mapping, shared-project,
+  Delivery, or public-link behavior changed. Post-merge main run
+  `35024108141` completed successfully with all ten jobs passed.
+- These changes remain dormant. No production router, scheduled task,
+  persistence adapter, mapping reader, public-link resolver, legacy integration
+  path or thumbnail path imports them. Migration 0119 has not been applied to
+  remote D1 by this work. The next slice is the private adapter that atomically
+  converts only transport-minted evidence into ledger events/receipts, followed
+  by reviewed canonical shared-project settlement. Historical rows remain
+  collision/provenance evidence and never imply current authority.
+- The older M05 joined HTTP/MySQL evidence predates PR59/PR60 and does not prove
+  this new project transport or persistence path end to end. Runtime settlement,
+  real PA/MySQL integration and both-instance acceptance remain open gates.
+- Before implementing that adapter, extend the transport's private provenance
+  to retain the exact canonical request-byte hash and exact bounded response-byte
+  hash, and privately brand the rehydrated evidence so structural clones cannot
+  settle D1 state. Reserve the request before network dispatch; then write the
+  acknowledged event, validated acknowledgement and receipt in one D1 batch.
+  Refresh remains outside migration 0119. Lost-response retries must reuse the
+  same command ID/body/destination, and an exact existing receipt is the only
+  replay success. This adapter remains unmounted until its rollback, concurrency,
+  stale-authority and byte-for-byte no-public-link-mutation tests pass.
+- Thumbnail optimization remains explicitly deferred at the owner's request;
+  the currently functional thumbnail path is outside this migration slice.
 
 September 15 migration-safety checkpoint: Operations PR 54 restored the exact
 0054–0118 migration chain and strengthened the staging release gate to require
@@ -545,8 +843,8 @@ acceptance requirements.
   explicit native project scopes/grants and captured current staff authority.
   Existing client/org grants cannot be treated as project rights. No automatic
   grants, inferred historical authority, or portal publication are permitted.
-  See [project synchronization](project-synchronization-contract.md) for the
-  required joined tests. Implementation and independent review remain in progress.
+  The required joined project-synchronization tests are recorded in this work
+  register. Implementation and independent review remain in progress.
 - No production migration, PA release, Ops deployment or authority cutover is
   established by these local results. Public-link compatibility, release flag
   reconciliation, both-instance acceptance and the full remaining register stay
@@ -1181,7 +1479,7 @@ broader client navigation, service journeys and live acceptance remain open.
 
 ### M01: immediate Incoming rollout
 
-- Completed evidence: PR47 merged into `main` at `6752ee2cf8f69bdb8221f7b02a6a68962eb3f28d`; exact PR-head pre-merge CI and post-merge run 34537003386 both passed all ten checks. Fresh focused local Incoming tests passed 39/39 across four files. See the [decision record](api-first-decisions-2026-09-10.md) for dated limits.
+- Completed evidence: PR47 merged into `main` at `6752ee2cf8f69bdb8221f7b02a6a68962eb3f28d`; exact PR-head pre-merge CI and post-merge run 34537003386 both passed all ten checks. Fresh focused local Incoming tests passed 39/39 across four files. Dated limits remain recorded in this work register.
 - Current owner-confirmed state: TrueNAS selects `ready/` and its hourly PULL/MOVE task is resumed. Preserve the current destination; no extra server scanner/agent. Earlier paused-task instructions were superseded by this confirmation.
 - Verify Cloudflare's deployed revision before claiming a release is live. Initial publication was default-off; the active checkpoint below now records the approved PR48 activation and exact deployed bindings.
 - Confirm private staging and exclusive ready publishing, the unchanged retention policy, migration state and the original pending-upload object identity. Never label an absent object "downloaded" without independent evidence.
@@ -2385,8 +2683,7 @@ broader client navigation, service journeys and live acceptance remain open.
   Runner cleanup and parent filtered Docker readback confirmed no test container
   remains. This uses migrations 0090–0093 over a partial domain fixture, not a
   full-baseline migration or completed two-way synchronization rehearsal.
-- Remaining project integration is specified in
-  [project-synchronization-contract.md](project-synchronization-contract.md):
+- Remaining project integration is specified below in this work register:
   PA-local writer composition, canonical Ops project
   maps/outbox/inbox, generic reads/feed, conflict-aware consumption and UI.
 - Atomic project event provenance implemented locally with migration 0095,
@@ -4821,7 +5118,7 @@ pending; this requirement does not claim a deployed UI change.
   validated-acknowledgement evidence. Focused Ops Vitest passes **8 tests**
   and TypeScript `--noEmit` passes. This is transport only: it sends nothing
   until called, persists no D1 refresh ledger, and changes no mapping or link.
-  A dormant, untracked Ops migration 0118 now adds append-only refresh
+  Tracked Ops migration 0118 adds append-only refresh
   commands, transitions, and exact success receipts. It pins the acquired
   native-owner claim, local version, source/application/history identity,
   external and PA public IDs, revisions, generation and request hash. A unique

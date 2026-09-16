@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { privateProjectAlphaProjectSettlementEvidence, sendConfiguredProjectAlphaProjectCreateCommand, sendProjectAlphaProjectCreateCommand, sendProjectAlphaProjectUpdateCommand, sendProjectAlphaProjectBindingCommand, sendProjectAlphaProjectRefreshCommand, validatedProjectAlphaProjectAcknowledgement, type ProjectAlphaProjectCreateCommand, type ProjectAlphaProjectOutcome, type ProjectAlphaProjectUpdateCommand, type ProjectAlphaProjectBindCommand, type ProjectAlphaProjectRefreshCommand } from "../src/worker/project-alpha-project-api-v2";
-import { readProjectAlphaProject } from "../src/worker/project-alpha-project-read-api-v2";
+import { privateProjectAlphaProjectReadEvidence, readProjectAlphaProject, validatedProjectAlphaProjectRead } from "../src/worker/project-alpha-project-read-api-v2";
 import { readProjectAlphaProjectInventory } from "../src/worker/project-alpha-project-inventory-api-v2";
 import { readProjectAlphaProjectBindingStatus } from "../src/worker/project-alpha-project-binding-status-api-v2";
 import { sendProjectAlphaProjectLifecycleCommand } from "../src/worker/project-alpha-project-lifecycle-api-v2";
@@ -10,7 +10,7 @@ const source = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", application = "bbbbbbbb-b
 const connection = { baseUrl: "https://alpha.example.test", apiKey: "test-secret", expectedSourceInstanceId: source, expectedApplicationId: application, expectedHistoryEpoch: epoch };
 const create: ProjectAlphaProjectCreateCommand = { commandId: request, externalId: "ops/project-1", expectedAuthorizationGeneration: "0", project: { name: "Survey", description: "", estimatedStart: "1000-01-01", estimatedEnd: "9999-12-31" }, organization: { externalId: "ops/org-1", expectedPublicId: org, expectedRevision: "1", expectedProjectionSha256: "a".repeat(64) }, client: null };
 function metadata(route: Record<string, unknown>, capabilities = ["api.capabilities.read", route.requiredCapability as string]) { return { apiVersion: "2", sourceInstanceId: source, applicationId: application, historyEpoch: epoch, requestId: request, grantedCapabilities: capabilities.map(name => ({ name })), implementedEndpoints: [{ method: "GET", path: "/api/v2/capabilities", requiredCapability: "api.capabilities.read" }, route] }; }
-function json(value: unknown, status = 200, headers: Record<string, string> = {}) { return new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", "X-Request-ID": request, ...headers } }); }
+function json(value: unknown, status = 200, headers: Record<string, string> = {}, raw?: string) { return new Response(raw ?? JSON.stringify(value), { status, headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", "X-Request-ID": request, ...headers } }); }
 function syncReceipt() { return { apiVersion: "2", sourceInstanceId: source, applicationId: application, historyEpoch: epoch, requestId: request, replayed: false, result: { resource: { type: "project", id: create.externalId, publicId: project, revision: "1", projectionSha256: "a".repeat(64) }, authorizationGeneration: "1", presentation: { portalPublished: false, publicLinkEnabled: false } } }; }
 const sha256 = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
 
@@ -86,6 +86,18 @@ describe("dormant PA project v2 transport", () => {
     const invRoute = { method: "GET", path: "/api/v2/projects/inventory", requiredCapability: "projects.inventory.read", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true };
     const invSend = vi.fn<typeof fetch>(async url => String(url).endsWith("capabilities") ? json(metadata(invRoute)) : json({ apiVersion: "2", sourceInstanceId: source, applicationId: application, historyEpoch: epoch, requestId: request, authorizationGeneration: "1", projects: [], nextCursor: null }));
     await expect(readProjectAlphaProjectInventory(connection, { limit: 1 }, invSend)).resolves.toMatchObject({ status: "observed", response: { projects: [], nextCursor: null } });
+  });
+  it("mints non-forgeable project-read evidence from exact raw response bytes", async () => {
+    const readRoute = { method: "GET", path: "/api/v2/projects/{publicId}", requiredCapability: "projects.v2.read", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true };
+    const readBody = { apiVersion: "2", sourceInstanceId: source, applicationId: application, historyEpoch: epoch, requestId: request, replayed: false, accepted: true, resource: { type: "project", id: project, revision: "1", projectionSha256: "a".repeat(64) }, data: { name: "Survey", description: null, status: "active", archived: false, overdueWarning: false, completedAt: null, archivedAt: null, estimatedStart: null, estimatedEnd: null, clientPublicId: null, organizationPublicId: org } };
+    const raw = `\n${JSON.stringify(readBody, null, 2)}\n`;
+    const send = vi.fn<typeof fetch>(async url => String(url).endsWith("capabilities") ? json(metadata(readRoute)) : json(readBody, 200, {}, raw));
+    const outcome = await readProjectAlphaProject(connection, project, send), evidence = validatedProjectAlphaProjectRead(outcome);
+    expect(evidence).toMatchObject({ requestedPublicId: project, response: readBody, responseJson: raw,
+      destinationOrigin: connection.baseUrl, responseSha256: sha256(raw) });
+    expect(privateProjectAlphaProjectReadEvidence(evidence)).toBe(evidence);
+    expect(privateProjectAlphaProjectReadEvidence(JSON.parse(JSON.stringify(evidence)))).toBeNull();
+    expect(validatedProjectAlphaProjectRead({ status: "read", httpStatus: 200, response: readBody } as never)).toBeNull();
   });
   it("uses separate lifecycle capability and exact reversible body", async () => {
     const route = { method: "POST", path: `/api/v2/projects/${project}/archive/commands`, requiredCapability: "projects.lifecycle.archive", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true };

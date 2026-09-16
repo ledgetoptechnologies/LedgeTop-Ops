@@ -32,13 +32,18 @@ function sender(value: ProjectAlphaProjectCreateCommand, onPost?: () => Promise<
 beforeAll(async () => { runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06", script: "export default {fetch(){return new Response('ok')}}", d1Databases: ["OPS_DB"] }); db = await runtime.getD1Database("OPS_DB") as D1Database;
   await migrate("0062_project_alpha_project_outbox.sql"); await migrate("0063_project_alpha_project_adoption.sql"); await migrate("0064_project_alpha_project_history_epoch.sql");
   await db.exec("CREATE TABLE native_staff_admissions(staff_id TEXT PRIMARY KEY,active INTEGER,bound_access_subject TEXT,version INTEGER); CREATE TABLE native_staff_profiles(staff_id TEXT PRIMARY KEY,login_email TEXT,version INTEGER); CREATE TABLE native_business_areas(id TEXT PRIMARY KEY,active INTEGER); CREATE TABLE native_business_divisions(id TEXT PRIMARY KEY,business_area_id TEXT,active INTEGER,UNIQUE(business_area_id,id)); CREATE TABLE operations_directory_records(record_id TEXT PRIMARY KEY,record_kind TEXT); CREATE TABLE project_alpha_directory_mappings(source_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,resource_type TEXT,external_id TEXT,project_alpha_public_id TEXT); CREATE TABLE operations_directory_client_organizations(client_record_id TEXT,organization_record_id TEXT);");
-  await migrate("0086_native_shared_projects.sql"); await db.exec("CREATE TABLE delivery_public_shares(id TEXT PRIMARY KEY,project_id TEXT,url TEXT); INSERT INTO operations_shared_projects(external_project_id,name,lifecycle,scopes_json) VALUES('legacy-shared','Legacy','active','[]'); INSERT INTO delivery_public_shares VALUES('legacy-share','legacy-shared','https://public.example.test/secret');"); await migrate("0119_project_alpha_project_v2_persistence_ledger.sql");
+  await migrate("0086_native_shared_projects.sql"); await db.exec("CREATE TABLE delivery_public_shares(id TEXT PRIMARY KEY,project_id TEXT,url TEXT); INSERT INTO operations_shared_projects(external_project_id,name,lifecycle,scopes_json) VALUES('legacy-shared','Legacy','active','[]'); INSERT INTO delivery_public_shares VALUES('legacy-share','legacy-shared','https://public.example.test/secret');"); await migrate("0119_project_alpha_project_v2_persistence_ledger.sql"); await migrate("0120_project_alpha_project_v2_canonical_settlement.sql"); await migrate("0121_project_alpha_project_v2_settlement_proof_expiry.sql"); await migrate("0122_project_alpha_project_v2_canonical_activation.sql");
 });
 afterAll(async () => runtime.dispose());
 
 describe("dormant project v2 settlement adapter", () => {
-  it("reserves exact request bytes before dispatch and atomically persists bounded transport provenance without legacy mutations", async () => { const value = command(); await native(value); const legacyBefore = await Promise.all([db.prepare("SELECT * FROM project_alpha_project_mappings").all(), db.prepare("SELECT * FROM operations_shared_projects WHERE external_project_id='legacy-shared'").all(), db.prepare("SELECT * FROM delivery_public_shares WHERE id='legacy-share'").all()]); let pendingAtPost = false; const send = sender(value, async () => { pendingAtPost = !!await db.prepare("SELECT 1 FROM project_alpha_project_v2_events WHERE command_id=? AND state='pending'").bind(value.commandId).first(); });
-    await expect(settleProjectAlphaProjectV2Command({ OPS_DB: db }, "create", connection, value, send)).resolves.toMatchObject({ status: "acknowledged", replayed: false }); expect(pendingAtPost).toBe(true);
+  it("reserves exact request bytes, canonical intent, and pending event atomically before dispatch", async () => { const value = command(); await native(value); const legacyBefore = await Promise.all([db.prepare("SELECT * FROM project_alpha_project_mappings").all(), db.prepare("SELECT * FROM operations_shared_projects WHERE external_project_id='legacy-shared'").all(), db.prepare("SELECT * FROM delivery_public_shares WHERE id='legacy-share'").all()]); let reservationAtPost: unknown = null; const send = sender(value, async () => { reservationAtPost = await db.prepare(`SELECT fingerprint.request_sha256,intent.operation,event.state
+      FROM project_alpha_project_v2_request_fingerprints fingerprint
+      JOIN project_alpha_project_v2_canonical_intents intent ON intent.command_id=fingerprint.command_id
+      JOIN project_alpha_project_v2_events event ON event.command_id=fingerprint.command_id AND event.state_version=1
+      WHERE fingerprint.command_id=?`).bind(value.commandId).first(); });
+    await expect(settleProjectAlphaProjectV2Command({ OPS_DB: db }, "create", connection, value, send)).resolves.toMatchObject({ status: "acknowledged", replayed: false }); expect(reservationAtPost).toMatchObject({ operation: "create", state: "pending" });
+    expect(await db.prepare("SELECT operation FROM project_alpha_project_v2_canonical_intents WHERE command_id=?").bind(value.commandId).first("operation")).toBe("create");
     const stored = await db.prepare("SELECT request_sha256,response_sha256,destination_origin,pa_request_id FROM project_alpha_project_v2_validated_acknowledgements WHERE command_id=?").bind(value.commandId).first<{request_sha256:string;response_sha256:string;destination_origin:string;pa_request_id:string}>();
     expect(stored).toMatchObject({ destination_origin: connection.baseUrl, pa_request_id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee" }); expect(stored!.request_sha256).toBe(createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex")); expect(stored!.response_sha256).toBe(createHash("sha256").update(JSON.stringify(acknowledgement(value)), "utf8").digest("hex"));
     expect(await db.prepare("SELECT COUNT(*) total FROM project_alpha_project_v2_success_receipts WHERE command_id=?").bind(value.commandId).first<number>("total")).toBe(1); const legacyAfter = await Promise.all([db.prepare("SELECT * FROM project_alpha_project_mappings").all(), db.prepare("SELECT * FROM operations_shared_projects WHERE external_project_id='legacy-shared'").all(), db.prepare("SELECT * FROM delivery_public_shares WHERE id='legacy-share'").all()]); expect(legacyAfter.map(result => result.results)).toEqual(legacyBefore.map(result => result.results));
@@ -49,8 +54,8 @@ describe("dormant project v2 settlement adapter", () => {
     expect(await db.prepare("SELECT COUNT(*) total FROM project_alpha_project_v2_request_fingerprints WHERE command_id=?").bind(value.commandId).first<number>("total")).toBe(0);
   });
   it("rechecks live native authority after reservation and before any network request", async () => { const value = command(); const staff = await native(value); const send = vi.fn<typeof fetch>();
-    const trigger = `CREATE TRIGGER settlement_test_authority_drift AFTER INSERT ON project_alpha_project_v2_request_fingerprints
-      WHEN NEW.command_id='${value.commandId}' BEGIN
+    const trigger = `CREATE TRIGGER settlement_test_authority_drift AFTER INSERT ON project_alpha_project_v2_events
+      WHEN NEW.command_id='${value.commandId}' AND NEW.state_version=1 BEGIN
         UPDATE native_staff_admissions SET active=0 WHERE staff_id='${staff}';
       END;`;
     await db.batch(splitD1MigrationStatements(trigger).map(sql => db.prepare(sql)));
@@ -58,6 +63,7 @@ describe("dormant project v2 settlement adapter", () => {
       await expect(settleProjectAlphaProjectV2Command({ OPS_DB: db }, "create", connection, value, send)).resolves.toEqual({ status: "blocked", reason: "authority" });
       expect(send).not.toHaveBeenCalled();
       expect(await db.prepare("SELECT state FROM project_alpha_project_v2_events WHERE command_id=? ORDER BY state_version").bind(value.commandId).all()).toMatchObject({ results: [{ state: "pending" }, { state: "rejected" }] });
+      expect(await db.prepare("SELECT count(*) n FROM project_alpha_project_v2_canonical_intents WHERE command_id=?").bind(value.commandId).first("n")).toBe(1);
     } finally {
       await db.exec("DROP TRIGGER settlement_test_authority_drift");
     }
