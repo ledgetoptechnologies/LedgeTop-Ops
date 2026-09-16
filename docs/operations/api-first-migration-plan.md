@@ -2,6 +2,26 @@
 
 Updated September 15, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
 
+### September 15, 2026 PA review-branch readiness checkpoint — combined directory CI
+
+- The combined local PA review branch `codex/api-first-directory-ci` is at
+  `e353e0ad` (its base includes `b13cb259`). The reviewed fixes are `0b727a39`
+  (directory MySQL CI), `bd6de7f5` (MySQL 8.4 reserved alias), `f88608a7`
+  (CRLF test portability), and `e353e0ad` (DNS-label runner fix).
+- Evidence is **102 migration files valid**, a fresh MySQL 8.4 baseline plus
+  migrations `0001`–`0102`, changed-file PHP lint **135/135**, and a focused
+  run of **24 files / 195 tests / 2,292 assertions**. Real-runner coverage is
+  **project 9/67, client 2/18, directory 4/37, organization 9/63**, with zero
+  leftovers. The audit found no code-security blocker.
+- This branch is ready only for PA review-branch publication and repository CI;
+  it is not ready for production cutover. The branch remains unpushed and all
+  related flags remain false. Per-instance backfill, attestation, scoped-key,
+  public-link, rollback, and legacy-retirement evidence, plus owner deployment,
+  remain outstanding. No secrets are included.
+- The Operations branch remains local at `fce6c9c`, with **6 files / 33 tests**.
+  No push, deployment, migration, route mount, flag enablement or cutover is
+  claimed by this checkpoint.
+
 ### September 15 authoritative checkpoint — Operations PR62 and release boundaries
 
 - Operations PR62 merged to `main` at `a58a406`. The merge is source history,
