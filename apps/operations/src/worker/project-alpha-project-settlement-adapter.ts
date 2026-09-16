@@ -25,16 +25,26 @@ type Outbox = Readonly<{
   external_project_id: string;
   operation: string;
   command_json: string;
+  source_id: string;
   application_id: string;
   destination_base_url: string;
   expected_source_instance_id: string;
   expected_history_epoch_id: string;
+  grant_generation: number;
 }>;
+type Head = Readonly<{ current_version: number; canonical_projection_sha256: string | null;
+  source_id: string | null; source_instance_id: string | null; application_id: string | null;
+  history_epoch_id: string | null; project_alpha_public_id: string | null }>;
+type Mapping = Readonly<{ source_id: string; source_instance_id: string; application_id: string;
+  history_epoch_id: string; project_alpha_public_id: string }>;
+type Reservation = Readonly<{ outbox: Outbox; expectedLocalVersion: number;
+  expectedLocalProjectionSha256: string | null; expectedMappingState: "absent" | "exact";
+  expectedProjectAlphaPublicId: string | null }>;
 type Prior = Readonly<{ request_sha256: string; state: string | null; receipt_id: string | null }>;
 export type ProjectAlphaProjectSettlementOutcome =
   | Readonly<{ status: "acknowledged"; receiptId: string; replayed: boolean }>
   | Readonly<{ status: "rejected"; reason: "invalid_command" | "refresh_not_supported" }>
-  | Readonly<{ status: "blocked"; reason: "authority" | "destination" | "in_progress" | "lost_ack" }>
+  | Readonly<{ status: "blocked"; reason: "authority" | "destination" | "in_progress" | "lost_ack" | "stale" }>
   | Readonly<{ status: "uncertain"; reason: "database" | "evidence" | "prior_uncertain" }>
   | ProjectAlphaProjectFailure;
 
@@ -59,23 +69,52 @@ async function alreadyReserved(db: D1Database, commandId: string, requestSha256:
   if (value.receipt_id) return { status: "acknowledged", receiptId: value.receipt_id, replayed: true };
   return value.state === "acknowledged" ? { status: "blocked", reason: "lost_ack" } : value.state === "uncertain" ? { status: "uncertain", reason: "prior_uncertain" } : { status: "blocked", reason: "in_progress" };
 }
-async function currentOutbox(db: D1Database, type: EligibleOperation, command: ProjectAlphaProjectCommand, body: string, connection: ProjectAlphaApiV2Connection): Promise<"ok" | "authority" | "destination"> {
-  const row = await db.prepare(`SELECT outbox.command_id,outbox.external_project_id,outbox.operation,outbox.command_json,outbox.application_id,outbox.destination_base_url,outbox.expected_source_instance_id,outbox.expected_history_epoch_id
+async function currentOutbox(db: D1Database, type: EligibleOperation, command: ProjectAlphaProjectCommand, body: string, connection: ProjectAlphaApiV2Connection): Promise<Reservation | "authority" | "destination" | "stale"> {
+  const row = await db.prepare(`SELECT outbox.command_id,outbox.external_project_id,outbox.operation,outbox.command_json,outbox.source_id,outbox.application_id,outbox.destination_base_url,outbox.expected_source_instance_id,outbox.expected_history_epoch_id
+      ,proof.grant_generation
     FROM project_alpha_project_outbox outbox
     JOIN native_project_command_reservations reservation ON reservation.command_id=outbox.command_id
     JOIN native_project_live_command_proofs proof ON proof.command_id=outbox.command_id AND proof.external_project_id=outbox.external_project_id
-    WHERE outbox.command_id=?`).bind(command.commandId).first<Outbox>();
+      AND proof.verified_until>strftime('%Y-%m-%dT%H:%M:%fZ','now')
+    WHERE outbox.command_id=? AND outbox.state='pending'`).bind(command.commandId).first<Outbox>();
   if (!row || row.operation !== type || row.external_project_id !== command.externalId || row.command_json !== body) return "authority";
   const configured = origin(connection.baseUrl), reserved = origin(row.destination_base_url);
   if (!configured || !reserved || configured !== reserved) return "destination";
-  return row.application_id === connection.expectedApplicationId
-    && row.expected_source_instance_id === connection.expectedSourceInstanceId
-    && row.expected_history_epoch_id === connection.expectedHistoryEpoch ? "ok" : "authority";
+  if (row.application_id !== connection.expectedApplicationId
+    || row.expected_source_instance_id !== connection.expectedSourceInstanceId
+    || row.expected_history_epoch_id !== connection.expectedHistoryEpoch) return "authority";
+  const [head, mapping] = await Promise.all([
+    db.prepare(`SELECT current_version,canonical_projection_sha256,source_id,source_instance_id,
+        application_id,history_epoch_id,project_alpha_public_id FROM operations_shared_projects
+      WHERE external_project_id=?`).bind(command.externalId).first<Head>(),
+    db.prepare(`SELECT source_id,source_instance_id,application_id,history_epoch_id,project_alpha_public_id
+      FROM project_alpha_project_mappings WHERE external_project_id=?`).bind(command.externalId).first<Mapping>(),
+  ]);
+  if (head && head.canonical_projection_sha256 === null) return "stale";
+  if (type === "update") {
+    if (!head || !mapping || mapping.source_id !== row.source_id
+      || mapping.source_instance_id !== row.expected_source_instance_id || mapping.application_id !== row.application_id
+      || mapping.history_epoch_id !== row.expected_history_epoch_id
+      || !("expectedProjectionSha256" in command) || command.expectedProjectionSha256 !== head.canonical_projection_sha256)
+      return "stale";
+  } else if (mapping || head && (head.source_id !== null || head.source_instance_id !== null
+    || head.application_id !== null || head.history_epoch_id !== null || head.project_alpha_public_id !== null)) return "stale";
+  return { outbox: row, expectedLocalVersion: head?.current_version ?? 0,
+    expectedLocalProjectionSha256: head?.canonical_projection_sha256 ?? null,
+    expectedMappingState: type === "update" ? "exact" : "absent",
+    expectedProjectAlphaPublicId: type === "update" ? mapping!.project_alpha_public_id : null };
 }
 function send(type: EligibleOperation, connection: ProjectAlphaApiV2Connection, command: ProjectAlphaProjectCommand, fetcher: typeof fetch): Promise<ProjectAlphaProjectOutcome> {
   if (type === "create") return sendProjectAlphaProjectCreateCommand(connection, command as never, fetcher);
   if (type === "update") return sendProjectAlphaProjectUpdateCommand(connection, command as never, fetcher);
   return sendProjectAlphaProjectBindingCommand(connection, command as never, fetcher);
+}
+function sameReservation(left: Reservation, right: Reservation): boolean {
+  return left.expectedLocalVersion === right.expectedLocalVersion
+    && left.expectedLocalProjectionSha256 === right.expectedLocalProjectionSha256
+    && left.expectedMappingState === right.expectedMappingState
+    && left.expectedProjectAlphaPublicId === right.expectedProjectAlphaPublicId
+    && left.outbox.grant_generation === right.outbox.grant_generation;
 }
 async function appendFailure(db: D1Database, commandId: string, requestSha256: string, failure: ProjectAlphaProjectFailure): Promise<void> {
   await db.batch([db.prepare(`INSERT INTO project_alpha_project_v2_events(command_id,state_version,transition_id,request_sha256,state)
@@ -104,11 +143,21 @@ export async function settleProjectAlphaProjectV2Command(
 
   const existing = await alreadyReserved(env.OPS_DB, command.commandId, requestSha256);
   if (existing) return existing;
-  const authority = await currentOutbox(env.OPS_DB, type, command, body, connection);
-  if (authority !== "ok") return { status: "blocked", reason: authority };
+  const reservation = await currentOutbox(env.OPS_DB, type, command, body, connection);
+  if (typeof reservation === "string") return { status: "blocked", reason: reservation };
   try {
     await env.OPS_DB.batch([
       env.OPS_DB.prepare("INSERT INTO project_alpha_project_v2_request_fingerprints(command_id,request_sha256) VALUES(?,?)").bind(command.commandId, requestSha256),
+      env.OPS_DB.prepare(`INSERT INTO project_alpha_project_v2_canonical_intents(
+        command_id,request_sha256,operation,external_project_id,expected_local_version,
+        expected_local_projection_sha256,expected_grant_generation,expected_mapping_state,
+        expected_project_alpha_public_id,source_id,source_instance_id,application_id,history_epoch_id)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(command.commandId, requestSha256, type, command.externalId,
+        reservation.expectedLocalVersion, reservation.expectedLocalProjectionSha256,
+        reservation.outbox.grant_generation, reservation.expectedMappingState,
+        reservation.expectedProjectAlphaPublicId, reservation.outbox.source_id,
+        reservation.outbox.expected_source_instance_id, reservation.outbox.application_id,
+        reservation.outbox.expected_history_epoch_id),
       env.OPS_DB.prepare("INSERT INTO project_alpha_project_v2_events(command_id,state_version,transition_id,request_sha256,state) VALUES(?,1,?,?,'pending')").bind(command.commandId, crypto.randomUUID(), requestSha256),
     ]);
   } catch {
@@ -123,10 +172,10 @@ export async function settleProjectAlphaProjectV2Command(
   // completed batch. Recheck the complete outbox fence after winning the
   // reservation and immediately before any Project Alpha network request.
   const reservedAuthority = await currentOutbox(env.OPS_DB, type, command, body, connection);
-  if (reservedAuthority !== "ok") {
+  if (typeof reservedAuthority === "string" || !sameReservation(reservation, reservedAuthority)) {
     try { await appendFailure(env.OPS_DB, command.commandId, requestSha256, { status: "rejected", reason: "invalid_contract" }); }
     catch { return { status: "uncertain", reason: "database" }; }
-    return { status: "blocked", reason: reservedAuthority };
+    return { status: "blocked", reason: typeof reservedAuthority === "string" ? reservedAuthority : "stale" };
   }
 
   const outcome = await send(type, connection, command, fetcher);

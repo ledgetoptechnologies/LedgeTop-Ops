@@ -129,49 +129,6 @@ function exactIntent(value: Intent, source: Receipt): boolean {
     && value.application_id === source.application_id && value.history_epoch_id === source.history_epoch_id
     && value.expected_grant_generation === source.grant_generation;
 }
-async function reserveIntent(db: D1Database, source: Receipt): Promise<Intent | "authority" | "stale" | "database"> {
-  const existing = await intent(db, source.command_id);
-  if (existing) return exactIntent(existing, source) ? existing : "stale";
-  if (source.grant_generation === null) return "authority";
-  const [liveHead, liveMapping] = await Promise.all([head(db, source.external_project_id), mapping(db, source.external_project_id)]);
-  if (liveHead && liveHead.canonical_projection_sha256 === null) return "stale";
-  const expectsMapping = source.operation === "update";
-  if (expectsMapping !== (liveMapping !== null)) return "stale";
-  if (expectsMapping && (!liveMapping || liveMapping.source_id !== source.source_id
-    || liveMapping.source_instance_id !== source.source_instance_id || liveMapping.application_id !== source.application_id
-    || liveMapping.history_epoch_id !== source.history_epoch_id || liveMapping.project_alpha_public_id !== source.project_alpha_public_id)) return "stale";
-  const expectedLocalVersion = liveHead?.current_version ?? 0;
-  const candidate: Intent = {
-    command_id: source.command_id, request_sha256: source.request_sha256, operation: source.operation,
-    external_project_id: source.external_project_id, expected_local_version: expectedLocalVersion,
-    expected_local_projection_sha256: liveHead?.canonical_projection_sha256 ?? null,
-    expected_grant_generation: source.grant_generation, expected_mapping_state: expectsMapping ? "exact" : "absent",
-    expected_project_alpha_public_id: expectsMapping ? source.project_alpha_public_id : null,
-    source_id: source.source_id, source_instance_id: source.source_instance_id,
-    application_id: source.application_id, history_epoch_id: source.history_epoch_id,
-  };
-  try {
-    await db.prepare(`INSERT INTO project_alpha_project_v2_canonical_intents(
-      command_id,request_sha256,operation,external_project_id,expected_local_version,
-      expected_local_projection_sha256,expected_grant_generation,expected_mapping_state,
-      expected_project_alpha_public_id,source_id,source_instance_id,application_id,history_epoch_id)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
-        source.command_id, source.request_sha256, source.operation, source.external_project_id, expectedLocalVersion,
-        liveHead?.canonical_projection_sha256 ?? null, source.grant_generation, expectsMapping ? "exact" : "absent",
-        expectsMapping ? source.project_alpha_public_id : null, source.source_id, source.source_instance_id,
-        source.application_id, source.history_epoch_id,
-      ).run();
-  } catch {
-    const winner = await intent(db, source.command_id).catch(() => null);
-    if (!winner) {
-      const fence = await current(db, candidate).catch(() => "database" as const);
-      return fence === "ok" ? "database" : fence;
-    }
-    return exactIntent(winner, source) ? winner : "stale";
-  }
-  return await intent(db, source.command_id) ?? "database";
-}
-
 /**
  * Resume only after an immutable 0119 success receipt. It never retries the
  * command POST: the only remote work is capability discovery plus the private
@@ -203,10 +160,10 @@ export async function settleProjectAlphaProjectV2Read(
     || source.outbox_application_id !== source.application_id || source.outbox_history_epoch_id !== source.history_epoch_id)
     return { status: "blocked", reason: "destination" };
 
-  let reserved: Intent | "authority" | "stale" | "database";
-  try { reserved = await reserveIntent(env.OPS_DB, source); }
+  let reserved: Intent | null;
+  try { reserved = await intent(env.OPS_DB, source.command_id); }
   catch { return { status: "uncertain", reason: "database" }; }
-  if (typeof reserved === "string") return reserved === "database" ? { status: "uncertain", reason: "database" } : { status: "blocked", reason: reserved };
+  if (!reserved || !exactIntent(reserved, source)) return { status: "blocked", reason: "stale" };
   const before = await current(env.OPS_DB, reserved).catch(() => "database" as const);
   if (before !== "ok") return before === "database" ? { status: "uncertain", reason: "database" } : { status: "blocked", reason: before };
 
