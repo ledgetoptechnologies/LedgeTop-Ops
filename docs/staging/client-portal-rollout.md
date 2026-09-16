@@ -6,7 +6,7 @@ ignored staging configuration must end with `CLIENT_PORTAL_ENABLED=false`.
 
 ## Fixed staging topology
 
-- Existing Worker: `ltds-delivery-staging`; do not create or rename a Worker.
+- Target Worker: `ledgetop-clients-staging`; do not create or rename a Worker.
 - Anonymous public-share host and canonical public origin:
   `delivery-staging.ledgetopdroneservices.com`.
 - Authenticated client portal hosts:

@@ -17,7 +17,7 @@ const repositoryRoot = path.resolve(import.meta.dirname, "..");
 
 const sourceConfig = () => ({
   $schema: "node_modules/wrangler/config-schema.json",
-  name: "ltds-delivery-staging",
+  name: "ledgetop-clients-staging",
   main: "src/worker/index.ts",
   vars: { ENVIRONMENT: "staging", FEATURE_FLAG: "false" },
   r2_buckets: [{ binding: "DATA_BUCKET", bucket_name: "client-data-staging" }],
@@ -27,7 +27,7 @@ const sourceConfig = () => ({
     database_id: "b6f653ab-9acd-4421-9ad0-207754b59aeb",
     migrations_dir: "migrations",
   }],
-  services: [{ binding: "VIEWER_SESSION_ISSUER", service: "ltds-ops-staging" }],
+  services: [{ binding: "VIEWER_SESSION_ISSUER", service: "ledgetop-ops-staging" }],
 });
 
 function fixture() {

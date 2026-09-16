@@ -1,5 +1,5 @@
 export const STAGING_ACCOUNT_ID = "846c924bf17bf4f3dd15c97a4c5d1d51";
-export const STAGING_PROJECT_ALPHA_ORIGIN = "https://project-alpha-staging.ledgetopdroneservices.com";
+export const STAGING_PROJECT_ALPHA_ORIGIN = "https://pa-staging.ledgetoptechnologies.com";
 
 // Runtime candidates are pinned independently from the release-packet HEAD.
 // This lets evidence and documentation evolve without silently changing the
@@ -866,7 +866,7 @@ export const STAGING_ALLOWED_VAR_NAMES = Object.freeze({
 
 export const STAGING_INVENTORY = Object.freeze({
   delivery: {
-    name: "ltds-delivery-staging",
+    name: "ledgetop-clients-staging",
     main: "src/worker/index.ts",
     compatibility_date: "2026-07-16",
     compatibility_flags: ["nodejs_compat"],
@@ -882,8 +882,8 @@ export const STAGING_INVENTORY = Object.freeze({
       { name: "ltds-cloud-transfer-staging", binding: "CLOUD_TRANSFER_WORKFLOW", class_name: "CloudTransferWorkflow" },
     ],
     services: [
-      { binding: "CLIENT_DELEGATED_SHARE_SIGNER", service: "ltds-ops-staging", entrypoint: "ClientDelegatedShareSigner" },
-      { binding: "VIEWER_SESSION_ISSUER", service: "ltds-ops-staging", entrypoint: "ViewerSessionIssuer" },
+      { binding: "CLIENT_DELEGATED_SHARE_SIGNER", service: "ledgetop-ops-staging", entrypoint: "ClientDelegatedShareSigner" },
+      { binding: "VIEWER_SESSION_ISSUER", service: "ledgetop-ops-staging", entrypoint: "ViewerSessionIssuer" },
     ],
     queues: [],
     crons: ["*/5 * * * *", "15 * * * *"],
@@ -903,7 +903,7 @@ export const STAGING_INVENTORY = Object.freeze({
     ],
   },
   operations: {
-    name: "ltds-ops-staging",
+    name: "ledgetop-ops-staging",
     main: "src/worker/index.ts",
     compatibility_date: "2026-07-22",
     compatibility_flags: ["nodejs_compat"],
@@ -940,7 +940,7 @@ export const STAGING_INVENTORY = Object.freeze({
     ratelimits: [],
   },
   "ops-sync": {
-    name: "ltds-ops-sync-staging",
+    name: "ledgetop-ops-sync-staging",
     main: "src/index.ts",
     compatibility_date: "2026-07-22",
     compatibility_flags: ["nodejs_compat"],
@@ -952,8 +952,8 @@ export const STAGING_INVENTORY = Object.freeze({
     r2_buckets: [],
     workflows: [],
     services: [
-      { binding: "CLIENT_PORTAL_PROJECTION_INGRESS", service: "ltds-delivery-staging", entrypoint: "OpsSyncPortalProjectionIngress" },
-      { binding: "OPERATIONS_DELIVERY_INTENT_INGRESS", service: "ltds-ops-staging", entrypoint: "ProjectAlphaDeliveryIntentIngress" },
+      { binding: "CLIENT_PORTAL_PROJECTION_INGRESS", service: "ledgetop-clients-staging", entrypoint: "OpsSyncPortalProjectionIngress" },
+      { binding: "OPERATIONS_DELIVERY_INTENT_INGRESS", service: "ledgetop-ops-staging", entrypoint: "ProjectAlphaDeliveryIntentIngress" },
     ],
     queues: [],
     crons: ["*/5 * * * *"],

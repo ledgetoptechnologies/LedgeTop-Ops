@@ -27,9 +27,9 @@ feature.
 
 | Concern | Staging value |
 | --- | --- |
-| Delivery Worker | `ltds-delivery-staging` |
-| Operations Worker | `ltds-ops-staging` |
-| Ops Sync Worker | `ltds-ops-sync-staging` |
+| Delivery Worker | `ledgetop-clients-staging` |
+| Operations Worker | `ledgetop-ops-staging` |
+| Ops Sync Worker | `ledgetop-ops-sync-staging` |
 | Delivery rollback/admin host | `delivery-staging.ledgetopdroneservices.com` |
 | Client portal/public-share host | `client-staging.ledgetopdroneservices.com` |
 | Secondary client portal host | `portal-staging.ledgetoptechnologies.com` |

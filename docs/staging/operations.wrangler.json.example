@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "ltds-ops-staging",
+  "name": "ledgetop-ops-staging",
   "account_id": "846c924bf17bf4f3dd15c97a4c5d1d51",
   "main": "src/worker/index.ts",
   "compatibility_date": "2026-07-22",
@@ -23,7 +23,7 @@
     "DELIVERY_BASE_URL": "https://client-staging.ledgetopdroneservices.com",
     "CLIENT_PORTAL_ORIGINS": "https://client-staging.ledgetopdroneservices.com,https://portal-staging.ledgetoptechnologies.com",
     "PUBLIC_SHARE_ORIGIN": "https://delivery-staging.ledgetopdroneservices.com",
-    "PROJECT_ALPHA_BASE_URL": "https://project-alpha-staging.ledgetopdroneservices.com",
+    "PROJECT_ALPHA_BASE_URL": "https://pa-staging.ledgetoptechnologies.com",
     "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED": "false",
     "PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED": "false",
     "PROJECT_ALPHA_DELIVERY_GUEST_ENABLED": "false",
