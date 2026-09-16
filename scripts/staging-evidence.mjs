@@ -322,6 +322,29 @@ export function validateEvidence(evidence, options = {}) {
   if (!recentDate(portalTests.observedAt, now) || !populated(portalTests.evidenceRef)) errors.push("client portal end-to-end evidence must be current and referenced");
 
   const migrations = evidence.migrations ?? {};
+  const freshBootstrap = migrations.freshBootstrap ?? {};
+  if (freshBootstrap.schemaVersion !== 1 || freshBootstrap.mode !== "generated-empty-d1") {
+    errors.push("fresh bootstrap evidence must use schemaVersion 1 and generated-empty-d1 mode");
+  }
+  if (freshBootstrap.canonicalMigrationsUnchanged !== true) errors.push("fresh bootstrap must prove canonical migrations remained unchanged");
+  if (!/^[a-f0-9]{64}$/i.test(freshBootstrap.ownerEmailSha256 ?? "")) errors.push("fresh bootstrap must record the normalized owner email SHA-256, not the email");
+  if (!recentDate(freshBootstrap.generatedAt, now) || !populated(freshBootstrap.generatorEvidenceRef)) errors.push("fresh bootstrap generation must be current and referenced");
+  for (const [app, expected] of Object.entries({
+    delivery: { configPath: "apps/client/wrangler.staging.bootstrap.json", manifestPath: "apps/client/.staging-bootstrap/manifest.json", seed: "0002_seed_initial_staff.sql", ledgerCount: 132, finalMigration: "0213_incoming_rclone_promotion.sql" },
+    operations: { configPath: "apps/operations/wrangler.staging.bootstrap.json", manifestPath: "apps/operations/.staging-bootstrap/manifest.json", seed: "0002_seed_acl.sql", ledgerCount: 122, finalMigration: "0122_project_alpha_project_v2_canonical_activation.sql" },
+  })) {
+    const proof = freshBootstrap.applications?.[app] ?? {};
+    if (proof.configPath !== expected.configPath || proof.manifestPath !== expected.manifestPath) errors.push(`${app} fresh bootstrap must identify the generated config and manifest`);
+    if (!sameSequence(proof.transformedFiles, [expected.seed])) errors.push(`${app} fresh bootstrap must transform exactly ${expected.seed}`);
+    if (proof.ledgerCount !== expected.ledgerCount || proof.finalMigration !== expected.finalMigration) errors.push(`${app} fresh bootstrap ledger count and final migration must match the full canonical chain`);
+    if (!/^[a-f0-9]{64}$/i.test(proof.sourceSeedSha256 ?? "") || !/^[a-f0-9]{64}$/i.test(proof.generatedSeedSha256 ?? "") || proof.sourceSeedSha256 === proof.generatedSeedSha256) errors.push(`${app} fresh bootstrap must record distinct source and generated seed SHA-256 values`);
+    for (const field of ["databaseWasEmpty", "generatedChainVerified", "appliedWithBootstrapConfig", "appliedExactlyOnce", "singleSyntheticOwnerVerified", "canonicalHumanRowsAbsent", "ownerRoleVerified", "ledgerMatchesGeneratedChain", "secondListEmpty", "idempotentReapplyPassed", "foreignKeyCheckPassed"]) {
+      if (proof[field] !== true) errors.push(`${app} fresh bootstrap must prove ${field}`);
+    }
+    if (app === "delivery" && proof.both0199FilenamesExactlyOnce !== true) errors.push("delivery fresh bootstrap must prove both 0199 filenames exactly once");
+    if (app === "operations" && proof.portableCatalogSeedVerified !== true) errors.push("operations fresh bootstrap must prove the portable ACL catalog seed");
+    if (!populated(proof.evidenceRef)) errors.push(`${app} fresh bootstrap needs an evidence reference`);
+  }
   for (const app of ["delivery", "operations"]) {
     const migration = migrations[app] ?? {};
     if (!sameSequence(migration.expected, REQUIRED_STAGING_MIGRATIONS[app])) errors.push(`${app} migration sequence must exactly match the ordered release contract`);

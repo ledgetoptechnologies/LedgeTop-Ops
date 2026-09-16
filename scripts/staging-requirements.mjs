@@ -272,6 +272,7 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0197_portal_root_access_policy.sql",
     "0198_incoming_upload_owner_notifications.sql",
     "0199_incoming_upload_pickup_lifecycle.sql",
+    "0199_native_viewer_grants.sql",
     "0200_native_feedback_workspace_history.sql",
     "0201_native_draft_quote_notifications.sql",
     "0202_native_delivery_recipient_events.sql",
@@ -282,6 +283,10 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0207_delivery_change_projection.sql",
     "0208_authenticated_delivery_change_batch_provider_identity.sql",
     "0209_authenticated_delivery_change_recipient_events.sql",
+    "0210_client_delegated_share_expiry_health.sql",
+    "0211_incoming_upload_verification_lifecycle.sql",
+    "0212_incoming_upload_archive_inventory.sql",
+    "0213_incoming_rclone_promotion.sql",
   ]),
   operations: Object.freeze([
     "0014_staff_acl_controls.sql",

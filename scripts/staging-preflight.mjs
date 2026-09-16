@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { APP_SOURCE_DIRS, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_STAGING_SECRETS, STAGING_ACCOUNT_ID, STAGING_ALLOWED_VAR_NAMES, STAGING_HOSTS, STAGING_INVENTORY, STAGING_REQUEST_ATTACHMENT_R2_CORS, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
+import { APP_SOURCE_DIRS, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_SECRETS, STAGING_ACCOUNT_ID, STAGING_ALLOWED_VAR_NAMES, STAGING_HOSTS, STAGING_INVENTORY, STAGING_REQUEST_ATTACHMENT_R2_CORS, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const apps = ["delivery", "operations", "ops-sync"];
@@ -271,6 +271,24 @@ export function validateFiles(base = root) {
     catch (error) { errors.push(`${path.relative(base, secretManifestFile)} is invalid JSON: ${error.message}`); }
   }
   if (apps.every((app) => configs[app])) errors.push(...validateCrossApp(configs, productionConfigs));
+  errors.push(...validateMigrationInventory(base));
+  return errors;
+}
+
+export function validateMigrationInventory(base = root) {
+  const errors = [];
+  for (const app of ["delivery", "operations"]) {
+    const directory = path.join(base, "apps", APP_SOURCE_DIRS[app], "migrations");
+    if (!fs.existsSync(directory)) { errors.push(`${path.relative(base, directory)} is missing`); continue; }
+    const first = REQUIRED_STAGING_MIGRATIONS[app][0];
+    const entries = fs.readdirSync(directory, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.name.endsWith(".sql") && entry.name.localeCompare(first) >= 0 && (!entry.isFile() || entry.isSymbolicLink())) errors.push(`${app} release migration ${entry.name} must be a regular non-symlink file`);
+    }
+    const actual = entries.filter((entry) => entry.isFile() && !entry.isSymbolicLink() && entry.name.endsWith(".sql") && entry.name.localeCompare(first) >= 0).map((entry) => entry.name).sort();
+    const expected = [...REQUIRED_STAGING_MIGRATIONS[app]];
+    if (JSON.stringify(actual) !== JSON.stringify(expected)) errors.push(`${app} release migration inventory must exactly match the ordered contract`);
+  }
   return errors;
 }
 

@@ -1,0 +1,8 @@
+{
+  "owner": {
+    "email": "owner@staging.example.test",
+    "displayName": "Synthetic Staging Owner",
+    "clientStaffId": "staging-client-owner",
+    "operationsStaffId": "staging-operations-owner"
+  }
+}
