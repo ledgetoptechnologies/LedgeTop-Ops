@@ -1,8 +1,12 @@
 # Client portal staging rollout and rollback
 
-Status: plan only. No Cloudflare, DNS, Access, secret, migration, Worker, or
-Project Alpha mutation is authorized by this document. The checked-in and
-ignored staging configuration must end with `CLIENT_PORTAL_ENABLED=false`.
+Status: Access applications provisioned; rollout not activated. A live
+dashboard readback on 2026-09-16 verified the dedicated client group, portal
+path application, and separate public Bypass application described below.
+DNS, secrets, migrations, Workers, routes, and Project Alpha remain governed by
+their individual gates. This document is not authorization for another
+mutation, and the checked-in and ignored staging configuration must end with
+`CLIENT_PORTAL_ENABLED=false`.
 
 ## Fixed staging topology
 
@@ -45,11 +49,12 @@ and warns that Bypass disables Access enforcement in
 3. Obtain separate approvals for Access/DNS/routes, staging migrations,
    staging deployment, and temporary portal activation. Production remains out
    of scope.
-4. Create the dedicated client group, portal path app, and public Bypass app
-   before publishing either hostname. Assign both portal hosts to the one portal
-   app; do not create a second audience or policy stack. Re-list their IDs,
-   destinations, policies, group membership, and audience. Keep the client group
-   invitation-owned and separate from staff ACL automation.
+4. Reuse the existing dedicated client group, portal path app, and public
+   Bypass app; do not recreate them. Before publishing either hostname, re-list
+   their IDs, destinations, policies, group membership, and audience and verify
+   that both portal hosts remain on the one portal app. Do not create a second
+   audience or policy stack. Keep the client group invitation-owned and separate
+   from staff ACL automation.
 5. Put the single new human audience only in the ignored staging config. Set
    the exact authenticated client origin/team domain. Treat Client
    `EXPECTED_HOST`, Client and Operations `PUBLIC_SHARE_ORIGIN`, Client
