@@ -62,6 +62,33 @@ npm run staging:check:test
 npm run staging:release:prepare
 ```
 
+## Fresh empty-D1 bootstrap
+
+Never apply the canonical `0002` human seed rows to a new staging database and
+never edit the historical migrations. Copy
+`docs/staging/staging-bootstrap-owner.json.example` to the ignored
+`.backups/staging-bootstrap-owner.json`, replace its example identity with the
+approved synthetic staging owner, and generate isolated migration chains:
+
+```text
+npm run staging:bootstrap:generate
+npm run staging:bootstrap:check
+npm run staging:bootstrap:test
+```
+
+The generator accepts only the exact staging Worker and D1 identities, copies
+every canonical migration into ignored `.staging-bootstrap` directories,
+changes only Client `0002_seed_initial_staff.sql` and Operations
+`0002_seed_acl.sql`, rejects any content drift from the reviewed full-chain
+digest, and emits source/derived SHA-256 manifests. Apply a fresh
+empty database only with the generated `wrangler.staging.bootstrap.json` for
+that application. Do not use these configs for an existing database. Confirm
+the full 132-row Client ledger (both `0199` filenames once, final `0213`) and
+122-row Operations ledger (final `0122`), a second list/apply with no pending
+migrations, one synthetic owner in each database, the Operations owner role and
+portable ACL catalog, and an empty `PRAGMA foreign_key_check`. Record those
+results in `migrations.freshBootstrap` without storing the owner email.
+
 The preparation command validates all configs and the sidecar secret-name
 manifest, then runs checks, tests, builds, browser tests, and explicit-config
 dry-runs. It intentionally performs no Cloudflare operation. Complete

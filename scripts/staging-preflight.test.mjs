@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { validateApp, validateCrossApp, validateFiles, validateRequestAttachmentCors, validateSecretManifest } from "./staging-preflight.mjs";
+import { validateApp, validateCrossApp, validateFiles, validateMigrationInventory, validateRequestAttachmentCors, validateSecretManifest } from "./staging-preflight.mjs";
 import { APP_SOURCE_DIRS, FEATURE_FLAG_ACTIVATION_POLICIES, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_SECRETS, STAGING_ACCOUNT_ID, STAGING_ALLOWED_VAR_NAMES, STAGING_HOSTS, STAGING_INVENTORY, STAGING_PROJECT_ALPHA_ORIGIN, STAGING_REQUEST_ATTACHMENT_R2_CORS, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
 
 const audiences = Object.freeze({ delivery: "c".repeat(64), operations: "d".repeat(64), "ops-sync": "b".repeat(64) });
@@ -93,6 +93,18 @@ test("accepts the exact approved isolated staging inventory", () => {
     const staging = stagingConfig(app);
     assert.deepEqual(validateApp(app, staging, productionFrom(staging)), []);
   }
+});
+test("rejects missing, unexpected, or non-regular release migrations", () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-staging-migrations-"));
+  for (const app of ["delivery", "operations"]) {
+    const directory = path.join(base, "apps", APP_SOURCE_DIRS[app], "migrations");
+    fs.mkdirSync(directory, { recursive: true });
+    for (const name of REQUIRED_STAGING_MIGRATIONS[app]) fs.writeFileSync(path.join(directory, name), "-- migration\n");
+  }
+  assert.deepEqual(validateMigrationInventory(base), []);
+  fs.rmSync(path.join(base, "apps", "client", "migrations", "0213_incoming_rclone_promotion.sql"));
+  fs.writeFileSync(path.join(base, "apps", "client", "migrations", "0214_unreviewed.sql"), "-- unexpected\n");
+  assert(validateMigrationInventory(base).some((error) => error.includes("delivery release migration inventory")));
 });
 test("rejects an Access audience reused from any production audience field", () => {
   const staging = stagingConfig("delivery");
@@ -188,6 +200,11 @@ test("resolves logical delivery staging files from apps/client", () => {
     fs.writeFileSync(path.join(directory, "wrangler.staging.json"), JSON.stringify(staging));
     fs.writeFileSync(path.join(directory, "wrangler.jsonc"), JSON.stringify(productionFrom(staging)));
   }
+  for (const app of ["delivery", "operations"]) {
+    const directory = path.join(base, "apps", APP_SOURCE_DIRS[app], "migrations");
+    fs.mkdirSync(directory, { recursive: true });
+    for (const name of REQUIRED_STAGING_MIGRATIONS[app]) fs.writeFileSync(path.join(directory, name), "-- migration\n");
+  }
   const corsDirectory = path.join(base, "docs", "staging");
   fs.mkdirSync(corsDirectory, { recursive: true });
   fs.writeFileSync(path.join(corsDirectory, "request-attachments-r2-cors.json"), JSON.stringify(STAGING_REQUEST_ATTACHMENT_R2_CORS));
@@ -238,8 +255,8 @@ test("requires every portal-v2 and Operations capability to be explicitly false"
   }
 });
 
-test("pins the native portal, root-access, Operations 0054-0122, incoming-notification, pickup lifecycle, and 0200-0209 migration-first release contract", () => {
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-26), [
+test("pins the native portal, Operations 0054-0122, both 0199 files, and the 0200-0213 release contract", () => {
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-31), [
     "0184_native_client_feedback.sql",
     "0185_native_service_request_ownership.sql",
     "0186_delivery_notification_authority_provenance.sql",
@@ -256,6 +273,7 @@ test("pins the native portal, root-access, Operations 0054-0122, incoming-notifi
     "0197_portal_root_access_policy.sql",
     "0198_incoming_upload_owner_notifications.sql",
     "0199_incoming_upload_pickup_lifecycle.sql",
+    "0199_native_viewer_grants.sql",
     "0200_native_feedback_workspace_history.sql",
     "0201_native_draft_quote_notifications.sql",
     "0202_native_delivery_recipient_events.sql",
@@ -266,6 +284,10 @@ test("pins the native portal, root-access, Operations 0054-0122, incoming-notifi
     "0207_delivery_change_projection.sql",
     "0208_authenticated_delivery_change_batch_provider_identity.sql",
     "0209_authenticated_delivery_change_recipient_events.sql",
+    "0210_client_delegated_share_expiry_health.sql",
+    "0211_incoming_upload_verification_lifecycle.sql",
+    "0212_incoming_upload_archive_inventory.sql",
+    "0213_incoming_rclone_promotion.sql",
   ]);
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(-4), [
     "0119_project_alpha_project_v2_persistence_ledger.sql",

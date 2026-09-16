@@ -112,7 +112,7 @@ emergency operation, not the ordinary rollback for additive migrations.
 2. Apply Project Alpha producer migrations only after the Project Alpha branch
    has been approved and rebased on current main. Preserve onboarding,
    approvals, projects, contracts, and documents.
-3. For the current default-on release, confirm Client migrations through `0209`
+3. For the current default-on release, confirm Client migrations through `0213`
    and Operations through `0122`, plus Project Alpha `0102`. The populated
    `0195` upgrade must prove stale bootstrap authority is invalidated while
    signed native successors and public-link records are preserved. `0197` adds
@@ -121,10 +121,10 @@ emergency operation, not the ordinary rollback for additive migrations.
    administrator revoke an organization or standalone-client workspace without
    deleting projected memberships, and later Project Alpha sync cannot clear it.
    `0198` adds the incoming-upload owner-notification outbox required by the
-   upload completion transaction. `0199` adds the private Incoming pickup
-   lifecycle and its fenced server claim lease. Apply both before deploying the
-   dependent Worker so a completed upload cannot fail while recording its
-   notification and a pickup server cannot race another claimant. `0200`–`0203`
+   upload completion transaction. The two distinct `0199` filenames add the
+   private Incoming pickup lifecycle/fenced server claim lease and native
+   Viewer grants. Apply both full `0199` names before deploying dependent
+   Workers. `0200`–`0203`
    extend the ordered Client chain for workspace feedback history, preserving
    draft-quote notices, native delivery recipient events, and primary delivery
    authority. Apply the full sequence before deploying dependent Workers;
@@ -134,7 +134,10 @@ emergency operation, not the ordinary rollback for additive migrations.
    provider-identity fencing, bounded projection, and batch-item provenance;
    `0209` adds the immutable exact-recipient bell ledger and individual
    read/dismiss state. Apply `0204` through `0209` strictly in filename order
-   through the D1 migration ledger, never as copied raw SQL. Before applying,
+   and retain both distinct `0199` ledger rows. The same reviewed release
+   inventory continues with `0210` through `0213`; do not truncate the fresh
+   bootstrap chain at `0209`. Apply the sequence through the D1 migration
+   ledger, never as copied raw SQL. Before applying,
    capture a current Delivery backup and record the full remote migration list.
    After applying, record the exact applied names, `PRAGMA foreign_key_check`,
    schema-readiness results, and a second `migrations apply` result of `No

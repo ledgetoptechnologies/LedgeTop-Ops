@@ -142,10 +142,11 @@ migration hashes. Set `RELEASE_CONTRACT_FINALIZED=true` only after independent
 comparison with those repositories. The verifier intentionally fails while any
 release-candidate placeholder remains.
 
-The current candidate inventory extends through Client `0209`, Operations
+The current candidate inventory extends through Client `0213` (including both
+distinct `0199` filenames), Operations
 `0122`, and Project Alpha `0102`. The reviewed Operations runtime boundary is
 PR63's merge commit `d1c20163956d180439e51c5aceb96fc37bdb5360`; current main
-head `fce12ef3cf724cf4f564a32fdd2808ec8111d5f2` contains only the staging
+head `6444136340dff6188cbc4e668617fe7ec7149481` contains only the staging
 contract repair, so using HEAD as the runtime identity would create a circular
 self-pin. Project Alpha is pinned independently at PR184 head
 `31deb85b87b95de27dc9e90a5591e036ae96709e`.
@@ -281,8 +282,20 @@ separate TrueNAS PULL/MOVE and ready-prefix acceptance packet is approved.
 
 The example evidence intentionally fails until the client Access/public-path
 contract, migrations, end-to-end tests, final default-off state, and every
-Ops-Sync-to-Client private projection dependency in `REQUIRED_EXTERNAL_GATES` are recorded. Do not
-mark future or inferred results true.
+Ops-Sync-to-Client private projection dependency in `REQUIRED_EXTERNAL_GATES`
+is recorded. Do not mark future or inferred results true.
+
+If both staging D1 databases are confirmed empty, stop before any ordinary
+migration command and follow the fresh empty-D1 procedure in `README.md`.
+Generate and check the ignored bootstrap configs from the approved synthetic
+owner input, then use only those configs for the first full apply. The ordinary
+configs would replay the canonical named-human `0002` rows. A populated or
+partially migrated database must never use the bootstrap configs. Attach both
+generated manifests and complete `migrations.freshBootstrap`; the required
+proof includes 132/122 ledger rows, both Client `0199` filenames exactly once,
+final `0213`/`0122`, canonical-human absence, the one synthetic owner and its
+role, the retained Operations ACL catalog, no pending reapply, and an empty
+foreign-key check.
 
 It also requires the pushed source ref, exact deployed version/config hashes,
 an ordered remote migration-ledger readback, a pre-migration open-fence and
