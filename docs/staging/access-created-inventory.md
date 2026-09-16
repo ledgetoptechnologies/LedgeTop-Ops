@@ -10,23 +10,24 @@ Cloudflare authentication error `10000`.
 
 ## Applications
 
-This is the pre-client-portal inventory. No `LTDS Client Portal Staging` app,
-`LTDS Client Public Staging` Bypass app, or dedicated client staging group was
+This is a historical pre-client-portal inventory, not evidence of live staging
+Access state. No `Ledge Top Client Portal Staging` app,
+`Ledge Top Client Public Staging` Bypass app, or dedicated client staging group was
 created in this step. The historic Delivery staging audience must not be used
 as `CLIENT_ACCESS_AUD`.
 
 | Application | ID | Audience | Domain | Session | Launcher |
 | --- | --- | --- | --- | --- | --- |
-| LTDS Delivery Staging | `2ef49026-12ac-4e5a-a354-4843b8b01249` | `f6942c97e306d81d206c94746dc731413d5e59461b35d9b213f13fdf96b62835` | `delivery-staging.ledgetopdroneservices.com` | 1 hour | hidden |
-| LTDS Operations Staging | `8689176a-df0a-44b4-ac4f-caae5cd12d08` | `e5e2026896677c6fbaa0c7eb9b795e326516c15a3191dfba3c2ad43da4728671` | `ops-staging.ledgetopdroneservices.com` | 1 hour | hidden |
-| LTDS Ops Sync Staging | `30d86d9e-7da4-476f-bc2e-ecb9debccf29` | `7b578ad388abb5c5eb550e86ddf3263af0b2a5694e8bf4810c67affa5721ec37` | `ops-sync-staging.ledgetopdroneservices.com` | 1 hour | hidden |
+| Retired Delivery staging app | retired (do not reuse) | retired (do not reuse) | `delivery-staging.ledgetopdroneservices.com` | 1 hour | hidden |
+| Retired Operations staging app | retired (do not reuse) | retired (do not reuse) | `ops-staging.ledgetopdroneservices.com` | 1 hour | hidden |
+| Retired Ops Sync staging app | retired (do not reuse) | retired (do not reuse) | `ops-sync-staging.ledgetopdroneservices.com` | 1 hour | hidden |
 
 ## Policies
 
 | Application | Policy | ID | Decision | Subject |
 | --- | --- | --- | --- | --- |
-| Delivery | LTDS Delivery Staging - Initial Tester | `acb50f64-c99e-41a5-8bae-08428bd2939c` | Allow | one verified Access email |
-| Operations | LTDS Operations Staging - Initial Tester | `ead911a7-833a-40d3-80a6-2de9368a909b` | Allow | one verified Access email |
+| Delivery | Retired initial tester policy | retired (do not reuse) | Allow | one verified Access email |
+| Operations | Retired initial tester policy | retired (do not reuse) | Allow | one verified Access email |
 | Ops Sync | none | — | default-deny | staging service token not created |
 
 The human identity had a recorded successful Access login before the policies

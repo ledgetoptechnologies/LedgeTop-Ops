@@ -58,10 +58,12 @@ must be the new portal app audience, never `POLICY_AUD`, `OPERATIONS_AUD`, or
 The receiver-only projection path is infrastructure, not an activation flag:
 Client must set `PROJECT_ALPHA_PORTAL_SYNC_ENABLED=true`, keep
 `PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED=false`, and share the exact
-`ltds_ops_staging` application key with Ops Sync. Ops Sync must bind
+`ledgetop_ops_staging` application key with Ops Sync. Ops Sync must bind
 `CLIENT_PORTAL_PROJECTION_INGRESS` to the `ledgetop-clients-staging`
-`OpsSyncPortalProjectionIngress` named entrypoint. Do not provision a direct
-Client portal Access audience, HMAC key ID, or portal HMAC secret.
+`OpsSyncPortalProjectionIngress` named entrypoint. Do not provision a second
+Project Alpha catalog/portal Access audience, HMAC key ID, or portal HMAC
+secret; the catalog path must use the same Ops Sync audience and application
+key.
 
 Client migration `0189_primary_staff_folder_bindings.sql` must be applied and
 verified before deploying the Operations build that exposes primary Client
@@ -140,15 +142,16 @@ migration hashes. Set `RELEASE_CONTRACT_FINALIZED=true` only after independent
 comparison with those repositories. The verifier intentionally fails while any
 release-candidate placeholder remains.
 
-The current candidate inventory extends through Client `0195`, Operations
-`0052`, and Project Alpha `0083`. The reviewed Operations runtime boundary is
-`ab4d83fac9f0775228398cc38f5e28c573e25399`; later commits through the prepared
-branch HEAD are CI/test portability and release-packet maintenance, so using
-HEAD as the runtime identity would create a circular self-pin. Project Alpha is
-pinned independently at `67cfe73a9a2c4507524a017cd8996aab5598c534`.
+The current candidate inventory extends through Client `0209`, Operations
+`0122`, and Project Alpha `0102`. The reviewed Operations runtime boundary is
+PR63's merge commit `d1c20163956d180439e51c5aceb96fc37bdb5360`; current main
+head `fce12ef3cf724cf4f564a32fdd2808ec8111d5f2` contains only the staging
+contract repair, so using HEAD as the runtime identity would create a circular
+self-pin. Project Alpha is pinned independently at PR184 head
+`31deb85b87b95de27dc9e90a5591e036ae96709e`.
 Keep `RELEASE_CONTRACT_FINALIZED=false` until independent cross-repository,
 image, migration, and live staging evidence is complete. Any runtime change
-after `ab4d83f` requires a newly reviewed non-circular boundary and coordinated
+after `d1c2016` requires a newly reviewed non-circular boundary and coordinated
 evidence refresh.
 
 The Viewer evidence is separate from the three Wrangler deployments. Record its
@@ -165,7 +168,7 @@ processing Compose profile, WebODM discovery, `PROXY_SHARED_SECRET`, and
 part of the required manifest for this release.
 
 Project Alpha evidence must identify its exact commit and immutable web/cron
-image digests, migration `0066`/`0067`/`0068`/`0069` ledger and source hashes, all eleven
+image digests, the complete migration `0066` through `0102` ledger and source hashes, all eleven
 installation settings and profile capabilities/delivery still off, the inert
 one-minute outbound sender, non-secret delivery key IDs, encrypted-secret and
 redacted-evidence proof, retry/dead-letter/revocation behavior, fresh backup,
@@ -355,7 +358,7 @@ apply time and is the explicit exception to this packet's normal
 migration-first order. Confirm every predecessor is already applied; otherwise
 resolve those predecessors in a separately reviewed release.
 
-For Operations, preserve the full ordered `0054` through `0118` suffix in the
+For Operations, preserve the full ordered `0054` through `0122` suffix in the
 remote Wrangler ledger. Attach the list output that proves every filename is in
 the exact checked-in order, with no duplicate, renamed, skipped, or unexpected
 row. A local migration-chain run, a directory listing, or a successful raw SQL
@@ -367,7 +370,7 @@ all are terminal or deliberately cancelled, then close mutation ingress and
 drain HTTP requests, queue consumers, leases, schedulers, and reconciliation
 batches. The evidence must prove this quiescent state and name the compatible
 Operations writer version already handling all traffic. Do not apply `0054`-
-`0118` while an old writer, an in-flight fence, or a scheduled/retry worker can
+`0122` while an old writer, an in-flight fence, or a scheduled/retry worker can
 commit a pre-migration assumption. Keep the compatible writer in place through
 the final ledger readback; use a compatible fix forward, never a pre-suffix
 writer rollback.
@@ -454,7 +457,7 @@ Confirm Operations
 `0014_staff_acl_controls.sql` through
 `0052_project_operational_reassignment_recovery.sql` and
 `0053_project_internal_notes.sql`, then Operations `0054` through
-`0118_project_alpha_existing_directory_binding_revision_refresh_ledger.sql` in
+`0122_project_alpha_project_v2_canonical_activation.sql` in
 that exact ledger order. Migration `0100` removes
 `share_version` from the delivery-grant parent key so existing share
 rotation/revocation updates cannot be blocked by a portal grant; the grant

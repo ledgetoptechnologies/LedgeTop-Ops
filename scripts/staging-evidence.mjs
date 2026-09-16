@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { APP_SOURCE_DIRS, FEATURE_FLAG_ACTIVATION_POLICIES, FEATURE_FLAG_DEPENDENCY_WINDOWS, PROJECT_ALPHA_STAGING, RELEASE_CANDIDATES, RELEASE_CONTRACT_FINALIZED, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_EXTERNAL_GATES, REQUIRED_EXTERNAL_GATE_PROOFS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_CLIENT_PORTAL, STAGING_HOSTS, STAGING_INVENTORY, STAGING_STATIC_VARS, STAGING_VIEWER } from "./staging-requirements.mjs";
+import { APP_SOURCE_DIRS, FEATURE_FLAG_ACTIVATION_POLICIES, FEATURE_FLAG_DEPENDENCY_WINDOWS, PROJECT_ALPHA_STAGING, RELEASE_CANDIDATES, RELEASE_CONTRACT_FINALIZED, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_EXTERNAL_GATES, REQUIRED_EXTERNAL_GATE_PROOFS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_SECRETS, STAGING_ACCOUNT_ID, STAGING_CLIENT_PORTAL, STAGING_HOSTS, STAGING_INVENTORY, STAGING_STATIC_VARS, STAGING_VIEWER } from "./staging-requirements.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const defaultEvidence = path.join(root, ".backups", "staging-release-evidence.json");
@@ -233,8 +233,19 @@ export function validateEvidence(evidence, options = {}) {
   }
 
   const access = evidence.access ?? {};
+  const configuredAudiences = {
+    delivery: configs.delivery?.vars?.POLICY_AUD,
+    operations: configs.operations?.vars?.OPERATIONS_AUD,
+    "ops-sync": configs["ops-sync"]?.vars?.CF_ACCESS_AUD,
+  };
   for (const app of apps) {
-    if (access.audiences?.[app] !== STAGING_ACCESS_AUDS[app]) errors.push(`${app} Access audience must match the approved staging app`);
+    if (access.audiences?.[app] !== configuredAudiences[app]) errors.push(`${app} Access audience must match the reviewed rendered staging config`);
+    const application = access.applications?.[app] ?? {};
+    if (!populated(application.applicationId) || !populated(application.applicationName)) errors.push(`${app} Access application needs an explicit ID and name`);
+    if (application.audience !== configuredAudiences[app]) errors.push(`${app} Access application audience must match the reviewed rendered staging config`);
+    if (!sameSet(application.destinations, [STAGING_HOSTS[app]])) errors.push(`${app} Access application destinations must exactly match its staging host`);
+    if (!Array.isArray(application.policyIds) || !application.policyIds.length || application.policyIds.some((policyId) => !populated(policyId))) errors.push(`${app} Access application needs explicit policy IDs`);
+    if (!populated(application.readbackEvidenceRef)) errors.push(`${app} Access application needs a readback evidence reference`);
   }
   if (!populated(access.groupId) || access.groupId !== configs["ops-sync"]?.vars?.CF_ACCESS_GROUP_ID) errors.push("Access groupId must match Ops Sync staging config");
   if (!populated(access.groupName) || access.groupName !== configs["ops-sync"]?.vars?.CF_ACCESS_GROUP_NAME) errors.push("Access groupName must match Ops Sync staging config");
@@ -259,7 +270,7 @@ export function validateEvidence(evidence, options = {}) {
   if (portal.teamDomain !== STAGING_STATIC_VARS.delivery.CLIENT_ACCESS_TEAM_DOMAIN || portal.teamDomain !== deliveryVars.CLIENT_ACCESS_TEAM_DOMAIN) errors.push("client portal Access team domain must match Delivery staging config");
   if (portal.applicationName !== STAGING_CLIENT_PORTAL.applicationName || !populated(portal.applicationId)) errors.push("client portal needs the dedicated Access application identity");
   if (!/^[a-f0-9]{64}$/i.test(portal.audience ?? "") || portal.audience !== deliveryVars.CLIENT_ACCESS_AUD) errors.push("client portal audience must match the dedicated Access app and Delivery staging config");
-  if (Object.values(STAGING_ACCESS_AUDS).includes(portal.audience)) errors.push("client portal audience must not reuse Delivery, Operations, or Ops Sync Access");
+  if (Object.values(configuredAudiences).includes(portal.audience)) errors.push("client portal audience must not reuse Delivery, Operations, or Ops Sync Access");
   if (!populated(portal.groupId) || portal.groupName !== STAGING_CLIENT_PORTAL.groupName) errors.push("client portal needs the dedicated staging client group");
   if (portal.groupId === access.groupId || portal.groupName === access.groupName) errors.push("client portal group must not reuse the staff or Ops Sync group");
   if (!sameSet(portal.protectedPaths, STAGING_CLIENT_PORTAL.protectedPaths)) errors.push("client portal protected paths must exactly match the portal Access contract");
@@ -322,10 +333,10 @@ export function validateEvidence(evidence, options = {}) {
   }
   const operationsMigration = migrations.operations ?? {};
   for (const proof of ["remoteLedgerOrderVerified", "openFencesChecked", "writerAndSchedulerQuiescent", "compatibleWritersOrdered"]) {
-    if (operationsMigration[proof] !== true) errors.push(`operations 0054-0118 release gate must prove ${proof}`);
+    if (operationsMigration[proof] !== true) errors.push(`operations 0054-0122 release gate must prove ${proof}`);
   }
   for (const field of ["remoteLedgerEvidenceRef", "preMigrationFenceEvidenceRef", "compatibleWriterVersionId", "compatibleWriterOrderingEvidenceRef"]) {
-    if (!populated(operationsMigration[field])) errors.push(`operations 0054-0118 release gate needs ${field}`);
+    if (!populated(operationsMigration[field])) errors.push(`operations 0054-0122 release gate needs ${field}`);
   }
   const deliveryMigration = migrations.delivery ?? {};
   for (const proof of ["videoRecoveryCompleted", "videoRowsPendingForTrueNas", "legacyBridgeAcceptanceMatrixPassed"]) {

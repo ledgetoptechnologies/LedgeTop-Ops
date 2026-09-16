@@ -7,9 +7,10 @@ import { renderConfigs, REQUIRED_STAGING_CONFIG_VALUES, validateRenderedConfigs,
 
 const root = path.resolve(import.meta.dirname, "..");
 const values = Object.freeze({
-  PROJECT_ALPHA_CATALOG_STAGING_ACCESS_AUD: "a".repeat(64),
-  PROJECT_ALPHA_PORTAL_STAGING_ACCESS_AUD: "b".repeat(64),
-  DEDICATED_CLIENT_PORTAL_STAGING_ACCESS_AUD: "c".repeat(64),
+  DELIVERY_STAGING_ACCESS_AUD: "a".repeat(64),
+  OPERATIONS_STAGING_ACCESS_AUD: "b".repeat(64),
+  PROJECT_ALPHA_OPS_SYNC_STAGING_ACCESS_AUD: "c".repeat(64),
+  DEDICATED_CLIENT_PORTAL_STAGING_ACCESS_AUD: "d".repeat(64),
   CLIENT_STAGING_RESTRICTED_MAPBOX_PUBLIC_TOKEN: "pk.client-staging-test",
   OPERATIONS_STAGING_RESTRICTED_MAPBOX_PUBLIC_TOKEN: "pk.operations-staging-test",
   STAGING_EMAIL_DOMAIN: "staging.example.test",
@@ -33,7 +34,7 @@ test("rejects missing, unexpected, duplicated, and malformed values", () => {
   const invalid = { ...values };
   delete invalid.STAGING_TRIAGE_EMAIL;
   invalid.UNKNOWN = "value";
-  invalid.PROJECT_ALPHA_PORTAL_STAGING_ACCESS_AUD = invalid.PROJECT_ALPHA_CATALOG_STAGING_ACCESS_AUD;
+  invalid.PROJECT_ALPHA_OPS_SYNC_STAGING_ACCESS_AUD = invalid.OPERATIONS_STAGING_ACCESS_AUD;
   invalid.OPERATIONS_STAGING_RESTRICTED_MAPBOX_PUBLIC_TOKEN = "secret-token";
   const errors = validateValues(invalid);
   for (const expected of ["STAGING_TRIAGE_EMAIL", "unexpected", "distinct", "public Mapbox"]) assert(errors.some((error) => error.includes(expected)), errors.join(" | "));
