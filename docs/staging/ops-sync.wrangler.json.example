@@ -12,11 +12,11 @@
     "ENVIRONMENT": "staging",
     "EXPECTED_HOST": "ops-sync-staging.ledgetopdroneservices.com",
     "TEAM_DOMAIN": "https://ledgetoptechnologies.cloudflareaccess.com",
-    "CF_ACCESS_AUD": "7b578ad388abb5c5eb550e86ddf3263af0b2a5694e8bf4810c67affa5721ec37",
+    "CF_ACCESS_AUD": "<PROJECT_ALPHA_OPS_SYNC_STAGING_ACCESS_AUD>",
     "CF_ACCOUNT_ID": "846c924bf17bf4f3dd15c97a4c5d1d51",
     "CF_ACCESS_GROUP_ID": "<STAGING_ACCESS_GROUP_ID>",
     "CF_ACCESS_GROUP_NAME": "<STAGING_ACCESS_GROUP_NAME>",
-    "APPLICATION_KEY": "ltds_ops_staging",
+    "APPLICATION_KEY": "ledgetop_ops_staging",
     "PROJECT_ALPHA_ALLOW_LEGACY_HMAC": "true"
   },
   "observability": { "enabled": true, "head_sampling_rate": 1 },

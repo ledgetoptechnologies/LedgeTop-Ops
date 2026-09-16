@@ -5,7 +5,9 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { validateApp, validateCrossApp, validateFiles, validateRequestAttachmentCors, validateSecretManifest } from "./staging-preflight.mjs";
-import { APP_SOURCE_DIRS, FEATURE_FLAG_ACTIVATION_POLICIES, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_ALLOWED_VAR_NAMES, STAGING_HOSTS, STAGING_INVENTORY, STAGING_PROJECT_ALPHA_ORIGIN, STAGING_REQUEST_ATTACHMENT_R2_CORS, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
+import { APP_SOURCE_DIRS, FEATURE_FLAG_ACTIVATION_POLICIES, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_SECRETS, STAGING_ACCOUNT_ID, STAGING_ALLOWED_VAR_NAMES, STAGING_HOSTS, STAGING_INVENTORY, STAGING_PROJECT_ALPHA_ORIGIN, STAGING_REQUEST_ATTACHMENT_R2_CORS, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
+
+const audiences = Object.freeze({ delivery: "c".repeat(64), operations: "d".repeat(64), "ops-sync": "b".repeat(64) });
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
 function stagingConfig(app) {
@@ -25,7 +27,7 @@ function stagingConfig(app) {
       ENVIRONMENT: "staging",
       EXPECTED_HOST: inventory.routes[0].pattern,
       ...(app === "delivery" ? {
-        POLICY_AUD: STAGING_ACCESS_AUDS.delivery,
+        POLICY_AUD: audiences.delivery,
         PUBLIC_BASE_URL: `https://${STAGING_HOSTS.delivery}`,
         CLIENT_PORTAL_ENABLED: "false",
         CLIENT_PORTAL_ORIGIN: `https://${STAGING_HOSTS.client}`,
@@ -36,7 +38,7 @@ function stagingConfig(app) {
         CLIENT_PORTAL_INVITATION_FROM: "portal@staging.example.test",
       } : {}),
       ...(app === "operations" ? {
-        OPERATIONS_AUD: STAGING_ACCESS_AUDS.operations,
+        OPERATIONS_AUD: audiences.operations,
         PUBLIC_BASE_URL: `https://${inventory.routes[0].pattern}`,
         PROJECT_ALPHA_BASE_URL: STAGING_STATIC_VARS.operations.PROJECT_ALPHA_BASE_URL,
         INCOMING_EXPECTED_HOST: "incoming-staging.ledgetopdroneservices.com",
@@ -45,7 +47,7 @@ function stagingConfig(app) {
         CLIENT_REQUEST_TRIAGE_TO: "triage@staging.example.test",
         NOTIFICATION_FROM: "delivery@staging.example.test",
       } : {}),
-      ...(app === "ops-sync" ? { CF_ACCESS_AUD: STAGING_ACCESS_AUDS["ops-sync"], CF_ACCESS_GROUP_ID: "staging-group", CF_ACCESS_GROUP_NAME: "Staging Testers" } : {}),
+      ...(app === "ops-sync" ? { CF_ACCESS_AUD: audiences["ops-sync"], CF_ACCESS_GROUP_ID: "staging-group", CF_ACCESS_GROUP_NAME: "Staging Testers" } : {}),
     },
     d1_databases: inventory.d1_databases,
     r2_buckets: inventory.r2_buckets,
@@ -92,6 +94,15 @@ test("accepts the exact approved isolated staging inventory", () => {
     assert.deepEqual(validateApp(app, staging, productionFrom(staging)), []);
   }
 });
+test("rejects an Access audience reused from any production audience field", () => {
+  const staging = stagingConfig("delivery");
+  const production = productionFrom(staging);
+  const productionAudience = "f".repeat(64);
+  production.vars.UNRELATED_LEGACY_AUD = productionAudience;
+  staging.vars.POLICY_AUD = productionAudience;
+  const errors = validateApp("delivery", staging, production);
+  assert(errors.some((error) => error.includes("POLICY_AUD reuses a production Access audience")), errors.join(" | "));
+});
 test("rejects account, route, resource, secret, and capability drift", () => {
   const staging = stagingConfig("delivery");
   const production = productionFrom(staging);
@@ -137,7 +148,7 @@ test("requires staging-only map, triage, and email bindings", () => {
   delivery.send_email[0].allowed_sender_addresses = ["wrong@staging.example.test"];
   const deliveryErrors = validateApp("delivery", delivery, productionFrom(stagingConfig("delivery")));
   assert(deliveryErrors.some((error) => error.includes("MAPBOX_PUBLIC_TOKEN")), deliveryErrors.join(" | "));
-  assert(deliveryErrors.some((error) => error.includes("Access audiences must all be distinct")), deliveryErrors.join(" | "));
+  assert(deliveryErrors.some((error) => error.includes("client portal audience must remain distinct")), deliveryErrors.join(" | "));
   assert(deliveryErrors.some((error) => error.includes("invitation email binding")), deliveryErrors.join(" | "));
 
   const operations = stagingConfig("operations");
@@ -160,6 +171,13 @@ test("requires shared staging resources to agree", () => {
   assert(errors.some((error) => error.includes("Viewer session issuer")));
   assert(errors.some((error) => error.includes("portal projection ingress")));
   assert(errors.some((error) => error.includes("application key")));
+});
+test("rejects a staging Access audience reused from another production Worker", () => {
+  const configs = { delivery: stagingConfig("delivery"), operations: stagingConfig("operations"), "ops-sync": stagingConfig("ops-sync") };
+  const productionConfigs = Object.fromEntries(Object.entries(configs).map(([app, config]) => [app, productionFrom(config)]));
+  productionConfigs.operations.vars.UNRELATED_AUD = configs.delivery.vars.POLICY_AUD;
+  const errors = validateCrossApp(configs, productionConfigs);
+  assert(errors.some((error) => error.includes("delivery staging Access audience reuses a production Access audience")), errors.join(" | "));
 });
 test("resolves logical delivery staging files from apps/client", () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-staging-layout-"));
@@ -185,9 +203,9 @@ test("fails closed on client portal activation, host namespace origins, and audi
   staging.vars.CLIENT_PORTAL_ORIGIN = "https://other-staging.example";
   staging.vars.PUBLIC_SHARE_ORIGIN = `https://${STAGING_HOSTS.client}`;
   staging.vars.PUBLIC_BASE_URL = staging.vars.PUBLIC_SHARE_ORIGIN;
-  staging.vars.CLIENT_ACCESS_AUD = STAGING_ACCESS_AUDS.operations;
+  staging.vars.CLIENT_ACCESS_AUD = staging.vars.PROJECT_ALPHA_CATALOG_ACCESS_AUD;
   const errors = validateApp("delivery", staging, production);
-  for (const expected of ["CLIENT_PORTAL_ENABLED", "authenticated client staging host", "anonymous delivery staging host", "must not reuse"]) {
+  for (const expected of ["CLIENT_PORTAL_ENABLED", "authenticated client staging host", "anonymous delivery staging host", "must remain distinct"]) {
     assert(errors.some((error) => error.includes(expected)), `${expected}: ${errors.join(" | ")}`);
   }
 });
@@ -220,7 +238,7 @@ test("requires every portal-v2 and Operations capability to be explicitly false"
   }
 });
 
-test("pins the native portal, root-access, Operations 0054-0118, incoming-notification, pickup lifecycle, and 0200-0209 migration-first release contract", () => {
+test("pins the native portal, root-access, Operations 0054-0122, incoming-notification, pickup lifecycle, and 0200-0209 migration-first release contract", () => {
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-26), [
     "0184_native_client_feedback.sql",
     "0185_native_service_request_ownership.sql",
@@ -249,8 +267,13 @@ test("pins the native portal, root-access, Operations 0054-0118, incoming-notifi
     "0208_authenticated_delivery_change_batch_provider_identity.sql",
     "0209_authenticated_delivery_change_recipient_events.sql",
   ]);
-  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.at(-1), "0118_project_alpha_existing_directory_binding_revision_refresh_ledger.sql");
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(-65, -62), [
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(-4), [
+    "0119_project_alpha_project_v2_persistence_ledger.sql",
+    "0120_project_alpha_project_v2_canonical_settlement.sql",
+    "0121_project_alpha_project_v2_settlement_proof_expiry.sql",
+    "0122_project_alpha_project_v2_canonical_activation.sql",
+  ]);
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(-69, -66), [
     "0054_project_alpha_directory_outbox.sql",
     "0055_operations_directory_authority.sql",
     "0056_operations_directory_materialization.sql",

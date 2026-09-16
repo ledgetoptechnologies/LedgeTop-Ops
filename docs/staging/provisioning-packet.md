@@ -1,4 +1,4 @@
-# LTDS staging provisioning packet
+# Ledge Top Ops staging provisioning packet
 
 Status: the standalone storage resources, file-event queue/DLQ, and three
 staging Access applications listed under **Created standalone resources** were
@@ -71,9 +71,13 @@ unlocked. The listed queues initially have zero producers and zero consumers. No
 event subscription, route, Access policy, Workflow, or Worker version was
 created by this provisioning step.
 
-The three existing staging Access applications and their policy state are recorded in
-`docs/staging/access-created-inventory.md`. Their audiences are distinct from
-production; Access creation did not create DNS records or Worker routes.
+The historical Access inventory in `docs/staging/access-created-inventory.md`
+is not current deployment evidence. Recreate and record current staging-only
+Access applications before rendering config: distinct Delivery and Operations
+human audiences, one shared Ops Sync audience for both the Client catalog call
+and Ops Sync service authentication, and a distinct client-portal audience.
+Never reuse a production audience, and do not infer an audience ID from the
+historical document.
 
 The two client portal hosts, shared dedicated client portal Access
 app/audience/group, and public
@@ -114,8 +118,9 @@ npx.cmd wrangler queues create ltds-thumbnail-jobs-staging-dlq
 
 Before ignored `apps/*/wrangler.staging.json` files can pass preflight:
 
-- copy the recorded staging Access audiences into `POLICY_AUD`,
-  `OPERATIONS_AUD`, and `CF_ACCESS_AUD`;
+- create and record current staging-only Delivery, Operations, Ops Sync, and
+  client portal audiences; use the one Ops Sync audience in both
+  `PROJECT_ALPHA_CATALOG_ACCESS_AUD` and `CF_ACCESS_AUD`;
 - create and record the distinct client portal audience and group, assign both
   approved portal hosts to that single application, set `CLIENT_ACCESS_AUD`,
   `CLIENT_ACCESS_TEAM_DOMAIN`, `CLIENT_PORTAL_ORIGIN`, and the exact two-entry

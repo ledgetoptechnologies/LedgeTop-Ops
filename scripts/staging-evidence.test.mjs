@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { validateEvidence as validateEvidenceContract } from "./staging-evidence.mjs";
-import { FEATURE_FLAG_ACTIVATION_POLICIES, FEATURE_FLAG_DEPENDENCY_WINDOWS, PROJECT_ALPHA_STAGING, RELEASE_CANDIDATES, RELEASE_CONTRACT_FINALIZED, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_EXTERNAL_GATES, REQUIRED_EXTERNAL_GATE_PROOFS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_CLIENT_PORTAL, STAGING_HOSTS, STAGING_INVENTORY, STAGING_STATIC_VARS, STAGING_VIEWER } from "./staging-requirements.mjs";
+import { FEATURE_FLAG_ACTIVATION_POLICIES, FEATURE_FLAG_DEPENDENCY_WINDOWS, PROJECT_ALPHA_STAGING, RELEASE_CANDIDATES, RELEASE_CONTRACT_FINALIZED, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_EXTERNAL_GATES, REQUIRED_EXTERNAL_GATE_PROOFS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_SECRETS, STAGING_ACCOUNT_ID, STAGING_CLIENT_PORTAL, STAGING_HOSTS, STAGING_INVENTORY, STAGING_STATIC_VARS, STAGING_VIEWER } from "./staging-requirements.mjs";
 
 const now = Date.parse("2026-07-30T12:30:00Z");
 const digest = (value) => crypto.createHash("sha256").update(value).digest("hex").toUpperCase();
@@ -20,9 +20,9 @@ function fixture(base) {
   fs.utimesSync(path.join(base, ".backups", "delivery.sql"), backupTime, backupTime);
   fs.utimesSync(path.join(base, ".backups", "operations.sql"), backupTime, backupTime);
   const configs = {
-    delivery: { vars: { CLIENT_PORTAL_ENABLED: "false", EXPECTED_HOST: STAGING_HOSTS.delivery, CLIENT_PORTAL_ORIGIN: `https://${STAGING_HOSTS.client}`, PUBLIC_SHARE_ORIGIN: `https://${STAGING_HOSTS.delivery}`, PUBLIC_BASE_URL: `https://${STAGING_HOSTS.delivery}`, CLIENT_ACCESS_TEAM_DOMAIN: STAGING_STATIC_VARS.delivery.CLIENT_ACCESS_TEAM_DOMAIN, CLIENT_ACCESS_AUD: "a".repeat(64) } },
-    operations: { vars: { PROJECT_ALPHA_BASE_URL: "https://pa-staging.ledgetoptechnologies.com" } },
-    "ops-sync": { vars: { CF_ACCESS_GROUP_ID: "staging-group-id", CF_ACCESS_GROUP_NAME: "LTDS Staging Testers" } },
+    delivery: { vars: { CLIENT_PORTAL_ENABLED: "false", EXPECTED_HOST: STAGING_HOSTS.delivery, CLIENT_PORTAL_ORIGIN: `https://${STAGING_HOSTS.client}`, PUBLIC_SHARE_ORIGIN: `https://${STAGING_HOSTS.delivery}`, PUBLIC_BASE_URL: `https://${STAGING_HOSTS.delivery}`, CLIENT_ACCESS_TEAM_DOMAIN: STAGING_STATIC_VARS.delivery.CLIENT_ACCESS_TEAM_DOMAIN, CLIENT_ACCESS_AUD: "a".repeat(64), POLICY_AUD: "b".repeat(64) } },
+    operations: { vars: { PROJECT_ALPHA_BASE_URL: "https://pa-staging.ledgetoptechnologies.com", OPERATIONS_AUD: "c".repeat(64) } },
+    "ops-sync": { vars: { CF_ACCESS_AUD: "d".repeat(64), CF_ACCESS_GROUP_ID: "staging-group-id", CF_ACCESS_GROUP_NAME: "LTDS Staging Testers" } },
   };
   const evidence = {
     releaseCommit: "a".repeat(40),
@@ -155,7 +155,18 @@ function fixture(base) {
       "ops-sync": { hostname: STAGING_HOSTS["ops-sync"], dnsReady: true, accessReady: true },
       viewer: { hostname: STAGING_HOSTS.viewer, dnsReady: true, tlsReady: true, tunnelReady: true, protectedRoutesReady: true, publicShareBypassReady: true },
     },
-    access: { audiences: { ...STAGING_ACCESS_AUDS }, groupId: "staging-group-id", groupName: "LTDS Staging Testers", testerEmail: "tester@example.com", testerActiveOperationsUser: true, approvalRef: "ticket:access" },
+    access: {
+      audiences: { delivery: configs.delivery.vars.POLICY_AUD, operations: configs.operations.vars.OPERATIONS_AUD, "ops-sync": configs["ops-sync"].vars.CF_ACCESS_AUD },
+      applications: Object.fromEntries(["delivery", "operations", "ops-sync"].map((app) => [app, {
+        applicationId: `${app}-access-application-id`,
+        applicationName: `${app} staging access`,
+        audience: { delivery: configs.delivery.vars.POLICY_AUD, operations: configs.operations.vars.OPERATIONS_AUD, "ops-sync": configs["ops-sync"].vars.CF_ACCESS_AUD }[app],
+        destinations: [STAGING_HOSTS[app]],
+        policyIds: [`${app}-access-policy-id`],
+        readbackEvidenceRef: `ticket:${app}:access-readback`,
+      }])),
+      groupId: "staging-group-id", groupName: "LTDS Staging Testers", testerEmail: "tester@example.com", testerActiveOperationsUser: true, approvalRef: "ticket:access",
+    },
     clientPortal: {
       hostname: STAGING_CLIENT_PORTAL.hostname,
       secondaryHostname: STAGING_CLIENT_PORTAL.secondaryHostname,
@@ -290,6 +301,15 @@ test("Viewer image state is bound to the candidate and release-finalization stat
   else assert.equal(STAGING_VIEWER.image, `PENDING_VIEWER_IMAGE_FOR_${RELEASE_CANDIDATES.viewer}`);
 });
 
+test("pins the current paired Ops runtime and Project Alpha API-v2 migration boundary", () => {
+  assert.equal(RELEASE_CONTRACT_FINALIZED, false);
+  assert.equal(RELEASE_CANDIDATES.operations, "d1c20163956d180439e51c5aceb96fc37bdb5360");
+  assert.equal(RELEASE_CANDIDATES.projectAlpha, "31deb85b87b95de27dc9e90a5591e036ae96709e");
+  assert.equal(PROJECT_ALPHA_STAGING.migrations["0066_generic_portal_v2_integration.sql"], "12cfd32e4854bddf763a5fe80653fe7494ab5f9e82b592bf0da05eed78f3e886");
+  assert.equal(PROJECT_ALPHA_STAGING.migrations["0102_api_v2_project_synchronization.sql"], "63e2010529678ce866adaa38ea7a54084b1384adcc56e02727cfbbc3584959a0");
+  assert.equal(Object.keys(PROJECT_ALPHA_STAGING.migrations).length, 37);
+});
+
 test("fails closed on Viewer and Project Alpha deployment-contract drift", () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-evidence-cross-repo-"));
   const { configs, evidence, configHashes } = fixture(base);
@@ -341,12 +361,25 @@ test("fails closed on stale credential, config drift, branch builds, secrets, an
 test("fails closed on client Access reuse, public-share bypass drift, and missing migrations", () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-evidence-"));
   const { configs, evidence } = fixture(base);
-  evidence.clientPortal.audience = STAGING_ACCESS_AUDS.delivery;
+  evidence.clientPortal.audience = configs.delivery.vars.POLICY_AUD;
   evidence.clientPortal.publicAccess.workerPublicPaths = ["/"];
   evidence.migrations.delivery.expected = [];
   evidence.projectAlpha.authorizationBypassUsed = true;
   const errors = validateEvidence(evidence, { base, head: evidence.releaseCommit, configs, configHashes: evidence.configSha256, now, sourceControlVerified: true });
   for (const expected of ["must not reuse", "public paths", "migration sequence", "must not bypass"]) {
+    assert(errors.some((error) => error.includes(expected)), `${expected}: ${errors.join(" | ")}`);
+  }
+});
+
+test("binds every staff Access application readback to the rendered staging audience and host", () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-evidence-staff-access-"));
+  const { configs, evidence } = fixture(base);
+  evidence.access.applications.delivery.audience = configs.operations.vars.OPERATIONS_AUD;
+  evidence.access.applications.operations.destinations = [STAGING_HOSTS.delivery];
+  evidence.access.applications["ops-sync"].policyIds = [];
+  evidence.access.applications.delivery.readbackEvidenceRef = "";
+  const errors = validateEvidence(evidence, { base, head: evidence.releaseCommit, configs, configHashes: evidence.configSha256, now, sourceControlVerified: true });
+  for (const expected of ["delivery Access application audience", "operations Access application destinations", "ops-sync Access application needs explicit policy IDs", "delivery Access application needs a readback"]) {
     assert(errors.some((error) => error.includes(expected)), `${expected}: ${errors.join(" | ")}`);
   }
 });
@@ -400,7 +433,7 @@ test("requires evidence for the 0179 compatible-writer drain before 0180-0186", 
     assert(errors.some((error) => error.includes(expected)), `${expected}: ${errors.join(" | ")}`);
   }
 });
-test("requires an ordered 0054-0118 remote ledger, a quiescent open-fence check, and compatible Operations writers", () => {
+test("requires an ordered 0054-0122 remote ledger, a quiescent open-fence check, and compatible Operations writers", () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-evidence-operations-migration-gate-"));
   const { evidence, configs, configHashes } = fixture(base);
   [evidence.migrations.operations.expected[40], evidence.migrations.operations.expected[41]] =
@@ -584,12 +617,15 @@ test("checked-in evidence example stays complete as migrations, flags, gates, an
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const example = JSON.parse(fs.readFileSync(path.join(root, "docs", "staging", "release-evidence.json.example"), "utf8"));
   for (const app of ["delivery", "operations"]) assert.deepEqual(example.migrations[app].expected, [...REQUIRED_STAGING_MIGRATIONS[app]], `migrations.${app}`);
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(-65), [
-    "0054_project_alpha_directory_outbox.sql", "0055_operations_directory_authority.sql", "0056_operations_directory_materialization.sql", "0057_native_directory_permissions.sql", "0058_operations_directory_write_authority.sql", "0059_native_staff_profiles.sql", "0060_native_staff_bootstrap.sql", "0061_native_staff_administration.sql", "0062_project_alpha_project_outbox.sql", "0063_project_alpha_project_adoption.sql", "0064_project_alpha_project_history_epoch.sql", "0065_project_alpha_directory_history_epoch.sql", "0066_operations_directory_original_actor_subject.sql", "0067_native_staff_management_authority.sql", "0068_native_staff_control_plane.sql", "0069_native_staff_management_commands.sql", "0070_native_staff_pending_onboarding.sql", "0071_native_staff_management_targets.sql", "0072_native_staff_onboarding_cancel.sql", "0073_native_staff_onboarding_create.sql", "0074_native_staff_onboarding_approve.sql", "0075_native_staff_onboarding_rate_limits.sql", "0076_native_staff_onboarding_handoff.sql", "0077_client_onboarding_submissions.sql", "0078_client_onboarding_issuance.sql", "0079_client_onboarding_rate_limits.sql", "0080_client_onboarding_handoffs.sql", "0081_operations_directory_relationships.sql", "0082_operations_directory_intent_relationship_dependencies.sql", "0083_client_onboarding_decisions.sql", "0084_operations_directory_delivery_checkpoint.sql", "0085_operations_directory_admission_version.sql", "0086_native_shared_projects.sql", "0087_project_alpha_api_v2_incidents.sql", "0088_project_alpha_api_v2_incident_alerts.sql", "0089_project_alpha_api_v2_monitor_lifecycle.sql", "0090_project_alpha_api_v2_monitor_retirement.sql", "0091_native_integration_control.sql", "0092_native_integration_grant_management.sql", "0093_native_integration_alert_reconciliation.sql", "0094_client_onboarding_submission_notifications.sql", "0095_client_onboarding_notification_scan.sql", "0096_native_workforce_foundation.sql", "0097_native_workforce_authority.sql", "0098_native_workforce_time_record_receipts.sql", "0099_native_workforce_time_submit_review_receipts.sql", "0100_native_workforce_authority_grant_change_receipts.sql", "0101_native_workforce_grant_issuer.sql", "0102_native_workforce_grant_issuance.sql", "0103_client_onboarding_recipient_identity_bindings.sql", "0104_client_onboarding_prefill_disclosures.sql", "0105_client_onboarding_disclosure_recipient.sql", "0106_client_onboarding_prefill_binding_commands.sql", "0107_client_onboarding_prefill_authorization_intents.sql", "0108_native_workforce_time_beneficiary_selection.sql", "0109_native_workforce_time_beneficiary_selection_issuance.sql", "0110_native_workforce_time_beneficiary_selection_lifecycle.sql", "0111_project_alpha_existing_directory_binding_review_evidence.sql", "0112_project_alpha_existing_directory_binding_acquisition_ledger.sql", "0113_project_alpha_existing_directory_binding_acquired_mapping_receipts.sql", "0114_project_alpha_existing_directory_binding_acquisition_response_receipts.sql", "0115_project_alpha_existing_directory_binding_review_local_revision_fence.sql", "0116_project_alpha_acquired_canonical_mapping_activation.sql", "0117_project_alpha_native_owner_epoch_claims.sql", "0118_project_alpha_existing_directory_binding_revision_refresh_ledger.sql",
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(-4), [
+    "0119_project_alpha_project_v2_persistence_ledger.sql",
+    "0120_project_alpha_project_v2_canonical_settlement.sql",
+    "0121_project_alpha_project_v2_settlement_proof_expiry.sql",
+    "0122_project_alpha_project_v2_canonical_activation.sql",
   ]);
   assert.deepEqual(
-    fs.readdirSync(path.join(root, "apps", "operations", "migrations")).filter((name) => REQUIRED_STAGING_MIGRATIONS.operations.includes(name)).sort().slice(-65),
-    REQUIRED_STAGING_MIGRATIONS.operations.slice(-65),
+    fs.readdirSync(path.join(root, "apps", "operations", "migrations")).filter((name) => REQUIRED_STAGING_MIGRATIONS.operations.includes(name)).sort().slice(-69),
+    REQUIRED_STAGING_MIGRATIONS.operations.slice(-69),
   );
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-23), [
     "0187_authenticated_content_audit.sql",

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { APP_SOURCE_DIRS, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_ALLOWED_VAR_NAMES, STAGING_HOSTS, STAGING_INVENTORY, STAGING_REQUEST_ATTACHMENT_R2_CORS, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
+import { APP_SOURCE_DIRS, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_STAGING_SECRETS, STAGING_ACCOUNT_ID, STAGING_ALLOWED_VAR_NAMES, STAGING_HOSTS, STAGING_INVENTORY, STAGING_REQUEST_ATTACHMENT_R2_CORS, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const apps = ["delivery", "operations", "ops-sync"];
@@ -66,7 +66,7 @@ export function validateApp(app, staging, production) {
   }
   const audienceKey = { delivery: "POLICY_AUD", operations: "OPERATIONS_AUD", "ops-sync": "CF_ACCESS_AUD" }[app];
   if (vars.EXPECTED_HOST !== STAGING_HOSTS[app]) errors.push(`${app} EXPECTED_HOST must match the approved staging host`);
-  if (vars[audienceKey] !== STAGING_ACCESS_AUDS[app]) errors.push(`${app} Access audience must match the approved staging app`);
+  if (!/^[a-f0-9]{64}$/i.test(vars[audienceKey] ?? "")) errors.push(`${app} Access audience must be a 64-character staging audience`);
   if (app === "operations" && vars.PUBLIC_BASE_URL !== `https://${STAGING_HOSTS.operations}`) errors.push("operations PUBLIC_BASE_URL must match the approved staging host");
   if (app === "delivery") {
     if (vars.CLIENT_PORTAL_ENABLED !== "false") errors.push("delivery CLIENT_PORTAL_ENABLED must remain false for release preparation");
@@ -77,12 +77,9 @@ export function validateApp(app, staging, production) {
       errors.push("delivery public origins must match the approved anonymous delivery staging host");
     if (vars.CLIENT_ACCESS_TEAM_DOMAIN !== STAGING_STATIC_VARS.delivery.CLIENT_ACCESS_TEAM_DOMAIN) errors.push("delivery CLIENT_ACCESS_TEAM_DOMAIN must match the approved Access team");
     if (!/^[a-f0-9]{64}$/i.test(vars.CLIENT_ACCESS_AUD ?? "")) errors.push("delivery CLIENT_ACCESS_AUD must be the dedicated client portal Access audience");
-    if (Object.values(STAGING_ACCESS_AUDS).includes(vars.CLIENT_ACCESS_AUD)) errors.push("delivery CLIENT_ACCESS_AUD must not reuse another staging Access audience");
-    const integrationAudiences = [vars.PROJECT_ALPHA_CATALOG_ACCESS_AUD];
-    if (!/^[a-f0-9]{64}$/i.test(integrationAudiences[0] ?? "")) errors.push("delivery PROJECT_ALPHA_CATALOG_ACCESS_AUD must be a dedicated 64-character Access audience");
-    if (new Set([vars.CLIENT_ACCESS_AUD, ...integrationAudiences, ...Object.values(STAGING_ACCESS_AUDS)]).size !== 2 + Object.values(STAGING_ACCESS_AUDS).length) {
-      errors.push("delivery client, catalog, and staff Access audiences must all be distinct");
-    }
+    if (!/^[a-f0-9]{64}$/i.test(vars.PROJECT_ALPHA_CATALOG_ACCESS_AUD ?? "")) errors.push("delivery PROJECT_ALPHA_CATALOG_ACCESS_AUD must be a 64-character Ops Sync staging audience");
+    if (vars.CLIENT_ACCESS_AUD === vars.PROJECT_ALPHA_CATALOG_ACCESS_AUD || vars.CLIENT_ACCESS_AUD === vars.POLICY_AUD)
+      errors.push("delivery client portal audience must remain distinct from Delivery and Ops Sync audiences");
     complete(vars.MAPBOX_PUBLIC_TOKEN, "delivery vars.MAPBOX_PUBLIC_TOKEN", errors);
     if (!email(vars.CLIENT_PORTAL_INVITATION_FROM)) errors.push("delivery CLIENT_PORTAL_INVITATION_FROM must be a valid staging sender");
     const emailBindings = staging.send_email ?? [];
@@ -111,8 +108,18 @@ export function validateApp(app, staging, production) {
     if (vars[flag] !== "false") errors.push(`${app} must explicitly set ${flag}=false`);
   }
   if (app === "ops-sync") for (const key of ["CF_ACCESS_GROUP_ID", "CF_ACCESS_GROUP_NAME"]) complete(vars[key], `${app} vars.${key}`, errors);
+  const productionAudienceValues = new Set(
+    Object.entries(production.vars ?? {})
+      .filter(([key, value]) => key.endsWith("_AUD") && /^[a-f0-9]{64}$/i.test(value ?? ""))
+      .map(([, value]) => value),
+  );
+  for (const [key, value] of Object.entries(vars)) {
+    if (key.endsWith("_AUD") && productionAudienceValues.has(value)) {
+      errors.push(`${app} vars.${key} reuses a production Access audience`);
+    }
+  }
   for (const key of Object.keys(production.vars ?? {})) {
-    if (!/(?:EXPECTED_HOST|BASE_URL|_ORIGIN|_AUD)$/.test(key)) continue;
+    if (!/(?:EXPECTED_HOST|BASE_URL|_ORIGIN)$/.test(key)) continue;
     complete(vars[key], `${app} vars.${key}`, errors);
     if (vars[key] === production.vars[key]) errors.push(`${app} vars.${key} reuses production`);
   }
@@ -171,7 +178,7 @@ export function validateApp(app, staging, production) {
   return errors;
 }
 
-export function validateCrossApp(configs) {
+export function validateCrossApp(configs, productionConfigs = {}) {
   const errors = [];
   const deliveryDb = mapped(configs.delivery.d1_databases, "database_id").get("DELIVERY_DB");
   if (deliveryDb !== mapped(configs.operations.d1_databases, "database_id").get("DELIVERY_DB")) errors.push("operations DELIVERY_DB must equal delivery staging DELIVERY_DB");
@@ -193,6 +200,25 @@ export function validateCrossApp(configs) {
   }
   if (configs.delivery.vars?.PROJECT_ALPHA_PORTAL_APPLICATION_KEY !== configs["ops-sync"].vars?.APPLICATION_KEY) {
     errors.push("Client and Ops Sync must share the reviewed Project Alpha staging application key");
+  }
+  const accessAudiences = {
+    delivery: configs.delivery.vars?.POLICY_AUD,
+    operations: configs.operations.vars?.OPERATIONS_AUD,
+    "ops-sync": configs["ops-sync"].vars?.CF_ACCESS_AUD,
+    clientPortal: configs.delivery.vars?.CLIENT_ACCESS_AUD,
+  };
+  if (new Set(Object.values(accessAudiences)).size !== Object.keys(accessAudiences).length)
+    errors.push("Delivery, Operations, Ops Sync, and client portal Access audiences must all be distinct");
+  if (configs.delivery.vars?.PROJECT_ALPHA_CATALOG_ACCESS_AUD !== accessAudiences["ops-sync"])
+    errors.push("delivery catalog authorization must use the single Ops Sync staging Access audience");
+  const productionAudiences = new Set(
+    Object.values(productionConfigs)
+      .flatMap((config) => Object.entries(config?.vars ?? {}))
+      .filter(([key, value]) => key.endsWith("_AUD") && /^[a-f0-9]{64}$/i.test(value ?? ""))
+      .map(([, value]) => value),
+  );
+  for (const [name, audience] of Object.entries(accessAudiences)) {
+    if (productionAudiences.has(audience)) errors.push(`${name} staging Access audience reuses a production Access audience`);
   }
   return errors;
 }
@@ -220,6 +246,7 @@ export function validateRequestAttachmentCors(config) {
 
 export function validateFiles(base = root) {
   const configs = {};
+  const productionConfigs = {};
   const errors = [];
   for (const app of apps) {
     const sourceDir = APP_SOURCE_DIRS[app];
@@ -227,7 +254,8 @@ export function validateFiles(base = root) {
     if (!fs.existsSync(stagingFile)) { errors.push(`${path.relative(base, stagingFile)} is missing`); continue; }
     try {
       configs[app] = readJson(stagingFile);
-      errors.push(...validateApp(app, configs[app], readJson(path.join(base, "apps", sourceDir, "wrangler.jsonc"))));
+      productionConfigs[app] = readJson(path.join(base, "apps", sourceDir, "wrangler.jsonc"));
+      errors.push(...validateApp(app, configs[app], productionConfigs[app]));
     } catch (error) { errors.push(`${path.relative(base, stagingFile)} is invalid JSON: ${error.message}`); }
   }
   const corsFile = path.join(base, "docs", "staging", "request-attachments-r2-cors.json");
@@ -242,7 +270,7 @@ export function validateFiles(base = root) {
     try { errors.push(...validateSecretManifest(readJson(secretManifestFile))); }
     catch (error) { errors.push(`${path.relative(base, secretManifestFile)} is invalid JSON: ${error.message}`); }
   }
-  if (apps.every((app) => configs[app])) errors.push(...validateCrossApp(configs));
+  if (apps.every((app) => configs[app])) errors.push(...validateCrossApp(configs, productionConfigs));
   return errors;
 }
 

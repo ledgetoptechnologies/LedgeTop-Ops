@@ -12,14 +12,14 @@ ignored staging configuration must end with `CLIENT_PORTAL_ENABLED=false`.
 - Authenticated client portal hosts:
   `client-staging.ledgetopdroneservices.com` and
   `portal-staging.ledgetoptechnologies.com`.
-- Dedicated Access app: `LTDS Client Portal Staging`, with a new app ID and
+- Dedicated Access app: `Ledge Top Client Portal Staging`, with a new app ID and
   audience that are not any Delivery, Operations, or Ops Sync value.
-- Dedicated group: `LTDS Client Portal Staging Testers`; never use the staff,
+- Dedicated group: `Ledge Top Client Portal Staging Testers`; never use the staff,
   Operations, Ops Sync, or production client group.
 - Portal app destinations: `/portal`, `/portal/*`, `/api/client`, and
   `/api/client/*` on both client test hosts, using the same application,
   audience, and policy set.
-- Public app: `LTDS Client Public Staging`, with the anonymous delivery hostname
+- Public app: `Ledge Top Client Public Staging`, with the anonymous delivery hostname
   as its root destination and a Bypass Everyone policy. The portal host retains
   the dedicated portal Allow policy. The release-critical public
   path families are `/`, `/s/*`, `/client-share/*`, `/api/public/*`, `/health`, and `/assets/*`;
@@ -67,7 +67,7 @@ and warns that Bypass disables Access enforcement in
    `0177_domain_neutral_delivery_notifications.sql` and
    `0178_domain_neutral_delivery_notification_contract.sql`, plus the later
    `0179`-`0186` assignment/notification/native-portal sequence, and the complete
-   ordered Operations `0054`-`0118` suffix. Client migration `0113` is
+   ordered Operations `0054`-`0122` suffix. Client migration `0113` is
    intentionally reserved and absent. The
    release evidence validator compares the complete filename sets; do not
    shorten them to a range or infer success from a local migration run.
@@ -99,7 +99,7 @@ and warns that Bypass disables Access enforcement in
    drain proof. Only then apply `0180`-`0183` from the final input. Keep native
     capabilities unavailable while applying Client `0184`-`0195`, satisfying
     the separate `0187` content-audit and `0189` primary-binding barriers, then
-    apply Operations through `0118` only after the remote-ledger, open-fence,
+    apply Operations through `0122` only after the remote-ledger, open-fence,
     quiescence, populated-export/time-travel-recovery, and compatible-writer
     ordering evidence is recorded. The combined candidate is not an expand-only input; do not
    run one all-pending apply or execute raw migration SQL.

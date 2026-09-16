@@ -103,13 +103,14 @@ test("rollout manifest is pinned to the current receiver migration boundary", ()
     "apps/operations/migrations/0051_client_hub_internal_notes.sql",
     "apps/operations/migrations/0052_project_operational_reassignment_recovery.sql",
     "apps/operations/migrations/0053_project_internal_notes.sql",
+    "apps/operations/migrations/0122_project_alpha_project_v2_canonical_activation.sql",
   ]) assert.equal(exists(migration), true, `missing rollout migration ${migration}`);
 
   assert.match(manifest, /Client migrations through `0209`/);
   assert.match(manifest, /R8c — Authenticated delivery recovery and bell/);
   assert.match(manifest, /No migrations to apply/);
-  assert.match(manifest, /Operations through `0053`/);
-  assert.match(manifest, /Project Alpha `0083`/);
+  assert.match(manifest, /Operations through `0122`/);
+  assert.match(manifest, /Project Alpha `0102`/);
 });
 
 test("rollout manifest keeps every joined workflow and reversible window explicit", () => {
