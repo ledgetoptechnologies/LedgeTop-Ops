@@ -1,13 +1,14 @@
 # Ledge Top Ops staging provisioning packet
 
-Status: the standalone storage resources, file-event queue/DLQ, and three
-staging Access applications listed under **Created standalone resources** were
-provisioned. The thumbnail queue/DLQ and private Container entitlement have not been
-verified by this repository audit and must be treated as pending until a fresh
-Cloudflare inventory records their IDs/status. Delivery and Operations have one
-narrow human test policy each; Ops Sync remains default-deny. Worker deployment,
-Workflow creation, migrations, routes, additional Access changes, event
-subscriptions, secrets, and feature activation remain deferred.
+Status: the standalone storage resources, file-event queue/DLQ, thumbnail
+queue/DLQ, and staging Access applications were provisioned. A live Cloudflare
+inventory on 2026-09-16 verified Workers Containers entitlement and a ready
+production thumbnail renderer as account-level entitlement evidence only. No
+staging Worker, Workflow, or private staging `THUMBNAIL_RENDERER` binding has
+been created or read back. Delivery and Operations have one narrow human test
+policy each; Ops Sync remains service-auth only. Worker deployment, Workflow
+creation, migrations, routes, event subscriptions, secrets, and feature
+activation remain deferred.
 
 ## Deliberate same-account exception
 
@@ -42,9 +43,9 @@ feature.
 | Incoming R2 | `ltds-incoming-staging`, ENAM, Standard |
 | File-events queue | `ltds-file-events-staging` |
 | Dead-letter queue | `ltds-file-events-staging-dlq` |
-| Thumbnail queue | `ltds-thumbnail-jobs-staging` (required; existence unverified) |
-| Thumbnail DLQ | `ltds-thumbnail-jobs-staging-dlq` (required; existence unverified) |
-| Thumbnail renderer | private `ThumbnailRendererContainer`, one `standard-1` maximum instance (required; entitlement unverified) |
+| Thumbnail queue | `ltds-thumbnail-jobs-staging` / `f85e103c23684deeb0bc07c1734191be` |
+| Thumbnail DLQ | `ltds-thumbnail-jobs-staging-dlq` / `e4d88e9c1b4948b591356307d2d53f15` |
+| Thumbnail renderer | Workers Containers entitlement verified; staging private `ThumbnailRendererContainer` binding pending, with one maximum `standard-1` instance intended |
 | R2 retention | Disposable test data; no bucket lock or automatic expiry |
 | Provider flags | Dropbox, Google, and Google Picker `false` |
 | Direct R2 upload | `false` |
@@ -65,11 +66,14 @@ required. Do not infer a recovery time from an untested source-sync schedule.
 | R2 | `ltds-incoming-staging` | Incoming test quarantine |
 | Queue | `ltds-file-events-staging` / `6ce589b7865e4ed8a2b01a515a247416` | Future staging file events |
 | DLQ | `ltds-file-events-staging-dlq` / `b6f9faccbab64c8db7bfd29c483b3708` | Failed staging file events |
+| Queue | `ltds-thumbnail-jobs-staging` / `f85e103c23684deeb0bc07c1734191be` | Future staging thumbnail jobs |
+| DLQ | `ltds-thumbnail-jobs-staging-dlq` / `e4d88e9c1b4948b591356307d2d53f15` | Failed staging thumbnail jobs |
 
 Both D1 databases are empty. Both R2 buckets are Standard, empty, private, and
-unlocked. The listed queues initially have zero producers and zero consumers. No migration,
-event subscription, route, Access policy, Workflow, or Worker version was
-created by this provisioning step.
+unlocked. All four staging queues had zero producers and zero consumers in the
+2026-09-16 inventory. No migration, event subscription, route, Workflow,
+staging Worker version, or staging Container binding was created by this
+provisioning step.
 
 The historical Access inventory in `docs/staging/access-created-inventory.md`
 is not current deployment evidence. Recreate and record current staging-only
@@ -104,14 +108,12 @@ npx.cmd wrangler queues create ltds-file-events-staging
 npx.cmd wrangler queues create ltds-file-events-staging-dlq
 ```
 
-The following are required by the new configuration but are not recorded as
-created resources above. List queues first; create only a missing exact name
-during a separately approved provisioning step:
+The thumbnail queue and DLQ are recorded above. Re-list queues before release
+and fail closed if an expected identity is missing or has an unexpected
+producer or consumer. Do not re-run a create command for an existing name:
 
 ```powershell
 npx.cmd wrangler queues list
-npx.cmd wrangler queues create ltds-thumbnail-jobs-staging
-npx.cmd wrangler queues create ltds-thumbnail-jobs-staging-dlq
 ```
 
 ## Minimal unresolved configuration
@@ -131,8 +133,9 @@ Before ignored `apps/*/wrangler.staging.json` files can pass preflight:
 - the staging Access group ID/name and approved test identities;
 - a staging-only Project Alpha origin and service-token policy;
 - interactive staging secrets, never committed or placed in shell commands;
-- verified Workers Containers entitlement plus the private renderer binding,
-  thumbnail queue/DLQ identities, and one-instance resource cap;
+- the verified Workers Containers entitlement plus a separately created and
+  read-back private staging renderer binding, the recorded thumbnail queue/DLQ
+  identities, and one-instance resource cap;
 - eight unused positive-integer rate-limit namespace values;
 - the reviewed commit and build artifact checksum.
 
