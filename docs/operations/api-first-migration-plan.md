@@ -114,6 +114,29 @@ No `0122` migration or adapter is implemented by this checkpoint. No runtime
 mount, canonical mutation, remote migration, deployment or publication is
 claimed.
 
+### September 15 implementation evidence — local Operations commit `e1190f2`
+
+Local Operations commit `e1190f2c762a9b991af244f64cda81edacdcea55` implements
+the forward-only `0122` migration and the unmounted canonical-activation
+adapter. The supported command set is create, update and bind only; refresh is
+not supported. The adapter reserves the canonical fingerprint, intent and
+pending event before the PA POST. Activation then rechecks live authority,
+the project head, canonical mapping, outbox state and directory mappings before
+atomically advancing mapping, head, history and outbox state with one immutable
+activation receipt. `overdue_warning` is included in the activated project
+projection. Existing Delivery behavior and public-link bytes are untouched.
+
+The focused five-file evidence is **31/31**; the activation-specific suite is
+**13/13**; an isolated strict TypeScript pass completed; and independent review
+found no blocker. The full package TypeScript check is non-actionable because
+of stale parent-junction dependencies, not because of this change. The
+worktree is clean and the commit remains local only: no runtime mount, push,
+deployment or publication occurred.
+
+Remaining gates are CI and publication approval, a populated D1 migration and
+recovery rehearsal, a per-instance PA cutover manifest and deployment, live
+public-link proof, and coordinated owner acceptance.
+
 ### September 15 — API-first transport and ownership checkpoint
 
 - Operations PR57 merged to `main` at `e8bbfab`. Its dormant Project Alpha
