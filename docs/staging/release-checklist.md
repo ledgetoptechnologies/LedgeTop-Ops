@@ -19,6 +19,10 @@ Operations, and Ops Sync:
 - Builds for non-production branches is off;
 - the dashboard or Builds API record is attached to the release ticket.
 
+A live dashboard readback on 2026-09-16 confirmed those first two controls for
+Delivery (`ledgetop-clients`), Operations (`ledgetop-ops`), and Ops Sync
+(`ledgetop-ops-sync`). All three still use `*` as the build watch include path.
+
 Do not push a branch merely to test this setting. Historical preview uploads
 for Operations and Ops Sync contained production bindings even though they did
 not become active deployments.
@@ -146,15 +150,24 @@ The current candidate inventory extends through Client `0213` (including both
 distinct `0199` filenames), Operations
 `0122`, and Project Alpha `0102`. The reviewed Operations runtime boundary is
 PR63's merge commit `d1c20163956d180439e51c5aceb96fc37bdb5360`. The staging
-contract lineage through PR66 merge `ffff9dddba4702b1d61701199ea102ba64bf7b8c`
+contract lineage through PR67 merge `0aab6773f109f84b2d0ff166fd24ee1bb537d429`
 contains only staging-contract, bootstrap, test, and documentation changes, so
 using the repository head as the runtime identity would create a circular
-self-pin. Project Alpha is pinned independently at PR184 head
-`31deb85b87b95de27dc9e90a5591e036ae96709e`.
+self-pin. Because all three production Workers currently watch `*`, the docs-only
+PR67 merge uploaded a same-code version of Delivery, Operations, and Ops Sync;
+it did not move the reviewed runtime boundary. Project Alpha is pinned
+independently at PR184 head `31deb85b87b95de27dc9e90a5591e036ae96709e`.
 Keep `RELEASE_CONTRACT_FINALIZED=false` until independent cross-repository,
 image, migration, and live staging evidence is complete. Any runtime change
 after `d1c2016` requires a newly reviewed non-circular boundary and coordinated
 evidence refresh.
+
+The live Project Alpha staging instance reports `v31deb85`. API key ID `1`
+exists with the reviewed API v2 directory and Project scopes, but it is not yet
+bound to an application identity; a scoped key alone is not deployment or
+projection readiness. The staging control API has no `exec` route. Perform the
+one-time application binding inside the staging web container with the reviewed
+CLI command; never infer or invent an undocumented control endpoint.
 
 The Viewer evidence is separate from the three Wrangler deployments. Record its
 exact image/commit, a SHA-256 of the non-secret `viewer.env` shape, secret names

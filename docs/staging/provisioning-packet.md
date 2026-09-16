@@ -76,18 +76,21 @@ staging Worker version, or staging Container binding was created by this
 provisioning step.
 
 The historical Access inventory in `docs/staging/access-created-inventory.md`
-is not current deployment evidence. Recreate and record current staging-only
-Access applications before rendering config: distinct Delivery and Operations
-human audiences, one shared Ops Sync audience for both the Client catalog call
-and Ops Sync service authentication, and a distinct client-portal audience.
-Never reuse a production audience, and do not infer an audience ID from the
-historical document.
+is not current deployment evidence. A live dashboard readback on 2026-09-16
+verified the staging-only Delivery, Operations, Ops Sync, Client Portal, and
+separate public Bypass Access applications. The Client Portal application owns
+both approved portal hosts and has its own audience and tester group; the
+public Bypass policy remains a separate application. Delivery and Operations
+have distinct human audiences, and Ops Sync has one service-auth audience for
+both its receiver and catalog call. Record the current application, audience,
+group, host, and policy identities in release evidence before rendering config.
+Never reuse a production audience, infer an audience ID from the historical
+document, or create another application for an already represented host.
 
-The two client portal hosts, shared dedicated client portal Access
-app/audience/group, and public
-Bypass app/policy are not provisioned. Their exact fail-closed contract and
-ordered plan are in `docs/staging/client-portal-rollout.md`; none may reuse the
-existing Delivery Access audience or tester policy.
+The exact fail-closed portal contract and ordered verification plan remain in
+`docs/staging/client-portal-rollout.md`. Additional Access applications beyond
+the five verified above require separate review, and none may reuse the
+Delivery audience or tester policy.
 
 ## Reproducible commands
 
