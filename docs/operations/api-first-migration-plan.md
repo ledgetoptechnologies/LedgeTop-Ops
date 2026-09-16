@@ -46,6 +46,33 @@ Updated September 15, 2026. The owner approved implementation and resumption aft
   the legacy integration and all replacement paths dormant until those gates,
   CI and coordinated deployment evidence pass.
 
+### September 15, 2026 PA cutover audit checkpoint — candidate `33eae4b`
+
+- Generic PA directory and Project APIs exist, and directory externally-managed
+  mode exists, but the related flags remain default-off. Projects intentionally
+  remain dual-editor: the owner requires edits in either PA or Operations, with
+  one-to-one synchronization and explicit conflict handling. No Project
+  ownership lock is desired.
+- Per-instance staging/LTT/LTDS non-secret cutover manifests and their evidence
+  are missing. Legacy custom-integration retirement criteria and its kill-switch
+  are not complete. Public-link compatibility is present at code level but is
+  not deployment-verified. The PA migration README also contains documented
+  drift stating that lifecycle and relations are unimplemented; reconcile that
+  documentation against the candidate before treating the APIs as ready.
+
+#### Next safe actions
+
+- Keep PA unpublished, undeployed and default-off pending explicit owner
+  approval; after approval, deploy and sign in to both instances before any
+  authority cutover.
+- Reconcile the README and candidate route/flag inventory, then produce a
+  per-instance non-secret cutover manifest and LTT/LTDS staging evidence for
+  synchronization, conflicts, rollback and preserved public links.
+- Define and test legacy-retirement gates and a reversible kill-switch, and
+  verify public-link compatibility on both deployed instances. Do not add a
+  Project ownership lock or retire the legacy integration until joined evidence
+  and owner acceptance are complete.
+
 ### September 15 approved design checkpoint — forward-only canonical activation
 
 This is an approved design, not an implementation or release claim. The next
