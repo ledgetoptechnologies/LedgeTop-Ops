@@ -145,9 +145,10 @@ release-candidate placeholder remains.
 The current candidate inventory extends through Client `0213` (including both
 distinct `0199` filenames), Operations
 `0122`, and Project Alpha `0102`. The reviewed Operations runtime boundary is
-PR63's merge commit `d1c20163956d180439e51c5aceb96fc37bdb5360`; current main
-head `6444136340dff6188cbc4e668617fe7ec7149481` contains only the staging
-contract repair, so using HEAD as the runtime identity would create a circular
+PR63's merge commit `d1c20163956d180439e51c5aceb96fc37bdb5360`. The staging
+contract lineage through PR66 merge `ffff9dddba4702b1d61701199ea102ba64bf7b8c`
+contains only staging-contract, bootstrap, test, and documentation changes, so
+using the repository head as the runtime identity would create a circular
 self-pin. Project Alpha is pinned independently at PR184 head
 `31deb85b87b95de27dc9e90a5591e036ae96709e`.
 Keep `RELEASE_CONTRACT_FINALIZED=false` until independent cross-repository,
@@ -527,8 +528,8 @@ forward.
 Before version upload, verify rather than infer the remaining operator-owned
 media prerequisites: the staging thumbnail queue and DLQ exist, Operations has
 the exact `THUMBNAIL_QUEUE` producer, main consumer and DLQ consumer; the
-private `THUMBNAIL_RENDERER` Container binding resolves with four maximum
-instances, internet disabled and no SSH/public route; and all five Operations
+private `THUMBNAIL_RENDERER` Container binding resolves with one maximum
+`standard-1` instance, internet disabled and no SSH/public route; and all five Operations
 crons are present: consolidated 15-minute work, five-minute request processing,
 Client Hub indexing, hourly source recovery, and the offset native-delivery
 notification scheduler. Confirm the
