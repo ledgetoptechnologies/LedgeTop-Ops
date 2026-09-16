@@ -15,6 +15,7 @@
     "DIRECT_DELIVERY_UPLOADS_ENABLED": "false",
     "INCOMING_BASE_URL": "https://incoming-staging.ledgetopdroneservices.com",
     "INCOMING_EXPECTED_HOST": "incoming-staging.ledgetopdroneservices.com",
+    "INCOMING_RCLONE_PROMOTION_ENABLED": "false",
     "THUMBNAIL_INGEST_EXPECTED_HOST": "ops-staging.ledgetopdroneservices.com",
     "THUMBNAIL_RENDERER_EXPECTED_HOST": "incoming-staging.ledgetopdroneservices.com",
     "ENVIRONMENT": "staging",
@@ -113,6 +114,7 @@
   "workflows": [
     { "name": "ltds-r2-crud-staging", "binding": "R2_CRUD_WORKFLOW", "class_name": "R2CrudWorkflow" },
     { "name": "ltds-incoming-upload-lifecycle-staging", "binding": "INCOMING_LIFECYCLE_WORKFLOW", "class_name": "IncomingUploadLifecycleWorkflow" },
+    { "name": "ledgetop-incoming-rclone-promotion-staging", "binding": "INCOMING_RCLONE_PROMOTION_WORKFLOW", "class_name": "IncomingRclonePromotionWorkflow" },
     { "name": "ltds-dropbox-import-staging", "binding": "DROPBOX_IMPORT_WORKFLOW", "class_name": "DropboxImportWorkflow" }
   ]
 }

@@ -48,6 +48,7 @@ feature.
 | R2 retention | Disposable test data; no bucket lock or automatic expiry |
 | Provider flags | Dropbox, Google, and Google Picker `false` |
 | Direct R2 upload | `false` |
+| Incoming rclone promotion | `false`; the Workflow binding remains inert until a separately approved staging acceptance packet |
 | Permanent purge | `false` |
 
 Regions mirror the corresponding production resources. The unlocked staging
@@ -142,7 +143,7 @@ controls and the direct-upload capability gate are separately approved.
 
 ## Deferred actions
 
-Do not create the three Workers or five Workflows merely to reserve their names.
+Do not create the three Workers or six Workflows merely to reserve their names.
 Deployment would create or update Workflows and activate the five reviewed
 Operations schedules: consolidated 15-minute work, five-minute request work,
 offset five-minute Client Hub indexing, hourly source recovery, and offset

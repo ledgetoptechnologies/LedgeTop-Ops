@@ -264,6 +264,12 @@ test("pins the native portal, root-access, Operations 0054-0118, incoming-notifi
   assert.equal(STAGING_STATIC_VARS.delivery.PROJECT_ALPHA_PORTAL_SYNC_ENABLED, "true");
   assert.equal(STAGING_STATIC_VARS.delivery.PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED, "false");
   assert.equal(STAGING_STATIC_VARS.delivery.PROJECT_ALPHA_PORTAL_APPLICATION_KEY, STAGING_STATIC_VARS["ops-sync"].APPLICATION_KEY);
+  assert.equal(STAGING_STATIC_VARS.operations.INCOMING_RCLONE_PROMOTION_ENABLED, "false");
+  assert.deepEqual(STAGING_INVENTORY.operations.workflows.find(({ binding }) => binding === "INCOMING_RCLONE_PROMOTION_WORKFLOW"), {
+    name: "ledgetop-incoming-rclone-promotion-staging",
+    binding: "INCOMING_RCLONE_PROMOTION_WORKFLOW",
+    class_name: "IncomingRclonePromotionWorkflow",
+  });
   assert.equal(STAGING_PROJECT_ALPHA_ORIGIN, "https://pa-staging.ledgetoptechnologies.com");
   assert.deepEqual(Object.fromEntries(Object.entries(STAGING_INVENTORY).map(([app, inventory]) => [app, inventory.name])), {
     delivery: "ledgetop-clients-staging",

@@ -273,6 +273,8 @@ only for the separately approved synthetic Operations acceptance run described
 in the [thumbnail and upload runbook](../media-thumbnail-pipeline.md), then
 return it to the intended reviewed state and record the deployed value. Client
 Portal, public-share, and Incoming identities remain denied in either state.
+Keep `INCOMING_RCLONE_PROMOTION_ENABLED=false`; its binding is inert until the
+separate TrueNAS PULL/MOVE and ready-prefix acceptance packet is approved.
 
 The example evidence intentionally fails until the client Access/public-path
 contract, migrations, end-to-end tests, final default-off state, and every
