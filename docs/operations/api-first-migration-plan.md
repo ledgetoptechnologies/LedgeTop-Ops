@@ -137,6 +137,11 @@ Remaining gates are CI and publication approval, a populated D1 migration and
 recovery rehearsal, a per-instance PA cutover manifest and deployment, live
 public-link proof, and coordinated owner acceptance.
 
+Composition note: verified directory-capability fix `a65d765` was cherry-picked
+after `e1190f2` into the local activation branch as `fce6c9c`. The combined
+focused regression passed **6 files / 33 tests**. No push or deployment occurred;
+the source and dependency tree are clean after restoration.
+
 ### September 15 — API-first transport and ownership checkpoint
 
 - Operations PR57 merged to `main` at `e8bbfab`. Its dormant Project Alpha
