@@ -59,7 +59,7 @@ The receiver-only projection path is infrastructure, not an activation flag:
 Client must set `PROJECT_ALPHA_PORTAL_SYNC_ENABLED=true`, keep
 `PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED=false`, and share the exact
 `ltds_ops_staging` application key with Ops Sync. Ops Sync must bind
-`CLIENT_PORTAL_PROJECTION_INGRESS` to the `ltds-delivery-staging`
+`CLIENT_PORTAL_PROJECTION_INGRESS` to the `ledgetop-clients-staging`
 `OpsSyncPortalProjectionIngress` named entrypoint. Do not provision a direct
 Client portal Access audience, HMAC key ID, or portal HMAC secret.
 
@@ -261,9 +261,9 @@ Get-FileHash -Algorithm SHA256 apps/operations/wrangler.staging.json
 Get-FileHash -Algorithm SHA256 apps/ops-sync/wrangler.staging.json
 npm.cmd run staging:release:prepare
 
-& '.\apps\client\node_modules\.bin\wrangler.cmd' deploy --dry-run --config apps/client/wrangler.staging.json --outdir C:\tmp\ltds-delivery-staging-dry-run
-& '.\apps\operations\node_modules\.bin\wrangler.cmd' deploy --dry-run --config apps/operations/wrangler.staging.json --outdir C:\tmp\ltds-ops-staging-dry-run
-& '.\apps\ops-sync\node_modules\.bin\wrangler.cmd' deploy --dry-run --config apps/ops-sync/wrangler.staging.json --outdir C:\tmp\ltds-ops-sync-staging-dry-run
+& '.\apps\client\node_modules\.bin\wrangler.cmd' deploy --dry-run --config apps/client/wrangler.staging.json --outdir C:\tmp\ledgetop-clients-staging-dry-run
+& '.\apps\operations\node_modules\.bin\wrangler.cmd' deploy --dry-run --config apps/operations/wrangler.staging.json --outdir C:\tmp\ledgetop-ops-staging-dry-run
+& '.\apps\ops-sync\node_modules\.bin\wrangler.cmd' deploy --dry-run --config apps/ops-sync/wrangler.staging.json --outdir C:\tmp\ledgetop-ops-sync-staging-dry-run
 ```
 
 The isolated incoming staging hostname is required for quarantine intake
@@ -273,6 +273,8 @@ only for the separately approved synthetic Operations acceptance run described
 in the [thumbnail and upload runbook](../media-thumbnail-pipeline.md), then
 return it to the intended reviewed state and record the deployed value. Client
 Portal, public-share, and Incoming identities remain denied in either state.
+Keep `INCOMING_RCLONE_PROMOTION_ENABLED=false`; its binding is inert until the
+separate TrueNAS PULL/MOVE and ready-prefix acceptance packet is approved.
 
 The example evidence intentionally fails until the client Access/public-path
 contract, migrations, end-to-end tests, final default-off state, and every

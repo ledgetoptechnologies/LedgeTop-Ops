@@ -23,7 +23,7 @@ function deliveryDatabase(config) {
 export function validateSourceConfig(config, base = root) {
   const errors = [];
   if (!config || typeof config !== "object" || Array.isArray(config)) return ["Client staging config must be a JSON object"];
-  if (config.name !== "ltds-delivery-staging") errors.push("Client staging config must target ltds-delivery-staging");
+  if (config.name !== "ledgetop-clients-staging") errors.push("Client staging config must target ledgetop-clients-staging");
   if (config.vars?.ENVIRONMENT !== "staging") errors.push("Client staging config ENVIRONMENT must be staging");
 
   const databases = Array.isArray(config.d1_databases) ? config.d1_databases : [];

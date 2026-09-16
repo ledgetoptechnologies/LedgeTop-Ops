@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "ltds-delivery-staging",
+  "name": "ledgetop-clients-staging",
   "account_id": "846c924bf17bf4f3dd15c97a4c5d1d51",
   "main": "src/worker/index.ts",
   "compatibility_date": "2026-07-16",
@@ -39,8 +39,8 @@
     "CLIENT_PORTAL_SERVICE_ASSIGNMENT_POLICY_ENABLED": "false",
     "PROJECT_ALPHA_PORTAL_APPLICATION_KEY": "ltds_ops_staging",
     "PROJECT_ALPHA_PRICING_HINTS_ENABLED": "false",
-    "PROJECT_ALPHA_PRICING_HINT_URL": "https://project-alpha-staging.ledgetopdroneservices.com/api/v2/integrations/ltds_client_pricing_staging/pricing-hints",
-    "PROJECT_ALPHA_PRICING_HINT_ALLOWED_ORIGIN": "https://project-alpha-staging.ledgetopdroneservices.com",
+    "PROJECT_ALPHA_PRICING_HINT_URL": "https://pa-staging.ledgetoptechnologies.com/api/v2/integrations/ltds_client_pricing_staging/pricing-hints",
+    "PROJECT_ALPHA_PRICING_HINT_ALLOWED_ORIGIN": "https://pa-staging.ledgetoptechnologies.com",
     "PROJECT_ALPHA_PRICING_HINT_APPLICATION_KEY": "ltds_client_pricing_staging",
     "PROJECT_ALPHA_PRICING_HINT_CURRENCIES": "USD",
     "CLIENT_REQUEST_ATTACHMENTS_ENABLED": "false",
@@ -100,8 +100,8 @@
   "r2_buckets": [{ "binding": "DATA_BUCKET", "bucket_name": "client-data-staging" }],
   "d1_databases": [{ "binding": "DELIVERY_DB", "database_name": "client-data-staging", "database_id": "b6f653ab-9acd-4421-9ad0-207754b59aeb", "migrations_dir": "migrations" }],
   "services": [
-    { "binding": "CLIENT_DELEGATED_SHARE_SIGNER", "service": "ltds-ops-staging", "entrypoint": "ClientDelegatedShareSigner" },
-    { "binding": "VIEWER_SESSION_ISSUER", "service": "ltds-ops-staging", "entrypoint": "ViewerSessionIssuer" }
+    { "binding": "CLIENT_DELEGATED_SHARE_SIGNER", "service": "ledgetop-ops-staging", "entrypoint": "ClientDelegatedShareSigner" },
+    { "binding": "VIEWER_SESSION_ISSUER", "service": "ledgetop-ops-staging", "entrypoint": "ViewerSessionIssuer" }
   ],
   "stream": { "binding": "STREAM" },
   "workflows": [

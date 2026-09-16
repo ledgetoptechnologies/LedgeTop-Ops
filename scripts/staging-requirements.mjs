@@ -1,5 +1,5 @@
 export const STAGING_ACCOUNT_ID = "846c924bf17bf4f3dd15c97a4c5d1d51";
-export const STAGING_PROJECT_ALPHA_ORIGIN = "https://project-alpha-staging.ledgetopdroneservices.com";
+export const STAGING_PROJECT_ALPHA_ORIGIN = "https://pa-staging.ledgetoptechnologies.com";
 
 // Runtime candidates are pinned independently from the release-packet HEAD.
 // This lets evidence and documentation evolve without silently changing the
@@ -431,6 +431,7 @@ export const REQUIRED_DISABLED_FEATURE_FLAGS = Object.freeze({
     "CLIENT_VIEWER_SESSION_ISSUER_ENABLED",
     "CLIENT_VIEWER_SHARES_ENABLED",
     "DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED",
+    "INCOMING_RCLONE_PROMOTION_ENABLED",
     "DIRECT_DELIVERY_UPLOADS_ENABLED",
     "DROPBOX_IMPORT_ENABLED",
     "R2_PURGE_ENABLED",
@@ -623,6 +624,7 @@ export const FEATURE_FLAG_ACTIVATION_POLICIES = Object.freeze({
     CLIENT_VIEWER_SESSION_ISSUER_ENABLED: Object.freeze({ gates: Object.freeze(["viewerDeployment", "viewerServiceContract", "viewerClientSessions"]), stagingGates: Object.freeze(["viewerDeployment", "viewerServiceContract"]) }),
     CLIENT_VIEWER_SHARES_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaPortalProjection", "viewerDeployment", "viewerPublicShares", "viewerClientShares"]), stagingGates: Object.freeze(["viewerDeployment", "viewerServiceContract"]) }),
     DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaPortalProjection", "projectionParityAndAlerts"]) }),
+    INCOMING_RCLONE_PROMOTION_ENABLED: Object.freeze({ prohibitedReason: "Incoming rclone promotion requires its separately approved TrueNAS selector, bounded PULL/MOVE, ready-prefix retention, and staging acceptance packet" }),
     DIRECT_DELIVERY_UPLOADS_ENABLED: Object.freeze({ prohibitedReason: "Direct Delivery upload activation requires its separate media acceptance packet" }),
     DROPBOX_IMPORT_ENABLED: Object.freeze({ prohibitedReason: "Dropbox import is outside this release packet" }),
     R2_PURGE_ENABLED: Object.freeze({ prohibitedReason: "Permanent purge requires a separate destructive-lifecycle approval" }),
@@ -792,6 +794,7 @@ export const STAGING_STATIC_VARS = Object.freeze({
     CLIENT_VIEWER_SESSION_ISSUER_ENABLED: "false",
     CLIENT_VIEWER_SHARES_ENABLED: "false",
     DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED: "false",
+    INCOMING_RCLONE_PROMOTION_ENABLED: "false",
     DIRECT_DELIVERY_UPLOADS_ENABLED: "false",
     DROPBOX_IMPORT_ENABLED: "false",
     R2_PURGE_ENABLED: "false",
@@ -851,6 +854,7 @@ export const STAGING_ALLOWED_VAR_NAMES = Object.freeze({
     "VIEWER_SERVICE_KEY_ID", "VIEWER_EVENT_KEY_ID", "VIEWER_EVENT_PREVIOUS_KEY_ID", "DEFAULT_UNITS",
     "CLIENT_VIEWER_SESSION_ISSUER_ENABLED", "CLIENT_VIEWER_SHARES_ENABLED",
     "DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED", "APPLICATION_KEY", "TFR_REGION",
+    "INCOMING_RCLONE_PROMOTION_ENABLED",
     "DISPLAY_TIMEZONE", "MAP_STYLE_URL", "MAPBOX_PUBLIC_TOKEN", "STREAM_ACCOUNT_ID",
     "STREAM_CUSTOMER_CODE", "R2_ACCOUNT_ID", "R2_BUCKET_NAME", "R2_PURGE_ENABLED",
     "R2_INCOMING_BUCKET_NAME", "FILE_EVENTS_QUEUE_NAME", "THUMBNAIL_QUEUE_NAME",
@@ -866,7 +870,7 @@ export const STAGING_ALLOWED_VAR_NAMES = Object.freeze({
 
 export const STAGING_INVENTORY = Object.freeze({
   delivery: {
-    name: "ltds-delivery-staging",
+    name: "ledgetop-clients-staging",
     main: "src/worker/index.ts",
     compatibility_date: "2026-07-16",
     compatibility_flags: ["nodejs_compat"],
@@ -882,8 +886,8 @@ export const STAGING_INVENTORY = Object.freeze({
       { name: "ltds-cloud-transfer-staging", binding: "CLOUD_TRANSFER_WORKFLOW", class_name: "CloudTransferWorkflow" },
     ],
     services: [
-      { binding: "CLIENT_DELEGATED_SHARE_SIGNER", service: "ltds-ops-staging", entrypoint: "ClientDelegatedShareSigner" },
-      { binding: "VIEWER_SESSION_ISSUER", service: "ltds-ops-staging", entrypoint: "ViewerSessionIssuer" },
+      { binding: "CLIENT_DELEGATED_SHARE_SIGNER", service: "ledgetop-ops-staging", entrypoint: "ClientDelegatedShareSigner" },
+      { binding: "VIEWER_SESSION_ISSUER", service: "ledgetop-ops-staging", entrypoint: "ViewerSessionIssuer" },
     ],
     queues: [],
     crons: ["*/5 * * * *", "15 * * * *"],
@@ -903,7 +907,7 @@ export const STAGING_INVENTORY = Object.freeze({
     ],
   },
   operations: {
-    name: "ltds-ops-staging",
+    name: "ledgetop-ops-staging",
     main: "src/worker/index.ts",
     compatibility_date: "2026-07-22",
     compatibility_flags: ["nodejs_compat"],
@@ -919,6 +923,7 @@ export const STAGING_INVENTORY = Object.freeze({
     workflows: [
       { name: "ltds-r2-crud-staging", binding: "R2_CRUD_WORKFLOW", class_name: "R2CrudWorkflow" },
       { name: "ltds-incoming-upload-lifecycle-staging", binding: "INCOMING_LIFECYCLE_WORKFLOW", class_name: "IncomingUploadLifecycleWorkflow" },
+      { name: "ledgetop-incoming-rclone-promotion-staging", binding: "INCOMING_RCLONE_PROMOTION_WORKFLOW", class_name: "IncomingRclonePromotionWorkflow" },
       { name: "ltds-dropbox-import-staging", binding: "DROPBOX_IMPORT_WORKFLOW", class_name: "DropboxImportWorkflow" },
     ],
     services: [],
@@ -940,7 +945,7 @@ export const STAGING_INVENTORY = Object.freeze({
     ratelimits: [],
   },
   "ops-sync": {
-    name: "ltds-ops-sync-staging",
+    name: "ledgetop-ops-sync-staging",
     main: "src/index.ts",
     compatibility_date: "2026-07-22",
     compatibility_flags: ["nodejs_compat"],
@@ -952,8 +957,8 @@ export const STAGING_INVENTORY = Object.freeze({
     r2_buckets: [],
     workflows: [],
     services: [
-      { binding: "CLIENT_PORTAL_PROJECTION_INGRESS", service: "ltds-delivery-staging", entrypoint: "OpsSyncPortalProjectionIngress" },
-      { binding: "OPERATIONS_DELIVERY_INTENT_INGRESS", service: "ltds-ops-staging", entrypoint: "ProjectAlphaDeliveryIntentIngress" },
+      { binding: "CLIENT_PORTAL_PROJECTION_INGRESS", service: "ledgetop-clients-staging", entrypoint: "OpsSyncPortalProjectionIngress" },
+      { binding: "OPERATIONS_DELIVERY_INTENT_INGRESS", service: "ledgetop-ops-staging", entrypoint: "ProjectAlphaDeliveryIntentIngress" },
     ],
     queues: [],
     crons: ["*/5 * * * *"],

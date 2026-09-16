@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { validateApp, validateCrossApp, validateFiles, validateRequestAttachmentCors, validateSecretManifest } from "./staging-preflight.mjs";
-import { APP_SOURCE_DIRS, FEATURE_FLAG_ACTIVATION_POLICIES, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_ALLOWED_VAR_NAMES, STAGING_HOSTS, STAGING_INVENTORY, STAGING_REQUEST_ATTACHMENT_R2_CORS, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
+import { APP_SOURCE_DIRS, FEATURE_FLAG_ACTIVATION_POLICIES, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_ALLOWED_VAR_NAMES, STAGING_HOSTS, STAGING_INVENTORY, STAGING_PROJECT_ALPHA_ORIGIN, STAGING_REQUEST_ATTACHMENT_R2_CORS, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
 function stagingConfig(app) {
@@ -264,6 +264,18 @@ test("pins the native portal, root-access, Operations 0054-0118, incoming-notifi
   assert.equal(STAGING_STATIC_VARS.delivery.PROJECT_ALPHA_PORTAL_SYNC_ENABLED, "true");
   assert.equal(STAGING_STATIC_VARS.delivery.PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED, "false");
   assert.equal(STAGING_STATIC_VARS.delivery.PROJECT_ALPHA_PORTAL_APPLICATION_KEY, STAGING_STATIC_VARS["ops-sync"].APPLICATION_KEY);
+  assert.equal(STAGING_STATIC_VARS.operations.INCOMING_RCLONE_PROMOTION_ENABLED, "false");
+  assert.deepEqual(STAGING_INVENTORY.operations.workflows.find(({ binding }) => binding === "INCOMING_RCLONE_PROMOTION_WORKFLOW"), {
+    name: "ledgetop-incoming-rclone-promotion-staging",
+    binding: "INCOMING_RCLONE_PROMOTION_WORKFLOW",
+    class_name: "IncomingRclonePromotionWorkflow",
+  });
+  assert.equal(STAGING_PROJECT_ALPHA_ORIGIN, "https://pa-staging.ledgetoptechnologies.com");
+  assert.deepEqual(Object.fromEntries(Object.entries(STAGING_INVENTORY).map(([app, inventory]) => [app, inventory.name])), {
+    delivery: "ledgetop-clients-staging",
+    operations: "ledgetop-ops-staging",
+    "ops-sync": "ledgetop-ops-sync-staging",
+  });
   for (const obsolete of [
     "PROJECT_ALPHA_PORTAL_ACCESS_TEAM_DOMAIN", "PROJECT_ALPHA_PORTAL_ACCESS_AUD",
     "PROJECT_ALPHA_PORTAL_HMAC_KEY_ID", "PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_KEY_ID",
@@ -272,8 +284,8 @@ test("pins the native portal, root-access, Operations 0054-0118, incoming-notifi
     assert.equal(REQUIRED_STAGING_SECRETS.delivery.includes(obsolete), false, obsolete);
   assert.match(FEATURE_FLAG_ACTIVATION_POLICIES.delivery.PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED.prohibitedReason, /private Client service binding/);
   assert.deepEqual(STAGING_INVENTORY["ops-sync"].services, [
-    { binding: "CLIENT_PORTAL_PROJECTION_INGRESS", service: "ltds-delivery-staging", entrypoint: "OpsSyncPortalProjectionIngress" },
-    { binding: "OPERATIONS_DELIVERY_INTENT_INGRESS", service: "ltds-ops-staging", entrypoint: "ProjectAlphaDeliveryIntentIngress" },
+    { binding: "CLIENT_PORTAL_PROJECTION_INGRESS", service: "ledgetop-clients-staging", entrypoint: "OpsSyncPortalProjectionIngress" },
+    { binding: "OPERATIONS_DELIVERY_INTENT_INGRESS", service: "ledgetop-ops-staging", entrypoint: "ProjectAlphaDeliveryIntentIngress" },
   ]);
   assert.equal(STAGING_INVENTORY.delivery.workflows.find(({ binding }) => binding === "BULK_DOWNLOAD_WORKFLOW").limits.steps, 25000);
   assert.deepEqual(FEATURE_FLAG_ACTIVATION_POLICIES.delivery.CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED.gates, [

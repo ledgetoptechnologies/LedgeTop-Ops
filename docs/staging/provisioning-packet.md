@@ -27,9 +27,9 @@ feature.
 
 | Concern | Staging value |
 | --- | --- |
-| Delivery Worker | `ltds-delivery-staging` |
-| Operations Worker | `ltds-ops-staging` |
-| Ops Sync Worker | `ltds-ops-sync-staging` |
+| Delivery Worker | `ledgetop-clients-staging` |
+| Operations Worker | `ledgetop-ops-staging` |
+| Ops Sync Worker | `ledgetop-ops-sync-staging` |
 | Delivery rollback/admin host | `delivery-staging.ledgetopdroneservices.com` |
 | Client portal/public-share host | `client-staging.ledgetopdroneservices.com` |
 | Secondary client portal host | `portal-staging.ledgetoptechnologies.com` |
@@ -48,6 +48,7 @@ feature.
 | R2 retention | Disposable test data; no bucket lock or automatic expiry |
 | Provider flags | Dropbox, Google, and Google Picker `false` |
 | Direct R2 upload | `false` |
+| Incoming rclone promotion | `false`; the Workflow binding remains inert until a separately approved staging acceptance packet |
 | Permanent purge | `false` |
 
 Regions mirror the corresponding production resources. The unlocked staging
@@ -142,7 +143,7 @@ controls and the direct-upload capability gate are separately approved.
 
 ## Deferred actions
 
-Do not create the three Workers or five Workflows merely to reserve their names.
+Do not create the three Workers or six Workflows merely to reserve their names.
 Deployment would create or update Workflows and activate the five reviewed
 Operations schedules: consolidated 15-minute work, five-minute request work,
 offset five-minute Client Hub indexing, hourly source recovery, and offset

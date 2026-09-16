@@ -21,7 +21,7 @@ function fixture(base) {
   fs.utimesSync(path.join(base, ".backups", "operations.sql"), backupTime, backupTime);
   const configs = {
     delivery: { vars: { CLIENT_PORTAL_ENABLED: "false", EXPECTED_HOST: STAGING_HOSTS.delivery, CLIENT_PORTAL_ORIGIN: `https://${STAGING_HOSTS.client}`, PUBLIC_SHARE_ORIGIN: `https://${STAGING_HOSTS.delivery}`, PUBLIC_BASE_URL: `https://${STAGING_HOSTS.delivery}`, CLIENT_ACCESS_TEAM_DOMAIN: STAGING_STATIC_VARS.delivery.CLIENT_ACCESS_TEAM_DOMAIN, CLIENT_ACCESS_AUD: "a".repeat(64) } },
-    operations: { vars: { PROJECT_ALPHA_BASE_URL: "https://project-alpha-staging.ledgetopdroneservices.com" } },
+    operations: { vars: { PROJECT_ALPHA_BASE_URL: "https://pa-staging.ledgetoptechnologies.com" } },
     "ops-sync": { vars: { CF_ACCESS_GROUP_ID: "staging-group-id", CF_ACCESS_GROUP_NAME: "LTDS Staging Testers" } },
   };
   const evidence = {
@@ -642,6 +642,9 @@ test("Viewer processing cannot disappear from the staging release inventory", ()
   assert(REQUIRED_STAGING_SECRETS.operations.includes("VIEWER_EVENT_HMAC_SECRET"));
   assert(REQUIRED_DISABLED_FEATURE_FLAGS.operations.includes("VIEWER_PROCESSING_ENABLED"));
   assert.equal(STAGING_STATIC_VARS.operations.VIEWER_PROCESSING_ENABLED, "false");
+  assert(REQUIRED_DISABLED_FEATURE_FLAGS.operations.includes("INCOMING_RCLONE_PROMOTION_ENABLED"));
+  assert.equal(STAGING_STATIC_VARS.operations.INCOMING_RCLONE_PROMOTION_ENABLED, "false");
+  assert.match(FEATURE_FLAG_ACTIVATION_POLICIES.operations.INCOMING_RCLONE_PROMOTION_ENABLED.prohibitedReason, /TrueNAS selector/);
   assert.equal(STAGING_STATIC_VARS.operations.VIEWER_EVENT_KEY_ID, "viewer-staging-v1");
   assert.equal(STAGING_HOSTS.viewer, STAGING_VIEWER.hostname);
   assert.deepEqual(FEATURE_FLAG_ACTIVATION_POLICIES.operations.VIEWER_PROCESSING_ENABLED.gates, ["viewerDeployment", "viewerServiceContract", "viewerProcessing"]);
