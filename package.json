@@ -23,6 +23,8 @@
     "staging:evidence:check:test": "node --test scripts/staging-evidence.test.mjs",
     "staging:acceptance": "node scripts/staging-acceptance.mjs",
     "staging:acceptance:test": "node --test scripts/staging-acceptance.test.mjs",
+    "staging:pa-api-v2:acceptance": "node scripts/pa-api-v2-staging-acceptance.mjs",
+    "staging:pa-api-v2:acceptance:test": "node --test scripts/pa-api-v2-staging-acceptance.test.mjs",
     "staging:release:prepare": "node scripts/staging-release.mjs",
     "staging:release:verify": "node scripts/staging-release-verify.mjs"
   }
