@@ -97,8 +97,13 @@ Updated September 17, 2026. The owner approved implementation and resumption aft
   `archived` column, while the list used unqualified `archived=0`, so MySQL
   returned a shell-only HTTP 200 page. PA PR184 now contains generic fix
   `dd8c0ea5` (`c.archived=0`) plus regression coverage and MySQL rebind replay
-  coverage in `d7177def`. The updated candidate must be rebuilt and the client
-  list rechecked before the Project-only window starts.
+  coverage in `d7177def`. The exact PR184 head passed its normal CI, its
+  workflow-dispatched web/cron/database staging images passed both Trivy
+  scans, and staging was rebuilt as `vdd8c0ea`. The client list then rendered
+  normally and displayed all three disposable API-created clients, including
+  the completed acceptance client, with ordinary view/edit controls present.
+  The blank-list release blocker is closed; no production image or instance
+  was changed.
 
 #### Remaining release gates
 
