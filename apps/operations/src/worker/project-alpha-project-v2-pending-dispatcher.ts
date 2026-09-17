@@ -36,6 +36,7 @@ type Head = Readonly<{ current_version: number; canonical_projection_sha256: str
   source_instance_id: string | null; application_id: string | null; history_epoch_id: string | null; project_alpha_public_id: string | null }>;
 type Mapping = Readonly<{ source_id: string; source_instance_id: string; application_id: string; history_epoch_id: string; project_alpha_public_id: string }>;
 type Receipt = Readonly<{ receipt_id: string; source_id: string; application_id: string; expected_source_instance_id: string; expected_history_epoch_id: string; destination_base_url: string; request_sha256: string }>;
+type Terminal = Readonly<{ event_state: string | null; outcome_json: string | null }>;
 
 export type ProjectAlphaProjectV2PendingDispatcherOutcome =
   | Readonly<{ status: "acknowledged"; receiptId: string; replayed: boolean }>
@@ -65,6 +66,25 @@ async function receipt(db: D1Database, commandId: string): Promise<Receipt | nul
     JOIN project_alpha_project_outbox outbox ON outbox.command_id=receipt.command_id
     JOIN project_alpha_project_v2_request_fingerprints fingerprint ON fingerprint.command_id=receipt.command_id
     WHERE receipt.command_id=?`).bind(commandId).first<Receipt>();
+}
+async function terminal(db: D1Database, commandId: string): Promise<Terminal | null> {
+  return db.prepare(`SELECT (SELECT state FROM project_alpha_project_v2_events event
+      WHERE event.command_id=outbox.command_id ORDER BY state_version DESC LIMIT 1) event_state,outcome_json
+    FROM project_alpha_project_outbox outbox WHERE command_id=? AND state='terminal'`).bind(commandId).first<Terminal>();
+}
+function terminalReplay(value: Terminal): ProjectAlphaProjectV2PendingDispatcherOutcome {
+  let details: Record<string, unknown> = {};
+  try {
+    const parsed = value.outcome_json && JSON.parse(value.outcome_json);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) details = parsed as Record<string, unknown>;
+  } catch { /* Event state remains the authoritative terminal discriminator. */ }
+  const reason = typeof details.reason === "string" && ["invalid_command", "request_limit", "preflight", "http_status", "timeout", "transport", "response_limit", "invalid_contract"].includes(details.reason)
+    ? details.reason as ProjectAlphaProjectFailure["reason"] : "invalid_contract";
+  const diagnostic = Number.isInteger(details.httpStatus) && (details.httpStatus as number) >= 100 && (details.httpStatus as number) <= 599
+    ? { httpStatus: details.httpStatus as number } : {};
+  return value.event_state === "conflict" ? { status: "conflict", reason, ...diagnostic }
+    : value.event_state === "rejected" ? { status: "rejected", reason, ...diagnostic }
+      : { status: "uncertain", reason, ...diagnostic };
 }
 async function pending(db: D1Database, commandId: string, state: "pending" | "leased"): Promise<Outbox | null> {
   return db.prepare(`SELECT outbox.command_id,outbox.external_project_id,outbox.operation,outbox.command_json,outbox.source_id,
@@ -96,7 +116,8 @@ function sameHead(value: Head | null, row: Outbox): boolean {
 async function exactReservation(db: D1Database, row: Outbox, sourceId: string, connection: ProjectAlphaApiV2Connection): Promise<{ command: ProjectAlphaProjectCommand; body: string } | "authority" | "destination" | "stale" | "command"> {
   if (!sameIdentity(row, sourceId, connection)) return row.source_id === sourceId ? "destination" : "authority";
   if (!await db.prepare(`SELECT 1 current_proof FROM native_project_live_command_proofs
-      WHERE command_id=? AND external_project_id=?`).bind(row.command_id, row.external_project_id).first("current_proof")) return "authority";
+      WHERE command_id=? AND external_project_id=?
+        AND verified_until>strftime('%Y-%m-%dT%H:%M:%fZ','now')`).bind(row.command_id, row.external_project_id).first("current_proof")) return "authority";
   let parsed: unknown;
   try { parsed = JSON.parse(row.command_json); } catch { return "command"; }
   if (!operation(row.operation) || !isProjectAlphaProjectCommand(row.operation, parsed)) return "command";
@@ -130,6 +151,11 @@ async function finishFailure(db: D1Database, row: Outbox, failure: ProjectAlphaP
       .bind(outcomeJson(failure.status, failure.reason, failure), row.command_id),
   ]);
 }
+async function releasePreflight(db: D1Database, row: Outbox): Promise<void> {
+  await db.prepare(`UPDATE project_alpha_project_outbox SET state='pending',lease_token=NULL,lease_expires_at=NULL,
+    outcome_json=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+    WHERE command_id=? AND state='leased'`).bind(row.command_id).run();
+}
 function send(type: Operation, connection: ProjectAlphaApiV2Connection, command: ProjectAlphaProjectCommand, transport: typeof fetch): Promise<ProjectAlphaProjectOutcome> {
   if (type === "create") return sendProjectAlphaProjectCreateCommand(connection, command as never, transport);
   if (type === "update") return sendProjectAlphaProjectUpdateCommand(connection, command as never, transport);
@@ -153,7 +179,9 @@ async function dispatchEnabledProjectAlphaProjectV2PendingCommand(
     const initial = await pending(env.OPS_DB, commandId, "pending");
     if (!initial) {
       const leased = await pending(env.OPS_DB, commandId, "leased");
-      return leased ? { status: "uncertain", reason: "lost_ack" } : { status: "blocked", reason: "in_progress" };
+      if (leased) return { status: "uncertain", reason: "lost_ack" };
+      const completed = await terminal(env.OPS_DB, commandId);
+      return completed ? terminalReplay(completed) : { status: "blocked", reason: "in_progress" };
     }
     if (initial.source_id !== sourceId) return { status: "conflict", reason: "source" };
     const before = await exactReservation(env.OPS_DB, initial, sourceId, connection);
@@ -180,6 +208,13 @@ async function dispatchEnabledProjectAlphaProjectV2PendingCommand(
     }
     const outcome = await send(current!.operation as Operation, connection, checked.command, transport);
     if (outcome.status !== "acknowledged") {
+      // Capability discovery did not issue a POST. Return the lease to its
+      // original pending state without an immutable terminal event so a later
+      // healthy capability check can make the one authorized dispatch.
+      if (outcome.reason === "preflight") {
+        await releasePreflight(env.OPS_DB, current!);
+        return outcome;
+      }
       // Even a syntactically clear non-success response cannot establish that
       // PA did not accept the command before a proxy/client failure.  Preserve
       // only uncertain evidence and require a later receipt-recovery design.
@@ -207,7 +242,12 @@ async function dispatchEnabledProjectAlphaProjectV2PendingCommand(
         response.sourceInstanceId, response.applicationId, response.historyEpoch, evidence.destinationOrigin, resource.publicId,
         resource.revision, resource.projectionSha256, response.result.authorizationGeneration, response.requestId,
         response.replayed ? 1 : 0, evidence.responseSha256),
-      env.OPS_DB.prepare(`UPDATE project_alpha_project_outbox SET state='acknowledged',lease_token=NULL,lease_expires_at=NULL,
+      // 0122 activation deliberately leases a *pending* outbox row while it
+      // atomically changes the canonical mapping/head/history. The immutable
+      // acknowledgement and success receipt above record POST completion;
+      // returning this row to pending leaves that later local-only activation
+      // composable without re-dispatching because receipt() wins all replays.
+      env.OPS_DB.prepare(`UPDATE project_alpha_project_outbox SET state='pending',lease_token=NULL,lease_expires_at=NULL,
         outcome_json=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE command_id=? AND state='leased' AND lease_token=?`)
         .bind(outcomeJson("acknowledged", "validated"), current!.command_id, leaseToken),
     ]);

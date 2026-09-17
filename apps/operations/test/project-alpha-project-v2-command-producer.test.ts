@@ -4,6 +4,8 @@ import { Miniflare } from "miniflare";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import { planProjectAlphaProjectV2Command, type ProjectAlphaProjectV2CommandProducerAction } from "../src/worker/project-alpha-project-v2-command-producer";
 import { dispatchProjectAlphaProjectV2PendingCommand } from "../src/worker/project-alpha-project-v2-pending-dispatcher";
+import { settleProjectAlphaProjectV2Read } from "../src/worker/project-alpha-project-read-settlement-adapter";
+import { activateProjectAlphaProjectV2Canonical } from "../src/worker/project-alpha-project-canonical-activation-adapter";
 
 let runtime: Miniflare, db: D1Database, sequence = 0;
 const uuid = () => `10000000-0000-4000-8000-${(++sequence).toString(16).padStart(12, "0")}`;
@@ -69,6 +71,25 @@ function transport(action: Extract<ProjectAlphaProjectV2CommandProducerAction, {
     return response({ apiVersion: "2", sourceInstanceId, applicationId, historyEpoch, requestId: "11111111-1111-4111-8111-111111111111", replayed: false,
       result: { resource: { type: "project", id: action.command.externalId, publicId: "d".repeat(32), revision: "1", projectionSha256: sha }, authorizationGeneration: "1", presentation: { portalPublished: false, publicLinkEnabled: false } } }, 201);
   });
+}
+function readTransport(action: Extract<ProjectAlphaProjectV2CommandProducerAction, { operation: "create" }>) {
+  const sourceInstanceId = action.sourceId === "project-alpha:one" ? sourceOne : sourceTwo;
+  const applicationId = action.sourceId === "project-alpha:one" ? appOne : appTwo;
+  const historyEpoch = action.sourceId === "project-alpha:one" ? epochOne : epochTwo, publicId = "d".repeat(32);
+  return vi.fn<typeof fetch>(async (url) => {
+    if (String(url).endsWith("/api/v2/capabilities")) return response({ apiVersion: "2", sourceInstanceId, applicationId, historyEpoch,
+      requestId: "11111111-1111-4111-8111-111111111111", grantedCapabilities: [{ name: "api.capabilities.read" }, { name: "projects.v2.read" }],
+      implementedEndpoints: [{ method: "GET", path: "/api/v2/capabilities", requiredCapability: "api.capabilities.read" }, { method: "GET", path: "/api/v2/projects/{publicId}", requiredCapability: "projects.v2.read", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true }] });
+    return response({ apiVersion: "2", sourceInstanceId, applicationId, historyEpoch, requestId: "11111111-1111-4111-8111-111111111111", replayed: false, accepted: true,
+      resource: { type: "project", id: publicId, revision: "1", projectionSha256: sha }, data: { name: action.command.project.name, description: action.command.project.description,
+        status: "active", archived: false, overdueWarning: false, completedAt: null, archivedAt: null, estimatedStart: action.command.project.estimatedStart,
+        estimatedEnd: action.command.project.estimatedEnd, clientPublicId: action.command.client!.expectedPublicId, organizationPublicId: action.command.organization.expectedPublicId } });
+  });
+}
+function selectedConnection(sourceId: string) {
+  return sourceId === "project-alpha:one"
+    ? { baseUrl: "https://one.example.test", apiKey: "one", expectedSourceInstanceId: sourceOne, expectedApplicationId: appOne, expectedHistoryEpoch: epochOne }
+    : { baseUrl: "https://two.example.test", apiKey: "two", expectedSourceInstanceId: sourceTwo, expectedApplicationId: appTwo, expectedHistoryEpoch: epochTwo };
 }
 
 beforeAll(async () => {
@@ -180,7 +201,7 @@ describe("unmounted project-v2 command producer", () => {
       .resolves.toEqual({ status: "acknowledged", receiptId: receipt, replayed: true });
     expect(replayTransport).not.toHaveBeenCalled();
     expect(await db.prepare("SELECT state,lease_token,lease_expires_at FROM project_alpha_project_outbox WHERE command_id=?").bind(action.command.commandId).first())
-      .toEqual({ state: "acknowledged", lease_token: null, lease_expires_at: null });
+      .toEqual({ state: "pending", lease_token: null, lease_expires_at: null });
     expect(await db.prepare("SELECT state FROM project_alpha_project_v2_events WHERE command_id=? ORDER BY state_version").bind(action.command.commandId).all())
       .toEqual({ results: [{ state: "pending" }, { state: "acknowledged" }], success: true, meta: expect.any(Object) });
   });
@@ -202,8 +223,36 @@ describe("unmounted project-v2 command producer", () => {
     expect(await db.prepare("SELECT state,outcome_json FROM project_alpha_project_outbox WHERE command_id=?").bind(timeout.command.commandId).first())
       .toMatchObject({ state: "terminal", outcome_json: expect.stringContaining("transport") });
     const retry = vi.fn<typeof fetch>();
-    await expect(dispatchProjectAlphaProjectV2PendingCommand(env(true), timeout.sourceId, timeout.command.commandId, retry)).resolves.toEqual({ status: "blocked", reason: "in_progress" });
+    await expect(dispatchProjectAlphaProjectV2PendingCommand(env(true), timeout.sourceId, timeout.command.commandId, retry)).resolves.toEqual({ status: "uncertain", reason: "transport" });
     expect(retry).not.toHaveBeenCalled();
+  });
+
+  it("replays terminal uncertain, conflict, and rejected ledger evidence without transport", async () => {
+    for (const [state, expected] of [["uncertain", { status: "uncertain", reason: "transport" }], ["conflict", { status: "conflict", reason: "http_status", httpStatus: 409 }], ["rejected", { status: "rejected", reason: "invalid_command" }]] as const) {
+      const action = await createAction();
+      await planProjectAlphaProjectV2Command(env(), action);
+      await db.batch([
+        db.prepare("INSERT INTO project_alpha_project_v2_events(command_id,state_version,transition_id,request_sha256,state) SELECT ?,2,?,request_sha256,? FROM project_alpha_project_v2_request_fingerprints WHERE command_id=?")
+          .bind(action.command.commandId, uuid(), state, action.command.commandId),
+        db.prepare("UPDATE project_alpha_project_outbox SET state='terminal',outcome_json=? WHERE command_id=?")
+          .bind(JSON.stringify({ projectV2Dispatcher: state, reason: expected.reason, ...(state === "conflict" ? { httpStatus: 409 } : {}) }), action.command.commandId),
+      ]);
+      const noSend = vi.fn<typeof fetch>();
+      await expect(dispatchProjectAlphaProjectV2PendingCommand(env(true), action.sourceId, action.command.commandId, noSend)).resolves.toEqual(expected);
+      expect(noSend).not.toHaveBeenCalled();
+    }
+  });
+
+  it("releases a preflight-only lease back to pending without appending terminal evidence", async () => {
+    const action = await createAction(), unavailable = vi.fn<typeof fetch>(async () => response({ malformed: true }));
+    await planProjectAlphaProjectV2Command(env(), action);
+    await expect(dispatchProjectAlphaProjectV2PendingCommand(env(true), action.sourceId, action.command.commandId, unavailable))
+      .resolves.toMatchObject({ status: "blocked", reason: "preflight" });
+    expect(unavailable.mock.calls.every(([, init]) => init?.method === "GET")).toBe(true);
+    expect(await db.prepare("SELECT state,lease_token,lease_expires_at,outcome_json FROM project_alpha_project_outbox WHERE command_id=?").bind(action.command.commandId).first())
+      .toEqual({ state: "pending", lease_token: null, lease_expires_at: null, outcome_json: null });
+    expect(await db.prepare("SELECT state FROM project_alpha_project_v2_events WHERE command_id=? ORDER BY state_version").bind(action.command.commandId).all())
+      .toMatchObject({ results: [{ state: "pending" }] });
   });
 
   it("is default-off and records malformed successful-looking transport as uncertain without changing canonical state", async () => {
@@ -222,6 +271,42 @@ describe("unmounted project-v2 command producer", () => {
     expect(await db.prepare("SELECT state FROM project_alpha_project_v2_events WHERE command_id=? ORDER BY state_version").bind(malformed.command.commandId).all())
       .toMatchObject({ results: [{ state: "pending" }, { state: "uncertain" }] });
     expect(await db.prepare("SELECT COUNT(*) n FROM project_alpha_project_v2_success_receipts WHERE command_id=?").bind(malformed.command.commandId).first("n")).toBe(0);
+  });
+
+  it("rejects an expired proof before transport even when its staff admission and grants still look live", async () => {
+    const expiring = await createAction();
+    const action = { ...expiring, actor: { ...expiring.actor, verifiedUntil: new Date(Date.now() + 1_500).toISOString() } };
+    await expect(planProjectAlphaProjectV2Command(env(), action)).resolves.toMatchObject({ status: "queued" });
+    await new Promise(resolve => setTimeout(resolve, 1_650));
+    const noSend = vi.fn<typeof fetch>();
+    await expect(dispatchProjectAlphaProjectV2PendingCommand(env(true), action.sourceId, action.command.commandId, noSend)).resolves.toEqual({ status: "blocked", reason: "authority" });
+    expect(noSend).not.toHaveBeenCalled();
+    expect(await db.prepare("SELECT state FROM project_alpha_project_outbox WHERE command_id=?").bind(action.command.commandId).first("state")).toBe("pending");
+  });
+
+  it("keeps a dispatcher acknowledgement pending for the existing read/activation chain and changes no canonical or public state before activation", async () => {
+    const action = await createAction(), post = transport(action);
+    await planProjectAlphaProjectV2Command(env(), action);
+    const dispatched = await dispatchProjectAlphaProjectV2PendingCommand(env(true), action.sourceId, action.command.commandId, post);
+    expect(dispatched.status).toBe("acknowledged");
+    if (dispatched.status !== "acknowledged") throw new Error("dispatcher setup failed");
+    const before = await Promise.all([
+      db.prepare("SELECT * FROM project_alpha_project_mappings WHERE external_project_id=?").bind(action.command.externalId).all(),
+      db.prepare("SELECT * FROM operations_shared_projects WHERE external_project_id=?").bind(action.command.externalId).all(),
+      db.prepare("SELECT id,url,hex(payload) payload FROM delivery_public_shares ORDER BY id").all(),
+    ]);
+    expect(await db.prepare("SELECT state FROM project_alpha_project_outbox WHERE command_id=?").bind(action.command.commandId).first("state")).toBe("pending");
+    const settled = await settleProjectAlphaProjectV2Read({ OPS_DB: db }, dispatched.receiptId, selectedConnection(action.sourceId), readTransport(action));
+    expect(settled).toMatchObject({ status: "settled", successReceiptId: dispatched.receiptId, commandId: action.command.commandId });
+    expect(await Promise.all([
+      db.prepare("SELECT * FROM project_alpha_project_mappings WHERE external_project_id=?").bind(action.command.externalId).all(),
+      db.prepare("SELECT * FROM operations_shared_projects WHERE external_project_id=?").bind(action.command.externalId).all(),
+      db.prepare("SELECT id,url,hex(payload) payload FROM delivery_public_shares ORDER BY id").all(),
+    ])).toEqual(before);
+    if (settled.status !== "settled") throw new Error("read settlement setup failed");
+    await expect(activateProjectAlphaProjectV2Canonical({ OPS_DB: db }, settled.settlementId)).resolves.toMatchObject({ status: "activated", commandId: action.command.commandId });
+    expect(await db.prepare("SELECT state FROM project_alpha_project_outbox WHERE command_id=?").bind(action.command.commandId).first("state")).toBe("acknowledged");
+    expect(await db.prepare("SELECT id,url,hex(payload) payload FROM delivery_public_shares ORDER BY id").all()).toEqual(before[2]);
   });
 
   it("allows bind only from a current unmapped native head and rejects unsupported operations", async () => {
