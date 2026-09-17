@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildConnectionSummaries, PROJECT_ALPHA_SNAPSHOT_FRESHNESS_MS, projectAlphaHealthIsStale } from "../src/worker/integration-health";
+import { buildConnectionSummaries, PROJECT_ALPHA_SNAPSHOT_FRESHNESS_MS, projectAlphaHealthIsStale, projectAlphaQuoteFreshness } from "../src/worker/integration-health";
 
 const now = Date.parse("2026-07-23T12:00:00Z");
 
@@ -36,5 +36,20 @@ describe("Project Alpha integration health", () => {
       expect.objectContaining({ id: "delivery", status: "configured", href: "/delivery" }),
     ]));
     expect(JSON.stringify(connections)).not.toMatch(/secret|api.?key|bucket/i);
+  });
+
+  it("marks financial summaries as last verified when their exact PA source is unavailable or unmonitored", () => {
+    const unavailable = projectAlphaQuoteFreshness({
+      sourceId: "project-alpha:secondary", quoteVerifiedAt: "2026-07-23T10:00:00Z",
+      incidentStateJson: JSON.stringify({ category: "unavailable", lastProbeStartedAt: now }), activeIdentityMatched: true,
+    });
+    expect(unavailable).toEqual({ sourceId: "project-alpha:secondary", availability: "unavailable",
+      lastVerifiedAt: "2026-07-23T10:00:00Z", lastCheckedAt: "2026-07-23T12:00:00.000Z" });
+    expect(projectAlphaQuoteFreshness({ sourceId: "project-alpha:primary", quoteVerifiedAt: "invalid", incidentStateJson: undefined, activeIdentityMatched: false }))
+      .toEqual({ sourceId: "project-alpha:primary", availability: "unknown", lastVerifiedAt: null, lastCheckedAt: null });
+    expect(projectAlphaQuoteFreshness({ sourceId: "project-alpha:primary", quoteVerifiedAt: null,
+      incidentStateJson: JSON.stringify({ category: "disabled", lastProbeStartedAt: now }), activeIdentityMatched: true }).availability).toBe("monitor_disabled");
+    expect(projectAlphaQuoteFreshness({ sourceId: "project-alpha:primary", quoteVerifiedAt: "2026-07-23T10:00:00Z",
+      incidentStateJson: JSON.stringify({ category: "verified", lastProbeStartedAt: now }), activeIdentityMatched: false }).availability).toBe("unknown");
   });
 });

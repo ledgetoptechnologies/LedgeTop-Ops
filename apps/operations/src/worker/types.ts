@@ -8,6 +8,11 @@ export type Env = Omit<
   | "THUMBNAIL_RENDERER"
   | "LEGACY_CLIENT_REQUEST_PA_QUOTE_LINK_ENABLED"
   | "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED"
+  | "PROJECT_ALPHA_API_V2_MONITOR_ENABLED"
+  | "PROJECT_ALPHA_API_V2_MONITOR_RECIPIENT"
+  | "NATIVE_INTEGRATION_CONTROL_ENABLED"
+  | "NATIVE_INTEGRATION_CONTROL_ORIGIN"
+  | "NATIVE_STAFF_ONBOARDING_AUD"
   | "DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED"
   | "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED"
   | "CLIENT_PORTAL_HIERARCHY_V2_ENABLED"
@@ -29,6 +34,16 @@ export type Env = Omit<
   PROJECT_ALPHA_CONNECTOR_CREDENTIALS?: string;
   /** Versioned, deployment-owned API-v2 connections. Never accepted from a browser or connector registry request. */
   PROJECT_ALPHA_API_V2_CONNECTIONS?: string;
+  /** Default-off bounded API-v2 health/incident monitor. */
+  PROJECT_ALPHA_API_V2_MONITOR_ENABLED?: string;
+  /** Explicit deployment-owned owner mailbox for outage alerts; never inferred from Project Alpha data. */
+  PROJECT_ALPHA_API_V2_MONITOR_RECIPIENT?: string;
+  /** Default-off native, explicit-grant authority for monitor lifecycle control. */
+  NATIVE_INTEGRATION_CONTROL_ENABLED?: string;
+  /** Exact same-origin native monitor-control UI origin; no implicit fallback. */
+  NATIVE_INTEGRATION_CONTROL_ORIGIN?: string;
+  /** Separate Access audience; never accepted for monitor-control sessions. */
+  NATIVE_STAFF_ONBOARDING_AUD?: string;
   PROJECT_ALPHA_CONNECTOR_SNAPSHOT_CREDENTIALS?: string;
   PROJECT_ALPHA_CONNECTOR_EVENT_CREDENTIALS?: string;
   /** Deploy-managed source manifest; selects configured credential references and is never browser-administered. */

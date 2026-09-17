@@ -178,6 +178,29 @@ test("an unavailable current connector does not replace the original receipt des
   await expect(page.getByRole("link", { name: "Open draft in Project Alpha" })).toHaveAttribute("href", savedReceipt.editorUrl!);
 });
 
+test("shows a source-qualified last-verified quote when Project Alpha is unavailable", async ({ page }) => {
+  const unavailableQuote = {
+    ...request,
+    quote_document_number: "Q-0042",
+    quote_verified_at: "2026-08-01T12:00:00.000Z",
+    project_alpha_quote_freshness: {
+      sourceId: "project-alpha:secondary", availability: "unavailable",
+      lastVerifiedAt: "2026-08-01T12:00:00.000Z", lastCheckedAt: "2026-08-01T12:15:00.000Z",
+    },
+    quote_scope_stale_at: "2026-08-01T12:20:00.000Z",
+  };
+  await installFixture(page, async route => {
+    await route.fulfill({ json: { capability: { enabled: false, reason: "Project Alpha is unavailable." }, receipt: null } });
+  });
+  await page.route("**/api/client-service-requests/request-pa-draft", route => route.fulfill({ json: detail(unavailableQuote) }));
+  await page.goto(`/clients/requests/${request.id}`);
+  await expect(page.getByText("Verified Project Alpha quote:")).toBeVisible();
+  await expect(page.getByText(/Last verified/)).toBeVisible();
+  await expect(page.getByText("project-alpha:secondary")).toBeVisible();
+  await expect(page.getByText(/Project Alpha is unavailable. This is the last verified summary/)).toBeVisible();
+  await expect(page.getByText("Project Alpha scope needs review")).toBeVisible();
+});
+
 test("draft availability errors disable creation and offer a focused retry", async ({ page }) => {
   let reads = 0;
   await installFixture(page, async route => {
