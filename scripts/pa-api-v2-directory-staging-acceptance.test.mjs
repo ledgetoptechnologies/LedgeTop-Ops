@@ -25,6 +25,7 @@ function environment(overrides = {}) {
     PA_DIRECTORY_ORGANIZATION_PROFILE_JSON: JSON.stringify(profile.organization),
     PA_DIRECTORY_MOVE_ORGANIZATION_PROFILE_JSON: JSON.stringify(profile.moveOrganization),
     PA_DIRECTORY_CLIENT_PROFILE_JSON: JSON.stringify(profile.client),
+    PA_DIRECTORY_ACCEPTANCE_MIN_REQUEST_INTERVAL_MS: "0",
     ...overrides,
   };
 }
@@ -134,7 +135,8 @@ function happyFetcher(options = {}) {
       const match = parsed.pathname.match(/^\/api\/v2\/directory\/(clients|organizations)\/([0-9a-f]{32})$/);
       assert(match); const type = match[1] === "clients" ? "client" : "organization"; const item = resources.get(match[2]);
       assert(item); assert.equal(item.type, type); assert.equal(item.present, true);
-      const data = { publicId: item.publicId, name: item.profile.name, email: type === "client" ? item.profile.email : item.profile.generalEmail, phone: type === "client" ? item.profile.phone : item.profile.generalPhone, address: { line1: item.profile.addressLine1, line2: item.profile.addressLine2, city: item.profile.city, state: item.profile.state, postalCode: item.profile.postalCode, country: item.profile.country } };
+      const readNullable = (value) => value === "" ? null : value;
+      const data = { publicId: item.publicId, name: item.profile.name, email: readNullable(type === "client" ? item.profile.email : item.profile.generalEmail), phone: readNullable(type === "client" ? item.profile.phone : item.profile.generalPhone), address: { line1: item.profile.addressLine1, line2: readNullable(item.profile.addressLine2), city: item.profile.city, state: item.profile.state, postalCode: item.profile.postalCode, country: item.profile.country } };
       if (type === "client") { data.clientType = item.profile.clientType; data.organizationPublicId = item.organizationPublicId; }
       return send("read", { apiVersion: "2", ...identity(), authorizationGeneration: generation, resource: { type, id: item.publicId, revision: item.revision }, data });
     }
@@ -265,6 +267,54 @@ test("rejects revision and generation values above signed-64 maximum", async () 
 test("default mode neither sends a key nor claims mutation identity", async () => {
   const report = await runDirectoryAcceptance(parseDirectoryAcceptanceConfig({ PA_DIRECTORY_BASE_URL: "https://pa-staging.example.test" }), { fetcher: async (_url, init) => { assert.equal(init.headers.authorization, undefined); return error(401); } });
   assert.equal(report.mutationsPerformed, false); assert.equal(report.stages.capabilitiesNoKey.status, 401);
+});
+
+test("models empty optional directory read fields as canonical null values", async () => {
+  const emptyOptional = {
+    ...profile.client,
+    email: "",
+    phone: "",
+    addressLine2: "",
+  };
+  const config = parseDirectoryAcceptanceConfig(environment({ PA_DIRECTORY_CLIENT_PROFILE_JSON: JSON.stringify(emptyOptional) }));
+  const report = await runDirectoryAcceptance(config, { fetcher: happyFetcher(), uuid: predictableUuid() });
+  assert.equal(report.status, "passed");
+});
+
+test("retries bounded rate-limit responses, honors Retry-After, and reports pacing evidence", async () => {
+  const base = happyFetcher();
+  let throttled = 0;
+  const sleeps = [];
+  const report = await runDirectoryAcceptance(parseDirectoryAcceptanceConfig(environment()), {
+    fetcher: async (url, init) => {
+      if (throttled < 2) {
+        throttled += 1;
+        return response({ error: "rate_limited" }, 429, { "retry-after": "2" });
+      }
+      return base(url, init);
+    },
+    sleep: async (milliseconds) => sleeps.push(milliseconds),
+    uuid: predictableUuid(),
+  });
+  assert.equal(report.status, "passed");
+  assert.equal(report.rateLimit.responses429, 2);
+  assert.equal(report.rateLimit.retries, 2);
+  assert.deepEqual(report.rateLimit.retryAfterMs, [2000, 2000]);
+  assert.deepEqual(sleeps.slice(0, 2), [2000, 2000]);
+});
+
+test("fails closed after the bounded rate-limit retry budget", async () => {
+  let calls = 0;
+  await assert.rejects(runDirectoryAcceptance(parseDirectoryAcceptanceConfig(environment()), {
+    fetcher: async () => { calls += 1; return response({ error: "rate_limited" }, 429, { "retry-after": "999999" }); },
+    sleep: async () => {},
+    uuid: predictableUuid(),
+  }), { code: "rate_limit_retry_exhausted" });
+  assert.equal(calls, 5);
+});
+
+test("rejects an unsafe request pacing interval", () => {
+  assert.throws(() => parseDirectoryAcceptanceConfig(environment({ PA_DIRECTORY_ACCEPTANCE_MIN_REQUEST_INTERVAL_MS: "60001" })), { code: "invalid_pa_directory_acceptance_min_request_interval_ms" });
 });
 
 test("configuration rejects incomplete Access credentials and client-type profile updates are not sent", () => {

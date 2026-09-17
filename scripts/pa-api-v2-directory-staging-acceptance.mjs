@@ -9,6 +9,15 @@ const SHA256 = /^[0-9a-f]{64}$/i;
 const SIGNED_64_MAX = "9223372036854775807";
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const MAX_INVENTORY_RESPONSE_BYTES = 256 * 1024;
+// PA's default per-key limit is 60 requests/minute. Keep the acceptance
+// client below that limit even when a replay probe deliberately performs
+// three requests for one command. The interval is configurable for tests,
+// but the live default is intentionally conservative (55 requests/minute).
+const DEFAULT_MIN_REQUEST_INTERVAL_MS = 1100;
+const MAX_MIN_REQUEST_INTERVAL_MS = 60_000;
+const MAX_RATE_LIMIT_RETRIES = 4;
+const MAX_RETRY_AFTER_MS = 30_000;
+const RETRY_BACKOFF_MS = 1000;
 
 export class DirectoryAcceptanceError extends Error {
   constructor(code) { super(code); this.code = code; }
@@ -134,11 +143,20 @@ function normalizeProfile(value, type) {
 }
 function parseJson(env, name) { try { return JSON.parse(required(env, name)); } catch { fail(`invalid_${name.toLowerCase()}`); } }
 
+function boundedMilliseconds(env, name, fallback) {
+  const raw = env[name];
+  if (raw === undefined || raw === "") return fallback;
+  if (!/^\d+$/.test(String(raw))) fail(`invalid_${name.toLowerCase()}`);
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value > MAX_MIN_REQUEST_INTERVAL_MS) fail(`invalid_${name.toLowerCase()}`);
+  return value;
+}
+
 export function parseDirectoryAcceptanceConfig(env = process.env) {
   let parsed;
   try { parsed = new URL(required(env, "PA_DIRECTORY_BASE_URL")); } catch { fail("invalid_pa_directory_base_url"); }
   if (parsed.protocol !== "https:" || parsed.pathname !== "/" || parsed.username || parsed.password || parsed.search || parsed.hash) fail("invalid_pa_directory_base_url");
-  const config = { baseUrl: parsed.origin, token: env.PA_DIRECTORY_API_TOKEN?.trim(), mutate: env.PA_DIRECTORY_ACCEPTANCE_ALLOW_MUTATIONS === "allow", cfAccessClientId: env.PA_DIRECTORY_CF_ACCESS_CLIENT_ID || undefined, cfAccessClientSecret: env.PA_DIRECTORY_CF_ACCESS_CLIENT_SECRET || undefined };
+  const config = { baseUrl: parsed.origin, token: env.PA_DIRECTORY_API_TOKEN?.trim(), mutate: env.PA_DIRECTORY_ACCEPTANCE_ALLOW_MUTATIONS === "allow", cfAccessClientId: env.PA_DIRECTORY_CF_ACCESS_CLIENT_ID || undefined, cfAccessClientSecret: env.PA_DIRECTORY_CF_ACCESS_CLIENT_SECRET || undefined, minRequestIntervalMs: boundedMilliseconds(env, "PA_DIRECTORY_ACCEPTANCE_MIN_REQUEST_INTERVAL_MS", DEFAULT_MIN_REQUEST_INTERVAL_MS) };
   if (Boolean(config.cfAccessClientId) !== Boolean(config.cfAccessClientSecret)) fail("incomplete_cloudflare_access_credentials");
   if (!config.mutate) return config;
   config.token = required(env, "PA_DIRECTORY_API_TOKEN");
@@ -191,19 +209,68 @@ async function decode(response, maximum) {
   for (const part of chunks) { bytes.set(part, at); at += part.byteLength; }
   try { return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); } catch { fail("invalid_utf8_or_json_response"); }
 }
+function retryAfterMilliseconds(response, retryNumber) {
+  const raw = response.headers.get("retry-after");
+  if (raw !== null) {
+    if (/^\d+$/.test(raw.trim())) return Math.min(Number(raw) * 1000, MAX_RETRY_AFTER_MS);
+    const timestamp = Date.parse(raw);
+    if (Number.isFinite(timestamp)) return Math.min(Math.max(0, timestamp - Date.now()), MAX_RETRY_AFTER_MS);
+  }
+  return Math.min(RETRY_BACKOFF_MS * (2 ** (retryNumber - 1)), MAX_RETRY_AFTER_MS);
+}
+
+function rateLimitState(config) {
+  if (!config.rateLimitState) config.rateLimitState = { requests: 0, responses429: 0, retries: 0, retryAfterMs: [], retryAfterCapped: 0, nextRequestAt: 0 };
+  return config.rateLimitState;
+}
+
+function recordRateLimitEvidence(config, report) {
+  const state = config.rateLimitState;
+  if (!state) return;
+  report.rateLimit = {
+    minRequestIntervalMs: config.minRequestIntervalMs,
+    requests: state.requests,
+    responses429: state.responses429,
+    retries: state.retries,
+    retryAfterMs: [...state.retryAfterMs],
+    retryAfterCapped: state.retryAfterCapped,
+  };
+}
+
+const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
 async function api(fetcher, config, path, options = {}) {
   const { method = "GET", body, identity = false } = options;
   const request = commandBody(path, body);
-  const response = await fetcher(`${config.baseUrl}${path}`, { method, headers: headers(config, request, identity), body: request === undefined ? undefined : JSON.stringify(request), redirect: "manual", credentials: "omit", cache: "no-store" });
-  if ((response.status >= 300 && response.status < 400) || response.headers.has("set-cookie") || response.headers.has("location")) fail("unsafe_response");
-  if (!(response.headers.get("cache-control") || "").split(",").some((value) => value.trim().toLowerCase() === "no-store")) fail("response_no_store_required");
-  const requestId = response.headers.get("x-request-id");
-  if (!UUID.test(requestId || "")) fail("invalid_request_id");
-  if (response.status < 200 || response.status > 299) return { status: response.status, requestId, payload: null };
-  if (!/^application\/json(?:\s*;|$)/i.test(response.headers.get("content-type") || "")) fail("response_json_required");
-  const payload = await decode(response, path.startsWith("/api/v2/directory/inventory") ? MAX_INVENTORY_RESPONSE_BYTES : MAX_RESPONSE_BYTES);
-  if (!object(payload) || payload.requestId !== requestId || !UUID.test(payload.requestId || "")) fail("invalid_request_id");
-  return { status: response.status, requestId, payload };
+  const state = rateLimitState(config);
+  let retryNumber = 0;
+  for (;;) {
+    const delay = state.nextRequestAt - Date.now();
+    if (delay > 0) await (config.sleep ?? wait)(delay);
+    state.requests += 1;
+    const response = await fetcher(`${config.baseUrl}${path}`, { method, headers: headers(config, request, identity), body: request === undefined ? undefined : JSON.stringify(request), redirect: "manual", credentials: "omit", cache: "no-store" });
+    state.nextRequestAt = Date.now() + config.minRequestIntervalMs;
+    if (response.status === 429) {
+      state.responses429 += 1;
+      if (++retryNumber > MAX_RATE_LIMIT_RETRIES) fail("rate_limit_retry_exhausted");
+      const retryAfter = retryAfterMilliseconds(response, retryNumber);
+      const rawRetryAfter = response.headers.get("retry-after");
+      if (rawRetryAfter !== null && ((/^\d+$/.test(rawRetryAfter.trim()) && Number(rawRetryAfter) * 1000 > MAX_RETRY_AFTER_MS) || (!/^\d+$/.test(rawRetryAfter.trim()) && Number.isFinite(Date.parse(rawRetryAfter)) && Math.max(0, Date.parse(rawRetryAfter) - Date.now()) > MAX_RETRY_AFTER_MS))) state.retryAfterCapped += 1;
+      state.retryAfterMs.push(retryAfter);
+      state.retries += 1;
+      state.nextRequestAt = Math.max(state.nextRequestAt, Date.now() + retryAfter);
+      continue;
+    }
+    if ((response.status >= 300 && response.status < 400) || response.headers.has("set-cookie") || response.headers.has("location")) fail("unsafe_response");
+    if (!(response.headers.get("cache-control") || "").split(",").some((value) => value.trim().toLowerCase() === "no-store")) fail("response_no_store_required");
+    const requestId = response.headers.get("x-request-id");
+    if (!UUID.test(requestId || "")) fail("invalid_request_id");
+    if (response.status < 200 || response.status > 299) return { status: response.status, requestId, payload: null };
+    if (!/^application\/json(?:\s*;|$)/i.test(response.headers.get("content-type") || "")) fail("response_json_required");
+    const payload = await decode(response, path.startsWith("/api/v2/directory/inventory") ? MAX_INVENTORY_RESPONSE_BYTES : MAX_RESPONSE_BYTES);
+    if (!object(payload) || payload.requestId !== requestId || !UUID.test(payload.requestId || "")) fail("invalid_request_id");
+    return { status: response.status, requestId, payload };
+  }
 }
 
 function identity(payload, config, versioned = false) {
@@ -272,8 +339,14 @@ async function replay(fetcher, config, path, type, kind, command, report, meta) 
   return outcome;
 }
 
+// Directory write profiles intentionally use strings so command validation is
+// unambiguous. PA's read projection follows nullable DB semantics for fields
+// that are optional: an empty stored value is returned as null. Keep that
+// normalization local to the read contract; it must not loosen command or
+// response shape validation for any other field.
+const nullableRead = (value) => value === "" ? null : value;
 function readData(type, resource, profile, organizationPublicId) {
-  const data = { publicId: resource.publicId, name: profile.name, email: type === "client" ? profile.email : profile.generalEmail, phone: type === "client" ? profile.phone : profile.generalPhone, address: { line1: profile.addressLine1, line2: profile.addressLine2, city: profile.city, state: profile.state, postalCode: profile.postalCode, country: profile.country } };
+  const data = { publicId: resource.publicId, name: profile.name, email: nullableRead(type === "client" ? profile.email : profile.generalEmail), phone: nullableRead(type === "client" ? profile.phone : profile.generalPhone), address: { line1: profile.addressLine1, line2: nullableRead(profile.addressLine2), city: profile.city, state: profile.state, postalCode: profile.postalCode, country: profile.country } };
   return type === "client" ? { ...data, clientType: resource.clientType, organizationPublicId } : data;
 }
 async function read(fetcher, config, type, resource, profile, organizationPublicId, report, stage) {
@@ -336,13 +409,15 @@ function runUniqueOrganizationProfile(profile, label, role) {
 }
 function updateProfile(type, profile) { return Object.fromEntries(UPDATE_PROFILE_FIELDS[type].map((field) => [field, profile[field]])); }
 
-export async function runDirectoryAcceptance(config, { fetcher = fetch, uuid = randomUUID } = {}) {
+export async function runDirectoryAcceptance(config, { fetcher = fetch, uuid = randomUUID, sleep } = {}) {
+  config.rateLimitState = { requests: 0, responses429: 0, retries: 0, retryAfterMs: [], retryAfterCapped: 0, nextRequestAt: 0 };
+  if (sleep) config.sleep = sleep;
   const report = { schemaVersion: 3, environment: "staging", status: "passed", mutationsPerformed: false, credentials: { valuesExcluded: true }, requiredFeatureFlags: DIRECTORY_FLAGS, stages: {} };
-  if (!config.token) { const result = await api(fetcher, config, "/api/v2/capabilities"); if (result.status !== 401) fail("capabilities_requires_authentication"); report.stages.capabilitiesNoKey = summary(result); return report; }
+  if (!config.token) { const result = await api(fetcher, config, "/api/v2/capabilities"); if (result.status !== 401) fail("capabilities_requires_authentication"); report.stages.capabilitiesNoKey = summary(result); recordRateLimitEvidence(config, report); return report; }
   const capabilities = await api(fetcher, config, "/api/v2/capabilities");
   if (capabilities.status !== 200) fail("capabilities_failed");
   report.stages.capabilities = summary(capabilities);
-  if (!config.mutate) return report;
+  if (!config.mutate) { recordRateLimitEvidence(config, report); return report; }
   capabilityContract(capabilities.payload, config); report.mutationsPerformed = true;
   const issued = new Set();
   const commandId = () => { const value = uuid(); if (!UUID.test(value) || issued.has(value)) fail("unsafe_or_reused_command_id"); issued.add(value); return value; };
@@ -379,6 +454,7 @@ export async function runDirectoryAcceptance(config, { fetcher = fetch, uuid = r
   const rebindPriorGeneration = generation;
   await replay(fetcher, config, "/api/v2/directory/clients/bindings/commands", "client", "bind", { commandId: commandId(), externalId: client.externalId, expectedPublicId: client.publicId, expectedRevision: client.revision }, report, { stage: "clientBindingRebind", priorGeneration: rebindPriorGeneration }); report.stages.clientBindingRebound = await status(fetcher, config, "client", client, 200, { revision: client.revision, generation: plusOne(rebindPriorGeneration) }); generation = client.generation;
   await inventory(fetcher, config, [organization, moveOrganization, client], report);
+  recordRateLimitEvidence(config, report);
   return report;
 }
 async function main() { process.stdout.write(`${JSON.stringify(await runDirectoryAcceptance(parseDirectoryAcceptanceConfig()))}\n`); }
