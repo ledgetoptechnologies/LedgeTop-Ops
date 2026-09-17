@@ -4,6 +4,22 @@ This is an operator-only staging release check. It calls Project Alpha (PA)
 directly; it is never mounted in an Operations Worker and is not a production
 synchronization path.
 
+## September 17, 2026 checkpoint
+
+The current PA PR184 staging candidate is head `e260abeb`. It includes the
+generic existing-application key-binding CLI, added after staging exposed a
+separate application-identity conflict. SQLite is **15/64** and disposable
+MySQL is **10/81**; PR smoke, CodeQL, Gitleaks, Docker publish workflow
+`35283843624`, and Trivy are green. Staging was rebuilt healthy from exact
+image `e260abe`. Unauthenticated capabilities returned JSON 401 with
+`no-store` and no cookie; the web-log window had no errors or warnings.
+
+Before live Project acceptance, create or rebind a temporary Project-only key
+to shared application UUID `150cb108-af37-4973-ab6e-f6d991a6e8c8`. After the
+live Project run, separately verify binding, refresh, lifecycle, and public-link
+parity. PA `main` is not merged; this checkpoint does not claim production
+activation and contains no secret or client data.
+
 Run its default-off baseline without credentials:
 
 ```powershell
