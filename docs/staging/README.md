@@ -62,6 +62,33 @@ names live in the checked-in sidecar
 as a `secrets` property in a Wrangler config. Secret values remain ignored and
 operator-supplied.
 
+`PROJECT_ALPHA_API_V2_CONNECTIONS` is an Operations secret envelope and is
+default-off per connection: omitting `enabled` has the same effect as setting
+it to `false`. When a Project Alpha staging origin is protected by Cloudflare
+Access service authentication, its connection may include both
+`accessClientId` and `accessClientSecret`; the pair is optional, but a partial
+pair is rejected. Keep the full envelope in the approved secret store (not
+this repository, a Wrangler config, or `staging-config-values.json`):
+
+```json
+{
+  "version": 1,
+  "instances": {
+    "project-alpha:<source-id>": {
+      "sourceId": "project-alpha:<source-id>",
+      "enabled": false,
+      "baseUrl": "https://<staging-project-alpha-origin>",
+      "apiKey": "<operator-supplied-api-key>",
+      "sourceInstanceId": "<source-instance-uuid>",
+      "applicationId": "<application-uuid>",
+      "historyEpoch": "<history-epoch-uuid>",
+      "accessClientId": "<operator-supplied-access-client-id>",
+      "accessClientSecret": "<operator-supplied-access-client-secret>"
+    }
+  }
+}
+```
+
 Preserve all fail-closed feature variables, then run:
 
 ```text

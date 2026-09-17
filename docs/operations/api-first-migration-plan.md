@@ -1,6 +1,54 @@
 # API-first migration — current implementation objective and work register
 
-Updated September 15, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+Updated September 16, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+
+### September 16, 2026 staging application-binding and release checkpoint
+
+- PA staging API key `#1` is now bound to the generic API v2 application
+  identity `e4b3b484-ee7c-475f-ad40-46d7f928cff2`. The host-local operator
+  procedure completed its dry run before apply, created the directory and
+  project authorization-state generation-zero rows, and produced a valid
+  capabilities identity. This supersedes only the older statement that the
+  binding CLI had never been exercised; it is not evidence for either
+  production PA instance.
+- An independent authenticated LAN request to
+  `http://192.168.60.92:1628/api/v2/capabilities` returned HTTP 200 with a
+  present application identity and one granted capability. This proves the
+  staging application binding and capabilities route. It does not prove a
+  directory/project write, reconciliation, conflict recovery, public-link
+  preservation, or a production authority cutover.
+- The public staging hostname is not yet valid acceptance evidence. Its
+  existing DNS record targets the locally managed `demo-sites` tunnel, but
+  that tunnel's inspected ingress table does not contain
+  `pa-staging.ledgetoptechnologies.com`; the request therefore reaches the
+  catch-all 404. The Cloudflare dashboard cannot add a route to that locally
+  managed tunnel. Add `pa-staging.ledgetoptechnologies.com` ->
+  `http://localhost:1628` to the host-local ingress configuration before the
+  final catch-all, reload the tunnel, and then verify HTTPS and the dedicated
+  Access service-auth policy. Keep the existing DNS record rather than moving
+  the hostname to another tunnel without a separate network-reachability
+  review.
+- Operations PR69 merged to `main` at `8abeaf8`; all ten CI checks passed.
+  Staging may explicitly defer Mapbox only with both staging tokens empty and
+  `MAPBOX_STAGING_ACCEPTANCE_DEFERRED="true"`. The deferral is recorded as
+  deferred rather than verified and does not authorize production acceptance
+  for a map-dependent workflow.
+- The next default-off Operations staging slice accepts an optional complete
+  Cloudflare Access service-token pair inside each
+  `PROJECT_ALPHA_API_V2_CONNECTIONS` entry. A partial pair, an unsafe header
+  value, or an unknown envelope field fails closed. Public configuration
+  resolution redacts the API key and both Access values; only the one-shot
+  probe/transport bridge receives them, and the headers are absent when the
+  pair is omitted. Focused connection/project transport evidence is **53/53**,
+  Operations TypeScript passes, staging preflight is **21/21**, and an
+  independent review found no secret-handling defect. The immutable staging
+  runtime candidate must be advanced to the executable commit containing this
+  slice before the documented pair may be installed or exercised.
+- No production PA configuration, key, migration, feature flag, public link,
+  legacy writer, or authority was changed by this checkpoint. Joined staging
+  acceptance remains gated by the public HTTPS ingress, Access service auth,
+  exact capability/read/write exercises, retry/conflict evidence, rollback,
+  and preservation checks for existing public links.
 
 ### September 15, 2026 PA review-branch readiness checkpoint — combined directory CI
 

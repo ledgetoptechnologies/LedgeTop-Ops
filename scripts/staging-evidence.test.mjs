@@ -337,7 +337,7 @@ test("requires origin-restriction proof and public token shape for verified Mapb
 
 test("pins the current paired Ops runtime and Project Alpha API-v2 migration boundary", () => {
   assert.equal(RELEASE_CONTRACT_FINALIZED, false);
-  assert.equal(RELEASE_CANDIDATES.operations, "d1c20163956d180439e51c5aceb96fc37bdb5360");
+  assert.equal(RELEASE_CANDIDATES.operations, "5ca70d4f5ec834bfddf7bff68ffc1d89c6fd32a7");
   assert.equal(RELEASE_CANDIDATES.projectAlpha, "31deb85b87b95de27dc9e90a5591e036ae96709e");
   assert.equal(PROJECT_ALPHA_STAGING.migrations["0066_generic_portal_v2_integration.sql"], "12cfd32e4854bddf763a5fe80653fe7494ab5f9e82b592bf0da05eed78f3e886");
   assert.equal(PROJECT_ALPHA_STAGING.migrations["0102_api_v2_project_synchronization.sql"], "63e2010529678ce866adaa38ea7a54084b1384adcc56e02727cfbbc3584959a0");
