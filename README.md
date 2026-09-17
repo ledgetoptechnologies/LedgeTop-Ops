@@ -73,6 +73,25 @@ npm.cmd run build
 
 Run each app locally with `npm.cmd --prefix apps/<app> run dev`. Copy its `.dev.vars.example` to `.dev.vars` and supply development-only values. Never commit `.dev.vars`.
 
+## Project Alpha API v2 staging acceptance
+
+`npm run staging:pa-api-v2:acceptance` is an isolated, non-production Node
+harness for Project Alpha API v2. It reads every credential from environment
+variables and emits only sanitized JSON evidence: status, correlation IDs,
+resource IDs, revisions, generations, and hashes. It never prints API tokens,
+Cloudflare Access service credentials, request bodies, or profile content.
+
+With only `PA_BASE_URL`, it proves the unauthenticated and default-off baseline.
+Adding `PA_API_TOKEN` performs the authenticated capability baseline.
+The disposable project flow additionally requires
+`PA_ACCEPTANCE_ALLOW_MUTATIONS=allow`, a `PA_ACCEPTANCE_PREFIX` beginning with
+`pa-acceptance-`, the exact PA source/application/history IDs, a bound
+organization proof JSON, and a project profile JSON whose name begins with the
+same prefix. Optional status/inventory, bind/refresh, and reversible
+archive/restore plus public-link parity checks require their explicit matching
+environment settings. See the script header/configuration errors for the exact
+variable names; never put those values in a repository file.
+
 ## Cloudflare resources
 
 - D1 `client-data` (`7f40a7b7-c3ec-470e-a626-e798867f71f8`)

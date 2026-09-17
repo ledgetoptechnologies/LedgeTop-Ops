@@ -29,13 +29,35 @@ Updated September 17, 2026. The owner approved implementation and resumption aft
   replacement route remains subject to its default-off deployment flag. No
   production PA instance, authority policy, legacy writer, or public link was
   changed.
+- The container-local migration gate is complete. Directory dry-run/apply
+  reported `scanned 1, inserted 1, current 0`; Project dry-run/apply reported
+  `scanned 0, inserted 0, current 0`, with zero presentation revocations.
+  Neither bounded apply returned a resume cursor, and the final dry runs found
+  no remaining inserts. The retained non-secret attestations are directory
+  `7d315e254ce5167c5cc6b9f1a0c14802bf95edbd0aa1807d3309b8bcc4b0f1b2`
+  and Projects
+  `8f6e7bbde18f639a446d93414c5dfb5a58a8d773dce0ee503b8791df70ca8a25`;
+  the Project release checker reports the latter current.
+- Exact Operations `main` transport regression coverage now passes **55
+  tests / 3 files**, the acceptance runner's fail-closed and secrecy suite
+  passes **6/6**, and the cross-app TypeScript check passes. A reviewed,
+  non-production runner at
+  `scripts/pa-api-v2-staging-acceptance.mjs` requires an explicit mutation
+  opt-in plus a `pa-acceptance-*` fixture prefix, reads
+  secrets only from the environment, and emits sanitized status/identity/
+  revision evidence. Its live non-mutating baseline passed: capabilities
+  returned JSON 401, disabled Project inventory returned JSON 404, neither
+  redirected or set a cookie, both were `no-store`, and the corresponding PA
+  web-log window contained no error or fatal entry.
+- Operations Project-v2 production entrypoints remain deliberately unmounted;
+  an import-graph regression enforces that boundary. Therefore the remaining
+  live gate is direct PA acceptance with disposable fixtures, not evidence of
+  an already active Operations-to-PA synchronization path. Mounting the
+  reviewed adapters and joined reconciliation remains a later, separately
+  reviewed Operations activation step.
 
 #### Remaining release gates
 
-- On the staging host, run bounded directory and Project dry runs and applies
-  to cursor exhaustion, then persist the directory and Project release
-  attestations. Retain only aggregate counts, resume cursors, and the safe
-  SHA-256 digests; do not retain credentials or customer bodies.
 - Enable only the reviewed staging route subset, then exercise authenticated
   capabilities, positive reads/writes/bindings, least-privilege denials,
   stale revision/generation rejection, exact idempotent replay, changed-body
