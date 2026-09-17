@@ -1,6 +1,53 @@
 # API-first migration — current implementation objective and work register
 
-Updated September 16, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+Updated September 17, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+
+### September 17, 2026 staging release-candidate checkpoint
+
+- Operations PR71 merged to `main` as `c58aa171`. Its ten PR-head checks
+  passed, and all ten jobs in the exact post-merge `main` workflow also passed.
+  The merge adds the default-off, per-instance Project Alpha outage monitor
+  and stale-data presentation; it does not enable monitoring or change a
+  production credential, route, public link, or Project Alpha grant.
+- Project Alpha PR186 merged the reviewed API-first candidate to `dev` as
+  `fae48c10`. CI, Docker/Trivy, CodeQL, and Gitleaks all passed on that exact
+  merge. Staging was rebuilt from the resulting `:dev` images and reports
+  `vfae48c1`; the database is healthy, the migration container exited zero,
+  and the web container is healthy.
+- The public staging tunnel is now routed correctly. Public login returns HTTP
+  200. Without credentials, `/api/v2/capabilities` returns 401 and the
+  default-off `/api/v2/ops/snapshot` returns 404. This supersedes the September
+  16 ingress-blocker statement below.
+- An authenticated, read-only staging smoke covered the dashboard, client and
+  organization lists, Projects, workforce time and review, API keys, directory
+  management, and the retained legacy-integration settings page. All nine
+  pages returned HTTP 200 with no fatal marker; the corresponding web-log
+  window contained no error, fatal, exception, or warning line.
+- The generic `Ledge Top Ops Staging` application binding is present and its
+  active key metadata lists the reviewed fine-grained directory and Project
+  scopes. External directory ownership remains unconfigured, and every
+  replacement route remains subject to its default-off deployment flag. No
+  production PA instance, authority policy, legacy writer, or public link was
+  changed.
+
+#### Remaining release gates
+
+- On the staging host, run bounded directory and Project dry runs and applies
+  to cursor exhaustion, then persist the directory and Project release
+  attestations. Retain only aggregate counts, resume cursors, and the safe
+  SHA-256 digests; do not retain credentials or customer bodies.
+- Enable only the reviewed staging route subset, then exercise authenticated
+  capabilities, positive reads/writes/bindings, least-privilege denials,
+  stale revision/generation rejection, exact idempotent replay, changed-body
+  conflict, reconciliation, and rollback.
+- Verify an ordinary PA browser edit remains available for the dual-editor
+  Project contract, and verify existing public-link resolution before and
+  after the selected lifecycle operations. A fresh staging database without
+  an approved fixture is not public-link parity evidence.
+- Keep Project Alpha PR184 open against `main` until these live gates pass.
+  After a successful merge, stop for the owner to deploy and sign in to both
+  production PA instances; production acceptance and legacy retirement remain
+  separate later gates.
 
 ### September 16, 2026 staging application-binding and release checkpoint
 
