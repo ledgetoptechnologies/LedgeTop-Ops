@@ -36,6 +36,11 @@ test("Operations browser acceptance remains a required CI job", () => {
   assert(workflow.includes("apps/operations/test-results"));
 });
 
+test("Directory API-v2 staging contract suite remains a required CI check", () => {
+  const workflow = read(".github/workflows/ci.yml");
+  assert(workflow.includes("scripts/pa-api-v2-directory-staging-acceptance.test.mjs"));
+});
+
 test("Client Portal browser acceptance remains a required CI job", () => {
   const workflow = read(".github/workflows/ci.yml");
   assert(workflow.includes("client-browser:"));

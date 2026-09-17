@@ -89,6 +89,12 @@ this repository, a Wrangler config, or `staging-config-values.json`):
 }
 ```
 
+The separately authorized, disposable Project Alpha Directory API-v2
+rehearsal is documented in
+[pa-api-v2-directory-acceptance.md](pa-api-v2-directory-acceptance.md). It
+requires an exact feature-flag/capability contract and an exactly scoped key;
+it does not enable an Operations connection or change source authority.
+
 Preserve all fail-closed feature variables, then run:
 
 ```text

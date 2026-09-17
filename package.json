@@ -5,7 +5,7 @@
   "scripts": {
     "check:worker-types": "npm --prefix apps/client run cf-typegen:check && npm --prefix apps/operations run cf-typegen:check && npm --prefix apps/ops-sync run cf-typegen:check",
     "check": "npm run check:worker-types && npm --prefix apps/client run check && npm --prefix apps/operations run check && npm --prefix apps/ops-sync run check && npm --prefix apps/thumbnail-renderer run check",
-    "test": "node --test scripts/source-layout-invariants.test.mjs scripts/client-portal-rollout-manifest.test.mjs scripts/client-portal-release-profile.test.mjs scripts/pa-api-v2-staging-acceptance.test.mjs && npm --prefix apps/client test && npm --prefix apps/operations test && npm --prefix apps/ops-sync test && npm --prefix apps/thumbnail-renderer test",
+    "test": "node --test scripts/source-layout-invariants.test.mjs scripts/client-portal-rollout-manifest.test.mjs scripts/client-portal-release-profile.test.mjs scripts/pa-api-v2-staging-acceptance.test.mjs scripts/pa-api-v2-directory-staging-acceptance.test.mjs && npm --prefix apps/client test && npm --prefix apps/operations test && npm --prefix apps/ops-sync test && npm --prefix apps/thumbnail-renderer test",
     "test:browser": "npm --prefix apps/client run test:browser && npm --prefix apps/operations run test:browser",
     "test:portal:joined": "node scripts/client-portal-joined-acceptance.mjs",
     "build": "npm --prefix apps/client run build && npm --prefix apps/operations run build && npm --prefix apps/ops-sync run build",
@@ -25,6 +25,8 @@
     "staging:acceptance:test": "node --test scripts/staging-acceptance.test.mjs",
     "staging:pa-api-v2:acceptance": "node scripts/pa-api-v2-staging-acceptance.mjs",
     "staging:pa-api-v2:acceptance:test": "node --test scripts/pa-api-v2-staging-acceptance.test.mjs",
+    "staging:pa-api-v2:directory:acceptance": "node scripts/pa-api-v2-directory-staging-acceptance.mjs",
+    "staging:pa-api-v2:directory:acceptance:test": "node --test scripts/pa-api-v2-directory-staging-acceptance.test.mjs",
     "staging:release:prepare": "node scripts/staging-release.mjs",
     "staging:release:verify": "node scripts/staging-release-verify.mjs"
   }

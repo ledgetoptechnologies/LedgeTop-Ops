@@ -1,0 +1,83 @@
+# Project Alpha Directory API v2 staging acceptance
+
+`npm run staging:pa-api-v2:directory:acceptance` is an operator-only staging
+rehearsal. It neither deploys a Worker nor makes a hard-delete request. With no
+token it makes just one unauthenticated capabilities request and requires the
+expected `401` response.
+
+A mutable rehearsal requires these secret-store values. Do not put any of them
+on a command line, in a fixture, or in CI output:
+
+- `PA_DIRECTORY_BASE_URL`: a root HTTPS Project Alpha staging origin.
+- `PA_DIRECTORY_API_TOKEN`: a dedicated, fine-grained, non-`full` key.
+- `PA_DIRECTORY_ACCEPTANCE_ALLOW_MUTATIONS=allow` and a new prefix beginning
+  `pa-directory-acceptance-`.
+- `PA_SOURCE_INSTANCE_ID`, `PA_APPLICATION_ID`, and `PA_HISTORY_EPOCH`: the
+  bound application identity UUIDs.
+- `PA_DIRECTORY_ORGANIZATION_PROFILE_JSON`,
+  `PA_DIRECTORY_MOVE_ORGANIZATION_PROFILE_JSON`, and
+  `PA_DIRECTORY_CLIENT_PROFILE_JSON`: complete disposable profiles.
+
+Profiles are preflighted before the capabilities call or any mutation using the
+same constraints as Project Alpha: valid UTF-8, no Unicode control characters,
+PHP-compatible trimming, scalar and UTF-8 byte limits, canonical valid email
+(including dot-atom checks such as rejecting `a..b@example.com` and the PHP-
+invalid numeric-leading final label in `a@b.1`), and the
+`unknown`/`business`/`consumer` client-type enum. The two organization names
+must differ case-insensitively. Organization base names can be at most 109
+scalar values (client base names, which are only updated, can be 110): the
+runner appends ` <32-hex> primary` and ` <32-hex> move` to its two organization
+create names, making every created organization run-unique, and appends
+` <32-hex> update` for profile updates. This reservation ensures a locally
+accepted configuration cannot reach a later create or update and then fail
+because the generated name is too long.
+
+The Node preflight intentionally uses a conservative, documented subset of
+PHP `FILTER_VALIDATE_EMAIL`: conventional ASCII dot-atoms and DNS domains with
+an alphabetic-leading final label. It may reject unusual addresses PHP accepts
+(for example quoted local parts or address literals), but it rejects the
+standard malformed local/domain forms Project Alpha rejects before any request
+or mutation is attempted.
+
+If Cloudflare Access protects the staging origin, set both
+`PA_DIRECTORY_CF_ACCESS_CLIENT_ID` and
+`PA_DIRECTORY_CF_ACCESS_CLIENT_SECRET`; a partial pair fails closed.
+
+Before mutating, the runner compares the complete ordered Project Alpha
+capabilities document with the exact route and scope matrix from commit
+`33e623ac`. That matrix includes the default-off `APP_API_V2_*` directory
+flags exported as `DIRECTORY_FEATURE_FLAGS`. Capabilities exposes an enabled
+flag through its route/scope mapping, not through a raw feature-flag object;
+extra scopes, missing scopes, route aliases, omitted identity headers, or
+invented fields fail the run. The revoke routes are only verified in discovery:
+the rehearsal never invokes them.
+
+Every command gets a fresh UUID; replay deliberately reuses that command ID
+with the identical body, then reuses it once more with a changed body. Server
+generated public IDs, revisions, and authorization generations are carried
+forward instead of being supplied in a fixture; final inventory projection
+hashes are dynamically verified and retained only as hashes in evidence.
+The mutable sequence verifies organization and client create (`201`), replay
+(`200`), changed-body conflict (`409`), exact reads, profile updates, automatic
+create bindings, stale binding status plus refresh, client
+assign/move/remove readback, soft archive/restore replay/conflict, persistent
+tombstone/no-auto-rebind behavior, and the required explicit rebind.
+It asserts each source transition: create is revision `1` and advances the
+authorization generation once; profile update advances only revision; refresh,
+relationship mutation, archive/tombstone, and rebind each advance generation
+once; restore advances only revision. Revisions and generations are restricted
+to signed-64-bit decimal values.
+
+Final inventory uses `type=all&limit=2`; the three disposable records force a
+bounded full pagination walk. It requires sorted, duplicate-free resources in
+the caller's application scope, requires each generated record, and accepts
+the Directory inventory route's 256 KiB response limit (all other route
+responses are bounded to 64 KiB). Its authorization generation is pinned across
+all pages; a concurrent change causes a fail-closed result instead of mixed
+inventory evidence.
+
+Evidence contains only response statuses, request IDs, command-body and final
+projection SHA-256 digests, and page/generation counts. It excludes bearer tokens, Access
+credentials, profile contents, external IDs, public IDs, and command bodies.
+Archive is a soft lifecycle event: retain the disposable records, bindings,
+receipts, tombstones, and audit history; do not hard-delete them after a run.
