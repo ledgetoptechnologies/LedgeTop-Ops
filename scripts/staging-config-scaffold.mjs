@@ -17,10 +17,16 @@ export const REQUIRED_STAGING_CONFIG_VALUES = Object.freeze([
   "DEDICATED_CLIENT_PORTAL_STAGING_ACCESS_AUD",
   "CLIENT_STAGING_RESTRICTED_MAPBOX_PUBLIC_TOKEN",
   "OPERATIONS_STAGING_RESTRICTED_MAPBOX_PUBLIC_TOKEN",
+  "MAPBOX_STAGING_ACCEPTANCE_DEFERRED",
   "STAGING_EMAIL_DOMAIN",
   "STAGING_TRIAGE_EMAIL",
   "STAGING_ACCESS_GROUP_ID",
   "STAGING_ACCESS_GROUP_NAME",
+]);
+
+const MAPBOX_VALUE_KEYS = Object.freeze([
+  "CLIENT_STAGING_RESTRICTED_MAPBOX_PUBLIC_TOKEN",
+  "OPERATIONS_STAGING_RESTRICTED_MAPBOX_PUBLIC_TOKEN",
 ]);
 
 const readJson = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
@@ -29,7 +35,10 @@ const populated = (value) => typeof value === "string" && value.length > 0 && !/
 export function validateValues(values) {
   const errors = [];
   if (!values || typeof values !== "object" || Array.isArray(values)) return ["staging config values must be a JSON object"];
-  for (const key of REQUIRED_STAGING_CONFIG_VALUES) if (!populated(values[key])) errors.push(`${key} is missing or contains a placeholder`);
+  for (const key of REQUIRED_STAGING_CONFIG_VALUES) {
+    if (MAPBOX_VALUE_KEYS.includes(key) || key === "MAPBOX_STAGING_ACCEPTANCE_DEFERRED") continue;
+    if (!populated(values[key])) errors.push(`${key} is missing or contains a placeholder`);
+  }
   for (const key of Object.keys(values)) if (!REQUIRED_STAGING_CONFIG_VALUES.includes(key)) errors.push(`unexpected staging config value ${key}`);
   for (const key of ["DELIVERY_STAGING_ACCESS_AUD", "OPERATIONS_STAGING_ACCESS_AUD", "PROJECT_ALPHA_OPS_SYNC_STAGING_ACCESS_AUD", "DEDICATED_CLIENT_PORTAL_STAGING_ACCESS_AUD"]) {
     if (populated(values[key]) && !/^[a-f0-9]{64}$/i.test(values[key])) errors.push(`${key} must be a 64-character Access audience`);
@@ -41,8 +50,17 @@ export function validateValues(values) {
     values.DEDICATED_CLIENT_PORTAL_STAGING_ACCESS_AUD,
   ].filter(populated);
   if (new Set(audiences.map((value) => value.toLowerCase())).size !== audiences.length) errors.push("staging Access audiences must be distinct");
-  for (const key of ["CLIENT_STAGING_RESTRICTED_MAPBOX_PUBLIC_TOKEN", "OPERATIONS_STAGING_RESTRICTED_MAPBOX_PUBLIC_TOKEN"]) {
-    if (populated(values[key]) && !values[key].startsWith("pk.")) errors.push(`${key} must be a restricted public Mapbox token`);
+  if (!["true", "false"].includes(values.MAPBOX_STAGING_ACCEPTANCE_DEFERRED)) {
+    errors.push("MAPBOX_STAGING_ACCEPTANCE_DEFERRED must be the string true or false");
+  } else if (values.MAPBOX_STAGING_ACCEPTANCE_DEFERRED === "true") {
+    for (const key of MAPBOX_VALUE_KEYS) {
+      if (!Object.hasOwn(values, key) || values[key] !== "") {
+        errors.push(`${key} must be an empty string when MAPBOX_STAGING_ACCEPTANCE_DEFERRED=true`);
+      }
+    }
+  } else for (const key of MAPBOX_VALUE_KEYS) {
+    if (!populated(values[key])) errors.push(`${key} is missing or contains a placeholder`);
+    else if (!values[key].startsWith("pk.")) errors.push(`${key} must be a restricted public Mapbox token`);
   }
   if (populated(values.STAGING_EMAIL_DOMAIN) && !/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i.test(values.STAGING_EMAIL_DOMAIN)) errors.push("STAGING_EMAIL_DOMAIN must be a DNS domain");
   if (populated(values.STAGING_TRIAGE_EMAIL) && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(values.STAGING_TRIAGE_EMAIL)) errors.push("STAGING_TRIAGE_EMAIL must be an email address");

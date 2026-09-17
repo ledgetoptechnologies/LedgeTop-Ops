@@ -892,7 +892,13 @@
     "r2LifecycleVerified": false,
     "accessPoliciesVerified": false,
     "emailBindingsVerified": false,
-    "mapboxOriginRestrictionsVerified": false,
+    "mapbox": {
+      "state": "deferred",
+      "stagingTokensConfigured": false,
+      "productionAcceptanceRequired": true,
+      "originRestrictionsVerified": false,
+      "evidenceRef": "<EVIDENCE_REFERENCE>"
+    },
     "observabilityAndAlertDestinationsVerified": false,
     "costBudgetsVerified": false,
     "verifiedAt": "<ISO_8601_TIMESTAMP>",

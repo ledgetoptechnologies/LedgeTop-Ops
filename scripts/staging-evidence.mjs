@@ -4,6 +4,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { APP_SOURCE_DIRS, FEATURE_FLAG_ACTIVATION_POLICIES, FEATURE_FLAG_DEPENDENCY_WINDOWS, PROJECT_ALPHA_STAGING, RELEASE_CANDIDATES, RELEASE_CONTRACT_FINALIZED, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_EXTERNAL_GATES, REQUIRED_EXTERNAL_GATE_PROOFS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_SECRETS, STAGING_ACCOUNT_ID, STAGING_CLIENT_PORTAL, STAGING_HOSTS, STAGING_INVENTORY, STAGING_STATIC_VARS, STAGING_VIEWER } from "./staging-requirements.mjs";
+import { validateFiles as validateStagingFiles } from "./staging-preflight.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const defaultEvidence = path.join(root, ".backups", "staging-release-evidence.json");
@@ -40,6 +41,38 @@ const sameSet = (left, right) => Array.isArray(left) && Array.isArray(right)
 const sameSequence = (left, right) => Array.isArray(left) && Array.isArray(right)
   && left.length === right.length
   && left.every((item, index) => item === right[index]);
+
+function validateMapboxEvidence(infrastructure, configs, errors) {
+  const states = ["delivery", "operations"].map((app) => ({
+    app,
+    deferred: configs[app]?.vars?.MAPBOX_STAGING_ACCEPTANCE_DEFERRED,
+    token: configs[app]?.vars?.MAPBOX_PUBLIC_TOKEN,
+  }));
+  const deferralValues = new Set(states.map(({ deferred }) => deferred));
+  if (deferralValues.size !== 1 || !["true", "false"].includes(states[0].deferred)) {
+    errors.push("Mapbox evidence requires a coherent rendered staging deferral state");
+    return;
+  }
+  const deferred = states[0].deferred === "true";
+  const tokensEmpty = states.every(({ token }) => token === "");
+  const tokensConfigured = states.every(({ token }) => typeof token === "string" && token.length > 0);
+  if ((deferred && !tokensEmpty) || (!deferred && !tokensConfigured)) {
+    errors.push("Mapbox evidence does not match the rendered staging token state");
+    return;
+  }
+  const mapbox = infrastructure.mapbox;
+  if (!mapbox || typeof mapbox !== "object" || Array.isArray(mapbox)) {
+    errors.push("staging infrastructure needs a Mapbox evidence state");
+    return;
+  }
+  const expectedState = deferred ? "deferred" : "verified";
+  if (mapbox.state !== expectedState) errors.push(`Mapbox evidence state must be ${expectedState}`);
+  if (mapbox.stagingTokensConfigured !== !deferred) errors.push(`Mapbox evidence stagingTokensConfigured must be ${!deferred}`);
+  if (mapbox.productionAcceptanceRequired !== deferred) errors.push(`Mapbox evidence productionAcceptanceRequired must be ${deferred}`);
+  if (mapbox.originRestrictionsVerified !== !deferred) errors.push(`Mapbox evidence originRestrictionsVerified must be ${!deferred}`);
+  if (!deferred && !states.every(({ token }) => token.startsWith("pk."))) errors.push("verified Mapbox evidence requires restricted public pk. tokens");
+  if (!populated(mapbox.evidenceRef)) errors.push("Mapbox evidence needs an evidence reference");
+}
 
 export function validateActivationPlan(plan, evidence, options = {}) {
   const now = options.now ?? Date.now();
@@ -469,9 +502,10 @@ export function validateEvidence(evidence, options = {}) {
     "remoteInventoryVerified", "dnsTlsAndRoutesVerified", "queuesAndDlqsVerified",
     "eventNotificationsVerified", "cronsVerified", "workflowBindingsVerified",
     "containerBindingAndEntitlementVerified", "r2LifecycleVerified",
-    "accessPoliciesVerified", "emailBindingsVerified", "mapboxOriginRestrictionsVerified",
+    "accessPoliciesVerified", "emailBindingsVerified",
     "observabilityAndAlertDestinationsVerified", "costBudgetsVerified",
   ]) if (infrastructure[proof] !== true) errors.push(`staging infrastructure must prove ${proof}`);
+  validateMapboxEvidence(infrastructure, configs, errors);
   if (!recentDate(infrastructure.verifiedAt, now) || !populated(infrastructure.evidenceRef)) errors.push("staging infrastructure verification must be current and referenced");
 
   const rollback = evidence.rollback ?? {};
@@ -498,6 +532,7 @@ export function validateEvidence(evidence, options = {}) {
 export function validateEvidenceFile(base = root, evidenceFile = defaultEvidence, headOverride) {
   if (!fs.existsSync(evidenceFile)) return [`${path.relative(base, evidenceFile)} is missing`];
   try {
+    const stagingErrors = validateStagingFiles(base);
     const evidence = JSON.parse(fs.readFileSync(evidenceFile, "utf8"));
     const configs = {};
     const configHashes = {};
@@ -513,7 +548,10 @@ export function validateEvidenceFile(base = root, evidenceFile = defaultEvidence
       && spawnSync("git", ["merge-base", "--is-ancestor", head, remoteRef], { cwd: base, encoding: "utf8" }).status === 0;
     const runtimeSourceControlVerified = safeRemoteRef
       && spawnSync("git", ["merge-base", "--is-ancestor", RELEASE_CANDIDATES.operations, remoteRef], { cwd: base, encoding: "utf8" }).status === 0;
-    return validateEvidence(evidence, { base, head, configs, configHashes, sourceControlVerified, runtimeSourceControlVerified });
+    return [
+      ...stagingErrors.map((error) => `staging preflight: ${error}`),
+      ...validateEvidence(evidence, { base, head, configs, configHashes, sourceControlVerified, runtimeSourceControlVerified }),
+    ];
   } catch (error) { return [`staging release evidence is invalid: ${error.message}`]; }
 }
 

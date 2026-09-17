@@ -35,6 +35,7 @@ function stagingConfig(app) {
         CLIENT_ACCESS_AUD: "a".repeat(64),
         PROJECT_ALPHA_CATALOG_ACCESS_AUD: "b".repeat(64),
         MAPBOX_PUBLIC_TOKEN: "pk.staging-client-mapbox-token",
+        MAPBOX_STAGING_ACCEPTANCE_DEFERRED: "false",
         CLIENT_PORTAL_INVITATION_FROM: "portal@staging.example.test",
       } : {}),
       ...(app === "operations" ? {
@@ -44,6 +45,7 @@ function stagingConfig(app) {
         INCOMING_EXPECTED_HOST: "incoming-staging.ledgetopdroneservices.com",
         INCOMING_BASE_URL: "https://incoming-staging.ledgetopdroneservices.com",
         MAPBOX_PUBLIC_TOKEN: "pk.staging-operations-mapbox-token",
+        MAPBOX_STAGING_ACCEPTANCE_DEFERRED: "false",
         CLIENT_REQUEST_TRIAGE_TO: "triage@staging.example.test",
         NOTIFICATION_FROM: "delivery@staging.example.test",
       } : {}),
@@ -76,6 +78,7 @@ function productionFrom(staging) {
   production.name = production.name.replace("-staging", "");
   production.routes = production.routes.map((route) => ({ ...route, pattern: route.pattern.replace("-staging", "") }));
   for (const key of Object.keys(production.vars)) if (/(?:EXPECTED_HOST|BASE_URL|_ORIGIN|_AUD)$/.test(key)) production.vars[key] = `production-${key}`;
+  if (production.vars.MAPBOX_PUBLIC_TOKEN) production.vars.MAPBOX_PUBLIC_TOKEN = `pk.production-${production.name}-mapbox-token`;
   production.d1_databases = production.d1_databases.map((item) => ({ ...item, database_id: `prod-${item.database_id}` }));
   production.r2_buckets = production.r2_buckets.map((item) => ({ ...item, bucket_name: `prod-${item.bucket_name}` }));
   production.workflows = production.workflows.map((item) => ({ ...item, name: `prod-${item.name}` }));
@@ -183,6 +186,33 @@ test("requires shared staging resources to agree", () => {
   assert(errors.some((error) => error.includes("Viewer session issuer")));
   assert(errors.some((error) => error.includes("portal projection ingress")));
   assert(errors.some((error) => error.includes("application key")));
+});
+test("allows Mapbox staging deferral only as an all-or-none explicit state", () => {
+  const configs = { delivery: stagingConfig("delivery"), operations: stagingConfig("operations"), "ops-sync": stagingConfig("ops-sync") };
+  for (const app of ["delivery", "operations"]) {
+    configs[app].vars.MAPBOX_STAGING_ACCEPTANCE_DEFERRED = "true";
+    configs[app].vars.MAPBOX_PUBLIC_TOKEN = "";
+  }
+  assert.deepEqual(validateApp("delivery", configs.delivery, productionFrom(stagingConfig("delivery"))), []);
+  assert.deepEqual(validateApp("operations", configs.operations, productionFrom(stagingConfig("operations"))), []);
+  assert.deepEqual(validateCrossApp(configs), []);
+
+  configs.operations.vars.MAPBOX_STAGING_ACCEPTANCE_DEFERRED = "false";
+  let errors = validateCrossApp(configs);
+  assert(errors.some((error) => error.includes("deferral must match")), errors.join(" | "));
+  assert(errors.some((error) => error.includes("requires both rendered MAPBOX_PUBLIC_TOKEN values to be populated")), errors.join(" | "));
+
+  configs.operations.vars.MAPBOX_STAGING_ACCEPTANCE_DEFERRED = "true";
+  configs.operations.vars.MAPBOX_PUBLIC_TOKEN = "pk.must-not-be-rendered";
+  errors = validateCrossApp(configs);
+  assert(errors.some((error) => error.includes("requires both rendered MAPBOX_PUBLIC_TOKEN values to be empty")), errors.join(" | "));
+});
+test("rejects a configured staging Mapbox token reused from production", () => {
+  const staging = stagingConfig("delivery");
+  const production = productionFrom(staging);
+  production.vars.MAPBOX_PUBLIC_TOKEN = staging.vars.MAPBOX_PUBLIC_TOKEN;
+  const errors = validateApp("delivery", staging, production);
+  assert(errors.some((error) => error.includes("reuses a production Mapbox token")), errors.join(" | "));
 });
 test("rejects a staging Access audience reused from another production Worker", () => {
   const configs = { delivery: stagingConfig("delivery"), operations: stagingConfig("operations"), "ops-sync": stagingConfig("ops-sync") };
