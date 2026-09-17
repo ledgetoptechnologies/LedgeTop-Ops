@@ -23,12 +23,16 @@ Updated September 17, 2026. The owner approved implementation and resumption aft
   management, and the retained legacy-integration settings page. All nine
   pages returned HTTP 200 with no fatal marker; the corresponding web-log
   window contained no error, fatal, exception, or warning line.
-- The generic `Ledge Top Ops Staging` application binding is present and its
-  active key metadata lists the reviewed fine-grained directory and Project
-  scopes. External directory ownership remains unconfigured, and every
-  replacement route remains subject to its default-off deployment flag. No
-  production PA instance, authority policy, legacy writer, or public link was
-  changed.
+- The live acceptance credentials are now split by responsibility. Project key
+  `#4` is bound to application
+  `2c0b12a8-0abe-418d-b33f-6f46805cf84c` with exactly ten reviewed scopes and
+  deliberately excludes the unused complete and cancel routes. Directory key
+  `#5` is bound to application
+  `150cb108-af37-4973-ab6e-f6d991a6e8c8` with exactly 23 reviewed scopes. No
+  secret value is retained in this record. These bindings supersede the older
+  single-key staging checkpoint below; every replacement route remains subject
+  to its default-off deployment flag. No production PA instance, authority
+  policy, legacy writer, or public link was changed.
 - The container-local migration gate is complete. Directory dry-run/apply
   reported `scanned 1, inserted 1, current 0`; Project dry-run/apply reported
   `scanned 0, inserted 0, current 0`, with zero presentation revocations.
@@ -74,10 +78,12 @@ Updated September 17, 2026. The owner approved implementation and resumption aft
 
 #### Remaining release gates
 
-- Enable only the reviewed staging route subset, then exercise authenticated
-  capabilities, positive reads/writes/bindings, least-privilege denials,
-  stale revision/generation rejection, exact idempotent replay, changed-body
-  conflict, reconciliation, and rollback.
+- Run two sequential, least-privilege flag windows: Directory routes with all
+  Project routes dark, then the selected Project routes with all Directory
+  routes dark. Exercise authenticated capabilities, positive
+  reads/writes/bindings, least-privilege denials, stale revision/generation
+  rejection, exact idempotent replay, changed-body conflict, reconciliation,
+  and rollback in those windows.
 - Verify an ordinary PA browser edit remains available for the dual-editor
   Project contract, and verify existing public-link resolution before and
   after the selected lifecycle operations. A fresh staging database without
