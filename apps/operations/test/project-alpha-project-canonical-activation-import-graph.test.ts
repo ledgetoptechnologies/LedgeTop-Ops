@@ -15,6 +15,7 @@ describe("project v2 canonical activation import graph", () => {
       "project-alpha-project-settlement-adapter",
       "project-alpha-project-read-settlement-adapter",
       "project-alpha-project-canonical-activation-adapter",
+      "project-alpha-project-v2-command-producer",
     ];
     const adapters = new Set(forbidden.map(name => new URL(`${name}.ts`, worker).pathname));
     const offenders = files(worker).filter(file => !adapters.has(file.pathname)).flatMap(file => {
@@ -24,9 +25,15 @@ describe("project v2 canonical activation import graph", () => {
     expect(offenders).toEqual([]);
   });
 
-  it("accepts no fetcher, connection, request, route, queue, or scheduler surface", async () => {
+  it("keeps the activation surface free of fetcher, connection, request, route, queue, and scheduler inputs", async () => {
     const module = await import("../src/worker/project-alpha-project-canonical-activation-adapter");
     expect(Object.keys(module)).toEqual(["activateProjectAlphaProjectV2Canonical"]);
     expect(module.activateProjectAlphaProjectV2Canonical.length).toBe(2);
+  });
+
+  it("keeps the command producer private and without a transport argument", async () => {
+    const module = await import("../src/worker/project-alpha-project-v2-command-producer");
+    expect(Object.keys(module)).toEqual(["planProjectAlphaProjectV2Command"]);
+    expect(module.planProjectAlphaProjectV2Command.length).toBe(2);
   });
 });
