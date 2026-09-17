@@ -21,6 +21,24 @@ function complete(value, label, errors) {
   if (typeof value !== "string" || !value || markers.test(value)) errors.push(`${label} is empty or contains a placeholder`);
 }
 
+function validateMapbox(app, vars, production, errors) {
+  const deferred = vars.MAPBOX_STAGING_ACCEPTANCE_DEFERRED;
+  const token = vars.MAPBOX_PUBLIC_TOKEN;
+  if (!["true", "false"].includes(deferred)) {
+    errors.push(`${app} MAPBOX_STAGING_ACCEPTANCE_DEFERRED must be the string true or false`);
+    return;
+  }
+  if (deferred === "true") {
+    if (token !== "") errors.push(`${app} must render an empty MAPBOX_PUBLIC_TOKEN when Mapbox staging acceptance is deferred`);
+    return;
+  }
+  complete(token, `${app} vars.MAPBOX_PUBLIC_TOKEN`, errors);
+  if (typeof token === "string" && token && !markers.test(token) && !token.startsWith("pk.")) {
+    errors.push(`${app} vars.MAPBOX_PUBLIC_TOKEN must be a restricted public Mapbox token`);
+  }
+  if (token && token === production.vars?.MAPBOX_PUBLIC_TOKEN) errors.push(`${app} vars.MAPBOX_PUBLIC_TOKEN reuses a production Mapbox token`);
+}
+
 function compareResources(app, kind, staging, production, key, errors) {
   const stage = mapped(staging, key);
   for (const [binding, productionValue] of mapped(production, key)) {
@@ -80,7 +98,7 @@ export function validateApp(app, staging, production) {
     if (!/^[a-f0-9]{64}$/i.test(vars.PROJECT_ALPHA_CATALOG_ACCESS_AUD ?? "")) errors.push("delivery PROJECT_ALPHA_CATALOG_ACCESS_AUD must be a 64-character Ops Sync staging audience");
     if (vars.CLIENT_ACCESS_AUD === vars.PROJECT_ALPHA_CATALOG_ACCESS_AUD || vars.CLIENT_ACCESS_AUD === vars.POLICY_AUD)
       errors.push("delivery client portal audience must remain distinct from Delivery and Ops Sync audiences");
-    complete(vars.MAPBOX_PUBLIC_TOKEN, "delivery vars.MAPBOX_PUBLIC_TOKEN", errors);
+    validateMapbox(app, vars, production, errors);
     if (!email(vars.CLIENT_PORTAL_INVITATION_FROM)) errors.push("delivery CLIENT_PORTAL_INVITATION_FROM must be a valid staging sender");
     const emailBindings = staging.send_email ?? [];
     const invitationEmail = emailBindings.find((binding) => binding.name === "CLIENT_PORTAL_INVITATION_EMAIL");
@@ -94,7 +112,7 @@ export function validateApp(app, staging, production) {
     if (vars.PUBLIC_SHARE_ORIGIN !== `https://${STAGING_HOSTS.delivery}`)
       errors.push("operations PUBLIC_SHARE_ORIGIN must match the approved anonymous delivery staging host");
     if (vars.INCOMING_EXPECTED_HOST !== STAGING_HOSTS.incoming || vars.INCOMING_BASE_URL !== `https://${STAGING_HOSTS.incoming}`) errors.push("operations incoming host variables must match the reserved staging hostname");
-    complete(vars.MAPBOX_PUBLIC_TOKEN, "operations vars.MAPBOX_PUBLIC_TOKEN", errors);
+    validateMapbox(app, vars, production, errors);
     if (!email(vars.CLIENT_REQUEST_TRIAGE_TO)) errors.push("operations CLIENT_REQUEST_TRIAGE_TO must be a valid staging recipient");
     if (!email(vars.NOTIFICATION_FROM)) errors.push("operations NOTIFICATION_FROM must be a valid staging sender");
     const emailBindings = staging.send_email ?? [];
@@ -201,6 +219,19 @@ export function validateCrossApp(configs, productionConfigs = {}) {
   if (configs.delivery.vars?.PROJECT_ALPHA_PORTAL_APPLICATION_KEY !== configs["ops-sync"].vars?.APPLICATION_KEY) {
     errors.push("Client and Ops Sync must share the reviewed Project Alpha staging application key");
   }
+  const mapboxStates = ["delivery", "operations"].map((app) => ({
+    app,
+    deferred: configs[app].vars?.MAPBOX_STAGING_ACCEPTANCE_DEFERRED,
+    token: configs[app].vars?.MAPBOX_PUBLIC_TOKEN,
+  }));
+  if (new Set(mapboxStates.map(({ deferred }) => deferred)).size !== 1) {
+    errors.push("Delivery and Operations Mapbox staging acceptance deferral must match");
+  }
+  const mapboxDeferred = mapboxStates.every(({ deferred }) => deferred === "true");
+  const mapboxConfigured = mapboxStates.every(({ token }) => typeof token === "string" && token.length > 0);
+  const mapboxEmpty = mapboxStates.every(({ token }) => token === "");
+  if (mapboxDeferred && !mapboxEmpty) errors.push("deferred Mapbox staging acceptance requires both rendered MAPBOX_PUBLIC_TOKEN values to be empty");
+  if (!mapboxDeferred && !mapboxConfigured) errors.push("verified Mapbox staging acceptance requires both rendered MAPBOX_PUBLIC_TOKEN values to be populated");
   const accessAudiences = {
     delivery: configs.delivery.vars?.POLICY_AUD,
     operations: configs.operations.vars?.OPERATIONS_AUD,

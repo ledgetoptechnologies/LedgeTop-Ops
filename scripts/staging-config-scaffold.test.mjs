@@ -13,6 +13,7 @@ const values = Object.freeze({
   DEDICATED_CLIENT_PORTAL_STAGING_ACCESS_AUD: "d".repeat(64),
   CLIENT_STAGING_RESTRICTED_MAPBOX_PUBLIC_TOKEN: "pk.client-staging-test",
   OPERATIONS_STAGING_RESTRICTED_MAPBOX_PUBLIC_TOKEN: "pk.operations-staging-test",
+  MAPBOX_STAGING_ACCEPTANCE_DEFERRED: "false",
   STAGING_EMAIL_DOMAIN: "staging.example.test",
   STAGING_TRIAGE_EMAIL: "triage@staging.example.test",
   STAGING_ACCESS_GROUP_ID: "staging-group-id",
@@ -38,6 +39,27 @@ test("rejects missing, unexpected, duplicated, and malformed values", () => {
   invalid.OPERATIONS_STAGING_RESTRICTED_MAPBOX_PUBLIC_TOKEN = "secret-token";
   const errors = validateValues(invalid);
   for (const expected of ["STAGING_TRIAGE_EMAIL", "unexpected", "distinct", "public Mapbox"]) assert(errors.some((error) => error.includes(expected)), errors.join(" | "));
+});
+
+test("allows an explicit Mapbox staging deferral only with both rendered tokens empty", () => {
+  const deferred = {
+    ...values,
+    MAPBOX_STAGING_ACCEPTANCE_DEFERRED: "true",
+    CLIENT_STAGING_RESTRICTED_MAPBOX_PUBLIC_TOKEN: "",
+    OPERATIONS_STAGING_RESTRICTED_MAPBOX_PUBLIC_TOKEN: "",
+  };
+  assert.deepEqual(validateValues(deferred), []);
+  const configs = renderConfigs(root, deferred);
+  assert.equal(configs.delivery.vars.MAPBOX_PUBLIC_TOKEN, "");
+  assert.equal(configs.operations.vars.MAPBOX_PUBLIC_TOKEN, "");
+  assert.equal(configs.delivery.vars.MAPBOX_STAGING_ACCEPTANCE_DEFERRED, "true");
+  assert.equal(configs.operations.vars.MAPBOX_STAGING_ACCEPTANCE_DEFERRED, "true");
+  assert.deepEqual(validateRenderedConfigs(root, configs), []);
+
+  const mixed = { ...deferred, CLIENT_STAGING_RESTRICTED_MAPBOX_PUBLIC_TOKEN: "pk.must-not-be-rendered" };
+  assert(validateValues(mixed).some((error) => error.includes("empty string")));
+  const unflagged = { ...deferred, MAPBOX_STAGING_ACCEPTANCE_DEFERRED: "false" };
+  assert(validateValues(unflagged).some((error) => error.includes("CLIENT_STAGING_RESTRICTED_MAPBOX_PUBLIC_TOKEN is missing")));
 });
 
 test("writes only absent ignored targets and refuses replacement", () => {

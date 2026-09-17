@@ -20,8 +20,8 @@ function fixture(base) {
   fs.utimesSync(path.join(base, ".backups", "delivery.sql"), backupTime, backupTime);
   fs.utimesSync(path.join(base, ".backups", "operations.sql"), backupTime, backupTime);
   const configs = {
-    delivery: { vars: { CLIENT_PORTAL_ENABLED: "false", EXPECTED_HOST: STAGING_HOSTS.delivery, CLIENT_PORTAL_ORIGIN: `https://${STAGING_HOSTS.client}`, PUBLIC_SHARE_ORIGIN: `https://${STAGING_HOSTS.delivery}`, PUBLIC_BASE_URL: `https://${STAGING_HOSTS.delivery}`, CLIENT_ACCESS_TEAM_DOMAIN: STAGING_STATIC_VARS.delivery.CLIENT_ACCESS_TEAM_DOMAIN, CLIENT_ACCESS_AUD: "a".repeat(64), POLICY_AUD: "b".repeat(64) } },
-    operations: { vars: { PROJECT_ALPHA_BASE_URL: "https://pa-staging.ledgetoptechnologies.com", OPERATIONS_AUD: "c".repeat(64) } },
+    delivery: { vars: { CLIENT_PORTAL_ENABLED: "false", EXPECTED_HOST: STAGING_HOSTS.delivery, CLIENT_PORTAL_ORIGIN: `https://${STAGING_HOSTS.client}`, PUBLIC_SHARE_ORIGIN: `https://${STAGING_HOSTS.delivery}`, PUBLIC_BASE_URL: `https://${STAGING_HOSTS.delivery}`, CLIENT_ACCESS_TEAM_DOMAIN: STAGING_STATIC_VARS.delivery.CLIENT_ACCESS_TEAM_DOMAIN, CLIENT_ACCESS_AUD: "a".repeat(64), POLICY_AUD: "b".repeat(64), MAPBOX_STAGING_ACCEPTANCE_DEFERRED: "false", MAPBOX_PUBLIC_TOKEN: "pk.client-staging-test" } },
+    operations: { vars: { PROJECT_ALPHA_BASE_URL: "https://pa-staging.ledgetoptechnologies.com", OPERATIONS_AUD: "c".repeat(64), MAPBOX_STAGING_ACCEPTANCE_DEFERRED: "false", MAPBOX_PUBLIC_TOKEN: "pk.operations-staging-test" } },
     "ops-sync": { vars: { CF_ACCESS_AUD: "d".repeat(64), CF_ACCESS_GROUP_ID: "staging-group-id", CF_ACCESS_GROUP_NAME: "LTDS Staging Testers" } },
   };
   const evidence = {
@@ -256,7 +256,8 @@ function fixture(base) {
       remoteInventoryVerified: true, dnsTlsAndRoutesVerified: true, queuesAndDlqsVerified: true,
       eventNotificationsVerified: true, cronsVerified: true, workflowBindingsVerified: true,
       containerBindingAndEntitlementVerified: true, r2LifecycleVerified: true,
-      accessPoliciesVerified: true, emailBindingsVerified: true, mapboxOriginRestrictionsVerified: true,
+      accessPoliciesVerified: true, emailBindingsVerified: true,
+      mapbox: { state: "verified", stagingTokensConfigured: true, productionAcceptanceRequired: false, originRestrictionsVerified: true, evidenceRef: "ticket:mapbox" },
       observabilityAndAlertDestinationsVerified: true, costBudgetsVerified: true,
       verifiedAt: "2026-07-30T12:00:00Z", evidenceRef: "ticket:infrastructure",
     },
@@ -307,6 +308,31 @@ test("Viewer image state is bound to the candidate and release-finalization stat
   const immutable = /^ghcr\.io\/ledgetoptechnologies\/3d-viewer@sha256:[a-f0-9]{64}$/;
   if (RELEASE_CONTRACT_FINALIZED) assert.match(STAGING_VIEWER.image, immutable);
   else assert.equal(STAGING_VIEWER.image, `PENDING_VIEWER_IMAGE_FOR_${RELEASE_CANDIDATES.viewer}`);
+});
+
+test("distinguishes explicitly deferred Mapbox staging acceptance from verified acceptance", () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-evidence-mapbox-deferred-"));
+  const { configs, evidence, configHashes } = fixture(base);
+  for (const app of ["delivery", "operations"]) {
+    configs[app].vars.MAPBOX_STAGING_ACCEPTANCE_DEFERRED = "true";
+    configs[app].vars.MAPBOX_PUBLIC_TOKEN = "";
+  }
+  evidence.infrastructure.mapbox = { state: "deferred", stagingTokensConfigured: false, productionAcceptanceRequired: true, originRestrictionsVerified: false, evidenceRef: "ticket:mapbox-deferred" };
+  assert.deepEqual(validateEvidence(evidence, { base, head: evidence.releaseCommit, configs, configHashes, now, sourceControlVerified: true }), []);
+
+  evidence.infrastructure.mapbox.state = "verified";
+  const errors = validateEvidence(evidence, { base, head: evidence.releaseCommit, configs, configHashes, now, sourceControlVerified: true });
+  assert(errors.some((error) => error.includes("Mapbox evidence state must be deferred")), errors.join(" | "));
+});
+
+test("requires origin-restriction proof and public token shape for verified Mapbox evidence", () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-evidence-mapbox-origin-"));
+  const { configs, evidence, configHashes } = fixture(base);
+  evidence.infrastructure.mapbox.originRestrictionsVerified = false;
+  configs.delivery.vars.MAPBOX_PUBLIC_TOKEN = "not-a-public-token";
+  const errors = validateEvidence(evidence, { base, head: evidence.releaseCommit, configs, configHashes, now, sourceControlVerified: true });
+  assert(errors.some((error) => error.includes("originRestrictionsVerified must be true")), errors.join(" | "));
+  assert(errors.some((error) => error.includes("restricted public pk. tokens")), errors.join(" | "));
 });
 
 test("pins the current paired Ops runtime and Project Alpha API-v2 migration boundary", () => {

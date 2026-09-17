@@ -38,8 +38,10 @@ not become active deployments.
   Access app/audience/group, and the separately reviewed public Bypass app/policy;
 - reviewed commit SHA and current build-control evidence;
 - D1 export paths and SHA-256 checksums.
-- origin-restricted staging Mapbox public tokens for both Delivery and
-  Operations;
+- either origin-restricted staging Mapbox public tokens for both Delivery and
+  Operations, or explicit `MAPBOX_STAGING_ACCEPTANCE_DEFERRED="true"` with
+  both rendered `MAPBOX_PUBLIC_TOKEN` values empty. Never reuse a production
+  token;
 - a non-production Operations triage recipient and exact allowed notification
   sender;
 - each native test source's immutable source ID, connector revision, credential
@@ -58,6 +60,39 @@ staging origins.
 `CLIENT_ACCESS_AUD`
 must be the new portal app audience, never `POLICY_AUD`, `OPERATIONS_AUD`, or
 `CF_ACCESS_AUD`.
+
+## Deferred Mapbox production acceptance
+
+If staging uses the explicit Mapbox deferral, record
+`infrastructure.mapbox.state="deferred"`, leave both staging token values
+empty, and do not treat map-dependent staging workflows as tested. The
+deferral is only a staging exception; this candidate is not production-ready
+for map-dependent paths until the following production acceptance is recorded.
+Use the existing reviewed production configuration for that controlled test;
+never copy its token into staging or evidence.
+
+1. An authenticated client can open a drone service request, load the map,
+   search/select a location, draw or edit the requested area and points of
+   interest, and see the expected acreage and review summary.
+2. The client can save the request as a draft, reload it, edit the geometry,
+   and submit it; malformed, self-intersecting, or oversized geometry is
+   rejected server-side.
+3. An Operations reviewer can open the submitted request map, edit it where
+   authorized, and complete the request workflow without a blank-screen or
+   browser-console failure.
+4. An authorized client can open an image-location map in shared drone data;
+   an unauthorized identity cannot obtain either the map token or locations.
+5. Browser developer tools confirm requests use only the reviewed Mapbox
+   origins and token; no production token is copied into staging evidence,
+   configuration, a non-production hostname, or logs containing private
+   coordinates or request geometry.
+6. Repeat the origin and console checks from both the client and Operations
+   production origins.
+
+Keep the staging deferral recorded after production acceptance. Change it to
+`"false"` only if separate origin-restricted staging tokens are later created;
+then record `infrastructure.mapbox.state="verified"`,
+`originRestrictionsVerified=true`, and the staging restriction evidence.
 
 The receiver-only projection path is infrastructure, not an activation flag:
 Client must set `PROJECT_ALPHA_PORTAL_SYNC_ENABLED=true`, keep

@@ -42,11 +42,19 @@ npm run staging:config:check -- --values .backups/staging-config-values.json
 npm run staging:config:check -- --values .backups/staging-config-values.json --write
 ```
 
-The renderer accepts only the nine reviewed values, resolves the checked-in
+The renderer accepts only the reviewed values, resolves the checked-in
 templates, runs the same fail-closed inventory checks as `staging:check`, and
 refuses to overwrite an existing ignored config. It never accepts secrets and
 performs no Cloudflare action. Preserve or remove an obsolete ignored config
 explicitly before rendering a replacement.
+
+Mapbox staging acceptance may be deferred only by setting
+`MAPBOX_STAGING_ACCEPTANCE_DEFERRED` to `"true"` and setting **both** staging
+Mapbox token values to empty strings. The renderer then writes empty
+`MAPBOX_PUBLIC_TOKEN` values to Delivery and Operations, so map-dependent
+screens are intentionally unavailable in staging. It never substitutes a
+production token. Set the flag to `"false"` only with both reviewed,
+origin-restricted staging `pk.` tokens; mixed states fail preflight.
 
 The Wrangler examples contain only fields accepted by Wrangler. Required secret
 names live in the checked-in sidecar
