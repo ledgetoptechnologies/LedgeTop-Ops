@@ -6,6 +6,7 @@ vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntry
 
 import { dispatchIncomingPublicRequest } from "../src/worker/incoming";
 import { createIncomingSession } from "../src/worker/incoming-security";
+import { hmac } from "../src/worker/crypto";
 
 class IncomingBucket {
   uploads = new Map<string, { key: string; aborted: boolean; completed: boolean; size: number }>();
@@ -225,5 +226,27 @@ describe("incoming upload public routes", () => {
     }), env, {} as ExecutionContext) as Response;
     expect(response.status).toBe(400);
     expect(await db.prepare("SELECT SUM(count) count FROM public_rate_limits").first()).toEqual({ count: 1 });
+  });
+
+  it("renders access-code UI from the resolved request but authorizes against the current server requirement", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({ success: true, hostname: "incoming.test" }), { headers: { "Content-Type": "application/json" } }));
+    const unprotected = await request("/r/public-a");
+    expect(unprotected.status).toBe(200);
+    expect(await unprotected.text()).not.toContain('id="code"');
+    const authorize = (accessCode = "") => request("/api/public/requests/public-a/authorize", "POST", {
+      name: "Client", email: "client@example.test", message: "", accessCode, turnstileToken: "", website: "",
+    }, "");
+    expect((await authorize()).status).toBe(200);
+
+    const accessCode = "correct-access-code";
+    const accessCodeHash = await hmac(env.INCOMING_ACCESS_CODE_PEPPER, `incoming-code:v1:request-a:${accessCode}`);
+    await db.prepare("UPDATE file_requests SET access_code_hash=? WHERE id='request-a'").bind(accessCodeHash).run();
+    const protectedPage = await request("/r/public-a");
+    const protectedHtml = await protectedPage.text();
+    expect(protectedHtml).toContain('id="code" type="password"');
+    expect(protectedHtml).not.toContain(accessCodeHash);
+    expect((await authorize("wrong-access-code")).status).toBe(403);
+    expect((await authorize(accessCode)).status).toBe(200);
+    fetchMock.mockRestore();
   });
 });

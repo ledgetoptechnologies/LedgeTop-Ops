@@ -299,6 +299,7 @@ publicApp.get("/r/:publicId", async (c) => {
     publicId: row.public_id,
     title: row.title,
     turnstileSiteKey: c.env.TURNSTILE_SITE_KEY,
+    requiresAccessCode: Boolean(row.access_code_hash),
   }), 200, {
     "Cache-Control": "private, no-store",
     "Content-Security-Policy": "default-src 'none'; script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; style-src 'unsafe-inline'; connect-src 'self' https://*.r2.cloudflarestorage.com; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
