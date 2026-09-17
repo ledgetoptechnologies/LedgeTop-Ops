@@ -1,5 +1,26 @@
 # Client and portal goal completion audit — 2026-09-08
 
+## Operations reliability follow-up — 2026-09-16
+
+The bounded API-v2 outage monitor is implemented locally in Operations and is
+default-off. It records per-source pinned incident state, alerts an explicitly
+configured owner only after more than ten continuous unhealthy minutes, and
+keeps retry/lease outcomes durable. The Operations quote-review surface now
+labels a source-qualified quote as last verified when PA is unavailable,
+unknown, monitoring-disabled, or scope-stale. This is not deployment or live
+acceptance evidence. The focused native-control suite passed 43 tests, the
+real-D1 durability suites passed 27 tests, the production build passed, and an
+independent security scan closed all 23 changed runtime files with no findings.
+An owner-approved per-instance failure/recovery exercise, physical-mail proof,
+and reviewed ambiguous-delivery reconciliation are still required before
+enabling it.
+
+Monitor activation is also a separate native-control ceremony: an admitted
+operator needs a reviewed global `integrations.monitor.manage` grant, an exact
+deployment identity match, and an immutable command audit record. The
+deployment kill switch and blank control origin remain default-off; this audit
+does not seed a grant, configure a secret, or authorize production activation.
+
 This is a point-in-time completion audit for the unified Operations and Client
 Portal goal. It reconciles the current Operations `main` implementation at
 `193cae069d9e88e9095ce23ba5249f8c3a1eba53`, Project Alpha `main` at

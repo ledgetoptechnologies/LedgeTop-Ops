@@ -38,7 +38,14 @@ export interface ClientRequestRecord {
   quote_document_number?: string | null;
   quote_total_minor?: number | null;
   quote_currency?: string | null;
+  quote_verified_at?: string | null;
   quote_scope_stale_at?: string | null;
+  project_alpha_quote_freshness?: {
+    sourceId: string | null;
+    availability: "available" | "unavailable" | "unknown" | "monitor_disabled";
+    lastVerifiedAt: string | null;
+    lastCheckedAt: string | null;
+  };
   created_at: string;
   updated_at: string;
 }
@@ -882,10 +889,22 @@ function ClientRequestDetail({
           </p>
         )}
         {request.quote_document_number && (
-          <p>
-            <strong>Verified Project Alpha quote:</strong>{" "}
-            {request.quote_document_number}
-          </p>
+          <div className="notice" role="status">
+            <strong>Verified Project Alpha quote:</strong>{" "}{request.quote_document_number}
+            <span>
+              Last verified {date(request.project_alpha_quote_freshness?.lastVerifiedAt || request.quote_verified_at)}
+              {request.project_alpha_quote_freshness?.sourceId ? ` · ${request.project_alpha_quote_freshness.sourceId}` : ""}
+            </span>
+            {request.project_alpha_quote_freshness?.availability === "unavailable" && (
+              <span>Project Alpha is unavailable. This is the last verified summary, not a current price or approval.</span>
+            )}
+            {request.project_alpha_quote_freshness?.availability === "unknown" && (
+              <span>Current Project Alpha availability has not been verified. Treat this as a last verified summary.</span>
+            )}
+            {request.project_alpha_quote_freshness?.availability === "monitor_disabled" && (
+              <span>Project Alpha monitoring is disabled. Treat this as a last verified summary.</span>
+            )}
+          </div>
         )}
       </Card>
       <div className="request-review-grid">

@@ -15,7 +15,7 @@ describe("isolated native delivery notification schedule",()=>{
   const context=()=>({waitUntil:vi.fn(()=>{throw new Error("Unrelated detached work");}),passThroughOnException(){}}) as unknown as ExecutionContext;
   it("preserves other schedules and awaits native dispatch without unrelated bindings",async()=>{
     const config=readFileSync(new URL("../wrangler.jsonc",import.meta.url),"utf8");
-    expect(config).toContain('"crons": ["*/15 * * * *", "*/5 * * * *", "2-57/5 * * * *", "17 * * * *", "4-59/15 * * * *"]');
+    expect(config).toContain('"crons": ["*/15 * * * *", "*/5 * * * *", "2-57/5 * * * *", "17 * * * *", "4-59/15 * * * *", "3-58/5 * * * *"]');
     const source=readFileSync(new URL("../src/worker/index.ts",import.meta.url),"utf8");
     expect(source.match(/processProjectAlphaDeliveryPortalNotifications\(env\)/g)).toHaveLength(1);
     const env=new Proxy({} as Env,{get(){throw new Error("Unrelated environment access");}}),ctx=context();

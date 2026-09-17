@@ -66,7 +66,12 @@ import { registerProjectAlphaConnectorAdminRoutes, portalAuthorityErrorResponse 
 import { PortalSourceAuthorityError } from "../../../client/src/worker/project-alpha-portal-authority";
 import { ensureDeploymentConfiguredProjectAlphaConnectors, ProjectAlphaConnectorError } from "./project-alpha-connectors";
 import { ClientHubSourcesChangedError } from "./client-hub-directory";
-import { buildConnectionSummaries, projectAlphaHealthIsStale } from "./integration-health";
+import { buildConnectionSummaries, projectAlphaHealthIsStale, projectAlphaQuoteFreshness } from "./integration-health";
+import { runProjectAlphaApiV2MonitorCycle } from "./project-alpha-api-v2-monitor-cycle";
+import { selectProjectAlphaApiV2MonitorSchedulerRevision } from "./project-alpha-api-v2-monitor-scheduler-selection";
+import { handleProjectAlphaApiV2MonitorControlHttp,
+  projectAlphaApiV2MonitorControlHttpRequest } from "./project-alpha-api-v2-monitor-control-http";
+import { consumeNativeStaffOnboardingRateLimit } from "./native-staff-onboarding-rate-limit";
 import {
   auditStatement,
   csrfToken,
@@ -411,6 +416,29 @@ app.use("*", async (c, next) => {
       c.header("Cache-Control", "no-store");
   }
 });
+// This native boundary deliberately runs before the legacy Operations staff
+// middleware: monitor grants are native, global, deny-overridable authority,
+// not a Project Alpha role or an ordinary Operations administrator session.
+async function dispatchProjectAlphaApiV2MonitorControl(c: any) {
+  if (!projectAlphaApiV2MonitorControlHttpRequest(c.req.method, c.req.path))
+    return c.json({ error: "not_found" }, 404);
+  return handleProjectAlphaApiV2MonitorControlHttp(c.req.raw, {
+    configuration: {
+      enabled: c.env.NATIVE_INTEGRATION_CONTROL_ENABLED === "true",
+      issuer: c.env.TEAM_DOMAIN ?? "",
+      staffAudience: c.env.OPERATIONS_AUD,
+      onboardingAudience: c.env.NATIVE_STAFF_ONBOARDING_AUD ?? "",
+      origin: c.env.NATIVE_INTEGRATION_CONTROL_ORIGIN ?? "",
+      csrfSecret: c.env.OPERATIONS_SESSION_SECRET,
+    },
+    database: c.env.OPS_DB,
+    projectAlphaConnectionsJson: c.env.PROJECT_ALPHA_API_V2_CONNECTIONS,
+    consumeRateLimit: (key, limit, periodSeconds) =>
+      consumeNativeStaffOnboardingRateLimit(c.env.OPS_DB, key, limit, periodSeconds),
+  });
+}
+app.use("/api/native-integrations/monitor", dispatchProjectAlphaApiV2MonitorControl);
+app.use("/api/native-integrations/monitor/*", dispatchProjectAlphaApiV2MonitorControl);
 app.use("/api/*", async (c, next) => {
   if (viewerMachineEventRequest(c.req.method, c.req.path) || projectAlphaDeliveryMachineRequest(c.req.method, c.req.path)) {
     await next();
@@ -1668,6 +1696,33 @@ app.get("/api/client-service-requests/:id", async (c) => {
     responseRequest.quote_verified_at = null;
     responseRequest.quote_scope_stale_at = null;
   }
+  // Connection health is read from Operations' monitor state, never from a
+  // client-delivery row. A missing/newer monitor schema simply yields unknown
+  // availability; it must not make the request detail unavailable.
+  let incidentStateJson: string | undefined;
+  if (typeof responseRequest.catalog_source_id === "string") {
+    try {
+      const health = await c.env.OPS_DB.withSession("first-primary").prepare(
+        `SELECT incident.state_json FROM project_alpha_api_v2_incident_heads incident
+         JOIN project_alpha_api_v2_monitor_lifecycle_heads lifecycle
+           ON lifecycle.lifecycle_id=1 AND lifecycle.enabled=1
+         JOIN json_each(lifecycle.identities_json) pin
+           ON json_extract(pin.value,'$.sourceId')=incident.source_id
+          AND json_extract(pin.value,'$.applicationId')=incident.application_id
+          AND json_extract(pin.value,'$.baseUrl')=incident.base_url
+          AND json_extract(pin.value,'$.expectedSourceInstanceId')=incident.expected_source_instance_id
+          AND json_extract(pin.value,'$.expectedHistoryEpoch')=incident.expected_history_epoch
+         WHERE incident.source_id=? ORDER BY incident.last_probe_started_at DESC LIMIT 1`,
+      ).bind(responseRequest.catalog_source_id).first<{ state_json: string }>();
+      incidentStateJson = health?.state_json;
+    } catch { /* Existing native Operations reads retain their normal result. */ }
+  }
+  responseRequest.project_alpha_quote_freshness = projectAlphaQuoteFreshness({
+    sourceId: responseRequest.catalog_source_id,
+    quoteVerifiedAt: responseRequest.quote_verified_at,
+    incidentStateJson,
+    activeIdentityMatched: incidentStateJson !== undefined,
+  });
   const responseEstimates = estimates.map((raw) => {
     const estimate = { ...raw } as Record<string, unknown>;
     if (usesCatalogV2) {
@@ -3184,6 +3239,7 @@ const CLIENT_REQUEST_NOTIFICATION_CRON = "*/5 * * * *";
 const CLIENT_HUB_INDEX_CRON = "2-57/5 * * * *";
 const PROJECT_ALPHA_RECOVERY_CRON = "17 * * * *";
 const NATIVE_DELIVERY_NOTIFICATION_CRON = "4-59/15 * * * *";
+export const PROJECT_ALPHA_API_V2_MONITOR_CRON = "3-58/5 * * * *";
 
 export async function runScheduledPrimaryProjectAlphaSync(env: Env) {
   const result = await syncProjectAlpha(env);
@@ -3208,6 +3264,38 @@ async function scheduled(
   env: Env,
   ctx: ExecutionContext,
 ) {
+  if (event.cron === PROJECT_ALPHA_API_V2_MONITOR_CRON) {
+    try {
+      if (env.PROJECT_ALPHA_API_V2_MONITOR_ENABLED !== "true") {
+        console.log(JSON.stringify({ event: "project_alpha_api_v2.monitor.tick", status: "disabled" }));
+        return;
+      }
+      // Snapshot deployment-owned values before the first await. They are
+      // never emitted and are revalidated by the cycle before a probe/send.
+      const connections = env.PROJECT_ALPHA_API_V2_CONNECTIONS;
+      const recipient = env.PROJECT_ALPHA_API_V2_MONITOR_RECIPIENT;
+      const selected = await selectProjectAlphaApiV2MonitorSchedulerRevision(env.OPS_DB,
+        { enabled: "true", connections });
+      if (selected.status === "disabled") {
+        console.log(JSON.stringify({ event: "project_alpha_api_v2.monitor.tick", status: "disabled" }));
+        return;
+      }
+      // A missing owner address is a deployment fault, never a successful
+      // no-op. Fail before a probe/claim so it is observable in cron health.
+      if (typeof recipient !== "string" || recipient.length === 0 || recipient.length > 254
+        || recipient.trim() !== recipient || /[\x00-\x1f\x7f]/.test(recipient)
+        || !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(recipient))
+        throw new Error("invalid monitor recipient");
+      const result = await runProjectAlphaApiV2MonitorCycle(env.OPS_DB, env,
+        { enabled: "true", connections, expectedMonitorRevision: selected.revision, recipient });
+      console.log(JSON.stringify({ event: "project_alpha_api_v2.monitor.tick", status: "checked",
+        health: result.health, alerts: result.alerts }));
+    } catch {
+      console.error(JSON.stringify({ event: "project_alpha_api_v2.monitor.error" }));
+      throw new Error("Project Alpha API v2 monitoring failed");
+    }
+    return;
+  }
   if (event.cron === NATIVE_DELIVERY_NOTIFICATION_CRON) {
     // Native staged + retained direct mail share ownership, but not a budget
     // with bucket reconciliation, thumbnails, Viewer or other maintenance.
