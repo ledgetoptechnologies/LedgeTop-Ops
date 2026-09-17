@@ -75,6 +75,16 @@ Updated September 17, 2026. The owner approved implementation and resumption aft
   an already active Operations-to-PA synchronization path. Mounting the
   reviewed adapters and joined reconciliation remains a later, separately
   reviewed Operations activation step.
+- A dormant, no-network Operations Project-v2 command producer now reserves a
+  deliberately selected source, current staff authority proof, canonical
+  request fingerprint, pending outbox row, reservation, event, and settlement
+  intent in one D1 batch. Exact retries revalidate the complete destination
+  identity and current actor proof; cross-source command-ID reuse conflicts,
+  revoked actors cannot replay, create commands must match the selected
+  Directory records, and bind commands must match the native projection hash.
+  Independent review found and closed those four fail-closed boundaries; the
+  focused producer/import-graph suite passes **10/10**. The producer remains
+  unmounted and does not send a request, enable a route, or change production.
 - The isolated Directory-only live window has now passed. A dedicated key
   advertised the exact 23 reviewed scopes while every Project flag remained
   dark. The mutable run completed capabilities, paginated inventory, two

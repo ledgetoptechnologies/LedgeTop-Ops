@@ -133,6 +133,10 @@ describe("unmounted project-v2 command producer", () => {
     await expect(planProjectAlphaProjectV2Command(env(), wrong)).resolves.toEqual({ status: "blocked", reason: "directory" });
     const mismatchedId = { ...different, directory: { ...different.directory, organizationRecordId: uuid() } };
     await expect(planProjectAlphaProjectV2Command(env(), mismatchedId)).resolves.toEqual({ status: "blocked", reason: "invalid_action" });
+    const mismatchedClient = { ...different, directory: { ...different.directory, clientRecordId: uuid() } };
+    await expect(planProjectAlphaProjectV2Command(env(), mismatchedClient)).resolves.toEqual({ status: "blocked", reason: "invalid_action" });
+    const mismatchedNullClient = { ...different, directory: { ...different.directory, clientRecordId: null } };
+    await expect(planProjectAlphaProjectV2Command(env(), mismatchedNullClient)).resolves.toEqual({ status: "blocked", reason: "invalid_action" });
   });
 
   it("keeps a disabled/outage-selected connection pending and never sends", async () => {
