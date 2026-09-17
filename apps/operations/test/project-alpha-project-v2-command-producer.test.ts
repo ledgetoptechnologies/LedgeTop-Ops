@@ -94,6 +94,31 @@ describe("unmounted project-v2 command producer", () => {
     expect(await db.prepare("SELECT count(*) n FROM project_alpha_project_outbox WHERE command_id=?").bind(action.command.commandId).first("n")).toBe(1);
   });
 
+  it("does not turn a cross-source concurrent reservation into a fallback replay", async () => {
+    const one = await createAction();
+    await db.batch([
+      db.prepare(`INSERT INTO project_alpha_directory_mappings(source_id,source_instance_id,application_id,history_epoch_id,resource_type,external_id,project_alpha_public_id)
+        VALUES('project-alpha:two',?,?,?,'organization',?,?)`).bind(sourceTwo, appTwo, epochTwo, one.directory.organizationRecordId, one.command.organization.expectedPublicId),
+      db.prepare(`INSERT INTO project_alpha_directory_mappings(source_id,source_instance_id,application_id,history_epoch_id,resource_type,external_id,project_alpha_public_id)
+        VALUES('project-alpha:two',?,?,?,'client',?,?)`).bind(sourceTwo, appTwo, epochTwo, one.directory.clientRecordId, one.command.client!.expectedPublicId),
+    ]);
+    const two = { ...one, sourceId: "project-alpha:two" };
+    const outcomes = await Promise.all([planProjectAlphaProjectV2Command(env(), one), planProjectAlphaProjectV2Command(env(), two)]);
+    expect(outcomes.filter(value => value.status === "queued")).toHaveLength(1);
+    expect(outcomes.filter(value => value.status === "queued" && value.replayed)).toHaveLength(0);
+    expect(outcomes.some(value => value.status === "conflict" || value.status === "uncertain")).toBe(true);
+    const winningSource = await db.prepare("SELECT source_id FROM project_alpha_project_outbox WHERE command_id=?").bind(one.command.commandId).first("source_id");
+    const loser = winningSource === "project-alpha:one" ? two : one;
+    await expect(planProjectAlphaProjectV2Command(env(), loser)).resolves.toEqual({ status: "conflict", reason: "command_id" });
+  });
+
+  it("blocks a replay when the original staff proof is revoked", async () => {
+    const action = await createAction();
+    await expect(planProjectAlphaProjectV2Command(env(), action)).resolves.toMatchObject({ status: "queued", replayed: false });
+    await db.prepare("UPDATE native_staff_admissions SET active=0 WHERE staff_id=?").bind(action.actor.staffId).run();
+    await expect(planProjectAlphaProjectV2Command(env(), action)).resolves.toEqual({ status: "blocked", reason: "authority" });
+  });
+
   it("fails closed for a revoked staff member and missing or different directory mappings", async () => {
     const revoked = await createAction();
     await db.prepare("UPDATE native_staff_admissions SET active=0 WHERE staff_id=?").bind(revoked.actor.staffId).run();
@@ -106,6 +131,8 @@ describe("unmounted project-v2 command producer", () => {
     const different = await createAction();
     const wrong = { ...different, command: { ...different.command, organization: { ...different.command.organization, expectedPublicId: "f".repeat(32) } } } as ProjectAlphaProjectV2CommandProducerAction;
     await expect(planProjectAlphaProjectV2Command(env(), wrong)).resolves.toEqual({ status: "blocked", reason: "directory" });
+    const mismatchedId = { ...different, directory: { ...different.directory, organizationRecordId: uuid() } };
+    await expect(planProjectAlphaProjectV2Command(env(), mismatchedId)).resolves.toEqual({ status: "blocked", reason: "invalid_action" });
   });
 
   it("keeps a disabled/outage-selected connection pending and never sends", async () => {
@@ -125,6 +152,8 @@ describe("unmounted project-v2 command producer", () => {
       VALUES(?,'Native','active','[]',?,?,?)`).bind(externalId, sha, records.organizationRecordId, records.clientRecordId).run();
     const bind: ProjectAlphaProjectV2CommandProducerAction = { sourceId: "project-alpha:one", actor: { ...staff, verifiedUntil: until, scopes: [] }, operation: "bind",
       local: { expectedLocalVersion: 1, expectedLocalProjectionSha256: sha }, command: { commandId: uuid(), externalId, expectedPublicId: "1".repeat(32), expectedRevision: "1", expectedProjectionSha256: sha, expectedAuthorizationGeneration: "0" } };
+    const badHash = { ...bind, command: { ...bind.command, commandId: uuid(), expectedProjectionSha256: "b".repeat(64) } } as ProjectAlphaProjectV2CommandProducerAction;
+    await expect(planProjectAlphaProjectV2Command(env(), badHash)).resolves.toEqual({ status: "blocked", reason: "invalid_action" });
     await expect(planProjectAlphaProjectV2Command(env(), bind)).resolves.toMatchObject({ status: "queued", replayed: false });
     const unsupported = { ...bind, operation: "refresh" } as unknown as ProjectAlphaProjectV2CommandProducerAction;
     await expect(planProjectAlphaProjectV2Command(env(), unsupported)).resolves.toEqual({ status: "blocked", reason: "invalid_action" });

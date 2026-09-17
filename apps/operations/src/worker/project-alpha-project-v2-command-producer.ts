@@ -123,6 +123,25 @@ async function prior(db: D1Database, commandId: string) {
         expected_source_instance_id: string; expected_history_epoch_id: string; request_sha256: string | null; reservation: number; intent: number;
       }>();
 }
+async function exactLiveReplay(
+  db: D1Database, previous: Awaited<ReturnType<typeof prior>>, connection: Connection, operation: Operation,
+  body: string, requestSha256: string, actor: Actor, current: ActorState, scopesJson: string,
+): Promise<boolean> {
+  if (!sameReservation(previous, connection, operation, body, requestSha256)) return false;
+  return !!await db.prepare(`SELECT 1 present FROM native_project_live_command_proofs proof
+    WHERE proof.command_id=? AND proof.actor_staff_id=? AND proof.actor_access_subject=?
+      AND proof.actor_admission_version=? AND proof.actor_profile_version=? AND proof.actor_email=?
+      AND proof.grant_generation=? AND proof.scopes_json=? AND proof.verified_until>strftime('%Y-%m-%dT%H:%M:%fZ','now')`)
+    .bind((JSON.parse(body) as { commandId: string }).commandId, actor.staffId, actor.accessSubject,
+      current.admission_version, current.profile_version, current.email, current.generation, scopesJson).first("present");
+}
+function sameReservation(previous: Awaited<ReturnType<typeof prior>>, connection: Connection, operation: Operation, body: string, requestSha256: string): boolean {
+  return !!previous && previous.command_json === body && previous.operation === operation
+    && previous.source_id === connection.sourceId && previous.application_id === connection.applicationId
+    && previous.destination_base_url === connection.baseUrl && previous.expected_source_instance_id === connection.sourceInstanceId
+    && previous.expected_history_epoch_id === connection.historyEpochId && previous.request_sha256 === requestSha256
+    && previous.reservation === 1 && previous.intent === 1;
+}
 
 /** Plans one canonical pending request. It is intentionally the only export. */
 export async function planProjectAlphaProjectV2Command(
@@ -133,19 +152,30 @@ export async function planProjectAlphaProjectV2Command(
   if (!connection || !validActor(action.actor) || !validLocal(action.local, action.operation === "create")) return { status: "blocked", reason: connection ? "invalid_action" : "configuration" };
   const canonical = canonicalProjectAlphaProjectRequest(action.operation, action.command);
   if (!canonical || canonical.command.commandId !== action.command.commandId) return { status: "blocked", reason: "invalid_action" };
+  if (action.operation === "create") {
+    const command = canonical.command as ProjectAlphaProjectCreateCommand;
+    if (command.organization.externalId !== action.directory.organizationRecordId
+      || (command.client === null) !== (action.directory.clientRecordId === null)
+      || (command.client !== null && command.client.externalId !== action.directory.clientRecordId)) return { status: "blocked", reason: "invalid_action" };
+  }
+  if (action.operation === "bind" && (canonical.command as ProjectAlphaProjectBindCommand).expectedProjectionSha256 !== action.local.expectedLocalProjectionSha256)
+    return { status: "blocked", reason: "invalid_action" };
   const requestSha256 = await sha256(canonical.body).catch(() => null);
   if (!requestSha256) return { status: "uncertain", reason: "database" };
+  const scopesJson = JSON.stringify(action.actor.scopes.map(scope => scope.scopeKind === "business_area"
+    ? { scopeKind: "business_area", businessAreaId: scope.businessAreaId, divisionId: null }
+    : { scopeKind: "division", businessAreaId: scope.businessAreaId, divisionId: scope.divisionId }));
 
   try {
+    const currentActor = await actorState(env.OPS_DB, action.actor);
+    if (!currentActor) return { status: "blocked", reason: "authority" };
     const previous = await prior(env.OPS_DB, canonical.command.commandId);
     if (previous) {
-      const same = previous.command_json === canonical.body && previous.operation === action.operation
-        && previous.source_id === connection.sourceId && previous.application_id === connection.applicationId
-        && previous.destination_base_url === connection.baseUrl && previous.expected_source_instance_id === connection.sourceInstanceId
-        && previous.expected_history_epoch_id === connection.historyEpochId && previous.request_sha256 === requestSha256
-        && previous.reservation === 1 && previous.intent === 1;
+      if (!sameReservation(previous, connection, action.operation, canonical.body, requestSha256)) return { status: "conflict", reason: "command_id" };
+      const same = await exactLiveReplay(env.OPS_DB, previous, connection, action.operation, canonical.body, requestSha256,
+        action.actor, currentActor, scopesJson);
       return same ? { status: "queued", commandId: canonical.command.commandId, requestSha256, replayed: true }
-        : { status: "conflict", reason: "command_id" };
+        : { status: "blocked", reason: "authority" };
     }
 
     const destination = await env.OPS_DB.prepare(`SELECT source_id,application_id,destination_base_url,expected_source_instance_id,
@@ -174,11 +204,6 @@ export async function planProjectAlphaProjectV2Command(
       organizationRecordId = head!.organization_record_id; clientRecordId = head!.client_record_id;
       if (!await directoryReady(env.OPS_DB, connection, organizationRecordId, clientRecordId)) return { status: "blocked", reason: "directory" };
     }
-    const actor = await actorState(env.OPS_DB, action.actor);
-    if (!actor) return { status: "blocked", reason: "authority" };
-    const scopesJson = JSON.stringify(action.actor.scopes.map(scope => scope.scopeKind === "business_area"
-      ? { scopeKind: "business_area", businessAreaId: scope.businessAreaId, divisionId: null }
-      : { scopeKind: "division", businessAreaId: scope.businessAreaId, divisionId: scope.divisionId }));
     const originSnapshot = JSON.stringify({ actorId: action.actor.staffId });
     const nextAttemptAt = Math.floor(Date.now() / 1000);
     const mappingState = action.operation === "update" ? "exact" : "absent";
@@ -191,7 +216,7 @@ export async function planProjectAlphaProjectV2Command(
       env.OPS_DB.prepare(`INSERT INTO native_project_command_proofs(command_id,external_project_id,actor_staff_id,actor_access_subject,
         actor_admission_version,actor_profile_version,actor_email,verified_until,grant_generation,scopes_json)
         VALUES(?,?,?,?,?,?,?,?,?,?)`).bind(canonical.command.commandId, canonical.command.externalId, action.actor.staffId,
-        action.actor.accessSubject, actor.admission_version, actor.profile_version, actor.email, action.actor.verifiedUntil, actor.generation, scopesJson),
+        action.actor.accessSubject, currentActor.admission_version, currentActor.profile_version, currentActor.email, action.actor.verifiedUntil, currentActor.generation, scopesJson),
       env.OPS_DB.prepare(`INSERT INTO project_alpha_project_outbox(command_id,external_project_id,operation,command_json,source_id,
         application_id,destination_base_url,expected_source_instance_id,origin_snapshot_json,state,attempts,next_attempt_at,expected_history_epoch_id)
         VALUES(?,?,?,?,?,?,?,?,?,'pending',0,?,?)`).bind(canonical.command.commandId, canonical.command.externalId,
@@ -206,7 +231,7 @@ export async function planProjectAlphaProjectV2Command(
         expected_project_alpha_public_id,source_id,source_instance_id,application_id,history_epoch_id)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(canonical.command.commandId, requestSha256, action.operation,
         canonical.command.externalId, action.local.expectedLocalVersion, action.local.expectedLocalProjectionSha256,
-        actor.generation, mappingState, expectedPublicId, connection.sourceId, connection.sourceInstanceId,
+        currentActor.generation, mappingState, expectedPublicId, connection.sourceId, connection.sourceInstanceId,
         connection.applicationId, connection.historyEpochId),
     );
     await env.OPS_DB.batch(statements);
@@ -214,8 +239,13 @@ export async function planProjectAlphaProjectV2Command(
   } catch {
     try {
       const replay = await prior(env.OPS_DB, canonical.command.commandId);
-      if (replay && replay.command_json === canonical.body && replay.request_sha256 === requestSha256 && replay.reservation === 1 && replay.intent === 1)
+      const currentActor = await actorState(env.OPS_DB, action.actor);
+      if (replay) {
+        if (!sameReservation(replay, connection, action.operation, canonical.body, requestSha256)) return { status: "conflict", reason: "command_id" };
+        if (!currentActor || !await exactLiveReplay(env.OPS_DB, replay, connection, action.operation, canonical.body, requestSha256,
+          action.actor, currentActor, scopesJson)) return { status: "blocked", reason: "authority" };
         return { status: "queued", commandId: canonical.command.commandId, requestSha256, replayed: true };
+      }
     } catch { /* preserve the unknown outcome */ }
     return { status: "uncertain", reason: "database" };
   }
