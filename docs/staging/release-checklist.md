@@ -5,6 +5,26 @@ client portal, Dropbox, Google, permanent purge, and incoming uploads disabled.
 The client-specific sequence is in
 [client-portal-rollout.md](client-portal-rollout.md).
 
+## September 17, 2026 staging evidence checkpoint
+
+Operations PR79 (`3f5ec3a`) and PR80 (`2befb68`) are merged to `main`; the
+exact combined workflow `35281356118` passed all 10 jobs. PR79's Project v2
+command producer remains dormant, unmounted, and non-networked. PR80 adds
+conditional access-code handling and centered responsive Incoming upload
+controls.
+
+PA PR184 head is `e260abeb`, with generic existing-application key binding
+after staging exposed a separate application-identity conflict. SQLite is
+**15/64**, disposable MySQL **10/81**, PR smoke/CodeQL/Gitleaks are green, and
+Docker publish `35283843624` plus Trivy are green. The exact `e260abe` staging
+rebuild is healthy; unauthenticated capabilities are JSON 401 with `no-store`
+and no cookie, and the web-log window has no errors or warnings.
+
+The remaining gate is a temporary Project-only key created or rebound to
+`150cb108-af37-4973-ab6e-f6d991a6e8c8`, followed by live Project acceptance,
+then binding/refresh/lifecycle/public-link parity. PA `main` is not merged.
+Do not record secrets or client data or claim production activation.
+
 ## Current credential boundary
 
 Use `& '.\apps\client\node_modules\.bin\wrangler.cmd' whoami` immediately before a release. Record only the

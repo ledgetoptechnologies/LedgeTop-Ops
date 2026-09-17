@@ -2,6 +2,27 @@
 
 Updated September 17, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
 
+### September 17, 2026 — latest staging evidence checkpoint
+
+- Operations PR79 merged to `main` at `3f5ec3a`. It adds the dormant Project v2
+  command producer; the producer remains unmounted and makes no network call.
+  Operations PR80 merged to `main` at `2befb68`, adding the Incoming upload
+  form's conditional access-code behavior and centered responsive controls.
+  The exact combined `main` workflow `35281356118` passed all 10 jobs.
+- Project Alpha PR184's current head is `e260abeb`. It includes the generic
+  existing-application key-binding CLI, added after staging exposed a separate
+  application-identity conflict. SQLite passed **15/64** and disposable MySQL
+  passed **10/81**; PR smoke, CodeQL, and Gitleaks are green. Docker publish
+  workflow `35283843624` and Trivy are green. Staging was rebuilt healthy from
+  the exact `e260abe` image. Unauthenticated capabilities returned JSON 401
+  with `no-store` and no cookie, and the web-log window contained no errors or
+  warnings.
+- The remaining gate is to create or rebind a temporary Project-only key to
+  shared application UUID `150cb108-af37-4973-ab6e-f6d991a6e8c8`, then run live
+  Project acceptance. Binding/refresh/lifecycle/public-link parity remain after
+  that acceptance. PA `main` is not merged. This checkpoint claims no
+  production activation and records no secret or client data.
+
 ### September 17, 2026 staging release-candidate checkpoint
 
 - Operations PR71 merged to `main` as `c58aa171`. Its ten PR-head checks
