@@ -5,11 +5,10 @@ Updated September 17, 2026. The owner approved implementation and resumption aft
 ### September 17, 2026 staging release-candidate checkpoint
 
 - Operations PR71 merged to `main` as `c58aa171`. Its ten PR-head checks
-  passed. The merge adds the default-off, per-instance Project Alpha outage
-  monitor and stale-data presentation; it does not enable monitoring or change
-  a production credential, route, public link, or Project Alpha grant. The
-  post-merge `main` workflow is still running, so this checkpoint does not
-  claim its terminal result.
+  passed, and all ten jobs in the exact post-merge `main` workflow also passed.
+  The merge adds the default-off, per-instance Project Alpha outage monitor
+  and stale-data presentation; it does not enable monitoring or change a
+  production credential, route, public link, or Project Alpha grant.
 - Project Alpha PR186 merged the reviewed API-first candidate to `dev` as
   `fae48c10`. CI, Docker/Trivy, CodeQL, and Gitleaks all passed on that exact
   merge. Staging was rebuilt from the resulting `:dev` images and reports
