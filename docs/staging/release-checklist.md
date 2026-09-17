@@ -192,27 +192,25 @@ comparison with those repositories. The verifier intentionally fails while any
 release-candidate placeholder remains.
 
 The current candidate inventory extends through Client `0213` (including both
-distinct `0199` filenames), Operations
-`0122`, and Project Alpha `0102`. The reviewed Operations runtime boundary is
-PR63's merge commit `d1c20163956d180439e51c5aceb96fc37bdb5360`. The staging
-contract lineage through PR67 merge `0aab6773f109f84b2d0ff166fd24ee1bb537d429`
-contains only staging-contract, bootstrap, test, and documentation changes, so
-using the repository head as the runtime identity would create a circular
-self-pin. Because all three production Workers currently watch `*`, the docs-only
-PR67 merge uploaded a same-code version of Delivery, Operations, and Ops Sync;
-it did not move the reviewed runtime boundary. Project Alpha is pinned
+distinct `0199` filenames), Operations `0122`, and Project Alpha `0102`. The
+reviewed Operations runtime boundary is commit
+`5ca70d4f5ec834bfddf7bff68ffc1d89c6fd32a7`, which adds default-off,
+fail-closed Cloudflare Access service-auth support to the PA API-v2 connection
+secret. This following contract-only commit pins that exact executable SHA so
+the release-packet HEAD is not self-referential. Project Alpha is pinned
 independently at PR184 head `31deb85b87b95de27dc9e90a5591e036ae96709e`.
 Keep `RELEASE_CONTRACT_FINALIZED=false` until independent cross-repository,
 image, migration, and live staging evidence is complete. Any runtime change
-after `d1c2016` requires a newly reviewed non-circular boundary and coordinated
+after `5ca70d4` requires a newly reviewed non-circular boundary and coordinated
 evidence refresh.
 
 The live Project Alpha staging instance reports `v31deb85`. API key ID `1`
-exists with the reviewed API v2 directory and Project scopes, but it is not yet
-bound to an application identity; a scoped key alone is not deployment or
-projection readiness. The staging control API has no `exec` route. Perform the
-one-time application binding inside the staging web container with the reviewed
-CLI command; never infer or invent an undocumented control endpoint.
+is bound to generic API-v2 application
+`e4b3b484-ee7c-475f-ad40-46d7f928cff2`; an authenticated LAN capabilities
+probe returns HTTP 200. That proves the binding and handshake only. Public
+HTTPS remains blocked by the missing locally managed tunnel ingress, and the
+current key advertises only `api.capabilities.read`; do not treat the binding
+as directory, project, projection, or cutover readiness.
 
 The Viewer evidence is separate from the three Wrangler deployments. Record its
 exact image/commit, a SHA-256 of the non-secret `viewer.env` shape, secret names

@@ -13,10 +13,10 @@ export const RELEASE_CONTRACT_FINALIZED = false;
 export const RELEASE_CANDIDATES = Object.freeze({
   // Runtime changes end here. Commits after this boundary only make the
   // contract/CI verification portable and must not silently move the runtime pin.
-  // PR64 only repairs staging contract artifacts. The current executable
-  // Operations boundary is the PR63 merge included by main, not main's
-  // documentation-only head.
-  operations: "d1c20163956d180439e51c5aceb96fc37bdb5360",
+  // The executable boundary is the reviewed Access-authenticated PA API-v2
+  // secret-envelope commit. The following contract-only commit pins it
+  // without making the release-packet HEAD self-referential.
+  operations: "5ca70d4f5ec834bfddf7bff68ffc1d89c6fd32a7",
   viewer: "32cece808289a942ce902797535ccff6e24763e3",
   projectAlpha: "31deb85b87b95de27dc9e90a5591e036ae96709e",
 });
