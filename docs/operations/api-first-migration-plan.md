@@ -38,9 +38,25 @@ Updated September 17, 2026. The owner approved implementation and resumption aft
   and Projects
   `8f6e7bbde18f639a446d93414c5dfb5a58a8d773dce0ee503b8791df70ca8a25`;
   the Project release checker reports the latter current.
+- This supplied container-local evidence proves bounded migration and current
+  attestation state only. It is not live authenticated acceptance and does not
+  prove writes, reconciliation, rollback, public-link parity, or an authority
+  cutover on staging or either production instance.
+- Operations PR75 merged to `main` as
+  `44b12cf924e49d21f167db5f83eec62f1d05d450`. All ten jobs in its exact
+  post-merge workflow `35239963223` passed. Its Project API-v2 acceptance
+  harness passes **19/19** focused contract cases after the merge. This is
+  source-history and CI evidence, not proof of deployment, route enablement,
+  migration, or live synchronization.
+- The separately reviewed Directory API-v2 acceptance harness passes **41/41**
+  focused cases, including exact route/scope/schema checks, safe reruns,
+  revision and authorization-generation transitions, pinned inventory
+  pagination, replay/conflict behavior, signed-64 bounds, and pre-mutation
+  profile validation. The joined source invariants pass **15/15** and the
+  Project harness still passes **19/19** on the rebased candidate. No
+  credentialed Directory mutation is claimed by these local results.
 - Exact Operations `main` transport regression coverage now passes **55
-  tests / 3 files**, the acceptance runner's fail-closed and secrecy suite
-  passes **6/6**, and the cross-app TypeScript check passes. A reviewed,
+  tests / 3 files**, and the cross-app TypeScript check passes. A reviewed,
   non-production runner at
   `scripts/pa-api-v2-staging-acceptance.mjs` requires an explicit mutation
   opt-in plus a `pa-acceptance-*` fixture prefix, reads
