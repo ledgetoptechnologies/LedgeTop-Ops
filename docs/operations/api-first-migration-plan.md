@@ -75,12 +75,41 @@ Updated September 17, 2026. The owner approved implementation and resumption aft
   an already active Operations-to-PA synchronization path. Mounting the
   reviewed adapters and joined reconciliation remains a later, separately
   reviewed Operations activation step.
+- The isolated Directory-only live window has now passed. A dedicated key
+  advertised the exact 23 reviewed scopes while every Project flag remained
+  dark. The mutable run completed capabilities, paginated inventory, two
+  organization creates, one client create, exact replays, changed-body
+  conflicts, readbacks, profile updates, stale-binding detection and refresh,
+  organization assign/move/remove, archive, restore without implicit authority,
+  explicit rebind, and final inventory verification. The sanitized schema-v3
+  report contains 31 named stages, final authorization generation `23`, five
+  inventory pages, and only request IDs and SHA-256 evidence; no credential,
+  profile, external ID, or public ID is retained in this record.
+- The first diagnostic run exposed two acceptance-tooling facts rather than a
+  failed PA mutation. Empty optional address fields are canonically returned
+  as `null`, and the dense replay/conflict rehearsal can exceed PA's normal
+  60-requests-per-minute key limit. The successful run preserved that limit
+  and used bounded pacing. Operations PR78 makes the canonical nullable read
+  contract and bounded `Retry-After`-aware pacing permanent in the harness.
+- Browser verification proved the API-created organization was visible and
+  editable through the ordinary PA administration UI. It also found a release
+  blocker on the client list: migration 0099 gives both joined tables an
+  `archived` column, while the list used unqualified `archived=0`, so MySQL
+  returned a shell-only HTTP 200 page. PA PR184 now contains generic fix
+  `dd8c0ea5` (`c.archived=0`) plus regression coverage and MySQL rebind replay
+  coverage in `d7177def`. The exact PR184 head passed its normal CI, its
+  workflow-dispatched web/cron/database staging images passed both Trivy
+  scans, and staging was rebuilt as `vdd8c0ea`. The client list then rendered
+  normally and displayed all three disposable API-created clients, including
+  the completed acceptance client, with ordinary view/edit controls present.
+  The blank-list release blocker is closed; no production image or instance
+  was changed.
 
 #### Remaining release gates
 
-- Run two sequential, least-privilege flag windows: Directory routes with all
-  Project routes dark, then the selected Project routes with all Directory
-  routes dark. Exercise authenticated capabilities, positive
+- Complete the second sequential, least-privilege flag window: the selected
+  Project routes with all Directory routes dark. Exercise authenticated
+  capabilities, positive
   reads/writes/bindings, least-privilege denials, stale revision/generation
   rejection, exact idempotent replay, changed-body conflict, reconciliation,
   and rollback in those windows.
