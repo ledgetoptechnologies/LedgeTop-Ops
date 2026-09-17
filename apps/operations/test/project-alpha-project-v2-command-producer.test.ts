@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { Miniflare } from "miniflare";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import { planProjectAlphaProjectV2Command, type ProjectAlphaProjectV2CommandProducerAction } from "../src/worker/project-alpha-project-v2-command-producer";
+import { dispatchProjectAlphaProjectV2PendingCommand } from "../src/worker/project-alpha-project-v2-pending-dispatcher";
 
 let runtime: Miniflare, db: D1Database, sequence = 0;
 const uuid = () => `10000000-0000-4000-8000-${(++sequence).toString(16).padStart(12, "0")}`;
@@ -14,10 +15,10 @@ async function migrate(name: string) {
   const sql = readFileSync(new URL(`../migrations/${name}`, import.meta.url), "utf8");
   await db.batch(splitD1MigrationStatements(sql).map(statement => db.prepare(statement)));
 }
-function env() {
+function env(enabled = false) {
   return { OPS_DB: db, PROJECT_ALPHA_API_V2_CONNECTIONS: JSON.stringify({ version: 1, instances: {
-    "project-alpha:one": { sourceId: "project-alpha:one", enabled: false, baseUrl: "https://one.example.test", apiKey: "one", sourceInstanceId: sourceOne, applicationId: appOne, historyEpoch: epochOne },
-    "project-alpha:two": { sourceId: "project-alpha:two", enabled: false, baseUrl: "https://two.example.test", apiKey: "two", sourceInstanceId: sourceTwo, applicationId: appTwo, historyEpoch: epochTwo },
+    "project-alpha:one": { sourceId: "project-alpha:one", enabled, baseUrl: "https://one.example.test", apiKey: "one", sourceInstanceId: sourceOne, applicationId: appOne, historyEpoch: epochOne },
+    "project-alpha:two": { sourceId: "project-alpha:two", enabled, baseUrl: "https://two.example.test", apiKey: "two", sourceInstanceId: sourceTwo, applicationId: appTwo, historyEpoch: epochTwo },
   } }) };
 }
 async function actor() {
@@ -55,6 +56,19 @@ async function createAction(sourceId = "project-alpha:one"): Promise<Extract<Pro
       organization: { externalId: records.organizationRecordId, expectedPublicId: records.organizationPublicId, expectedRevision: "1", expectedProjectionSha256: sha },
       client: { externalId: records.clientRecordId, expectedPublicId: records.clientPublicId, expectedRevision: "1", expectedProjectionSha256: sha } },
   };
+}
+function response(value: unknown, status = 200) { return new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", "X-Request-ID": "11111111-1111-4111-8111-111111111111" } }); }
+function transport(action: Extract<ProjectAlphaProjectV2CommandProducerAction, { operation: "create" }>) {
+  const sourceInstanceId = action.sourceId === "project-alpha:one" ? sourceOne : sourceTwo;
+  const applicationId = action.sourceId === "project-alpha:one" ? appOne : appTwo;
+  const historyEpoch = action.sourceId === "project-alpha:one" ? epochOne : epochTwo;
+  return vi.fn<typeof fetch>(async (_url, init) => {
+    if (init?.method !== "POST") return response({ apiVersion: "2", sourceInstanceId, applicationId, historyEpoch,
+      requestId: "11111111-1111-4111-8111-111111111111", grantedCapabilities: [{ name: "api.capabilities.read" }, { name: "projects.create" }],
+      implementedEndpoints: [{ method: "GET", path: "/api/v2/capabilities", requiredCapability: "api.capabilities.read" }, { method: "POST", path: "/api/v2/projects/commands", requiredCapability: "projects.create", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true }] });
+    return response({ apiVersion: "2", sourceInstanceId, applicationId, historyEpoch, requestId: "11111111-1111-4111-8111-111111111111", replayed: false,
+      result: { resource: { type: "project", id: action.command.externalId, publicId: "d".repeat(32), revision: "1", projectionSha256: sha }, authorizationGeneration: "1", presentation: { portalPublished: false, publicLinkEnabled: false } } }, 201);
+  });
 }
 
 beforeAll(async () => {
@@ -148,6 +162,66 @@ describe("unmounted project-v2 command producer", () => {
       expect(await db.prepare("SELECT state FROM project_alpha_project_outbox WHERE command_id=?").bind(action.command.commandId).first("state")).toBe("pending");
       expect(await db.prepare("SELECT state FROM project_alpha_project_v2_events WHERE command_id=? AND state_version=1").bind(action.command.commandId).first("state")).toBe("pending");
     } finally { vi.unstubAllGlobals(); }
+  });
+
+  it("leases exactly one producer reservation, records the validated receipt atomically, and replays it without another request", async () => {
+    const action = await createAction(), send = transport(action);
+    await expect(planProjectAlphaProjectV2Command(env(), action)).resolves.toMatchObject({ status: "queued", replayed: false });
+    const [first, second] = await Promise.all([
+      dispatchProjectAlphaProjectV2PendingCommand(env(true), action.sourceId, action.command.commandId, send),
+      dispatchProjectAlphaProjectV2PendingCommand(env(true), action.sourceId, action.command.commandId, send),
+    ]);
+    expect([first, second]).toContainEqual(expect.objectContaining({ status: "acknowledged" }));
+    expect(send.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+    const receipt = await db.prepare("SELECT receipt_id FROM project_alpha_project_v2_success_receipts WHERE command_id=?").bind(action.command.commandId).first<string>("receipt_id");
+    expect(receipt).toEqual(expect.any(String));
+    const replayTransport = vi.fn<typeof fetch>();
+    await expect(dispatchProjectAlphaProjectV2PendingCommand(env(true), action.sourceId, action.command.commandId, replayTransport))
+      .resolves.toEqual({ status: "acknowledged", receiptId: receipt, replayed: true });
+    expect(replayTransport).not.toHaveBeenCalled();
+    expect(await db.prepare("SELECT state,lease_token,lease_expires_at FROM project_alpha_project_outbox WHERE command_id=?").bind(action.command.commandId).first())
+      .toEqual({ state: "acknowledged", lease_token: null, lease_expires_at: null });
+    expect(await db.prepare("SELECT state FROM project_alpha_project_v2_events WHERE command_id=? ORDER BY state_version").bind(action.command.commandId).all())
+      .toEqual({ results: [{ state: "pending" }, { state: "acknowledged" }], success: true, meta: expect.any(Object) });
+  });
+
+  it("rechecks current proof and source identity before transport, and makes timeout evidence terminal without retry", async () => {
+    const revoked = await createAction(), noSend = vi.fn<typeof fetch>();
+    await planProjectAlphaProjectV2Command(env(), revoked);
+    await db.prepare("UPDATE native_staff_admissions SET active=0 WHERE staff_id=?").bind(revoked.actor.staffId).run();
+    await expect(dispatchProjectAlphaProjectV2PendingCommand(env(true), revoked.sourceId, revoked.command.commandId, noSend)).resolves.toEqual({ status: "blocked", reason: "authority" });
+    expect(noSend).not.toHaveBeenCalled();
+    await expect(dispatchProjectAlphaProjectV2PendingCommand(env(true), "project-alpha:two", revoked.command.commandId, noSend)).resolves.toEqual({ status: "conflict", reason: "source" });
+
+    const timeout = await createAction(), healthy = transport(timeout), timedOut = vi.fn<typeof fetch>(async (url, init) => {
+      if (init?.method === "POST") throw new Error("offline");
+      return healthy(url, init);
+    });
+    await planProjectAlphaProjectV2Command(env(), timeout);
+    await expect(dispatchProjectAlphaProjectV2PendingCommand(env(true), timeout.sourceId, timeout.command.commandId, timedOut)).resolves.toMatchObject({ status: "uncertain", reason: "transport" });
+    expect(await db.prepare("SELECT state,outcome_json FROM project_alpha_project_outbox WHERE command_id=?").bind(timeout.command.commandId).first())
+      .toMatchObject({ state: "terminal", outcome_json: expect.stringContaining("transport") });
+    const retry = vi.fn<typeof fetch>();
+    await expect(dispatchProjectAlphaProjectV2PendingCommand(env(true), timeout.sourceId, timeout.command.commandId, retry)).resolves.toEqual({ status: "blocked", reason: "in_progress" });
+    expect(retry).not.toHaveBeenCalled();
+  });
+
+  it("is default-off and records malformed successful-looking transport as uncertain without changing canonical state", async () => {
+    const disabled = await createAction(), noSend = vi.fn<typeof fetch>();
+    await planProjectAlphaProjectV2Command(env(), disabled);
+    await expect(dispatchProjectAlphaProjectV2PendingCommand(env(), disabled.sourceId, disabled.command.commandId, noSend)).resolves.toEqual({ status: "blocked", reason: "configuration" });
+    expect(noSend).not.toHaveBeenCalled();
+    expect(await db.prepare("SELECT state FROM project_alpha_project_outbox WHERE command_id=?").bind(disabled.command.commandId).first("state")).toBe("pending");
+
+    const malformed = await createAction(), healthy = transport(malformed), broken = vi.fn<typeof fetch>(async (url, init) => {
+      if (init?.method === "POST") return new Response("{", { status: 201, headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", "X-Request-ID": "11111111-1111-4111-8111-111111111111" } });
+      return healthy(url, init);
+    });
+    await planProjectAlphaProjectV2Command(env(), malformed);
+    await expect(dispatchProjectAlphaProjectV2PendingCommand(env(true), malformed.sourceId, malformed.command.commandId, broken)).resolves.toMatchObject({ status: "uncertain", reason: "invalid_contract" });
+    expect(await db.prepare("SELECT state FROM project_alpha_project_v2_events WHERE command_id=? ORDER BY state_version").bind(malformed.command.commandId).all())
+      .toMatchObject({ results: [{ state: "pending" }, { state: "uncertain" }] });
+    expect(await db.prepare("SELECT COUNT(*) n FROM project_alpha_project_v2_success_receipts WHERE command_id=?").bind(malformed.command.commandId).first("n")).toBe(0);
   });
 
   it("allows bind only from a current unmapped native head and rejects unsupported operations", async () => {

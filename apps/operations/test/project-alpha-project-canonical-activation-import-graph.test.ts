@@ -16,6 +16,7 @@ describe("project v2 canonical activation import graph", () => {
       "project-alpha-project-read-settlement-adapter",
       "project-alpha-project-canonical-activation-adapter",
       "project-alpha-project-v2-command-producer",
+      "project-alpha-project-v2-pending-dispatcher",
     ];
     const adapters = new Set(forbidden.map(name => new URL(`${name}.ts`, worker).pathname));
     const offenders = files(worker).filter(file => !adapters.has(file.pathname)).flatMap(file => {
@@ -35,5 +36,11 @@ describe("project v2 canonical activation import graph", () => {
     const module = await import("../src/worker/project-alpha-project-v2-command-producer");
     expect(Object.keys(module)).toEqual(["planProjectAlphaProjectV2Command"]);
     expect(module.planProjectAlphaProjectV2Command.length).toBe(2);
+  });
+
+  it("keeps the queued dispatcher private and requires an injected transport", async () => {
+    const module = await import("../src/worker/project-alpha-project-v2-pending-dispatcher");
+    expect(Object.keys(module)).toEqual(["dispatchProjectAlphaProjectV2PendingCommand"]);
+    expect(module.dispatchProjectAlphaProjectV2PendingCommand.length).toBe(4);
   });
 });
