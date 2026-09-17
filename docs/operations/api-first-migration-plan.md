@@ -30,8 +30,8 @@ Updated September 17, 2026. The owner approved implementation and resumption aft
   production PA instance, authority policy, legacy writer, or public link was
   changed.
 - The container-local migration gate is complete. Directory dry-run/apply
-  scanned one row and inserted one current binding; Project dry-run/apply
-  scanned zero rows and inserted zero, with zero presentation revocations.
+  reported `scanned 1, inserted 1, current 0`; Project dry-run/apply reported
+  `scanned 0, inserted 0, current 0`, with zero presentation revocations.
   Neither bounded apply returned a resume cursor, and the final dry runs found
   no remaining inserts. The retained non-secret attestations are directory
   `7d315e254ce5167c5cc6b9f1a0c14802bf95edbd0aa1807d3309b8bcc4b0f1b2`
