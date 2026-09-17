@@ -43,6 +43,15 @@ If Cloudflare Access protects the staging origin, set both
 `PA_DIRECTORY_CF_ACCESS_CLIENT_ID` and
 `PA_DIRECTORY_CF_ACCESS_CLIENT_SECRET`; a partial pair fails closed.
 
+The live runner spaces requests by 1.1 seconds by default, below Project
+Alpha's normal 60-requests-per-minute per-key limit even though each replay
+probe intentionally sends three calls. A `429` is retried only within a
+bounded four-retry budget using `Retry-After` when present and capped backoff
+otherwise. The sanitized report records request, `429`, retry, and delay
+counts. Tests may set `PA_DIRECTORY_ACCEPTANCE_MIN_REQUEST_INTERVAL_MS=0`;
+operators must not disable pacing for a live rehearsal merely to finish it
+faster or raise PA's production limit to accommodate the test.
+
 Before mutating, the runner compares the complete ordered Project Alpha
 capabilities document with the exact route and scope matrix from commit
 `33e623ac`. That matrix includes the default-off `APP_API_V2_*` directory
@@ -67,6 +76,12 @@ authorization generation once; profile update advances only revision; refresh,
 relationship mutation, archive/tombstone, and rebind each advance generation
 once; restore advances only revision. Revisions and generations are restricted
 to signed-64-bit decimal values.
+
+Write profiles remain exact string-valued contracts. Readback follows PA's
+canonical database projection for optional email, phone, and second address
+line fields: a submitted empty string is returned as JSON `null`. The runner
+models only those documented nullable fields and retains exact key order,
+shape, and value checks everywhere else.
 
 Final inventory uses `type=all&limit=2`; the three disposable records force a
 bounded full pagination walk. It requires sorted, duplicate-free resources in
