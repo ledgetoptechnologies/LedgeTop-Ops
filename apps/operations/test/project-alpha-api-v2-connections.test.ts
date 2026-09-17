@@ -11,9 +11,9 @@ const ids = {
   first: { source: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", application: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", epoch: "cccccccc-cccc-4ccc-8ccc-cccccccccccc" },
   second: { source: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", application: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", epoch: "ffffffff-ffff-4fff-8fff-ffffffffffff" },
 };
-function entry(sourceId: string, value: typeof ids.first, baseUrl: string, enabled?: boolean) {
+function entry(sourceId: string, value: typeof ids.first, baseUrl: string, enabled?: boolean, access?: { accessClientId: string; accessClientSecret: string }) {
   return { sourceId, ...(enabled === undefined ? {} : { enabled }), baseUrl, apiKey: `secret-for-${sourceId}`,
-    sourceInstanceId: value.source, applicationId: value.application, historyEpoch: value.epoch };
+    sourceInstanceId: value.source, applicationId: value.application, historyEpoch: value.epoch, ...access };
 }
 function environment(instances: Record<string, unknown>) {
   return { PROJECT_ALPHA_API_V2_CONNECTIONS: JSON.stringify({ version: 1, instances }) };
@@ -51,6 +51,32 @@ describe("deployment-owned Project Alpha API-v2 connections", () => {
     expect(result).toMatchObject({ status: "verified", sourceInstanceId: ids.first.source.toLowerCase() });
     expect(JSON.stringify(result)).not.toContain(secret);
     expect(String(send.mock.calls[0]![0])).toBe("https://source-a.example.test/api/v2/capabilities");
+    const headers = new Headers(send.mock.calls[0]![1]!.headers);
+    expect(headers.get("CF-Access-Client-Id")).toBeNull();
+    expect(headers.get("CF-Access-Client-Secret")).toBeNull();
+  });
+
+  it("accepts an all-or-nothing Access service credential pair without exposing it", async () => {
+    const access = { accessClientId: "access-client-id", accessClientSecret: "access-client-secret" };
+    const secret = `${access.accessClientId}:${access.accessClientSecret}`;
+    const env = environment({ [first]: entry(first, ids.first, "https://source-a.example.test", true, access) });
+    const resolved = resolveProjectAlphaApiV2Connection(env, first);
+    expect(resolved.connection).not.toHaveProperty("accessClientId");
+    expect(resolved.connection).not.toHaveProperty("accessClientSecret");
+    expect(JSON.stringify(resolved)).not.toContain(secret);
+    const send = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(metadata(ids.first)), { headers: { "Content-Type": "application/json", "Cache-Control": "no-store", "X-Request-ID": "11111111-1111-4111-8111-111111111111" } }));
+    await expect(probeConfiguredProjectAlphaApiV2Connection(env, first, [], send)).resolves.toMatchObject({ status: "verified" });
+    const headers = new Headers(send.mock.calls[0]![1]!.headers);
+    expect(headers.get("CF-Access-Client-Id")).toBe(access.accessClientId);
+    expect(headers.get("CF-Access-Client-Secret")).toBe(access.accessClientSecret);
+  });
+
+  it.each([
+    { accessClientId: "access-client-id" },
+    { accessClientSecret: "access-client-secret" },
+  ])("rejects a partial Access service credential pair", access => {
+    expect(() => resolveProjectAlphaApiV2Connection(environment({ [first]: { ...entry(first, ids.first, "https://source-a.example.test"), ...access } }), first))
+      .toThrow(ProjectAlphaApiV2ConnectionConfigurationError);
   });
 
   it.each([{ "Set-Cookie": "session=forbidden" }, { Location: "https://elsewhere.example.test" }])("rejects a credentialed capability response with redirect or cookie headers", async headers => {

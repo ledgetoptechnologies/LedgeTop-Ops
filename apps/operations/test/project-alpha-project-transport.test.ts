@@ -27,6 +27,18 @@ describe("dormant PA project v2 transport", () => {
     await expect(sendProjectAlphaProjectCreateCommand(connection, create, send)).resolves.toMatchObject({ status: "acknowledged", httpStatus: 201 });
     const init = send.mock.calls[1]![1]!; expect(String(send.mock.calls[1]![0])).toBe("https://alpha.example.test/api/v2/projects/commands"); expect(JSON.parse(String(init.body))).toEqual(create);
     const headers = new Headers(init.headers); expect(headers.get("Authorization")).toBe("Bearer test-secret"); expect(headers.get("X-PA-Source-Instance-ID")).toBe(source); expect(headers.get("X-PA-Application-ID")).toBe(application); expect(headers.get("X-PA-History-Epoch")).toBe(epoch);
+    expect(headers.get("CF-Access-Client-Id")).toBeNull(); expect(headers.get("CF-Access-Client-Secret")).toBeNull();
+  });
+  it("attaches an Access service credential pair to both preflight and command requests", async () => {
+    const route = { method: "POST", path: "/api/v2/projects/commands", requiredCapability: "projects.create", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true };
+    const access = { accessClientId: "access-client-id", accessClientSecret: "access-client-secret" };
+    const send = vi.fn<typeof fetch>(async (_url, init) => init?.method === "GET" ? json(metadata(route)) : json(syncReceipt(), 201));
+    await expect(sendProjectAlphaProjectCreateCommand({ ...connection, ...access }, create, send)).resolves.toMatchObject({ status: "acknowledged", httpStatus: 201 });
+    for (const [, init] of send.mock.calls) {
+      const headers = new Headers(init!.headers);
+      expect(headers.get("CF-Access-Client-Id")).toBe(access.accessClientId);
+      expect(headers.get("CF-Access-Client-Secret")).toBe(access.accessClientSecret);
+    }
   });
   it("rejects a create acknowledgement that implicitly publishes the project", async () => {
     const route = { method: "POST", path: "/api/v2/projects/commands", requiredCapability: "projects.create", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true };

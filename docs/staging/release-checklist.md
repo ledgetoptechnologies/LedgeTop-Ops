@@ -23,6 +23,16 @@ A live dashboard readback on 2026-09-16 confirmed those first two controls for
 Delivery (`ledgetop-clients`), Operations (`ledgetop-ops`), and Ops Sync
 (`ledgetop-ops-sync`). All three still use `*` as the build watch include path.
 
+Project Alpha staging uses an existing DNS record attached to a locally
+managed Cloudflare Tunnel. Before treating its public origin as ready, verify
+the host-local ingress configuration contains
+`pa-staging.ledgetoptechnologies.com` -> `http://localhost:1628` before its
+final catch-all, then record an HTTPS capabilities response through the
+dedicated Access service-auth policy. A successful LAN capabilities response
+proves the PA application binding, but does not prove the public tunnel or
+Access boundary. Do not move the DNS record to a different tunnel merely to
+bypass the locally managed configuration gate.
+
 Do not push a branch merely to test this setting. Historical preview uploads
 for Operations and Ops Sync contained production bindings even though they did
 not become active deployments.

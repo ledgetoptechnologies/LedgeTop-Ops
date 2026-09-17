@@ -16,8 +16,8 @@ export interface ProjectAlphaApiV2ConnectionEnvironment {
 export type ProjectAlphaApiV2ConfiguredConnection = Readonly<{
   sourceId: string;
   enabled: boolean;
-  /** Deliberately redacted: the API key stays inside the explicit probe bridge. */
-  connection: Readonly<Omit<ProjectAlphaApiV2Connection, "apiKey">>;
+  /** Deliberately redacted: credentials stay inside the explicit probe bridge. */
+  connection: Readonly<Omit<ProjectAlphaApiV2Connection, "apiKey" | "accessClientId" | "accessClientSecret">>;
 }>;
 
 export type ProjectAlphaApiV2ConfiguredProbe =
@@ -33,6 +33,7 @@ export class ProjectAlphaApiV2ConnectionConfigurationError extends Error {
 const MAX_SECRET_BYTES = 256 * 1024;
 const MAX_CONNECTIONS = 64;
 const MAX_API_KEY_LENGTH = 8192;
+const MAX_ACCESS_CREDENTIAL_LENGTH = 8192;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 // Keep the deployment-owned map on the exact canonical source-ID contract
 // shared with migration 0087 and source-identity.ts; aliases are not labels.
@@ -58,6 +59,14 @@ function apiKey(value: unknown): value is string {
   // to printable ASCII excluding SP, every control byte, and non-ASCII data.
   return typeof value === "string" && value.length > 0 && value.length <= MAX_API_KEY_LENGTH && /^[\x21-\x7e]+$/.test(value);
 }
+function accessCredential(value: unknown): value is string {
+  // These values are sent as HTTP header values. Reject anything that cannot
+  // safely become one, rather than deferring an invalid envelope until send.
+  return typeof value === "string" && value.length > 0 && value.length <= MAX_ACCESS_CREDENTIAL_LENGTH && /^[\x21-\x7e]+$/.test(value);
+}
+function accessCredentials(value: Record<string, unknown>): value is Record<string, unknown> & { accessClientId: string; accessClientSecret: string } {
+  return accessCredential(value.accessClientId) && accessCredential(value.accessClientSecret);
+}
 function origin(value: unknown): string {
   if (typeof value !== "string" || value.length === 0 || value.length > 2048 || value !== value.trim()) invalid();
   try {
@@ -70,7 +79,17 @@ function origin(value: unknown): string {
   } catch { return invalid(); }
 }
 
-type ParsedConfiguredConnection = Readonly<{ resolved: ProjectAlphaApiV2ConfiguredConnection; apiKey: string }>;
+type ParsedConfiguredConnection = Readonly<{
+  resolved: ProjectAlphaApiV2ConfiguredConnection;
+  apiKey: string;
+  accessClientId?: string;
+  accessClientSecret?: string;
+}>;
+
+function enabledConnection(connection: ParsedConfiguredConnection): Readonly<ProjectAlphaApiV2Connection> {
+  return Object.freeze({ ...connection.resolved.connection, apiKey: connection.apiKey,
+    ...(connection.accessClientId === undefined ? {} : { accessClientId: connection.accessClientId, accessClientSecret: connection.accessClientSecret! }) });
+}
 
 /**
  * Resolves one versioned, deployment-owned connection.  Every instance is
@@ -97,10 +116,15 @@ function parseProjectAlphaApiV2Connection(
   let selected: ParsedConfiguredConnection | undefined;
   for (const [key, value] of entries) {
     if (!sourceId(key) || !plain(value) || !optionalEnabled(value)) invalid();
-    const allowed = value.enabled === undefined
+    const baseFields = value.enabled === undefined
       ? ["sourceId", "baseUrl", "apiKey", "sourceInstanceId", "applicationId", "historyEpoch"]
       : ["sourceId", "enabled", "baseUrl", "apiKey", "sourceInstanceId", "applicationId", "historyEpoch"];
+    const hasAccessCredentials = value.accessClientId !== undefined || value.accessClientSecret !== undefined;
+    const allowed = hasAccessCredentials ? [...baseFields, "accessClientId", "accessClientSecret"] : baseFields;
+    const access = hasAccessCredentials && accessCredentials(value)
+      ? { accessClientId: value.accessClientId, accessClientSecret: value.accessClientSecret } : undefined;
     if (!exact(value, allowed) || !sourceId(value.sourceId) || value.sourceId !== key || !apiKey(value.apiKey)
+      || (hasAccessCredentials && !access)
       || !uuid(value.sourceInstanceId) || !uuid(value.applicationId) || !uuid(value.historyEpoch)) invalid();
     const baseUrl = origin(value.baseUrl);
     const identity = [value.sourceInstanceId.toLowerCase(), value.applicationId.toLowerCase(), value.historyEpoch.toLowerCase()];
@@ -109,7 +133,8 @@ function parseProjectAlphaApiV2Connection(
     sourceIds.add(value.sourceId); origins.add(baseUrl); sourceInstances.add(identity[0]!); applications.add(identity[1]!); historyEpochs.add(identity[2]!);
     const configured = Object.freeze({ sourceId: value.sourceId, enabled: value.enabled ?? false,
       connection: Object.freeze({ baseUrl, expectedSourceInstanceId: identity[0]!, expectedApplicationId: identity[1]!, expectedHistoryEpoch: identity[2]! }) });
-    const parsed = Object.freeze({ resolved: configured, apiKey: value.apiKey });
+    const parsed = Object.freeze({ resolved: configured, apiKey: value.apiKey,
+      ...(access ?? {}) });
     if (key === requestedSourceId) selected = parsed;
   }
   return selected ?? invalid();
@@ -135,7 +160,7 @@ export function probeConfiguredProjectAlphaApiV2Connection(
   try {
     const configured = parseProjectAlphaApiV2Connection(env, sourceId);
     if (!configured.resolved.enabled) return Promise.resolve({ status: "disabled", sourceId: configured.resolved.sourceId });
-    return probeProjectAlphaApiV2({ ...configured.resolved.connection, apiKey: configured.apiKey }, requiredCapabilities, send, requiredEndpoints);
+    return probeProjectAlphaApiV2(enabledConnection(configured), requiredCapabilities, send, requiredEndpoints);
   } catch { return Promise.resolve({ status: "misconfigured", reason: "configuration" }); }
 }
 
@@ -153,6 +178,6 @@ export async function withEnabledConfiguredProjectAlphaApiV2Connection<T>(
   try {
     const configured = parseProjectAlphaApiV2Connection(env, sourceId);
     if (!configured.resolved.enabled) return { status: "disabled", sourceId: configured.resolved.sourceId };
-    return { status: "enabled", value: await callback(Object.freeze({ ...configured.resolved.connection, apiKey: configured.apiKey })) };
+    return { status: "enabled", value: await callback(enabledConnection(configured)) };
   } catch { return { status: "misconfigured" }; }
 }
