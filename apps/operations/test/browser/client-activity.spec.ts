@@ -177,12 +177,16 @@ test("stale activity cursors clear old dates and refresh without reusing the cur
 });
 
 test("resetting search filters retains alphabetical preference and invalid sort inputs default safely", async ({ page }) => {
-  const calls = await fixture(page, (route, url) => route.fulfill({ json: response(url.searchParams.has("q") ? [] : [root()]) }));
+  await fixture(page, (route, url) => route.fulfill({ json: response(url.searchParams.has("q") ? [] : [root()]) }));
   await page.goto("/clients?q=missing&kind=organization&sort=name");
   await page.getByRole("button", { name: "Reset filters" }).click();
   await expect(page).toHaveURL("/clients?sort=name"); await expect(page.getByRole("combobox", { name: "Sort clients" })).toHaveValue("name");
-  await page.goto("/clients?sort=unsupported"); await expect(page.getByRole("combobox", { name: "Sort clients" })).toHaveValue("recent");
-  expect(calls.filter(url => url.pathname === "/api/client-hub").at(-1)!.searchParams.get("sort")).toBe("recent");
+  const recentRequest = page.waitForRequest(request => {
+    const url = new URL(request.url());
+    return url.pathname === "/api/client-hub" && url.searchParams.get("sort") === "recent";
+  });
+  await Promise.all([recentRequest, page.goto("/clients?sort=unsupported")]);
+  await expect(page.getByRole("combobox", { name: "Sort clients" })).toHaveValue("recent");
 });
 
 test("sort controls and compact business update cards fit mobile through ultrawide layouts", async ({ page }, testInfo) => {
