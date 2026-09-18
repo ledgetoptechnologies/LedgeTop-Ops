@@ -4,7 +4,11 @@ Updated September 18, 2026. The owner approved implementation and resumption aft
 
 ### September 18, 2026 — PA lifecycle and joined-window checkpoint
 
-- Operations `main` is pinned to `98d7b33`. The current Project Alpha PR184
+- Operations PR93 is merged to `main` at
+  `ccc32ed31a1781459ecdf8e3719d980eb05c5777`. Its authoritative post-merge
+  workflow `35366079255` completed successfully and all ten Operations,
+  Client, Ops Sync, browser, source-invariant, Incoming, and thumbnail jobs
+  passed. The current Project Alpha PR184
   candidate is `ff42c3432f39e50e92058b21d7e4942c26f5b355`; its CI, CodeQL, and
   Gitleaks checks are green. The candidate now serializes API-key rate-limit
   admission per key and fails closed on accounting errors; its disposable
@@ -16,8 +20,13 @@ Updated September 18, 2026. The owner approved implementation and resumption aft
   the exact installed candidate before PA `main` can merge.
 - The staging Project acceptance key **#6** is application-bound and has been
   temporarily extended from the reviewed Project acceptance surface with only
-  Project archive and restore for the exact-candidate lifecycle rerun. Refresh,
-  Directory, and all other scopes remain absent.
+  Project archive and restore for the exact-candidate lifecycle rerun. Its
+  one-time secret is no longer available to the acceptance runner. Replacement
+  least-privilege key **#7** has the exact lifecycle scopes and a retained
+  one-time secret, but a live capabilities probe currently fails closed with
+  `403 Application binding required`. Bind key #7 to the existing application
+  before the lifecycle run. Refresh, Directory, and all other scopes remain
+  absent.
 - Before the joined window, the PA staging server flags and key must have
   archive and restore removed again, with Project binding enabled. The base
   Project flags and binding-status/inventory prerequisites must remain limited
