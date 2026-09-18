@@ -185,6 +185,18 @@ Updated September 17, 2026. The owner approved implementation and resumption aft
   The blank-list release blocker is closed; no production image or instance
   was changed.
 
+#### September 18 Operations staging-authority packet merge
+
+- Operations PR87 merged to `main` as
+  `33f77c0600ca71673ec0bb7d3f83700c5090da89`. Its exact PR head passed all
+  ten required checks, including both desktop/mobile browser suites and the
+  native synchronization suite. The exact post-merge `main` workflow
+  `35312220232` also passed all ten jobs.
+- The merge adds the reversible, operator-invoked staging native-authority
+  packet and its contract tests. It does not enable a production authority,
+  mutate either production PA instance, change a public client link, or
+  retire any legacy writer.
+
 #### September 18 Project API-v2 live staging acceptance
 
 - Project Alpha PR184 head
@@ -193,10 +205,13 @@ Updated September 17, 2026. The owner approved implementation and resumption aft
   `35300503305` built and scanned the web, cron and database images
   successfully. Staging was rebuilt from that candidate, remained healthy,
   and reported `v0ed79be` before any acceptance mutation.
-- Dedicated API key `#6` is bound to one staging-only generic application and
-  initially granted exactly capabilities, Project read/create/write,
-  Project-binding status and Project inventory. The authenticated capabilities
-  document exposed exactly those six routes and scopes, with no surplus grant.
+- Dedicated API key `#6` is bound to staging-only generic application
+  `150cb108-af37-4973-ab6e-f6d991a6e8c8` (database application row `3`). Its
+  dry run passed before apply, the apply succeeded, and the staging web
+  container remained healthy. It initially granted exactly six capabilities:
+  API capability discovery, Project read/create/write, Project-binding status
+  and Project inventory. The authenticated capabilities document exposed
+  exactly those six routes and scopes, with no surplus grant.
 - The mutating Project acceptance runner completed with `status: passed`.
   It proved private create (`201`), exact replay, changed-body conflict
   (`409`), read-after-create, conditional profile update (`200`), update replay
@@ -221,6 +236,13 @@ Updated September 17, 2026. The owner approved implementation and resumption aft
   `200 -> 404 -> 404` public-link behavior, then turn the flags back off.
   This scope addition advanced the application authorization generation and
   invalidated earlier generation evidence as designed.
+- A fresh pre-lifecycle check found the staging web and database containers
+  healthy, the migration container exited successfully, and the last-hour web
+  log window contained no error, warning, fatal or exception line. The
+  synthetic public page still rendered its expected Project title without an
+  error state. A fresh authenticated capability read still advertised only the
+  six base Project routes because archive and restore remain disabled at the
+  host; no lifecycle mutation was attempted.
 - No production PA instance, Operations production route, public client link,
   authority policy or legacy writer changed. The API token and synthetic
   public-link token remain outside source control.
