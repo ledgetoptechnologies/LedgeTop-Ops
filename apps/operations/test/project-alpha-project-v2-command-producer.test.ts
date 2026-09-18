@@ -276,6 +276,46 @@ describe("unmounted project-v2 command producer", () => {
       .toMatchObject({ results: [{ state: "pending" }] });
   });
 
+  it("releases a post-lease authority drift without sending and permits a restored retry", async () => {
+    const action = await createAction(), noSend = vi.fn<typeof fetch>();
+    await planProjectAlphaProjectV2Command(env(), action);
+    let drifted = false;
+    const hookedDb = new Proxy(db, { get(target, property) {
+      if (property !== "prepare") {
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+      return (query: string) => {
+        const statement = target.prepare(query);
+        if (drifted || !query.includes("UPDATE project_alpha_project_outbox SET state='leased'")) return statement;
+        const hook = (candidate: D1PreparedStatement): D1PreparedStatement => new Proxy(candidate, { get(statementTarget, statementProperty) {
+          if (statementProperty === "run") return async () => {
+            const result = await statementTarget.run();
+            drifted = true;
+            await target.prepare("UPDATE native_staff_admissions SET active=0 WHERE staff_id=?").bind(action.actor.staffId).run();
+            return result;
+          };
+          if (statementProperty === "bind") return (...values: unknown[]) => hook(statementTarget.bind(...values));
+          const value = Reflect.get(statementTarget, statementProperty, statementTarget);
+          return typeof value === "function" ? value.bind(statementTarget) : value;
+        } }) as D1PreparedStatement;
+        return hook(statement);
+      };
+    } }) as D1Database;
+    await expect(dispatchProjectAlphaProjectV2PendingCommand({ ...env(true), OPS_DB: hookedDb }, action.sourceId, action.command.commandId, noSend))
+      .resolves.toEqual({ status: "blocked", reason: "authority" });
+    expect(drifted).toBe(true);
+    expect(noSend).not.toHaveBeenCalled();
+    expect(await db.prepare("SELECT state,lease_token,lease_expires_at,outcome_json FROM project_alpha_project_outbox WHERE command_id=?").bind(action.command.commandId).first())
+      .toEqual({ state: "pending", lease_token: null, lease_expires_at: null, outcome_json: null });
+    expect(await db.prepare("SELECT state FROM project_alpha_project_v2_events WHERE command_id=? ORDER BY state_version").bind(action.command.commandId).all())
+      .toMatchObject({ results: [{ state: "pending" }] });
+    await db.prepare("UPDATE native_staff_admissions SET active=1 WHERE staff_id=?").bind(action.actor.staffId).run();
+    const retry = transport(action);
+    await expect(dispatchProjectAlphaProjectV2PendingCommand(env(true), action.sourceId, action.command.commandId, retry)).resolves.toMatchObject({ status: "acknowledged" });
+    expect(retry.mock.calls.some(([, init]) => init?.method === "POST")).toBe(true);
+  });
+
   it("is default-off and records malformed successful-looking transport as uncertain without changing canonical state", async () => {
     const disabled = await createAction(), noSend = vi.fn<typeof fetch>();
     await planProjectAlphaProjectV2Command(env(), disabled);

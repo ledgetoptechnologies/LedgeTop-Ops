@@ -153,7 +153,8 @@ async function finishFailure(db: D1Database, row: Outbox, failure: ProjectAlphaP
       .bind(outcomeJson(failure.status, failure.reason, failure), row.command_id),
   ]);
 }
-async function releasePreflight(db: D1Database, row: Outbox): Promise<void> {
+/** No transport request was issued, so this lease must remain retryable. */
+async function releaseUnsent(db: D1Database, row: Outbox): Promise<void> {
   await db.prepare(`UPDATE project_alpha_project_outbox SET state='pending',lease_token=NULL,lease_expires_at=NULL,
     outcome_json=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
     WHERE command_id=? AND state='leased'`).bind(row.command_id).run();
@@ -207,8 +208,12 @@ async function dispatchEnabledProjectAlphaProjectV2PendingCommand(
     const current = await pending(env.OPS_DB, commandId, "leased");
     const checked = current ? await exactReservation(env.OPS_DB, current, sourceId, connection) : "authority";
     if (typeof checked === "string") {
-      const failure: ProjectAlphaProjectFailure = { status: checked === "command" ? "rejected" : "blocked", reason: "invalid_contract" };
-      await finishFailure(env.OPS_DB, initial, failure);
+      // The second validation is deliberately after our lease.  A revoked
+      // proof or changed local state is definitely pre-send, so preserve the
+      // original pending reservation rather than manufacturing uncertainty.
+      // A malformed or altered command stays fail-closed as a conflict on
+      // every later validation, without poisoning its outbox evidence.
+      if (current) await releaseUnsent(env.OPS_DB, current);
       return checked === "command" ? { status: "conflict", reason: "command" } : { status: "blocked", reason: checked };
     }
     const outcome = await send(current!.operation as Operation, connection, checked.command, transport);
@@ -217,7 +222,7 @@ async function dispatchEnabledProjectAlphaProjectV2PendingCommand(
       // original pending state without an immutable terminal event so a later
       // healthy capability check can make the one authorized dispatch.
       if (outcome.reason === "preflight") {
-        await releasePreflight(env.OPS_DB, current!);
+        await releaseUnsent(env.OPS_DB, current!);
         return outcome;
       }
       // Even a syntactically clear non-success response cannot establish that
