@@ -290,23 +290,23 @@ describe("unmounted project-v2 command producer", () => {
     const dispatched = await dispatchProjectAlphaProjectV2PendingCommand(env(true), action.sourceId, action.command.commandId, post);
     expect(dispatched.status).toBe("acknowledged");
     if (dispatched.status !== "acknowledged") throw new Error("dispatcher setup failed");
-    const before = await Promise.all([
+    const before = (await Promise.all([
       db.prepare("SELECT * FROM project_alpha_project_mappings WHERE external_project_id=?").bind(action.command.externalId).all(),
       db.prepare("SELECT * FROM operations_shared_projects WHERE external_project_id=?").bind(action.command.externalId).all(),
       db.prepare("SELECT id,url,hex(payload) payload FROM delivery_public_shares ORDER BY id").all(),
-    ]);
+    ])).map(result => result.results);
     expect(await db.prepare("SELECT state FROM project_alpha_project_outbox WHERE command_id=?").bind(action.command.commandId).first("state")).toBe("pending");
     const settled = await settleProjectAlphaProjectV2Read({ OPS_DB: db }, dispatched.receiptId, selectedConnection(action.sourceId), readTransport(action));
     expect(settled).toMatchObject({ status: "settled", successReceiptId: dispatched.receiptId, commandId: action.command.commandId });
-    expect(await Promise.all([
+    expect((await Promise.all([
       db.prepare("SELECT * FROM project_alpha_project_mappings WHERE external_project_id=?").bind(action.command.externalId).all(),
       db.prepare("SELECT * FROM operations_shared_projects WHERE external_project_id=?").bind(action.command.externalId).all(),
       db.prepare("SELECT id,url,hex(payload) payload FROM delivery_public_shares ORDER BY id").all(),
-    ])).toEqual(before);
+    ])).map(result => result.results)).toEqual(before);
     if (settled.status !== "settled") throw new Error("read settlement setup failed");
     await expect(activateProjectAlphaProjectV2Canonical({ OPS_DB: db }, settled.settlementId)).resolves.toMatchObject({ status: "activated", commandId: action.command.commandId });
     expect(await db.prepare("SELECT state FROM project_alpha_project_outbox WHERE command_id=?").bind(action.command.commandId).first("state")).toBe("acknowledged");
-    expect(await db.prepare("SELECT id,url,hex(payload) payload FROM delivery_public_shares ORDER BY id").all()).toEqual(before[2]);
+    expect((await db.prepare("SELECT id,url,hex(payload) payload FROM delivery_public_shares ORDER BY id").all()).results).toEqual(before[2]);
   });
 
   it("allows bind only from a current unmapped native head and rejects unsupported operations", async () => {
