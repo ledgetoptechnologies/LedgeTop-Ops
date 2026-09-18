@@ -4,6 +4,28 @@ This is an operator-only staging release check. It calls Project Alpha (PA)
 directly; it is never mounted in an Operations Worker and is not a production
 synchronization path.
 
+## September 18, 2026 joined-window checkpoint
+
+The current PA PR184 candidate is `0ed79bed12bd02fb4596868e0e28fea94ed8ab26`.
+Project lifecycle acceptance has passed and is recorded in the checked-in
+lifecycle evidence artifact. PA `main` remains unmerged until the joined
+Operations acceptance proves the cross-system route and public-link
+preservation.
+
+Project acceptance key **#6** is application-bound and is limited to the
+reviewed Project surface: capabilities discovery, Project read/create/write,
+identity binding, binding status, and inventory. Archive, restore, refresh,
+Directory, and every other scope are absent. The PA staging server must have
+archive and restore disabled and Project binding enabled before the joined
+window runs; do not treat the key being bound as proof that those server flags
+are configured.
+
+Operations staging Access/deployment and the joined harness are still pending.
+Use the existing least-privilege key only for the joined proof, and keep the
+existing Operations-side public-link status/body-hash preservation check in
+the acceptance run. No secret, private URL, application UUID, or client data
+belongs in this document or its reports.
+
 ## September 17, 2026 checkpoint
 
 The current PA PR184 staging candidate is head `e260abeb`. It includes the
