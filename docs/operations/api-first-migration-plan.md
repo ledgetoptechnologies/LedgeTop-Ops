@@ -22,11 +22,13 @@ Updated September 18, 2026. The owner approved implementation and resumption aft
   temporarily extended from the reviewed Project acceptance surface with only
   Project archive and restore for the exact-candidate lifecycle rerun. Its
   one-time secret is no longer available to the acceptance runner. Replacement
-  least-privilege key **#7** has the exact lifecycle scopes and a retained
-  one-time secret, but a live capabilities probe currently fails closed with
-  `403 Application binding required`. Bind key #7 to the existing application
-  before the lifecycle run. Refresh, Directory, and all other scopes remain
-  absent.
+  key **#7** was bound to the existing staging application, but its one-time
+  secret is also no longer available. Replacement least-privilege key **#8**
+  has exactly the eight reviewed lifecycle-acceptance scopes and no legacy
+  broad access; its one-time secret is retained outside the repository. A live
+  capabilities probe currently fails closed with `403 Application binding
+  required`. Bind key #8 to the existing application before the lifecycle
+  run. Refresh, Directory, and all other scopes remain absent.
 - Before the joined window, the PA staging server flags and key must have
   archive and restore removed again, with Project binding enabled. The base
   Project flags and binding-status/inventory prerequisites must remain limited
