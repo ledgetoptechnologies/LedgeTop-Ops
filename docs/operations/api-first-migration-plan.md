@@ -145,18 +145,56 @@ Updated September 17, 2026. The owner approved implementation and resumption aft
   The blank-list release blocker is closed; no production image or instance
   was changed.
 
+#### September 18 Project API-v2 live staging acceptance
+
+- Project Alpha PR184 head
+  `0ed79bed12bd02fb4596868e0e28fea94ed8ab26` is mergeable and all five
+  repository checks passed. The branch-specific Docker workflow
+  `35300503305` built and scanned the web, cron and database images
+  successfully. Staging was rebuilt from that candidate, remained healthy,
+  and reported `v0ed79be` before any acceptance mutation.
+- Dedicated API key `#6` is bound to one staging-only generic application and
+  initially granted exactly capabilities, Project read/create/write,
+  Project-binding status and Project inventory. The authenticated capabilities
+  document exposed exactly those six routes and scopes, with no surplus grant.
+- The mutating Project acceptance runner completed with `status: passed`.
+  It proved private create (`201`), exact replay, changed-body conflict
+  (`409`), read-after-create, conditional profile update (`200`), update replay
+  and changed-body conflict, binding status and complete inventory. The
+  disposable Project remained unpublished with its public link disabled
+  throughout that canonical runner.
+- An ordinary signed-in PA browser edit then renamed that same API-created
+  Project and advanced its revision from `2` to `3`. API readback returned the
+  browser value at revision `3`; the former binding-status proof returned
+  `409`, and a stale API writer fenced at revision `2` also returned `409`
+  without changing data. This is direct dual-editor conflict evidence, not an
+  automatic conflict-resolution claim.
+- A synthetic public link was then deliberately enabled through the normal PA
+  browser on the disposable Project. The public HTTPS URL returned `200` and
+  the expected Project title. That browser change advanced the Project to
+  revision `4` without changing the API projection hash. The URL token is not
+  retained in this repository.
+- Lifecycle acceptance remains open. Key `#6` now has only the additional
+  Project archive and restore scopes needed for that rehearsal, but the two
+  matching staging feature flags remain off. Enable only those two flags,
+  rerun the reviewed archive/restore fixture against revision `4`, verify
+  `200 -> 404 -> 404` public-link behavior, then turn the flags back off.
+  This scope addition advanced the application authorization generation and
+  invalidated earlier generation evidence as designed.
+- No production PA instance, Operations production route, public client link,
+  authority policy or legacy writer changed. The API token and synthetic
+  public-link token remain outside source control.
+
 #### Remaining release gates
 
-- Complete the second sequential, least-privilege flag window: the selected
-  Project routes with all Directory routes dark. Exercise authenticated
-  capabilities, positive
-  reads/writes/bindings, least-privilege denials, stale revision/generation
-  rejection, exact idempotent replay, changed-body conflict, reconciliation,
-  and rollback in those windows.
-- Verify an ordinary PA browser edit remains available for the dual-editor
-  Project contract, and verify existing public-link resolution before and
-  after the selected lifecycle operations. A fresh staging database without
-  an approved fixture is not public-link parity evidence.
+- Complete the narrowly scoped Project archive/restore rehearsal and verify
+  the synthetic public link before archive, while archived and after restore.
+- Exercise the joined Operations settlement/reconciliation path and its
+  rollback after the direct PA acceptance remains stable. Direct PA success is
+  not proof that the currently unmounted Operations adapter is ready.
+- Record least-privilege denial after removing the temporary lifecycle scopes,
+  and return the lifecycle flags to false. Keep all unrelated Directory and
+  Project flags off during this Project-only window.
 - Keep Project Alpha PR184 open against `main` until these live gates pass.
   After a successful merge, stop for the owner to deploy and sign in to both
   production PA instances; production acceptance and legacy retirement remain
