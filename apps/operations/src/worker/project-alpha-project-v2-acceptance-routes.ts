@@ -99,7 +99,8 @@ async function nativeActor(c: AppContext) {
     || identity.verifiedAccessSubject !== principal.accessSubject)
     throw new HTTPException(403, { message: "Operations and native staff identities do not match" });
   return { staffId: identity.staffId, accessSubject: identity.verifiedAccessSubject,
-    verifiedUntil: authenticated.verifiedUntil };
+    email: identity.email, admissionVersion: authenticated.admissionVersion,
+    profileVersion: identity.profileVersion, verifiedUntil: authenticated.verifiedUntil };
 }
 
 async function audit(c: AppContext, action: string, commandIdValue: string, requestedSourceId: string,
@@ -122,7 +123,7 @@ async function response(c: AppContext, input: z.infer<typeof requestSchema>, sta
  * GET route, scheduler, queue, service binding, or public/client route. */
 export function registerProjectAlphaProjectV2AcceptanceRoutes(app: App): void {
   app.post(PROJECT_ALPHA_PROJECT_V2_ACCEPTANCE_ROUTE, async c => {
-    if (c.env.PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED !== "true")
+    if (c.env.ENVIRONMENT !== "staging" || c.env.PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED !== "true")
       throw new HTTPException(404, { message: "Not found" });
     if (!c.get("administrator")) throw new HTTPException(403, { message: "Administrator access required" });
     const permission = await sqlScope(c.env, c.get("principal"), "integrations.manage");

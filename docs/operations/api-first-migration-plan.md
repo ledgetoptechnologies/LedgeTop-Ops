@@ -4,8 +4,9 @@ Updated September 17, 2026. The owner approved implementation and resumption aft
 
 ### September 17, 2026 — default-off joined Project-v2 acceptance mount
 
-- Operations now has one manually invoked composition endpoint at
+- Operations now has one manually invoked, staging-environment-only composition endpoint at
   `POST /api/admin/project-alpha/projects/v2/commands`. It is hidden unless
+  `ENVIRONMENT="staging"` and
   `PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED="true"`; the selected entry in
   deployment-owned `PROJECT_ALPHA_API_V2_CONNECTIONS` must also be explicitly
   enabled. The checked-in production and staging defaults remain `false`.
@@ -20,7 +21,8 @@ Updated September 17, 2026. The owner approved implementation and resumption aft
   binding, or scheduler. Existing staff authentication, administrator and
   same-origin CSRF checks are joined with deny-aware global
   `integrations.manage`, a second native-staff assertion verification, exact
-  legacy/native identity equality, and the existing live
+  legacy/native identity equality, exact authenticated admission/profile
+  version and email rechecks at write time, and the existing live
   `project.shared.sync` grant proof. Actor identity and assertion expiry are
   never accepted from JSON.
 - Every invocation writes a bounded administrative request audit before any PA

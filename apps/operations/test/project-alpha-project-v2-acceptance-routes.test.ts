@@ -38,11 +38,11 @@ const requestBody = {
     client: null },
 } as const;
 
-function fixture(enabled = true, administrator = true) {
+function fixture(enabled = true, administrator = true, environment = "staging") {
   const app = new Hono<{ Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } }>();
   app.use("*", async (c, next) => { c.set("principal", principal); c.set("administrator", administrator); await next(); });
   registerProjectAlphaProjectV2AcceptanceRoutes(app);
-  const env = { PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED: enabled ? "true" : "false",
+  const env = { ENVIRONMENT: environment, PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED: enabled ? "true" : "false",
     TEAM_DOMAIN: "https://team.cloudflareaccess.com", OPERATIONS_AUD: "operations-audience-value",
     NATIVE_STAFF_ONBOARDING_AUD: "onboarding-audience-value", AUDIT_IP_SECRET: "audit-secret",
     OPS_DB: { batch: mocks.batch } } as unknown as Env;
@@ -82,6 +82,13 @@ describe("Project-v2 administrator joined-acceptance route", () => {
     expect(mocks.plan).not.toHaveBeenCalled(); expect(mocks.dispatch).not.toHaveBeenCalled();
   });
 
+  it("remains hidden in production even if its mutable flag drifts on", async () => {
+    const response = await fixture(true, true, "production").send();
+    expect(response.status).toBe(404);
+    expect(mocks.native).not.toHaveBeenCalled(); expect(mocks.batch).not.toHaveBeenCalled();
+    expect(mocks.plan).not.toHaveBeenCalled(); expect(mocks.dispatch).not.toHaveBeenCalled();
+  });
+
   it("requires administrator, deny-aware integrations.manage, exact native identity, and exact application selection", async () => {
     expect((await fixture(true, false).send()).status).toBe(403);
     mocks.scope.mockResolvedValueOnce({ global: true, deniedGlobal: true });
@@ -111,6 +118,7 @@ describe("Project-v2 administrator joined-acceptance route", () => {
         externalProjectId: requestBody.command.externalId, version: 1, replayed: false } });
     expect(mocks.plan).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ sourceId: requestBody.sourceId,
       actor: { staffId: principal.id, accessSubject: principal.accessSubject,
+        email: principal.email, admissionVersion: 1, profileVersion: 1,
         verifiedUntil: "2999-01-01T00:00:00.000Z", scopes: [] } }));
     expect(mocks.plan.mock.invocationCallOrder[0]).toBeLessThan(mocks.dispatch.mock.invocationCallOrder[0]!);
     expect(mocks.dispatch.mock.invocationCallOrder[0]).toBeLessThan(mocks.settle.mock.invocationCallOrder[0]!);

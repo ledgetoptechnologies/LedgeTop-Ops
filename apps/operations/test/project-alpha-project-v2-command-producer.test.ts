@@ -31,7 +31,7 @@ async function actor() {
     db.prepare(`INSERT INTO native_project_grants(id,staff_id,capability,effect,scope_kind,granted_by)
       VALUES(?,?,'project.shared.sync','allow','global',?)`).bind(`grant-${staffId}`, staffId, staffId),
   ]);
-  return { staffId, accessSubject };
+  return { staffId, accessSubject, email, admissionVersion: 1, profileVersion: 1 };
 }
 async function directory(sourceId: string, sourceInstanceId: string, applicationId: string, historyEpochId: string) {
   const organizationRecordId = uuid(), clientRecordId = uuid(), organizationPublicId = crypto.randomUUID().replaceAll("-", ""), clientPublicId = crypto.randomUUID().replaceAll("-", "");
@@ -152,6 +152,20 @@ describe("unmounted project-v2 command producer", () => {
     await expect(planProjectAlphaProjectV2Command(env(), action)).resolves.toMatchObject({ status: "queued", replayed: false });
     await db.prepare("UPDATE native_staff_admissions SET active=0 WHERE staff_id=?").bind(action.actor.staffId).run();
     await expect(planProjectAlphaProjectV2Command(env(), action)).resolves.toEqual({ status: "blocked", reason: "authority" });
+  });
+
+  it("rejects an authenticated snapshot after admission or profile replacement", async () => {
+    const admissionChanged = await createAction();
+    await db.prepare("UPDATE native_staff_admissions SET version=version+1 WHERE staff_id=?")
+      .bind(admissionChanged.actor.staffId).run();
+    await expect(planProjectAlphaProjectV2Command(env(), admissionChanged))
+      .resolves.toEqual({ status: "blocked", reason: "authority" });
+
+    const profileChanged = await createAction();
+    await db.prepare("UPDATE native_staff_profiles SET version=version+1 WHERE staff_id=?")
+      .bind(profileChanged.actor.staffId).run();
+    await expect(planProjectAlphaProjectV2Command(env(), profileChanged))
+      .resolves.toEqual({ status: "blocked", reason: "authority" });
   });
 
   it("fails closed for a revoked staff member and missing or different directory mappings", async () => {
