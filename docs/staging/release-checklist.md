@@ -58,22 +58,24 @@ proof have passed. Its one-time secret is unavailable to the current runner.
 Replacement lifecycle key #7 was bound to the shared staging application, but
 its one-time secret is no longer available. Replacement key #8 has exactly the
 eight reviewed lifecycle-acceptance scopes, no legacy broad access, and a
-retained one-time secret outside the repository. An authenticated capability
-probe currently returns `403 Application binding required`; key #8 must be
-bound to the same existing application before use. The checked-in
-archive/restore artifact records a successful earlier
-run on candidate `0ed79bed12bd02fb4596868e0e28fea94ed8ab26`; it does not prove
-the installed `ff42c343` candidate. The exact reviewed fixture is prepared at
-revision `4` with its private public-link URL retained outside the repository,
-and the key and server are temporarily limited to the required lifecycle
-surface. Rerun the lifecycle-only acceptance against `ff42c343`, replace the
-sanitized artifact with that exact-candidate result, and only then count this
-gate as passed.
+retained one-time secret outside the repository. Key #8 is bound to the same
+existing application, and its authenticated capability response advertised
+exactly the eight reviewed routes. The checked-in archive/restore artifact
+records a successful run on the installed
+`ff42c3432f39e50e92058b21d7e4942c26f5b355` candidate. The guarded run used
+the verified disposable fixture at revision `7`, advanced archive to `8` and
+restore to `9`, proved exact replay and changed-body `409` behavior, and
+observed public-link status `200 -> 404 -> 404`. The private URL remains
+outside the repository. This exact-candidate lifecycle gate is passed.
 
 After that exact-candidate staging proof, disable the temporary archive
 and restore flags, remove those two temporary key scopes, prove a least-
 privilege denial, and complete the joined Operations settlement/reconciliation
 and rollback rehearsal. PA PR184 remains unmerged until those gates pass.
+
+Operations PR95 is merged at
+`a78bc056edcc3a7b559e724bb23b63cf4948dd66`; exact post-merge workflow
+`35376769639` passed all ten jobs.
 
 ## Current credential boundary
 

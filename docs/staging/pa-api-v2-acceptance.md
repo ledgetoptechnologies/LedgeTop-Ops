@@ -14,10 +14,12 @@ regression as a required CI step.
 Staging-only Docker workflow `35361793571` published this candidate and passed
 both Trivy scans. The PA staging control rebuild completed successfully, and
 the healthy web container reports `APP_VERSION=ff42c34`.
-The checked-in lifecycle evidence artifact names the earlier `0ed79bed` image;
-it must not be attributed to this `ff42c34` candidate. The bounded lifecycle
-run is pending on the exact installed candidate, and PA `main` remains unmerged
-until both that rerun and the joined Operations acceptance pass.
+The checked-in lifecycle evidence artifact now records the exact installed
+`ff42c343` candidate. The bounded run advanced the reviewed disposable fixture
+from revision `7` through archive revision `8` and restore revision `9`, proved
+exact replay and changed-body `409` handling, and observed public-link status
+`200 -> 404 -> 404`. PA `main` remains unmerged until the joined Operations
+acceptance passes.
 
 Project acceptance key **#6** is application-bound and is limited to the
 reviewed Project surface: capabilities discovery, Project read/create/write,
@@ -28,13 +30,16 @@ available to the acceptance runner. Replacement key **#7** was bound to the
 existing staging application, but its one-time secret is also no longer
 available. Replacement key **#8** has exactly the eight reviewed lifecycle
 scopes, no legacy broad access, and a retained one-time secret outside the
-repository. A live capability probe returns `403 Application binding
-required`; bind key #8 to the existing staging application before use. Remove
-the lifecycle scopes and disable their flags before enabling Project binding
+repository. Key #8 is bound to the existing staging application, and a live
+capability probe advertised exactly the eight reviewed routes. Remove the
+lifecycle scopes and disable their flags before enabling Project binding
 for the joined window; do not treat a key being bound as proof that those
 server flags are configured.
 
 Operations staging Access/deployment and the joined harness are still pending.
+Operations PR95 is merged at
+`a78bc056edcc3a7b559e724bb23b63cf4948dd66`, and exact post-merge workflow
+`35376769639` passed all ten jobs.
 Use the existing least-privilege key only for the joined proof, and keep the
 existing Operations-side public-link status/body-hash preservation check in
 the acceptance run. No secret, private URL, application UUID, or client data

@@ -13,11 +13,11 @@ Updated September 18, 2026. The owner approved implementation and resumption aft
   Gitleaks checks are green. The candidate now serializes API-key rate-limit
   admission per key and fails closed on accounting errors; its disposable
   MySQL 8.4 concurrency gate is mandatory in CI.
-  The checked-in disposable Project lifecycle artifact proves archive, exact
-  replay/conflict, restore, and public-link revocation/preservation behavior
-  for the earlier `0ed79bed12bd02fb4596868e0e28fea94ed8ab26` image. It is not
-  release evidence for `ff42c343`; the same bounded lifecycle run must pass on
-  the exact installed candidate before PA `main` can merge.
+  The checked-in disposable Project lifecycle artifact now proves archive,
+  exact replay/conflict, restore, and public-link revocation/preservation
+  behavior on that exact `ff42c343` candidate. The guarded run used the
+  fixture's verified current revision `7`, advanced it to `8` and `9`, and
+  observed public-link statuses `200 -> 404 -> 404` without storing the URL.
 - The staging Project acceptance key **#6** is application-bound and has been
   temporarily extended from the reviewed Project acceptance surface with only
   Project archive and restore for the exact-candidate lifecycle rerun. Its
@@ -25,10 +25,10 @@ Updated September 18, 2026. The owner approved implementation and resumption aft
   key **#7** was bound to the existing staging application, but its one-time
   secret is also no longer available. Replacement least-privilege key **#8**
   has exactly the eight reviewed lifecycle-acceptance scopes and no legacy
-  broad access; its one-time secret is retained outside the repository. A live
-  capabilities probe currently fails closed with `403 Application binding
-  required`. Bind key #8 to the existing application before the lifecycle
-  run. Refresh, Directory, and all other scopes remain absent.
+  broad access; its one-time secret is retained outside the repository. Key
+  #8 is bound to the existing staging application, and its live capabilities
+  response advertised exactly those eight routes. Refresh, Directory, and all
+  other scopes remain absent.
 - Before the joined window, the PA staging server flags and key must have
   archive and restore removed again, with Project binding enabled. The base
   Project flags and binding-status/inventory prerequisites must remain limited
@@ -37,7 +37,9 @@ Updated September 18, 2026. The owner approved implementation and resumption aft
   passed both Trivy scans. The documented control rebuild completed
   successfully; the healthy PA staging container reports
   `APP_VERSION=ff42c34`. Operations staging Access/deployment and the joined
-  acceptance harness remain pending. The next proof must exercise the joined
+  acceptance harness remain pending. Operations PR95 is merged at
+  `a78bc056edcc3a7b559e724bb23b63cf4948dd66`; exact post-merge workflow
+  `35376769639` passed all ten jobs. The next proof must exercise the joined
   route with the reviewed least-privilege key and preserve an existing
   Operations-side public link.
 
