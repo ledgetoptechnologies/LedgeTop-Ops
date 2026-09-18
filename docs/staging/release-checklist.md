@@ -39,7 +39,9 @@ Do not record secrets or client data or claim production activation.
 
 ## September 18, 2026 Project lifecycle checkpoint
 
-Operations `main` is pinned to `98d7b33`. PA PR184 is pinned to
+Operations PR93 is merged to `main` at
+`ccc32ed31a1781459ecdf8e3719d980eb05c5777`. Exact post-merge workflow
+`35366079255` passed all ten jobs. PA PR184 is pinned to
 `ff42c3432f39e50e92058b21d7e4942c26f5b355`; CI, CodeQL, and Gitleaks are
 green, including the serialized per-key rate-limit admission and disposable
 MySQL 8.4 concurrency regression. The exact candidate must be installed on PA
@@ -50,9 +52,13 @@ Staging-only Docker workflow `35361793571` passed both Trivy scans and
 published the candidate. The documented PA staging rebuild completed
 successfully; the healthy web container reports `APP_VERSION=ff42c34`.
 
-The Project-only application key is bound to the shared staging application
-identity and the base Project acceptance and browser/API conflict proof have
-passed. The checked-in archive/restore artifact records a successful earlier
+The original Project-only application key #6 is bound to the shared staging
+application identity, and the base Project acceptance and browser/API conflict
+proof have passed. Its one-time secret is unavailable to the current runner.
+Replacement lifecycle key #7 has the reviewed lifecycle scopes, but an
+authenticated capability probe currently returns `403 Application binding
+required`; it must be bound to the same existing application before use. The
+checked-in archive/restore artifact records a successful earlier
 run on candidate `0ed79bed12bd02fb4596868e0e28fea94ed8ab26`; it does not prove
 the installed `ff42c343` candidate. The exact reviewed fixture is prepared at
 revision `4` with its private public-link URL retained outside the repository,
