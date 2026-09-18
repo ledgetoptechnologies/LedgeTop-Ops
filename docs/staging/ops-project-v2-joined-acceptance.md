@@ -11,6 +11,18 @@ production synchronization path. It requires the explicit mutation gate
 `https://ops-staging.ledgetopdroneservices.com`. Do not run it against a
 production hostname, even for a read-only check.
 
+## September 18, 2026 readiness checkpoint
+
+The PA side is ready for the joined proof only after the staging server
+disables archive/restore and enables Project binding for the bounded window.
+The application-bound Project key is limited to capabilities discovery,
+Project read/create/write, identity binding, binding status, and inventory;
+archive, restore, refresh, Directory, and unrelated scopes must remain absent.
+Operations staging Access/deployment is still pending, so this harness has not
+run and PA PR184 must not merge before its result. Keep the existing public-link
+probe mandatory: it must return the same status, content type, and bounded body
+hash before and after the joined mutation.
+
 ## Required operator inputs
 
 Use an authenticated Operations browser storage-state file, or provide the
