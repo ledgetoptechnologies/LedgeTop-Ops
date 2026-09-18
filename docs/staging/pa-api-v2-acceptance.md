@@ -24,12 +24,15 @@ reviewed Project surface: capabilities discovery, Project read/create/write,
 identity binding, binding status, and inventory. Archive and restore are
 temporarily present only for the exact-candidate lifecycle rerun; refresh,
 Directory, and every other scope are absent. Its one-time secret is no longer
-available to the acceptance runner. Replacement key **#7** has the exact
-lifecycle scopes and a retained one-time secret, but a live capability probe
-returns `403 Application binding required`; bind it to the existing staging
-application before use. Remove the lifecycle scopes and disable their flags
-before enabling Project binding for the joined window; do not treat a key being
-bound as proof that those server flags are configured.
+available to the acceptance runner. Replacement key **#7** was bound to the
+existing staging application, but its one-time secret is also no longer
+available. Replacement key **#8** has exactly the eight reviewed lifecycle
+scopes, no legacy broad access, and a retained one-time secret outside the
+repository. A live capability probe returns `403 Application binding
+required`; bind key #8 to the existing staging application before use. Remove
+the lifecycle scopes and disable their flags before enabling Project binding
+for the joined window; do not treat a key being bound as proof that those
+server flags are configured.
 
 Operations staging Access/deployment and the joined harness are still pending.
 Use the existing least-privilege key only for the joined proof, and keep the

@@ -55,10 +55,13 @@ successfully; the healthy web container reports `APP_VERSION=ff42c34`.
 The original Project-only application key #6 is bound to the shared staging
 application identity, and the base Project acceptance and browser/API conflict
 proof have passed. Its one-time secret is unavailable to the current runner.
-Replacement lifecycle key #7 has the reviewed lifecycle scopes, but an
-authenticated capability probe currently returns `403 Application binding
-required`; it must be bound to the same existing application before use. The
-checked-in archive/restore artifact records a successful earlier
+Replacement lifecycle key #7 was bound to the shared staging application, but
+its one-time secret is no longer available. Replacement key #8 has exactly the
+eight reviewed lifecycle-acceptance scopes, no legacy broad access, and a
+retained one-time secret outside the repository. An authenticated capability
+probe currently returns `403 Application binding required`; key #8 must be
+bound to the same existing application before use. The checked-in
+archive/restore artifact records a successful earlier
 run on candidate `0ed79bed12bd02fb4596868e0e28fea94ed8ab26`; it does not prove
 the installed `ff42c343` candidate. The exact reviewed fixture is prepared at
 revision `4` with its private public-link URL retained outside the repository,
