@@ -11,6 +11,9 @@ export type Env = Omit<
   | "PROJECT_ALPHA_API_V2_MONITOR_ENABLED"
   | "PROJECT_ALPHA_API_V2_MONITOR_RECIPIENT"
   | "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED"
+  | "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ENABLED"
+  | "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_SOURCE_ID"
+  | "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ORIGIN"
   | "NATIVE_INTEGRATION_CONTROL_ENABLED"
   | "NATIVE_INTEGRATION_CONTROL_ORIGIN"
   | "NATIVE_STAFF_ONBOARDING_AUD"
@@ -41,6 +44,12 @@ export type Env = Omit<
   PROJECT_ALPHA_API_V2_MONITOR_RECIPIENT?: string;
   /** Default-off, manually invoked administrator-only Project-v2 staging acceptance. */
   PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED?: string;
+  /** Staging-only, manually invoked Directory bootstrap acceptance fixture. */
+  PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ENABLED?: string;
+  /** Staging-only immutable source pin for the Directory bootstrap fixture. */
+  PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_SOURCE_ID?: string;
+  /** Staging-only exact HTTPS origin pin for the Directory bootstrap fixture. */
+  PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ORIGIN?: string;
   /** Default-off native, explicit-grant authority for monitor lifecycle control. */
   NATIVE_INTEGRATION_CONTROL_ENABLED?: string;
   /** Exact same-origin native monitor-control UI origin; no implicit fallback. */

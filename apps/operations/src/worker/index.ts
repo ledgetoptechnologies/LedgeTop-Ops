@@ -64,6 +64,7 @@ import { syncProjectAlpha } from "./project-alpha";
 import { runProjectAlphaSnapshotRecovery } from "./project-alpha-snapshot-recovery";
 import { registerProjectAlphaConnectorAdminRoutes, portalAuthorityErrorResponse } from "./project-alpha-connector-admin";
 import { registerProjectAlphaProjectV2AcceptanceRoutes } from "./project-alpha-project-v2-acceptance-routes";
+import { PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ROUTE, projectAlphaDirectoryV2BootstrapAcceptanceEnabled, registerProjectAlphaDirectoryV2BootstrapAcceptanceRoutes } from "./project-alpha-directory-v2-bootstrap-acceptance-routes";
 import { PortalSourceAuthorityError } from "../../../client/src/worker/project-alpha-portal-authority";
 import { ensureDeploymentConfiguredProjectAlphaConnectors, ProjectAlphaConnectorError } from "./project-alpha-connectors";
 import { ClientHubSourcesChangedError } from "./client-hub-directory";
@@ -440,6 +441,14 @@ async function dispatchProjectAlphaApiV2MonitorControl(c: any) {
 }
 app.use("/api/native-integrations/monitor", dispatchProjectAlphaApiV2MonitorControl);
 app.use("/api/native-integrations/monitor/*", dispatchProjectAlphaApiV2MonitorControl);
+// This is intentionally before staff authentication. A disabled staging
+// fixture must be indistinguishable from an absent route, even to a request
+// without a valid Operations session.
+app.use(PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ROUTE, async (c, next) => {
+  if (c.req.path === PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ROUTE && !projectAlphaDirectoryV2BootstrapAcceptanceEnabled(c.env))
+    return c.json({ error: "Not found" }, 404);
+  await next();
+});
 app.use("/api/*", async (c, next) => {
   if (viewerMachineEventRequest(c.req.method, c.req.path) || projectAlphaDeliveryMachineRequest(c.req.method, c.req.path)) {
     await next();
@@ -3166,6 +3175,7 @@ app.get("/api/admin/delivery-change-recovery", async (c) => {
 });
 registerProjectAlphaConnectorAdminRoutes(app);
 registerProjectAlphaProjectV2AcceptanceRoutes(app);
+registerProjectAlphaDirectoryV2BootstrapAcceptanceRoutes(app);
 app.post("/api/admin/integrations/project-alpha/sync", async (c) => {
   const principal = c.get("principal");
   await requireGlobal(c.env, principal, "integrations.manage");
