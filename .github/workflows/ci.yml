@@ -27,7 +27,7 @@ jobs:
           node-version: 24
 
       - name: Verify repository contracts
-        run: node --test scripts/source-layout-invariants.test.mjs scripts/client-portal-rollout-manifest.test.mjs scripts/client-portal-release-profile.test.mjs scripts/pa-api-v2-staging-acceptance.test.mjs scripts/pa-api-v2-directory-staging-acceptance.test.mjs
+        run: node --test scripts/source-layout-invariants.test.mjs scripts/client-portal-rollout-manifest.test.mjs scripts/client-portal-release-profile.test.mjs scripts/pa-api-v2-staging-acceptance.test.mjs scripts/pa-api-v2-directory-staging-acceptance.test.mjs scripts/ops-project-v2-joined-live-acceptance.test.mjs
 
   incoming-pickup:
     name: incoming-pickup-alpine

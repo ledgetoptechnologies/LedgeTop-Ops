@@ -128,6 +128,13 @@ must be the new portal app audience, never `POLICY_AUD`, `OPERATIONS_AUD`, or
 
 ### Project-v2 joined-acceptance window
 
+Run the authenticated Operations-side command acceptance only with the
+[joined live harness](ops-project-v2-joined-acceptance.md). It requires the
+explicit staging mutation gate, refuses production origins, creates one fresh
+prefixed disposable project, verifies exact replay and changed-body conflict,
+and records bounded read-settlement/canonical-activation and public-link
+status/hash evidence without recording the URL or session cookie.
+
 The route also requires `ENVIRONMENT="staging"` in code and stays hidden in
 production even if its mutable flag drifts.
 `PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED` is required to be `false` in the
