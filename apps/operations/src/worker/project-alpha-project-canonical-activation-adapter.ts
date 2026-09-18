@@ -1,7 +1,8 @@
 /**
- * Unmounted finalizer for the dormant Project Alpha project-v2 evidence chain.
- * It performs no network I/O.  Do not import it from a route, queue, scheduler,
- * Durable Object, service entrypoint, or worker index.
+ * Finalizer for the Project Alpha project-v2 evidence chain. It performs no
+ * network I/O and is reachable only through the default-off administrator
+ * acceptance composition. Do not import it from any other route, queue,
+ * scheduler, Durable Object, service entrypoint, or worker index.
  */
 export type ProjectAlphaProjectCanonicalActivationEnvironment = Readonly<{ OPS_DB: D1Database }>;
 

@@ -10,6 +10,7 @@ export type Env = Omit<
   | "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED"
   | "PROJECT_ALPHA_API_V2_MONITOR_ENABLED"
   | "PROJECT_ALPHA_API_V2_MONITOR_RECIPIENT"
+  | "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED"
   | "NATIVE_INTEGRATION_CONTROL_ENABLED"
   | "NATIVE_INTEGRATION_CONTROL_ORIGIN"
   | "NATIVE_STAFF_ONBOARDING_AUD"
@@ -38,6 +39,8 @@ export type Env = Omit<
   PROJECT_ALPHA_API_V2_MONITOR_ENABLED?: string;
   /** Explicit deployment-owned owner mailbox for outage alerts; never inferred from Project Alpha data. */
   PROJECT_ALPHA_API_V2_MONITOR_RECIPIENT?: string;
+  /** Default-off, manually invoked administrator-only Project-v2 staging acceptance. */
+  PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED?: string;
   /** Default-off native, explicit-grant authority for monitor lifecycle control. */
   NATIVE_INTEGRATION_CONTROL_ENABLED?: string;
   /** Exact same-origin native monitor-control UI origin; no implicit fallback. */

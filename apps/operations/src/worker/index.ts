@@ -63,6 +63,7 @@ import { searchShareRecipients, shareDirectoryRecipientsEnabled } from "./share-
 import { syncProjectAlpha } from "./project-alpha";
 import { runProjectAlphaSnapshotRecovery } from "./project-alpha-snapshot-recovery";
 import { registerProjectAlphaConnectorAdminRoutes, portalAuthorityErrorResponse } from "./project-alpha-connector-admin";
+import { registerProjectAlphaProjectV2AcceptanceRoutes } from "./project-alpha-project-v2-acceptance-routes";
 import { PortalSourceAuthorityError } from "../../../client/src/worker/project-alpha-portal-authority";
 import { ensureDeploymentConfiguredProjectAlphaConnectors, ProjectAlphaConnectorError } from "./project-alpha-connectors";
 import { ClientHubSourcesChangedError } from "./client-hub-directory";
@@ -3164,6 +3165,7 @@ app.get("/api/admin/delivery-change-recovery", async (c) => {
   return c.json(await deliveryChangeRecoveryStatus(c.env));
 });
 registerProjectAlphaConnectorAdminRoutes(app);
+registerProjectAlphaProjectV2AcceptanceRoutes(app);
 app.post("/api/admin/integrations/project-alpha/sync", async (c) => {
   const principal = c.get("principal");
   await requireGlobal(c.env, principal, "integrations.manage");

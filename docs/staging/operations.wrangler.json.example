@@ -26,6 +26,7 @@
     "PUBLIC_SHARE_ORIGIN": "https://delivery-staging.ledgetopdroneservices.com",
     "PROJECT_ALPHA_BASE_URL": "https://pa-staging.ledgetoptechnologies.com",
     "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED": "false",
+    "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED": "false",
     "PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED": "false",
     "PROJECT_ALPHA_DELIVERY_GUEST_ENABLED": "false",
     "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED": "false",

@@ -1,8 +1,9 @@
 /**
- * Private, unmounted planner for Project Alpha project-v2 commands.
+ * Private planner for Project Alpha project-v2 commands. Its only production
+ * caller is the default-off administrator joined-acceptance composition route.
  *
  * This deliberately has no fetcher, route, queue, scheduler, or transport
- * dependency.  It only reserves a canonical request for a deliberately
+ * dependency. It only reserves a canonical request for a deliberately
  * selected configured source.  A later reviewed dispatcher may consume the
  * pending outbox row; an outage therefore leaves this exact command pending.
  */

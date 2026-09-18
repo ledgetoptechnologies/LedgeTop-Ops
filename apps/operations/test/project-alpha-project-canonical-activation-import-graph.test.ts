@@ -9,7 +9,7 @@ function files(directory: URL): URL[] {
 }
 
 describe("project v2 canonical activation import graph", () => {
-  it("keeps command/read/activation adapters unmounted from production entrypoints", () => {
+  it("mounts the current chain only through the dedicated acceptance route and keeps the legacy settlement adapter private", () => {
     const worker = new URL("../src/worker/", import.meta.url);
     const forbidden = [
       "project-alpha-project-settlement-adapter",
@@ -19,11 +19,23 @@ describe("project v2 canonical activation import graph", () => {
       "project-alpha-project-v2-pending-dispatcher",
     ];
     const adapters = new Set(forbidden.map(name => new URL(`${name}.ts`, worker).pathname));
+    const acceptance = new URL("project-alpha-project-v2-acceptance-routes.ts", worker).pathname;
+    const acceptedImports = new Set([
+      "project-alpha-project-v2-command-producer",
+      "project-alpha-project-v2-pending-dispatcher",
+      "project-alpha-project-read-settlement-adapter",
+      "project-alpha-project-canonical-activation-adapter",
+    ]);
     const offenders = files(worker).filter(file => !adapters.has(file.pathname)).flatMap(file => {
       const source = readFileSync(file, "utf8");
-      return forbidden.filter(name => source.includes(name)).map(name => `${file.pathname} -> ${name}`);
+      return forbidden.filter(name => source.includes(name)
+        && !(file.pathname === acceptance && acceptedImports.has(name)))
+        .map(name => `${file.pathname} -> ${name}`);
     });
     expect(offenders).toEqual([]);
+    const index = readFileSync(new URL("index.ts", worker), "utf8");
+    expect(index).toContain("project-alpha-project-v2-acceptance-routes");
+    for (const adapter of forbidden) expect(index).not.toContain(`./${adapter}`);
   });
 
   it("keeps the activation surface free of fetcher, connection, request, route, queue, and scheduler inputs", async () => {

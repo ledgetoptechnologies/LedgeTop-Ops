@@ -5,6 +5,13 @@ member opens a reviewed Project Alpha destination from the exact Client Hub
 source record, creates the project there, and then waits for that source's
 normal synchronization to project the record back into Operations.
 
+The separately reviewed, default-off Project-v2 joined-acceptance endpoint is
+not a Client Hub action and does not change this ordinary operator workflow.
+It has no UI or public/client link, is administrator-only, requires explicit
+native project authority, and exists solely for a bounded disposable staging
+rehearsal. Its activation flag and selected API-v2 connection remain off in the
+checked-in release configuration.
+
 ## Source-owned configuration
 
 Migration `0046_project_alpha_project_management_routes.sql` adds one optional

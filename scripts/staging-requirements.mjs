@@ -439,6 +439,7 @@ export const REQUIRED_DISABLED_FEATURE_FLAGS = Object.freeze({
   ]),
   operations: Object.freeze([
     "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED",
+    "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED",
     "PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED",
     "PROJECT_ALPHA_DELIVERY_GUEST_ENABLED",
     "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED",
@@ -632,6 +633,7 @@ export const FEATURE_FLAG_ACTIVATION_POLICIES = Object.freeze({
   }),
   operations: Object.freeze({
     PROJECT_ALPHA_DRAFT_QUOTES_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaDraftQuotes", "projectAlphaCatalogProjection"]) }),
+    PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED: Object.freeze({ prohibitedReason: "Project-v2 activation is limited to a separately approved, manually invoked joined staging window with remote migration 0122, native project authority, rollback, and public-link preservation evidence" }),
     PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED: Object.freeze({ prohibitedReason: "Project Alpha managed delivery requires migration 0069/0147/0031 and an independently approved end-to-end intent, notification, and revocation activation window" }),
     PROJECT_ALPHA_DELIVERY_GUEST_ENABLED: Object.freeze({ prohibitedReason: "Guest delivery remains explicit-only and requires a separate public-bearer notification and revocation approval after the portal intent path is proven" }),
     CLIENT_DELEGATED_SHARE_SIGNER_ENABLED: Object.freeze({ gates: Object.freeze(["delegatedShareSignerBinding", "delegatedSharePublicAuthorization"]) }),
@@ -791,6 +793,7 @@ export const STAGING_STATIC_VARS = Object.freeze({
     THUMBNAIL_RENDERER_EXPECTED_HOST: STAGING_HOSTS.incoming,
     APPLICATION_KEY: "ledgetop_ops_staging",
     PROJECT_ALPHA_DRAFT_QUOTES_ENABLED: "false",
+    PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED: "false",
     PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED: "false",
     PROJECT_ALPHA_DELIVERY_GUEST_ENABLED: "false",
     CLIENT_DELEGATED_SHARE_SIGNER_ENABLED: "false",
@@ -866,7 +869,7 @@ export const STAGING_ALLOWED_VAR_NAMES = Object.freeze({
     "PUBLIC_BASE_URL", "EXPECTED_HOST", "DIRECT_DELIVERY_UPLOADS_ENABLED",
     "INCOMING_BASE_URL", "INCOMING_EXPECTED_HOST", "THUMBNAIL_INGEST_EXPECTED_HOST", "THUMBNAIL_RENDERER_EXPECTED_HOST",
     "ENVIRONMENT", "TEAM_DOMAIN", "OPERATIONS_AUD", "DELIVERY_BASE_URL", "CLIENT_PORTAL_ORIGINS", "PUBLIC_SHARE_ORIGIN",
-    "PROJECT_ALPHA_BASE_URL", "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED",
+    "PROJECT_ALPHA_BASE_URL", "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED", "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED",
     "PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED", "PROJECT_ALPHA_DELIVERY_GUEST_ENABLED",
     "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED", "CLIENT_HUB_PA_CONTACT_ASSIGNMENTS_ENABLED", "CLIENT_PORTAL_HIERARCHY_V2_ENABLED",
     "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED", "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED",

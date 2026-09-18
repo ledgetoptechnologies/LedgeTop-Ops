@@ -103,6 +103,22 @@ staging origins.
 must be the new portal app audience, never `POLICY_AUD`, `OPERATIONS_AUD`, or
 `CF_ACCESS_AUD`.
 
+### Project-v2 joined-acceptance window
+
+`PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED` is required to be `false` in the
+release-preparation configuration. A separately approved staging-only window
+may set it to `true` only after Operations migrations `0119`–`0122` are applied
+and verified, the disposable PA source/application entry is explicitly enabled,
+and the same administrator has current global `integrations.manage` plus a
+live native `project.shared.sync` grant. Invoke only
+`POST /api/admin/project-alpha/projects/v2/commands` with a command-matching
+`Idempotency-Key`; there is no scheduled or public/client invocation path.
+
+Record exact replay, changed-body conflict, stale/revoked-authority rejection,
+create/update/bind settlement, rollback, and before/after public-link bytes.
+Then restore both the Operations activation flag and the selected connection's
+`enabled` field to false. This staging window does not authorize production.
+
 ## Deferred Mapbox production acceptance
 
 If staging uses the explicit Mapbox deferral, record
