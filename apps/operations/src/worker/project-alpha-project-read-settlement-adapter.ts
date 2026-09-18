@@ -7,9 +7,10 @@ import {
 import { canonicalConnection, uuid, type ProjectAlphaProjectFailure } from "./project-alpha-project-transport";
 
 /**
- * Dormant, authenticated read evidence for a completed 0119 command. This
- * module is intentionally not imported by a route, queue, scheduler, or worker
- * index and 0120 keeps every resulting receipt inactive.
+ * Authenticated read evidence for a completed 0119 command. Its only
+ * production caller is the default-off administrator acceptance composition;
+ * it remains absent from queues, schedulers, service bindings, and the worker
+ * index, and 0120 keeps every resulting receipt inactive until activation.
  */
 export type ProjectAlphaProjectReadSettlementEnvironment = Readonly<{ OPS_DB: D1Database }>;
 type Operation = "create" | "update" | "bind";

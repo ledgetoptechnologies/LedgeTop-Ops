@@ -2,19 +2,59 @@
 
 Updated September 17, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
 
+### September 17, 2026 — default-off joined Project-v2 acceptance mount
+
+- Operations now has one manually invoked, staging-environment-only composition endpoint at
+  `POST /api/admin/project-alpha/projects/v2/commands`. It is hidden unless
+  `ENVIRONMENT="staging"` and
+  `PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED="true"`; the selected entry in
+  deployment-owned `PROJECT_ALPHA_API_V2_CONNECTIONS` must also be explicitly
+  enabled. The checked-in production and staging defaults remain `false`.
+- One bounded, duplicate-member-free request must explicitly name the source,
+  expected application UUID, canonical create/update/bind command, local
+  expectation, reviewed project scopes, and an `Idempotency-Key` identical to
+  the command UUID. Refresh remains unsupported. The route composes the
+  producer, pending dispatcher, authenticated read settlement, and canonical
+  activation in that order. It does not mount the older direct settlement
+  adapter.
+- The route has no UI, GET surface, public/client route, queue, service
+  binding, or scheduler. Existing staff authentication, administrator and
+  same-origin CSRF checks are joined with deny-aware global
+  `integrations.manage`, a second native-staff assertion verification, exact
+  legacy/native identity equality, exact authenticated admission/profile
+  version and email rechecks at write time, and the existing live
+  `project.shared.sync` grant proof. Actor identity and assertion expiry are
+  never accepted from JSON.
+- Every invocation writes a bounded administrative request audit before any PA
+  call and a bounded completion audit after the terminal stage. The existing
+  immutable command, acknowledgement, read-settlement, and activation ledgers
+  remain the idempotency and recovery authority. Responses omit request bodies,
+  credentials, connection topology, preflight capability lists, and raw
+  transport diagnostics.
+- Enabling the flag is not production authority. A staging window still
+  requires applied/verified Operations migrations `0119` through `0122`, an
+  enabled disposable PA connection, the existing distinct native onboarding
+  audience, an admitted administrator with an explicit native project grant,
+  disposable create/update/bind fixtures, rollback evidence, and public-link
+  preservation checks. Restore the flag and selected connection to disabled
+  immediately after the bounded run. Production activation remains prohibited.
+
 ### September 17, 2026 — latest staging evidence checkpoint
 
 - Operations PR82 merged to `main` at `ecf9d24`. It adds the private,
   default-off Project-v2 pending dispatcher and its fail-closed lease,
   terminal-replay, destination-identity, and preservation boundaries. The
-  dispatcher is transport-capable through its injected sender but remains
-  deliberately unmounted, with no deployed production caller or public route.
+  At that merge checkpoint the dispatcher was transport-capable through its
+  injected sender but deliberately unmounted, with no deployed production
+  caller or public route. The newer default-off administrator composition
+  described above supersedes only that source-mount statement.
   It therefore makes no production call and does not mutate a public link or
   activate Project-v2 workflow authority. The authoritative post-merge
   workflow `35291426513` completed successfully at exact head
   `ecf9d24ef839793dd32d98435b48686a865b2e14`; all 10 jobs passed.
 - Operations PR79 merged to `main` at `3f5ec3a`. It adds the dormant Project v2
-  command producer; the producer remains unmounted and makes no network call.
+  command producer; at that checkpoint the producer was unmounted and made no
+  network call.
   Operations PR80 merged to `main` at `2befb68`, adding the Incoming upload
   form's conditional access-code behavior and centered responsive controls.
   The exact combined `main` workflow `35281356118` passed all 10 jobs.
@@ -99,12 +139,11 @@ Updated September 17, 2026. The owner approved implementation and resumption aft
   returned JSON 401, disabled Project inventory returned JSON 404, neither
   redirected or set a cookie, both were `no-store`, and the corresponding PA
   web-log window contained no error or fatal entry.
-- Operations Project-v2 production entrypoints remain deliberately unmounted;
-  an import-graph regression enforces that boundary. Therefore the remaining
-  live gate is direct PA acceptance with disposable fixtures, not evidence of
-  an already active Operations-to-PA synchronization path. Mounting the
-  reviewed adapters and joined reconciliation remains a later, separately
-  reviewed Operations activation step.
+- Operations Project-v2 adapters remain unreachable except through the one
+  default-off administrator composition; an import-graph regression enforces
+  that boundary and continues to prohibit the older settlement adapter. The
+  remaining live gate is still disposable joined acceptance, not evidence of
+  an active production Operations-to-PA synchronization path.
 - A dormant, no-network Operations Project-v2 command producer now reserves a
   deliberately selected source, current staff authority proof, canonical
   request fingerprint, pending outbox row, reservation, event, and settlement
@@ -113,8 +152,9 @@ Updated September 17, 2026. The owner approved implementation and resumption aft
   revoked actors cannot replay, create commands must match the selected
   Directory records, and bind commands must match the native projection hash.
   Independent review found and closed those four fail-closed boundaries; the
-  focused producer/import-graph suite passes **10/10**. The producer remains
-  unmounted and does not send a request, enable a route, or change production.
+  focused producer/import-graph suite passes **10/10**. That historical result
+  predates the default-off administrator composition above and did not itself
+  enable a route or change production.
 - The isolated Directory-only live window has now passed. A dedicated key
   advertised the exact 23 reviewed scopes while every Project flag remained
   dark. The mutable run completed capabilities, paginated inventory, two

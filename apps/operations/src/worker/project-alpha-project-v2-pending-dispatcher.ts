@@ -15,11 +15,12 @@ import type { ProjectAlphaApiV2Connection } from "./project-alpha-api-v2";
 import { uuid, type ProjectAlphaProjectFailure } from "./project-alpha-project-transport";
 
 /**
- * Private, unmounted dispatcher for an already planned Project-v2 command.
+ * Private dispatcher for an already planned Project-v2 command. Its only
+ * production caller is the default-off administrator acceptance composition.
  *
- * This module has no default transport and is deliberately not imported by a
- * route, queue, scheduler, worker entrypoint, or index.  Callers must inject
- * a test-only transport.  In particular, an uncertain result is terminal for
+ * This module has no default transport and is not imported by a queue,
+ * scheduler, service binding, or worker index. Callers must inject transport.
+ * In particular, an uncertain result is terminal for
  * this dispatcher: a later recovery design must establish PA's receipt before
  * any retry can be authorized.
  */
@@ -269,7 +270,7 @@ async function dispatchEnabledProjectAlphaProjectV2PendingCommand(
   }
 }
 
-/** Dispatches exactly one producer-created pending command through injected test transport. */
+/** Dispatches exactly one producer-created pending command through injected transport. */
 export async function dispatchProjectAlphaProjectV2PendingCommand(
   env: ProjectAlphaProjectV2PendingDispatcherEnvironment,
   sourceId: string,

@@ -1,8 +1,9 @@
 /**
- * Private, unmounted planner for Project Alpha project-v2 commands.
+ * Private planner for Project Alpha project-v2 commands. Its only production
+ * caller is the default-off administrator joined-acceptance composition route.
  *
  * This deliberately has no fetcher, route, queue, scheduler, or transport
- * dependency.  It only reserves a canonical request for a deliberately
+ * dependency. It only reserves a canonical request for a deliberately
  * selected configured source.  A later reviewed dispatcher may consume the
  * pending outbox row; an outage therefore leaves this exact command pending.
  */
@@ -12,7 +13,15 @@ import { resolveProjectAlphaApiV2Connection, type ProjectAlphaApiV2ConnectionEnv
 export type ProjectAlphaProjectV2CommandProducerEnvironment = ProjectAlphaApiV2ConnectionEnvironment & Readonly<{ OPS_DB: D1Database }>;
 type Operation = "create" | "update" | "bind";
 type Scope = Readonly<{ scopeKind: "business_area"; businessAreaId: string; divisionId: null } | { scopeKind: "division"; businessAreaId: string; divisionId: string }>;
-type Actor = Readonly<{ staffId: string; accessSubject: string; verifiedUntil: string; scopes: readonly Scope[] }>;
+type Actor = Readonly<{
+  staffId: string;
+  accessSubject: string;
+  email: string;
+  admissionVersion: number;
+  profileVersion: number;
+  verifiedUntil: string;
+  scopes: readonly Scope[];
+}>;
 type LocalExpectation = Readonly<{ expectedLocalVersion: number; expectedLocalProjectionSha256: string | null }>;
 
 export type ProjectAlphaProjectV2CommandProducerAction =
@@ -46,6 +55,9 @@ function validScope(value: unknown): value is Scope {
 function validActor(value: Actor): boolean {
   return typeof value.staffId === "string" && value.staffId.length > 0 && value.staffId.length <= 191
     && typeof value.accessSubject === "string" && value.accessSubject.length > 0 && value.accessSubject.length <= 764
+    && typeof value.email === "string" && value.email.length >= 3 && value.email.length <= 254
+    && Number.isSafeInteger(value.admissionVersion) && value.admissionVersion >= 1
+    && Number.isSafeInteger(value.profileVersion) && value.profileVersion >= 1
     && typeof value.verifiedUntil === "string" && INSTANT.test(value.verifiedUntil)
     && Number.isFinite(Date.parse(value.verifiedUntil)) && Date.parse(value.verifiedUntil) > Date.now()
     && Array.isArray(value.scopes) && value.scopes.length <= 128 && value.scopes.every(validScope);
@@ -133,7 +145,7 @@ async function exactLiveReplay(
       AND proof.actor_admission_version=? AND proof.actor_profile_version=? AND proof.actor_email=?
       AND proof.grant_generation=? AND proof.scopes_json=? AND proof.verified_until>strftime('%Y-%m-%dT%H:%M:%fZ','now')`)
     .bind((JSON.parse(body) as { commandId: string }).commandId, actor.staffId, actor.accessSubject,
-      current.admission_version, current.profile_version, current.email, current.generation, scopesJson).first("present");
+      actor.admissionVersion, actor.profileVersion, actor.email, current.generation, scopesJson).first("present");
 }
 function sameReservation(previous: Awaited<ReturnType<typeof prior>>, connection: Connection, operation: Operation, body: string, requestSha256: string): boolean {
   return !!previous && previous.command_json === body && previous.operation === operation
@@ -168,7 +180,9 @@ export async function planProjectAlphaProjectV2Command(
 
   try {
     const currentActor = await actorState(env.OPS_DB, action.actor);
-    if (!currentActor) return { status: "blocked", reason: "authority" };
+    if (!currentActor || currentActor.admission_version !== action.actor.admissionVersion
+      || currentActor.profile_version !== action.actor.profileVersion || currentActor.email !== action.actor.email)
+      return { status: "blocked", reason: "authority" };
     const previous = await prior(env.OPS_DB, canonical.command.commandId);
     if (previous) {
       if (!sameReservation(previous, connection, action.operation, canonical.body, requestSha256)) return { status: "conflict", reason: "command_id" };
@@ -216,7 +230,8 @@ export async function planProjectAlphaProjectV2Command(
       env.OPS_DB.prepare(`INSERT INTO native_project_command_proofs(command_id,external_project_id,actor_staff_id,actor_access_subject,
         actor_admission_version,actor_profile_version,actor_email,verified_until,grant_generation,scopes_json)
         VALUES(?,?,?,?,?,?,?,?,?,?)`).bind(canonical.command.commandId, canonical.command.externalId, action.actor.staffId,
-        action.actor.accessSubject, currentActor.admission_version, currentActor.profile_version, currentActor.email, action.actor.verifiedUntil, currentActor.generation, scopesJson),
+        action.actor.accessSubject, action.actor.admissionVersion, action.actor.profileVersion, action.actor.email,
+        action.actor.verifiedUntil, currentActor.generation, scopesJson),
       env.OPS_DB.prepare(`INSERT INTO project_alpha_project_outbox(command_id,external_project_id,operation,command_json,source_id,
         application_id,destination_base_url,expected_source_instance_id,origin_snapshot_json,state,attempts,next_attempt_at,expected_history_epoch_id)
         VALUES(?,?,?,?,?,?,?,?,?,'pending',0,?,?)`).bind(canonical.command.commandId, canonical.command.externalId,
@@ -242,7 +257,9 @@ export async function planProjectAlphaProjectV2Command(
       const currentActor = await actorState(env.OPS_DB, action.actor);
       if (replay) {
         if (!sameReservation(replay, connection, action.operation, canonical.body, requestSha256)) return { status: "conflict", reason: "command_id" };
-        if (!currentActor || !await exactLiveReplay(env.OPS_DB, replay, connection, action.operation, canonical.body, requestSha256,
+        if (!currentActor || currentActor.admission_version !== action.actor.admissionVersion
+          || currentActor.profile_version !== action.actor.profileVersion || currentActor.email !== action.actor.email
+          || !await exactLiveReplay(env.OPS_DB, replay, connection, action.operation, canonical.body, requestSha256,
           action.actor, currentActor, scopesJson)) return { status: "blocked", reason: "authority" };
         return { status: "queued", commandId: canonical.command.commandId, requestSha256, replayed: true };
       }

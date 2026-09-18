@@ -73,6 +73,8 @@ not become active deployments.
 
 - approved Project Alpha staging HTTPS origin;
 - staging Access group ID and exact group name;
+- a dedicated native-staff onboarding Access audience, distinct from the
+  Operations staff, Delivery, Ops Sync, Client Portal, and production audiences;
 - Ops Sync staging service-auth policy and Project Alpha service-token owner;
 - Delivery, Operations, Ops Sync, and self-hosted Viewer staging DNS readiness;
 - `client-staging.ledgetopdroneservices.com` and
@@ -102,6 +104,24 @@ staging origins.
 `CLIENT_ACCESS_AUD`
 must be the new portal app audience, never `POLICY_AUD`, `OPERATIONS_AUD`, or
 `CF_ACCESS_AUD`.
+
+### Project-v2 joined-acceptance window
+
+The route also requires `ENVIRONMENT="staging"` in code and stays hidden in
+production even if its mutable flag drifts.
+`PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED` is required to be `false` in the
+release-preparation configuration. A separately approved staging-only window
+may set it to `true` only after Operations migrations `0119`–`0122` are applied
+and verified, the disposable PA source/application entry is explicitly enabled,
+and the same administrator has current global `integrations.manage` plus a
+live native `project.shared.sync` grant. Invoke only
+`POST /api/admin/project-alpha/projects/v2/commands` with a command-matching
+`Idempotency-Key`; there is no scheduled or public/client invocation path.
+
+Record exact replay, changed-body conflict, stale/revoked-authority rejection,
+create/update/bind settlement, rollback, and before/after public-link bytes.
+Then restore both the Operations activation flag and the selected connection's
+`enabled` field to false. This staging window does not authorize production.
 
 ## Deferred Mapbox production acceptance
 
@@ -696,6 +716,25 @@ evidence verification is post-deployment so it can bind real version IDs:
 & '.\apps\client\node_modules\.bin\wrangler.cmd' whoami
 npm.cmd run staging:release:prepare
 ```
+
+`versions upload` cannot create a Worker that does not exist. If an exact
+staging Worker name is absent, stop and obtain separate approval for its one-time
+baseline creation. Only after migrations, Access, bindings, secrets, remote
+resource inventory, the complete default-false flag set, and the checks above
+are verified, run the explicit-config dry-run and then one explicit-config
+baseline deployment:
+
+```powershell
+& '.\apps\operations\node_modules\.bin\wrangler.cmd' deploy --dry-run --config apps/operations/wrangler.staging.json
+& '.\apps\operations\node_modules\.bin\wrangler.cmd' deploy --strict --config apps/operations/wrangler.staging.json --secrets-file '.backups\operations-staging.secrets.json'
+```
+
+This exception immediately creates and deploys routes and triggers; it is not a
+reviewable upload and must never use a default or production config. Record the
+created baseline version ID, verify the disabled endpoint returns `404`, and use
+the normal `versions upload` plus explicitly approved version deployment flow
+for every subsequent version. Do not repeat the creation exception once the
+Worker exists.
 
 ```powershell
 & '.\apps\client\node_modules\.bin\wrangler.cmd' versions upload --strict --config apps/client/wrangler.staging.json --secrets-file '.backups\delivery-staging.secrets.json'
