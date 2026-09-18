@@ -137,6 +137,17 @@ post-deployment evidence and activation dependencies are checked later with
 `npm run staging:release:verify`; this avoids requiring a deployed version ID
 before that version exists.
 
+## Bounded native authority for joined Project-v2 acceptance
+
+The fresh-D1 bootstrap creates the synthetic legacy owner but intentionally does
+not create native admission or Project authority. Before the separately approved
+joined Project-v2 acceptance window, follow the
+[staging native authority packet](native-authority-packet.md). Its generator
+creates ignored, reviewable provision and revoke migrations with separate
+configs and a dedicated staging-only migration ledger. It does not expose an
+issuer route, alter a normal Access token, touch the canonical migration chain,
+or perform a remote action. Raw D1 inserts or updates are not an alternative.
+
 Evidence collection normally enables one staging flag. The Viewer processing,
 public-share, Client-session, and Client-share cases require exact multi-flag
 dependency windows because their routes are deliberately gated in more than
