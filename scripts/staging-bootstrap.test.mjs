@@ -190,6 +190,6 @@ test("builds the complete checked-in 132/122 chains with both Client 0199 filena
   assert.equal(artifacts.operations.files.at(-1).name, "0122_project_alpha_project_v2_canonical_activation.sql");
   assert.deepEqual(artifacts.delivery.manifest.transformedFiles, ["0002_seed_initial_staff.sql"]);
   assert.deepEqual(artifacts.operations.manifest.transformedFiles, ["0002_seed_acl.sql"]);
-  assert.equal(artifacts.delivery.manifest.sourceChainSha256, "4ed26f02cdb1d611e2051957a28b89b647a1034a0b6703d187f65449cff74bcf");
-  assert.equal(artifacts.operations.manifest.sourceChainSha256, "c56c417c5fd90c6b6ea46bb643691b7dae2e0a1b6510b52112967d9e5c41b83b");
+  assert.equal(artifacts.delivery.manifest.sourceChainSha256, "c5b6271f9edff677237c45734bbf1b6eeebaaf1c7256b6b561ea1e2c03adb4a0");
+  assert.equal(artifacts.operations.manifest.sourceChainSha256, "20f127ae3193884494a021ac2f1851f6c2db06834d6f94498850d315e02df5d7");
 });

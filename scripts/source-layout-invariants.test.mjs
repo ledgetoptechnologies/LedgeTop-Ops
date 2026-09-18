@@ -19,6 +19,103 @@ function filesUnder(relativeDirectory, predicate = () => true) {
   });
 }
 
+function sqlTokens(sql) {
+  const tokens = [];
+  for (let index = 0; index < sql.length;) {
+    const current = sql[index];
+    const next = sql[index + 1];
+    if (/\s/.test(current)) {
+      index += 1;
+      continue;
+    }
+    if (current === "-" && next === "-") {
+      index = sql.indexOf("\n", index + 2);
+      if (index === -1) break;
+      continue;
+    }
+    if (current === "/" && next === "*") {
+      index = sql.indexOf("*/", index + 2);
+      if (index === -1) break;
+      index += 2;
+      continue;
+    }
+    if (current === "'" || current === '"' || current === "`") {
+      const marker = current;
+      index += 1;
+      while (index < sql.length) {
+        if (sql[index] === marker) {
+          if (sql[index + 1] === marker) {
+            index += 2;
+            continue;
+          }
+          index += 1;
+          break;
+        }
+        index += 1;
+      }
+      continue;
+    }
+    if (/[A-Za-z_]/.test(current)) {
+      const start = index;
+      index += 1;
+      while (index < sql.length && /[A-Za-z0-9_$]/.test(sql[index])) index += 1;
+      tokens.push(sql.slice(start, index).toUpperCase());
+      continue;
+    }
+    tokens.push(current);
+    index += 1;
+  }
+  return tokens;
+}
+
+function remoteIncompatibleTriggerCaseGuard(tokens) {
+  let trigger = false;
+  let triggerHeader = false;
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (!trigger) {
+      if (token === "CREATE") triggerHeader = true;
+      else if (triggerHeader && token === "TRIGGER") trigger = true;
+      else if (token === ";") triggerHeader = false;
+      continue;
+    }
+    if (token === "BEGIN") {
+      for (let bodyIndex = index + 1, depth = 0; bodyIndex < tokens.length; bodyIndex += 1) {
+        const bodyToken = tokens[bodyIndex];
+        const endsCase = bodyToken === "END" && depth > 0;
+        if (bodyToken === "CASE") depth += 1;
+        else if (endsCase) depth -= 1;
+        if (bodyToken === "SELECT") {
+          let statementCaseDepth = 0;
+          let hasCase = false;
+          let hasRaise = false;
+          for (let statementIndex = bodyIndex + 1; statementIndex < tokens.length; statementIndex += 1) {
+            const statementToken = tokens[statementIndex];
+            if (statementToken === "CASE") {
+              statementCaseDepth += 1;
+              hasCase = true;
+            } else if (statementToken === "RAISE") {
+              hasRaise = true;
+            } else if (statementToken === "END" && statementCaseDepth > 0) {
+              statementCaseDepth -= 1;
+            } else if (statementToken === ";" && statementCaseDepth === 0) {
+              if (hasCase && hasRaise) return true;
+              break;
+            }
+          }
+        }
+        if (bodyToken === "END" && !endsCase && tokens[bodyIndex + 1] === ";") {
+          index = bodyIndex + 1;
+          trigger = false;
+          triggerHeader = false;
+          break;
+        }
+      }
+    }
+  }
+  return false;
+}
+
 test("bulk ZIP release evidence matches the one-pass archive contract", () => {
   const runbook = read("docs/operations/bulk-zip-performance.md");
   assert(runbook.includes("Apply migration 0196 before activating"));
@@ -299,6 +396,63 @@ test("the Operations business-party lifecycle migration stays LF-only for D1 tri
   assert.match(read(".gitattributes"), /^apps\/operations\/migrations\/\*\.sql text eol=lf$/m);
   const bytes = fs.readFileSync(path.join(root, "apps/operations/migrations/0048_business_party_lifecycle.sql"));
   assert.equal(bytes.includes(13), false);
+});
+
+test("migration triggers avoid D1's nested SELECT CASE/RAISE transport form", () => {
+  const migrationDirectories = ["apps/client/migrations", "apps/operations/migrations"];
+  for (const migrationDirectory of migrationDirectories) {
+    for (const relative of filesUnder(migrationDirectory, candidate => candidate.endsWith(".sql"))) {
+      assert.equal(
+        remoteIncompatibleTriggerCaseGuard(sqlTokens(read(relative))),
+        false,
+        `${relative} uses SELECT CASE … THEN RAISE … END inside a trigger; use SELECT RAISE(...) WHERE <predicate> instead`,
+      );
+    }
+  }
+
+  assert.equal(remoteIncompatibleTriggerCaseGuard(sqlTokens(`
+    CREATE TRIGGER example BEFORE INSERT ON test
+    BEGIN
+      SELECT CASE WHEN NEW.id IS NULL THEN RAISE(ABORT, 'missing') END;
+    END;
+  `)), true);
+  assert.equal(remoteIncompatibleTriggerCaseGuard(sqlTokens(`
+    SELECT CASE WHEN 1 THEN 'top-level' END;
+    CREATE TRIGGER example BEFORE INSERT ON test
+    WHEN CASE WHEN NEW.id IS NULL THEN 1 ELSE 0 END
+    BEGIN SELECT RAISE(ABORT, 'missing') WHERE NEW.id IS NULL; END;
+  `)), false);
+  assert.equal(remoteIncompatibleTriggerCaseGuard(sqlTokens(`
+    CREATE TRIGGER example BEFORE INSERT ON test
+    BEGIN
+      UPDATE test SET label=CASE WHEN NEW.id IS NULL THEN 'missing' ELSE 'present' END;
+      SELECT CASE WHEN NEW.id IS NULL THEN RAISE(ABORT, 'missing') END;
+    END;
+  `)), true);
+  assert.equal(remoteIncompatibleTriggerCaseGuard(sqlTokens(`
+    CREATE TRIGGER example BEFORE INSERT ON test
+    BEGIN
+      SELECT (CASE WHEN NEW.id IS NULL THEN RAISE(ABORT, 'missing') END);
+    END;
+  `)), true);
+  assert.equal(remoteIncompatibleTriggerCaseGuard(sqlTokens(`
+    CREATE TRIGGER example BEFORE INSERT ON test
+    BEGIN
+      SELECT DISTINCT CASE WHEN NEW.id IS NULL THEN RAISE(ABORT, 'missing') END;
+    END;
+  `)), true);
+  assert.equal(remoteIncompatibleTriggerCaseGuard(sqlTokens(`
+    CREATE TRIGGER example BEFORE INSERT ON test
+    BEGIN
+      SELECT ALL CASE WHEN NEW.id IS NULL THEN RAISE(ABORT, 'missing') END;
+    END;
+  `)), true);
+  assert.equal(remoteIncompatibleTriggerCaseGuard(sqlTokens(`
+    CREATE TRIGGER example BEFORE INSERT ON test
+    BEGIN
+      SELECT CASE WHEN NEW.id IS NULL THEN 0 ELSE 1 END;
+    END;
+  `)), false);
 });
 
 test("the Project Alpha handoff stays pinned to the reviewed compatibility corpus", () => {

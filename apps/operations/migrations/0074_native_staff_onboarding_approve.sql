@@ -388,5 +388,5 @@ BEGIN
     terminal_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),approval_command_id=NEW.command_id
   WHERE onboarding_id=NEW.target_onboarding_id AND proposed_staff_id=NEW.target_proposed_staff_id
     AND state='claimed' AND version=2 AND expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now');
-  SELECT CASE WHEN changes()<>1 THEN RAISE(ABORT,'onboarding approval terminal transition failed') END;
+  SELECT RAISE(ABORT,'onboarding approval terminal transition failed') WHERE changes()<>1;
 END;

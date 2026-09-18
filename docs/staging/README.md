@@ -130,6 +130,17 @@ migrations, one synthetic owner in each database, the Operations owner role and
 portable ACL catalog, and an empty `PRAGMA foreign_key_check`. Record those
 results in `migrations.freshBootstrap` without storing the owner email.
 
+Cloudflare's remote D1 migration transport does not accept a nested
+`SELECT CASE ... RAISE(...) END` statement inside a trigger even though local
+SQLite does. The canonical chains use the equivalent portable form
+`SELECT RAISE(...) WHERE <predicate>`, and the source-layout invariant rejects
+reintroducing the remote-incompatible form. The September 18, 2026 fresh-chain
+rehearsal applied all 132 Client and 122 Operations migrations through Wrangler
+to isolated staging D1 databases, confirmed no pending migrations on a second
+list, and returned an empty foreign-key check. Existing databases continue to
+skip those already-recorded migration names; never remove or replay their
+ledger rows.
+
 The preparation command validates all configs and the sidecar secret-name
 manifest, then runs checks, tests, builds, browser tests, and explicit-config
 dry-runs. It intentionally performs no Cloudflare operation. Complete
