@@ -7,6 +7,16 @@ The client-specific sequence is in
 
 ## September 17, 2026 staging evidence checkpoint
 
+Operations PR82 (`ecf9d24`) is merged to `main` and adds the private,
+default-off Project-v2 pending dispatcher. Its entrypoints remain unmounted;
+the dispatcher is transport-capable through its injected sender, but no
+deployed production caller can invoke it. It has no mounted public route and
+does not currently make production calls or activate Project-v2 authority.
+Migration `0122` exists in source; remote application and runtime activation
+remain separate gates. The authoritative post-merge workflow
+`35291426513` completed successfully at exact head
+`ecf9d24ef839793dd32d98435b48686a865b2e14`; all 10 jobs passed.
+
 Operations PR79 (`3f5ec3a`) and PR80 (`2befb68`) are merged to `main`; the
 exact combined workflow `35281356118` passed all 10 jobs. PR79's Project v2
 command producer remains dormant, unmounted, and non-networked. PR80 adds
@@ -20,9 +30,11 @@ Docker publish `35283843624` plus Trivy are green. The exact `e260abe` staging
 rebuild is healthy; unauthenticated capabilities are JSON 401 with `no-store`
 and no cookie, and the web-log window has no errors or warnings.
 
-The remaining gate is a temporary Project-only key created or rebound to
+The remaining gate is a temporary Project-only key created or rebound to the
+shared Directory application identity
 `150cb108-af37-4973-ab6e-f6d991a6e8c8`, followed by live Project acceptance,
-then binding/refresh/lifecycle/public-link parity. PA `main` is not merged.
+then binding/refresh/lifecycle/public-link parity. PA PR184 remains unmerged
+at head `e260abeb`; PA `main` is not merged.
 Do not record secrets or client data or claim production activation.
 
 ## Current credential boundary
