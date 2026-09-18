@@ -66,5 +66,6 @@ test("keeps the original primary status and manual sync available while no sourc
   const card = page.getByRole("region", { name: "Primary connection" });
   await expect(card).toContainText("original deployment configuration");
   await card.getByRole("button", { name: "Sync primary now" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Primary connection synchronization finished." })).toBeVisible();
   expect(requests.filter(request => request.method !== "GET")).toEqual([{ path: `${endpoint}/project-alpha%3Aprimary/sync`, method: "POST", body: {} }]);
 });
