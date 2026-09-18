@@ -16,7 +16,7 @@ export const BOOTSTRAP_APPS = Object.freeze({
     seed: "0002_seed_initial_staff.sql",
     migrationCount: 132,
     migrationNamesSha256: "b81e6d679711da90f85ce9413e9627ee205f9b294173c70fdc0148376b158e4e",
-    migrationContentsSha256: "4ed26f02cdb1d611e2051957a28b89b647a1034a0b6703d187f65449cff74bcf",
+    migrationContentsSha256: "c5b6271f9edff677237c45734bbf1b6eeebaaf1c7256b6b561ea1e2c03adb4a0",
   }),
   operations: Object.freeze({
     source: "operations",
@@ -26,7 +26,7 @@ export const BOOTSTRAP_APPS = Object.freeze({
     seed: "0002_seed_acl.sql",
     migrationCount: 122,
     migrationNamesSha256: "a4f9d709bfb3b1ba96bf3acadb370eac6465e2b5ec9fef7d8bb0db20792de71a",
-    migrationContentsSha256: "c56c417c5fd90c6b6ea46bb643691b7dae2e0a1b6510b52112967d9e5c41b83b",
+    migrationContentsSha256: "20f127ae3193884494a021ac2f1851f6c2db06834d6f94498850d315e02df5d7",
   }),
 });
 

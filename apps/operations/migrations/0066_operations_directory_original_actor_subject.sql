@@ -10,15 +10,15 @@ CREATE TRIGGER operations_directory_audit_original_subject_required
 BEFORE INSERT ON operations_directory_audit
 WHEN NEW.actor_type = 'staff'
 BEGIN
-  SELECT CASE WHEN NEW.original_verified_access_subject IS NULL
+  SELECT RAISE(ABORT, 'directory audit original subject is not authorized')
+    WHERE NEW.original_verified_access_subject IS NULL
       OR length(NEW.original_verified_access_subject) NOT BETWEEN 1 AND 191
       OR NOT EXISTS (
         SELECT 1 FROM operations_directory_write_fences fence
         WHERE fence.mutation_id = NEW.mutation_id
           AND fence.actor_id = NEW.actor_id
           AND fence.bound_access_subject = NEW.original_verified_access_subject
-      )
-    THEN RAISE(ABORT, 'directory audit original subject is not authorized') END;
+      );
 END;
 
 CREATE TRIGGER operations_directory_audit_system_subject_null

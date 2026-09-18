@@ -21,11 +21,11 @@ CREATE INDEX idx_client_folder_notification_batch_controls_batch
 CREATE TRIGGER client_folder_notification_batch_control_result
 BEFORE INSERT ON client_folder_notification_batch_controls
 BEGIN
-  SELECT CASE WHEN NOT EXISTS (
+  SELECT RAISE(ABORT,'notification-control-result-mismatch') WHERE NOT EXISTS (
     SELECT 1 FROM client_folder_notification_batches batch
     WHERE batch.id=NEW.batch_id AND batch.revision=NEW.result_revision
       AND batch.status=NEW.result_status
       AND ((NEW.action='cancel' AND NEW.result_status='cancelled')
         OR (NEW.action='send-now' AND NEW.result_status='pending'))
-  ) THEN RAISE(ABORT,'notification-control-result-mismatch') END;
+  );
 END;

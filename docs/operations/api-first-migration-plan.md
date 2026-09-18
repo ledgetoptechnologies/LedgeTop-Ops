@@ -5482,3 +5482,32 @@ pending; this requirement does not claim a deployed UI change.
   passes **851 tests / 6,754 assertions, 94 skipped**. This is source-level
   proof, not a real-MySQL/staging concurrency acceptance. Initial unbound-key
   creation and first atomic application/key bind need no separate increment.
+
+### September 18 — Project lifecycle and fresh-D1 staging gates
+
+- Project lifecycle acceptance passed against the bound PA staging application:
+  archive advanced revision 4 to 5, an exact idempotency replay returned the
+  same result, and a changed-body replay returned 409; restore advanced revision
+  5 to 6 with the same replay/conflict behavior. The projection hash remained
+  unchanged. Archive revoked the existing public presentation, and restore did
+  not silently republish it. No credential or private public-link URL is stored
+  in the evidence.
+- The authenticated joined Operations-to-PA acceptance harness is merged into
+  Operations main in PR 90. It is staging-origin-only and mutation-gated, uses
+  the verified signed-in Operations principal plus CSRF/origin enforcement,
+  creates only a disposable project, proves exact replay and changed-body
+  conflict behavior, and compares an existing Operations public link before
+  and after. Running it still requires the staging Operations/Client Workers,
+  a bounded native-authority packet, and an existing 200 Operations-side public
+  link; it does not accept the PA lifecycle fixture as a substitute.
+- A new empty-D1 rehearsal exposed that Wrangler's remote D1 transport rejects
+  nested trigger `SELECT CASE ... RAISE(...) END` statements that local SQLite
+  accepts. Six historical migration definitions were changed only to the
+  equivalent `SELECT RAISE(...) WHERE <same predicate>` form, and a lexer-based
+  repository invariant now prevents the incompatible form from returning.
+  Reviewed bootstrap chain hashes were advanced. Isolated staging D1 databases
+  accepted the complete 132-row Client chain (both `0199` filenames, final
+  `0213`) and 122-row Operations chain (final `0122`); second migration lists
+  were empty, both foreign-key checks were clean, and each database contained
+  exactly one synthetic staging owner. Existing applied D1 ledgers are not
+  replayed or rewritten.
