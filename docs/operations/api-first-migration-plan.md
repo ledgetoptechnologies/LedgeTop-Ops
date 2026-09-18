@@ -20,19 +20,21 @@ Updated September 18, 2026. The owner approved implementation and resumption aft
   reviewed capabilities and Directory read/create/write/relationship/
   lifecycle/binding/inventory scopes. Its one-time secret is retained only in
   a Windows DPAPI-protected file outside the repository; decryption was checked
-  without printing the value and no plaintext copy was persisted. Key #9 is
-  not yet application-bound: its LAN capabilities probe fails closed with
-  HTTP 403. The host operator must dry-run and then bind it to existing staging
-  application `150cb108-af37-4973-ab6e-f6d991a6e8c8` before the Operations
-  connection or bootstrap gate is enabled. Existing key #5 remains active
-  until the replacement is bound and verified; it must not be revoked merely
-  because its one-time value is unavailable.
-- PA staging itself is healthy over LAN and its control API (`200`), while the
-  public staging hostname currently returns `404`. Joined Cloudflare Worker
-  acceptance is therefore blocked until the tunnel ingress again maps
-  `pa-staging.ledgetoptechnologies.com` to `http://localhost:1628` before the
-  catch-all and the tunnel service is restarted. LAN health is not accepted as
-  evidence that a Cloudflare-hosted Operations Worker can reach PA.
+  without printing the value and no plaintext copy was persisted. The binding
+  dry run and explicit apply completed; an authenticated capabilities probe now
+  returns HTTP 200 with the expected source, application, and history identity.
+  Existing key #5 remains active until the replacement completes acceptance;
+  it must not be revoked merely because its one-time value is unavailable.
+- PA staging is healthy over LAN and its control API, and the restored tunnel
+  ingress now returns HTTP 200 at the public staging hostname. The first live
+  key-#9 Directory rehearsal nevertheless failed closed before mutation with
+  `directory_capabilities_contract_mismatch`: the active PA server window
+  advertised only `api.capabilities.read`. The next host action is the exact
+  Directory-only feature-flag window; after its 23-route contract is observed,
+  run the full Directory rehearsal and governed Operations bootstrap, disable
+  every Directory flag, and switch to the Project-only joined window. Local
+  acceptance tooling passes 45/45 Directory and 6/6 joined Project tests; these
+  are not substitutes for the pending live proofs.
 - Project Alpha PR184 remains open at
   `ff42c3432f39e50e92058b21d7e4942c26f5b355`; CI, CodeQL, and Gitleaks are
   green and GitHub reports it cleanly mergeable. It must remain unmerged until
