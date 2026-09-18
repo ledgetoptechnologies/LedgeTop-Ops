@@ -27,6 +27,8 @@ test("incoming page keeps protected access and compact Turnstile/drop content in
   await page.getByLabel("Access code").fill("code");
   await page.getByRole("button", { name: "Continue securely" }).click();
   const drop = page.locator("#drop"), help = page.locator("#drop-help");
+  await expect(drop).toBeVisible();
+  await expect(help).toBeVisible();
   const [dropBox, helpBox] = await Promise.all([drop.boundingBox(), help.boundingBox()]);
   expect(dropBox).not.toBeNull();
   expect(helpBox).not.toBeNull();
