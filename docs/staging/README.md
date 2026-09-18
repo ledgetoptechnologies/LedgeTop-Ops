@@ -139,6 +139,12 @@ before that version exists.
 
 ## Bounded native authority for joined Project-v2 acceptance
 
+The authenticated Operations-side live command check is documented in
+[ops-project-v2-joined-acceptance.md](ops-project-v2-joined-acceptance.md). It
+is a manually invoked, mutation-gated staging harness with exact idempotency
+replay and read-settlement/canonical-activation evidence; it never accepts a
+production origin or stores the private public-link URL.
+
 The fresh-D1 bootstrap creates the synthetic legacy owner but intentionally does
 not create native admission or Project authority. Before the separately approved
 joined Project-v2 acceptance window, follow the
