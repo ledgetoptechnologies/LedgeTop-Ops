@@ -30,12 +30,33 @@ Docker publish `35283843624` plus Trivy are green. The exact `e260abe` staging
 rebuild is healthy; unauthenticated capabilities are JSON 401 with `no-store`
 and no cookie, and the web-log window has no errors or warnings.
 
-The remaining gate is a temporary Project-only key created or rebound to the
-shared Directory application identity
+At the September 17 checkpoint, the next gate was a temporary Project-only key
+created or rebound to the shared Directory application identity
 `150cb108-af37-4973-ab6e-f6d991a6e8c8`, followed by live Project acceptance,
 then binding/refresh/lifecycle/public-link parity. PA PR184 remains unmerged
 at head `e260abeb`; PA `main` is not merged.
 Do not record secrets or client data or claim production activation.
+
+## September 18, 2026 Project lifecycle checkpoint
+
+The Project-only application key is bound to the shared staging application
+identity and the base Project acceptance, browser/API conflict proof, and
+archive/restore rehearsal have passed. The lifecycle window advertised exactly
+the seven selected Project routes plus capability discovery. The exact reviewed
+fixture advanced from revision `4` to `5` on archive and to `6` on restore;
+exact replays were idempotent and changed valid bodies under the same command
+IDs returned `409`. Its synthetic public link changed `200 -> 404 -> 404`, so
+restore did not silently republish it. The lifecycle-only runner did not call
+inventory, create, profile update, or binding status and therefore preserved
+the intentional stale-binding conflict evidence. Credentials, profile bodies,
+and the public-link token remain outside the repository.
+The sanitized request IDs, body hashes, revisions and status transitions are
+retained in `pa-api-v2-project-lifecycle-evidence-2026-09-18.json`.
+
+This is staging evidence only. Before release, disable the temporary archive
+and restore flags, remove those two temporary key scopes, prove a least-
+privilege denial, and complete the joined Operations settlement/reconciliation
+and rollback rehearsal. PA PR184 remains unmerged until those gates pass.
 
 ## Current credential boundary
 

@@ -229,13 +229,20 @@ Updated September 17, 2026. The owner approved implementation and resumption aft
   the expected Project title. That browser change advanced the Project to
   revision `4` without changing the API projection hash. The URL token is not
   retained in this repository.
-- Lifecycle acceptance remains open. Key `#6` now has only the additional
-  Project archive and restore scopes needed for that rehearsal, but the two
-  matching staging feature flags remain off. Enable only those two flags,
-  rerun the reviewed archive/restore fixture against revision `4`, verify
-  `200 -> 404 -> 404` public-link behavior, then turn the flags back off.
-  This scope addition advanced the application authorization generation and
-  invalidated earlier generation evidence as designed.
+- Lifecycle acceptance passed against the exact reviewed disposable fixture at
+  revision `4`. Capability discovery advertised exactly the seven selected
+  Project routes plus capability discovery (eight endpoints and eight grants),
+  with no Directory or unrelated Project route. Archive advanced revision
+  `4 -> 5`; exact replay returned the same revision and result; a changed valid
+  body under the same command ID returned `409`. Restore then advanced revision
+  `5 -> 6`, with the same replay and changed-body conflict behavior. The
+  synthetic public link transitioned `200 -> 404 -> 404`: archive revoked its
+  presentation and restore deliberately did not republish it. The projection
+  hash remained the reviewed value. The constrained runner returned before
+  inventory, create, profile-write, or binding-status calls, so the stale
+  dual-editor binding evidence was not refreshed or overwritten. The sanitized
+  machine-readable report is retained in
+  `docs/staging/pa-api-v2-project-lifecycle-evidence-2026-09-18.json`.
 - A fresh pre-lifecycle check found the staging web and database containers
   healthy, the migration container exited successfully, and the last-hour web
   log window contained no error, warning, fatal or exception line. The
@@ -249,8 +256,6 @@ Updated September 17, 2026. The owner approved implementation and resumption aft
 
 #### Remaining release gates
 
-- Complete the narrowly scoped Project archive/restore rehearsal and verify
-  the synthetic public link before archive, while archived and after restore.
 - Exercise the joined Operations settlement/reconciliation path and its
   rollback after the direct PA acceptance remains stable. Direct PA success is
   not proof that the currently unmounted Operations adapter is ready.

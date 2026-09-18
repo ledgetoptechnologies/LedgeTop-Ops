@@ -93,6 +93,23 @@ test("rejects mutable configuration before network activity", () => {
   assert.throws(() => parseAcceptanceConfig(env({ PA_ACCEPTANCE_PREFIX: "not-clear" })), { code: "invalid_pa_acceptance_prefix" });
   assert.throws(() => parseAcceptanceConfig(env({ PA_CF_ACCESS_CLIENT_ID: "id" })), { code: "incomplete_cloudflare_access_service_credentials" });
   assert.throws(() => parseAcceptanceConfig({ PA_BASE_URL: "https://pa-staging.example.test", PA_API_TOKEN: token }), { code: "missing_pa_source_instance_id" });
+  assert.throws(() => parseAcceptanceConfig(env({ PA_ACCEPTANCE_LIFECYCLE_ONLY: "allow" })), { code: "lifecycle_only_requires_fixture" });
+  assert.throws(() => parseAcceptanceConfig(env({
+    PA_ACCEPTANCE_LIFECYCLE_ONLY: "allow", PA_ACCEPTANCE_ALLOW_LIFECYCLE: "allow",
+    PA_ACCEPTANCE_LIFECYCLE_FIXTURE_JSON: JSON.stringify({ projectPublicId: projectId, expectedRevision: "2", expectedProjectionSha256: updatedHash, expectedName: `${prefix} Project`, publicLinkUrl: "https://public.example.test/project", enabledStatus: 200, disabledStatus: 404 }),
+    PA_ACCEPTANCE_BIND_COMMAND_JSON: JSON.stringify({ externalId: `${prefix}:bound`, expectedPublicId: projectId, expectedName: "Bound project" }),
+  })), { code: "lifecycle_only_rejects_binding_commands" });
+});
+
+test("accepts lifecycle-only configuration without create or update fixtures", () => {
+  const config = parseAcceptanceConfig(env({
+    PA_ACCEPTANCE_LIFECYCLE_ONLY: "allow", PA_ACCEPTANCE_ALLOW_LIFECYCLE: "allow",
+    PA_ACCEPTANCE_ORGANIZATION_BINDING_JSON: undefined, PA_ACCEPTANCE_PROJECT_PROFILE_JSON: undefined,
+    PA_ACCEPTANCE_LIFECYCLE_FIXTURE_JSON: JSON.stringify({ projectPublicId: projectId, expectedRevision: "2", expectedProjectionSha256: updatedHash, expectedName: `${prefix} Project`, publicLinkUrl: "https://public.example.test/project", enabledStatus: 200, disabledStatus: 404 }),
+  }));
+  assert.equal(config.lifecycleOnly, true);
+  assert.equal(config.organization, undefined);
+  assert.equal(config.project, undefined);
 });
 
 test("accepts only lowercase canonical wire identifiers and fixture member order", () => {
@@ -219,6 +236,90 @@ test("replays lifecycle commands exactly and rejects changed valid bodies withou
   assert.equal(report.stages.lifecycle.restore.replay.replayed, true);
   assert.equal(report.stages.lifecycle.restore.changedBody.status, 409);
   assert.deepEqual(report.stages.lifecycle.publicLink, { before: 200, archived: 404, restored: 404 });
+});
+
+test("lifecycle-only mode calls only capability, fixture read, archive, restore, and public-link routes", async () => {
+  const config = parseAcceptanceConfig(env({
+    PA_ACCEPTANCE_LIFECYCLE_ONLY: "allow", PA_ACCEPTANCE_ALLOW_LIFECYCLE: "allow",
+    PA_ACCEPTANCE_ORGANIZATION_BINDING_JSON: undefined, PA_ACCEPTANCE_PROJECT_PROFILE_JSON: undefined,
+    PA_ACCEPTANCE_LIFECYCLE_FIXTURE_JSON: JSON.stringify({ projectPublicId: projectId, expectedRevision: "2", expectedProjectionSha256: updatedHash, expectedName: `${prefix} Project`, publicLinkUrl: "https://public.example.test/project", enabledStatus: 200, disabledStatus: 404 }),
+  }));
+  const calls = [];
+  const receipts = new Map();
+  let publicVisible = true;
+  const fetcher = async (url, init = {}) => {
+    const text = String(url);
+    calls.push({ text, method: init.method || "GET" });
+    if (text.startsWith("https://public.example.test/")) return new Response("", { status: publicVisible ? 200 : 404 });
+    const parsed = new URL(text);
+    if (parsed.pathname === "/api/v2/capabilities") {
+      const body = capabilities();
+      for (const [scope, path] of [["projects.lifecycle.archive", "/api/v2/projects/{publicId}/archive/commands"], ["projects.lifecycle.restore", "/api/v2/projects/{publicId}/restore/commands"]]) {
+        body.implementedEndpoints.push({ method: "POST", path, requiredCapability: scope, requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true });
+        body.grantedCapabilities.push({ name: scope });
+      }
+      return response(body);
+    }
+    if (parsed.pathname === `/api/v2/projects/${projectId}`) return response({
+      apiVersion: "2", sourceInstanceId: source, applicationId: application, historyEpoch: epoch,
+      resource: { type: "project", id: projectId, revision: "2", projectionSha256: updatedHash },
+      data: { name: `${prefix} Project`, status: "not_started", completedAt: null, archived: false, archivedAt: null },
+    });
+    if (parsed.pathname === "/api/v2/projects/inventory" || parsed.pathname === "/api/v2/projects/commands" || parsed.pathname === "/api/v2/projects/profile/commands" || parsed.pathname.includes("/bindings/status/"))
+      throw new Error(`forbidden lifecycle-only call: ${parsed.pathname}`);
+    if (parsed.pathname.endsWith("/archive/commands") || parsed.pathname.endsWith("/restore/commands")) {
+      const body = JSON.parse(init.body);
+      const key = `${parsed.pathname}:${body.commandId}`;
+      const fingerprint = JSON.stringify(body);
+      const prior = receipts.get(key);
+      if (prior && prior !== fingerprint) return response({}, 409);
+      const replayed = Boolean(prior);
+      receipts.set(key, fingerprint);
+      const archive = parsed.pathname.endsWith("/archive/commands");
+      if (!replayed && archive) publicVisible = false;
+      return response({ apiVersion: "2", sourceInstanceId: source, applicationId: application, historyEpoch: epoch, replayed, accepted: true,
+        resource: { type: "project", id: projectId, revision: archive ? "3" : "4" },
+        result: { status: "not_started", completedAt: null, archived: archive, archivedAt: archive ? "2026-09-17T00:00:02Z" : null, presentation: { portalPublished: false, publicLinkEnabled: false } } });
+    }
+    throw new Error(`unexpected lifecycle-only call: ${parsed.pathname}`);
+  };
+  const uuids = ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2"];
+  const report = await runPaApiV2StagingAcceptance(config, { fetcher, uuid: () => uuids.shift(), now: () => Date.UTC(2026, 8, 17) });
+  assert.equal(report.status, "passed");
+  assert.equal(report.mutationsPerformed, true);
+  assert.deepEqual(report.stages.lifecycle.publicLink, { before: 200, archived: 404, restored: 404 });
+  assert.equal(calls.some(call => call.text.includes("/inventory") || call.text.includes("/profile/commands") || call.text.includes("/bindings/status/")), false);
+  assert.equal(calls.some(call => call.text.endsWith("/api/v2/projects/commands")), false);
+  assert.equal(calls.filter(call => call.text.endsWith("/api/v2/capabilities")).length, 1);
+  assert.equal(calls.filter(call => call.text.endsWith(`/api/v2/projects/${projectId}`)).length, 1);
+});
+
+test("lifecycle-only mode rejects missing or surplus advertised Project capabilities", async () => {
+  const config = parseAcceptanceConfig(env({
+    PA_ACCEPTANCE_LIFECYCLE_ONLY: "allow", PA_ACCEPTANCE_ALLOW_LIFECYCLE: "allow",
+    PA_ACCEPTANCE_ORGANIZATION_BINDING_JSON: undefined, PA_ACCEPTANCE_PROJECT_PROFILE_JSON: undefined,
+    PA_ACCEPTANCE_LIFECYCLE_FIXTURE_JSON: JSON.stringify({ projectPublicId: projectId, expectedRevision: "2", expectedProjectionSha256: updatedHash, expectedName: `${prefix} Project`, publicLinkUrl: "https://public.example.test/project", enabledStatus: 200, disabledStatus: 404 }),
+  }));
+  const lifecycleCapabilities = () => {
+    const body = capabilities();
+    for (const [scope, path] of [["projects.lifecycle.archive", "/api/v2/projects/{publicId}/archive/commands"], ["projects.lifecycle.restore", "/api/v2/projects/{publicId}/restore/commands"]]) {
+      body.implementedEndpoints.push({ method: "POST", path, requiredCapability: scope, requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true });
+      body.grantedCapabilities.push({ name: scope });
+    }
+    return body;
+  };
+  const missing = async url => {
+    const body = lifecycleCapabilities();
+    body.grantedCapabilities = body.grantedCapabilities.filter(item => item.name !== "projects.binding_status.read");
+    return response(body);
+  };
+  await assert.rejects(runPaApiV2StagingAcceptance(config, { fetcher: missing }), { code: "missing_route_or_scope_status" });
+  const surplus = async url => {
+    const body = lifecycleCapabilities();
+    body.grantedCapabilities.push({ name: "projects.lifecycle.cancel" });
+    return response(body);
+  };
+  await assert.rejects(runPaApiV2StagingAcceptance(config, { fetcher: surplus }), { code: "unexpected_route_or_scope_advertised" });
 });
 
 test("rejects added or reordered lifecycle envelope and resource members", async () => {
