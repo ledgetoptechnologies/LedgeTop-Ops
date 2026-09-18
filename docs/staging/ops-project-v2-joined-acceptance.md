@@ -13,6 +13,16 @@ production hostname, even for a read-only check.
 
 ## September 18, 2026 readiness checkpoint
 
+The exact PA candidate for this run is
+`ff42c3432f39e50e92058b21d7e4942c26f5b355`; the Operations candidate starts
+from `98d7b33`. Record the deployed PA version before any mutation. A healthy
+container on an older image is not acceptable evidence.
+
+PA candidate deployment parity is now proven: staging-only Docker workflow
+`35361793571` passed both Trivy scans, the staging rebuild completed, and the
+healthy web container reports `APP_VERSION=ff42c34`. Operations staging Access,
+deployment, and joined-route execution remain pending.
+
 The PA side is ready for the joined proof only after the staging server
 disables archive/restore and enables Project binding for the bounded window.
 The application-bound Project key is limited to capabilities discovery,

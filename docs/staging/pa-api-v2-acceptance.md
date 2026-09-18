@@ -6,7 +6,14 @@ synchronization path.
 
 ## September 18, 2026 joined-window checkpoint
 
-The current PA PR184 candidate is `0ed79bed12bd02fb4596868e0e28fea94ed8ab26`.
+The current PA PR184 candidate is
+`ff42c3432f39e50e92058b21d7e4942c26f5b355`. CI, CodeQL, and Gitleaks are
+green. This candidate also serializes per-key API rate-limit admission, fails
+closed on accounting errors, and runs the disposable MySQL 8.4 concurrency
+regression as a required CI step.
+Staging-only Docker workflow `35361793571` published this candidate and passed
+both Trivy scans. The PA staging control rebuild completed successfully, and
+the healthy web container reports `APP_VERSION=ff42c34`.
 Project lifecycle acceptance has passed and is recorded in the checked-in
 lifecycle evidence artifact. PA `main` remains unmerged until the joined
 Operations acceptance proves the cross-system route and public-link

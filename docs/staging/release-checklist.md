@@ -39,6 +39,17 @@ Do not record secrets or client data or claim production activation.
 
 ## September 18, 2026 Project lifecycle checkpoint
 
+Operations `main` is pinned to `98d7b33`. PA PR184 is pinned to
+`ff42c3432f39e50e92058b21d7e4942c26f5b355`; CI, CodeQL, and Gitleaks are
+green, including the serialized per-key rate-limit admission and disposable
+MySQL 8.4 concurrency regression. The exact candidate must be installed on PA
+staging before the joined proof; green PR checks alone are not deployment
+evidence.
+
+Staging-only Docker workflow `35361793571` passed both Trivy scans and
+published the candidate. The documented PA staging rebuild completed
+successfully; the healthy web container reports `APP_VERSION=ff42c34`.
+
 The Project-only application key is bound to the shared staging application
 identity and the base Project acceptance, browser/API conflict proof, and
 archive/restore rehearsal have passed. The lifecycle window advertised exactly
