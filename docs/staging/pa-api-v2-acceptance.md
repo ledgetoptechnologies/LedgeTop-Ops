@@ -14,18 +14,18 @@ regression as a required CI step.
 Staging-only Docker workflow `35361793571` published this candidate and passed
 both Trivy scans. The PA staging control rebuild completed successfully, and
 the healthy web container reports `APP_VERSION=ff42c34`.
-Project lifecycle acceptance has passed and is recorded in the checked-in
-lifecycle evidence artifact. PA `main` remains unmerged until the joined
-Operations acceptance proves the cross-system route and public-link
-preservation.
+The checked-in lifecycle evidence artifact names the earlier `0ed79bed` image;
+it must not be attributed to this `ff42c34` candidate. The bounded lifecycle
+run is pending on the exact installed candidate, and PA `main` remains unmerged
+until both that rerun and the joined Operations acceptance pass.
 
 Project acceptance key **#6** is application-bound and is limited to the
 reviewed Project surface: capabilities discovery, Project read/create/write,
-identity binding, binding status, and inventory. Archive, restore, refresh,
-Directory, and every other scope are absent. The PA staging server must have
-archive and restore disabled and Project binding enabled before the joined
-window runs; do not treat the key being bound as proof that those server flags
-are configured.
+identity binding, binding status, and inventory. Archive and restore are
+temporarily present only for the exact-candidate lifecycle rerun; refresh,
+Directory, and every other scope are absent. Remove the lifecycle scopes and
+disable their flags before enabling Project binding for the joined window; do
+not treat the key being bound as proof that those server flags are configured.
 
 Operations staging Access/deployment and the joined harness are still pending.
 Use the existing least-privilege key only for the joined proof, and keep the
