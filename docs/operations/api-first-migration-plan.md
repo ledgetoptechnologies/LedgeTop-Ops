@@ -4,6 +4,15 @@ Updated September 17, 2026. The owner approved implementation and resumption aft
 
 ### September 17, 2026 — latest staging evidence checkpoint
 
+- Operations PR82 merged to `main` at `ecf9d24`. It adds the private,
+  default-off Project-v2 pending dispatcher and its fail-closed lease,
+  terminal-replay, destination-identity, and preservation boundaries. The
+  dispatcher is transport-capable through its injected sender but remains
+  deliberately unmounted, with no deployed production caller or public route.
+  It therefore makes no production call and does not mutate a public link or
+  activate Project-v2 workflow authority. The authoritative post-merge
+  workflow `35291426513` completed successfully at exact head
+  `ecf9d24ef839793dd32d98435b48686a865b2e14`; all 10 jobs passed.
 - Operations PR79 merged to `main` at `3f5ec3a`. It adds the dormant Project v2
   command producer; the producer remains unmounted and makes no network call.
   Operations PR80 merged to `main` at `2befb68`, adding the Incoming upload
@@ -329,9 +338,17 @@ rows.
   and rollback/fix-forward handling before any route, flag or scheduler is
   enabled.
 
-No `0122` migration or adapter is implemented by this checkpoint. No runtime
-mount, canonical mutation, remote migration, deployment or publication is
-claimed.
+The earlier statement that no `0122` migration or adapter was implemented is
+superseded by PR82 (`ecf9d24`) and its merged predecessor work. The private
+pending dispatcher and canonical-activation components now exist in source:
+the dispatcher is transport-capable through its injected sender but has no
+mounted/deployed production caller or public route, while canonical activation
+is D1-only until its PA transport path is separately mounted. Migration `0122`
+exists in `main`/source; remote application and runtime activation remain
+separate gates. No production call, canonical mutation, remote migration,
+deployment, publication, or public-link mutation is claimed. The authoritative
+post-merge workflow `35291426513` is recorded above as terminal success at the
+exact PR82 head.
 
 ### September 15 implementation evidence — local Operations commit `e1190f2`
 
