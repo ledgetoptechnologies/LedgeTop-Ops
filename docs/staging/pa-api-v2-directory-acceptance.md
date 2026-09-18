@@ -5,6 +5,24 @@ rehearsal. It neither deploys a Worker nor makes a hard-delete request. With no
 token it makes just one unauthenticated capabilities request and requires the
 expected `401` response.
 
+## Current staging prerequisite checkpoint (September 18, 2026)
+
+- Dedicated Directory key **#9** has the exact 23-scope Directory/capabilities
+  set required by this rehearsal. Its secret is DPAPI-protected outside the
+  repository and has no plaintext file copy.
+- Key #9 still requires host-side binding to existing staging application
+  `150cb108-af37-4973-ab6e-f6d991a6e8c8`. Run the binding CLI dry run first,
+  review it, and only then apply with the CLI's explicit confirmation flag.
+  An HTTP 403 from the current capabilities probe is expected until binding is
+  complete; do not enable an Operations connection on that basis.
+- The PA LAN application and control API currently return HTTP 200, but the
+  public staging hostname returns HTTP 404. Restore the tunnel ingress before
+  running this harness. A LAN-only success cannot prove the Cloudflare-hosted
+  Operations path.
+- After both prerequisites are verified, run this Directory-only window and
+  the governed Operations bootstrap before disabling every Directory flag and
+  switching to the separate Project-only joined window.
+
 A mutable rehearsal requires these secret-store values. Do not put any of them
 on a command line, in a fixture, or in CI output:
 

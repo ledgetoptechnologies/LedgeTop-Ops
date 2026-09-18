@@ -2,6 +2,43 @@
 
 Updated September 18, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
 
+### September 18, 2026 — Directory bootstrap release and staging prerequisite checkpoint
+
+- Operations PR97 is merged to `main` at
+  `5cfcba3e7b621c8cb23217f583aaa2fd5ab3f711`. Pull-request workflow
+  `35387044730` and authoritative post-merge workflow `35388479643` both
+  passed all ten Operations, Client, Ops Sync, browser, source-invariant,
+  Incoming, and thumbnail jobs. This releases the default-off,
+  staging-environment-only Directory bootstrap endpoint at
+  `POST /api/admin/project-alpha/directory/v2/bootstrap` with exact staging
+  source/origin pins, native administrator admission and identity rechecks,
+  durable command/idempotency recovery, strict PA receipt/readback validation,
+  and mapping creation only after the remote identity and binding are proven.
+  Production remains hidden before authentication because the checked-in gate
+  is false and the route also requires `ENVIRONMENT="staging"`.
+- PA staging Directory acceptance key **#9** was created with exactly the 23
+  reviewed capabilities and Directory read/create/write/relationship/
+  lifecycle/binding/inventory scopes. Its one-time secret is retained only in
+  a Windows DPAPI-protected file outside the repository; decryption was checked
+  without printing the value and no plaintext copy was persisted. Key #9 is
+  not yet application-bound: its LAN capabilities probe fails closed with
+  HTTP 403. The host operator must dry-run and then bind it to existing staging
+  application `150cb108-af37-4973-ab6e-f6d991a6e8c8` before the Operations
+  connection or bootstrap gate is enabled. Existing key #5 remains active
+  until the replacement is bound and verified; it must not be revoked merely
+  because its one-time value is unavailable.
+- PA staging itself is healthy over LAN and its control API (`200`), while the
+  public staging hostname currently returns `404`. Joined Cloudflare Worker
+  acceptance is therefore blocked until the tunnel ingress again maps
+  `pa-staging.ledgetoptechnologies.com` to `http://localhost:1628` before the
+  catch-all and the tunnel service is restarted. LAN health is not accepted as
+  evidence that a Cloudflare-hosted Operations Worker can reach PA.
+- Project Alpha PR184 remains open at
+  `ff42c3432f39e50e92058b21d7e4942c26f5b355`; CI, CodeQL, and Gitleaks are
+  green and GitHub reports it cleanly mergeable. It must remain unmerged until
+  the Directory-only bootstrap window, the subsequent Project-only joined
+  command/read/settlement window, and public-link preservation checks all pass.
+
 ### September 18, 2026 — PA lifecycle and joined-window checkpoint
 
 - Operations PR93 is merged to `main` at
