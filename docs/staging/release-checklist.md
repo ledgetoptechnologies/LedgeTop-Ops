@@ -118,6 +118,14 @@ live native `project.shared.sync` grant. Invoke only
 `POST /api/admin/project-alpha/projects/v2/commands` with a command-matching
 `Idempotency-Key`; there is no scheduled or public/client invocation path.
 
+Create and revoke that native admission/grant only with the reviewed
+[staging native authority packet](native-authority-packet.md). Provision and
+revoke must use their separate generated configs and the dedicated staging-only
+migration ledger; raw D1 inserts/updates and a new issuer route are prohibited.
+Generate and review revocation before enabling the acceptance window. Disable
+the route and selected connection, drain pending/leased actor commands, and
+apply the revoke packet immediately after the bounded run.
+
 Record exact replay, changed-body conflict, stale/revoked-authority rejection,
 create/update/bind settlement, rollback, and before/after public-link bytes.
 Then restore both the Operations activation flag and the selected connection's
