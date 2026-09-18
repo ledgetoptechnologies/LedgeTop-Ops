@@ -26,15 +26,24 @@ Updated September 18, 2026. The owner approved implementation and resumption aft
   Existing key #5 remains active until the replacement completes acceptance;
   it must not be revoked merely because its one-time value is unavailable.
 - PA staging is healthy over LAN and its control API, and the restored tunnel
-  ingress now returns HTTP 200 at the public staging hostname. The first live
-  key-#9 Directory rehearsal nevertheless failed closed before mutation with
-  `directory_capabilities_contract_mismatch`: the active PA server window
-  advertised only `api.capabilities.read`. The next host action is the exact
-  Directory-only feature-flag window; after its 23-route contract is observed,
-  run the full Directory rehearsal and governed Operations bootstrap, disable
-  every Directory flag, and switch to the Project-only joined window. Local
-  acceptance tooling passes 45/45 Directory and 6/6 joined Project tests; these
-  are not substitutes for the pending live proofs.
+  ingress returns HTTP 200 at the public staging hostname. After the initial
+  rehearsal failed closed before mutation with
+  `directory_capabilities_contract_mismatch`, the host was moved into the exact
+  Directory-only feature window. Key #9 then advertised the exact 23 granted
+  capabilities and 23 implemented endpoints (capabilities plus 22 Directory
+  and binding endpoints), with zero Project endpoints and matching source,
+  application, and history identities. The live mutation rehearsal passed all
+  71 paced requests with zero `429` responses or retries. It proved create,
+  exact replay, changed-body conflict, read, update, stale binding and refresh,
+  relationship assign/move/remove, archive/restore, tombstone/no-auto-rebind,
+  explicit rebind, inventory, revision, and authorization-generation contracts.
+  Disposable records and immutable audit history were retained; no hard delete
+  was attempted. The governed Operations bootstrap remains pending because the
+  isolated staging D1 currently has no bound staff subject, active native
+  admission, or global `directory.profile.edit` grant. Establish those only
+  through the reviewed native-authority packet before enabling the bootstrap
+  route or selected PA connection. Local acceptance tooling remains green at
+  45/45 Directory and 6/6 joined Project tests.
 - Project Alpha PR184 remains open at
   `ff42c3432f39e50e92058b21d7e4942c26f5b355`; CI, CodeQL, and Gitleaks are
   green and GitHub reports it cleanly mergeable. It must remain unmerged until

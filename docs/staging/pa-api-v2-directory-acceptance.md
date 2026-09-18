@@ -19,13 +19,16 @@ expected `401` response.
   expected Project Alpha login page, so the Cloudflare-hosted Operations path
   is no longer blocked by the former public 404.
 - The first credentialed Directory rehearsal failed closed before mutation with
-  `directory_capabilities_contract_mismatch`: the active PA server window
-  advertised only `api.capabilities.read`, not the exact 23 Directory routes
-  and scopes. Enable the documented Directory-only flags, rerun the rehearsal
-  and governed Operations bootstrap, then disable every Directory flag before
-  switching to the separate Project-only joined window. The local Directory
-  harness remains green at 45/45 tests; that is tooling evidence, not a live
-  mutation result.
+  `directory_capabilities_contract_mismatch`. After the host was corrected to
+  the exact Directory-only window, the authenticated preflight returned the
+  exact 23 capabilities and endpoints, 22 Directory/binding endpoints, zero
+  Project endpoints, and matching source/application/history identity. The
+  subsequent live rehearsal passed all 71 paced requests with zero `429`
+  responses or retries. It proved the complete create/read/update/binding/
+  relationship/lifecycle/replay/conflict contract and retained only disposable
+  soft-lifecycle records plus immutable audit history. The governed Operations
+  bootstrap is now the next gate; do not switch to the Project-only window
+  until that acknowledged mapping and replay evidence are complete.
 
 A mutable rehearsal requires these secret-store values. Do not put any of them
 on a command line, in a fixture, or in CI output:
