@@ -76,7 +76,9 @@ test("incoming page sends file bytes only to R2 and completes through checkpoint
   await page.getByLabel("Your name").fill("Client Tester");
   await page.getByLabel("Email").fill("client@example.test");
   await continueButton.click();
-  const dropBox = await page.locator("#drop").boundingBox();
+  const drop = page.locator("#drop");
+  await expect(drop).toBeVisible();
+  const dropBox = await drop.boundingBox();
   expect(dropBox).not.toBeNull();
   expect(dropBox!.width).toBeGreaterThan(200);
   expect(dropBox!.height).toBeGreaterThan(150);
