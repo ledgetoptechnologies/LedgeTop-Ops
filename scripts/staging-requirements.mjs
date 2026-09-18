@@ -438,6 +438,7 @@ export const REQUIRED_DISABLED_FEATURE_FLAGS = Object.freeze({
     "CLOUD_TRANSFER_GOOGLE_PICKER_CLIENT_ENABLED",
   ]),
   operations: Object.freeze([
+    "NATIVE_INTEGRATION_CONTROL_ENABLED",
     "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED",
     "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED",
     "PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED",
@@ -632,6 +633,7 @@ export const FEATURE_FLAG_ACTIVATION_POLICIES = Object.freeze({
     CLOUD_TRANSFER_GOOGLE_PICKER_CLIENT_ENABLED: Object.freeze({ prohibitedReason: "Google Picker is outside this release packet" }),
   }),
   operations: Object.freeze({
+    NATIVE_INTEGRATION_CONTROL_ENABLED: Object.freeze({ prohibitedReason: "Native integration control requires a separately approved native-authority and origin-bound activation packet" }),
     PROJECT_ALPHA_DRAFT_QUOTES_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaDraftQuotes", "projectAlphaCatalogProjection"]) }),
     PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED: Object.freeze({ prohibitedReason: "Project-v2 activation is limited to a separately approved, manually invoked joined staging window with remote migration 0122, native project authority, rollback, and public-link preservation evidence" }),
     PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED: Object.freeze({ prohibitedReason: "Project Alpha managed delivery requires migration 0069/0147/0031 and an independently approved end-to-end intent, notification, and revocation activation window" }),
@@ -779,6 +781,8 @@ export const STAGING_STATIC_VARS = Object.freeze({
   }),
   operations: Object.freeze({
     TEAM_DOMAIN: "https://ledgetoptechnologies.cloudflareaccess.com",
+    NATIVE_INTEGRATION_CONTROL_ENABLED: "false",
+    NATIVE_INTEGRATION_CONTROL_ORIGIN: "",
     DELIVERY_BASE_URL: `https://${STAGING_HOSTS.client}`,
     CLIENT_PORTAL_ORIGINS: `https://${STAGING_HOSTS.client},https://${STAGING_CLIENT_PORTAL.secondaryHostname}`,
     PUBLIC_SHARE_ORIGIN: `https://${STAGING_HOSTS.delivery}`,
@@ -868,7 +872,9 @@ export const STAGING_ALLOWED_VAR_NAMES = Object.freeze({
   operations: Object.freeze([
     "PUBLIC_BASE_URL", "EXPECTED_HOST", "DIRECT_DELIVERY_UPLOADS_ENABLED",
     "INCOMING_BASE_URL", "INCOMING_EXPECTED_HOST", "THUMBNAIL_INGEST_EXPECTED_HOST", "THUMBNAIL_RENDERER_EXPECTED_HOST",
-    "ENVIRONMENT", "TEAM_DOMAIN", "OPERATIONS_AUD", "DELIVERY_BASE_URL", "CLIENT_PORTAL_ORIGINS", "PUBLIC_SHARE_ORIGIN",
+    "ENVIRONMENT", "TEAM_DOMAIN", "OPERATIONS_AUD", "NATIVE_STAFF_ONBOARDING_AUD",
+    "NATIVE_INTEGRATION_CONTROL_ENABLED", "NATIVE_INTEGRATION_CONTROL_ORIGIN",
+    "DELIVERY_BASE_URL", "CLIENT_PORTAL_ORIGINS", "PUBLIC_SHARE_ORIGIN",
     "PROJECT_ALPHA_BASE_URL", "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED", "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED",
     "PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED", "PROJECT_ALPHA_DELIVERY_GUEST_ENABLED",
     "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED", "CLIENT_HUB_PA_CONTACT_ASSIGNMENTS_ENABLED", "CLIENT_PORTAL_HIERARCHY_V2_ENABLED",

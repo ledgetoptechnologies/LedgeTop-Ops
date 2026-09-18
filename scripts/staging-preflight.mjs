@@ -107,6 +107,21 @@ export function validateApp(app, staging, production) {
     }
   }
   if (app === "operations") {
+    if (!/^[a-f0-9]{64}$/i.test(vars.NATIVE_STAFF_ONBOARDING_AUD ?? ""))
+      errors.push("operations native staff onboarding Access audience must be a 64-character staging audience");
+    if (vars.NATIVE_STAFF_ONBOARDING_AUD === vars.OPERATIONS_AUD)
+      errors.push("operations staff and native onboarding Access audiences must be distinct");
+    if (vars.NATIVE_INTEGRATION_CONTROL_ENABLED === "false" && vars.NATIVE_INTEGRATION_CONTROL_ORIGIN !== "")
+      errors.push("operations native integration control origin must remain empty while control is disabled");
+    if (vars.NATIVE_INTEGRATION_CONTROL_ENABLED === "true") {
+      try {
+        const nativeControlOrigin = new URL(vars.NATIVE_INTEGRATION_CONTROL_ORIGIN);
+        if (nativeControlOrigin.protocol !== "https:" || nativeControlOrigin.origin !== vars.NATIVE_INTEGRATION_CONTROL_ORIGIN
+          || !/(?:^|[.-])staging(?:[.-]|$)/i.test(nativeControlOrigin.hostname)) throw new Error();
+      } catch {
+        errors.push("operations enabled native integration control requires an exact HTTPS staging origin");
+      }
+    }
     if (vars.DELIVERY_BASE_URL !== `https://${STAGING_HOSTS.client}`)
       errors.push("operations DELIVERY_BASE_URL must match the approved authenticated client staging host");
     if (vars.PUBLIC_SHARE_ORIGIN !== `https://${STAGING_HOSTS.delivery}`)
@@ -138,6 +153,8 @@ export function validateApp(app, staging, production) {
   }
   for (const key of Object.keys(production.vars ?? {})) {
     if (!/(?:EXPECTED_HOST|BASE_URL|_ORIGIN)$/.test(key)) continue;
+    if (app === "operations" && key === "NATIVE_INTEGRATION_CONTROL_ORIGIN"
+      && vars.NATIVE_INTEGRATION_CONTROL_ENABLED === "false" && vars[key] === "") continue;
     complete(vars[key], `${app} vars.${key}`, errors);
     if (vars[key] === production.vars[key]) errors.push(`${app} vars.${key} reuses production`);
   }
@@ -235,11 +252,12 @@ export function validateCrossApp(configs, productionConfigs = {}) {
   const accessAudiences = {
     delivery: configs.delivery.vars?.POLICY_AUD,
     operations: configs.operations.vars?.OPERATIONS_AUD,
+    nativeStaffOnboarding: configs.operations.vars?.NATIVE_STAFF_ONBOARDING_AUD,
     "ops-sync": configs["ops-sync"].vars?.CF_ACCESS_AUD,
     clientPortal: configs.delivery.vars?.CLIENT_ACCESS_AUD,
   };
   if (new Set(Object.values(accessAudiences)).size !== Object.keys(accessAudiences).length)
-    errors.push("Delivery, Operations, Ops Sync, and client portal Access audiences must all be distinct");
+    errors.push("Delivery, Operations, native staff onboarding, Ops Sync, and client portal Access audiences must all be distinct");
   if (configs.delivery.vars?.PROJECT_ALPHA_CATALOG_ACCESS_AUD !== accessAudiences["ops-sync"])
     errors.push("delivery catalog authorization must use the single Ops Sync staging Access audience");
   const productionAudiences = new Set(

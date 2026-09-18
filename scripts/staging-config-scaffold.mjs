@@ -13,6 +13,7 @@ const entries = Object.freeze({
 export const REQUIRED_STAGING_CONFIG_VALUES = Object.freeze([
   "DELIVERY_STAGING_ACCESS_AUD",
   "OPERATIONS_STAGING_ACCESS_AUD",
+  "NATIVE_STAFF_ONBOARDING_STAGING_ACCESS_AUD",
   "PROJECT_ALPHA_OPS_SYNC_STAGING_ACCESS_AUD",
   "DEDICATED_CLIENT_PORTAL_STAGING_ACCESS_AUD",
   "CLIENT_STAGING_RESTRICTED_MAPBOX_PUBLIC_TOKEN",
@@ -40,12 +41,13 @@ export function validateValues(values) {
     if (!populated(values[key])) errors.push(`${key} is missing or contains a placeholder`);
   }
   for (const key of Object.keys(values)) if (!REQUIRED_STAGING_CONFIG_VALUES.includes(key)) errors.push(`unexpected staging config value ${key}`);
-  for (const key of ["DELIVERY_STAGING_ACCESS_AUD", "OPERATIONS_STAGING_ACCESS_AUD", "PROJECT_ALPHA_OPS_SYNC_STAGING_ACCESS_AUD", "DEDICATED_CLIENT_PORTAL_STAGING_ACCESS_AUD"]) {
+  for (const key of ["DELIVERY_STAGING_ACCESS_AUD", "OPERATIONS_STAGING_ACCESS_AUD", "NATIVE_STAFF_ONBOARDING_STAGING_ACCESS_AUD", "PROJECT_ALPHA_OPS_SYNC_STAGING_ACCESS_AUD", "DEDICATED_CLIENT_PORTAL_STAGING_ACCESS_AUD"]) {
     if (populated(values[key]) && !/^[a-f0-9]{64}$/i.test(values[key])) errors.push(`${key} must be a 64-character Access audience`);
   }
   const audiences = [
     values.DELIVERY_STAGING_ACCESS_AUD,
     values.OPERATIONS_STAGING_ACCESS_AUD,
+    values.NATIVE_STAFF_ONBOARDING_STAGING_ACCESS_AUD,
     values.PROJECT_ALPHA_OPS_SYNC_STAGING_ACCESS_AUD,
     values.DEDICATED_CLIENT_PORTAL_STAGING_ACCESS_AUD,
   ].filter(populated);

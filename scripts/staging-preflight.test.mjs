@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { validateApp, validateCrossApp, validateFiles, validateMigrationInventory, validateRequestAttachmentCors, validateSecretManifest } from "./staging-preflight.mjs";
 import { APP_SOURCE_DIRS, FEATURE_FLAG_ACTIVATION_POLICIES, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_SECRETS, STAGING_ACCOUNT_ID, STAGING_ALLOWED_VAR_NAMES, STAGING_HOSTS, STAGING_INVENTORY, STAGING_PROJECT_ALPHA_ORIGIN, STAGING_REQUEST_ATTACHMENT_R2_CORS, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
 
-const audiences = Object.freeze({ delivery: "c".repeat(64), operations: "d".repeat(64), "ops-sync": "b".repeat(64) });
+const audiences = Object.freeze({ delivery: "c".repeat(64), operations: "d".repeat(64), nativeStaffOnboarding: "e".repeat(64), "ops-sync": "b".repeat(64) });
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
 function stagingConfig(app) {
@@ -40,6 +40,7 @@ function stagingConfig(app) {
       } : {}),
       ...(app === "operations" ? {
         OPERATIONS_AUD: audiences.operations,
+        NATIVE_STAFF_ONBOARDING_AUD: audiences.nativeStaffOnboarding,
         PUBLIC_BASE_URL: `https://${inventory.routes[0].pattern}`,
         PROJECT_ALPHA_BASE_URL: STAGING_STATIC_VARS.operations.PROJECT_ALPHA_BASE_URL,
         INCOMING_EXPECTED_HOST: "incoming-staging.ledgetopdroneservices.com",
@@ -173,6 +174,31 @@ test("requires staging-only map, triage, and email bindings", () => {
   assert(operationsErrors.some((error) => error.includes("CLIENT_REQUEST_TRIAGE_TO")), operationsErrors.join(" | "));
   assert(operationsErrors.some((error) => error.includes("notification email binding")), operationsErrors.join(" | "));
 });
+test("keeps native integration control inert and requires a distinct onboarding audience", () => {
+  const exact = stagingConfig("operations");
+  assert.deepEqual(validateApp("operations", exact, productionFrom(exact)), []);
+
+  const populatedDisabledOrigin = stagingConfig("operations");
+  populatedDisabledOrigin.vars.NATIVE_INTEGRATION_CONTROL_ORIGIN = "https://ops-staging.ledgetopdroneservices.com";
+  let errors = validateApp("operations", populatedDisabledOrigin, productionFrom(stagingConfig("operations")));
+  assert(errors.some((error) => error.includes("origin must remain empty")), errors.join(" | "));
+
+  const enabled = stagingConfig("operations");
+  enabled.vars.NATIVE_INTEGRATION_CONTROL_ENABLED = "true";
+  errors = validateApp("operations", enabled, productionFrom(stagingConfig("operations")));
+  assert(errors.some((error) => error.includes("NATIVE_INTEGRATION_CONTROL_ENABLED=false")), errors.join(" | "));
+  assert(errors.some((error) => error.includes("requires an exact HTTPS staging origin")), errors.join(" | "));
+
+  const colliding = stagingConfig("operations");
+  colliding.vars.NATIVE_STAFF_ONBOARDING_AUD = colliding.vars.OPERATIONS_AUD;
+  errors = validateApp("operations", colliding, productionFrom(stagingConfig("operations")));
+  assert(errors.some((error) => error.includes("must be distinct")), errors.join(" | "));
+
+  const malformed = stagingConfig("operations");
+  malformed.vars.NATIVE_STAFF_ONBOARDING_AUD = "invalid";
+  errors = validateApp("operations", malformed, productionFrom(stagingConfig("operations")));
+  assert(errors.some((error) => error.includes("64-character staging audience")), errors.join(" | "));
+});
 test("requires shared staging resources to agree", () => {
   const configs = { delivery: stagingConfig("delivery"), operations: stagingConfig("operations"), "ops-sync": stagingConfig("ops-sync") };
   configs.operations.d1_databases[1].database_id = "wrong";
@@ -220,6 +246,12 @@ test("rejects a staging Access audience reused from another production Worker", 
   productionConfigs.operations.vars.UNRELATED_AUD = configs.delivery.vars.POLICY_AUD;
   const errors = validateCrossApp(configs, productionConfigs);
   assert(errors.some((error) => error.includes("delivery staging Access audience reuses a production Access audience")), errors.join(" | "));
+});
+test("requires every staging Access audience, including native onboarding, to be distinct", () => {
+  const configs = { delivery: stagingConfig("delivery"), operations: stagingConfig("operations"), "ops-sync": stagingConfig("ops-sync") };
+  configs.operations.vars.NATIVE_STAFF_ONBOARDING_AUD = configs.delivery.vars.CLIENT_ACCESS_AUD;
+  const errors = validateCrossApp(configs);
+  assert(errors.some((error) => error.includes("native staff onboarding")), errors.join(" | "));
 });
 test("resolves logical delivery staging files from apps/client", () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-staging-layout-"));

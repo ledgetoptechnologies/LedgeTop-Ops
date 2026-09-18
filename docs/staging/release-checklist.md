@@ -73,6 +73,8 @@ not become active deployments.
 
 - approved Project Alpha staging HTTPS origin;
 - staging Access group ID and exact group name;
+- a dedicated native-staff onboarding Access audience, distinct from the
+  Operations staff, Delivery, Ops Sync, Client Portal, and production audiences;
 - Ops Sync staging service-auth policy and Project Alpha service-token owner;
 - Delivery, Operations, Ops Sync, and self-hosted Viewer staging DNS readiness;
 - `client-staging.ledgetopdroneservices.com` and
@@ -714,6 +716,25 @@ evidence verification is post-deployment so it can bind real version IDs:
 & '.\apps\client\node_modules\.bin\wrangler.cmd' whoami
 npm.cmd run staging:release:prepare
 ```
+
+`versions upload` cannot create a Worker that does not exist. If an exact
+staging Worker name is absent, stop and obtain separate approval for its one-time
+baseline creation. Only after migrations, Access, bindings, secrets, remote
+resource inventory, the complete default-false flag set, and the checks above
+are verified, run the explicit-config dry-run and then one explicit-config
+baseline deployment:
+
+```powershell
+& '.\apps\operations\node_modules\.bin\wrangler.cmd' deploy --dry-run --config apps/operations/wrangler.staging.json
+& '.\apps\operations\node_modules\.bin\wrangler.cmd' deploy --strict --config apps/operations/wrangler.staging.json --secrets-file '.backups\operations-staging.secrets.json'
+```
+
+This exception immediately creates and deploys routes and triggers; it is not a
+reviewable upload and must never use a default or production config. Record the
+created baseline version ID, verify the disabled endpoint returns `404`, and use
+the normal `versions upload` plus explicitly approved version deployment flow
+for every subsequent version. Do not repeat the creation exception once the
+Worker exists.
 
 ```powershell
 & '.\apps\client\node_modules\.bin\wrangler.cmd' versions upload --strict --config apps/client/wrangler.staging.json --secrets-file '.backups\delivery-staging.secrets.json'
