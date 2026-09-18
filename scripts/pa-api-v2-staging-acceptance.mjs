@@ -182,15 +182,21 @@ export function parseAcceptanceConfig(env = process.env) {
   if (!/^pa-acceptance-[a-z0-9][a-z0-9-]{2,60}$/i.test(config.prefix))
     throw new PaAcceptanceError("invalid_pa_acceptance_prefix");
   config.identity = parseIdentity(env);
-  config.organization = parseRelation(parseJson(env, "PA_ACCEPTANCE_ORGANIZATION_BINDING_JSON", true), "pa_acceptance_organization_binding_json", true);
-  config.client = parseRelation(parseJson(env, "PA_ACCEPTANCE_CLIENT_BINDING_JSON"), "pa_acceptance_client_binding_json", false);
-  config.project = parseProjectProfile(parseJson(env, "PA_ACCEPTANCE_PROJECT_PROFILE_JSON", true), config.prefix);
+  config.lifecycleOnly = env.PA_ACCEPTANCE_LIFECYCLE_ONLY === "allow";
   config.exerciseStatus = env.PA_ACCEPTANCE_EXERCISE_STATUS === "allow";
   config.bindCommand = assertOptionalCommand(parseJson(env, "PA_ACCEPTANCE_BIND_COMMAND_JSON"), "bind", config.prefix);
   config.refreshCommand = assertOptionalCommand(parseJson(env, "PA_ACCEPTANCE_REFRESH_COMMAND_JSON"), "refresh", config.prefix);
   config.lifecycleFixture = parseLifecycleFixture(parseJson(env, "PA_ACCEPTANCE_LIFECYCLE_FIXTURE_JSON"), config.prefix);
   if (config.lifecycleFixture && env.PA_ACCEPTANCE_ALLOW_LIFECYCLE !== "allow")
     throw new PaAcceptanceError("lifecycle_requires_explicit_allow");
+  if (config.lifecycleOnly) {
+    if (!config.lifecycleFixture) throw new PaAcceptanceError("lifecycle_only_requires_fixture");
+    if (config.bindCommand || config.refreshCommand) throw new PaAcceptanceError("lifecycle_only_rejects_binding_commands");
+    return config;
+  }
+  config.organization = parseRelation(parseJson(env, "PA_ACCEPTANCE_ORGANIZATION_BINDING_JSON", true), "pa_acceptance_organization_binding_json", true);
+  config.client = parseRelation(parseJson(env, "PA_ACCEPTANCE_CLIENT_BINDING_JSON"), "pa_acceptance_client_binding_json", false);
+  config.project = parseProjectProfile(parseJson(env, "PA_ACCEPTANCE_PROJECT_PROFILE_JSON", true), config.prefix);
   return config;
 }
 
@@ -520,6 +526,39 @@ async function runLifecycleReplayExpectation(fetcher, config, path, command, exp
   return first;
 }
 
+async function runLifecycleFixture(fetcher, config, report, uuid) {
+  const fixture = config.lifecycleFixture;
+  const before = assertResponse(await requestApi(fetcher, config, `/api/v2/projects/${fixture.projectPublicId}`, { identity: true }), 200, "lifecycle_fixture_read");
+  assertResponseIdentity(before, config.identity);
+  const lifecycleData = before.payload?.data;
+  if (before.payload?.resource?.id !== fixture.projectPublicId || before.payload?.resource?.revision !== fixture.expectedRevision ||
+      before.payload?.resource?.projectionSha256 !== fixture.expectedProjectionSha256 || lifecycleData?.name !== fixture.expectedName ||
+      !["not_started", "active", "completed", "cancelled"].includes(lifecycleData?.status) ||
+      !(lifecycleData.completedAt === null || (typeof lifecycleData.completedAt === "string" && lifecycleData.completedAt !== "")) ||
+      lifecycleData.archived !== false || lifecycleData.archivedAt !== null)
+    throw new PaAcceptanceError("lifecycle_fixture_not_disposable");
+  const preStatus = await requestPublic(fetcher, fixture.publicLinkUrl);
+  if (preStatus !== fixture.enabledStatus) throw new PaAcceptanceError("unexpected_public_link_pre_archive_status");
+  const archive = await runLifecycleReplayExpectation(fetcher, config, `/api/v2/projects/${fixture.projectPublicId}/archive/commands`,
+    { commandId: uuid(), expectedRevision: fixture.expectedRevision }, fixture.projectPublicId,
+    { status: lifecycleData.status, completedAt: lifecycleData.completedAt, archived: true }, "archive", report.stages);
+  const archiveRevision = archive.payload?.resource?.revision;
+  if (!validRevision(archiveRevision) || BigInt(archiveRevision) !== BigInt(fixture.expectedRevision) + 1n)
+    throw new PaAcceptanceError("invalid_archive_result");
+  const archivedStatus = await requestPublic(fetcher, fixture.publicLinkUrl);
+  if (archivedStatus !== fixture.disabledStatus) throw new PaAcceptanceError("unexpected_public_link_archived_status");
+  const restore = await runLifecycleReplayExpectation(fetcher, config, `/api/v2/projects/${fixture.projectPublicId}/restore/commands`,
+    { commandId: uuid(), expectedRevision: archiveRevision }, fixture.projectPublicId,
+    { status: lifecycleData.status, completedAt: lifecycleData.completedAt, archived: false }, "restore", report.stages);
+  if (!validRevision(restore.payload?.resource?.revision) || BigInt(restore.payload.resource.revision) !== BigInt(archiveRevision) + 1n)
+    throw new PaAcceptanceError("invalid_restore_result");
+  const restoredStatus = await requestPublic(fetcher, fixture.publicLinkUrl);
+  if (restoredStatus !== fixture.disabledStatus || restore.payload?.result?.presentation?.publicLinkEnabled !== false || restore.payload?.result?.presentation?.portalPublished !== false)
+    throw new PaAcceptanceError("unexpected_public_link_restored_status");
+  report.stages.lifecycle = { archive: report.stages.archive, restore: report.stages.restore,
+    publicLink: { before: preStatus, archived: archivedStatus, restored: restoredStatus } };
+}
+
 /**
  * Runs a bounded Project Alpha API-v2 staging acceptance sequence. The report
  * intentionally contains only status, IDs, revisions, generations, and hashes.
@@ -558,15 +597,21 @@ export async function runPaApiV2StagingAcceptance(config, dependencies = {}) {
     return report;
   }
   assertResponseIdentity(capabilities, config.identity);
-  const selectedRoutes = ["create", "read", "write", "inventory"];
-  if (config.exerciseStatus) selectedRoutes.push("status");
-  if (config.bindCommand) selectedRoutes.push("bind");
-  if (config.refreshCommand) selectedRoutes.push("refresh");
-  if (config.lifecycleFixture) selectedRoutes.push("archive", "restore");
+  const selectedRoutes = config.lifecycleOnly
+    ? ["create", "read", "write", "status", "inventory", "archive", "restore"]
+    : ["create", "read", "write", "inventory"];
+  if (!config.lifecycleOnly && config.exerciseStatus) selectedRoutes.push("status");
+  if (!config.lifecycleOnly && config.bindCommand) selectedRoutes.push("bind");
+  if (!config.lifecycleOnly && config.refreshCommand) selectedRoutes.push("refresh");
+  if (!config.lifecycleOnly && config.lifecycleFixture) selectedRoutes.push("archive", "restore");
   for (const routeName of selectedRoutes) requireRoute(available, routeName);
   assertExactCapabilities(capabilityPayload, selectedRoutes);
 
   report.mutationsPerformed = true;
+  if (config.lifecycleOnly) {
+    await runLifecycleFixture(fetcher, config, report, uuid);
+    return report;
+  }
   requireRoute(available, "inventory");
   const inventoryBefore = assertResponse(await requestApi(fetcher, config, "/api/v2/projects/inventory?limit=1", { identity: true, maxResponseBytes: MAX_INVENTORY_RESPONSE_BYTES }), 200, "inventory_before");
   assertResponseIdentity(inventoryBefore, config.identity);
@@ -644,36 +689,7 @@ export async function runPaApiV2StagingAcceptance(config, dependencies = {}) {
       throw new PaAcceptanceError("invalid_refresh_generation");
   }
   if (config.lifecycleFixture) {
-    const fixture = config.lifecycleFixture;
-    const before = assertResponse(await requestApi(fetcher, config, `/api/v2/projects/${fixture.projectPublicId}`, { identity: true }), 200, "lifecycle_fixture_read");
-    assertResponseIdentity(before, config.identity);
-    const lifecycleData = before.payload?.data;
-    if (before.payload?.resource?.id !== fixture.projectPublicId || before.payload?.resource?.revision !== fixture.expectedRevision ||
-        before.payload?.resource?.projectionSha256 !== fixture.expectedProjectionSha256 || lifecycleData?.name !== fixture.expectedName ||
-        !["not_started", "active", "completed", "cancelled"].includes(lifecycleData?.status) ||
-        !(lifecycleData.completedAt === null || (typeof lifecycleData.completedAt === "string" && lifecycleData.completedAt !== "")) ||
-        lifecycleData.archived !== false || lifecycleData.archivedAt !== null)
-      throw new PaAcceptanceError("lifecycle_fixture_not_disposable");
-    const preStatus = await requestPublic(fetcher, fixture.publicLinkUrl);
-    if (preStatus !== fixture.enabledStatus) throw new PaAcceptanceError("unexpected_public_link_pre_archive_status");
-    const archive = await runLifecycleReplayExpectation(fetcher, config, `/api/v2/projects/${fixture.projectPublicId}/archive/commands`,
-      { commandId: uuid(), expectedRevision: fixture.expectedRevision }, fixture.projectPublicId,
-      { status: lifecycleData.status, completedAt: lifecycleData.completedAt, archived: true }, "archive", report.stages);
-    const archiveRevision = archive.payload?.resource?.revision;
-    if (!validRevision(archiveRevision) || BigInt(archiveRevision) !== BigInt(fixture.expectedRevision) + 1n)
-      throw new PaAcceptanceError("invalid_archive_result");
-    const archivedStatus = await requestPublic(fetcher, fixture.publicLinkUrl);
-    if (archivedStatus !== fixture.disabledStatus) throw new PaAcceptanceError("unexpected_public_link_archived_status");
-    const restore = await runLifecycleReplayExpectation(fetcher, config, `/api/v2/projects/${fixture.projectPublicId}/restore/commands`,
-      { commandId: uuid(), expectedRevision: archiveRevision }, fixture.projectPublicId,
-      { status: lifecycleData.status, completedAt: lifecycleData.completedAt, archived: false }, "restore", report.stages);
-    if (!validRevision(restore.payload?.resource?.revision) || BigInt(restore.payload.resource.revision) !== BigInt(archiveRevision) + 1n)
-      throw new PaAcceptanceError("invalid_restore_result");
-    const restoredStatus = await requestPublic(fetcher, fixture.publicLinkUrl);
-    if (restoredStatus !== fixture.disabledStatus || restore.payload?.result?.presentation?.publicLinkEnabled !== false || restore.payload?.result?.presentation?.portalPublished !== false)
-      throw new PaAcceptanceError("unexpected_public_link_restored_status");
-    report.stages.lifecycle = { archive: report.stages.archive, restore: report.stages.restore,
-      publicLink: { before: preStatus, archived: archivedStatus, restored: restoredStatus } };
+    await runLifecycleFixture(fetcher, config, report, uuid);
   }
   return report;
 }

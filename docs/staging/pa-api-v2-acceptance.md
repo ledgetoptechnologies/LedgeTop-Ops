@@ -103,6 +103,17 @@ same-command `409` for archive and restore. Before archive it requires that
 the exact public ID, revision, projection hash, and name all match this
 fixture. It never deletes the fixture.
 
+When the same reviewed fixture has intentionally been made stale in the
+application binding by the dual-editor conflict rehearsal, also set
+`PA_ACCEPTANCE_LIFECYCLE_ONLY=allow`. This constrained mode requires the
+lifecycle fixture and explicit lifecycle allow, rejects bind or refresh
+commands, and returns before inventory, project creation, profile update, or
+binding-status requests. It still fails closed unless capability discovery
+advertises exactly the five base Project routes (create, read, write, binding
+status, and inventory), archive, restore, and no others. This preserves the
+stale-binding evidence while exercising archive/restore only on the exact
+reviewed public ID, revision, projection hash, name, and public-link URL.
+
 ## Least-privilege scope and flag checklist
 
 Give the dedicated application key `api.capabilities.read` plus only the
