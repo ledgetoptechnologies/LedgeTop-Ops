@@ -240,7 +240,28 @@ describe("unmounted project-v2 command producer", () => {
       const noSend = vi.fn<typeof fetch>();
       await expect(dispatchProjectAlphaProjectV2PendingCommand(env(true), action.sourceId, action.command.commandId, noSend)).resolves.toEqual(expected);
       expect(noSend).not.toHaveBeenCalled();
+      if (state === "uncertain") {
+        await expect(dispatchProjectAlphaProjectV2PendingCommand(env(true), "project-alpha:two", action.command.commandId, noSend)).resolves.toEqual({ status: "conflict", reason: "source" });
+        const wrongIdentity = JSON.parse(env(true).PROJECT_ALPHA_API_V2_CONNECTIONS!);
+        wrongIdentity.instances["project-alpha:one"].applicationId = "99999999-9999-4999-8999-999999999999";
+        await expect(dispatchProjectAlphaProjectV2PendingCommand({ OPS_DB: db, PROJECT_ALPHA_API_V2_CONNECTIONS: JSON.stringify(wrongIdentity) }, action.sourceId, action.command.commandId, noSend))
+          .resolves.toEqual({ status: "blocked", reason: "destination" });
+        expect(noSend).not.toHaveBeenCalled();
+      }
     }
+  });
+
+  it("replays the persisted request identifier for an ambiguous non-success response", async () => {
+    const action = await createAction(), healthy = transport(action), failure = vi.fn<typeof fetch>(async (url, init) => {
+      if (init?.method === "POST") return response({ error: "upstream" }, 500);
+      return healthy(url, init);
+    });
+    await planProjectAlphaProjectV2Command(env(), action);
+    const first = await dispatchProjectAlphaProjectV2PendingCommand(env(true), action.sourceId, action.command.commandId, failure);
+    expect(first).toEqual({ status: "uncertain", reason: "http_status", httpStatus: 500, requestId: "11111111-1111-4111-8111-111111111111" });
+    const replay = vi.fn<typeof fetch>();
+    await expect(dispatchProjectAlphaProjectV2PendingCommand(env(true), action.sourceId, action.command.commandId, replay)).resolves.toEqual(first);
+    expect(replay).not.toHaveBeenCalled();
   });
 
   it("releases a preflight-only lease back to pending without appending terminal evidence", async () => {

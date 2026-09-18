@@ -12,7 +12,7 @@ import {
 } from "./project-alpha-project-api-v2";
 import { withEnabledConfiguredProjectAlphaApiV2Connection, type ProjectAlphaApiV2ConnectionEnvironment } from "./project-alpha-api-v2-connections";
 import type { ProjectAlphaApiV2Connection } from "./project-alpha-api-v2";
-import type { ProjectAlphaProjectFailure } from "./project-alpha-project-transport";
+import { uuid, type ProjectAlphaProjectFailure } from "./project-alpha-project-transport";
 
 /**
  * Private, unmounted dispatcher for an already planned Project-v2 command.
@@ -36,7 +36,8 @@ type Head = Readonly<{ current_version: number; canonical_projection_sha256: str
   source_instance_id: string | null; application_id: string | null; history_epoch_id: string | null; project_alpha_public_id: string | null }>;
 type Mapping = Readonly<{ source_id: string; source_instance_id: string; application_id: string; history_epoch_id: string; project_alpha_public_id: string }>;
 type Receipt = Readonly<{ receipt_id: string; source_id: string; application_id: string; expected_source_instance_id: string; expected_history_epoch_id: string; destination_base_url: string; request_sha256: string }>;
-type Terminal = Readonly<{ event_state: string | null; outcome_json: string | null }>;
+type Terminal = Readonly<{ event_state: string | null; outcome_json: string | null; source_id: string; application_id: string;
+  expected_source_instance_id: string; expected_history_epoch_id: string; destination_base_url: string }>;
 
 export type ProjectAlphaProjectV2PendingDispatcherOutcome =
   | Readonly<{ status: "acknowledged"; receiptId: string; replayed: boolean }>
@@ -69,7 +70,8 @@ async function receipt(db: D1Database, commandId: string): Promise<Receipt | nul
 }
 async function terminal(db: D1Database, commandId: string): Promise<Terminal | null> {
   return db.prepare(`SELECT (SELECT state FROM project_alpha_project_v2_events event
-      WHERE event.command_id=outbox.command_id ORDER BY state_version DESC LIMIT 1) event_state,outcome_json
+      WHERE event.command_id=outbox.command_id ORDER BY state_version DESC LIMIT 1) event_state,outcome_json,
+      source_id,application_id,expected_source_instance_id,expected_history_epoch_id,destination_base_url
     FROM project_alpha_project_outbox outbox WHERE command_id=? AND state='terminal'`).bind(commandId).first<Terminal>();
 }
 function terminalReplay(value: Terminal): ProjectAlphaProjectV2PendingDispatcherOutcome {
@@ -80,8 +82,8 @@ function terminalReplay(value: Terminal): ProjectAlphaProjectV2PendingDispatcher
   } catch { /* Event state remains the authoritative terminal discriminator. */ }
   const reason = typeof details.reason === "string" && ["invalid_command", "request_limit", "preflight", "http_status", "timeout", "transport", "response_limit", "invalid_contract"].includes(details.reason)
     ? details.reason as ProjectAlphaProjectFailure["reason"] : "invalid_contract";
-  const diagnostic = Number.isInteger(details.httpStatus) && (details.httpStatus as number) >= 100 && (details.httpStatus as number) <= 599
-    ? { httpStatus: details.httpStatus as number } : {};
+  const diagnostic = { ...(Number.isInteger(details.httpStatus) && (details.httpStatus as number) >= 100 && (details.httpStatus as number) <= 599
+    ? { httpStatus: details.httpStatus as number } : {}), ...(uuid(details.requestId) ? { requestId: details.requestId } : {}) };
   return value.event_state === "conflict" ? { status: "conflict", reason, ...diagnostic }
     : value.event_state === "rejected" ? { status: "rejected", reason, ...diagnostic }
       : { status: "uncertain", reason, ...diagnostic };
@@ -181,7 +183,10 @@ async function dispatchEnabledProjectAlphaProjectV2PendingCommand(
       const leased = await pending(env.OPS_DB, commandId, "leased");
       if (leased) return { status: "uncertain", reason: "lost_ack" };
       const completed = await terminal(env.OPS_DB, commandId);
-      return completed ? terminalReplay(completed) : { status: "blocked", reason: "in_progress" };
+      if (!completed) return { status: "blocked", reason: "in_progress" };
+      if (completed.source_id !== sourceId) return { status: "conflict", reason: "source" };
+      if (!sameIdentity(completed, sourceId, connection)) return { status: "blocked", reason: "destination" };
+      return terminalReplay(completed);
     }
     if (initial.source_id !== sourceId) return { status: "conflict", reason: "source" };
     const before = await exactReservation(env.OPS_DB, initial, sourceId, connection);
