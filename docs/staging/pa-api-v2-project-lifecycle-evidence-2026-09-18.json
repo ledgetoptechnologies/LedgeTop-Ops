@@ -3,35 +3,35 @@
   "environment": "staging",
   "runnerMode": "lifecycle-only",
   "status": "passed",
-  "projectAlphaCandidate": "0ed79bed12bd02fb4596868e0e28fea94ed8ab26",
+  "projectAlphaCandidate": "ff42c3432f39e50e92058b21d7e4942c26f5b355",
   "credentialsExcluded": true,
   "publicLinkUrlExcluded": true,
   "fixture": {
     "publicId": "b015c03cb23c2d48ebe6641802ad772d",
-    "initialRevision": "4",
-    "finalRevision": "6",
+    "initialRevision": "7",
+    "finalRevision": "9",
     "projectionSha256": "5ac5b8eb6c603d20e44c1dcea2fd3170277b7b793737bee2f9865cc36a0237cd"
   },
   "capabilities": {
     "implementedEndpointCount": 8,
     "grantedCapabilityCount": 8,
-    "requestId": "b69e768b-a53d-4838-af88-8fb7e8a3a696"
+    "requestId": "436e12cf-164f-46e6-a38a-d870e45b5dd1"
   },
   "archive": {
-    "revision": "5",
-    "firstRequestId": "d06e69d3-dcb5-4c49-85b2-600428f2b160",
-    "replayRequestId": "102502c3-348b-4039-8f18-842b1af7943c",
+    "revision": "8",
+    "firstRequestId": "1d43ede2-e66a-407a-954f-0400a1a66cf3",
+    "replayRequestId": "3c5af40f-b9c5-4a97-a450-a02c34aaec15",
     "changedBodyStatus": 409,
-    "changedBodyRequestId": "9937ce63-2f18-47eb-bcfa-1b44e906efb3",
-    "requestBodySha256": "2f3e0c01d21f75a286a731759f8c4fa896fe17eda00da1e0a5265bb4bb3e11a1"
+    "changedBodyRequestId": "d1a60921-cc09-405d-85c2-238eb5a51a4f",
+    "requestBodySha256": "84ffa44076f08c7fa9d3c1979ab2871357556ec1279ac99b569111f773605fbd"
   },
   "restore": {
-    "revision": "6",
-    "firstRequestId": "a9da3147-3ab0-40ee-925b-beb747c8e2e2",
-    "replayRequestId": "a740a3f0-16fd-4801-820d-6ce41fb2703e",
+    "revision": "9",
+    "firstRequestId": "19b9938c-bf9c-44ef-9e98-053be030c7a0",
+    "replayRequestId": "d565dc77-f984-4242-a6ef-f2f0db1dac77",
     "changedBodyStatus": 409,
-    "changedBodyRequestId": "7418d69a-95eb-47cc-b301-cdbc679f6bdb",
-    "requestBodySha256": "3d3a035b2cd44a61cf479e115832626b6ac2cc493a8730dd9f02da528aa96e46"
+    "changedBodyRequestId": "5c5c0a05-d225-410a-a965-9b031bdd9d82",
+    "requestBodySha256": "5be876ad04dda00a03dedcfd7f547679c74f33e716825b66e537e30d1e6d0edf"
   },
   "publicLinkStatuses": {
     "beforeArchive": 200,
