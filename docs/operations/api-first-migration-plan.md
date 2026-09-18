@@ -1,24 +1,34 @@
 # API-first migration — current implementation objective and work register
 
-Updated September 17, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+Updated September 18, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
 
 ### September 18, 2026 — PA lifecycle and joined-window checkpoint
 
-- The current Project Alpha PR184 candidate is `0ed79bed12bd02fb4596868e0e28fea94ed8ab26`.
-  The disposable Project lifecycle acceptance (archive, exact replay/conflict,
-  restore, and public-link revocation/preservation behavior) passed and is
-  recorded in the checked-in lifecycle evidence artifact. This is staging
-  evidence only; PA `main` must not merge before the joined Operations proof.
+- Operations `main` is pinned to `98d7b33`. The current Project Alpha PR184
+  candidate is `ff42c3432f39e50e92058b21d7e4942c26f5b355`; its CI, CodeQL, and
+  Gitleaks checks are green. The candidate now serializes API-key rate-limit
+  admission per key and fails closed on accounting errors; its disposable
+  MySQL 8.4 concurrency gate is mandatory in CI.
+  The checked-in disposable Project lifecycle artifact proves archive, exact
+  replay/conflict, restore, and public-link revocation/preservation behavior
+  for the earlier `0ed79bed12bd02fb4596868e0e28fea94ed8ab26` image. It is not
+  release evidence for `ff42c343`; the same bounded lifecycle run must pass on
+  the exact installed candidate before PA `main` can merge.
 - The staging Project acceptance key **#6** is application-bound and has been
-  narrowed to the reviewed Project acceptance surface: capabilities discovery,
-  Project read/create/write, identity binding, binding status, and inventory.
-  Archive, restore, refresh, Directory, and all other scopes are absent.
-- Before the joined window, the PA staging server flags still need archive and
-  restore disabled and Project binding enabled. The base Project flags and
-  binding-status/inventory prerequisites must remain limited to staging.
-- Operations staging Access/deployment and the joined acceptance harness remain
-  pending. The next proof must exercise the joined route with the reviewed
-  least-privilege key and preserve an existing Operations-side public link.
+  temporarily extended from the reviewed Project acceptance surface with only
+  Project archive and restore for the exact-candidate lifecycle rerun. Refresh,
+  Directory, and all other scopes remain absent.
+- Before the joined window, the PA staging server flags and key must have
+  archive and restore removed again, with Project binding enabled. The base
+  Project flags and binding-status/inventory prerequisites must remain limited
+  to staging.
+- Staging-only Docker workflow `35361793571` published the exact candidate and
+  passed both Trivy scans. The documented control rebuild completed
+  successfully; the healthy PA staging container reports
+  `APP_VERSION=ff42c34`. Operations staging Access/deployment and the joined
+  acceptance harness remain pending. The next proof must exercise the joined
+  route with the reviewed least-privilege key and preserve an existing
+  Operations-side public link.
 
 ### September 17, 2026 — default-off joined Project-v2 acceptance mount
 

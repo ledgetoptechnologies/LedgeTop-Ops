@@ -39,21 +39,29 @@ Do not record secrets or client data or claim production activation.
 
 ## September 18, 2026 Project lifecycle checkpoint
 
-The Project-only application key is bound to the shared staging application
-identity and the base Project acceptance, browser/API conflict proof, and
-archive/restore rehearsal have passed. The lifecycle window advertised exactly
-the seven selected Project routes plus capability discovery. The exact reviewed
-fixture advanced from revision `4` to `5` on archive and to `6` on restore;
-exact replays were idempotent and changed valid bodies under the same command
-IDs returned `409`. Its synthetic public link changed `200 -> 404 -> 404`, so
-restore did not silently republish it. The lifecycle-only runner did not call
-inventory, create, profile update, or binding status and therefore preserved
-the intentional stale-binding conflict evidence. Credentials, profile bodies,
-and the public-link token remain outside the repository.
-The sanitized request IDs, body hashes, revisions and status transitions are
-retained in `pa-api-v2-project-lifecycle-evidence-2026-09-18.json`.
+Operations `main` is pinned to `98d7b33`. PA PR184 is pinned to
+`ff42c3432f39e50e92058b21d7e4942c26f5b355`; CI, CodeQL, and Gitleaks are
+green, including the serialized per-key rate-limit admission and disposable
+MySQL 8.4 concurrency regression. The exact candidate must be installed on PA
+staging before the joined proof; green PR checks alone are not deployment
+evidence.
 
-This is staging evidence only. Before release, disable the temporary archive
+Staging-only Docker workflow `35361793571` passed both Trivy scans and
+published the candidate. The documented PA staging rebuild completed
+successfully; the healthy web container reports `APP_VERSION=ff42c34`.
+
+The Project-only application key is bound to the shared staging application
+identity and the base Project acceptance and browser/API conflict proof have
+passed. The checked-in archive/restore artifact records a successful earlier
+run on candidate `0ed79bed12bd02fb4596868e0e28fea94ed8ab26`; it does not prove
+the installed `ff42c343` candidate. The exact reviewed fixture is prepared at
+revision `4` with its private public-link URL retained outside the repository,
+and the key and server are temporarily limited to the required lifecycle
+surface. Rerun the lifecycle-only acceptance against `ff42c343`, replace the
+sanitized artifact with that exact-candidate result, and only then count this
+gate as passed.
+
+After that exact-candidate staging proof, disable the temporary archive
 and restore flags, remove those two temporary key scopes, prove a least-
 privilege denial, and complete the joined Operations settlement/reconciliation
 and rollback rehearsal. PA PR184 remains unmerged until those gates pass.
