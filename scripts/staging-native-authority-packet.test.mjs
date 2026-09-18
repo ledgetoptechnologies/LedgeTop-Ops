@@ -20,7 +20,7 @@ const expiresAt = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
 
 function input(overrides = {}) {
   const value = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     packet: {
       packetId: "staging-authority-project-v2-001", mode: "create", staffId: owner.operationsStaffId,
       email: owner.email, displayName: owner.displayName, accessSubject: subject,
@@ -76,6 +76,7 @@ test("validates a narrow, non-secret packet contract", () => {
   assert.deepEqual(validatePacketInput(input()), []);
   for (const invalid of [
     input({ extra: true }),
+    { ...input(), schemaVersion: 1 },
     input({ packet: { accessSubject: "aaa.bbb.ccc" } }),
     input({ packet: { email: "owner@example.test" } }),
     input({ packet: { staffId: "staff-owner" } }),
@@ -95,8 +96,13 @@ test("builds separate one-migration configs with a dedicated ledger and sanitize
   assert.doesNotMatch(manifests, new RegExp(subject));
   assert.doesNotMatch(manifests, new RegExp(owner.displayName));
   assert.match(artifact.provision.sql, /project\.shared\.sync/);
+  assert.match(artifact.provision.sql, /directory\.profile\.edit/);
   assert.match(artifact.provision.sql, /scope_kind='global'|,'global'/);
   assert.match(artifact.provision.sql, /SELECT count\(\*\) FROM d1_migrations/);
+  assert.deepEqual(artifact.provision.manifest.directoryGrant, {
+    id: `staging-directory-profile-edit:${owner.operationsStaffId}`,
+    permission: "directory.profile.edit", effect: "allow", scopeKind: "global",
+  });
 });
 
 test("writes provision then revoke artifacts without exposing both migrations to either config", () => {
@@ -140,7 +146,15 @@ test("full canonical schema provisions, revokes, and reactivates exact native au
   assert.deepEqual(queryOne(db, "SELECT active,version FROM native_staff_admissions WHERE staff_id=?", owner.operationsStaffId), { active: 1, version: 1 });
   assert.deepEqual(queryOne(db, "SELECT active,version,scope_kind,capability FROM native_project_grants WHERE staff_id=?", owner.operationsStaffId),
     { active: 1, version: 1, scope_kind: "global", capability: "project.shared.sync" });
+  assert.deepEqual(queryOne(db, `SELECT active,scope_kind,permission,effect FROM native_directory_grants WHERE staff_id=?`, owner.operationsStaffId),
+    { active: 1, scope_kind: "global", permission: "directory.profile.edit", effect: "allow" });
   assert.deepEqual(queryOne(db, "SELECT generation FROM native_project_grant_generations WHERE staff_id=?", owner.operationsStaffId), { generation: 1 });
+  const provisionReceipt = queryOne(db, `SELECT canonical_plan_json,result_json FROM native_staff_bootstrap_receipts
+    WHERE command_id=?`, first.ids.provisionCommand);
+  assert.deepEqual(JSON.parse(provisionReceipt.canonical_plan_json).directoryGrant, {
+    id: first.ids.directoryGrant, permission: "directory.profile.edit", effect: "allow", scopeKind: "global",
+  });
+  assert.equal(JSON.parse(provisionReceipt.result_json).directoryGrantActive, 1);
 
   db.prepare(`INSERT INTO project_alpha_project_destinations(external_project_id,source_id,application_id,destination_base_url,expected_source_instance_id,expected_history_epoch_id)
     VALUES(?,?,?,?,?,?)`).run("staging-project-001", "project-alpha:staging", "00000000-0000-4000-8000-000000000001",
@@ -154,9 +168,15 @@ test("full canonical schema provisions, revokes, and reactivates exact native au
   applyMigration(db, first.revoke.sql, first.revoke.name, AUTHORITY_MIGRATIONS_TABLE);
   assert.deepEqual(queryOne(db, "SELECT active,version FROM native_staff_admissions WHERE staff_id=?", owner.operationsStaffId), { active: 0, version: 2 });
   assert.deepEqual(queryOne(db, "SELECT active,version FROM native_project_grants WHERE staff_id=?", owner.operationsStaffId), { active: 0, version: 2 });
+  assert.deepEqual(queryOne(db, "SELECT active,count(*) count FROM native_directory_grants WHERE staff_id=?", owner.operationsStaffId),
+    { active: 0, count: 1 });
   assert.deepEqual(queryOne(db, "SELECT generation FROM native_project_grant_generations WHERE staff_id=?", owner.operationsStaffId), { generation: 2 });
   assert.equal(queryOne(db, "SELECT count(*) count FROM native_project_live_command_proofs WHERE actor_staff_id=?", owner.operationsStaffId).count, 0);
   assert.equal(queryOne(db, "SELECT count(*) count FROM native_staff_bootstrap_receipts").count, 2);
+  const revokeReceipt = queryOne(db, `SELECT canonical_plan_json,result_json FROM native_staff_bootstrap_receipts
+    WHERE command_id=?`, first.ids.revokeCommand);
+  assert.equal(JSON.parse(revokeReceipt.canonical_plan_json).expected.directoryGrantActive, 1);
+  assert.equal(JSON.parse(revokeReceipt.result_json).directoryGrantActive, 0);
 
   const reactivationInput = input({ packet: { packetId: "staging-authority-project-v2-002", mode: "reactivate",
     expected: { admissionVersion: 2, profileVersion: 1, grantVersion: 2, grantGeneration: 2 } } });
@@ -164,6 +184,8 @@ test("full canonical schema provisions, revokes, and reactivates exact native au
   applyMigration(db, second.provision.sql, second.provision.name, AUTHORITY_MIGRATIONS_TABLE);
   assert.deepEqual(queryOne(db, "SELECT active,version FROM native_staff_admissions WHERE staff_id=?", owner.operationsStaffId), { active: 1, version: 3 });
   assert.deepEqual(queryOne(db, "SELECT active,version FROM native_project_grants WHERE staff_id=?", owner.operationsStaffId), { active: 1, version: 3 });
+  assert.deepEqual(queryOne(db, "SELECT active,count(*) count FROM native_directory_grants WHERE staff_id=?", owner.operationsStaffId),
+    { active: 1, count: 1 });
   assert.deepEqual(queryOne(db, "SELECT generation FROM native_project_grant_generations WHERE staff_id=?", owner.operationsStaffId), { generation: 3 });
   db.close();
 });
@@ -173,6 +195,7 @@ test("late migration failure rolls authority and ledger row back", () => {
   const failing = `${artifact.provision.sql}\nCREATE TABLE forced_packet_failure(ok INTEGER CHECK(ok=1));\nINSERT INTO forced_packet_failure VALUES(0);`;
   assert.throws(() => applyMigration(db, failing, artifact.provision.name, AUTHORITY_MIGRATIONS_TABLE));
   assert.equal(queryOne(db, "SELECT count(*) count FROM native_staff_admissions WHERE staff_id=?", owner.operationsStaffId).count, 0);
+  assert.equal(queryOne(db, "SELECT count(*) count FROM native_directory_grants WHERE staff_id=?", owner.operationsStaffId).count, 0);
   assert.equal(queryOne(db, `SELECT count(*) count FROM ${AUTHORITY_MIGRATIONS_TABLE}`).count, 0);
   assert.equal(queryOne(db, "SELECT count(*) count FROM native_staff_bootstrap_receipts").count, 0);
   db.close();
@@ -199,6 +222,7 @@ test("revoke fails atomically while an actor command is pending", () => {
   assert.throws(() => applyMigration(db, artifact.revoke.sql, artifact.revoke.name, AUTHORITY_MIGRATIONS_TABLE));
   assert.deepEqual(queryOne(db, "SELECT active,version FROM native_staff_admissions WHERE staff_id=?", owner.operationsStaffId), { active: 1, version: 1 });
   assert.deepEqual(queryOne(db, "SELECT active,version FROM native_project_grants WHERE staff_id=?", owner.operationsStaffId), { active: 1, version: 1 });
+  assert.deepEqual(queryOne(db, "SELECT active FROM native_directory_grants WHERE staff_id=?", owner.operationsStaffId), { active: 1 });
   assert.equal(queryOne(db, `SELECT count(*) count FROM ${AUTHORITY_MIGRATIONS_TABLE}`).count, 1);
   assert.equal(queryOne(db, "SELECT count(*) count FROM native_staff_bootstrap_receipts").count, 1);
   db.close();
@@ -209,6 +233,86 @@ test("provision rejects canonical-ledger drift before writing authority", () => 
   db.prepare("DELETE FROM d1_migrations WHERE name='0122_project_alpha_project_v2_canonical_activation.sql'").run();
   assert.throws(() => applyMigration(db, artifact.provision.sql, artifact.provision.name, AUTHORITY_MIGRATIONS_TABLE));
   assert.equal(queryOne(db, "SELECT count(*) count FROM native_staff_admissions WHERE staff_id=?", owner.operationsStaffId).count, 0);
+  assert.equal(queryOne(db, "SELECT count(*) count FROM native_directory_grants WHERE staff_id=?", owner.operationsStaffId).count, 0);
   assert.equal(queryOne(db, `SELECT count(*) count FROM ${AUTHORITY_MIGRATIONS_TABLE}`).count, 0);
+  db.close();
+});
+
+test("revoke fails atomically while an actor directory command is pending", () => {
+  const db = canonicalDatabase(), artifact = buildAuthorityArtifacts(fixture(), input(), "revoke");
+  applyMigration(db, artifact.provision.sql, artifact.provision.name, AUTHORITY_MIGRATIONS_TABLE);
+  db.prepare(`INSERT INTO project_alpha_directory_outbox(command_id,source_id,application_id,resource_type,external_id,
+    command_json,destination_base_url,expected_source_instance_id,expected_history_epoch_id,origin_snapshot_json,next_attempt_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,0)`).run(
+    "00000000-0000-4000-8000-000000000020", "project-alpha:staging", "00000000-0000-4000-8000-000000000021",
+    "organization", "staging-directory-pending", "{}", "https://pa-staging.example.test",
+    "00000000-0000-4000-8000-000000000022", "00000000-0000-4000-8000-000000000023",
+    JSON.stringify({ actorId: owner.operationsStaffId }),
+  );
+  assert.throws(() => applyMigration(db, artifact.revoke.sql, artifact.revoke.name, AUTHORITY_MIGRATIONS_TABLE));
+  assert.deepEqual(queryOne(db, "SELECT active,version FROM native_staff_admissions WHERE staff_id=?", owner.operationsStaffId), { active: 1, version: 1 });
+  assert.deepEqual(queryOne(db, "SELECT active,version FROM native_project_grants WHERE staff_id=?", owner.operationsStaffId), { active: 1, version: 1 });
+  assert.deepEqual(queryOne(db, "SELECT active FROM native_directory_grants WHERE staff_id=?", owner.operationsStaffId), { active: 1 });
+  assert.equal(queryOne(db, `SELECT count(*) count FROM ${AUTHORITY_MIGRATIONS_TABLE}`).count, 1);
+  assert.equal(queryOne(db, "SELECT count(*) count FROM native_staff_bootstrap_receipts").count, 1);
+  db.close();
+});
+
+test("revoke fails atomically while an actor directory write fence survives", () => {
+  const db = canonicalDatabase(), artifact = buildAuthorityArtifacts(fixture(), input(), "revoke");
+  applyMigration(db, artifact.provision.sql, artifact.provision.name, AUTHORITY_MIGRATIONS_TABLE);
+  db.prepare(`INSERT INTO operations_directory_write_fences(mutation_id,operation_kind,actor_id,bound_access_subject,
+    actor_admission_version,permission,record_id,record_kind,expected_version,selected_grant_id,scopes_json,
+    profile_json,command_json,destinations_json,intent_writes)
+    VALUES(?,'update',?,? ,1,'directory.profile.edit',?,'organization',1,?,'[]','{}','{}','[]',0)`)
+    .run("staging-surviving-directory-fence", owner.operationsStaffId, subject,
+      "staging-surviving-directory-record", artifact.ids.directoryGrant);
+  assert.throws(() => applyMigration(db, artifact.revoke.sql, artifact.revoke.name, AUTHORITY_MIGRATIONS_TABLE));
+  assert.deepEqual(queryOne(db, "SELECT active,version FROM native_staff_admissions WHERE staff_id=?", owner.operationsStaffId), { active: 1, version: 1 });
+  assert.deepEqual(queryOne(db, "SELECT active FROM native_directory_grants WHERE staff_id=?", owner.operationsStaffId), { active: 1 });
+  assert.equal(queryOne(db, "SELECT count(*) count FROM native_staff_bootstrap_receipts").count, 1);
+  assert.equal(queryOne(db, `SELECT count(*) count FROM ${AUTHORITY_MIGRATIONS_TABLE}`).count, 1);
+  db.close();
+});
+
+test("late revoke failure rolls every authority change and audit write back", () => {
+  const db = canonicalDatabase(), artifact = buildAuthorityArtifacts(fixture(), input(), "revoke");
+  applyMigration(db, artifact.provision.sql, artifact.provision.name, AUTHORITY_MIGRATIONS_TABLE);
+  const failing = `${artifact.revoke.sql}\nCREATE TABLE forced_revoke_failure(ok INTEGER CHECK(ok=1));\nINSERT INTO forced_revoke_failure VALUES(0);`;
+  assert.throws(() => applyMigration(db, failing, artifact.revoke.name, AUTHORITY_MIGRATIONS_TABLE));
+  assert.deepEqual(queryOne(db, "SELECT active,version FROM native_staff_admissions WHERE staff_id=?", owner.operationsStaffId), { active: 1, version: 1 });
+  assert.deepEqual(queryOne(db, "SELECT active,version FROM native_project_grants WHERE staff_id=?", owner.operationsStaffId), { active: 1, version: 1 });
+  assert.deepEqual(queryOne(db, "SELECT active FROM native_directory_grants WHERE staff_id=?", owner.operationsStaffId), { active: 1 });
+  assert.deepEqual(queryOne(db, "SELECT revoked_at FROM native_staff_bootstrap_approvals WHERE approval_id=?", artifact.ids.provisionApproval), { revoked_at: null });
+  assert.equal(queryOne(db, "SELECT count(*) count FROM native_staff_bootstrap_receipts").count, 1);
+  assert.equal(queryOne(db, `SELECT count(*) count FROM ${AUTHORITY_MIGRATIONS_TABLE}`).count, 1);
+  db.close();
+});
+
+test("provision fails closed on pre-existing directory authority", () => {
+  const db = canonicalDatabase(), artifact = buildAuthorityArtifacts(fixture(), input(), "provision");
+  db.prepare(`INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,active,granted_by)
+    VALUES('pre-existing-directory-grant',?,'directory.profile.view','allow','global',1,?)`)
+    .run(owner.operationsStaffId, owner.operationsStaffId);
+  assert.throws(() => applyMigration(db, artifact.provision.sql, artifact.provision.name, AUTHORITY_MIGRATIONS_TABLE));
+  assert.equal(queryOne(db, "SELECT count(*) count FROM native_directory_grants WHERE staff_id=?", owner.operationsStaffId).count, 1);
+  assert.equal(queryOne(db, "SELECT count(*) count FROM native_staff_admissions WHERE staff_id=?", owner.operationsStaffId).count, 0);
+  assert.equal(queryOne(db, "SELECT count(*) count FROM native_staff_bootstrap_receipts").count, 0);
+  assert.equal(queryOne(db, `SELECT count(*) count FROM ${AUTHORITY_MIGRATIONS_TABLE}`).count, 0);
+  db.close();
+});
+
+test("revoke fails closed on added directory-authority drift", () => {
+  const db = canonicalDatabase(), artifact = buildAuthorityArtifacts(fixture(), input(), "revoke");
+  applyMigration(db, artifact.provision.sql, artifact.provision.name, AUTHORITY_MIGRATIONS_TABLE);
+  db.prepare(`INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,active,granted_by)
+    VALUES('drift-directory-deny',?,'directory.profile.edit','deny','global',1,?)`)
+    .run(owner.operationsStaffId, owner.operationsStaffId);
+  assert.throws(() => applyMigration(db, artifact.revoke.sql, artifact.revoke.name, AUTHORITY_MIGRATIONS_TABLE));
+  assert.equal(queryOne(db, "SELECT active FROM native_directory_grants WHERE id=?", artifact.ids.directoryGrant).active, 1);
+  assert.deepEqual(queryOne(db, "SELECT active,version FROM native_staff_admissions WHERE staff_id=?", owner.operationsStaffId), { active: 1, version: 1 });
+  assert.deepEqual(queryOne(db, "SELECT active,version FROM native_project_grants WHERE staff_id=?", owner.operationsStaffId), { active: 1, version: 1 });
+  assert.equal(queryOne(db, "SELECT count(*) count FROM native_staff_bootstrap_receipts").count, 1);
+  assert.equal(queryOne(db, `SELECT count(*) count FROM ${AUTHORITY_MIGRATIONS_TABLE}`).count, 1);
   db.close();
 });

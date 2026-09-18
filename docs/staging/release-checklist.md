@@ -161,17 +161,23 @@ release-preparation configuration. A separately approved staging-only window
 may set it to `true` only after Operations migrations `0119`–`0122` are applied
 and verified, the disposable PA source/application entry is explicitly enabled,
 and the same administrator has current global `integrations.manage` plus a
-live native `project.shared.sync` grant. Invoke only
+live native `project.shared.sync` grant. The separately reviewed Directory-v2
+bootstrap window also requires that administrator's exact active global
+`directory.profile.edit` grant from the same packet; keep
+`PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ENABLED` false outside that
+window. Invoke the joined Project route only through
 `POST /api/admin/project-alpha/projects/v2/commands` with a command-matching
 `Idempotency-Key`; there is no scheduled or public/client invocation path.
 
-Create and revoke that native admission/grant only with the reviewed
+Create and revoke that native admission and both grants only with the reviewed
 [staging native authority packet](native-authority-packet.md). Provision and
 revoke must use their separate generated configs and the dedicated staging-only
 migration ledger; raw D1 inserts/updates and a new issuer route are prohibited.
-Generate and review revocation before enabling the acceptance window. Disable
-the route and selected connection, drain pending/leased actor commands, and
-apply the revoke packet immediately after the bounded run.
+Generate and review revocation before enabling either acceptance window.
+Disable both acceptance routes and the selected connection, drain pending/leased
+Project and Directory actor commands, require no surviving directory write
+fence for the actor, and apply the revoke packet immediately after the bounded
+run.
 
 Record exact replay, changed-body conflict, stale/revoked-authority rejection,
 create/update/bind settlement, rollback, and before/after public-link bytes.

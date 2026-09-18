@@ -7,7 +7,7 @@ import { BOOTSTRAP_APPS } from "./staging-bootstrap.mjs";
 import { STAGING_ACCOUNT_ID, STAGING_INVENTORY } from "./staging-requirements.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-export const PACKET_SCHEMA_VERSION = 1;
+export const PACKET_SCHEMA_VERSION = 2;
 export const AUTHORITY_MIGRATIONS_TABLE = "staging_native_authority_migrations";
 const OUTPUT_ROOT = ".staging-native-authority";
 const SUBJECT = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,190}$/;
@@ -128,24 +128,26 @@ function versionState(packet) {
 
 function plan(packet, action, ids, versions) {
   const base = {
-    schemaVersion: 1, environment: "staging", packetId: packet.packetId, action, mode: packet.mode,
+    schemaVersion: PACKET_SCHEMA_VERSION, environment: "staging", packetId: packet.packetId, action, mode: packet.mode,
     staffId: packet.staffId, emailSha256: sha256(packet.email), displayNameSha256: sha256(packet.displayName),
-    accessSubjectSha256: sha256(packet.accessSubject), grant: { id: ids.grant, capability: "project.shared.sync", effect: "allow", scopeKind: "global" },
+    accessSubjectSha256: sha256(packet.accessSubject),
+    grant: { id: ids.grant, capability: "project.shared.sync", effect: "allow", scopeKind: "global" },
+    directoryGrant: { id: ids.directoryGrant, permission: "directory.profile.edit", effect: "allow", scopeKind: "global" },
     issuedAt: packet.issuedAt, expiresAt: packet.expiresAt, reason: packet.reason,
     evidence: packet.evidence,
   };
   if (action === "provision") return { ...base, expected: packet.expected,
     result: { admissionVersion: versions.admissionActive, profileVersion: versions.profile,
-      grantVersion: versions.grantActive, grantGeneration: versions.generationActive } };
+      grantVersion: versions.grantActive, grantGeneration: versions.generationActive, directoryGrantActive: 1 } };
   return { ...base, provisionApprovalId: ids.provisionApproval,
     expected: { admissionVersion: versions.admissionActive, profileVersion: versions.profile,
-      grantVersion: versions.grantActive, grantGeneration: versions.generationActive },
+      grantVersion: versions.grantActive, grantGeneration: versions.generationActive, directoryGrantActive: 1 },
     result: { admissionVersion: versions.admissionActive + 1, profileVersion: versions.profile,
-      grantVersion: versions.grantActive + 1, grantGeneration: versions.generationActive + 1 } };
+      grantVersion: versions.grantActive + 1, grantGeneration: versions.generationActive + 1, directoryGrantActive: 0 } };
 }
 
 function verification(packet) {
-  return canonicalJson({ schemaVersion: 1, changeTicket: packet.evidence.changeTicket, reviewer: packet.evidence.reviewer,
+  return canonicalJson({ schemaVersion: PACKET_SCHEMA_VERSION, changeTicket: packet.evidence.changeTicket, reviewer: packet.evidence.reviewer,
     bindingEvidenceSha256: packet.evidence.bindingEvidenceSha256, emailSha256: sha256(packet.email),
     accessSubjectSha256: sha256(packet.accessSubject) });
 }
@@ -162,8 +164,7 @@ function canonicalLedger(names) {
 }
 
 function minimalAuthorityAbsent(staff) {
-  return `NOT EXISTS(SELECT 1 FROM native_directory_grants WHERE staff_id=${staff})
-  AND NOT EXISTS(SELECT 1 FROM native_staff_target_memberships WHERE staff_id=${staff})
+  return `NOT EXISTS(SELECT 1 FROM native_staff_target_memberships WHERE staff_id=${staff})
   AND NOT EXISTS(SELECT 1 FROM native_staff_admin_delegations WHERE actor_staff_id=${staff})
   AND NOT EXISTS(SELECT 1 FROM native_staff_management_delegations WHERE actor_staff_id=${staff})
   AND NOT EXISTS(SELECT 1 FROM native_integration_control_grants WHERE actor_staff_id=${staff})
@@ -222,12 +223,18 @@ function provisionSql(packet, ids, versions, names, migrationNames) {
   const verificationJson = verification(packet), verificationSha = sha256(verificationJson);
   const createState = `NOT EXISTS(SELECT 1 FROM native_staff_admissions WHERE staff_id=${staff})
     AND NOT EXISTS(SELECT 1 FROM native_staff_profiles WHERE staff_id=${staff})
+    AND NOT EXISTS(SELECT 1 FROM native_directory_grants WHERE staff_id=${staff} OR id=${sqlString(ids.directoryGrant)})
     AND NOT EXISTS(SELECT 1 FROM native_project_grants WHERE staff_id=${staff} OR id=${sqlString(ids.grant)})
     AND NOT EXISTS(SELECT 1 FROM native_project_grant_generations WHERE staff_id=${staff})`;
   const reactivateState = `EXISTS(SELECT 1 FROM native_staff_admissions WHERE staff_id=${staff} AND bound_access_subject=${sqlString(packet.accessSubject)}
       AND active=0 AND version=${versions.admissionBefore} AND admitted_by=${staff})
     AND EXISTS(SELECT 1 FROM native_staff_profiles WHERE staff_id=${staff} AND login_email=${sqlString(packet.email)}
       AND display_name=${sqlString(packet.displayName)} AND version=${versions.profile})
+    AND (SELECT count(*) FROM native_directory_grants WHERE staff_id=${staff})=1
+    AND EXISTS(SELECT 1 FROM native_directory_grants WHERE id=${sqlString(ids.directoryGrant)} AND staff_id=${staff}
+      AND permission='directory.profile.edit' AND effect='allow' AND scope_kind='global'
+      AND business_area_id IS NULL AND division_id IS NULL AND resource_id IS NULL
+      AND active=0 AND granted_by=${staff})
     AND (SELECT count(*) FROM native_project_grants WHERE staff_id=${staff})=1
     AND EXISTS(SELECT 1 FROM native_project_grants WHERE id=${sqlString(ids.grant)} AND staff_id=${staff}
       AND capability='project.shared.sync' AND effect='allow' AND scope_kind='global'
@@ -238,19 +245,30 @@ function provisionSql(packet, ids, versions, names, migrationNames) {
 VALUES(${staff},${sqlString(packet.accessSubject)},1,${staff});
 INSERT INTO native_staff_profiles(staff_id,login_email,display_name)
 VALUES(${staff},${sqlString(packet.email)},${sqlString(packet.displayName)});
+INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,active,granted_by)
+VALUES(${sqlString(ids.directoryGrant)},${staff},'directory.profile.edit','allow','global',1,${staff});
 INSERT INTO native_project_grants(id,staff_id,capability,effect,scope_kind,active,granted_by)
 VALUES(${sqlString(ids.grant)},${staff},'project.shared.sync','allow','global',1,${staff});`
     : `UPDATE native_staff_admissions SET active=1,version=version+1,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
 WHERE staff_id=${staff} AND active=0 AND version=${versions.admissionBefore};
+UPDATE native_directory_grants SET active=1
+WHERE id=${sqlString(ids.directoryGrant)} AND staff_id=${staff} AND permission='directory.profile.edit'
+  AND effect='allow' AND scope_kind='global' AND business_area_id IS NULL AND division_id IS NULL
+  AND resource_id IS NULL AND active=0 AND granted_by=${staff};
 UPDATE native_project_grants SET active=1,version=version+1
 WHERE id=${sqlString(ids.grant)} AND staff_id=${staff} AND active=0 AND version=${versions.grantBefore};`;
-  const result = { schemaVersion: 1, action: "provision", packetId: packet.packetId, staffId: packet.staffId,
-    grantId: ids.grant, admissionVersion: versions.admissionActive, profileVersion: versions.profile,
-    grantVersion: versions.grantActive, grantGeneration: versions.generationActive };
+  const result = { schemaVersion: PACKET_SCHEMA_VERSION, action: "provision", packetId: packet.packetId, staffId: packet.staffId,
+    grantId: ids.grant, directoryGrantId: ids.directoryGrant, admissionVersion: versions.admissionActive,
+    profileVersion: versions.profile, grantVersion: versions.grantActive,
+    grantGeneration: versions.generationActive, directoryGrantActive: 1 };
   const final = `(SELECT count(*) FROM native_staff_admissions WHERE staff_id=${staff} AND bound_access_subject=${sqlString(packet.accessSubject)}
       AND active=1 AND version=${versions.admissionActive} AND admitted_by=${staff})=1
     AND (SELECT count(*) FROM native_staff_profiles WHERE staff_id=${staff} AND login_email=${sqlString(packet.email)}
       AND display_name=${sqlString(packet.displayName)} AND version=${versions.profile})=1
+    AND (SELECT count(*) FROM native_directory_grants WHERE staff_id=${staff})=1
+    AND EXISTS(SELECT 1 FROM native_directory_grants WHERE id=${sqlString(ids.directoryGrant)} AND staff_id=${staff}
+      AND permission='directory.profile.edit' AND effect='allow' AND scope_kind='global' AND active=1
+      AND business_area_id IS NULL AND division_id IS NULL AND resource_id IS NULL AND granted_by=${staff})
     AND (SELECT count(*) FROM native_project_grants WHERE staff_id=${staff})=1
     AND EXISTS(SELECT 1 FROM native_project_grants WHERE id=${sqlString(ids.grant)} AND staff_id=${staff}
       AND capability='project.shared.sync' AND effect='allow' AND scope_kind='global' AND active=1
@@ -278,9 +296,10 @@ function revokeSql(packet, ids, versions, provision, names, migrationNames) {
   const table = guardTable(packet.packetId, "revoke"), staff = sqlString(packet.staffId);
   const canonicalPlan = canonicalJson(plan(packet, "revoke", ids, versions)), planSha = sha256(canonicalPlan);
   const verificationJson = verification(packet), verificationSha = sha256(verificationJson);
-  const result = { schemaVersion: 1, action: "revoke", packetId: packet.packetId, staffId: packet.staffId,
-    grantId: ids.grant, admissionVersion: versions.admissionActive + 1, profileVersion: versions.profile,
-    grantVersion: versions.grantActive + 1, grantGeneration: versions.generationActive + 1 };
+  const result = { schemaVersion: PACKET_SCHEMA_VERSION, action: "revoke", packetId: packet.packetId, staffId: packet.staffId,
+    grantId: ids.grant, directoryGrantId: ids.directoryGrant, admissionVersion: versions.admissionActive + 1,
+    profileVersion: versions.profile, grantVersion: versions.grantActive + 1,
+    grantGeneration: versions.generationActive + 1, directoryGrantActive: 0 };
   const precondition = `${canonicalLedger(names)}
     AND EXISTS(SELECT 1 FROM ${AUTHORITY_MIGRATIONS_TABLE} WHERE name=${sqlString(migrationNames.provision)})
     AND NOT EXISTS(SELECT 1 FROM ${AUTHORITY_MIGRATIONS_TABLE} WHERE name=${sqlString(migrationNames.revoke)})
@@ -289,6 +308,10 @@ function revokeSql(packet, ids, versions, provision, names, migrationNames) {
       AND active=1 AND version=${versions.admissionActive} AND admitted_by=${staff})
     AND EXISTS(SELECT 1 FROM native_staff_profiles WHERE staff_id=${staff} AND login_email=${sqlString(packet.email)}
       AND display_name=${sqlString(packet.displayName)} AND version=${versions.profile})
+    AND (SELECT count(*) FROM native_directory_grants WHERE staff_id=${staff})=1
+    AND EXISTS(SELECT 1 FROM native_directory_grants WHERE id=${sqlString(ids.directoryGrant)} AND staff_id=${staff}
+      AND permission='directory.profile.edit' AND effect='allow' AND scope_kind='global' AND active=1
+      AND business_area_id IS NULL AND division_id IS NULL AND resource_id IS NULL AND granted_by=${staff})
     AND (SELECT count(*) FROM native_project_grants WHERE staff_id=${staff})=1
     AND EXISTS(SELECT 1 FROM native_project_grants WHERE id=${sqlString(ids.grant)} AND staff_id=${staff}
       AND capability='project.shared.sync' AND effect='allow' AND scope_kind='global' AND active=1
@@ -300,11 +323,18 @@ function revokeSql(packet, ids, versions, provision, names, migrationNames) {
       AND approval_id=${sqlString(ids.provisionApproval)} AND canonical_plan_sha256=${sqlString(provision.planSha)})
     AND NOT EXISTS(SELECT 1 FROM native_staff_bootstrap_approvals WHERE approval_id=${sqlString(ids.revokeApproval)})
     AND NOT EXISTS(SELECT 1 FROM native_staff_bootstrap_receipts WHERE command_id=${sqlString(ids.revokeCommand)})
+    AND NOT EXISTS(SELECT 1 FROM operations_directory_write_fences WHERE actor_id=${staff})
     AND NOT EXISTS(SELECT 1 FROM project_alpha_project_outbox outbox JOIN native_project_command_proofs proof ON proof.command_id=outbox.command_id
-      WHERE proof.actor_staff_id=${staff} AND outbox.state IN ('pending','leased'))`;
+      WHERE proof.actor_staff_id=${staff} AND outbox.state IN ('pending','leased'))
+    AND NOT EXISTS(SELECT 1 FROM project_alpha_directory_outbox
+      WHERE json_extract(origin_snapshot_json,'$.actorId')=${staff} AND state IN ('pending','leased'))`;
   const final = `EXISTS(SELECT 1 FROM native_staff_admissions WHERE staff_id=${staff} AND bound_access_subject=${sqlString(packet.accessSubject)}
       AND active=0 AND version=${versions.admissionActive + 1} AND admitted_by=${staff})
     AND EXISTS(SELECT 1 FROM native_staff_profiles WHERE staff_id=${staff} AND version=${versions.profile})
+    AND (SELECT count(*) FROM native_directory_grants WHERE staff_id=${staff})=1
+    AND EXISTS(SELECT 1 FROM native_directory_grants WHERE id=${sqlString(ids.directoryGrant)} AND staff_id=${staff}
+      AND permission='directory.profile.edit' AND effect='allow' AND scope_kind='global' AND active=0
+      AND business_area_id IS NULL AND division_id IS NULL AND resource_id IS NULL AND granted_by=${staff})
     AND EXISTS(SELECT 1 FROM native_project_grants WHERE id=${sqlString(ids.grant)} AND staff_id=${staff}
       AND active=0 AND version=${versions.grantActive + 1})
     AND EXISTS(SELECT 1 FROM native_project_grant_generations WHERE staff_id=${staff} AND generation=${versions.generationActive + 1})
@@ -317,6 +347,10 @@ function revokeSql(packet, ids, versions, provision, names, migrationNames) {
 CREATE TABLE ${table}(ok INTEGER NOT NULL CHECK(ok=1));
 ${guardInsert(table, precondition)}
 ${approvalSql(packet, ids, "revoke", canonicalPlan, planSha, verificationJson, verificationSha)}
+UPDATE native_directory_grants SET active=0
+WHERE id=${sqlString(ids.directoryGrant)} AND staff_id=${staff} AND permission='directory.profile.edit'
+  AND effect='allow' AND scope_kind='global' AND business_area_id IS NULL AND division_id IS NULL
+  AND resource_id IS NULL AND active=1 AND granted_by=${staff};
 UPDATE native_project_grants SET active=0,version=version+1
 WHERE id=${sqlString(ids.grant)} AND staff_id=${staff} AND active=1 AND version=${versions.grantActive};
 UPDATE native_staff_admissions SET active=0,version=version+1,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
@@ -369,6 +403,7 @@ export function buildAuthorityArtifacts(base, input, phase) {
   const packet = structuredClone(input.packet), versions = versionState(packet);
   const ids = {
     grant: `staging-project-sync:${packet.staffId}`,
+    directoryGrant: `staging-directory-profile-edit:${packet.staffId}`,
     provisionApproval: `${packet.packetId}:provision:approval`, provisionCommand: `${packet.packetId}:provision:command`,
     revokeApproval: `${packet.packetId}:revoke:approval`, revokeCommand: `${packet.packetId}:revoke:command`,
   };
@@ -388,20 +423,21 @@ export function buildAuthorityArtifacts(base, input, phase) {
   }
   const identity = { staffId: packet.staffId, emailSha256: sha256(packet.email), displayNameSha256: sha256(packet.displayName),
     accessSubjectSha256: sha256(packet.accessSubject) };
-  const baseManifest = { schemaVersion: 1, environment: "staging", packetId: packet.packetId,
+  const baseManifest = { schemaVersion: PACKET_SCHEMA_VERSION, environment: "staging", packetId: packet.packetId,
     databaseName: selected.database_name, databaseId: selected.database_id, migrationsTable: AUTHORITY_MIGRATIONS_TABLE,
     canonicalOperationsLedger: { count: names.length, finalMigration: names.at(-1), chainSha256 }, identity,
     grant: { id: ids.grant, capability: "project.shared.sync", effect: "allow", scopeKind: "global" },
+    directoryGrant: { id: ids.directoryGrant, permission: "directory.profile.edit", effect: "allow", scopeKind: "global" },
     issuedAt: packet.issuedAt, expiresAt: packet.expiresAt, reasonSha256: sha256(packet.reason) };
   const manifests = {
     provision: { ...baseManifest, phase: "provision", mode: packet.mode, migration: { name: provisionName, sha256: sha256(provision) },
       expected: packet.expected, result: { admissionVersion: versions.admissionActive, profileVersion: versions.profile,
-        grantVersion: versions.grantActive, grantGeneration: versions.generationActive } },
+        grantVersion: versions.grantActive, grantGeneration: versions.generationActive, directoryGrantActive: 1 } },
     revoke: { ...baseManifest, phase: "revoke", migration: { name: revokeName, sha256: sha256(revoke) },
       expected: { admissionVersion: versions.admissionActive, profileVersion: versions.profile,
-        grantVersion: versions.grantActive, grantGeneration: versions.generationActive },
+        grantVersion: versions.grantActive, grantGeneration: versions.generationActive, directoryGrantActive: 1 },
       result: { admissionVersion: versions.admissionActive + 1, profileVersion: versions.profile,
-        grantVersion: versions.grantActive + 1, grantGeneration: versions.generationActive + 1 } },
+        grantVersion: versions.grantActive + 1, grantGeneration: versions.generationActive + 1, directoryGrantActive: 0 } },
   };
   return { packet, ids, versions, configs, provision: { name: provisionName, sql: provision, manifest: manifests.provision },
     revoke: { name: revokeName, sql: revoke, manifest: manifests.revoke }, phase };

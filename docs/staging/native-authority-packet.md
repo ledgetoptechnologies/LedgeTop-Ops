@@ -1,20 +1,24 @@
 # Staging native authority packet
 
 This procedure establishes and later revokes the minimum native authority needed
-for the manually invoked joined Project-v2 staging acceptance route. It does not
-create an HTTP route, Worker binding, feature flag, production migration, token,
-or Access policy. It never applies SQL by itself.
+for the manually invoked Directory-v2 bootstrap and joined Project-v2 staging
+acceptance routes. It does not create an HTTP route, Worker binding, feature
+flag, production migration, token, or Access policy. It never applies SQL by
+itself.
 
 The packet gives one existing synthetic staging Operations owner:
 
 - one active `native_staff_admissions` row bound to the owner's already verified
   Access subject;
-- one exact `native_staff_profiles` row; and
+- one exact `native_staff_profiles` row;
+- one explicit global `directory.profile.edit` allow in
+  `native_directory_grants`; and
 - one explicit global `project.shared.sync` allow in `native_project_grants`.
 
-The global scope is deliberate and temporary. Initial Project create inserts its
-destination in the same transaction as its native proof, so an `exact_project`
-grant cannot satisfy the foreign key before that create. No directory,
+Both global scopes are deliberate and temporary. Directory bootstrap must
+authorize a not-yet-created record, and initial Project create inserts its
+destination in the same transaction as its native proof, so narrower resource
+or `exact_project` grants cannot authorize those creates. No other directory,
 staff-management, integration-control, workforce, or delegation authority is
 created.
 
@@ -32,7 +36,19 @@ the canonical `d1_migrations` ledger. Each migration rechecks the exact 122-name
 canonical ledger in D1 and its expected auxiliary-ledger predecessor before any
 authority mutation. Wrangler migration rollback, database constraints, final
 sentinel checks, immutable bootstrap approvals/receipts, admission versions, and
-project-grant generations make the change atomic and auditable.
+project-grant generations make the change atomic and auditable. Packet schema
+v2 records the exact directory-grant identity and active result in each
+canonical plan, immutable approval/receipt, and sanitized manifest. The
+directory-grant table has no version column, so each transition instead requires
+exactly one full-shape row and rejects any additional or conflicting row.
+
+Remaining hardening: the canonical `native_directory_grants` schema has no
+version/generation column or deletion-protection trigger. The packet's exact
+current-state guards and immutable approval/receipt evidence cannot detect a
+historical off/on transition or delete/reinsert performed outside this governed
+path. Adding revisioned, deletion-protected grant history requires a future
+canonical schema migration; it is intentionally not simulated in generated
+staging SQL.
 
 The input contains no bearer secret. Never put a JWT, `CF_Authorization` cookie,
 service token, API token, Access client secret, or PA key in it. The Access
@@ -43,9 +59,10 @@ in the ignored local directory with operator-only filesystem access.
 
 ## Prepare and review
 
-1. Keep the joined route flag and the selected PA connection disabled.
+1. Keep both acceptance-route flags and the selected PA connection disabled.
 2. Apply and verify the canonical Operations migrations through `0122`. Confirm
-   that no native staff-management, directory, or Project command fence is open.
+   that no native staff-management, directory, or Project command fence is open
+   and neither Project nor Directory outbox has pending or leased actor work.
 3. Sign in once through the ordinary staging Operations Access application so
    the existing synthetic owner's `staff_users.access_subject` is bound. Verify
    the owner is active, has the exact reviewed email/display name, a global
@@ -57,10 +74,12 @@ in the ignored local directory with operator-only filesystem access.
    `.backups/staging-native-authority.json`. Replace every placeholder. The
    authority window must already have started, must remain open at apply time,
    and may not exceed four hours.
-6. For the first native admission use `mode: "create"` and zero expected
-   versions. For a later window use a new packet ID, `mode: "reactivate"`, and
-   the exact inactive admission/profile/grant/generation versions recorded by
-   the preceding revoke manifest and independent readback.
+6. For the first native admission use packet schema v2, `mode: "create"`, and
+   zero expected versions. For a later window use a new packet ID,
+   `mode: "reactivate"`, and the exact inactive admission/profile/Project-grant
+   versions and generation recorded by the preceding revoke manifest and
+   independent readback. Reactivation also requires the one exact inactive
+   directory-grant row; there is no directory-grant version counter.
 
 Generate both phases before opening the window so reviewed emergency revocation
 is already available:
@@ -93,20 +112,24 @@ revoke config for provisioning.
 The list must contain exactly the one reviewed provision filename. After apply,
 list again and require no pending migration. Record the generated manifest hash,
 Wrangler backup/migration output, auxiliary-ledger filename, and sanitized
-readback proving active admission/profile/grant versions and generation. Do not
-record the raw email or subject in release evidence.
+readback proving the active admission/profile/Project-grant versions and
+generation plus the one exact active global directory grant. Do not record the
+raw email or subject in release evidence.
 
-Only then may the separately approved acceptance window enable the joined route
-flag and exact disposable PA connection. The same signed-in owner must satisfy
-legacy administrator, global `integrations.manage`, native identity equality,
-and current project-grant checks.
+Only then may separately approved acceptance windows enable the Directory-v2
+bootstrap or joined Project-v2 route flag and the exact disposable PA
+connection. The same signed-in owner must satisfy legacy administrator, global
+`integrations.manage`, native identity equality, and the route-specific current
+directory or Project grant check. Keep the two route flags in their reviewed
+windows; provisioned authority is not permission to enable both routes at once.
 
 ## Normal revoke
 
-1. Restore the joined route flag and selected PA connection to disabled and
-   verify the deployed values.
-2. Confirm no Project outbox command for this actor remains `pending` or
-   `leased`. The revoke SQL independently rejects that state.
+1. Restore both acceptance-route flags and the selected PA connection to
+   disabled and verify the deployed values.
+2. Confirm no Project or Directory outbox command for this actor remains
+   `pending` or `leased`, and no directory write fence for the actor remains.
+   The revoke SQL independently rejects those states.
 3. Apply only the generated revoke config:
 
 ```powershell
@@ -115,19 +138,24 @@ and current project-grant checks.
 ```
 
 The migration requires the provision filename in the auxiliary ledger, exact
-active admission/profile/grant versions, the exact grant generation, and the
-unrevoked provision approval. It deactivates the grant, increments its version
-and generation, deactivates the admission and increments its version, marks the
-provision approval revoked, and writes a separate immutable revocation receipt.
-The profile and durable authority history remain. Existing native Project proofs
-cease to be live.
+active admission/profile/Project-grant versions, the exact Project grant
+generation, the one exact active directory-grant row, and the unrevoked
+provision approval. It deactivates both grants, increments the Project grant
+version and generation, deactivates the admission and increments its version,
+marks the provision approval revoked, and writes a separate immutable revocation
+receipt. The profile and durable authority history remain. The inactive
+directory row remains as the packet's durable authority identity; revoke never
+uses destructive cleanup, and any surviving directory write fence makes it fail
+closed. Existing native Project proofs cease to be live.
 
 List the revoke config again and require no pending migration. Record sanitized
-readback of the inactive admission/grant, incremented generation, both immutable
-receipts, revoked provision approval, and zero live native Project proofs.
+readback of the inactive admission and both grants, incremented Project
+generation, both immutable receipts, revoked provision approval, zero live
+native Project proofs, and no pending/leased actor work in either outbox.
 
 For an active compromise, apply the already-reviewed revoke packet first, then
-disable the route and PA connection immediately. If any exact-version guard
-fails, stop; investigate current state and generate a new independently reviewed
-packet. Never weaken a predicate, delete a durable row, restore an old D1 backup
-over later acceptance data, or fall back to raw inserts/updates.
+disable both routes and the PA connection immediately. If any exact-version or
+exact-directory-row guard fails, stop; investigate current state and generate a
+new independently reviewed packet. Never weaken a predicate, delete a durable
+row, restore an old D1 backup over later acceptance data, or fall back to raw
+inserts/updates.

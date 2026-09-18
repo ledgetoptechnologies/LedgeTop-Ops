@@ -148,7 +148,7 @@ post-deployment evidence and activation dependencies are checked later with
 `npm run staging:release:verify`; this avoids requiring a deployed version ID
 before that version exists.
 
-## Bounded native authority for joined Project-v2 acceptance
+## Bounded native authority for Directory bootstrap and joined Project-v2 acceptance
 
 The authenticated Operations-side live command check is documented in
 [ops-project-v2-joined-acceptance.md](ops-project-v2-joined-acceptance.md). It
@@ -157,13 +157,17 @@ replay and read-settlement/canonical-activation evidence; it never accepts a
 production origin or stores the private public-link URL.
 
 The fresh-D1 bootstrap creates the synthetic legacy owner but intentionally does
-not create native admission or Project authority. Before the separately approved
-joined Project-v2 acceptance window, follow the
+not create native admission, global Directory edit authority, or Project
+authority. Before the separately approved Directory-v2 bootstrap and joined
+Project-v2 acceptance windows, follow the
 [staging native authority packet](native-authority-packet.md). Its generator
 creates ignored, reviewable provision and revoke migrations with separate
-configs and a dedicated staging-only migration ledger. It does not expose an
-issuer route, alter a normal Access token, touch the canonical migration chain,
-or perform a remote action. Raw D1 inserts or updates are not an alternative.
+configs and a dedicated staging-only migration ledger. Packet schema v2 creates
+exactly one global `directory.profile.edit` allow and one global
+`project.shared.sync` allow, records both in immutable approval/receipt evidence,
+and deactivates both during revoke. It does not expose an issuer route, alter a
+normal Access token, touch the canonical migration chain, or perform a remote
+action. Raw D1 inserts or updates are not an alternative.
 
 Evidence collection normally enables one staging flag. The Viewer processing,
 public-share, Client-session, and Client-share cases require exact multi-flag
