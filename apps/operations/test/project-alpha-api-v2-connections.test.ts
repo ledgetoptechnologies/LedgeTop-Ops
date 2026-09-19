@@ -87,6 +87,17 @@ describe("deployment-owned Project Alpha API-v2 connections", () => {
       .resolves.toMatchObject({ status: "incompatible", reason: "invalid_contract" });
   });
 
+  it("uses manual redirect handling and rejects an upstream redirect without following it", async () => {
+    const send = vi.fn<typeof fetch>(async (_input, init) => {
+      expect(init).toMatchObject({ method: "GET", redirect: "manual", credentials: "omit" });
+      return new Response(null, { status: 302, headers: { Location: "https://elsewhere.example.test/" } });
+    });
+    await expect(probeConfiguredProjectAlphaApiV2Connection(
+      environment({ [first]: entry(first, ids.first, "https://source-a.example.test", true) }), first, [], send,
+    )).resolves.toMatchObject({ status: "incompatible", reason: "invalid_contract", httpStatus: 302 });
+    expect(send).toHaveBeenCalledOnce();
+  });
+
   it.each([
     " leading", "trailing ", "internal space", "tab\tinside", "line\nbreak", "carriage\rreturn", "nul\0byte", "delete\u007fbyte", "caf\u00e9",
   ])("rejects header-unsafe API-key values", value => {

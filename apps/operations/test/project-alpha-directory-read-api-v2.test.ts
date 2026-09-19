@@ -52,7 +52,7 @@ describe("dormant Project Alpha API-v2 directory reads", () => {
     const send = vi.fn<typeof fetch>(async (url, init) => {
       if (String(url).endsWith("/capabilities")) return json(capabilities(ids.b, endpoint("client")));
       expect(String(url)).toBe(`https://source-b.example.test/api/v2/directory/clients/${clientId}`);
-      expect(init).toMatchObject({ method: "GET", redirect: "error", credentials: "omit", cache: "no-store" });
+      expect(init).toMatchObject({ method: "GET", redirect: "manual", credentials: "omit", cache: "no-store" });
       const headers = new Headers(init?.headers);
       expect(headers.get("X-PA-Source-Instance-ID")).toBe(ids.b.source);
       expect(headers.get("X-PA-Application-ID")).toBe(ids.b.application);

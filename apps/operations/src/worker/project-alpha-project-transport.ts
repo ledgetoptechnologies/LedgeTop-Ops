@@ -127,8 +127,9 @@ export function preflightFailure(preflight: ProjectAlphaApiV2Probe): ProjectAlph
 export async function post(connection: ProjectAlphaApiV2Connection, route: ProjectAlphaApiV2Endpoint, body: string, send: typeof fetch, accepted: readonly number[] = [200]): Promise<Response | ProjectAlphaProjectFailure> {
   const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 10_000); let response: Response | undefined;
   try {
-    response = await send(new URL(route.path, connection.baseUrl), { method: "POST", headers: authHeaders(connection, true), body, redirect: "error", credentials: "omit", cache: "no-store", signal: controller.signal });
+    response = await send(new URL(route.path, connection.baseUrl), { method: "POST", headers: authHeaders(connection, true), body, redirect: "manual", credentials: "omit", cache: "no-store", signal: controller.signal });
     const info = diagnostic(response);
+    if (response.redirected || (response.status >= 300 && response.status < 400)) { await response.body?.cancel(); return { status: "uncertain", reason: "invalid_contract", ...info }; }
     if (!accepted.includes(response.status)) { await response.body?.cancel(); const status = response.status >= 500 || response.status < 400 ? "uncertain" : response.status === 409 ? "conflict" : [400, 413, 415].includes(response.status) ? "rejected" : "blocked"; return { status, reason: "http_status", ...info }; }
     if (!trusted(response, true)) { await response.body?.cancel(); return { status: "uncertain", reason: "invalid_contract", ...info }; }
     return response;
@@ -137,7 +138,11 @@ export async function post(connection: ProjectAlphaApiV2Connection, route: Proje
 }
 export async function get(connection: ProjectAlphaApiV2Connection, path: string, send: typeof fetch): Promise<Response | ProjectAlphaProjectFailure> {
   const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 10_000);
-  try { return await send(new URL(path, connection.baseUrl), { method: "GET", headers: authHeaders(connection), redirect: "error", credentials: "omit", cache: "no-store", signal: controller.signal }); }
+  try {
+    const response = await send(new URL(path, connection.baseUrl), { method: "GET", headers: authHeaders(connection), redirect: "manual", credentials: "omit", cache: "no-store", signal: controller.signal });
+    if (response.redirected || (response.status >= 300 && response.status < 400)) { await response.body?.cancel(); return { status: "uncertain", reason: "invalid_contract", ...diagnostic(response) }; }
+    return response;
+  }
   catch { return { status: "uncertain", reason: controller.signal.aborted ? "timeout" : "transport" }; }
   finally { clearTimeout(timer); }
 }

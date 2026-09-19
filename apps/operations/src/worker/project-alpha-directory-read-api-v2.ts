@@ -193,7 +193,11 @@ function base64url(value: string): string {
 }
 async function get(connection: Readonly<ProjectAlphaApiV2Connection>, path: string, send: typeof fetch): Promise<Response | Uncertain> {
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  try { return await send(new URL(path, connection.baseUrl), { method: "GET", headers: headers(connection), redirect: "error", credentials: "omit", cache: "no-store", signal: controller.signal }); }
+  try {
+    const response = await send(new URL(path, connection.baseUrl), { method: "GET", headers: headers(connection), redirect: "manual", credentials: "omit", cache: "no-store", signal: controller.signal });
+    if (response.redirected || (response.status >= 300 && response.status < 400)) { await response.body?.cancel(); return { status: "uncertain", reason: "invalid_contract", httpStatus: response.status }; }
+    return response;
+  }
   catch { return { status: "uncertain", reason: controller.signal.aborted ? "timeout" : "transport" }; }
   finally { clearTimeout(timer); }
 }
