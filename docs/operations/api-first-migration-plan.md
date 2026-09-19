@@ -5642,3 +5642,22 @@ pending; this requirement does not claim a deployed UI change.
   were empty, both foreign-key checks were clean, and each database contained
   exactly one synthetic staging owner. Existing applied D1 ledgers are not
   replayed or rewritten.
+
+### September 19 — Directory-v2 joined staging acceptance
+
+- The bounded Directory-v2 staging window completed with a real PA create for
+  public ID `63382355879f38ef7d77e7e97424188e`. Command
+  `4349b923-d993-4022-9dce-50ef62a85d35` returned the exact replay result,
+  rejected the changed body with `409`, and advanced authorization generation
+  `41 -> 42`. PA and Operations verified the exact configured
+  source/application/history identity and retained durable Operations
+  acknowledgement, mapping, and audit evidence in
+  `staging-directory-acceptance-ff089045-ea88-4c34-90a5-2ef898b9142f`.
+- The applied transport/receipt contract fixes are `e38c61a`; current inspected
+  Operations staging is `07a1d7d0-a20d-4122-befa-00ac2cdaae9a`. The bounded
+  authority window is closed: the Directory acceptance route was removed, the
+  selected PA connection disabled, no actor command/lease/Directory write fence
+  remains, and the reviewed revocation migration verified inactive authority
+  versions, Project-grant generation `2`, and its immutable receipt. This is
+  not Project-v2 acceptance, a PA `main` merge, production readiness, or full
+  regression evidence.

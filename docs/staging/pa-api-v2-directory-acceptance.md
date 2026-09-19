@@ -27,8 +27,33 @@ expected `401` response.
   responses or retries. It proved the complete create/read/update/binding/
   relationship/lifecycle/replay/conflict contract and retained only disposable
   soft-lifecycle records plus immutable audit history. The governed Operations
-  bootstrap is now the next gate; do not switch to the Project-only window
-  until that acknowledged mapping and replay evidence are complete.
+  bootstrap was the next gate; its completed Directory-v2 acceptance evidence
+  is recorded below. Do not infer Project-only acceptance from this window.
+
+## September 19, 2026 live Directory-v2 joined acceptance
+
+The bounded staging window completed for Directory-v2 only. PA created the
+disposable Directory record with public ID
+`63382355879f38ef7d77e7e97424188e`; command
+`4349b923-d993-4022-9dce-50ef62a85d35` then proved the exact replay and the
+changed-body `409` conflict. The accepted mutation advanced authorization
+generation `41 -> 42` and was recorded as
+`staging-directory-acceptance-ff089045-ea88-4c34-90a5-2ef898b9142f`.
+
+The PA response and Operations acknowledgement/mapping/audit records agreed on
+the exact configured source, application, and history identity; the application
+is `150cb108-af37-4973-ab6e-f6d991a6e8c8`. Operations persisted the durable
+acknowledgement, mapping, and audit evidence. The transport and receipt
+contract corrections used for this run are at `e38c61a`; the inspected current
+Operations staging version is `07a1d7d0-a20d-4122-befa-00ac2cdaae9a`.
+
+Cleanup is complete: no actor command, lease, or Directory write fence remains;
+the Directory acceptance route was removed, the selected PA connection was
+disabled, and the reviewed authority-revocation migration was applied. Its
+sanitized readback verified inactive authority versions and Project-grant
+generation `2`, with the immutable revocation receipt retained. This evidence
+does not accept the Project-v2 route, merge PA to `main`, establish production
+readiness, or substitute for full regression coverage.
 
 A mutable rehearsal requires these secret-store values. Do not put any of them
 on a command line, in a fixture, or in CI output:

@@ -159,6 +159,20 @@ directory row remains as the packet's durable authority identity; revoke never
 uses destructive cleanup, and any surviving directory write fence makes it fail
 closed. Existing native Project proofs cease to be live.
 
+### Applied Directory-v2 packet evidence — September 19, 2026
+
+The reviewed revocation packet for the bounded Directory-v2 acceptance window
+was applied after the route was removed, the selected PA connection was
+disabled, and no actor command, lease, or Directory write fence remained. Its
+sanitized readback confirmed the inactive authority versions, Project-grant
+generation `2`, and the immutable revocation receipt. The related accepted PA
+command was `4349b923-d993-4022-9dce-50ef62a85d35`, with durable Operations
+acknowledgement/mapping/audit evidence retained under
+`staging-directory-acceptance-ff089045-ea88-4c34-90a5-2ef898b9142f`.
+
+This is evidence of a closed Directory-v2 staging authority window only; it
+does not establish a live Project-v2 authority window or production readiness.
+
 List the revoke config again and require no pending migration. Record sanitized
 readback of the inactive admission and both grants, incremented Project
 generation, both immutable receipts, revoked provision approval, zero live

@@ -77,6 +77,28 @@ Operations PR95 is merged at
 `a78bc056edcc3a7b559e724bb23b63cf4948dd66`; exact post-merge workflow
 `35376769639` passed all ten jobs.
 
+## September 19, 2026 Directory-v2 joined staging evidence
+
+The separately bounded Directory-v2 window completed, without accepting the
+Project-v2 route. PA created disposable public ID
+`63382355879f38ef7d77e7e97424188e`; command
+`4349b923-d993-4022-9dce-50ef62a85d35` proved exact replay and changed-body
+`409`, advanced authorization generation `41 -> 42`, and produced acceptance
+record `staging-directory-acceptance-ff089045-ea88-4c34-90a5-2ef898b9142f`.
+PA and Operations matched the exact configured source/application/history
+identity, and Operations retained the durable acknowledgement, mapping, and
+audit evidence. The applicable transport/receipt contract fixes are
+`e38c61a`; the verified current Operations staging version is
+`07a1d7d0-a20d-4122-befa-00ac2cdaae9a`.
+
+The window was closed: no actor command, lease, or Directory write fence
+remains; the Directory acceptance route was removed; the PA connection is
+disabled; and the reviewed authority-revocation migration was applied. Its
+sanitized verification found inactive authority versions, Project-grant
+generation `2`, and the immutable revocation receipt. PA `main` merge,
+Project-v2 acceptance, production readiness, and full regression remain
+separate unproven gates.
+
 ## Current credential boundary
 
 Use `& '.\apps\client\node_modules\.bin\wrangler.cmd' whoami` immediately before a release. Record only the
