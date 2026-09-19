@@ -99,6 +99,32 @@ generation `2`, and the immutable revocation receipt. PA `main` merge,
 Project-v2 acceptance, production readiness, and full regression remain
 separate unproven gates.
 
+## September 19, 2026 current joined-window gate recheck
+
+The Ops staging Cloudflare Access policy **Ledge Top Staging Staff Access**
+explicitly includes `beaukoltz@ledgetopdroneservices.com`. A live in-app
+session loaded the authenticated administrator view for Beau Koltz. This
+confirms the authenticated delivery path only; it is not Project
+authority or joined acceptance.
+
+The exact PA staging candidate remains
+`ff42c3432f39e50e92058b21d7e4942c26f5b355`. Fresh nonmutating capability
+probes with key **#8** returned HTTP `200`, `apiVersion: 2`,
+`implementedEndpointCount: 23`, and `grantedCapabilityCount: 1`, proving that
+PA is still Directory-only rather than in the required Project-only window.
+No Project authority, Ops route, selected connection, or mutation was
+activated. Project-v2 acceptance therefore remains open and must not be
+recorded as passed.
+
+The local Operations check and build pass. Focused diagnosis of
+`authenticated-delivery-change-notifications` (`batches forty together`)
+passes in about 100 seconds because it performs roughly 90 sequential
+Miniflare/D1 operations on Windows; it is not a deadlock or functional
+regression. The pure-function batch suite passed 11 tests and the access-code
+suite passed 2 tests. The broad suite has no trustworthy complete total.
+GitHub PR98 checks were rejected in about two seconds by the account
+spending/build limit, not by code failures.
+
 ## Current credential boundary
 
 Use `& '.\apps\client\node_modules\.bin\wrangler.cmd' whoami` immediately before a release. Record only the
