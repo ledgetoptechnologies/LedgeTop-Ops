@@ -912,8 +912,21 @@ publicApp.onError((error, c) => {
 });
 
 export function isIncomingPublicRequest(request: Request, env: IncomingEnv): boolean {
-  const expected = env.INCOMING_EXPECTED_HOST || new URL(env.INCOMING_BASE_URL).hostname;
-  return new URL(request.url).hostname === expected;
+  let expected = env.INCOMING_EXPECTED_HOST?.trim();
+  if (!expected) {
+    const baseUrl = env.INCOMING_BASE_URL?.trim();
+    if (!baseUrl) return false;
+    try {
+      expected = new URL(baseUrl).hostname;
+    } catch {
+      return false;
+    }
+  }
+  try {
+    return new URL(request.url).hostname === expected;
+  } catch {
+    return false;
+  }
 }
 
 export function dispatchIncomingPublicRequest(
