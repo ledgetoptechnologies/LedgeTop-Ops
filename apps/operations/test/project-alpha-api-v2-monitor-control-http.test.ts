@@ -38,7 +38,7 @@ function deps(overrides: Partial<ProjectAlphaApiV2MonitorControlHttpDependencies
   return {
     configuration: overrides.configuration ?? { enabled: true,
       issuer: "https://synthetic-team.cloudflareaccess.com", staffAudience: "regular-staff-audience",
-      onboardingAudience: "dedicated-onboarding-audience", origin, csrfSecret: "x".repeat(48) },
+      origin, csrfSecret: "x".repeat(48) },
     database: overrides.database ?? database,
     projectAlphaConnectionsJson: overrides.projectAlphaConnectionsJson ?? validConnections,
     consumeRateLimit: overrides.consumeRateLimit ?? calls.quota,

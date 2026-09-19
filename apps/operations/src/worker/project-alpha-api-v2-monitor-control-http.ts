@@ -57,7 +57,6 @@ function snapshotDependencies(dependencies: ProjectAlphaApiV2MonitorControlHttpD
     const enabled = configuration.enabled;
     const issuer = configuration.issuer;
     const staffAudience = configuration.staffAudience;
-    const onboardingAudience = configuration.onboardingAudience;
     const origin = configuration.origin;
     const csrfSecret = configuration.csrfSecret;
     const database = dependencies.database;
@@ -66,8 +65,7 @@ function snapshotDependencies(dependencies: ProjectAlphaApiV2MonitorControlHttpD
     // preparer will snapshot/parse it synchronously only after the body read.
     const projectAlphaConnectionsJson = dependencies.projectAlphaConnectionsJson;
     if (enabled !== true || typeof issuer !== "string" || typeof staffAudience !== "string"
-      || typeof onboardingAudience !== "string" || !AUDIENCE.test(staffAudience)
-      || !AUDIENCE.test(onboardingAudience) || staffAudience === onboardingAudience
+      || !AUDIENCE.test(staffAudience)
       || typeof origin !== "string" || typeof csrfSecret !== "string"
       || encoder.encode(csrfSecret).byteLength < 32 || encoder.encode(csrfSecret).byteLength > 512
       || !database || typeof consumeRateLimit !== "function")
@@ -81,7 +79,7 @@ function snapshotDependencies(dependencies: ProjectAlphaApiV2MonitorControlHttpD
       || originUrl.username || originUrl.password || originUrl.pathname !== "/"
       || originUrl.search || originUrl.hash)
       throw new HttpFailure(503, "native_monitor_unavailable");
-    return { access: { enabled, issuer, staffAudience, onboardingAudience }, origin, csrfSecret,
+    return { access: { enabled, issuer, staffAudience }, origin, csrfSecret,
       database, consumeRateLimit, projectAlphaConnectionsJson };
   } catch (error) {
     if (error instanceof HttpFailure) throw error;

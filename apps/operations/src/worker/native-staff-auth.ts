@@ -6,7 +6,6 @@ export type NativeStaffAccessConfiguration = Readonly<{
   enabled: boolean;
   issuer: string;
   staffAudience: string;
-  onboardingAudience: string;
 }>;
 
 export type AuthenticatedNativeStaff = Readonly<{
@@ -23,24 +22,20 @@ const EMAIL = /^[^\s@]+@[^\s@]+$/;
 const ASSERTION_LIMIT = 16_384;
 
 function configurationSnapshot(value: NativeStaffAccessConfiguration): {
-  issuer: string; staffAudience: string; onboardingAudience: string; jwksUrl: URL;
+  issuer: string; staffAudience: string; jwksUrl: URL;
 } {
   if (value === null || typeof value !== "object") throw Error();
   const enabled = value.enabled;
   const issuer = value.issuer;
   const staffAudience = value.staffAudience;
-  const onboardingAudience = value.onboardingAudience;
   if (enabled !== true || typeof issuer !== "string"
-    || typeof staffAudience !== "string" || typeof onboardingAudience !== "string"
-    || !AUDIENCE.test(staffAudience) || !AUDIENCE.test(onboardingAudience)
-    || staffAudience === onboardingAudience) throw Error();
+    || typeof staffAudience !== "string" || !AUDIENCE.test(staffAudience)) throw Error();
 
   const url = new URL(issuer);
   if (url.protocol !== "https:" || !url.hostname.endsWith(".cloudflareaccess.com")
     || url.hostname === ".cloudflareaccess.com" || url.port || url.username || url.password
     || url.pathname !== "/" || url.search || url.hash || url.origin !== issuer) throw Error();
-  return { issuer, staffAudience, onboardingAudience: onboardingAudience,
-    jwksUrl: new URL("/cdn-cgi/access/certs", url) };
+  return { issuer, staffAudience, jwksUrl: new URL("/cdn-cgi/access/certs", url) };
 }
 
 function emailClaim(value: unknown): string {
@@ -83,7 +78,6 @@ export async function authenticateNativeStaffWithAdmissionVersion(
     const now = Math.floor(Date.now() / 1000);
     if (!Array.isArray(audiences) || audiences.length !== 1
       || audiences[0] !== authority.staffAudience
-      || audiences.includes(authority.onboardingAudience)
       || payload.type !== "app" || !isNativeAccessSubject(payload.sub)
       || Object.hasOwn(payload, "service_token_id")
       || (Object.hasOwn(payload, "service_token_status") && payload.service_token_status !== false)

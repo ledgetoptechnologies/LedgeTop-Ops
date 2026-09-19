@@ -16,7 +16,6 @@ export type Env = Omit<
   | "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ORIGIN"
   | "NATIVE_INTEGRATION_CONTROL_ENABLED"
   | "NATIVE_INTEGRATION_CONTROL_ORIGIN"
-  | "NATIVE_STAFF_ONBOARDING_AUD"
   | "DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED"
   | "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED"
   | "CLIENT_PORTAL_HIERARCHY_V2_ENABLED"
@@ -54,8 +53,6 @@ export type Env = Omit<
   NATIVE_INTEGRATION_CONTROL_ENABLED?: string;
   /** Exact same-origin native monitor-control UI origin; no implicit fallback. */
   NATIVE_INTEGRATION_CONTROL_ORIGIN?: string;
-  /** Separate Access audience; never accepted for monitor-control sessions. */
-  NATIVE_STAFF_ONBOARDING_AUD?: string;
   PROJECT_ALPHA_CONNECTOR_SNAPSHOT_CREDENTIALS?: string;
   PROJECT_ALPHA_CONNECTOR_EVENT_CREDENTIALS?: string;
   /** Deploy-managed source manifest; selects configured credential references and is never browser-administered. */

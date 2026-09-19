@@ -1,6 +1,48 @@
 # API-first migration — current implementation objective and work register
 
-Updated September 18, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+Updated September 19, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+
+### September 19, 2026 — Operations staging entry recovery
+
+- The first Access-authenticated Operations staging request reached Worker
+  version `b0816c47-fed1-4851-8456-c9eaf1370892` and exposed an unrelated
+  fail-open configuration bug before the ordinary authenticated router:
+  `isIncomingPublicRequest` attempted to parse an absent
+  `INCOMING_BASE_URL`, producing Cloudflare Error 1101. Commit `56cfe9a`
+  makes the public Incoming host gate fail closed when neither Incoming host
+  setting is configured, preserves explicit-host precedence, and rejects
+  malformed fallback URLs. The focused gate suite passes 9/9, Operations
+  typechecking passes, and an independent focused review found no security or
+  regression concern.
+- The reviewed fix was first uploaded as isolated staging version
+  `af66e2ec-e4f3-4e40-87c0-608b7aea3043`. The first authenticated browser
+  retry then exposed that the isolated acceptance config omitted the static
+  `ASSETS` binding, so it could not serve the Operations SPA needed to call
+  `/api/session`. The production-equivalent SPA asset contract was added only
+  to the ignored staging config, the app rebuilt successfully, and version
+  `9aa05566-bf5d-4eba-b2fd-20c8a11d8eb0` was uploaded. Inspection confirmed
+  the exact two existing secrets, the same staging D1/R2 bindings, and the new
+  `ASSETS` binding; a 100% dry run preceded its 100% deployment. The staging
+  UI now loads and fails closed for the still-active unmatched Gmail identity.
+  No production route, data, secret, or Incoming retention setting changed.
+- The reusable staging staff policy admitted only the Gmail test identity,
+  while the existing synthetic Operations owner is keyed to a different exact
+  email. The policy now retains the existing tester group and adds only that
+  exact owner email as a second OR rule. The database correctly remains
+  unbound until a fresh Access session uses the matching identity; no email
+  aliasing, subject bypass, duplicate staff record, or direct D1 mutation was
+  introduced. Canonical migrations are current and the pre-authority readback
+  remains clean: zero admissions, profiles, Directory grants, Project grants,
+  Directory fences, and pending/leased Directory or Project commands.
+- A staging contract audit found that `NATIVE_STAFF_ONBOARDING_AUD` was an
+  unused required value: no onboarding HTTP route exists, while every live
+  native staff path verifies only the ordinary Operations staff audience and
+  an existing native admission. The unused audience plumbing and staging
+  prerequisite were removed without changing the exact single-audience JWT,
+  human-app token, issuer, subject/email, or admission checks. Focused native
+  auth, monitor, acceptance-route, scaffold, and preflight suites pass; an
+  independent security review found no regression. The preflight suite now
+  also explicitly rejects an Operations staging config missing its SPA assets.
 
 ### September 18, 2026 — Directory bootstrap release and staging prerequisite checkpoint
 

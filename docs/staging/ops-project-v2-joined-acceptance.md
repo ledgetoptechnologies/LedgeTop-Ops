@@ -11,17 +11,32 @@ production synchronization path. It requires the explicit mutation gate
 `https://ops-staging.ledgetopdroneservices.com`. Do not run it against a
 production hostname, even for a read-only check.
 
-## September 18, 2026 readiness checkpoint
+## September 19, 2026 readiness checkpoint
 
 The exact PA candidate for this run is
 `ff42c3432f39e50e92058b21d7e4942c26f5b355`; the Operations candidate starts
-from `98d7b33`. Record the deployed PA version before any mutation. A healthy
+from `56cfe9a`. Record the deployed PA version before any mutation. A healthy
 container on an older image is not acceptable evidence.
 
 PA candidate deployment parity is now proven: staging-only Docker workflow
 `35361793571` passed both Trivy scans, the staging rebuild completed, and the
-healthy web container reports `APP_VERSION=ff42c34`. Operations staging Access,
-deployment, and joined-route execution remain pending.
+healthy web container reports `APP_VERSION=ff42c34`. Operations staging Worker
+version `9aa05566-bf5d-4eba-b2fd-20c8a11d8eb0` now contains the reviewed
+fail-closed Incoming host gate fix from `56cfe9a` and the SPA assets needed for
+the authenticated UI. Version inspection preserved the existing two secrets,
+the same staging D1/R2 bindings, and added only the `ASSETS` binding. The
+staging Access policy now permits the exact existing synthetic-owner email in
+addition to the prior tester group. The app loads and correctly rejects the
+still-active unmatched Gmail tester identity. A fresh matching-identity sign-in
+and subject binding remain pending before the native-authority packet may be
+generated or applied.
+
+The former `NATIVE_STAFF_ONBOARDING_AUD` prerequisite is not part of this
+acceptance window. No native onboarding route is mounted, and the accepted
+assertion remains exactly one human-app assertion for the Operations staff
+audience plus an existing native admission. Focused auth and staging-config
+tests and an independent security review confirm that removing the unused
+value did not broaden the accepted identity boundary.
 
 The PA side is ready for the joined proof only after the staging server
 disables archive/restore and enables Project binding for the bounded window.

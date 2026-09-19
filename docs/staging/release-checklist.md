@@ -113,8 +113,6 @@ not become active deployments.
 
 - approved Project Alpha staging HTTPS origin;
 - staging Access group ID and exact group name;
-- a dedicated native-staff onboarding Access audience, distinct from the
-  Operations staff, Delivery, Ops Sync, Client Portal, and production audiences;
 - Ops Sync staging service-auth policy and Project Alpha service-token owner;
 - Delivery, Operations, Ops Sync, and self-hosted Viewer staging DNS readiness;
 - `client-staging.ledgetopdroneservices.com` and
