@@ -50,6 +50,17 @@ path. Adding revisioned, deletion-protected grant history requires a future
 canonical schema migration; it is intentionally not simulated in generated
 staging SQL.
 
+The preferred `operatorKind` is `synthetic`. A staging database that still
+contains the immutable production-seeded owner may explicitly use
+`legacy-roster-staging`, which accepts only the one exact reviewed
+`staff-beau-koltz` / `beaukoltz@ledgetopdroneservices.com` / `Beau Koltz` tuple
+after ordinary Cloudflare Access sign-in has bound its subject. Mixed tuples,
+other canonical identities, arbitrary real identities, implicit fallback, and
+every non-staging D1 database remain rejected. This exception exists only
+because the generator also pins the Cloudflare account, complete binding
+inventory, exact `ltds-ops-staging` database ID, and canonical migration chain;
+it does not make the identity portable to production.
+
 The input contains no bearer secret. Never put a JWT, `CF_Authorization` cookie,
 service token, API token, Access client secret, or PA key in it. The Access
 subject is an identifier, not an assertion; handle it as private identity data.
@@ -74,8 +85,8 @@ in the ignored local directory with operator-only filesystem access.
    `.backups/staging-native-authority.json`. Replace every placeholder. The
    authority window must already have started, must remain open at apply time,
    and may not exceed four hours.
-6. For the first native admission use packet schema v2, `mode: "create"`, and
-   zero expected versions. For a later window use a new packet ID,
+6. For the first native admission use packet schema v3, `mode: "create"`, an
+   explicit `operatorKind`, and zero expected versions. For a later window use a new packet ID,
    `mode: "reactivate"`, and the exact inactive admission/profile/Project-grant
    versions and generation recorded by the preceding revoke manifest and
    independent readback. Reactivation also requires the one exact inactive

@@ -7,7 +7,7 @@ import { BOOTSTRAP_APPS } from "./staging-bootstrap.mjs";
 import { STAGING_ACCOUNT_ID, STAGING_INVENTORY } from "./staging-requirements.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-export const PACKET_SCHEMA_VERSION = 2;
+export const PACKET_SCHEMA_VERSION = 3;
 export const AUTHORITY_MIGRATIONS_TABLE = "staging_native_authority_migrations";
 const OUTPUT_ROOT = ".staging-native-authority";
 const SUBJECT = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,190}$/;
@@ -20,6 +20,11 @@ const canonicalPeople = new Set([
   "beaukoltz@ledgetopdroneservices.com", "kstirn@ledgetopdroneservices.com",
   "staff-beau-koltz", "staff-kollins-stirn", "initial-beau-koltz", "initial-kollins-stirn",
 ]);
+const SEEDED_STAGING_OWNER = Object.freeze({
+  staffId: "staff-beau-koltz",
+  email: "beaukoltz@ledgetopdroneservices.com",
+  displayName: "Beau Koltz",
+});
 
 const sha256 = value => crypto.createHash("sha256").update(value).digest("hex");
 const sqlString = value => `'${String(value).replaceAll("'", "''")}'`;
@@ -27,6 +32,9 @@ const populated = value => typeof value === "string" && value.length > 0 && valu
   && !/[\u0000-\u001f\u007f]/.test(value) && !/replace|placeholder|example[_-]?only/i.test(value);
 const plain = value => value !== null && typeof value === "object" && !Array.isArray(value)
   && Object.getPrototypeOf(value) === Object.prototype;
+const isExactSeededStagingOwner = packet => packet?.staffId === SEEDED_STAGING_OWNER.staffId
+  && packet?.email === SEEDED_STAGING_OWNER.email
+  && packet?.displayName === SEEDED_STAGING_OWNER.displayName;
 
 function exactKeys(value, allowed, label, errors) {
   if (!plain(value)) { errors.push(`${label} must be an object`); return; }
@@ -74,18 +82,25 @@ export function validatePacketInput(input) {
   if (!plain(input)) return errors;
   if (input.schemaVersion !== PACKET_SCHEMA_VERSION) errors.push(`schemaVersion must be ${PACKET_SCHEMA_VERSION}`);
   const packet = input.packet;
-  exactKeys(packet, ["packetId", "mode", "staffId", "email", "displayName", "accessSubject", "issuedAt", "expiresAt", "reason", "expected", "evidence"], "packet", errors);
+  exactKeys(packet, ["packetId", "mode", "operatorKind", "staffId", "email", "displayName", "accessSubject", "issuedAt", "expiresAt", "reason", "expected", "evidence"], "packet", errors);
   if (!plain(packet)) return errors;
   exactKeys(packet.expected, ["admissionVersion", "profileVersion", "grantVersion", "grantGeneration"], "packet.expected", errors);
   exactKeys(packet.evidence, ["changeTicket", "reviewer", "bindingEvidenceSha256"], "packet.evidence", errors);
   if (!PACKET_ID.test(packet.packetId ?? "")) errors.push("packet.packetId must be a bounded staging-authority identifier");
   if (!['create', 'reactivate'].includes(packet.mode)) errors.push("packet.mode must be create or reactivate");
-  if (!IDENTIFIER.test(packet.staffId ?? "") || String(packet.staffId).length > 120) errors.push("packet.staffId must be a staging-prefixed identifier");
-  if (typeof packet.email !== "string" || packet.email !== packet.email.trim().toLowerCase()
-    || !EMAIL.test(packet.email) || packet.email.length > 254 || !packet.email.includes("staging"))
-    errors.push("packet.email must be a normalized synthetic staging email");
-  if (!populated(packet.displayName) || packet.displayName.length > 160 || !/staging/i.test(packet.displayName))
-    errors.push("packet.displayName must visibly identify staging");
+  if (!['synthetic', 'legacy-roster-staging'].includes(packet.operatorKind))
+    errors.push("packet.operatorKind must be synthetic or legacy-roster-staging");
+  const legacyRosterStaging = packet.operatorKind === "legacy-roster-staging";
+  const seededStagingOwner = isExactSeededStagingOwner(packet);
+  if (legacyRosterStaging && !seededStagingOwner)
+    errors.push("legacy-roster-staging requires the exact reviewed seeded staging owner tuple");
+  if (!legacyRosterStaging && (!IDENTIFIER.test(packet.staffId ?? "") || String(packet.staffId).length > 120))
+    errors.push("synthetic operator packet.staffId must be staging-prefixed");
+  if (!legacyRosterStaging && (typeof packet.email !== "string" || packet.email !== packet.email.trim().toLowerCase()
+    || !EMAIL.test(packet.email) || packet.email.length > 254 || !packet.email.includes("staging")))
+    errors.push("synthetic operator packet.email must be a normalized staging email");
+  if (!legacyRosterStaging && (!populated(packet.displayName) || packet.displayName.length > 160 || !/staging/i.test(packet.displayName)))
+    errors.push("synthetic operator packet.displayName must visibly identify staging");
   if (!populated(packet.accessSubject) || !SUBJECT.test(packet.accessSubject)
     || String(packet.accessSubject).split(".").length === 3) errors.push("packet.accessSubject must be a reviewed opaque Access subject, not a token");
   if (!populated(packet.reason) || packet.reason.length > 500) errors.push("packet.reason must be a bounded non-placeholder string");
@@ -111,8 +126,10 @@ export function validatePacketInput(input) {
     if (!SHA256.test(packet.evidence.bindingEvidenceSha256 ?? "") || /^([0-9a-f])\1{63}$/.test(packet.evidence.bindingEvidenceSha256 ?? ""))
       errors.push("packet.evidence.bindingEvidenceSha256 must be a nontrivial lowercase SHA-256");
   }
-  for (const value of [packet.staffId, packet.email].filter(value => typeof value === "string"))
-    if (canonicalPeople.has(value.toLowerCase())) errors.push("canonical human identities are forbidden");
+  if (!legacyRosterStaging) {
+    for (const value of [packet.staffId, packet.email].filter(value => typeof value === "string"))
+      if (canonicalPeople.has(value.toLowerCase())) errors.push("canonical human identities are forbidden outside the exact seeded staging owner tuple");
+  }
   return errors;
 }
 
@@ -129,6 +146,7 @@ function versionState(packet) {
 function plan(packet, action, ids, versions) {
   const base = {
     schemaVersion: PACKET_SCHEMA_VERSION, environment: "staging", packetId: packet.packetId, action, mode: packet.mode,
+    operatorKind: packet.operatorKind,
     staffId: packet.staffId, emailSha256: sha256(packet.email), displayNameSha256: sha256(packet.displayName),
     accessSubjectSha256: sha256(packet.accessSubject),
     grant: { id: ids.grant, capability: "project.shared.sync", effect: "allow", scopeKind: "global" },
@@ -424,6 +442,7 @@ export function buildAuthorityArtifacts(base, input, phase) {
   const identity = { staffId: packet.staffId, emailSha256: sha256(packet.email), displayNameSha256: sha256(packet.displayName),
     accessSubjectSha256: sha256(packet.accessSubject) };
   const baseManifest = { schemaVersion: PACKET_SCHEMA_VERSION, environment: "staging", packetId: packet.packetId,
+    operatorKind: packet.operatorKind,
     databaseName: selected.database_name, databaseId: selected.database_id, migrationsTable: AUTHORITY_MIGRATIONS_TABLE,
     canonicalOperationsLedger: { count: names.length, finalMigration: names.at(-1), chainSha256 }, identity,
     grant: { id: ids.grant, capability: "project.shared.sync", effect: "allow", scopeKind: "global" },

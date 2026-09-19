@@ -13,6 +13,8 @@ import { transformSeed } from "./staging-bootstrap.mjs";
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
 const owner = Object.freeze({ email: "owner@staging.example.test", displayName: "Synthetic Staging Owner",
   clientStaffId: "staging-client-owner", operationsStaffId: "staging-operations-owner" });
+const seededOwner = Object.freeze({ email: "beaukoltz@ledgetopdroneservices.com", displayName: "Beau Koltz",
+  operationsStaffId: "staff-beau-koltz" });
 const subject = "staging-access-subject-001";
 const evidenceSha = "0123456789abcdef".repeat(4);
 const issuedAt = new Date(Date.now() - 5 * 60 * 1000).toISOString();
@@ -20,9 +22,10 @@ const expiresAt = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
 
 function input(overrides = {}) {
   const value = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     packet: {
-      packetId: "staging-authority-project-v2-001", mode: "create", staffId: owner.operationsStaffId,
+      packetId: "staging-authority-project-v2-001", mode: "create", operatorKind: "synthetic",
+      staffId: owner.operationsStaffId,
       email: owner.email, displayName: owner.displayName, accessSubject: subject,
       issuedAt, expiresAt,
       reason: "Bounded joined Project-v2 staging acceptance",
@@ -58,28 +61,40 @@ function applyMigration(db, sql, name, table = "d1_migrations") {
   }
 }
 
-function canonicalDatabase() {
+function canonicalDatabase(databaseOwner = owner) {
   const db = new DatabaseSync(":memory:");
   db.exec("PRAGMA foreign_keys=ON; CREATE TABLE d1_migrations(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE,applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL)");
   const directory = path.join(repositoryRoot, "apps", "operations", "migrations");
   for (const name of fs.readdirSync(directory).filter(name => name.endsWith(".sql")).sort()) {
     const source = fs.readFileSync(path.join(directory, name), "utf8");
-    applyMigration(db, name === "0002_seed_acl.sql" ? transformSeed("operations", source, owner) : source, name);
+    const seeded = name === "0002_seed_acl.sql" && databaseOwner === owner
+      ? transformSeed("operations", source, owner) : source;
+    applyMigration(db, seeded, name);
   }
   db.prepare("UPDATE staff_users SET access_subject=?,last_seen_at=datetime('now'),updated_at=datetime('now') WHERE id=?")
-    .run(subject, owner.operationsStaffId);
+    .run(subject, databaseOwner.operationsStaffId);
   db.exec(`CREATE TABLE ${AUTHORITY_MIGRATIONS_TABLE}(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE,applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL)`);
   return db;
 }
 
 test("validates a narrow, non-secret packet contract", () => {
   assert.deepEqual(validatePacketInput(input()), []);
+  assert.deepEqual(validatePacketInput(input({ packet: {
+    operatorKind: "legacy-roster-staging", staffId: seededOwner.operationsStaffId,
+    email: seededOwner.email, displayName: seededOwner.displayName,
+  } })), []);
   for (const invalid of [
     input({ extra: true }),
-    { ...input(), schemaVersion: 1 },
+    { ...input(), schemaVersion: 2 },
+    input({ packet: { operatorKind: "production-roster" } }),
     input({ packet: { accessSubject: "aaa.bbb.ccc" } }),
     input({ packet: { email: "owner@example.test" } }),
     input({ packet: { staffId: "staff-owner" } }),
+    input({ packet: { staffId: seededOwner.operationsStaffId } }),
+    input({ packet: { email: seededOwner.email } }),
+    input({ packet: { displayName: seededOwner.displayName } }),
+    input({ packet: { operatorKind: "legacy-roster-staging", staffId: "staff-kollins-stirn",
+      email: "kstirn@ledgetopdroneservices.com", displayName: "Kollins Stirn" } }),
     input({ packet: { expiresAt: new Date(Date.parse(issuedAt) + 5 * 60 * 60 * 1000).toISOString() } }),
     input({ packet: { evidence: { changeTicket: "REPLACE_ME", reviewer: "reviewer", bindingEvidenceSha256: "0".repeat(64) } } }),
   ]) assert(validatePacketInput(invalid).length > 0);
@@ -235,6 +250,26 @@ test("provision rejects canonical-ledger drift before writing authority", () => 
   assert.equal(queryOne(db, "SELECT count(*) count FROM native_staff_admissions WHERE staff_id=?", owner.operationsStaffId).count, 0);
   assert.equal(queryOne(db, "SELECT count(*) count FROM native_directory_grants WHERE staff_id=?", owner.operationsStaffId).count, 0);
   assert.equal(queryOne(db, `SELECT count(*) count FROM ${AUTHORITY_MIGRATIONS_TABLE}`).count, 0);
+  db.close();
+});
+
+test("legacy-roster-staging provisions only the exact seeded staging owner", () => {
+  const legacy = input({ packet: {
+    operatorKind: "legacy-roster-staging", staffId: seededOwner.operationsStaffId,
+    email: seededOwner.email, displayName: seededOwner.displayName,
+  } });
+  const db = canonicalDatabase(seededOwner);
+  const artifact = buildAuthorityArtifacts(fixture(), legacy, "revoke");
+  assert.equal(artifact.provision.manifest.operatorKind, "legacy-roster-staging");
+  applyMigration(db, artifact.provision.sql, artifact.provision.name, AUTHORITY_MIGRATIONS_TABLE);
+  assert.deepEqual(queryOne(db, "SELECT active,version FROM native_staff_admissions WHERE staff_id=?",
+    seededOwner.operationsStaffId), { active: 1, version: 1 });
+  const receipt = queryOne(db, `SELECT canonical_plan_json FROM native_staff_bootstrap_receipts
+    WHERE command_id=?`, artifact.ids.provisionCommand);
+  assert.equal(JSON.parse(receipt.canonical_plan_json).operatorKind, "legacy-roster-staging");
+  applyMigration(db, artifact.revoke.sql, artifact.revoke.name, AUTHORITY_MIGRATIONS_TABLE);
+  assert.deepEqual(queryOne(db, "SELECT active,version FROM native_staff_admissions WHERE staff_id=?",
+    seededOwner.operationsStaffId), { active: 0, version: 2 });
   db.close();
 });
 

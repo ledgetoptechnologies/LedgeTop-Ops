@@ -1,8 +1,9 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "packet": {
     "packetId": "staging-authority-example-001",
     "mode": "create",
+    "operatorKind": "synthetic",
     "staffId": "staging-operations-owner",
     "email": "owner@staging.example.test",
     "displayName": "Synthetic Staging Owner",
