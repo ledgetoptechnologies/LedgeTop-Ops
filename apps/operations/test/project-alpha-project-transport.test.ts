@@ -90,6 +90,42 @@ describe("dormant PA project v2 transport", () => {
     await expect(sendProjectAlphaProjectCreateCommand(connection, create, send)).resolves.toMatchObject({ status: "uncertain", reason: "invalid_contract" });
     expect(validatedProjectAlphaProjectAcknowledgement(await sendProjectAlphaProjectCreateCommand(connection, create, send))).toBeNull();
   });
+  it("accepts only the exact, correlated Project-v2 command conflict envelopes", async () => {
+    const route = { method: "POST", path: "/api/v2/projects/commands", requiredCapability: "projects.create", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true };
+    const verified = (code: string) => ({ apiVersion: "2", sourceInstanceId: source, applicationId: application, historyEpoch: epoch, requestId: request, error: { code } });
+    const identityWithoutEcho = { apiVersion: "2", requestId: request, error: { code: "identity_conflict" } };
+    const send = (body: unknown, raw?: string, headers?: Record<string, string>) => vi.fn<typeof fetch>(async (_url, init) =>
+      init?.method === "GET" ? json(metadata(route)) : json(body, 409, headers, raw));
+
+    await expect(sendProjectAlphaProjectCreateCommand(connection, create, send(identityWithoutEcho))).resolves
+      .toEqual({ status: "conflict", reason: "identity_conflict", httpStatus: 409, requestId: request });
+    for (const code of ["identity_conflict", "command_id_conflict", "authorization_generation_conflict", "external_binding_conflict", "relationship_proof_conflict", "resource_precondition_conflict", "database_constraint_conflict"]) {
+      await expect(sendProjectAlphaProjectCreateCommand(connection, create, send(verified(code)))).resolves
+        .toEqual({ status: "conflict", reason: code, httpStatus: 409, requestId: request });
+    }
+  });
+  it("fails closed for malformed, surplus, mismatched, oversized, or duplicate command conflict envelopes", async () => {
+    const route = { method: "POST", path: "/api/v2/projects/commands", requiredCapability: "projects.create", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true };
+    const valid = { apiVersion: "2", sourceInstanceId: source, applicationId: application, historyEpoch: epoch, requestId: request, error: { code: "command_id_conflict" } };
+    const send = (body: unknown, raw?: string, headers?: Record<string, string>) => vi.fn<typeof fetch>(async (_url, init) =>
+      init?.method === "GET" ? json(metadata(route)) : json(body, 409, headers, raw));
+    const duplicate = `{"apiVersion":"2","requestId":"${request}","requestId":"${request}","error":{"code":"identity_conflict"}}`;
+    const cases: Array<[unknown, string | undefined, Record<string, string> | undefined]> = [
+      [{ ...valid, sourceInstanceId: epoch }, undefined, undefined],
+      [{ ...valid, extra: true }, undefined, undefined],
+      [{ apiVersion: "2", requestId: request, error: { code: "command_id_conflict" } }, undefined, undefined],
+      [{ apiVersion: "2", sourceInstanceId: source, requestId: request, error: { code: "identity_conflict" } }, undefined, undefined],
+      [{ apiVersion: "2", sourceInstanceId: epoch, applicationId: application, historyEpoch: epoch, requestId: request, error: { code: "identity_conflict" } }, undefined, undefined],
+      [valid, duplicate, undefined],
+      [valid, " ".repeat(64 * 1024 + 1), undefined],
+      [{ ...valid, requestId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee" }, undefined, undefined],
+      [valid, undefined, { "X-Request-ID": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee" }],
+    ];
+    for (const [body, raw, headers] of cases) {
+      await expect(sendProjectAlphaProjectCreateCommand(connection, create, send(body, raw, headers))).resolves
+        .toMatchObject({ status: "uncertain", reason: "invalid_contract", httpStatus: 409 });
+    }
+  });
   it("keeps reads and inventory non-authoritative and bounded", async () => {
     const readRoute = { method: "GET", path: "/api/v2/projects/{publicId}", requiredCapability: "projects.v2.read", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true };
     const readBody = { apiVersion: "2", sourceInstanceId: source, applicationId: application, historyEpoch: epoch, requestId: request, replayed: false, accepted: true, resource: { type: "project", id: project, revision: "1", projectionSha256: "a".repeat(64) }, data: { name: "Survey", description: null, status: "active", archived: false, overdueWarning: false, completedAt: null, archivedAt: null, estimatedStart: null, estimatedEnd: null, clientPublicId: null, organizationPublicId: org } };

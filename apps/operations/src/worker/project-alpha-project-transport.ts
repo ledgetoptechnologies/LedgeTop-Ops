@@ -13,6 +13,16 @@ export const PROJECT_ALPHA_PROJECT_MAX_GENERATION = "9223372036854775807";
 export const PROJECT_ALPHA_PROJECT_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 export const PROJECT_ALPHA_PROJECT_PUBLIC_ID = /^[0-9a-f]{32}$/;
 export const PROJECT_ALPHA_PROJECT_HASH = /^[0-9a-f]{64}$/;
+export const PROJECT_ALPHA_PROJECT_CONFLICT_CODES = [
+  "identity_conflict",
+  "command_id_conflict",
+  "authorization_generation_conflict",
+  "external_binding_conflict",
+  "relationship_proof_conflict",
+  "resource_precondition_conflict",
+  "database_constraint_conflict",
+] as const;
+export type ProjectAlphaProjectConflictCode = typeof PROJECT_ALPHA_PROJECT_CONFLICT_CODES[number];
 
 export type ProjectAlphaProjectLifecycle = "not_started" | "active" | "completed" | "cancelled";
 export type ProjectAlphaProjectCustomer = Readonly<{ organizationPublicId: string | null; clientPublicId: string | null }>;
@@ -30,7 +40,7 @@ export type ProjectAlphaProjectRelationProof = Readonly<{
 }>;
 export type ProjectAlphaProjectFailure = Readonly<{
   status: "rejected" | "blocked" | "conflict" | "uncertain";
-  reason: "invalid_command" | "request_limit" | "preflight" | "http_status" | "timeout" | "transport" | "response_limit" | "invalid_contract";
+  reason: "invalid_command" | "request_limit" | "preflight" | "http_status" | "timeout" | "transport" | "response_limit" | "invalid_contract" | ProjectAlphaProjectConflictCode;
   httpStatus?: number;
   requestId?: string;
   preflight?: ProjectAlphaApiV2Probe;
