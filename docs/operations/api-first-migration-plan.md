@@ -5847,9 +5847,25 @@ pending; this requirement does not claim a deployed UI change.
   legacy `full` access. The one-time values were retained only in a local
   Windows DPAPI-protected secret file; no plaintext value entered source
   control, command output, or this record.
-- Both keys remain unbound and all production API-v2 flags remain `false`.
-  The next gate is instance-local migration validation/application through
-  `0102`, application binding for the instance's own key ID, bounded Directory
-  and Project backfills, current attestations, and web/worker/cron recreation
-  with the existing shared config and encryption key preserved. No Operations
-  connection secret or authority policy changes before those gates pass.
+- Both keys are now bound to their instance-local API-v2 applications. The
+  instance-local migration validation and apply gates passed with the existing
+  shared config and encryption key preserved. Final bounded backfill readback
+  is complete: LTT has 7 Directory records and 0 Project records; LTDS has 47
+  Directory records and 3 Project records. Final dry runs report no remaining
+  inserts, refusals, conflicts, or presentation revocations.
+- The Project release attestations are current and verified by the release
+  checker: LTT
+  `dcb52be99a38d26cdc1f62ccc6eb56f0fd48a38228631324999cd6bec7ce40a9` and LTDS
+  `c47bfb8a30168856517391a8c387ca06160a2cd0cfd435ea781c694920fa2b40`.
+  Directory attestations are LTT
+  `9525e87f05e93d5d62832760b5f5c8221e1d8c02d5d49929b7b77e494af86818` and
+  LTDS `814c5b92cf4f91ec09319cab308772d8d00f1dd4d6bc7fd5a0e6b1429c045557`.
+- The production Operations Worker connection envelope is stored only as the
+  encrypted Cloudflare secret `PROJECT_ALPHA_API_V2_CONNECTIONS`. It contains
+  the LTDS primary and LTT secondary connections, both with `enabled: false`.
+  `PROJECT_ALPHA_API_V2_MONITOR_ENABLED`,
+  `PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED`, and
+  `NATIVE_INTEGRATION_CONTROL_ENABLED` remain `false`; no Project Alpha
+  API-v2 feature flag or authority policy is enabled by this checkpoint.
+  Verify the secret by name/value state only; never record or print its raw
+  value.
