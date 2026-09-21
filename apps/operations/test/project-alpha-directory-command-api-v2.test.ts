@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  readProjectAlphaDirectoryInventoryAfterVerifiedCapabilities,
   readConfiguredProjectAlphaDirectoryInventory,
   sendConfiguredProjectAlphaDirectoryBindingRevokeCommand,
   sendProjectAlphaDirectoryLifecycleCommand,
@@ -67,6 +68,13 @@ describe("dormant PA directory command and inventory transport", () => {
     const result = await readConfiguredProjectAlphaDirectoryInventory(env, sourceId, { type: "client", limit: 1 }, send);
     expect(result).toMatchObject({ status: "observed", inventory: { authoritative: false, sourceId, authorizationGeneration: "4", resources: [{ present: false, lastAction: "delete", binding: { status: "tombstoned" } }] } });
     expect(String(send.mock.calls[1]![0])).toBe(`https://source-a.example.test/api/v2/directory/inventory?type=client&limit=1`);
+  });
+
+  it("can reuse a capabilities verification from the same bounded request", async () => {
+    const send = vi.fn<typeof fetch>(async () => json({ sourceInstanceId: source, applicationId: application, historyEpoch: epoch, requestId, authorizationGeneration: "4", resources: [], nextCursor: null }));
+    await expect(readProjectAlphaDirectoryInventoryAfterVerifiedCapabilities(connection, sourceId, { type: "all", limit: 200 }, send)).resolves.toMatchObject({ status: "observed", inventory: { resources: [] } });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(String(send.mock.calls[0]![0])).toBe(`https://source-a.example.test/api/v2/directory/inventory?type=all&limit=200`);
   });
 
   it("rejects identity, replay-conflict-shaped contracts, and malformed bounds without leaking errors", async () => {

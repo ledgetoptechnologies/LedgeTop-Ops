@@ -171,7 +171,7 @@ function revokeEndpoint(kind: ProjectAlphaDirectoryCommandKind): ProjectAlphaApi
   const plural = kind === "client" ? "clients" : "organizations";
   return { method: "POST", path: `/api/v2/directory/${plural}/bindings/revoke/commands`, requiredCapability: `directory.${plural}.unbind`, requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true };
 }
-const inventoryEndpoint: ProjectAlphaApiV2Endpoint = { method: "GET", path: "/api/v2/directory/inventory", requiredCapability: "directory.inventory.read", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true };
+export const PROJECT_ALPHA_DIRECTORY_INVENTORY_ENDPOINT: Readonly<ProjectAlphaApiV2Endpoint> = Object.freeze({ method: "GET", path: "/api/v2/directory/inventory", requiredCapability: "directory.inventory.read", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true });
 
 export function isProjectAlphaDirectoryLifecycleCommand(value: unknown): value is ProjectAlphaDirectoryLifecycleCommand {
   return plain(value) && exact(value, ["commandId", "expectedRevision", "expectedAuthorizationGeneration"])
@@ -317,10 +317,9 @@ function inventorySuccess(value: unknown, sourceId: string, query: { type: "all"
   return Object.freeze({ authoritative: false, sourceId, sourceInstanceId: value.sourceInstanceId, applicationId: value.applicationId, historyEpoch: value.historyEpoch, requestId: value.requestId, authorizationGeneration: value.authorizationGeneration, resources: Object.freeze(resources), nextCursor: value.nextCursor });
 }
 
-export async function readProjectAlphaDirectoryInventory(connectionInput: ProjectAlphaApiV2Connection, sourceId: string, inputQuery: ProjectAlphaDirectoryInventoryQuery = {}, send: typeof fetch = fetch): Promise<ProjectAlphaDirectoryInventoryOutcome> {
-  const query = inventoryQuery(inputQuery); if (!query || !SOURCE_ID.test(sourceId)) return { status: "blocked", reason: "configuration" };
-  let connection: ProjectAlphaApiV2Connection; try { connection = normalizedConnection(connectionInput); if (typeof connection.expectedHistoryEpoch !== "string" || !uuid(connection.expectedHistoryEpoch)) return { status: "blocked", reason: "configuration" }; } catch { return { status: "blocked", reason: "configuration" }; }
-  const preflight = await probeProjectAlphaApiV2(connection, [], send, [inventoryEndpoint]); if (preflight.status !== "verified") return { status: "blocked", reason: preflight.status === "unauthorized" ? "credentials_or_scope" : "preflight", preflight };
+type ProjectAlphaDirectoryInventoryConnection = ProjectAlphaApiV2Connection & Readonly<{ expectedHistoryEpoch: string }>;
+
+async function readProjectAlphaDirectoryInventoryRequest(connection: ProjectAlphaDirectoryInventoryConnection, sourceId: string, query: { type: "all" | ProjectAlphaDirectoryCommandKind; cursor: string | null; limit: number }, send: typeof fetch): Promise<ProjectAlphaDirectoryInventoryOutcome> {
   const params = new URLSearchParams({ type: query.type, limit: String(query.limit) }); if (query.cursor !== null) params.set("cursor", query.cursor);
   const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 10_000); let response: Response | undefined;
   try {
@@ -331,6 +330,26 @@ export async function readProjectAlphaDirectoryInventory(connectionInput: Projec
     const parsed = await boundedJson(response); const inventory = inventorySuccess(parsed, sourceId, query, connection, info.requestId ?? null); return inventory ? { status: "observed", inventory } : { status: "uncertain", reason: "invalid_contract", ...info };
   } catch (error) { return { status: "uncertain", reason: controller.signal.aborted ? "timeout" : error instanceof Error && error.message === "response_limit" ? "response_limit" : error instanceof Error && error.message === "transport" ? "transport" : "invalid_contract" }; }
   finally { clearTimeout(timer); }
+}
+
+function normalizedDirectoryInventoryInput(connectionInput: ProjectAlphaApiV2Connection, sourceId: string, inputQuery: ProjectAlphaDirectoryInventoryQuery): { connection: ProjectAlphaDirectoryInventoryConnection; query: { type: "all" | ProjectAlphaDirectoryCommandKind; cursor: string | null; limit: number } } | null {
+  const query = inventoryQuery(inputQuery); if (!query || !SOURCE_ID.test(sourceId)) return null;
+  let connection: ProjectAlphaApiV2Connection; try { connection = normalizedConnection(connectionInput); if (typeof connection.expectedHistoryEpoch !== "string" || !uuid(connection.expectedHistoryEpoch)) return null; } catch { return null; }
+  return { connection: connection as ProjectAlphaDirectoryInventoryConnection, query };
+}
+
+export async function readProjectAlphaDirectoryInventory(connectionInput: ProjectAlphaApiV2Connection, sourceId: string, inputQuery: ProjectAlphaDirectoryInventoryQuery = {}, send: typeof fetch = fetch): Promise<ProjectAlphaDirectoryInventoryOutcome> {
+  const input = normalizedDirectoryInventoryInput(connectionInput, sourceId, inputQuery); if (!input) return { status: "blocked", reason: "configuration" };
+  const { connection, query } = input;
+  const preflight = await probeProjectAlphaApiV2(connection, [], send, [PROJECT_ALPHA_DIRECTORY_INVENTORY_ENDPOINT]); if (preflight.status !== "verified") return { status: "blocked", reason: preflight.status === "unauthorized" ? "credentials_or_scope" : "preflight", preflight };
+  return readProjectAlphaDirectoryInventoryRequest(connection, sourceId, query, send);
+}
+
+/** For callers that have already verified this exact inventory endpoint with
+ * probeProjectAlphaApiV2 during the same bounded request. */
+export async function readProjectAlphaDirectoryInventoryAfterVerifiedCapabilities(connectionInput: ProjectAlphaApiV2Connection, sourceId: string, inputQuery: ProjectAlphaDirectoryInventoryQuery = {}, send: typeof fetch = fetch): Promise<ProjectAlphaDirectoryInventoryOutcome> {
+  const input = normalizedDirectoryInventoryInput(connectionInput, sourceId, inputQuery); if (!input) return { status: "blocked", reason: "configuration" };
+  return readProjectAlphaDirectoryInventoryRequest(input.connection, sourceId, input.query, send);
 }
 export async function readConfiguredProjectAlphaDirectoryInventory(env: ProjectAlphaApiV2ConnectionEnvironment, sourceId: string, query: ProjectAlphaDirectoryInventoryQuery = {}, send: typeof fetch = fetch): Promise<ProjectAlphaDirectoryInventoryOutcome> {
   const configured = await withEnabledConfiguredProjectAlphaApiV2Connection(env, sourceId, connection => readProjectAlphaDirectoryInventory(connection, sourceId, query, send));
