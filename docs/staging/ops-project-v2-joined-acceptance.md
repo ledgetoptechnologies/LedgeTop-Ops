@@ -57,6 +57,39 @@ an ordinary conflict, and the parser does not issue a refresh, retry the page,
 or otherwise mutate PA. A future staging rehearsal must exercise the exact JSON
 contract before any joined recovery orchestration is considered.
 
+## September 20, 2026 recovery-contract staging proof
+
+PA candidate `2956779ce6bb40e95aeb76704018b470f3f42a7b` was published by the
+staging-only Docker run `35548372193`; the web, cron, and database images built,
+both Trivy scans passed, the staging control rebuild completed, migrations exited
+zero, and the web/database containers were healthy. The server remained in the
+exact five-flag base Project window.
+
+A nonmutating key-#8 probe then exercised the new contract. Inventory returned
+the exact six-field trusted `409 binding_stale` discovery envelope. Binding
+status returned the exact nine-field trusted recovery envelope with matching
+source/application/history identity, canonical authorization generation,
+matching external identity, valid public ID, valid pinned and live revisions, a
+strictly newer live revision, a lowercase projection hash, and `no-store`.
+No static generation was guessed and no PA mutation ran.
+
+Operations commit `0bb69c6` adds the matching strict adapter. Its focused
+transport suite passed 14 tests and the Operations TypeScript check passed. The
+adapter was deployed first under the Project-v2 staging config and then restored
+to the default-off config after the prior internal Operations login had expired.
+The selected PA connection was enabled only during that bounded attempt, then
+disabled again. Temporary native-authority packet
+`staging-authority-project-v2-20260921-005000z` was provisioned only after a
+zero-fence/zero-pending preflight and safely revoked without a Project command.
+Final readback showed inactive admission and grants at versions `6`/`6`, Project
+generation `6`, zero pending/leased work, zero directory write fences, and one
+immutable revoke receipt. Joined mutation remains pending a fresh authenticated
+Operations staging session.
+
+PA PR184's CodeQL, JavaScript analysis, Python analysis, gitleaks, and smoke
+checks all passed. PR98's ten GitHub jobs were rejected before startup by the
+account payment/spending limit; this is not a code-test failure.
+
 ## September 19, 2026 readiness checkpoint
 
 The exact PA candidate for this run is

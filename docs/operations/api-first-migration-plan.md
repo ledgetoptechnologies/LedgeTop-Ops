@@ -5718,3 +5718,13 @@ pending; this requirement does not claim a deployed UI change.
   strictly newer live revision and valid projection hash. Bare `409` responses
   remain ordinary conflicts; malformed or untrusted JSON fails closed as
   uncertain. No refresh command, retry loop, or automatic recovery is wired.
+- Staging now proves that contract end to end on PA candidate `2956779`: the
+  exact inventory and binding-status `409 binding_stale` envelopes passed every
+  identity, generation, revision, and hash fence without a mutation. Operations
+  commit `0bb69c6` is deployed to staging and passed its 14-test focused suite
+  plus TypeScript checking. The joined create/replay/conflict proof did not run
+  because the internal Operations login expired after deployment. The temporary
+  connection, Project route, and authority packet were restored to default-off;
+  final readback proved inactive versions `6`/`6`, generation `6`, zero actor
+  work/fences, and the immutable revoke receipt. Resume only after a fresh Ops
+  staging sign-in; do not reopen authority merely to wait for authentication.
