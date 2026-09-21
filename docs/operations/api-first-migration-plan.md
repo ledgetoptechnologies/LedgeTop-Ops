@@ -1,6 +1,120 @@
 # API-first migration — current implementation objective and work register
 
-Updated September 18, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+Updated September 19, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+
+### September 19, 2026 — current joined-window gate recheck
+
+- The Ops staging Cloudflare Access policy **Ledge Top Staging Staff Access**
+  explicitly includes `beaukoltz@ledgetopdroneservices.com`. A live in-app
+  session loaded the authenticated administrator view for Beau Koltz. This
+  confirms the authenticated delivery path, not Project-v2
+  authority or acceptance.
+- The exact PA staging candidate remains
+  `ff42c3432f39e50e92058b21d7e4942c26f5b355`. Fresh nonmutating capability
+  probes with key **#8** returned HTTP `200`, `apiVersion: 2`,
+  `implementedEndpointCount: 23`, and `grantedCapabilityCount: 1`. PA is
+  therefore still Directory-only, not in the required Project-only window.
+  No Project authority, Ops route, selected connection, or mutation
+  was activated.
+- The local Operations check and build pass. Focused diagnosis of
+  `authenticated-delivery-change-notifications` (`batches forty together`)
+  passes in about 100 seconds because it performs roughly 90 sequential
+  Miniflare/D1 operations on Windows; it is not a deadlock or functional
+  regression. The pure-function batch suite passed 11 tests and the access-code
+  suite passed 2 tests. The broad suite has no trustworthy complete total.
+  GitHub PR98 checks were rejected in about two seconds by the account
+  spending/build limit, not by code failures. No joined Project acceptance is
+  claimed.
+
+### September 19, 2026 — Operations staging entry recovery
+
+- The first Access-authenticated Operations staging request reached Worker
+  version `b0816c47-fed1-4851-8456-c9eaf1370892` and exposed an unrelated
+  fail-open configuration bug before the ordinary authenticated router:
+  `isIncomingPublicRequest` attempted to parse an absent
+  `INCOMING_BASE_URL`, producing Cloudflare Error 1101. Commit `56cfe9a`
+  makes the public Incoming host gate fail closed when neither Incoming host
+  setting is configured, preserves explicit-host precedence, and rejects
+  malformed fallback URLs. The focused gate suite passes 9/9, Operations
+  typechecking passes, and an independent focused review found no security or
+  regression concern.
+- The reviewed fix was first uploaded as isolated staging version
+  `af66e2ec-e4f3-4e40-87c0-608b7aea3043`. The first authenticated browser
+  retry then exposed that the isolated acceptance config omitted the static
+  `ASSETS` binding, so it could not serve the Operations SPA needed to call
+  `/api/session`. The production-equivalent SPA asset contract was added only
+  to the ignored staging config, the app rebuilt successfully, and version
+  `9aa05566-bf5d-4eba-b2fd-20c8a11d8eb0` was uploaded. Inspection confirmed
+  the exact two existing secrets, the same staging D1/R2 bindings, and the new
+  `ASSETS` binding; a 100% dry run preceded its 100% deployment. The staging
+  UI now loads and fails closed for the still-active unmatched Gmail identity.
+  No production route, data, secret, or Incoming retention setting changed.
+- The reusable staging staff policy admitted only the Gmail test identity,
+  while the existing synthetic Operations owner is keyed to a different exact
+  email. The policy now retains the existing tester group and adds only that
+  exact owner email as a second OR rule. The database correctly remains
+  unbound until a fresh Access session uses the matching identity; no email
+  aliasing, subject bypass, duplicate staff record, or direct D1 mutation was
+  introduced. Canonical migrations are current and the pre-authority readback
+  remains clean: zero admissions, profiles, Directory grants, Project grants,
+  Directory fences, and pending/leased Directory or Project commands.
+- A staging contract audit found that `NATIVE_STAFF_ONBOARDING_AUD` was an
+  unused required value: no onboarding HTTP route exists, while every live
+  native staff path verifies only the ordinary Operations staff audience and
+  an existing native admission. The unused audience plumbing and staging
+  prerequisite were removed without changing the exact single-audience JWT,
+  human-app token, issuer, subject/email, or admission checks. Focused native
+  auth, monitor, acceptance-route, scaffold, and preflight suites pass; an
+  independent security review found no regression. The preflight suite now
+  also explicitly rejects an Operations staging config missing its SPA assets.
+
+### September 18, 2026 — Directory bootstrap release and staging prerequisite checkpoint
+
+- Operations PR97 is merged to `main` at
+  `5cfcba3e7b621c8cb23217f583aaa2fd5ab3f711`. Pull-request workflow
+  `35387044730` and authoritative post-merge workflow `35388479643` both
+  passed all ten Operations, Client, Ops Sync, browser, source-invariant,
+  Incoming, and thumbnail jobs. This releases the default-off,
+  staging-environment-only Directory bootstrap endpoint at
+  `POST /api/admin/project-alpha/directory/v2/bootstrap` with exact staging
+  source/origin pins, native administrator admission and identity rechecks,
+  durable command/idempotency recovery, strict PA receipt/readback validation,
+  and mapping creation only after the remote identity and binding are proven.
+  Production remains hidden before authentication because the checked-in gate
+  is false and the route also requires `ENVIRONMENT="staging"`.
+- PA staging Directory acceptance key **#9** was created with exactly the 23
+  reviewed capabilities and Directory read/create/write/relationship/
+  lifecycle/binding/inventory scopes. Its one-time secret is retained only in
+  a Windows DPAPI-protected file outside the repository; decryption was checked
+  without printing the value and no plaintext copy was persisted. The binding
+  dry run and explicit apply completed; an authenticated capabilities probe now
+  returns HTTP 200 with the expected source, application, and history identity.
+  Existing key #5 remains active until the replacement completes acceptance;
+  it must not be revoked merely because its one-time value is unavailable.
+- PA staging is healthy over LAN and its control API, and the restored tunnel
+  ingress returns HTTP 200 at the public staging hostname. After the initial
+  rehearsal failed closed before mutation with
+  `directory_capabilities_contract_mismatch`, the host was moved into the exact
+  Directory-only feature window. Key #9 then advertised the exact 23 granted
+  capabilities and 23 implemented endpoints (capabilities plus 22 Directory
+  and binding endpoints), with zero Project endpoints and matching source,
+  application, and history identities. The live mutation rehearsal passed all
+  71 paced requests with zero `429` responses or retries. It proved create,
+  exact replay, changed-body conflict, read, update, stale binding and refresh,
+  relationship assign/move/remove, archive/restore, tombstone/no-auto-rebind,
+  explicit rebind, inventory, revision, and authorization-generation contracts.
+  Disposable records and immutable audit history were retained; no hard delete
+  was attempted. The governed Operations bootstrap remains pending because the
+  isolated staging D1 currently has no bound staff subject, active native
+  admission, or global `directory.profile.edit` grant. Establish those only
+  through the reviewed native-authority packet before enabling the bootstrap
+  route or selected PA connection. Local acceptance tooling remains green at
+  45/45 Directory and 6/6 joined Project tests.
+- Project Alpha PR184 remains open at
+  `ff42c3432f39e50e92058b21d7e4942c26f5b355`; CI, CodeQL, and Gitleaks are
+  green and GitHub reports it cleanly mergeable. It must remain unmerged until
+  the Directory-only bootstrap window, the subsequent Project-only joined
+  command/read/settlement window, and public-link preservation checks all pass.
 
 ### September 18, 2026 — PA lifecycle and joined-window checkpoint
 
@@ -5552,3 +5666,155 @@ pending; this requirement does not claim a deployed UI change.
   were empty, both foreign-key checks were clean, and each database contained
   exactly one synthetic staging owner. Existing applied D1 ledgers are not
   replayed or rewritten.
+
+### September 19 — Directory-v2 joined staging acceptance
+
+- The bounded Directory-v2 staging window completed with a real PA create for
+  public ID `63382355879f38ef7d77e7e97424188e`. Command
+  `4349b923-d993-4022-9dce-50ef62a85d35` returned the exact replay result,
+  rejected the changed body with `409`, and advanced authorization generation
+  `41 -> 42`. PA and Operations verified the exact configured
+  source/application/history identity and retained durable Operations
+  acknowledgement, mapping, and audit evidence in
+  `staging-directory-acceptance-ff089045-ea88-4c34-90a5-2ef898b9142f`.
+- The applied transport/receipt contract fixes are `e38c61a`; current inspected
+  Operations staging is `07a1d7d0-a20d-4122-befa-00ac2cdaae9a`. The bounded
+  authority window is closed: the Directory acceptance route was removed, the
+  selected PA connection disabled, no actor command/lease/Directory write fence
+  remains, and the reviewed revocation migration verified inactive authority
+  versions, Project-grant generation `2`, and its immutable receipt. This is
+  not Project-v2 acceptance, a PA `main` merge, production readiness, or full
+  regression evidence.
+
+### September 19–20 — base Project window checkpoint
+
+- The exact PA candidate remained `ff42c3432f39e50e92058b21d7e4942c26f5b355`.
+  Exactly five base Project flags were enabled:
+  `APP_API_V2_PROJECTS_CREATE_ENABLED`, `APP_API_V2_PROJECTS_READ_ENABLED`,
+  `APP_API_V2_PROJECTS_WRITE_ENABLED`,
+  `APP_API_V2_PROJECTS_BINDING_STATUS_ENABLED`, and
+  `APP_API_V2_PROJECTS_INVENTORY_ENABLED`. Capabilities returned HTTP `200`,
+  `implementedEndpointCount: 6`, and `grantedCapabilityCount: 6`.
+- Project inventory GET returned an empty-body `409` because the deliberately
+  stale browser-edited binding remains. No joined mutation ran, and static
+  generation must not be guessed. This remains a checkpoint, not joined
+  acceptance.
+- Temporary staging-only Ops packet
+  `staging-authority-project-v2-20260919-215846z` was provisioned and safely
+  revoked. Pre-revoke counts were `actor_fences=0`,
+  `project_pending_or_leased=0`, and `directory_pending_or_leased=0`;
+  post-revoke readback was admission active `0`/version `4`, profile `1`,
+  directory grant `0`, project grant `0`/version `4`/generation `4`, live
+  proofs `0`, one revoke receipt, one revoked provision approval, and no
+  pending revoke migration.
+- The next gate is a read-only PA-side DB readback of the current Project
+  authorization generation for application
+  `150cb108-af37-4973-ab6e-f6d991a6e8c8`, without refreshing stale bindings.
+- The local Operations Project transport now recognizes PA's exact stale-binding
+  recovery envelopes without mutating anything. Inventory accepts only a trusted,
+  identity- and request-correlated `binding_stale` discovery containing the
+  selected external ID. Binding status additionally requires the current
+  generation, exact binding external/public IDs and pinned revision, plus a
+  strictly newer live revision and valid projection hash. Bare `409` responses
+  remain ordinary conflicts; malformed or untrusted JSON fails closed as
+  uncertain. No refresh command, retry loop, or automatic recovery is wired.
+- Staging now proves that contract end to end on PA candidate `2956779`: the
+  exact inventory and binding-status `409 binding_stale` envelopes passed every
+  identity, generation, revision, and hash fence without a mutation. Operations
+  commit `0bb69c6` is deployed to staging and passed its 14-test focused suite
+  plus TypeScript checking. The joined create/replay/conflict proof did not run
+  because the internal Operations login expired after deployment. The temporary
+  connection, Project route, and authority packet were restored to default-off;
+  final readback proved inactive versions `6`/`6`, generation `6`, zero actor
+  work/fences, and the immutable revoke receipt. Resume only after a fresh Ops
+  staging sign-in; do not reopen authority merely to wait for authentication.
+
+### September 21 — authenticated joined attempt and remaining Directory fence
+
+- A matching Operations staging administrator session passed the session,
+  CSRF, administrator, and `integrations.manage` gates. The bounded Project
+  route and PA connection were enabled only for the attempt; PA's current
+  Project authorization generation was read as `5` rather than guessed.
+- Fresh synthetic create command
+  `9eb7ba9b-5fb2-4cfb-a2b1-4293cf8deb8e` reached PA but received an empty-body
+  `409`. Operations retained one immutable `pending -> uncertain` evidence
+  chain and correctly withheld settlement/activation. A second read proved the
+  generation was still `5`, so this was not a generation race. The remaining
+  source-level candidates are PA's application identity fence or the exact
+  application-scoped organization binding/revision/hash proof. Re-open the
+  Directory-only PA window and read back that one synthetic organization
+  binding before issuing a new Project command; do not retry the uncertain
+  command as though it were known absent.
+- The pre-existing staging public link remained byte-for-byte stable (`200`,
+  `text/html`) across the attempt. Cleanup is complete: the temporary bridge
+  was removed, the Project route and PA connection are default-off, worker
+  version `0e60b962-ab56-4d25-a924-25dbd4be5b1c` is deployed, authority is
+  inactive at admission/grant version `8` and Project generation `8`, the
+  Directory grant is inactive, all pending/lease/fence counts are zero, and one
+  immutable revoke receipt exists with no pending revoke migration.
+
+### September 21 — Project conflict contract and remaining joined gate
+
+- The corrected Ops PR98 harness and evidence checkpoint at
+  `0ada2ab2213e4d25c5a804b0ba4a1226521fa601` passed all ten CI jobs in exact
+  workflow `35564563048`. PA PR184 is at
+  `3b43e1275e3b248979876ace56ca38e6e383f52c` with green required checks.
+  A supported `cloudflared` human Access login succeeded for the staging
+  Operations origin.
+- The harness omission of the canonical PA staging host blocked the first
+  joined run before mutation. The corrected harness accepts
+  `STAGING_PROJECT_ALPHA_ORIGIN` and its unit suite is 10/10. A fresh command
+  `3b785ca6-96a8-4103-b2e5-4a60ce5cae41` made one attempt and ended terminal
+  `relationship_proof_conflict` HTTP `409`, request
+  `fcd6627d-405d-477b-8486-d51140a2d6bf`; no success receipt or activation was
+  recorded. The authoritative PA Project generation was `5`.
+- The independently observed stale Project binding is
+  `pa-acceptance-p184fix-20260917a:33b8e6f6-8beb-4190-a24f-abdd7b401112`,
+  revision `2` against live revision `10`, reporting generation `5`. This
+  proves the generation without guessing, but is separate from the typed
+  relationship-proof rejection. Neither result proves the command was absent,
+  and the terminal command must not be replayed.
+- Public-link safety remains proven. The first failed run stopped before its
+  public probe/command; the second run probed the link before its single Project
+  attempt. A separate post-attempt probe returned `200 text/html`, `3266` bytes,
+  and the same SHA-256 as before,
+  `5632e883d6fe3ca72c68e900e8e6b76561c07d454605e728c4a765d07a383464`.
+- Staging cleanup is complete. The connection secret is empty, default-off
+  version `de550f0c-f5ec-452c-a4db-3c61bc7cffc2` is deployed, and the revoke
+  migration is applied. Admission, Project grant, and Project generation are
+  inactive at version `10`; Directory grant is inactive; pending/leased rows,
+  actor fences, and live proofs are zero; one immutable revoke receipt remains.
+- The remaining-gate wording above is superseded by the passing checkpoint below.
+
+### September 21 — passing joined Project-v2 staging acceptance
+
+- The exact PA Directory proof is source
+  `d2f7acb8-375d-4da7-8d37-3f2455a3972b`, application
+  `150cb108-af37-4973-ab6e-f6d991a6e8c8`, epoch
+  `8c194c00-c7dd-4c6c-82ce-d391ef3fa998`, organization external ID
+  `staging-directory-acceptance-ff089045-ea88-4c34-90a5-2ef898b9142f`, public
+  ID `63382355879f38ef7d77e7e97424188e`, revision `1`, projection SHA-256
+  `7a45cf37ea099868f82f459ed2c8cab9dcabf6348ca35f6439734cd08b9f9bef`, and
+  Directory generation `42`. Project generation was authoritatively re-read as
+  `5` from typed `binding_stale` request
+  `e9dd5105-dd0e-401f-a0dc-265798c7d13b`, pinned revision `2`, live revision
+  `10`.
+- Passing command `9b60e1de-3926-48fc-a049-ca8af9ec36db` used external ID
+  `ops-joined-acceptance-20260921d:project:9b60e1de-3926-48fc-a049-ca8af9ec36db`.
+  First settlement `bacd6769-34ed-4d2f-b00a-131f34c1ecb3` activated
+  `3d862f3f-3bb3-4ef8-a854-6522bf5e0cf0`, version `1`, `replay=false`; exact
+  replay returned the same IDs/version with `replay=true`; changed body
+  conflicted at stage `plan` for reason `command_id`.
+- The existing PA staging public link remained `200 text/html`, `3266` bytes,
+  with unchanged SHA-256
+  `5632e883d6fe3ca72c68e900e8e6b76561c07d454605e728c4a765d07a383464` before
+  and after. The temporary staging-only browser bridge was removed before the
+  default-off deploy. Default-off version is
+  `ed0bc4ba-5e98-448a-8819-319424aa04db`; connection secret empty, activation
+  false; revoke migration `9001` applied with no pending migrations.
+- Final D1 readback: admission inactive v12, profile v1, Project grant inactive
+  v12/generation 12, Directory grant inactive, zero pending/leased Project and
+  Directory rows, zero Directory fences, zero live proofs, and one revoke
+  receipt. Joined staging acceptance passes and the migration is merge-ready
+  subject to exact CI and normal owner approval; no production cutover is
+  authorized.

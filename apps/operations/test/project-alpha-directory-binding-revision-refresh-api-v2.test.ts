@@ -21,7 +21,7 @@ describe("PA directory binding revision refresh transport", () => {
     expect(await sendProjectAlphaDirectoryBindingRevisionRefreshCommand(connection, "client", command(), send)).toMatchObject({ status: "acknowledged", httpStatus: 200 });
     expect(String(send.mock.calls[1]![0])).toBe("https://pa.example.test/api/v2/directory/clients/bindings/revisions/commands");
     const init = send.mock.calls[1]![1]!;
-    expect(init).toMatchObject({ method: "POST", redirect: "error", credentials: "omit", cache: "no-store" });
+    expect(init).toMatchObject({ method: "POST", redirect: "manual", credentials: "omit", cache: "no-store" });
     expect(JSON.parse(String(init.body))).toEqual(command());
     const headers = new Headers(init.headers);
     expect(headers.get("Authorization")).toBe("Bearer synthetic-refresh-secret");

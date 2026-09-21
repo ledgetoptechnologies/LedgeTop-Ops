@@ -91,7 +91,6 @@ async function nativeActor(c: AppContext) {
   try {
     authenticated = await authenticateNativeStaffWithAdmissionVersion(c.req.raw, c.env.OPS_DB, {
       enabled: true, issuer: c.env.TEAM_DOMAIN ?? "", staffAudience: c.env.OPERATIONS_AUD,
-      onboardingAudience: c.env.NATIVE_STAFF_ONBOARDING_AUD ?? "",
     });
   } catch { throw new HTTPException(403, { message: "Current native staff authority is required" }); }
   const principal = c.get("principal"), identity = authenticated.identity;

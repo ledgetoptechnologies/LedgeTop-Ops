@@ -241,6 +241,27 @@ describe("unmounted project-v2 command producer", () => {
     expect(retry).not.toHaveBeenCalled();
   });
 
+  it("persists a validated PA conflict by safe code and diagnostics only, never its body", async () => {
+    const action = await createAction(), healthy = transport(action);
+    const conflict = vi.fn<typeof fetch>(async (url, init) => {
+      if (init?.method !== "POST") return healthy(url, init);
+      return response({ apiVersion: "2", sourceInstanceId: sourceOne, applicationId: appOne, historyEpoch: epochOne,
+        requestId: "11111111-1111-4111-8111-111111111111", error: { code: "relationship_proof_conflict" } }, 409);
+    });
+    await planProjectAlphaProjectV2Command(env(), action);
+    await expect(dispatchProjectAlphaProjectV2PendingCommand(env(true), action.sourceId, action.command.commandId, conflict))
+      .resolves.toEqual({ status: "conflict", reason: "relationship_proof_conflict", httpStatus: 409, requestId: "11111111-1111-4111-8111-111111111111" });
+    const saved = await db.prepare("SELECT state,outcome_json FROM project_alpha_project_outbox WHERE command_id=?").bind(action.command.commandId).first<{ state: string; outcome_json: string }>();
+    expect(saved?.state).toBe("terminal");
+    expect(JSON.parse(saved!.outcome_json)).toEqual({ projectV2Dispatcher: "conflict", reason: "relationship_proof_conflict", httpStatus: 409, requestId: "11111111-1111-4111-8111-111111111111" });
+    expect(saved!.outcome_json).not.toContain("sourceInstanceId");
+    expect(await db.prepare("SELECT state FROM project_alpha_project_v2_events WHERE command_id=? ORDER BY state_version").bind(action.command.commandId).all())
+      .toMatchObject({ results: [{ state: "pending" }, { state: "conflict" }] });
+    await expect(dispatchProjectAlphaProjectV2PendingCommand(env(true), action.sourceId, action.command.commandId, conflict))
+      .resolves.toEqual({ status: "conflict", reason: "relationship_proof_conflict", httpStatus: 409, requestId: "11111111-1111-4111-8111-111111111111" });
+    expect(conflict.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+  });
+
   it("replays terminal uncertain, conflict, and rejected ledger evidence without transport", async () => {
     for (const [state, expected] of [["uncertain", { status: "uncertain", reason: "transport" }], ["conflict", { status: "conflict", reason: "http_status", httpStatus: 409 }], ["rejected", { status: "rejected", reason: "invalid_command" }]] as const) {
       const action = await createAction();

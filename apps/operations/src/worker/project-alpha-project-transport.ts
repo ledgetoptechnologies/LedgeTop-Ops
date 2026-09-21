@@ -13,6 +13,16 @@ export const PROJECT_ALPHA_PROJECT_MAX_GENERATION = "9223372036854775807";
 export const PROJECT_ALPHA_PROJECT_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 export const PROJECT_ALPHA_PROJECT_PUBLIC_ID = /^[0-9a-f]{32}$/;
 export const PROJECT_ALPHA_PROJECT_HASH = /^[0-9a-f]{64}$/;
+export const PROJECT_ALPHA_PROJECT_CONFLICT_CODES = [
+  "identity_conflict",
+  "command_id_conflict",
+  "authorization_generation_conflict",
+  "external_binding_conflict",
+  "relationship_proof_conflict",
+  "resource_precondition_conflict",
+  "database_constraint_conflict",
+] as const;
+export type ProjectAlphaProjectConflictCode = typeof PROJECT_ALPHA_PROJECT_CONFLICT_CODES[number];
 
 export type ProjectAlphaProjectLifecycle = "not_started" | "active" | "completed" | "cancelled";
 export type ProjectAlphaProjectCustomer = Readonly<{ organizationPublicId: string | null; clientPublicId: string | null }>;
@@ -30,7 +40,7 @@ export type ProjectAlphaProjectRelationProof = Readonly<{
 }>;
 export type ProjectAlphaProjectFailure = Readonly<{
   status: "rejected" | "blocked" | "conflict" | "uncertain";
-  reason: "invalid_command" | "request_limit" | "preflight" | "http_status" | "timeout" | "transport" | "response_limit" | "invalid_contract";
+  reason: "invalid_command" | "request_limit" | "preflight" | "http_status" | "timeout" | "transport" | "response_limit" | "invalid_contract" | ProjectAlphaProjectConflictCode;
   httpStatus?: number;
   requestId?: string;
   preflight?: ProjectAlphaApiV2Probe;
@@ -114,6 +124,24 @@ export async function boundedJsonWithBytes(response: Response, maximum = PROJECT
   const bytes = new Uint8Array(size); let offset = 0; for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
   try { return Object.freeze({ value: parseDuplicateFreeJson(new TextDecoder("utf-8", { fatal: true }).decode(bytes)), bytes }); } catch { throw new Error("invalid_contract"); }
 }
+export async function boundedJsonOrEmpty(response: Response, maximum = PROJECT_ALPHA_PROJECT_RESPONSE_LIMIT): Promise<Readonly<{ empty: true }> | Readonly<{ empty: false; value: unknown }>> {
+  const declared = response.headers.get("Content-Length");
+  if (declared !== null && (!/^\d+$/.test(declared) || !Number.isSafeInteger(Number(declared)) || Number(declared) > maximum)) { await response.body?.cancel(); throw new Error("response_limit"); }
+  const reader = response.body?.getReader();
+  if (!reader) {
+    if (declared === null || Number(declared) === 0) return Object.freeze({ empty: true });
+    throw new Error("invalid_contract");
+  }
+  const chunks: Uint8Array[] = []; let size = 0;
+  try { for (;;) { const part = await reader.read().catch(() => { throw new Error("transport"); }); if (part.done) break; size += part.value.byteLength; if (size > maximum) { await reader.cancel(); throw new Error("response_limit"); } chunks.push(part.value); } }
+  finally { reader.releaseLock(); }
+  if (size === 0) {
+    if (declared !== null && Number(declared) !== 0) throw new Error("invalid_contract");
+    return Object.freeze({ empty: true });
+  }
+  const bytes = new Uint8Array(size); let offset = 0; for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  try { return Object.freeze({ empty: false, value: parseDuplicateFreeJson(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) }); } catch { throw new Error("invalid_contract"); }
+}
 export function authHeaders(connection: ProjectAlphaApiV2Connection, contentType = false): Headers {
   const headers = new Headers({ Accept: "application/json", Authorization: `Bearer ${connection.apiKey}`, "X-PA-Source-Instance-ID": connection.expectedSourceInstanceId, "X-PA-Application-ID": connection.expectedApplicationId, "X-PA-History-Epoch": connection.expectedHistoryEpoch! });
   if (contentType) headers.set("Content-Type", "application/json; charset=utf-8");
@@ -127,8 +155,9 @@ export function preflightFailure(preflight: ProjectAlphaApiV2Probe): ProjectAlph
 export async function post(connection: ProjectAlphaApiV2Connection, route: ProjectAlphaApiV2Endpoint, body: string, send: typeof fetch, accepted: readonly number[] = [200]): Promise<Response | ProjectAlphaProjectFailure> {
   const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 10_000); let response: Response | undefined;
   try {
-    response = await send(new URL(route.path, connection.baseUrl), { method: "POST", headers: authHeaders(connection, true), body, redirect: "error", credentials: "omit", cache: "no-store", signal: controller.signal });
+    response = await send(new URL(route.path, connection.baseUrl), { method: "POST", headers: authHeaders(connection, true), body, redirect: "manual", credentials: "omit", cache: "no-store", signal: controller.signal });
     const info = diagnostic(response);
+    if (response.redirected || (response.status >= 300 && response.status < 400)) { await response.body?.cancel(); return { status: "uncertain", reason: "invalid_contract", ...info }; }
     if (!accepted.includes(response.status)) { await response.body?.cancel(); const status = response.status >= 500 || response.status < 400 ? "uncertain" : response.status === 409 ? "conflict" : [400, 413, 415].includes(response.status) ? "rejected" : "blocked"; return { status, reason: "http_status", ...info }; }
     if (!trusted(response, true)) { await response.body?.cancel(); return { status: "uncertain", reason: "invalid_contract", ...info }; }
     return response;
@@ -137,7 +166,11 @@ export async function post(connection: ProjectAlphaApiV2Connection, route: Proje
 }
 export async function get(connection: ProjectAlphaApiV2Connection, path: string, send: typeof fetch): Promise<Response | ProjectAlphaProjectFailure> {
   const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 10_000);
-  try { return await send(new URL(path, connection.baseUrl), { method: "GET", headers: authHeaders(connection), redirect: "error", credentials: "omit", cache: "no-store", signal: controller.signal }); }
+  try {
+    const response = await send(new URL(path, connection.baseUrl), { method: "GET", headers: authHeaders(connection), redirect: "manual", credentials: "omit", cache: "no-store", signal: controller.signal });
+    if (response.redirected || (response.status >= 300 && response.status < 400)) { await response.body?.cancel(); return { status: "uncertain", reason: "invalid_contract", ...diagnostic(response) }; }
+    return response;
+  }
   catch { return { status: "uncertain", reason: controller.signal.aborted ? "timeout" : "transport" }; }
   finally { clearTimeout(timer); }
 }

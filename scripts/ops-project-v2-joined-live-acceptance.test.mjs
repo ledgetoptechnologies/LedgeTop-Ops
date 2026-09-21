@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseJoinedAcceptanceConfig, runJoinedAcceptance, JoinedAcceptanceError } from "./ops-project-v2-joined-live-acceptance.mjs";
+import { parseBrowserContextJoinedAcceptanceConfig, parseJoinedAcceptanceConfig, runJoinedAcceptance,
+  runJoinedAcceptanceWithBrowserContext, JoinedAcceptanceError } from "./ops-project-v2-joined-live-acceptance.mjs";
 
 const identity = {
   OPS_BASE_URL: "https://ops-staging.ledgetopdroneservices.com",
@@ -31,9 +32,16 @@ test("joined mutation config refuses production and requires explicit session/mu
   assert.equal((await parseJoinedAcceptanceConfig({ ...identity, OPS_ACCEPTANCE_ALLOW_MUTATIONS: "" })).mutate, false);
   await assert.rejects(() => parseJoinedAcceptanceConfig({ ...identity, OPS_SESSION_COOKIE: "" }), { code: "operations_session_required" });
   await assert.rejects(() => parseJoinedAcceptanceConfig({ ...identity, OPS_ACCEPTANCE_PUBLIC_LINK_URL: "https://portal.ledgetopdroneservices.com/s/abc" }), { code: "production_or_nonstaging_public_link" });
+  await assert.rejects(() => parseJoinedAcceptanceConfig({ ...identity, OPS_ACCEPTANCE_PUBLIC_LINK_URL: "https://project-alpha.ledgetoptechnologies.com/?page=project&id=1" }), { code: "production_or_nonstaging_public_link" });
   const assertion = "header.payload.signature";
   assert.equal((await parseJoinedAcceptanceConfig({ ...identity, OPS_CF_ACCESS_JWT_ASSERTION: assertion })).accessAssertion, assertion);
   await assert.rejects(() => parseJoinedAcceptanceConfig({ ...identity, OPS_CF_ACCESS_JWT_ASSERTION: "not-a-jwt" }), { code: "invalid_access_assertion" });
+});
+
+test("joined mutation config accepts the canonical Project Alpha staging public-link host", async () => {
+  const publicLinkUrl = "https://pa-staging.ledgetoptechnologies.com/public/project/example";
+  const config = await parseJoinedAcceptanceConfig({ ...identity, OPS_ACCEPTANCE_PUBLIC_LINK_URL: publicLinkUrl });
+  assert.equal(config.publicLinkUrl, publicLinkUrl);
 });
 
 test("joined runner performs disposable create, exact replay, changed-body conflict, and sanitized public-link evidence", async () => {
@@ -107,4 +115,72 @@ test("joined runner fails closed when an existing public link changes", async ()
     if (posts === 2) return response(200, activated(body.command.commandId, body.command.externalId, true, 1));
     return response(409, { stage: "plan", outcome: { status: "conflict", reason: "command_id" } });
   } }), { code: "public_link_changed" });
+});
+
+test("browser-context config never accepts copied browser credentials", async () => {
+  const { OPS_SESSION_COOKIE: _cookie, ...browserIdentity } = identity;
+  const config = await parseBrowserContextJoinedAcceptanceConfig(browserIdentity);
+  assert.equal(config.browserContext, true);
+  assert.equal(Object.hasOwn(config, "cookie"), false);
+  assert.equal(Object.hasOwn(config, "accessAssertion"), false);
+  for (const env of [
+    { ...browserIdentity, OPS_SESSION_COOKIE: identity.OPS_SESSION_COOKIE },
+    { ...browserIdentity, OPS_STORAGE_STATE: ".backups/browser-state.json" },
+    { ...browserIdentity, OPS_CF_ACCESS_JWT_ASSERTION: "header.payload.signature" },
+  ]) await assert.rejects(() => parseBrowserContextJoinedAcceptanceConfig(env), { code: "browser_context_credentials_forbidden" });
+  await assert.rejects(() => runJoinedAcceptanceWithBrowserContext({ ...config, cookie: identity.OPS_SESSION_COOKIE }, {
+    browserContextFetcher: async () => { throw new Error("must not fetch"); },
+  }), { code: "browser_context_credentials_forbidden" });
+  await assert.rejects(() => runJoinedAcceptanceWithBrowserContext({ ...config, accessAssertion: "header.payload.signature" }, {
+    browserContextFetcher: async () => { throw new Error("must not fetch"); },
+  }), { code: "browser_context_credentials_forbidden" });
+});
+
+test("browser-context runner uses native same-origin auth without forwarding cookie headers", async () => {
+  const { OPS_SESSION_COOKIE: _cookie, ...browserIdentity } = identity;
+  const config = await parseBrowserContextJoinedAcceptanceConfig(browserIdentity);
+  const browserCalls = [], publicCalls = [];
+  let posts = 0;
+  const report = await runJoinedAcceptanceWithBrowserContext(config, {
+    now: Date.parse("2026-09-20T12:00:00Z"),
+    browserContextFetcher: async (url, init = {}) => {
+      browserCalls.push({ url, init: { ...init, headers: { ...init.headers } } });
+      assert.equal(new URL(url).origin, identity.OPS_BASE_URL);
+      assert.equal(init.credentials, "same-origin");
+      assert.equal(init.headers.Cookie, undefined);
+      assert.equal(init.headers.cookie, undefined);
+      assert.equal(init.headers["Cf-Access-Jwt-Assertion"], undefined);
+      assert.equal(init.headers.Origin, undefined);
+      if (url.endsWith("/api/session"))
+        return response(200, { csrfToken: "csrf-test-token-1234", user: { isAdministrator: true, permissions: ["integrations.manage"] } });
+      const body = JSON.parse(init.body);
+      posts += 1;
+      if (posts === 1) return response(200, activated(body.command.commandId, body.command.externalId, false, 1));
+      if (posts === 2) return response(200, activated(body.command.commandId, body.command.externalId, true, 1));
+      return response(409, { stage: "plan", outcome: { status: "conflict", reason: "command_id" } });
+    },
+    publicFetcher: async (url, init = {}) => {
+      publicCalls.push({ url, init: { ...init, headers: { ...init.headers } } });
+      assert.equal(url, identity.OPS_ACCEPTANCE_PUBLIC_LINK_URL);
+      assert.equal(init.credentials, "omit");
+      assert.equal(init.headers.Cookie, undefined);
+      assert.equal(init.headers.cookie, undefined);
+      return new Response("stable-public-link", { status: 200, headers: { "content-type": "text/html" } });
+    },
+  });
+  assert.equal(report.status, "passed");
+  assert.equal(browserCalls.length, 4);
+  assert.equal(publicCalls.length, 2);
+  assert.equal(JSON.stringify(report).includes(identity.OPS_SESSION_COOKIE), false);
+});
+
+test("browser-context runner fails closed before reaching an unapproved Operations origin", async () => {
+  const { OPS_SESSION_COOKIE: _cookie, ...browserIdentity } = identity;
+  const config = await parseBrowserContextJoinedAcceptanceConfig(browserIdentity);
+  let called = false;
+  await assert.rejects(() => runJoinedAcceptanceWithBrowserContext({ ...config, origin: "https://ops.ledgetopdroneservices.com" }, {
+    browserContextFetcher: async () => { called = true; throw new Error("must not fetch"); },
+    publicFetcher: async () => { called = true; throw new Error("must not fetch"); },
+  }), { code: "production_or_noncanonical_operations_origin" });
+  assert.equal(called, false);
 });

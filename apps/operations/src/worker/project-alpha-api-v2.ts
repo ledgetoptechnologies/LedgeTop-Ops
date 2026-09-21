@@ -132,9 +132,16 @@ export async function probeProjectAlphaApiV2(
   const timer = setTimeout(() => controller.abort(), 10_000);
   let response: Response | undefined;
   try {
-    response = await send(url, { method: "GET", headers, redirect: "error", credentials: "omit", cache: "no-store", signal: controller.signal });
+    // Workers turns redirect:"error" into an opaque transport TypeError before
+    // callers can classify the response. Manual mode still never follows the
+    // redirect, and lets us reject it as an incompatible upstream contract.
+    response = await send(url, { method: "GET", headers, redirect: "manual", credentials: "omit", cache: "no-store", signal: controller.signal });
     const candidateId = response.headers.get("X-Request-ID");
     const diagnostic = { httpStatus: response.status, ...(candidateId && UUID.test(candidateId) ? { requestId: candidateId } : {}) };
+    if (response.redirected || (response.status >= 300 && response.status < 400)) {
+      await response.body?.cancel();
+      return { status: "incompatible", reason: "invalid_contract", ...diagnostic };
+    }
     if (!candidateId || !UUID.test(candidateId)) {
       await response.body?.cancel();
       return { status: "incompatible", reason: "invalid_contract", ...diagnostic };

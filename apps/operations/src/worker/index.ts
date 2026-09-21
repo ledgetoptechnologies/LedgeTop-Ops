@@ -429,7 +429,6 @@ async function dispatchProjectAlphaApiV2MonitorControl(c: any) {
       enabled: c.env.NATIVE_INTEGRATION_CONTROL_ENABLED === "true",
       issuer: c.env.TEAM_DOMAIN ?? "",
       staffAudience: c.env.OPERATIONS_AUD,
-      onboardingAudience: c.env.NATIVE_STAFF_ONBOARDING_AUD ?? "",
       origin: c.env.NATIVE_INTEGRATION_CONTROL_ORIGIN ?? "",
       csrfSecret: c.env.OPERATIONS_SESSION_SECRET,
     },

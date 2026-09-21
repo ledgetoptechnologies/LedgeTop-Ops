@@ -90,6 +90,42 @@ describe("dormant PA project v2 transport", () => {
     await expect(sendProjectAlphaProjectCreateCommand(connection, create, send)).resolves.toMatchObject({ status: "uncertain", reason: "invalid_contract" });
     expect(validatedProjectAlphaProjectAcknowledgement(await sendProjectAlphaProjectCreateCommand(connection, create, send))).toBeNull();
   });
+  it("accepts only the exact, correlated Project-v2 command conflict envelopes", async () => {
+    const route = { method: "POST", path: "/api/v2/projects/commands", requiredCapability: "projects.create", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true };
+    const verified = (code: string) => ({ apiVersion: "2", sourceInstanceId: source, applicationId: application, historyEpoch: epoch, requestId: request, error: { code } });
+    const identityWithoutEcho = { apiVersion: "2", requestId: request, error: { code: "identity_conflict" } };
+    const send = (body: unknown, raw?: string, headers?: Record<string, string>) => vi.fn<typeof fetch>(async (_url, init) =>
+      init?.method === "GET" ? json(metadata(route)) : json(body, 409, headers, raw));
+
+    await expect(sendProjectAlphaProjectCreateCommand(connection, create, send(identityWithoutEcho))).resolves
+      .toEqual({ status: "conflict", reason: "identity_conflict", httpStatus: 409, requestId: request });
+    for (const code of ["identity_conflict", "command_id_conflict", "authorization_generation_conflict", "external_binding_conflict", "relationship_proof_conflict", "resource_precondition_conflict", "database_constraint_conflict"]) {
+      await expect(sendProjectAlphaProjectCreateCommand(connection, create, send(verified(code)))).resolves
+        .toEqual({ status: "conflict", reason: code, httpStatus: 409, requestId: request });
+    }
+  });
+  it("fails closed for malformed, surplus, mismatched, oversized, or duplicate command conflict envelopes", async () => {
+    const route = { method: "POST", path: "/api/v2/projects/commands", requiredCapability: "projects.create", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true };
+    const valid = { apiVersion: "2", sourceInstanceId: source, applicationId: application, historyEpoch: epoch, requestId: request, error: { code: "command_id_conflict" } };
+    const send = (body: unknown, raw?: string, headers?: Record<string, string>) => vi.fn<typeof fetch>(async (_url, init) =>
+      init?.method === "GET" ? json(metadata(route)) : json(body, 409, headers, raw));
+    const duplicate = `{"apiVersion":"2","requestId":"${request}","requestId":"${request}","error":{"code":"identity_conflict"}}`;
+    const cases: Array<[unknown, string | undefined, Record<string, string> | undefined]> = [
+      [{ ...valid, sourceInstanceId: epoch }, undefined, undefined],
+      [{ ...valid, extra: true }, undefined, undefined],
+      [{ apiVersion: "2", requestId: request, error: { code: "command_id_conflict" } }, undefined, undefined],
+      [{ apiVersion: "2", sourceInstanceId: source, requestId: request, error: { code: "identity_conflict" } }, undefined, undefined],
+      [{ apiVersion: "2", sourceInstanceId: epoch, applicationId: application, historyEpoch: epoch, requestId: request, error: { code: "identity_conflict" } }, undefined, undefined],
+      [valid, duplicate, undefined],
+      [valid, " ".repeat(64 * 1024 + 1), undefined],
+      [{ ...valid, requestId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee" }, undefined, undefined],
+      [valid, undefined, { "X-Request-ID": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee" }],
+    ];
+    for (const [body, raw, headers] of cases) {
+      await expect(sendProjectAlphaProjectCreateCommand(connection, create, send(body, raw, headers))).resolves
+        .toMatchObject({ status: "uncertain", reason: "invalid_contract", httpStatus: 409 });
+    }
+  });
   it("keeps reads and inventory non-authoritative and bounded", async () => {
     const readRoute = { method: "GET", path: "/api/v2/projects/{publicId}", requiredCapability: "projects.v2.read", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true };
     const readBody = { apiVersion: "2", sourceInstanceId: source, applicationId: application, historyEpoch: epoch, requestId: request, replayed: false, accepted: true, resource: { type: "project", id: project, revision: "1", projectionSha256: "a".repeat(64) }, data: { name: "Survey", description: null, status: "active", archived: false, overdueWarning: false, completedAt: null, archivedAt: null, estimatedStart: null, estimatedEnd: null, clientPublicId: null, organizationPublicId: org } };
@@ -98,6 +134,76 @@ describe("dormant PA project v2 transport", () => {
     const invRoute = { method: "GET", path: "/api/v2/projects/inventory", requiredCapability: "projects.inventory.read", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true };
     const invSend = vi.fn<typeof fetch>(async url => String(url).endsWith("capabilities") ? json(metadata(invRoute)) : json({ apiVersion: "2", sourceInstanceId: source, applicationId: application, historyEpoch: epoch, requestId: request, authorizationGeneration: "1", projects: [], nextCursor: null }));
     await expect(readProjectAlphaProjectInventory(connection, { limit: 1 }, invSend)).resolves.toMatchObject({ status: "observed", response: { projects: [], nextCursor: null } });
+  });
+  it("returns typed stale-binding discovery and recovery evidence only for exact trusted 409 envelopes", async () => {
+    const inventoryRoute = { method: "GET", path: "/api/v2/projects/inventory", requiredCapability: "projects.inventory.read", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true };
+    const inventoryStale = { apiVersion: "2", sourceInstanceId: source, applicationId: application, historyEpoch: epoch, requestId: request, error: { code: "binding_stale", externalId: "ops/project-1" } };
+    const inventorySend = vi.fn<typeof fetch>(async url => String(url).endsWith("capabilities") ? json(metadata(inventoryRoute)) : json(inventoryStale, 409));
+    await expect(readProjectAlphaProjectInventory(connection, { cursor: "ops/project-0", limit: 1 }, inventorySend)).resolves.toEqual({ status: "binding_stale", httpStatus: 409, response: inventoryStale });
+
+    const bindingRoute = { method: "GET", path: "/api/v2/projects/bindings/status/{base64urlExternalId}", requiredCapability: "projects.binding_status.read", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true };
+    const bindingStale = { apiVersion: "2", sourceInstanceId: source, applicationId: application, historyEpoch: epoch, requestId: request, error: { code: "binding_stale" }, authorizationGeneration: "2", binding: { externalId: "ops/project-1", publicId: project, revision: "2" }, resource: { revision: "3", projectionSha256: "b".repeat(64) } };
+    const bindingSend = vi.fn<typeof fetch>(async url => String(url).endsWith("capabilities") ? json(metadata(bindingRoute)) : json(bindingStale, 409));
+    await expect(readProjectAlphaProjectBindingStatus(connection, "ops/project-1", bindingSend)).resolves.toEqual({ status: "binding_stale", httpStatus: 409, response: bindingStale });
+
+    const current = { apiVersion: "2", sourceInstanceId: source, applicationId: application, historyEpoch: epoch, requestId: request, authorizationGeneration: "3", binding: { externalId: "ops/project-1", publicId: project, createdAt: "2026-09-20T00:00:00.000Z", updatedAt: "2026-09-20T00:00:01.000Z" }, resource: { revision: "3", projectionSha256: "b".repeat(64), status: "active", archived: false } };
+    const currentSend = vi.fn<typeof fetch>(async url => String(url).endsWith("capabilities") ? json(metadata(bindingRoute)) : json(current));
+    await expect(readProjectAlphaProjectBindingStatus(connection, "ops/project-1", currentSend)).resolves.toEqual({ status: "observed", httpStatus: 200, response: current });
+  });
+  it("keeps bare 409s as ordinary conflicts and fails closed on untrusted or invalid stale bodies", async () => {
+    const inventoryRoute = { method: "GET", path: "/api/v2/projects/inventory", requiredCapability: "projects.inventory.read", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true };
+    const bindingRoute = { method: "GET", path: "/api/v2/projects/bindings/status/{base64urlExternalId}", requiredCapability: "projects.binding_status.read", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true };
+    const trustedHeaders = { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", "X-Request-ID": request };
+    const bare = (route: Record<string, unknown>) => vi.fn<typeof fetch>(async url => String(url).endsWith("capabilities") ? json(metadata(route)) : new Response(null, { status: 409, headers: trustedHeaders }));
+    await expect(readProjectAlphaProjectInventory(connection, {}, bare(inventoryRoute))).resolves.toEqual({ status: "conflict", reason: "http_status", httpStatus: 409, requestId: request });
+    await expect(readProjectAlphaProjectBindingStatus(connection, "ops/project-1", bare(bindingRoute))).resolves.toEqual({ status: "conflict", reason: "http_status", httpStatus: 409, requestId: request });
+
+    const untrustedHeaders: Record<string, string>[] = [
+      { "Content-Type": "application/json", "Cache-Control": "no-store" },
+      { ...trustedHeaders, "X-Request-ID": "not-a-request-id" },
+      { "Content-Type": "application/json", "X-Request-ID": request },
+      { ...trustedHeaders, "Cache-Control": "public" },
+      { "Cache-Control": "no-store", "X-Request-ID": request },
+      { ...trustedHeaders, "Set-Cookie": "session=unsafe" },
+      { ...trustedHeaders, Location: "https://elsewhere.example.test" },
+    ];
+    for (const headers of untrustedHeaders) {
+      const inventorySend = vi.fn<typeof fetch>(async url => String(url).endsWith("capabilities") ? json(metadata(inventoryRoute)) : new Response(null, { status: 409, headers }));
+      await expect(readProjectAlphaProjectInventory(connection, {}, inventorySend)).resolves.toMatchObject({ status: "uncertain", reason: "invalid_contract", httpStatus: 409 });
+      const bindingSend = vi.fn<typeof fetch>(async url => String(url).endsWith("capabilities") ? json(metadata(bindingRoute)) : new Response(null, { status: 409, headers }));
+      await expect(readProjectAlphaProjectBindingStatus(connection, "ops/project-1", bindingSend)).resolves.toMatchObject({ status: "uncertain", reason: "invalid_contract", httpStatus: 409 });
+    }
+    const wrongLength = vi.fn<typeof fetch>(async url => String(url).endsWith("capabilities") ? json(metadata(inventoryRoute)) : new Response(new ReadableStream({ start(controller) { controller.close(); } }), { status: 409, headers: { ...trustedHeaders, "Content-Length": "1" } }));
+    await expect(readProjectAlphaProjectInventory(connection, {}, wrongLength)).resolves.toMatchObject({ status: "uncertain", reason: "invalid_contract", httpStatus: 409 });
+
+    const inventoryStale = { apiVersion: "2", sourceInstanceId: source, applicationId: application, historyEpoch: epoch, requestId: request, error: { code: "binding_stale", externalId: "ops/project-1" } };
+    const untrustedInventory = vi.fn<typeof fetch>(async url => String(url).endsWith("capabilities") ? json(metadata(inventoryRoute)) : json(inventoryStale, 409, { "Cache-Control": "public" }));
+    await expect(readProjectAlphaProjectInventory(connection, {}, untrustedInventory)).resolves.toMatchObject({ status: "uncertain", reason: "invalid_contract", httpStatus: 409 });
+
+    const bindingStale = { apiVersion: "2", sourceInstanceId: source, applicationId: application, historyEpoch: epoch, requestId: request, error: { code: "binding_stale" }, authorizationGeneration: "2", binding: { externalId: "ops/project-1", publicId: project, revision: "2" }, resource: { revision: "3", projectionSha256: "b".repeat(64) } };
+    const invalidInventory = [
+      { ...inventoryStale, applicationId: source },
+      { ...inventoryStale, requestId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee" },
+      { ...inventoryStale, extra: true },
+      { ...inventoryStale, error: { ...inventoryStale.error, externalId: "" } },
+      { ...inventoryStale, error: { ...inventoryStale.error, code: "conflict" } },
+    ];
+    for (const body of invalidInventory) {
+      const send = vi.fn<typeof fetch>(async url => String(url).endsWith("capabilities") ? json(metadata(inventoryRoute)) : json(body, 409));
+      await expect(readProjectAlphaProjectInventory(connection, { cursor: "ops/project-0" }, send)).resolves.toMatchObject({ status: "uncertain", reason: "invalid_contract", httpStatus: 409 });
+    }
+    const invalidBinding = [
+      { ...bindingStale, authorizationGeneration: "02" },
+      { ...bindingStale, error: { code: "binding_stale", extra: true } },
+      { ...bindingStale, binding: { ...bindingStale.binding, externalId: "ops/project-2" } },
+      { ...bindingStale, binding: { ...bindingStale.binding, publicId: "not-a-public-id" } },
+      { ...bindingStale, resource: { ...bindingStale.resource, revision: "2" } },
+      { ...bindingStale, resource: { ...bindingStale.resource, projectionSha256: "B".repeat(64) } },
+    ];
+    for (const body of invalidBinding) {
+      const send = vi.fn<typeof fetch>(async url => String(url).endsWith("capabilities") ? json(metadata(bindingRoute)) : json(body, 409));
+      await expect(readProjectAlphaProjectBindingStatus(connection, "ops/project-1", send)).resolves.toMatchObject({ status: "uncertain", reason: "invalid_contract", httpStatus: 409 });
+    }
   });
   it("mints non-forgeable project-read evidence from exact raw response bytes", async () => {
     const readRoute = { method: "GET", path: "/api/v2/projects/{publicId}", requiredCapability: "projects.v2.read", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true };

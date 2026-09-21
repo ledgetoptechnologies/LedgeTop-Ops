@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {}, DurableObject: class {} }));
 
-import { dispatchIncomingPublicRequest } from "../src/worker/incoming";
+import { dispatchIncomingPublicRequest, isIncomingPublicRequest } from "../src/worker/incoming";
 
 const incomingEnv = {
   INCOMING_BASE_URL: "https://incoming.test",
@@ -18,6 +18,31 @@ const configuredIncomingEnv = {
 };
 
 describe("incoming upload route gate", () => {
+  it("fails closed when the incoming base URL is missing or blank", () => {
+    const request = new Request("https://incoming.test/health");
+
+    expect(isIncomingPublicRequest(request, {} as never)).toBe(false);
+    expect(isIncomingPublicRequest(request, { INCOMING_BASE_URL: "   " } as never)).toBe(false);
+  });
+
+  it("fails closed when the incoming base URL is malformed", () => {
+    expect(isIncomingPublicRequest(
+      new Request("https://incoming.test/health"),
+      { INCOMING_BASE_URL: "not a URL" } as never,
+    )).toBe(false);
+  });
+
+  it("uses an explicitly configured incoming host", () => {
+    expect(isIncomingPublicRequest(
+      new Request("https://incoming.test/health"),
+      { INCOMING_BASE_URL: "not a URL", INCOMING_EXPECTED_HOST: "incoming.test" } as never,
+    )).toBe(true);
+    expect(isIncomingPublicRequest(
+      new Request("https://other.test/health"),
+      { INCOMING_EXPECTED_HOST: "incoming.test" } as never,
+    )).toBe(false);
+  });
+
   it("keeps the authenticated internal completion route outside the public-upload gate", async () => {
     const response = await dispatchIncomingPublicRequest(
       new Request("https://incoming.test/api/internal/uploads/upload-id/accepted", { method: "POST" }),

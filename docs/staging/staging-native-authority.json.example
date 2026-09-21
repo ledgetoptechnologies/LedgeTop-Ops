@@ -1,15 +1,16 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 3,
   "packet": {
     "packetId": "staging-authority-example-001",
     "mode": "create",
+    "operatorKind": "synthetic",
     "staffId": "staging-operations-owner",
     "email": "owner@staging.example.test",
     "displayName": "Synthetic Staging Owner",
     "accessSubject": "REPLACE_WITH_REVIEWED_ACCESS_SUBJECT",
     "issuedAt": "2026-09-17T15:00:00.000Z",
     "expiresAt": "2026-09-17T17:00:00.000Z",
-    "reason": "Bounded joined Project-v2 staging acceptance",
+    "reason": "Bounded Directory-v2 bootstrap and joined Project-v2 staging acceptance",
     "expected": {
       "admissionVersion": 0,
       "profileVersion": 0,

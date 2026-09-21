@@ -44,7 +44,7 @@ function fixture(enabled = true, administrator = true, environment = "staging") 
   registerProjectAlphaProjectV2AcceptanceRoutes(app);
   const env = { ENVIRONMENT: environment, PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED: enabled ? "true" : "false",
     TEAM_DOMAIN: "https://team.cloudflareaccess.com", OPERATIONS_AUD: "operations-audience-value",
-    NATIVE_STAFF_ONBOARDING_AUD: "onboarding-audience-value", AUDIT_IP_SECRET: "audit-secret",
+    AUDIT_IP_SECRET: "audit-secret",
     OPS_DB: { batch: mocks.batch } } as unknown as Env;
   const send = (body: unknown = requestBody, headers: Record<string, string> = {}) => app.request(
     `https://ops.example${PROJECT_ALPHA_PROJECT_V2_ACCEPTANCE_ROUTE}`,

@@ -209,12 +209,12 @@ async function decode(response, maximum) {
   for (const part of chunks) { bytes.set(part, at); at += part.byteLength; }
   try { return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); } catch { fail("invalid_utf8_or_json_response"); }
 }
-function retryAfterMilliseconds(response, retryNumber) {
+function retryAfterMilliseconds(response, retryNumber, now) {
   const raw = response.headers.get("retry-after");
   if (raw !== null) {
     if (/^\d+$/.test(raw.trim())) return Math.min(Number(raw) * 1000, MAX_RETRY_AFTER_MS);
     const timestamp = Date.parse(raw);
-    if (Number.isFinite(timestamp)) return Math.min(Math.max(0, timestamp - Date.now()), MAX_RETRY_AFTER_MS);
+    if (Number.isFinite(timestamp)) return Math.min(Math.max(0, timestamp - now()), MAX_RETRY_AFTER_MS);
   }
   return Math.min(RETRY_BACKOFF_MS * (2 ** (retryNumber - 1)), MAX_RETRY_AFTER_MS);
 }
@@ -243,22 +243,23 @@ async function api(fetcher, config, path, options = {}) {
   const { method = "GET", body, identity = false } = options;
   const request = commandBody(path, body);
   const state = rateLimitState(config);
+  const now = config.now ?? Date.now;
   let retryNumber = 0;
   for (;;) {
-    const delay = state.nextRequestAt - Date.now();
+    const delay = state.nextRequestAt - now();
     if (delay > 0) await (config.sleep ?? wait)(delay);
     state.requests += 1;
     const response = await fetcher(`${config.baseUrl}${path}`, { method, headers: headers(config, request, identity), body: request === undefined ? undefined : JSON.stringify(request), redirect: "manual", credentials: "omit", cache: "no-store" });
-    state.nextRequestAt = Date.now() + config.minRequestIntervalMs;
+    state.nextRequestAt = now() + config.minRequestIntervalMs;
     if (response.status === 429) {
       state.responses429 += 1;
       if (++retryNumber > MAX_RATE_LIMIT_RETRIES) fail("rate_limit_retry_exhausted");
-      const retryAfter = retryAfterMilliseconds(response, retryNumber);
+      const retryAfter = retryAfterMilliseconds(response, retryNumber, now);
       const rawRetryAfter = response.headers.get("retry-after");
-      if (rawRetryAfter !== null && ((/^\d+$/.test(rawRetryAfter.trim()) && Number(rawRetryAfter) * 1000 > MAX_RETRY_AFTER_MS) || (!/^\d+$/.test(rawRetryAfter.trim()) && Number.isFinite(Date.parse(rawRetryAfter)) && Math.max(0, Date.parse(rawRetryAfter) - Date.now()) > MAX_RETRY_AFTER_MS))) state.retryAfterCapped += 1;
+      if (rawRetryAfter !== null && ((/^\d+$/.test(rawRetryAfter.trim()) && Number(rawRetryAfter) * 1000 > MAX_RETRY_AFTER_MS) || (!/^\d+$/.test(rawRetryAfter.trim()) && Number.isFinite(Date.parse(rawRetryAfter)) && Math.max(0, Date.parse(rawRetryAfter) - now()) > MAX_RETRY_AFTER_MS))) state.retryAfterCapped += 1;
       state.retryAfterMs.push(retryAfter);
       state.retries += 1;
-      state.nextRequestAt = Math.max(state.nextRequestAt, Date.now() + retryAfter);
+      state.nextRequestAt = Math.max(state.nextRequestAt, now() + retryAfter);
       continue;
     }
     if ((response.status >= 300 && response.status < 400) || response.headers.has("set-cookie") || response.headers.has("location")) fail("unsafe_response");
@@ -409,9 +410,10 @@ function runUniqueOrganizationProfile(profile, label, role) {
 }
 function updateProfile(type, profile) { return Object.fromEntries(UPDATE_PROFILE_FIELDS[type].map((field) => [field, profile[field]])); }
 
-export async function runDirectoryAcceptance(config, { fetcher = fetch, uuid = randomUUID, sleep } = {}) {
+export async function runDirectoryAcceptance(config, { fetcher = fetch, uuid = randomUUID, sleep, now } = {}) {
   config.rateLimitState = { requests: 0, responses429: 0, retries: 0, retryAfterMs: [], retryAfterCapped: 0, nextRequestAt: 0 };
   if (sleep) config.sleep = sleep;
+  if (now) config.now = now;
   const report = { schemaVersion: 3, environment: "staging", status: "passed", mutationsPerformed: false, credentials: { valuesExcluded: true }, requiredFeatureFlags: DIRECTORY_FLAGS, stages: {} };
   if (!config.token) { const result = await api(fetcher, config, "/api/v2/capabilities"); if (result.status !== 401) fail("capabilities_requires_authentication"); report.stages.capabilitiesNoKey = summary(result); recordRateLimitEvidence(config, report); return report; }
   const capabilities = await api(fetcher, config, "/api/v2/capabilities");

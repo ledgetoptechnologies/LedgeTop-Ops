@@ -77,6 +77,54 @@ Operations PR95 is merged at
 `a78bc056edcc3a7b559e724bb23b63cf4948dd66`; exact post-merge workflow
 `35376769639` passed all ten jobs.
 
+## September 19, 2026 Directory-v2 joined staging evidence
+
+The separately bounded Directory-v2 window completed, without accepting the
+Project-v2 route. PA created disposable public ID
+`63382355879f38ef7d77e7e97424188e`; command
+`4349b923-d993-4022-9dce-50ef62a85d35` proved exact replay and changed-body
+`409`, advanced authorization generation `41 -> 42`, and produced acceptance
+record `staging-directory-acceptance-ff089045-ea88-4c34-90a5-2ef898b9142f`.
+PA and Operations matched the exact configured source/application/history
+identity, and Operations retained the durable acknowledgement, mapping, and
+audit evidence. The applicable transport/receipt contract fixes are
+`e38c61a`; the verified current Operations staging version is
+`07a1d7d0-a20d-4122-befa-00ac2cdaae9a`.
+
+The window was closed: no actor command, lease, or Directory write fence
+remains; the Directory acceptance route was removed; the PA connection is
+disabled; and the reviewed authority-revocation migration was applied. Its
+sanitized verification found inactive authority versions, Project-grant
+generation `2`, and the immutable revocation receipt. PA `main` merge,
+Project-v2 acceptance, production readiness, and full regression remain
+separate unproven gates.
+
+## September 19, 2026 current joined-window gate recheck
+
+The Ops staging Cloudflare Access policy **Ledge Top Staging Staff Access**
+explicitly includes `beaukoltz@ledgetopdroneservices.com`. A live in-app
+session loaded the authenticated administrator view for Beau Koltz. This
+confirms the authenticated delivery path only; it is not Project
+authority or joined acceptance.
+
+The exact PA staging candidate remains
+`ff42c3432f39e50e92058b21d7e4942c26f5b355`. Fresh nonmutating capability
+probes with key **#8** returned HTTP `200`, `apiVersion: 2`,
+`implementedEndpointCount: 23`, and `grantedCapabilityCount: 1`, proving that
+PA is still Directory-only rather than in the required Project-only window.
+No Project authority, Ops route, selected connection, or mutation was
+activated. Project-v2 acceptance therefore remains open and must not be
+recorded as passed.
+
+The local Operations check and build pass. Focused diagnosis of
+`authenticated-delivery-change-notifications` (`batches forty together`)
+passes in about 100 seconds because it performs roughly 90 sequential
+Miniflare/D1 operations on Windows; it is not a deadlock or functional
+regression. The pure-function batch suite passed 11 tests and the access-code
+suite passed 2 tests. The broad suite has no trustworthy complete total.
+GitHub PR98 checks were rejected in about two seconds by the account
+spending/build limit, not by code failures.
+
 ## Current credential boundary
 
 Use `& '.\apps\client\node_modules\.bin\wrangler.cmd' whoami` immediately before a release. Record only the
@@ -113,8 +161,6 @@ not become active deployments.
 
 - approved Project Alpha staging HTTPS origin;
 - staging Access group ID and exact group name;
-- a dedicated native-staff onboarding Access audience, distinct from the
-  Operations staff, Delivery, Ops Sync, Client Portal, and production audiences;
 - Ops Sync staging service-auth policy and Project Alpha service-token owner;
 - Delivery, Operations, Ops Sync, and self-hosted Viewer staging DNS readiness;
 - `client-staging.ledgetopdroneservices.com` and
@@ -161,17 +207,23 @@ release-preparation configuration. A separately approved staging-only window
 may set it to `true` only after Operations migrations `0119`–`0122` are applied
 and verified, the disposable PA source/application entry is explicitly enabled,
 and the same administrator has current global `integrations.manage` plus a
-live native `project.shared.sync` grant. Invoke only
+live native `project.shared.sync` grant. The separately reviewed Directory-v2
+bootstrap window also requires that administrator's exact active global
+`directory.profile.edit` grant from the same packet; keep
+`PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ENABLED` false outside that
+window. Invoke the joined Project route only through
 `POST /api/admin/project-alpha/projects/v2/commands` with a command-matching
 `Idempotency-Key`; there is no scheduled or public/client invocation path.
 
-Create and revoke that native admission/grant only with the reviewed
+Create and revoke that native admission and both grants only with the reviewed
 [staging native authority packet](native-authority-packet.md). Provision and
 revoke must use their separate generated configs and the dedicated staging-only
 migration ledger; raw D1 inserts/updates and a new issuer route are prohibited.
-Generate and review revocation before enabling the acceptance window. Disable
-the route and selected connection, drain pending/leased actor commands, and
-apply the revoke packet immediately after the bounded run.
+Generate and review revocation before enabling either acceptance window.
+Disable both acceptance routes and the selected connection, drain pending/leased
+Project and Directory actor commands, require no surviving directory write
+fence for the actor, and apply the revoke packet immediately after the bounded
+run.
 
 Record exact replay, changed-body conflict, stale/revoked-authority rejection,
 create/update/bind settlement, rollback, and before/after public-link bytes.
@@ -825,3 +877,67 @@ npm.cmd run staging:release:verify
 
 That command reruns local preparation and validates the complete current
 post-deployment packet. It performs no remote action.
+
+### September 21 — typed Project conflict checkpoint and cleanup
+
+- The corrected Ops PR98 harness and evidence checkpoint at
+  `0ada2ab2213e4d25c5a804b0ba4a1226521fa601` passed all ten jobs in exact
+  workflow `35564563048`. PA PR184 head is
+  `3b43e1275e3b248979876ace56ca38e6e383f52c` with green required checks.
+  A supported `cloudflared` human Access login succeeded for staging.
+- The first joined run was stopped before mutation because the harness omitted
+  the canonical PA staging host. The harness now accepts
+  `STAGING_PROJECT_ALPHA_ORIGIN`; its unit suite is 10/10. Fresh command
+  `3b785ca6-96a8-4103-b2e5-4a60ce5cae41` made one Project attempt and ended in
+  terminal typed `relationship_proof_conflict` HTTP `409`, request
+  `fcd6627d-405d-477b-8486-d51140a2d6bf`. No success receipt or activation was
+  produced. PA's authoritative Project generation was `5`.
+- The independently observed stale binding is external ID
+  `pa-acceptance-p184fix-20260917a:33b8e6f6-8beb-4190-a24f-abdd7b401112`,
+  revision `2` versus live revision `10`, reporting generation `5`. It proves
+  the generation without guessing but is separate from the relationship-proof
+  conflict. Do not retry the terminal command.
+- Public-link preservation is proven. The first harness failure stopped before
+  its public probe/command, and the second run performed one pre-command probe
+  before attempting Project creation. A separate post-attempt probe returned
+  `200 text/html`, `3266` bytes, and the unchanged SHA-256
+  `5632e883d6fe3ca72c68e900e8e6b76561c07d454605e728c4a765d07a383464`.
+- Cleanup is complete: the connection secret is empty; default-off version
+  `de550f0c-f5ec-452c-a4db-3c61bc7cffc2` is deployed; the revoke migration was
+  applied; admission, Project grant, and Project generation are inactive at
+  version `10`; Directory grant is inactive; Project/Directory pending and
+  leased rows, actor fences, and live proofs are all zero; and one immutable
+  revoke receipt exists.
+- The remaining-gate wording above is superseded by the passing checkpoint below.
+
+### September 21 — passing joined Project-v2 staging acceptance
+
+- The exact PA Directory proof is source
+  `d2f7acb8-375d-4da7-8d37-3f2455a3972b`, application
+  `150cb108-af37-4973-ab6e-f6d991a6e8c8`, epoch
+  `8c194c00-c7dd-4c6c-82ce-d391ef3fa998`, organization external ID
+  `staging-directory-acceptance-ff089045-ea88-4c34-90a5-2ef898b9142f`, public
+  ID `63382355879f38ef7d77e7e97424188e`, revision `1`, projection SHA-256
+  `7a45cf37ea099868f82f459ed2c8cab9dcabf6348ca35f6439734cd08b9f9bef`, and
+  Directory generation `42`. Project generation was authoritatively re-read as
+  `5` from typed `binding_stale` request
+  `e9dd5105-dd0e-401f-a0dc-265798c7d13b`, pinned revision `2`, live revision
+  `10`.
+- Passing command `9b60e1de-3926-48fc-a049-ca8af9ec36db` used external ID
+  `ops-joined-acceptance-20260921d:project:9b60e1de-3926-48fc-a049-ca8af9ec36db`.
+  Settlement `bacd6769-34ed-4d2f-b00a-131f34c1ecb3` activated
+  `3d862f3f-3bb3-4ef8-a854-6522bf5e0cf0`, version `1`, `replay=false`; the
+  exact replay returned the same IDs/version with `replay=true`; the changed
+  body conflicted at `plan` for `command_id`.
+- The existing PA staging public link stayed `200 text/html`, `3266` bytes,
+  and SHA-256
+  `5632e883d6fe3ca72c68e900e8e6b76561c07d454605e728c4a765d07a383464` before
+  and after. The temporary browser bridge was removed before the default-off
+  deploy. Default-off version is `ed0bc4ba-5e98-448a-8819-319424aa04db`, the
+  connection secret is empty, activation is false, revoke migration `9001` is
+  applied, and no migrations are pending.
+- Final D1 readback: admission inactive v12, profile v1, Project grant inactive
+  v12/generation 12, Directory grant inactive, zero pending/leased Project or
+  Directory rows, zero Directory fences, zero live proofs, and one revoke
+  receipt. Joined staging acceptance passes and is merge-ready subject to exact
+  CI and normal owner approval; production cutover remains unauthorized.

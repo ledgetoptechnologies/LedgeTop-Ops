@@ -11,17 +11,129 @@ production synchronization path. It requires the explicit mutation gate
 `https://ops-staging.ledgetopdroneservices.com`. Do not run it against a
 production hostname, even for a read-only check.
 
-## September 18, 2026 readiness checkpoint
+## Authenticated browser-context adapter
+
+For an already-authenticated Operations browser, callers can use
+`parseBrowserContextJoinedAcceptanceConfig` with
+`runJoinedAcceptanceWithBrowserContext`. Supply a `browserContextFetcher` that
+executes native browser `fetch` in that exact Operations origin, and a separate
+ordinary `publicFetcher` for the reviewed public-link GETs. The adapter allows
+the browser fetcher only for the fixed Ops origin and the session/command
+routes; it gives public probes `credentials: "omit"`.
+
+Browser-context mode rejects `OPS_SESSION_COOKIE`, `OPS_STORAGE_STATE`, and
+`OPS_CF_ACCESS_JWT_ASSERTION`. It neither reads nor serializes cookies,
+localStorage, Playwright storage state, or Access assertions, and never passes
+credential headers to either fetcher. Native same-origin browser authentication
+and the in-memory CSRF value from `/api/session` remain the only Operations
+credential path. The existing validation, replay/conflict workflow, public-link
+invariant, response bounds, and sanitized report are unchanged.
+
+## September 19, 2026 current joined-window gate recheck
+
+The Ops staging Cloudflare Access policy **Ledge Top Staging Staff Access**
+explicitly includes `beaukoltz@ledgetopdroneservices.com`. A live in-app
+session loaded the authenticated administrator view for Beau Koltz. This
+proves the authenticated delivery path, not
+Project-v2 authority or acceptance.
+
+The exact PA staging candidate remains
+`ff42c3432f39e50e92058b21d7e4942c26f5b355`. Fresh nonmutating capability
+probes with key **#8** returned HTTP `200`, `apiVersion: 2`,
+`implementedEndpointCount: 23`, and `grantedCapabilityCount: 1`. PA therefore
+remains Directory-only and is not in the required Project-only window. No
+Project authority, Ops route, selected connection, or mutation was
+activated.
+
+The local Operations check and build pass. Focused diagnosis of
+`authenticated-delivery-change-notifications` (`batches forty together`)
+passes in about 100 seconds; the delay comes from roughly 90 sequential
+Miniflare/D1 operations on Windows, not a deadlock or functional regression.
+The pure-function batch suite passed 11 tests and the access-code suite passed
+2 tests. The broad suite has no trustworthy complete total. GitHub PR98 checks
+were rejected in about two seconds by the account spending/build limit, not by
+code failures. This harness has not run and no acceptance is claimed.
+
+## September 19–20, 2026 base Project window checkpoint
+
+The exact PA candidate remains
+`ff42c3432f39e50e92058b21d7e4942c26f5b355`. The deliberately bounded base
+Project window had exactly these five PA flags enabled: `APP_API_V2_PROJECTS_CREATE_ENABLED`, `APP_API_V2_PROJECTS_READ_ENABLED`, `APP_API_V2_PROJECTS_WRITE_ENABLED`,
+`APP_API_V2_PROJECTS_BINDING_STATUS_ENABLED`, and `APP_API_V2_PROJECTS_INVENTORY_ENABLED`. A capabilities request returned HTTP `200`,
+`apiVersion: 2`, `implementedEndpointCount: 6`, and
+`grantedCapabilityCount: 6`.
+
+The Project inventory GET returned an empty-body `409` because the deliberately
+stale browser-edited binding remains. No joined mutation ran, and static
+generation must not be guessed from this result. This is a read-only base
+Project checkpoint, not joined acceptance.
+
+Operations has a local parser for the newer PA stale-binding recovery contract.
+It treats only exact, trusted, identity- and request-correlated JSON envelopes as
+typed discovery/recovery evidence. The observed empty-body `409` above remains
+an ordinary conflict, and the parser does not issue a refresh, retry the page,
+or otherwise mutate PA. A future staging rehearsal must exercise the exact JSON
+contract before any joined recovery orchestration is considered.
+
+## September 20, 2026 recovery-contract staging proof
+
+PA candidate `2956779ce6bb40e95aeb76704018b470f3f42a7b` was published by the
+staging-only Docker run `35548372193`; the web, cron, and database images built,
+both Trivy scans passed, the staging control rebuild completed, migrations exited
+zero, and the web/database containers were healthy. The server remained in the
+exact five-flag base Project window.
+
+A nonmutating key-#8 probe then exercised the new contract. Inventory returned
+the exact six-field trusted `409 binding_stale` discovery envelope. Binding
+status returned the exact nine-field trusted recovery envelope with matching
+source/application/history identity, canonical authorization generation,
+matching external identity, valid public ID, valid pinned and live revisions, a
+strictly newer live revision, a lowercase projection hash, and `no-store`.
+No static generation was guessed and no PA mutation ran.
+
+Operations commit `0bb69c6` adds the matching strict adapter. Its focused
+transport suite passed 14 tests and the Operations TypeScript check passed. The
+adapter was deployed first under the Project-v2 staging config and then restored
+to the default-off config after the prior internal Operations login had expired.
+The selected PA connection was enabled only during that bounded attempt, then
+disabled again. Temporary native-authority packet
+`staging-authority-project-v2-20260921-005000z` was provisioned only after a
+zero-fence/zero-pending preflight and safely revoked without a Project command.
+Final readback showed inactive admission and grants at versions `6`/`6`, Project
+generation `6`, zero pending/leased work, zero directory write fences, and one
+immutable revoke receipt. Joined mutation remains pending a fresh authenticated
+Operations staging session.
+
+PA PR184's CodeQL, JavaScript analysis, Python analysis, gitleaks, and smoke
+checks all passed. PR98's ten GitHub jobs were rejected before startup by the
+account payment/spending limit; this is not a code-test failure.
+
+## September 19, 2026 readiness checkpoint
 
 The exact PA candidate for this run is
 `ff42c3432f39e50e92058b21d7e4942c26f5b355`; the Operations candidate starts
-from `98d7b33`. Record the deployed PA version before any mutation. A healthy
+from `56cfe9a`. Record the deployed PA version before any mutation. A healthy
 container on an older image is not acceptable evidence.
 
 PA candidate deployment parity is now proven: staging-only Docker workflow
 `35361793571` passed both Trivy scans, the staging rebuild completed, and the
-healthy web container reports `APP_VERSION=ff42c34`. Operations staging Access,
-deployment, and joined-route execution remain pending.
+healthy web container reports `APP_VERSION=ff42c34`. Operations staging Worker
+version `9aa05566-bf5d-4eba-b2fd-20c8a11d8eb0` now contains the reviewed
+fail-closed Incoming host gate fix from `56cfe9a` and the SPA assets needed for
+the authenticated UI. Version inspection preserved the existing two secrets,
+the same staging D1/R2 bindings, and added only the `ASSETS` binding. The
+staging Access policy now permits the exact existing synthetic-owner email in
+addition to the prior tester group. The app loads and correctly rejects the
+still-active unmatched Gmail tester identity. A fresh matching-identity sign-in
+and subject binding remain pending before the native-authority packet may be
+generated or applied.
+
+The former `NATIVE_STAFF_ONBOARDING_AUD` prerequisite is not part of this
+acceptance window. No native onboarding route is mounted, and the accepted
+assertion remains exactly one human-app assertion for the Operations staff
+audience plus an existing native admission. Focused auth and staging-config
+tests and an independent security review confirm that removing the unused
+value did not broaden the accepted identity boundary.
 
 The PA side is ready for the joined proof only after the staging server
 disables archive/restore and enables Project binding for the bounded window.
@@ -35,11 +147,12 @@ hash before and after the joined mutation.
 
 ## Required operator inputs
 
-Use an authenticated Operations browser storage-state file, or provide the
-short-lived Cloudflare Access cookie through the environment. Only the secure
-`CF_Authorization` cookie for the exact staging Operations host is accepted;
-the harness never imports or forwards unrelated browser cookies. The harness
-never prints or stores the cookie:
+The legacy Node CLI (not the browser-context adapter) accepts an authenticated
+Operations browser storage-state file or short-lived Cloudflare Access cookie.
+Only the secure `CF_Authorization` cookie for the exact staging Operations host
+is accepted; that legacy path never imports or forwards unrelated browser
+cookies, and never prints or stores the cookie. Do not provide those values to
+browser-context mode:
 
 ```powershell
 $env:OPS_BASE_URL = "https://ops-staging.ledgetopdroneservices.com"
@@ -115,3 +228,84 @@ pending or leased commands for the acceptance actor, and apply the reviewed
 native-authority revoke packet. Keep the immutable ledger evidence, but do not
 delete the generated Project or rewrite its history. This harness does not
 provide rollback or cleanup mutations.
+
+## September 21, 2026 joined attempt
+
+The matching staging administrator identity authenticated successfully, and
+the browser-context transport reached the protected Operations command route
+without copying a cookie, Access assertion, or storage state. PA reported the
+current Project authorization generation as `5`. Operations accepted fresh
+synthetic command `9eb7ba9b-5fb2-4cfb-a2b1-4293cf8deb8e`, reserved it, and
+dispatched it once. PA returned an empty-body `409`; Operations therefore
+recorded the command as `uncertain` and did not create a canonical activation
+or claim success. The generation remained `5`, ruling out a concurrent
+generation advance. Source inspection narrows the remaining create-time
+conflict to PA's application-scoped identity or Directory relation proof
+fences; the exact Directory binding must be read back in a Directory-only
+window before another fresh command is authorized.
+
+The existing staging public link returned `200 text/html` before and after the
+attempt with the same bounded body hash. Its URL and token were never emitted
+or stored in the report. The temporary browser bridge assets were removed, the
+Project route restored to default-off, and the selected PA connection disabled.
+Worker version `0e60b962-ab56-4d25-a924-25dbd4be5b1c` is the restored default-
+off deployment. Final D1 readback proved admission inactive at version `8`,
+Project grant inactive at version `8`, Project grant generation `8`, Directory
+grant inactive, zero Project/Directory pending or leased work, zero Directory
+write fences, exactly one revoke receipt, and no pending revoke migration.
+This is preserved negative acceptance evidence, not a passing joined result.
+
+## September 21, 2026 — typed Project conflict and closed staging window
+
+The corrected Operations harness and evidence checkpoint was verified at PR98
+head `0ada2ab2213e4d25c5a804b0ba4a1226521fa601`; its exact GitHub workflow
+`35564563048` passed all ten jobs. PA PR184 head is
+`3b43e1275e3b248979876ace56ca38e6e383f52c` and its required checks are green.
+A supported `cloudflared` human Access login succeeded for the staging
+Operations origin; no cookie, Access assertion, or browser storage state was
+copied into the harness.
+
+The first joined attempt was blocked before mutation because the harness omitted the canonical PA staging host from its origin configuration. The harness now accepts `STAGING_PROJECT_ALPHA_ORIGIN`, and its unit suite is 10/10. This corrected configuration was then exercised with fresh command `3b785ca6-96a8-4103-b2e5-4a60ce5cae41`. PA made one attempt and returned terminal typed `relationship_proof_conflict` HTTP `409`, correlated to request `fcd6627d-405d-477b-8486-d51140a2d6bf`. There was no success receipt and no Operations activation. The authoritative PA Project authorization generation was `5`.
+
+The independently observed Project binding remains stale: external ID `pa-acceptance-p184fix-20260917a:33b8e6f6-8beb-4190-a24f-abdd7b401112` is revision `2` while the live revision is `10`, and the binding reports generation `5`. That proves the generation without guessing, but it is separate from the typed relationship-proof rejection and is not evidence that the terminal command was absent. The runner stopped before the public-link probe/command on the first harness failure; the second run attempted only Project creation after its pre-command public probe. A separate post-attempt probe returned `200 text/html`, `3266` bytes, and the unchanged SHA-256 `5632e883d6fe3ca72c68e900e8e6b76561c07d454605e728c4a765d07a383464`.
+
+Cleanup completed after the bounded attempt: the selected PA connection secret is empty, default-off Operations version `de550f0c-f5ec-452c-a4db-3c61bc7cffc2` is deployed, and the native-authority revoke was applied. Final readback shows admission, Project grant, and Project generation at inactive version `10`, Directory grant inactive, zero actor fences, zero Project/Directory pending or leased outbox rows, zero live proofs, and one immutable revoke receipt. Do not call this joined acceptance passing or merge-ready.
+
+The remaining-gate wording above is superseded by the passing checkpoint below.
+
+## September 21, 2026 — passing joined Project-v2 staging acceptance
+
+The bounded joined acceptance now passes. The exact PA Directory proof source
+is `d2f7acb8-375d-4da7-8d37-3f2455a3972b`, application
+`150cb108-af37-4973-ab6e-f6d991a6e8c8`, epoch
+`8c194c00-c7dd-4c6c-82ce-d391ef3fa998`, and organization external ID
+`staging-directory-acceptance-ff089045-ea88-4c34-90a5-2ef898b9142f` with
+public ID `63382355879f38ef7d77e7e97424188e`, revision `1`, projection SHA-256
+`7a45cf37ea099868f82f459ed2c8cab9dcabf6348ca35f6439734cd08b9f9bef`, and
+Directory generation `42`. The current Project generation was authoritatively
+re-read as `5` from typed `binding_stale` request
+`e9dd5105-dd0e-401f-a0dc-265798c7d13b`, with pinned revision `2` and live
+revision `10`.
+
+Passing command `9b60e1de-3926-48fc-a049-ca8af9ec36db` used external ID
+`ops-joined-acceptance-20260921d:project:9b60e1de-3926-48fc-a049-ca8af9ec36db`.
+The first settlement was `bacd6769-34ed-4d2f-b00a-131f34c1ecb3` with
+activation `3d862f3f-3bb3-4ef8-a854-6522bf5e0cf0`, version `1`, and
+`replay=false`; the exact replay returned the same IDs/version with
+`replay=true`; a changed body correctly conflicted at stage `plan` with reason
+`command_id`. This proves the joined create, replay, conflict, settlement, and
+activation contract.
+
+The existing PA staging public link remained `200 text/html`, `3266` bytes,
+with the same SHA-256 `5632e883d6fe3ca72c68e900e8e6b76561c07d454605e728c4a765d07a383464`
+before and after. The temporary staging-only browser bridge was removed before
+the default-off deploy. Default-off Worker version is
+`ed0bc4ba-5e98-448a-8819-319424aa04db`; the connection secret is empty and
+activation is false. Revoke migration `9001` is applied with no pending
+migrations. Final D1 readback shows admission inactive v12, profile v1,
+Project grant inactive v12/generation 12, Directory grant inactive, zero
+pending/leased Project or Directory rows, zero Directory fences, zero live
+proofs, and one revoke receipt.
+
+This is a passing, merge-ready staging checkpoint subject to exact CI and the
+normal owner approval; it does not authorize production cutover.

@@ -54,7 +54,7 @@ it("joins real readiness parsing to durable per-instance incidents without queue
     const url = new URL(String(input));
     calls.push(url.origin);
     expect(url.pathname).toBe("/api/v2/capabilities");
-    expect(options).toMatchObject({ method: "GET", redirect: "error", credentials: "omit" });
+    expect(options).toMatchObject({ method: "GET", redirect: "manual", credentials: "omit" });
     if (url.origin === primary.baseUrl) return primaryRecovered ? healthy(primary) : new Response("synthetic failure", { status: 503 });
     expect(url.origin).toBe(secondary.baseUrl);
     return healthy(secondary);

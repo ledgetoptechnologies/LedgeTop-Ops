@@ -3,7 +3,7 @@ import { parseDuplicateFreeJson } from "./bounded-json";
 import { resolveProjectAlphaApiV2Connection, withEnabledConfiguredProjectAlphaApiV2Connection } from "./project-alpha-api-v2-connections";
 import { probeProjectAlphaApiV2 } from "./project-alpha-api-v2";
 import { readConfiguredProjectAlphaDirectoryBindingStatus, readConfiguredProjectAlphaDirectoryProfile } from "./project-alpha-directory-read-api-v2";
-import { readConfiguredProjectAlphaDirectoryInventory } from "./project-alpha-directory-inventory-api-v2";
+import { readConfiguredProjectAlphaDirectoryInventory, type ProjectAlphaDirectoryInventoryOutcome } from "./project-alpha-directory-inventory-api-v2";
 import type { Env } from "./types";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -19,7 +19,19 @@ export type DirectoryBootstrapInput = Readonly<{
   profile: Readonly<{ name: string; generalEmail: string; generalPhone: string; addressLine1: string; addressLine2: string; city: string; state: string; postalCode: string; country: string }>;
   actor: Readonly<{ staffId: string; accessSubject: string; admissionVersion: number }>;
 }>;
-export type DirectoryBootstrapOutcome = Readonly<{ status: "acknowledged" | "replayed" | "conflict" | "blocked" | "uncertain"; reason?: string; publicId?: string; revision?: string }>;
+export type DirectoryBootstrapOutcome = Readonly<{ status: "acknowledged" | "replayed" | "conflict" | "blocked" | "uncertain"; reason?: string; publicId?: string; revision?: string;
+  diagnostic?: Readonly<{ status: string; reason?: string; httpStatus?: number; preflightStatus?: string; preflightReason?: string }> }>;
+
+function inventoryDiagnostic(outcome: ProjectAlphaDirectoryInventoryOutcome): NonNullable<DirectoryBootstrapOutcome["diagnostic"]> {
+  const diagnostic: { status: string; reason?: string; httpStatus?: number; preflightStatus?: string; preflightReason?: string } = { status: outcome.status };
+  if ("reason" in outcome) diagnostic.reason = outcome.reason;
+  if ("httpStatus" in outcome && typeof outcome.httpStatus === "number") diagnostic.httpStatus = outcome.httpStatus;
+  if ("preflight" in outcome && outcome.preflight) {
+    diagnostic.preflightStatus = outcome.preflight.status;
+    if (outcome.preflight.status !== "verified") diagnostic.preflightReason = outcome.preflight.reason;
+  }
+  return diagnostic;
+}
 
 function headers(connection: Readonly<{ apiKey: string; expectedSourceInstanceId: string; expectedApplicationId: string; expectedHistoryEpoch?: string; accessClientId?: string; accessClientSecret?: string }>): Headers {
   const result = new Headers({ Accept: "application/json", "Content-Type": "application/json; charset=utf-8", Authorization: `Bearer ${connection.apiKey}`,
@@ -49,7 +61,7 @@ async function boundedJson(response: Response): Promise<unknown> {
   return parseDuplicateFreeJson(new TextDecoder("utf-8",{fatal:true}).decode(bytes));
 }
 function receipt(value: unknown, input: DirectoryBootstrapInput, connection: Readonly<{ expectedSourceInstanceId:string;expectedApplicationId:string;expectedHistoryEpoch?:string }>, requestId:string): { publicId:string; revision:string; body:Record<string,unknown> } | null {
-  if(!plain(value)||!exact(value,["apiVersion","sourceInstanceId","applicationId","historyEpoch","requestId","replayed","result"])||value.apiVersion!=="2"||value.sourceInstanceId!==connection.expectedSourceInstanceId||value.applicationId!==connection.expectedApplicationId||value.historyEpoch!==connection.expectedHistoryEpoch||value.requestId!==requestId||!UUID.test(requestId)||typeof value.replayed!=="boolean"||!plain(value.result)||!exact(value.result,["resource","authorizationGeneration"])||typeof value.result.authorizationGeneration!=="string"||!REVISION.test(value.result.authorizationGeneration)||!plain(value.result.resource)||!exact(value.result.resource,["type","id","publicId","revision"]))return null;
+  if(!plain(value)||!exact(value,["sourceInstanceId","applicationId","historyEpoch","requestId","replayed","result"])||value.sourceInstanceId!==connection.expectedSourceInstanceId||value.applicationId!==connection.expectedApplicationId||value.historyEpoch!==connection.expectedHistoryEpoch||value.requestId!==requestId||!UUID.test(requestId)||typeof value.replayed!=="boolean"||!plain(value.result)||!exact(value.result,["resource","authorizationGeneration"])||typeof value.result.authorizationGeneration!=="string"||!REVISION.test(value.result.authorizationGeneration)||!plain(value.result.resource)||!exact(value.result.resource,["type","id","publicId","revision"]))return null;
   const resource=value.result.resource;
   if(resource.type!=="organization"||resource.id!==input.recordId||typeof resource.publicId!=="string"||!PUBLIC_ID.test(resource.publicId)||resource.revision!=="1"||typeof resource.revision!=="string"||!REVISION.test(resource.revision))return null;
   return { publicId:resource.publicId,revision:resource.revision,body:value };
@@ -87,7 +99,7 @@ export async function bootstrapProjectAlphaDirectoryOrganization(env: Env, input
   let expectedAuthorizationGeneration: string;
   if(existing){let prior:unknown;try{prior=JSON.parse(String(existing.command_json));}catch{return{status:"conflict",reason:"command_id_body_conflict"};}if(!plain(prior)||!exact(prior,["operation","commandId","resourceType","externalId","expectedRevision","expectedAuthorizationGeneration","fields","scopes"])||prior.operation!=="create"||prior.commandId!==input.commandId||prior.resourceType!=="organization"||prior.externalId!==input.recordId||prior.expectedRevision!=="0"||JSON.stringify(prior.fields)!==JSON.stringify(input.profile)||JSON.stringify(prior.scopes)!==JSON.stringify(input.scopes)||typeof prior.expectedAuthorizationGeneration!=="string"||!REVISION.test(prior.expectedAuthorizationGeneration))return{status:"conflict",reason:"command_id_body_conflict"};expectedAuthorizationGeneration=prior.expectedAuthorizationGeneration;}
   else { const inventory=await readConfiguredProjectAlphaDirectoryInventory(env,input.sourceId,{type:"organization",limit:1},send);
-    if(inventory.status!=="observed"||!REVISION.test(inventory.inventory.authorizationGeneration))return {status:"blocked",reason:"directory_inventory"};
+    if(inventory.status!=="observed"||!REVISION.test(inventory.inventory.authorizationGeneration))return {status:"blocked",reason:"directory_inventory",diagnostic:inventoryDiagnostic(inventory)};
     expectedAuthorizationGeneration=inventory.inventory.authorizationGeneration; }
   const apiCommand = { commandId: input.commandId, externalId: input.recordId, expectedAuthorizationGeneration, profile: input.profile };
   const commandJson = { operation: "create", commandId: input.commandId, resourceType: "organization", externalId: input.recordId,
@@ -127,9 +139,10 @@ export async function bootstrapProjectAlphaDirectoryOrganization(env: Env, input
     ]);
   } catch { return { status: "blocked", reason: "native_guard_or_materialization" }; }
   let response: Response; const controller=new AbortController(), timer=setTimeout(()=>controller.abort(),timeoutMs);
-  try { response = await send(new URL("/api/v2/directory/organizations/commands", connection.baseUrl), { method:"POST", headers: headers(connection), body: JSON.stringify(apiCommand), redirect:"error", credentials:"omit", cache:"no-store",signal:controller.signal }); }
+  try { response = await send(new URL("/api/v2/directory/organizations/commands", connection.baseUrl), { method:"POST", headers: headers(connection), body: JSON.stringify(apiCommand), redirect:"manual", credentials:"omit", cache:"no-store",signal:controller.signal }); }
   catch { return { status: "uncertain", reason: controller.signal.aborted ? "timeout" : "transport" }; }
   finally { clearTimeout(timer); }
+  if(response.redirected||(response.status>=300&&response.status<400)){await response.body?.cancel();return {status:"uncertain",reason:"pa_receipt"};}
   const requestId=trustedCreateReceipt(response,existing?200:201); if(!requestId)return { status:"uncertain", reason:"pa_receipt" };
   let confirmed:ReturnType<typeof receipt>; try { confirmed=receipt(await boundedJson(response),input,connection,requestId); } catch { confirmed=null; }
   if(!confirmed)return {status:"uncertain",reason:"pa_receipt"};

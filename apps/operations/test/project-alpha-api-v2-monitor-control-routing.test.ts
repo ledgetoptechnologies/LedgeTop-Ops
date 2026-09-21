@@ -28,7 +28,7 @@ function environment(controlEnabled = "false"): Env {
     PUBLIC_BASE_URL: origin, INCOMING_EXPECTED_HOST: "incoming.example.test",
     INCOMING_BASE_URL: "https://incoming.example.test", OPS_DB: database,
     TEAM_DOMAIN: "https://synthetic-team.cloudflareaccess.com",
-    OPERATIONS_AUD: "synthetic-staff-audience", NATIVE_STAFF_ONBOARDING_AUD: "synthetic-claimant-audience",
+    OPERATIONS_AUD: "synthetic-staff-audience",
     NATIVE_INTEGRATION_CONTROL_ENABLED: controlEnabled, NATIVE_INTEGRATION_CONTROL_ORIGIN: origin,
     PROJECT_ALPHA_API_V2_CONNECTIONS: "server-only-configured-connections",
     OPERATIONS_SESSION_SECRET: "synthetic-native-control-csrf-secret-at-least-thirty-two-bytes",
@@ -58,7 +58,7 @@ describe("native monitor reserved namespace routing", () => {
     for (const call of calls.monitor.mock.calls)
       expect(call[1]).toMatchObject({ database, projectAlphaConnectionsJson: "server-only-configured-connections",
         configuration: { enabled: false, issuer: env.TEAM_DOMAIN, staffAudience: env.OPERATIONS_AUD,
-          onboardingAudience: env.NATIVE_STAFF_ONBOARDING_AUD, origin, csrfSecret: env.OPERATIONS_SESSION_SECRET },
+          origin, csrfSecret: env.OPERATIONS_SESSION_SECRET },
         consumeRateLimit: expect.any(Function) });
     expect(calls.legacy).not.toHaveBeenCalled();
   });

@@ -231,8 +231,9 @@ async function boundedJson(response: Response, maximum = RESPONSE_LIMIT): Promis
 async function post(connection: ProjectAlphaApiV2Connection, path: string, body: string, send: typeof fetch): Promise<Response | ProjectAlphaDirectoryTransportFailure> {
   const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 10_000); let response: Response | undefined;
   try {
-    response = await send(new URL(path, connection.baseUrl), { method: "POST", headers: headers(connection), body, redirect: "error", credentials: "omit", cache: "no-store", signal: controller.signal });
+    response = await send(new URL(path, connection.baseUrl), { method: "POST", headers: headers(connection), body, redirect: "manual", credentials: "omit", cache: "no-store", signal: controller.signal });
     const info = diagnostic(response);
+    if (response.redirected || (response.status >= 300 && response.status < 400)) { await response.body?.cancel(); return { status: "uncertain", reason: "invalid_contract", ...info }; }
     if (response.status !== 200) { await response.body?.cancel(); return { status: response.status === 409 ? "conflict" : response.status >= 500 ? "uncertain" : response.status === 401 || response.status === 403 ? "blocked" : response.status === 400 || response.status === 413 || response.status === 415 ? "rejected" : "uncertain", reason: "http_status", ...info }; }
     if (!trusted(response, true)) { await response.body?.cancel(); return { status: "uncertain", reason: "invalid_contract", ...info }; }
     return response;
@@ -323,8 +324,9 @@ export async function readProjectAlphaDirectoryInventory(connectionInput: Projec
   const params = new URLSearchParams({ type: query.type, limit: String(query.limit) }); if (query.cursor !== null) params.set("cursor", query.cursor);
   const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 10_000); let response: Response | undefined;
   try {
-    response = await send(new URL(`/api/v2/directory/inventory?${params.toString()}`, connection.baseUrl), { method: "GET", headers: new Headers({ Accept: "application/json", Authorization: `Bearer ${connection.apiKey}`, "X-PA-Source-Instance-ID": connection.expectedSourceInstanceId, "X-PA-Application-ID": connection.expectedApplicationId, "X-PA-History-Epoch": connection.expectedHistoryEpoch, ...(connection.accessClientId && connection.accessClientSecret ? { "CF-Access-Client-Id": connection.accessClientId, "CF-Access-Client-Secret": connection.accessClientSecret } : {}) }), redirect: "error", credentials: "omit", cache: "no-store", signal: controller.signal });
-    const info = diagnostic(response); if (response.status !== 200) { await response.body?.cancel(); return { status: "uncertain", reason: "http_status", httpStatus: response.status }; }
+    response = await send(new URL(`/api/v2/directory/inventory?${params.toString()}`, connection.baseUrl), { method: "GET", headers: new Headers({ Accept: "application/json", Authorization: `Bearer ${connection.apiKey}`, "X-PA-Source-Instance-ID": connection.expectedSourceInstanceId, "X-PA-Application-ID": connection.expectedApplicationId, "X-PA-History-Epoch": connection.expectedHistoryEpoch, ...(connection.accessClientId && connection.accessClientSecret ? { "CF-Access-Client-Id": connection.accessClientId, "CF-Access-Client-Secret": connection.accessClientSecret } : {}) }), redirect: "manual", credentials: "omit", cache: "no-store", signal: controller.signal });
+    const info = diagnostic(response); if (response.redirected || (response.status >= 300 && response.status < 400)) { await response.body?.cancel(); return { status: "uncertain", reason: "invalid_contract", ...info }; }
+    if (response.status !== 200) { await response.body?.cancel(); return { status: "uncertain", reason: "http_status", httpStatus: response.status }; }
     if (!trusted(response, true)) { await response.body?.cancel(); return { status: "uncertain", reason: "invalid_contract", ...info }; }
     const parsed = await boundedJson(response); const inventory = inventorySuccess(parsed, sourceId, query, connection, info.requestId ?? null); return inventory ? { status: "observed", inventory } : { status: "uncertain", reason: "invalid_contract", ...info };
   } catch (error) { return { status: "uncertain", reason: controller.signal.aborted ? "timeout" : error instanceof Error && error.message === "response_limit" ? "response_limit" : error instanceof Error && error.message === "transport" ? "transport" : "invalid_contract" }; }

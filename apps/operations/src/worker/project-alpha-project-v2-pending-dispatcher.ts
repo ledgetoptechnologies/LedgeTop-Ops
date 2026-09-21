@@ -12,7 +12,7 @@ import {
 } from "./project-alpha-project-api-v2";
 import { withEnabledConfiguredProjectAlphaApiV2Connection, type ProjectAlphaApiV2ConnectionEnvironment } from "./project-alpha-api-v2-connections";
 import type { ProjectAlphaApiV2Connection } from "./project-alpha-api-v2";
-import { uuid, type ProjectAlphaProjectFailure } from "./project-alpha-project-transport";
+import { PROJECT_ALPHA_PROJECT_CONFLICT_CODES, uuid, type ProjectAlphaProjectFailure } from "./project-alpha-project-transport";
 
 /**
  * Private dispatcher for an already planned Project-v2 command. Its only
@@ -81,7 +81,7 @@ function terminalReplay(value: Terminal): ProjectAlphaProjectV2PendingDispatcher
     const parsed = value.outcome_json && JSON.parse(value.outcome_json);
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) details = parsed as Record<string, unknown>;
   } catch { /* Event state remains the authoritative terminal discriminator. */ }
-  const reason = typeof details.reason === "string" && ["invalid_command", "request_limit", "preflight", "http_status", "timeout", "transport", "response_limit", "invalid_contract"].includes(details.reason)
+  const reason = typeof details.reason === "string" && ["invalid_command", "request_limit", "preflight", "http_status", "timeout", "transport", "response_limit", "invalid_contract", ...PROJECT_ALPHA_PROJECT_CONFLICT_CODES].includes(details.reason)
     ? details.reason as ProjectAlphaProjectFailure["reason"] : "invalid_contract";
   const diagnostic = { ...(Number.isInteger(details.httpStatus) && (details.httpStatus as number) >= 100 && (details.httpStatus as number) <= 599
     ? { httpStatus: details.httpStatus as number } : {}), ...(uuid(details.requestId) ? { requestId: details.requestId } : {}) };
@@ -224,6 +224,13 @@ async function dispatchEnabledProjectAlphaProjectV2PendingCommand(
       // healthy capability check can make the one authorized dispatch.
       if (outcome.reason === "preflight") {
         await releaseUnsent(env.OPS_DB, current!);
+        return outcome;
+      }
+      // Exact PA 409 envelopes are correlated and identity-fenced by the
+      // transport. Persist only their stable code and ordinary diagnostics;
+      // never retain the remote response body.
+      if (outcome.status === "conflict") {
+        await finishFailure(env.OPS_DB, current!, outcome);
         return outcome;
       }
       // Even a syntactically clear non-success response cannot establish that

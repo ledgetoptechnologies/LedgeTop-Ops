@@ -9,9 +9,10 @@ const root = path.resolve(import.meta.dirname, "..");
 const values = Object.freeze({
   DELIVERY_STAGING_ACCESS_AUD: "a".repeat(64),
   OPERATIONS_STAGING_ACCESS_AUD: "b".repeat(64),
-  NATIVE_STAFF_ONBOARDING_STAGING_ACCESS_AUD: "c".repeat(64),
-  PROJECT_ALPHA_OPS_SYNC_STAGING_ACCESS_AUD: "d".repeat(64),
-  DEDICATED_CLIENT_PORTAL_STAGING_ACCESS_AUD: "e".repeat(64),
+  PROJECT_ALPHA_OPS_SYNC_STAGING_ACCESS_AUD: "c".repeat(64),
+  DEDICATED_CLIENT_PORTAL_STAGING_ACCESS_AUD: "d".repeat(64),
+  STAGING_PROJECT_ALPHA_SOURCE_ID: "project-alpha:staging",
+  STAGING_PROJECT_ALPHA_HTTPS_ORIGIN: "https://pa-staging.ledgetoptechnologies.com",
   CLIENT_STAGING_RESTRICTED_MAPBOX_PUBLIC_TOKEN: "pk.client-staging-test",
   OPERATIONS_STAGING_RESTRICTED_MAPBOX_PUBLIC_TOKEN: "pk.operations-staging-test",
   MAPBOX_STAGING_ACCEPTANCE_DEFERRED: "false",
@@ -26,7 +27,6 @@ test("renders all three exact staging configs without placeholders", () => {
   const configs = renderConfigs(root, values);
   assert.deepEqual(validateRenderedConfigs(root, configs), []);
   assert.equal(configs.delivery.vars.CLIENT_ACCESS_AUD, values.DEDICATED_CLIENT_PORTAL_STAGING_ACCESS_AUD);
-  assert.equal(configs.operations.vars.NATIVE_STAFF_ONBOARDING_AUD, values.NATIVE_STAFF_ONBOARDING_STAGING_ACCESS_AUD);
   assert.equal(configs.operations.vars.NATIVE_INTEGRATION_CONTROL_ENABLED, "false");
   assert.equal(configs.operations.vars.NATIVE_INTEGRATION_CONTROL_ORIGIN, "");
   assert.equal(configs.operations.vars.CLIENT_REQUEST_TRIAGE_TO, values.STAGING_TRIAGE_EMAIL);
@@ -40,10 +40,9 @@ test("rejects missing, unexpected, duplicated, and malformed values", () => {
   delete invalid.STAGING_TRIAGE_EMAIL;
   invalid.UNKNOWN = "value";
   invalid.PROJECT_ALPHA_OPS_SYNC_STAGING_ACCESS_AUD = invalid.OPERATIONS_STAGING_ACCESS_AUD;
-  invalid.NATIVE_STAFF_ONBOARDING_STAGING_ACCESS_AUD = "not-an-audience";
   invalid.OPERATIONS_STAGING_RESTRICTED_MAPBOX_PUBLIC_TOKEN = "secret-token";
   const errors = validateValues(invalid);
-  for (const expected of ["STAGING_TRIAGE_EMAIL", "unexpected", "NATIVE_STAFF_ONBOARDING_STAGING_ACCESS_AUD", "distinct", "public Mapbox"]) assert(errors.some((error) => error.includes(expected)), errors.join(" | "));
+  for (const expected of ["STAGING_TRIAGE_EMAIL", "unexpected", "distinct", "public Mapbox"]) assert(errors.some((error) => error.includes(expected)), errors.join(" | "));
 });
 
 test("allows an explicit Mapbox staging deferral only with both rendered tokens empty", () => {

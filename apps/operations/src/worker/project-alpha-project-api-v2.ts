@@ -1,6 +1,6 @@
 import {
   authHeaders, advances, boundedJson, boundedJsonWithBytes, canonicalConnection, decimal, endpoint, externalId, exact, get, hash, isFailure, post, preflightFailure, profile, publicId, relation, runPreflight, trusted, uuid,
-  PROJECT_ALPHA_PROJECT_REQUEST_LIMIT, type ProjectAlphaProjectFailure, type ProjectAlphaProjectProfile, type ProjectAlphaProjectRelationProof,
+  PROJECT_ALPHA_PROJECT_CONFLICT_CODES, PROJECT_ALPHA_PROJECT_REQUEST_LIMIT, type ProjectAlphaProjectConflictCode, type ProjectAlphaProjectFailure, type ProjectAlphaProjectProfile, type ProjectAlphaProjectRelationProof,
 } from "./project-alpha-project-transport";
 import { withEnabledConfiguredProjectAlphaApiV2Connection, type ProjectAlphaApiV2ConnectionEnvironment } from "./project-alpha-api-v2-connections";
 import type { ProjectAlphaApiV2Connection, ProjectAlphaApiV2Endpoint } from "./project-alpha-api-v2";
@@ -133,6 +133,27 @@ function success(value: unknown, type: ProjectAlphaProjectCommandType, command: 
   if (type === "update") { const expected = command as ProjectAlphaProjectUpdateCommand; return value.result.authorizationGeneration === expected.expectedAuthorizationGeneration && (resource.revision.length > expected.expectedRevision.length || (resource.revision.length === expected.expectedRevision.length && resource.revision >= expected.expectedRevision)); }
   return value.result.authorizationGeneration === incremented((command as ProjectAlphaProjectCreateCommand).expectedAuthorizationGeneration);
 }
+function conflictCode(value: unknown): value is ProjectAlphaProjectConflictCode {
+  return typeof value === "string" && (PROJECT_ALPHA_PROJECT_CONFLICT_CODES as readonly string[]).includes(value);
+}
+/**
+ * A 409 is terminal only when PA proves it is describing this connection and
+ * this response. Identity conflicts are intentionally usable before PA can
+ * echo a verified identity; every other conflict must carry all three echoed
+ * identity fields. No remote body is retained after this check.
+ */
+function conflict(value: unknown, connection: ProjectAlphaApiV2Connection, requestId: string | null): ProjectAlphaProjectConflictCode | null {
+  if (!plain(value) || value.apiVersion !== "2" || !uuid(value.requestId) || value.requestId !== requestId
+    || !plain(value.error) || !exact(value.error, ["code"]) || !conflictCode(value.error.code)) return null;
+  const hasIdentity = ["sourceInstanceId", "applicationId", "historyEpoch"].every(field => Object.hasOwn(value, field));
+  const base = exact(value, ["apiVersion", "requestId", "error"]);
+  const verified = exact(value, ["apiVersion", "sourceInstanceId", "applicationId", "historyEpoch", "requestId", "error"])
+    && value.sourceInstanceId === connection.expectedSourceInstanceId
+    && value.applicationId === connection.expectedApplicationId
+    && value.historyEpoch === connection.expectedHistoryEpoch;
+  if (value.error.code === "identity_conflict") return base || (hasIdentity && verified) ? value.error.code : null;
+  return hasIdentity && verified ? value.error.code : null;
+}
 export function isProjectAlphaProjectAcknowledgement(type: ProjectAlphaProjectCommandType, value: unknown, command: ProjectAlphaProjectCommand, connection: ProjectAlphaApiV2Connection): value is Extract<ProjectAlphaProjectOutcome, { status: "acknowledged" }> {
   return plain(value) && exact(value, ["status", "httpStatus", "response"]) && value.status === "acknowledged" && (value.httpStatus === 200 || value.httpStatus === 201) && plain(value.response) && typeof value.response.requestId === "string" && success(value.response, type, command, connection, value.httpStatus, value.response.requestId);
 }
@@ -145,10 +166,15 @@ async function send(type: ProjectAlphaProjectCommandType, inputConnection: Proje
   if (!canonical) return { status: "rejected", reason: "invalid_command" };
   const { body } = canonical; const command = canonical.command;
   const preflight = await runPreflight(connection, routes[type], fetcher); if (preflight) return preflight;
-  const response = await post(connection, routes[type], body, fetcher, type === "create" ? [201, 200] : [200]);
+  const response = await post(connection, routes[type], body, fetcher, type === "create" ? [201, 200, 409] : [200, 409]);
   if (isFailure(response)) return response;
   try {
     const decoded = await boundedJsonWithBytes(response), parsed = decoded.value;
+    if (response.status === 409) {
+      const reason = conflict(parsed, connection, response.headers.get("X-Request-ID"));
+      return reason ? { status: "conflict", reason, httpStatus: 409, requestId: response.headers.get("X-Request-ID")! }
+        : { status: "uncertain", reason: "invalid_contract", ...diagnostic(response) };
+    }
     if (!success(parsed, type, command, connection, response.status, response.headers.get("X-Request-ID")))
       return { status: "uncertain", reason: "invalid_contract", ...diagnostic(response) };
     const acknowledged: ProjectAlphaProjectOutcome = {
@@ -166,7 +192,12 @@ async function send(type: ProjectAlphaProjectCommandType, inputConnection: Proje
     }));
     return acknowledged;
   }
-  catch (error) { return { status: "uncertain", reason: error instanceof Error && error.message === "response_limit" ? "response_limit" : error instanceof Error && error.message === "transport" ? "transport" : "invalid_contract", ...diagnostic(response) }; }
+  catch (error) {
+    // A 409 body is a narrow typed contract. Oversize and read/parse failures
+    // cannot safely be treated as a meaningful conflict.
+    if (response.status === 409) return { status: "uncertain", reason: "invalid_contract", ...diagnostic(response) };
+    return { status: "uncertain", reason: error instanceof Error && error.message === "response_limit" ? "response_limit" : error instanceof Error && error.message === "transport" ? "transport" : "invalid_contract", ...diagnostic(response) };
+  }
 }
 function diagnostic(response: Response): { httpStatus: number; requestId?: string } { const value = response.headers.get("X-Request-ID"); return { httpStatus: response.status, ...(value && uuid(value) ? { requestId: value } : {}) }; }
 export function sendProjectAlphaProjectCreateCommand(connection: ProjectAlphaApiV2Connection, command: ProjectAlphaProjectCreateCommand, fetcher: typeof fetch = fetch): Promise<ProjectAlphaProjectOutcome> { return send("create", connection, command, fetcher); }

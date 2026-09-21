@@ -21,7 +21,6 @@
     "ENVIRONMENT": "staging",
     "TEAM_DOMAIN": "https://ledgetoptechnologies.cloudflareaccess.com",
     "OPERATIONS_AUD": "<OPERATIONS_STAGING_ACCESS_AUD>",
-    "NATIVE_STAFF_ONBOARDING_AUD": "<NATIVE_STAFF_ONBOARDING_STAGING_ACCESS_AUD>",
     "NATIVE_INTEGRATION_CONTROL_ENABLED": "false",
     "NATIVE_INTEGRATION_CONTROL_ORIGIN": "",
     "DELIVERY_BASE_URL": "https://client-staging.ledgetopdroneservices.com",
