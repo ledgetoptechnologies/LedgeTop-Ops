@@ -880,8 +880,9 @@ post-deployment packet. It performs no remote action.
 
 ### September 21 — typed Project conflict checkpoint and cleanup
 
-- Ops PR98 head is `de1e9db9ba0363834b1f4600fca9eb685fc121ae`; workflow
-  `35561740004` passed all ten jobs. PA PR184 head is
+- The corrected Ops PR98 harness and evidence checkpoint at
+  `0ada2ab2213e4d25c5a804b0ba4a1226521fa601` passed all ten jobs in exact
+  workflow `35564563048`. PA PR184 head is
   `3b43e1275e3b248979876ace56ca38e6e383f52c` with green required checks.
   A supported `cloudflared` human Access login succeeded for staging.
 - The first joined run was stopped before mutation because the harness omitted
@@ -907,8 +908,10 @@ post-deployment packet. It performs no remote action.
   version `10`; Directory grant is inactive; Project/Directory pending and
   leased rows, actor fences, and live proofs are all zero; and one immutable
   revoke receipt exists.
-- Remaining release gate: enable only PA Directory read and binding-status
-  flags alongside the Project window, read the current organization proof with
-  key #9, restore the Project-only window if needed, issue a fresh authority
-  packet, and rerun the joined acceptance with a fresh command. This checkpoint
-  is not merge-ready.
+- Remaining release gate: enable only PA Directory read, binding-status, and
+  inventory flags alongside the Project window, read the current organization
+  proof with key #9, restore the Project-only window if needed, issue a fresh
+  authority packet, and rerun the joined acceptance with a fresh command.
+  Inventory is necessary for the authoritative projection SHA-256; neither the
+  direct read nor binding-status response contains it. This checkpoint is not
+  merge-ready.

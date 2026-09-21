@@ -5755,8 +5755,9 @@ pending; this requirement does not claim a deployed UI change.
 
 ### September 21 — Project conflict contract and remaining joined gate
 
-- Ops PR98 is at `de1e9db9ba0363834b1f4600fca9eb685fc121ae`; exact workflow
-  `35561740004` passed all ten CI jobs. PA PR184 is at
+- The corrected Ops PR98 harness and evidence checkpoint at
+  `0ada2ab2213e4d25c5a804b0ba4a1226521fa601` passed all ten CI jobs in exact
+  workflow `35564563048`. PA PR184 is at
   `3b43e1275e3b248979876ace56ca38e6e383f52c` with green required checks.
   A supported `cloudflared` human Access login succeeded for the staging
   Operations origin.
@@ -5783,9 +5784,11 @@ pending; this requirement does not claim a deployed UI change.
   migration is applied. Admission, Project grant, and Project generation are
   inactive at version `10`; Directory grant is inactive; pending/leased rows,
   actor fences, and live proofs are zero; one immutable revoke receipt remains.
-- Next implementation/acceptance step: enable only PA Directory read and
-  binding-status flags beside the bounded Project window, read the current
-  organization proof with key #9, restore the Project-only flags if desired,
-  issue a fresh authority packet, and rerun with a fresh command. Until that
-  proof succeeds, the migration is not merge-ready and no production cutover
-  should occur.
+- Next implementation/acceptance step: enable only PA Directory read,
+  binding-status, and inventory flags beside the bounded Project window, read
+  the current organization proof with key #9, restore the Project-only flags if
+  desired, issue a fresh authority packet, and rerun with a fresh command.
+  Inventory is required to recover the authoritative projection SHA-256 because
+  neither direct read nor binding status returns that field. Until that proof
+  succeeds, the migration is not merge-ready and no production cutover should
+  occur.

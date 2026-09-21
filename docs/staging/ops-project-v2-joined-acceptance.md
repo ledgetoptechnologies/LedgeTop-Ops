@@ -257,7 +257,13 @@ This is preserved negative acceptance evidence, not a passing joined result.
 
 ## September 21, 2026 — typed Project conflict and closed staging window
 
-The current Operations candidate is PR98 head `de1e9db9ba0363834b1f4600fca9eb685fc121ae`; its exact GitHub workflow `35561740004` passed all ten jobs. PA PR184 head is `3b43e1275e3b248979876ace56ca38e6e383f52c` and its required checks are green. A supported `cloudflared` human Access login succeeded for the staging Operations origin; no cookie, Access assertion, or browser storage state was copied into the harness.
+The corrected Operations harness and evidence checkpoint was verified at PR98
+head `0ada2ab2213e4d25c5a804b0ba4a1226521fa601`; its exact GitHub workflow
+`35564563048` passed all ten jobs. PA PR184 head is
+`3b43e1275e3b248979876ace56ca38e6e383f52c` and its required checks are green.
+A supported `cloudflared` human Access login succeeded for the staging
+Operations origin; no cookie, Access assertion, or browser storage state was
+copied into the harness.
 
 The first joined attempt was blocked before mutation because the harness omitted the canonical PA staging host from its origin configuration. The harness now accepts `STAGING_PROJECT_ALPHA_ORIGIN`, and its unit suite is 10/10. This corrected configuration was then exercised with fresh command `3b785ca6-96a8-4103-b2e5-4a60ce5cae41`. PA made one attempt and returned terminal typed `relationship_proof_conflict` HTTP `409`, correlated to request `fcd6627d-405d-477b-8486-d51140a2d6bf`. There was no success receipt and no Operations activation. The authoritative PA Project authorization generation was `5`.
 
@@ -265,4 +271,12 @@ The independently observed Project binding remains stale: external ID `pa-accept
 
 Cleanup completed after the bounded attempt: the selected PA connection secret is empty, default-off Operations version `de550f0c-f5ec-452c-a4db-3c61bc7cffc2` is deployed, and the native-authority revoke was applied. Final readback shows admission, Project grant, and Project generation at inactive version `10`, Directory grant inactive, zero actor fences, zero Project/Directory pending or leased outbox rows, zero live proofs, and one immutable revoke receipt. Do not call this joined acceptance passing or merge-ready.
 
-The remaining gate is deliberately narrow: enable only PA Directory read and binding-status flags alongside the bounded Project window, read the current organization proof with key #9, restore the Project-only flags if desired, issue a fresh authority packet, and rerun with a fresh command. Do not retry the uncertain or terminal command IDs.
+The remaining gate is deliberately narrow: enable only PA Directory read,
+binding-status, and inventory flags alongside the bounded Project window, read
+the current organization proof with key #9, restore the Project-only flags if
+desired, issue a fresh authority packet, and rerun with a fresh command. The
+inventory route is required because the binding-status and direct-read
+responses do not expose the authoritative projection SHA-256 required by the
+joined runner. Reusing the old hash would be a guess and could repeat the typed
+`relationship_proof_conflict`. Do not retry the uncertain or terminal command
+IDs.
