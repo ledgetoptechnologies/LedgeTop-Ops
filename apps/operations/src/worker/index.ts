@@ -64,6 +64,7 @@ import { syncProjectAlpha } from "./project-alpha";
 import { runProjectAlphaSnapshotRecovery } from "./project-alpha-snapshot-recovery";
 import { registerProjectAlphaConnectorAdminRoutes, portalAuthorityErrorResponse } from "./project-alpha-connector-admin";
 import { registerProjectAlphaProjectV2AcceptanceRoutes } from "./project-alpha-project-v2-acceptance-routes";
+import { registerProjectAlphaApiV2ReadAcceptanceRoutes } from "./project-alpha-api-v2-read-acceptance-routes";
 import { PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ROUTE, projectAlphaDirectoryV2BootstrapAcceptanceEnabled, registerProjectAlphaDirectoryV2BootstrapAcceptanceRoutes } from "./project-alpha-directory-v2-bootstrap-acceptance-routes";
 import { PortalSourceAuthorityError } from "../../../client/src/worker/project-alpha-portal-authority";
 import { ensureDeploymentConfiguredProjectAlphaConnectors, ProjectAlphaConnectorError } from "./project-alpha-connectors";
@@ -3173,6 +3174,7 @@ app.get("/api/admin/delivery-change-recovery", async (c) => {
   return c.json(await deliveryChangeRecoveryStatus(c.env));
 });
 registerProjectAlphaConnectorAdminRoutes(app);
+registerProjectAlphaApiV2ReadAcceptanceRoutes(app);
 registerProjectAlphaProjectV2AcceptanceRoutes(app);
 registerProjectAlphaDirectoryV2BootstrapAcceptanceRoutes(app);
 app.post("/api/admin/integrations/project-alpha/sync", async (c) => {

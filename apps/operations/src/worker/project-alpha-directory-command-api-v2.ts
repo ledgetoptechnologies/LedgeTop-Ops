@@ -171,7 +171,7 @@ function revokeEndpoint(kind: ProjectAlphaDirectoryCommandKind): ProjectAlphaApi
   const plural = kind === "client" ? "clients" : "organizations";
   return { method: "POST", path: `/api/v2/directory/${plural}/bindings/revoke/commands`, requiredCapability: `directory.${plural}.unbind`, requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true };
 }
-const inventoryEndpoint: ProjectAlphaApiV2Endpoint = { method: "GET", path: "/api/v2/directory/inventory", requiredCapability: "directory.inventory.read", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true };
+export const PROJECT_ALPHA_DIRECTORY_INVENTORY_ENDPOINT: Readonly<ProjectAlphaApiV2Endpoint> = Object.freeze({ method: "GET", path: "/api/v2/directory/inventory", requiredCapability: "directory.inventory.read", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true });
 
 export function isProjectAlphaDirectoryLifecycleCommand(value: unknown): value is ProjectAlphaDirectoryLifecycleCommand {
   return plain(value) && exact(value, ["commandId", "expectedRevision", "expectedAuthorizationGeneration"])
@@ -320,7 +320,7 @@ function inventorySuccess(value: unknown, sourceId: string, query: { type: "all"
 export async function readProjectAlphaDirectoryInventory(connectionInput: ProjectAlphaApiV2Connection, sourceId: string, inputQuery: ProjectAlphaDirectoryInventoryQuery = {}, send: typeof fetch = fetch): Promise<ProjectAlphaDirectoryInventoryOutcome> {
   const query = inventoryQuery(inputQuery); if (!query || !SOURCE_ID.test(sourceId)) return { status: "blocked", reason: "configuration" };
   let connection: ProjectAlphaApiV2Connection; try { connection = normalizedConnection(connectionInput); if (typeof connection.expectedHistoryEpoch !== "string" || !uuid(connection.expectedHistoryEpoch)) return { status: "blocked", reason: "configuration" }; } catch { return { status: "blocked", reason: "configuration" }; }
-  const preflight = await probeProjectAlphaApiV2(connection, [], send, [inventoryEndpoint]); if (preflight.status !== "verified") return { status: "blocked", reason: preflight.status === "unauthorized" ? "credentials_or_scope" : "preflight", preflight };
+  const preflight = await probeProjectAlphaApiV2(connection, [], send, [PROJECT_ALPHA_DIRECTORY_INVENTORY_ENDPOINT]); if (preflight.status !== "verified") return { status: "blocked", reason: preflight.status === "unauthorized" ? "credentials_or_scope" : "preflight", preflight };
   const params = new URLSearchParams({ type: query.type, limit: String(query.limit) }); if (query.cursor !== null) params.set("cursor", query.cursor);
   const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 10_000); let response: Response | undefined;
   try {

@@ -10,6 +10,7 @@ export type Env = Omit<
   | "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED"
   | "PROJECT_ALPHA_API_V2_MONITOR_ENABLED"
   | "PROJECT_ALPHA_API_V2_MONITOR_RECIPIENT"
+  | "PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ENABLED"
   | "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED"
   | "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ENABLED"
   | "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_SOURCE_ID"
@@ -41,6 +42,8 @@ export type Env = Omit<
   PROJECT_ALPHA_API_V2_MONITOR_ENABLED?: string;
   /** Explicit deployment-owned owner mailbox for outage alerts; never inferred from Project Alpha data. */
   PROJECT_ALPHA_API_V2_MONITOR_RECIPIENT?: string;
+  /** Default-off administrator-only API-v2 capabilities and inventory readiness check. */
+  PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ENABLED?: string;
   /** Default-off, manually invoked administrator-only Project-v2 staging acceptance. */
   PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED?: string;
   /** Staging-only, manually invoked Directory bootstrap acceptance fixture. */
