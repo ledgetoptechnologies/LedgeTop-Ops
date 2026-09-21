@@ -20,11 +20,11 @@ vi.mock("../src/worker/project-alpha-api-v2-connections", () => ({
 vi.mock("../src/worker/project-alpha-api-v2", () => ({ probeProjectAlphaApiV2: mocks.probe }));
 vi.mock("../src/worker/project-alpha-directory-command-api-v2", () => ({
   PROJECT_ALPHA_DIRECTORY_INVENTORY_ENDPOINT: { method: "GET", path: "/api/v2/directory/inventory", requiredCapability: "directory.inventory.read" },
-  readProjectAlphaDirectoryInventory: mocks.directory,
+  readProjectAlphaDirectoryInventoryAfterVerifiedCapabilities: mocks.directory,
 }));
 vi.mock("../src/worker/project-alpha-project-inventory-api-v2", () => ({
   PROJECT_ALPHA_PROJECT_INVENTORY_ENDPOINT: { method: "GET", path: "/api/v2/projects/inventory", requiredCapability: "projects.inventory.read" },
-  readProjectAlphaProjectInventory: mocks.projects,
+  readProjectAlphaProjectInventoryAfterVerifiedCapabilities: mocks.projects,
 }));
 vi.mock("../src/worker/request-security", () => ({ auditStatement: mocks.audit }));
 

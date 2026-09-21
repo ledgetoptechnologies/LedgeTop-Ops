@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { privateProjectAlphaProjectSettlementEvidence, sendConfiguredProjectAlphaProjectCreateCommand, sendProjectAlphaProjectCreateCommand, sendProjectAlphaProjectUpdateCommand, sendProjectAlphaProjectBindingCommand, sendProjectAlphaProjectRefreshCommand, validatedProjectAlphaProjectAcknowledgement, type ProjectAlphaProjectCreateCommand, type ProjectAlphaProjectOutcome, type ProjectAlphaProjectUpdateCommand, type ProjectAlphaProjectBindCommand, type ProjectAlphaProjectRefreshCommand } from "../src/worker/project-alpha-project-api-v2";
 import { privateProjectAlphaProjectReadEvidence, readProjectAlphaProject, validatedProjectAlphaProjectRead } from "../src/worker/project-alpha-project-read-api-v2";
-import { readProjectAlphaProjectInventory } from "../src/worker/project-alpha-project-inventory-api-v2";
+import { readProjectAlphaProjectInventory, readProjectAlphaProjectInventoryAfterVerifiedCapabilities } from "../src/worker/project-alpha-project-inventory-api-v2";
 import { readProjectAlphaProjectBindingStatus } from "../src/worker/project-alpha-project-binding-status-api-v2";
 import { sendProjectAlphaProjectLifecycleCommand } from "../src/worker/project-alpha-project-lifecycle-api-v2";
 
@@ -134,6 +134,13 @@ describe("dormant PA project v2 transport", () => {
     const invRoute = { method: "GET", path: "/api/v2/projects/inventory", requiredCapability: "projects.inventory.read", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true };
     const invSend = vi.fn<typeof fetch>(async url => String(url).endsWith("capabilities") ? json(metadata(invRoute)) : json({ apiVersion: "2", sourceInstanceId: source, applicationId: application, historyEpoch: epoch, requestId: request, authorizationGeneration: "1", projects: [], nextCursor: null }));
     await expect(readProjectAlphaProjectInventory(connection, { limit: 1 }, invSend)).resolves.toMatchObject({ status: "observed", response: { projects: [], nextCursor: null } });
+  });
+
+  it("can reuse a capabilities verification for one bounded inventory GET", async () => {
+    const send = vi.fn<typeof fetch>(async () => json({ apiVersion: "2", sourceInstanceId: source, applicationId: application, historyEpoch: epoch, requestId: request, authorizationGeneration: "0", projects: [], nextCursor: null }));
+    await expect(readProjectAlphaProjectInventoryAfterVerifiedCapabilities(connection, { limit: 200 }, send)).resolves.toMatchObject({ status: "observed", response: { projects: [] } });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(String(send.mock.calls[0]![0])).toBe("https://alpha.example.test/api/v2/projects/inventory?limit=200");
   });
   it("returns typed stale-binding discovery and recovery evidence only for exact trusted 409 envelopes", async () => {
     const inventoryRoute = { method: "GET", path: "/api/v2/projects/inventory", requiredCapability: "projects.inventory.read", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true };

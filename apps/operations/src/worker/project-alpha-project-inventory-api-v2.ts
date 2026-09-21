@@ -21,10 +21,7 @@ function validStaleBinding(value: unknown, connection: ProjectAlphaApiV2Connecti
     && value.historyEpoch === connection.expectedHistoryEpoch && uuid(value.requestId) && value.requestId === requestId
     && plain(value.error) && exact(value.error, ["code", "externalId"]) && value.error.code === "binding_stale" && externalId(value.error.externalId);
 }
-export async function readProjectAlphaProjectInventory(connectionInput: ProjectAlphaApiV2Connection, query: ProjectAlphaProjectInventoryQuery = {}, fetcher: typeof fetch = fetch): Promise<ProjectAlphaProjectInventoryOutcome> {
-  if (!plain(query) || !validQuery(query)) return { status: "rejected", reason: "invalid_command" };
-  const connection = canonicalConnection(connectionInput); if (!connection) return { status: "blocked", reason: "preflight", preflight: { status: "misconfigured", reason: "configuration" } };
-  const preflight = await runPreflight(connection, PROJECT_ALPHA_PROJECT_INVENTORY_ENDPOINT, fetcher); if (preflight) return preflight;
+async function readProjectAlphaProjectInventoryRequest(connection: ProjectAlphaApiV2Connection, query: ProjectAlphaProjectInventoryQuery, fetcher: typeof fetch): Promise<ProjectAlphaProjectInventoryOutcome> {
   const limit = query.limit ?? 100; const params = new URLSearchParams({ limit: String(limit) }); if (query.cursor !== undefined && query.cursor !== null) params.set("cursor", query.cursor);
   const response = await get(connection, `/api/v2/projects/inventory?${params.toString()}`, fetcher); if (isFailure(response)) return response; const info = diagnostic(response);
   if (response.status === 409) {
@@ -41,5 +38,24 @@ export async function readProjectAlphaProjectInventory(connectionInput: ProjectA
   if (!trusted(response, true)) { await response.body?.cancel(); return { status: "uncertain", reason: "invalid_contract", ...info }; }
   try { const parsed = await boundedJson(response, 256 * 1024); return valid(parsed, connection, response.headers.get("X-Request-ID"), limit) ? { status: "observed", httpStatus: 200, response: parsed } : { status: "uncertain", reason: "invalid_contract", ...info }; }
   catch (error) { return { status: "uncertain", reason: error instanceof Error && error.message === "response_limit" ? "response_limit" : error instanceof Error && error.message === "transport" ? "transport" : "invalid_contract", ...info }; }
+}
+
+function normalizedProjectInventoryInput(connectionInput: ProjectAlphaApiV2Connection): ProjectAlphaApiV2Connection | null {
+  return canonicalConnection(connectionInput);
+}
+
+export async function readProjectAlphaProjectInventory(connectionInput: ProjectAlphaApiV2Connection, query: ProjectAlphaProjectInventoryQuery = {}, fetcher: typeof fetch = fetch): Promise<ProjectAlphaProjectInventoryOutcome> {
+  if (!plain(query) || !validQuery(query)) return { status: "rejected", reason: "invalid_command" };
+  const connection = normalizedProjectInventoryInput(connectionInput); if (!connection) return { status: "blocked", reason: "preflight", preflight: { status: "misconfigured", reason: "configuration" } };
+  const preflight = await runPreflight(connection, PROJECT_ALPHA_PROJECT_INVENTORY_ENDPOINT, fetcher); if (preflight) return preflight;
+  return readProjectAlphaProjectInventoryRequest(connection, query, fetcher);
+}
+
+/** For callers that have already verified this exact inventory endpoint with
+ * probeProjectAlphaApiV2 during the same bounded request. */
+export async function readProjectAlphaProjectInventoryAfterVerifiedCapabilities(connectionInput: ProjectAlphaApiV2Connection, query: ProjectAlphaProjectInventoryQuery = {}, fetcher: typeof fetch = fetch): Promise<ProjectAlphaProjectInventoryOutcome> {
+  if (!plain(query) || !validQuery(query)) return { status: "rejected", reason: "invalid_command" };
+  const connection = normalizedProjectInventoryInput(connectionInput); if (!connection) return { status: "blocked", reason: "preflight", preflight: { status: "misconfigured", reason: "configuration" } };
+  return readProjectAlphaProjectInventoryRequest(connection, query, fetcher);
 }
 export async function readConfiguredProjectAlphaProjectInventory(env: ProjectAlphaApiV2ConnectionEnvironment, sourceId: string, query: ProjectAlphaProjectInventoryQuery = {}, fetcher: typeof fetch = fetch): Promise<ProjectAlphaProjectInventoryOutcome | Readonly<{ status: "disabled"; sourceId: string }>> { const result = await withEnabledConfiguredProjectAlphaApiV2Connection(env, sourceId, connection => readProjectAlphaProjectInventory(connection, query, fetcher)); return result.status === "enabled" ? result.value : result.status === "disabled" ? result : { status: "blocked", reason: "preflight", preflight: { status: "misconfigured", reason: "configuration" } }; }

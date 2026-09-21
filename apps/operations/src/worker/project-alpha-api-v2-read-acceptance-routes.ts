@@ -8,12 +8,12 @@ import { probeProjectAlphaApiV2, type ProjectAlphaApiV2Probe } from "./project-a
 import { withEnabledConfiguredProjectAlphaApiV2Connection } from "./project-alpha-api-v2-connections";
 import {
   PROJECT_ALPHA_DIRECTORY_INVENTORY_ENDPOINT,
-  readProjectAlphaDirectoryInventory,
+  readProjectAlphaDirectoryInventoryAfterVerifiedCapabilities,
   type ProjectAlphaDirectoryInventoryOutcome,
 } from "./project-alpha-directory-command-api-v2";
 import {
   PROJECT_ALPHA_PROJECT_INVENTORY_ENDPOINT,
-  readProjectAlphaProjectInventory,
+  readProjectAlphaProjectInventoryAfterVerifiedCapabilities,
   type ProjectAlphaProjectInventoryOutcome,
 } from "./project-alpha-project-inventory-api-v2";
 import type { Env, StaffPrincipal } from "./types";
@@ -169,9 +169,9 @@ export function registerProjectAlphaApiV2ReadAcceptanceRoutes(app: App): void {
           const unavailable = { status: "not_attempted", reason: "capabilities" };
           return acceptanceSummary(requestedSourceId, safeProbe(probe), unavailable, unavailable);
         }
-        const directory = await readProjectAlphaDirectoryInventory(connection, requestedSourceId,
+        const directory = await readProjectAlphaDirectoryInventoryAfterVerifiedCapabilities(connection, requestedSourceId,
           { type: "all", limit: 200 }, fetch);
-        const projects = await readProjectAlphaProjectInventory(connection, { limit: 200 }, fetch);
+        const projects = await readProjectAlphaProjectInventoryAfterVerifiedCapabilities(connection, { limit: 200 }, fetch);
         return acceptanceSummary(requestedSourceId, safeProbe(probe), await safeDirectory(directory),
           await safeProject(projects));
       });
