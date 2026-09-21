@@ -11,6 +11,24 @@ production synchronization path. It requires the explicit mutation gate
 `https://ops-staging.ledgetopdroneservices.com`. Do not run it against a
 production hostname, even for a read-only check.
 
+## Authenticated browser-context adapter
+
+For an already-authenticated Operations browser, callers can use
+`parseBrowserContextJoinedAcceptanceConfig` with
+`runJoinedAcceptanceWithBrowserContext`. Supply a `browserContextFetcher` that
+executes native browser `fetch` in that exact Operations origin, and a separate
+ordinary `publicFetcher` for the reviewed public-link GETs. The adapter allows
+the browser fetcher only for the fixed Ops origin and the session/command
+routes; it gives public probes `credentials: "omit"`.
+
+Browser-context mode rejects `OPS_SESSION_COOKIE`, `OPS_STORAGE_STATE`, and
+`OPS_CF_ACCESS_JWT_ASSERTION`. It neither reads nor serializes cookies,
+localStorage, Playwright storage state, or Access assertions, and never passes
+credential headers to either fetcher. Native same-origin browser authentication
+and the in-memory CSRF value from `/api/session` remain the only Operations
+credential path. The existing validation, replay/conflict workflow, public-link
+invariant, response bounds, and sanitized report are unchanged.
+
 ## September 19, 2026 current joined-window gate recheck
 
 The Ops staging Cloudflare Access policy **Ledge Top Staging Staff Access**
@@ -129,11 +147,12 @@ hash before and after the joined mutation.
 
 ## Required operator inputs
 
-Use an authenticated Operations browser storage-state file, or provide the
-short-lived Cloudflare Access cookie through the environment. Only the secure
-`CF_Authorization` cookie for the exact staging Operations host is accepted;
-the harness never imports or forwards unrelated browser cookies. The harness
-never prints or stores the cookie:
+The legacy Node CLI (not the browser-context adapter) accepts an authenticated
+Operations browser storage-state file or short-lived Cloudflare Access cookie.
+Only the secure `CF_Authorization` cookie for the exact staging Operations host
+is accepted; that legacy path never imports or forwards unrelated browser
+cookies, and never prints or stores the cookie. Do not provide those values to
+browser-context mode:
 
 ```powershell
 $env:OPS_BASE_URL = "https://ops-staging.ledgetopdroneservices.com"

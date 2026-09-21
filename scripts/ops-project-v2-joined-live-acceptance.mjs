@@ -143,10 +143,16 @@ function optionalAccessAssertion(env) {
   return value;
 }
 
-export async function parseJoinedAcceptanceConfig(env = process.env) {
+function browserContextCredentialsPresent(env) {
+  return ["OPS_SESSION_COOKIE", "OPS_STORAGE_STATE", "OPS_CF_ACCESS_JWT_ASSERTION"].some(name =>
+    typeof env[name] === "string" && env[name].trim());
+}
+
+async function parseJoinedAcceptanceConfigForTransport(env, browserContext) {
   const origin = parseOrigin(env.OPS_BASE_URL || STAGING_OPERATIONS_ORIGIN);
   const mutate = env.OPS_ACCEPTANCE_ALLOW_MUTATIONS === "allow";
-  if (!mutate) return Object.freeze({ origin, mutate: false });
+  if (browserContext && browserContextCredentialsPresent(env)) fail("browser_context_credentials_forbidden");
+  if (!mutate) return Object.freeze({ origin, mutate: false, ...(browserContext ? { browserContext: true } : {}) });
   const prefix = required(env, "OPS_ACCEPTANCE_PREFIX");
   if (!PREFIX.test(prefix)) fail("invalid_acceptance_prefix");
   const identity = parseIdentity(env);
@@ -154,11 +160,26 @@ export async function parseJoinedAcceptanceConfig(env = process.env) {
   const scopes = parseScopes(env);
   const authorizationGeneration = required(env, "OPS_ACCEPTANCE_AUTHORIZATION_GENERATION");
   if (!/^(?:0|[1-9][0-9]{0,18})$/.test(authorizationGeneration)) fail("invalid_authorization_generation");
-  const cookie = await sessionCookie(env, origin);
   const publicLinkUrl = parsePublicLink(required(env, "OPS_ACCEPTANCE_PUBLIC_LINK_URL"));
+  if (browserContext) return Object.freeze({ origin, mutate: true, prefix, identity, proof, scopes, authorizationGeneration,
+    browserContext: true, publicLinkUrl,
+  });
+  const cookie = await sessionCookie(env, origin);
   return Object.freeze({ origin, mutate: true, prefix, identity, proof, scopes, authorizationGeneration, cookie,
     accessAssertion: optionalAccessAssertion(env), publicLinkUrl,
   });
+}
+
+export async function parseJoinedAcceptanceConfig(env = process.env) {
+  return parseJoinedAcceptanceConfigForTransport(env, false);
+}
+
+/**
+ * Parses a joined-acceptance run that must use an already-authenticated browser
+ * context. Browser credentials are deliberately neither read nor accepted here.
+ */
+export async function parseBrowserContextJoinedAcceptanceConfig(env = process.env) {
+  return parseJoinedAcceptanceConfigForTransport(env, true);
 }
 
 async function boundedBytes(response, maximum) {
@@ -204,8 +225,8 @@ function safeResponse(payload, responseSha256) {
 
 async function acquireSession(config, fetcher) {
   const response = await fetcher(`${config.origin}/api/session`, { method: "GET", redirect: "manual", cache: "no-store",
-    headers: { Accept: "application/json", "Cache-Control": "no-store", Origin: config.origin, Cookie: config.cookie,
-      ...(config.accessAssertion ? { "Cf-Access-Jwt-Assertion": config.accessAssertion } : {}) } });
+    headers: { Accept: "application/json", "Cache-Control": "no-store", ...(config.browserContext ? {} : { Origin: config.origin, Cookie: config.cookie,
+      ...(config.accessAssertion ? { "Cf-Access-Jwt-Assertion": config.accessAssertion } : {}) }) } });
   if (response.status >= 300 && response.status < 400) fail("operations_session_redirect_denied");
   if (response.status !== 200) fail(`operations_session_http_${response.status}`);
   const parsed = await jsonResponse(response);
@@ -239,9 +260,10 @@ function generatedCommand(config) {
 async function postCommand(config, command, fetcher, expectedStatuses = [200]) {
   const body = JSON.stringify(command);
   const response = await fetcher(`${config.origin}${ROUTE}`, { method: "POST", redirect: "manual", cache: "no-store",
-    headers: { Accept: "application/json", "Content-Type": "application/json", "Cache-Control": "no-store", Origin: config.origin,
-      Cookie: config.cookie, "X-CSRF-Token": config.csrfToken, "Idempotency-Key": command.command.commandId,
-      ...(config.accessAssertion ? { "Cf-Access-Jwt-Assertion": config.accessAssertion } : {}) }, body });
+    headers: { Accept: "application/json", "Content-Type": "application/json", "Cache-Control": "no-store",
+      ...(config.browserContext ? {} : { Origin: config.origin }), "X-CSRF-Token": config.csrfToken, "Idempotency-Key": command.command.commandId,
+      ...(config.browserContext ? {} : { Cookie: config.cookie,
+        ...(config.accessAssertion ? { "Cf-Access-Jwt-Assertion": config.accessAssertion } : {}) }) }, body });
   if (response.status >= 300 && response.status < 400) fail("operations_redirect_denied");
   const parsed = await jsonResponse(response);
   if (!expectedStatuses.includes(response.status)) fail(`operations_http_${response.status}`);
@@ -299,6 +321,47 @@ export async function runJoinedAcceptance(config, dependencies = {}) {
     canonicalActivation: first.outcome.status === "activated" ? { status: "evidence_present", activationId: first.outcome.activationId, version: first.outcome.version } : { status: "missing" },
     publicLink: { before, after }, credentials: { valuesExcluded: true, sessionPresent: true },
   });
+}
+
+function requireBrowserContextConfig(config) {
+  if (!config?.mutate) fail("mutation_allow_required");
+  if (!config?.browserContext) fail("browser_context_config_required");
+  parseOrigin(config.origin);
+  if (typeof config.publicLinkUrl !== "string" || parsePublicLink(config.publicLinkUrl) !== config.publicLinkUrl)
+    fail("invalid_public_link_url");
+  if (Object.hasOwn(config, "cookie") || Object.hasOwn(config, "accessAssertion")) fail("browser_context_credentials_forbidden");
+}
+
+function browserSafeInit(init, credentials) {
+  const headers = new Headers(init?.headers);
+  if (headers.has("cookie") || headers.has("cf-access-jwt-assertion")) fail("browser_context_credentials_forbidden");
+  if (headers.has("origin")) fail("browser_context_origin_header_forbidden");
+  return { ...init, headers: Object.fromEntries(headers), credentials };
+}
+
+/**
+ * Runs the existing strict acceptance workflow with browser-native same-origin
+ * authentication for Operations and a separate unauthenticated public fetcher.
+ * The supplied browserContextFetcher must execute native fetch in an already
+ * authenticated Operations browser context; it never receives credential values.
+ */
+export async function runJoinedAcceptanceWithBrowserContext(config, dependencies = {}) {
+  requireBrowserContextConfig(config);
+  const browserContextFetcher = dependencies.browserContextFetcher;
+  const publicFetcher = dependencies.publicFetcher ?? fetch;
+  if (typeof browserContextFetcher !== "function") fail("browser_context_fetcher_required");
+  if (typeof publicFetcher !== "function") fail("public_fetcher_required");
+  const routedFetcher = async (input, init = {}) => {
+    let url;
+    try { url = new URL(input); } catch { fail("browser_context_fetch_destination_denied"); }
+    if (url.origin === config.origin) {
+      if (url.pathname !== "/api/session" && url.pathname !== ROUTE) fail("browser_context_fetch_destination_denied");
+      return browserContextFetcher(url.toString(), browserSafeInit(init, "same-origin"));
+    }
+    if (url.toString() !== config.publicLinkUrl) fail("browser_context_fetch_destination_denied");
+    return publicFetcher(url.toString(), browserSafeInit(init, "omit"));
+  };
+  return runJoinedAcceptance(config, { ...dependencies, fetcher: routedFetcher });
 }
 
 async function atomicWriteJson(path, value) {
