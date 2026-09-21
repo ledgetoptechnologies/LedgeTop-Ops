@@ -908,10 +908,36 @@ post-deployment packet. It performs no remote action.
   version `10`; Directory grant is inactive; Project/Directory pending and
   leased rows, actor fences, and live proofs are all zero; and one immutable
   revoke receipt exists.
-- Remaining release gate: enable only PA Directory read, binding-status, and
-  inventory flags alongside the Project window, read the current organization
-  proof with key #9, restore the Project-only window if needed, issue a fresh
-  authority packet, and rerun the joined acceptance with a fresh command.
-  Inventory is necessary for the authoritative projection SHA-256; neither the
-  direct read nor binding-status response contains it. This checkpoint is not
-  merge-ready.
+- The remaining-gate wording above is superseded by the passing checkpoint below.
+
+### September 21 — passing joined Project-v2 staging acceptance
+
+- The exact PA Directory proof is source
+  `d2f7acb8-375d-4da7-8d37-3f2455a3972b`, application
+  `150cb108-af37-4973-ab6e-f6d991a6e8c8`, epoch
+  `8c194c00-c7dd-4c6c-82ce-d391ef3fa998`, organization external ID
+  `staging-directory-acceptance-ff089045-ea88-4c34-90a5-2ef898b9142f`, public
+  ID `63382355879f38ef7d77e7e97424188e`, revision `1`, projection SHA-256
+  `7a45cf37ea099868f82f459ed2c8cab9dcabf6348ca35f6439734cd08b9f9bef`, and
+  Directory generation `42`. Project generation was authoritatively re-read as
+  `5` from typed `binding_stale` request
+  `e9dd5105-dd0e-401f-a0dc-265798c7d13b`, pinned revision `2`, live revision
+  `10`.
+- Passing command `9b60e1de-3926-48fc-a049-ca8af9ec36db` used external ID
+  `ops-joined-acceptance-20260921d:project:9b60e1de-3926-48fc-a049-ca8af9ec36db`.
+  Settlement `bacd6769-34ed-4d2f-b00a-131f34c1ecb3` activated
+  `3d862f3f-3bb3-4ef8-a854-6522bf5e0cf0`, version `1`, `replay=false`; the
+  exact replay returned the same IDs/version with `replay=true`; the changed
+  body conflicted at `plan` for `command_id`.
+- The existing PA staging public link stayed `200 text/html`, `3266` bytes,
+  and SHA-256
+  `5632e883d6fe3ca72c68e900e8e6b76561c07d454605e728c4a765d07a383464` before
+  and after. The temporary browser bridge was removed before the default-off
+  deploy. Default-off version is `ed0bc4ba-5e98-448a-8819-319424aa04db`, the
+  connection secret is empty, activation is false, revoke migration `9001` is
+  applied, and no migrations are pending.
+- Final D1 readback: admission inactive v12, profile v1, Project grant inactive
+  v12/generation 12, Directory grant inactive, zero pending/leased Project or
+  Directory rows, zero Directory fences, zero live proofs, and one revoke
+  receipt. Joined staging acceptance passes and is merge-ready subject to exact
+  CI and normal owner approval; production cutover remains unauthorized.

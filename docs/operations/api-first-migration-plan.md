@@ -5784,11 +5784,37 @@ pending; this requirement does not claim a deployed UI change.
   migration is applied. Admission, Project grant, and Project generation are
   inactive at version `10`; Directory grant is inactive; pending/leased rows,
   actor fences, and live proofs are zero; one immutable revoke receipt remains.
-- Next implementation/acceptance step: enable only PA Directory read,
-  binding-status, and inventory flags beside the bounded Project window, read
-  the current organization proof with key #9, restore the Project-only flags if
-  desired, issue a fresh authority packet, and rerun with a fresh command.
-  Inventory is required to recover the authoritative projection SHA-256 because
-  neither direct read nor binding status returns that field. Until that proof
-  succeeds, the migration is not merge-ready and no production cutover should
-  occur.
+- The remaining-gate wording above is superseded by the passing checkpoint below.
+
+### September 21 — passing joined Project-v2 staging acceptance
+
+- The exact PA Directory proof is source
+  `d2f7acb8-375d-4da7-8d37-3f2455a3972b`, application
+  `150cb108-af37-4973-ab6e-f6d991a6e8c8`, epoch
+  `8c194c00-c7dd-4c6c-82ce-d391ef3fa998`, organization external ID
+  `staging-directory-acceptance-ff089045-ea88-4c34-90a5-2ef898b9142f`, public
+  ID `63382355879f38ef7d77e7e97424188e`, revision `1`, projection SHA-256
+  `7a45cf37ea099868f82f459ed2c8cab9dcabf6348ca35f6439734cd08b9f9bef`, and
+  Directory generation `42`. Project generation was authoritatively re-read as
+  `5` from typed `binding_stale` request
+  `e9dd5105-dd0e-401f-a0dc-265798c7d13b`, pinned revision `2`, live revision
+  `10`.
+- Passing command `9b60e1de-3926-48fc-a049-ca8af9ec36db` used external ID
+  `ops-joined-acceptance-20260921d:project:9b60e1de-3926-48fc-a049-ca8af9ec36db`.
+  First settlement `bacd6769-34ed-4d2f-b00a-131f34c1ecb3` activated
+  `3d862f3f-3bb3-4ef8-a854-6522bf5e0cf0`, version `1`, `replay=false`; exact
+  replay returned the same IDs/version with `replay=true`; changed body
+  conflicted at stage `plan` for reason `command_id`.
+- The existing PA staging public link remained `200 text/html`, `3266` bytes,
+  with unchanged SHA-256
+  `5632e883d6fe3ca72c68e900e8e6b76561c07d454605e728c4a765d07a383464` before
+  and after. The temporary staging-only browser bridge was removed before the
+  default-off deploy. Default-off version is
+  `ed0bc4ba-5e98-448a-8819-319424aa04db`; connection secret empty, activation
+  false; revoke migration `9001` applied with no pending migrations.
+- Final D1 readback: admission inactive v12, profile v1, Project grant inactive
+  v12/generation 12, Directory grant inactive, zero pending/leased Project and
+  Directory rows, zero Directory fences, zero live proofs, and one revoke
+  receipt. Joined staging acceptance passes and the migration is merge-ready
+  subject to exact CI and normal owner approval; no production cutover is
+  authorized.

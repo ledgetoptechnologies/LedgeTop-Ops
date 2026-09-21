@@ -271,12 +271,41 @@ The independently observed Project binding remains stale: external ID `pa-accept
 
 Cleanup completed after the bounded attempt: the selected PA connection secret is empty, default-off Operations version `de550f0c-f5ec-452c-a4db-3c61bc7cffc2` is deployed, and the native-authority revoke was applied. Final readback shows admission, Project grant, and Project generation at inactive version `10`, Directory grant inactive, zero actor fences, zero Project/Directory pending or leased outbox rows, zero live proofs, and one immutable revoke receipt. Do not call this joined acceptance passing or merge-ready.
 
-The remaining gate is deliberately narrow: enable only PA Directory read,
-binding-status, and inventory flags alongside the bounded Project window, read
-the current organization proof with key #9, restore the Project-only flags if
-desired, issue a fresh authority packet, and rerun with a fresh command. The
-inventory route is required because the binding-status and direct-read
-responses do not expose the authoritative projection SHA-256 required by the
-joined runner. Reusing the old hash would be a guess and could repeat the typed
-`relationship_proof_conflict`. Do not retry the uncertain or terminal command
-IDs.
+The remaining-gate wording above is superseded by the passing checkpoint below.
+
+## September 21, 2026 — passing joined Project-v2 staging acceptance
+
+The bounded joined acceptance now passes. The exact PA Directory proof source
+is `d2f7acb8-375d-4da7-8d37-3f2455a3972b`, application
+`150cb108-af37-4973-ab6e-f6d991a6e8c8`, epoch
+`8c194c00-c7dd-4c6c-82ce-d391ef3fa998`, and organization external ID
+`staging-directory-acceptance-ff089045-ea88-4c34-90a5-2ef898b9142f` with
+public ID `63382355879f38ef7d77e7e97424188e`, revision `1`, projection SHA-256
+`7a45cf37ea099868f82f459ed2c8cab9dcabf6348ca35f6439734cd08b9f9bef`, and
+Directory generation `42`. The current Project generation was authoritatively
+re-read as `5` from typed `binding_stale` request
+`e9dd5105-dd0e-401f-a0dc-265798c7d13b`, with pinned revision `2` and live
+revision `10`.
+
+Passing command `9b60e1de-3926-48fc-a049-ca8af9ec36db` used external ID
+`ops-joined-acceptance-20260921d:project:9b60e1de-3926-48fc-a049-ca8af9ec36db`.
+The first settlement was `bacd6769-34ed-4d2f-b00a-131f34c1ecb3` with
+activation `3d862f3f-3bb3-4ef8-a854-6522bf5e0cf0`, version `1`, and
+`replay=false`; the exact replay returned the same IDs/version with
+`replay=true`; a changed body correctly conflicted at stage `plan` with reason
+`command_id`. This proves the joined create, replay, conflict, settlement, and
+activation contract.
+
+The existing PA staging public link remained `200 text/html`, `3266` bytes,
+with the same SHA-256 `5632e883d6fe3ca72c68e900e8e6b76561c07d454605e728c4a765d07a383464`
+before and after. The temporary staging-only browser bridge was removed before
+the default-off deploy. Default-off Worker version is
+`ed0bc4ba-5e98-448a-8819-319424aa04db`; the connection secret is empty and
+activation is false. Revoke migration `9001` is applied with no pending
+migrations. Final D1 readback shows admission inactive v12, profile v1,
+Project grant inactive v12/generation 12, Directory grant inactive, zero
+pending/leased Project or Directory rows, zero Directory fences, zero live
+proofs, and one revoke receipt.
+
+This is a passing, merge-ready staging checkpoint subject to exact CI and the
+normal owner approval; it does not authorize production cutover.
