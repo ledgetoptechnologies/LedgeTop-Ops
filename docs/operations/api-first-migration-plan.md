@@ -5818,3 +5818,28 @@ pending; this requirement does not claim a deployed UI change.
   receipt. Joined staging acceptance passes and the migration is merge-ready
   subject to exact CI and normal owner approval; no production cutover is
   authorized.
+
+### September 21 — production pre-cutover checkpoint
+
+- Both production Project Alpha instances render `vc3f2ad5`. The Operations
+  production Worker is active at 100% on version
+  `89a5d07d-ff58-4793-a374-51162dc00177`.
+- Project Alpha's `main` Docker Compose keeps every API-v2 flag explicitly
+  `false`. The owner did not change the deployed Compose, so generic API-v2
+  routes remain off. Existing custom integrations remain enabled pending their
+  reviewed replacement.
+- Fresh pre-cutover encrypted full backups completed successfully on both PA
+  instances: LTT at `2026-09-21 13:42:43` and LTDS at
+  `2026-09-21 13:46:09` (16 retained backups on each instance). Both pages
+  show cron backup success, no backup failure, and writable directories.
+  External directory policy is unconfigured/local changes are available on
+  both instances.
+- The web reports Ready, but cron preflight is not ready. Terminal
+  `external-operations-delivery-unavailable` rows remain: LTT has 8 total
+  records across 3 workspaces (portal plus service assignments), and LTDS has
+  49 portal records across 25 workspaces. Recreate cron from the current
+  release while preserving the shared config, then verify prerequisites before
+  retrying.
+- Production API-v2 key creation is awaiting explicit owner approval. Existing
+  tokens must not be broadened. The signed-in production sessions are
+  short-lived, so a follow-up verification may require re-authentication.
