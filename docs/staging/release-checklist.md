@@ -963,6 +963,16 @@ post-deployment packet. It performs no remote action.
   49 portal records across 25 workspaces. Recreate cron from the current
   release while preserving the shared config, then verify prerequisites before
   retrying.
-- Production API-v2 key creation is awaiting explicit owner approval. Existing
-  tokens must not be broadened. The signed-in production sessions are
-  short-lived, so a follow-up verification may require re-authentication.
+- With explicit owner approval, one new dedicated API-v2 key was created in
+  each instance without changing any existing token: LTT key ID `3` and LTDS
+  key ID `4`. Each key is active, has exactly the 34 approved Directory and
+  Project API-v2 scopes (including `api.capabilities.read`), and does not have
+  legacy `full` access. The one-time values were retained only in a local
+  Windows DPAPI-protected secret file; no plaintext value entered source
+  control, command output, or this record.
+- Both keys remain unbound and all production API-v2 flags remain `false`.
+  The next gate is instance-local migration validation/application through
+  `0102`, application binding for the instance's own key ID, bounded Directory
+  and Project backfills, current attestations, and web/worker/cron recreation
+  with the existing shared config and encryption key preserved. No Operations
+  connection secret or authority policy changes before those gates pass.
