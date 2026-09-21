@@ -114,6 +114,24 @@ export async function boundedJsonWithBytes(response: Response, maximum = PROJECT
   const bytes = new Uint8Array(size); let offset = 0; for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
   try { return Object.freeze({ value: parseDuplicateFreeJson(new TextDecoder("utf-8", { fatal: true }).decode(bytes)), bytes }); } catch { throw new Error("invalid_contract"); }
 }
+export async function boundedJsonOrEmpty(response: Response, maximum = PROJECT_ALPHA_PROJECT_RESPONSE_LIMIT): Promise<Readonly<{ empty: true }> | Readonly<{ empty: false; value: unknown }>> {
+  const declared = response.headers.get("Content-Length");
+  if (declared !== null && (!/^\d+$/.test(declared) || !Number.isSafeInteger(Number(declared)) || Number(declared) > maximum)) { await response.body?.cancel(); throw new Error("response_limit"); }
+  const reader = response.body?.getReader();
+  if (!reader) {
+    if (declared === null || Number(declared) === 0) return Object.freeze({ empty: true });
+    throw new Error("invalid_contract");
+  }
+  const chunks: Uint8Array[] = []; let size = 0;
+  try { for (;;) { const part = await reader.read().catch(() => { throw new Error("transport"); }); if (part.done) break; size += part.value.byteLength; if (size > maximum) { await reader.cancel(); throw new Error("response_limit"); } chunks.push(part.value); } }
+  finally { reader.releaseLock(); }
+  if (size === 0) {
+    if (declared !== null && Number(declared) !== 0) throw new Error("invalid_contract");
+    return Object.freeze({ empty: true });
+  }
+  const bytes = new Uint8Array(size); let offset = 0; for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  try { return Object.freeze({ empty: false, value: parseDuplicateFreeJson(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) }); } catch { throw new Error("invalid_contract"); }
+}
 export function authHeaders(connection: ProjectAlphaApiV2Connection, contentType = false): Headers {
   const headers = new Headers({ Accept: "application/json", Authorization: `Bearer ${connection.apiKey}`, "X-PA-Source-Instance-ID": connection.expectedSourceInstanceId, "X-PA-Application-ID": connection.expectedApplicationId, "X-PA-History-Epoch": connection.expectedHistoryEpoch! });
   if (contentType) headers.set("Content-Type", "application/json; charset=utf-8");

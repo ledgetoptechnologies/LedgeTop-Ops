@@ -5710,3 +5710,11 @@ pending; this requirement does not claim a deployed UI change.
 - The next gate is a read-only PA-side DB readback of the current Project
   authorization generation for application
   `150cb108-af37-4973-ab6e-f6d991a6e8c8`, without refreshing stale bindings.
+- The local Operations Project transport now recognizes PA's exact stale-binding
+  recovery envelopes without mutating anything. Inventory accepts only a trusted,
+  identity- and request-correlated `binding_stale` discovery containing the
+  selected external ID. Binding status additionally requires the current
+  generation, exact binding external/public IDs and pinned revision, plus a
+  strictly newer live revision and valid projection hash. Bare `409` responses
+  remain ordinary conflicts; malformed or untrusted JSON fails closed as
+  uncertain. No refresh command, retry loop, or automatic recovery is wired.

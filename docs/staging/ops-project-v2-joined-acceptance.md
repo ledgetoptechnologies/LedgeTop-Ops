@@ -50,6 +50,13 @@ stale browser-edited binding remains. No joined mutation ran, and static
 generation must not be guessed from this result. This is a read-only base
 Project checkpoint, not joined acceptance.
 
+Operations has a local parser for the newer PA stale-binding recovery contract.
+It treats only exact, trusted, identity- and request-correlated JSON envelopes as
+typed discovery/recovery evidence. The observed empty-body `409` above remains
+an ordinary conflict, and the parser does not issue a refresh, retry the page,
+or otherwise mutate PA. A future staging rehearsal must exercise the exact JSON
+contract before any joined recovery orchestration is considered.
+
 ## September 19, 2026 readiness checkpoint
 
 The exact PA candidate for this run is
