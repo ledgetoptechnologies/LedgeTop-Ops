@@ -284,6 +284,7 @@ test("models empty optional directory read fields as canonical null values", asy
 test("retries bounded rate-limit responses, honors Retry-After, and reports pacing evidence", async () => {
   const base = happyFetcher();
   let throttled = 0;
+  let currentTime = 0;
   const sleeps = [];
   const report = await runDirectoryAcceptance(parseDirectoryAcceptanceConfig(environment()), {
     fetcher: async (url, init) => {
@@ -293,7 +294,8 @@ test("retries bounded rate-limit responses, honors Retry-After, and reports paci
       }
       return base(url, init);
     },
-    sleep: async (milliseconds) => sleeps.push(milliseconds),
+    sleep: async (milliseconds) => { sleeps.push(milliseconds); currentTime += milliseconds; },
+    now: () => currentTime,
     uuid: predictableUuid(),
   });
   assert.equal(report.status, "passed");
