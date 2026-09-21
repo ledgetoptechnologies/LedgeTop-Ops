@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Card } from "@ltds/ui";
-import { api } from "./api";
+import { api, ApiError } from "./api";
 
 const ENDPOINT = "/api/admin/integrations/project-alpha/connectors";
+const READ_ACCEPTANCE_ENDPOINT = "/api/admin/integrations/project-alpha/api-v2/read-acceptance";
 const PRIMARY = "project-alpha:primary";
 type Connector = {
   sourceId: string; displayName: string; producerBindingId: string; snapshotOrigin: string; snapshotBasePath: string;
@@ -18,6 +19,9 @@ type PortalStatus = { available: boolean; authorities: PortalAuthority[];
 type ProjectManagementRoute = { sourceId: string; version: number; revision: number; enabled: boolean; reviewedUrlTemplate: string | null };
 type Directory = { connectors: Connector[]; health: Health[]; legacyPrimary: boolean; recovery?: Recovery[] | null;
   portal?: PortalStatus; projectManagement?: ProjectManagementRoute[] };
+type ReadAcceptancePart = { status: string; count?: number; exactIdentityMatch?: boolean; exactContractMatch?: boolean };
+type ReadAcceptance = { sourceId: string; readOnly: boolean; capabilities: ReadAcceptancePart;
+  directory: ReadAcceptancePart; projects: ReadAcceptancePart };
 
 function date(value: string | null) { return value ? new Date(value.includes("T") ? value : `${value.replace(" ", "T")}Z`).toLocaleString() : "Not yet"; }
 function SyncHealth({ health }: { health?: Health }) {
@@ -38,6 +42,35 @@ function RecoveryStatus({ connector, recovery }: { connector: Connector; recover
   const labels: Record<Recovery["status"], string> = { never: "Not attempted", running: "Running", success: "Succeeded", failed: "Failed", deferred: "Deferred" };
   return <p><strong>Scheduled recovery</strong> · {connector.state === "active" ? "Eligible by deployment configuration" : `Paused by deployment configuration (${connector.state})`}<br />
     {recovery ? <>Last attempt: {labels[recovery.status]} · Last success: {date(recovery.lastSuccessAt)}{recovery.nextAttemptAt && <><br />Next attempt not before: {date(recovery.nextAttemptAt)}</>}{recovery.errorCode && <><br />Last recovery error: {recovery.errorCode}</>}{recovery.failureCount > 0 && <> · Failure count: {recovery.failureCount}</>}</> : "Recovery status unavailable."}</p>;
+}
+function ReadAcceptanceCheck({ connector, disabled }: { connector: Connector; disabled: boolean }) {
+  const [busy, setBusy] = useState(false), [result, setResult] = useState<ReadAcceptance | null>(null), [error, setError] = useState("");
+  const verify = async () => {
+    if (busy || disabled || connector.state !== "active") return;
+    setBusy(true); setResult(null); setError("");
+    try {
+      const response = await api<ReadAcceptance>(READ_ACCEPTANCE_ENDPOINT, {
+        method: "POST", body: JSON.stringify({ sourceId: connector.sourceId }),
+      });
+      setResult(response);
+    } catch (caught) {
+      setError(caught instanceof ApiError && caught.status === 404
+        ? "Read-only verification is disabled outside an approved maintenance window."
+        : caught instanceof Error ? caught.message : "The read-only API connection could not be verified.");
+    } finally { setBusy(false); }
+  };
+  const verified = result?.readOnly === true && result.sourceId === connector.sourceId
+    && result.capabilities.status === "verified" && result.capabilities.exactIdentityMatch === true
+    && result.capabilities.exactContractMatch === true && result.directory.status === "observed"
+    && result.projects.status === "observed";
+  return <div className="alpha-read-acceptance" role="group" aria-label="Read-only API verification">
+    <button type="button" className="button-ghost button-small" disabled={busy || disabled || connector.state !== "active"}
+      onClick={() => void verify()}>{busy ? "Verifying read connection…" : "Verify read-only API connection"}</button>
+    {result && <p role={verified ? "status" : "alert"} className="notice">{verified
+      ? `API v2 read connection verified · Directory ${result.directory.count ?? 0} · Projects ${result.projects.count ?? 0}`
+      : `API v2 read verification did not pass · Capabilities ${result.capabilities.status} · Directory ${result.directory.status} · Projects ${result.projects.status}`}</p>}
+    {error && <p role="alert" className="notice">{error}</p>}
+  </div>;
 }
 function projectManagementTemplateError(value: string): string | null {
   const template = value.trim();
@@ -189,7 +222,9 @@ export function ProjectAlphaConnections() {
           primaryActive={data.legacyPrimary || data.connectors.some(row => row.sourceId === PRIMARY && row.state === "active")}
           disabled={loading || Boolean(syncing)} onAction={action => void portalAction(connector, action)} />
         <ProjectManagement connector={connector} route={management} disabled={loading || Boolean(syncing)} onRefresh={() => setRevision(value => value + 1)} />
-        <button type="button" disabled={loading || Boolean(syncing) || connector.state !== "active"} onClick={() => void sync(connector)}>{syncing === connector.sourceId ? "Synchronizing…" : "Sync now"}</button>
+        <div className="alpha-connection-actions"><button type="button" disabled={loading || Boolean(syncing) || connector.state !== "active"} onClick={() => void sync(connector)}>{syncing === connector.sourceId ? "Synchronizing…" : "Sync now"}</button>
+          <ReadAcceptanceCheck key={`${connector.sourceId}:${connector.version}:${connector.activeRevision}:${revision}`}
+            connector={connector} disabled={loading || Boolean(syncing)} /></div>
         <details><summary>Connection details</summary><dl><dt>Source</dt><dd>{connector.sourceId}</dd><dt>Producer</dt><dd>{connector.producerBindingId}</dd><dt>Destination</dt><dd>{connector.snapshotOrigin}{connector.snapshotBasePath}</dd><dt>Application</dt><dd>{connector.applicationKey}</dd><dt>Revision</dt><dd>{connector.activeRevision}</dd></dl><p>These values are read-only here. Change the reviewed deployment source manifest and deploy Operations; do not paste credentials into this page.</p></details>
       </section>;
     })}
