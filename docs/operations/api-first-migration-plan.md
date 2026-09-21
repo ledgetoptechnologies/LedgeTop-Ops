@@ -5728,3 +5728,27 @@ pending; this requirement does not claim a deployed UI change.
   final readback proved inactive versions `6`/`6`, generation `6`, zero actor
   work/fences, and the immutable revoke receipt. Resume only after a fresh Ops
   staging sign-in; do not reopen authority merely to wait for authentication.
+
+### September 21 — authenticated joined attempt and remaining Directory fence
+
+- A matching Operations staging administrator session passed the session,
+  CSRF, administrator, and `integrations.manage` gates. The bounded Project
+  route and PA connection were enabled only for the attempt; PA's current
+  Project authorization generation was read as `5` rather than guessed.
+- Fresh synthetic create command
+  `9eb7ba9b-5fb2-4cfb-a2b1-4293cf8deb8e` reached PA but received an empty-body
+  `409`. Operations retained one immutable `pending -> uncertain` evidence
+  chain and correctly withheld settlement/activation. A second read proved the
+  generation was still `5`, so this was not a generation race. The remaining
+  source-level candidates are PA's application identity fence or the exact
+  application-scoped organization binding/revision/hash proof. Re-open the
+  Directory-only PA window and read back that one synthetic organization
+  binding before issuing a new Project command; do not retry the uncertain
+  command as though it were known absent.
+- The pre-existing staging public link remained byte-for-byte stable (`200`,
+  `text/html`) across the attempt. Cleanup is complete: the temporary bridge
+  was removed, the Project route and PA connection are default-off, worker
+  version `0e60b962-ab56-4d25-a924-25dbd4be5b1c` is deployed, authority is
+  inactive at admission/grant version `8` and Project generation `8`, the
+  Directory grant is inactive, all pending/lease/fence counts are zero, and one
+  immutable revoke receipt exists with no pending revoke migration.

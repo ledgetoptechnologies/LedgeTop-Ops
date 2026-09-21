@@ -228,3 +228,29 @@ pending or leased commands for the acceptance actor, and apply the reviewed
 native-authority revoke packet. Keep the immutable ledger evidence, but do not
 delete the generated Project or rewrite its history. This harness does not
 provide rollback or cleanup mutations.
+
+## September 21, 2026 joined attempt
+
+The matching staging administrator identity authenticated successfully, and
+the browser-context transport reached the protected Operations command route
+without copying a cookie, Access assertion, or storage state. PA reported the
+current Project authorization generation as `5`. Operations accepted fresh
+synthetic command `9eb7ba9b-5fb2-4cfb-a2b1-4293cf8deb8e`, reserved it, and
+dispatched it once. PA returned an empty-body `409`; Operations therefore
+recorded the command as `uncertain` and did not create a canonical activation
+or claim success. The generation remained `5`, ruling out a concurrent
+generation advance. Source inspection narrows the remaining create-time
+conflict to PA's application-scoped identity or Directory relation proof
+fences; the exact Directory binding must be read back in a Directory-only
+window before another fresh command is authorized.
+
+The existing staging public link returned `200 text/html` before and after the
+attempt with the same bounded body hash. Its URL and token were never emitted
+or stored in the report. The temporary browser bridge assets were removed, the
+Project route restored to default-off, and the selected PA connection disabled.
+Worker version `0e60b962-ab56-4d25-a924-25dbd4be5b1c` is the restored default-
+off deployment. Final D1 readback proved admission inactive at version `8`,
+Project grant inactive at version `8`, Project grant generation `8`, Directory
+grant inactive, zero Project/Directory pending or leased work, zero Directory
+write fences, exactly one revoke receipt, and no pending revoke migration.
+This is preserved negative acceptance evidence, not a passing joined result.
