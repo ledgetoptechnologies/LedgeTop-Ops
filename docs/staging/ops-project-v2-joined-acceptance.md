@@ -36,6 +36,20 @@ The pure-function batch suite passed 11 tests and the access-code suite passed
 were rejected in about two seconds by the account spending/build limit, not by
 code failures. This harness has not run and no acceptance is claimed.
 
+## September 19–20, 2026 base Project window checkpoint
+
+The exact PA candidate remains
+`ff42c3432f39e50e92058b21d7e4942c26f5b355`. The deliberately bounded base
+Project window had exactly these five PA flags enabled: `APP_API_V2_PROJECTS_CREATE_ENABLED`, `APP_API_V2_PROJECTS_READ_ENABLED`, `APP_API_V2_PROJECTS_WRITE_ENABLED`,
+`APP_API_V2_PROJECTS_BINDING_STATUS_ENABLED`, and `APP_API_V2_PROJECTS_INVENTORY_ENABLED`. A capabilities request returned HTTP `200`,
+`apiVersion: 2`, `implementedEndpointCount: 6`, and
+`grantedCapabilityCount: 6`.
+
+The Project inventory GET returned an empty-body `409` because the deliberately
+stale browser-edited binding remains. No joined mutation ran, and static
+generation must not be guessed from this result. This is a read-only base
+Project checkpoint, not joined acceptance.
+
 ## September 19, 2026 readiness checkpoint
 
 The exact PA candidate for this run is

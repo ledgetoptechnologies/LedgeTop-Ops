@@ -173,6 +173,22 @@ acknowledgement/mapping/audit evidence retained under
 This is evidence of a closed Directory-v2 staging authority window only; it
 does not establish a live Project-v2 authority window or production readiness.
 
+### Applied staging-only Project authority packet — September 19–20, 2026
+
+Temporary Ops native authority packet
+`staging-authority-project-v2-20260919-215846z` was provisioned only for
+staging. Before revoke, its sanitized counts were
+`actor_fences=0`, `project_pending_or_leased=0`, and
+`directory_pending_or_leased=0`. It was safely revoked with
+`admission active=0, version=4; profile=1; directory grant=0; project grant=0,
+version=4, generation=4; live proofs=0`, one revoke receipt, one revoked
+provision approval, and no pending revoke migration.
+
+This packet evidence is not joined acceptance. The next gate is a read-only
+PA-side DB readback of the current Project authorization generation for
+application `150cb108-af37-4973-ab6e-f6d991a6e8c8`, without refreshing stale
+bindings.
+
 List the revoke config again and require no pending migration. Record sanitized
 readback of the inactive admission and both grants, incremented Project
 generation, both immutable receipts, revoked provision approval, zero live

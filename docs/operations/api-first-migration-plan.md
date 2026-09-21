@@ -5685,3 +5685,28 @@ pending; this requirement does not claim a deployed UI change.
   versions, Project-grant generation `2`, and its immutable receipt. This is
   not Project-v2 acceptance, a PA `main` merge, production readiness, or full
   regression evidence.
+
+### September 19–20 — base Project window checkpoint
+
+- The exact PA candidate remained `ff42c3432f39e50e92058b21d7e4942c26f5b355`.
+  Exactly five base Project flags were enabled:
+  `APP_API_V2_PROJECTS_CREATE_ENABLED`, `APP_API_V2_PROJECTS_READ_ENABLED`,
+  `APP_API_V2_PROJECTS_WRITE_ENABLED`,
+  `APP_API_V2_PROJECTS_BINDING_STATUS_ENABLED`, and
+  `APP_API_V2_PROJECTS_INVENTORY_ENABLED`. Capabilities returned HTTP `200`,
+  `implementedEndpointCount: 6`, and `grantedCapabilityCount: 6`.
+- Project inventory GET returned an empty-body `409` because the deliberately
+  stale browser-edited binding remains. No joined mutation ran, and static
+  generation must not be guessed. This remains a checkpoint, not joined
+  acceptance.
+- Temporary staging-only Ops packet
+  `staging-authority-project-v2-20260919-215846z` was provisioned and safely
+  revoked. Pre-revoke counts were `actor_fences=0`,
+  `project_pending_or_leased=0`, and `directory_pending_or_leased=0`;
+  post-revoke readback was admission active `0`/version `4`, profile `1`,
+  directory grant `0`, project grant `0`/version `4`/generation `4`, live
+  proofs `0`, one revoke receipt, one revoked provision approval, and no
+  pending revoke migration.
+- The next gate is a read-only PA-side DB readback of the current Project
+  authorization generation for application
+  `150cb108-af37-4973-ab6e-f6d991a6e8c8`, without refreshing stale bindings.

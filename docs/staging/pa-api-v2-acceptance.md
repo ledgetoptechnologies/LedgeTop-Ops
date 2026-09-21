@@ -45,6 +45,18 @@ existing Operations-side public-link status/body-hash preservation check in
 the acceptance run. No secret, private URL, application UUID, or client data
 belongs in this document or its reports.
 
+## September 19–20, 2026 base Project window checkpoint
+
+The exact PA candidate remains
+`ff42c3432f39e50e92058b21d7e4942c26f5b355`. The base Project window had
+exactly five flags enabled: `APP_API_V2_PROJECTS_CREATE_ENABLED`, `APP_API_V2_PROJECTS_READ_ENABLED`, `APP_API_V2_PROJECTS_WRITE_ENABLED`, `APP_API_V2_PROJECTS_BINDING_STATUS_ENABLED`, and `APP_API_V2_PROJECTS_INVENTORY_ENABLED`.
+The capabilities request returned HTTP `200`, `apiVersion: 2`,
+`implementedEndpointCount: 6`, and `grantedCapabilityCount: 6`.
+
+The Project inventory GET returned an empty-body `409` because the deliberately
+stale browser-edited binding remains. No joined mutation ran; static generation
+must not be guessed. This checkpoint does not claim joined acceptance.
+
 ## September 17, 2026 checkpoint
 
 The current PA PR184 staging candidate is head `e260abeb`. It includes the
