@@ -32,9 +32,16 @@ test("joined mutation config refuses production and requires explicit session/mu
   assert.equal((await parseJoinedAcceptanceConfig({ ...identity, OPS_ACCEPTANCE_ALLOW_MUTATIONS: "" })).mutate, false);
   await assert.rejects(() => parseJoinedAcceptanceConfig({ ...identity, OPS_SESSION_COOKIE: "" }), { code: "operations_session_required" });
   await assert.rejects(() => parseJoinedAcceptanceConfig({ ...identity, OPS_ACCEPTANCE_PUBLIC_LINK_URL: "https://portal.ledgetopdroneservices.com/s/abc" }), { code: "production_or_nonstaging_public_link" });
+  await assert.rejects(() => parseJoinedAcceptanceConfig({ ...identity, OPS_ACCEPTANCE_PUBLIC_LINK_URL: "https://project-alpha.ledgetoptechnologies.com/?page=project&id=1" }), { code: "production_or_nonstaging_public_link" });
   const assertion = "header.payload.signature";
   assert.equal((await parseJoinedAcceptanceConfig({ ...identity, OPS_CF_ACCESS_JWT_ASSERTION: assertion })).accessAssertion, assertion);
   await assert.rejects(() => parseJoinedAcceptanceConfig({ ...identity, OPS_CF_ACCESS_JWT_ASSERTION: "not-a-jwt" }), { code: "invalid_access_assertion" });
+});
+
+test("joined mutation config accepts the canonical Project Alpha staging public-link host", async () => {
+  const publicLinkUrl = "https://pa-staging.ledgetoptechnologies.com/public/project/example";
+  const config = await parseJoinedAcceptanceConfig({ ...identity, OPS_ACCEPTANCE_PUBLIC_LINK_URL: publicLinkUrl });
+  assert.equal(config.publicLinkUrl, publicLinkUrl);
 });
 
 test("joined runner performs disposable create, exact replay, changed-body conflict, and sanitized public-link evidence", async () => {

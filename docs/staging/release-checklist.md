@@ -877,3 +877,38 @@ npm.cmd run staging:release:verify
 
 That command reruns local preparation and validates the complete current
 post-deployment packet. It performs no remote action.
+
+### September 21 — typed Project conflict checkpoint and cleanup
+
+- Ops PR98 head is `de1e9db9ba0363834b1f4600fca9eb685fc121ae`; workflow
+  `35561740004` passed all ten jobs. PA PR184 head is
+  `3b43e1275e3b248979876ace56ca38e6e383f52c` with green required checks.
+  A supported `cloudflared` human Access login succeeded for staging.
+- The first joined run was stopped before mutation because the harness omitted
+  the canonical PA staging host. The harness now accepts
+  `STAGING_PROJECT_ALPHA_ORIGIN`; its unit suite is 10/10. Fresh command
+  `3b785ca6-96a8-4103-b2e5-4a60ce5cae41` made one Project attempt and ended in
+  terminal typed `relationship_proof_conflict` HTTP `409`, request
+  `fcd6627d-405d-477b-8486-d51140a2d6bf`. No success receipt or activation was
+  produced. PA's authoritative Project generation was `5`.
+- The independently observed stale binding is external ID
+  `pa-acceptance-p184fix-20260917a:33b8e6f6-8beb-4190-a24f-abdd7b401112`,
+  revision `2` versus live revision `10`, reporting generation `5`. It proves
+  the generation without guessing but is separate from the relationship-proof
+  conflict. Do not retry the terminal command.
+- Public-link preservation is proven. The first harness failure stopped before
+  its public probe/command, and the second run performed one pre-command probe
+  before attempting Project creation. A separate post-attempt probe returned
+  `200 text/html`, `3266` bytes, and the unchanged SHA-256
+  `5632e883d6fe3ca72c68e900e8e6b76561c07d454605e728c4a765d07a383464`.
+- Cleanup is complete: the connection secret is empty; default-off version
+  `de550f0c-f5ec-452c-a4db-3c61bc7cffc2` is deployed; the revoke migration was
+  applied; admission, Project grant, and Project generation are inactive at
+  version `10`; Directory grant is inactive; Project/Directory pending and
+  leased rows, actor fences, and live proofs are all zero; and one immutable
+  revoke receipt exists.
+- Remaining release gate: enable only PA Directory read and binding-status
+  flags alongside the Project window, read the current organization proof with
+  key #9, restore the Project-only window if needed, issue a fresh authority
+  packet, and rerun the joined acceptance with a fresh command. This checkpoint
+  is not merge-ready.

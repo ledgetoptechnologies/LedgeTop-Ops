@@ -5752,3 +5752,40 @@ pending; this requirement does not claim a deployed UI change.
   inactive at admission/grant version `8` and Project generation `8`, the
   Directory grant is inactive, all pending/lease/fence counts are zero, and one
   immutable revoke receipt exists with no pending revoke migration.
+
+### September 21 — Project conflict contract and remaining joined gate
+
+- Ops PR98 is at `de1e9db9ba0363834b1f4600fca9eb685fc121ae`; exact workflow
+  `35561740004` passed all ten CI jobs. PA PR184 is at
+  `3b43e1275e3b248979876ace56ca38e6e383f52c` with green required checks.
+  A supported `cloudflared` human Access login succeeded for the staging
+  Operations origin.
+- The harness omission of the canonical PA staging host blocked the first
+  joined run before mutation. The corrected harness accepts
+  `STAGING_PROJECT_ALPHA_ORIGIN` and its unit suite is 10/10. A fresh command
+  `3b785ca6-96a8-4103-b2e5-4a60ce5cae41` made one attempt and ended terminal
+  `relationship_proof_conflict` HTTP `409`, request
+  `fcd6627d-405d-477b-8486-d51140a2d6bf`; no success receipt or activation was
+  recorded. The authoritative PA Project generation was `5`.
+- The independently observed stale Project binding is
+  `pa-acceptance-p184fix-20260917a:33b8e6f6-8beb-4190-a24f-abdd7b401112`,
+  revision `2` against live revision `10`, reporting generation `5`. This
+  proves the generation without guessing, but is separate from the typed
+  relationship-proof rejection. Neither result proves the command was absent,
+  and the terminal command must not be replayed.
+- Public-link safety remains proven. The first failed run stopped before its
+  public probe/command; the second run probed the link before its single Project
+  attempt. A separate post-attempt probe returned `200 text/html`, `3266` bytes,
+  and the same SHA-256 as before,
+  `5632e883d6fe3ca72c68e900e8e6b76561c07d454605e728c4a765d07a383464`.
+- Staging cleanup is complete. The connection secret is empty, default-off
+  version `de550f0c-f5ec-452c-a4db-3c61bc7cffc2` is deployed, and the revoke
+  migration is applied. Admission, Project grant, and Project generation are
+  inactive at version `10`; Directory grant is inactive; pending/leased rows,
+  actor fences, and live proofs are zero; one immutable revoke receipt remains.
+- Next implementation/acceptance step: enable only PA Directory read and
+  binding-status flags beside the bounded Project window, read the current
+  organization proof with key #9, restore the Project-only flags if desired,
+  issue a fresh authority packet, and rerun with a fresh command. Until that
+  proof succeeds, the migration is not merge-ready and no production cutover
+  should occur.

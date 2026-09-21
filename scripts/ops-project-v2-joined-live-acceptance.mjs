@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { chmod, lstat, readFile, rename, mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { STAGING_HOSTS } from "./staging-requirements.mjs";
+import { STAGING_HOSTS, STAGING_PROJECT_ALPHA_ORIGIN } from "./staging-requirements.mjs";
 
 const ROUTE = "/api/admin/project-alpha/projects/v2/commands";
 const MAX_RESPONSE_BYTES = 64 * 1024;
@@ -14,7 +14,12 @@ const SHA256 = /^[0-9a-f]{64}$/;
 const APPLICATION_ID = UUID_V4;
 const PREFIX = /^ops-joined-acceptance-[a-z0-9][a-z0-9-]{2,60}$/i;
 const STAGING_OPERATIONS_ORIGIN = `https://${STAGING_HOSTS.operations}`;
-const STAGING_PUBLIC_HOSTS = new Set([STAGING_HOSTS.delivery, STAGING_HOSTS.client, "portal-staging.ledgetoptechnologies.com"]);
+const STAGING_PUBLIC_HOSTS = new Set([
+  STAGING_HOSTS.delivery,
+  STAGING_HOSTS.client,
+  "portal-staging.ledgetoptechnologies.com",
+  new URL(STAGING_PROJECT_ALPHA_ORIGIN).hostname,
+]);
 const JWT_SEGMENT = /^[A-Za-z0-9_-]+$/;
 
 export class JoinedAcceptanceError extends Error {
