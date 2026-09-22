@@ -1,7 +1,7 @@
 import type { ProjectAlphaDirectoryRelationshipAction, ProjectAlphaDirectoryRelationshipCommand } from "./project-alpha-directory-relationship-api-v2";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const REVISION = /^(?:0|[1-9][0-9]{0,18})$/;
+const MAX_REVISION = "9223372036854775807";
 
 export type NativeDirectoryRelationshipActor = Readonly<{
   staffId: string;
@@ -36,6 +36,9 @@ type Destination = Readonly<{ sourceId: string; sourceInstanceUUID: string; appl
 type Head = Readonly<{ publicId: string; revision: string }>;
 
 function integer(value: unknown): value is number { return Number.isSafeInteger(value) && Number(value) >= 1; }
+function revision(value: unknown, zero=false): value is string { return typeof value === "string"
+  && (zero ? /^(?:0|[1-9][0-9]{0,18})$/ : /^[1-9][0-9]{0,18}$/).test(value)
+  && (value.length<MAX_REVISION.length || value<=MAX_REVISION); }
 function endpoint(value: unknown): value is NativeDirectoryRelationshipEndpoint {
   return !!value && typeof value === "object" && !Array.isArray(value)
     && UUID.test(String((value as NativeDirectoryRelationshipEndpoint).recordId))
@@ -103,7 +106,7 @@ async function activeHead(db: D1Database, recordId: string, kind: "client" | "or
       ORDER BY relationship_version DESC,created_at DESC,command_id DESC LIMIT 1`)
       .bind(recordId,destination.sourceId,destination.sourceInstanceUUID,destination.applicationUUID,destination.historyEpoch,mapping.publicId)
       .first<{ revision: string }>();
-    if (relationship && REVISION.test(relationship.revision) && relationship.revision !== "0") return { publicId: mapping.publicId, revision: relationship.revision };
+    if (relationship && revision(relationship.revision)) return { publicId: mapping.publicId, revision: relationship.revision };
   }
   const profile = await db.prepare(`SELECT json_extract(outbox.outcome_json,'$.response.result.resource.revision') revision
     FROM project_alpha_directory_outbox outbox WHERE outbox.source_id=? AND outbox.expected_source_instance_id=?
@@ -113,19 +116,19 @@ async function activeHead(db: D1Database, recordId: string, kind: "client" | "or
     ORDER BY outbox.created_at DESC,outbox.command_id DESC LIMIT 1`)
     .bind(destination.sourceId,destination.sourceInstanceUUID,destination.applicationUUID,destination.historyEpoch,destination.origin,kind,recordId,mapping.publicId)
     .first<{ revision: string }>();
-  if (profile && REVISION.test(profile.revision) && profile.revision !== "0") return { publicId: mapping.publicId, revision: profile.revision };
+  if (profile && revision(profile.revision)) return { publicId: mapping.publicId, revision: profile.revision };
   const refresh = await db.prepare(`SELECT live_revision revision FROM project_alpha_existing_directory_binding_revision_refresh_receipts
     WHERE record_id=? AND source_id=? AND source_instance_id=? AND application_id=? AND history_epoch_id=?
       AND resource_type=? AND external_id=? AND project_alpha_public_id=? ORDER BY received_at DESC,receipt_id DESC LIMIT 1`)
     .bind(recordId,destination.sourceId,destination.sourceInstanceUUID,destination.applicationUUID,destination.historyEpoch,kind,recordId,mapping.publicId)
     .first<{ revision: string }>();
-  if (refresh && REVISION.test(refresh.revision) && refresh.revision !== "0") return { publicId: mapping.publicId, revision: refresh.revision };
+  if (refresh && revision(refresh.revision)) return { publicId: mapping.publicId, revision: refresh.revision };
   const activation = await db.prepare(`SELECT project_alpha_revision revision FROM project_alpha_existing_directory_binding_activation_receipts
     WHERE record_id=? AND source_id=? AND source_instance_id=? AND application_id=? AND history_epoch_id=?
       AND resource_type=? AND external_id=? AND project_alpha_public_id=?`)
     .bind(recordId,destination.sourceId,destination.sourceInstanceUUID,destination.applicationUUID,destination.historyEpoch,kind,recordId,mapping.publicId)
     .first<{ revision: string }>();
-  return activation && REVISION.test(activation.revision) && activation.revision !== "0" ? { publicId: mapping.publicId, revision: activation.revision } : null;
+  return activation && revision(activation.revision) ? { publicId: mapping.publicId, revision: activation.revision } : null;
 }
 async function currentGeneration(db: D1Database, destination: Destination): Promise<string | null> {
   const row = await db.prepare(`SELECT generation FROM (
@@ -143,7 +146,7 @@ async function currentGeneration(db: D1Database, destination: Destination): Prom
       destination.sourceId,destination.sourceInstanceUUID,destination.applicationUUID,destination.historyEpoch,
       destination.sourceId,destination.sourceInstanceUUID,destination.applicationUUID,destination.historyEpoch)
     .first<{ generation: string }>();
-  return row && REVISION.test(row.generation) && row.generation !== "9223372036854775807" ? row.generation : null;
+  return row && revision(row.generation,true) && row.generation !== MAX_REVISION ? row.generation : null;
 }
 async function loadEnrollment(db: D1Database, recordId: string): Promise<Destination[] | null> {
   const row = await db.prepare("SELECT destinations_json FROM native_directory_enrollments WHERE record_id=?").bind(recordId).first<{ destinations_json: string }>();

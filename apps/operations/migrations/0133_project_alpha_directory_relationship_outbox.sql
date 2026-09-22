@@ -21,11 +21,12 @@ CREATE TABLE project_alpha_directory_relationship_outbox (
   destination_origin TEXT NOT NULL CHECK(substr(destination_origin,1,8)='https://' AND length(destination_origin)<=2048),
   client_public_id TEXT NOT NULL CHECK(length(client_public_id)=32 AND client_public_id NOT GLOB '*[^0-9a-f]*'),
   expected_client_revision TEXT NOT NULL CHECK(length(expected_client_revision) BETWEEN 1 AND 19
-    AND expected_client_revision NOT GLOB '*[^0-9]*' AND substr(expected_client_revision,1,1)<>'0'),
+    AND expected_client_revision NOT GLOB '*[^0-9]*' AND substr(expected_client_revision,1,1)<>'0'
+    AND (length(expected_client_revision)<19 OR expected_client_revision<='9223372036854775807')),
   expected_authorization_generation TEXT NOT NULL CHECK(length(expected_authorization_generation) BETWEEN 1 AND 19
     AND expected_authorization_generation NOT GLOB '*[^0-9]*'
     AND (expected_authorization_generation='0' OR substr(expected_authorization_generation,1,1)<>'0')
-    AND expected_authorization_generation<>'9223372036854775807'),
+    AND (length(expected_authorization_generation)<19 OR expected_authorization_generation<='9223372036854775806')),
   expected_current_organization_record_id TEXT,
   expected_current_organization_public_id TEXT CHECK(expected_current_organization_public_id IS NULL
     OR (length(expected_current_organization_public_id)=32 AND expected_current_organization_public_id NOT GLOB '*[^0-9a-f]*')),
@@ -34,7 +35,8 @@ CREATE TABLE project_alpha_directory_relationship_outbox (
     OR (length(organization_public_id)=32 AND organization_public_id NOT GLOB '*[^0-9a-f]*')),
   expected_organization_revision TEXT CHECK(expected_organization_revision IS NULL OR
     (length(expected_organization_revision) BETWEEN 1 AND 19 AND expected_organization_revision NOT GLOB '*[^0-9]*'
-      AND substr(expected_organization_revision,1,1)<>'0')),
+      AND substr(expected_organization_revision,1,1)<>'0'
+      AND (length(expected_organization_revision)<19 OR expected_organization_revision<='9223372036854775807'))),
   command_json TEXT NOT NULL CHECK(json_valid(command_json) AND json_type(command_json)='object'),
   request_json TEXT NOT NULL CHECK(json_valid(request_json) AND json_type(request_json)='object'),
   state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','leased','acknowledged','terminal')),
