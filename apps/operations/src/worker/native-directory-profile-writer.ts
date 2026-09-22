@@ -402,6 +402,22 @@ export async function writeNativeDirectoryProfile(db: D1Database, input: NativeD
   if (write.operation === "create" ? !!record : !record || record.record_kind !== write.kind || record.current_version !== write.expectedLocalVersion)
     return { status: "conflict", reason: write.operation === "create" ? "record_exists" : "stale_local_version" };
   if (!await authority(db, write)) return { status: "blocked", reason: "native_directory_authority" };
+  const scopesJson = JSON.stringify(write.scopes), profileJson = JSON.stringify(write.profile);
+  if (write.operation === "create" && !await db.prepare(`SELECT 1 ok FROM native_directory_create_admissions
+    WHERE id=? AND staff_id=? AND bound_access_subject=? AND record_id=? AND record_kind=? AND active=1
+      AND consumed_mutation_id IS NULL AND consumed_at IS NULL AND json(scopes_json)=json(?)
+      AND json(profile_json)=json(?) AND json(destinations_json)=json(?)
+      AND (?<>'client' OR EXISTS(SELECT 1 FROM native_directory_create_admission_relationships relationship
+        WHERE relationship.create_admission_id=? AND relationship.client_record_id=?
+          AND relationship.organization_record_id IS ?
+          AND (relationship.organization_record_id IS NULL OR EXISTS(
+            SELECT 1 FROM operations_directory_records organization
+            WHERE organization.record_id=relationship.organization_record_id AND organization.record_kind='organization'
+              AND organization.current_version=relationship.organization_record_version))))`).bind(write.createAdmissionId,
+      write.actor.staffId, write.actor.accessSubject, write.recordId, write.kind, scopesJson, profileJson,
+      JSON.stringify(write.destinations.map(identity)), write.kind, write.createAdmissionId, write.recordId,
+      write.relationship?.organizationRecordId ?? null).first("ok"))
+    return { status: "blocked", reason: "create_admission" };
   let relationshipState: RelationshipState | null = null;
   if (write.kind === "client") {
     if (!await authority(db, write, "directory.identity.link", write.actor.selectedIdentityGrantId))
@@ -458,14 +474,7 @@ export async function writeNativeDirectoryProfile(db: D1Database, input: NativeD
       relationshipEvidence.set(destinationKey(value), evidence);
     }
   }
-  const nextVersion = write.expectedLocalVersion + 1;
-  const scopesJson = JSON.stringify(write.scopes), profileJson = JSON.stringify(write.profile), destinationsJson = JSON.stringify(enrolled);
-  if (write.operation === "create" && !await db.prepare(`SELECT 1 ok FROM native_directory_create_admissions
-    WHERE id=? AND staff_id=? AND bound_access_subject=? AND record_id=? AND record_kind=? AND active=1
-      AND consumed_mutation_id IS NULL AND consumed_at IS NULL AND json(scopes_json)=json(?)
-      AND json(profile_json)=json(?) AND json(destinations_json)=json(?)`).bind(write.createAdmissionId,
-      write.actor.staffId, write.actor.accessSubject, write.recordId, write.kind, scopesJson, profileJson, destinationsJson).first("ok"))
-    return { status: "blocked", reason: "create_admission" };
+  const nextVersion = write.expectedLocalVersion + 1, destinationsJson = JSON.stringify(enrolled);
   const commandIds = await Promise.all(write.destinations.map(value => commandId(write.mutationId, value)));
   const statements: D1PreparedStatement[] = [];
   statements.push(db.prepare(`INSERT INTO operations_directory_write_fences

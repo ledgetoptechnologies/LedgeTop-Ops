@@ -16,6 +16,8 @@ import {
   type NativeDirectoryWriterActor,
 } from "./native-directory-profile-writer";
 import { resolveProjectAlphaApiV2Connection } from "./project-alpha-api-v2-connections";
+import { nativeDirectoryOrganizationChoices, type NativeDirectoryOrganizationChoice } from "./native-directory-profile-editor-record";
+import { writeNativeDirectoryRelationship, type NativeDirectoryRelationshipWrite } from "./native-directory-relationship-writer";
 import type { Env, StaffPrincipal } from "./types";
 
 type Variables = { principal: StaffPrincipal; administrator: boolean };
@@ -29,6 +31,8 @@ const SOURCE_ID = /^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/;
 const MAX_BODY_BYTES = 24 * 1024;
 
 const mutationId = z.string().regex(UUID);
+const canonicalRecordId = z.string().min(1).max(191).refine(value => !/[\p{C}]/u.test(value)
+  && new TextEncoder().encode(value).byteLength <= 764);
 const sourceIds = z.array(z.string().regex(SOURCE_ID)).min(1).max(16)
   .refine(values => new Set(values).size === values.length);
 const scalar = (maximum: number, required = false) => z.string().max(maximum)
@@ -46,14 +50,23 @@ const clientCreateProfile = z.object({
   addressLine1: scalar(255), addressLine2: scalar(255), city: scalar(100), state: scalar(2), postalCode: scalar(20), country: scalar(100),
 }).strict();
 const clientUpdateProfile = clientCreateProfile.omit({ clientType: true });
+const relationshipChoice = z.object({ organizationRecordId: canonicalRecordId.nullable(), expectedOrganizationVersion: z.number().int().positive().nullable() })
+  .strict().refine(value => (value.organizationRecordId === null) === (value.expectedOrganizationVersion === null));
 const organizationCreate = z.object({ mutationId, sourceIds, scopes, profile: organizationProfile }).strict();
-const clientCreate = z.object({ mutationId, sourceIds, scopes, profile: clientCreateProfile }).strict();
+const clientCreate = z.object({ mutationId, sourceIds, scopes, profile: clientCreateProfile, relationship: relationshipChoice }).strict();
 const createAdmissionIntent = z.discriminatedUnion("kind", [
   organizationCreate.extend({ kind: z.literal("organization") }).strict(),
   clientCreate.extend({ kind: z.literal("client") }).strict(),
 ]);
 const organizationUpdate = z.object({ mutationId, expectedLocalVersion: z.number().int().positive(), profile: organizationProfile }).strict();
 const clientUpdate = z.object({ mutationId, expectedLocalVersion: z.number().int().positive(), profile: clientUpdateProfile }).strict();
+const relationshipMutation = z.object({ mutationId, expectedRelationshipVersion: z.number().int().positive(), organization: z.object({
+  recordId: canonicalRecordId, expectedVersion: z.number().int().positive(),
+}).strict().nullable() }).strict();
+const relationshipRecoveryMutation = relationshipMutation.extend({
+  expectedTerminalCommandIds: z.array(mutationId).min(1).max(16)
+    .refine(values => new Set(values).size === values.length),
+}).strict();
 
 type StoredDestination = Omit<NativeDirectoryDestinationAuthority, "expectedAuthorizationGeneration">;
 type StoredCreateAdmission = {
@@ -61,6 +74,9 @@ type StoredCreateAdmission = {
   scopes_json: string; profile_json: string; destinations_json: string; active: number;
   consumed_mutation_id: string | null; issued_by: string;
 };
+type CurrentClientRelationship = { organization_record_id: string | null; relationship_version: number;
+  client_version: number; organization_version: number | null };
+type StoredAdmissionRelationship = { organization_record_id: string | null; organization_record_version: number | null };
 
 export function nativeDirectoryProfileWritesEnabled(env: Pick<Env, "NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED">): boolean {
   return env.NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED === "true";
@@ -224,6 +240,18 @@ async function storedCreateAdmission(db: D1Database, record: string): Promise<St
     FROM native_directory_create_admissions WHERE record_id=?`).bind(record).first<StoredCreateAdmission>();
 }
 
+async function storedAdmissionRelationship(db: D1Database, admissionId: string): Promise<StoredAdmissionRelationship | null> {
+  return db.withSession("first-primary").prepare(`SELECT organization_record_id,organization_record_version
+    FROM native_directory_create_admission_relationships WHERE create_admission_id=?`).bind(admissionId)
+    .first<StoredAdmissionRelationship>();
+}
+
+function exactAdmissionRelationship(row: StoredAdmissionRelationship | null,
+  relationship: z.infer<typeof relationshipChoice>): boolean {
+  return !!row && row.organization_record_id === relationship.organizationRecordId
+    && row.organization_record_version === relationship.expectedOrganizationVersion;
+}
+
 function exactCreateAdmission(row: StoredCreateAdmission,
   actor: Omit<NativeDirectoryWriterActor, "selectedGrantId" | "selectedIdentityGrantId">,
   kind: NativeDirectoryProfileKind, record: string, profile: Record<string, string>, requestedScopes: readonly NativeDirectoryScope[],
@@ -275,14 +303,73 @@ async function updateDestinations(env: Env, record: string): Promise<NativeDirec
   return destinations;
 }
 
-async function standaloneRelationship(db: D1Database, record: string): Promise<{
-  organizationRecordId: null; expectedRelationshipVersion: number;
-} | null> {
-  const row = await db.withSession("first-primary").prepare(`SELECT organization_record_id,relationship_version
-    FROM operations_directory_client_organizations WHERE client_record_id=?`).bind(record)
-    .first<{ organization_record_id: string | null; relationship_version: number }>();
-  return row && row.organization_record_id === null && Number.isSafeInteger(row.relationship_version)
-    && row.relationship_version >= 1 ? { organizationRecordId: null, expectedRelationshipVersion: row.relationship_version } : null;
+async function currentClientRelationship(db: D1Database, record: string): Promise<CurrentClientRelationship | null> {
+  const row = await db.withSession("first-primary").prepare(`SELECT relationship.organization_record_id,
+      relationship.relationship_version,client.current_version client_version,parent.current_version organization_version
+    FROM operations_directory_client_organizations relationship
+    JOIN operations_directory_records client ON client.record_id=relationship.client_record_id AND client.record_kind='client'
+    LEFT JOIN operations_directory_records parent ON parent.record_id=relationship.organization_record_id AND parent.record_kind='organization'
+    WHERE relationship.client_record_id=?`).bind(record).first<CurrentClientRelationship>();
+  return row && Number.isSafeInteger(row.relationship_version) && row.relationship_version >= 1
+    && Number.isSafeInteger(row.client_version) && row.client_version >= 1
+    && (row.organization_record_id === null || (canonicalRecordId.safeParse(row.organization_record_id).success
+      && Number.isSafeInteger(row.organization_version) && row.organization_version !== null && row.organization_version >= 1)) ? row : null;
+}
+
+async function enrollmentSourceIds(env: Env, record: string): Promise<string[] | null> {
+  const row = await env.OPS_DB.withSession("first-primary").prepare(`SELECT destinations_json
+    FROM native_directory_enrollments WHERE record_id=?`).bind(record).first<{ destinations_json: string }>();
+  let values: unknown;
+  try { values = row ? JSON.parse(row.destinations_json) : null; } catch { return null; }
+  if (!Array.isArray(values) || values.length < 1 || values.length > 16) return null;
+  const result: string[] = [];
+  for (const value of values) {
+    const destination = storedDestination(value, record);
+    if (!destination) return null;
+    const configured = await configuredDestination(env, destination.sourceId, record);
+    if (!configured || JSON.stringify(configured) !== JSON.stringify(destination)) return null;
+    result.push(destination.sourceId);
+  }
+  return new Set(result).size === result.length ? result.sort() : null;
+}
+
+async function relationshipDeliverySettled(db: D1Database, record: string, relationshipVersion: number,
+  destinationCount: number): Promise<boolean> {
+  if (relationshipVersion === 1) return true;
+  const row = await db.withSession("first-primary").prepare(`SELECT count(*) total,
+      sum(CASE WHEN state='acknowledged' THEN 1 ELSE 0 END) acknowledged
+    FROM project_alpha_directory_relationship_outbox WHERE client_record_id=? AND relationship_version=?`)
+    .bind(record, relationshipVersion).first<{ total: number; acknowledged: number }>();
+  return !!row && row.total === destinationCount && row.acknowledged === destinationCount;
+}
+
+function sameSources(choice: NativeDirectoryOrganizationChoice, selectedSources: readonly string[]): boolean {
+  return selectedSources.length > 0 && new Set(selectedSources).size === selectedSources.length
+    && selectedSources.every(sourceId => choice.sourceIds.includes(sourceId));
+}
+
+async function selectableOrganization(c: AppContext, actor: Omit<NativeDirectoryWriterActor, "selectedGrantId" | "selectedIdentityGrantId">,
+  recordId: string, expectedVersion: number, selectedSources?: readonly string[]): Promise<NativeDirectoryOrganizationChoice | null> {
+  const choice = (await nativeDirectoryOrganizationChoices(c.env)).find(value => value.recordId === recordId
+    && value.expectedVersion === expectedVersion && (selectedSources === undefined || sameSources(value, selectedSources)));
+  if (!choice) return null;
+  for (const permission of ["directory.profile.edit", "directory.identity.link"] as const)
+    if (!await selectGrant(c.env.OPS_DB, actor.staffId, permission, recordId, [], false)) return null;
+  return choice;
+}
+
+async function organizationChoicesForActor(c: AppContext,
+  actor: Omit<NativeDirectoryWriterActor, "selectedGrantId" | "selectedIdentityGrantId">,
+  selectedSources?: readonly string[]): Promise<NativeDirectoryOrganizationChoice[]> {
+  const result: NativeDirectoryOrganizationChoice[] = [];
+  for (const choice of await nativeDirectoryOrganizationChoices(c.env)) {
+    if (selectedSources !== undefined && !sameSources(choice, selectedSources)) continue;
+    let allowed = true;
+    for (const permission of ["directory.profile.edit", "directory.identity.link"] as const)
+      if (!await selectGrant(c.env.OPS_DB, actor.staffId, permission, choice.recordId, [], false)) { allowed = false; break; }
+    if (allowed) result.push(choice);
+  }
+  return result;
 }
 
 async function publicResult(c: AppContext, outcome: Awaited<ReturnType<typeof writeNativeDirectoryProfile>>) {
@@ -307,9 +394,161 @@ async function publicResult(c: AppContext, outcome: Awaited<ReturnType<typeof wr
   destinations.every(value => value.state === "acknowledged") ? 200 : 202);
 }
 
+async function publicRelationshipResult(c: AppContext, outcome: Awaited<ReturnType<typeof writeNativeDirectoryRelationship>>) {
+  if (outcome.status !== "written") {
+    if (outcome.status === "rejected") return c.json({ status: "invalid_request", reason: outcome.reason }, 400);
+    return c.json({ status: "conflict", reason: outcome.reason }, 409);
+  }
+  const destinations: Array<{ sourceId: string; state: "pending" | "acknowledged" | "conflict" }> = [];
+  for (const reservation of outcome.reservations) {
+    const state = await c.env.OPS_DB.withSession("first-primary").prepare(`SELECT state
+      FROM project_alpha_directory_relationship_outbox WHERE command_id=?`).bind(reservation.commandId)
+      .first<string>("state");
+    if (!state) return c.json({ status: "conflict", reason: "destination_state_unavailable" }, 409);
+    destinations.push({ sourceId: reservation.sourceId, state: state === "acknowledged" ? "acknowledged"
+      : state === "terminal" ? "conflict" : "pending" });
+  }
+  const response = { status: destinations.every(value => value.state === "acknowledged") ? "written" : "pending",
+    mutationId: outcome.mutationId, relationshipVersion: outcome.relationshipVersion, replayed: outcome.replayed, destinations };
+  return destinations.some(value => value.state === "conflict")
+    ? c.json({ ...response, status: "conflict", reason: "destination_conflict" }, 409)
+    : c.json(response, response.status === "written" ? 200 : 202);
+}
+
+async function relationshipReplay(c: AppContext, actor: Omit<NativeDirectoryWriterActor, "selectedGrantId" | "selectedIdentityGrantId">,
+  clientRecordId: string, input: z.infer<typeof relationshipMutation>,
+  expectedTerminalCommandIds: readonly string[] = []): Promise<NativeDirectoryRelationshipWrite | null | "conflict"> {
+  const rows = (await c.env.OPS_DB.withSession("first-primary").prepare(`SELECT request_json FROM project_alpha_directory_relationship_outbox
+    WHERE mutation_id=? ORDER BY command_id LIMIT 17`).bind(input.mutationId).all<{ request_json: string }>()).results;
+  if (!rows.length) return null;
+  if (rows.length > 16 || rows.some(row => row.request_json !== rows[0]!.request_json)) return "conflict";
+  let replay: NativeDirectoryRelationshipWrite;
+  try { replay = JSON.parse(rows[0]!.request_json) as NativeDirectoryRelationshipWrite; } catch { return "conflict"; }
+  if (replay.mutationId !== input.mutationId || replay.clientRecordId !== clientRecordId
+    || replay.expectedRelationshipVersion !== input.expectedRelationshipVersion
+    || replay.organization?.recordId !== input.organization?.recordId
+    || replay.organization?.expectedRecordVersion !== input.organization?.expectedVersion
+    || replay.actor.staffId !== actor.staffId || replay.actor.accessSubject !== actor.accessSubject
+    || replay.actor.email !== actor.loginEmail || replay.actor.admissionVersion !== actor.admissionVersion
+    || replay.actor.profileVersion !== actor.profileVersion
+    || JSON.stringify([...(replay.supersedeTerminalCommandIds ?? [])].sort())
+      !== JSON.stringify([...expectedTerminalCommandIds].sort())) return "conflict";
+  return replay;
+}
+
+async function immediateTerminalPredecessors(env: Env, clientRecordId: string,
+  expectedRelationshipVersion: number): Promise<string[] | null> {
+  const row = await env.OPS_DB.withSession("first-primary").prepare(`SELECT destinations_json
+    FROM native_directory_enrollments WHERE record_id=?`).bind(clientRecordId).first<{ destinations_json: string }>();
+  let stored: unknown;
+  try { stored = row ? JSON.parse(row.destinations_json) : null; } catch { return null; }
+  if (!Array.isArray(stored) || stored.length < 1 || stored.length > 16) return null;
+  const commandIds: string[] = [];
+  for (const value of stored) {
+    const destination = storedDestination(value, clientRecordId);
+    if (!destination) return null;
+    const configured = await configuredDestination(env, destination.sourceId, clientRecordId);
+    if (!configured || JSON.stringify(configured) !== JSON.stringify(destination)) return null;
+    const predecessor = await env.OPS_DB.withSession("first-primary").prepare(`SELECT command_id,state
+      FROM project_alpha_directory_relationship_outbox
+      WHERE client_record_id=? AND source_id=? AND source_instance_id=? AND application_id=? AND history_epoch_id=?
+        AND relationship_version<? ORDER BY relationship_version DESC,command_id DESC LIMIT 1`)
+      .bind(clientRecordId, destination.sourceId, destination.sourceInstanceUUID, destination.applicationUUID,
+        destination.historyEpoch, expectedRelationshipVersion + 1).first<{ command_id: string; state: string }>();
+    if (!predecessor || (predecessor.state !== "acknowledged" && predecessor.state !== "terminal")) return null;
+    if (predecessor.state === "terminal") commandIds.push(predecessor.command_id);
+  }
+  return commandIds.length > 0 && new Set(commandIds).size === commandIds.length ? commandIds.sort() : null;
+}
+
+async function requireRelationshipGrants(c: AppContext,
+  actor: Omit<NativeDirectoryWriterActor, "selectedGrantId" | "selectedIdentityGrantId">, resources: readonly string[]): Promise<void> {
+  for (const resource of new Set(resources)) for (const permission of ["directory.profile.edit", "directory.identity.link"] as const)
+    if (!await selectGrant(c.env.OPS_DB, actor.staffId, permission, resource, [], false))
+      throw new HTTPException(403, { message: "Directory relationship permission required" });
+}
+
+async function mutateRelationship(c: AppContext) {
+  const input = await parsed(c.req.raw, relationshipMutation);
+  if (c.req.header("Idempotency-Key") !== input.mutationId)
+    throw new HTTPException(400, { message: "Idempotency-Key must match mutationId" });
+  const checkedRecordId = canonicalRecordId.safeParse(c.req.param("recordId"));
+  if (!checkedRecordId.success) throw new HTTPException(404, { message: "Directory record not found" });
+  const clientRecordId = checkedRecordId.data;
+  const actor = await nativeActor(c), replay = await relationshipReplay(c, actor, clientRecordId, input);
+  if (replay === "conflict") return c.json({ status: "conflict", reason: "idempotency_body_conflict" }, 409);
+  if (replay) {
+    await requireRelationshipGrants(c, actor, [clientRecordId, ...(replay.previousOrganization ? [replay.previousOrganization.recordId] : []),
+      ...(replay.organization ? [replay.organization.recordId] : [])]);
+    return publicRelationshipResult(c, await writeNativeDirectoryRelationship(c.env.OPS_DB, replay));
+  }
+  const current = await currentClientRelationship(c.env.OPS_DB, clientRecordId);
+  if (!current || current.relationship_version !== input.expectedRelationshipVersion)
+    return c.json({ status: "conflict", reason: "stale_relationship" }, 409);
+  const resources = [clientRecordId, ...(current.organization_record_id ? [current.organization_record_id] : []),
+    ...(input.organization ? [input.organization.recordId] : [])];
+  await requireRelationshipGrants(c, actor, resources);
+  if (input.organization && !await selectableOrganization(c, actor, input.organization.recordId, input.organization.expectedVersion))
+    return c.json({ status: "conflict", reason: "organization_relationship_unavailable" }, 409);
+  const previousOrganization = current.organization_record_id ? { recordId: current.organization_record_id,
+    expectedRecordVersion: current.organization_version! } : null;
+  const organization = input.organization ? { recordId: input.organization.recordId,
+    expectedRecordVersion: input.organization.expectedVersion } : null;
+  if (previousOrganization?.recordId === organization?.recordId)
+    return c.json({ status: "invalid_request", reason: "no_change" }, 400);
+  return publicRelationshipResult(c, await writeNativeDirectoryRelationship(c.env.OPS_DB, {
+    mutationId: input.mutationId, clientRecordId, expectedRelationshipVersion: input.expectedRelationshipVersion,
+    expectedClientRecordVersion: current.client_version, previousOrganization, organization,
+    actor: { staffId: actor.staffId, accessSubject: actor.accessSubject, email: actor.loginEmail,
+      admissionVersion: actor.admissionVersion, profileVersion: actor.profileVersion },
+  }));
+}
+
+async function recoverRelationship(c: AppContext) {
+  if (!c.get("administrator")) throw new HTTPException(403, { message: "Administrator authority required" });
+  const input = await parsed(c.req.raw, relationshipRecoveryMutation);
+  if (c.req.header("Idempotency-Key") !== input.mutationId)
+    throw new HTTPException(400, { message: "Idempotency-Key must match mutationId" });
+  const checkedRecordId = canonicalRecordId.safeParse(c.req.param("recordId"));
+  if (!checkedRecordId.success) throw new HTTPException(404, { message: "Directory record not found" });
+  const clientRecordId = checkedRecordId.data, actor = await nativeActor(c);
+  const replay = await relationshipReplay(c, actor, clientRecordId, input, input.expectedTerminalCommandIds);
+  if (replay === "conflict") return c.json({ status: "conflict", reason: "idempotency_body_conflict" }, 409);
+  if (replay) {
+    await requireRelationshipGrants(c, actor, [clientRecordId, ...(replay.previousOrganization ? [replay.previousOrganization.recordId] : []),
+      ...(replay.organization ? [replay.organization.recordId] : [])]);
+    return publicRelationshipResult(c, await writeNativeDirectoryRelationship(c.env.OPS_DB, replay));
+  }
+  const current = await currentClientRelationship(c.env.OPS_DB, clientRecordId);
+  if (!current || current.relationship_version !== input.expectedRelationshipVersion)
+    return c.json({ status: "conflict", reason: "stale_relationship" }, 409);
+  const terminalCommandIds = await immediateTerminalPredecessors(c.env, clientRecordId, input.expectedRelationshipVersion);
+  if (!terminalCommandIds || JSON.stringify(terminalCommandIds) !== JSON.stringify([...input.expectedTerminalCommandIds].sort()))
+    return c.json({ status: "conflict", reason: "terminal_predecessor" }, 409);
+  const resources = [clientRecordId, ...(current.organization_record_id ? [current.organization_record_id] : []),
+    ...(input.organization ? [input.organization.recordId] : [])];
+  await requireRelationshipGrants(c, actor, resources);
+  if (input.organization && !await selectableOrganization(c, actor, input.organization.recordId, input.organization.expectedVersion))
+    return c.json({ status: "conflict", reason: "organization_relationship_unavailable" }, 409);
+  const previousOrganization = current.organization_record_id ? { recordId: current.organization_record_id,
+    expectedRecordVersion: current.organization_version! } : null;
+  const organization = input.organization ? { recordId: input.organization.recordId,
+    expectedRecordVersion: input.organization.expectedVersion } : null;
+  if (previousOrganization?.recordId === organization?.recordId)
+    return c.json({ status: "invalid_request", reason: "no_change" }, 400);
+  return publicRelationshipResult(c, await writeNativeDirectoryRelationship(c.env.OPS_DB, {
+    mutationId: input.mutationId, clientRecordId, expectedRelationshipVersion: input.expectedRelationshipVersion,
+    expectedClientRecordVersion: current.client_version, previousOrganization, organization,
+    supersedeTerminalCommandIds: terminalCommandIds,
+    actor: { staffId: actor.staffId, accessSubject: actor.accessSubject, email: actor.loginEmail,
+      admissionVersion: actor.admissionVersion, profileVersion: actor.profileVersion },
+  }));
+}
+
 async function committedReplay(env: Env, actor: Omit<NativeDirectoryWriterActor, "selectedGrantId" | "selectedIdentityGrantId">,
   input: { operation: "create" | "update"; mutationId: string; recordId: string; kind: NativeDirectoryProfileKind;
-    expectedLocalVersion: number; profile: Record<string, string>; scopes?: readonly NativeDirectoryScope[]; sourceIds?: readonly string[] },
+    expectedLocalVersion: number; profile: Record<string, string>; scopes?: readonly NativeDirectoryScope[]; sourceIds?: readonly string[];
+    createRelationship?: z.infer<typeof relationshipChoice> },
 ): Promise<NativeDirectoryProfileWriteOutcome | null> {
   const primary = env.OPS_DB.withSession("first-primary");
   const row = await primary.prepare(`SELECT audit.command_json,audit.actor_id,audit.original_verified_access_subject,
@@ -324,10 +563,18 @@ async function committedReplay(env: Env, actor: Omit<NativeDirectoryWriterActor,
   const destinations = command && Array.isArray(command.destinations) ? command.destinations as Record<string, unknown>[] : [];
   const exactSources = input.sourceIds === undefined || JSON.stringify(destinations.map(value => value.sourceId).sort()) === JSON.stringify([...input.sourceIds].sort());
   const exactScopes = input.operation === "update" || JSON.stringify(command?.scopes) === JSON.stringify(input.scopes);
+  let exactRelationship = true;
+  if (input.operation === "create" && input.kind === "client") {
+    const commandRelationship = command?.relationship, admissionId = command?.createAdmissionId;
+    exactRelationship = !!input.createRelationship && typeof admissionId === "string"
+      && JSON.stringify(commandRelationship) === JSON.stringify({ organizationRecordId: input.createRelationship.organizationRecordId,
+        expectedRelationshipVersion: 0 })
+      && exactAdmissionRelationship(await storedAdmissionRelationship(env.OPS_DB, admissionId), input.createRelationship);
+  }
   if (!command || row.actor_id !== actor.staffId || row.original_verified_access_subject !== actor.accessSubject
     || row.record_id !== input.recordId || row.record_kind !== input.kind || command.operation !== input.operation
     || command.mutationId !== input.mutationId || command.expectedLocalVersion !== input.expectedLocalVersion
-    || JSON.stringify(command.fields) !== JSON.stringify(input.profile) || !exactScopes || !exactSources
+    || JSON.stringify(command.fields) !== JSON.stringify(input.profile) || !exactScopes || !exactSources || !exactRelationship
     || typeof row.version !== "number" || !Number.isSafeInteger(row.version))
     return { status: "conflict", reason: "idempotency_body_conflict" };
   const materializations = await primary.prepare(`SELECT materialization.command_id FROM operations_directory_materializations materialization
@@ -367,8 +614,16 @@ async function prepareCreateAdmission(c: AppContext) {
   if (!await selectGrant(c.env.OPS_DB, actor.staffId, "directory.enrollment.manage", record, requestedScopes, true))
     throw new HTTPException(403, { message: "Directory enrollment-management permission required" });
 
+  const relationship = input.kind === "client" ? input.relationship : null;
+  if (relationship && relationship.organizationRecordId !== null && !await selectableOrganization(c, actor,
+    relationship.organizationRecordId, relationship.expectedOrganizationVersion!, selectedSources))
+    return c.json({ status: "conflict", reason: "organization_relationship_unavailable" }, 409);
+
   const existing = await storedCreateAdmission(c.env.OPS_DB, record);
   if (existing && !exactCreateAdmission(existing, actor, input.kind, record, profile, requestedScopes, selectedSources))
+    return c.json({ status: "conflict", reason: "idempotency_body_conflict" }, 409);
+  if (existing && relationship && !exactAdmissionRelationship(
+    await storedAdmissionRelationship(c.env.OPS_DB, existing.id), relationship))
     return c.json({ status: "conflict", reason: "idempotency_body_conflict" }, 409);
   const destinations = await requestedCreateDestinations(c.env, selectedSources, record);
   if (!destinations) return c.json({ status: "conflict", reason: "source_authority_unavailable" }, 409);
@@ -376,13 +631,20 @@ async function prepareCreateAdmission(c: AppContext) {
     ? c.json({ status: "prepared" })
     : c.json({ status: "conflict", reason: "create_admission_unavailable" }, 409);
   try {
-    await c.env.OPS_DB.withSession("first-primary").prepare(`INSERT INTO native_directory_create_admissions
+    const primary = c.env.OPS_DB.withSession("first-primary"), admission = primary.prepare(`INSERT INTO native_directory_create_admissions
       (id,staff_id,bound_access_subject,record_id,record_kind,scopes_json,profile_json,destinations_json,issued_by)
       VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING`).bind(createAdmissionId(record), actor.staffId, actor.accessSubject,
-      record, input.kind, JSON.stringify(requestedScopes), JSON.stringify(profile), JSON.stringify(destinations), actor.staffId).run();
+      record, input.kind, JSON.stringify(requestedScopes), JSON.stringify(profile), JSON.stringify(destinations), actor.staffId);
+    if (relationship) await primary.batch([admission, primary.prepare(`INSERT INTO native_directory_create_admission_relationships
+      (create_admission_id,client_record_id,organization_record_id,organization_record_version)
+      VALUES(?,?,?,?) ON CONFLICT DO NOTHING`).bind(createAdmissionId(record), record,
+        relationship.organizationRecordId, relationship.expectedOrganizationVersion)]);
+    else await admission.run();
   } catch { /* The exact read below distinguishes a concurrent replay from unavailable admission state. */ }
   const prepared = await storedCreateAdmission(c.env.OPS_DB, record);
+  const preparedRelationship = relationship ? await storedAdmissionRelationship(c.env.OPS_DB, createAdmissionId(record)) : null;
   return prepared && exactCreateAdmission(prepared, actor, input.kind, record, profile, requestedScopes, selectedSources, destinations)
+    && (!relationship || exactAdmissionRelationship(preparedRelationship, relationship))
     ? c.json({ status: "prepared" })
     : c.json({ status: "conflict", reason: "create_admission_unavailable" }, 409);
 }
@@ -393,9 +655,10 @@ async function create(c: AppContext, kind: NativeDirectoryProfileKind) {
     throw new HTTPException(400, { message: "Idempotency-Key must match mutationId" });
   const localRecordId = recordId(kind, input.mutationId);
   const baseActor = await nativeActor(c), normalizedProfile = normalizeProfile(input.profile), normalizedScopeValues = normalizeScopes(input.scopes);
+  const relationship = kind === "client" ? (input as z.infer<typeof clientCreate>).relationship : null;
   const replay = await committedReplay(c.env, baseActor, { operation: "create", mutationId: input.mutationId,
     recordId: localRecordId, expectedLocalVersion: 0, kind, profile: normalizedProfile,
-    scopes: normalizedScopeValues, sourceIds: input.sourceIds });
+    scopes: normalizedScopeValues, sourceIds: input.sourceIds, ...(relationship ? { createRelationship: relationship } : {}) });
   if (replay) return publicResult(c, replay);
   const actor = await actorWithGrants(c, kind, localRecordId, normalizedScopeValues, true, baseActor);
   if (!await selectGrant(c.env.OPS_DB, baseActor.staffId, "directory.enrollment.manage",
@@ -403,12 +666,17 @@ async function create(c: AppContext, kind: NativeDirectoryProfileKind) {
     throw new HTTPException(403, { message: "Directory enrollment-management permission required" });
   const admitted = await admittedCreate(c.env, baseActor, kind, localRecordId, normalizedProfile, normalizedScopeValues, input.sourceIds);
   if (!admitted) return c.json({ status: "conflict", reason: "create_admission_unavailable" }, 409);
+  if (relationship && !exactAdmissionRelationship(await storedAdmissionRelationship(c.env.OPS_DB, admitted.createAdmissionId), relationship))
+    return c.json({ status: "conflict", reason: "create_admission_unavailable" }, 409);
+  if (relationship && relationship.organizationRecordId !== null && !await selectableOrganization(c, baseActor,
+    relationship.organizationRecordId, relationship.expectedOrganizationVersion!, input.sourceIds))
+    return c.json({ status: "conflict", reason: "organization_relationship_unavailable" }, 409);
   const common = { operation: "create" as const, mutationId: input.mutationId, recordId: localRecordId,
     expectedLocalVersion: 0 as const, scopes: normalizedScopeValues, destinations: admitted.destinations,
     createAdmissionId: admitted.createAdmissionId, actor };
   const write: NativeDirectoryProfileWrite = kind === "client"
     ? { ...common, kind: "client", profile: normalizedProfile as NativeDirectoryClientCreateProfile,
-        relationship: { organizationRecordId: null, expectedRelationshipVersion: 0 } }
+        relationship: { organizationRecordId: relationship!.organizationRecordId, expectedRelationshipVersion: 0 } }
     : { ...common, kind: "organization", profile: normalizedProfile as NativeDirectoryOrganizationProfile };
   return publicResult(c, await writeNativeDirectoryProfile(c.env.OPS_DB, write));
 }
@@ -417,17 +685,23 @@ async function update(c: AppContext, kind: NativeDirectoryProfileKind) {
   const input = kind === "organization" ? await parsed(c.req.raw, organizationUpdate) : await parsed(c.req.raw, clientUpdate);
   if (c.req.header("Idempotency-Key") !== input.mutationId)
     throw new HTTPException(400, { message: "Idempotency-Key must match mutationId" });
-  const localRecordId = c.req.param("recordId");
-  if (!localRecordId || Array.from(localRecordId).length > 191 || /\p{C}/u.test(localRecordId)
-    || (kind === "client" && !UUID.test(localRecordId))) throw new HTTPException(404, { message: "Directory record not found" });
+  const checkedRecordId = canonicalRecordId.safeParse(c.req.param("recordId"));
+  if (!checkedRecordId.success) throw new HTTPException(404, { message: "Directory record not found" });
+  const localRecordId = checkedRecordId.data;
   const baseActor = await nativeActor(c), normalizedProfile = normalizeProfile(input.profile);
   const replay = await committedReplay(c.env, baseActor, { operation: "update", mutationId: input.mutationId,
     recordId: localRecordId, expectedLocalVersion: input.expectedLocalVersion, kind, profile: normalizedProfile });
   if (replay) return publicResult(c, replay);
   const actor = await actorWithGrants(c, kind, localRecordId, [], false, baseActor);
-  const relationship = kind === "client" ? await standaloneRelationship(c.env.OPS_DB, localRecordId) : null;
+  const currentRelationship = kind === "client" ? await currentClientRelationship(c.env.OPS_DB, localRecordId) : null;
+  const relationship = currentRelationship ? { organizationRecordId: currentRelationship.organization_record_id,
+    expectedRelationshipVersion: currentRelationship.relationship_version } : null;
   if (kind === "client" && !relationship)
-    return c.json({ status: "conflict", reason: "standalone_relationship_changed" }, 409);
+    return c.json({ status: "conflict", reason: "relationship_state_unavailable" }, 409);
+  const enrolledSources = kind === "client" ? await enrollmentSourceIds(c.env, localRecordId) : null;
+  if (kind === "client" && (!enrolledSources || !await relationshipDeliverySettled(c.env.OPS_DB, localRecordId,
+    currentRelationship!.relationship_version, enrolledSources.length)))
+    return c.json({ status: "conflict", reason: "relationship_delivery_pending" }, 409);
   const destinations = await updateDestinations(c.env, localRecordId);
   if (!destinations) return c.json({ status: "conflict", reason: "source_authority_unavailable" }, 409);
   const common = { operation: "update" as const, mutationId: input.mutationId, recordId: localRecordId,
@@ -470,16 +744,19 @@ async function createOptions(c: AppContext) {
   for (const source of connectors.results)
     if (SOURCE_ID.test(source.sourceId) && typeof source.displayName === "string" && await configuredDestination(c.env, source.sourceId, "create-options"))
       sources.push({ id: source.sourceId, name: source.displayName });
-  return c.json({ kind, scopes, sources });
+  const organizations = kind === "client" ? (await organizationChoicesForActor(c, actor))
+    .map(choice => ({ recordId: choice.recordId, expectedVersion: choice.expectedVersion, name: choice.name,
+      sourceIds: choice.sourceIds })) : [];
+  return c.json({ kind, scopes, sources, organizations });
 }
 
 /** Read the immutable, canonical profile revision for the editor.  This is a
  * separate native-authority read: Client Hub projections are intentionally
  * not used as an edit snapshot because they can lag a queued write. */
 async function profile(c: AppContext, kind: NativeDirectoryProfileKind) {
-  const record = c.req.param("recordId");
-  if (!record || Array.from(record).length > 191 || /\p{C}/u.test(record)
-    || (kind === "client" && !UUID.test(record))) throw new HTTPException(404, { message: "Directory record not found" });
+  const checkedRecordId = canonicalRecordId.safeParse(c.req.param("recordId"));
+  if (!checkedRecordId.success) throw new HTTPException(404, { message: "Directory record not found" });
+  const record = checkedRecordId.data;
   const actor = await nativeActor(c);
   if (!await selectGrant(c.env.OPS_DB, actor.staffId, "directory.profile.view", record, [], false))
     throw new HTTPException(403, { message: "Directory profile view permission required" });
@@ -500,15 +777,22 @@ async function profile(c: AppContext, kind: NativeDirectoryProfileKind) {
   if (!currentScopes.success) throw new HTTPException(409, { message: "Directory profile is unavailable" });
   if (kind === "organization") return c.json({ recordId: record, kind, version: current.version,
     profile: normalizeProfile(checkedProfile.data), scopes: currentScopes.data, editing: { available: true, reason: null } });
-  const relationship = await c.env.OPS_DB.withSession("first-primary").prepare(`SELECT organization_record_id,relationship_version
-    FROM operations_directory_client_organizations WHERE client_record_id=?`).bind(record)
-    .first<{ organization_record_id: string | null; relationship_version: number }>();
-  const standalone = relationship && relationship.organization_record_id === null
-    && Number.isSafeInteger(relationship.relationship_version) && relationship.relationship_version >= 1;
+  const relationship = await currentClientRelationship(c.env.OPS_DB, record), sourceIds = await enrollmentSourceIds(c.env, record);
+  const representable = relationship && sourceIds ? (await nativeDirectoryOrganizationChoices(c.env))
+    .filter(choice => sameSources(choice, sourceIds)) : [];
+  const choices = relationship && sourceIds ? await organizationChoicesForActor(c, actor, sourceIds) : [];
+  const selected = relationship?.organization_record_id ? representable.find(choice => choice.recordId === relationship.organization_record_id
+    && choice.expectedVersion === relationship.organization_version) : null;
+  const settled = relationship && sourceIds ? await relationshipDeliverySettled(c.env.OPS_DB, record,
+    relationship.relationship_version, sourceIds.length) : false;
+  const available = !!relationship && !!sourceIds && settled && (relationship.organization_record_id === null || !!selected);
   return c.json({ recordId: record, kind, version: current.version, profile: normalizeProfile(checkedProfile.data),
-    scopes: currentScopes.data, linkage: standalone ? "standalone" : relationship?.organization_record_id ? "linked" : "unavailable",
-    editing: standalone ? { available: true, reason: null } : { available: false,
-      reason: relationship?.organization_record_id ? "linked_client_relationship_updates_unavailable" : "relationship_state_unavailable" } });
+    scopes: currentScopes.data, linkage: relationship?.organization_record_id ? "linked" : relationship ? "standalone" : "unavailable",
+    relationship: relationship ? { version: relationship.relationship_version,
+      organization: selected ? { recordId: selected.recordId, expectedVersion: selected.expectedVersion, name: selected.name } : null,
+      organizations: choices.map(choice => ({ recordId: choice.recordId, expectedVersion: choice.expectedVersion, name: choice.name })) } : null,
+    editing: available ? { available: true, reason: null } : { available: false,
+      reason: relationship && !settled ? "relationship_delivery_pending" : "relationship_state_unavailable" } });
 }
 
 /** Mounted under the shared authenticated /api mutation middleware, which
@@ -536,4 +820,6 @@ export function registerNativeDirectoryProfileRoutes(app: App): void {
     if (kind === "standalone-clients") return update(c, "client");
     throw new HTTPException(404, { message: "Directory record not found" });
   });
+  app.post(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/standalone-clients/:recordId/relationship`, mutateRelationship);
+  app.post(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/standalone-clients/:recordId/relationship-recovery`, recoverRelationship);
 }

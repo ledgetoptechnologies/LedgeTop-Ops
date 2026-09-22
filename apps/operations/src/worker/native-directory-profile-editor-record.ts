@@ -1,6 +1,95 @@
 import type { Env } from "./types";
 import { resolveProjectAlphaApiV2Connection } from "./project-alpha-api-v2-connections";
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const SOURCE_ID = /^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/;
+
+export type NativeDirectoryOrganizationChoice = Readonly<{
+  recordId: string;
+  expectedVersion: number;
+  name: string;
+  sourceIds: readonly string[];
+}>;
+
+type EnrollmentDestination = Readonly<{
+  sourceId: string; sourceInstanceUUID: string; applicationUUID: string; historyEpoch: string;
+  origin: string; externalCanonicalId: string;
+}>;
+
+function enrollment(value: unknown, recordId: string): EnrollmentDestination[] | null {
+  let parsed: unknown;
+  try { parsed = typeof value === "string" ? JSON.parse(value) : value; } catch { return null; }
+  if (!Array.isArray(parsed) || parsed.length < 1 || parsed.length > 16) return null;
+  const result: EnrollmentDestination[] = [], seen = new Set<string>();
+  for (const item of parsed) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+    const row = item as Record<string, unknown>;
+    if (Object.keys(row).length !== 6 || typeof row.sourceId !== "string" || !SOURCE_ID.test(row.sourceId)
+      || typeof row.sourceInstanceUUID !== "string" || !UUID.test(row.sourceInstanceUUID)
+      || typeof row.applicationUUID !== "string" || !UUID.test(row.applicationUUID)
+      || typeof row.historyEpoch !== "string" || !UUID.test(row.historyEpoch)
+      || typeof row.origin !== "string" || row.externalCanonicalId !== recordId) return null;
+    try { if (new URL(row.origin).origin !== row.origin || !row.origin.startsWith("https://")) return null; } catch { return null; }
+    const key = [row.sourceId, row.sourceInstanceUUID, row.applicationUUID, row.historyEpoch, row.origin].join("\0");
+    if (seen.has(key)) return null;
+    seen.add(key); result.push(row as EnrollmentDestination);
+  }
+  return result.sort((left, right) => left.sourceId.localeCompare(right.sourceId));
+}
+
+/** Returns only organizations whose immutable enrollment, active mapping, and
+ * currently configured PA destination identity agree exactly. No PA public ID,
+ * revision, generation, origin, application, or history identity leaves this
+ * server-owned helper. */
+export async function nativeDirectoryOrganizationChoices(env: Env): Promise<NativeDirectoryOrganizationChoice[]> {
+  const rows = (await env.OPS_DB.withSession("first-primary").prepare(`SELECT record.record_id recordId,
+      record.current_version expectedVersion,revision.profile_json profileJson,enrollment.destinations_json destinationsJson
+    FROM operations_directory_records record
+    JOIN operations_directory_revisions revision ON revision.record_id=record.record_id AND revision.version=record.current_version
+    JOIN native_directory_enrollments enrollment ON enrollment.record_id=record.record_id
+    WHERE record.record_kind='organization' ORDER BY record.record_id LIMIT 101`).all<{
+      recordId: string; expectedVersion: number; profileJson: string; destinationsJson: string;
+    }>()).results;
+  if (rows.length > 100) return [];
+  const choices: NativeDirectoryOrganizationChoice[] = [];
+  for (const row of rows) {
+    if (!row.recordId || Array.from(row.recordId).length > 191 || /\p{C}/u.test(row.recordId)
+      || new TextEncoder().encode(row.recordId).byteLength > 764
+      || !Number.isSafeInteger(row.expectedVersion) || row.expectedVersion < 1) continue;
+    let profile: unknown;
+    try { profile = JSON.parse(row.profileJson); } catch { continue; }
+    const profileName = profile && typeof profile === "object" && !Array.isArray(profile)
+      ? (profile as Record<string, unknown>).name : null;
+    const name = typeof profileName === "string" ? profileName.normalize("NFC").trim() : "";
+    if (!name || Array.from(name).length > 150 || /\p{C}/u.test(name)) continue;
+    const destinations = enrollment(row.destinationsJson, row.recordId);
+    if (!destinations) continue;
+    let valid = true;
+    for (const destination of destinations) {
+      try {
+        const configured = resolveProjectAlphaApiV2Connection(env, destination.sourceId);
+        if (!configured.enabled || !configured.connection.expectedHistoryEpoch
+          || configured.connection.expectedSourceInstanceId !== destination.sourceInstanceUUID
+          || configured.connection.expectedApplicationId !== destination.applicationUUID
+          || configured.connection.expectedHistoryEpoch !== destination.historyEpoch
+          || configured.connection.baseUrl !== destination.origin
+          || !await env.OPS_DB.withSession("first-primary").prepare(`SELECT 1 present
+            FROM pa_connectors connector JOIN project_alpha_active_directory_mappings mapping
+              ON mapping.source_id=connector.source_id
+            WHERE connector.source_id=? AND connector.state='active' AND connector.read_visible=1
+              AND mapping.source_instance_id=? AND mapping.application_id=? AND mapping.history_epoch_id=?
+              AND mapping.resource_type='organization' AND mapping.external_id=?`).bind(destination.sourceId,
+              destination.sourceInstanceUUID, destination.applicationUUID, destination.historyEpoch, row.recordId).first()) {
+          valid = false; break;
+        }
+      } catch { valid = false; break; }
+    }
+    if (valid) choices.push({ recordId: row.recordId, expectedVersion: row.expectedVersion, name,
+      sourceIds: destinations.map(value => value.sourceId) });
+  }
+  return choices.sort((left, right) => left.name.localeCompare(right.name) || left.recordId.localeCompare(right.recordId));
+}
+
 /** A projected PA public ID is never an Operations Directory record ID. Expose
  * an editor coordinate only when the active mapping proves the exact pair. */
 export async function nativeDirectoryProfileEditorRecord(env: Env, root: { source_id: string; root_namespace: string;

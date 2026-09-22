@@ -1,10 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ connection: vi.fn() }));
 vi.mock("../src/worker/project-alpha-api-v2-connections", () => ({ resolveProjectAlphaApiV2Connection: mocks.connection }));
-import { nativeDirectoryProfileEditorRecord } from "../src/worker/native-directory-profile-editor-record";
+import { nativeDirectoryOrganizationChoices, nativeDirectoryProfileEditorRecord } from "../src/worker/native-directory-profile-editor-record";
 import type { Env } from "../src/worker/types";
 
-const identity = { sourceId: "project-alpha:primary", sourceInstanceId: "source-instance", applicationId: "application", historyEpochId: "history" };
+const identity = { sourceId: "project-alpha:primary", sourceInstanceId: "11111111-1111-4111-8111-111111111111",
+  applicationId: "22222222-2222-4222-8222-222222222222", historyEpochId: "33333333-3333-4333-8333-333333333333" };
 function environment(rows: Array<{ recordId: string }>, mapping = identity, bound?: unknown[][]): Env {
   let values: unknown[] = [];
   const statement = { bind: (...next: unknown[]) => { values = next; bound?.push(next); return statement; }, all: async () => ({ results:
@@ -18,7 +19,8 @@ describe("Client Hub native profile editor coordinate", () => {
   const root = { source_id: identity.sourceId, root_namespace: "business", kind: "organization" as const, public_id: "pa-public-id" };
   beforeEach(() => {
     mocks.connection.mockReturnValue({ enabled: true, connection: { expectedSourceInstanceId: identity.sourceInstanceId,
-      expectedApplicationId: identity.applicationId, expectedHistoryEpoch: identity.historyEpochId } });
+      expectedApplicationId: identity.applicationId, expectedHistoryEpoch: identity.historyEpochId,
+      baseUrl: "https://pa.example.test" } });
   });
 
   it("uses only an exact, unambiguous active mapping rather than the projected public ID", async () => {
@@ -39,5 +41,29 @@ describe("Client Hub native profile editor coordinate", () => {
   it("does not create an editor coordinate for a non-business or non-Project-Alpha root", async () => {
     await expect(nativeDirectoryProfileEditorRecord(environment([{ recordId: "wrong" }]), { ...root, root_namespace: "portal" })).resolves.toBeNull();
     await expect(nativeDirectoryProfileEditorRecord(environment([{ recordId: "wrong" }]), { ...root, source_id: "delivery:local" })).resolves.toBeNull();
+  });
+
+  it("offers a non-UUID acquired organization only with exact configured enrollment and active mapping", async () => {
+    const recordId = "acquired:organization:west", destination = { sourceId: identity.sourceId,
+      sourceInstanceUUID: identity.sourceInstanceId, applicationUUID: identity.applicationId,
+      historyEpoch: identity.historyEpochId, origin: "https://pa.example.test", externalCanonicalId: recordId };
+    const make = (mapped: boolean) => {
+      const database = { withSession: () => database, prepare: (sql: string) => {
+        const statement = { bind: () => statement, all: async () => ({ results: sql.includes("operations_directory_records") ? [{
+          recordId, expectedVersion: 7, profileJson: JSON.stringify({ name: "Acquired West" }),
+          destinationsJson: JSON.stringify([destination]),
+        }] : [] }), first: async () => mapped ? { present: 1 } : null };
+        return statement;
+      } };
+      return { OPS_DB: database } as unknown as Env;
+    };
+    await expect(nativeDirectoryOrganizationChoices(make(true))).resolves.toEqual([{
+      recordId, expectedVersion: 7, name: "Acquired West", sourceIds: [identity.sourceId],
+    }]);
+    await expect(nativeDirectoryOrganizationChoices(make(false))).resolves.toEqual([]);
+    mocks.connection.mockReturnValueOnce({ enabled: true, connection: { expectedSourceInstanceId: "wrong",
+      expectedApplicationId: identity.applicationId, expectedHistoryEpoch: identity.historyEpochId,
+      baseUrl: "https://pa.example.test" } });
+    await expect(nativeDirectoryOrganizationChoices(make(true))).resolves.toEqual([]);
   });
 });

@@ -25,8 +25,11 @@ describe("Client Hub profile editor UI contract", () => {
     expect(editor).not.toContain("historyEpoch");
   });
 
-  it("keeps linked-client profile changes visibly unavailable", () => {
-    expect(editor).toContain("linked-client profile is read-only here");
-    expect(editor).toContain("immutable relationship assertion");
+  it("offers linked creation and keeps profile and relationship actions visibly separate", () => {
+    expect(editor).toContain("Organization relationship");
+    expect(editor).toContain("No organization (standalone client)");
+    expect(editor).toContain("This is separate from profile editing");
+    expect(editor).toContain("expectedRelationshipVersion: snapshot.relationship.version");
+    expect(editor).not.toContain("organizationPublicId");
   });
 });
