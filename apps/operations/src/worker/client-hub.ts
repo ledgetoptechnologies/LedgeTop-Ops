@@ -27,6 +27,7 @@ import { registerProjectOperationalRoutes } from "./project-operational-routes";
 import { registerOrganizationOperationalContactRoutes } from "./organization-operational-contact-routes";
 import { readClientHubProjectManagementAction } from "./project-alpha-project-management";
 import { exactBusinessProjectPublicId, listProjectAlphaContactRoles, projectAlphaContactRolesEnabled } from "./project-alpha-contact-roles";
+import { nativeDirectoryProfileEditorRecord } from "./native-directory-profile-editor-record";
 
 type AppEnv = {
   Bindings: Env;
@@ -258,6 +259,8 @@ async function clientHubDetail(env: Env, principal: StaffPrincipal, kind: Client
   // Cross-database reads are not an atomic snapshot; retain the source/authority
   // check around this final independently authorized metadata read.
   await verifyContext(env, principal, context);
+  const nativeDirectoryProfile = await nativeDirectoryProfileEditorRecord(env, workspace);
+  await verifyContext(env, principal, context);
   return {
     ...party,
     client: { ...workspace, route_kind: clientHubRouteKind(workspace.kind), detail_path: clientHubDetailPath(workspace) },
@@ -283,6 +286,7 @@ async function clientHubDetail(env: Env, principal: StaffPrincipal, kind: Client
     projectManagementAvailable: workspace.root_namespace === "business",
     businessActivityAvailable: workspace.root_namespace === "business",
     auditTimelineAvailable: true,
+    nativeDirectoryProfile,
   };
 }
 

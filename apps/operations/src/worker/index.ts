@@ -838,6 +838,7 @@ app.get("/api/session", async (c) => {
     mapboxPublicToken: c.env.MAPBOX_PUBLIC_TOKEN || null,
     units: { default: defaultViewerUnits(c.env), resolved: displayUnits },
     capabilities: {
+      nativeDirectoryProfileWrites: { enabled: nativeDirectoryProfileWritesEnabled(c.env) },
       clientFeedback: { enabled: clientFeedbackEnabled },
       dropboxImport: dropboxImportCapability(c.env),
       incomingUploads: incomingUploadsCapability(c.env),

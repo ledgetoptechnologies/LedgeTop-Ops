@@ -98,7 +98,7 @@ async function nativeActor(c: AppContext): Promise<Omit<NativeDirectoryWriterAct
 }
 
 async function selectGrant(db: D1Database, staffId: string,
-  permission: "directory.profile.edit" | "directory.identity.link" | "directory.enrollment.manage",
+  permission: "directory.profile.view" | "directory.profile.edit" | "directory.identity.link" | "directory.enrollment.manage",
   record: string, requestedScopes: readonly NativeDirectoryScope[], creating: boolean): Promise<string | null> {
   const primary = db.withSession("first-primary"), scopeJson = JSON.stringify(requestedScopes);
   const applies = creating ? `(grant.scope_kind='global'
@@ -438,6 +438,79 @@ async function update(c: AppContext, kind: NativeDirectoryProfileKind) {
   return publicResult(c, await writeNativeDirectoryProfile(c.env.OPS_DB, write));
 }
 
+/** Server-owned choices for a create intent.  These are advisory UI choices;
+ * the admission and write paths still re-check every selected value. */
+async function createOptions(c: AppContext) {
+  const kind: NativeDirectoryProfileKind = c.req.query("kind") === "client" ? "client" : "organization";
+  const actor = await nativeActor(c), permissions = kind === "client"
+    ? ["directory.profile.edit", "directory.enrollment.manage", "directory.identity.link"] as const
+    : ["directory.profile.edit", "directory.enrollment.manage"] as const;
+  const [areas, divisions, grants, connectors] = await Promise.all([
+    c.env.OPS_DB.withSession("first-primary").prepare("SELECT id,name FROM native_business_areas WHERE active=1 ORDER BY name,id").all<{ id: string; name: string }>(),
+    c.env.OPS_DB.withSession("first-primary").prepare("SELECT id,business_area_id businessAreaId,name FROM native_business_divisions WHERE active=1 ORDER BY name,id").all<{ id: string; businessAreaId: string; name: string }>(),
+    c.env.OPS_DB.withSession("first-primary").prepare(`SELECT permission,effect,scope_kind,business_area_id businessAreaId,division_id divisionId
+      FROM native_directory_grants WHERE staff_id=? AND active=1 AND permission IN (${permissions.map(() => "?").join(",")})`)
+      .bind(actor.staffId, ...permissions).all<{ permission: string; effect: "allow" | "deny"; scope_kind: string; businessAreaId: string | null; divisionId: string | null }>(),
+    c.env.OPS_DB.withSession("first-primary").prepare("SELECT source_id sourceId,display_name displayName FROM pa_connectors WHERE state='active' AND read_visible=1 ORDER BY display_name,source_id").all<{ sourceId: string; displayName: string }>(),
+  ]);
+  const effective = (permission: string, businessAreaId: string, divisionId: string | null) => {
+    const matches = (grant: { scope_kind: string; businessAreaId: string | null; divisionId: string | null }) => grant.scope_kind === "global"
+      || (grant.scope_kind === "business_area" && grant.businessAreaId === businessAreaId)
+      || (divisionId !== null && grant.scope_kind === "division" && grant.divisionId === divisionId);
+    const current = grants.results.filter(grant => grant.permission === permission && matches(grant));
+    return current.some(grant => grant.effect === "allow") && !current.some(grant => grant.effect === "deny");
+  };
+  const allowed = (area: string, division: string | null) => permissions.every(permission => effective(permission, area, division));
+  const scopes = areas.results.flatMap(area => {
+    const divisionsForArea = divisions.results.filter(division => division.businessAreaId === area.id && allowed(area.id, division.id))
+      .map(division => ({ id: division.id, name: division.name }));
+    return allowed(area.id, null) || divisionsForArea.length ? [{ id: area.id, name: area.name, divisions: divisionsForArea }] : [];
+  });
+  const sources: Array<{ id: string; name: string }> = [];
+  for (const source of connectors.results)
+    if (SOURCE_ID.test(source.sourceId) && typeof source.displayName === "string" && await configuredDestination(c.env, source.sourceId, "create-options"))
+      sources.push({ id: source.sourceId, name: source.displayName });
+  return c.json({ kind, scopes, sources });
+}
+
+/** Read the immutable, canonical profile revision for the editor.  This is a
+ * separate native-authority read: Client Hub projections are intentionally
+ * not used as an edit snapshot because they can lag a queued write. */
+async function profile(c: AppContext, kind: NativeDirectoryProfileKind) {
+  const record = c.req.param("recordId");
+  if (!record || Array.from(record).length > 191 || /\p{C}/u.test(record)
+    || (kind === "client" && !UUID.test(record))) throw new HTTPException(404, { message: "Directory record not found" });
+  const actor = await nativeActor(c);
+  if (!await selectGrant(c.env.OPS_DB, actor.staffId, "directory.profile.view", record, [], false))
+    throw new HTTPException(403, { message: "Directory profile view permission required" });
+  const current = await c.env.OPS_DB.withSession("first-primary").prepare(`SELECT record.current_version version,revision.profile_json
+    FROM operations_directory_records record JOIN operations_directory_revisions revision
+      ON revision.record_id=record.record_id AND revision.version=record.current_version
+    WHERE record.record_id=? AND record.record_kind=?`).bind(record, kind).first<{ version: number; profile_json: string }>();
+  if (!current || !Number.isSafeInteger(current.version) || current.version < 1) throw new HTTPException(404, { message: "Directory record not found" });
+  let parsedProfile: unknown;
+  try { parsedProfile = JSON.parse(current.profile_json); } catch { throw new HTTPException(409, { message: "Directory profile is unavailable" }); }
+  const profileSchema = kind === "organization" ? organizationProfile : clientCreateProfile;
+  const checkedProfile = profileSchema.safeParse(parsedProfile);
+  if (!checkedProfile.success) throw new HTTPException(409, { message: "Directory profile is unavailable" });
+  const scopeRows = (await c.env.OPS_DB.withSession("first-primary").prepare(`SELECT business_area_id businessAreaId,division_id divisionId
+    FROM native_directory_resource_scopes WHERE record_id=? AND active=1
+    ORDER BY business_area_id,coalesce(division_id,'')`).bind(record).all<{ businessAreaId: string; divisionId: string | null }>()).results;
+  const currentScopes = scopes.safeParse(scopeRows);
+  if (!currentScopes.success) throw new HTTPException(409, { message: "Directory profile is unavailable" });
+  if (kind === "organization") return c.json({ recordId: record, kind, version: current.version,
+    profile: normalizeProfile(checkedProfile.data), scopes: currentScopes.data, editing: { available: true, reason: null } });
+  const relationship = await c.env.OPS_DB.withSession("first-primary").prepare(`SELECT organization_record_id,relationship_version
+    FROM operations_directory_client_organizations WHERE client_record_id=?`).bind(record)
+    .first<{ organization_record_id: string | null; relationship_version: number }>();
+  const standalone = relationship && relationship.organization_record_id === null
+    && Number.isSafeInteger(relationship.relationship_version) && relationship.relationship_version >= 1;
+  return c.json({ recordId: record, kind, version: current.version, profile: normalizeProfile(checkedProfile.data),
+    scopes: currentScopes.data, linkage: standalone ? "standalone" : relationship?.organization_record_id ? "linked" : "unavailable",
+    editing: standalone ? { available: true, reason: null } : { available: false,
+      reason: relationship?.organization_record_id ? "linked_client_relationship_updates_unavailable" : "relationship_state_unavailable" } });
+}
+
 /** Mounted under the shared authenticated /api mutation middleware, which
  * supplies staff authentication plus same-origin and CSRF enforcement. This
  * route only derives native Directory and PA authority and never sends HTTP. */
@@ -450,6 +523,13 @@ export function registerNativeDirectoryProfileRoutes(app: App): void {
   app.post(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/create-admissions`, prepareCreateAdmission);
   app.post(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/organizations`, c => create(c, "organization"));
   app.post(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/standalone-clients`, c => create(c, "client"));
+  app.get(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/create-options`, createOptions);
+  app.get(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/:kind/:recordId`, c => {
+    const kind = c.req.param("kind");
+    if (kind === "organizations") return profile(c, "organization");
+    if (kind === "standalone-clients") return profile(c, "client");
+    throw new HTTPException(404, { message: "Directory record not found" });
+  });
   app.patch(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/:kind/:recordId`, c => {
     const kind = c.req.param("kind");
     if (kind === "organizations") return update(c, "organization");

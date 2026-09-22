@@ -27,7 +27,7 @@ const client = { name: "Example Client", email: "client@example.test", phone: ""
 type Row = Record<string, unknown>;
 function database(options: { enrollment?: unknown; outboxState?: string; deny?: string; missingGeneration?: boolean;
   admission?: false; connectorActive?: false; replay?: "exact" | "conflict"; linked?: boolean;
-  insertRace?: "exact" | "conflict" } = {}) {
+  insertRace?: "exact" | "conflict"; profile?: "organization" | "client"; inactiveDivision?: boolean } = {}) {
   let preparedAdmission: Row | null = null;
   const db = { prepare(sql: string) {
     let values: unknown[] = [];
@@ -35,6 +35,12 @@ function database(options: { enrollment?: unknown; outboxState?: string; deny?: 
       bind(...next: unknown[]) { values = next; return statement; },
       async all<T>() {
         if (sql.includes("operations_directory_materializations")) return { results: [{ command_id: ids.command }] as T[] };
+        if (sql.includes("FROM native_business_areas")) return { results: [{ id: "drone", name: "Drone operations" }] as T[] };
+        if (sql.includes("FROM native_business_divisions")) return { results: (options.inactiveDivision ? [] : [{ id: "survey", businessAreaId: "drone", name: "Survey" }]) as T[] };
+        if (sql.includes("FROM native_directory_grants")) return { results: [...values.slice(1).map(permission => ({ permission,
+          effect: "allow", scope_kind: "global", businessAreaId: null, divisionId: null })),
+          ...(options.deny ? [{ permission: options.deny, effect: "deny", scope_kind: "global", businessAreaId: null, divisionId: null }] : [])] as T[] };
+        if (sql.includes("FROM pa_connectors")) return { results: [{ sourceId, displayName: "Primary Project Alpha" }] as T[] };
         if (sql.includes("effect='allow'")) {
           const permission = String(values[1]);
           return { results: [{ id: permission === "directory.identity.link" ? "identity-grant" : "edit-grant",
@@ -52,6 +58,9 @@ function database(options: { enrollment?: unknown; outboxState?: string; deny?: 
         let value: unknown = null;
         if (sql.includes("SELECT grant.id")) value = options.deny === String(values[1]) ? null
           : { id: String(values[1]) === "directory.identity.link" ? "identity-grant" : "edit-grant" };
+        else if (sql.includes("SELECT record.current_version version,revision.profile_json")) value = {
+          version: 4, profile_json: JSON.stringify(options.profile === "client" ? client : organization),
+        };
         else if (sql.includes("SELECT id,staff_id,bound_access_subject")) value = preparedAdmission;
         else if (sql.includes("operations_directory_audit audit") && options.replay) value = {
           command_json: JSON.stringify({ operation: "create", mutationId: ids.mutation, resourceType: "organization",
@@ -101,7 +110,8 @@ function fixture(options: { enabled?: boolean; db?: D1Database } = {}) {
     TEAM_DOMAIN: "https://team.example.test", OPERATIONS_AUD: "operations-audience-1234",
     PROJECT_ALPHA_API_V2_CONNECTIONS: "server-owned", OPS_DB: options.db ?? database() } as unknown as Env;
   const send = (path: string, body: unknown, method = "POST", key = ids.mutation) => app.request(`https://ops.example${path}`, {
-    method, headers: { "Content-Type": "application/json", "Idempotency-Key": key }, body: JSON.stringify(body),
+    method, headers: { "Content-Type": "application/json", "Idempotency-Key": key },
+    ...(method === "GET" || method === "HEAD" ? {} : { body: JSON.stringify(body) }),
   }, env);
   return { send, env };
 }
@@ -131,6 +141,49 @@ describe("native Directory profile routes", () => {
     expect(response.status).toBe(404);
     expect(mocks.authenticate).not.toHaveBeenCalled();
     expect(mocks.writer).not.toHaveBeenCalled();
+  });
+
+  it("offers only server-derived source and effective scope choices for the create editor", async () => {
+    const response = await fixture().send(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/create-options?kind=client`, null, "GET");
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ kind: "client", sources: [{ id: sourceId, name: "Primary Project Alpha" }],
+      scopes: [{ id: "drone", name: "Drone operations", divisions: [{ id: "survey", name: "Survey" }] }] });
+  });
+
+  it("does not offer choices when a required create permission is denied, a division is inactive, or a connector is unavailable", async () => {
+    const denied = await fixture({ db: database({ deny: "directory.identity.link" }) }).send(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/create-options?kind=client`, null, "GET");
+    await expect(denied.json()).resolves.toEqual({ kind: "client", sources: [{ id: sourceId, name: "Primary Project Alpha" }], scopes: [] });
+    const inactiveDivision = await fixture({ db: database({ inactiveDivision: true }) }).send(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/create-options`, null, "GET");
+    await expect(inactiveDivision.json()).resolves.toEqual({ kind: "organization", sources: [{ id: sourceId, name: "Primary Project Alpha" }],
+      scopes: [{ id: "drone", name: "Drone operations", divisions: [] }] });
+    const connectorUnavailable = await fixture({ db: database({ connectorActive: false }) }).send(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/create-options`, null, "GET");
+    await expect(connectorUnavailable.json()).resolves.toEqual({ kind: "organization", sources: [],
+      scopes: [{ id: "drone", name: "Drone operations", divisions: [{ id: "survey", name: "Survey" }] }] });
+  });
+
+  it("publishes the default-off session capability without enabling the route", () => {
+    const source = readFileSync(new URL("../src/worker/index.ts", import.meta.url), "utf8");
+    expect(source).toContain("nativeDirectoryProfileWrites: { enabled: nativeDirectoryProfileWritesEnabled(c.env) }");
+    expect(readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8")).toContain('"NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED": "false"');
+  });
+
+  it("reads the current canonical profile and server-owned scopes only with native view authority", async () => {
+    const response = await fixture({ db: database() }).send(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/organizations/${ids.mutation}`, null, "GET");
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ recordId: ids.mutation, kind: "organization", version: 4,
+      profile: organization, scopes, editing: { available: true, reason: null } });
+    expect(mocks.writer).not.toHaveBeenCalled();
+    expect(mocks.connection).not.toHaveBeenCalled();
+    expect((await fixture({ db: database({ deny: "directory.profile.view" }) }).send(
+      `${NATIVE_DIRECTORY_PROFILE_ROUTE}/organizations/${ids.mutation}`, null, "GET")).status).toBe(403);
+  });
+
+  it("keeps linked-client profile updates explicitly unavailable in the read model", async () => {
+    const response = await fixture({ db: database({ profile: "client", linked: true }) }).send(
+      `${NATIVE_DIRECTORY_PROFILE_ROUTE}/standalone-clients/${ids.client}`, null, "GET");
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual(expect.objectContaining({ recordId: ids.client, kind: "client", version: 4,
+      profile: client, scopes, linkage: "linked", editing: { available: false, reason: "linked_client_relationship_updates_unavailable" } }));
   });
 
   it("prepares and exactly replays a deterministic server-derived create admission", async () => {
