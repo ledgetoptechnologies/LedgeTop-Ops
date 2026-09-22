@@ -59,8 +59,8 @@ async function create(db: D1Database, kind: "organization" | "client", recordId:
   return writeNativeDirectoryProfile(db, input);
 }
 
-describe("0135 canonical Directory relationship IDs", () => {
-  it("preserves a guarded populated relationship and admits bounded canonical IDs after upgrade", async () => {
+describe("0135 canonical Directory relationship IDs and 0136 reconciliation ledger", () => {
+  it("preserves populated Directory authority through both forward upgrades", async () => {
     const runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06",
       script: "export default {fetch(){return new Response('ok')}}", d1Databases: ["OPS_DB"] });
     runtimes.push(runtime);
@@ -101,5 +101,27 @@ describe("0135 canonical Directory relationship IDs", () => {
       (id,staff_id,bound_access_subject,record_id,record_kind,scopes_json,profile_json,destinations_json,issued_by)
       VALUES('overlong-admission',?,?,?,?,?,?,?,?)`).bind(actor.staffId, actor.accessSubject, "x".repeat(192), "client",
         JSON.stringify(scopes), JSON.stringify(clientProfile), "[]", actor.staffId).run()).rejects.toThrow(/length\(record_id\) BETWEEN 1 AND 191/);
+
+    const protectedBefore = await db.batch([
+      db.prepare("SELECT * FROM operations_directory_records ORDER BY record_id"),
+      db.prepare("SELECT * FROM operations_directory_revisions ORDER BY record_id,version"),
+      db.prepare("SELECT * FROM operations_directory_client_organizations ORDER BY client_record_id"),
+      db.prepare("SELECT * FROM operations_directory_client_organization_history ORDER BY client_record_id,relationship_version"),
+      db.prepare("SELECT * FROM project_alpha_directory_outbox ORDER BY command_id"),
+    ]);
+    const reconciliationMigration = readFileSync(new URL("../migrations/0136_project_alpha_directory_reconciliation.sql", import.meta.url), "utf8");
+    await db.batch(splitD1MigrationStatements(reconciliationMigration).map(sql => db.prepare(sql)));
+    const protectedAfter = await db.batch([
+      db.prepare("SELECT * FROM operations_directory_records ORDER BY record_id"),
+      db.prepare("SELECT * FROM operations_directory_revisions ORDER BY record_id,version"),
+      db.prepare("SELECT * FROM operations_directory_client_organizations ORDER BY client_record_id"),
+      db.prepare("SELECT * FROM operations_directory_client_organization_history ORDER BY client_record_id,relationship_version"),
+      db.prepare("SELECT * FROM project_alpha_directory_outbox ORDER BY command_id"),
+    ]);
+    expect(protectedAfter.map(result => result.results)).toEqual(protectedBefore.map(result => result.results));
+    expect(await db.prepare("SELECT count(*) n FROM project_alpha_directory_reconciliation_runs").first<number>("n")).toBe(0);
+    expect(await db.prepare("SELECT count(*) n FROM project_alpha_directory_reconciliation_checkpoints").first<number>("n")).toBe(0);
+    expect(await db.prepare("SELECT count(*) n FROM project_alpha_directory_reconciliation_observations").first<number>("n")).toBe(0);
+    expect(await db.prepare("SELECT count(*) n FROM project_alpha_directory_reconciliation_findings").first<number>("n")).toBe(0);
   }, 240_000);
 });
