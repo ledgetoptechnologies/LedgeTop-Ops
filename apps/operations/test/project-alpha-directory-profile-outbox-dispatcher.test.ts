@@ -65,6 +65,14 @@ async function create(kind: "organization" | "client", organizationRecordId: str
     (id,staff_id,bound_access_subject,record_id,record_kind,scopes_json,profile_json,destinations_json,issued_by)
     VALUES(?,?,?,?,?,?,?,?,?)`).bind(createAdmissionId, staff.staffId, staff.accessSubject, recordId, kind,
       JSON.stringify(input.scopes), JSON.stringify(input.profile), JSON.stringify(input.destinations.map(({ expectedAuthorizationGeneration: _, ...value }) => value)), staff.staffId).run();
+  if (kind === "client") {
+    const organizationRecordVersion = organizationRecordId === null ? null
+      : await db.prepare("SELECT current_version FROM operations_directory_records WHERE record_id=? AND record_kind='organization'")
+        .bind(organizationRecordId).first<number>("current_version");
+    await db.prepare(`INSERT INTO native_directory_create_admission_relationships
+      (create_admission_id,client_record_id,organization_record_id,organization_record_version) VALUES(?,?,?,?)`)
+      .bind(createAdmissionId, recordId, organizationRecordId, organizationRecordVersion).run();
+  }
   const result = await writeNativeDirectoryProfile(db, input); if (result.status !== "written") throw new Error(result.reason);
   return { input, staff, commandId: result.commandIds[0]! };
 }
@@ -73,7 +81,7 @@ beforeAll(async () => {
   runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06", script: "export default {fetch(){return new Response('ok')}}", d1Databases: ["OPS_DB"] });
   db = await runtime.getD1Database("OPS_DB") as D1Database;
   const directory = new URL("../migrations/", import.meta.url);
-  for (const migration of readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0132").sort())
+  for (const migration of readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0135").sort())
     await db.batch(splitD1MigrationStatements(readFileSync(new URL(migration, directory), "utf8")).map(sql => db.prepare(sql)));
   await db.batch([
     db.prepare("INSERT INTO staff_users(id,email,display_name,access_subject,status) VALUES('owner','owner@example.test','Owner','access|owner','active')"),
