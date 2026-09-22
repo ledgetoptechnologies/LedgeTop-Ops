@@ -11,6 +11,7 @@ const applicationId = "10000000-0000-4000-8000-000000000002";
 const historyEpochId = "10000000-0000-4000-8000-000000000003";
 const recordId = "30000000-0000-4000-8000-000000000001";
 const publicId = "a".repeat(32);
+const bindingStatusPath = `/api/v2/bindings/organization/status/${Buffer.from(recordId).toString("base64url")}`;
 const reviewer = { staffId: "staff", accessSubject: "access|staff" };
 const reviewId = "20000000-0000-4000-8000-000000000001";
 const commandId = "20000000-0000-4000-8000-000000000002";
@@ -21,7 +22,13 @@ const connections = JSON.stringify({ version: 1, instances: { [sourceId]: {
   sourceInstanceId, applicationId, historyEpoch: historyEpochId,
 } } });
 
-type Remote = { revision: string; profileGeneration: string; bindingGeneration: string; bound: boolean };
+type Remote = Readonly<{
+  revision: string;
+  profileGeneration: string;
+  bindingGeneration: string;
+  bound: boolean;
+  bindResponse?: "success" | "malformed_success" | "precondition_conflict";
+}>;
 
 function remote(state: Remote): typeof fetch {
   let request = 10;
@@ -31,7 +38,18 @@ function remote(state: Remote): typeof fetch {
     const reply = (value: Record<string, unknown>) => new Response(JSON.stringify({ ...value, requestId }), {
       headers: { "Content-Type": "application/json", "Cache-Control": "no-store", "X-Request-ID": requestId },
     });
-    if (path === "/api/v2/capabilities") return reply({ apiVersion: "2", sourceInstanceId, applicationId,
+    const headers = new Headers(init?.headers);
+    const assertIdentityHeaders = () => {
+      if (headers.get("Authorization") !== "Bearer deployment-only-secret"
+        || headers.get("X-PA-Source-Instance-ID") !== sourceInstanceId
+        || headers.get("X-PA-Application-ID") !== applicationId
+        || headers.get("X-PA-History-Epoch") !== historyEpochId)
+        throw new Error("PA request did not preserve the configured identity boundary");
+    };
+    if (path === "/api/v2/capabilities") {
+      if (init?.method !== "GET" || headers.get("Authorization") !== "Bearer deployment-only-secret")
+        throw new Error("invalid PA capabilities preflight");
+      return reply({ apiVersion: "2", sourceInstanceId, applicationId,
       historyEpoch: historyEpochId, grantedCapabilities: ["api.capabilities.read", "directory.organizations.read",
         "directory.organizations.binding_status.read", "directory.organizations.bind"].map(name => ({ name })),
       implementedEndpoints: [
@@ -41,25 +59,47 @@ function remote(state: Remote): typeof fetch {
         { method: "POST", path: "/api/v2/directory/organizations/bindings/commands", requiredCapability: "directory.organizations.bind", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true, requiresExpectedPublicId: true, requiresExpectedRevision: true },
       ],
     });
-    if (path === `/api/v2/directory/organizations/${publicId}`) return reply({ apiVersion: "2", sourceInstanceId,
+    }
+    if (path === `/api/v2/directory/organizations/${publicId}`) {
+      if (init?.method !== "GET") throw new Error("invalid PA profile read method");
+      assertIdentityHeaders();
+      return reply({ apiVersion: "2", sourceInstanceId,
       applicationId, historyEpoch: historyEpochId, authorizationGeneration: state.profileGeneration,
       resource: { type: "organization", id: publicId, revision: state.revision }, data: { publicId,
         name: "Existing customer", email: null, phone: null,
         address: { line1: null, line2: null, city: null, state: null, postalCode: null, country: null } },
-    });
-    if (path.startsWith("/api/v2/bindings/organization/status/")) return reply({ apiVersion: "2", sourceInstanceId,
+      });
+    }
+    if (path === bindingStatusPath) {
+      if (init?.method !== "GET") throw new Error("invalid PA binding-status read method");
+      assertIdentityHeaders();
+      return reply({ apiVersion: "2", sourceInstanceId,
       applicationId, historyEpoch: historyEpochId, authorizationGeneration: state.bindingGeneration,
       binding: { type: "organization", externalId: recordId, publicId, createdAt: "2026-09-22T12:00:00.000Z" },
       resource: { revision: state.revision, present: state.bound },
-    });
-    if (init?.method === "POST") {
-      const command = JSON.parse(String(init.body)) as { externalId: string };
-      state.bound = true;
-      return reply({ replayed: false, sourceInstanceId, applicationId, historyEpoch: historyEpochId,
-        result: { binding: { publicId }, resource: { type: "organization", id: command.externalId, revision: state.revision } },
       });
     }
-    return new Response("not found", { status: 404 });
+    if (path === "/api/v2/directory/organizations/bindings/commands") {
+      if (init?.method !== "POST" || headers.get("Content-Type") !== "application/json; charset=utf-8")
+        throw new Error("invalid PA bind request method or media type");
+      assertIdentityHeaders();
+      const command = JSON.parse(String(init.body));
+      const expected = { commandId, externalId: recordId, expectedPublicId: publicId, expectedRevision: state.revision };
+      if (JSON.stringify(command) !== JSON.stringify(expected))
+        throw new Error("PA bind command did not preserve exact selection preconditions");
+      if (state.bindResponse === "precondition_conflict")
+        return new Response(JSON.stringify({ code: "PRECONDITION_FAILED", requestId }), {
+          status: 409, headers: { "Content-Type": "application/json", "Cache-Control": "no-store", "X-Request-ID": requestId },
+        });
+      if (state.bindResponse === "malformed_success") return reply({ replayed: false, sourceInstanceId, applicationId,
+        historyEpoch: historyEpochId, result: { binding: { publicId }, resource: { type: "organization", id: "wrong", revision: state.revision } },
+      });
+      state.bound = true;
+      return reply({ replayed: false, sourceInstanceId, applicationId, historyEpoch: historyEpochId,
+        result: { binding: { publicId }, resource: { type: "organization", id: recordId, revision: state.revision } },
+      });
+    }
+    throw new Error(`unexpected PA request: ${init?.method ?? "GET"} ${path}`);
   });
 }
 
@@ -123,6 +163,7 @@ describe("private existing Directory acquisition-to-activation acceptance harnes
       { reviewItemId: (await db.prepare("SELECT receipt_id FROM project_alpha_existing_directory_binding_review_evidence").first<string>("receipt_id"))!, idempotencyKey }, actor, fetcher);
   }
   async function activationCount() { return db.prepare("SELECT count(*) count FROM project_alpha_existing_directory_binding_activation_receipts").first<number>("count"); }
+  async function mappingCount() { return db.prepare("SELECT count(*) count FROM project_alpha_acquired_canonical_mappings").first<number>("count"); }
   async function deliveryBytes() {
     return {
       share: await db.prepare("SELECT url,hex(payload) payload FROM delivery_public_shares WHERE id='share'").first(),
@@ -154,6 +195,16 @@ describe("private existing Directory acquisition-to-activation acceptance harnes
     await expect(activate(fetcher, { staffId: "other", accessSubject: "access|other" }))
       .resolves.toEqual({ status: "blocked", reason: "actor" });
     expect(await activationCount()).toBe(0);
+  });
+
+  it.each(["malformed_success", "precondition_conflict"] as const)("does not materialize a mapping on PA %s", async bindResponse => {
+    const fetcher = remote({ revision: "7", profileGeneration: "8", bindingGeneration: "8", bound: false, bindResponse });
+    const before = await deliveryBytes();
+    await expect(acquire(fetcher)).resolves.toMatchObject(bindResponse === "precondition_conflict"
+      ? { status: "conflict", reason: "remote" } : { status: "uncertain", reason: "transport" });
+    expect(await mappingCount()).toBe(0);
+    expect(await activationCount()).toBe(0);
+    expect(await deliveryBytes()).toEqual(before);
   });
 
   it("keeps the chain inactive when PA revision or its paired authorization generation changes", async () => {
