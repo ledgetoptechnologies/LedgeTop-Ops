@@ -5957,37 +5957,35 @@ pending; this requirement does not claim a deployed UI change.
 
 ### September 22 — private adoption foundation, still default-off
 
-- Operations commits `3cfbf2b`, `11a467d`, `5a909fe`, `8218ea2`, `4f33361`,
-  and `41b0f2f` add the private adoption foundation only. Directory now has a
+- Operations commits through `24a4b51` add the private adoption foundation
+  only. Directory now has a
   strict existing-record binding transport, an immutable reviewed acquisition
   coordinator, inactive canonical/native-owner materialization, and a separate
   activation consumer with authenticated-actor binding plus fresh exact PA
-  profile and binding-status reads. Project now has reviewed reservation and
-  bind-planning consumers, including active acquired-Directory mapping
-  composition and authenticated-caller binding. Every one of these consumers
-  remains private, unmounted, and default-off; no browser or administrator
-  route invokes them.
-- Focused evidence was preserved per commit. `3cfbf2b` passed the adoption D1
-  suite `15/15`, Project command producer `19/19`, and migration chain `2/2`
-  (`3` files, `36` tests). `11a467d` passed `3` files / `16` tests.
-  `5a909fe` passed `3` files / `28` tests after correcting the pre-review versus
-  post-binding evidence transition. `8218ea2` passed the focused adoption D1
-  suite `24/24`. `41b0f2f` passed that suite `26/26` after authenticated-caller
-  binding. Independent current Project verification passes `3` files / `47`
-  tests (`26` adoption, `19` command, `2` migration-chain). For `4f33361`, the
-  current Directory activation suite passes `18/18`, and the coordinator plus
-  Directory-read suites pass `27/27`; an independent combined checkpoint before
-  the final standalone-client assertion passed `4` files / `52` tests. These
-  are focused local tests, not live production acceptance.
+  profile and binding-status reads. Project now has an immutable review-evidence
+  producer plus reviewed reservation and bind-planning consumers, including
+  active acquired-Directory mapping composition and authenticated-caller
+  binding. Every one of these consumers remains private, unmounted, and
+  default-off; no browser or administrator route invokes them.
+- Current focused evidence includes the complete Project adoption/evidence/bind
+  suite `39/39`, its producer subset `10/10`, the populated migration chain
+  through `0130` `4/4`, and the private Directory acquisition-to-activation
+  harness `5/5`. Independent reruns passed the migration chain `4/4`, Directory
+  harness `5/5`, and the final replay/race regressions `2/2`. Byte-exact PA
+  evidence remains retained and hash-checked; replay excludes only the volatile
+  PA request ID from its stable semantic digest. A simulated post-observation PA
+  revision/projection change terminates as `resource_precondition_conflict`
+  without creating a mapping or changing public-link data. These are focused
+  local tests, not live production acceptance.
 - No migration in this increment was applied to production D1. No production
   Worker, PA deployment, credential, feature flag, public link, Delivery row,
   or legacy mapping changed. PA managed mode and its generic API-v2 flags remain
   off. Legacy integrations and mappings remain active and authoritative; the
   portal migration and cutover have not started.
-- Important implementation gaps remain. No executable Project review-evidence
-  producer currently creates the independent reviewed evidence from an
-  authenticated operator workflow, and no authenticated route mounts the new
-  Directory or Project consumers. Migration `0122` canonical Project guards
+- Important implementation gaps remain. No authenticated, same-origin,
+  CSRF-protected, default-off administrator route mounts the new Directory or
+  Project consumers. Any such route must derive the actor from the authenticated
+  server session rather than request JSON. Migration `0122` canonical Project guards
   still recognize only `project_alpha_directory_mappings`, not acquired active
   mappings. Changing that boundary requires a separate forward migration and
   explicit owner authorization; neither `0126` nor the private adoption
