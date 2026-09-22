@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { Miniflare } from "miniflare";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import { writeNativeDirectoryProfile, type NativeDirectoryProfileWrite } from "../src/worker/native-directory-profile-writer";
-import { writeNativeDirectoryRelationship, type NativeDirectoryRelationshipWrite } from "../src/worker/native-directory-relationship-writer";
+import { maximumDirectoryRevisionEvidence, writeNativeDirectoryRelationship, type NativeDirectoryRelationshipWrite } from "../src/worker/native-directory-relationship-writer";
 import { dispatchProjectAlphaDirectoryRelationshipCommand } from "../src/worker/project-alpha-directory-relationship-outbox-dispatcher";
 import type { ProjectAlphaApiV2Endpoint } from "../src/worker/project-alpha-api-v2";
 
@@ -19,21 +19,23 @@ const profileActor={staffId:actor.staffId,accessSubject:actor.accessSubject,admi
   loginEmail:actor.loginEmail,profileVersion:1,selectedIdentityGrantId:actor.selectedIdentityGrantId};
 function uuid(){return`00000000-0000-4000-8000-${String(sequence++).padStart(12,"0")}`;}
 function publicId(){return(sequence++).toString(16).padStart(32,"0");}
-function destination(recordId:string,second=false){return{sourceId:second?"project-alpha:secondary":sourceId,
+function destination(recordId:string,second=false,originOverride=baseUrl){return{sourceId:second?"project-alpha:secondary":sourceId,
   sourceInstanceUUID:second?"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa":source,applicationUUID:second?"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb":application,
-  historyEpoch:second?"cccccccc-cccc-4ccc-8ccc-cccccccccccc":epoch,origin:second?"https://pa-secondary.example.test":baseUrl,
+  historyEpoch:second?"cccccccc-cccc-4ccc-8ccc-cccccccccccc":epoch,origin:second?"https://pa-secondary.example.test":originOverride,
   externalCanonicalId:recordId,expectedAuthorizationGeneration:"0"};}
 function env(second=false){const instances:Record<string,unknown>={[sourceId]:{sourceId,enabled:true,baseUrl,apiKey:"secret",sourceInstanceId:source,applicationId:application,historyEpoch:epoch}};
   if(second)instances["project-alpha:secondary"]={sourceId:"project-alpha:secondary",enabled:true,baseUrl:"https://pa-secondary.example.test",apiKey:"secret2",sourceInstanceId:"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",applicationId:"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",historyEpoch:"cccccccc-cccc-4ccc-8ccc-cccccccccccc"};
   return{OPS_DB:db,PROJECT_ALPHA_API_V2_CONNECTIONS:JSON.stringify({version:1,instances})};}
-async function create(kind:"organization"|"client",two=false){const recordId=uuid(),mutationId=uuid(),createAdmissionId=`admission-${mutationId}`;
-  const destinations=[destination(recordId),...(two?[destination(recordId,true)]:[])],scopes=[{businessAreaId:"area",divisionId:"division"}];
+async function create(kind:"organization"|"client",two=false,recordId=uuid(),originOverride=baseUrl){const mutationId=uuid(),createAdmissionId=`admission-${mutationId}`;
+  const destinations=[destination(recordId,false,originOverride),...(two?[destination(recordId,true)]:[])],scopes=[{businessAreaId:"area",divisionId:"division"}];
   const input={operation:"create",mutationId,createAdmissionId,recordId,expectedLocalVersion:0,kind,profile:kind==="client"?clientProfile:orgProfile,
     scopes,destinations,actor:profileActor,
     ...(kind==="client"?{relationship:{organizationRecordId:null,expectedRelationshipVersion:0}}:{})} as NativeDirectoryProfileWrite;
   await db.prepare(`INSERT INTO native_directory_create_admissions(id,staff_id,bound_access_subject,record_id,record_kind,scopes_json,profile_json,destinations_json,issued_by)
     VALUES(?,?,?,?,?,?,?,?,?)`).bind(createAdmissionId,actor.staffId,actor.accessSubject,recordId,kind,JSON.stringify(scopes),JSON.stringify(input.profile),
       JSON.stringify(destinations.map(({expectedAuthorizationGeneration:_,...value})=>value)),actor.staffId).run();
+  if(kind==="client")await db.prepare(`INSERT INTO native_directory_create_admission_relationships(create_admission_id,client_record_id)
+    VALUES(?,?)`).bind(createAdmissionId,recordId).run();
   const result=await writeNativeDirectoryProfile(db,input);if(result.status!=="written")throw new Error(JSON.stringify(result));
   return{recordId,mutationId,commandIds:result.commandIds,input};}
 async function acknowledge(value:Awaited<ReturnType<typeof create>>,kind:"organization"|"client",generation:string){const id=publicId();
@@ -45,6 +47,22 @@ async function acknowledge(value:Awaited<ReturnType<typeof create>>,kind:"organi
         .bind(JSON.stringify({status:"acknowledged",response:{sourceInstanceId:row!.expected_source_instance_id,applicationId:row!.application_id,
           historyEpoch:row!.expected_history_epoch_id,result:{resource:{type:kind,id:value.recordId,publicId:id,revision:"1"},data:{publicId:id},authorizationGeneration:generation}}}),commandId)]);}
   await db.prepare("UPDATE operations_directory_intents SET state='acknowledged' WHERE mutation_id=?").bind(value.mutationId).run();return id;}
+async function updateAndAcknowledge(value:Awaited<ReturnType<typeof create>>,kind:"organization"|"client",publicIdValue:string,
+  expectedGeneration:string,revisionValue:string,generation:string,relationship?:{organizationRecordId:string|null;expectedRelationshipVersion:number}){
+  const input={operation:"update",mutationId:uuid(),recordId:value.recordId,expectedLocalVersion:1,kind,
+    profile:kind==="client"?{name:"Client Updated",email:clientProfile.email,phone:clientProfile.phone,addressLine1:clientProfile.addressLine1,
+      addressLine2:clientProfile.addressLine2,city:clientProfile.city,state:clientProfile.state,postalCode:clientProfile.postalCode,country:clientProfile.country}
+      :{...orgProfile,name:"Organization Updated"},
+    destinations:[{...destination(value.recordId),expectedAuthorizationGeneration:expectedGeneration}],actor:profileActor,
+    ...(kind==="client"?{relationship:relationship!}:{})} as NativeDirectoryProfileWrite;
+  const result=await writeNativeDirectoryProfile(db,input);if(result.status!=="written")throw new Error(JSON.stringify(result));
+  for(const commandId of result.commandIds){const row=await db.prepare("SELECT source_id,expected_source_instance_id,application_id,expected_history_epoch_id FROM project_alpha_directory_outbox WHERE command_id=?").bind(commandId).first<Record<string,string>>();
+    await db.batch([db.prepare("UPDATE project_alpha_directory_outbox SET state='leased',lease_token='fixture',lease_expires_at=9999999999999 WHERE command_id=?").bind(commandId),
+      db.prepare("UPDATE project_alpha_directory_outbox SET state='acknowledged',outcome_json=?,lease_token=NULL,lease_expires_at=NULL WHERE command_id=?")
+        .bind(JSON.stringify({status:"acknowledged",response:{sourceInstanceId:row!.expected_source_instance_id,applicationId:row!.application_id,
+          historyEpoch:row!.expected_history_epoch_id,result:{resource:{type:kind,id:value.recordId,publicId:publicIdValue,revision:revisionValue},
+            data:{publicId:publicIdValue},authorizationGeneration:generation}}}),commandId)]);}
+  await db.prepare("UPDATE operations_directory_intents SET state='acknowledged' WHERE mutation_id=?").bind(result.mutationId).run();return result;}
 function writeInput(client:string,version:number,previous:{recordId:string;expectedRecordVersion:number}|null,organization:{recordId:string;expectedRecordVersion:number}|null,mutationId=uuid()):NativeDirectoryRelationshipWrite{
   return{mutationId,clientRecordId:client,expectedRelationshipVersion:version,expectedClientRecordVersion:1,previousOrganization:previous,organization,
     actor:{staffId:actor.staffId,accessSubject:actor.accessSubject,email:actor.email,admissionVersion:1,profileVersion:1}};}
@@ -59,7 +77,7 @@ function transport(action:"assign"|"move"|"remove",clientId:string,organizationI
     result:{action,client:{publicId:clientId,revision},organizationPublicId:organizationId,authorizationGeneration:generation}});});}
 
 beforeAll(async()=>{runtime=new Miniflare({modules:true,compatibilityDate:"2026-08-06",script:"export default {fetch(){return new Response('ok')}}",d1Databases:["OPS_DB"]});db=await runtime.getD1Database("OPS_DB") as D1Database;
-  const directory=new URL("../migrations/",import.meta.url);for(const migration of readdirSync(directory).filter(name=>/^\d{4}_.+\.sql$/.test(name)&&name.slice(0,4)<="0133").sort())
+  const directory=new URL("../migrations/",import.meta.url);for(const migration of readdirSync(directory).filter(name=>/^\d{4}_.+\.sql$/.test(name)&&name.slice(0,4)<="0135").sort())
     try{await db.batch(splitD1MigrationStatements(readFileSync(new URL(migration,directory),"utf8")).map(sql=>db.prepare(sql)));}catch(error){throw new Error(`migration ${migration}: ${String(error)}`);}
   await db.batch([db.prepare("INSERT INTO staff_users(id,email,display_name,access_subject,status) VALUES('owner','owner@example.test','Owner','access|owner','active')"),
     db.prepare("INSERT INTO staff_users(id,email,display_name,access_subject,status) VALUES(?,?,?,?, 'active')").bind(actor.staffId,actor.email,"Relationship Actor",actor.accessSubject),
@@ -97,6 +115,78 @@ describe("native Directory relationship writer and outbox",()=>{
     await expect(writeNativeDirectoryRelationship(db,writeInput(client.recordId,1,null,{recordId:organization.recordId,expectedRecordVersion:1}))).resolves.toEqual({status:"blocked",reason:"destination_mismatch"});
     expect(await db.prepare("SELECT organization_record_id,relationship_version FROM operations_directory_client_organizations WHERE client_record_id=?").bind(client.recordId).first()).toEqual({organization_record_id:null,relationship_version:1});
     expect(await db.prepare("SELECT count(*) n FROM project_alpha_directory_relationship_outbox WHERE client_record_id=?").bind(client.recordId).first("n")).toBe(0);
+  });
+
+  it("accepts an organization with a superset of client destinations and canonical non-UUID IDs",async()=>{const organization=await create("organization",true,"ops/org/adopted-1001"),client=await create("client",false,"ops/client/adopted-1001");
+    const organizationPublic=await acknowledge(organization,"organization","1"),clientPublic=await acknowledge(client,"client","2");
+    const written=await writeNativeDirectoryRelationship(db,writeInput(client.recordId,1,null,{recordId:organization.recordId,expectedRecordVersion:1}));
+    if(written.status!=="written")throw new Error(JSON.stringify(written));
+    expect(written).toMatchObject({status:"written",reservations:[{command:{expectedClientRevision:"1",organization:{externalId:"ops/org/adopted-1001",publicId:organizationPublic}}}]});
+    const acknowledgedGeneration=String(BigInt(written.reservations[0]!.command.expectedAuthorizationGeneration)+1n);
+    await expect(dispatchProjectAlphaDirectoryRelationshipCommand(env(),sourceId,written.reservations[0]!.commandId,
+      transport("assign",clientPublic,organizationPublic,"2",acknowledgedGeneration))).resolves.toMatchObject({status:"acknowledged"});
+  });
+
+  it("selects the numeric maximum when a current profile acknowledgement follows relationship evidence",async()=>{const first=await create("organization"),second=await create("organization"),client=await create("client");
+    const firstPublic=await acknowledge(first,"organization","1"),secondPublic=await acknowledge(second,"organization","2"),clientPublic=await acknowledge(client,"client","3");
+    const assigned=await writeNativeDirectoryRelationship(db,writeInput(client.recordId,1,null,{recordId:first.recordId,expectedRecordVersion:1}));
+    if(assigned.status!=="written")throw new Error(JSON.stringify(assigned));
+    const relationshipGeneration=String(BigInt(assigned.reservations[0]!.command.expectedAuthorizationGeneration)+1n);
+    await dispatchProjectAlphaDirectoryRelationshipCommand(env(),sourceId,assigned.reservations[0]!.commandId,transport("assign",clientPublic,firstPublic,"2",relationshipGeneration));
+    const profileGeneration=String(BigInt(relationshipGeneration)+1n);
+    await updateAndAcknowledge(client,"client",clientPublic,relationshipGeneration,"10",profileGeneration,{organizationRecordId:first.recordId,expectedRelationshipVersion:2});
+    const moved=await writeNativeDirectoryRelationship(db,{...writeInput(client.recordId,2,{recordId:first.recordId,expectedRecordVersion:1},
+      {recordId:second.recordId,expectedRecordVersion:1}),expectedClientRecordVersion:2});
+    expect(moved).toMatchObject({status:"written",reservations:[{command:{expectedClientRevision:"10",expectedAuthorizationGeneration:profileGeneration,
+      organization:{publicId:secondPublic}}}]});
+  });
+
+  it("selects a newer bounded refresh revision after profile acknowledgement",()=>{
+    expect(maximumDirectoryRevisionEvidence(["9","10"])).toBe("10");
+    expect(maximumDirectoryRevisionEvidence(["10","09"])).toBeNull();
+    expect(maximumDirectoryRevisionEvidence(["10","9223372036854775808"])).toBeNull();
+  });
+
+  it("ignores newer generation evidence from the same identity tuple at a different origin",async()=>{
+    const wrongOrigin=await create("organization",false,uuid(),"https://other-pa.example.test");
+    await acknowledge(wrongOrigin,"organization","999");
+    const organization=await create("organization"),client=await create("client");
+    await acknowledge(organization,"organization","100");await acknowledge(client,"client","101");
+    const written=await writeNativeDirectoryRelationship(db,writeInput(client.recordId,1,null,
+      {recordId:organization.recordId,expectedRecordVersion:1}));
+    expect(written).toMatchObject({status:"written",reservations:[{command:{expectedAuthorizationGeneration:"101"}}]});
+  });
+
+  it("fails closed before transport when exact newer or incoherent public-ID evidence appears",async()=>{const organization=await create("organization"),client=await create("client"),organizationPublic=await acknowledge(organization,"organization","1");await acknowledge(client,"client","2");
+    const pending=await writeNativeDirectoryRelationship(db,writeInput(client.recordId,1,null,{recordId:organization.recordId,expectedRecordVersion:1}));
+    if(pending.status!=="written")throw new Error(JSON.stringify(pending));const send=vi.fn<typeof fetch>();
+    const clientCommand=client.commandIds[0]!,outcome=JSON.parse(String(await db.prepare("SELECT outcome_json FROM project_alpha_directory_outbox WHERE command_id=?").bind(clientCommand).first("outcome_json")));
+    outcome.response.result.resource.revision="2";
+    await db.prepare("UPDATE project_alpha_directory_outbox SET outcome_json=? WHERE command_id=?").bind(JSON.stringify(outcome),clientCommand).run();
+    await expect(dispatchProjectAlphaDirectoryRelationshipCommand(env(),sourceId,pending.reservations[0]!.commandId,send)).resolves.toEqual({status:"blocked",reason:"authority"});
+    expect(send).not.toHaveBeenCalled();
+    outcome.response.result.resource.publicId=organizationPublic;
+    await db.prepare("UPDATE project_alpha_directory_outbox SET outcome_json=? WHERE command_id=?").bind(JSON.stringify(outcome),clientCommand).run();
+    await expect(writeNativeDirectoryRelationship(db,writeInput(client.recordId,2,{recordId:organization.recordId,expectedRecordVersion:1},null))).resolves.toEqual({status:"blocked",reason:"mapping_evidence"});
+  });
+
+  it("requires and records explicit supersession of a terminal predecessor",async()=>{const first=await create("organization"),second=await create("organization"),client=await create("client");
+    const firstPublic=await acknowledge(first,"organization","1"),secondPublic=await acknowledge(second,"organization","2"),clientPublic=await acknowledge(client,"client","3");
+    const assigned=await writeNativeDirectoryRelationship(db,writeInput(client.recordId,1,null,{recordId:first.recordId,expectedRecordVersion:1}));
+    if(assigned.status!=="written")throw new Error(JSON.stringify(assigned));const terminalId=assigned.reservations[0]!.commandId;
+    await expect(dispatchProjectAlphaDirectoryRelationshipCommand(env(),sourceId,terminalId,transport("assign",clientPublic,firstPublic,"2","4",409))).resolves.toMatchObject({status:"conflict"});
+    const reconciliation=writeInput(client.recordId,2,{recordId:first.recordId,expectedRecordVersion:1},{recordId:second.recordId,expectedRecordVersion:1});
+    await expect(writeNativeDirectoryRelationship(db,reconciliation)).resolves.toEqual({status:"blocked",reason:"terminal_predecessor"});
+    await expect(writeNativeDirectoryRelationship(db,{...reconciliation,mutationId:uuid(),supersedeTerminalCommandIds:[uuid()]}))
+      .resolves.toEqual({status:"blocked",reason:"terminal_predecessor"});
+    const recovered=await writeNativeDirectoryRelationship(db,{...reconciliation,mutationId:uuid(),supersedeTerminalCommandIds:[terminalId]});
+    expect(recovered).toMatchObject({status:"written",reservations:[{action:"move"}]});if(recovered.status!=="written")throw new Error(JSON.stringify(recovered));
+    expect(await db.prepare("SELECT supersedes_terminal_command_id FROM project_alpha_directory_relationship_outbox WHERE command_id=?")
+      .bind(recovered.reservations[0]!.commandId).first("supersedes_terminal_command_id")).toBe(terminalId);
+    const recoveredGeneration=String(BigInt(recovered.reservations[0]!.command.expectedAuthorizationGeneration)+1n);
+    const dispatched=await dispatchProjectAlphaDirectoryRelationshipCommand(env(),sourceId,recovered.reservations[0]!.commandId,
+      transport("move",clientPublic,secondPublic,"2",recoveredGeneration));if(dispatched.status!=="acknowledged")throw new Error(JSON.stringify({dispatched,command:recovered.reservations[0]!.command}));
+    expect(await db.prepare("SELECT state FROM project_alpha_directory_relationship_outbox WHERE command_id=?").bind(terminalId).first("state")).toBe("terminal");
   });
 
   it("retries an outage with the identical command and distinguishes a remote conflict",async()=>{const organization=await create("organization"),client=await create("client"),organizationPublic=await acknowledge(organization,"organization","1"),clientPublic=await acknowledge(client,"client","2");

@@ -120,9 +120,9 @@ function normalize(input: NativeDirectoryProfileWrite): NormalizedWrite | null {
     || !boundedText(input.actor.selectedGrantId, 191, true) || !Number.isSafeInteger(input.actor.admissionVersion) || input.actor.admissionVersion < 1
     || !boundedText(input.actor.loginEmail, 254, true) || input.actor.loginEmail !== input.actor.loginEmail.trim().toLowerCase()
     || !Number.isSafeInteger(input.actor.profileVersion) || input.actor.profileVersion < 1 || !boundedText(input.actor.selectedIdentityGrantId, 191, true)
-    || (input.kind === "client" && (!UUID.test(input.recordId) || !plain(input.relationship)
+    || (input.kind === "client" && (!externalId(input.recordId) || !plain(input.relationship)
       || !exact(input.relationship, ["organizationRecordId", "expectedRelationshipVersion"])
-      || (input.relationship.organizationRecordId !== null && (typeof input.relationship.organizationRecordId !== "string" || !UUID.test(input.relationship.organizationRecordId)))
+      || (input.relationship.organizationRecordId !== null && !externalId(input.relationship.organizationRecordId))
       || !Number.isSafeInteger(input.relationship.expectedRelationshipVersion) || input.relationship.expectedRelationshipVersion < 0
       || (input.operation === "create" ? input.relationship.expectedRelationshipVersion !== 0 : input.relationship.expectedRelationshipVersion < 1)))
     || !profile(normalizedProfile, input.kind, input.operation) || !Array.isArray(input.destinations)
@@ -371,9 +371,35 @@ async function updateRemoteState(db: D1Database, write: NormalizedWrite, destina
       AND mapping.resource_type=? AND mapping.external_id=? AND outbox.state='acknowledged'
     ORDER BY outbox.created_at DESC,outbox.command_id DESC LIMIT 1`).bind(destinationValue.sourceId, destinationValue.sourceInstanceUUID,
       destinationValue.applicationUUID, destinationValue.historyEpoch, write.kind, write.recordId).first<Record<string, unknown>>();
-  return row && row.projectAlphaPublicId === active.projectAlphaPublicId
+  if (row && row.projectAlphaPublicId === active.projectAlphaPublicId
     && revision(row.revision) && revision(row.authorizationGeneration) && row.authorizationGeneration === destinationValue.expectedAuthorizationGeneration
-    ? { projectAlphaPublicId: row.projectAlphaPublicId, revision: row.revision, authorizationGeneration: row.authorizationGeneration } : null;
+    ) return { projectAlphaPublicId: row.projectAlphaPublicId, revision: row.revision, authorizationGeneration: row.authorizationGeneration };
+  if (write.kind !== "client") return null;
+  const relationship = await db.prepare(`SELECT
+      json_extract(outbox.outcome_json,'$.response.result.client.publicId') projectAlphaPublicId,
+      json_extract(outbox.outcome_json,'$.response.result.client.revision') revision,
+      json_extract(outbox.outcome_json,'$.response.result.authorizationGeneration') authorizationGeneration
+    FROM project_alpha_directory_relationship_outbox outbox
+    JOIN operations_directory_client_organization_history history ON history.client_record_id=outbox.client_record_id
+      AND history.relationship_version=outbox.relationship_version
+    WHERE outbox.client_record_id=? AND history.client_record_version=? AND outbox.source_id=?
+      AND outbox.source_instance_id=? AND outbox.application_id=? AND outbox.history_epoch_id=?
+      AND outbox.destination_origin=? AND outbox.state='acknowledged'
+      AND json_extract(outbox.outcome_json,'$.response.sourceInstanceId')=outbox.source_instance_id
+      AND json_extract(outbox.outcome_json,'$.response.applicationId')=outbox.application_id
+      AND json_extract(outbox.outcome_json,'$.response.historyEpoch')=outbox.history_epoch_id
+      AND json_extract(outbox.outcome_json,'$.response.result.action')=outbox.action
+      AND json_extract(outbox.outcome_json,'$.response.result.client.publicId')=outbox.client_public_id
+      AND json_extract(outbox.outcome_json,'$.response.result.organizationPublicId') IS outbox.organization_public_id
+    ORDER BY length(json_extract(outbox.outcome_json,'$.response.result.client.revision')) DESC,
+      json_extract(outbox.outcome_json,'$.response.result.client.revision') DESC LIMIT 1`)
+    .bind(write.recordId,write.expectedLocalVersion,destinationValue.sourceId,destinationValue.sourceInstanceUUID,
+      destinationValue.applicationUUID,destinationValue.historyEpoch,destinationValue.origin).first<Record<string, unknown>>();
+  return relationship && relationship.projectAlphaPublicId === active.projectAlphaPublicId
+    && revision(relationship.revision) && revision(relationship.authorizationGeneration)
+    && relationship.authorizationGeneration === destinationValue.expectedAuthorizationGeneration
+    ? { projectAlphaPublicId: relationship.projectAlphaPublicId, revision: relationship.revision,
+      authorizationGeneration: relationship.authorizationGeneration } : null;
 }
 
 /**
