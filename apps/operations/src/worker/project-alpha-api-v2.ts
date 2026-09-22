@@ -19,6 +19,7 @@ export type ProjectAlphaApiV2Endpoint = {
   requiresUpdatePublicId?: boolean;
   requiresHistoryEpoch?: boolean;
   requiresExpectedPublicId?: boolean;
+  requiresExpectedRevision?: boolean;
   requiresExpectedProfileSha256?: boolean;
 };
 
@@ -71,6 +72,7 @@ function endpointContract(value: unknown): value is ProjectAlphaApiV2Endpoint {
     && (value.requiresUpdatePublicId === undefined || typeof value.requiresUpdatePublicId === "boolean")
     && (value.requiresHistoryEpoch === undefined || typeof value.requiresHistoryEpoch === "boolean")
     && (value.requiresExpectedPublicId === undefined || typeof value.requiresExpectedPublicId === "boolean")
+    && (value.requiresExpectedRevision === undefined || typeof value.requiresExpectedRevision === "boolean")
     && (value.requiresExpectedProfileSha256 === undefined || typeof value.requiresExpectedProfileSha256 === "boolean");
 }
 
@@ -212,6 +214,8 @@ export async function probeProjectAlphaApiV2(
             && implementedEndpoint.requiresHistoryEpoch !== endpoint.requiresHistoryEpoch)
           || (endpoint.requiresExpectedPublicId !== undefined
             && implementedEndpoint.requiresExpectedPublicId !== endpoint.requiresExpectedPublicId)
+          || (endpoint.requiresExpectedRevision !== undefined
+            && implementedEndpoint.requiresExpectedRevision !== endpoint.requiresExpectedRevision)
           || (endpoint.requiresExpectedProfileSha256 !== undefined
             && implementedEndpoint.requiresExpectedProfileSha256 !== endpoint.requiresExpectedProfileSha256);
       })) {
