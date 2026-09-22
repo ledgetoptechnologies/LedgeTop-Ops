@@ -12,6 +12,10 @@ const SUBJECT = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,190}$/;
 const PACKET_ID = /^production-authority-[a-z0-9]+(?:-[a-z0-9]+){1,7}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
 const EXACT_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const PERMISSION_KEY = /^[a-z][a-z0-9]*(?:[._:-][a-z0-9]+)*$/;
+const PERMISSION_OVERRIDE_KEYS = Object.freeze([
+  "id", "permissionKey", "effect", "scope", "divisionId", "scopeKey", "createdBy",
+]);
 const CANONICAL_OPERATIONS = Object.freeze({
   count: 124,
   finalMigration: "0124_project_alpha_project_adoption_review_evidence.sql",
@@ -103,7 +107,7 @@ export function validatePacketInput(input) {
   if (input.schemaVersion !== PACKET_SCHEMA_VERSION) errors.push(`schemaVersion must be ${PACKET_SCHEMA_VERSION}`);
   validateProductionIdentity(input.production, errors);
   const packet = input.packet;
-  exactKeys(packet, ["packetId", "mode", "staffId", "email", "displayName", "accessSubject", "issuedAt", "expiresAt", "reason", "expected", "evidence"], "packet", errors);
+  exactKeys(packet, ["packetId", "mode", "staffId", "email", "displayName", "accessSubject", "issuedAt", "expiresAt", "reason", "permissionOverrides", "expected", "evidence"], "packet", errors);
   if (!plain(packet)) return errors;
   exactKeys(packet.expected, ["admissionVersion", "profileVersion", "directoryGrantVersion", "directoryGrantGeneration", "projectGrantVersion", "projectGrantGeneration"], "packet.expected", errors);
   exactKeys(packet.evidence, ["changeTicket", "reviewer", "bindingEvidenceSha256"], "packet.evidence", errors);
@@ -120,6 +124,37 @@ export function validatePacketInput(input) {
     || String(packet.accessSubject).split(".").length === 3)
     errors.push("packet.accessSubject must be a reviewed opaque Access subject, not a token");
   if (!populated(packet.reason) || packet.reason.length > 500) errors.push("packet.reason must be a bounded non-placeholder string");
+  if (!Array.isArray(packet.permissionOverrides)) errors.push("packet.permissionOverrides must be an array");
+  else {
+    const ids = new Set(), identities = new Set();
+    for (const [index, override] of packet.permissionOverrides.entries()) {
+      const label = `packet.permissionOverrides[${index}]`;
+      exactKeys(override, PERMISSION_OVERRIDE_KEYS, label, errors);
+      if (!plain(override)) continue;
+      if (!populated(override.id) || override.id.length > 191 || ids.has(override.id))
+        errors.push(`${label}.id must be unique, bounded, and non-placeholder`);
+      ids.add(override.id);
+      if (!populated(override.permissionKey) || override.permissionKey.length > 191 || !PERMISSION_KEY.test(override.permissionKey))
+        errors.push(`${label}.permissionKey must be a bounded lowercase permission key`);
+      if (!["allow", "deny"].includes(override.effect)) errors.push(`${label}.effect must be allow or deny`);
+      if (!["global", "division", "assigned", "own"].includes(override.scope))
+        errors.push(`${label}.scope must be global, division, assigned, or own`);
+      if (override.scope === "division") {
+        if (!populated(override.divisionId) || override.divisionId.length > 191)
+          errors.push(`${label}.divisionId must be a bounded non-placeholder string for division scope`);
+        if (override.scopeKey !== override.divisionId) errors.push(`${label}.scopeKey must equal divisionId for division scope`);
+      } else {
+        if (override.divisionId !== null) errors.push(`${label}.divisionId must be null outside division scope`);
+        if (override.scopeKey !== override.scope) errors.push(`${label}.scopeKey must equal scope outside division scope`);
+      }
+      if (!populated(override.scopeKey) || override.scopeKey.length > 191)
+        errors.push(`${label}.scopeKey must be a bounded non-placeholder string`);
+      if (override.createdBy !== packet.staffId) errors.push(`${label}.createdBy must equal packet.staffId`);
+      const identity = canonicalJson([override.permissionKey, override.effect, override.scope, override.scopeKey]);
+      if (identities.has(identity)) errors.push(`${label} duplicates a database permission override identity`);
+      identities.add(identity);
+    }
+  }
   for (const key of ["issuedAt", "expiresAt"]) {
     if (typeof packet[key] !== "string" || !EXACT_UTC.test(packet[key]) || new Date(packet[key]).toISOString() !== packet[key])
       errors.push(`packet.${key} must be an exact millisecond UTC timestamp`);
@@ -143,6 +178,21 @@ export function validatePacketInput(input) {
 }
 
 function canonicalJson(value) { return JSON.stringify(value); }
+function canonicalPermissionOverrides(packet) {
+  return packet.permissionOverrides.map(override => ({
+    id: override.id,
+    permissionKey: override.permissionKey,
+    effect: override.effect,
+    scope: override.scope,
+    divisionId: override.divisionId,
+    scopeKey: override.scopeKey,
+    createdBy: override.createdBy,
+  })).sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
+}
+function permissionOverridesSummary(packet) {
+  const canonical = canonicalJson(canonicalPermissionOverrides(packet));
+  return { count: packet.permissionOverrides.length, sha256: sha256(canonical) };
+}
 function state(active) {
   return active
     ? { admissionVersion: 1, profileVersion: 1, directoryGrantActive: 1, directoryGrantVersion: 1,
@@ -162,6 +212,7 @@ function plan(packet, action, ids) {
     emailSha256: sha256(packet.email),
     displayNameSha256: sha256(packet.displayName),
     accessSubjectSha256: sha256(packet.accessSubject),
+    permissionOverrides: permissionOverridesSummary(packet),
     directoryGrant: { id: ids.directoryGrant, permission: "directory.profile.edit", effect: "allow", scopeKind: "global" },
     projectGrant: { id: ids.projectGrant, capability: "project.shared.sync", effect: "allow", scopeKind: "global" },
     issuedAt: packet.issuedAt,
@@ -181,6 +232,7 @@ function verification(packet) {
     bindingEvidenceSha256: packet.evidence.bindingEvidenceSha256,
     emailSha256: sha256(packet.email),
     accessSubjectSha256: sha256(packet.accessSubject),
+    permissionOverrides: permissionOverridesSummary(packet),
   });
 }
 
@@ -223,6 +275,23 @@ function noPendingActorWork(staff) {
       WHERE json_extract(origin_snapshot_json,'$.actorId')=${staff} AND state IN ('pending','leased'))`;
 }
 
+function permissionOverridesState(packet) {
+  const staff = sqlString(packet.staffId);
+  const expected = sqlString(canonicalJson(canonicalPermissionOverrides(packet)));
+  const match = `actual.id=json_extract(expected.value,'$.id')
+        AND actual.permission_key=json_extract(expected.value,'$.permissionKey')
+        AND actual.effect=json_extract(expected.value,'$.effect')
+        AND actual.scope=json_extract(expected.value,'$.scope')
+        AND actual.division_id IS json_extract(expected.value,'$.divisionId')
+        AND actual.scope_key=json_extract(expected.value,'$.scopeKey')
+        AND actual.created_by=json_extract(expected.value,'$.createdBy')`;
+  return `(SELECT count(*) FROM staff_permission_overrides WHERE staff_id=${staff})=${packet.permissionOverrides.length}
+    AND NOT EXISTS(SELECT 1 FROM json_each(${expected}) expected
+      WHERE NOT EXISTS(SELECT 1 FROM staff_permission_overrides actual WHERE actual.staff_id=${staff} AND ${match}))
+    AND NOT EXISTS(SELECT 1 FROM staff_permission_overrides actual WHERE actual.staff_id=${staff}
+      AND NOT EXISTS(SELECT 1 FROM json_each(${expected}) expected WHERE ${match}))`;
+}
+
 function verifiedOwner(packet) {
   const staff = sqlString(packet.staffId), email = sqlString(packet.email), subject = sqlString(packet.accessSubject);
   return `(SELECT count(*) FROM staff_users WHERE id=${staff} AND email=${email}
@@ -232,7 +301,7 @@ function verifiedOwner(packet) {
     AND (SELECT count(*) FROM staff_role_assignments WHERE staff_id=${staff} AND role_id='role-owner'
       AND scope='global' AND division_id IS NULL AND scope_key='global')=1
     AND EXISTS(SELECT 1 FROM role_permissions WHERE role_id='role-owner' AND permission_key='integrations.manage')
-    AND NOT EXISTS(SELECT 1 FROM staff_permission_overrides WHERE staff_id=${staff})
+    AND ${permissionOverridesState(packet)}
     AND NOT EXISTS(SELECT 1 FROM native_staff_admissions WHERE staff_id<>${staff} AND bound_access_subject=${subject})
     AND NOT EXISTS(SELECT 1 FROM native_staff_profiles WHERE staff_id<>${staff} AND login_email=${email})`;
 }
@@ -302,6 +371,7 @@ function provisionSql(packet, ids, names, migrationNames) {
       AND display_name=${sqlString(packet.displayName)} AND version=1)=1
     AND ${directoryState(staff, ids, 1, 1, 1)}
     AND ${projectState(staff, ids, 1, 1, 1)}
+    AND ${permissionOverridesState(packet)}
     AND ${minimalNativeAuthorityAbsent(staff)}
     AND EXISTS(SELECT 1 FROM native_staff_bootstrap_receipts WHERE command_id=${sqlString(ids.provisionCommand)}
       AND approval_id=${sqlString(ids.provisionApproval)} AND canonical_plan_sha256=${sqlString(planSha)})`;
@@ -364,6 +434,7 @@ function revokeSql(packet, ids, names, migrationNames, provisionPlanSha) {
     AND EXISTS(SELECT 1 FROM native_directory_grant_history WHERE grant_id=${sqlString(ids.directoryGrant)}
       AND grant_version=1 AND active=1 AND grant_generation=1)
     AND ${projectState(staff, ids, 0, 2, 2)}
+    AND ${permissionOverridesState(packet)}
     AND ${minimalNativeAuthorityAbsent(staff)}
     AND NOT EXISTS(SELECT 1 FROM native_project_live_command_proofs WHERE actor_staff_id=${staff})
     AND EXISTS(SELECT 1 FROM native_staff_bootstrap_approvals WHERE approval_id=${sqlString(ids.provisionApproval)} AND revoked_at IS NOT NULL)
@@ -478,6 +549,7 @@ export function buildAuthorityArtifacts(base, input, phase) {
   };
   const identity = { staffId: packet.staffId, emailSha256: sha256(packet.email), displayNameSha256: sha256(packet.displayName),
     accessSubjectSha256: sha256(packet.accessSubject) };
+  const permissionOverrides = permissionOverridesSummary(packet);
   const baseManifest = {
     schemaVersion: PACKET_SCHEMA_VERSION,
     environment: "production",
@@ -489,6 +561,7 @@ export function buildAuthorityArtifacts(base, input, phase) {
     migrationsTable: AUTHORITY_MIGRATIONS_TABLE,
     canonicalOperationsLedger: { count: names.length, finalMigration: names.at(-1), chainSha256 },
     identity,
+    permissionOverrides,
     directoryGrant: { id: ids.directoryGrant, permission: "directory.profile.edit", effect: "allow", scopeKind: "global" },
     projectGrant: { id: ids.projectGrant, capability: "project.shared.sync", effect: "allow", scopeKind: "global" },
     issuedAt: packet.issuedAt,

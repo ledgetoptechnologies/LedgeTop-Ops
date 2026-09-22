@@ -26,6 +26,35 @@ const production = Object.freeze({
   ]),
 });
 const subject = "production-access-subject-reviewed-001";
+const permissionOverrides = Object.freeze([
+  Object.freeze({
+    id: "override-reviewed-owner-delivery-browse",
+    permissionKey: "delivery.browse",
+    effect: "allow",
+    scope: "global",
+    divisionId: null,
+    scopeKey: "global",
+    createdBy: owner.staffId,
+  }),
+  Object.freeze({
+    id: "override-reviewed-owner-delivery-share-create",
+    permissionKey: "delivery.share.create",
+    effect: "allow",
+    scope: "global",
+    divisionId: null,
+    scopeKey: "global",
+    createdBy: owner.staffId,
+  }),
+]);
+const extraPermissionOverride = Object.freeze({
+  id: "override-reviewed-owner-delivery-share-audit",
+  permissionKey: "delivery.share.audit",
+  effect: "allow",
+  scope: "global",
+  divisionId: null,
+  scopeKey: "global",
+  createdBy: owner.staffId,
+});
 const evidenceSha = "0123456789abcdef".repeat(4);
 const issuedAt = new Date(Date.now() - 5 * 60 * 1000).toISOString();
 const expiresAt = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
@@ -42,6 +71,7 @@ function input(overrides = {}) {
       issuedAt,
       expiresAt,
       reason: "Bounded production native Directory and Project authority window",
+      permissionOverrides,
       expected: {
         admissionVersion: 0,
         profileVersion: 0,
@@ -94,7 +124,7 @@ function applyMigration(db, sql, name, table = "d1_migrations") {
   }
 }
 
-function canonicalDatabase() {
+function canonicalDatabase(overrides = permissionOverrides) {
   const db = new DatabaseSync(":memory:");
   db.exec("PRAGMA foreign_keys=ON; CREATE TABLE d1_migrations(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE,applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL)");
   const directory = path.join(repositoryRoot, "apps", "operations", "migrations");
@@ -104,12 +134,23 @@ function canonicalDatabase() {
     VALUES(?,?,?,?,'active',datetime('now'))`).run(owner.staffId, owner.email, owner.displayName, subject);
   db.prepare(`INSERT INTO staff_role_assignments(id,staff_id,role_id,scope,scope_key)
     VALUES('assignment-reviewed-owner',?,'role-owner','global','global')`).run(owner.staffId);
+  const insertOverride = db.prepare(`INSERT INTO staff_permission_overrides
+    (id,staff_id,permission_key,effect,scope,division_id,scope_key,created_by) VALUES(?,?,?,?,?,?,?,?)`);
+  for (const override of overrides) insertOverride.run(override.id, owner.staffId, override.permissionKey, override.effect,
+    override.scope, override.divisionId, override.scopeKey, override.createdBy);
   db.exec(`CREATE TABLE ${AUTHORITY_MIGRATIONS_TABLE}(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE,applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL)`);
   return db;
 }
 
+function permissionOverrideRows(db) {
+  return db.prepare(`SELECT id,permission_key permissionKey,effect,scope,division_id divisionId,
+    scope_key scopeKey,created_by createdBy FROM staff_permission_overrides WHERE staff_id=? ORDER BY id`)
+    .all(owner.staffId).map(row => ({ ...row }));
+}
+
 test("accepts a strictly reviewed production owner tuple and create-mode zero state", () => {
   assert.deepEqual(validatePacketInput(input()), []);
+  assert.deepEqual(validatePacketInput(input({ packet: { permissionOverrides: [] } })), []);
   for (const invalid of [
     input({ extra: true }),
     { ...input(), schemaVersion: 2 },
@@ -120,6 +161,10 @@ test("accepts a strictly reviewed production owner tuple and create-mode zero st
     input({ production: { ...production, worker: { ...production.worker, environment: "staging" } } }),
     input({ packet: { accessSubject: "aaa.bbb.ccc" } }),
     input({ packet: { expected: { ...input().packet.expected, directoryGrantGeneration: 1 } } }),
+    input({ packet: { permissionOverrides: [{ ...permissionOverrides[0], unexpected: true }] } }),
+    input({ packet: { permissionOverrides: [permissionOverrides[0], { ...permissionOverrides[0], id: "override-duplicate-row" }] } }),
+    input({ packet: { permissionOverrides: [{ ...permissionOverrides[0], divisionId: "division-unexpected" }] } }),
+    input({ packet: { permissionOverrides: [{ ...permissionOverrides[0], createdBy: "staff-other" }] } }),
     input({ packet: { expiresAt: new Date(Date.parse(issuedAt) + 5 * 60 * 60 * 1000).toISOString() } }),
     input({ packet: { evidence: { changeTicket: "REPLACE_ME", reviewer: "reviewer", bindingEvidenceSha256: "0".repeat(64) } } }),
   ]) assert(validatePacketInput(invalid).length > 0);
@@ -150,6 +195,13 @@ test("builds production-only one-migration configs and sanitized manifests throu
   assert.doesNotMatch(manifests, new RegExp(owner.email.replaceAll(".", "\\.")));
   assert.doesNotMatch(manifests, new RegExp(subject));
   assert.doesNotMatch(manifests, new RegExp(owner.displayName));
+  assert.equal(artifact.provision.manifest.permissionOverrides.count, permissionOverrides.length);
+  assert.match(artifact.provision.manifest.permissionOverrides.sha256, /^[0-9a-f]{64}$/);
+  assert.deepEqual(Object.keys(artifact.provision.manifest.permissionOverrides).sort(), ["count", "sha256"]);
+  for (const override of permissionOverrides) {
+    assert.doesNotMatch(manifests, new RegExp(override.id));
+    assert.doesNotMatch(manifests, new RegExp(override.permissionKey.replaceAll(".", "\\.")));
+  }
   assert.match(artifact.provision.sql, /directory\.profile\.edit/);
   assert.match(artifact.provision.sql, /project\.shared\.sync/);
   assert.match(artifact.provision.sql, /native_directory_grant_history/);
@@ -192,6 +244,7 @@ test("canonical schema provisions and revokes exactly one bounded authority set"
   const db = canonicalDatabase();
   const artifact = buildAuthorityArtifacts(fixture(), input(), "revoke");
   applyMigration(db, artifact.provision.sql, artifact.provision.name, AUTHORITY_MIGRATIONS_TABLE);
+  assert.deepEqual(permissionOverrideRows(db), permissionOverrides);
   assert.deepEqual(queryOne(db, "SELECT active,version FROM native_staff_admissions WHERE staff_id=?", owner.staffId), { active: 1, version: 1 });
   assert.deepEqual(queryOne(db, "SELECT login_email,display_name,version FROM native_staff_profiles WHERE staff_id=?", owner.staffId),
     { login_email: owner.email, display_name: owner.displayName, version: 1 });
@@ -205,6 +258,7 @@ test("canonical schema provisions and revokes exactly one bounded authority set"
   assert.deepEqual(queryOne(db, "SELECT generation FROM native_project_grant_generations WHERE staff_id=?", owner.staffId), { generation: 1 });
 
   applyMigration(db, artifact.revoke.sql, artifact.revoke.name, AUTHORITY_MIGRATIONS_TABLE);
+  assert.deepEqual(permissionOverrideRows(db), permissionOverrides);
   assert.deepEqual(queryOne(db, "SELECT active,version FROM native_staff_admissions WHERE staff_id=?", owner.staffId), { active: 0, version: 2 });
   assert.deepEqual(queryOne(db, "SELECT active FROM native_directory_grants WHERE staff_id=?", owner.staffId), { active: 0 });
   assert.deepEqual(queryOne(db, "SELECT generation FROM native_directory_grant_generations WHERE staff_id=?", owner.staffId), { generation: 2 });
@@ -217,6 +271,55 @@ test("canonical schema provisions and revokes exactly one bounded authority set"
   assert.deepEqual(queryOne(db, "SELECT generation FROM native_project_grant_generations WHERE staff_id=?", owner.staffId), { generation: 2 });
   assert.equal(queryOne(db, "SELECT count(*) count FROM native_staff_bootstrap_receipts WHERE operator_staff_id=?", owner.staffId).count, 2);
   db.close();
+});
+
+test("provision supports an exact reviewed zero-override set", () => {
+  const emptyInput = input({ packet: { permissionOverrides: [] } });
+  const db = canonicalDatabase([]), artifact = buildAuthorityArtifacts(fixture(), emptyInput, "provision");
+  applyMigration(db, artifact.provision.sql, artifact.provision.name, AUTHORITY_MIGRATIONS_TABLE);
+  assert.deepEqual(permissionOverrideRows(db), []);
+  assert.equal(artifact.provision.manifest.permissionOverrides.count, 0);
+  db.close();
+});
+
+test("permission override mismatch, extra, or missing rows fail closed on provision", () => {
+  const actualSets = [
+    [{ ...permissionOverrides[0], effect: "deny" }, permissionOverrides[1]],
+    [...permissionOverrides, extraPermissionOverride],
+    permissionOverrides.slice(1),
+  ];
+  for (const actual of actualSets) {
+    const db = canonicalDatabase(actual), artifact = buildAuthorityArtifacts(fixture(), input(), "provision");
+    assert.throws(() => applyMigration(db, artifact.provision.sql, artifact.provision.name, AUTHORITY_MIGRATIONS_TABLE));
+    assert.equal(queryOne(db, "SELECT count(*) count FROM native_staff_admissions WHERE staff_id=?", owner.staffId).count, 0);
+    assert.equal(queryOne(db, "SELECT count(*) count FROM native_staff_bootstrap_receipts").count, 0);
+    assert.equal(queryOne(db, `SELECT count(*) count FROM ${AUTHORITY_MIGRATIONS_TABLE}`).count, 0);
+    db.close();
+  }
+});
+
+test("permission override mismatch, extra, or missing rows fail closed on revoke", () => {
+  for (const drift of [
+    db => db.prepare("UPDATE staff_permission_overrides SET effect='deny' WHERE id=?").run(permissionOverrides[0].id),
+    db => db.prepare(`INSERT INTO staff_permission_overrides
+      (id,staff_id,permission_key,effect,scope,division_id,scope_key,created_by) VALUES(?,?,?,?,?,?,?,?)`)
+      .run(extraPermissionOverride.id, owner.staffId, extraPermissionOverride.permissionKey, extraPermissionOverride.effect,
+        extraPermissionOverride.scope, extraPermissionOverride.divisionId, extraPermissionOverride.scopeKey,
+        extraPermissionOverride.createdBy),
+    db => db.prepare("DELETE FROM staff_permission_overrides WHERE id=?").run(permissionOverrides[0].id),
+  ]) {
+    const db = canonicalDatabase(), artifact = buildAuthorityArtifacts(fixture(), input(), "revoke");
+    applyMigration(db, artifact.provision.sql, artifact.provision.name, AUTHORITY_MIGRATIONS_TABLE);
+    drift(db);
+    assert.throws(() => applyMigration(db, artifact.revoke.sql, artifact.revoke.name, AUTHORITY_MIGRATIONS_TABLE));
+    assert.deepEqual(queryOne(db, "SELECT active,version FROM native_staff_admissions WHERE staff_id=?", owner.staffId),
+      { active: 1, version: 1 });
+    assert.deepEqual(queryOne(db, "SELECT active,version FROM native_project_grants WHERE staff_id=?", owner.staffId),
+      { active: 1, version: 1 });
+    assert.equal(queryOne(db, "SELECT count(*) count FROM native_staff_bootstrap_receipts").count, 1);
+    assert.equal(queryOne(db, `SELECT count(*) count FROM ${AUTHORITY_MIGRATIONS_TABLE}`).count, 1);
+    db.close();
+  }
 });
 
 test("provision rejects canonical and auxiliary ledger drift atomically", () => {

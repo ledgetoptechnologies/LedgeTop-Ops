@@ -29,6 +29,17 @@
     "issuedAt": "2026-09-22T15:00:00.000Z",
     "expiresAt": "2026-09-22T17:00:00.000Z",
     "reason": "Bounded production native Directory and Project authority window",
+    "permissionOverrides": [
+      {
+        "id": "REPLACE_WITH_REVIEWED_OVERRIDE_ID",
+        "permissionKey": "REPLACE_WITH_REVIEWED_PERMISSION_KEY",
+        "effect": "allow",
+        "scope": "global",
+        "divisionId": null,
+        "scopeKey": "global",
+        "createdBy": "REPLACE_WITH_REVIEWED_OWNER_STAFF_ID"
+      }
+    ],
     "expected": {
       "admissionVersion": 0,
       "profileVersion": 0,
