@@ -2,6 +2,30 @@
 
 Updated September 21, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
 
+### September 22, 2026 — default-off reconciliation scheduler checkpoint
+
+- Migration `0137` adds a scheduler-wide exact-token lease, fair source cursor
+  and per-source retry state without changing the reconciliation evidence or
+  any canonical, mapping, Delivery or public-link table. The scheduled entry is
+  present at its own five-minute offset, but
+  `PROJECT_ALPHA_DIRECTORY_RECONCILIATION_ENABLED` is checked in as exactly
+  `false`; no deployment setting was enabled.
+- Each tick parses only enabled generic API-v2 connections, selects at most one
+  due source in fair rotation, applies strict page/item/time bounds and records
+  only aggregate complete/uncertain scheduling state. Uncertain or thrown work
+  receives bounded exponential backoff. The fair cursor advances after every
+  attempted source, including a thrown reader, so one failing PA instance does
+  not starve the other.
+- Independent review found that a finite unrenewed lease could permit a second
+  tick during a delayed first run. The scheduler now renews the exact-token
+  lease while the reconciliation core is awaited, stops and awaits that
+  heartbeat before token-scoped release, and fences every post-result update.
+  A deferred-run regression holds the first core call beyond its original
+  lease and proves a second tick remains contended. The final focused suite
+  passes **9/9**; scheduler, reconciliation core and Directory write-drain pass
+  **33/33** together; and the production Operations bundle builds. This proves
+  dormant composition, not staged or production reconciliation acceptance.
+
 ### September 22, 2026 — bounded read-only Directory reconciliation checkpoint
 
 - Forward migration `0136` adds a reconciliation-only ledger: immutable run
@@ -29,9 +53,10 @@ Updated September 21, 2026. The owner approved implementation and resumption aft
   ownership, stale-run takeover, exact-fence filtering, bounded-query and
   deadline gaps. Root review then found and closed stale-owner observation
   insert/update windows. The final focused suite passes **17/17** independently.
-  A default-off, bounded scheduler and operator review/adoption path are still
-  required before either production instance can enter externally managed
-  Directory mode.
+  The default-off bounded scheduler is recorded above. An operator
+  review/adoption path and joined both-instance acceptance are still required
+  before either production instance can enter externally managed Directory
+  mode.
 
 ### September 22, 2026 — linked-client write and relationship-recovery checkpoint
 
