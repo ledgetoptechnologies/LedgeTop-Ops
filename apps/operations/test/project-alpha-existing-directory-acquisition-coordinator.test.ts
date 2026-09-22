@@ -150,6 +150,34 @@ describe("private existing Directory acquisition coordinator", () => {
     expect(await db.prepare("SELECT count(*) FROM project_alpha_acquired_canonical_mappings").first("count(*)")).toBe(0);
   });
 
+  it.each([
+    ["exact legacy pair", `INSERT INTO project_alpha_directory_mappings(source_id,resource_type,external_id,project_alpha_public_id,source_instance_id,application_id,history_epoch_id,command_id,created_at)
+      VALUES('${sourceId}','organization','${recordId}','${publicId}','${source}','${application}','${epoch}','legacy-exact','2026-09-22T00:00:00.000Z')`],
+    ["legacy local record", `INSERT INTO project_alpha_directory_mappings(source_id,resource_type,external_id,project_alpha_public_id,source_instance_id,application_id,history_epoch_id,command_id,created_at)
+      VALUES('${sourceId}','organization','${recordId}','${"b".repeat(32)}','${source}','${application}',NULL,'legacy-local','2026-09-22T00:00:00.000Z')`],
+    ["legacy PA public ID", `INSERT INTO project_alpha_directory_mappings(source_id,resource_type,external_id,project_alpha_public_id,source_instance_id,application_id,history_epoch_id,command_id,created_at)
+      VALUES('${sourceId}','organization','other-record','${publicId}','${source}','${application}','${epoch}','legacy-public','2026-09-22T00:00:00.000Z')`],
+  ])("rejects %s collision before reserving or posting", async (_name, statement) => {
+    await db.prepare(statement).run();
+    const send = transport();
+    await expect(acquireProjectAlphaExistingDirectoryBinding({ OPS_DB: db, PROJECT_ALPHA_API_V2_CONNECTIONS: envSecret() }, input(), send))
+      .resolves.toEqual({ status: "conflict", reason: "collision" });
+    expect(send.mock.calls.some(call => call[1]?.method === "POST")).toBe(false);
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_existing_directory_binding_acquisition_commands").first("count")).toBe(0);
+  });
+
+  it("rejects an acquired reservation collision before posting", async () => {
+    await expect(acquireProjectAlphaExistingDirectoryBinding(
+      { OPS_DB: db, PROJECT_ALPHA_API_V2_CONNECTIONS: envSecret() }, input(), transport(),
+    )).resolves.toMatchObject({ status: "acquired" });
+    const send = transport();
+    await expect(acquireProjectAlphaExistingDirectoryBinding({ OPS_DB: db, PROJECT_ALPHA_API_V2_CONNECTIONS: envSecret() }, input({
+      reviewId: "21000000-0000-4000-8000-000000000003", commandId: "21000000-0000-4000-8000-000000000004",
+    }), send))
+      .resolves.toEqual({ status: "conflict", reason: "collision" });
+    expect(send.mock.calls.some(call => call[1]?.method === "POST")).toBe(false);
+  });
+
   it("acquires the same native customer independently in two deployment-owned PA sources", async () => {
     const env = { OPS_DB: db, PROJECT_ALPHA_API_V2_CONNECTIONS: twoSourceSecret() };
     await expect(acquireProjectAlphaExistingDirectoryBinding(env, input(), transport())).resolves.toMatchObject({ status: "acquired" });

@@ -190,6 +190,31 @@ async function latestState(db: D1Database, commandId: string): Promise<Readonly<
     WHERE command_id=? ORDER BY state_version DESC LIMIT 1`).bind(commandId).first();
 }
 
+/**
+ * A PA bind is an external side effect. Reject identities that the later
+ * immutable receipt/mapping inserts would reject before sending that bind.
+ * Legacy rows deliberately ignore history epoch here: a NULL legacy epoch is
+ * collision evidence, not a namespace escape.
+ */
+async function mappingCollision(db: D1Database, selected: ProjectAlphaExistingDirectoryAcquisitionInput,
+  identity: Readonly<{ sourceInstanceId: string; applicationId: string }>): Promise<boolean> {
+  const row = await db.prepare(`SELECT 1 collision WHERE EXISTS(
+      SELECT 1 FROM project_alpha_directory_mappings legacy
+      WHERE legacy.source_id=? AND legacy.source_instance_id=? AND legacy.application_id=?
+        AND legacy.resource_type=? AND (legacy.external_id=? OR legacy.project_alpha_public_id=?)
+    ) OR EXISTS(
+      SELECT 1 FROM project_alpha_acquired_canonical_mappings acquired
+      WHERE acquired.source_id=? AND acquired.source_instance_id=? AND acquired.application_id=?
+        AND acquired.resource_type=? AND (acquired.record_id=? OR acquired.external_id=? OR acquired.project_alpha_public_id=?)
+    ) LIMIT 1`)
+    .bind(selected.sourceId, identity.sourceInstanceId, identity.applicationId, selected.resourceType,
+      selected.recordId, selected.projectAlphaPublicId,
+      selected.sourceId, identity.sourceInstanceId, identity.applicationId, selected.resourceType,
+      selected.recordId, selected.recordId, selected.projectAlphaPublicId)
+    .first<{ collision: number }>();
+  return row?.collision === 1;
+}
+
 async function markUncertain(db: D1Database, commandId: string, requestSha256: string): Promise<void> {
   const state = await latestState(db, commandId);
   if (state?.state !== "pending") return;
@@ -243,6 +268,9 @@ export async function acquireProjectAlphaExistingDirectoryBinding(
   if (!current?.record_current) return { status: "blocked", reason: "stale_local" };
   if (!current.authority_current) return { status: "blocked", reason: "authority" };
   if (!current.relationship_current) return { status: "blocked", reason: "relationship" };
+  try {
+    if (await mappingCollision(env.OPS_DB, selected, identity)) return { status: "conflict", reason: "collision" };
+  } catch { return { status: "uncertain", reason: "database" }; }
 
   let reservation: Reservation;
   try {

@@ -25,6 +25,16 @@ Updated September 22, 2026. The owner approved implementation and resumption aft
   a staging-only host update and sanitized evidence. Do not request either
   production PA update or activate managed mode until these gates and the
   coordinated release order are accepted.
+- Existing-record acquisition review found that a legacy mapping collision
+  could reject the local acquired receipt *after* PA accepted a bind. The
+  coordinator now checks legacy and prior acquired identity overlaps before
+  making the PA bind request; focused collision, replay and two-source tests
+  and Operations typecheck pass. This prevents the known staging fixture from
+  making an orphaning POST, but is not live rollback evidence or a substitute
+  for external-side-effect recovery after a later failure. The current
+  staging authority packet also lacks `directory.identity.link`, which this
+  route requires. A separately reviewed, temporary grant and an unmapped,
+  disposable staging source/record are required before live acquisition.
 - Green PR CI does not substitute for joined staging or production cutover
   acceptance. Neither PR is deployed to either production PA instance.
 - A private pre-migration staging D1 backup was recorded before applying remote
