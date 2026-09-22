@@ -117,7 +117,7 @@ export async function nativeDirectoryProfileEditorRecord(env: Env, root: { sourc
 /** Lists only clients whose active mapping and current native relationship both
  * point at the exact organization represented by this Client Hub workspace. */
 export async function nativeDirectoryLinkedClientEditorRecords(env: Env, root: { source_id: string; root_namespace: string;
-  kind: "organization" | "standalone_client"; public_id: string }): Promise<NativeDirectoryLinkedClientEditorRecord[]> {
+  kind: "organization" | "standalone_client"; public_id: string }, staffId: string): Promise<NativeDirectoryLinkedClientEditorRecord[]> {
   if (root.root_namespace !== "business" || root.kind !== "organization" || !root.source_id.startsWith("project-alpha:")) return [];
   try {
     const configured = resolveProjectAlphaApiV2Connection(env, root.source_id);
@@ -134,8 +134,28 @@ export async function nativeDirectoryLinkedClientEditorRecords(env: Env, root: {
       JOIN operations_directory_revisions revision ON revision.record_id=record.record_id AND revision.version=record.current_version
       WHERE parent.source_id=? AND parent.source_instance_id=? AND parent.application_id=? AND parent.history_epoch_id=?
         AND parent.resource_type='organization' AND parent.project_alpha_public_id=?
+        AND EXISTS(SELECT 1 FROM native_directory_grants allowed
+          WHERE allowed.staff_id=? AND allowed.permission='directory.profile.view'
+            AND allowed.effect='allow' AND allowed.active=1 AND (allowed.scope_kind='global'
+              OR (allowed.scope_kind='resource' AND allowed.resource_id=record.record_id)
+              OR (allowed.scope_kind='assigned' AND EXISTS(SELECT 1 FROM native_directory_assignments assignment
+                WHERE assignment.record_id=record.record_id AND assignment.staff_id=allowed.staff_id AND assignment.active=1))
+              OR (allowed.scope_kind='business_area' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes scope
+                WHERE scope.record_id=record.record_id AND scope.active=1 AND scope.business_area_id=allowed.business_area_id))
+              OR (allowed.scope_kind='division' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes scope
+                WHERE scope.record_id=record.record_id AND scope.active=1 AND scope.division_id=allowed.division_id))))
+        AND NOT EXISTS(SELECT 1 FROM native_directory_grants denied
+          WHERE denied.staff_id=? AND denied.permission='directory.profile.view'
+            AND denied.effect='deny' AND denied.active=1 AND (denied.scope_kind='global'
+              OR (denied.scope_kind='resource' AND denied.resource_id=record.record_id)
+              OR (denied.scope_kind='assigned' AND EXISTS(SELECT 1 FROM native_directory_assignments assignment
+                WHERE assignment.record_id=record.record_id AND assignment.staff_id=denied.staff_id AND assignment.active=1))
+              OR (denied.scope_kind='business_area' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes scope
+                WHERE scope.record_id=record.record_id AND scope.active=1 AND scope.business_area_id=denied.business_area_id))
+              OR (denied.scope_kind='division' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes scope
+                WHERE scope.record_id=record.record_id AND scope.active=1 AND scope.division_id=denied.division_id))))
       ORDER BY client.external_id LIMIT 101`).bind(root.source_id, configured.connection.expectedSourceInstanceId,
-        configured.connection.expectedApplicationId, configured.connection.expectedHistoryEpoch, root.public_id)
+        configured.connection.expectedApplicationId, configured.connection.expectedHistoryEpoch, root.public_id, staffId, staffId)
       .all<{ recordId: string; name: unknown }>()).results;
     if (rows.length > 100) return [];
     return rows.flatMap(row => typeof row.recordId === "string" && row.recordId.length > 0

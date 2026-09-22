@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { Miniflare } from "miniflare";
 const mocks = vi.hoisted(() => ({ connection: vi.fn() }));
 vi.mock("../src/worker/project-alpha-api-v2-connections", () => ({ resolveProjectAlphaApiV2Connection: mocks.connection }));
 import { nativeDirectoryLinkedClientEditorRecords, nativeDirectoryOrganizationChoices, nativeDirectoryProfileEditorRecord } from "../src/worker/native-directory-profile-editor-record";
@@ -48,18 +49,52 @@ describe("Client Hub native profile editor coordinate", () => {
     const database = { withSession: () => database, prepare: (sql: string) => {
       expect(sql).toContain("operations_directory_client_organizations relationship");
       expect(sql).toContain("client.source_instance_id=parent.source_instance_id");
+      expect(sql).toContain("allowed.permission='directory.profile.view'");
+      expect(sql).toContain("denied.permission='directory.profile.view'");
       const statement = { bind: (...values: unknown[]) => { bound.push(values); return statement; }, all: async () => ({ results: rows }) };
       return statement;
     } };
     const organizationRoot = { ...root, public_id: "organization-public-id" };
-    await expect(nativeDirectoryLinkedClientEditorRecords({ OPS_DB: database } as unknown as Env, organizationRoot))
+    await expect(nativeDirectoryLinkedClientEditorRecords({ OPS_DB: database } as unknown as Env, organizationRoot, "staff-one"))
       .resolves.toEqual([{ recordId: "acquired:client:one", name: "Linked One" }]);
     expect(bound).toEqual([[identity.sourceId, identity.sourceInstanceId, identity.applicationId,
-      identity.historyEpochId, organizationRoot.public_id]]);
+      identity.historyEpochId, organizationRoot.public_id, "staff-one", "staff-one"]]);
     await expect(nativeDirectoryLinkedClientEditorRecords({ OPS_DB: database } as unknown as Env,
-      { ...organizationRoot, kind: "standalone_client" })).resolves.toEqual([]);
+      { ...organizationRoot, kind: "standalone_client" }, "staff-one")).resolves.toEqual([]);
     await expect(nativeDirectoryLinkedClientEditorRecords({ OPS_DB: database } as unknown as Env,
-      { ...organizationRoot, root_namespace: "portal" })).resolves.toEqual([]);
+      { ...organizationRoot, root_namespace: "portal" }, "staff-one")).resolves.toEqual([]);
+  });
+
+  it("does not reveal a linked client's name without an effective child view grant", async () => {
+    const runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06",
+      script: "export default {fetch(){return new Response('ok')}}", d1Databases: ["OPS_DB"] });
+    try {
+      const db = await runtime.getD1Database("OPS_DB");
+      for (const sql of [
+        "CREATE TABLE project_alpha_active_directory_mappings(source_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,resource_type TEXT,external_id TEXT,project_alpha_public_id TEXT)",
+        "CREATE TABLE operations_directory_client_organizations(client_record_id TEXT,organization_record_id TEXT)",
+        "CREATE TABLE operations_directory_records(record_id TEXT,record_kind TEXT,current_version INTEGER)",
+        "CREATE TABLE operations_directory_revisions(record_id TEXT,version INTEGER,profile_json TEXT)",
+        "CREATE TABLE native_directory_grants(staff_id TEXT,permission TEXT,effect TEXT,active INTEGER,scope_kind TEXT,resource_id TEXT,business_area_id TEXT,division_id TEXT)",
+        "CREATE TABLE native_directory_assignments(record_id TEXT,staff_id TEXT,active INTEGER)",
+        "CREATE TABLE native_directory_resource_scopes(record_id TEXT,active INTEGER,business_area_id TEXT,division_id TEXT)",
+      ]) await db.prepare(sql).run();
+      for (const [type, externalId, publicId] of [["organization", "ops-org", root.public_id],
+        ["client", "ops-client", "client-public-id"]]) await db.prepare(`INSERT INTO project_alpha_active_directory_mappings
+        (source_id,source_instance_id,application_id,history_epoch_id,resource_type,external_id,project_alpha_public_id)
+        VALUES(?,?,?,?,?,?,?)`).bind(identity.sourceId, identity.sourceInstanceId, identity.applicationId,
+          identity.historyEpochId, type, externalId, publicId).run();
+      await db.prepare("INSERT INTO operations_directory_client_organizations VALUES('ops-client','ops-org')").run();
+      await db.prepare("INSERT INTO operations_directory_records VALUES('ops-client','client',1)").run();
+      await db.prepare("INSERT INTO operations_directory_revisions VALUES('ops-client',1,'{\"name\":\"Private Child\"}')").run();
+      const env = { OPS_DB: db } as unknown as Env;
+      await expect(nativeDirectoryLinkedClientEditorRecords(env, root, "staff-one")).resolves.toEqual([]);
+      await db.prepare("INSERT INTO native_directory_grants(staff_id,permission,effect,active,scope_kind,resource_id) VALUES('staff-one','directory.profile.view','allow',1,'resource','ops-client')").run();
+      await expect(nativeDirectoryLinkedClientEditorRecords(env, root, "staff-one"))
+        .resolves.toEqual([{ recordId: "ops-client", name: "Private Child" }]);
+      await db.prepare("INSERT INTO native_directory_grants(staff_id,permission,effect,active,scope_kind,resource_id) VALUES('staff-one','directory.profile.view','deny',1,'resource','ops-client')").run();
+      await expect(nativeDirectoryLinkedClientEditorRecords(env, root, "staff-one")).resolves.toEqual([]);
+    } finally { await runtime.dispose(); }
   });
 
   it("offers a non-UUID acquired organization only with exact configured enrollment and active mapping", async () => {
