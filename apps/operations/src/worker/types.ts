@@ -12,6 +12,7 @@ export type Env = Omit<
   | "PROJECT_ALPHA_API_V2_MONITOR_RECIPIENT"
   | "PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ENABLED"
   | "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED"
+  | "PROJECT_ALPHA_PRIVATE_ADMIN_TRANSPORT_ENABLED"
   | "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ENABLED"
   | "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_SOURCE_ID"
   | "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ORIGIN"
@@ -46,6 +47,8 @@ export type Env = Omit<
   PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ENABLED?: string;
   /** Default-off, manually invoked administrator-only Project-v2 staging acceptance. */
   PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED?: string;
+  /** Default-off administrator transport for private PA Directory and Project consumers. */
+  PROJECT_ALPHA_PRIVATE_ADMIN_TRANSPORT_ENABLED?: string;
   /** Staging-only, manually invoked Directory bootstrap acceptance fixture. */
   PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ENABLED?: string;
   /** Staging-only immutable source pin for the Directory bootstrap fixture. */

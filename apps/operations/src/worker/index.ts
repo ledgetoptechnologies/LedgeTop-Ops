@@ -64,6 +64,7 @@ import { syncProjectAlpha } from "./project-alpha";
 import { runProjectAlphaSnapshotRecovery } from "./project-alpha-snapshot-recovery";
 import { registerProjectAlphaConnectorAdminRoutes, portalAuthorityErrorResponse } from "./project-alpha-connector-admin";
 import { registerProjectAlphaProjectV2AcceptanceRoutes } from "./project-alpha-project-v2-acceptance-routes";
+import { registerProjectAlphaPrivateAdminRoutes } from "./project-alpha-private-admin-routes";
 import { registerProjectAlphaApiV2ReadAcceptanceRoutes } from "./project-alpha-api-v2-read-acceptance-routes";
 import { PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ROUTE, projectAlphaDirectoryV2BootstrapAcceptanceEnabled, registerProjectAlphaDirectoryV2BootstrapAcceptanceRoutes } from "./project-alpha-directory-v2-bootstrap-acceptance-routes";
 import { PortalSourceAuthorityError } from "../../../client/src/worker/project-alpha-portal-authority";
@@ -3176,6 +3177,7 @@ app.get("/api/admin/delivery-change-recovery", async (c) => {
 registerProjectAlphaConnectorAdminRoutes(app);
 registerProjectAlphaApiV2ReadAcceptanceRoutes(app);
 registerProjectAlphaProjectV2AcceptanceRoutes(app);
+registerProjectAlphaPrivateAdminRoutes(app);
 registerProjectAlphaDirectoryV2BootstrapAcceptanceRoutes(app);
 app.post("/api/admin/integrations/project-alpha/sync", async (c) => {
   const principal = c.get("principal");
