@@ -6224,3 +6224,34 @@ pending; this requirement does not claim a deployed UI change.
   Operations build, pinned Wrangler generated-type check and scoped TypeScript
   diagnostics. The flag remains `false`; no cron delivery, D1 migration,
   connection, credential, PA instance or public link was changed.
+
+### September 22 — administrator Directory reconciliation review checkpoint
+
+- The existing default-off private administrator transport now exposes a
+  bounded, keyset-paged review feed over only each selected PA source's stable
+  complete reconciliation run. It returns opaque/source/native/public IDs,
+  classification, review state and bounded inventory/binding metadata; it does
+  not select or return reconciliation details, profile JSON, names, email,
+  credentials, configured URLs or mutation controls.
+- An administrator with deny-aware global `integrations.manage` may explicitly
+  select one open mapping-related finding, one existing Operations record and
+  its exact current version. Migration `0138` durably pins that selection to
+  the current run, source instance, application, history epoch, authorization
+  generation, resource kind, PA public ID and revision. Action, review and
+  command IDs are generated server-side. Replays are exact, and same-source
+  record reuse is rejected across application, epoch and resource-kind changes;
+  the same native record remains independently eligible in a distinct PA
+  source namespace.
+- Before invoking the existing acquisition coordinator, the service re-reads
+  the remote profile through the configured API-v2 reader and matches every
+  pinned identity/generation/kind/revision field. The coordinator may create
+  only its existing inactive acquired-mapping and native-owner-claim chain.
+  This checkpoint does not activate client access, create native records,
+  guess by name/email, or change Delivery/public-link state.
+- Focused implementation evidence passed `15/15`; the final combined
+  reconciliation, acquisition, private-admin and scheduler run passed `59/59`.
+  An independent combined run passed `36/36`, the production Operations build
+  passed, and final independent review found no remaining P0-P2 issues. The
+  private administrator transport remains default-off; no deployment,
+  activation, credential, PA configuration, Delivery row or public link was
+  changed by this checkpoint.

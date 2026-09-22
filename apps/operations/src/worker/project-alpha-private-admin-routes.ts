@@ -5,6 +5,8 @@ import { sqlScope } from "./acl";
 import { readBoundedJson } from "./bounded-json";
 import { acquireProjectAlphaExistingDirectoryBinding } from "./project-alpha-existing-directory-acquisition-coordinator";
 import { activateProjectAlphaExistingDirectoryBinding } from "./project-alpha-existing-directory-binding-review-consumer";
+import { acquireProjectAlphaDirectoryReconciliationFinding,
+  listProjectAlphaDirectoryReconciliationFindings } from "./project-alpha-directory-reconciliation-review";
 import { reserveProjectAlphaProjectAdoptionReview } from "./project-alpha-project-adoption-review-consumer";
 import { planProjectAlphaProjectAdoptionBind } from "./project-alpha-project-adoption-bind-consumer";
 import type { Env, StaffPrincipal } from "./types";
@@ -33,6 +35,12 @@ const acquireSchema = z.object({
 const activationSchema = z.object({ reviewItemId: UUID, idempotencyKey: IDEMPOTENCY }).strict();
 const reservationSchema = z.object({ reviewItemId: UUID, idempotencyKey: IDEMPOTENCY }).strict();
 const bindSchema = z.object({ reservationId: UUID }).strict();
+const reconciliationAdoptionSchema = z.object({
+  findingId: UUID,
+  recordId: RECORD_ID,
+  expectedRecordVersion: positiveInteger,
+  idempotencyKey: IDEMPOTENCY,
+}).strict();
 
 function enabled(env: Pick<Env, "PROJECT_ALPHA_PRIVATE_ADMIN_TRANSPORT_ENABLED">): boolean {
   return env.PROJECT_ALPHA_PRIVATE_ADMIN_TRANSPORT_ENABLED === "true";
@@ -90,6 +98,29 @@ async function guard(c: AppContext, next: () => Promise<void>): Promise<void> {
  */
 export function registerProjectAlphaPrivateAdminRoutes(app: App): void {
   app.use(`${PROJECT_ALPHA_PRIVATE_ADMIN_ROUTE}/*`, guard);
+
+  app.get(`${PROJECT_ALPHA_PRIVATE_ADMIN_ROUTE}/directory/reconciliation/findings`, async c => {
+    const url = new URL(c.req.url);
+    if ([...url.searchParams.keys()].some(key => !["sourceId", "limit", "cursor"].includes(key)))
+      throw new HTTPException(400, { message: "Reconciliation finding query is invalid" });
+    const sourceIds = url.searchParams.getAll("sourceId");
+    const rawLimit = url.searchParams.get("limit") ?? "25";
+    if (!/^[1-9][0-9]?$/u.test(rawLimit) || Number(rawLimit) > 50)
+      throw new HTTPException(400, { message: "Reconciliation finding query is invalid" });
+    const page = await listProjectAlphaDirectoryReconciliationFindings(c.env, {
+      sourceIds, limit: Number(rawLimit), ...(url.searchParams.has("cursor")
+        ? { cursor: url.searchParams.get("cursor") ?? "" } : {}),
+    });
+    if (!page) throw new HTTPException(400, { message: "Reconciliation finding query is invalid" });
+    return c.json(page);
+  });
+
+  app.post(`${PROJECT_ALPHA_PRIVATE_ADMIN_ROUTE}/directory/reconciliation/acquire`, async c => {
+    const input = await json(c.req.raw, reconciliationAdoptionSchema, "Reconciliation acquisition");
+    requireIdempotency(c.req.raw, input.idempotencyKey);
+    const reviewer = await currentReviewer(c.env, c.get("principal"));
+    return c.json(await acquireProjectAlphaDirectoryReconciliationFinding(c.env, input, reviewer));
+  });
 
   app.post(`${PROJECT_ALPHA_PRIVATE_ADMIN_ROUTE}/directory/acquire`, async c => {
     const input = await json(c.req.raw, acquireSchema, "Directory acquisition");
