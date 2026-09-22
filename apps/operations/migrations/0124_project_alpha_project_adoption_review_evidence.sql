@@ -125,6 +125,13 @@ WHEN NEW.expires_at<=strftime('%Y-%m-%dT%H:%M:%fZ','now')
      OR (json_extract(scope.value,'$.scopeKind')='business_area' AND json_type(scope.value,'$.divisionId')<>'null')
      OR (json_extract(scope.value,'$.scopeKind')='division' AND json_type(scope.value,'$.divisionId')<>'text'))
  OR EXISTS (SELECT 1 FROM json_each(NEW.normalized_scopes_json) scope
+   WHERE NOT EXISTS (SELECT 1 FROM native_business_areas area
+     LEFT JOIN native_business_divisions division
+       ON division.id=json_extract(scope.value,'$.divisionId') AND division.business_area_id=area.id AND division.active=1
+     WHERE area.id=json_extract(scope.value,'$.businessAreaId') AND area.active=1
+       AND (json_extract(scope.value,'$.scopeKind')='business_area'
+         OR (json_extract(scope.value,'$.scopeKind')='division' AND division.id IS NOT NULL))))
+ OR EXISTS (SELECT 1 FROM json_each(NEW.normalized_scopes_json) scope
    WHERE NOT EXISTS (SELECT 1 FROM native_project_grants grant_row
      WHERE grant_row.staff_id=NEW.reviewer_staff_id AND grant_row.capability='project.shared.sync' AND grant_row.effect='allow' AND grant_row.active=1
        AND (grant_row.scope_kind='global' OR (grant_row.scope_kind='exact_project' AND grant_row.external_project_id=NEW.external_project_id)
@@ -200,6 +207,13 @@ WHEN NOT EXISTS (SELECT 1 FROM project_alpha_project_adoption_review_evidence re
      AND profile.version=NEW.reviewer_profile_version AND generation.generation=NEW.project_grant_generation)
  OR NOT EXISTS (SELECT 1 FROM staff_role_assignments owner_assignment
    WHERE owner_assignment.staff_id=NEW.reviewer_staff_id AND owner_assignment.role_id=NEW.reviewer_owner_role_id AND owner_assignment.scope='global')
+ OR EXISTS (SELECT 1 FROM json_each(NEW.normalized_scopes_json) scope
+   WHERE NOT EXISTS (SELECT 1 FROM native_business_areas area
+     LEFT JOIN native_business_divisions division
+       ON division.id=json_extract(scope.value,'$.divisionId') AND division.business_area_id=area.id AND division.active=1
+     WHERE area.id=json_extract(scope.value,'$.businessAreaId') AND area.active=1
+       AND (json_extract(scope.value,'$.scopeKind')='business_area'
+         OR (json_extract(scope.value,'$.scopeKind')='division' AND division.id IS NOT NULL))))
  OR (NEW.organization_record_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM project_alpha_directory_mappings mapping JOIN operations_directory_records record ON record.record_id=mapping.external_id AND record.record_kind='organization'
    WHERE mapping.source_id=NEW.source_id AND mapping.source_instance_id=NEW.source_instance_id AND mapping.application_id=NEW.application_id AND mapping.history_epoch_id=NEW.history_epoch_id AND mapping.resource_type='organization'
      AND mapping.external_id=NEW.organization_record_id AND mapping.project_alpha_public_id=NEW.organization_project_alpha_public_id))

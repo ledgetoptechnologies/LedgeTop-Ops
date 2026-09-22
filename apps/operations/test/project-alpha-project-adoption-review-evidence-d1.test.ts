@@ -74,6 +74,24 @@ async function seedAuthority(externalProjectId = "server-generated-project") {
   ]);
 }
 
+async function seedScopedAuthority(scope: "business_area" | "division") {
+  await db.batch([
+    db.prepare("INSERT INTO native_staff_admissions VALUES('staff',1,'access|staff',1,'staff','2026-09-21T00:00:00.000Z','2026-09-21T00:00:00.000Z')"),
+    db.prepare("INSERT INTO native_staff_profiles VALUES('staff','staff@example.test',1)"),
+    db.prepare("INSERT INTO staff_role_assignments VALUES('owner-assignment','staff','role-owner','global')"),
+    db.prepare("INSERT INTO native_business_areas VALUES('area',1)"),
+    db.prepare("INSERT INTO native_business_divisions VALUES('division','area',1)"),
+    db.prepare(`INSERT INTO project_alpha_project_destinations(external_project_id,source_id,application_id,destination_base_url,expected_source_instance_id,expected_history_epoch_id)
+      VALUES('server-generated-project','project-alpha:primary',?,'https://alpha.example.test',?,?)`).bind(applicationId, sourceInstanceId, historyEpochId),
+    scope === "business_area"
+      ? db.prepare("INSERT INTO native_project_grants(id,staff_id,capability,effect,scope_kind,business_area_id,granted_by) VALUES('grant-scope','staff','project.shared.sync','allow','business_area','area','staff')")
+      : db.prepare("INSERT INTO native_project_grants(id,staff_id,capability,effect,scope_kind,business_area_id,division_id,granted_by) VALUES('grant-scope','staff','project.shared.sync','allow','division','area','division','staff')"),
+    db.prepare("INSERT INTO operations_directory_records VALUES('organization-record','organization')"),
+    db.prepare(`INSERT INTO project_alpha_directory_mappings VALUES('project-alpha:primary',?,?,?,'organization','organization-record',?)`)
+      .bind(sourceInstanceId, applicationId, historyEpochId, organizationPublicId),
+  ]);
+}
+
 function reviewStatement(
   itemId = reviewItemId,
   externalProjectId = "server-generated-project",
@@ -82,15 +100,16 @@ function reviewStatement(
   grantGeneration = 1,
   independentEvidenceHash = "e".repeat(64),
   expiryModifier = "+5 minutes",
+  scopesJson = "[]",
 ) {
   return db.prepare(`INSERT INTO project_alpha_project_adoption_review_evidence(
     review_item_id,request_sha256,source_id,source_instance_id,application_id,history_epoch_id,external_project_id,
     project_alpha_public_id,project_alpha_revision,projection_sha256,authorization_generation,canonical_detail_read_json,
     canonical_detail_read_sha256,organization_record_id,organization_project_alpha_public_id,client_record_id,client_project_alpha_public_id,
     reviewer_staff_id,reviewer_access_subject,reviewer_admission_version,reviewer_profile_version,reviewer_owner_role_id,independent_evidence_sha256,project_grant_generation,normalized_scopes_json,reviewed_at,expires_at)
-    VALUES(?,?,'project-alpha:primary',?,?,?,? ,?,'7',?,'0',?,?, 'organization-record',?,NULL,NULL,'staff','access|staff',1,1,'role-owner',?,?,'[]',
+    VALUES(?,?,'project-alpha:primary',?,?,?,? ,?,'7',?,'0',?,?, 'organization-record',?,NULL,NULL,'staff','access|staff',1,1,'role-owner',?,?,?,
       strftime('%Y-%m-%dT%H:%M:%fZ','now'),strftime('%Y-%m-%dT%H:%M:%fZ','now','${expiryModifier}'))`)
-    .bind(itemId, requestHash, sourceInstanceId, applicationId, historyEpochId, externalProjectId, publicId, hash, detail, detailHash, organizationPublicId, independentEvidenceHash, grantGeneration);
+    .bind(itemId, requestHash, sourceInstanceId, applicationId, historyEpochId, externalProjectId, publicId, hash, detail, detailHash, organizationPublicId, independentEvidenceHash, grantGeneration, scopesJson);
 }
 
 function reservationStatement(itemId = reviewItemId, key = idempotencyKey) {
@@ -191,5 +210,25 @@ describe("0124 project adoption review evidence", () => {
 
     await db.prepare("INSERT INTO operations_shared_projects(external_project_id,name,lifecycle,scopes_json) VALUES('server-generated-project','Existing local project','active','[]')").run();
     await expect(reviewStatement().run()).rejects.toThrow(/authority/);
+  });
+
+  it("invalidates reviewed authority when its business area is deactivated", async () => {
+    await seedScopedAuthority("business_area");
+    const scopes = JSON.stringify([{ scopeKind: "business_area", businessAreaId: "area", divisionId: null }]);
+    await reviewStatement(reviewItemId, "server-generated-project", hash, detailJson(), 1, "e".repeat(64), "+5 minutes", scopes).run();
+    await db.prepare("UPDATE native_business_areas SET active=0 WHERE id='area'").run();
+    await expect(reservationStatement().run()).rejects.toThrow(/not current and exact/);
+  });
+
+  it("rejects inactive or parent-mismatched division scopes", async () => {
+    await seedScopedAuthority("division");
+    const divisionScope = JSON.stringify([{ scopeKind: "division", businessAreaId: "area", divisionId: "division" }]);
+    await db.prepare("UPDATE native_business_divisions SET active=0 WHERE id='division'").run();
+    await expect(reviewStatement(reviewItemId, "server-generated-project", hash, detailJson(), 1, "e".repeat(64), "+5 minutes", divisionScope).run()).rejects.toThrow(/authority/);
+
+    await db.prepare("UPDATE native_business_divisions SET active=1 WHERE id='division'").run();
+    await db.prepare("INSERT INTO native_business_areas VALUES('other-area',1)").run();
+    const mismatchedScope = JSON.stringify([{ scopeKind: "division", businessAreaId: "other-area", divisionId: "division" }]);
+    await expect(reviewStatement("57000000-0000-4000-8000-000000000005", "server-generated-project", hash, detailJson(), 1, "e".repeat(64), "+5 minutes", mismatchedScope).run()).rejects.toThrow(/authority/);
   });
 });
