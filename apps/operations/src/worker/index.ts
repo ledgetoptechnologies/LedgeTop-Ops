@@ -73,6 +73,7 @@ import { ClientHubSourcesChangedError } from "./client-hub-directory";
 import { buildConnectionSummaries, projectAlphaHealthIsStale, projectAlphaQuoteFreshness } from "./integration-health";
 import { runProjectAlphaApiV2MonitorCycle } from "./project-alpha-api-v2-monitor-cycle";
 import { selectProjectAlphaApiV2MonitorSchedulerRevision } from "./project-alpha-api-v2-monitor-scheduler-selection";
+import { drainNativeDirectoryOutboxes } from "./native-directory-outbox-scheduler";
 import { handleProjectAlphaApiV2MonitorControlHttp,
   projectAlphaApiV2MonitorControlHttpRequest } from "./project-alpha-api-v2-monitor-control-http";
 import { consumeNativeStaffOnboardingRateLimit } from "./native-staff-onboarding-rate-limit";
@@ -3264,6 +3265,7 @@ const CLIENT_HUB_INDEX_CRON = "2-57/5 * * * *";
 const PROJECT_ALPHA_RECOVERY_CRON = "17 * * * *";
 const NATIVE_DELIVERY_NOTIFICATION_CRON = "4-59/15 * * * *";
 export const PROJECT_ALPHA_API_V2_MONITOR_CRON = "3-58/5 * * * *";
+export const NATIVE_DIRECTORY_OUTBOX_CRON = "1-56/5 * * * *";
 
 export async function runScheduledPrimaryProjectAlphaSync(env: Env) {
   const result = await syncProjectAlpha(env);
@@ -3288,6 +3290,17 @@ async function scheduled(
   env: Env,
   ctx: ExecutionContext,
 ) {
+  if (event.cron === NATIVE_DIRECTORY_OUTBOX_CRON) {
+    try {
+      const result = await drainNativeDirectoryOutboxes(env, { rotationTime: event.scheduledTime });
+      console.log(JSON.stringify({ event: "native_directory.outbox.tick", ...result }));
+    } catch {
+      // Never emit connection secrets, command payloads or private profiles.
+      console.error(JSON.stringify({ event: "native_directory.outbox.error" }));
+      throw new Error("Native Directory outbox drain failed");
+    }
+    return;
+  }
   if (event.cron === PROJECT_ALPHA_API_V2_MONITOR_CRON) {
     try {
       if (env.PROJECT_ALPHA_API_V2_MONITOR_ENABLED !== "true") {

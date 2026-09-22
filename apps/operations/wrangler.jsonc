@@ -41,6 +41,7 @@
     "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED": "false",
     "PROJECT_ALPHA_PRIVATE_ADMIN_TRANSPORT_ENABLED": "false",
     "NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED": "false",
+    "NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED": "false",
     "NATIVE_INTEGRATION_CONTROL_ENABLED": "false",
     "NATIVE_INTEGRATION_CONTROL_ORIGIN": "",
     "CLIENT_PORTAL_NOTIFICATION_MIGRATION_MAINTENANCE": "false",
@@ -104,7 +105,7 @@
   },
   "send_email": [{ "name": "NOTIFICATION_EMAIL", "allowed_sender_addresses": ["delivery@ledgetopdroneservices.com"] }],
   "observability": { "enabled": true, "head_sampling_rate": 1 },
-  "triggers": { "crons": ["*/15 * * * *", "*/5 * * * *", "2-57/5 * * * *", "17 * * * *", "4-59/15 * * * *", "3-58/5 * * * *"] },
+  "triggers": { "crons": ["*/15 * * * *", "*/5 * * * *", "2-57/5 * * * *", "17 * * * *", "4-59/15 * * * *", "3-58/5 * * * *", "1-56/5 * * * *"] },
   "r2_buckets": [
     { "binding": "DATA_BUCKET", "bucket_name": "client-data" },
     { "binding": "INCOMING_BUCKET", "bucket_name": "ltds-incoming" }
