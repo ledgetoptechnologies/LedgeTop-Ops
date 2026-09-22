@@ -5957,7 +5957,7 @@ pending; this requirement does not claim a deployed UI change.
 
 ### September 22 — private adoption foundation, still default-off
 
-- Operations commits through `24a4b51` add the private adoption foundation
+- Operations commits through `1d520c0` add the private adoption foundation
   only. Directory now has a
   strict existing-record binding transport, an immutable reviewed acquisition
   coordinator, inactive canonical/native-owner materialization, and a separate
@@ -5970,8 +5970,8 @@ pending; this requirement does not claim a deployed UI change.
 - Current focused evidence includes the complete Project adoption/evidence/bind
   suite `39/39`, its producer subset `10/10`, the populated migration chain
   through `0130` `4/4`, and the private Directory acquisition-to-activation
-  harness `5/5`. Independent reruns passed the migration chain `4/4`, Directory
-  harness `5/5`, and the final replay/race regressions `2/2`. Byte-exact PA
+  harness `7/7`. Independent reruns passed the migration chain `4/4`, Directory
+  harness `7/7`, and the final replay/race regressions `2/2`. Byte-exact PA
   evidence remains retained and hash-checked; replay excludes only the volatile
   PA request ID from its stable semantic digest. A simulated post-observation PA
   revision/projection change terminates as `resource_precondition_conflict`

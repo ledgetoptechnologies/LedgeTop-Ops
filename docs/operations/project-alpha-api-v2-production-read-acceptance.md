@@ -82,7 +82,7 @@ acceptance made no PA mutation and does not authorize legacy retirement.
 ## September 22 private adoption checkpoint
 
 The read acceptance above remains historical read-only evidence. Subsequent
-Operations commits through `24a4b51` implement private foundations for reviewed
+Operations commits through `1d520c0` implement private foundations for reviewed
 adoption without changing that production result. Directory existing-record
 binding now has a strict PA transport, immutable review/reservation/acquisition
 chain, inactive canonical mapping materialization, and an activation consumer
@@ -103,8 +103,8 @@ remain active, and portal migration/cutover has not started.
 Focused verification is bounded to local code. The populated migration chain
 through `0130` passes `4/4`; the complete Project adoption/evidence/bind suite
 passes `39/39`; its producer subset passes `10/10`; and the dedicated private
-Directory acquisition-to-activation harness passes `5/5`. Independent reruns
-also passed the migration chain `4/4`, the Directory harness `5/5`, and the two
+Directory acquisition-to-activation harness passes `7/7`. Independent reruns
+also passed the migration chain `4/4`, the Directory harness `7/7`, and the two
 final replay/race regressions `2/2`. The race regression proves that PA revision
 or projection drift after observation is rejected as a terminal
 `resource_precondition_conflict` without creating a mapping or changing public
