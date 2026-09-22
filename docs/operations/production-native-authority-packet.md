@@ -29,6 +29,13 @@ the production `OPS_DB` identity supplied in the ignored private values file.
 No owner identity or infrastructure UUID is embedded in the public generator,
 tests, example, or runbook.
 
+The ignored private values file must also enumerate the owner's complete
+reviewed `staff_permission_overrides` set. Each entry contains exactly `id`,
+`permissionKey`, `effect`, `scope`, nullable `divisionId`, `scopeKey`, and
+`createdBy`. The generator canonicalizes those entries by ID. Public manifests
+contain only the canonical row count and SHA-256 digest, never the raw override
+values.
+
 It also pins the exact 124-file Operations migration chain and its content
 digest through `0124_project_alpha_project_adoption_review_evidence.sql`.
 Generated configs are intentionally smaller than the deploy config: they carry
@@ -46,11 +53,18 @@ the revoke migration, and the reverse is also true.
 
 Before provision, the migration requires the exact canonical 124-name D1
 ledger, an empty auxiliary ledger, the exact active seeded owner row and global
-owner assignment, the reviewed Access subject, and no prior native admission,
+owner assignment, the reviewed Access subject, the exact complete reviewed
+permission-override set, and no prior native admission,
 profile, grant, grant generation/history, bootstrap approval, or bootstrap
 receipt for that owner. It rejects other native management, integration,
 workforce, Directory, or Project authority and any surviving actor command,
 pending/leased outbox work, or Directory write fence.
+
+Permission overrides are existing owner state, not authority created by this
+packet. The packet never inserts, updates, or deletes them. Both phases require
+the complete current set to match the private canonical set with no missing,
+extra, or changed reviewed row, and verify that exact set again before commit.
+An explicitly reviewed empty array is supported.
 
 Provision verifies all of the following before it can commit:
 
@@ -85,6 +99,13 @@ failure.
 5. Copy `docs/operations/production-native-authority.json.example` to the
    ignored `.backups/production-native-authority.json`. Replace every
    placeholder. The window may not exceed four hours.
+6. Read every current override for the owner from `staff_permission_overrides`
+   and copy the complete reviewed set into `permissionOverrides`. Preserve each
+   row's exact `id`, `permission_key`, `effect`, `scope`, nullable `division_id`,
+   `scope_key`, and `created_by` values using the example's camel-case field
+   names. `createdBy` must equal the packet `staffId`; otherwise stop for review.
+   Do not omit apparently redundant allows. Use `[]` only after explicitly
+   confirming that the current set is empty.
 
 Never place a JWT, `CF_Authorization` cookie, API token, service-token secret,
 PA key, or other credential in the values file. Manifests contain hashes, but
@@ -121,7 +142,8 @@ production deploy config, or a dashboard query.
 
 Before provision, independently recheck the canonical ledger, auxiliary ledger,
 owner binding, empty native state, and zero pending actor work. After provision,
-record sanitized readback of admission/profile versions, the exact Directory
+record sanitized readback of admission/profile versions, the permission-override
+count and canonical digest, the exact Directory
 grant plus generation/history, the exact Project grant plus version/generation,
 and the immutable receipt. Do not record the raw Access subject or email in
 release evidence.
@@ -132,6 +154,8 @@ Use only the already reviewed revoke config. Record sanitized readback of the
 inactive admission and grants, Directory history version/generation `2`, Project
 version/generation `2`, the revoked provision approval, both receipts, zero live
 Project proofs, and no pending auxiliary migration.
+The readback must also reproduce the same permission-override count and digest;
+do not record raw override values in public release evidence.
 
 If a guard fails, stop and investigate the current database state. Do not
 weaken a predicate, rewrite history, delete durable rows, use raw D1 updates, or
