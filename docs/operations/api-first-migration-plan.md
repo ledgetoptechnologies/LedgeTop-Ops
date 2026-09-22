@@ -2,6 +2,49 @@
 
 Updated September 21, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
 
+### September 22, 2026 — linked-client write and relationship-recovery checkpoint
+
+- Operations now exposes the default-off, native-authority Client Hub path for
+  creating standalone or organization-linked clients, editing linked profiles,
+  and assigning, moving or removing a client relationship. Client creation
+  reserves the profile and exact initial relationship assertion in one D1
+  batch. Committed replays compare that durable assertion rather than trusting
+  a caller-supplied parent. PA destinations remain a deliberate subset of the
+  organization's enrolled destinations, so a client can be served by one PA
+  instance while its organization is enrolled in both. Existing Delivery and
+  public-link records are not rewritten.
+- Canonical imported record IDs are no longer incorrectly restricted to UUIDs.
+  They remain bounded to 191 Unicode scalar values and 764 UTF-8 bytes with
+  control characters rejected; mutation, application, instance, epoch and
+  transport command identifiers remain strict UUIDs. Forward migration `0135`
+  rebuilds only the current relationship table constraint. A populated
+  through-`0134` rehearsal preserves its row, relationship version, timestamps,
+  history, five guards and dependent live views, then proves bounded non-UUID
+  client and organization IDs work.
+- Relationship writes now derive the numeric maximum from coherent,
+  current-local-version profile, relationship, refresh and activation
+  evidence. Every source/application/history/origin/public-ID fence must match;
+  evidence from another origin cannot advance a command. A pending predecessor
+  blocks new work. A terminal predecessor also blocks the normal mutation
+  route; only the administrator recovery route can name the exact immediate
+  terminal command IDs, and those immutable supersession IDs are persisted on
+  the replacement outbox rows. Ownership of this recovery proof is therefore
+  server-side rather than a general editor permission.
+- Independent linked-client verification passed five files and **50/50** tests.
+  Relationship plus populated-`0135` verification passed **11/11** tests. The
+  first seven-file integration run correctly exposed one stale dispatcher
+  fixture that stopped before the new create-admission relationship table; the
+  fixture now runs through `0135`, creates the exact client relationship
+  assertion and pins the parent's current version. Its full dispatcher suite
+  passes **6/6** and the other six integrated files passed **50/50**. The
+  production Operations build also succeeds. These are local source and D1
+  results, not staging or production write acceptance.
+- No write, scheduler, monitor, reconciliation or managed-directory flag was
+  enabled. PA must remain locally editable until the read-only reconciliation
+  consumer, both-instance joined acceptance and coordinated owner deployment
+  prove that Operations can replace browser writes without hiding existing PA
+  changes or stranding terminal conflicts.
+
 ### September 21, 2026 — production native-authority provision checkpoint
 
 - Operations PR106 merged to `main` as
