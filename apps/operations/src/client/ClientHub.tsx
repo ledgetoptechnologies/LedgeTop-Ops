@@ -56,6 +56,7 @@ interface ClientDetailResponse {
   projectAlphaContactRolesAvailable?: boolean;
   projectAlphaContactRoles?: ProjectAlphaContactRolePage;
   nativeDirectoryProfile?: { recordId: string; kind: "organization" | "client" } | null;
+  nativeDirectoryLinkedClients?: Array<{ recordId: string; name: string }>;
 }
 interface BusinessProject extends CollectionItem { id: string; name: string; status: string | null; start_date: string | null; end_date: string | null; manager_name: string | null; created_at: string | null }
 interface ProjectManagementResult {
@@ -438,6 +439,7 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess, nativeDir
   const [revision, setRevision] = useState(0);
   const [invalidated, setInvalidated] = useState("");
   const [portalFeedback, setPortalFeedback] = useState("");
+  const [linkedClientRecordId, setLinkedClientRecordId] = useState("");
   const contextController = useRef<AbortController | null>(null);
   if (!contextController.current) contextController.current = new AbortController();
   const refresh = () => {
@@ -486,6 +488,16 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess, nativeDir
     </div>
     {nativeDirectoryProfileWrites && data.nativeDirectoryProfile
       && <NativeDirectoryProfileEdit kind={data.nativeDirectoryProfile.kind} recordId={data.nativeDirectoryProfile.recordId} />}
+    {nativeDirectoryProfileWrites && data.client.kind === "organization" && (data.nativeDirectoryLinkedClients?.length ?? 0) > 0 && <Card title="Edit linked client profile">
+      <p>Select a currently linked client. Client Hub verifies its exact Project Alpha mapping and organization relationship on every refresh.</p>
+      <label htmlFor="native-directory-linked-client">Linked client<select id="native-directory-linked-client" value={linkedClientRecordId}
+        onChange={event => setLinkedClientRecordId(event.target.value)}>
+        <option value="">Choose a linked client</option>
+        {data.nativeDirectoryLinkedClients!.map(client => <option key={client.recordId} value={client.recordId}>{client.name}</option>)}
+      </select></label>
+      {linkedClientRecordId && data.nativeDirectoryLinkedClients!.some(client => client.recordId === linkedClientRecordId)
+        && <NativeDirectoryProfileEdit kind="client" recordId={linkedClientRecordId} />}
+    </Card>}
     <SourceBusinessParty key={revision} client={data.client} party={data.businessParty} canManage={data.canManageBusinessParties}
       contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} onRefresh={refresh} />
     <p className="client-hub-inventory-note">{data.businessProjects ? "Business projects are separate from the work shared with this client and their portal access." : "These sections show work shared with this client. Full business project history is separate."}</p>

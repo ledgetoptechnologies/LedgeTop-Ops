@@ -5,13 +5,17 @@ const editor = readFileSync(new URL("../src/client/NativeDirectoryProfileEditor.
 const hub = readFileSync(new URL("../src/client/ClientHub.tsx", import.meta.url), "utf8");
 const directory = readFileSync(new URL("../src/client/ClientDirectory.tsx", import.meta.url), "utf8");
 const app = readFileSync(new URL("../src/client/OperationsApp.tsx", import.meta.url), "utf8");
+const hubRoute = readFileSync(new URL("../src/worker/client-hub.ts", import.meta.url), "utf8");
 
 describe("Client Hub profile editor UI contract", () => {
   it("is mounted only behind the server session capability and exact mapped record ID", () => {
     expect(app).toContain("session.capabilities?.nativeDirectoryProfileWrites?.enabled === true");
     expect(directory).toContain("nativeDirectoryProfileWrites && <NativeDirectoryProfileCreate />");
     expect(hub).toContain("data.nativeDirectoryProfile.recordId");
+    expect(hub).toContain("data.nativeDirectoryLinkedClients");
+    expect(hub).toContain('NativeDirectoryProfileEdit kind="client" recordId={linkedClientRecordId}');
     expect(hub).not.toContain("recordId={data.client.public_id}");
+    expect(hubRoute).toContain("nativeDirectoryProfileWritesEnabled(env)");
   });
 
   it("uses server-owned choices and sends only the mutation intent to the two-step create and update routes", () => {

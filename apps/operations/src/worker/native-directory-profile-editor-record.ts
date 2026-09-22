@@ -11,6 +11,8 @@ export type NativeDirectoryOrganizationChoice = Readonly<{
   sourceIds: readonly string[];
 }>;
 
+export type NativeDirectoryLinkedClientEditorRecord = Readonly<{ recordId: string; name: string }>;
+
 type EnrollmentDestination = Readonly<{
   sourceId: string; sourceInstanceUUID: string; applicationUUID: string; historyEpoch: string;
   origin: string; externalCanonicalId: string;
@@ -110,4 +112,34 @@ export async function nativeDirectoryProfileEditorRecord(env: Env, root: { sourc
     return rows.length === 1 && typeof rows[0]?.recordId === "string" && rows[0].recordId.length > 0
       ? { recordId: rows[0].recordId, kind: recordKind } : null;
   } catch { return null; }
+}
+
+/** Lists only clients whose active mapping and current native relationship both
+ * point at the exact organization represented by this Client Hub workspace. */
+export async function nativeDirectoryLinkedClientEditorRecords(env: Env, root: { source_id: string; root_namespace: string;
+  kind: "organization" | "standalone_client"; public_id: string }): Promise<NativeDirectoryLinkedClientEditorRecord[]> {
+  if (root.root_namespace !== "business" || root.kind !== "organization" || !root.source_id.startsWith("project-alpha:")) return [];
+  try {
+    const configured = resolveProjectAlphaApiV2Connection(env, root.source_id);
+    if (!configured.enabled || !configured.connection.expectedHistoryEpoch) return [];
+    const rows = (await env.OPS_DB.withSession("first-primary").prepare(`SELECT client.external_id recordId,
+        json_extract(revision.profile_json,'$.name') name
+      FROM project_alpha_active_directory_mappings parent
+      JOIN operations_directory_client_organizations relationship ON relationship.organization_record_id=parent.external_id
+      JOIN project_alpha_active_directory_mappings client ON client.external_id=relationship.client_record_id
+        AND client.source_id=parent.source_id AND client.source_instance_id=parent.source_instance_id
+        AND client.application_id=parent.application_id AND client.history_epoch_id=parent.history_epoch_id
+        AND client.resource_type='client'
+      JOIN operations_directory_records record ON record.record_id=client.external_id AND record.record_kind='client'
+      JOIN operations_directory_revisions revision ON revision.record_id=record.record_id AND revision.version=record.current_version
+      WHERE parent.source_id=? AND parent.source_instance_id=? AND parent.application_id=? AND parent.history_epoch_id=?
+        AND parent.resource_type='organization' AND parent.project_alpha_public_id=?
+      ORDER BY client.external_id LIMIT 101`).bind(root.source_id, configured.connection.expectedSourceInstanceId,
+        configured.connection.expectedApplicationId, configured.connection.expectedHistoryEpoch, root.public_id)
+      .all<{ recordId: string; name: unknown }>()).results;
+    if (rows.length > 100) return [];
+    return rows.flatMap(row => typeof row.recordId === "string" && row.recordId.length > 0
+      && typeof row.name === "string" && row.name.normalize("NFC").trim().length > 0
+      ? [{ recordId: row.recordId, name: row.name.normalize("NFC").trim() }] : []);
+  } catch { return []; }
 }
