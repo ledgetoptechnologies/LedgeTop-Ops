@@ -1,6 +1,37 @@
 # API-first migration — current implementation objective and work register
 
-Updated September 21, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+Updated September 22, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+
+### September 22, 2026 — authoritative PR and staging acceptance status
+
+- Operations PR [#107](https://github.com/ledgetoptechnologies/LedgeTop-Ops/pull/107)
+  is open at `e2044dc4d09b9721a20d5dd4d5f271798ec1e89e`. The first full
+  run passed 2,756 tests and found only three stale schedule-array assertions;
+  commit `e2044dc` updated those exact assertions and its focused rerun passed
+  8/8. The replacement full CI run is still in progress, so the PR is not
+  merge-ready yet.
+- Project Alpha PR [#188](https://github.com/ledgetoptechnologies/Project-Alpha/pull/188)
+  is open at `cbabe57e3d2bceceb5fc724d083ea332c1864500`. Smoke, JavaScript
+  and Python CodeQL, and gitleaks checks are green. It is not merged or deployed
+  to either production PA instance.
+- A private pre-migration staging D1 backup was recorded before applying remote
+  Operations staging migrations 0123–0138. Staging Worker version
+  `5e0e00db-a05a-4e1f-8f8f-487ffad6b582` retains the existing `DATA_BUCKET`
+  binding and enables only Directory reconciliation and private-administrator
+  review for this test window. The corrected `6-51/15 * * * *` trigger fired
+  and logged an idle reconciliation tick with zero attempted sources because
+  staging has no enabled PA API-v2 connection.
+- Consequently no live finding reservation, inactive mapping, ownership claim,
+  mapping activation, or client-access activation has been accepted in staging.
+  The focused inactive-reservation and explicit-activation suite is green at
+  62/62 with an extended timeout, including stale evidence, collision,
+  authority-revocation and byte-preserved public-link cases.
+- Production remains unchanged: PA is correctly still locally editable,
+  Operations production flags remain off, existing portal/Delivery/public-link
+  behavior is untouched, and no client access was activated. PR #188 implements
+  the server-enforced managed-directory mode, but deployment to both PA
+  instances and a separate explicit PA administrator activation are still
+  required after joined staging acceptance.
 
 ### September 22, 2026 — default-off reconciliation scheduler checkpoint
 
@@ -182,8 +213,8 @@ Updated September 21, 2026. The owner approved implementation and resumption aft
 ### September 19, 2026 — current joined-window gate recheck
 
 - The Ops staging Cloudflare Access policy **Ledge Top Staging Staff Access**
-  explicitly includes `beaukoltz@ledgetopdroneservices.com`. A live in-app
-  session loaded the authenticated administrator view for Beau Koltz. This
+  explicitly includes the approved owner account. A live in-app session loaded
+  the authenticated owner-administrator view. This
   confirms the authenticated delivery path, not Project-v2
   authority or acceptance.
 - The exact PA staging candidate remains
@@ -2014,7 +2045,7 @@ nor send financial mail. Contract/invoice reads and per-document allowlists
 follow after quote authorization tests; no PA code was changed in this audit.
 
 September 14 PA branch reconciliation: the generic API implementation is local
-and uncommitted in `C:\Projects\Project-Alpha\.worktrees\cron-preflight-diagnostics`,
+and uncommitted in a separate Project Alpha diagnostic worktree,
 not in PA `origin/main` or a published release artifact. That worktree includes
 untracked migrations 0088–0099, generic service/route tests and reference docs;
 its branch is ahead of the verified PA main by six commits and behind by one.
@@ -2223,7 +2254,7 @@ broader client navigation, service journeys and live acceptance remain open.
 - Ops compatibility baseline: six focused client suites passed 129 tests plus 9 preflight checks, covering public routes/lifecycle, legacy routing, authorization, file and bulk Range/If-Range behavior. Source/release invariant tests passed 35/35. No customer tokens or production download. An accidentally broad local browser invocation is not counted as completed acceptance.
 - Local application identity/expiry migration 0089 is now present but under lifecycle/authentication review. The disposable MySQL 8.4 scope-migration test caught unsupported `ADD COLUMN IF NOT EXISTS`; 0088/0089 syntax was corrected. Follow-up must verify actual runner sequencing, ledger reruns, runtime-repaired schemas and interrupted-DDL recovery. The identity foundation is not a usable administration UI or complete replacement API, and neither PA instance has received these changes.
 - The follow-up migration rehearsal passed **4 MySQL 8.4 tests, 43 assertions, zero skips**. Metadata-guarded DDL supports replay at all five durable 0089 boundaries, runtime schema repair before migrations, ledger reruns and preserved legacy/exact scopes. The isolated harness uses real migration-library helpers but reconstructs the apply loop; it is not the full production CLI/backup/restore rehearsal. Container cleanup verified empty afterward. Application lifecycle tests and independent credential-policy QA continue separately.
-- Live Incoming browser inspection confirmed staff can open the upload browser and Joe's record, which honestly reports no private object available and offers no archive/download. The old list still says awaiting verification and counts this reservation under awaiting pickup. Source review also found queued outbox records can claim basic checks passed before checks run. A separate local wording/count patch is in progress; do not change the verified PR48 head for it. PR48's exact CI run currently has nine successful jobs and the Operations test job still running; it has not been merged or activated.
+- Live Incoming browser inspection confirmed staff can open the upload browser and the affected uploader's record, which honestly reports no private object available and offers no archive/download. The old list still says awaiting verification and counts this reservation under awaiting pickup. Source review also found queued outbox records can claim basic checks passed before checks run. A separate local wording/count patch is in progress; do not change the verified PR48 head for it. PR48's exact CI run currently has nine successful jobs and the Operations test job still running; it has not been merged or activated.
 - PR48 CI run `34546318599` subsequently completed successfully: all ten jobs passed for exact head `3331a62f7047ba92a61a7fc24dfc2ddaf31f8978`. The approval system rejected the attempted merge because it requires PR48-specific authorization beyond PR47. No merge/deployment was performed; an explicit permission question was sent to the owner. Do not bypass this by direct deployment or another merge surface. Unaffected local API implementation continues.
 - The owner explicitly approved PR48 and its Cloudflare deployment. PR48 then merged successfully at `63425fc9758bb37037eb14ba181eb8f586e21636` (September 11, 00:37:22 UTC). Fresh fetch proves the merged tracked tree equals tested head `3331a62`. The first post-merge deployment read still showed old active version `1feb9d5c`; build/deployment verification is pending, so activation is not yet claimed.
 - Cloudflare build `f417102a-b643-4ad8-b5dd-c7e679f6884f` subsequently succeeded for merge `63425fc`. Parent Wrangler readback confirms active deployment `938e15c0-8818-4dac-8ff9-cb6675c60c02`, version `11bc24af-b36d-44b9-b6d9-808fef136987` at **100%**, created September 11, 00:39:11 UTC. Version bindings confirm Incoming bucket `ltds-incoming`, promotion Workflow, publication flag `true`, and SMTP notifications enabled. No manual deployment/restart was needed. This proves activation, not upload/MOVE/email acceptance. Post-merge GitHub CI run `34547269404` is separate and remains tracked.
@@ -6297,8 +6328,9 @@ pending; this requirement does not claim a deployed UI change.
   no activation, create or delete control.
 - Focused service and route evidence passed `19/19`; the responsive desktop
   and mobile panel plus existing Administration/connection regressions passed
-  `16/16`; and the production Operations build passed. The repo-wide
-  TypeScript command remains blocked by pre-existing cross-package dependency
-  resolution and unrelated baseline errors, none in this slice. No deployment,
-  feature enablement, migration, remote PA write, canonical mapping rewrite,
-  Delivery row or public-link mutation was performed.
+  `16/16`; and the production Operations build passed. Commit `814380b`
+  resolved the six strict type errors in this slice; the repo-wide Operations
+  TypeScript check and production build now pass. At this historical checkpoint
+  no deployment, feature enablement, migration, remote PA write, canonical
+  mapping rewrite, Delivery row or public-link mutation had been performed;
+  the later staging-only deployment is recorded above.
