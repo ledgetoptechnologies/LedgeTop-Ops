@@ -197,7 +197,9 @@ export async function reconcileProjectAlphaDirectorySource(env: ReconciliationEn
   const maxPages = integer(options.maxPages, DEFAULT_MAX_PAGES, 1, 32);
   const maxItems = integer(options.maxItems, DEFAULT_MAX_ITEMS, 1, 5_000);
   const timeBudgetMs = integer(options.timeBudgetMs, DEFAULT_TIME_BUDGET_MS, 1, 120_000);
-  const now = options.now ?? Date.now, runIdFactory = options.runId ?? crypto.randomUUID;
+  // Keep the Web Crypto receiver: Workers may reject an extracted method as an
+  // illegal invocation, while injected test ID factories do not exercise it.
+  const now = options.now ?? Date.now, runIdFactory = options.runId ?? (() => crypto.randomUUID());
   const fetcher = options.fetcher ?? fetch;
   const readers = options.readers ?? { inventory: readConfiguredProjectAlphaDirectoryInventory,
     profile: readConfiguredProjectAlphaDirectoryProfile, binding: readConfiguredProjectAlphaDirectoryBindingStatus };

@@ -3,7 +3,12 @@ import { Card } from "@ltds/ui";
 import { api, ApiError } from "./api";
 
 const ROOT = "/api/admin/project-alpha/private/directory/reconciliation";
-const SOURCES = ["project-alpha:primary", "project-alpha:secondary"] as const;
+const PRODUCTION_SOURCES = ["project-alpha:primary", "project-alpha:secondary"] as const;
+const STAGING_SOURCES = ["project-alpha:staging"] as const;
+function reviewSources(): readonly string[] {
+  return window.location.hostname === "ops-staging.ledgetopdroneservices.com"
+    ? STAGING_SOURCES : PRODUCTION_SOURCES;
+}
 const ADOPTABLE = new Set(["extra_remote", "public_id_mismatch", "external_id_mismatch", "binding_mismatch"]);
 
 type ResourceType = "client" | "organization";
@@ -40,8 +45,9 @@ const classificationLabels: Record<string, string> = {
 };
 
 function sourceLabel(sourceId: string): string {
-  if (sourceId === SOURCES[0]) return "Ledge Top Drone Services Project Alpha";
-  if (sourceId === SOURCES[1]) return "Ledge Top Technologies Project Alpha";
+  if (sourceId === PRODUCTION_SOURCES[0]) return "Ledge Top Drone Services Project Alpha";
+  if (sourceId === PRODUCTION_SOURCES[1]) return "Ledge Top Technologies Project Alpha";
+  if (sourceId === STAGING_SOURCES[0]) return "Project Alpha staging";
   return "Unknown Project Alpha source";
 }
 function date(value: string): string {
@@ -157,7 +163,7 @@ export function ProjectAlphaDirectoryReconciliationReview() {
     setLoading(true); setError("");
     try {
       const query = new URLSearchParams({ limit: "25" });
-      for (const sourceId of SOURCES) query.append("sourceId", sourceId);
+      for (const sourceId of reviewSources()) query.append("sourceId", sourceId);
       if (cursor) query.set("cursor", cursor);
       const page = await api<FindingPage>(`${ROOT}/findings?${query}`, { signal });
       if (signal.aborted) return;
@@ -181,7 +187,7 @@ export function ProjectAlphaDirectoryReconciliationReview() {
   return <Card title="Project Alpha reconciliation review" action={<button type="button" className="button-ghost button-small"
     disabled={loading} onClick={refresh}>Refresh findings</button>}>
     <div className="reconciliation-review">
-      <p>Review stable findings from the latest complete primary and secondary snapshots. Acquiring an exact existing Operations record creates only an inactive mapping; activation remains a separate workflow.</p>
+      <p>Review stable findings from the latest complete configured source snapshots. Acquiring an exact existing Operations record creates only an inactive mapping; activation remains a separate workflow.</p>
       {error && <p className="notice" role="alert">{error}</p>}
       {loading && items.length === 0 && <p role="status">Loading reconciliation findings…</p>}
       {!loading && !error && items.length === 0 && <p>No findings are present in the current complete snapshots.</p>}

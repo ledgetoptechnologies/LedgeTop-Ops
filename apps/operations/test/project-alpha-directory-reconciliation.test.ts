@@ -126,6 +126,14 @@ beforeEach(async () => {
 afterEach(async () => runtime.dispose());
 
 describe("bounded read-only Project Alpha directory reconciliation", () => {
+  it("creates a run with the production Web Crypto ID factory", async () => {
+    const testOptions = options(readers(() => inventory(sourceA, [], null)));
+    const { runId: _injectedRunId, ...productionOptions } = testOptions;
+    const result = await reconcileProjectAlphaDirectorySource({ OPS_DB: db }, sourceA, productionOptions);
+    expect(result).toMatchObject({ status: "complete", pages: 1, items: 0 });
+    expect(result.runId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
+  });
+
   it("keeps two source checkpoints isolated and completes ordered pagination", async () => {
     await seedMapping(sourceA, "client", "client-a", publicId("1"));
     await seedMapping(sourceB, "organization", "organization-b", publicId("2"));

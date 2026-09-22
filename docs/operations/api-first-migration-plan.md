@@ -5,27 +5,38 @@ Updated September 22, 2026. The owner approved implementation and resumption aft
 ### September 22, 2026 — authoritative PR and staging acceptance status
 
 - Operations PR [#107](https://github.com/ledgetoptechnologies/LedgeTop-Ops/pull/107)
-  is open at `e2044dc4d09b9721a20d5dd4d5f271798ec1e89e`. The first full
-  run passed 2,756 tests and found only three stale schedule-array assertions;
-  commit `e2044dc` updated those exact assertions and its focused rerun passed
-  8/8. The replacement full CI run is still in progress, so the PR is not
-  merge-ready yet.
+  passed all ten CI checks at `6940543`, including Operations, client, browser
+  desktop/mobile, synchronization, incoming, thumbnail and invariant suites.
+  Later linked-client and staging-reconciliation corrections still need their
+  own CI run. Green CI does not substitute for joined staging or production
+  cutover acceptance.
 - Project Alpha PR [#188](https://github.com/ledgetoptechnologies/Project-Alpha/pull/188)
   is open at `cbabe57e3d2bceceb5fc724d083ea332c1864500`. Smoke, JavaScript
   and Python CodeQL, and gitleaks checks are green. It is not merged or deployed
   to either production PA instance.
 - A private pre-migration staging D1 backup was recorded before applying remote
   Operations staging migrations 0123–0138. Staging Worker version
-  `5e0e00db-a05a-4e1f-8f8f-487ffad6b582` retains the existing `DATA_BUCKET`
-  binding and enables only Directory reconciliation and private-administrator
-  review for this test window. The corrected `6-51/15 * * * *` trigger fired
-  and logged an idle reconciliation tick with zero attempted sources because
-  staging has no enabled PA API-v2 connection.
+  `61d5f669-f6a2-4da6-b974-1d8911749996` runs the current Operations PR
+  code and assets with an enabled, application-bound PA staging API-v2
+  connection through an encrypted deployment secret. The exact 29 existing
+  bindings, including all secrets, were verified after the prior code upload.
+  Directory reconciliation and private-administrator review are the only
+  enabled migration behaviors in this window. The first connected scheduled
+  tick reached the scheduler but recorded an uncertain retry before a run row
+  existed. The production Web Crypto ID factory had been passed as an unbound
+  method while tests injected IDs; it is now receiver-safe, with a default-ID
+  regression test (18/18 focused), deployed to staging for the next tick.
 - Consequently no live finding reservation, inactive mapping, ownership claim,
   mapping activation, or client-access activation has been accepted in staging.
   The focused inactive-reservation and explicit-activation suite is green at
   62/62 with an extended timeout, including stale evidence, collision,
   authority-revocation and byte-preserved public-link cases.
+- Linked-client profile and relationship PATCH/POST mechanics are implemented
+  with exact mapping and relationship-version checks. Commit `fffb713` adds
+  an explicit linked-client selection coordinate within the organization
+  workspace, checking the exact source/application/epoch mapping and current
+  local relationship before mounting the existing editor. TypeScript and
+  focused 8/8 tests passed; live end-to-end UI acceptance remains pending.
 - Production remains unchanged: PA is correctly still locally editable,
   Operations production flags remain off, existing portal/Delivery/public-link
   behavior is untouched, and no client access was activated. PR #188 implements
