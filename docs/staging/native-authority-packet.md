@@ -48,17 +48,41 @@ verify the complete set, and revoke deactivates both rows atomically. Any
 additional, missing, changed, denied, scoped, or active-state-drift row aborts
 the packet; do not delete a row to force recovery.
 
+### Empty-enrollment fixture and acquisition successor (schema v5)
+
+Schema v5 has two fixed staging-only purposes; it is not a configurable
+permission list. `staging-empty-enrollment-fixture` temporarily adds only
+global `directory.profile.edit` and one `directory.enrollment.manage` allow
+scoped to the reviewed active business area. It requires `mode: "reactivate"`
+from the exact inactive prior authority state, and the compiled fixture
+record, mutation, and create-admission IDs to be absent before provision. Its
+revoke requires the exact prior provision ledger, unrevoked approval and
+receipt, active admission and grant shapes, and no actor write fence or
+pending/leased Project or Directory work. The revoke deactivates both grants; it never
+deletes the durable enrollment-grant row.
+
+When the same owner later performs acquisition, use v5 purpose
+`existing-directory-acquisition-after-fixture` with the reviewed record and
+business-area IDs, `mode: "reactivate"`, and
+`directoryAuthorityState: "v5-fixture-inactive"`.
+It reactivates profile edit, adds only the record-scoped identity-link allow,
+and keeps enrollment management inactive through both acquisition provision
+and revoke. Do not use the v4 packet against this three-row durable state or
+delete the inactive row to make v4 fit. Generate and review both revoke
+artifacts before either staging-only authority window; keep the windows
+separate and disable the fixture route before fixture revoke.
+
 ## Safety model
 
 The checked-in generator validates the exact staging account, Operations D1 ID,
-complete D1 binding inventory, and the exact reviewed 138-file Operations
+complete D1 binding inventory, and the exact reviewed 139-file Operations
 migration chain. Generated files are ignored. Provision and revoke use separate
 Wrangler configs and separate one-file migration directories so applying the
 provision config cannot select the revoke migration.
 
 Both configs use the staging-only
 `staging_native_authority_migrations` migration table. They do not add rows to
-the canonical `d1_migrations` ledger. Each migration rechecks the exact 138-name
+the canonical `d1_migrations` ledger. Each migration rechecks the exact 139-name
 canonical ledger in D1 and its expected auxiliary-ledger predecessor before any
 authority mutation. Wrangler migration rollback, database constraints, final
 sentinel checks, immutable bootstrap approvals/receipts, admission versions, and
@@ -97,7 +121,7 @@ in the ignored local directory with operator-only filesystem access.
 ## Prepare and review
 
 1. Keep both acceptance-route flags and the selected PA connection disabled.
-2. Apply and verify the canonical Operations migrations through `0138`. Confirm
+2. Apply and verify the canonical Operations migrations through `0139`. Confirm
    that no native staff-management, directory, or Project command fence is open
    and neither Project nor Directory outbox has pending or leased actor work.
 3. Sign in once through the ordinary staging Operations Access application so
