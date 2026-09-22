@@ -86,6 +86,24 @@ async function seedMapping(sourceId: string, type: "client" | "organization", ex
   if (type === "client") await db.prepare(`INSERT INTO operations_directory_client_organizations(client_record_id,
     organization_record_id) VALUES(?,?)`).bind(externalId, relationshipOrganization).run();
 }
+async function takeOwnership(sourceId: string): Promise<{ previous: string; takeover: string }> {
+  const checkpoint = await db.prepare(`SELECT active_run_id activeRunId FROM
+    project_alpha_directory_reconciliation_checkpoints WHERE source_id=?`).bind(sourceId)
+    .first<{ activeRunId: string }>();
+  if (!checkpoint?.activeRunId) throw new Error("missing active reconciliation run");
+  const takeover = uuid(), at = "2026-09-22T12:30:00.000Z";
+  await db.batch([
+    db.prepare(`UPDATE project_alpha_directory_reconciliation_runs SET status='uncertain',
+      failure_reason='stale_run',completed_at=? WHERE run_id=? AND status='running'`).bind(at, checkpoint.activeRunId),
+    db.prepare(`UPDATE project_alpha_directory_reconciliation_checkpoints SET active_run_id=NULL,cursor=NULL,
+      updated_at=? WHERE source_id=? AND active_run_id=?`).bind(at, sourceId, checkpoint.activeRunId),
+    db.prepare(`INSERT INTO project_alpha_directory_reconciliation_runs(run_id,source_id,status,started_at)
+      VALUES(?,?,'running',?)`).bind(takeover, sourceId, at),
+    db.prepare(`UPDATE project_alpha_directory_reconciliation_checkpoints SET active_run_id=?,updated_at=?
+      WHERE source_id=? AND active_run_id IS NULL`).bind(takeover, at, sourceId),
+  ]);
+  return { previous: checkpoint.activeRunId, takeover };
+}
 
 beforeEach(async () => {
   runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06",
@@ -217,6 +235,28 @@ describe("bounded read-only Project Alpha directory reconciliation", () => {
     const result = await reconcileProjectAlphaDirectorySource({ OPS_DB: db }, sourceA,
       options(readers(() => inventory(sourceA, [], null))));
     expect(result).toMatchObject({ status: "complete", findings: 0 });
+  });
+
+  it.each(["insert", "update"] as const)("rejects stale observation %s after checkpoint ownership changes", async phase => {
+    const id = publicId("7"), item = resource("client", id, "ownership-client");
+    if (phase === "update") await seedMapping(sourceA, "client", "ownership-client", id);
+    let stolen: { previous: string; takeover: string } | null = null;
+    const base = readers(async () => {
+      if (phase === "insert") stolen = await takeOwnership(sourceA);
+      return inventory(sourceA, [item], null);
+    });
+    const originalProfile = base.profile;
+    const guardedReaders: NonNullable<ProjectAlphaDirectoryReconciliationOptions["readers"]> = phase === "update"
+      ? { ...base, profile: async (...args) => { stolen = await takeOwnership(sourceA); return originalProfile(...args); } }
+      : base;
+    const result = await reconcileProjectAlphaDirectorySource({ OPS_DB: db }, sourceA, options(guardedReaders));
+    expect(result).toMatchObject({ status: "uncertain", reason: "ownership_lost", runId: stolen!.previous });
+    expect(await db.prepare(`SELECT active_run_id FROM project_alpha_directory_reconciliation_checkpoints
+      WHERE source_id=?`).bind(sourceA).first()).toEqual({ active_run_id: stolen!.takeover });
+    const observations = await db.prepare(`SELECT profile_json FROM project_alpha_directory_reconciliation_observations
+      WHERE run_id=?`).bind(stolen!.previous).all<{ profile_json: string | null }>();
+    if (phase === "insert") expect(observations.results).toEqual([]);
+    else expect(observations.results).toEqual([{ profile_json: null }]);
   });
 
   it("persists every drift class, uses the prior complete snapshot for immutable projection drift, and preserves public links", async () => {

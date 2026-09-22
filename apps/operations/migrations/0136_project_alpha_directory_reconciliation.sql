@@ -113,6 +113,13 @@ BEGIN SELECT RAISE(ABORT,'directory reconciliation run update is invalid'); END;
 CREATE TRIGGER project_alpha_directory_reconciliation_runs_no_delete
 BEFORE DELETE ON project_alpha_directory_reconciliation_runs
 BEGIN SELECT RAISE(ABORT,'directory reconciliation runs are durable'); END;
+CREATE TRIGGER project_alpha_directory_reconciliation_observations_insert_guard
+BEFORE INSERT ON project_alpha_directory_reconciliation_observations
+WHEN NOT EXISTS(SELECT 1 FROM project_alpha_directory_reconciliation_runs run
+  JOIN project_alpha_directory_reconciliation_checkpoints checkpoint
+    ON checkpoint.source_id=run.source_id AND checkpoint.active_run_id=run.run_id
+  WHERE run.run_id=NEW.run_id AND run.status='running')
+BEGIN SELECT RAISE(ABORT,'directory reconciliation observation requires the active run'); END;
 CREATE TRIGGER project_alpha_directory_reconciliation_observations_update_guard
 BEFORE UPDATE ON project_alpha_directory_reconciliation_observations
 WHEN NEW.run_id IS NOT OLD.run_id OR NEW.ordinal IS NOT OLD.ordinal
@@ -125,6 +132,8 @@ WHEN NEW.run_id IS NOT OLD.run_id OR NEW.ordinal IS NOT OLD.ordinal
  OR OLD.profile_authorization_generation IS NOT NULL OR OLD.binding_status_json IS NOT NULL
  OR OLD.binding_authorization_generation IS NOT NULL
  OR NOT EXISTS(SELECT 1 FROM project_alpha_directory_reconciliation_runs run
+      JOIN project_alpha_directory_reconciliation_checkpoints checkpoint
+        ON checkpoint.source_id=run.source_id AND checkpoint.active_run_id=run.run_id
       WHERE run.run_id=OLD.run_id AND run.status='running')
 BEGIN SELECT RAISE(ABORT,'directory reconciliation observation update is invalid'); END;
 CREATE TRIGGER project_alpha_directory_reconciliation_observations_no_delete

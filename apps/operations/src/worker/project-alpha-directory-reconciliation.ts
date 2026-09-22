@@ -279,7 +279,10 @@ export async function reconcileProjectAlphaDirectorySource(env: ReconciliationEn
       remote.set(resourceKey, item); statements.push(observationStatement(env.OPS_DB, runId, ordinal++, item, iso(now())));
     }
     pages += 1;
-    if (statements.length) await env.OPS_DB.batch(statements);
+    if (statements.length) {
+      try { await env.OPS_DB.batch(statements); }
+      catch { return setUncertain(env.OPS_DB, sourceId, runId, "ownership_lost", pages, ordinal, cursor, now(), previous); }
+    }
     const progress = await env.OPS_DB.batch([
       env.OPS_DB.prepare(`UPDATE project_alpha_directory_reconciliation_runs SET source_instance_id=?,application_id=?,
         history_epoch_id=?,authorization_generation=?,cursor=?,pages_observed=?,items_observed=? WHERE run_id=? AND status='running'`)
@@ -364,14 +367,16 @@ export async function reconcileProjectAlphaDirectorySource(env: ReconciliationEn
       resourceType: local.resourceType, localExternalId: local.externalId, localPublicId: local.publicId,
       remotePublicId: found.publicId, details: { inventoryRevision: found.revision,
         bindingRevision: binding.observation.resource.revision } });
-    await env.OPS_DB.prepare(`UPDATE project_alpha_directory_reconciliation_observations SET profile_json=?,
-      profile_revision=?,profile_authorization_generation=?,binding_status_json=?,binding_authorization_generation=?
-      WHERE run_id=? AND resource_type=? AND public_id=?`).bind(
-        JSON.stringify({ organizationPublicId: relationship }), profile.observation.resource.revision,
-        profile.observation.authorizationGeneration, JSON.stringify({ externalId: binding.observation.binding.externalId,
-          publicId: binding.observation.binding.publicId, revision: binding.observation.resource.revision,
-          present: binding.observation.resource.present }), binding.observation.authorizationGeneration,
-        runId, local.resourceType, local.publicId).run();
+    try {
+      await env.OPS_DB.prepare(`UPDATE project_alpha_directory_reconciliation_observations SET profile_json=?,
+        profile_revision=?,profile_authorization_generation=?,binding_status_json=?,binding_authorization_generation=?
+        WHERE run_id=? AND resource_type=? AND public_id=?`).bind(
+          JSON.stringify({ organizationPublicId: relationship }), profile.observation.resource.revision,
+          profile.observation.authorizationGeneration, JSON.stringify({ externalId: binding.observation.binding.externalId,
+            publicId: binding.observation.binding.publicId, revision: binding.observation.resource.revision,
+            present: binding.observation.resource.present }), binding.observation.authorizationGeneration,
+          runId, local.resourceType, local.publicId).run();
+    } catch { return setUncertain(env.OPS_DB, sourceId, runId, "ownership_lost", pages, ordinal, null, now(), previous); }
   }
   for (const item of remote.values()) {
     if (!localByPublic.has(key(item.type, item.publicId)) && !(item.binding && localByExternal.has(key(item.type, item.binding.externalId)))) {
