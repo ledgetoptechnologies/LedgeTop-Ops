@@ -2,6 +2,37 @@
 
 Updated September 21, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
 
+### September 22, 2026 — bounded read-only Directory reconciliation checkpoint
+
+- Forward migration `0136` adds a reconciliation-only ledger: immutable run
+  history, one durable checkpoint per PA source, paged remote observations and
+  reviewable drift findings. It has no foreign key, trigger or view that can
+  mutate native Directory records, PA mappings, Delivery/public-link state or
+  Project Alpha. Only a currently running run that owns the exact source
+  checkpoint may insert or enrich observations or create findings; stale-owner
+  writes fail closed.
+- The new reconciliation core reads one configured PA source at a time through
+  the generic API-v2 inventory, profile and binding-status readers. It bounds
+  page size, page count, total items and elapsed time; fences every page and
+  targeted read to the same source instance, application, history epoch and
+  authorization generation; rejects duplicate/out-of-order pages and cursor
+  loops; retains the previous complete snapshot when a run becomes uncertain;
+  and supports guarded takeover of an expired run without stealing a live
+  source lease.
+- Complete snapshots compare only exact-fence local mappings and classify
+  missing/extra remote resources, public/external-ID, revision, immutable
+  projection, presence, binding and client-parent relationship drift. The
+  reader creates review evidence only. It never repairs, remaps, creates,
+  updates, archives or deletes a PA record, and it does not treat an uncertain
+  transport result as a completed snapshot.
+- Independent review found and closed checkpoint-acquisition, completion-
+  ownership, stale-run takeover, exact-fence filtering, bounded-query and
+  deadline gaps. Root review then found and closed stale-owner observation
+  insert/update windows. The final focused suite passes **17/17** independently.
+  A default-off, bounded scheduler and operator review/adoption path are still
+  required before either production instance can enter externally managed
+  Directory mode.
+
 ### September 22, 2026 — linked-client write and relationship-recovery checkpoint
 
 - Operations now exposes the default-off, native-authority Client Hub path for
