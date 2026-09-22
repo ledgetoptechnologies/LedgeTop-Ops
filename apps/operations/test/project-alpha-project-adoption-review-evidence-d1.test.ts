@@ -19,6 +19,10 @@ const clientPublicId = "d".repeat(32);
 const hash = "c".repeat(64);
 const detailHash = "2beb7793e47ac43b6fc431a8860fab8fe296650bc376440a2e3b31886162cc0e";
 const clientDetailHash = "b155ff100e5dba2118a2f8a490718216e5bcba05c0e1b9b4cb43af0dfd412118";
+const reviewerActor = { staffId: "staff", accessSubject: "access|staff" } as const;
+
+const reserveReview = (input: unknown, caller: unknown = reviewerActor) =>
+  reserveProjectAlphaProjectAdoptionReview({ OPS_DB: db }, caller, input);
 
 async function migrate(name: string) {
   const sql = readFileSync(new URL(`../migrations/${name}`, import.meta.url), "utf8");
@@ -172,7 +176,7 @@ async function seedReservation(expiryModifier = "+5 minutes") {
   await seedAuthority();
   await reviewStatement(reviewItemId, "server-generated-project", hash, detailJson(), 1,
     "e".repeat(64), expiryModifier).run();
-  const outcome = await reserveProjectAlphaProjectAdoptionReview({ OPS_DB: db }, { reviewItemId, idempotencyKey });
+  const outcome = await reserveReview({ reviewItemId, idempotencyKey });
   if (outcome.status !== "reserved") throw new Error(`reservation setup failed: ${outcome.status}`);
   return outcome.reservationId;
 }
@@ -211,7 +215,7 @@ describe("0124 project adoption review evidence", () => {
     await db.prepare("INSERT INTO operations_directory_client_organizations VALUES('client-record','organization-record')").run();
     const beforeShare = await db.prepare("SELECT * FROM delivery_public_shares").all();
     await statement().run();
-    await expect(reserveProjectAlphaProjectAdoptionReview({ OPS_DB: db }, { reviewItemId, idempotencyKey }))
+    await expect(reserveReview({ reviewItemId, idempotencyKey }))
       .resolves.toMatchObject({ status: "reserved", replayed: false });
     expect(await db.prepare("SELECT count(*) count FROM project_alpha_directory_mappings").first("count")).toBe(0);
     expect(await db.prepare("SELECT mapping_kind FROM project_alpha_active_directory_mappings ORDER BY resource_type").all())
@@ -226,7 +230,7 @@ describe("0124 project adoption review evidence", () => {
     await db.prepare(`INSERT INTO project_alpha_directory_mappings
       VALUES('project-alpha:primary',?,?,?,'organization','organization-record',?)`)
       .bind(sourceInstanceId, applicationId, historyEpochId, organizationPublicId).run();
-    await expect(reserveProjectAlphaProjectAdoptionReview({ OPS_DB: db }, { reviewItemId, idempotencyKey }))
+    await expect(reserveReview({ reviewItemId, idempotencyKey }))
       .resolves.toEqual({ status: "blocked", reason: "current_state" });
     expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_reservations").first("count")).toBe(0);
   });
@@ -320,10 +324,10 @@ describe("project adoption review reservation consumer", () => {
     await seedAuthority();
     await reviewStatement().run();
     const beforeShare = await db.prepare("SELECT * FROM delivery_public_shares").all();
-    const first = await reserveProjectAlphaProjectAdoptionReview({ OPS_DB: db }, { reviewItemId, idempotencyKey });
+    const first = await reserveReview({ reviewItemId, idempotencyKey });
     expect(first).toMatchObject({ status: "reserved", reviewItemId, idempotencyKey, replayed: false });
     if (first.status !== "reserved") throw new Error("reservation setup failed");
-    await expect(reserveProjectAlphaProjectAdoptionReview({ OPS_DB: db }, { reviewItemId, idempotencyKey }))
+    await expect(reserveReview({ reviewItemId, idempotencyKey }))
       .resolves.toEqual({ ...first, replayed: true });
     expect(await db.prepare(`SELECT reservation_id,review_item_id,idempotency_key,request_sha256,source_id,
       source_instance_id,application_id,history_epoch_id,external_project_id,project_alpha_public_id,
@@ -347,12 +351,21 @@ describe("project adoption review reservation consumer", () => {
   it("accepts exactly two UUID fields and remains unmounted from the Worker", async () => {
     await seedAuthority();
     await reviewStatement().run();
+    await expect(reserveReview({ reviewItemId, idempotencyKey }, null))
+      .resolves.toEqual({ status: "rejected", reason: "invalid_actor" });
+    await expect(reserveReview({ reviewItemId, idempotencyKey }, { ...reviewerActor, unexpected: true }))
+      .resolves.toEqual({ status: "rejected", reason: "invalid_actor" });
+    for (const caller of [
+      { staffId: "other-staff", accessSubject: reviewerActor.accessSubject },
+      { staffId: reviewerActor.staffId, accessSubject: "access|other" },
+    ]) await expect(reserveReview({ reviewItemId, idempotencyKey }, caller))
+      .resolves.toEqual({ status: "blocked", reason: "caller" });
     for (const invalid of [
       null,
       { reviewItemId, idempotencyKey, externalProjectId: "browser-controlled" },
       { reviewItemId: "5000000A-0000-4000-8000-000000000005", idempotencyKey },
       { reviewItemId, idempotencyKey: "not-a-uuid" },
-    ]) await expect(reserveProjectAlphaProjectAdoptionReview({ OPS_DB: db }, invalid))
+    ]) await expect(reserveReview(invalid))
       .resolves.toEqual({ status: "rejected", reason: "invalid_action" });
     expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_reservations").first("count")).toBe(0);
     const index = readFileSync(new URL("../src/worker/index.ts", import.meta.url), "utf8");
@@ -361,8 +374,26 @@ describe("project adoption review reservation consumer", () => {
     expect(Object.keys(module)).toEqual(["reserveProjectAlphaProjectAdoptionReview"]);
   });
 
+  it("binds the stored reviewer to the current admission", async () => {
+    await seedAuthority();
+    await reviewStatement().run();
+    await db.prepare("UPDATE native_staff_admissions SET active=0,version=2 WHERE staff_id='staff'").run();
+    await expect(reserveReview({ reviewItemId, idempotencyKey }))
+      .resolves.toEqual({ status: "blocked", reason: "current_state" });
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_reservations").first("count")).toBe(0);
+  });
+
+  it("binds the stored reviewer to the current profile", async () => {
+    await seedAuthority();
+    await reviewStatement().run();
+    await db.prepare("UPDATE native_staff_profiles SET version=2 WHERE staff_id='staff'").run();
+    await expect(reserveReview({ reviewItemId, idempotencyKey }))
+      .resolves.toEqual({ status: "blocked", reason: "current_state" });
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_reservations").first("count")).toBe(0);
+  });
+
   it("rejects missing or digest-invalid private evidence without a reservation", async () => {
-    await expect(reserveProjectAlphaProjectAdoptionReview({ OPS_DB: db }, { reviewItemId, idempotencyKey }))
+    await expect(reserveReview({ reviewItemId, idempotencyKey }))
       .resolves.toEqual({ status: "blocked", reason: "missing_review" });
     await seedAuthority();
     await db.prepare(`INSERT INTO project_alpha_project_adoption_review_evidence(
@@ -374,7 +405,7 @@ describe("project adoption review reservation consumer", () => {
       VALUES(?,?,'project-alpha:primary',?,?,?,'server-generated-project',?,'7',?,'0',?,?,'organization-record',?,NULL,NULL,
         'staff','access|staff',1,1,'role-owner',?,1,'[]',strftime('%Y-%m-%dT%H:%M:%fZ','now'),strftime('%Y-%m-%dT%H:%M:%fZ','now','+5 minutes'))`)
       .bind(reviewItemId, hash, sourceInstanceId, applicationId, historyEpochId, publicId, hash, detailJson(), "d".repeat(64), organizationPublicId, "e".repeat(64)).run();
-    await expect(reserveProjectAlphaProjectAdoptionReview({ OPS_DB: db }, { reviewItemId, idempotencyKey }))
+    await expect(reserveReview({ reviewItemId, idempotencyKey }))
       .resolves.toEqual({ status: "blocked", reason: "invalid_evidence" });
     expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_reservations").first("count")).toBe(0);
   });
@@ -396,7 +427,7 @@ describe("project adoption review reservation consumer", () => {
       await seedAuthority();
       await reviewStatement(reviewItemId, "server-generated-project", hash, detailJson(), 1, "e".repeat(64), index === 3 ? "+1 second" : "+5 minutes").run();
       await drift();
-      await expect(reserveProjectAlphaProjectAdoptionReview({ OPS_DB: db }, { reviewItemId, idempotencyKey }))
+      await expect(reserveReview({ reviewItemId, idempotencyKey }))
         .resolves.toEqual({ status: "blocked", reason: "current_state" });
       expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_reservations").first("count")).toBe(0);
     }
@@ -405,10 +436,10 @@ describe("project adoption review reservation consumer", () => {
   it("does not turn an exact idempotent replay into stale authority", async () => {
     await seedAuthority();
     await reviewStatement().run();
-    await expect(reserveProjectAlphaProjectAdoptionReview({ OPS_DB: db }, { reviewItemId, idempotencyKey }))
+    await expect(reserveReview({ reviewItemId, idempotencyKey }))
       .resolves.toMatchObject({ status: "reserved", replayed: false });
     await db.prepare("UPDATE native_project_grants SET active=0,version=2 WHERE id='grant-server-generated-project'").run();
-    await expect(reserveProjectAlphaProjectAdoptionReview({ OPS_DB: db }, { reviewItemId, idempotencyKey }))
+    await expect(reserveReview({ reviewItemId, idempotencyKey }))
       .resolves.toEqual({ status: "blocked", reason: "current_state" });
     expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_reservations").first("count")).toBe(1);
     expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_outbox").first("count")).toBe(0);
@@ -418,8 +449,8 @@ describe("project adoption review reservation consumer", () => {
     await seedAuthority();
     await reviewStatement().run();
     const [left, right] = await Promise.all([
-      reserveProjectAlphaProjectAdoptionReview({ OPS_DB: db }, { reviewItemId, idempotencyKey }),
-      reserveProjectAlphaProjectAdoptionReview({ OPS_DB: db }, { reviewItemId, idempotencyKey }),
+      reserveReview({ reviewItemId, idempotencyKey }),
+      reserveReview({ reviewItemId, idempotencyKey }),
     ]);
     expect(left.status).toBe("reserved");
     expect(right.status).toBe("reserved");
@@ -429,11 +460,11 @@ describe("project adoption review reservation consumer", () => {
     expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_reservations").first("count")).toBe(1);
 
     const differentKey = "71000000-0000-4000-8000-000000000007";
-    await expect(reserveProjectAlphaProjectAdoptionReview({ OPS_DB: db }, { reviewItemId, idempotencyKey: differentKey }))
+    await expect(reserveReview({ reviewItemId, idempotencyKey: differentKey }))
       .resolves.toEqual({ status: "conflict", reason: "review_item" });
     const secondReview = "51000000-0000-4000-8000-000000000005";
     await reviewStatement(secondReview).run();
-    await expect(reserveProjectAlphaProjectAdoptionReview({ OPS_DB: db }, { reviewItemId: secondReview, idempotencyKey }))
+    await expect(reserveReview({ reviewItemId: secondReview, idempotencyKey }))
       .resolves.toEqual({ status: "conflict", reason: "idempotency_key" });
   });
 });
@@ -524,7 +555,7 @@ describe("project adoption bind bridge consumer", () => {
     await seedActivatedClient(true);
     await reviewStatement(reviewItemId, "server-generated-project", hash, detailJson(clientPublicId), 1,
       "e".repeat(64), "+5 minutes", "[]", "client-record", clientPublicId, clientDetailHash).run();
-    const reserved = await reserveProjectAlphaProjectAdoptionReview({ OPS_DB: db }, { reviewItemId, idempotencyKey });
+    const reserved = await reserveReview({ reviewItemId, idempotencyKey });
     if (reserved.status !== "reserved") throw new Error("reservation setup failed");
     await db.prepare("DELETE FROM operations_directory_client_organizations WHERE client_record_id='client-record'").run();
     await expect(planProjectAlphaProjectAdoptionBind({ OPS_DB: db }, { reservationId: reserved.reservationId }))

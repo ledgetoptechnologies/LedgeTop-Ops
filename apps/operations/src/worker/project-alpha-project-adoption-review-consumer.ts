@@ -1,21 +1,21 @@
 /**
  * Private, default-off consumer for immutable Project adoption review evidence.
  * It is intentionally not imported by a route, queue, scheduler, or Worker
- * entrypoint. Browser-controlled input is limited to two UUIDs; every Project,
- * authority, directory, source, and digest value is loaded from D1.
+ * entrypoint. Browser-controlled input is limited to two UUIDs. Separately
+ * authenticated server actor context must exactly identify the stored reviewer;
+ * every Project, authority, directory, source, and digest value is loaded from D1.
  *
- * This boundary reserves the reviewed intent only. Migration 0124 requires an
- * absent local head, while the existing bind planner requires a versioned
- * unmapped local head. Joining those mutually exclusive invariants requires a
- * separately reviewed atomic integration and is not approximated here.
+ * This boundary reserves the reviewed intent only. The unmounted 0128 bridge
+ * separately consumes the durable reservation into an atomic bind plan.
  */
 
 export type ProjectAlphaProjectAdoptionReviewConsumerEnvironment = Readonly<{ OPS_DB: D1Database }>;
+export type ProjectAlphaProjectAdoptionReviewActor = Readonly<{ staffId: string; accessSubject: string }>;
 export type ProjectAlphaProjectAdoptionReviewAction = Readonly<{ reviewItemId: string; idempotencyKey: string }>;
 export type ProjectAlphaProjectAdoptionReviewOutcome =
   | Readonly<{ status: "reserved"; reservationId: string; reviewItemId: string; idempotencyKey: string; replayed: boolean }>
-  | Readonly<{ status: "rejected"; reason: "invalid_action" }>
-  | Readonly<{ status: "blocked"; reason: "missing_review" | "invalid_evidence" | "current_state" }>
+  | Readonly<{ status: "rejected"; reason: "invalid_action" | "invalid_actor" }>
+  | Readonly<{ status: "blocked"; reason: "caller" | "missing_review" | "invalid_evidence" | "current_state" }>
   | Readonly<{ status: "conflict"; reason: "review_item" | "idempotency_key" }>
   | Readonly<{ status: "uncertain"; reason: "database" }>;
 
@@ -146,6 +146,17 @@ function action(value: unknown): value is ProjectAlphaProjectAdoptionReviewActio
     && UUID.test(typeof record.reviewItemId === "string" ? record.reviewItemId : "")
     && UUID.test(typeof record.idempotencyKey === "string" ? record.idempotencyKey : "");
 }
+function actor(value: unknown): value is ProjectAlphaProjectAdoptionReviewActor {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) return false;
+  const record = value as Record<string, unknown>, keys = Reflect.ownKeys(record);
+  return keys.length === 2 && keys.every(key => typeof key === "string"
+      && ["staffId", "accessSubject"].includes(key)
+      && Object.getOwnPropertyDescriptor(record, key)?.enumerable === true
+      && "value" in Object.getOwnPropertyDescriptor(record, key)!)
+    && typeof record.staffId === "string" && record.staffId.length >= 1 && record.staffId.length <= 191
+    && typeof record.accessSubject === "string" && record.accessSubject.length >= 1 && record.accessSubject.length <= 764;
+}
 async function digest(value: string): Promise<string> {
   const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)));
   return [...bytes].map(byte => byte.toString(16).padStart(2, "0")).join("");
@@ -177,9 +188,10 @@ async function reservation(db: Database, reviewItemId: string, idempotencyKey: s
     WHERE review_item_id=? OR idempotency_key=? ORDER BY reserved_at,reservation_id LIMIT 1`)
     .bind(reviewItemId, idempotencyKey).first<Reservation>();
 }
-async function current(db: Database, reviewItemId: string): Promise<boolean> {
+async function current(db: Database, reviewItemId: string, caller: ProjectAlphaProjectAdoptionReviewActor): Promise<boolean> {
   return !!await db.prepare(`SELECT 1 current FROM project_alpha_project_adoption_review_evidence review
-    WHERE review.review_item_id=? AND ${CURRENT_REVIEW}`).bind(reviewItemId).first("current");
+    WHERE review.review_item_id=? AND review.reviewer_staff_id=? AND review.reviewer_access_subject=?
+      AND ${CURRENT_REVIEW}`).bind(reviewItemId, caller.staffId, caller.accessSubject).first("current");
 }
 function replay(value: Reservation, input: ProjectAlphaProjectAdoptionReviewAction): ProjectAlphaProjectAdoptionReviewOutcome {
   if (value.review_item_id !== input.reviewItemId) return { status: "conflict", reason: "idempotency_key" };
@@ -190,8 +202,10 @@ function replay(value: Reservation, input: ProjectAlphaProjectAdoptionReviewActi
 /** Reserves one still-current immutable review item. It performs no network I/O and no Project bind. */
 export async function reserveProjectAlphaProjectAdoptionReview(
   env: ProjectAlphaProjectAdoptionReviewConsumerEnvironment,
+  caller: unknown,
   input: unknown,
 ): Promise<ProjectAlphaProjectAdoptionReviewOutcome> {
+  if (!actor(caller)) return { status: "rejected", reason: "invalid_actor" };
   if (!action(input)) return { status: "rejected", reason: "invalid_action" };
   const db = env.OPS_DB.withSession("first-primary");
   let review: Review | null;
@@ -201,6 +215,8 @@ export async function reserveProjectAlphaProjectAdoptionReview(
       .bind(input.reviewItemId).first<Review>();
   } catch { return { status: "uncertain", reason: "database" }; }
   if (!review) return { status: "blocked", reason: "missing_review" };
+  if (review.reviewer_staff_id !== caller.staffId || review.reviewer_access_subject !== caller.accessSubject)
+    return { status: "blocked", reason: "caller" };
   try { if (!await validEvidence(review)) return { status: "blocked", reason: "invalid_evidence" }; }
   catch { return { status: "uncertain", reason: "database" }; }
 
@@ -209,7 +225,7 @@ export async function reserveProjectAlphaProjectAdoptionReview(
     if (previous) {
       const outcome = replay(previous, input);
       if (outcome.status !== "reserved") return outcome;
-      return await current(db, input.reviewItemId) ? outcome : { status: "blocked", reason: "current_state" };
+      return await current(db, input.reviewItemId, caller) ? outcome : { status: "blocked", reason: "current_state" };
     }
     const reservationId = crypto.randomUUID();
     const inserted = await db.prepare(`INSERT INTO project_alpha_project_adoption_review_reservations(
@@ -226,8 +242,9 @@ export async function reserveProjectAlphaProjectAdoptionReview(
         review.reviewer_admission_version,review.reviewer_profile_version,review.reviewer_owner_role_id,
         review.independent_evidence_sha256,review.project_grant_generation,review.normalized_scopes_json
       FROM project_alpha_project_adoption_review_evidence review
-      WHERE review.review_item_id=? AND ${CURRENT_REVIEW}`)
-      .bind(reservationId, input.idempotencyKey, input.reviewItemId).run();
+      WHERE review.review_item_id=? AND review.reviewer_staff_id=? AND review.reviewer_access_subject=?
+        AND ${CURRENT_REVIEW}`)
+      .bind(reservationId, input.idempotencyKey, input.reviewItemId, caller.staffId, caller.accessSubject).run();
     if (inserted.meta.changes !== 1) return { status: "blocked", reason: "current_state" };
     const saved = await reservation(db, input.reviewItemId, input.idempotencyKey);
     if (!saved || saved.reservation_id !== reservationId || saved.review_item_id !== input.reviewItemId
@@ -239,7 +256,7 @@ export async function reserveProjectAlphaProjectAdoptionReview(
       if (winner) {
         const outcome = replay(winner, input);
         if (outcome.status !== "reserved") return outcome;
-        return await current(db, input.reviewItemId) ? outcome : { status: "blocked", reason: "current_state" };
+        return await current(db, input.reviewItemId, caller) ? outcome : { status: "blocked", reason: "current_state" };
       }
     } catch { return { status: "uncertain", reason: "database" }; }
     const message = error instanceof Error ? error.message : "";
