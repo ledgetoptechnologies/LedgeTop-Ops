@@ -7,7 +7,7 @@ Updated September 21, 2026. The owner approved implementation and resumption aft
 - Migration `0137` adds a scheduler-wide exact-token lease, fair source cursor
   and per-source retry state without changing the reconciliation evidence or
   any canonical, mapping, Delivery or public-link table. The scheduled entry is
-  present at its own five-minute offset, but
+  present at a distinct fifteen-minute cadence, but
   `PROJECT_ALPHA_DIRECTORY_RECONCILIATION_ENABLED` is checked in as exactly
   `false`; no deployment setting was enabled.
 - Each tick parses only enabled generic API-v2 connections, selects at most one
@@ -25,6 +25,18 @@ Updated September 21, 2026. The owner approved implementation and resumption aft
   passes **9/9**; scheduler, reconciliation core and Directory write-drain pass
   **33/33** together; and the production Operations bundle builds. This proves
   dormant composition, not staged or production reconciliation acceptance.
+
+- A staging observation later showed that the original `0-55/5 * * * *`
+  expression was semantically identical to the existing `*/5 * * * *`
+  trigger, so Cloudflare emitted only the existing event at their shared
+  boundary and the reconciliation branch did not run. The worker and
+  checked-in Wrangler schedule now use the distinct `6-51/15 * * * *`
+  expression (minutes 6, 21, 36 and 51). A focused configuration regression
+  expands the minute fields and proves that no other checked-in schedule has
+  the same firing set. This correction changes no feature flag, activation,
+  Delivery or public-link behavior and was not deployed by this checkpoint.
+  The corrected focused scheduler suite passes **9/9**, and the production
+  Operations bundle builds.
 
 ### September 22, 2026 — bounded read-only Directory reconciliation checkpoint
 

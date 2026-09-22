@@ -11,6 +11,24 @@ import type { ProjectAlphaDirectoryReconciliationResult } from "../src/worker/pr
 let runtime: Miniflare, db: D1Database, counter = 0;
 const sourceA = "project-alpha:a", sourceB = "project-alpha:b", sourceDisabled = "project-alpha:disabled";
 function uuid(): string { return `20000000-0000-4000-8000-${String(++counter).padStart(12, "0")}`; }
+function configuredCrons(source: string): string[] {
+  const encoded = source.match(/"triggers"\s*:\s*\{\s*"crons"\s*:\s*(\[[^\]]*\])/u)?.[1];
+  if (!encoded) throw new Error("missing cron trigger configuration");
+  return JSON.parse(encoded) as string[];
+}
+function scheduledMinutes(cron: string): number[] {
+  const field = cron.split(" ")[0];
+  const range = field.match(/^(\d+)-(\d+)\/(\d+)$/u);
+  const wildcard = field.match(/^\*\/(\d+)$/u);
+  if (/^\d+$/u.test(field)) return [Number(field)];
+  const start = range ? Number(range[1]) : 0;
+  const end = range ? Number(range[2]) : 59;
+  const step = range ? Number(range[3]) : wildcard ? Number(wildcard[1]) : Number.NaN;
+  if (!Number.isInteger(step) || step < 1) throw new Error(`unsupported cron minute field ${field}`);
+  const minutes: number[] = [];
+  for (let minute = start; minute <= end; minute += step) minutes.push(minute);
+  return minutes;
+}
 function splitSql(sql: string): string[] {
   const statements: string[] = []; let current = "", trigger = false;
   for (const line of sql.split(/\r?\n/u)) {
@@ -70,11 +88,19 @@ beforeEach(async () => {
 afterAll(async () => runtime.dispose());
 
 describe("default-off native Directory reconciliation scheduler", () => {
-  it("does zero work while disabled and the checked-in cron remains independently default-off", async () => {
+  it("does zero work while disabled and uses a unique 15-minute checked-in cron", async () => {
     const config = readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8");
     const entrypoint = readFileSync(new URL("../src/worker/index.ts", import.meta.url), "utf8");
+    const reconciliationCron = "6-51/15 * * * *";
     expect(config).toMatch(/"PROJECT_ALPHA_DIRECTORY_RECONCILIATION_ENABLED"\s*:\s*"false"/);
-    expect(config.match(/"0-55\/5 \* \* \* \*"/g)).toHaveLength(1);
+    expect(configuredCrons(config)).toContain(reconciliationCron);
+    expect(configuredCrons(config).filter((candidate) => candidate === reconciliationCron)).toHaveLength(1);
+    expect(scheduledMinutes(reconciliationCron)).toEqual([6, 21, 36, 51]);
+    for (const cron of configuredCrons(config).filter((candidate) => candidate !== reconciliationCron)) {
+      expect(scheduledMinutes(cron)).not.toEqual(scheduledMinutes(reconciliationCron));
+    }
+    expect(config).not.toContain("0-55/5 * * * *");
+    expect(entrypoint).toContain(`NATIVE_DIRECTORY_RECONCILIATION_CRON = "${reconciliationCron}"`);
     expect(entrypoint).toContain("runNativeDirectoryReconciliationScheduler(env)");
     const disabled = new Proxy({ PROJECT_ALPHA_DIRECTORY_RECONCILIATION_ENABLED: "false" }, { get(target, key) {
       if (key === "PROJECT_ALPHA_DIRECTORY_RECONCILIATION_ENABLED") return target.PROJECT_ALPHA_DIRECTORY_RECONCILIATION_ENABLED;

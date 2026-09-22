@@ -3272,7 +3272,7 @@ const PROJECT_ALPHA_RECOVERY_CRON = "17 * * * *";
 const NATIVE_DELIVERY_NOTIFICATION_CRON = "4-59/15 * * * *";
 export const PROJECT_ALPHA_API_V2_MONITOR_CRON = "3-58/5 * * * *";
 export const NATIVE_DIRECTORY_OUTBOX_CRON = "1-56/5 * * * *";
-export const NATIVE_DIRECTORY_RECONCILIATION_CRON = "0-55/5 * * * *";
+export const NATIVE_DIRECTORY_RECONCILIATION_CRON = "6-51/15 * * * *";
 
 export async function runScheduledPrimaryProjectAlphaSync(env: Env) {
   const result = await syncProjectAlpha(env);

@@ -106,7 +106,7 @@
   },
   "send_email": [{ "name": "NOTIFICATION_EMAIL", "allowed_sender_addresses": ["delivery@ledgetopdroneservices.com"] }],
   "observability": { "enabled": true, "head_sampling_rate": 1 },
-  "triggers": { "crons": ["*/15 * * * *", "*/5 * * * *", "2-57/5 * * * *", "17 * * * *", "4-59/15 * * * *", "3-58/5 * * * *", "1-56/5 * * * *", "0-55/5 * * * *"] },
+  "triggers": { "crons": ["*/15 * * * *", "*/5 * * * *", "2-57/5 * * * *", "17 * * * *", "4-59/15 * * * *", "3-58/5 * * * *", "1-56/5 * * * *", "6-51/15 * * * *"] },
   "r2_buckets": [
     { "binding": "DATA_BUCKET", "bucket_name": "client-data" },
     { "binding": "INCOMING_BUCKET", "bucket_name": "ltds-incoming" }
