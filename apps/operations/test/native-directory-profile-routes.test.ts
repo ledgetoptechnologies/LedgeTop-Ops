@@ -26,7 +26,9 @@ const client = { name: "Example Client", email: "client@example.test", phone: ""
 
 type Row = Record<string, unknown>;
 function database(options: { enrollment?: unknown; outboxState?: string; deny?: string; missingGeneration?: boolean;
-  admission?: false; connectorActive?: false; replay?: "exact" | "conflict"; linked?: boolean } = {}) {
+  admission?: false; connectorActive?: false; replay?: "exact" | "conflict"; linked?: boolean;
+  insertRace?: "exact" | "conflict" } = {}) {
+  let preparedAdmission: Row | null = null;
   const db = { prepare(sql: string) {
     let values: unknown[] = [];
     const statement = {
@@ -50,6 +52,7 @@ function database(options: { enrollment?: unknown; outboxState?: string; deny?: 
         let value: unknown = null;
         if (sql.includes("SELECT grant.id")) value = options.deny === String(values[1]) ? null
           : { id: String(values[1]) === "directory.identity.link" ? "identity-grant" : "edit-grant" };
+        else if (sql.includes("SELECT id,staff_id,bound_access_subject")) value = preparedAdmission;
         else if (sql.includes("operations_directory_audit audit") && options.replay) value = {
           command_json: JSON.stringify({ operation: "create", mutationId: ids.mutation, resourceType: "organization",
             recordId: ids.mutation, expectedLocalVersion: 0, actor: {},
@@ -57,9 +60,10 @@ function database(options: { enrollment?: unknown; outboxState?: string; deny?: 
             scopes, destinations: [{ sourceId }] }), actor_id: principal.id,
           original_verified_access_subject: principal.accessSubject, record_id: ids.mutation, version: 1, record_kind: "organization",
         };
-        else if (sql.includes("native_directory_create_admissions")) value = options.admission === false ? null : { id: "create-admission",
-          destinations_json: JSON.stringify([{ sourceId, sourceInstanceUUID: ids.instance, applicationUUID: ids.application,
-            historyEpoch: ids.epoch, origin, externalCanonicalId: String(values[2]) }]) };
+        else if (sql.includes("native_directory_create_admissions")) value = options.admission === false ? null
+          : preparedAdmission ? { id: preparedAdmission.id, destinations_json: preparedAdmission.destinations_json }
+          : { id: "create-admission", destinations_json: JSON.stringify([{ sourceId, sourceInstanceUUID: ids.instance,
+              applicationUUID: ids.application, historyEpoch: ids.epoch, origin, externalCanonicalId: String(values[2]) }]) };
         else if (sql.includes("FROM pa_connectors")) value = options.connectorActive === false ? null : { ok: 1 };
         else if (sql.includes("operations_directory_client_organizations")) value = {
           organization_record_id: options.linked ? "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" : null, relationship_version: 2,
@@ -73,10 +77,20 @@ function database(options: { enrollment?: unknown; outboxState?: string; deny?: 
         if (column && value && typeof value === "object") return ((value as Row)[column] ?? null) as T | null;
         return value as T | null;
       },
+      async run() {
+        if (sql.includes("INSERT INTO native_directory_create_admissions") && !preparedAdmission) preparedAdmission = {
+          id: values[0], staff_id: values[1], bound_access_subject: values[2], record_id: values[3], record_kind: values[4],
+          scopes_json: values[5], profile_json: options.insertRace === "conflict"
+            ? JSON.stringify({ ...JSON.parse(String(values[6])), name: "Concurrent mismatch" }) : values[6],
+          destinations_json: values[7], issued_by: values[8],
+          active: 1, consumed_mutation_id: null,
+        };
+        return { success: true };
+      },
     };
     return statement;
-  }, withSession() { return db; } };
-  return db as unknown as D1Database;
+  }, withSession() { return db; }, preparedAdmission() { return preparedAdmission; } };
+  return db as unknown as D1Database & { preparedAdmission(): Row | null };
 }
 
 function fixture(options: { enabled?: boolean; db?: D1Database } = {}) {
@@ -117,6 +131,91 @@ describe("native Directory profile routes", () => {
     expect(response.status).toBe(404);
     expect(mocks.authenticate).not.toHaveBeenCalled();
     expect(mocks.writer).not.toHaveBeenCalled();
+  });
+
+  it("prepares and exactly replays a deterministic server-derived create admission", async () => {
+    const db = database(), app = fixture({ db });
+    const intent = { kind: "organization" as const, mutationId: ids.mutation, sourceIds: [sourceId], scopes, profile: organization };
+    const first = await app.send(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/create-admissions`, intent);
+    expect(first.status).toBe(200);
+    await expect(first.json()).resolves.toEqual({ status: "prepared" });
+    expect(db.preparedAdmission()).toEqual(expect.objectContaining({
+      id: `native-directory-create:${ids.mutation}`, staff_id: principal.id,
+      bound_access_subject: principal.accessSubject, record_id: ids.mutation, record_kind: "organization",
+      scopes_json: JSON.stringify(scopes), profile_json: JSON.stringify(organization), issued_by: principal.id,
+      destinations_json: JSON.stringify([{ sourceId, sourceInstanceUUID: ids.instance, applicationUUID: ids.application,
+        historyEpoch: ids.epoch, origin, externalCanonicalId: ids.mutation }]),
+    }));
+    const replay = await app.send(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/create-admissions`, intent);
+    expect(replay.status).toBe(200);
+    await expect(replay.json()).resolves.toEqual({ status: "prepared" });
+    expect(mocks.writer).not.toHaveBeenCalled();
+
+    const create = await app.send(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/organizations`, {
+      mutationId: ids.mutation, sourceIds: [sourceId], scopes, profile: organization,
+    });
+    expect(create.status).toBe(202);
+    expect(mocks.writer).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      createAdmissionId: `native-directory-create:${ids.mutation}`,
+    }));
+  });
+
+  it("post-reads an ON CONFLICT race and accepts only the exact concurrent admission", async () => {
+    const path = `${NATIVE_DIRECTORY_PROFILE_ROUTE}/create-admissions`;
+    const intent = { kind: "organization" as const, mutationId: ids.mutation, sourceIds: [sourceId], scopes, profile: organization };
+    const exact = await fixture({ db: database({ insertRace: "exact" }) }).send(path, intent);
+    expect(exact.status).toBe(200);
+    await expect(exact.json()).resolves.toEqual({ status: "prepared" });
+    const mismatch = await fixture({ db: database({ insertRace: "conflict" }) }).send(path, intent);
+    expect(mismatch.status).toBe(409);
+    await expect(mismatch.json()).resolves.toEqual({ status: "conflict", reason: "create_admission_unavailable" });
+  });
+
+  it("requires current enrollment and client identity-link authority before preparing", async () => {
+    const path = `${NATIVE_DIRECTORY_PROFILE_ROUTE}/create-admissions`;
+    const organizationIntent = { kind: "organization" as const, mutationId: ids.mutation,
+      sourceIds: [sourceId], scopes, profile: organization };
+    expect((await fixture({ db: database({ deny: "directory.enrollment.manage" }) }).send(path, organizationIntent)).status).toBe(403);
+    const clientIntent = { kind: "client" as const, mutationId: ids.mutation, sourceIds: [sourceId], scopes, profile: client };
+    expect((await fixture({ db: database({ deny: "directory.identity.link" }) }).send(path, clientIntent)).status).toBe(403);
+    expect(mocks.connection).not.toHaveBeenCalled();
+  });
+
+  it("rejects inactive connectors and never accepts caller-supplied PA authority tuples", async () => {
+    const path = `${NATIVE_DIRECTORY_PROFILE_ROUTE}/create-admissions`;
+    const intent = { kind: "organization" as const, mutationId: ids.mutation, sourceIds: [sourceId], scopes, profile: organization };
+    const inactive = await fixture({ db: database({ connectorActive: false }) }).send(path, intent);
+    expect(inactive.status).toBe(409);
+    await expect(inactive.json()).resolves.toEqual({ status: "conflict", reason: "source_authority_unavailable" });
+    expect((await fixture().send(path, { ...intent, destination: { sourceInstanceUUID: ids.instance,
+      applicationUUID: ids.application, historyEpoch: ids.epoch, origin, expectedAuthorizationGeneration: "7" } })).status).toBe(400);
+  });
+
+  it("conflicts on kind, source, profile or scope drift for the same preparation UUID", async () => {
+    const db = database(), app = fixture({ db }), path = `${NATIVE_DIRECTORY_PROFILE_ROUTE}/create-admissions`;
+    const intent = { kind: "organization" as const, mutationId: ids.mutation, sourceIds: [sourceId], scopes, profile: organization };
+    expect((await app.send(path, intent)).status).toBe(200);
+    const variants = [
+      { ...intent, sourceIds: ["project-alpha:secondary"] },
+      { ...intent, profile: { ...organization, name: "Different" } },
+      { ...intent, scopes: [{ businessAreaId: "survey", divisionId: null }] },
+      { kind: "client" as const, mutationId: ids.mutation, sourceIds: [sourceId], scopes, profile: client },
+    ];
+    for (const variant of variants) {
+      const response = await app.send(path, variant);
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toEqual({ status: "conflict", reason: "idempotency_body_conflict" });
+    }
+  });
+
+  it("rejects admission preparation when the shared principal and current native identity differ", async () => {
+    mocks.authenticate.mockResolvedValueOnce({ admissionVersion: 3, identity: { staffId: "other", email: principal.email,
+      verifiedAccessSubject: principal.accessSubject, profileVersion: 4 } });
+    const response = await fixture().send(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/create-admissions`, {
+      kind: "organization", mutationId: ids.mutation, sourceIds: [sourceId], scopes, profile: organization,
+    });
+    expect(response.status).toBe(403);
+    expect(mocks.connection).not.toHaveBeenCalled();
   });
 
   it("creates an organization with only server-derived identity, grants, record ID, namespace and generation", async () => {

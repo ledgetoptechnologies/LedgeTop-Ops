@@ -48,10 +48,19 @@ const clientCreateProfile = z.object({
 const clientUpdateProfile = clientCreateProfile.omit({ clientType: true });
 const organizationCreate = z.object({ mutationId, sourceIds, scopes, profile: organizationProfile }).strict();
 const clientCreate = z.object({ mutationId, sourceIds, scopes, profile: clientCreateProfile }).strict();
+const createAdmissionIntent = z.discriminatedUnion("kind", [
+  organizationCreate.extend({ kind: z.literal("organization") }).strict(),
+  clientCreate.extend({ kind: z.literal("client") }).strict(),
+]);
 const organizationUpdate = z.object({ mutationId, expectedLocalVersion: z.number().int().positive(), profile: organizationProfile }).strict();
 const clientUpdate = z.object({ mutationId, expectedLocalVersion: z.number().int().positive(), profile: clientUpdateProfile }).strict();
 
 type StoredDestination = Omit<NativeDirectoryDestinationAuthority, "expectedAuthorizationGeneration">;
+type StoredCreateAdmission = {
+  id: string; staff_id: string; bound_access_subject: string; record_id: string; record_kind: string;
+  scopes_json: string; profile_json: string; destinations_json: string; active: number;
+  consumed_mutation_id: string | null; issued_by: string;
+};
 
 export function nativeDirectoryProfileWritesEnabled(env: Pick<Env, "NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED">): boolean {
   return env.NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED === "true";
@@ -104,14 +113,20 @@ async function selectGrant(db: D1Database, staffId: string,
         WHERE scope.record_id=? AND scope.active=1 AND scope.business_area_id=grant.business_area_id))
       OR (grant.scope_kind='division' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes scope
         WHERE scope.record_id=? AND scope.active=1 AND scope.division_id=grant.division_id)))`;
-  const denyApplies = applies.replaceAll("grant.", "deny.").replaceAll("assignment.staff_id=?", "assignment.staff_id=?");
+  const denyApplies = creating ? `(deny.scope_kind='global' OR (deny.scope_kind='resource' AND deny.resource_id=?)
+      OR (deny.scope_kind='business_area' AND EXISTS(SELECT 1 FROM json_each(?) scope
+        WHERE json_extract(scope.value,'$.businessAreaId')=deny.business_area_id))
+      OR (deny.scope_kind='division' AND EXISTS(SELECT 1 FROM json_each(?) scope
+        WHERE json_extract(scope.value,'$.divisionId')=deny.division_id)))`
+    : applies.replaceAll("grant.", "deny.");
   const parameters = creating ? [scopeJson, scopeJson] : [record, record, staffId, record, record];
+  const denyParameters = creating ? [record, scopeJson, scopeJson] : parameters;
   const row = await primary.prepare(`SELECT grant.id FROM native_directory_grants grant
     WHERE grant.staff_id=? AND grant.permission=? AND grant.effect='allow' AND grant.active=1 AND ${applies}
       AND NOT EXISTS(SELECT 1 FROM native_directory_grants deny WHERE deny.staff_id=grant.staff_id
         AND deny.permission=grant.permission AND deny.effect='deny' AND deny.active=1 AND ${denyApplies})
     ORDER BY CASE grant.scope_kind WHEN 'resource' THEN 1 WHEN 'division' THEN 2 WHEN 'business_area' THEN 3
-      WHEN 'assigned' THEN 4 ELSE 5 END,grant.id LIMIT 1`).bind(staffId, permission, ...parameters, ...parameters)
+      WHEN 'assigned' THEN 4 ELSE 5 END,grant.id LIMIT 1`).bind(staffId, permission, ...parameters, ...denyParameters)
     .first<{ id: string }>();
   return row?.id ?? null;
 }
@@ -197,6 +212,48 @@ async function admittedCreate(env: Env, actor: Omit<NativeDirectoryWriterActor, 
     destinations.push({ ...selected, expectedAuthorizationGeneration });
   }
   return { createAdmissionId: row.id, destinations };
+}
+
+function createAdmissionId(record: string): string {
+  return `native-directory-create:${record}`;
+}
+
+async function storedCreateAdmission(db: D1Database, record: string): Promise<StoredCreateAdmission | null> {
+  return db.withSession("first-primary").prepare(`SELECT id,staff_id,bound_access_subject,record_id,record_kind,
+      scopes_json,profile_json,destinations_json,active,consumed_mutation_id,issued_by
+    FROM native_directory_create_admissions WHERE record_id=?`).bind(record).first<StoredCreateAdmission>();
+}
+
+function exactCreateAdmission(row: StoredCreateAdmission,
+  actor: Omit<NativeDirectoryWriterActor, "selectedGrantId" | "selectedIdentityGrantId">,
+  kind: NativeDirectoryProfileKind, record: string, profile: Record<string, string>, requestedScopes: readonly NativeDirectoryScope[],
+  selectedSources: readonly string[], expectedDestinations?: readonly StoredDestination[]): boolean {
+  let storedProfile: unknown, storedScopes: unknown, storedDestinations: unknown;
+  try {
+    storedProfile = JSON.parse(row.profile_json); storedScopes = JSON.parse(row.scopes_json);
+    storedDestinations = JSON.parse(row.destinations_json);
+  } catch { return false; }
+  if (!Array.isArray(storedDestinations)) return false;
+  const destinations = storedDestinations.map(value => storedDestination(value, record));
+  if (destinations.some(value => value === null)) return false;
+  const exactSources = JSON.stringify(destinations.map(value => value!.sourceId).sort()) === JSON.stringify([...selectedSources].sort());
+  return row.id === createAdmissionId(record) && row.staff_id === actor.staffId
+    && row.bound_access_subject === actor.accessSubject && row.record_id === record && row.record_kind === kind
+    && row.issued_by === actor.staffId && row.active === 1 && row.consumed_mutation_id === null
+    && JSON.stringify(storedProfile) === JSON.stringify(profile)
+    && JSON.stringify(storedScopes) === JSON.stringify(requestedScopes) && exactSources
+    && (expectedDestinations === undefined
+      || JSON.stringify(destinations) === JSON.stringify(expectedDestinations));
+}
+
+async function requestedCreateDestinations(env: Env, selectedSources: readonly string[], record: string): Promise<StoredDestination[] | null> {
+  const destinations: StoredDestination[] = [];
+  for (const sourceId of selectedSources) {
+    const destination = await configuredDestination(env, sourceId, record);
+    if (!destination) return null;
+    destinations.push(destination);
+  }
+  return destinations;
 }
 
 async function updateDestinations(env: Env, record: string): Promise<NativeDirectoryDestinationAuthority[] | null> {
@@ -299,6 +356,37 @@ async function parsed<T>(request: Request, schema: z.ZodType<T>): Promise<T> {
   return result.data;
 }
 
+async function prepareCreateAdmission(c: AppContext) {
+  const input = await parsed(c.req.raw, createAdmissionIntent);
+  if (c.req.header("Idempotency-Key") !== input.mutationId)
+    throw new HTTPException(400, { message: "Idempotency-Key must match mutationId" });
+  const record = recordId(input.kind, input.mutationId);
+  const actor = await nativeActor(c), profile = normalizeProfile(input.profile);
+  const requestedScopes = normalizeScopes(input.scopes), selectedSources = [...input.sourceIds].sort();
+  await actorWithGrants(c, input.kind, record, requestedScopes, true, actor);
+  if (!await selectGrant(c.env.OPS_DB, actor.staffId, "directory.enrollment.manage", record, requestedScopes, true))
+    throw new HTTPException(403, { message: "Directory enrollment-management permission required" });
+
+  const existing = await storedCreateAdmission(c.env.OPS_DB, record);
+  if (existing && !exactCreateAdmission(existing, actor, input.kind, record, profile, requestedScopes, selectedSources))
+    return c.json({ status: "conflict", reason: "idempotency_body_conflict" }, 409);
+  const destinations = await requestedCreateDestinations(c.env, selectedSources, record);
+  if (!destinations) return c.json({ status: "conflict", reason: "source_authority_unavailable" }, 409);
+  if (existing) return exactCreateAdmission(existing, actor, input.kind, record, profile, requestedScopes, selectedSources, destinations)
+    ? c.json({ status: "prepared" })
+    : c.json({ status: "conflict", reason: "create_admission_unavailable" }, 409);
+  try {
+    await c.env.OPS_DB.withSession("first-primary").prepare(`INSERT INTO native_directory_create_admissions
+      (id,staff_id,bound_access_subject,record_id,record_kind,scopes_json,profile_json,destinations_json,issued_by)
+      VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING`).bind(createAdmissionId(record), actor.staffId, actor.accessSubject,
+      record, input.kind, JSON.stringify(requestedScopes), JSON.stringify(profile), JSON.stringify(destinations), actor.staffId).run();
+  } catch { /* The exact read below distinguishes a concurrent replay from unavailable admission state. */ }
+  const prepared = await storedCreateAdmission(c.env.OPS_DB, record);
+  return prepared && exactCreateAdmission(prepared, actor, input.kind, record, profile, requestedScopes, selectedSources, destinations)
+    ? c.json({ status: "prepared" })
+    : c.json({ status: "conflict", reason: "create_admission_unavailable" }, 409);
+}
+
 async function create(c: AppContext, kind: NativeDirectoryProfileKind) {
   const input = kind === "organization" ? await parsed(c.req.raw, organizationCreate) : await parsed(c.req.raw, clientCreate);
   if (c.req.header("Idempotency-Key") !== input.mutationId)
@@ -359,6 +447,7 @@ export function registerNativeDirectoryProfileRoutes(app: App): void {
     c.header("Cache-Control", "no-store");
     await next();
   });
+  app.post(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/create-admissions`, prepareCreateAdmission);
   app.post(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/organizations`, c => create(c, "organization"));
   app.post(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/standalone-clients`, c => create(c, "client"));
   app.patch(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/:kind/:recordId`, c => {
