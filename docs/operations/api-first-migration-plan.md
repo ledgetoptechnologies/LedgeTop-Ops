@@ -5,10 +5,10 @@ Updated September 22, 2026. The owner approved implementation and resumption aft
 ### September 22, 2026 — authoritative PR and staging acceptance status
 
 - Latest read-only release check: Operations PR #107 head
-  `ad7f2348eb97f41ae3dd202a85ed302afb5bc9b5` passed all ten
-  exact-head CI jobs. The newer local fixture commits `78972f9` and
-  `792938a` passed focused tests and typecheck but are not yet exact-head CI
-  evidence. PA PR #188 head
+  `14dbd3ca4efae31f256b67f26cdd2de5a72100f0` passed all ten
+  exact-head CI jobs. A newer Ops packet commit `8c9b116` has been pushed;
+  its own exact-head CI is pending and must not inherit the earlier result.
+  PA PR #188 head
   `731677dda1821c53f93dd0b38f1504f184c320d9` passed exact-head CI,
   CodeQL and gitleaks, including its real-MySQL cutover gate. These replace
   the earlier commit/check snapshots below; neither PR is merged. An
@@ -21,8 +21,10 @@ Updated September 22, 2026. The owner approved implementation and resumption aft
   migration-list check found exactly `0125`–`0138` pending in `OPS_DB`; no
   migration was applied. This is a deployment snapshot, not proof of the
   exact source commit currently running or of any future deployment path.
-- PA staging host has not yet confirmed deployment of PR #188 at the exact
-  head above, and host-specific migrations/backfills, attestation, joined
+- PA staging public and LAN readiness plus its LAN control-API health returned
+  HTTP 200 with schema version 102 on September 22, but none attested the
+  deployed image digest or PR #188 exact head above. Host-specific
+  migrations/backfills, attestation, joined
   API acceptance and rollback remain unproven. The owner has been asked for
   a staging-only host update and sanitized evidence. Do not request either
   production PA update or activate managed mode until these gates and the
@@ -89,6 +91,21 @@ Updated September 22, 2026. The owner approved implementation and resumption aft
   temporary authority and enabled-route review remain required for the live
   staging window. The ordinary production authority and PA rollout gates are
   unchanged.
+- The schema-v5 staging authority packet now has purpose-pinned fixture and
+  same-owner post-fixture acquisition windows, with exact inactive-grant
+  preservation and independently reviewed revoke guards. The canonical
+  staging inventory is pinned to all 139 Operations migrations. Local
+  bootstrap and packet tests passed 38/38 (two Windows symlink tests skipped),
+  including a real-D1 v3-inactive → fixture provision/revoke → acquisition
+  provision/revoke lifecycle, a fixed-record collision, and atomic failure
+  when a Project command remains pending. No authority packet has been
+  applied remotely. A private pre-`0139` staging D1 export was verified at
+  1,360,004 bytes and SHA-256
+  `01608c4476f4c4d9fc83b475166944b273e488c98c4cf6f0cb04b54823907a35`;
+  its local ACL permits only the owner, Administrators, and SYSTEM. The
+  remaining live gates are CI on the new head, staged `0139`/Worker rollout
+  with the fixture flag off, temporary packet review/provision/revoke, and
+  exact PA staging revision evidence before joined acquisition.
 - Green PR CI does not substitute for joined staging or production cutover
   acceptance. Neither PR is deployed to either production PA instance.
 - A private pre-migration staging D1 backup was recorded before applying remote
