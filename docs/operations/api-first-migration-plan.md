@@ -68,6 +68,16 @@ Updated September 22, 2026. The owner approved implementation and resumption aft
   temporary authority is revoked; do not raw-insert or hard-delete D1 rows as
   fixture setup/compensation. Remote-success/local-persistence failure still
   needs explicit recovery evidence before claiming rollback acceptance.
+- The existing native create fence could technically accept an empty
+  destination list and write zero intents, but it would still persist a
+  `native_directory_enrollments` row containing `[]`. Application routes
+  currently prohibit that create. A staging-only endpoint draft was stopped
+  by safety review because the durable enrollment row may conflict with the
+  original no-enrollment fixture constraint; the draft was removed without a
+  commit or deployment. Do not loosen the route or database guards until the
+  owner explicitly decides whether a source-less, empty enrollment row is an
+  acceptable staging fixture. This decision does not grant production write
+  authority or change the separate PA staging revision/rollback gates.
 - Green PR CI does not substitute for joined staging or production cutover
   acceptance. Neither PR is deployed to either production PA instance.
 - A private pre-migration staging D1 backup was recorded before applying remote
