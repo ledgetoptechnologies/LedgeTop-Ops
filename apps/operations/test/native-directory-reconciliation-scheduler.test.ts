@@ -17,7 +17,8 @@ function configuredCrons(source: string): string[] {
   return JSON.parse(encoded) as string[];
 }
 function scheduledMinutes(cron: string): number[] {
-  const field = cron.split(" ")[0];
+  const [field] = cron.split(" ");
+  if (!field) throw new Error("missing cron minute field");
   const range = field.match(/^(\d+)-(\d+)\/(\d+)$/u);
   const wildcard = field.match(/^\*\/(\d+)$/u);
   if (/^\d+$/u.test(field)) return [Number(field)];

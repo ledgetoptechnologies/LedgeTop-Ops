@@ -22,13 +22,13 @@ const connections = JSON.stringify({ version: 1, instances: { [sourceId]: {
   sourceInstanceId, applicationId, historyEpoch: historyEpochId,
 } } });
 
-type Remote = Readonly<{
+type Remote = {
   revision: string;
   profileGeneration: string;
   bindingGeneration: string;
   bound: boolean;
   bindResponse?: "success" | "malformed_success" | "precondition_conflict";
-}>;
+};
 
 function remote(state: Remote): typeof fetch {
   let request = 10;

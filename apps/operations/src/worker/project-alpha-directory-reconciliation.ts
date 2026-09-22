@@ -2,6 +2,7 @@ import {
   readConfiguredProjectAlphaDirectoryInventory,
   type ProjectAlphaDirectoryInventoryOutcome,
   type ProjectAlphaDirectoryInventoryResource,
+  type ProjectAlphaDirectoryInventorySuccess,
 } from "./project-alpha-directory-inventory-api-v2";
 import {
   readConfiguredProjectAlphaDirectoryBindingStatus,
@@ -257,11 +258,11 @@ export async function reconcileProjectAlphaDirectorySource(env: ReconciliationEn
   for (;;) {
     if (now() - started >= timeBudgetMs) return setUncertain(env.OPS_DB, sourceId, runId, "time_limit", pages, ordinal, cursor, now(), previous);
     if (pages >= maxPages) return setUncertain(env.OPS_DB, sourceId, runId, "page_limit", pages, ordinal, cursor, now(), previous);
-    const outcome = await beforeDeadline(readers.inventory(env, sourceId,
+    const outcome: ProjectAlphaDirectoryInventoryOutcome | null = await beforeDeadline(readers.inventory(env, sourceId,
       { type: "all", cursor, limit: pageSize }, fetcher), timeBudgetMs - (now() - started));
     if (!outcome) return setUncertain(env.OPS_DB, sourceId, runId, "time_limit", pages, ordinal, cursor, now(), previous);
     if (outcome.status !== "observed") return setUncertain(env.OPS_DB, sourceId, runId, outcomeReason(outcome), pages, ordinal, cursor, now(), previous);
-    const inventory = outcome.inventory;
+    const inventory: ProjectAlphaDirectoryInventorySuccess = outcome.inventory;
     const observedFence = { sourceInstanceId: inventory.sourceInstanceId, applicationId: inventory.applicationId,
       historyEpoch: inventory.historyEpoch, authorizationGeneration: inventory.authorizationGeneration };
     if (fence && (fence.sourceInstanceId !== observedFence.sourceInstanceId || fence.applicationId !== observedFence.applicationId

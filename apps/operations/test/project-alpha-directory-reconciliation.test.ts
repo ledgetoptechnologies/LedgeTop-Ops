@@ -49,7 +49,7 @@ function inventory(sourceId: string, resources: readonly ProjectAlphaDirectoryIn
   return { status: "observed" as const, inventory: { authoritative: false as const, sourceId, ...fence, ...overrides,
     requestId: uuid(), resources, nextCursor } };
 }
-function readers(pages: (sourceId: string, cursor: string | null) => ReturnType<typeof inventory> | { status: "uncertain"; reason: "transport" | "timeout" | "response_limit" | "invalid_contract" | "http_status"; httpStatus?: number }) {
+function readers(pages: (sourceId: string, cursor: string | null) => ReturnType<typeof inventory> | Promise<ReturnType<typeof inventory>> | { status: "uncertain"; reason: "transport" | "timeout" | "response_limit" | "invalid_contract" | "http_status"; httpStatus?: number }) {
   return {
     inventory: async (_env: unknown, sourceId: string, query: { cursor: string | null }) => pages(sourceId, query.cursor),
     profile: async (_env: unknown, sourceId: string, kind: "client" | "organization", id: string) => {

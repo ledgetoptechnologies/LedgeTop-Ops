@@ -2,7 +2,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { Miniflare } from "miniflare";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
-import { writeNativeDirectoryProfile, type NativeDirectoryCreateWrite } from "../src/worker/native-directory-profile-writer";
+import { writeNativeDirectoryProfile, type NativeDirectoryCreateWrite, type NativeDirectoryProfileWrite } from "../src/worker/native-directory-profile-writer";
 import { dispatchProjectAlphaDirectoryProfileOutboxCommand } from "../src/worker/project-alpha-directory-profile-outbox-dispatcher";
 
 let runtime: Miniflare, db: D1Database, sequence = 1;

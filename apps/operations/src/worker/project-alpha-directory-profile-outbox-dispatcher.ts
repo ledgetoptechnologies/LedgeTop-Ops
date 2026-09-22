@@ -213,13 +213,13 @@ async function exactReservation(db: D1Database, row: Row, connection: ProjectAlp
     || command.resourceType !== row.resource_type || command.externalId !== row.external_id
     || command.expectedProjectAlphaPublicId !== mapping.project_alpha_public_id || disposition.projectAlphaPublicId !== mapping.project_alpha_public_id
     || command.expectedRevision !== disposition.projectAlphaRevision || command.fields === undefined) return "command";
-  let fields = command.fields;
+  if (!plain(command.fields)) return "command";
+  const fields = { ...command.fields };
   if (row.resource_type === "client") {
-    if (!plain(command.fields) || !Object.hasOwn(command.fields, "organizationPublicId")) return "command";
-    const commandFields = command.fields as Record<string, unknown>;
+    if (!Object.hasOwn(fields, "organizationPublicId")) return "command";
     const dependency = await relationshipDependency(db, row);
-    if (!dependency || commandFields.organizationPublicId !== dependency.resolved_parent_public_id) return "command";
-    fields = { ...commandFields }; delete fields.organizationPublicId;
+    if (!dependency || fields.organizationPublicId !== dependency.resolved_parent_public_id) return "command";
+    delete fields.organizationPublicId;
   }
   const transport = { commandId: row.command_id, expectedRevision: command.expectedRevision,
     expectedAuthorizationGeneration: command.expectedAuthorizationGeneration, profile: fields };
