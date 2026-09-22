@@ -7,6 +7,9 @@ Updated September 22, 2026. The owner approved implementation and resumption aft
 - Latest read-only release check: Operations PR #107 head
   `32edbafedad7c5cb6e081c081b2edfed52057a46` passed all ten
   exact-head CI jobs, including Operations and desktop/mobile browser checks.
+  The subsequent documentation-only commit `ceaa896` was still running its
+  CI recheck at the last observation; it does not change the reviewed Worker
+  source or the completed exact-head result for `32edbaf`.
   PA PR #188 head
   `731677dda1821c53f93dd0b38f1504f184c320d9` passed exact-head CI,
   CodeQL and gitleaks, including its real-MySQL cutover gate. These replace
@@ -41,7 +44,11 @@ Updated September 22, 2026. The owner approved implementation and resumption aft
   and the fixture route flag remains absent/off. Public health requests from
   the shell redirected to Cloudflare Access, so no authenticated application
   smoke test or fixture invocation is claimed. Production Workers and D1 were
-  not changed by this staging step.
+  not changed by this staging step. The newly deployed staging Worker then
+  completed a scheduled connected PA reconciliation at
+  `2026-09-22T23:21:32.862Z`: one page, 14 remote items, one local item,
+  zero consecutive uncertain attempts. This is a live read-path/scheduler
+  check, not evidence for the gated fixture or Directory write path.
 - Existing-record acquisition review found that a legacy mapping collision
   could reject the local acquired receipt *after* PA accepted a bind. The
   coordinator now checks legacy and prior acquired identity overlaps before
@@ -97,13 +104,17 @@ Updated September 22, 2026. The owner approved implementation and resumption aft
   race a revocation. Local route tests pass 5/5, migrated-D1 writer tests
   15/15 (including revocation immediately before the batch, replay and
   byte-preserved Delivery/public-link rows), and Operations typecheck passes.
-  The fixture has not been deployed or invoked against staging; `0139` is not
-  applied remotely, and no PA organization has been created for it. Neither
-  this source-less record nor local retry tests prove joined acquisition or
-  remote-bind compensation. A fresh backup/readback, exact PA target/revision,
-  temporary authority and enabled-route review remain required for the live
-  staging window. The ordinary production authority and PA rollout gates are
-  unchanged.
+  At this earlier local implementation checkpoint, the fixture had not been
+  deployed or invoked and `0139` had not yet been applied remotely. Those
+  deployment facts were superseded by the later staging evidence above:
+  `0139` is now applied to staging and the staging Worker is on the reviewed
+  candidate with the route flag absent/off. The fixture still has **not** been
+  invoked, no PA organization has been created for it, and neither this
+  source-less record nor local retry tests prove joined acquisition or
+  remote-bind compensation. Exact PA target/revision evidence, temporary
+  authority review/provision/revoke, and enabled-route review remain required
+  for the live staging window. The ordinary production authority and PA rollout
+  gates are unchanged.
 - The schema-v5 staging authority packet now has purpose-pinned fixture and
   same-owner post-fixture acquisition windows, with exact inactive-grant
   preservation and independently reviewed revoke guards. The canonical
@@ -116,17 +127,23 @@ Updated September 22, 2026. The owner approved implementation and resumption aft
   1,360,004 bytes and SHA-256
   `01608c4476f4c4d9fc83b475166944b273e488c98c4cf6f0cb04b54823907a35`;
   its local ACL permits only the owner, Administrators, and SYSTEM. The
-  remaining live gates are CI on the new head, staged `0139`/Worker rollout
-  with the fixture flag off, temporary packet review/provision/revoke, and
-  exact PA staging revision evidence before joined acquisition.
+  `0139` and the reviewed Ops Worker have since been staged with the fixture
+  route flag off, and `32edbaf` has passed its exact-head CI. The remaining
+  live gates are temporary packet review/provision/revoke, an authenticated
+  staging application smoke test, and exact PA staging revision evidence before
+  joined acquisition. The later `ceaa896` documentation-only CI recheck is not
+  evidence of a new runtime deployment and was still running at last check.
 - Green PR CI does not substitute for joined staging or production cutover
   acceptance. Neither PR is deployed to either production PA instance.
 - A private pre-migration staging D1 backup was recorded before applying remote
-  Operations staging migrations 0123–0138. Staging Worker version
-  `0b703087-88b4-4e5a-8fbc-fd5e260e1ae4` runs the current Operations PR
-  code and assets with an enabled, application-bound PA staging API-v2
-  connection through an encrypted deployment secret. The exact 29 existing
-  bindings, including all secrets, were verified after the prior code upload.
+  Operations staging migrations 0123–0138. This records an **earlier** staging
+  deployment snapshot: Worker version
+  `0b703087-88b4-4e5a-8fbc-fd5e260e1ae4` was subsequently replaced by
+  `e5469ba5-19ca-4982-9b0e-e0aa49c8e096` at 100% traffic after `0139` was
+  applied. The exact 29 existing binding names/types, including the three
+  secret bindings, were unchanged across that later rollout; no secret values
+  were inspected or recorded. The enabled, application-bound PA staging API-v2
+  connection remains an encrypted deployment secret.
   Directory reconciliation and private-administrator review are the only
   enabled migration behaviors in this window. The first connected scheduled
   tick reached the scheduler but recorded an uncertain retry before a run row
