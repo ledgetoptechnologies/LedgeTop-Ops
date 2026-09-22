@@ -97,7 +97,7 @@ beforeAll(async () => {
   runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06", script: "export default {fetch(){return new Response('ok')}}", d1Databases: ["OPS_DB"] });
   db = await runtime.getD1Database("OPS_DB") as D1Database;
   const directory = new URL("../migrations/", import.meta.url);
-  const migrations = readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0134").sort();
+  const migrations = readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0139").sort();
   for (const migration of migrations) await db.batch(splitD1MigrationStatements(readFileSync(new URL(migration, directory), "utf8")).map(sql => db.prepare(sql)));
   await db.batch([
     db.prepare(`INSERT INTO staff_users(id,email,display_name,access_subject,status) VALUES('owner','owner@example.test','Owner','access|owner','active')`),
@@ -114,6 +114,9 @@ afterAll(async () => { await runtime.dispose(); });
 describe("canonical native Directory profile writer", () => {
   it("permits the one fixed staging fixture to persist an empty enrollment, replay, and reserve no PA work", async () => {
     const actor = await seedActor();
+    const enrollmentGrantId = `enrollment-${actor.staffId}`;
+    await db.prepare(`INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,active,granted_by)
+      VALUES(?,?,'directory.enrollment.manage','allow','global',1,'owner')`).bind(enrollmentGrantId, actor.staffId).run();
     const input = { operation: "create" as const, mutationId: STAGING_EMPTY_ENROLLMENT_FIXTURE_MUTATION_ID,
       recordId: STAGING_EMPTY_ENROLLMENT_FIXTURE_RECORD_ID, expectedLocalVersion: 0 as const, kind: "organization" as const,
       createAdmissionId: STAGING_EMPTY_ENROLLMENT_FIXTURE_ADMISSION_ID, profile: STAGING_EMPTY_ENROLLMENT_FIXTURE_PROFILE,
@@ -122,6 +125,21 @@ describe("canonical native Directory profile writer", () => {
       (id,staff_id,bound_access_subject,record_id,record_kind,scopes_json,profile_json,destinations_json,issued_by)
       VALUES(?,?,?,?, 'organization',?,?, '[]',?)`).bind(input.createAdmissionId, actor.staffId, actor.accessSubject,
       input.recordId, JSON.stringify(input.scopes), JSON.stringify(input.profile), actor.staffId).run();
+    let batches = 0;
+    const revoking = new Proxy(db, { get(target, key) {
+      if (key === "batch") return async (statements: D1PreparedStatement[]) => {
+        if (++batches === 1) await target.prepare("UPDATE native_directory_grants SET active=0 WHERE id=?").bind(enrollmentGrantId).run();
+        return target.batch(statements);
+      };
+      const value = target[key as keyof D1Database];
+      return typeof value === "function" ? value.bind(target) : value;
+    } }) as D1Database;
+    await expect(writeStagingEmptyEnrollmentOrganizationFixture(revoking, input)).resolves.toEqual({ status: "blocked", reason: "authority_or_atomic_write" });
+    expect(await db.prepare("SELECT 1 FROM operations_directory_records WHERE record_id=?").bind(input.recordId).first()).toBeNull();
+    expect(await db.prepare("SELECT 1 FROM operations_directory_revisions WHERE record_id=?").bind(input.recordId).first()).toBeNull();
+    expect(await db.prepare("SELECT active FROM native_directory_create_admissions WHERE id=?").bind(input.createAdmissionId).first("active")).toBe(1);
+    expect(await count("project_alpha_directory_outbox")).toBe(0);
+    await db.prepare("UPDATE native_directory_grants SET active=1 WHERE id=?").bind(enrollmentGrantId).run();
     await expect(writeNativeDirectoryProfile(db, input)).resolves.toEqual({ status: "rejected", reason: "invalid_write" });
     await expect(writeStagingEmptyEnrollmentOrganizationFixture(db, input)).resolves.toMatchObject({
       status: "written", replayed: false, commandIds: [], recordId: input.recordId,
