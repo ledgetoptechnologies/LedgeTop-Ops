@@ -6027,3 +6027,44 @@ pending; this requirement does not claim a deployed UI change.
   remain required. PA browser writers therefore remain available until the
   complete replacement is verified; enabling read-only mode now would strand
   normal customer administration.
+
+### September 22 — guarded Client Hub editor and relationship-ledger checkpoint
+
+- Operations commits `d2a66ea`, `1a3c3cf`, and `b5e48e2` add the
+  authenticated create-admission issuer, a capability-gated Client Hub
+  organization/standalone-client profile editor, exact current-connection
+  mapping resolution, and the durable per-destination client/organization
+  relationship ledger. The browser supplies business intent only. The server
+  derives the authenticated actor, effective grants and deny precedence,
+  configured PA source/application/epoch, destination origin, current
+  authorization generation, and canonical Operations record identity.
+- Create uses a two-step, exact-body admission contract. Replays of the same
+  mutation/body recover the same prepared admission; changed bodies conflict.
+  Client Hub creation choices come from active server-owned business areas,
+  divisions, effective access and configured PA connections. The editor never
+  treats a projected PA public ID as an Operations record ID: it exposes an
+  editor coordinate only when exactly one mapping matches the currently
+  configured source instance, application and history epoch.
+- Migration `0133_project_alpha_directory_relationship_outbox.sql` keeps the
+  canonical local relationship revision and every per-instance PA reservation
+  in one D1 batch. The dispatcher is separately retryable and revalidates the
+  actor, exact relationship version, enrollment, mapping, source identity,
+  revisions and newest known authorization generation before transport. It
+  distinguishes retryable uncertainty from terminal conflict and preserves
+  Delivery/public-link rows byte-for-byte. Signed-64-bit revision and
+  generation bounds are enforced in both schema and writer.
+- Independent local evidence is green: the profile route/writer/dispatcher
+  suite is `34/34`; Client Hub route, exact-mapping and UI contracts are
+  `26/26`; relationship migration/writer plus the existing API-v2 command
+  transport are `10/10`; and the production Operations build succeeds. These
+  are focused local checks, not live staging or production acceptance.
+- Authority has **not** moved. `NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED`
+  remains `false`, PA managed-directory mode remains inactive, and no Worker,
+  D1 migration, PA instance, credential, public link or legacy connection was
+  changed by this checkpoint. Linked-client creation/editing is not yet
+  exposed through the Client Hub admission/profile route, and neither the
+  profile nor relationship dispatcher is wired to a bounded scheduler/drain.
+  The relationship writer also still needs an authenticated HTTP/UI boundary.
+  Reconciliation, both-instance staging acceptance, outage monitoring, the
+  coordinated PA activation and legacy retirement remain required before PA
+  browser writers can be disabled safely.
