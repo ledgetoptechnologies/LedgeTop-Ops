@@ -6086,3 +6086,21 @@ pending; this requirement does not claim a deployed UI change.
   mail was sent, and no source health or production state was mutated. The
   remaining outage gate is coordinated staging and production enablement with
   both exact PA connections, not a new monitor implementation.
+
+### September 22 — Project Alpha managed-directory surface revalidation
+
+- The generic Project Alpha managed-directory policy remains implemented but
+  inactive. A fresh local rerun of its policy and activation suite passed
+  `17/17` tests with `182` assertions. That suite proves the capable-key,
+  route-flag, current-attestation, backfill-health and ownership-sentinel gates;
+  it also inventories the interactive browser writers and requires central and
+  controller-level enforcement for every projected writer.
+- The same suite verifies the neutral open-source label, guarded client and
+  organization list/create/edit/archive/onboarding/detail surfaces, degraded
+  behavior and explicit administrative release. The broader workflow source
+  suites also remained green at `40/40` tests and `799` assertions.
+- This is source-level and local policy evidence, not authorization to enable
+  production ownership. Both PA instances must continue permitting local edits
+  until the Operations create/update/relationship delivery path, reconciliation
+  and both-instance acceptance are complete; activating the policy earlier
+  would strand normal customer administration.
