@@ -187,6 +187,37 @@ async function updateRemoteState(db: D1Database, write: NormalizedWrite, destina
       destinationValue.applicationUUID, destinationValue.historyEpoch, write.kind, write.recordId).first<Record<string, unknown>>();
   if (!active || typeof active.projectAlphaPublicId !== "string" || !/^[0-9a-f]{32}$/.test(active.projectAlphaPublicId)) return null;
   if (active.mappingKind === "acquired") {
+    // An acquired mapping is never copied into the legacy mapping table. After
+    // its first native profile update, the exact acknowledged writer intent is
+    // the newest revision/generation proof for the next update.
+    const delivered = await db.prepare(`SELECT
+        json_extract(outbox.outcome_json,'$.response.result.resource.revision') revision,
+        json_extract(outbox.outcome_json,'$.response.result.authorizationGeneration') authorizationGeneration
+      FROM operations_directory_intents intent
+      JOIN operations_directory_materializations materialization ON materialization.intent_id=intent.intent_id
+      JOIN project_alpha_directory_outbox outbox ON outbox.command_id=materialization.command_id
+      WHERE intent.record_id=? AND intent.record_version=? AND intent.state='acknowledged'
+        AND intent.source_id=? AND intent.source_instance_uuid=? AND intent.application_uuid=?
+        AND intent.expected_history_epoch_id=? AND intent.destination_origin=? AND intent.external_canonical_id=?
+        AND outbox.state='acknowledged' AND outbox.source_id=intent.source_id
+        AND outbox.expected_source_instance_id=intent.source_instance_uuid AND outbox.application_id=intent.application_uuid
+        AND outbox.expected_history_epoch_id=intent.expected_history_epoch_id AND outbox.destination_base_url=intent.destination_origin
+        AND outbox.resource_type=? AND outbox.external_id=intent.external_canonical_id
+        AND json_extract(outbox.command_json,'$.operation')='update'
+        AND json_extract(outbox.command_json,'$.expectedProjectAlphaPublicId')=?
+        AND json_extract(outbox.outcome_json,'$.status')='acknowledged'
+        AND json_extract(outbox.outcome_json,'$.response.sourceInstanceId')=intent.source_instance_uuid
+        AND json_extract(outbox.outcome_json,'$.response.applicationId')=intent.application_uuid
+        AND json_extract(outbox.outcome_json,'$.response.historyEpoch')=intent.expected_history_epoch_id
+        AND json_extract(outbox.outcome_json,'$.response.result.resource.type')=?
+        AND json_extract(outbox.outcome_json,'$.response.result.resource.publicId')=?
+      ORDER BY outbox.created_at DESC,outbox.command_id DESC LIMIT 1`).bind(write.recordId, write.expectedLocalVersion,
+        destinationValue.sourceId, destinationValue.sourceInstanceUUID, destinationValue.applicationUUID, destinationValue.historyEpoch,
+        destinationValue.origin, write.recordId, write.kind, active.projectAlphaPublicId, write.kind, active.projectAlphaPublicId)
+      .first<Record<string, unknown>>();
+    if (delivered) return revision(delivered.revision) && revision(delivered.authorizationGeneration)
+      && delivered.authorizationGeneration === destinationValue.expectedAuthorizationGeneration
+      ? { projectAlphaPublicId: active.projectAlphaPublicId, revision: delivered.revision, authorizationGeneration: delivered.authorizationGeneration } : null;
     const refreshed = await db.prepare(`SELECT live_revision revision,authorization_generation authorizationGeneration
       FROM project_alpha_existing_directory_binding_revision_refresh_receipts WHERE record_id=? AND source_id=?
         AND source_instance_id=? AND application_id=? AND history_epoch_id=? AND resource_type=? AND external_id=?
