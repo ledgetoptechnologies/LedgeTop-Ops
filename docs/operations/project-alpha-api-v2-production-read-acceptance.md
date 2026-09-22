@@ -78,3 +78,41 @@ Operations D1. The empty Project inventories are an adoption boundary, not
 proof that PA has no historical Projects: existing Projects are not silently
 bound to the new application and require deliberate review/adoption. The
 acceptance made no PA mutation and does not authorize legacy retirement.
+
+## September 22 private adoption checkpoint
+
+The read acceptance above remains historical read-only evidence. Subsequent
+Operations commits `3cfbf2b`, `11a467d`, `5a909fe`, `8218ea2`, `4f33361`, and
+`41b0f2f` implement private foundations for reviewed adoption without changing
+that production result. Directory existing-record binding now has a strict PA
+transport, immutable review/reservation/acquisition chain, inactive canonical
+mapping materialization, and an activation consumer that requires the exact
+authenticated reviewer, fresh PA profile and binding-status observations, and
+current native authority. Project adoption now has private reservation and bind
+planning consumers and can compose an explicitly activated acquired Directory
+mapping in those later workflows.
+
+All of those consumers remain unmounted and default-off. There is no new
+authenticated browser or administrator route, no production D1 migration or
+write, no PA flag or managed-mode change, and no public-link, Delivery, portal,
+or legacy-mapping change. PA managed mode remains off, legacy integrations
+remain active, and portal migration/cutover has not started.
+
+Focused verification is bounded to local code. `3cfbf2b` passed `3` files / `36`
+tests (`15` adoption D1, `19` Project command, `2` migration-chain); `11a467d`
+passed `3` / `16`; `5a909fe` passed `3` / `28`; `8218ea2` passed the adoption
+D1 suite `24/24`; and `41b0f2f` passed it `26/26`. Current independent Project
+verification passes `3` files / `47` tests. For `4f33361`, current activation
+verification passes `18/18` and coordinator plus Directory-read verification
+passes `27/27`; an independent combined checkpoint before the final
+standalone-client assertion passed `4` files / `52` tests. None of these focused
+runs is a production write or cutover proof.
+
+The remaining boundary is explicit. A Project review-evidence producer and
+authenticated routes for the private consumers are still absent. Migration
+`0122` canonical Project guards still consult only legacy
+`project_alpha_directory_mappings`; recognizing acquired active mappings there
+requires a separately reviewed forward migration with explicit owner
+authorization. Until those gaps, production reconciliation, and a separately
+authorized rollout are complete, the new adoption state must not replace the
+legacy path or be described as portal migration progress.
