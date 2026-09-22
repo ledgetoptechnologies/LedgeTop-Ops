@@ -42,6 +42,25 @@ Updated September 22, 2026. The owner approved implementation and resumption aft
   Its local lifecycle and drift suite passes 22/22. No packet has been applied
   to staging; the exact fixture, PA revision, contextual read grant, remote
   bind compensation and joined rollback remain separate acceptance gates.
+- A read-only staging D1 check on September 22 found all 138 Operations
+  migrations applied, one native organization, one active legacy organization
+  mapping, no acquired mappings, no active native admissions, and no pending
+  Directory outbox. The only native organization is the mapped one; there are
+  zero eligible unmapped organizations. The staging authority history includes
+  one inactive admission (version 12) and one inactive global
+  `directory.profile.edit` grant, not live acquisition authority. No staging
+  record or grant was changed by this check.
+- Independent fixture review confirms that normal Operations organization
+  create requires at least one PA destination and durably queues a PA-create
+  command; the staging bootstrap also creates a mapped record. Neither is a
+  safe acquisition fixture. A second Ops source pointed at the same PA staging
+  installation is rejected by unique origin/source/application/history-epoch
+  constraints. Live acquisition acceptance needs an isolated second PA staging
+  installation plus governed staging-only native-only and unbound-PA fixture
+  creation, each with revision/audit evidence and no portal, Delivery, public
+  link, mapping, or outbound command side effects. Do not raw-insert D1 rows or
+  treat local row deletion as compensation for an accepted PA bind. Design and
+  review this fixture mechanism before opening the bounded v4 authority window.
 - Green PR CI does not substitute for joined staging or production cutover
   acceptance. Neither PR is deployed to either production PA instance.
 - A private pre-migration staging D1 backup was recorded before applying remote
