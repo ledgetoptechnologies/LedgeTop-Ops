@@ -7,16 +7,16 @@ Updated September 22, 2026. The owner approved implementation and resumption aft
 - Operations PR [#107](https://github.com/ledgetoptechnologies/LedgeTop-Ops/pull/107)
   passed all ten CI checks at `6940543`, including Operations, client, browser
   desktop/mobile, synchronization, incoming, thumbnail and invariant suites.
-  Later linked-client and staging-reconciliation corrections still need their
-  own CI run. Green CI does not substitute for joined staging or production
-  cutover acceptance.
+  Later linked-client and staging-reconciliation corrections are on the PR;
+  their full CI run is pending. Green CI does not substitute for joined staging
+  or production cutover acceptance.
 - Project Alpha PR [#188](https://github.com/ledgetoptechnologies/Project-Alpha/pull/188)
   is open at `cbabe57e3d2bceceb5fc724d083ea332c1864500`. Smoke, JavaScript
   and Python CodeQL, and gitleaks checks are green. It is not merged or deployed
   to either production PA instance.
 - A private pre-migration staging D1 backup was recorded before applying remote
   Operations staging migrations 0123–0138. Staging Worker version
-  `61d5f669-f6a2-4da6-b974-1d8911749996` runs the current Operations PR
+  `0b703087-88b4-4e5a-8fbc-fd5e260e1ae4` runs the current Operations PR
   code and assets with an enabled, application-bound PA staging API-v2
   connection through an encrypted deployment secret. The exact 29 existing
   bindings, including all secrets, were verified after the prior code upload.
@@ -25,9 +25,15 @@ Updated September 22, 2026. The owner approved implementation and resumption aft
   tick reached the scheduler but recorded an uncertain retry before a run row
   existed. The production Web Crypto ID factory had been passed as an unbound
   method while tests injected IDs; it is now receiver-safe, with a default-ID
-  regression test (18/18 focused), deployed to staging for the next tick.
-- Consequently no live finding reservation, inactive mapping, ownership claim,
-  mapping activation, or client-access activation has been accepted in staging.
+  regression test (18/18 focused). The next staging tick completed at
+  2026-09-22 19:36 UTC: one page, 14 remote items, one local item, 13
+  extra-remote findings (four clients, nine organizations), and zero actions.
+  The signed-in staging administration page displays those findings.
+- No live finding reservation, inactive mapping, ownership claim, mapping
+  activation, or client-access activation has been accepted in staging. The
+  sole staging native organization is already actively mapped to another PA
+  record, so it is not an eligible exact existing-record reservation target;
+  no automatic match or synthetic claim was made.
   The focused inactive-reservation and explicit-activation suite is green at
   62/62 with an extended timeout, including stale evidence, collision,
   authority-revocation and byte-preserved public-link cases.
@@ -36,7 +42,10 @@ Updated September 22, 2026. The owner approved implementation and resumption aft
   an explicit linked-client selection coordinate within the organization
   workspace, checking the exact source/application/epoch mapping and current
   local relationship before mounting the existing editor. TypeScript and
-  focused 8/8 tests passed; live end-to-end UI acceptance remains pending.
+  focused tests passed. A subsequent correction applies per-client native
+  Directory view ACL (including explicit deny) before exposing linked-client
+  names in that selector; its focused D1 suite passed 6/6. Live end-to-end
+  editing acceptance remains pending because native writes are still off.
 - Production remains unchanged: PA is correctly still locally editable,
   Operations production flags remain off, existing portal/Delivery/public-link
   behavior is untouched, and no client access was activated. PR #188 implements
