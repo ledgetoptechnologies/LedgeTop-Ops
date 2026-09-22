@@ -6118,8 +6118,10 @@ pending; this requirement does not claim a deployed UI change.
   contain aggregate outcomes only; credential values, command bodies and
   private profiles are never emitted. An unexpected dispatch failure leaves the
   durable row recoverable rather than treating absence as delivery success.
-- The focused scheduler suite passed `5/5` both in the implementation run and
-  an independent rerun. The implementation run also passed the production
+- The focused scheduler suite initially passed `5/5`; after independent review
+  added malformed-disabled-sibling and in-flight deadline-abort/retry coverage,
+  the expanded suite passed `7/7` in both its implementation run and an
+  independent rerun. The implementation run also passed the production
   Operations build, pinned Wrangler generated-type check and scoped TypeScript
   diagnostics. The flag remains `false`; no cron delivery, D1 migration,
   connection, credential, PA instance or public link was changed.
