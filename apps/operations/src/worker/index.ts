@@ -806,10 +806,11 @@ app.get("/health", (c) => c.json({ status: "ok", service: "ltds-ops" }));
 app.get("/api/session", async (c) => {
   const principal = c.get("principal"),
     administrator = c.get("administrator");
-  const [permissions, globalScope, deliveryBrowseScope, displayUnits, clientFeedbackEnabled] = await Promise.all([
+  const [permissions, globalScope, deliveryBrowseScope, integrationsManageScope, displayUnits, clientFeedbackEnabled] = await Promise.all([
     permissionKeys(c.env, principal),
     sqlScope(c.env, principal, "dashboard.view"),
     sqlScope(c.env, principal, "delivery.browse"),
+    sqlScope(c.env, principal, "integrations.manage"),
     resolveViewerUnits(c.env, principal.id),
     staffFeedbackEntryEnabled(c.env, principal),
   ]);
@@ -840,6 +841,10 @@ app.get("/api/session", async (c) => {
     mapboxPublicToken: c.env.MAPBOX_PUBLIC_TOKEN || null,
     units: { default: defaultViewerUnits(c.env), resolved: displayUnits },
     capabilities: {
+      projectAlphaPrivateAdminTransport: {
+        enabled: c.env.PROJECT_ALPHA_PRIVATE_ADMIN_TRANSPORT_ENABLED === "true" && administrator
+          && integrationsManageScope.global && !integrationsManageScope.deniedGlobal,
+      },
       nativeDirectoryProfileWrites: { enabled: nativeDirectoryProfileWritesEnabled(c.env) },
       clientFeedback: { enabled: clientFeedbackEnabled },
       dropboxImport: dropboxImportCapability(c.env),

@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Miniflare } from "miniflare";
 import { acquireProjectAlphaDirectoryReconciliationFinding,
   listProjectAlphaDirectoryReconciliationFindings,
+  listProjectAlphaDirectoryReconciliationRecords,
+  readProjectAlphaDirectoryReconciliationFindingContext,
   type ProjectAlphaDirectoryReconciliationReviewEnvironment } from "../src/worker/project-alpha-directory-reconciliation-review";
 
 const sourceA = "project-alpha:a", sourceB = "project-alpha:b";
@@ -48,7 +50,7 @@ function env(): ProjectAlphaDirectoryReconciliationReviewEnvironment {
 }
 
 async function completeRun(sourceId: string, count: number,
-  fence = identity(sourceId), resourceType: "client" | "organization" = "organization"):
+  fence = identity(sourceId), resourceType: "client" | "organization" = "organization", classification = "extra_remote"):
   Promise<{ runId: string; findings: string[]; publics: string[] }> {
   const runId = uuid(), at = "2026-09-22T12:00:00.000Z";
   await db.prepare(`INSERT INTO project_alpha_directory_reconciliation_runs(run_id,source_id,status,
@@ -69,7 +71,7 @@ async function completeRun(sourceId: string, count: number,
         JSON.stringify({ email: "secret@example.test", name: "Secret Name" }), at).run();
     await db.prepare(`INSERT INTO project_alpha_directory_reconciliation_findings(finding_id,run_id,source_id,
       classification,resource_type,remote_public_id,details_json,created_at)
-      VALUES(?,?,?,'extra_remote',?,?,?,?)`).bind(findingId, runId, sourceId, resourceType, remotePublicId,
+      VALUES(?,?,?,?,?,?,?,?)`).bind(findingId, runId, sourceId, classification, resourceType, remotePublicId,
         JSON.stringify({ apiKey: "private-secret", profile: { email: "secret@example.test" } }), at).run();
   }
   await db.prepare(`UPDATE project_alpha_directory_reconciliation_runs SET status='complete',pages_observed=1,
@@ -102,6 +104,11 @@ beforeEach(async () => {
   db = await runtime.getD1Database("OPS_DB");
   await apply(`
     CREATE TABLE operations_directory_records(record_id TEXT PRIMARY KEY,record_kind TEXT,current_version INTEGER);
+    CREATE TABLE operations_directory_revisions(record_id TEXT,version INTEGER,profile_json TEXT,PRIMARY KEY(record_id,version));
+    CREATE TABLE native_directory_grants(id TEXT PRIMARY KEY,staff_id TEXT,permission TEXT,effect TEXT,active INTEGER,
+      scope_kind TEXT,business_area_id TEXT,division_id TEXT,resource_id TEXT);
+    CREATE TABLE native_directory_assignments(record_id TEXT,staff_id TEXT,active INTEGER);
+    CREATE TABLE native_directory_resource_scopes(record_id TEXT,active INTEGER,business_area_id TEXT,division_id TEXT);
     CREATE TABLE project_alpha_existing_directory_binding_review_evidence(
       receipt_id TEXT,record_id TEXT,source_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,
       resource_type TEXT,external_id TEXT,project_alpha_public_id TEXT,project_alpha_revision TEXT,review_id TEXT,
@@ -121,6 +128,81 @@ beforeEach(async () => {
 afterEach(async () => runtime.dispose());
 
 describe("administrator reconciliation review service", () => {
+  it("keyset-pages only exact native IDs, kinds, and current versions", async () => {
+    await db.prepare("INSERT INTO native_directory_grants VALUES(?,?,?,?,?,?,?,?,?)")
+      .bind("view-all", reviewer.staffId, "directory.profile.view", "allow", 1, "global", null, null, null).run();
+    for (let index = 0; index < 54; index++) {
+      await db.prepare("INSERT INTO operations_directory_records VALUES(?,?,?)")
+        .bind(`organization-${String(index).padStart(2, "0")}`, "organization", index + 1).run();
+      await db.prepare("INSERT INTO operations_directory_revisions VALUES(?,?,?)")
+        .bind(`organization-${String(index).padStart(2, "0")}`, index + 1, JSON.stringify({
+          name: `Organization ${index}`, generalEmail: index === 0 ? null : `organization-${index}@example.test`, apiKey: "never-return",
+        })).run();
+    }
+    await db.prepare("INSERT INTO operations_directory_records VALUES(?,?,?)")
+      .bind("client-private", "client", 7).run();
+    await db.prepare("INSERT INTO operations_directory_revisions VALUES(?,?,?)")
+      .bind("client-private", 7, JSON.stringify({ name: "Private Client", email: null })).run();
+    const first = await listProjectAlphaDirectoryReconciliationRecords(env(), {
+      resourceType: "organization", reviewerStaffId: reviewer.staffId, limit: 47,
+    });
+    expect(first?.items).toHaveLength(47); expect(first?.nextCursor).toBeTruthy();
+    const second = await listProjectAlphaDirectoryReconciliationRecords(env(), {
+      resourceType: "organization", reviewerStaffId: reviewer.staffId, limit: 47, cursor: first?.nextCursor ?? "",
+    });
+    expect(second?.items).toHaveLength(7); expect(second?.nextCursor).toBeNull();
+    expect(first?.items[0]).toEqual({ recordId: "organization-00", resourceType: "organization", currentVersion: 1,
+      displayName: "Organization 0", contactEmail: null });
+    expect(JSON.stringify([first, second])).not.toMatch(/profile_json|profileJson|apiKey|never-return|client-private/i);
+    const clients = await listProjectAlphaDirectoryReconciliationRecords(env(), {
+      resourceType: "client", reviewerStaffId: reviewer.staffId, limit: 10,
+    });
+    expect(clients?.items).toEqual([{ recordId: "client-private", resourceType: "client", currentVersion: 7,
+      displayName: "Private Client", contactEmail: null }]);
+    await expect(listProjectAlphaDirectoryReconciliationRecords(env(), {
+      resourceType: "client", reviewerStaffId: reviewer.staffId, limit: 10, cursor: first?.nextCursor ?? "",
+    })).resolves.toBeNull();
+    await expect(listProjectAlphaDirectoryReconciliationRecords(env(), {
+      resourceType: "organization", reviewerStaffId: reviewer.staffId, limit: 51,
+    })).resolves.toBeNull();
+    await db.prepare("INSERT INTO operations_directory_records VALUES(?,?,?)").bind("00-invalid", "organization", 1).run();
+    await db.prepare("INSERT INTO operations_directory_revisions VALUES(?,?,?)")
+      .bind("00-invalid", 1, JSON.stringify({ name: 42, generalEmail: "not-returned@example.test" })).run();
+    const invalidPage = await listProjectAlphaDirectoryReconciliationRecords(env(), {
+      resourceType: "organization", reviewerStaffId: reviewer.staffId, limit: 1,
+    });
+    expect(invalidPage?.items).toEqual([]); expect(invalidPage?.nextCursor).toBeTruthy();
+    const afterInvalid = await listProjectAlphaDirectoryReconciliationRecords(env(), {
+      resourceType: "organization", reviewerStaffId: reviewer.staffId, limit: 1,
+      cursor: invalidPage?.nextCursor ?? "",
+    });
+    expect(afterInvalid?.items[0]?.recordId).toBe("organization-00");
+    await db.prepare("INSERT INTO native_directory_grants VALUES(?,?,?,?,?,?,?,?,?)")
+      .bind("deny-one", reviewer.staffId, "directory.profile.view", "deny", 1, "resource", null, null, "organization-00").run();
+    const denied = await listProjectAlphaDirectoryReconciliationRecords(env(), {
+      resourceType: "organization", reviewerStaffId: reviewer.staffId, limit: 10,
+    });
+    expect(denied?.items.map(item => item.recordId)).not.toContain("organization-00");
+  });
+
+  it("rechecks the current finding fence before returning minimal remote profile context", async () => {
+    const selected = await completeRun(sourceA, 1);
+    const readProfile = vi.fn(async () => observed(sourceA, selected.publics[0]!));
+    const context = await readProjectAlphaDirectoryReconciliationFindingContext(env(), selected.findings[0]!, fetch,
+      readProfile as never);
+    expect(context).toEqual({ findingId: selected.findings[0], resourceType: "organization", displayName: "Remote",
+      contactEmail: null, organizationPublicId: null });
+    expect(JSON.stringify(context)).not.toMatch(/address|phone|profile|requestId|sourceInstance|authorization/i);
+    await expect(readProjectAlphaDirectoryReconciliationFindingContext(env(), selected.findings[0]!, fetch,
+      (async () => observed(sourceA, selected.publics[0]!, { revision: "10" })) as never)).resolves.toBeNull();
+    await expect(readProjectAlphaDirectoryReconciliationFindingContext(env(), selected.findings[0]!, fetch,
+      (async () => { await completeRun(sourceA, 1); return observed(sourceA, selected.publics[0]!); }) as never))
+      .resolves.toBeNull();
+    const nonAdoptable = await completeRun(sourceB, 1, identity(sourceB), "organization", "revision_mismatch");
+    await expect(readProjectAlphaDirectoryReconciliationFindingContext(env(), nonAdoptable.findings[0]!, fetch,
+      (async () => observed(sourceB, nonAdoptable.publics[0]!)) as never)).resolves.toBeNull();
+  });
+
   it("keyset-pages a 47/7 two-source feed without profile fields, secrets, or public-link writes", async () => {
     await completeRun(sourceA, 27); await completeRun(sourceB, 27);
     const first = await listProjectAlphaDirectoryReconciliationFindings(env(), { sourceIds: [sourceB, sourceA], limit: 47 });

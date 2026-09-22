@@ -6,7 +6,9 @@ import { readBoundedJson } from "./bounded-json";
 import { acquireProjectAlphaExistingDirectoryBinding } from "./project-alpha-existing-directory-acquisition-coordinator";
 import { activateProjectAlphaExistingDirectoryBinding } from "./project-alpha-existing-directory-binding-review-consumer";
 import { acquireProjectAlphaDirectoryReconciliationFinding,
-  listProjectAlphaDirectoryReconciliationFindings } from "./project-alpha-directory-reconciliation-review";
+  listProjectAlphaDirectoryReconciliationFindings,
+  listProjectAlphaDirectoryReconciliationRecords,
+  readProjectAlphaDirectoryReconciliationFindingContext } from "./project-alpha-directory-reconciliation-review";
 import { reserveProjectAlphaProjectAdoptionReview } from "./project-alpha-project-adoption-review-consumer";
 import { planProjectAlphaProjectAdoptionBind } from "./project-alpha-project-adoption-bind-consumer";
 import type { Env, StaffPrincipal } from "./types";
@@ -76,6 +78,16 @@ async function currentReviewer(env: Env, principal: StaffPrincipal): Promise<{
     admissionVersion: row.admissionVersion, profileVersion: row.profileVersion, grantGeneration: row.grantGeneration };
 }
 
+async function requireGlobalDirectoryProfileView(env: Env, staffId: string): Promise<void> {
+  const row = await env.OPS_DB.prepare(`SELECT 1 ok FROM native_directory_grants allowed
+    WHERE allowed.staff_id=? AND allowed.permission='directory.profile.view' AND allowed.effect='allow'
+      AND allowed.active=1 AND allowed.scope_kind='global'
+      AND NOT EXISTS(SELECT 1 FROM native_directory_grants denied WHERE denied.staff_id=allowed.staff_id
+        AND denied.permission=allowed.permission AND denied.effect='deny' AND denied.active=1
+        AND denied.scope_kind='global') LIMIT 1`).bind(staffId).first<{ ok: number }>();
+  if (!row) throw new HTTPException(403, { message: "Global directory profile view permission required" });
+}
+
 function principalActor(principal: StaffPrincipal): { staffId: string; accessSubject: string } {
   return { staffId: principal.id, accessSubject: principal.accessSubject };
 }
@@ -113,6 +125,35 @@ export function registerProjectAlphaPrivateAdminRoutes(app: App): void {
     });
     if (!page) throw new HTTPException(400, { message: "Reconciliation finding query is invalid" });
     return c.json(page);
+  });
+
+  app.get(`${PROJECT_ALPHA_PRIVATE_ADMIN_ROUTE}/directory/reconciliation/records`, async c => {
+    const url = new URL(c.req.url);
+    if ([...url.searchParams.keys()].some(key => !["resourceType", "limit", "cursor"].includes(key)))
+      throw new HTTPException(400, { message: "Reconciliation record query is invalid" });
+    const resourceType = url.searchParams.get("resourceType");
+    const rawLimit = url.searchParams.get("limit") ?? "25";
+    if ((resourceType !== "client" && resourceType !== "organization")
+      || !/^[1-9][0-9]?$/u.test(rawLimit) || Number(rawLimit) > 50)
+      throw new HTTPException(400, { message: "Reconciliation record query is invalid" });
+    const reviewer = await currentReviewer(c.env, c.get("principal"));
+    const page = await listProjectAlphaDirectoryReconciliationRecords(c.env, {
+      resourceType, reviewerStaffId: reviewer.staffId, limit: Number(rawLimit), ...(url.searchParams.has("cursor")
+        ? { cursor: url.searchParams.get("cursor") ?? "" } : {}),
+    });
+    if (!page) throw new HTTPException(400, { message: "Reconciliation record query is invalid" });
+    return c.json(page);
+  });
+
+  app.get(`${PROJECT_ALPHA_PRIVATE_ADMIN_ROUTE}/directory/reconciliation/findings/:findingId/context`, async c => {
+    const findingId = c.req.param("findingId");
+    if (!UUID.safeParse(findingId).success)
+      throw new HTTPException(404, { message: "Reconciliation finding not found" });
+    const reviewer = await currentReviewer(c.env, c.get("principal"));
+    await requireGlobalDirectoryProfileView(c.env, reviewer.staffId);
+    const context = await readProjectAlphaDirectoryReconciliationFindingContext(c.env, findingId, fetch);
+    if (!context) throw new HTTPException(409, { message: "Current reconciliation context is unavailable" });
+    return c.json(context);
   });
 
   app.post(`${PROJECT_ALPHA_PRIVATE_ADMIN_ROUTE}/directory/reconciliation/acquire`, async c => {

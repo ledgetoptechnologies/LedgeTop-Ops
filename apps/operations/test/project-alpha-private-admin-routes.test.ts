@@ -6,6 +6,8 @@ import type { Env, StaffPrincipal } from "../src/worker/types";
 const mocks = vi.hoisted(() => ({
   scope: vi.fn(), acquire: vi.fn(), activate: vi.fn(), reserve: vi.fn(), bind: vi.fn(), first: vi.fn(),
   reconciliationList: vi.fn(), reconciliationAcquire: vi.fn(),
+  reconciliationRecords: vi.fn(),
+  reconciliationContext: vi.fn(),
 }));
 vi.mock("../src/worker/acl", () => ({ sqlScope: mocks.scope }));
 vi.mock("../src/worker/project-alpha-existing-directory-acquisition-coordinator", () => ({
@@ -16,6 +18,8 @@ vi.mock("../src/worker/project-alpha-existing-directory-binding-review-consumer"
 }));
 vi.mock("../src/worker/project-alpha-directory-reconciliation-review", () => ({
   listProjectAlphaDirectoryReconciliationFindings: mocks.reconciliationList,
+  listProjectAlphaDirectoryReconciliationRecords: mocks.reconciliationRecords,
+  readProjectAlphaDirectoryReconciliationFindingContext: mocks.reconciliationContext,
   acquireProjectAlphaDirectoryReconciliationFinding: mocks.reconciliationAcquire,
 }));
 vi.mock("../src/worker/project-alpha-project-adoption-review-consumer", () => ({
@@ -40,7 +44,7 @@ const key = "10000000-0000-4000-8000-000000000003";
 const reservationId = "10000000-0000-4000-8000-000000000004";
 const publicId = "a".repeat(32);
 
-function fixture(options: { enabled?: boolean; administrator?: boolean; global?: boolean; denied?: boolean } = {}) {
+function fixture(options: { enabled?: boolean; administrator?: boolean; global?: boolean; denied?: boolean; directoryView?: boolean } = {}) {
   const app = new Hono<{ Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } }>();
   app.use("/api/*", async (c, next) => {
     c.set("principal", principal);
@@ -53,7 +57,10 @@ function fixture(options: { enabled?: boolean; administrator?: boolean; global?:
     PROJECT_ALPHA_PRIVATE_ADMIN_TRANSPORT_ENABLED: options.enabled === false ? "false" : "true",
     OPERATIONS_SESSION_SECRET: "operations-session-secret-0123456789abcdef",
     OPERATIONS_ORIGINS: "https://ops.example.test",
-    OPS_DB: { prepare: vi.fn(() => ({ bind: vi.fn(() => ({ first: mocks.first })) })) },
+    OPS_DB: { prepare: vi.fn((sql: string) => ({ bind: vi.fn(() => ({
+      first: sql.includes("FROM native_directory_grants allowed")
+        ? vi.fn().mockResolvedValue(options.directoryView === false ? null : { ok: 1 }) : mocks.first,
+    })) })) },
   } as unknown as Env;
   mocks.first.mockResolvedValue({ admissionVersion: 3, profileVersion: 4, grantGeneration: 5 });
   mocks.scope.mockResolvedValue({ global: options.global ?? true, deniedGlobal: options.denied ?? false });
@@ -81,6 +88,9 @@ describe("private Project Alpha administrator transport", () => {
     mocks.reserve.mockResolvedValue({ status: "reserved", reservationId, reviewItemId: reviewId, idempotencyKey: key, replayed: false });
     mocks.bind.mockResolvedValue({ status: "planned", bridgeId: key, reservationId, commandId, requestSha256: "b".repeat(64), replayed: false });
     mocks.reconciliationList.mockResolvedValue({ items: [], nextCursor: null });
+    mocks.reconciliationRecords.mockResolvedValue({ items: [], nextCursor: null });
+    mocks.reconciliationContext.mockResolvedValue({ findingId: reviewId, resourceType: "organization",
+      displayName: "Example Organization", contactEmail: "contact@example.test", organizationPublicId: null });
     mocks.reconciliationAcquire.mockResolvedValue({ status: "acquired", actionId: key,
       findingId: reviewId, acquiredReceiptId: reservationId, replayed: false });
   });
@@ -158,6 +168,35 @@ describe("private Project Alpha administrator transport", () => {
     });
     expect((await get("/directory/reconciliation/findings?sourceId=project-alpha:primary&limit=99")).status).toBe(400);
     expect((await get("/directory/reconciliation/findings?sourceId=project-alpha:primary&secret=x")).status).toBe(400);
+  });
+
+  it("guards and bounds the exact native-record selector without accepting search terms", async () => {
+    expect((await fixture({ enabled: false }).get(
+      "/directory/reconciliation/records?resourceType=organization")).status).toBe(404);
+    expect((await fixture({ administrator: false }).get(
+      "/directory/reconciliation/records?resourceType=organization")).status).toBe(403);
+    expect((await fixture({ global: false }).get(
+      "/directory/reconciliation/records?resourceType=organization")).status).toBe(403);
+    const { get } = fixture();
+    expect((await get("/directory/reconciliation/records?resourceType=client&limit=47&cursor=opaque")).status).toBe(200);
+    expect(mocks.reconciliationRecords).toHaveBeenCalledWith(expect.anything(), {
+      resourceType: "client", reviewerStaffId: principal.id, limit: 47, cursor: "opaque",
+    });
+    expect((await get("/directory/reconciliation/records?resourceType=organization&limit=99")).status).toBe(400);
+    expect((await get("/directory/reconciliation/records?resourceType=user")).status).toBe(400);
+    expect((await get("/directory/reconciliation/records?resourceType=client&search=email")).status).toBe(400);
+  });
+
+  it("requires global native profile-view authority for minimal current PA context", async () => {
+    expect((await fixture({ directoryView: false }).get(
+      `/directory/reconciliation/findings/${reviewId}/context`)).status).toBe(403);
+    expect(mocks.reconciliationContext).not.toHaveBeenCalled();
+    const response = await fixture().get(`/directory/reconciliation/findings/${reviewId}/context`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ findingId: reviewId, resourceType: "organization",
+      displayName: "Example Organization", contactEmail: "contact@example.test", organizationPublicId: null });
+    expect(mocks.reconciliationContext).toHaveBeenCalledWith(expect.anything(), reviewId, fetch);
+    expect((await fixture().get("/directory/reconciliation/findings/not-a-uuid/context")).status).toBe(404);
   });
 
   it("accepts only finding/native-version selection and derives acquisition identities server-side", async () => {

@@ -6255,3 +6255,38 @@ pending; this requirement does not claim a deployed UI change.
   private administrator transport remains default-off; no deployment,
   activation, credential, PA configuration, Delivery row or public link was
   changed by this checkpoint.
+
+### September 22 — Operations reconciliation review panel checkpoint
+
+- The Operations Administration page now has a responsive reconciliation
+  review panel for the fixed Ledge Top Drone Services and Ledge Top
+  Technologies PA sources. It is rendered only when the authenticated session
+  is an administrator with deny-aware global `integrations.manage` and the
+  existing `PROJECT_ALPHA_PRIVATE_ADMIN_TRANSPORT_ENABLED` flag is exactly
+  `true`; the checked-in flag remains `false`.
+- The panel keyset-pages the existing sanitized current-complete finding feed.
+  For an open adoptable finding, an explicit operator action performs a
+  current, exact source-instance/application/history-epoch/authorization-
+  generation/revision-fenced PA profile read and returns only display name,
+  nullable contact email and organization public ID. Candidate Operations
+  records are keyset-paged in exact record-ID order and require current native
+  `directory.profile.view` authority with deny precedence. Only display name,
+  nullable contact email, exact record ID, kind and current version leave the
+  server; raw `profile_json`, configuration URLs, credentials and secrets do
+  not. Invalid stored summaries are skipped while the opaque cursor advances,
+  so a bounded empty page can still continue without looping or exposing the
+  malformed profile.
+- Nothing is suggested, similarity-ranked, auto-matched or preselected. The
+  operator must choose one exact matching-kind record and confirm the POST;
+  the browser sends only finding ID, record ID, current version and a UUID
+  idempotency key. Uncertain retry retains that UUID, while stale and conflict
+  outcomes are reported without claiming success. A successful result is
+  labeled inactive and pending separate activation review; the panel exposes
+  no activation, create or delete control.
+- Focused service and route evidence passed `19/19`; the responsive desktop
+  and mobile panel plus existing Administration/connection regressions passed
+  `16/16`; and the production Operations build passed. The repo-wide
+  TypeScript command remains blocked by pre-existing cross-package dependency
+  resolution and unrelated baseline errors, none in this slice. No deployment,
+  feature enablement, migration, remote PA write, canonical mapping rewrite,
+  Delivery row or public-link mutation was performed.

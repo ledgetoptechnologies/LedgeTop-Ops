@@ -22,8 +22,19 @@ export type ProjectAlphaDirectoryReconciliationFinding = Readonly<{
 export type ProjectAlphaDirectoryReconciliationFindingPage = Readonly<{
   items: readonly ProjectAlphaDirectoryReconciliationFinding[]; nextCursor: string | null;
 }>;
+export type ProjectAlphaDirectoryReconciliationRecord = Readonly<{
+  recordId: string; resourceType: "client" | "organization"; currentVersion: number;
+  displayName: string; contactEmail: string | null;
+}>;
+export type ProjectAlphaDirectoryReconciliationRecordPage = Readonly<{
+  items: readonly ProjectAlphaDirectoryReconciliationRecord[]; nextCursor: string | null;
+}>;
 export type ProjectAlphaDirectoryReconciliationAdoptionInput = Readonly<{
   findingId: string; recordId: string; expectedRecordVersion: number; idempotencyKey: string;
+}>;
+export type ProjectAlphaDirectoryReconciliationFindingContext = Readonly<{
+  findingId: string; resourceType: "client" | "organization"; displayName: string;
+  contactEmail: string | null; organizationPublicId: string | null;
 }>;
 export type ProjectAlphaDirectoryReconciliationAdoptionOutcome =
   | Readonly<{ status: "acquired"; actionId: string; findingId: string; acquiredReceiptId: string; replayed: boolean }>
@@ -33,7 +44,10 @@ export type ProjectAlphaDirectoryReconciliationAdoptionOutcome =
   | Readonly<{ status: "rejected"; reason: "invalid_input" }>;
 
 type Cursor = Readonly<{ sourceId: string; findingId: string }>;
+type RecordCursor = Readonly<{ resourceType: "client" | "organization"; recordId: string }>;
 type FindingRow = Omit<ProjectAlphaDirectoryReconciliationFinding, "present"> & { present: number | null };
+type RecordRow = Readonly<{ recordId: string; resourceType: "client" | "organization";
+  currentVersion: number; profileJson: string }>;
 type Action = Readonly<{
   actionId: string; idempotencyKey: string; findingId: string; runId: string; sourceId: string;
   sourceInstanceId: string; applicationId: string; historyEpoch: string; authorizationGeneration: string;
@@ -59,7 +73,40 @@ function decodeCursor(value: string | undefined): Cursor | null | undefined {
     return { sourceId: object.s, findingId: object.f };
   } catch { return undefined; }
 }
+function encodeRecordCursor(row: RecordCursor): string {
+  const bytes = new TextEncoder().encode(JSON.stringify({ k: row.resourceType, r: row.recordId }));
+  let value = "";
+  for (const byte of bytes) value += String.fromCharCode(byte);
+  return btoa(value).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
+}
+function decodeRecordCursor(value: string | undefined): RecordCursor | null | undefined {
+  if (value === undefined) return null;
+  if (value.length < 1 || value.length > 1024 || !/^[A-Za-z0-9_-]+$/u.test(value)) return undefined;
+  try {
+    const padded = value.replaceAll("-", "+").replaceAll("_", "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+    const bytes = Uint8Array.from(atob(padded), character => character.charCodeAt(0));
+    const parsed: unknown = JSON.parse(new TextDecoder().decode(bytes));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    const object = parsed as Record<string, unknown>;
+    if (Reflect.ownKeys(object).length !== 2 || (object.k !== "client" && object.k !== "organization")
+      || typeof object.r !== "string" || !RECORD.test(object.r)) return undefined;
+    return { resourceType: object.k, recordId: object.r };
+  } catch { return undefined; }
+}
 function positive(value: unknown): value is number { return Number.isSafeInteger(value) && (value as number) > 0; }
+function summaryText(value: unknown, maximum: number, required = false): value is string {
+  return typeof value === "string" && (!required || value.length > 0) && Array.from(value).length <= maximum && !/\p{C}/u.test(value);
+}
+function recordSummary(row: RecordRow): ProjectAlphaDirectoryReconciliationRecord | null {
+  let profile: unknown;
+  try { profile = JSON.parse(row.profileJson); } catch { return null; }
+  if (!profile || typeof profile !== "object" || Array.isArray(profile)) return null;
+  const value = profile as Record<string, unknown>, email = row.resourceType === "organization" ? value.generalEmail : value.email;
+  if (!summaryText(value.name, 150, true)
+    || (email !== null && email !== undefined && !summaryText(email, 255))) return null;
+  return Object.freeze({ recordId: row.recordId, resourceType: row.resourceType, currentVersion: row.currentVersion,
+    displayName: value.name, contactEmail: typeof email === "string" && email.length ? email : null });
+}
 
 /** Keyset-page only stable complete-run findings; profile evidence and deployment configuration are never selected. */
 export async function listProjectAlphaDirectoryReconciliationFindings(
@@ -98,6 +145,96 @@ export async function listProjectAlphaDirectoryReconciliationFindings(
   const items = selected.map(row => Object.freeze({ ...row, present: row.present === null ? null : row.present === 1 }));
   const last = selected.at(-1);
   return Object.freeze({ items: Object.freeze(items), nextCursor: rows.results.length > input.limit && last ? encodeCursor(last) : null });
+}
+
+/** List exact native identities plus minimal display context for explicitly authorized operators. */
+export async function listProjectAlphaDirectoryReconciliationRecords(
+  env: Pick<ProjectAlphaDirectoryReconciliationReviewEnvironment, "OPS_DB">,
+  input: Readonly<{ resourceType: "client" | "organization"; reviewerStaffId: string; limit: number; cursor?: string }>,
+): Promise<ProjectAlphaDirectoryReconciliationRecordPage | null> {
+  const cursor = decodeRecordCursor(input.cursor);
+  if ((input.resourceType !== "client" && input.resourceType !== "organization")
+    || !RECORD.test(input.reviewerStaffId) || !Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 50 || cursor === undefined
+    || (cursor !== null && cursor.resourceType !== input.resourceType)) return null;
+  const rows = await env.OPS_DB.prepare(`SELECT record.record_id recordId,record.record_kind resourceType,
+      record.current_version currentVersion,revision.profile_json profileJson
+    FROM operations_directory_records record
+    JOIN operations_directory_revisions revision
+      ON revision.record_id=record.record_id AND revision.version=record.current_version
+    WHERE record.record_kind=? AND (? IS NULL OR record.record_id>?)
+      AND EXISTS(SELECT 1 FROM native_directory_grants allowed
+        WHERE allowed.staff_id=? AND allowed.permission='directory.profile.view'
+          AND allowed.effect='allow' AND allowed.active=1 AND (allowed.scope_kind='global'
+            OR (allowed.scope_kind='resource' AND allowed.resource_id=record.record_id)
+            OR (allowed.scope_kind='assigned' AND EXISTS(SELECT 1 FROM native_directory_assignments assignment
+              WHERE assignment.record_id=record.record_id AND assignment.staff_id=allowed.staff_id AND assignment.active=1))
+            OR (allowed.scope_kind='business_area' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes scope
+              WHERE scope.record_id=record.record_id AND scope.active=1 AND scope.business_area_id=allowed.business_area_id))
+            OR (allowed.scope_kind='division' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes scope
+              WHERE scope.record_id=record.record_id AND scope.active=1 AND scope.division_id=allowed.division_id)))
+      ) AND NOT EXISTS(SELECT 1 FROM native_directory_grants denied
+        WHERE denied.staff_id=? AND denied.permission='directory.profile.view'
+          AND denied.effect='deny' AND denied.active=1 AND (denied.scope_kind='global'
+            OR (denied.scope_kind='resource' AND denied.resource_id=record.record_id)
+            OR (denied.scope_kind='assigned' AND EXISTS(SELECT 1 FROM native_directory_assignments assignment
+              WHERE assignment.record_id=record.record_id AND assignment.staff_id=denied.staff_id AND assignment.active=1))
+            OR (denied.scope_kind='business_area' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes scope
+              WHERE scope.record_id=record.record_id AND scope.active=1 AND scope.business_area_id=denied.business_area_id))
+            OR (denied.scope_kind='division' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes scope
+              WHERE scope.record_id=record.record_id AND scope.active=1 AND scope.division_id=denied.division_id)))
+      ) ORDER BY record.record_id LIMIT ?`)
+    .bind(input.resourceType, cursor?.recordId ?? null, cursor?.recordId ?? "", input.reviewerStaffId,
+      input.reviewerStaffId, input.limit + 1).all<RecordRow>();
+  const selectedRows = rows.results.slice(0, input.limit), selected = selectedRows.flatMap(row => {
+    const summary = recordSummary(row); return summary ? [summary] : [];
+  });
+  const last = selectedRows.at(-1);
+  return Object.freeze({ items: Object.freeze(selected), nextCursor: rows.results.length > input.limit && last
+    ? encodeRecordCursor({ resourceType: last.resourceType, recordId: last.recordId }) : null });
+}
+
+/** Re-read one current finding's PA profile and return only minimal operator context. */
+export async function readProjectAlphaDirectoryReconciliationFindingContext(
+  env: ProjectAlphaDirectoryReconciliationReviewEnvironment,
+  findingId: string,
+  send: typeof fetch = fetch,
+  readProfile: typeof readConfiguredProjectAlphaDirectoryProfile = readConfiguredProjectAlphaDirectoryProfile,
+): Promise<ProjectAlphaDirectoryReconciliationFindingContext | null> {
+  if (!UUID.test(findingId)) return null;
+  const row = await env.OPS_DB.prepare(`SELECT finding.finding_id findingId,finding.run_id runId,finding.source_id sourceId,
+      finding.resource_type resourceType,finding.remote_public_id remotePublicId,
+      run.source_instance_id sourceInstanceId,run.application_id applicationId,
+      run.history_epoch_id historyEpoch,run.authorization_generation authorizationGeneration,
+      observation.revision remoteRevision
+    FROM project_alpha_directory_reconciliation_findings finding
+    JOIN project_alpha_directory_reconciliation_checkpoints checkpoint
+      ON checkpoint.source_id=finding.source_id AND checkpoint.complete_run_id=finding.run_id
+    JOIN project_alpha_directory_reconciliation_runs run ON run.run_id=finding.run_id AND run.status='complete'
+    JOIN project_alpha_directory_reconciliation_observations observation
+      ON observation.run_id=finding.run_id AND observation.resource_type=finding.resource_type
+        AND observation.public_id=finding.remote_public_id
+    WHERE finding.finding_id=? AND finding.review_state='open'
+      AND finding.classification IN ('extra_remote','public_id_mismatch','external_id_mismatch','binding_mismatch')
+      AND NOT EXISTS(SELECT 1 FROM project_alpha_directory_reconciliation_actions action
+        JOIN project_alpha_directory_reconciliation_action_outcomes outcome ON outcome.action_id=action.action_id
+        WHERE action.finding_id=finding.finding_id)
+    `).bind(findingId).first<{ findingId: string; runId: string; sourceId: string;
+      resourceType: "client" | "organization"; remotePublicId: string; sourceInstanceId: string;
+      applicationId: string; historyEpoch: string; authorizationGeneration: string; remoteRevision: string }>();
+  if (!row) return null;
+  const remote = await readProfile(env, row.sourceId, row.resourceType, row.remotePublicId, send);
+  if (remote.status !== "observed") return null;
+  const observation = remote.observation;
+  if (observation.sourceId !== row.sourceId || observation.sourceInstanceId !== row.sourceInstanceId
+    || observation.applicationId !== row.applicationId || observation.historyEpoch !== row.historyEpoch
+    || observation.authorizationGeneration !== row.authorizationGeneration || observation.resource.type !== row.resourceType
+    || observation.resource.id !== row.remotePublicId || observation.resource.revision !== row.remoteRevision) return null;
+  const current = await env.OPS_DB.prepare(`SELECT 1 ok FROM project_alpha_directory_reconciliation_checkpoints
+    WHERE source_id=? AND complete_run_id=?`).bind(row.sourceId, row.runId).first<{ ok: number }>();
+  if (!current) return null;
+  return Object.freeze({ findingId: row.findingId, resourceType: row.resourceType,
+    displayName: observation.profile.name, contactEmail: observation.profile.email,
+    organizationPublicId: observation.profile.organizationPublicId ?? null });
 }
 
 function validAdoption(value: ProjectAlphaDirectoryReconciliationAdoptionInput,

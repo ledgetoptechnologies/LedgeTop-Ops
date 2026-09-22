@@ -32,6 +32,7 @@ import { DropboxImportDialog } from "./DropboxImportDialog";
 import { ClientHubWorkspaceRouter } from "./BusinessProjectWorkspace";
 import { DeliveryLinksPage } from "./DeliveryLinksPage";
 import { ProjectAlphaConnections } from "./ProjectAlphaConnections";
+import { ProjectAlphaDirectoryReconciliationReview } from "./ProjectAlphaDirectoryReconciliationReview";
 import { PortalWorkflowReadiness } from "./PortalWorkflowReadiness";
 import { ProjectAlphaAccessTokenExpiry } from "./ProjectAlphaAccessTokenExpiry";
 import { DeliveryChangeRecoveryStatus } from "./DeliveryChangeRecoveryStatus";
@@ -90,6 +91,7 @@ interface Session {
     authenticatedDeliveryGrants?: AuthenticatedDeliveryCapability;
     clientFeedback?: { enabled: boolean };
     nativeDirectoryProfileWrites?: { enabled: boolean };
+    projectAlphaPrivateAdminTransport?: { enabled: boolean };
   };
 }
 type AuthenticatedDeliveryReadinessReason =
@@ -7174,6 +7176,8 @@ function Administration({ session }: { session: Session }) {
       </section>
       <div className="administration-panels">
         {canManageConnections && <section id="project-alpha-connections" className="administration-panel administration-panel-wide"><ProjectAlphaConnections /></section>}
+        {canManageConnections && session.capabilities?.projectAlphaPrivateAdminTransport?.enabled === true
+          && <section id="project-alpha-reconciliation-review" className="administration-panel administration-panel-wide"><ProjectAlphaDirectoryReconciliationReview /></section>}
         {canManageConnections && <section className="administration-panel"><PortalWorkflowReadiness /></section>}
         {canManageConnections && <section className="administration-panel"><ProjectAlphaAccessTokenExpiry /></section>}
         {canManageConnections && <section className="administration-panel administration-panel-wide"><DeliveryChangeRecoveryStatus /></section>}
