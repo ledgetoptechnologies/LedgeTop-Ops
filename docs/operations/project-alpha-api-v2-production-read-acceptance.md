@@ -19,6 +19,16 @@ valid for at most four hours, pins the reviewer's exact bound Access subject and
 an existing global `role-owner` assignment, and carries a distinct evidence
 digest. It does not impose a permanent single-owner invariant.
 
+The reviewed production native-authority packet was provisioned on September
+21, 2026 after the canonical `0124` chain, private backup, exact owner binding,
+existing permission overrides, empty native state and zero pending actor work
+were rechecked. Sanitized readback proves admission/profile version `1`,
+Directory and Project grant generation/version `1`, the immutable Directory
+history row, approval and receipt. This satisfies the Operations authority
+prerequisite only. It does not make this read-acceptance route a write route,
+consume a Project-adoption review item, enable either PA connection or retire a
+legacy connection.
+
 ## Activation and authority
 
 - `PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ENABLED` is `false` by default.
@@ -56,3 +66,15 @@ connection entry back to `false`. A successful result does not enable
 synchronization, grant any PA write capability, alter client records, or make
 legacy connections safe to retire. Preserve public links and complete the
 separate legacy entitlement/outbox audit before retirement.
+
+## Production evidence
+
+On September 21, 2026, the bounded route completed once for LTDS primary and
+once for LTT secondary. Both capability probes returned `verified` with exact
+identity and contract matches. Directory inventory returned `47` LTDS records
+and `7` LTT records, with no additional page; both Project inventories returned
+an observed empty application-scoped set. The safe audit rows are retained in
+Operations D1. The empty Project inventories are an adoption boundary, not
+proof that PA has no historical Projects: existing Projects are not silently
+bound to the new application and require deliberate review/adoption. The
+acceptance made no PA mutation and does not authorize legacy retirement.

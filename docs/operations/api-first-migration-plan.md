@@ -1,6 +1,72 @@
 # API-first migration — current implementation objective and work register
 
-Updated September 19, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+Updated September 21, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+
+### September 21, 2026 — production native-authority provision checkpoint
+
+- Operations PR106 merged to `main` as
+  `8115ce1ca7bf736bb37039f42338547da2617d92`. Its authoritative post-merge
+  workflow `35685511112` passed all ten Operations, Client, Ops Sync, browser,
+  source-invariant, Incoming and thumbnail jobs. The public change teaches the
+  production-only authority-packet generator to preserve and verify an exact
+  pre-existing permission-override set; it does not mount a route, enable a
+  connection or alter Project Alpha.
+- A fresh private D1 backup was retained before the authority work. Canonical
+  Operations migrations `0123` and `0124` were applied and independently
+  read back before authority provision. The isolated provision packet then
+  required exactly one pending migration and applied
+  `9000_production-authority-project-v2-001_provision.sql` to `ltds-ops`.
+  Wrangler reported all 12 statements successful; the packet migration ledger
+  now contains exactly that one row and has no pending migration.
+- Sanitized post-provision readback proves one active native admission and
+  profile at version `1`, one active global `directory.profile.edit` grant at
+  generation/version `1`, one immutable Directory history row at
+  generation/version `1`, and one active global `project.shared.sync` grant at
+  generation/version `1`. The exact approval and receipt are present. Pending
+  actor fences/outboxes and unrelated native authority remain zero.
+- The four existing Delivery permission overrides were re-read before and
+  after provision. Their canonical count remains `4` and their reviewed digest
+  remains `827c1e8ced874e5a1539e4c57e7cd41f56c1ce0dc373ce32a62e4a7de46d19b0`.
+  The packet targeted only `OPS_DB`; it did not bind `DELIVERY_DB`, rewrite a
+  public link, enable a PA connection or activate a write route. The reviewed
+  revoke packet remains unused and available only for a failed-postcondition
+  response; no rollback was required.
+- This establishes governed Operations-side authority, not client migration.
+  Production Directory and Project mutation callers remain unactivated. The
+  next gate is one-source-at-a-time write acceptance, beginning with a bounded
+  LTDS fixture or deliberate existing-record review, followed by exact replay,
+  stale/conflict, rollback and public-link-preservation evidence. LTT and
+  legacy connections remain unchanged until that gate passes. Migration
+  `0124` review evidence still needs its separately reviewed consumer before an
+  existing PA Project can be adopted through a browser action.
+
+### September 21, 2026 — two-instance production read acceptance
+
+- The production read-only acceptance route completed once for each configured
+  source before native write authority was provisioned. Both capability probes
+  returned `verified` with exact source/application/history identity and exact
+  contract matches. Each Directory and Project inventory GET returned
+  `observed`, not redirected, unauthorized, stale or uncertain.
+- LTDS primary reported Directory generation `0`, `47` Directory records, no
+  next page, and metadata digest
+  `e224612a24d58643abd1715cf367c3466a98eaa56cdb93fbb70861e578e9b26f`.
+  LTT secondary reported Directory generation `0`, `7` Directory records, no
+  next page, and metadata digest
+  `636c100cc3aa9a4f0bf4dc7df1b65dbdb542dd461e3e18d435158075a0dec680`.
+  The safe audit rows were written at `2026-09-21 23:10:27` and
+  `2026-09-21 23:10:42` UTC respectively.
+- Both application-scoped Project inventories were empty with the canonical
+  empty-array digest
+  `4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945`.
+  This does not contradict the PA backfill evidence: historical Project rows do
+  not become application-bound merely because a new API key/application was
+  created. Existing Projects require deliberate review/adoption; they must not
+  be guessed or automatically merged by name. This is the immediate reason the
+  `0124` consumer precedes Project write acceptance and portal migration.
+- The route performed GETs only and its stored evidence contains no API key,
+  Access credential, URL, client/organization/Project identifier, or profile
+  field. A successful read does not activate synchronization or make the
+  legacy integration safe to retire.
 
 ### September 19, 2026 — current joined-window gate recheck
 
