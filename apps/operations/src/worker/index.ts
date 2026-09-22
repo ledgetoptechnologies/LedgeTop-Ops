@@ -163,6 +163,7 @@ import { provePrimaryBusinessReferences } from "./project-alpha-primary-referenc
 import { registerTeamAssignedWorkRoutes } from "./team-assigned-work";
 import { registerClientHubRoutes } from "./client-hub";
 import { NATIVE_DIRECTORY_PROFILE_ROUTE, nativeDirectoryProfileWritesEnabled, registerNativeDirectoryProfileRoutes } from "./native-directory-profile-routes";
+import { NATIVE_DIRECTORY_STAGING_EMPTY_ENROLLMENT_FIXTURE_ROUTE, nativeDirectoryStagingEmptyEnrollmentFixtureEnabled, registerNativeDirectoryStagingEmptyEnrollmentFixtureRoutes } from "./native-directory-staging-empty-enrollment-fixture-routes";
 import { registerBusinessPartyRoutes } from "./business-party-routes";
 import { registerNotificationCenterRoutes } from "./notification-center";
 import { registerStaffInboxRequestRoutes } from "./staff-inbox-requests";
@@ -457,6 +458,11 @@ app.use(PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ROUTE, async (c, next) =
 // authentication, matching other rollout-gated authenticated route families.
 app.use(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/*`, async (c, next) => {
   if (!nativeDirectoryProfileWritesEnabled(c.env)) return c.json({ error: "Not found" }, 404);
+  await next();
+});
+app.use(NATIVE_DIRECTORY_STAGING_EMPTY_ENROLLMENT_FIXTURE_ROUTE, async (c, next) => {
+  if (c.req.path === NATIVE_DIRECTORY_STAGING_EMPTY_ENROLLMENT_FIXTURE_ROUTE
+    && !nativeDirectoryStagingEmptyEnrollmentFixtureEnabled(c.env)) return c.json({ error: "Not found" }, 404);
   await next();
 });
 app.use("/api/*", async (c, next) => {
@@ -1570,6 +1576,7 @@ registerProjectAlphaDraftQuoteRoutes(app);
 registerTeamAssignedWorkRoutes(app);
 registerClientHubRoutes(app);
 registerNativeDirectoryProfileRoutes(app);
+registerNativeDirectoryStagingEmptyEnrollmentFixtureRoutes(app);
 registerBusinessPartyRoutes(app);
 registerNotificationCenterRoutes(app);
 registerStaffInboxRequestRoutes(app);

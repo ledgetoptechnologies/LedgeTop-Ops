@@ -17,6 +17,8 @@ export type Env = Omit<
   | "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ENABLED"
   | "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_SOURCE_ID"
   | "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ORIGIN"
+  | "NATIVE_DIRECTORY_STAGING_EMPTY_ENROLLMENT_FIXTURE_ENABLED"
+  | "NATIVE_DIRECTORY_STAGING_EMPTY_ENROLLMENT_FIXTURE_BUSINESS_AREA_ID"
   | "NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED"
   | "NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED"
   | "NATIVE_INTEGRATION_CONTROL_ENABLED"
@@ -60,6 +62,10 @@ export type Env = Omit<
   PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_SOURCE_ID?: string;
   /** Staging-only exact HTTPS origin pin for the Directory bootstrap fixture. */
   PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ORIGIN?: string;
+  /** Default-off, staging-only native organization fixture with no PA enrollment. */
+  NATIVE_DIRECTORY_STAGING_EMPTY_ENROLLMENT_FIXTURE_ENABLED?: string;
+  /** Deployment-pinned active business area for the native-only staging fixture. */
+  NATIVE_DIRECTORY_STAGING_EMPTY_ENROLLMENT_FIXTURE_BUSINESS_AREA_ID?: string;
   /** Default-off authenticated native Directory profile create/update routes. */
   NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED?: string;
   /** Default-off bounded scheduled delivery for native Directory outboxes. */

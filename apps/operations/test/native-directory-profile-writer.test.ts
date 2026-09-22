@@ -4,6 +4,11 @@ import { Miniflare } from "miniflare";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import {
   writeNativeDirectoryProfile,
+  writeStagingEmptyEnrollmentOrganizationFixture,
+  STAGING_EMPTY_ENROLLMENT_FIXTURE_ADMISSION_ID,
+  STAGING_EMPTY_ENROLLMENT_FIXTURE_MUTATION_ID,
+  STAGING_EMPTY_ENROLLMENT_FIXTURE_PROFILE,
+  STAGING_EMPTY_ENROLLMENT_FIXTURE_RECORD_ID,
   type NativeDirectoryCreateWrite,
   type NativeDirectoryDestinationAuthority,
   type NativeDirectoryProfileWrite,
@@ -107,6 +112,35 @@ beforeAll(async () => {
 afterAll(async () => { await runtime.dispose(); });
 
 describe("canonical native Directory profile writer", () => {
+  it("permits the one fixed staging fixture to persist an empty enrollment, replay, and reserve no PA work", async () => {
+    const actor = await seedActor();
+    const input = { operation: "create" as const, mutationId: STAGING_EMPTY_ENROLLMENT_FIXTURE_MUTATION_ID,
+      recordId: STAGING_EMPTY_ENROLLMENT_FIXTURE_RECORD_ID, expectedLocalVersion: 0 as const, kind: "organization" as const,
+      createAdmissionId: STAGING_EMPTY_ENROLLMENT_FIXTURE_ADMISSION_ID, profile: STAGING_EMPTY_ENROLLMENT_FIXTURE_PROFILE,
+      scopes: [{ businessAreaId: "area", divisionId: null }], destinations: [], actor };
+    await db.prepare(`INSERT INTO native_directory_create_admissions
+      (id,staff_id,bound_access_subject,record_id,record_kind,scopes_json,profile_json,destinations_json,issued_by)
+      VALUES(?,?,?,?, 'organization',?,?, '[]',?)`).bind(input.createAdmissionId, actor.staffId, actor.accessSubject,
+      input.recordId, JSON.stringify(input.scopes), JSON.stringify(input.profile), actor.staffId).run();
+    await expect(writeNativeDirectoryProfile(db, input)).resolves.toEqual({ status: "rejected", reason: "invalid_write" });
+    await expect(writeStagingEmptyEnrollmentOrganizationFixture(db, input)).resolves.toMatchObject({
+      status: "written", replayed: false, commandIds: [], recordId: input.recordId,
+    });
+    expect(await db.prepare("SELECT destinations_json FROM native_directory_enrollments WHERE record_id=?").bind(input.recordId).first("destinations_json"))
+      .toBe("[]");
+    for (const table of ["operations_directory_intents", "operations_directory_materializations", "project_alpha_directory_outbox", "project_alpha_directory_mappings", "operations_directory_client_organizations"])
+      expect(await count(table)).toBe(0);
+    expect(await db.prepare("SELECT active,consumed_mutation_id FROM native_directory_create_admissions WHERE id=?")
+      .bind(input.createAdmissionId).first()).toEqual({ active: 0, consumed_mutation_id: input.mutationId });
+    expect(Array.from(await db.prepare("SELECT payload FROM delivery_rows WHERE id='delivery'").first<Uint8Array>("payload") ?? []))
+      .toEqual([255, 0, 128]);
+    expect(Array.from(await db.prepare("SELECT payload FROM delivery_public_links WHERE id='link'").first<Uint8Array>("payload") ?? []))
+      .toEqual([0, 255, 128]);
+    await expect(writeStagingEmptyEnrollmentOrganizationFixture(db, input)).resolves.toMatchObject({ status: "written", replayed: true, commandIds: [] });
+    await expect(writeStagingEmptyEnrollmentOrganizationFixture(db, { ...input, profile: { ...input.profile, name: "repurposed" } }))
+      .resolves.toEqual({ status: "rejected", reason: "invalid_staging_fixture" });
+  });
+
   it("creates an organization through the authority fence and reserves one command per destination", async () => {
     const { input, outcome } = await create("organization"), result = written(outcome);
     expect(result).toMatchObject({ replayed: false, recordId: input.recordId, kind: "organization", version: 1 });

@@ -50,6 +50,15 @@ export type NativeDirectoryProfileWriteOutcome =
   | Readonly<{ status: "written"; replayed: boolean; mutationId: string; recordId: string; kind: NativeDirectoryProfileKind; version: number; commandIds: readonly string[] }>
   | Readonly<{ status: "rejected" | "blocked" | "conflict"; reason: string }>;
 
+/** These constants deliberately make the only empty-enrollment write a single staging fixture. */
+export const STAGING_EMPTY_ENROLLMENT_FIXTURE_MUTATION_ID = "6d0da70c-f4f5-4b10-8988-6639b8e01531";
+export const STAGING_EMPTY_ENROLLMENT_FIXTURE_RECORD_ID = "staging-native-empty-enrollment-organization-v1";
+export const STAGING_EMPTY_ENROLLMENT_FIXTURE_PROFILE: NativeDirectoryOrganizationProfile = Object.freeze({
+  name: "Staging native empty-enrollment fixture", generalEmail: "", generalPhone: "", addressLine1: "",
+  addressLine2: "", city: "", state: "", postalCode: "", country: "",
+});
+export const STAGING_EMPTY_ENROLLMENT_FIXTURE_ADMISSION_ID = `${STAGING_EMPTY_ENROLLMENT_FIXTURE_MUTATION_ID}:admission`;
+
 type NormalizedWrite = Readonly<{
   operation: "create" | "update"; mutationId: string; recordId: string; kind: NativeDirectoryProfileKind;
   expectedLocalVersion: number; actor: NativeDirectoryWriterActor; profile: Record<string, string>;
@@ -106,7 +115,7 @@ function destination(value: unknown, recordId: string): value is NativeDirectory
     && typeof value.applicationUUID === "string" && UUID.test(value.applicationUUID) && typeof value.historyEpoch === "string" && UUID.test(value.historyEpoch)
     && canonicalOrigin(value.origin) && value.externalCanonicalId === recordId && revision(value.expectedAuthorizationGeneration);
 }
-function normalize(input: NativeDirectoryProfileWrite): NormalizedWrite | null {
+function normalize(input: NativeDirectoryProfileWrite, allowEmptyDestinations = false): NormalizedWrite | null {
   const normalizedProfile = plain(input.profile) ? Object.fromEntries(Object.entries(input.profile).map(([field, value]) => {
     const normalized = typeof value === "string" ? value.normalize("NFC").trim() : value;
     return [field, (field === "email" || field === "generalEmail") && typeof normalized === "string" ? normalized.toLowerCase() : normalized];
@@ -126,7 +135,7 @@ function normalize(input: NativeDirectoryProfileWrite): NormalizedWrite | null {
       || !Number.isSafeInteger(input.relationship.expectedRelationshipVersion) || input.relationship.expectedRelationshipVersion < 0
       || (input.operation === "create" ? input.relationship.expectedRelationshipVersion !== 0 : input.relationship.expectedRelationshipVersion < 1)))
     || !profile(normalizedProfile, input.kind, input.operation) || !Array.isArray(input.destinations)
-    || input.destinations.length < 1 || input.destinations.length > MAX_DESTINATIONS
+    || input.destinations.length < (allowEmptyDestinations ? 0 : 1) || input.destinations.length > MAX_DESTINATIONS
     || !input.destinations.every(value => destination(value, input.recordId))) return null;
   const scopes = input.operation === "create" ? input.scopes : [];
   if (!Array.isArray(scopes) || scopes.length < (input.operation === "create" ? 1 : 0) || scopes.length > MAX_SCOPES
@@ -409,8 +418,9 @@ async function updateRemoteState(db: D1Database, write: NormalizedWrite, destina
  * legacy-mapping, or acquired-mapping evidence. Relationship fields remain
  * transport-only and never enter the canonical profile revision.
  */
-export async function writeNativeDirectoryProfile(db: D1Database, input: NativeDirectoryProfileWrite): Promise<NativeDirectoryProfileWriteOutcome> {
-  const write = normalize(input); if (!write) return { status: "rejected", reason: "invalid_write" };
+async function writeNativeDirectoryProfileInternal(db: D1Database, input: NativeDirectoryProfileWrite,
+  allowEmptyDestinations = false): Promise<NativeDirectoryProfileWriteOutcome> {
+  const write = normalize(input, allowEmptyDestinations); if (!write) return { status: "rejected", reason: "invalid_write" };
   const auditJson = auditCommand(write);
   const replay = await db.prepare(`SELECT audit.command_json,audit.actor_id,audit.original_verified_access_subject,revision.record_id,
       revision.version,record.record_kind FROM operations_directory_audit audit
@@ -573,4 +583,27 @@ export async function writeNativeDirectoryProfile(db: D1Database, input: NativeD
   try { await db.batch(statements); }
   catch { return { status: "blocked", reason: "authority_or_atomic_write" }; }
   return { status: "written", replayed: false, mutationId: write.mutationId, recordId: write.recordId, kind: write.kind, version: nextVersion, commandIds };
+}
+
+/** Normal profile routes always require PA destinations. */
+export async function writeNativeDirectoryProfile(db: D1Database, input: NativeDirectoryProfileWrite): Promise<NativeDirectoryProfileWriteOutcome> {
+  return writeNativeDirectoryProfileInternal(db, input);
+}
+
+/**
+ * The sole exception to the normal non-empty enrollment rule. Its caller is a
+ * staging-gated route; this function also fixes every mutable fixture value so
+ * another route cannot repurpose the exception for a source-less record.
+ */
+export async function writeStagingEmptyEnrollmentOrganizationFixture(db: D1Database,
+  input: NativeDirectoryCreateWrite): Promise<NativeDirectoryProfileWriteOutcome> {
+  if (input.operation !== "create" || input.kind !== "organization"
+    || input.mutationId !== STAGING_EMPTY_ENROLLMENT_FIXTURE_MUTATION_ID
+    || input.recordId !== STAGING_EMPTY_ENROLLMENT_FIXTURE_RECORD_ID
+    || input.createAdmissionId !== STAGING_EMPTY_ENROLLMENT_FIXTURE_ADMISSION_ID
+    || input.expectedLocalVersion !== 0 || input.destinations.length !== 0
+    || JSON.stringify(input.profile) !== JSON.stringify(STAGING_EMPTY_ENROLLMENT_FIXTURE_PROFILE)
+    || input.scopes.length !== 1 || input.scopes[0]!.divisionId !== null)
+    return { status: "rejected", reason: "invalid_staging_fixture" };
+  return writeNativeDirectoryProfileInternal(db, input, true);
 }
