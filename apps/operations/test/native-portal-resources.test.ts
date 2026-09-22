@@ -383,7 +383,11 @@ describe('source-owned native portal resources with real signed projection and l
       expect(rootHistory.items.map(item=>[item.feedbackId,item.target.kind])).toEqual(expect.arrayContaining([
         [projectFeedback,'project'],[orgFeedback,'folder'],[clientFeedback,'file'],
       ]));
-      expect(JSON.stringify(rootHistory)).not.toMatch(/Please review|completionNote|actor|message|note|storageKey|fingerprint|scopeProof/i);
+      // nextCursor is opaque AES-GCM ciphertext; exclude it from the redaction
+      // assertion because random ciphertext can coincidentally contain a word
+      // from the forbidden-substring list.
+      const rootHistoryWithoutCursor={...rootHistory,page:{...rootHistory.page,nextCursor:null}};
+      expect(JSON.stringify(rootHistoryWithoutCursor)).not.toMatch(/Please review|completionNote|actor|message|note|storageKey|fingerprint|scopeProof/i);
       const nativePlan=await db.prepare(`EXPLAIN QUERY PLAN SELECT rowid watermark,id,created_at FROM portal_native_feedback
         INDEXED BY idx_portal_native_feedback_workspace_chronological WHERE source_id=? AND workspace_id=? AND rowid<=? AND created_at<=?
         ORDER BY created_at DESC,id DESC LIMIT 51`).bind(a.source,a.workspace,Number.MAX_SAFE_INTEGER,new Date().toISOString()).all<{detail:string}>();
