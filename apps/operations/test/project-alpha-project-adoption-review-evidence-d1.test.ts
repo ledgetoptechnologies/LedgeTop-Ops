@@ -1,9 +1,10 @@
 import { readFileSync } from "node:fs";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Miniflare } from "miniflare";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import { reserveProjectAlphaProjectAdoptionReview } from "../src/worker/project-alpha-project-adoption-review-consumer";
 import { planProjectAlphaProjectAdoptionBind } from "../src/worker/project-alpha-project-adoption-bind-consumer";
+import { produceProjectAlphaProjectAdoptionReview } from "../src/worker/project-alpha-project-adoption-review-producer";
 
 let runtime: Miniflare;
 let db: D1Database;
@@ -25,6 +26,62 @@ const reserveReview = (input: unknown, caller: unknown = reviewerActor) =>
   reserveProjectAlphaProjectAdoptionReview({ OPS_DB: db }, caller, input);
 const planAdoption = (input: unknown, caller: unknown = reviewerActor, database: D1Database = db) =>
   planProjectAlphaProjectAdoptionBind({ OPS_DB: database }, caller, input);
+const producerSelection = { idempotencyKey, sourceId: "project-alpha:primary",
+  externalProjectId: "server-generated-project", projectAlphaPublicId: publicId } as const;
+const producerRequestId = "80000000-0000-4000-8000-000000000008";
+const producerConnection = () => JSON.stringify({ version: 1, instances: { "project-alpha:primary": {
+  sourceId: "project-alpha:primary", enabled: true, baseUrl: "https://alpha.example.test", apiKey: "test-secret",
+  sourceInstanceId, applicationId, historyEpoch: historyEpochId,
+} } });
+const producerEnv = (database: D1Database = db) => ({ OPS_DB: database, PROJECT_ALPHA_API_V2_CONNECTIONS: producerConnection() });
+
+function producerJson(value: unknown, raw?: string) {
+  return new Response(raw ?? JSON.stringify(value), { status: 200, headers: {
+    "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", "X-Request-ID": producerRequestId,
+  } });
+}
+function producerCapabilities() {
+  return { apiVersion: "2", sourceInstanceId, applicationId, historyEpoch: historyEpochId,
+    requestId: producerRequestId, grantedCapabilities: ["api.capabilities.read", "projects.v2.read",
+      "projects.binding_status.read", "projects.inventory.read"].map(name => ({ name })), implementedEndpoints: [
+      { method: "GET", path: "/api/v2/capabilities", requiredCapability: "api.capabilities.read" },
+      { method: "GET", path: "/api/v2/projects/{publicId}", requiredCapability: "projects.v2.read",
+        requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true },
+      { method: "GET", path: "/api/v2/projects/bindings/status/{base64urlExternalId}",
+        requiredCapability: "projects.binding_status.read", requiresSourceInstanceId: true,
+        requiresApplicationId: true, requiresHistoryEpoch: true },
+      { method: "GET", path: "/api/v2/projects/inventory", requiredCapability: "projects.inventory.read",
+        requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true },
+    ] };
+}
+type ProducerRemote = {
+  detail?: unknown;
+  detailRaw?: string;
+  binding?: Record<string, unknown>;
+  inventory?: Record<string, unknown>;
+};
+function producerSend(overrides: ProducerRemote = {}) {
+  const detail = overrides.detail ?? JSON.parse(detailJson());
+  const binding = overrides.binding ?? { apiVersion: "2", sourceInstanceId, applicationId, historyEpoch: historyEpochId,
+    requestId: producerRequestId, authorizationGeneration: "0", binding: { externalId: "server-generated-project",
+      publicId, createdAt: "2026-09-20T00:00:00.000Z", updatedAt: "2026-09-20T00:00:01.000Z" },
+    resource: { revision: "7", projectionSha256: hash, status: "active", archived: false } };
+  const inventory = overrides.inventory ?? { apiVersion: "2", sourceInstanceId, applicationId,
+    historyEpoch: historyEpochId, requestId: producerRequestId, authorizationGeneration: "0",
+    projects: [{ externalId: "server-generated-project", publicId, revision: "7", projectionSha256: hash,
+      status: "active", archived: false }], nextCursor: null };
+  return vi.fn<typeof fetch>(async url => {
+    const value = String(url);
+    if (value.endsWith("/api/v2/capabilities")) return producerJson(producerCapabilities());
+    if (value.includes("/api/v2/projects/bindings/status/")) return producerJson(binding);
+    if (value.includes("/api/v2/projects/inventory?")) return producerJson(inventory);
+    if (value.endsWith(`/api/v2/projects/${publicId}`)) return producerJson(detail, overrides.detailRaw);
+    return new Response(null, { status: 404 });
+  });
+}
+const produceReview = (send: typeof fetch = producerSend(), selected: unknown = producerSelection,
+  caller: unknown = reviewerActor, database: D1Database = db) =>
+  produceProjectAlphaProjectAdoptionReview(producerEnv(database), caller, selected, send);
 
 async function migrate(name: string) {
   const sql = readFileSync(new URL(`../migrations/${name}`, import.meta.url), "utf8");
@@ -42,6 +99,7 @@ async function setupSchema() {
     CREATE TABLE native_business_areas(id TEXT PRIMARY KEY,active INTEGER);
     CREATE TABLE native_business_divisions(id TEXT PRIMARY KEY,business_area_id TEXT,active INTEGER,UNIQUE(business_area_id,id));
     CREATE TABLE operations_directory_records(record_id TEXT PRIMARY KEY,record_kind TEXT);
+    CREATE TABLE native_directory_resource_scopes(record_id TEXT,scope_kind TEXT,business_area_id TEXT,division_id TEXT,active INTEGER);
     CREATE TABLE project_alpha_directory_mappings(source_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,resource_type TEXT,external_id TEXT,project_alpha_public_id TEXT);
     CREATE TABLE operations_directory_client_organizations(client_record_id TEXT,organization_record_id TEXT);
     CREATE TABLE native_directory_grants(id TEXT PRIMARY KEY,staff_id TEXT,permission TEXT,effect TEXT,scope_kind TEXT,business_area_id TEXT,division_id TEXT,resource_id TEXT,active INTEGER,granted_by TEXT,created_at TEXT);
@@ -71,6 +129,7 @@ async function setupSchema() {
   `).map(statement => db.prepare(statement)));
   await migrate("0126_project_alpha_project_active_directory_mapping_bridge.sql");
   await migrate("0128_project_alpha_project_adoption_bind_bridge.sql");
+  await migrate("0130_project_alpha_project_adoption_review_producer.sql");
 }
 
 function detailJson(clientId: string | null = null) {
@@ -318,6 +377,188 @@ describe("0124 project adoption review evidence", () => {
     await db.prepare("INSERT INTO native_business_areas VALUES('other-area',1)").run();
     const mismatchedScope = JSON.stringify([{ scopeKind: "division", businessAreaId: "other-area", divisionId: "division" }]);
     await expect(reviewStatement("57000000-0000-4000-8000-000000000005", "server-generated-project", hash, detailJson(), 1, "e".repeat(64), "+5 minutes", mismatchedScope).run()).rejects.toThrow(/authority/);
+  });
+});
+
+describe("private project adoption review producer", () => {
+  it("creates and exactly replays one short-lived review without public-state mutation", async () => {
+    await seedAuthority();
+    const publicBefore = await db.prepare("SELECT * FROM delivery_public_shares ORDER BY id").all();
+    const first = await produceReview();
+    expect(first).toMatchObject({ status: "reviewed", replayed: false });
+    if (first.status !== "reviewed") throw new Error("producer setup failed");
+    await expect(produceReview()).resolves.toEqual({ ...first, replayed: true });
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_evidence").first("count")).toBe(1);
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_producer_receipts").first("count")).toBe(1);
+    expect(await db.prepare(`SELECT source_id,external_project_id,project_alpha_public_id,reviewer_staff_id,
+      reviewer_access_subject,reviewer_admission_version,reviewer_profile_version,project_grant_generation,
+      normalized_scopes_json FROM project_alpha_project_adoption_review_evidence`).first()).toEqual({
+      source_id: "project-alpha:primary", external_project_id: "server-generated-project",
+      project_alpha_public_id: publicId, reviewer_staff_id: "staff", reviewer_access_subject: "access|staff",
+      reviewer_admission_version: 1, reviewer_profile_version: 1, project_grant_generation: 1,
+      normalized_scopes_json: "[]",
+    });
+    expect((await db.prepare("SELECT * FROM delivery_public_shares ORDER BY id").all()).results).toEqual(publicBefore.results);
+    expect(await db.prepare("SELECT count(*) count FROM operations_shared_projects").first("count")).toBe(0);
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_outbox").first("count")).toBe(0);
+  });
+
+  it("accepts only exact server selection and actor objects and remains unmounted", async () => {
+    const send = producerSend();
+    await expect(produceReview(send, producerSelection, null))
+      .resolves.toEqual({ status: "rejected", reason: "invalid_actor" });
+    await expect(produceReview(send, producerSelection, { ...reviewerActor, profileVersion: 1 }))
+      .resolves.toEqual({ status: "rejected", reason: "invalid_actor" });
+    for (const selected of [null, { ...producerSelection, baseUrl: "https://browser.invalid" },
+      { ...producerSelection, sourceInstanceId }, { ...producerSelection, idempotencyKey: "not-a-uuid" }]) {
+      await expect(produceReview(send, selected)).resolves.toEqual({ status: "rejected", reason: "invalid_selection" });
+    }
+    expect(send).not.toHaveBeenCalled();
+    const index = readFileSync(new URL("../src/worker/index.ts", import.meta.url), "utf8");
+    expect(index).not.toContain("project-alpha-project-adoption-review-producer");
+    const module = await import("../src/worker/project-alpha-project-adoption-review-producer");
+    expect(Object.keys(module)).toEqual(["produceProjectAlphaProjectAdoptionReview"]);
+  });
+
+  it("binds review production to the current actor, owner role, and Project grants", async () => {
+    await seedAuthority();
+    await expect(produceReview(producerSend(), producerSelection,
+      { staffId: "staff", accessSubject: "access|other" }))
+      .resolves.toEqual({ status: "blocked", reason: "authority" });
+    await db.prepare("UPDATE native_staff_admissions SET active=0,version=2 WHERE staff_id='staff'").run();
+    await expect(produceReview()).resolves.toEqual({ status: "blocked", reason: "authority" });
+    await db.prepare("UPDATE native_staff_admissions SET active=1,version=3 WHERE staff_id='staff'").run();
+    await db.prepare("DELETE FROM staff_role_assignments WHERE staff_id='staff'").run();
+    await expect(produceReview()).resolves.toEqual({ status: "blocked", reason: "authority" });
+    await db.prepare("INSERT INTO staff_role_assignments VALUES('owner-again','staff','role-owner','global')").run();
+    await db.prepare(`INSERT INTO native_project_grants(id,staff_id,capability,effect,scope_kind,external_project_id,granted_by)
+      VALUES('deny-project','staff','project.shared.sync','deny','exact_project','server-generated-project','staff')`).run();
+    await expect(produceReview()).resolves.toEqual({ status: "blocked", reason: "authority" });
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_evidence").first("count")).toBe(0);
+  });
+
+  it("fails closed on remote drift and malformed or duplicate JSON", async () => {
+    await seedAuthority();
+    const driftedBinding = { apiVersion: "2", sourceInstanceId, applicationId, historyEpoch: historyEpochId,
+      requestId: producerRequestId, authorizationGeneration: "0", binding: { externalId: "server-generated-project",
+        publicId, createdAt: "2026-09-20T00:00:00.000Z", updatedAt: "2026-09-20T00:00:01.000Z" },
+      resource: { revision: "8", projectionSha256: hash, status: "active", archived: false } };
+    await expect(produceReview(producerSend({ binding: driftedBinding })))
+      .resolves.toEqual({ status: "blocked", reason: "remote" });
+    const duplicate = detailJson().replace(`"requestId":"${producerRequestId}"`,
+      `"requestId":"${producerRequestId}","requestId":"${producerRequestId}"`);
+    await expect(produceReview(producerSend({ detailRaw: duplicate })))
+      .resolves.toEqual({ status: "uncertain", reason: "remote" });
+    const collisionInventory = { apiVersion: "2", sourceInstanceId, applicationId, historyEpoch: historyEpochId,
+      requestId: producerRequestId, authorizationGeneration: "0", projects: [
+        { externalId: "server-generated-project", publicId: "f".repeat(32), revision: "7",
+          projectionSha256: hash, status: "active", archived: false },
+      ], nextCursor: null };
+    await expect(produceReview(producerSend({ inventory: collisionInventory })))
+      .resolves.toEqual({ status: "blocked", reason: "remote" });
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_evidence").first("count")).toBe(0);
+  });
+
+  it("requires one exact active Directory mapping from the selected source", async () => {
+    await seedAuthority();
+    await db.prepare("DELETE FROM project_alpha_directory_mappings WHERE external_id='organization-record'").run();
+    await expect(produceReview()).resolves.toEqual({ status: "blocked", reason: "directory" });
+    await db.prepare(`INSERT INTO project_alpha_directory_mappings
+      VALUES('project-alpha:other',?,?,?,'organization','organization-record',?)`)
+      .bind(sourceInstanceId, applicationId, historyEpochId, organizationPublicId).run();
+    await expect(produceReview()).resolves.toEqual({ status: "blocked", reason: "directory" });
+    await db.prepare(`INSERT INTO project_alpha_directory_mappings
+      VALUES('project-alpha:primary',?,?,?,'organization','organization-record',?)`)
+      .bind(sourceInstanceId, applicationId, historyEpochId, organizationPublicId).run();
+    await db.prepare(`INSERT INTO project_alpha_existing_directory_binding_activation_receipts
+      VALUES('63000000-0000-4000-8000-000000000006','project-alpha:primary',?,?,?,'organization','organization-record',?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))`)
+      .bind(sourceInstanceId, applicationId, historyEpochId, organizationPublicId).run();
+    await expect(produceReview()).resolves.toEqual({ status: "blocked", reason: "directory" });
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_producer_receipts").first("count")).toBe(0);
+  });
+
+  it("requires the exact current organization-client relationship", async () => {
+    await seedAuthority("server-generated-project", "acquired");
+    await seedActivatedClient(false);
+    const clientDetail = JSON.parse(detailJson(clientPublicId));
+    await expect(produceReview(producerSend({ detail: clientDetail })))
+      .resolves.toEqual({ status: "blocked", reason: "relationship" });
+    await db.prepare("INSERT INTO operations_directory_client_organizations VALUES('client-record','organization-record')").run();
+    await expect(produceReview(producerSend({ detail: clientDetail })))
+      .resolves.toMatchObject({ status: "reviewed", replayed: false });
+  });
+
+  it("loads canonical live scopes and rejects later scope drift on replay", async () => {
+    await seedScopedAuthority("business_area");
+    await db.prepare(`INSERT INTO native_directory_resource_scopes
+      VALUES('organization-record','business_area','area',NULL,1)`).run();
+    const first = await produceReview();
+    expect(first).toMatchObject({ status: "reviewed", replayed: false });
+    expect(await db.prepare("SELECT normalized_scopes_json FROM project_alpha_project_adoption_review_evidence")
+      .first("normalized_scopes_json")).toBe('[{"scopeKind":"business_area","businessAreaId":"area","divisionId":null}]');
+    await db.prepare("UPDATE native_directory_resource_scopes SET active=0 WHERE record_id='organization-record'").run();
+    await expect(produceReview()).resolves.toEqual({ status: "blocked", reason: "authority" });
+  });
+
+  it("atomically rejects business-area or division deactivation immediately before persistence", async () => {
+    await seedAuthority();
+    await db.batch([
+      db.prepare("INSERT INTO native_business_areas VALUES('area',1)"),
+      db.prepare("INSERT INTO native_business_divisions VALUES('division','area',1)"),
+      db.prepare("INSERT INTO native_directory_resource_scopes VALUES('organization-record','business_area','area',NULL,1)"),
+      db.prepare("INSERT INTO native_directory_resource_scopes VALUES('organization-record','division','area','division',1)"),
+    ]);
+    const racing = (statement: string) => new Proxy(db, { get(target, property) {
+      if (property !== "batch") {
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+      return async (statements: D1PreparedStatement[]) => {
+        await target.prepare(statement).run();
+        return target.batch(statements);
+      };
+    } }) as D1Database;
+    await expect(produceReview(producerSend(), producerSelection, reviewerActor,
+      racing("UPDATE native_business_areas SET active=0 WHERE id='area'")))
+      .resolves.toEqual({ status: "blocked", reason: "stale_evidence" });
+    await db.prepare("UPDATE native_business_areas SET active=1 WHERE id='area'").run();
+    await expect(produceReview(producerSend(), producerSelection, reviewerActor,
+      racing("UPDATE native_business_divisions SET active=0 WHERE id='division'")))
+      .resolves.toEqual({ status: "blocked", reason: "stale_evidence" });
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_evidence").first("count")).toBe(0);
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_producer_receipts").first("count")).toBe(0);
+  });
+
+  it("enforces idempotency conflicts and rejects expired replay evidence", async () => {
+    await seedAuthority();
+    const first = await produceReview();
+    expect(first.status).toBe("reviewed");
+    await expect(produceReview(producerSend(), { ...producerSelection, projectAlphaPublicId: "f".repeat(32) }))
+      .resolves.toEqual({ status: "conflict", reason: "idempotency_key" });
+    await db.exec("DROP TRIGGER project_alpha_project_adoption_review_evidence_no_update");
+    await db.prepare(`UPDATE project_alpha_project_adoption_review_evidence
+      SET reviewed_at='2026-09-20T00:00:00.000Z',expires_at='2026-09-20T00:01:00.000Z'`).run();
+    await expect(produceReview()).resolves.toEqual({ status: "blocked", reason: "stale_evidence" });
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_producer_receipts").first("count")).toBe(1);
+  });
+
+  it("rolls back evidence and receipt together on a final-batch failure", async () => {
+    await seedAuthority();
+    const failingDb = new Proxy(db, { get(target, property) {
+      if (property !== "batch") {
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+      return (statements: D1PreparedStatement[]) => target.batch([...statements,
+        target.prepare(`INSERT INTO project_alpha_project_adoption_review_producer_receipts(
+          producer_receipt_id,idempotency_key,request_sha256,canonical_request_json,review_item_id,source_id,
+          external_project_id,project_alpha_public_id,reviewer_staff_id,reviewer_access_subject)
+          VALUES('not-a-uuid','not-a-uuid','bad','{}','missing','bad','bad','bad','bad','bad')`)]);
+    } }) as D1Database;
+    await expect(produceReview(producerSend(), producerSelection, reviewerActor, failingDb))
+      .resolves.toEqual({ status: "blocked", reason: "stale_evidence" });
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_evidence").first("count")).toBe(0);
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_producer_receipts").first("count")).toBe(0);
   });
 });
 

@@ -91,21 +91,22 @@ async function activateFixture(database: D1Database, fixture: AcquisitionFixture
 }
 
 describe("existing PA directory acquisition migration chain", () => {
-  it("applies the clean sequential chain through 0129 without creating adoption state", async () => {
+  it("applies the clean sequential chain through 0130 without creating adoption state", async () => {
     const runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06",
       script: "export default {fetch(){return new Response('ok')}}", d1Databases: ["OPS_DB"] });
     runtimes.push(runtime);
     const database = await runtime.getD1Database("OPS_DB") as D1Database;
     const directory = new URL("../migrations/", import.meta.url);
     const migrations = readdirSync(directory)
-      .filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0129").sort();
-    expect(migrations.at(-1)).toBe("0129_project_alpha_existing_directory_binding_activation_relationship.sql");
+      .filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0130").sort();
+    expect(migrations.at(-1)).toBe("0130_project_alpha_project_adoption_review_producer.sql");
     for (const migration of migrations) {
       await database.batch(splitD1MigrationStatements(readFileSync(new URL(migration, directory), "utf8"))
         .map(statement => database.prepare(statement)));
     }
     expect(await database.prepare("SELECT count(*) FROM project_alpha_existing_directory_binding_activation_receipts").first("count(*)")).toBe(0);
     expect(await database.prepare("SELECT count(*) FROM project_alpha_project_adoption_bind_receipts").first("count(*)")).toBe(0);
+    expect(await database.prepare("SELECT count(*) FROM project_alpha_project_adoption_review_producer_receipts").first("count(*)")).toBe(0);
     expect(await database.prepare("SELECT count(*) FROM project_alpha_active_directory_mappings").first("count(*)")).toBe(0);
     expect(await database.prepare(`SELECT count(*) FROM sqlite_master WHERE type='trigger'
       AND name LIKE 'project_alpha_project_adoption_bind_receipts_%'`).first("count(*)")).toBe(8);
@@ -113,17 +114,21 @@ describe("existing PA directory acquisition migration chain", () => {
       AND name='project_alpha_existing_directory_binding_activation_exact'`).first("count(*)")).toBe(1);
     expect(await database.prepare(`SELECT count(*) FROM sqlite_master WHERE type='trigger'
       AND name='project_alpha_existing_directory_binding_activation_relationship'`).first("count(*)")).toBe(1);
+    expect(await database.prepare(`SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name IN (
+      'project_alpha_project_adoption_review_producer_receipts_exact',
+      'project_alpha_project_adoption_review_producer_receipts_no_update',
+      'project_alpha_project_adoption_review_producer_receipts_no_delete')`).first("count(*)")).toBe(3);
   });
 
-  it("applies through 0129 without changing populated canonical history or activating acquired mappings", async () => {
+  it("applies through 0130 without changing populated canonical history or activating acquired mappings", async () => {
     const runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06",
       script: "export default {fetch(){return new Response('ok')}}", d1Databases: ["OPS_DB"] });
     runtimes.push(runtime);
     const database = await runtime.getD1Database("OPS_DB") as D1Database;
     const directory = new URL("../migrations/", import.meta.url);
     const migrations = readdirSync(directory)
-      .filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0129").sort();
-    expect(migrations.at(-1)).toBe("0129_project_alpha_existing_directory_binding_activation_relationship.sql");
+      .filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0130").sort();
+    expect(migrations.at(-1)).toBe("0130_project_alpha_project_adoption_review_producer.sql");
     const recordId = "11111111-1111-4111-8111-111111111111";
     const profile = JSON.stringify({ name: "Synthetic Existing", email: "existing@example.test", phone: null,
       address: { line1: null, line2: null, city: null, state: null, postalCode: null, country: null }, clientType: "business" });
@@ -190,6 +195,7 @@ describe("existing PA directory acquisition migration chain", () => {
     expect(await database.prepare("SELECT count(*) FROM project_alpha_project_adoption_review_reservations").first("count(*)")).toBe(0);
     expect(await database.prepare("SELECT count(*) FROM project_alpha_existing_directory_binding_activation_receipts").first("count(*)")).toBe(0);
     expect(await database.prepare("SELECT count(*) FROM project_alpha_project_adoption_bind_receipts").first("count(*)")).toBe(0);
+    expect(await database.prepare("SELECT count(*) FROM project_alpha_project_adoption_review_producer_receipts").first("count(*)")).toBe(0);
     expect(await database.prepare("SELECT mapping_kind FROM project_alpha_active_directory_mappings WHERE provenance_id='legacy-command'").first("mapping_kind")).toBe("legacy");
     expect(await database.prepare("SELECT count(*) FROM project_alpha_directory_mappings WHERE command_id='legacy-command'").first("count(*)")).toBe(1);
     await database.prepare(`INSERT INTO project_alpha_existing_directory_binding_review_evidence(
@@ -373,7 +379,7 @@ describe("existing PA directory acquisition migration chain", () => {
       .rejects.toThrow(/local record version is stale/);
   });
 
-  it("upgrades populated 0125 activation state through 0129 without changing protected rows", async () => {
+  it("upgrades populated 0125 activation state through 0130 without changing protected rows", async () => {
     const runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06",
       script: "export default {fetch(){return new Response('ok')}}", d1Databases: ["OPS_DB"] });
     runtimes.push(runtime);
@@ -496,6 +502,16 @@ describe("existing PA directory acquisition migration chain", () => {
       new URL("0129_project_alpha_existing_directory_binding_activation_relationship.sql",directory),"utf8"))
       .map(statement => database.prepare(statement)));
     expect(await readPreserved()).toEqual(preserved);
+
+    await database.batch(splitD1MigrationStatements(readFileSync(
+      new URL("0130_project_alpha_project_adoption_review_producer.sql",directory),"utf8"))
+      .map(statement => database.prepare(statement)));
+    expect(await readPreserved()).toEqual(preserved);
+    expect(await database.prepare("SELECT count(*) FROM project_alpha_project_adoption_review_producer_receipts").first("count(*)")).toBe(0);
+    expect(await database.prepare(`SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name IN (
+      'project_alpha_project_adoption_review_producer_receipts_exact',
+      'project_alpha_project_adoption_review_producer_receipts_no_update',
+      'project_alpha_project_adoption_review_producer_receipts_no_delete')`).first("count(*)")).toBe(3);
 
     const standalone: AcquisitionFixture = {
       stem: "b", recordId: standaloneRecordId, kind: "client",
