@@ -5991,3 +5991,39 @@ pending; this requirement does not claim a deployed UI change.
   Directory mapping view; it does not rewrite legacy rows, alter Delivery or
   public-link data, or enable cutover. Production enablement, reconciliation,
   portal migration, legacy retirement, and cutover therefore remain pending.
+
+### September 22 — canonical Directory profile-write checkpoint
+
+- Operations commits `eaeff0b`, `dc4650b`, `8cc1dd4`, `06046bd`, and
+  `8acb55d1` now provide the default-off canonical Directory profile writer,
+  durable PA profile outbox dispatcher, acquired-parent relationship evidence,
+  and authenticated HTTP boundary. The HTTP route accepts only bounded business
+  intent; actor identity, active grants and deny precedence, connector state,
+  application identity, history epoch, origin and current Directory generation
+  are derived and revalidated server-side. Raw PA authority tuples are not a
+  browser contract.
+- Every client profile write carries an explicit relationship/version
+  assertion. Standalone is explicit `null`; linked clients pin the exact parent
+  identity per destination using a current parent intent, immutable legacy
+  mapping evidence or an acquired-binding activation receipt. The dispatcher
+  separately proves the parent's PA revision at the asserted local parent
+  version, so an original create/activation revision is never reused after a
+  later parent update. Relationship races, enrollment drift, missing or
+  ambiguous evidence, stale versions and public-ID/revision mismatches fail
+  closed.
+- Migration `0132_operations_directory_acquired_relationship_dependencies.sql`
+  extends the immutable dependency contract with `acquired_mapping` evidence
+  without fabricating legacy mappings or outbox history. Its populated upgrade
+  chain is `4/4` green. The parent-independent rerun of the guarded route,
+  writer and dispatcher suites is `28/28` green; the writer/dispatcher subset
+  is `19/19` and the route subset is `9/9`.
+- This is not a production authority cutover. The route flag remains `false`.
+  Create consumes a one-shot server-issued admission, but no authenticated
+  admission issuer or Client Hub form is connected yet. The standalone-client
+  update route deliberately rejects a linked client, and profile writes do not
+  change relationships. A linked-client HTTP update boundary, relationship
+  mutation coordinator/dispatcher, scheduler drain, production reconciliation,
+  both-instance acceptance and the coordinated PA managed-directory activation
+  remain required. PA browser writers therefore remain available until the
+  complete replacement is verified; enabling read-only mode now would strand
+  normal customer administration.
