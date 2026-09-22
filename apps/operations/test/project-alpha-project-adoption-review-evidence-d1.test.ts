@@ -5,6 +5,7 @@ import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrati
 import { reserveProjectAlphaProjectAdoptionReview } from "../src/worker/project-alpha-project-adoption-review-consumer";
 import { planProjectAlphaProjectAdoptionBind } from "../src/worker/project-alpha-project-adoption-bind-consumer";
 import { produceProjectAlphaProjectAdoptionReview } from "../src/worker/project-alpha-project-adoption-review-producer";
+import { dispatchProjectAlphaProjectV2PendingCommand } from "../src/worker/project-alpha-project-v2-pending-dispatcher";
 
 let runtime: Miniflare;
 let db: D1Database;
@@ -35,14 +36,14 @@ const producerConnection = () => JSON.stringify({ version: 1, instances: { "proj
 } } });
 const producerEnv = (database: D1Database = db) => ({ OPS_DB: database, PROJECT_ALPHA_API_V2_CONNECTIONS: producerConnection() });
 
-function producerJson(value: unknown, raw?: string) {
-  return new Response(raw ?? JSON.stringify(value), { status: 200, headers: {
-    "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", "X-Request-ID": producerRequestId,
+function producerJson(value: unknown, raw?: string, requestId = producerRequestId, status = 200) {
+  return new Response(raw ?? JSON.stringify(value), { status, headers: {
+    "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", "X-Request-ID": requestId,
   } });
 }
-function producerCapabilities() {
+function producerCapabilities(requestId = producerRequestId) {
   return { apiVersion: "2", sourceInstanceId, applicationId, historyEpoch: historyEpochId,
-    requestId: producerRequestId, grantedCapabilities: ["api.capabilities.read", "projects.v2.read",
+    requestId, grantedCapabilities: ["api.capabilities.read", "projects.v2.read",
       "projects.binding_status.read", "projects.inventory.read"].map(name => ({ name })), implementedEndpoints: [
       { method: "GET", path: "/api/v2/capabilities", requiredCapability: "api.capabilities.read" },
       { method: "GET", path: "/api/v2/projects/{publicId}", requiredCapability: "projects.v2.read",
@@ -55,27 +56,29 @@ function producerCapabilities() {
     ] };
 }
 type ProducerRemote = {
+  requestId?: string;
   detail?: unknown;
   detailRaw?: string;
   binding?: Record<string, unknown>;
   inventory?: Record<string, unknown>;
 };
 function producerSend(overrides: ProducerRemote = {}) {
-  const detail = overrides.detail ?? JSON.parse(detailJson());
+  const requestId = overrides.requestId ?? producerRequestId;
+  const detail = overrides.detail ?? { ...JSON.parse(detailJson()), requestId };
   const binding = overrides.binding ?? { apiVersion: "2", sourceInstanceId, applicationId, historyEpoch: historyEpochId,
-    requestId: producerRequestId, authorizationGeneration: "0", binding: { externalId: "server-generated-project",
+    requestId, authorizationGeneration: "0", binding: { externalId: "server-generated-project",
       publicId, createdAt: "2026-09-20T00:00:00.000Z", updatedAt: "2026-09-20T00:00:01.000Z" },
     resource: { revision: "7", projectionSha256: hash, status: "active", archived: false } };
   const inventory = overrides.inventory ?? { apiVersion: "2", sourceInstanceId, applicationId,
-    historyEpoch: historyEpochId, requestId: producerRequestId, authorizationGeneration: "0",
+    historyEpoch: historyEpochId, requestId, authorizationGeneration: "0",
     projects: [{ externalId: "server-generated-project", publicId, revision: "7", projectionSha256: hash,
       status: "active", archived: false }], nextCursor: null };
   return vi.fn<typeof fetch>(async url => {
     const value = String(url);
-    if (value.endsWith("/api/v2/capabilities")) return producerJson(producerCapabilities());
-    if (value.includes("/api/v2/projects/bindings/status/")) return producerJson(binding);
-    if (value.includes("/api/v2/projects/inventory?")) return producerJson(inventory);
-    if (value.endsWith(`/api/v2/projects/${publicId}`)) return producerJson(detail, overrides.detailRaw);
+    if (value.endsWith("/api/v2/capabilities")) return producerJson(producerCapabilities(requestId), undefined, requestId);
+    if (value.includes("/api/v2/projects/bindings/status/")) return producerJson(binding, undefined, requestId);
+    if (value.includes("/api/v2/projects/inventory?")) return producerJson(inventory, undefined, requestId);
+    if (value.endsWith(`/api/v2/projects/${publicId}`)) return producerJson(detail, overrides.detailRaw, requestId);
     return new Response(null, { status: 404 });
   });
 }
@@ -401,6 +404,27 @@ describe("private project adoption review producer", () => {
     expect((await db.prepare("SELECT * FROM delivery_public_shares ORDER BY id").all()).results).toEqual(publicBefore.results);
     expect(await db.prepare("SELECT count(*) count FROM operations_shared_projects").first("count")).toBe(0);
     expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_outbox").first("count")).toBe(0);
+  });
+
+  it("replays stable semantic evidence across fresh PA request IDs without replacing byte-exact evidence", async () => {
+    await seedAuthority();
+    const firstRequestId = "81000000-0000-4000-8000-000000000008";
+    const secondRequestId = "82000000-0000-4000-8000-000000000008";
+    const first = await produceReview(producerSend({ requestId: firstRequestId }));
+    expect(first).toMatchObject({ status: "reviewed", replayed: false });
+    if (first.status !== "reviewed") throw new Error("producer setup failed");
+    const stored = await db.prepare(`SELECT canonical_detail_read_json,canonical_detail_read_sha256
+      FROM project_alpha_project_adoption_review_evidence WHERE review_item_id=?`)
+      .bind(first.reviewItemId).first<{ canonical_detail_read_json: string; canonical_detail_read_sha256: string }>();
+    expect(JSON.parse(stored!.canonical_detail_read_json)).toMatchObject({ requestId: firstRequestId });
+
+    await expect(produceReview(producerSend({ requestId: secondRequestId })))
+      .resolves.toEqual({ ...first, replayed: true });
+    expect(await db.prepare(`SELECT canonical_detail_read_json,canonical_detail_read_sha256
+      FROM project_alpha_project_adoption_review_evidence WHERE review_item_id=?`).bind(first.reviewItemId).first())
+      .toEqual(stored);
+    expect(stored!.canonical_detail_read_json).not.toContain(secondRequestId);
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_evidence").first("count")).toBe(1);
   });
 
   it("accepts only exact server selection and actor objects and remains unmounted", async () => {
@@ -738,6 +762,63 @@ describe("project adoption bind bridge consumer", () => {
     });
     expect(await db.prepare("SELECT expected_local_version,expected_local_projection_sha256,expected_mapping_state FROM project_alpha_project_v2_canonical_intents WHERE command_id=?")
       .bind(first.commandId).first()).toEqual({ expected_local_version: 1, expected_local_projection_sha256: hash, expected_mapping_state: "absent" });
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_mappings").first("count")).toBe(0);
+    expect((await db.prepare("SELECT * FROM delivery_public_shares ORDER BY id").all()).results).toEqual(publicBefore.results);
+  });
+
+  it("pins observed PA revision and projection so a persistence race is rejected by the pending bind", async () => {
+    await seedAuthority();
+    const publicBefore = await db.prepare("SELECT * FROM delivery_public_shares ORDER BY id").all();
+    let liveRevision = "7", liveProjectionSha256 = hash, raced = false;
+    const racingDb = new Proxy(db, { get(target, property) {
+      if (property !== "batch") {
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+      return async (statements: D1PreparedStatement[]) => {
+        liveRevision = "8";
+        liveProjectionSha256 = "e".repeat(64);
+        raced = true;
+        return target.batch(statements);
+      };
+    } }) as D1Database;
+    const produced = await produceReview(producerSend(), producerSelection, reviewerActor, racingDb);
+    expect(produced).toMatchObject({ status: "reviewed", replayed: false });
+    expect(raced).toBe(true);
+    if (produced.status !== "reviewed") throw new Error("producer setup failed");
+    const reserved = await reserveReview({ reviewItemId: produced.reviewItemId, idempotencyKey });
+    if (reserved.status !== "reserved") throw new Error("reservation setup failed");
+    const planned = await planAdoption({ reservationId: reserved.reservationId });
+    expect(planned).toMatchObject({ status: "planned", replayed: false });
+    if (planned.status !== "planned") throw new Error("bind plan setup failed");
+
+    const dispatchRequestId = "83000000-0000-4000-8000-000000000008";
+    const transport = vi.fn<typeof fetch>(async (_url, init) => {
+      if (init?.method !== "POST") return producerJson({
+        apiVersion: "2", sourceInstanceId, applicationId, historyEpoch: historyEpochId,
+        requestId: dispatchRequestId,
+        grantedCapabilities: [{ name: "api.capabilities.read" }, { name: "projects.bind" }],
+        implementedEndpoints: [
+          { method: "GET", path: "/api/v2/capabilities", requiredCapability: "api.capabilities.read" },
+          { method: "POST", path: "/api/v2/projects/bindings/commands", requiredCapability: "projects.bind",
+            requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true },
+        ],
+      }, undefined, dispatchRequestId);
+      const command = JSON.parse(String(init.body)) as Record<string, unknown>;
+      expect(command).toMatchObject({ expectedRevision: "7", expectedProjectionSha256: hash });
+      expect([command.expectedRevision, command.expectedProjectionSha256])
+        .not.toEqual([liveRevision, liveProjectionSha256]);
+      return producerJson({ apiVersion: "2", sourceInstanceId, applicationId, historyEpoch: historyEpochId,
+        requestId: dispatchRequestId, error: { code: "resource_precondition_conflict" } },
+      undefined, dispatchRequestId, 409);
+    });
+    await expect(dispatchProjectAlphaProjectV2PendingCommand(producerEnv(), producerSelection.sourceId,
+      planned.commandId, transport)).resolves.toEqual({ status: "conflict", reason: "resource_precondition_conflict",
+      httpStatus: 409, requestId: dispatchRequestId });
+    expect(await db.prepare("SELECT state FROM project_alpha_project_outbox WHERE command_id=?")
+      .bind(planned.commandId).first("state")).toBe("terminal");
+    expect((await db.prepare("SELECT state FROM project_alpha_project_v2_events WHERE command_id=? ORDER BY state_version")
+      .bind(planned.commandId).all<{ state: string }>()).results.map(row => row.state)).toEqual(["pending", "conflict"]);
     expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_mappings").first("count")).toBe(0);
     expect((await db.prepare("SELECT * FROM delivery_public_shares ORDER BY id").all()).results).toEqual(publicBefore.results);
   });

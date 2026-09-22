@@ -122,6 +122,32 @@ function canonical(value: unknown): string {
   }
   return JSON.stringify(normalize(value));
 }
+function stableDetailEvidence(value: unknown): string | null {
+  if (!ownData(value, ["apiVersion", "sourceInstanceId", "applicationId", "historyEpoch", "requestId", "replayed",
+    "accepted", "resource", "data"])
+    || !ownData(value.resource, ["type", "id", "revision", "projectionSha256"])
+    || !ownData(value.data, ["name", "description", "status", "archived", "overdueWarning", "completedAt",
+      "archivedAt", "estimatedStart", "estimatedEnd", "clientPublicId", "organizationPublicId"])) return null;
+  return canonical({
+    apiVersion: value.apiVersion,
+    sourceInstanceId: value.sourceInstanceId,
+    applicationId: value.applicationId,
+    historyEpoch: value.historyEpoch,
+    replayed: value.replayed,
+    accepted: value.accepted,
+    resource: value.resource,
+    data: value.data,
+  });
+}
+async function detailEvidenceSha256(value: unknown): Promise<string | null> {
+  const stable = stableDetailEvidence(value);
+  return stable === null ? null : sha256(stable);
+}
+async function storedDetailEvidenceSha256(value: Receipt): Promise<string | null> {
+  if (await sha256(value.canonical_detail_read_json) !== value.canonical_detail_read_sha256) return null;
+  try { return detailEvidenceSha256(JSON.parse(value.canonical_detail_read_json)); }
+  catch { return null; }
+}
 function canonicalRequest(input: ProjectAlphaProjectAdoptionReviewSelection, caller: ProjectAlphaProjectAdoptionReviewProducerActor): string {
   return JSON.stringify({ version: 1, idempotencyKey: input.idempotencyKey, sourceId: input.sourceId,
     externalProjectId: input.externalProjectId, projectAlphaPublicId: input.projectAlphaPublicId,
@@ -287,19 +313,22 @@ async function prior(db: D1Database, idempotencyKey: string, requestSha256: stri
     WHERE receipt.idempotency_key=? OR receipt.request_sha256=? ORDER BY receipt.created_at,receipt.producer_receipt_id LIMIT 1`)
     .bind(idempotencyKey, requestSha256).first<Receipt>();
 }
-function exactReplay(saved: Receipt, input: ProjectAlphaProjectAdoptionReviewSelection,
+async function exactReplay(saved: Receipt, input: ProjectAlphaProjectAdoptionReviewSelection,
   caller: ProjectAlphaProjectAdoptionReviewProducerActor, requestJson: string, connection: Configured,
-  currentActor: ActorState, directory: DirectoryIdentity, evidence: RemoteEvidence, scopesJson: string): boolean {
+  currentActor: ActorState, directory: DirectoryIdentity, evidence: RemoteEvidence, scopesJson: string): Promise<boolean> {
   const detail = evidence.detail.response;
-  return saved.canonical_request_json === requestJson && saved.source_id === input.sourceId
+  const [savedStableDetailSha256, observedStableDetailSha256] = await Promise.all([
+    storedDetailEvidenceSha256(saved), detailEvidenceSha256(detail),
+  ]);
+  return savedStableDetailSha256 !== null && observedStableDetailSha256 !== null
+    && savedStableDetailSha256 === observedStableDetailSha256
+    && saved.canonical_request_json === requestJson && saved.source_id === input.sourceId
     && saved.external_project_id === input.externalProjectId && saved.project_alpha_public_id === input.projectAlphaPublicId
     && saved.reviewer_staff_id === caller.staffId && saved.reviewer_access_subject === caller.accessSubject
     && saved.source_instance_id === connection.sourceInstanceId && saved.application_id === connection.applicationId
     && saved.history_epoch_id === connection.historyEpochId && saved.project_alpha_revision === detail.resource.revision
     && saved.projection_sha256 === detail.resource.projectionSha256
     && saved.authorization_generation === evidence.authorizationGeneration
-    && saved.canonical_detail_read_json === evidence.detail.responseJson
-    && saved.canonical_detail_read_sha256 === evidence.detail.responseSha256
     && saved.organization_record_id === directory.organizationRecordId
     && saved.organization_project_alpha_public_id === detail.data.organizationPublicId
     && saved.client_record_id === directory.clientRecordId
@@ -372,7 +401,7 @@ export async function produceProjectAlphaProjectAdoptionReview(
     if (saved) {
       if (saved.idempotency_key !== input.idempotencyKey) return { status: "conflict", reason: "request_sha256" };
       if (saved.request_sha256 !== requestSha256) return { status: "conflict", reason: "idempotency_key" };
-      return exactReplay(saved, input, caller, requestJson, connection, finalActor, directory, observed, scopesJson)
+      return await exactReplay(saved, input, caller, requestJson, connection, finalActor, directory, observed, scopesJson)
         ? { status: "reviewed", reviewItemId: saved.review_item_id, requestSha256, replayed: true }
         : { status: "blocked", reason: "stale_evidence" };
     }
@@ -403,7 +432,7 @@ export async function produceProjectAlphaProjectAdoptionReview(
         reviewItemId, input.sourceId, input.externalProjectId, input.projectAlphaPublicId, caller.staffId, caller.accessSubject),
     ]);
     const inserted = await prior(env.OPS_DB, input.idempotencyKey, requestSha256);
-    if (!inserted || inserted.review_item_id !== reviewItemId || !exactReplay(inserted, input, caller, requestJson,
+    if (!inserted || inserted.review_item_id !== reviewItemId || !await exactReplay(inserted, input, caller, requestJson,
       connection, finalActor, directory, observed, scopesJson)) return { status: "uncertain", reason: "database" };
     return { status: "reviewed", reviewItemId, requestSha256, replayed: false };
   } catch (error) {
@@ -412,7 +441,7 @@ export async function produceProjectAlphaProjectAdoptionReview(
       if (winner) {
         if (winner.idempotency_key !== input.idempotencyKey) return { status: "conflict", reason: "request_sha256" };
         if (winner.request_sha256 !== requestSha256) return { status: "conflict", reason: "idempotency_key" };
-        return exactReplay(winner, input, caller, requestJson, connection, currentActor, directory, observed, scopesJson)
+        return await exactReplay(winner, input, caller, requestJson, connection, currentActor, directory, observed, scopesJson)
           ? { status: "reviewed", reviewItemId: winner.review_item_id, requestSha256, replayed: true }
           : { status: "blocked", reason: "stale_evidence" };
       }
