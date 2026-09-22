@@ -84,10 +84,9 @@ function findingKey(value: Finding): string {
 }
 function addFinding(findings: Map<string, Finding>, value: Finding): void { findings.set(findingKey(value), value); }
 
-async function localResources(db: D1Database, sourceId: string, maximum: number): Promise<LocalResource[] | null> {
-  const count = await db.prepare(`SELECT count(*) count FROM project_alpha_active_directory_mappings WHERE source_id=?`)
-    .bind(sourceId).first<{ count: number }>();
-  if (Number(count?.count ?? 0) > maximum) return null;
+async function localResources(db: D1Database, sourceId: string,
+  fence: Readonly<{ sourceInstanceId: string; applicationId: string; historyEpoch: string }>,
+  maximum: number): Promise<LocalResource[] | null> {
   const rows = await db.prepare(`SELECT mapping.resource_type resourceType,mapping.external_id externalId,
       mapping.project_alpha_public_id publicId,
       COALESCE((SELECT json_extract(evidence.outcome_json,'$.response.result.resource.revision')
@@ -111,9 +110,11 @@ async function localResources(db: D1Database, sourceId: string, maximum: number)
       ON parent.source_id=mapping.source_id AND parent.source_instance_id=mapping.source_instance_id
       AND parent.application_id=mapping.application_id AND parent.history_epoch_id=mapping.history_epoch_id
       AND parent.resource_type='organization' AND parent.external_id=relation.organization_record_id
-    WHERE mapping.source_id=? ORDER BY mapping.resource_type,mapping.project_alpha_public_id`)
-    .bind(sourceId).all<LocalResource>();
-  return rows.results;
+    WHERE mapping.source_id=? AND mapping.source_instance_id=? AND mapping.application_id=?
+      AND mapping.history_epoch_id=?
+    ORDER BY mapping.resource_type,mapping.project_alpha_public_id LIMIT ?`)
+    .bind(sourceId, fence.sourceInstanceId, fence.applicationId, fence.historyEpoch, maximum + 1).all<LocalResource>();
+  return rows.results.length > maximum ? null : rows.results;
 }
 
 async function priorResources(db: D1Database, runId: string | null): Promise<Map<string, PriorResource>> {
@@ -150,6 +151,14 @@ function observationStatement(db: D1Database, runId: string, ordinal: number,
       resource.binding?.resourceRevision ?? null, observedAt);
 }
 
+async function beforeDeadline<T>(promise: Promise<T>, remainingMs: number): Promise<T | null> {
+  if (remainingMs <= 0) return null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([promise, new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), remainingMs); })]);
+  } finally { if (timer !== undefined) clearTimeout(timer); }
+}
+
 async function finishComplete(db: D1Database, sourceId: string, runId: string, previous: string | null,
   fence: Readonly<{ sourceInstanceId: string; applicationId: string; historyEpoch: string; authorizationGeneration: string }>,
   pages: number, items: number, locals: number, findings: Map<string, Finding>, now: number): Promise<ProjectAlphaDirectoryReconciliationResult> {
@@ -161,7 +170,7 @@ async function finishComplete(db: D1Database, sourceId: string, runId: string, p
       .bind(crypto.randomUUID(), runId, sourceId, finding.classification, finding.resourceType,
         finding.localExternalId, finding.localPublicId, finding.remotePublicId, JSON.stringify(finding.details), at)));
   }
-  await db.batch([
+  try { await db.batch([
     db.prepare(`UPDATE project_alpha_directory_reconciliation_runs SET status='complete',cursor=NULL,pages_observed=?,
       items_observed=?,local_items_observed=?,completed_at=? WHERE run_id=? AND status='running'`)
       .bind(pages, items, locals, at, runId),
@@ -170,7 +179,10 @@ async function finishComplete(db: D1Database, sourceId: string, runId: string, p
       authorization_generation=?,updated_at=? WHERE source_id=? AND active_run_id=?`)
       .bind(runId, pages, items, fence.sourceInstanceId, fence.applicationId, fence.historyEpoch,
         fence.authorizationGeneration, at, sourceId, runId),
-  ]);
+  ]); } catch {
+    return { sourceId, runId, status: "uncertain", reason: "ownership_lost", pages, items,
+      findings: findings.size, previousCompleteRunId: previous };
+  }
   return { sourceId, runId, status: "complete", pages, items, findings: findings.size, previousCompleteRunId: previous };
 }
 
@@ -193,28 +205,50 @@ export async function reconcileProjectAlphaDirectorySource(env: ReconciliationEn
     return { sourceId, runId, status: "uncertain", reason: "configuration", pages: 0, items: 0, findings: 0, previousCompleteRunId: null };
   }
   const checkpoint = await env.OPS_DB.prepare(`SELECT checkpoint.active_run_id activeRunId,
-      checkpoint.complete_run_id completeRunId,run.status activeStatus
+      checkpoint.complete_run_id completeRunId,checkpoint.cursor activeCursor,
+      checkpoint.pages_observed activePages,checkpoint.items_observed activeItems,
+      run.status activeStatus,run.started_at activeStartedAt
     FROM project_alpha_directory_reconciliation_checkpoints checkpoint
     LEFT JOIN project_alpha_directory_reconciliation_runs run ON run.run_id=checkpoint.active_run_id
     WHERE checkpoint.source_id=?`).bind(sourceId)
-    .first<{ activeRunId: string | null; completeRunId: string | null; activeStatus: string | null }>();
+    .first<{ activeRunId: string | null; completeRunId: string | null; activeCursor: string | null;
+      activePages: number; activeItems: number; activeStatus: string | null; activeStartedAt: string | null }>();
   if (checkpoint?.activeRunId && checkpoint.activeStatus === "running") {
-    return { sourceId, runId: checkpoint.activeRunId, status: "uncertain", reason: "run_in_progress",
-      pages: 0, items: 0, findings: 0, previousCompleteRunId: checkpoint.completeRunId };
+    const activeStarted = checkpoint.activeStartedAt ? Date.parse(checkpoint.activeStartedAt) : Number.NaN;
+    if (Number.isFinite(activeStarted) && started - activeStarted < timeBudgetMs) {
+      return { sourceId, runId: checkpoint.activeRunId, status: "uncertain", reason: "run_in_progress",
+        pages: checkpoint.activePages, items: checkpoint.activeItems, findings: 0,
+        previousCompleteRunId: checkpoint.completeRunId };
+    }
+    await env.OPS_DB.batch([
+      env.OPS_DB.prepare(`UPDATE project_alpha_directory_reconciliation_runs SET status='uncertain',
+        failure_reason='stale_run',completed_at=? WHERE run_id=? AND status='running'`)
+        .bind(iso(started), checkpoint.activeRunId),
+      env.OPS_DB.prepare(`UPDATE project_alpha_directory_reconciliation_checkpoints SET active_run_id=NULL,cursor=NULL,
+        updated_at=? WHERE source_id=? AND active_run_id=?`).bind(iso(started), sourceId, checkpoint.activeRunId),
+    ]);
   }
   const previous = checkpoint?.completeRunId ?? null, at = iso(started);
-  await env.OPS_DB.batch([
+  const acquisition = await env.OPS_DB.batch([
     env.OPS_DB.prepare(`INSERT INTO project_alpha_directory_reconciliation_runs(run_id,source_id,status,
       previous_complete_run_id,started_at) VALUES(?,?,'running',?,?)`).bind(runId, sourceId, previous, at),
     env.OPS_DB.prepare(`INSERT INTO project_alpha_directory_reconciliation_checkpoints(source_id,active_run_id,
-      complete_run_id,cursor,pages_observed,items_observed,updated_at) VALUES(?,?,?,NULL,0,0,?)
-      ON CONFLICT(source_id) DO UPDATE SET active_run_id=excluded.active_run_id,cursor=NULL,
-        pages_observed=0,items_observed=0,updated_at=excluded.updated_at`)
-      .bind(sourceId, runId, previous, at),
+      complete_run_id,cursor,pages_observed,items_observed,updated_at) VALUES(?,NULL,?,NULL,0,0,?)
+      ON CONFLICT(source_id) DO NOTHING`).bind(sourceId, previous, at),
+    env.OPS_DB.prepare(`UPDATE project_alpha_directory_reconciliation_checkpoints SET active_run_id=?,cursor=NULL,
+      pages_observed=0,items_observed=0,updated_at=? WHERE source_id=? AND active_run_id IS NULL`)
+      .bind(runId, at, sourceId),
   ]);
+  if (Number(acquisition[2]?.meta.changes ?? 0) !== 1) {
+    await env.OPS_DB.prepare(`UPDATE project_alpha_directory_reconciliation_runs SET status='uncertain',
+      failure_reason='ownership_not_acquired',completed_at=? WHERE run_id=? AND status='running'`).bind(at, runId).run();
+    const owner = await env.OPS_DB.prepare(`SELECT active_run_id activeRunId FROM
+      project_alpha_directory_reconciliation_checkpoints WHERE source_id=?`).bind(sourceId)
+      .first<{ activeRunId: string | null }>();
+    return { sourceId, runId: owner?.activeRunId ?? runId, status: "uncertain", reason: "run_in_progress",
+      pages: 0, items: 0, findings: 0, previousCompleteRunId: previous };
+  }
 
-  const locals = await localResources(env.OPS_DB, sourceId, maxItems);
-  if (!locals) return setUncertain(env.OPS_DB, sourceId, runId, "item_limit", 0, 0, null, now(), previous);
   const prior = await priorResources(env.OPS_DB, previous);
   const remote = new Map<string, RemoteResource>();
   let cursor: string | null = null, pages = 0, ordinal = 0, previousRemoteKey = "";
@@ -223,7 +257,9 @@ export async function reconcileProjectAlphaDirectorySource(env: ReconciliationEn
   for (;;) {
     if (now() - started >= timeBudgetMs) return setUncertain(env.OPS_DB, sourceId, runId, "time_limit", pages, ordinal, cursor, now(), previous);
     if (pages >= maxPages) return setUncertain(env.OPS_DB, sourceId, runId, "page_limit", pages, ordinal, cursor, now(), previous);
-    const outcome = await readers.inventory(env, sourceId, { type: "all", cursor, limit: pageSize }, fetcher);
+    const outcome = await beforeDeadline(readers.inventory(env, sourceId,
+      { type: "all", cursor, limit: pageSize }, fetcher), timeBudgetMs - (now() - started));
+    if (!outcome) return setUncertain(env.OPS_DB, sourceId, runId, "time_limit", pages, ordinal, cursor, now(), previous);
     if (outcome.status !== "observed") return setUncertain(env.OPS_DB, sourceId, runId, outcomeReason(outcome), pages, ordinal, cursor, now(), previous);
     const inventory = outcome.inventory;
     const observedFence = { sourceInstanceId: inventory.sourceInstanceId, applicationId: inventory.applicationId,
@@ -244,7 +280,7 @@ export async function reconcileProjectAlphaDirectorySource(env: ReconciliationEn
     }
     pages += 1;
     if (statements.length) await env.OPS_DB.batch(statements);
-    await env.OPS_DB.batch([
+    const progress = await env.OPS_DB.batch([
       env.OPS_DB.prepare(`UPDATE project_alpha_directory_reconciliation_runs SET source_instance_id=?,application_id=?,
         history_epoch_id=?,authorization_generation=?,cursor=?,pages_observed=?,items_observed=? WHERE run_id=? AND status='running'`)
         .bind(fence.sourceInstanceId, fence.applicationId, fence.historyEpoch, fence.authorizationGeneration,
@@ -254,6 +290,8 @@ export async function reconcileProjectAlphaDirectorySource(env: ReconciliationEn
         WHERE source_id=? AND active_run_id=?`).bind(inventory.nextCursor, pages, ordinal, fence.sourceInstanceId,
           fence.applicationId, fence.historyEpoch, fence.authorizationGeneration, iso(now()), sourceId, runId),
     ]);
+    if (Number(progress[1]?.meta.changes ?? 0) !== 1)
+      return setUncertain(env.OPS_DB, sourceId, runId, "ownership_lost", pages, ordinal, cursor, now(), previous);
     if (inventory.nextCursor === null) break;
     if (inventory.nextCursor === cursor || seenCursors.has(inventory.nextCursor))
       return setUncertain(env.OPS_DB, sourceId, runId, "duplicate_or_order", pages, ordinal, cursor, now(), previous);
@@ -261,6 +299,8 @@ export async function reconcileProjectAlphaDirectorySource(env: ReconciliationEn
     cursor = inventory.nextCursor;
   }
   if (!fence) return setUncertain(env.OPS_DB, sourceId, runId, "invalid_contract", pages, ordinal, cursor, now(), previous);
+  const locals = await localResources(env.OPS_DB, sourceId, fence, maxItems);
+  if (!locals) return setUncertain(env.OPS_DB, sourceId, runId, "item_limit", pages, ordinal, null, now(), previous);
 
   const localByPublic = new Map(locals.map(item => [key(item.resourceType, item.publicId), item]));
   const localByExternal = new Map(locals.map(item => [key(item.resourceType, item.externalId), item]));
@@ -298,7 +338,9 @@ export async function reconcileProjectAlphaDirectorySource(env: ReconciliationEn
     }
     if (!found.present) continue;
     if (now() - started >= timeBudgetMs) return setUncertain(env.OPS_DB, sourceId, runId, "time_limit", pages, ordinal, null, now(), previous);
-    const profile = await readers.profile(env, sourceId, local.resourceType, local.publicId, fetcher);
+    const profile = await beforeDeadline(readers.profile(env, sourceId, local.resourceType, local.publicId, fetcher),
+      timeBudgetMs - (now() - started));
+    if (!profile) return setUncertain(env.OPS_DB, sourceId, runId, "time_limit", pages, ordinal, null, now(), previous);
     if (profile.status !== "observed") return setUncertain(env.OPS_DB, sourceId, runId, outcomeReason(profile), pages, ordinal, null, now(), previous);
     if (profile.observation.sourceInstanceId !== fence.sourceInstanceId || profile.observation.applicationId !== fence.applicationId
       || profile.observation.historyEpoch !== fence.historyEpoch || profile.observation.authorizationGeneration !== fence.authorizationGeneration) {
@@ -310,7 +352,9 @@ export async function reconcileProjectAlphaDirectorySource(env: ReconciliationEn
       localPublicId: local.publicId, remotePublicId: found.publicId,
       details: { expectedOrganizationPublicId: local.relationshipPublicId, observedOrganizationPublicId: relationship } });
     if (now() - started >= timeBudgetMs) return setUncertain(env.OPS_DB, sourceId, runId, "time_limit", pages, ordinal, null, now(), previous);
-    const binding = await readers.binding(env, sourceId, local.resourceType, local.externalId, local.publicId, fetcher);
+    const binding = await beforeDeadline(readers.binding(env, sourceId, local.resourceType, local.externalId,
+      local.publicId, fetcher), timeBudgetMs - (now() - started));
+    if (!binding) return setUncertain(env.OPS_DB, sourceId, runId, "time_limit", pages, ordinal, null, now(), previous);
     if (binding.status !== "observed") return setUncertain(env.OPS_DB, sourceId, runId, outcomeReason(binding), pages, ordinal, null, now(), previous);
     if (binding.observation.sourceInstanceId !== fence.sourceInstanceId || binding.observation.applicationId !== fence.applicationId
       || binding.observation.historyEpoch !== fence.historyEpoch || binding.observation.authorizationGeneration !== fence.authorizationGeneration) {

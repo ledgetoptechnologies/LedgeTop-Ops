@@ -177,6 +177,48 @@ describe("bounded read-only Project Alpha directory reconciliation", () => {
     expect(calls).toBe(0);
   });
 
+  it("takes over a stale durable run but does not steal a live source lease", async () => {
+    const stale = uuid();
+    await db.batch([
+      db.prepare(`INSERT INTO project_alpha_directory_reconciliation_runs(run_id,source_id,status,started_at)
+        VALUES(?,?,'running','2020-01-01T00:00:00.000Z')`).bind(stale, sourceA),
+      db.prepare(`INSERT INTO project_alpha_directory_reconciliation_checkpoints(source_id,active_run_id,
+        cursor,pages_observed,items_observed,updated_at) VALUES(?,?,NULL,0,0,'2020-01-01T00:00:00.000Z')`)
+        .bind(sourceA, stale),
+    ]);
+    const current = Date.parse("2026-09-22T12:00:00.000Z");
+    const result = await reconcileProjectAlphaDirectorySource({ OPS_DB: db }, sourceA,
+      options(readers(() => inventory(sourceA, [], null)), { now: () => current }));
+    expect(result.status).toBe("complete");
+    expect(await db.prepare(`SELECT status,failure_reason FROM project_alpha_directory_reconciliation_runs
+      WHERE run_id=?`).bind(stale).first()).toEqual({ status: "uncertain", failure_reason: "stale_run" });
+    const live = uuid();
+    await db.batch([
+      db.prepare(`INSERT INTO project_alpha_directory_reconciliation_runs(run_id,source_id,status,started_at)
+        VALUES(?,?,'running',?)`).bind(live, sourceB, new Date(current).toISOString()),
+      db.prepare(`INSERT INTO project_alpha_directory_reconciliation_checkpoints(source_id,active_run_id,
+        cursor,pages_observed,items_observed,updated_at) VALUES(?,?,NULL,0,0,?)`)
+        .bind(sourceB, live, new Date(current).toISOString()),
+    ]);
+    const contended = await reconcileProjectAlphaDirectorySource({ OPS_DB: db }, sourceB,
+      options(readers(() => inventory(sourceB, [], null)), { now: () => current }));
+    expect(contended).toMatchObject({ status: "uncertain", reason: "run_in_progress", runId: live });
+  });
+
+  it("ignores historical mappings outside the exact observed instance/application/epoch fence", async () => {
+    const oldCommand = uuid(), old = "99999999-9999-4999-8999-999999999999";
+    await db.prepare(`INSERT INTO project_alpha_directory_outbox(command_id,source_id,expected_source_instance_id,
+      application_id,expected_history_epoch_id,resource_type,external_id,state,outcome_json)
+      VALUES(?,?,?,?,?,'organization','historical','acknowledged',?)`).bind(oldCommand, sourceA, old, old, old,
+        JSON.stringify({ response: { result: { resource: { revision: "1" } } } })).run();
+    await db.prepare(`INSERT INTO project_alpha_active_directory_mappings(source_id,resource_type,external_id,
+      project_alpha_public_id,source_instance_id,application_id,history_epoch_id,provenance_id,mapping_kind)
+      VALUES(?,'organization','historical',?,?,?,?,?,'legacy')`).bind(sourceA, publicId("6"), old, old, old, oldCommand).run();
+    const result = await reconcileProjectAlphaDirectorySource({ OPS_DB: db }, sourceA,
+      options(readers(() => inventory(sourceA, [], null))));
+    expect(result).toMatchObject({ status: "complete", findings: 0 });
+  });
+
   it("persists every drift class, uses the prior complete snapshot for immutable projection drift, and preserves public links", async () => {
     const organizationRecord = "organization-parent";
     await seedMapping(sourceA, "organization", organizationRecord, publicId("8"));

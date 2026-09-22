@@ -106,6 +106,9 @@ WHEN NEW.run_id IS NOT OLD.run_id OR NEW.source_id IS NOT OLD.source_id
  OR (OLD.application_id IS NOT NULL AND NEW.application_id IS NOT OLD.application_id)
  OR (OLD.history_epoch_id IS NOT NULL AND NEW.history_epoch_id IS NOT OLD.history_epoch_id)
  OR (OLD.authorization_generation IS NOT NULL AND NEW.authorization_generation IS NOT OLD.authorization_generation)
+ OR (NEW.status='complete' AND NOT EXISTS(
+      SELECT 1 FROM project_alpha_directory_reconciliation_checkpoints checkpoint
+      WHERE checkpoint.source_id=OLD.source_id AND checkpoint.active_run_id=OLD.run_id))
 BEGIN SELECT RAISE(ABORT,'directory reconciliation run update is invalid'); END;
 CREATE TRIGGER project_alpha_directory_reconciliation_runs_no_delete
 BEFORE DELETE ON project_alpha_directory_reconciliation_runs
@@ -135,6 +138,13 @@ WHEN NEW.finding_id IS NOT OLD.finding_id OR NEW.run_id IS NOT OLD.run_id OR NEW
  OR NEW.remote_public_id IS NOT OLD.remote_public_id OR NEW.details_json IS NOT OLD.details_json
  OR NEW.created_at IS NOT OLD.created_at OR OLD.review_state<>'open'
 BEGIN SELECT RAISE(ABORT,'directory reconciliation finding identity/review is immutable'); END;
+CREATE TRIGGER project_alpha_directory_reconciliation_findings_insert_guard
+BEFORE INSERT ON project_alpha_directory_reconciliation_findings
+WHEN NOT EXISTS(SELECT 1 FROM project_alpha_directory_reconciliation_runs run
+  JOIN project_alpha_directory_reconciliation_checkpoints checkpoint
+    ON checkpoint.source_id=run.source_id AND checkpoint.active_run_id=run.run_id
+  WHERE run.run_id=NEW.run_id AND run.source_id=NEW.source_id AND run.status='running')
+BEGIN SELECT RAISE(ABORT,'directory reconciliation finding requires the active run'); END;
 CREATE TRIGGER project_alpha_directory_reconciliation_findings_no_delete
 BEFORE DELETE ON project_alpha_directory_reconciliation_findings
 BEGIN SELECT RAISE(ABORT,'directory reconciliation findings are durable'); END;
