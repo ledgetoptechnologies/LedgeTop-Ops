@@ -23,6 +23,8 @@ const reviewerActor = { staffId: "staff", accessSubject: "access|staff" } as con
 
 const reserveReview = (input: unknown, caller: unknown = reviewerActor) =>
   reserveProjectAlphaProjectAdoptionReview({ OPS_DB: db }, caller, input);
+const planAdoption = (input: unknown, caller: unknown = reviewerActor, database: D1Database = db) =>
+  planProjectAlphaProjectAdoptionBind({ OPS_DB: database }, caller, input);
 
 async function migrate(name: string) {
   const sql = readFileSync(new URL(`../migrations/${name}`, import.meta.url), "utf8");
@@ -473,10 +475,10 @@ describe("project adoption bind bridge consumer", () => {
   it("atomically creates one native head, revision, and exact pending bind plan and replays it", async () => {
     const savedReservationId = await seedReservation();
     const publicBefore = await db.prepare("SELECT * FROM delivery_public_shares ORDER BY id").all();
-    const first = await planProjectAlphaProjectAdoptionBind({ OPS_DB: db }, { reservationId: savedReservationId });
+    const first = await planAdoption({ reservationId: savedReservationId });
     expect(first).toMatchObject({ status: "planned", reservationId: savedReservationId, replayed: false });
     if (first.status !== "planned") throw new Error("bind bridge setup failed");
-    await expect(planProjectAlphaProjectAdoptionBind({ OPS_DB: db }, { reservationId: savedReservationId }))
+    await expect(planAdoption({ reservationId: savedReservationId }))
       .resolves.toEqual({ ...first, replayed: true });
     expect(await db.prepare(`SELECT external_project_id,current_version,name,description,lifecycle,source_id,
       project_alpha_public_id,canonical_projection_sha256,organization_record_id,client_record_id
@@ -500,12 +502,16 @@ describe("project adoption bind bridge consumer", () => {
   });
 
   it("accepts only one immutable reservation UUID and remains unmounted", async () => {
+    await expect(planAdoption({ reservationId }, null))
+      .resolves.toEqual({ status: "rejected", reason: "invalid_actor" });
+    await expect(planAdoption({ reservationId }, { ...reviewerActor, unexpected: true }))
+      .resolves.toEqual({ status: "rejected", reason: "invalid_actor" });
     for (const invalid of [null, {}, { reservationId: "not-a-uuid" },
       { reservationId, commandId: "browser-selected" }]) {
-      await expect(planProjectAlphaProjectAdoptionBind({ OPS_DB: db }, invalid))
+      await expect(planAdoption(invalid))
         .resolves.toEqual({ status: "rejected", reason: "invalid_action" });
     }
-    await expect(planProjectAlphaProjectAdoptionBind({ OPS_DB: db }, { reservationId }))
+    await expect(planAdoption({ reservationId }))
       .resolves.toEqual({ status: "blocked", reason: "missing_reservation" });
     const index = readFileSync(new URL("../src/worker/index.ts", import.meta.url), "utf8");
     expect(index).not.toContain("project-alpha-project-adoption-bind-consumer");
@@ -513,10 +519,26 @@ describe("project adoption bind bridge consumer", () => {
     expect(Object.keys(module)).toEqual(["planProjectAlphaProjectAdoptionBind"]);
   });
 
+  it("binds first plan and replay to the current authenticated reviewer", async () => {
+    const savedReservationId = await seedReservation();
+    for (const caller of [
+      { staffId: "other-staff", accessSubject: reviewerActor.accessSubject },
+      { staffId: reviewerActor.staffId, accessSubject: "access|other" },
+    ]) await expect(planAdoption({ reservationId: savedReservationId }, caller))
+      .resolves.toEqual({ status: "blocked", reason: "caller" });
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_bind_receipts").first("count")).toBe(0);
+
+    await expect(planAdoption({ reservationId: savedReservationId }))
+      .resolves.toMatchObject({ status: "planned", replayed: false });
+    await db.prepare("UPDATE native_staff_profiles SET version=2 WHERE staff_id='staff'").run();
+    await expect(planAdoption({ reservationId: savedReservationId }))
+      .resolves.toEqual({ status: "blocked", reason: "current_state" });
+  });
+
   it("rolls back every planned row when current authority is revoked", async () => {
     const savedReservationId = await seedReservation();
     await db.prepare("UPDATE native_project_grants SET active=0,version=2 WHERE id='grant-server-generated-project'").run();
-    await expect(planProjectAlphaProjectAdoptionBind({ OPS_DB: db }, { reservationId: savedReservationId }))
+    await expect(planAdoption({ reservationId: savedReservationId }))
       .resolves.toEqual({ status: "blocked", reason: "current_state" });
     expect(await db.prepare("SELECT count(*) count FROM operations_shared_projects").first("count")).toBe(0);
     expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_outbox").first("count")).toBe(0);
@@ -526,7 +548,7 @@ describe("project adoption bind bridge consumer", () => {
   it("rejects expired reservations without leaving a native head or bind plan", async () => {
     const savedReservationId = await seedReservation("+1 second");
     await new Promise(resolve => setTimeout(resolve, 1_100));
-    await expect(planProjectAlphaProjectAdoptionBind({ OPS_DB: db }, { reservationId: savedReservationId }))
+    await expect(planAdoption({ reservationId: savedReservationId }))
       .resolves.toEqual({ status: "blocked", reason: "current_state" });
     expect(await db.prepare("SELECT count(*) count FROM operations_shared_projects").first("count")).toBe(0);
     expect(await db.prepare("SELECT count(*) count FROM native_project_command_proofs").first("count")).toBe(0);
@@ -535,7 +557,7 @@ describe("project adoption bind bridge consumer", () => {
   it("fails closed for missing or multiple active Directory mappings", async () => {
     const savedReservationId = await seedReservation();
     await db.prepare("DELETE FROM project_alpha_directory_mappings WHERE external_id='organization-record'").run();
-    await expect(planProjectAlphaProjectAdoptionBind({ OPS_DB: db }, { reservationId: savedReservationId }))
+    await expect(planAdoption({ reservationId: savedReservationId }))
       .resolves.toEqual({ status: "blocked", reason: "current_state" });
     expect(await db.prepare("SELECT count(*) count FROM operations_shared_projects").first("count")).toBe(0);
 
@@ -545,7 +567,7 @@ describe("project adoption bind bridge consumer", () => {
     await db.prepare(`INSERT INTO project_alpha_existing_directory_binding_activation_receipts
       VALUES('63000000-0000-4000-8000-000000000006','project-alpha:primary',?,?,?,'organization','organization-record',?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))`)
       .bind(sourceInstanceId, applicationId, historyEpochId, organizationPublicId).run();
-    await expect(planProjectAlphaProjectAdoptionBind({ OPS_DB: db }, { reservationId: savedReservationId }))
+    await expect(planAdoption({ reservationId: savedReservationId }))
       .resolves.toEqual({ status: "blocked", reason: "current_state" });
     expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_outbox").first("count")).toBe(0);
   });
@@ -558,7 +580,7 @@ describe("project adoption bind bridge consumer", () => {
     const reserved = await reserveReview({ reviewItemId, idempotencyKey });
     if (reserved.status !== "reserved") throw new Error("reservation setup failed");
     await db.prepare("DELETE FROM operations_directory_client_organizations WHERE client_record_id='client-record'").run();
-    await expect(planProjectAlphaProjectAdoptionBind({ OPS_DB: db }, { reservationId: reserved.reservationId }))
+    await expect(planAdoption({ reservationId: reserved.reservationId }))
       .resolves.toEqual({ status: "blocked", reason: "current_state" });
     expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_bind_receipts").first("count")).toBe(0);
   });
@@ -570,7 +592,7 @@ describe("project adoption bind bridge consumer", () => {
       VALUES('server-generated-project',2,'Stale local head','active','organization-record','[]',?)`).bind(hash).run();
     await db.prepare(`INSERT INTO operations_shared_project_revisions(external_project_id,version,read_json)
       VALUES('server-generated-project',2,'{}')`).run();
-    await expect(planProjectAlphaProjectAdoptionBind({ OPS_DB: db }, { reservationId: savedReservationId }))
+    await expect(planAdoption({ reservationId: savedReservationId }))
       .resolves.toEqual({ status: "blocked", reason: "current_state" });
     expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_outbox").first("count")).toBe(0);
   });
@@ -593,7 +615,7 @@ describe("project adoption bind bridge consumer", () => {
       application_id,history_epoch_id,project_alpha_public_id,establishment_kind,establishment_command_id)
       VALUES('server-generated-project','project-alpha:primary',?,?,?,?,'bind','91000000-0000-4000-8000-000000000009')`)
       .bind(sourceInstanceId, applicationId, historyEpochId, publicId).run();
-    await expect(planProjectAlphaProjectAdoptionBind({ OPS_DB: db }, { reservationId: savedReservationId }))
+    await expect(planAdoption({ reservationId: savedReservationId }))
       .resolves.toEqual({ status: "blocked", reason: "current_state" });
     expect(await db.prepare("SELECT count(*) count FROM operations_shared_projects").first("count")).toBe(0);
     expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_bind_receipts").first("count")).toBe(0);
@@ -616,7 +638,7 @@ describe("project adoption bind bridge consumer", () => {
             VALUES('server-generated-project','forced duplicate','active','[]')`)]);
       } });
     } }) as D1Database;
-    await expect(planProjectAlphaProjectAdoptionBind({ OPS_DB: failingDb }, { reservationId: savedReservationId }))
+    await expect(planAdoption({ reservationId: savedReservationId }, reviewerActor, failingDb))
       .resolves.toEqual({ status: "blocked", reason: "current_state" });
     expect(await db.prepare("SELECT count(*) count FROM operations_shared_projects").first("count")).toBe(0);
     expect(await db.prepare("SELECT count(*) count FROM native_project_command_proofs").first("count")).toBe(0);

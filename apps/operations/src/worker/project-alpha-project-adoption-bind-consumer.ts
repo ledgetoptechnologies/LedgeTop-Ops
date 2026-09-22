@@ -8,10 +8,11 @@
 import { canonicalProjectAlphaProjectRequest, type ProjectAlphaProjectBindCommand } from "./project-alpha-project-api-v2";
 
 export type ProjectAlphaProjectAdoptionBindEnvironment = Readonly<{ OPS_DB: D1Database }>;
+export type ProjectAlphaProjectAdoptionBindActor = Readonly<{ staffId: string; accessSubject: string }>;
 export type ProjectAlphaProjectAdoptionBindOutcome =
   | Readonly<{ status: "planned"; bridgeId: string; reservationId: string; commandId: string; requestSha256: string; replayed: boolean }>
-  | Readonly<{ status: "rejected"; reason: "invalid_action" }>
-  | Readonly<{ status: "blocked"; reason: "missing_reservation" | "invalid_evidence" | "current_state" }>
+  | Readonly<{ status: "rejected"; reason: "invalid_action" | "invalid_actor" }>
+  | Readonly<{ status: "blocked"; reason: "caller" | "missing_reservation" | "invalid_evidence" | "current_state" }>
   | Readonly<{ status: "uncertain"; reason: "database" }>;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -69,6 +70,19 @@ function action(value: unknown): value is Readonly<{ reservationId: string }> {
     && "value" in Object.getOwnPropertyDescriptor(record, "reservationId")!
     && typeof record.reservationId === "string" && UUID.test(record.reservationId);
 }
+function actor(value: unknown): value is ProjectAlphaProjectAdoptionBindActor {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) return false;
+  const record = value as Record<string, unknown>, keys = Reflect.ownKeys(record);
+  return keys.length === 2 && keys.every(key => typeof key === "string"
+      && ["staffId", "accessSubject"].includes(key)
+      && Object.getOwnPropertyDescriptor(record, key)?.enumerable === true
+      && "value" in Object.getOwnPropertyDescriptor(record, key)!)
+    && typeof record.staffId === "string" && record.staffId.length >= 1 && record.staffId.length <= 191
+    && !/[\u0000-\u001f\u007f]/.test(record.staffId)
+    && typeof record.accessSubject === "string" && record.accessSubject.length >= 1 && record.accessSubject.length <= 764
+    && !/[\u0000-\u001f\u007f]/.test(record.accessSubject);
+}
 function exact(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value)
     && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
@@ -118,7 +132,7 @@ async function stored(db: D1Database, reservationId: string): Promise<Receipt | 
     FROM project_alpha_project_adoption_bind_receipts WHERE reservation_id=?`)
     .bind(reservationId).first<Receipt>();
 }
-async function currentReplay(db: D1Database, receipt: Receipt): Promise<boolean> {
+async function currentReplay(db: D1Database, receipt: Receipt, caller: ProjectAlphaProjectAdoptionBindActor): Promise<boolean> {
   return !!await db.prepare(`SELECT 1 current
     FROM project_alpha_project_adoption_bind_receipts bridge
     JOIN project_alpha_project_adoption_review_reservations reservation
@@ -128,6 +142,13 @@ async function currentReplay(db: D1Database, receipt: Receipt): Promise<boolean>
     JOIN native_project_live_command_proofs proof ON proof.command_id=bridge.command_id
     WHERE bridge.bridge_id=? AND bridge.reservation_id=? AND bridge.command_id=? AND bridge.request_sha256=?
       AND review.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')
+      AND reservation.reviewer_staff_id=? AND reservation.reviewer_access_subject=?
+      AND EXISTS (SELECT 1 FROM native_staff_admissions admission
+        JOIN native_staff_profiles profile ON profile.staff_id=admission.staff_id
+        WHERE admission.staff_id=reservation.reviewer_staff_id AND admission.active=1
+          AND admission.bound_access_subject=reservation.reviewer_access_subject
+          AND admission.version=reservation.reviewer_admission_version
+          AND profile.version=reservation.reviewer_profile_version)
       AND proof.actor_staff_id=reservation.reviewer_staff_id
       AND proof.grant_generation=reservation.project_grant_generation
       AND EXISTS (SELECT 1 FROM staff_role_assignments owner_assignment
@@ -151,7 +172,15 @@ async function currentReplay(db: D1Database, receipt: Receipt): Promise<boolean>
         SELECT 1 FROM operations_directory_client_organizations relationship
         WHERE relationship.client_record_id=reservation.client_record_id
           AND relationship.organization_record_id=reservation.organization_record_id))`)
-    .bind(receipt.bridge_id, receipt.reservation_id, receipt.command_id, receipt.request_sha256).first("current");
+    .bind(receipt.bridge_id, receipt.reservation_id, receipt.command_id, receipt.request_sha256,
+      caller.staffId, caller.accessSubject).first("current");
+}
+async function currentActor(db: D1Database, source: Candidate): Promise<boolean> {
+  return !!await db.prepare(`SELECT 1 current FROM native_staff_admissions admission
+    JOIN native_staff_profiles profile ON profile.staff_id=admission.staff_id
+    WHERE admission.staff_id=? AND admission.active=1 AND admission.bound_access_subject=?
+      AND admission.version=? AND profile.version=?`).bind(source.reviewer_staff_id,
+    source.reviewer_access_subject, source.reviewer_admission_version, source.reviewer_profile_version).first("current");
 }
 async function candidate(db: D1Database, reservationId: string): Promise<Candidate | null> {
   return db.prepare(`SELECT reservation.reservation_id,reservation.source_id,reservation.source_instance_id,
@@ -170,24 +199,28 @@ async function candidate(db: D1Database, reservationId: string): Promise<Candida
       AND destination.expected_source_instance_id=reservation.source_instance_id
       AND destination.expected_history_epoch_id=reservation.history_epoch_id
     JOIN native_staff_profiles profile ON profile.staff_id=reservation.reviewer_staff_id
-      AND profile.version=reservation.reviewer_profile_version
     WHERE reservation.reservation_id=?`).bind(reservationId).first<Candidate>();
 }
 
 export async function planProjectAlphaProjectAdoptionBind(
   env: ProjectAlphaProjectAdoptionBindEnvironment,
+  caller: unknown,
   input: unknown,
 ): Promise<ProjectAlphaProjectAdoptionBindOutcome> {
+  if (!actor(caller)) return { status: "rejected", reason: "invalid_actor" };
   if (!action(input)) return { status: "rejected", reason: "invalid_action" };
   const db = env.OPS_DB.withSession("first-primary");
   try {
     const previous = await stored(db, input.reservationId);
-    if (previous) return await currentReplay(db, previous)
+    if (previous) return await currentReplay(db, previous, caller)
       ? { status: "planned", bridgeId: previous.bridge_id, reservationId: previous.reservation_id,
         commandId: previous.command_id, requestSha256: previous.request_sha256, replayed: true }
       : { status: "blocked", reason: "current_state" };
     const source = await candidate(db, input.reservationId);
     if (!source) return { status: "blocked", reason: "missing_reservation" };
+    if (source.reviewer_staff_id !== caller.staffId || source.reviewer_access_subject !== caller.accessSubject)
+      return { status: "blocked", reason: "caller" };
+    if (!await currentActor(db, source)) return { status: "blocked", reason: "current_state" };
     const project = await detail(source);
     if (!project) return { status: "blocked", reason: "invalid_evidence" };
 
@@ -248,7 +281,7 @@ export async function planProjectAlphaProjectAdoptionBind(
   } catch (error) {
     try {
       const winner = await stored(db, input.reservationId);
-      if (winner) return await currentReplay(db, winner)
+      if (winner) return await currentReplay(db, winner, caller)
         ? { status: "planned", bridgeId: winner.bridge_id, reservationId: winner.reservation_id,
           commandId: winner.command_id, requestSha256: winner.request_sha256, replayed: true }
         : { status: "blocked", reason: "current_state" };
