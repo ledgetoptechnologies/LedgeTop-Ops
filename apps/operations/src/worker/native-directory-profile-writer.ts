@@ -16,6 +16,9 @@ export type NativeDirectoryClientCreateProfile = Readonly<{
 }>;
 export type NativeDirectoryClientUpdateProfile = Omit<NativeDirectoryClientCreateProfile, "clientType">;
 export type NativeDirectoryScope = Readonly<{ businessAreaId: string; divisionId: string | null }>;
+export type NativeDirectoryClientRelationship = Readonly<{
+  organizationRecordId: string | null; expectedRelationshipVersion: number;
+}>;
 export type NativeDirectoryDestinationAuthority = Readonly<{
   sourceId: string; sourceInstanceUUID: string; applicationUUID: string; historyEpoch: string;
   /** Trusted service observation; HTTP routes must derive this server-side. */
@@ -31,15 +34,16 @@ type CommonWrite = Readonly<{
 }>;
 export type NativeDirectoryCreateWrite = CommonWrite & Readonly<{
   operation: "create"; expectedLocalVersion: 0; kind: "organization"; profile: NativeDirectoryOrganizationProfile;
-  scopes: readonly NativeDirectoryScope[];
+  scopes: readonly NativeDirectoryScope[]; createAdmissionId: string;
 }> | CommonWrite & Readonly<{
   operation: "create"; expectedLocalVersion: 0; kind: "client"; profile: NativeDirectoryClientCreateProfile;
-  scopes: readonly NativeDirectoryScope[];
+  scopes: readonly NativeDirectoryScope[]; createAdmissionId: string; relationship: NativeDirectoryClientRelationship;
 }>;
 export type NativeDirectoryUpdateWrite = CommonWrite & Readonly<{
   operation: "update"; expectedLocalVersion: number; kind: "organization"; profile: NativeDirectoryOrganizationProfile;
 }> | CommonWrite & Readonly<{
   operation: "update"; expectedLocalVersion: number; kind: "client"; profile: NativeDirectoryClientUpdateProfile;
+  relationship: NativeDirectoryClientRelationship;
 }>;
 export type NativeDirectoryProfileWrite = NativeDirectoryCreateWrite | NativeDirectoryUpdateWrite;
 export type NativeDirectoryProfileWriteOutcome =
@@ -50,6 +54,7 @@ type NormalizedWrite = Readonly<{
   operation: "create" | "update"; mutationId: string; recordId: string; kind: NativeDirectoryProfileKind;
   expectedLocalVersion: number; actor: NativeDirectoryWriterActor; profile: Record<string, string>;
   scopes: readonly NativeDirectoryScope[]; destinations: readonly NativeDirectoryDestinationAuthority[];
+  createAdmissionId: string | null; relationship: NativeDirectoryClientRelationship | null;
 }>;
 type DestinationIdentity = Omit<NativeDirectoryDestinationAuthority, "expectedAuthorizationGeneration">;
 type GrantRow = Readonly<{ id: string; effect: string; scope_kind: string; business_area_id: string | null; division_id: string | null; resource_id: string | null }>;
@@ -109,12 +114,17 @@ function normalize(input: NativeDirectoryProfileWrite): NormalizedWrite | null {
   if (!plain(input) || !UUID.test(input.mutationId) || !externalId(input.recordId) || (input.kind !== "organization" && input.kind !== "client")
     || (input.operation !== "create" && input.operation !== "update") || !Number.isSafeInteger(input.expectedLocalVersion)
     || input.expectedLocalVersion < 0 || (input.operation === "create") !== (input.expectedLocalVersion === 0)
+    || (input.operation === "create" && !boundedText(input.createAdmissionId, 191, true))
     || !plain(input.actor) || !exact(input.actor, ["staffId", "accessSubject", "admissionVersion", "selectedGrantId", "loginEmail", "profileVersion", "selectedIdentityGrantId"])
     || !boundedText(input.actor.staffId, 191, true) || !boundedText(input.actor.accessSubject, 191, true)
     || !boundedText(input.actor.selectedGrantId, 191, true) || !Number.isSafeInteger(input.actor.admissionVersion) || input.actor.admissionVersion < 1
     || !boundedText(input.actor.loginEmail, 254, true) || input.actor.loginEmail !== input.actor.loginEmail.trim().toLowerCase()
     || !Number.isSafeInteger(input.actor.profileVersion) || input.actor.profileVersion < 1 || !boundedText(input.actor.selectedIdentityGrantId, 191, true)
-    || (input.kind === "client" && !UUID.test(input.recordId))
+    || (input.kind === "client" && (!UUID.test(input.recordId) || !plain(input.relationship)
+      || !exact(input.relationship, ["organizationRecordId", "expectedRelationshipVersion"])
+      || (input.relationship.organizationRecordId !== null && (typeof input.relationship.organizationRecordId !== "string" || !UUID.test(input.relationship.organizationRecordId)))
+      || !Number.isSafeInteger(input.relationship.expectedRelationshipVersion) || input.relationship.expectedRelationshipVersion < 0
+      || (input.operation === "create" ? input.relationship.expectedRelationshipVersion !== 0 : input.relationship.expectedRelationshipVersion < 1)))
     || !profile(normalizedProfile, input.kind, input.operation) || !Array.isArray(input.destinations)
     || input.destinations.length < 1 || input.destinations.length > MAX_DESTINATIONS
     || !input.destinations.every(value => destination(value, input.recordId))) return null;
@@ -128,7 +138,9 @@ function normalize(input: NativeDirectoryProfileWrite): NormalizedWrite | null {
   if (new Set(normalizedScopes.map(value => `${value.businessAreaId}\0${value.divisionId ?? ""}`)).size !== normalizedScopes.length
     || new Set(normalizedDestinations.map(destinationKey)).size !== normalizedDestinations.length) return null;
   return { operation: input.operation, mutationId: input.mutationId, recordId: input.recordId, kind: input.kind,
-    expectedLocalVersion: input.expectedLocalVersion, actor: { ...input.actor }, profile: normalizedProfile, scopes: normalizedScopes, destinations: normalizedDestinations };
+    expectedLocalVersion: input.expectedLocalVersion, actor: { ...input.actor }, profile: normalizedProfile, scopes: normalizedScopes,
+    destinations: normalizedDestinations, createAdmissionId: input.operation === "create" ? input.createAdmissionId : null,
+    relationship: input.kind === "client" ? { ...input.relationship } : null };
 }
 function destinationKey(value: Pick<NativeDirectoryDestinationAuthority, "sourceId" | "sourceInstanceUUID" | "applicationUUID">): string {
   return `${value.sourceId}\0${value.sourceInstanceUUID}\0${value.applicationUUID}`;
@@ -173,9 +185,125 @@ async function authority(db: D1Database, write: NormalizedWrite, permission = "d
 function auditCommand(write: NormalizedWrite): string {
   return JSON.stringify({ operation: write.operation, mutationId: write.mutationId, resourceType: write.kind, recordId: write.recordId,
     expectedLocalVersion: write.expectedLocalVersion, actor: write.actor, fields: write.profile,
-    scopes: write.operation === "create" ? write.scopes : null, destinations: write.destinations });
+    scopes: write.operation === "create" ? write.scopes : null, destinations: write.destinations,
+    createAdmissionId: write.createAdmissionId, relationship: write.kind === "client" ? write.relationship : null });
 }
 type RemoteState = Readonly<{ projectAlphaPublicId: string; revision: string; authorizationGeneration: string }>;
+type RelationshipState = Readonly<{
+  organizationRecordId: string | null; organizationRecordVersion: number | null;
+  relationshipVersion: number; relationshipMutationId: string;
+}>;
+type RelationshipEvidence = Readonly<{
+  evidenceKind: "unlinked" | "parent_intent" | "existing_mapping" | "acquired_mapping";
+  parentPublicId: string | null; parentIntentId: string | null; parentMappingCommandId: string | null;
+  parentActivationId: string | null; parentAckRevision: string | null; parentAckCommandJson: string | null;
+  parentAckOutcomeJson: string | null;
+}>;
+
+async function linkedRelationshipEvidence(db: D1Database, relationship: RelationshipState,
+  destinationValue: NativeDirectoryDestinationAuthority): Promise<RelationshipEvidence | null> {
+  if (relationship.organizationRecordId === null || relationship.organizationRecordVersion === null) return {
+    evidenceKind: "unlinked", parentPublicId: null, parentIntentId: null, parentMappingCommandId: null,
+    parentActivationId: null, parentAckRevision: null, parentAckCommandJson: null, parentAckOutcomeJson: null,
+  };
+  const parentId = relationship.organizationRecordId, parentVersion = relationship.organizationRecordVersion;
+  const activeRows = (await db.prepare(`SELECT mapping.project_alpha_public_id parentPublicId,mapping.mapping_kind mappingKind,
+      mapping.provenance_id provenanceId
+    FROM project_alpha_active_directory_mappings mapping
+    JOIN operations_directory_records parent ON parent.record_id=mapping.external_id AND parent.record_kind='organization'
+      AND parent.current_version=?
+    JOIN operations_directory_revisions revision ON revision.record_id=parent.record_id AND revision.version=parent.current_version
+    JOIN native_directory_enrollments enrollment ON enrollment.record_id=parent.record_id
+    WHERE mapping.source_id=? AND mapping.source_instance_id=? AND mapping.application_id=? AND mapping.history_epoch_id=?
+      AND mapping.resource_type='organization' AND mapping.external_id=?
+      AND EXISTS(SELECT 1 FROM json_each(enrollment.destinations_json) enrolled
+        WHERE json_extract(enrolled.value,'$.sourceId')=mapping.source_id
+          AND json_extract(enrolled.value,'$.sourceInstanceUUID')=mapping.source_instance_id
+          AND json_extract(enrolled.value,'$.applicationUUID')=mapping.application_id
+          AND json_extract(enrolled.value,'$.historyEpoch')=mapping.history_epoch_id
+          AND json_extract(enrolled.value,'$.origin')=?
+          AND json_extract(enrolled.value,'$.externalCanonicalId')=mapping.external_id)
+    LIMIT 2`).bind(parentVersion, destinationValue.sourceId, destinationValue.sourceInstanceUUID,
+      destinationValue.applicationUUID, destinationValue.historyEpoch, parentId, destinationValue.origin)
+    .all<{ parentPublicId: string; mappingKind: string; provenanceId: string }>()).results;
+  if (activeRows.length !== 1 || !/^[0-9a-f]{32}$/.test(activeRows[0]!.parentPublicId)) return null;
+  const active = activeRows[0]!;
+  if (active.mappingKind === "acquired") {
+    const activation = await db.prepare(`SELECT activation_id parentActivationId,project_alpha_revision parentAckRevision
+      FROM project_alpha_existing_directory_binding_activation_receipts
+      WHERE activation_id=? AND source_id=? AND source_instance_id=? AND application_id=? AND history_epoch_id=?
+        AND resource_type='organization' AND external_id=? AND project_alpha_public_id=?`)
+      .bind(active.provenanceId, destinationValue.sourceId, destinationValue.sourceInstanceUUID,
+        destinationValue.applicationUUID, destinationValue.historyEpoch, parentId, active.parentPublicId)
+      .first<{ parentActivationId: string; parentAckRevision: string }>();
+    return activation && revision(activation.parentAckRevision) ? {
+      evidenceKind: "acquired_mapping", parentPublicId: active.parentPublicId, parentIntentId: null,
+      parentMappingCommandId: null, parentActivationId: activation.parentActivationId,
+      parentAckRevision: activation.parentAckRevision, parentAckCommandJson: null, parentAckOutcomeJson: null,
+    } : null;
+  }
+  if (active.mappingKind !== "legacy") return null;
+  const parentIntents = (await db.prepare(`SELECT intent.intent_id parentIntentId,mapping.project_alpha_public_id parentPublicId
+    FROM operations_directory_intents intent
+    JOIN operations_directory_materializations materialization ON materialization.intent_id=intent.intent_id
+      AND materialization.history_epoch_id=intent.expected_history_epoch_id
+    JOIN project_alpha_directory_outbox outbox ON outbox.command_id=materialization.command_id
+      AND outbox.state='acknowledged' AND outbox.source_id=intent.source_id
+      AND outbox.expected_source_instance_id=intent.source_instance_uuid AND outbox.application_id=intent.application_uuid
+      AND outbox.expected_history_epoch_id=intent.expected_history_epoch_id AND outbox.destination_base_url=intent.destination_origin
+      AND outbox.resource_type='organization' AND outbox.external_id=intent.external_canonical_id
+    JOIN project_alpha_directory_mappings mapping ON mapping.source_id=intent.source_id
+      AND mapping.source_instance_id=intent.source_instance_uuid AND mapping.application_id=intent.application_uuid
+      AND mapping.history_epoch_id=intent.expected_history_epoch_id AND mapping.resource_type='organization'
+      AND mapping.external_id=intent.external_canonical_id
+      AND mapping.project_alpha_public_id=json_extract(outbox.outcome_json,'$.response.result.data.publicId')
+    WHERE intent.record_id=? AND intent.record_version=? AND intent.state='acknowledged'
+      AND intent.source_id=? AND intent.source_instance_uuid=? AND intent.application_uuid=?
+      AND intent.expected_history_epoch_id=? AND intent.destination_origin=? AND intent.external_canonical_id=?
+      AND mapping.project_alpha_public_id=?
+      AND json_extract(outbox.outcome_json,'$.status')='acknowledged'
+      AND json_extract(outbox.outcome_json,'$.response.historyEpoch')=intent.expected_history_epoch_id
+      AND json_extract(outbox.outcome_json,'$.response.sourceInstanceId')=intent.source_instance_uuid
+      AND json_extract(outbox.outcome_json,'$.response.applicationId')=intent.application_uuid
+      AND json_extract(outbox.outcome_json,'$.response.result.resource.type')='organization'
+      AND json_extract(outbox.outcome_json,'$.response.result.resource.id')=intent.external_canonical_id
+    LIMIT 2`).bind(parentId, parentVersion, destinationValue.sourceId, destinationValue.sourceInstanceUUID,
+      destinationValue.applicationUUID, destinationValue.historyEpoch, destinationValue.origin, parentId, active.parentPublicId)
+    .all<{ parentIntentId: string; parentPublicId: string }>()).results;
+  if (parentIntents.length === 1) return {
+    evidenceKind: "parent_intent", parentPublicId: parentIntents[0]!.parentPublicId,
+    parentIntentId: parentIntents[0]!.parentIntentId, parentMappingCommandId: null, parentActivationId: null,
+    parentAckRevision: null, parentAckCommandJson: null, parentAckOutcomeJson: null,
+  };
+  if (parentIntents.length > 1) return null;
+  const legacy = await db.prepare(`SELECT mapping.command_id parentMappingCommandId,mapping.project_alpha_public_id parentPublicId,
+      json_extract(outbox.outcome_json,'$.response.result.resource.revision') parentAckRevision,
+      outbox.command_json parentAckCommandJson,outbox.outcome_json parentAckOutcomeJson
+    FROM project_alpha_directory_mappings mapping JOIN project_alpha_directory_outbox outbox ON outbox.command_id=mapping.command_id
+    WHERE mapping.source_id=? AND mapping.source_instance_id=? AND mapping.application_id=? AND mapping.history_epoch_id=?
+      AND mapping.resource_type='organization' AND mapping.external_id=? AND mapping.project_alpha_public_id=?
+      AND outbox.state='acknowledged' AND outbox.source_id=mapping.source_id
+      AND outbox.expected_source_instance_id=mapping.source_instance_id AND outbox.application_id=mapping.application_id
+      AND outbox.expected_history_epoch_id=mapping.history_epoch_id AND outbox.destination_base_url=?
+      AND outbox.resource_type='organization' AND outbox.external_id=mapping.external_id
+      AND json_extract(outbox.outcome_json,'$.status')='acknowledged'
+      AND json_extract(outbox.outcome_json,'$.response.historyEpoch')=mapping.history_epoch_id
+      AND json_extract(outbox.outcome_json,'$.response.sourceInstanceId')=mapping.source_instance_id
+      AND json_extract(outbox.outcome_json,'$.response.applicationId')=mapping.application_id
+      AND json_extract(outbox.outcome_json,'$.response.result.resource.type')='organization'
+      AND json_extract(outbox.outcome_json,'$.response.result.resource.id')=mapping.external_id
+      AND json_extract(outbox.outcome_json,'$.response.result.data.publicId')=mapping.project_alpha_public_id`)
+    .bind(destinationValue.sourceId, destinationValue.sourceInstanceUUID, destinationValue.applicationUUID,
+      destinationValue.historyEpoch, parentId, active.parentPublicId, destinationValue.origin)
+    .first<{ parentMappingCommandId: string; parentPublicId: string; parentAckRevision: string;
+      parentAckCommandJson: string; parentAckOutcomeJson: string }>();
+  return legacy && revision(legacy.parentAckRevision) ? {
+    evidenceKind: "existing_mapping", parentPublicId: legacy.parentPublicId, parentIntentId: null,
+    parentMappingCommandId: legacy.parentMappingCommandId, parentActivationId: null,
+    parentAckRevision: legacy.parentAckRevision, parentAckCommandJson: legacy.parentAckCommandJson,
+    parentAckOutcomeJson: legacy.parentAckOutcomeJson,
+  } : null;
+}
 async function updateRemoteState(db: D1Database, write: NormalizedWrite, destinationValue: NativeDirectoryDestinationAuthority): Promise<RemoteState | null> {
   const pending = await db.prepare(`SELECT 1 present FROM project_alpha_directory_outbox WHERE source_id=? AND expected_source_instance_id=?
     AND application_id=? AND expected_history_epoch_id=? AND resource_type=? AND external_id=? AND state<>'acknowledged' LIMIT 1`)
@@ -250,10 +378,10 @@ async function updateRemoteState(db: D1Database, write: NormalizedWrite, destina
 
 /**
  * Persists a canonical native Directory profile mutation and reserves its PA
- * outbox work. It performs no HTTP work. Standalone clients receive an
- * explicit versioned unlinked relationship decision and per-intent dependency;
- * their transport-only fields materialize organizationPublicId:null. Linked
- * client profile writes remain fail-closed in this bounded slice.
+ * outbox work. It performs no HTTP work. Every client write carries an exact
+ * relationship assertion and pins each intent to unlinked, parent-intent,
+ * legacy-mapping, or acquired-mapping evidence. Relationship fields remain
+ * transport-only and never enter the canonical profile revision.
  */
 export async function writeNativeDirectoryProfile(db: D1Database, input: NativeDirectoryProfileWrite): Promise<NativeDirectoryProfileWriteOutcome> {
   const write = normalize(input); if (!write) return { status: "rejected", reason: "invalid_write" };
@@ -274,23 +402,43 @@ export async function writeNativeDirectoryProfile(db: D1Database, input: NativeD
   if (write.operation === "create" ? !!record : !record || record.record_kind !== write.kind || record.current_version !== write.expectedLocalVersion)
     return { status: "conflict", reason: write.operation === "create" ? "record_exists" : "stale_local_version" };
   if (!await authority(db, write)) return { status: "blocked", reason: "native_directory_authority" };
-  let relationshipVersion: number | null = null, relationshipMutationId: string | null = null;
+  let relationshipState: RelationshipState | null = null;
   if (write.kind === "client") {
     if (!await authority(db, write, "directory.identity.link", write.actor.selectedIdentityGrantId))
       return { status: "blocked", reason: "native_directory_identity_authority" };
     if (write.operation === "create") {
-      relationshipVersion = 1;
-      relationshipMutationId = await deterministicUuid(`${write.mutationId}\0standalone-client-relationship`);
+      const organizationRecordId = write.relationship!.organizationRecordId;
+      let organizationRecordVersion: number | null = null;
+      if (organizationRecordId !== null) {
+        const parent = await db.prepare(`SELECT record.current_version version FROM operations_directory_records record
+          JOIN operations_directory_revisions revision ON revision.record_id=record.record_id AND revision.version=record.current_version
+          JOIN native_directory_enrollments enrollment ON enrollment.record_id=record.record_id
+          WHERE record.record_id=? AND record.record_kind='organization'`).bind(organizationRecordId).first<{ version: number }>();
+        if (!parent || !Number.isSafeInteger(parent.version) || parent.version < 1)
+          return { status: "blocked", reason: "client_relationship_parent_state" };
+        organizationRecordVersion = parent.version;
+      }
+      relationshipState = { organizationRecordId, organizationRecordVersion, relationshipVersion: 1,
+        relationshipMutationId: await deterministicUuid(`${write.mutationId}\0client-relationship\0${organizationRecordId ?? "unlinked"}`) };
     } else {
-      const relationship = await db.prepare(`SELECT relation.organization_record_id,relation.relationship_version,history.mutation_id
+      const relationship = await db.prepare(`SELECT relation.organization_record_id,relation.relationship_version,history.mutation_id,
+          parent.current_version organization_record_version
         FROM operations_directory_client_organizations relation JOIN operations_directory_client_organization_history history
           ON history.client_record_id=relation.client_record_id AND history.relationship_version=relation.relationship_version
+        LEFT JOIN operations_directory_records parent ON parent.record_id=relation.organization_record_id AND parent.record_kind='organization'
+        LEFT JOIN operations_directory_revisions parent_revision ON parent_revision.record_id=parent.record_id AND parent_revision.version=parent.current_version
+        LEFT JOIN native_directory_enrollments parent_enrollment ON parent_enrollment.record_id=parent.record_id
         WHERE relation.client_record_id=?`).bind(write.recordId)
-        .first<{ organization_record_id: string | null; relationship_version: number; mutation_id: string }>();
+        .first<{ organization_record_id: string | null; relationship_version: number; mutation_id: string; organization_record_version: number | null }>();
       if (!relationship) return { status: "blocked", reason: "client_relationship_missing" };
-      if (relationship.organization_record_id !== null) return { status: "blocked", reason: "client_relationship_linked_out_of_scope" };
-      relationshipVersion = relationship.relationship_version;
-      relationshipMutationId = relationship.mutation_id;
+      if (relationship.organization_record_id !== write.relationship!.organizationRecordId
+        || relationship.relationship_version !== write.relationship!.expectedRelationshipVersion
+        || (relationship.organization_record_id !== null && (!Number.isSafeInteger(relationship.organization_record_version)
+          || relationship.organization_record_version === null || relationship.organization_record_version < 1)))
+        return { status: "blocked", reason: "client_relationship_mismatch" };
+      relationshipState = { organizationRecordId: relationship.organization_record_id,
+        organizationRecordVersion: relationship.organization_record_version,
+        relationshipVersion: relationship.relationship_version, relationshipMutationId: relationship.mutation_id };
     }
   }
   let enrolled: readonly DestinationIdentity[] = write.destinations.map(identity);
@@ -302,20 +450,30 @@ export async function writeNativeDirectoryProfile(db: D1Database, input: NativeD
     if (JSON.stringify(enrolled) !== JSON.stringify(requested)) return { status: "blocked", reason: "enrollment_drift" };
     for (const value of write.destinations) { const state = await updateRemoteState(db, write, value); if (!state) return { status: "blocked", reason: "mapping_or_delivery_state" }; remote.set(destinationKey(value), state); }
   }
+  const relationshipEvidence = new Map<string, RelationshipEvidence>();
+  if (relationshipState) {
+    for (const value of write.destinations) {
+      const evidence = await linkedRelationshipEvidence(db, relationshipState, value);
+      if (!evidence) return { status: "blocked", reason: "client_relationship_evidence" };
+      relationshipEvidence.set(destinationKey(value), evidence);
+    }
+  }
   const nextVersion = write.expectedLocalVersion + 1;
   const scopesJson = JSON.stringify(write.scopes), profileJson = JSON.stringify(write.profile), destinationsJson = JSON.stringify(enrolled);
+  if (write.operation === "create" && !await db.prepare(`SELECT 1 ok FROM native_directory_create_admissions
+    WHERE id=? AND staff_id=? AND bound_access_subject=? AND record_id=? AND record_kind=? AND active=1
+      AND consumed_mutation_id IS NULL AND consumed_at IS NULL AND json(scopes_json)=json(?)
+      AND json(profile_json)=json(?) AND json(destinations_json)=json(?)`).bind(write.createAdmissionId,
+      write.actor.staffId, write.actor.accessSubject, write.recordId, write.kind, scopesJson, profileJson, destinationsJson).first("ok"))
+    return { status: "blocked", reason: "create_admission" };
   const commandIds = await Promise.all(write.destinations.map(value => commandId(write.mutationId, value)));
   const statements: D1PreparedStatement[] = [];
-  const admissionId = `${write.mutationId}:create-admission`;
-  if (write.operation === "create") statements.push(db.prepare(`INSERT INTO native_directory_create_admissions
-    (id,staff_id,bound_access_subject,record_id,record_kind,scopes_json,profile_json,destinations_json,issued_by) VALUES(?,?,?,?,?,?,?,?,?)`)
-    .bind(admissionId, write.actor.staffId, write.actor.accessSubject, write.recordId, write.kind, scopesJson, profileJson, destinationsJson, write.actor.staffId));
   statements.push(db.prepare(`INSERT INTO operations_directory_write_fences
     (mutation_id,operation_kind,actor_id,bound_access_subject,actor_admission_version,permission,record_id,record_kind,expected_version,
       create_admission_id,selected_grant_id,scopes_json,profile_json,command_json,destinations_json,intent_writes)
     VALUES(?,?,?,?,?,'directory.profile.edit',?,?,?,?,?,?,?,?,?,?)`).bind(write.mutationId, write.operation, write.actor.staffId,
       write.actor.accessSubject, write.actor.admissionVersion, write.recordId, write.kind, write.expectedLocalVersion,
-      write.operation === "create" ? admissionId : null, write.actor.selectedGrantId, scopesJson, profileJson, auditJson, destinationsJson, write.destinations.length));
+      write.createAdmissionId, write.actor.selectedGrantId, scopesJson, profileJson, auditJson, destinationsJson, write.destinations.length));
   statements.push(write.operation === "create"
     ? db.prepare(`INSERT INTO operations_directory_records(record_id,record_kind,current_version) VALUES(?,?,1)`).bind(write.recordId, write.kind)
     : db.prepare(`UPDATE operations_directory_records SET current_version=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE record_id=? AND current_version=?`)
@@ -326,7 +484,8 @@ export async function writeNativeDirectoryProfile(db: D1Database, input: NativeD
   const materializations: D1PreparedStatement[] = [];
   write.destinations.forEach((value, index) => {
     const intentId = `${write.mutationId}:intent:${index}`, state = remote.get(destinationKey(value));
-    const fields = write.kind === "client" ? { ...write.profile, organizationPublicId: null } : write.profile;
+    const evidence = relationshipEvidence.get(destinationKey(value));
+    const fields = write.kind === "client" ? { ...write.profile, organizationPublicId: evidence?.parentPublicId ?? null } : write.profile;
     const materialized = write.operation === "create"
       ? { operation: "create", commandId: commandIds[index], resourceType: write.kind, externalId: write.recordId, expectedRevision: "0",
           expectedAuthorizationGeneration: value.expectedAuthorizationGeneration, fields, scopes: write.scopes }
@@ -351,20 +510,27 @@ export async function writeNativeDirectoryProfile(db: D1Database, input: NativeD
       statements.push(db.prepare(`INSERT INTO operations_directory_relationship_write_fences(mutation_id,client_record_id,
         expected_relationship_version,previous_organization_record_id,organization_record_id,client_record_version,
         previous_organization_record_version,organization_record_version,actor_staff_id,actor_access_subject,actor_email,
-        actor_admission_version,actor_profile_version,verified_until) VALUES(?,?,0,NULL,NULL,1,NULL,NULL,?,?,?,?,?,?)`)
-        .bind(relationshipMutationId, write.recordId, write.actor.staffId, write.actor.accessSubject, write.actor.loginEmail,
+        actor_admission_version,actor_profile_version,verified_until) VALUES(?,?,0,NULL,?,1,NULL,?,?,?,?,?,?,?)`)
+        .bind(relationshipState!.relationshipMutationId, write.recordId, relationshipState!.organizationRecordId,
+          relationshipState!.organizationRecordVersion, write.actor.staffId, write.actor.accessSubject, write.actor.loginEmail,
           write.actor.admissionVersion, write.actor.profileVersion, verifiedUntil));
       statements.push(db.prepare(`INSERT INTO operations_directory_client_organizations(client_record_id,organization_record_id,relationship_version)
-        VALUES(?,NULL,1)`).bind(write.recordId));
-      statements.push(db.prepare(`DELETE FROM operations_directory_relationship_write_fences WHERE mutation_id=?`).bind(relationshipMutationId));
+        VALUES(?,?,1)`).bind(write.recordId, relationshipState!.organizationRecordId));
+      statements.push(db.prepare(`DELETE FROM operations_directory_relationship_write_fences WHERE mutation_id=?`).bind(relationshipState!.relationshipMutationId));
     }
     write.destinations.forEach((value, index) => {
+      const evidence = relationshipEvidence.get(destinationKey(value))!;
       statements.push(db.prepare(`INSERT INTO operations_directory_intent_relationship_dependencies(
         intent_id,client_record_id,client_record_version,relationship_version,relationship_mutation_id,organization_record_id,
         organization_record_version,source_id,source_instance_uuid,application_uuid,history_epoch_id,destination_origin,
-        parent_external_canonical_id,evidence_kind) VALUES(?,?,?,?,?,NULL,NULL,?,?,?,?,?,NULL,'unlinked')`)
-        .bind(`${write.mutationId}:intent:${index}`, write.recordId, nextVersion, relationshipVersion, relationshipMutationId,
-          value.sourceId, value.sourceInstanceUUID, value.applicationUUID, value.historyEpoch, value.origin));
+        parent_external_canonical_id,evidence_kind,parent_intent_id,parent_mapping_command_id,parent_activation_id,parent_public_id,
+        parent_ack_revision,parent_ack_command_json,parent_ack_outcome_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .bind(`${write.mutationId}:intent:${index}`, write.recordId, nextVersion, relationshipState!.relationshipVersion,
+          relationshipState!.relationshipMutationId, relationshipState!.organizationRecordId, relationshipState!.organizationRecordVersion,
+          value.sourceId, value.sourceInstanceUUID, value.applicationUUID, value.historyEpoch, value.origin,
+          relationshipState!.organizationRecordId, evidence.evidenceKind, evidence.parentIntentId, evidence.parentMappingCommandId,
+          evidence.parentActivationId, evidence.evidenceKind === "parent_intent" ? null : evidence.parentPublicId, evidence.parentAckRevision,
+          evidence.parentAckCommandJson, evidence.parentAckOutcomeJson));
     });
   }
   statements.push(...materializations);

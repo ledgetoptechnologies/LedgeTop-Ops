@@ -41,12 +41,19 @@ async function seedActor(scope: "global" | "business_area" = "global") {
   return { staffId: id, accessSubject, admissionVersion: 1, selectedGrantId: grantId,
     loginEmail, profileVersion: 1, selectedIdentityGrantId: identityGrantId } as const;
 }
-async function create(kind: "organization" | "client", actor?: Awaited<ReturnType<typeof seedActor>>, requestedRecordId?: string) {
+async function create(kind: "organization" | "client", actor?: Awaited<ReturnType<typeof seedActor>>, requestedRecordId?: string,
+  organizationRecordId: string | null = null) {
   actor ??= await seedActor();
   const recordId = requestedRecordId ?? (kind === "client" ? uuid() : `ops/${kind}/${sequence++}`), mutationId = uuid();
-  const input = { operation: "create", mutationId, recordId, expectedLocalVersion: 0, kind,
+  const createAdmissionId = `admission-${mutationId}`;
+  const input = { operation: "create", mutationId, recordId, expectedLocalVersion: 0, kind, createAdmissionId,
     profile: kind === "organization" ? organizationProfile : clientProfile, scopes: [{ businessAreaId: "area", divisionId: "division" }],
-    destinations: [destination(recordId)], actor } as NativeDirectoryProfileWrite;
+    destinations: [destination(recordId)], actor,
+    ...(kind === "client" ? { relationship: { organizationRecordId, expectedRelationshipVersion: 0 } } : {}) } as NativeDirectoryProfileWrite;
+  await db.prepare(`INSERT INTO native_directory_create_admissions
+    (id,staff_id,bound_access_subject,record_id,record_kind,scopes_json,profile_json,destinations_json,issued_by)
+    VALUES(?,?,?,?,?,?,?,?,?)`).bind(createAdmissionId, actor.staffId, actor.accessSubject, recordId, kind,
+      JSON.stringify(input.scopes), JSON.stringify(input.profile), JSON.stringify(input.destinations.map(({ expectedAuthorizationGeneration: _, ...value }) => value)), actor.staffId).run();
   const outcome = await writeNativeDirectoryProfile(db, input);
   return { input, outcome, actor };
 }
@@ -55,7 +62,7 @@ function written(outcome: NativeDirectoryProfileWriteOutcome) {
   if (outcome.status !== "written") throw new Error(`write failed: ${outcome.reason}`);
   return outcome;
 }
-async function acknowledgeCreate(input: NativeDirectoryProfileWrite, outcome: NativeDirectoryProfileWriteOutcome, generation = "1") {
+async function acknowledgeCreate(input: NativeDirectoryProfileWrite, outcome: NativeDirectoryProfileWriteOutcome, generation = "1", acknowledgeIntent = true) {
   const result = written(outcome), id = publicId();
   for (const commandId of result.commandIds) {
     await db.prepare(`UPDATE project_alpha_directory_outbox SET state='leased',attempts=1,lease_token='lease',lease_expires_at=9999999999999 WHERE command_id=? AND state='pending'`).bind(commandId).run();
@@ -63,11 +70,12 @@ async function acknowledgeCreate(input: NativeDirectoryProfileWrite, outcome: Na
       source_instance_id,application_id,history_epoch_id,command_id) VALUES(?,?,?,?,?,?,?,?)`)
       .bind(sourceId, input.kind, input.recordId, id, sourceInstanceUUID, applicationUUID, historyEpoch, commandId).run();
     const response = { status: "acknowledged", response: { sourceInstanceId: sourceInstanceUUID, applicationId: applicationUUID,
-      historyEpoch, result: { resource: { type: input.kind, publicId: id, revision: "1" }, authorizationGeneration: generation } } };
+      historyEpoch, result: { resource: { type: input.kind, id: input.recordId, publicId: id, revision: "1" },
+        data: { publicId: id }, authorizationGeneration: generation } } };
     await db.prepare(`UPDATE project_alpha_directory_outbox SET state='acknowledged',outcome_json=?,lease_token=NULL,lease_expires_at=NULL WHERE command_id=? AND state='leased'`)
       .bind(JSON.stringify(response), commandId).run();
   }
-  await db.prepare(`UPDATE operations_directory_intents SET state='acknowledged' WHERE mutation_id=? AND state='materialized'`).bind(input.mutationId).run();
+  if (acknowledgeIntent) await db.prepare(`UPDATE operations_directory_intents SET state='acknowledged' WHERE mutation_id=? AND state='materialized'`).bind(input.mutationId).run();
   return id;
 }
 async function count(table: string): Promise<number> { return await db.prepare(`SELECT count(*) count FROM ${table}`).first<number>("count") ?? -1; }
@@ -76,7 +84,7 @@ beforeAll(async () => {
   runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06", script: "export default {fetch(){return new Response('ok')}}", d1Databases: ["OPS_DB"] });
   db = await runtime.getD1Database("OPS_DB") as D1Database;
   const directory = new URL("../migrations/", import.meta.url);
-  const migrations = readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0125").sort();
+  const migrations = readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0132").sort();
   for (const migration of migrations) await db.batch(splitD1MigrationStatements(readFileSync(new URL(migration, directory), "utf8")).map(sql => db.prepare(sql)));
   await db.batch([
     db.prepare(`INSERT INTO staff_users(id,email,display_name,access_subject,status) VALUES('owner','owner@example.test','Owner','access|owner','active')`),
@@ -119,6 +127,43 @@ describe("canonical native Directory profile writer", () => {
       .toBe("unlinked");
   });
 
+  it("creates and updates a linked client from current parent-intent evidence without storing relationship data in its profile", async () => {
+    const actor = await seedActor(), organization = await create("organization", actor, uuid());
+    const organizationPublicId = await acknowledgeCreate(organization.input, organization.outcome);
+    const client = await create("client", actor, undefined, organization.input.recordId), created = written(client.outcome);
+    expect(await db.prepare(`SELECT evidence_kind,parent_intent_id,parent_public_id FROM operations_directory_intent_relationship_dependencies
+      WHERE client_record_id=?`).bind(client.input.recordId).first()).toMatchObject({ evidence_kind: "parent_intent",
+      parent_intent_id: `${organization.input.mutationId}:intent:0`, parent_public_id: null });
+    const createCommand = JSON.parse((await db.prepare("SELECT command_json FROM project_alpha_directory_outbox WHERE command_id=?")
+      .bind(created.commandIds[0]).first<string>("command_json"))!);
+    expect(createCommand.fields.organizationPublicId).toBe(organizationPublicId);
+    expect(JSON.parse((await db.prepare("SELECT profile_json FROM operations_directory_revisions WHERE record_id=?")
+      .bind(client.input.recordId).first<string>("profile_json"))!)).toEqual(clientProfile);
+    await acknowledgeCreate(client.input, client.outcome);
+    const updateProfile = { name: "Linked Client", email: clientProfile.email, phone: clientProfile.phone,
+      addressLine1: clientProfile.addressLine1, addressLine2: clientProfile.addressLine2, city: clientProfile.city,
+      state: clientProfile.state, postalCode: clientProfile.postalCode, country: clientProfile.country };
+    const updated = written(await writeNativeDirectoryProfile(db, { operation: "update", mutationId: uuid(),
+      recordId: client.input.recordId, expectedLocalVersion: 1, kind: "client", profile: updateProfile,
+      relationship: { organizationRecordId: organization.input.recordId, expectedRelationshipVersion: 1 },
+      destinations: [destination(client.input.recordId, "1")], actor }));
+    const updateCommand = JSON.parse((await db.prepare("SELECT command_json FROM project_alpha_directory_outbox WHERE command_id=?")
+      .bind(updated.commandIds[0]).first<string>("command_json"))!);
+    expect(updateCommand.fields).toEqual({ ...updateProfile, organizationPublicId });
+  });
+
+  it("pins legacy mapping evidence when no acknowledged current parent intent is available", async () => {
+    const actor = await seedActor(), organization = await create("organization", actor, uuid());
+    const organizationPublicId = await acknowledgeCreate(organization.input, organization.outcome, "1", false);
+    const client = await create("client", actor, undefined, organization.input.recordId), created = written(client.outcome);
+    expect(await db.prepare(`SELECT evidence_kind,parent_mapping_command_id,parent_public_id,parent_ack_revision
+      FROM operations_directory_intent_relationship_dependencies WHERE client_record_id=?`).bind(client.input.recordId).first())
+      .toEqual({ evidence_kind: "existing_mapping", parent_mapping_command_id: written(organization.outcome).commandIds[0],
+        parent_public_id: organizationPublicId, parent_ack_revision: "1" });
+    expect(JSON.parse((await db.prepare("SELECT command_json FROM project_alpha_directory_outbox WHERE command_id=?")
+      .bind(created.commandIds[0]).first<string>("command_json"))!).fields.organizationPublicId).toBe(organizationPublicId);
+  });
+
   it("updates organization and client profiles from enrolled destinations and active mappings", async () => {
     for (const kind of ["organization", "client"] as const) {
       const seeded = await create(kind); await acknowledgeCreate(seeded.input, seeded.outcome);
@@ -126,7 +171,8 @@ describe("canonical native Directory profile writer", () => {
         : { name: "Updated Client", email: clientProfile.email, phone: clientProfile.phone, addressLine1: clientProfile.addressLine1,
             addressLine2: clientProfile.addressLine2, city: clientProfile.city, state: clientProfile.state, postalCode: clientProfile.postalCode, country: clientProfile.country };
       const update = { operation: "update", mutationId, recordId: seeded.input.recordId, expectedLocalVersion: 1, kind, profile,
-        destinations: [destination(seeded.input.recordId, "1")], actor: seeded.actor } as NativeDirectoryProfileWrite;
+        destinations: [destination(seeded.input.recordId, "1")], actor: seeded.actor,
+        ...(kind === "client" ? { relationship: { organizationRecordId: null, expectedRelationshipVersion: 1 } } : {}) } as NativeDirectoryProfileWrite;
       const result = written(await writeNativeDirectoryProfile(db, update));
       expect(result.version).toBe(2);
       const command = JSON.parse((await db.prepare(`SELECT command_json FROM project_alpha_directory_outbox WHERE command_id=?`).bind(result.commandIds[0]).first<string>("command_json"))!);
@@ -152,8 +198,9 @@ describe("canonical native Directory profile writer", () => {
     await expect(writeNativeDirectoryProfile(db, { operation: "update", mutationId: uuid(), recordId: client.input.recordId,
       expectedLocalVersion: 1, kind: "client", profile: { name: clientProfile.name, email: clientProfile.email, phone: clientProfile.phone,
         addressLine1: clientProfile.addressLine1, addressLine2: clientProfile.addressLine2, city: clientProfile.city, state: clientProfile.state,
-        postalCode: clientProfile.postalCode, country: clientProfile.country }, destinations: [destination(client.input.recordId, "1")], actor }))
-      .resolves.toEqual({ status: "blocked", reason: "client_relationship_linked_out_of_scope" });
+        postalCode: clientProfile.postalCode, country: clientProfile.country }, destinations: [destination(client.input.recordId, "1")], actor,
+        relationship: { organizationRecordId: null, expectedRelationshipVersion: 1 } }))
+      .resolves.toEqual({ status: "blocked", reason: "client_relationship_mismatch" });
   });
 
   it("resolves acquired active mappings from activation or same-local-version refresh evidence", async () => {
@@ -210,9 +257,13 @@ describe("canonical native Directory profile writer", () => {
   });
 
   it("rolls back every guarded write when a late materialization statement fails", async () => {
-    const actor = await seedActor(), recordId = `ops/organization/${sequence++}`, mutationId = uuid(), value = { operation: "create", mutationId,
-      recordId, expectedLocalVersion: 0, kind: "organization", profile: organizationProfile,
+    const actor = await seedActor(), recordId = `ops/organization/${sequence++}`, mutationId = uuid(), createAdmissionId = `admission-${mutationId}`,
+      value = { operation: "create", mutationId, createAdmissionId, recordId, expectedLocalVersion: 0, kind: "organization", profile: organizationProfile,
       scopes: [{ businessAreaId: "area", divisionId: "division" }], destinations: [destination(recordId)], actor } as NativeDirectoryProfileWrite;
+    await db.prepare(`INSERT INTO native_directory_create_admissions
+      (id,staff_id,bound_access_subject,record_id,record_kind,scopes_json,profile_json,destinations_json,issued_by) VALUES(?,?,?,?,?,?,?,?,?)`)
+      .bind(createAdmissionId, actor.staffId, actor.accessSubject, recordId, "organization", JSON.stringify(value.scopes),
+        JSON.stringify(value.profile), JSON.stringify(value.destinations.map(({ expectedAuthorizationGeneration: _, ...entry }) => entry)), actor.staffId).run();
     let prepared = 0;
     const failing = new Proxy(db, { get(target, property) {
       if (property === "prepare") return (sql: string) => { prepared++; return target.prepare(prepared === 8 ? "INSERT INTO missing_late_table VALUES(1)" : sql); };

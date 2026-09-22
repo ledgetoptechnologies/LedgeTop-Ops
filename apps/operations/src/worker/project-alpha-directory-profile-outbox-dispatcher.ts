@@ -31,6 +31,11 @@ type Actor = Readonly<{ staffId: string; accessSubject: string; admissionVersion
 type Grant = Readonly<{ id: string; effect: string; scope_kind: string; business_area_id: string | null; division_id: string | null; resource_id: string | null }>;
 type Internal = Readonly<{ operation: "create" | "update"; transport: ProjectAlphaDirectoryCreateCommand | ProjectAlphaDirectoryProfileUpdateCommand;
   publicId: string | null; actor: Actor }>;
+type RelationshipDependency = Readonly<{
+  evidence_kind: "unlinked" | "parent_intent" | "existing_mapping" | "acquired_mapping";
+  organization_record_id: string | null; organization_record_version: number | null;
+  parent_external_canonical_id: string | null; resolved_parent_public_id: string | null;
+}>;
 
 export type ProjectAlphaDirectoryProfileOutboxDispatcherOutcome =
   | Readonly<{ status: "acknowledged"; commandId: string; replayed: boolean; publicId: string; revision: string }>
@@ -89,6 +94,71 @@ async function activeMapping(db: D1Database, row: Row): Promise<{ project_alpha_
     .bind(row.source_id, row.expected_source_instance_id, row.application_id, row.expected_history_epoch_id, row.resource_type, row.external_id)
     .first<{ project_alpha_public_id: string; mapping_kind: string }>();
 }
+async function relationshipDependency(db: D1Database, row: Row): Promise<RelationshipDependency | null> {
+  const dependencies = (await db.prepare(`SELECT dependency.evidence_kind,dependency.organization_record_id,
+      dependency.organization_record_version,dependency.parent_external_canonical_id,resolved.resolved_parent_public_id
+    FROM operations_directory_intent_relationship_dependencies dependency
+    JOIN operations_directory_intent_relationship_resolved resolved ON resolved.intent_id=dependency.intent_id
+    WHERE dependency.intent_id=? AND dependency.client_record_id=? AND dependency.client_record_version=?
+      AND dependency.source_id=? AND dependency.source_instance_uuid=? AND dependency.application_uuid=?
+      AND dependency.history_epoch_id=? AND dependency.destination_origin=?
+    LIMIT 2`).bind(row.intent_id, row.record_id, row.record_version, row.source_id, row.expected_source_instance_id,
+      row.application_id, row.expected_history_epoch_id, row.destination_base_url).all<RelationshipDependency>()).results;
+  if (dependencies.length !== 1) return null;
+  const dependency = dependencies[0]!;
+  if (dependency.evidence_kind === "unlinked") return dependency.parent_external_canonical_id === null
+    && dependency.organization_record_id === null && dependency.organization_record_version === null
+    && dependency.resolved_parent_public_id === null ? dependency : null;
+  return typeof dependency.parent_external_canonical_id === "string" && dependency.parent_external_canonical_id.length > 0
+    && dependency.organization_record_id === dependency.parent_external_canonical_id
+    && typeof dependency.organization_record_version === "number" && Number.isSafeInteger(dependency.organization_record_version)
+    && dependency.organization_record_version >= 1
+    && typeof dependency.resolved_parent_public_id === "string" && /^[0-9a-f]{32}$/.test(dependency.resolved_parent_public_id)
+    ? dependency : null;
+}
+async function currentParentRevision(db: D1Database, row: Row, dependency: RelationshipDependency): Promise<string | null> {
+  if (dependency.organization_record_id === null || dependency.organization_record_version === null
+    || dependency.resolved_parent_public_id === null) return null;
+  const candidates = (await db.prepare(`SELECT DISTINCT revision FROM (
+      SELECT json_extract(outbox.outcome_json,'$.response.result.resource.revision') revision
+      FROM operations_directory_intents intent
+      JOIN operations_directory_materializations materialization ON materialization.intent_id=intent.intent_id
+        AND materialization.history_epoch_id=intent.expected_history_epoch_id
+      JOIN project_alpha_directory_outbox outbox ON outbox.command_id=materialization.command_id
+        AND outbox.state='acknowledged' AND outbox.source_id=intent.source_id
+        AND outbox.expected_source_instance_id=intent.source_instance_uuid AND outbox.application_id=intent.application_uuid
+        AND outbox.expected_history_epoch_id=intent.expected_history_epoch_id AND outbox.destination_base_url=intent.destination_origin
+        AND outbox.resource_type='organization' AND outbox.external_id=intent.external_canonical_id
+      WHERE intent.record_id=? AND intent.record_version=? AND intent.state='acknowledged'
+        AND intent.source_id=? AND intent.source_instance_uuid=? AND intent.application_uuid=?
+        AND intent.expected_history_epoch_id=? AND intent.destination_origin=? AND intent.external_canonical_id=?
+        AND json_extract(outbox.outcome_json,'$.status')='acknowledged'
+        AND json_extract(outbox.outcome_json,'$.response.sourceInstanceId')=intent.source_instance_uuid
+        AND json_extract(outbox.outcome_json,'$.response.applicationId')=intent.application_uuid
+        AND json_extract(outbox.outcome_json,'$.response.historyEpoch')=intent.expected_history_epoch_id
+        AND json_extract(outbox.outcome_json,'$.response.result.resource.type')='organization'
+        AND json_extract(outbox.outcome_json,'$.response.result.resource.publicId')=?
+      UNION ALL
+      SELECT live_revision revision FROM project_alpha_existing_directory_binding_revision_refresh_receipts
+      WHERE record_id=? AND local_record_version=? AND source_id=? AND source_instance_id=? AND application_id=?
+        AND history_epoch_id=? AND resource_type='organization' AND external_id=?
+        AND project_alpha_public_id=?
+      UNION ALL
+      SELECT project_alpha_revision revision FROM project_alpha_existing_directory_binding_activation_receipts
+      WHERE record_id=? AND local_record_version=? AND source_id=? AND source_instance_id=? AND application_id=?
+        AND history_epoch_id=? AND resource_type='organization' AND external_id=?
+        AND project_alpha_public_id=?) WHERE revision IS NOT NULL LIMIT 2`).bind(
+      dependency.organization_record_id, dependency.organization_record_version, row.source_id, row.expected_source_instance_id,
+      row.application_id, row.expected_history_epoch_id, row.destination_base_url, dependency.parent_external_canonical_id,
+      dependency.resolved_parent_public_id,
+      dependency.organization_record_id, dependency.organization_record_version, row.source_id, row.expected_source_instance_id,
+      row.application_id, row.expected_history_epoch_id, dependency.parent_external_canonical_id,
+      dependency.resolved_parent_public_id,
+      dependency.organization_record_id, dependency.organization_record_version, row.source_id, row.expected_source_instance_id,
+      row.application_id, row.expected_history_epoch_id, dependency.parent_external_canonical_id,
+      dependency.resolved_parent_public_id).all<{ revision: string }>()).results;
+  return candidates.length === 1 && /^[1-9][0-9]{0,18}$/.test(candidates[0]!.revision) ? candidates[0]!.revision : null;
+}
 async function exactReservation(db: D1Database, row: Row, connection: ProjectAlphaApiV2Connection): Promise<Internal | "destination" | "command" | "authority"> {
   if (!sameDestination(row, connection)) return "destination";
   if (row.intent_state !== "materialized" || row.command_json !== row.materialization_command_json || row.record_id !== row.external_id
@@ -125,24 +195,32 @@ async function exactReservation(db: D1Database, row: Row, connection: ProjectAlp
       return typeof command.expectedAuthorizationGeneration === "string" && isProjectAlphaDirectoryCreateCommand("organization", transport)
         ? { operation: "create", transport, publicId: null, actor: originalActor } : "command";
     }
-    if (!plain(command.fields) || command.fields.organizationPublicId !== null) return "command";
-    const profile = { ...command.fields }; delete profile.organizationPublicId;
-    const dependency = await db.prepare(`SELECT 1 ok FROM operations_directory_intent_relationship_dependencies
-      WHERE intent_id=? AND client_record_id=? AND client_record_version=? AND source_id=? AND source_instance_uuid=?
-        AND application_uuid=? AND history_epoch_id=? AND destination_origin=? AND evidence_kind='unlinked'`)
-      .bind(row.intent_id, row.record_id, row.record_version, row.source_id, row.expected_source_instance_id,
-        row.application_id, row.expected_history_epoch_id, row.destination_base_url).first("ok");
+    if (!plain(command.fields)) return "command";
+    const commandFields = command.fields as Record<string, unknown>;
+    const dependency = await relationshipDependency(db, row);
+    if (!dependency || commandFields.organizationPublicId !== dependency.resolved_parent_public_id) return "command";
+    const profile = { ...commandFields }; delete profile.organizationPublicId;
+    const parentRevision = dependency.evidence_kind === "unlinked" ? null : await currentParentRevision(db, row, dependency);
+    if (dependency.evidence_kind !== "unlinked" && !parentRevision) return "command";
     const transport = { commandId: row.command_id, externalId: row.external_id,
-      expectedAuthorizationGeneration: command.expectedAuthorizationGeneration, profile, organization: null };
-    return dependency && typeof command.expectedAuthorizationGeneration === "string" && isProjectAlphaDirectoryCreateCommand("client", transport)
+      expectedAuthorizationGeneration: command.expectedAuthorizationGeneration, profile,
+      organization: dependency.evidence_kind === "unlinked" ? null
+        : { externalId: dependency.parent_external_canonical_id!, expectedRevision: parentRevision! } };
+    return typeof command.expectedAuthorizationGeneration === "string" && isProjectAlphaDirectoryCreateCommand("client", transport)
       ? { operation: "create", transport, publicId: null, actor: originalActor } : "command";
   }
   if (command.operation !== "update" || disposition.kind !== "existing" || !mapping || command.commandId !== row.command_id
     || command.resourceType !== row.resource_type || command.externalId !== row.external_id
     || command.expectedProjectAlphaPublicId !== mapping.project_alpha_public_id || disposition.projectAlphaPublicId !== mapping.project_alpha_public_id
     || command.expectedRevision !== disposition.projectAlphaRevision || command.fields === undefined) return "command";
-  const fields = plain(command.fields) && row.resource_type === "client" && Object.hasOwn(command.fields, "organizationPublicId")
-    ? (() => { const copy = { ...command.fields }; delete copy.organizationPublicId; return copy; })() : command.fields;
+  let fields = command.fields;
+  if (row.resource_type === "client") {
+    if (!plain(command.fields) || !Object.hasOwn(command.fields, "organizationPublicId")) return "command";
+    const commandFields = command.fields as Record<string, unknown>;
+    const dependency = await relationshipDependency(db, row);
+    if (!dependency || commandFields.organizationPublicId !== dependency.resolved_parent_public_id) return "command";
+    fields = { ...commandFields }; delete fields.organizationPublicId;
+  }
   const transport = { commandId: row.command_id, expectedRevision: command.expectedRevision,
     expectedAuthorizationGeneration: command.expectedAuthorizationGeneration, profile: fields };
   return typeof command.expectedRevision === "string" && typeof command.expectedAuthorizationGeneration === "string"
@@ -242,7 +320,11 @@ export async function dispatchProjectAlphaDirectoryProfileOutboxCommand(env: Env
       return { phase: "invalid" as const, reason: after };
     }
     const response = evidence.response, resource = response.result.resource;
-    const outcomeJson = JSON.stringify({ status: "acknowledged", response });
+    // Relationship evidence predates the profile transport and resolves the
+    // canonical ID from result.data.publicId. Preserve the validated wire
+    // response while adding that durable compatibility projection locally.
+    const persistedResponse = { ...response, result: { ...response.result, data: { publicId: resource.publicId } } };
+    const outcomeJson = JSON.stringify({ status: "acknowledged", response: persistedResponse });
     const statements: D1PreparedStatement[] = [];
     if (current.operation === "create") statements.push(env.OPS_DB.prepare(`INSERT INTO project_alpha_directory_mappings(
       source_id,resource_type,external_id,project_alpha_public_id,source_instance_id,application_id,history_epoch_id,command_id)
