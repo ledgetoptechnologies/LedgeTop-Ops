@@ -6065,6 +6065,24 @@ pending; this requirement does not claim a deployed UI change.
   exposed through the Client Hub admission/profile route, and neither the
   profile nor relationship dispatcher is wired to a bounded scheduler/drain.
   The relationship writer also still needs an authenticated HTTP/UI boundary.
-  Reconciliation, both-instance staging acceptance, outage monitoring, the
-  coordinated PA activation and legacy retirement remain required before PA
-  browser writers can be disabled safely.
+  Reconciliation, both-instance staging acceptance, outage-monitor deployment
+  acceptance, the coordinated PA activation and legacy retirement remain
+  required before PA browser writers can be disabled safely.
+
+### September 22 — outage-monitor revalidation during Directory cutover work
+
+- The per-instance API-v2 outage monitor is already implemented and mounted on
+  its dedicated default-off five-minute cron. It is not a shutdown timer:
+  native Operations work remains available, the exact pinned PA identity is
+  monitored independently, queued mutations are retained, and owner mail is
+  eligible only strictly after ten continuous unhealthy minutes.
+- A fresh independent local rerun passed the pure incident policy suite `8/8`,
+  the durable D1 alert transition suite `10/10`, and the joined readiness-to-D1
+  health-cycle suite `1/1`. The durable cases cover exact monitor-revision CAS,
+  one logical alert across retry, lease reclaim, ambiguous attempted delivery,
+  recovery/disablement fencing, and transactional rollback on assertion failure.
+- This evidence confirms the existing implementation contract only. The
+  production monitor and owner-recipient configuration remain default-off, no
+  mail was sent, and no source health or production state was mutated. The
+  remaining outage gate is coordinated staging and production enablement with
+  both exact PA connections, not a new monitor implementation.
