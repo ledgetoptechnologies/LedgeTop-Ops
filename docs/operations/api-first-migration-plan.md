@@ -33,7 +33,18 @@ Updated September 22, 2026. The owner approved implementation and resumption aft
   activation, or client-access activation has been accepted in staging. The
   sole staging native organization is already actively mapped to another PA
   record, so it is not an eligible exact existing-record reservation target;
-  no automatic match or synthetic claim was made.
+  no automatic match or synthetic claim was made. Opening the staging chooser
+  also returned `Current directory authority is required`: the signed-in
+  staging administrator has no active native staff admission/profile/grant
+  generation in this isolated D1. A fresh reviewed native-authority admission
+  packet compatible with the current migration chain is required before
+  private reservation UI acceptance; legacy
+  administrator access is deliberately insufficient. A normal native
+  organization create on this same PA source is not a safe fixture shortcut:
+  it durably queues a future PA-create command even with draining disabled.
+  Live reservation acceptance therefore requires a separately scoped
+  staging-only fixture source/application or a later real unmapped Ops record;
+  local reservation tests do not claim this missing live proof.
   The focused inactive-reservation and explicit-activation suite is green at
   62/62 with an extended timeout, including stale evidence, collision,
   authority-revocation and byte-preserved public-link cases.
