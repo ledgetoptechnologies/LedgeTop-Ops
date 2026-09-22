@@ -91,15 +91,15 @@ async function activateFixture(database: D1Database, fixture: AcquisitionFixture
 }
 
 describe("existing PA directory acquisition migration chain", () => {
-  it("applies the clean sequential chain through 0131 without creating adoption state", async () => {
+  it("applies the clean sequential chain through 0132 without creating adoption state", async () => {
     const runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06",
       script: "export default {fetch(){return new Response('ok')}}", d1Databases: ["OPS_DB"] });
     runtimes.push(runtime);
     const database = await runtime.getD1Database("OPS_DB") as D1Database;
     const directory = new URL("../migrations/", import.meta.url);
     const migrations = readdirSync(directory)
-      .filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0131").sort();
-    expect(migrations.at(-1)).toBe("0131_project_alpha_project_active_directory_mapping_guards.sql");
+      .filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0132").sort();
+    expect(migrations.at(-1)).toBe("0132_operations_directory_acquired_relationship_dependencies.sql");
     for (const migration of migrations) {
       await database.batch(splitD1MigrationStatements(readFileSync(new URL(migration, directory), "utf8"))
         .map(statement => database.prepare(statement)));
@@ -120,15 +120,15 @@ describe("existing PA directory acquisition migration chain", () => {
       'project_alpha_project_adoption_review_producer_receipts_no_delete')`).first("count(*)")).toBe(3);
   });
 
-  it("applies through 0131 without changing populated canonical history or activating acquired mappings", async () => {
+  it("applies through 0132 without changing populated canonical history or activating acquired mappings", async () => {
     const runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06",
       script: "export default {fetch(){return new Response('ok')}}", d1Databases: ["OPS_DB"] });
     runtimes.push(runtime);
     const database = await runtime.getD1Database("OPS_DB") as D1Database;
     const directory = new URL("../migrations/", import.meta.url);
     const migrations = readdirSync(directory)
-      .filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0131").sort();
-    expect(migrations.at(-1)).toBe("0131_project_alpha_project_active_directory_mapping_guards.sql");
+      .filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0132").sort();
+    expect(migrations.at(-1)).toBe("0132_operations_directory_acquired_relationship_dependencies.sql");
     const recordId = "11111111-1111-4111-8111-111111111111";
     const profile = JSON.stringify({ name: "Synthetic Existing", email: "existing@example.test", phone: null,
       address: { line1: null, line2: null, city: null, state: null, postalCode: null, country: null }, clientType: "business" });
@@ -379,7 +379,7 @@ describe("existing PA directory acquisition migration chain", () => {
       .rejects.toThrow(/local record version is stale/);
   });
 
-  it("upgrades populated 0125 activation state through 0131 without changing protected rows", async () => {
+  it("upgrades populated 0125 activation state through 0132 without changing protected rows", async () => {
     const runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06",
       script: "export default {fetch(){return new Response('ok')}}", d1Databases: ["OPS_DB"] });
     runtimes.push(runtime);
@@ -526,6 +526,32 @@ describe("existing PA directory acquisition migration chain", () => {
       .not.toContain('project_alpha_project_mappings');
     expect(canonicalGuards.results.find(row => row.name === 'operations_shared_projects_no_update')!.sql)
       .toContain('project_alpha_project_mappings');
+
+    await database.batch(splitD1MigrationStatements(readFileSync(
+      new URL("0132_operations_directory_acquired_relationship_dependencies.sql",directory),"utf8"))
+      .map(statement => database.prepare(statement)));
+    expect(await readPreserved()).toEqual(preserved);
+    const dependencyColumns = await database.prepare(
+      "PRAGMA table_info(operations_directory_intent_relationship_dependencies)").all<{name:string}>();
+    expect(dependencyColumns.results.map(column => column.name)).toContain("parent_activation_id");
+    const dependencyGuard = await database.prepare(`SELECT sql FROM sqlite_master WHERE type='trigger'
+      AND name='operations_directory_intent_relationship_dependencies_insert_guard'`).first<string>("sql");
+    expect(dependencyGuard).toContain("evidence_kind='acquired_mapping'");
+    expect(dependencyGuard).toContain("project_alpha_active_directory_mappings");
+    const resolved = await database.prepare(`SELECT sql FROM sqlite_master WHERE type='view'
+      AND name='operations_directory_intent_relationship_resolved'`).first<string>("sql");
+    expect(resolved).toContain("parent_activation_id");
+    expect(resolved).toContain("mapping_kind='acquired'");
+    const schemaObjects = await database.prepare(
+      `SELECT name,sql FROM sqlite_master WHERE sql IS NOT NULL`,
+    ).all<{name:string;sql:string}>();
+    expect(schemaObjects.results.filter(object =>
+      object.sql.includes("operations_directory_intent_relationship_dependencies_legacy"),
+    )).toEqual([]);
+    expect(await database.prepare(`SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name IN (
+      'operations_directory_write_fences_exhausted',
+      'operations_directory_materializations_relationship_guard',
+      'operations_directory_materializations_reserve')`).first("count(*)")).toBe(3);
 
     const standalone: AcquisitionFixture = {
       stem: "b", recordId: standaloneRecordId, kind: "client",
