@@ -638,6 +638,25 @@ after `e1190f2` into the local activation branch as `fce6c9c`. The combined
 focused regression passed **6 files / 33 tests**. No push or deployment occurred;
 the source and dependency tree are clean after restoration.
 
+### September 21 task register — native authority before Project adoption review
+
+- `0123_native_directory_authority_history.sql` is the required forward-only
+  prerequisite for any Project-adoption review flow. It backfills only
+  immutable Directory-grant history and per-staff invalidation generations,
+  keeps existing grant/admission semantics, and blocks grant deletion plus
+  in-place admission subject/admitter replacement. It creates no admission,
+  grant, scope, mapping, Project, Delivery record, public link, route or flag.
+- `0124_project_alpha_project_adoption_review_evidence.sql` stores only
+  server-owned, bounded review evidence after `0123`. Review items and their
+  one-time reservations are immutable and require exact source/application/
+  epoch, PA revision/hash/detail evidence, current authority, and current
+  Directory mappings. The validity window is at most four hours; the evidence
+  also pins the reviewer's exact bound Access subject, an existing global
+  `role-owner` assignment, and a distinct evidence digest. This is one selected
+  packet at a time, not a permanent single-owner invariant. Browser input for
+  a later consumer is limited to review item ID plus idempotency key; a consumer
+  remains unmounted and separately approval-gated.
+
 ### September 15 — API-first transport and ownership checkpoint
 
 - Operations PR57 merged to `main` at `e8bbfab`. Its dormant Project Alpha

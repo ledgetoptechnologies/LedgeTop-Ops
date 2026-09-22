@@ -4,6 +4,21 @@ This Operations route is a bounded production-readiness check for a previously
 configured Project Alpha API-v2 connection. It is not a synchronizer, source
 registration mechanism, migration, or write path.
 
+## Review-ledger boundary
+
+Operations migration `0123` first makes native Directory grant generations and
+their immutable history durable, while preventing in-place replacement of a
+staff admission's bound Access subject or admitting principal. Migration
+`0124` then adds server-owned, short-lived Project-adoption review evidence and
+one-time reservations. Neither migration mounts a route, enables a flag,
+creates an admission or grant, binds a Project, or changes Delivery/public-link
+state. A future browser action may reference only a review-item ID and an
+idempotency key; it must recheck current unexpired authority and exact current
+Directory mappings before consuming its immutable evidence. Review evidence is
+valid for at most four hours, pins the reviewer's exact bound Access subject and
+an existing global `role-owner` assignment, and carries a distinct evidence
+digest. It does not impose a permanent single-owner invariant.
+
 ## Activation and authority
 
 - `PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ENABLED` is `false` by default.
