@@ -4,16 +4,29 @@ Updated September 22, 2026. The owner approved implementation and resumption aft
 
 ### September 22, 2026 — authoritative PR and staging acceptance status
 
-- Operations PR [#107](https://github.com/ledgetoptechnologies/LedgeTop-Ops/pull/107)
-  passed all ten CI checks at `6940543`, including Operations, client, browser
-  desktop/mobile, synchronization, incoming, thumbnail and invariant suites.
-  Later linked-client and staging-reconciliation corrections are on the PR;
-  their full CI run is pending. Green CI does not substitute for joined staging
-  or production cutover acceptance.
-- Project Alpha PR [#188](https://github.com/ledgetoptechnologies/Project-Alpha/pull/188)
-  is open at `cbabe57e3d2bceceb5fc724d083ea332c1864500`. Smoke, JavaScript
-  and Python CodeQL, and gitleaks checks are green. It is not merged or deployed
-  to either production PA instance.
+- Latest read-only release check: Operations PR #107 head
+  `137ad4c97c78cbfd1dc809c27ea076fa6b612fda` passed all ten
+  exact-head CI jobs (run `35776783077`). PA PR #188 head
+  `731677dda1821c53f93dd0b38f1504f184c320d9` passed exact-head CI,
+  CodeQL and gitleaks, including its real-MySQL cutover gate. These replace
+  the earlier commit/check snapshots below; neither PR is merged. An
+  independent patch-risk review held the Ops merge for missing live
+  reservation/rollback and deployment-sequence evidence.
+- Read-only Wrangler inspection of the live production `ledgetop-ops` Worker
+  found a 100%-deployed version `9a2e6997-c8f0-4e7b-ad7a-7d09fff5b4af`
+  created 2026-09-22 04:06 UTC from Wrangler. Its binding inventory does
+  not contain the new native-directory/reconciliation flags. A remote D1
+  migration-list check found exactly `0125`–`0138` pending in `OPS_DB`; no
+  migration was applied. This is a deployment snapshot, not proof of the
+  exact source commit currently running or of any future deployment path.
+- PA staging host has not yet confirmed deployment of PR #188 at the exact
+  head above, and host-specific migrations/backfills, attestation, joined
+  API acceptance and rollback remain unproven. The owner has been asked for
+  a staging-only host update and sanitized evidence. Do not request either
+  production PA update or activate managed mode until these gates and the
+  coordinated release order are accepted.
+- Green PR CI does not substitute for joined staging or production cutover
+  acceptance. Neither PR is deployed to either production PA instance.
 - A private pre-migration staging D1 backup was recorded before applying remote
   Operations staging migrations 0123–0138. Staging Worker version
   `0b703087-88b4-4e5a-8fbc-fd5e260e1ae4` runs the current Operations PR
