@@ -201,7 +201,8 @@ function exactChain(value: Chain): boolean {
     && value.acquired_request_sha256 === value.request_sha256
     && value.claim_request_sha256 === value.request_sha256
     && value.response_sha256 === value.acquisition_evidence_sha256
-    && value.reviewed_binding_evidence_sha256 === value.binding_status_evidence_sha256
+    && new Set([value.reviewed_binding_evidence_sha256,value.acquisition_evidence_sha256,
+      value.profile_evidence_sha256,value.binding_status_evidence_sha256]).size === 4
     && value.response_source_instance_id === value.source_instance_id
     && value.response_application_id === value.application_id
     && value.response_history_epoch_id === value.history_epoch_id

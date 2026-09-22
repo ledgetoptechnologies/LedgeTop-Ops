@@ -130,6 +130,8 @@ async function authority(db: D1Database, selected: ProjectAlphaExistingDirectory
       (?='organization' OR EXISTS(SELECT 1 FROM operations_directory_client_organizations relationship
         WHERE relationship.client_record_id=record.record_id AND ((? IS NULL AND relationship.organization_record_id IS NULL)
           OR (? IS NOT NULL AND EXISTS(SELECT 1 FROM project_alpha_active_directory_mappings parent
+            JOIN operations_directory_records parent_record ON parent_record.record_id=parent.external_id
+              AND parent_record.record_kind='organization'
             WHERE parent.source_id=? AND parent.source_instance_id=? AND parent.application_id=? AND parent.history_epoch_id=?
               AND parent.resource_type='organization' AND parent.external_id=relationship.organization_record_id
               AND parent.project_alpha_public_id=?))))) relationship_current
@@ -371,6 +373,8 @@ export async function acquireProjectAlphaExistingDirectoryBinding(
           AND (review.resource_type='organization' OR EXISTS(SELECT 1 FROM operations_directory_client_organizations relationship
             WHERE relationship.client_record_id=review.record_id AND ((? IS NULL AND relationship.organization_record_id IS NULL)
               OR (? IS NOT NULL AND EXISTS(SELECT 1 FROM project_alpha_active_directory_mappings parent
+                JOIN operations_directory_records parent_record ON parent_record.record_id=parent.external_id
+                  AND parent_record.record_kind='organization'
                 WHERE parent.source_id=review.source_id AND parent.source_instance_id=review.source_instance_id
                   AND parent.application_id=review.application_id AND parent.history_epoch_id=review.history_epoch_id
                   AND parent.resource_type='organization' AND parent.external_id=relationship.organization_record_id

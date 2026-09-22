@@ -21,6 +21,7 @@ const requestHash = "1".repeat(64);
 const bindingHash = "2".repeat(64);
 const responseHash = "3".repeat(64);
 const profileHash = "4".repeat(64);
+const reviewedHash = "5".repeat(64);
 
 const connection = (overrides: Record<string, unknown> = {}) => JSON.stringify({ version: 1, instances: {
   [sourceId]: { sourceId, enabled: true, baseUrl: "https://pa.example.test", apiKey: "test-secret",
@@ -79,7 +80,8 @@ describe("private existing Directory binding activation consumer", () => {
       "0116_project_alpha_acquired_canonical_mapping_activation.sql",
       "0117_project_alpha_native_owner_epoch_claims.sql",
       "0123_native_directory_authority_history.sql",
-      "0125_project_alpha_existing_directory_binding_activation.sql"]) {
+      "0125_project_alpha_existing_directory_binding_activation.sql",
+      "0127_project_alpha_existing_directory_binding_activation_evidence_transition.sql"]) {
       const sql = readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8");
       await db.batch(splitD1MigrationStatements(sql).map(statement => db.prepare(statement)));
     }
@@ -102,7 +104,7 @@ describe("private existing Directory binding activation consumer", () => {
       VALUES(?,?,?,?,?,?,?,?,?,?,'7','50000000-0000-4000-8000-000000000001',?,'staff','access|staff',1,1,
         COALESCE(?,strftime('%Y-%m-%dT%H:%M:%fZ','now')),1)`)
       .bind(reviewItemId,requestHash,recordId,sourceId,sourceInstanceId,applicationId,historyEpochId,kind,recordId,
-        publicId,bindingHash,options.reviewedAt ?? null).run();
+        publicId,options.bindingHash ?? reviewedHash,options.reviewedAt ?? null).run();
     await db.prepare(`INSERT INTO project_alpha_existing_directory_binding_acquisition_commands(
       command_id,request_sha256,record_id,source_id,source_instance_id,application_id,history_epoch_id,
       resource_type,external_id,project_alpha_public_id,project_alpha_revision,review_receipt_id)
@@ -142,6 +144,18 @@ describe("private existing Directory binding activation consumer", () => {
 
   const call = (key = idempotencyKey, raw: unknown = { reviewItemId, idempotencyKey: key }, rawConnection = connection()) =>
     activateProjectAlphaExistingDirectoryBinding({ OPS_DB: db, PROJECT_ALPHA_API_V2_CONNECTIONS: rawConnection }, raw);
+
+  const directActivation = (hashes: { acquisition?: string; profile?: string; binding?: string } = {}) =>
+    db.prepare(`INSERT INTO project_alpha_existing_directory_binding_activation_receipts(
+      activation_id,review_receipt_id,idempotency_key,acquired_receipt_id,native_owner_claim_id,
+      record_id,source_id,source_instance_id,application_id,history_epoch_id,resource_type,external_id,
+      project_alpha_public_id,project_alpha_revision,local_record_version,request_sha256,
+      acquisition_evidence_sha256,profile_evidence_sha256,binding_status_evidence_sha256,
+      activated_by_staff_id,directory_grant_generation)
+      VALUES('90000000-0000-4000-8000-000000000001',?,?,?,?,?,?,?,?,?,?,?,?, '7',1,?,?,?,?, 'staff',1)`)
+      .bind(reviewItemId,idempotencyKey,acquiredReceiptId,claimId,recordId,sourceId,sourceInstanceId,
+        applicationId,historyEpochId,"organization",recordId,publicId,requestHash,
+        hashes.acquisition ?? responseHash,hashes.profile ?? profileHash,hashes.binding ?? bindingHash).run();
 
   it("activates once, replays exactly, and preserves dormant, legacy, and public-link rows", async () => {
     await seed();
@@ -203,11 +217,18 @@ describe("private existing Directory binding activation consumer", () => {
       .resolves.toEqual({ status: "blocked", reason: "source" });
   });
 
-  it("blocks mismatched immutable evidence hashes", async () => {
-    await seed({ acquiredBindingHash: "9".repeat(64) });
+  it("blocks reused evidence roles", async () => {
+    await seed({ acquiredBindingHash: reviewedHash });
     await expect(call()).resolves.toEqual({ status: "blocked", reason: "stale_evidence" });
     expect(await db.prepare("SELECT count(*) count FROM project_alpha_existing_directory_binding_activation_receipts")
       .first("count")).toBe(0);
+  });
+
+  it("rejects swapped and unrelated activation evidence while accepting the exact distinct transition", async () => {
+    await seed();
+    await expect(directActivation({ profile: bindingHash, binding: profileHash })).rejects.toThrow(/current exact authority and evidence/);
+    await expect(directActivation({ acquisition: "9".repeat(64) })).rejects.toThrow(/current exact authority and evidence/);
+    await expect(directActivation()).resolves.toBeDefined();
   });
 
   it("requires a current explicit client relationship decision", async () => {

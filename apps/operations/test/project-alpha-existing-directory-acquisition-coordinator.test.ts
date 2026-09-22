@@ -7,13 +7,22 @@ import { acquireProjectAlphaExistingDirectoryBinding } from "../src/worker/proje
 const sourceId = "project-alpha:primary", source = "10000000-0000-4000-8000-000000000001";
 const application = "10000000-0000-4000-8000-000000000002", epoch = "10000000-0000-4000-8000-000000000003";
 const recordId = "30000000-0000-4000-8000-000000000001", publicId = "a".repeat(32);
-const input = () => ({ reviewId: "20000000-0000-4000-8000-000000000001",
+const input = (overrides: Record<string, unknown> = {}) => ({ reviewId: "20000000-0000-4000-8000-000000000001",
   commandId: "20000000-0000-4000-8000-000000000002", sourceId, recordId, resourceType: "organization" as const,
   projectAlphaPublicId: publicId, localRecordVersion: 1, reviewer: { staffId: "staff", accessSubject: "access|staff",
-    admissionVersion: 1, profileVersion: 1, grantGeneration: 1 } });
+    admissionVersion: 1, profileVersion: 1, grantGeneration: 1 }, ...overrides });
 const envSecret = () => JSON.stringify({ version: 1, instances: { [sourceId]: { sourceId, enabled: true,
   baseUrl: "https://pa.example.test", apiKey: "server-secret", sourceInstanceId: source, applicationId: application,
   historyEpoch: epoch } } });
+const secondary = { sourceId: "project-alpha:secondary", source: "11000000-0000-4000-8000-000000000001",
+  application: "11000000-0000-4000-8000-000000000002", epoch: "11000000-0000-4000-8000-000000000003" };
+const twoSourceSecret = () => JSON.stringify({ version: 1, instances: {
+  [sourceId]: { sourceId, enabled: true, baseUrl: "https://pa.example.test", apiKey: "primary-secret",
+    sourceInstanceId: source, applicationId: application, historyEpoch: epoch },
+  [secondary.sourceId]: { sourceId: secondary.sourceId, enabled: true, baseUrl: "https://pa-secondary.example.test",
+    apiKey: "secondary-secret", sourceInstanceId: secondary.source, applicationId: secondary.application,
+    historyEpoch: secondary.epoch },
+} });
 
 describe("private existing Directory acquisition coordinator", () => {
   let runtime: Miniflare, db: D1Database;
@@ -61,40 +70,47 @@ describe("private existing Directory acquisition coordinator", () => {
   });
   afterEach(async () => { await runtime.dispose(); });
 
-  function transport(options: { firstPostUncertain?: boolean; foreignPost?: boolean; changedProfile?: boolean } = {}) {
+  function transport(options: { firstPostUncertain?: boolean; alwaysUncertain?: boolean; conflict?: boolean;
+    foreignPost?: boolean; changedProfile?: boolean; kind?: "organization" | "client"; record?: string;
+    public?: string; parentPublicId?: string | null; sourceInstance?: string; app?: string; epochId?: string } = {}) {
     let profileReads = 0, postCalls = 0, ids = 10;
+    const kind = options.kind ?? "organization", plural = kind === "client" ? "clients" : "organizations";
+    const expectedRecord = options.record ?? recordId, expectedPublic = options.public ?? publicId;
+    const expectedSource = options.sourceInstance ?? source, expectedApplication = options.app ?? application;
+    const expectedEpoch = options.epochId ?? epoch;
     const requestId = () => `10000000-0000-4000-8000-${String(ids++).padStart(12, "0")}`;
     return vi.fn<typeof fetch>(async (request, init) => {
       const path = new URL(String(request)).pathname, id = requestId();
       const json = (value: Record<string, unknown>, status = 200) => new Response(JSON.stringify({ ...value, requestId: id }), {
         status, headers: { "Content-Type": "application/json", "Cache-Control": "no-store", "X-Request-ID": id },
       });
-      const plural = "organizations";
-      if (path === "/api/v2/capabilities") return json({ apiVersion: "2", sourceInstanceId: source, applicationId: application,
-        historyEpoch: epoch, grantedCapabilities: ["api.capabilities.read", `directory.${plural}.read`,
+      if (path === "/api/v2/capabilities") return json({ apiVersion: "2", sourceInstanceId: expectedSource, applicationId: expectedApplication,
+        historyEpoch: expectedEpoch, grantedCapabilities: ["api.capabilities.read", `directory.${plural}.read`,
           `directory.${plural}.binding_status.read`, `directory.${plural}.bind`].map(name => ({ name })),
         implementedEndpoints: [
           { method: "GET", path: "/api/v2/capabilities", requiredCapability: "api.capabilities.read" },
           { method: "GET", path: `/api/v2/directory/${plural}/{publicId}`, requiredCapability: `directory.${plural}.read`, requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true },
-          { method: "GET", path: "/api/v2/bindings/organization/status/{base64urlExternalId}", requiredCapability: `directory.${plural}.binding_status.read`, requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true },
+          { method: "GET", path: `/api/v2/bindings/${kind}/status/{base64urlExternalId}`, requiredCapability: `directory.${plural}.binding_status.read`, requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true },
           { method: "POST", path: `/api/v2/directory/${plural}/bindings/commands`, requiredCapability: `directory.${plural}.bind`, requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true, requiresExpectedPublicId: true, requiresExpectedRevision: true },
         ] });
-      if (path === `/api/v2/directory/${plural}/${publicId}`) {
+      if (path === `/api/v2/directory/${plural}/${expectedPublic}`) {
         profileReads++;
-        return json({ apiVersion: "2", sourceInstanceId: source, applicationId: application, historyEpoch: epoch,
-          authorizationGeneration: profileReads === 1 ? "4" : "5", resource: { type: "organization", id: publicId, revision: "7" },
-          data: { publicId, name: options.changedProfile && profileReads > 1 ? "Changed" : "Reviewed Customer", email: null,
-            phone: null, address: { line1: null, line2: null, city: null, state: null, postalCode: null, country: null } } });
+        const data = { publicId: expectedPublic, name: options.changedProfile && profileReads > 1 ? "Changed" : "Reviewed Customer", email: null,
+          phone: null, address: { line1: null, line2: null, city: null, state: null, postalCode: null, country: null },
+          ...(kind === "client" ? { clientType: "business", organizationPublicId: options.parentPublicId ?? null } : {}) };
+        return json({ apiVersion: "2", sourceInstanceId: expectedSource, applicationId: expectedApplication, historyEpoch: expectedEpoch,
+          authorizationGeneration: profileReads === 1 ? "4" : "5", resource: { type: kind, id: expectedPublic, revision: "7" }, data });
       }
-      if (path.startsWith("/api/v2/bindings/organization/status/")) return json({ apiVersion: "2", sourceInstanceId: source,
-        applicationId: application, historyEpoch: epoch, authorizationGeneration: "5", binding: { type: "organization",
-          externalId: recordId, publicId, createdAt: "2026-09-22T12:00:00.000Z" }, resource: { revision: "7", present: true } });
+      if (path.startsWith(`/api/v2/bindings/${kind}/status/`)) return json({ apiVersion: "2", sourceInstanceId: expectedSource,
+        applicationId: expectedApplication, historyEpoch: expectedEpoch, authorizationGeneration: "5", binding: { type: kind,
+          externalId: expectedRecord, publicId: expectedPublic, createdAt: "2026-09-22T12:00:00.000Z" }, resource: { revision: "7", present: true } });
       postCalls++;
-      if (options.firstPostUncertain && postCalls === 1) throw new Error("network uncertain");
+      if (options.alwaysUncertain || (options.firstPostUncertain && postCalls === 1)) throw new Error("network uncertain");
+      if (options.conflict) return json({ code: "COMMAND_CONFLICT" }, 409);
       const sent = JSON.parse(String(init?.body));
-      return json({ replayed: postCalls > 1, result: { binding: { publicId }, resource: { type: "organization",
-        id: sent.externalId, revision: "7" } }, sourceInstanceId: source,
-        applicationId: options.foreignPost ? "90000000-0000-4000-8000-000000000001" : application, historyEpoch: epoch });
+      return json({ replayed: postCalls > 1, result: { binding: { publicId: expectedPublic }, resource: { type: kind,
+        id: sent.externalId, revision: "7" } }, sourceInstanceId: expectedSource,
+        applicationId: options.foreignPost ? "90000000-0000-4000-8000-000000000001" : expectedApplication, historyEpoch: expectedEpoch });
     });
   }
 
@@ -118,6 +134,57 @@ describe("private existing Directory acquisition coordinator", () => {
     expect(await acquireProjectAlphaExistingDirectoryBinding(env, input(), send)).toMatchObject({ status: "acquired" });
     const bodies = send.mock.calls.filter(call => call[1]?.method === "POST").map(call => String(call[1]!.body));
     expect(bodies[1]).toBe(bodies[0]);
+  });
+
+  it("keeps permanent repeated uncertainty inactive without duplicating transitions", async () => {
+    const send = transport({ alwaysUncertain: true }), env = { OPS_DB: db, PROJECT_ALPHA_API_V2_CONNECTIONS: envSecret() };
+    await expect(acquireProjectAlphaExistingDirectoryBinding(env, input(), send)).resolves.toMatchObject({ status: "uncertain" });
+    await expect(acquireProjectAlphaExistingDirectoryBinding(env, input(), send)).resolves.toMatchObject({ status: "uncertain" });
+    expect(await db.prepare("SELECT group_concat(state,',') states FROM project_alpha_existing_directory_binding_acquisition_events").first("states")).toBe("pending,uncertain");
+    expect(await db.prepare("SELECT count(*) FROM project_alpha_acquired_canonical_mappings").first("count(*)")).toBe(0);
+  });
+
+  it("records a valid PA conflict as non-authoritative and creates no mapping", async () => {
+    const result = await acquireProjectAlphaExistingDirectoryBinding({ OPS_DB: db, PROJECT_ALPHA_API_V2_CONNECTIONS: envSecret() }, input(), transport({ conflict: true }));
+    expect(result).toEqual({ status: "conflict", reason: "remote" });
+    expect(await db.prepare("SELECT count(*) FROM project_alpha_acquired_canonical_mappings").first("count(*)")).toBe(0);
+  });
+
+  it("acquires the same native customer independently in two deployment-owned PA sources", async () => {
+    const env = { OPS_DB: db, PROJECT_ALPHA_API_V2_CONNECTIONS: twoSourceSecret() };
+    await expect(acquireProjectAlphaExistingDirectoryBinding(env, input(), transport())).resolves.toMatchObject({ status: "acquired" });
+    const second = input({ reviewId: "21000000-0000-4000-8000-000000000001",
+      commandId: "21000000-0000-4000-8000-000000000002", sourceId: secondary.sourceId });
+    await expect(acquireProjectAlphaExistingDirectoryBinding(env, second,
+      transport({ sourceInstance: secondary.source, app: secondary.application, epochId: secondary.epoch })))
+      .resolves.toMatchObject({ status: "acquired" });
+    expect(await db.prepare("SELECT count(*) FROM project_alpha_acquired_canonical_mappings WHERE record_id=?")
+      .bind(recordId).first("count(*)")).toBe(2);
+  });
+
+  it("requires the client's exact current parent mapping in the same PA namespace", async () => {
+    const clientRecord = "31000000-0000-4000-8000-000000000001", clientPublic = "c".repeat(32);
+    const parentRecord = "32000000-0000-4000-8000-000000000001", parentPublic = "b".repeat(32);
+    await db.batch([
+      db.prepare("INSERT INTO operations_directory_records VALUES(?,'client',1)").bind(clientRecord),
+      db.prepare("INSERT INTO operations_directory_records VALUES(?,'organization',1)").bind(parentRecord),
+      db.prepare("INSERT INTO operations_directory_client_organizations VALUES(?,?)").bind(clientRecord,parentRecord),
+    ]);
+    const selected = input({ reviewId: "22000000-0000-4000-8000-000000000001",
+      commandId: "22000000-0000-4000-8000-000000000002", recordId: clientRecord,
+      resourceType: "client", projectAlphaPublicId: clientPublic });
+    const env = { OPS_DB: db, PROJECT_ALPHA_API_V2_CONNECTIONS: envSecret() };
+    const firstSend = transport({ kind: "client", record: clientRecord, public: clientPublic, parentPublicId: parentPublic });
+    await expect(acquireProjectAlphaExistingDirectoryBinding(env, selected, firstSend))
+      .resolves.toEqual({ status: "blocked", reason: "relationship" });
+    expect(firstSend.mock.calls.some(call => call[1]?.method === "POST")).toBe(false);
+    await db.prepare(`INSERT INTO project_alpha_directory_mappings(source_id,resource_type,external_id,
+      project_alpha_public_id,source_instance_id,application_id,history_epoch_id,command_id,created_at)
+      VALUES(?,'organization',?,?,?,?,?,?,'2026-09-22T00:00:00.000Z')`)
+      .bind(sourceId,parentRecord,parentPublic,source,application,epoch,"parent-legacy").run();
+    await expect(acquireProjectAlphaExistingDirectoryBinding(env, selected,
+      transport({ kind: "client", record: clientRecord, public: clientPublic, parentPublicId: parentPublic })))
+      .resolves.toMatchObject({ status: "acquired" });
   });
 
   it.each(["authority", "local", "identity", "digest"]) ("fails closed on %s drift without a partial mapping", async drift => {
