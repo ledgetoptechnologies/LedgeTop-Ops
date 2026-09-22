@@ -16,6 +16,7 @@ export type Env = Omit<
   | "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ENABLED"
   | "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_SOURCE_ID"
   | "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ORIGIN"
+  | "NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED"
   | "NATIVE_INTEGRATION_CONTROL_ENABLED"
   | "NATIVE_INTEGRATION_CONTROL_ORIGIN"
   | "DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED"
@@ -55,6 +56,8 @@ export type Env = Omit<
   PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_SOURCE_ID?: string;
   /** Staging-only exact HTTPS origin pin for the Directory bootstrap fixture. */
   PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ORIGIN?: string;
+  /** Default-off authenticated native Directory profile create/update routes. */
+  NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED?: string;
   /** Default-off native, explicit-grant authority for monitor lifecycle control. */
   NATIVE_INTEGRATION_CONTROL_ENABLED?: string;
   /** Exact same-origin native monitor-control UI origin; no implicit fallback. */

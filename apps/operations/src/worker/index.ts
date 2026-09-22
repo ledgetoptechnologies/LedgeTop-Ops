@@ -160,6 +160,7 @@ import { registerProjectAlphaDraftQuoteRoutes } from "./project-alpha-draft-quot
 import { provePrimaryBusinessReferences } from "./project-alpha-primary-references";
 import { registerTeamAssignedWorkRoutes } from "./team-assigned-work";
 import { registerClientHubRoutes } from "./client-hub";
+import { NATIVE_DIRECTORY_PROFILE_ROUTE, nativeDirectoryProfileWritesEnabled, registerNativeDirectoryProfileRoutes } from "./native-directory-profile-routes";
 import { registerBusinessPartyRoutes } from "./business-party-routes";
 import { registerNotificationCenterRoutes } from "./notification-center";
 import { registerStaffInboxRequestRoutes } from "./staff-inbox-requests";
@@ -448,6 +449,12 @@ app.use("/api/native-integrations/monitor/*", dispatchProjectAlphaApiV2MonitorCo
 app.use(PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ROUTE, async (c, next) => {
   if (c.req.path === PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ROUTE && !projectAlphaDirectoryV2BootstrapAcceptanceEnabled(c.env))
     return c.json({ error: "Not found" }, 404);
+  await next();
+});
+// Keep the default-off write surface absent before ordinary staff
+// authentication, matching other rollout-gated authenticated route families.
+app.use(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/*`, async (c, next) => {
+  if (!nativeDirectoryProfileWritesEnabled(c.env)) return c.json({ error: "Not found" }, 404);
   await next();
 });
 app.use("/api/*", async (c, next) => {
@@ -1554,6 +1561,7 @@ registerClientRequestAttachmentRoutes(app);
 registerProjectAlphaDraftQuoteRoutes(app);
 registerTeamAssignedWorkRoutes(app);
 registerClientHubRoutes(app);
+registerNativeDirectoryProfileRoutes(app);
 registerBusinessPartyRoutes(app);
 registerNotificationCenterRoutes(app);
 registerStaffInboxRequestRoutes(app);
