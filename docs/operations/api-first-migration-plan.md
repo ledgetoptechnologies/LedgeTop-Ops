@@ -5,9 +5,8 @@ Updated September 22, 2026. The owner approved implementation and resumption aft
 ### September 22, 2026 — authoritative PR and staging acceptance status
 
 - Latest read-only release check: Operations PR #107 head
-  `14dbd3ca4efae31f256b67f26cdd2de5a72100f0` passed all ten
-  exact-head CI jobs. A newer Ops packet commit `8c9b116` has been pushed;
-  its own exact-head CI is pending and must not inherit the earlier result.
+  `32edbafedad7c5cb6e081c081b2edfed52057a46` passed all ten
+  exact-head CI jobs, including Operations and desktop/mobile browser checks.
   PA PR #188 head
   `731677dda1821c53f93dd0b38f1504f184c320d9` passed exact-head CI,
   CodeQL and gitleaks, including its real-MySQL cutover gate. These replace
@@ -29,6 +28,20 @@ Updated September 22, 2026. The owner approved implementation and resumption aft
   a staging-only host update and sanitized evidence. Do not request either
   production PA update or activate managed mode until these gates and the
   coordinated release order are accepted.
+- Before any new staging authority window, a private staging D1 export was
+  retained with SHA-256
+  `01608c4476f4c4d9fc83b475166944b273e488c98c4cf6f0cb04b54823907a35`.
+  Canonical migration `0139` was then applied only to `ltds-ops-staging`;
+  the remote migration list reports no pending migrations and read-only D1
+  inspection found its exact staging fixture guard trigger once. The
+  CI-green Ops candidate was deployed only to the staging Worker. Cloudflare
+  reports version `e5469ba5-19ca-4982-9b0e-e0aa49c8e096` at 100% traffic,
+  replacing `0b703087-88b4-4e5a-8fbc-fd5e260e1ae4`. The 29 binding
+  names/types remained identical, existing variables/secrets were preserved,
+  and the fixture route flag remains absent/off. Public health requests from
+  the shell redirected to Cloudflare Access, so no authenticated application
+  smoke test or fixture invocation is claimed. Production Workers and D1 were
+  not changed by this staging step.
 - Existing-record acquisition review found that a legacy mapping collision
   could reject the local acquired receipt *after* PA accepted a bind. The
   coordinator now checks legacy and prior acquired identity overlaps before
