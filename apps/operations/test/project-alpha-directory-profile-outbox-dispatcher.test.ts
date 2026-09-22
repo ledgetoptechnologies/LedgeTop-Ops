@@ -2,7 +2,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { Miniflare } from "miniflare";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
-import { writeNativeDirectoryProfile, type NativeDirectoryProfileWrite } from "../src/worker/native-directory-profile-writer";
+import { writeNativeDirectoryProfile, type NativeDirectoryCreateWrite } from "../src/worker/native-directory-profile-writer";
 import { dispatchProjectAlphaDirectoryProfileOutboxCommand } from "../src/worker/project-alpha-directory-profile-outbox-dispatcher";
 
 let runtime: Miniflare, db: D1Database, sequence = 1;
@@ -60,7 +60,7 @@ async function create(kind: "organization" | "client", organizationRecordId: str
     profile: kind === "client" ? clientProfile : organizationProfile, scopes: [{ businessAreaId: "area", divisionId: "division" }],
     destinations: [{ sourceId, sourceInstanceUUID: source, applicationUUID: application, historyEpoch: epoch, origin: baseUrl,
       externalCanonicalId: recordId, expectedAuthorizationGeneration: "0" }], actor: staff,
-    ...(kind === "client" ? { relationship: { organizationRecordId, expectedRelationshipVersion: 0 } } : {}) } as NativeDirectoryProfileWrite;
+    ...(kind === "client" ? { relationship: { organizationRecordId, expectedRelationshipVersion: 0 } } : {}) } as NativeDirectoryCreateWrite;
   await db.prepare(`INSERT INTO native_directory_create_admissions
     (id,staff_id,bound_access_subject,record_id,record_kind,scopes_json,profile_json,destinations_json,issued_by)
     VALUES(?,?,?,?,?,?,?,?,?)`).bind(createAdmissionId, staff.staffId, staff.accessSubject, recordId, kind,

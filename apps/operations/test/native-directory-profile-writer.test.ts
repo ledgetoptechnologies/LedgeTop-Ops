@@ -4,6 +4,7 @@ import { Miniflare } from "miniflare";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import {
   writeNativeDirectoryProfile,
+  type NativeDirectoryCreateWrite,
   type NativeDirectoryDestinationAuthority,
   type NativeDirectoryProfileWrite,
   type NativeDirectoryProfileWriteOutcome,
@@ -49,7 +50,7 @@ async function create(kind: "organization" | "client", actor?: Awaited<ReturnTyp
   const input = { operation: "create", mutationId, recordId, expectedLocalVersion: 0, kind, createAdmissionId,
     profile: kind === "organization" ? organizationProfile : clientProfile, scopes: [{ businessAreaId: "area", divisionId: "division" }],
     destinations: [destination(recordId)], actor,
-    ...(kind === "client" ? { relationship: { organizationRecordId, expectedRelationshipVersion: 0 } } : {}) } as NativeDirectoryProfileWrite;
+    ...(kind === "client" ? { relationship: { organizationRecordId, expectedRelationshipVersion: 0 } } : {}) } as NativeDirectoryCreateWrite;
   await db.prepare(`INSERT INTO native_directory_create_admissions
     (id,staff_id,bound_access_subject,record_id,record_kind,scopes_json,profile_json,destinations_json,issued_by)
     VALUES(?,?,?,?,?,?,?,?,?)`).bind(createAdmissionId, actor.staffId, actor.accessSubject, recordId, kind,
