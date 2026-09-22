@@ -136,6 +136,38 @@ describe("private existing Directory acquisition coordinator", () => {
     expect(bodies[1]).toBe(bodies[0]);
   });
 
+  it("recovers the same PA bind after its response-receipt D1 batch fails", async () => {
+    const send = transport();
+    let batchCalls = 0;
+    const failsReceiptOnce = new Proxy(db, { get(target, property) {
+      if (property === "batch") return async (statements: D1PreparedStatement[]) => {
+        batchCalls++;
+        if (batchCalls === 2) throw new Error("injected response-receipt persistence failure");
+        return target.batch(statements);
+      };
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    } }) as D1Database;
+    const first = await acquireProjectAlphaExistingDirectoryBinding(
+      { OPS_DB: failsReceiptOnce, PROJECT_ALPHA_API_V2_CONNECTIONS: envSecret() }, input(), send,
+    );
+    expect(first).toEqual({ status: "uncertain", reason: "database" });
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_existing_directory_binding_acquisition_response_receipts")
+      .first("count")).toBe(0);
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_acquired_canonical_mappings").first("count")).toBe(0);
+
+    const recovered = await acquireProjectAlphaExistingDirectoryBinding(
+      { OPS_DB: db, PROJECT_ALPHA_API_V2_CONNECTIONS: envSecret() }, input(), send,
+    );
+    expect(recovered).toMatchObject({ status: "acquired", replayed: false });
+    const bodies = send.mock.calls.filter(call => call[1]?.method === "POST").map(call => String(call[1]!.body));
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1]).toBe(bodies[0]);
+    expect(await db.prepare("SELECT pa_replayed FROM project_alpha_existing_directory_binding_acquisition_response_receipts")
+      .first("pa_replayed")).toBe(1);
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_acquired_canonical_mappings").first("count")).toBe(1);
+  });
+
   it("keeps permanent repeated uncertainty inactive without duplicating transitions", async () => {
     const send = transport({ alwaysUncertain: true }), env = { OPS_DB: db, PROJECT_ALPHA_API_V2_CONNECTIONS: envSecret() };
     await expect(acquireProjectAlphaExistingDirectoryBinding(env, input(), send)).resolves.toMatchObject({ status: "uncertain" });
