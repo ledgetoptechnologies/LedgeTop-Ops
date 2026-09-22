@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Miniflare } from "miniflare";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import { reserveProjectAlphaProjectAdoptionReview } from "../src/worker/project-alpha-project-adoption-review-consumer";
+import { planProjectAlphaProjectAdoptionBind } from "../src/worker/project-alpha-project-adoption-bind-consumer";
 
 let runtime: Miniflare;
 let db: D1Database;
@@ -63,6 +64,7 @@ async function setupSchema() {
         FROM project_alpha_existing_directory_binding_activation_receipts;
   `).map(statement => db.prepare(statement)));
   await migrate("0126_project_alpha_project_active_directory_mapping_bridge.sql");
+  await migrate("0128_project_alpha_project_adoption_bind_bridge.sql");
 }
 
 function detailJson(clientId: string | null = null) {
@@ -164,6 +166,15 @@ function reservationStatement(itemId = reviewItemId, key = idempotencyKey) {
       organization_record_id,organization_project_alpha_public_id,client_record_id,client_project_alpha_public_id,
       reviewer_staff_id,reviewer_access_subject,reviewer_admission_version,reviewer_profile_version,reviewer_owner_role_id,independent_evidence_sha256,project_grant_generation,normalized_scopes_json
     FROM project_alpha_project_adoption_review_evidence WHERE review_item_id=?`).bind(reservationId, key, itemId);
+}
+
+async function seedReservation(expiryModifier = "+5 minutes") {
+  await seedAuthority();
+  await reviewStatement(reviewItemId, "server-generated-project", hash, detailJson(), 1,
+    "e".repeat(64), expiryModifier).run();
+  const outcome = await reserveProjectAlphaProjectAdoptionReview({ OPS_DB: db }, { reviewItemId, idempotencyKey });
+  if (outcome.status !== "reserved") throw new Error(`reservation setup failed: ${outcome.status}`);
+  return outcome.reservationId;
 }
 
 beforeEach(async () => {
@@ -424,5 +435,161 @@ describe("project adoption review reservation consumer", () => {
     await reviewStatement(secondReview).run();
     await expect(reserveProjectAlphaProjectAdoptionReview({ OPS_DB: db }, { reviewItemId: secondReview, idempotencyKey }))
       .resolves.toEqual({ status: "conflict", reason: "idempotency_key" });
+  });
+});
+
+describe("project adoption bind bridge consumer", () => {
+  it("atomically creates one native head, revision, and exact pending bind plan and replays it", async () => {
+    const savedReservationId = await seedReservation();
+    const publicBefore = await db.prepare("SELECT * FROM delivery_public_shares ORDER BY id").all();
+    const first = await planProjectAlphaProjectAdoptionBind({ OPS_DB: db }, { reservationId: savedReservationId });
+    expect(first).toMatchObject({ status: "planned", reservationId: savedReservationId, replayed: false });
+    if (first.status !== "planned") throw new Error("bind bridge setup failed");
+    await expect(planProjectAlphaProjectAdoptionBind({ OPS_DB: db }, { reservationId: savedReservationId }))
+      .resolves.toEqual({ ...first, replayed: true });
+    expect(await db.prepare(`SELECT external_project_id,current_version,name,description,lifecycle,source_id,
+      project_alpha_public_id,canonical_projection_sha256,organization_record_id,client_record_id
+      FROM operations_shared_projects WHERE external_project_id='server-generated-project'`).first()).toEqual({
+      external_project_id: "server-generated-project", current_version: 1, name: "Reviewed Project",
+      description: null, lifecycle: "active", source_id: null, project_alpha_public_id: null,
+      canonical_projection_sha256: hash, organization_record_id: "organization-record", client_record_id: null,
+    });
+    expect(await db.prepare("SELECT version,pa_revision,refresh_command_id,v2_settlement_id FROM operations_shared_project_revisions WHERE external_project_id='server-generated-project'").first())
+      .toEqual({ version: 1, pa_revision: null, refresh_command_id: null, v2_settlement_id: null });
+    expect(await db.prepare("SELECT operation,state,command_json FROM project_alpha_project_outbox WHERE command_id=?")
+      .bind(first.commandId).first<{ operation: string; state: string; command_json: string }>()).toMatchObject({
+      operation: "bind", state: "pending", command_json: JSON.stringify({ commandId: first.commandId,
+        externalId: "server-generated-project", expectedPublicId: publicId, expectedRevision: "7",
+        expectedProjectionSha256: hash, expectedAuthorizationGeneration: "0" }),
+    });
+    expect(await db.prepare("SELECT expected_local_version,expected_local_projection_sha256,expected_mapping_state FROM project_alpha_project_v2_canonical_intents WHERE command_id=?")
+      .bind(first.commandId).first()).toEqual({ expected_local_version: 1, expected_local_projection_sha256: hash, expected_mapping_state: "absent" });
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_mappings").first("count")).toBe(0);
+    expect((await db.prepare("SELECT * FROM delivery_public_shares ORDER BY id").all()).results).toEqual(publicBefore.results);
+  });
+
+  it("accepts only one immutable reservation UUID and remains unmounted", async () => {
+    for (const invalid of [null, {}, { reservationId: "not-a-uuid" },
+      { reservationId, commandId: "browser-selected" }]) {
+      await expect(planProjectAlphaProjectAdoptionBind({ OPS_DB: db }, invalid))
+        .resolves.toEqual({ status: "rejected", reason: "invalid_action" });
+    }
+    await expect(planProjectAlphaProjectAdoptionBind({ OPS_DB: db }, { reservationId }))
+      .resolves.toEqual({ status: "blocked", reason: "missing_reservation" });
+    const index = readFileSync(new URL("../src/worker/index.ts", import.meta.url), "utf8");
+    expect(index).not.toContain("project-alpha-project-adoption-bind-consumer");
+    const module = await import("../src/worker/project-alpha-project-adoption-bind-consumer");
+    expect(Object.keys(module)).toEqual(["planProjectAlphaProjectAdoptionBind"]);
+  });
+
+  it("rolls back every planned row when current authority is revoked", async () => {
+    const savedReservationId = await seedReservation();
+    await db.prepare("UPDATE native_project_grants SET active=0,version=2 WHERE id='grant-server-generated-project'").run();
+    await expect(planProjectAlphaProjectAdoptionBind({ OPS_DB: db }, { reservationId: savedReservationId }))
+      .resolves.toEqual({ status: "blocked", reason: "current_state" });
+    expect(await db.prepare("SELECT count(*) count FROM operations_shared_projects").first("count")).toBe(0);
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_outbox").first("count")).toBe(0);
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_bind_receipts").first("count")).toBe(0);
+  });
+
+  it("rejects expired reservations without leaving a native head or bind plan", async () => {
+    const savedReservationId = await seedReservation("+1 second");
+    await new Promise(resolve => setTimeout(resolve, 1_100));
+    await expect(planProjectAlphaProjectAdoptionBind({ OPS_DB: db }, { reservationId: savedReservationId }))
+      .resolves.toEqual({ status: "blocked", reason: "current_state" });
+    expect(await db.prepare("SELECT count(*) count FROM operations_shared_projects").first("count")).toBe(0);
+    expect(await db.prepare("SELECT count(*) count FROM native_project_command_proofs").first("count")).toBe(0);
+  });
+
+  it("fails closed for missing or multiple active Directory mappings", async () => {
+    const savedReservationId = await seedReservation();
+    await db.prepare("DELETE FROM project_alpha_directory_mappings WHERE external_id='organization-record'").run();
+    await expect(planProjectAlphaProjectAdoptionBind({ OPS_DB: db }, { reservationId: savedReservationId }))
+      .resolves.toEqual({ status: "blocked", reason: "current_state" });
+    expect(await db.prepare("SELECT count(*) count FROM operations_shared_projects").first("count")).toBe(0);
+
+    await db.prepare(`INSERT INTO project_alpha_directory_mappings
+      VALUES('project-alpha:primary',?,?,?,'organization','organization-record',?)`)
+      .bind(sourceInstanceId, applicationId, historyEpochId, organizationPublicId).run();
+    await db.prepare(`INSERT INTO project_alpha_existing_directory_binding_activation_receipts
+      VALUES('63000000-0000-4000-8000-000000000006','project-alpha:primary',?,?,?,'organization','organization-record',?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))`)
+      .bind(sourceInstanceId, applicationId, historyEpochId, organizationPublicId).run();
+    await expect(planProjectAlphaProjectAdoptionBind({ OPS_DB: db }, { reservationId: savedReservationId }))
+      .resolves.toEqual({ status: "blocked", reason: "current_state" });
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_outbox").first("count")).toBe(0);
+  });
+
+  it("requires the reviewed organization-client relationship at bridge time", async () => {
+    await seedAuthority("server-generated-project", "acquired");
+    await seedActivatedClient(true);
+    await reviewStatement(reviewItemId, "server-generated-project", hash, detailJson(clientPublicId), 1,
+      "e".repeat(64), "+5 minutes", "[]", "client-record", clientPublicId, clientDetailHash).run();
+    const reserved = await reserveProjectAlphaProjectAdoptionReview({ OPS_DB: db }, { reviewItemId, idempotencyKey });
+    if (reserved.status !== "reserved") throw new Error("reservation setup failed");
+    await db.prepare("DELETE FROM operations_directory_client_organizations WHERE client_record_id='client-record'").run();
+    await expect(planProjectAlphaProjectAdoptionBind({ OPS_DB: db }, { reservationId: reserved.reservationId }))
+      .resolves.toEqual({ status: "blocked", reason: "current_state" });
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_bind_receipts").first("count")).toBe(0);
+  });
+
+  it("rejects stale local revisions and one-to-one identity collisions", async () => {
+    const savedReservationId = await seedReservation();
+    await db.prepare(`INSERT INTO operations_shared_projects(external_project_id,current_version,name,lifecycle,
+      organization_record_id,scopes_json,canonical_projection_sha256)
+      VALUES('server-generated-project',2,'Stale local head','active','organization-record','[]',?)`).bind(hash).run();
+    await db.prepare(`INSERT INTO operations_shared_project_revisions(external_project_id,version,read_json)
+      VALUES('server-generated-project',2,'{}')`).run();
+    await expect(planProjectAlphaProjectAdoptionBind({ OPS_DB: db }, { reservationId: savedReservationId }))
+      .resolves.toEqual({ status: "blocked", reason: "current_state" });
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_outbox").first("count")).toBe(0);
+  });
+
+  it("rejects a PA Project identity already pinned to another local project", async () => {
+    const savedReservationId = await seedReservation();
+    await db.exec(`
+      DROP TRIGGER project_alpha_project_outbox_native_proof;
+      DROP TRIGGER project_alpha_project_mapping_command_valid;
+      DROP TRIGGER project_alpha_project_mapping_epoch_valid;
+      DROP TRIGGER project_alpha_project_mappings_v2_settlement_guard;
+    `);
+    await db.prepare(`INSERT INTO project_alpha_project_outbox(command_id,external_project_id,operation,command_json,
+      source_id,application_id,destination_base_url,expected_source_instance_id,origin_snapshot_json,
+      expected_history_epoch_id,state,next_attempt_at,outcome_json)
+      VALUES('91000000-0000-4000-8000-000000000009','server-generated-project','bind','{"expectedRevision":"7"}',
+        'project-alpha:primary',?,'https://alpha.example.test',?,'{}',?,'acknowledged',0,'{}')`)
+      .bind(applicationId, sourceInstanceId, historyEpochId).run();
+    await db.prepare(`INSERT INTO project_alpha_project_mappings(external_project_id,source_id,source_instance_id,
+      application_id,history_epoch_id,project_alpha_public_id,establishment_kind,establishment_command_id)
+      VALUES('server-generated-project','project-alpha:primary',?,?,?,?,'bind','91000000-0000-4000-8000-000000000009')`)
+      .bind(sourceInstanceId, applicationId, historyEpochId, publicId).run();
+    await expect(planProjectAlphaProjectAdoptionBind({ OPS_DB: db }, { reservationId: savedReservationId }))
+      .resolves.toEqual({ status: "blocked", reason: "current_state" });
+    expect(await db.prepare("SELECT count(*) count FROM operations_shared_projects").first("count")).toBe(0);
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_bind_receipts").first("count")).toBe(0);
+  });
+
+  it("rolls back earlier writes when the final atomic batch statement fails", async () => {
+    const savedReservationId = await seedReservation();
+    const failingDb = new Proxy(db, { get(target, property) {
+      if (property !== "withSession") {
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+      return () => new Proxy(target.withSession("first-primary"), { get(session, sessionProperty) {
+        if (sessionProperty !== "batch") {
+          const value = Reflect.get(session, sessionProperty, session);
+          return typeof value === "function" ? value.bind(session) : value;
+        }
+        return (statements: D1PreparedStatement[]) => session.batch([...statements,
+          session.prepare(`INSERT INTO operations_shared_projects(external_project_id,name,lifecycle,scopes_json)
+            VALUES('server-generated-project','forced duplicate','active','[]')`)]);
+      } });
+    } }) as D1Database;
+    await expect(planProjectAlphaProjectAdoptionBind({ OPS_DB: failingDb }, { reservationId: savedReservationId }))
+      .resolves.toEqual({ status: "blocked", reason: "current_state" });
+    expect(await db.prepare("SELECT count(*) count FROM operations_shared_projects").first("count")).toBe(0);
+    expect(await db.prepare("SELECT count(*) count FROM native_project_command_proofs").first("count")).toBe(0);
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_outbox").first("count")).toBe(0);
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_bind_receipts").first("count")).toBe(0);
   });
 });
