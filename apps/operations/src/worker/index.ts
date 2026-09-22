@@ -74,6 +74,7 @@ import { buildConnectionSummaries, projectAlphaHealthIsStale, projectAlphaQuoteF
 import { runProjectAlphaApiV2MonitorCycle } from "./project-alpha-api-v2-monitor-cycle";
 import { selectProjectAlphaApiV2MonitorSchedulerRevision } from "./project-alpha-api-v2-monitor-scheduler-selection";
 import { drainNativeDirectoryOutboxes } from "./native-directory-outbox-scheduler";
+import { runNativeDirectoryReconciliationScheduler } from "./native-directory-reconciliation-scheduler";
 import { handleProjectAlphaApiV2MonitorControlHttp,
   projectAlphaApiV2MonitorControlHttpRequest } from "./project-alpha-api-v2-monitor-control-http";
 import { consumeNativeStaffOnboardingRateLimit } from "./native-staff-onboarding-rate-limit";
@@ -3266,6 +3267,7 @@ const PROJECT_ALPHA_RECOVERY_CRON = "17 * * * *";
 const NATIVE_DELIVERY_NOTIFICATION_CRON = "4-59/15 * * * *";
 export const PROJECT_ALPHA_API_V2_MONITOR_CRON = "3-58/5 * * * *";
 export const NATIVE_DIRECTORY_OUTBOX_CRON = "1-56/5 * * * *";
+export const NATIVE_DIRECTORY_RECONCILIATION_CRON = "0-55/5 * * * *";
 
 export async function runScheduledPrimaryProjectAlphaSync(env: Env) {
   const result = await syncProjectAlpha(env);
@@ -3290,6 +3292,17 @@ async function scheduled(
   env: Env,
   ctx: ExecutionContext,
 ) {
+  if (event.cron === NATIVE_DIRECTORY_RECONCILIATION_CRON) {
+    try {
+      const result = await runNativeDirectoryReconciliationScheduler(env);
+      console.log(JSON.stringify({ event: "native_directory.reconciliation.tick", ...result }));
+    } catch {
+      // Never emit connection secrets, remote payloads, profile fields, or source identifiers.
+      console.error(JSON.stringify({ event: "native_directory.reconciliation.error" }));
+      throw new Error("Native Directory reconciliation failed");
+    }
+    return;
+  }
   if (event.cron === NATIVE_DIRECTORY_OUTBOX_CRON) {
     try {
       const result = await drainNativeDirectoryOutboxes(env, { rotationTime: event.scheduledTime });

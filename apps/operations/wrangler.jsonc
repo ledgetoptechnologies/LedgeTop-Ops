@@ -36,6 +36,7 @@
     "LEGACY_CLIENT_REQUEST_PA_QUOTE_LINK_ENABLED": "false",
     "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED": "false",
     "PROJECT_ALPHA_API_V2_MONITOR_ENABLED": "false",
+    "PROJECT_ALPHA_DIRECTORY_RECONCILIATION_ENABLED": "false",
     "PROJECT_ALPHA_API_V2_MONITOR_RECIPIENT": "",
     "PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ENABLED": "false",
     "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED": "false",
@@ -105,7 +106,7 @@
   },
   "send_email": [{ "name": "NOTIFICATION_EMAIL", "allowed_sender_addresses": ["delivery@ledgetopdroneservices.com"] }],
   "observability": { "enabled": true, "head_sampling_rate": 1 },
-  "triggers": { "crons": ["*/15 * * * *", "*/5 * * * *", "2-57/5 * * * *", "17 * * * *", "4-59/15 * * * *", "3-58/5 * * * *", "1-56/5 * * * *"] },
+  "triggers": { "crons": ["*/15 * * * *", "*/5 * * * *", "2-57/5 * * * *", "17 * * * *", "4-59/15 * * * *", "3-58/5 * * * *", "1-56/5 * * * *", "0-55/5 * * * *"] },
   "r2_buckets": [
     { "binding": "DATA_BUCKET", "bucket_name": "client-data" },
     { "binding": "INCOMING_BUCKET", "bucket_name": "ltds-incoming" }
