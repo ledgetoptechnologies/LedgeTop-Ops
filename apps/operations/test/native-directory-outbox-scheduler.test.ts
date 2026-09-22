@@ -78,6 +78,39 @@ describe("native Directory scheduled outbox drain", () => {
     expect(relationshipDispatch).not.toHaveBeenCalled();
   });
 
+  it("rejects a malformed disabled sibling before database work or diagnostics", async () => {
+    const sourceId = "project-alpha:primary";
+    const disabledSource = "project-alpha:disabled";
+    const envelope = JSON.parse(connections([sourceId, disabledSource], [disabledSource])) as {
+      instances: Record<string, Record<string, unknown>>;
+    };
+    // The existing resolver validates disabled siblings too. A header-invalid
+    // disabled secret must therefore make the scheduler unavailable rather
+    // than silently selecting the enabled primary source.
+    envelope.instances[disabledSource]!.apiKey = "secret-token\nprivate@example.test";
+    const unavailable = new Proxy({
+      NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED: "true",
+      PROJECT_ALPHA_API_V2_CONNECTIONS: JSON.stringify(envelope),
+    }, { get(target, key) {
+      if (key === "OPS_DB") throw new Error("database must not be touched");
+      return Reflect.get(target, key);
+    } });
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(drainNativeDirectoryOutboxes(unavailable as never)).resolves.toMatchObject({
+        status: "unavailable", attempted: 0,
+      });
+      expect(profileDispatch).not.toHaveBeenCalled();
+      expect(relationshipDispatch).not.toHaveBeenCalled();
+      expect(log).not.toHaveBeenCalled();
+      expect(error).not.toHaveBeenCalled();
+    } finally {
+      log.mockRestore();
+      error.mockRestore();
+    }
+  });
+
   it("drains both queues, recovers expired leases, and skips live leases and terminal rows", async () => {
     const sourceId = "project-alpha:primary";
     await command("profile", "profile-due", sourceId);
@@ -134,6 +167,44 @@ describe("native Directory scheduled outbox drain", () => {
     });
     expect(result).toMatchObject({ attempted: 1, acknowledged: 1, exhausted: true });
     expect(profileDispatch).toHaveBeenCalledTimes(1);
+  });
+
+  it("aborts an in-flight send at the deadline without logging its private failure and retries the durable command", async () => {
+    const sourceId = "project-alpha:primary";
+    await command("profile", "profile-deadline", sourceId);
+    let observedSignal: AbortSignal | undefined;
+    const controlledFetch = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      observedSignal = init?.signal ?? undefined;
+      observedSignal?.addEventListener("abort", () => reject(new Error("secret-token private@example.test")), { once: true });
+    }));
+    profileDispatch.mockImplementationOnce(async (_env, _source, _commandId, send: typeof fetch) => {
+      try {
+        await send("https://directory.example.test/outbox", { method: "POST" });
+        return { status: "acknowledged" };
+      } catch {
+        return { status: "uncertain", reason: "transport" };
+      }
+    });
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const result = await drainNativeDirectoryOutboxes(environment([sourceId]), {
+        now: () => dueAt, rotationTime: 0, maxCommands: 1, maxRuntimeMs: 10, send: controlledFetch as typeof fetch,
+      });
+      expect(result).toMatchObject({ attempted: 1, uncertain: 1, acknowledged: 0, exhausted: true });
+      expect(observedSignal?.aborted).toBe(true);
+      expect(await db.prepare("SELECT state FROM project_alpha_directory_outbox WHERE command_id='profile-deadline'").first("state"))
+        .toBe("pending");
+      await expect(drainNativeDirectoryOutboxes(environment([sourceId]), {
+        now: () => dueAt, rotationTime: 0, maxCommands: 1,
+      })).resolves.toMatchObject({ attempted: 1, acknowledged: 1 });
+      expect(profileDispatch.mock.calls.map(call => call[2])).toEqual(["profile-deadline", "profile-deadline"]);
+      expect(log).not.toHaveBeenCalled();
+      expect(error).not.toHaveBeenCalled();
+    } finally {
+      log.mockRestore();
+      error.mockRestore();
+    }
   });
 
   it("retains an outage command for a later retry without logging private failure data", async () => {
