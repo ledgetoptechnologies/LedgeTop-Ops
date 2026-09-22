@@ -7,15 +7,15 @@ const runtimes: Miniflare[] = [];
 afterAll(async () => { for (const runtime of runtimes) await runtime.dispose(); });
 
 describe("existing PA directory acquisition migration chain", () => {
-  it("applies through 0124 without changing populated canonical history or activating acquired mappings", async () => {
+  it("applies through 0126 without changing populated canonical history or activating acquired mappings", async () => {
     const runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06",
       script: "export default {fetch(){return new Response('ok')}}", d1Databases: ["OPS_DB"] });
     runtimes.push(runtime);
     const database = await runtime.getD1Database("OPS_DB") as D1Database;
     const directory = new URL("../migrations/", import.meta.url);
     const migrations = readdirSync(directory)
-      .filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0124").sort();
-    expect(migrations.at(-1)).toBe("0124_project_alpha_project_adoption_review_evidence.sql");
+      .filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0126").sort();
+    expect(migrations.at(-1)).toBe("0126_project_alpha_project_active_directory_mapping_bridge.sql");
     const recordId = "11111111-1111-4111-8111-111111111111";
     const profile = JSON.stringify({ name: "Synthetic Existing", email: "existing@example.test", phone: null,
       address: { line1: null, line2: null, city: null, state: null, postalCode: null, country: null }, clientType: "business" });
@@ -80,6 +80,8 @@ describe("existing PA directory acquisition migration chain", () => {
     expect(await database.prepare("SELECT count(*) FROM project_alpha_project_v2_canonical_activation_receipts").first("count(*)")).toBe(0);
     expect(await database.prepare("SELECT count(*) FROM project_alpha_project_adoption_review_evidence").first("count(*)")).toBe(0);
     expect(await database.prepare("SELECT count(*) FROM project_alpha_project_adoption_review_reservations").first("count(*)")).toBe(0);
+    expect(await database.prepare("SELECT count(*) FROM project_alpha_existing_directory_binding_activation_receipts").first("count(*)")).toBe(0);
+    expect(await database.prepare("SELECT mapping_kind FROM project_alpha_active_directory_mappings WHERE provenance_id='legacy-command'").first("mapping_kind")).toBe("legacy");
     expect(await database.prepare("SELECT count(*) FROM project_alpha_directory_mappings WHERE command_id='legacy-command'").first("count(*)")).toBe(1);
     await database.prepare(`INSERT INTO project_alpha_existing_directory_binding_review_evidence(
       receipt_id,request_sha256,record_id,source_id,source_instance_id,application_id,history_epoch_id,

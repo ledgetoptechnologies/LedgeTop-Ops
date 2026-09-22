@@ -14,8 +14,10 @@ const reservationId = "60000000-0000-4000-8000-000000000006";
 const idempotencyKey = "70000000-0000-4000-8000-000000000007";
 const publicId = "a".repeat(32);
 const organizationPublicId = "b".repeat(32);
+const clientPublicId = "d".repeat(32);
 const hash = "c".repeat(64);
 const detailHash = "2beb7793e47ac43b6fc431a8860fab8fe296650bc376440a2e3b31886162cc0e";
+const clientDetailHash = "b155ff100e5dba2118a2f8a490718216e5bcba05c0e1b9b4cb43af0dfd412118";
 
 async function migrate(name: string) {
   const sql = readFileSync(new URL(`../migrations/${name}`, import.meta.url), "utf8");
@@ -47,20 +49,34 @@ async function setupSchema() {
   await migrate("0122_project_alpha_project_v2_canonical_activation.sql");
   await migrate("0123_native_directory_authority_history.sql");
   await migrate("0124_project_alpha_project_adoption_review_evidence.sql");
+  await db.batch(splitD1MigrationStatements(`
+    CREATE TABLE project_alpha_existing_directory_binding_activation_receipts(
+      activation_id TEXT PRIMARY KEY,source_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,
+      resource_type TEXT,external_id TEXT,project_alpha_public_id TEXT,activated_at TEXT
+    );
+    CREATE VIEW project_alpha_active_directory_mappings AS
+      SELECT source_id,resource_type,external_id,project_alpha_public_id,source_instance_id,application_id,history_epoch_id,
+        NULL AS provenance_id,'legacy' AS mapping_kind,NULL AS created_at FROM project_alpha_directory_mappings
+      UNION ALL
+      SELECT source_id,resource_type,external_id,project_alpha_public_id,source_instance_id,application_id,history_epoch_id,
+        activation_id AS provenance_id,'acquired' AS mapping_kind,activated_at AS created_at
+        FROM project_alpha_existing_directory_binding_activation_receipts;
+  `).map(statement => db.prepare(statement)));
+  await migrate("0126_project_alpha_project_active_directory_mapping_bridge.sql");
 }
 
-function detailJson() {
+function detailJson(clientId: string | null = null) {
   return JSON.stringify({
     apiVersion: "2", sourceInstanceId, applicationId, historyEpoch: historyEpochId,
     requestId: "80000000-0000-4000-8000-000000000008", replayed: false, accepted: true,
     resource: { type: "project", id: publicId, revision: "7", projectionSha256: hash },
     data: { name: "Reviewed Project", description: null, status: "active", archived: false,
       overdueWarning: false, completedAt: null, archivedAt: null, estimatedStart: null, estimatedEnd: null,
-      clientPublicId: null, organizationPublicId },
+      clientPublicId: clientId, organizationPublicId },
   });
 }
 
-async function seedAuthority(externalProjectId = "server-generated-project") {
+async function seedAuthority(externalProjectId = "server-generated-project", mappingKind: "legacy" | "acquired" = "legacy") {
   await db.batch([
     db.prepare("INSERT INTO native_staff_admissions VALUES('staff',1,'access|staff',1,'staff','2026-09-21T00:00:00.000Z','2026-09-21T00:00:00.000Z') ON CONFLICT(staff_id) DO NOTHING"),
     db.prepare("INSERT INTO native_staff_profiles VALUES('staff','staff@example.test',1) ON CONFLICT(staff_id) DO NOTHING"),
@@ -70,8 +86,28 @@ async function seedAuthority(externalProjectId = "server-generated-project") {
     db.prepare(`INSERT INTO native_project_grants(id,staff_id,capability,effect,scope_kind,external_project_id,granted_by)
       VALUES(?, 'staff','project.shared.sync','allow','exact_project',?,'staff') ON CONFLICT DO NOTHING`).bind(`grant-${externalProjectId}`, externalProjectId),
     db.prepare("INSERT INTO operations_directory_records VALUES('organization-record','organization') ON CONFLICT(record_id) DO NOTHING"),
-    db.prepare(`INSERT INTO project_alpha_directory_mappings VALUES('project-alpha:primary',?,?,?,?,'organization-record',?)`)
-      .bind(sourceInstanceId, applicationId, historyEpochId, "organization", organizationPublicId),
+    mappingKind === "legacy"
+      ? db.prepare(`INSERT INTO project_alpha_directory_mappings
+          SELECT 'project-alpha:primary',?,?,?,?,'organization-record',?
+          WHERE NOT EXISTS (SELECT 1 FROM project_alpha_directory_mappings WHERE source_id='project-alpha:primary'
+            AND source_instance_id=? AND application_id=? AND history_epoch_id=? AND resource_type='organization'
+            AND external_id='organization-record' AND project_alpha_public_id=?)`)
+        .bind(sourceInstanceId, applicationId, historyEpochId, "organization", organizationPublicId,
+          sourceInstanceId, applicationId, historyEpochId, organizationPublicId)
+      : db.prepare(`INSERT INTO project_alpha_existing_directory_binding_activation_receipts
+          VALUES('61000000-0000-4000-8000-000000000006','project-alpha:primary',?,?,?,'organization','organization-record',?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+          ON CONFLICT(activation_id) DO NOTHING`)
+        .bind(sourceInstanceId, applicationId, historyEpochId, organizationPublicId),
+  ]);
+}
+
+async function seedActivatedClient(withRelationship = true) {
+  await db.batch([
+    db.prepare("INSERT INTO operations_directory_records VALUES('client-record','client')"),
+    db.prepare(`INSERT INTO project_alpha_existing_directory_binding_activation_receipts
+      VALUES('62000000-0000-4000-8000-000000000006','project-alpha:primary',?,?,?,'client','client-record',?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))`)
+      .bind(sourceInstanceId, applicationId, historyEpochId, clientPublicId),
+    ...(withRelationship ? [db.prepare("INSERT INTO operations_directory_client_organizations VALUES('client-record','organization-record')")] : []),
   ]);
 }
 
@@ -102,15 +138,19 @@ function reviewStatement(
   independentEvidenceHash = "e".repeat(64),
   expiryModifier = "+5 minutes",
   scopesJson = "[]",
+  clientRecordId: string | null = null,
+  clientProjectAlphaPublicId: string | null = null,
+  canonicalDetailHash = detailHash,
 ) {
   return db.prepare(`INSERT INTO project_alpha_project_adoption_review_evidence(
     review_item_id,request_sha256,source_id,source_instance_id,application_id,history_epoch_id,external_project_id,
     project_alpha_public_id,project_alpha_revision,projection_sha256,authorization_generation,canonical_detail_read_json,
     canonical_detail_read_sha256,organization_record_id,organization_project_alpha_public_id,client_record_id,client_project_alpha_public_id,
     reviewer_staff_id,reviewer_access_subject,reviewer_admission_version,reviewer_profile_version,reviewer_owner_role_id,independent_evidence_sha256,project_grant_generation,normalized_scopes_json,reviewed_at,expires_at)
-    VALUES(?,?,'project-alpha:primary',?,?,?,? ,?,'7',?,'0',?,?, 'organization-record',?,NULL,NULL,'staff','access|staff',1,1,'role-owner',?,?,?,
+    VALUES(?,?,'project-alpha:primary',?,?,?,? ,?,'7',?,'0',?,?, 'organization-record',?,?,?,'staff','access|staff',1,1,'role-owner',?,?,?,
       strftime('%Y-%m-%dT%H:%M:%fZ','now'),strftime('%Y-%m-%dT%H:%M:%fZ','now','${expiryModifier}'))`)
-    .bind(itemId, requestHash, sourceInstanceId, applicationId, historyEpochId, externalProjectId, publicId, hash, detail, detailHash, organizationPublicId, independentEvidenceHash, grantGeneration, scopesJson);
+    .bind(itemId, requestHash, sourceInstanceId, applicationId, historyEpochId, externalProjectId, publicId, hash, detail, canonicalDetailHash,
+      organizationPublicId, clientRecordId, clientProjectAlphaPublicId, independentEvidenceHash, grantGeneration, scopesJson);
 }
 
 function reservationStatement(itemId = reviewItemId, key = idempotencyKey) {
@@ -148,6 +188,36 @@ describe("0124 project adoption review evidence", () => {
     await expect(db.prepare("DELETE FROM project_alpha_project_adoption_review_reservations").run()).rejects.toThrow(/durable/);
     expect((await db.prepare("SELECT * FROM delivery_public_shares").all()).results).toEqual(beforeShare.results);
     expect(await db.prepare("SELECT count(*) FROM operations_shared_projects").first("count(*)")).toBe(0);
+  });
+
+  it("accepts activated organization and client mappings only with their current relationship", async () => {
+    await seedAuthority("server-generated-project", "acquired");
+    await seedActivatedClient(false);
+    const reviewedDetail = detailJson(clientPublicId);
+    const statement = () => reviewStatement(reviewItemId, "server-generated-project", hash, reviewedDetail, 1,
+      "e".repeat(64), "+5 minutes", "[]", "client-record", clientPublicId, clientDetailHash);
+    await expect(statement().run()).rejects.toThrow(/authority/);
+    await db.prepare("INSERT INTO operations_directory_client_organizations VALUES('client-record','organization-record')").run();
+    const beforeShare = await db.prepare("SELECT * FROM delivery_public_shares").all();
+    await statement().run();
+    await expect(reserveProjectAlphaProjectAdoptionReview({ OPS_DB: db }, { reviewItemId, idempotencyKey }))
+      .resolves.toMatchObject({ status: "reserved", replayed: false });
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_directory_mappings").first("count")).toBe(0);
+    expect(await db.prepare("SELECT mapping_kind FROM project_alpha_active_directory_mappings ORDER BY resource_type").all())
+      .toMatchObject({ results: [{ mapping_kind: "acquired" }, { mapping_kind: "acquired" }] });
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_outbox").first("count")).toBe(0);
+    expect((await db.prepare("SELECT * FROM delivery_public_shares").all()).results).toEqual(beforeShare.results);
+  });
+
+  it("fails closed when an activated mapping collides with an otherwise exact legacy row", async () => {
+    await seedAuthority("server-generated-project", "acquired");
+    await reviewStatement().run();
+    await db.prepare(`INSERT INTO project_alpha_directory_mappings
+      VALUES('project-alpha:primary',?,?,?,'organization','organization-record',?)`)
+      .bind(sourceInstanceId, applicationId, historyEpochId, organizationPublicId).run();
+    await expect(reserveProjectAlphaProjectAdoptionReview({ OPS_DB: db }, { reviewItemId, idempotencyKey }))
+      .resolves.toEqual({ status: "blocked", reason: "current_state" });
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_reservations").first("count")).toBe(0);
   });
 
   it("rejects malformed detail, identity collisions, and expired or changed current authority", async () => {

@@ -117,18 +117,18 @@ const CURRENT_REVIEW = `
         OR EXISTS (SELECT 1 FROM json_each(review.normalized_scopes_json) scope
           WHERE (deny.scope_kind='business_area' AND deny.business_area_id=json_extract(scope.value,'$.businessAreaId'))
             OR (deny.scope_kind='division' AND deny.division_id=json_extract(scope.value,'$.divisionId')))))
-  AND (review.organization_record_id IS NULL OR EXISTS (SELECT 1 FROM project_alpha_directory_mappings mapping
+  AND (review.organization_record_id IS NULL OR (SELECT count(*) FROM project_alpha_active_directory_mappings mapping
     JOIN operations_directory_records record ON record.record_id=mapping.external_id AND record.record_kind='organization'
     WHERE mapping.source_id=review.source_id AND mapping.source_instance_id=review.source_instance_id
       AND mapping.application_id=review.application_id AND mapping.history_epoch_id=review.history_epoch_id
       AND mapping.resource_type='organization' AND mapping.external_id=review.organization_record_id
-      AND mapping.project_alpha_public_id=review.organization_project_alpha_public_id))
-  AND (review.client_record_id IS NULL OR EXISTS (SELECT 1 FROM project_alpha_directory_mappings mapping
+      AND mapping.project_alpha_public_id=review.organization_project_alpha_public_id)=1)
+  AND (review.client_record_id IS NULL OR (SELECT count(*) FROM project_alpha_active_directory_mappings mapping
     JOIN operations_directory_records record ON record.record_id=mapping.external_id AND record.record_kind='client'
     WHERE mapping.source_id=review.source_id AND mapping.source_instance_id=review.source_instance_id
       AND mapping.application_id=review.application_id AND mapping.history_epoch_id=review.history_epoch_id
       AND mapping.resource_type='client' AND mapping.external_id=review.client_record_id
-      AND mapping.project_alpha_public_id=review.client_project_alpha_public_id))
+      AND mapping.project_alpha_public_id=review.client_project_alpha_public_id)=1)
   AND (review.organization_record_id IS NULL OR review.client_record_id IS NULL OR EXISTS (
     SELECT 1 FROM operations_directory_client_organizations relationship
     WHERE relationship.client_record_id=review.client_record_id
