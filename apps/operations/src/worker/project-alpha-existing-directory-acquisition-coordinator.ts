@@ -127,14 +127,16 @@ async function authority(db: D1Database, selected: ProjectAlphaExistingDirectory
           AND grant_row.effect='allow' AND grant_row.active=1 AND ${APPLICABLE})
        AND NOT EXISTS(SELECT 1 FROM native_directory_grants grant_row WHERE grant_row.staff_id=? AND grant_row.permission='directory.identity.link'
           AND grant_row.effect='deny' AND grant_row.active=1 AND ${APPLICABLE})) authority_current,
-      (?='organization' OR EXISTS(SELECT 1 FROM operations_directory_client_organizations relationship
-        WHERE relationship.client_record_id=record.record_id AND ((? IS NULL AND relationship.organization_record_id IS NULL)
-          OR (? IS NOT NULL AND EXISTS(SELECT 1 FROM project_alpha_active_directory_mappings parent
+      (?='organization'
+        OR (? IS NULL AND NOT EXISTS(SELECT 1 FROM operations_directory_client_organizations relationship
+          WHERE relationship.client_record_id=record.record_id))
+        OR (? IS NOT NULL AND 1=(SELECT COUNT(*) FROM operations_directory_client_organizations relationship
+          JOIN project_alpha_active_directory_mappings parent ON parent.external_id=relationship.organization_record_id
             JOIN operations_directory_records parent_record ON parent_record.record_id=parent.external_id
               AND parent_record.record_kind='organization'
-            WHERE parent.source_id=? AND parent.source_instance_id=? AND parent.application_id=? AND parent.history_epoch_id=?
+            WHERE relationship.client_record_id=record.record_id AND parent.source_id=? AND parent.source_instance_id=? AND parent.application_id=? AND parent.history_epoch_id=?
               AND parent.resource_type='organization' AND parent.external_id=relationship.organization_record_id
-              AND parent.project_alpha_public_id=?))))) relationship_current
+              AND parent.project_alpha_public_id=?))) relationship_current
     FROM operations_directory_records record WHERE record.record_id=? AND record.record_kind=?`)
     .bind(selected.localRecordVersion, ...(reviewedAt === undefined ? [] : [reviewedAt, reviewedAt]),
       staff, selected.reviewer.accessSubject, selected.reviewer.admissionVersion, selected.reviewer.profileVersion,
@@ -370,15 +372,17 @@ export async function acquireProjectAlphaExistingDirectoryBinding(
             AND grant_row.permission='directory.identity.link' AND grant_row.effect='allow' AND grant_row.active=1 AND ${APPLICABLE_FINAL})
           AND NOT EXISTS(SELECT 1 FROM native_directory_grants grant_row WHERE grant_row.staff_id=review.reviewer_staff_id
             AND grant_row.permission='directory.identity.link' AND grant_row.effect='deny' AND grant_row.active=1 AND ${APPLICABLE_FINAL})
-          AND (review.resource_type='organization' OR EXISTS(SELECT 1 FROM operations_directory_client_organizations relationship
-            WHERE relationship.client_record_id=review.record_id AND ((? IS NULL AND relationship.organization_record_id IS NULL)
-              OR (? IS NOT NULL AND EXISTS(SELECT 1 FROM project_alpha_active_directory_mappings parent
+          AND (review.resource_type='organization'
+            OR (? IS NULL AND NOT EXISTS(SELECT 1 FROM operations_directory_client_organizations relationship
+              WHERE relationship.client_record_id=review.record_id))
+            OR (? IS NOT NULL AND 1=(SELECT COUNT(*) FROM operations_directory_client_organizations relationship
+              JOIN project_alpha_active_directory_mappings parent ON parent.external_id=relationship.organization_record_id
                 JOIN operations_directory_records parent_record ON parent_record.record_id=parent.external_id
                   AND parent_record.record_kind='organization'
-                WHERE parent.source_id=review.source_id AND parent.source_instance_id=review.source_instance_id
+                WHERE relationship.client_record_id=review.record_id AND parent.source_id=review.source_id AND parent.source_instance_id=review.source_instance_id
                   AND parent.application_id=review.application_id AND parent.history_epoch_id=review.history_epoch_id
                   AND parent.resource_type='organization' AND parent.external_id=relationship.organization_record_id
-                  AND parent.project_alpha_public_id=?)))))`)
+                  AND parent.project_alpha_public_id=?)))`)
         .bind(acquiredReceiptId, requestSha256, selected.commandId, selected.recordId, selected.sourceId,
           identity.sourceInstanceId, identity.applicationId, identity.historyEpoch, selected.resourceType, selected.recordId,
           selected.projectAlphaPublicId, command.expectedRevision, acquisitionEvidence!.response_sha256, profileHash, bindingHash,

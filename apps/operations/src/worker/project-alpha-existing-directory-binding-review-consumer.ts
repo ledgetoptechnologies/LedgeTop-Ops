@@ -2,6 +2,10 @@ import {
   resolveProjectAlphaApiV2Connection,
   type ProjectAlphaApiV2ConnectionEnvironment,
 } from "./project-alpha-api-v2-connections";
+import {
+  readConfiguredProjectAlphaDirectoryBindingStatus,
+  readConfiguredProjectAlphaDirectoryProfile,
+} from "./project-alpha-directory-read-api-v2";
 
 /**
  * Private, default-off consumer for an already acquired Directory binding.
@@ -17,15 +21,19 @@ export type ProjectAlphaExistingDirectoryBindingAction = Readonly<{
   reviewItemId: string;
   idempotencyKey: string;
 }>;
+export type ProjectAlphaExistingDirectoryBindingActor = Readonly<{
+  staffId: string;
+  accessSubject: string;
+}>;
 
 export type ProjectAlphaExistingDirectoryBindingOutcome =
   | Readonly<{ status: "activated"; activationId: string; reviewItemId: string; idempotencyKey: string;
     recordId: string; resourceType: "organization" | "client"; replayed: boolean }>
-  | Readonly<{ status: "rejected"; reason: "invalid_action" }>
+  | Readonly<{ status: "rejected"; reason: "invalid_action" | "invalid_actor" }>
   | Readonly<{ status: "blocked"; reason: "missing_review" | "source" | "expired" | "authority" |
-    "stale_evidence" | "collision" | "relationship" }>
+    "stale_evidence" | "collision" | "relationship" | "actor" | "remote" }>
   | Readonly<{ status: "conflict"; reason: "review_item" | "idempotency_key" }>
-  | Readonly<{ status: "uncertain"; reason: "database" }>;
+  | Readonly<{ status: "uncertain"; reason: "database" | "remote" }>;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
@@ -120,6 +128,21 @@ function exactAction(value: unknown): value is ProjectAlphaExistingDirectoryBind
     const review = descriptors.reviewItemId, key = descriptors.idempotencyKey;
     return review?.enumerable === true && "value" in review && typeof review.value === "string" && UUID.test(review.value)
       && key?.enumerable === true && "value" in key && typeof key.value === "string" && UUID.test(key.value);
+  } catch { return false; }
+}
+
+function exactActor(value: unknown): value is ProjectAlphaExistingDirectoryBindingActor {
+  try {
+    if (!value || typeof value !== "object" || Array.isArray(value)
+      || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) return false;
+    const fields = Reflect.ownKeys(value);
+    if (fields.length !== 2 || fields.some(field => typeof field !== "string"
+      || !["staffId", "accessSubject"].includes(field))) return false;
+    const descriptors = Object.getOwnPropertyDescriptors(value), staff = descriptors.staffId, subject = descriptors.accessSubject;
+    return staff?.enumerable === true && "value" in staff && typeof staff.value === "string"
+      && staff.value.length >= 1 && staff.value.length <= 191 && !/[\u0000-\u001f\u007f]/.test(staff.value)
+      && subject?.enumerable === true && "value" in subject && typeof subject.value === "string"
+      && subject.value.length >= 1 && subject.value.length <= 191 && !/[\u0000-\u001f\u007f]/.test(subject.value);
   } catch { return false; }
 }
 
@@ -248,17 +271,23 @@ async function current(db: D1Database, value: Review): Promise<Current | null> {
         AND legacy.source_instance_id=review.source_instance_id AND legacy.application_id=review.application_id
         AND legacy.resource_type=review.resource_type
         AND (legacy.external_id=review.external_id OR legacy.project_alpha_public_id=review.project_alpha_public_id)) collision_free,
-      (review.resource_type='organization' OR EXISTS (SELECT 1 FROM operations_directory_client_organizations relationship
-        WHERE relationship.client_record_id=review.record_id AND (relationship.organization_record_id IS NULL
-          OR EXISTS (SELECT 1 FROM project_alpha_directory_mappings parent
+      (review.resource_type='organization'
+        OR NOT EXISTS (SELECT 1 FROM operations_directory_client_organizations relationship
+          WHERE relationship.client_record_id=review.record_id)
+        OR 1=(
+          (SELECT COUNT(*) FROM operations_directory_client_organizations relationship
+            JOIN project_alpha_directory_mappings parent ON parent.external_id=relationship.organization_record_id
             JOIN operations_directory_records parent_record ON parent_record.record_id=parent.external_id AND parent_record.record_kind='organization'
-            WHERE parent.source_id=review.source_id AND parent.source_instance_id=review.source_instance_id
-              AND parent.application_id=review.application_id AND parent.history_epoch_id=review.history_epoch_id
-              AND parent.resource_type='organization' AND parent.external_id=relationship.organization_record_id)
-          OR EXISTS (SELECT 1 FROM project_alpha_existing_directory_binding_activation_receipts parent
-            WHERE parent.source_id=review.source_id AND parent.source_instance_id=review.source_instance_id
-              AND parent.application_id=review.application_id AND parent.history_epoch_id=review.history_epoch_id
-              AND parent.resource_type='organization' AND parent.record_id=relationship.organization_record_id)))) relationship_current,
+            WHERE relationship.client_record_id=review.record_id AND parent.source_id=review.source_id
+              AND parent.source_instance_id=review.source_instance_id AND parent.application_id=review.application_id
+              AND parent.history_epoch_id=review.history_epoch_id AND parent.resource_type='organization')
+          + (SELECT COUNT(*) FROM operations_directory_client_organizations relationship
+            JOIN project_alpha_existing_directory_binding_activation_receipts parent ON parent.record_id=relationship.organization_record_id
+            JOIN operations_directory_records parent_record ON parent_record.record_id=parent.record_id AND parent_record.record_kind='organization'
+            WHERE relationship.client_record_id=review.record_id AND parent.source_id=review.source_id
+              AND parent.source_instance_id=review.source_instance_id AND parent.application_id=review.application_id
+              AND parent.history_epoch_id=review.history_epoch_id AND parent.resource_type='organization')
+        )) relationship_current,
       (SELECT generation FROM native_directory_grant_generations WHERE staff_id=review.reviewer_staff_id) grant_generation
     FROM project_alpha_existing_directory_binding_review_evidence review WHERE review.receipt_id=?`)
     .bind(value.receipt_id).first<Current>();
@@ -277,22 +306,42 @@ function blocked(value: Current | null): ProjectAlphaExistingDirectoryBindingOut
 export async function activateProjectAlphaExistingDirectoryBinding(
   env: ProjectAlphaExistingDirectoryBindingConsumerEnvironment,
   inputValue: unknown,
+  actorValue: unknown,
+  send: typeof fetch = fetch,
 ): Promise<ProjectAlphaExistingDirectoryBindingOutcome> {
   if (!exactAction(inputValue)) return { status: "rejected", reason: "invalid_action" };
+  if (!exactActor(actorValue)) return { status: "rejected", reason: "invalid_actor" };
   const input = inputValue;
-  try {
-    const saved = await prior(env.OPS_DB, input.reviewItemId, input.idempotencyKey);
-    if (saved) return replay(saved, input);
-  } catch { return { status: "uncertain", reason: "database" }; }
-
+  const actor = actorValue;
+  let savedActivation: Activation | null;
+  try { savedActivation = await prior(env.OPS_DB,input.reviewItemId,input.idempotencyKey); }
+  catch { return { status: "uncertain",reason: "database" }; }
+  if (savedActivation && savedActivation.review_receipt_id !== input.reviewItemId) {
+    try {
+      const savedReview = await review(env.OPS_DB,savedActivation.review_receipt_id);
+      if (!savedReview || actor.staffId !== savedReview.reviewer_staff_id
+        || actor.accessSubject !== savedReview.reviewer_access_subject) return { status: "blocked",reason: "actor" };
+      if (!(await current(env.OPS_DB,savedReview))?.authority_current) return { status: "blocked",reason: "authority" };
+    } catch { return { status: "uncertain",reason: "database" }; }
+    return replay(savedActivation,input);
+  }
   let evidence: Review;
-  let acquired: Chain;
   try {
-    const [foundReview, foundChain] = await Promise.all([
-      review(env.OPS_DB, input.reviewItemId), chain(env.OPS_DB, input.reviewItemId),
-    ]);
+    const foundReview = await review(env.OPS_DB, input.reviewItemId);
     if (!foundReview) return { status: "blocked", reason: "missing_review" };
     evidence = foundReview;
+  } catch { return { status: "uncertain", reason: "database" }; }
+  if (actor.staffId !== evidence.reviewer_staff_id || actor.accessSubject !== evidence.reviewer_access_subject)
+    return { status: "blocked", reason: "actor" };
+
+  let acquired: Chain;
+  try {
+    const foundChain = await chain(env.OPS_DB,input.reviewItemId);
+    if (savedActivation) {
+      const currentActor = await current(env.OPS_DB, evidence);
+      if (!currentActor?.authority_current) return { status: "blocked", reason: "authority" };
+      return replay(savedActivation, input);
+    }
     if (!foundChain || !exactChain(foundChain)) return { status: "blocked", reason: "stale_evidence" };
     acquired = foundChain;
   } catch { return { status: "uncertain", reason: "database" }; }
@@ -306,6 +355,48 @@ export async function activateProjectAlphaExistingDirectoryBinding(
 
   let before: Current | null;
   try { before = await current(env.OPS_DB, evidence); }
+  catch { return { status: "uncertain", reason: "database" }; }
+  if (!before?.unexpired || !before.record_current || !before.authority_current
+    || !before.collision_free || !before.relationship_current || before.grant_generation === null) return blocked(before);
+
+  const [freshProfile, freshBinding] = await Promise.all([
+    readConfiguredProjectAlphaDirectoryProfile(env,evidence.source_id,evidence.resource_type,
+      evidence.project_alpha_public_id,send),
+    readConfiguredProjectAlphaDirectoryBindingStatus(env,evidence.source_id,evidence.resource_type,
+      evidence.external_id,evidence.project_alpha_public_id,send),
+  ]);
+  if (freshProfile.status !== "observed" || freshBinding.status !== "observed") {
+    const uncertain = [freshProfile,freshBinding].some(result => result.status === "uncertain"
+      || (result.status === "blocked" && result.preflight?.status === "unavailable")
+      || (result.status === "blocked" && result.preflight?.status === "rate_limited"));
+    return uncertain ? { status: "uncertain", reason: "remote" } : { status: "blocked", reason: "remote" };
+  }
+  if (freshProfile.observation.resource.revision !== evidence.project_alpha_revision
+    || freshBinding.observation.resource.revision !== evidence.project_alpha_revision
+    || freshProfile.observation.authorizationGeneration !== freshBinding.observation.authorizationGeneration)
+    return { status: "blocked", reason: "remote" };
+  if (evidence.resource_type === "client") {
+    const parentPublicId = freshProfile.observation.profile.organizationPublicId ?? null;
+    try {
+      const relationship = await env.OPS_DB.prepare(`SELECT 1 current_relationship WHERE
+        (? IS NULL AND NOT EXISTS(SELECT 1 FROM operations_directory_client_organizations relationship
+          WHERE relationship.client_record_id=?))
+        OR (? IS NOT NULL AND 1=(SELECT COUNT(*) FROM operations_directory_client_organizations relationship
+          JOIN project_alpha_active_directory_mappings parent ON parent.external_id=relationship.organization_record_id
+            JOIN operations_directory_records parent_record ON parent_record.record_id=parent.external_id
+              AND parent_record.record_kind='organization'
+          WHERE relationship.client_record_id=? AND parent.source_id=? AND parent.source_instance_id=? AND parent.application_id=?
+              AND parent.history_epoch_id=? AND parent.resource_type='organization'
+              AND parent.project_alpha_public_id=?))`)
+        .bind(parentPublicId,evidence.record_id,parentPublicId,evidence.record_id,evidence.source_id,evidence.source_instance_id,
+          evidence.application_id,evidence.history_epoch_id,parentPublicId).first();
+      if (!relationship) return { status: "blocked", reason: "relationship" };
+    } catch { return { status: "uncertain", reason: "database" }; }
+  }
+
+  // Network observations are non-transactional. Recheck every native fence
+  // after them so this is the last read before the trigger-protected INSERT.
+  try { before = await current(env.OPS_DB,evidence); }
   catch { return { status: "uncertain", reason: "database" }; }
   if (!before?.unexpired || !before.record_current || !before.authority_current
     || !before.collision_free || !before.relationship_current || before.grant_generation === null) return blocked(before);
