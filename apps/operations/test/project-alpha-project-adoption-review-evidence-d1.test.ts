@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Miniflare } from "miniflare";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
+import { reserveProjectAlphaProjectAdoptionReview } from "../src/worker/project-alpha-project-adoption-review-consumer";
 
 let runtime: Miniflare;
 let db: D1Database;
@@ -14,7 +15,7 @@ const idempotencyKey = "70000000-0000-4000-8000-000000000007";
 const publicId = "a".repeat(32);
 const organizationPublicId = "b".repeat(32);
 const hash = "c".repeat(64);
-const detailHash = "d".repeat(64);
+const detailHash = "2beb7793e47ac43b6fc431a8860fab8fe296650bc376440a2e3b31886162cc0e";
 
 async function migrate(name: string) {
   const sql = readFileSync(new URL(`../migrations/${name}`, import.meta.url), "utf8");
@@ -230,5 +231,128 @@ describe("0124 project adoption review evidence", () => {
     await db.prepare("INSERT INTO native_business_areas VALUES('other-area',1)").run();
     const mismatchedScope = JSON.stringify([{ scopeKind: "division", businessAreaId: "other-area", divisionId: "division" }]);
     await expect(reviewStatement("57000000-0000-4000-8000-000000000005", "server-generated-project", hash, detailJson(), 1, "e".repeat(64), "+5 minutes", mismatchedScope).run()).rejects.toThrow(/authority/);
+  });
+});
+
+describe("project adoption review reservation consumer", () => {
+  it("atomically reserves only server-owned evidence and exactly replays it without creating a bind", async () => {
+    await seedAuthority();
+    await reviewStatement().run();
+    const beforeShare = await db.prepare("SELECT * FROM delivery_public_shares").all();
+    const first = await reserveProjectAlphaProjectAdoptionReview({ OPS_DB: db }, { reviewItemId, idempotencyKey });
+    expect(first).toMatchObject({ status: "reserved", reviewItemId, idempotencyKey, replayed: false });
+    if (first.status !== "reserved") throw new Error("reservation setup failed");
+    await expect(reserveProjectAlphaProjectAdoptionReview({ OPS_DB: db }, { reviewItemId, idempotencyKey }))
+      .resolves.toEqual({ ...first, replayed: true });
+    expect(await db.prepare(`SELECT reservation_id,review_item_id,idempotency_key,request_sha256,source_id,
+      source_instance_id,application_id,history_epoch_id,external_project_id,project_alpha_public_id,
+      project_alpha_revision,projection_sha256,authorization_generation,canonical_detail_read_sha256,
+      reviewer_staff_id,reviewer_access_subject,reviewer_admission_version,reviewer_profile_version,
+      project_grant_generation,normalized_scopes_json
+      FROM project_alpha_project_adoption_review_reservations`).first()).toEqual({
+      reservation_id: first.reservationId, review_item_id: reviewItemId, idempotency_key: idempotencyKey,
+      request_sha256: hash, source_id: "project-alpha:primary", source_instance_id: sourceInstanceId,
+      application_id: applicationId, history_epoch_id: historyEpochId, external_project_id: "server-generated-project",
+      project_alpha_public_id: publicId, project_alpha_revision: "7", projection_sha256: hash,
+      authorization_generation: "0", canonical_detail_read_sha256: detailHash, reviewer_staff_id: "staff",
+      reviewer_access_subject: "access|staff", reviewer_admission_version: 1, reviewer_profile_version: 1,
+      project_grant_generation: 1, normalized_scopes_json: "[]",
+    });
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_outbox").first("count")).toBe(0);
+    expect(await db.prepare("SELECT count(*) count FROM operations_shared_projects").first("count")).toBe(0);
+    expect((await db.prepare("SELECT * FROM delivery_public_shares").all()).results).toEqual(beforeShare.results);
+  });
+
+  it("accepts exactly two UUID fields and remains unmounted from the Worker", async () => {
+    await seedAuthority();
+    await reviewStatement().run();
+    for (const invalid of [
+      null,
+      { reviewItemId, idempotencyKey, externalProjectId: "browser-controlled" },
+      { reviewItemId: "5000000A-0000-4000-8000-000000000005", idempotencyKey },
+      { reviewItemId, idempotencyKey: "not-a-uuid" },
+    ]) await expect(reserveProjectAlphaProjectAdoptionReview({ OPS_DB: db }, invalid))
+      .resolves.toEqual({ status: "rejected", reason: "invalid_action" });
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_reservations").first("count")).toBe(0);
+    const index = readFileSync(new URL("../src/worker/index.ts", import.meta.url), "utf8");
+    expect(index).not.toContain("project-alpha-project-adoption-review-consumer");
+    const module = await import("../src/worker/project-alpha-project-adoption-review-consumer");
+    expect(Object.keys(module)).toEqual(["reserveProjectAlphaProjectAdoptionReview"]);
+  });
+
+  it("rejects missing or digest-invalid private evidence without a reservation", async () => {
+    await expect(reserveProjectAlphaProjectAdoptionReview({ OPS_DB: db }, { reviewItemId, idempotencyKey }))
+      .resolves.toEqual({ status: "blocked", reason: "missing_review" });
+    await seedAuthority();
+    await db.prepare(`INSERT INTO project_alpha_project_adoption_review_evidence(
+      review_item_id,request_sha256,source_id,source_instance_id,application_id,history_epoch_id,external_project_id,
+      project_alpha_public_id,project_alpha_revision,projection_sha256,authorization_generation,canonical_detail_read_json,
+      canonical_detail_read_sha256,organization_record_id,organization_project_alpha_public_id,client_record_id,client_project_alpha_public_id,
+      reviewer_staff_id,reviewer_access_subject,reviewer_admission_version,reviewer_profile_version,reviewer_owner_role_id,
+      independent_evidence_sha256,project_grant_generation,normalized_scopes_json,reviewed_at,expires_at)
+      VALUES(?,?,'project-alpha:primary',?,?,?,'server-generated-project',?,'7',?,'0',?,?,'organization-record',?,NULL,NULL,
+        'staff','access|staff',1,1,'role-owner',?,1,'[]',strftime('%Y-%m-%dT%H:%M:%fZ','now'),strftime('%Y-%m-%dT%H:%M:%fZ','now','+5 minutes'))`)
+      .bind(reviewItemId, hash, sourceInstanceId, applicationId, historyEpochId, publicId, hash, detailJson(), "d".repeat(64), organizationPublicId, "e".repeat(64)).run();
+    await expect(reserveProjectAlphaProjectAdoptionReview({ OPS_DB: db }, { reviewItemId, idempotencyKey }))
+      .resolves.toEqual({ status: "blocked", reason: "invalid_evidence" });
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_reservations").first("count")).toBe(0);
+  });
+
+  it("fails closed when grant authority, directory mapping, local head, or expiry changes", async () => {
+    const cases: Array<() => Promise<unknown>> = [
+      () => db.prepare("UPDATE native_project_grants SET active=0,version=2 WHERE id='grant-server-generated-project'").run(),
+      () => db.prepare("DELETE FROM project_alpha_directory_mappings").run(),
+      () => db.prepare("INSERT INTO operations_shared_projects(external_project_id,name,lifecycle,scopes_json) VALUES('server-generated-project','Drift','active','[]')").run(),
+      async () => { await new Promise(resolve => setTimeout(resolve, 1_100)); },
+    ];
+    for (const [index, drift] of cases.entries()) {
+      if (index > 0) {
+        await runtime.dispose();
+        runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06", script: "export default {fetch(){return new Response('ok')}}", d1Databases: ["OPS_DB"] });
+        db = await runtime.getD1Database("OPS_DB") as D1Database;
+        await setupSchema();
+      }
+      await seedAuthority();
+      await reviewStatement(reviewItemId, "server-generated-project", hash, detailJson(), 1, "e".repeat(64), index === 3 ? "+1 second" : "+5 minutes").run();
+      await drift();
+      await expect(reserveProjectAlphaProjectAdoptionReview({ OPS_DB: db }, { reviewItemId, idempotencyKey }))
+        .resolves.toEqual({ status: "blocked", reason: "current_state" });
+      expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_reservations").first("count")).toBe(0);
+    }
+  });
+
+  it("does not turn an exact idempotent replay into stale authority", async () => {
+    await seedAuthority();
+    await reviewStatement().run();
+    await expect(reserveProjectAlphaProjectAdoptionReview({ OPS_DB: db }, { reviewItemId, idempotencyKey }))
+      .resolves.toMatchObject({ status: "reserved", replayed: false });
+    await db.prepare("UPDATE native_project_grants SET active=0,version=2 WHERE id='grant-server-generated-project'").run();
+    await expect(reserveProjectAlphaProjectAdoptionReview({ OPS_DB: db }, { reviewItemId, idempotencyKey }))
+      .resolves.toEqual({ status: "blocked", reason: "current_state" });
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_reservations").first("count")).toBe(1);
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_outbox").first("count")).toBe(0);
+  });
+
+  it("keeps review-item and idempotency-key collisions distinct and stores one winner under a race", async () => {
+    await seedAuthority();
+    await reviewStatement().run();
+    const [left, right] = await Promise.all([
+      reserveProjectAlphaProjectAdoptionReview({ OPS_DB: db }, { reviewItemId, idempotencyKey }),
+      reserveProjectAlphaProjectAdoptionReview({ OPS_DB: db }, { reviewItemId, idempotencyKey }),
+    ]);
+    expect(left.status).toBe("reserved");
+    expect(right.status).toBe("reserved");
+    if (left.status !== "reserved" || right.status !== "reserved") throw new Error("race setup failed");
+    expect(left.reservationId).toBe(right.reservationId);
+    expect([left.replayed, right.replayed].sort()).toEqual([false, true]);
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_reservations").first("count")).toBe(1);
+
+    const differentKey = "71000000-0000-4000-8000-000000000007";
+    await expect(reserveProjectAlphaProjectAdoptionReview({ OPS_DB: db }, { reviewItemId, idempotencyKey: differentKey }))
+      .resolves.toEqual({ status: "conflict", reason: "review_item" });
+    const secondReview = "51000000-0000-4000-8000-000000000005";
+    await reviewStatement(secondReview).run();
+    await expect(reserveProjectAlphaProjectAdoptionReview({ OPS_DB: db }, { reviewItemId: secondReview, idempotencyKey }))
+      .resolves.toEqual({ status: "conflict", reason: "idempotency_key" });
   });
 });
