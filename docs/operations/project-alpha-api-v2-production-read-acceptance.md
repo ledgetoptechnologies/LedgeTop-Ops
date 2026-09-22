@@ -94,14 +94,15 @@ those later workflows. The producer retains byte-exact PA evidence while using a
 stable semantic digest for idempotent replay, so a fresh transport request ID
 does not invalidate otherwise identical evidence.
 
-All of those consumers remain unmounted and default-off. There is no new
-authenticated browser or administrator route, no production D1 migration or
-write, no PA flag or managed-mode change, and no public-link, Delivery, portal,
-or legacy-mapping change. PA managed mode remains off, legacy integrations
-remain active, and portal migration/cutover has not started.
+The private transport and authenticated administrator routes now exist behind
+default-off gates, but the private consumers remain unmounted from production
+UI and cutover. There is no production write, no PA flag or managed-mode
+change, and no public-link, Delivery, portal, or legacy-mapping change. PA
+managed mode remains off, legacy integrations remain active, and portal
+migration/cutover has not started.
 
 Focused verification is bounded to local code. The populated migration chain
-through `0130` passes `4/4`; the complete Project adoption/evidence/bind suite
+through `0131` passes `4/4`; the complete Project adoption/evidence/bind suite
 passes `39/39`; its producer subset passes `10/10`; and the dedicated private
 Directory acquisition-to-activation harness passes `7/7`. Independent reruns
 also passed the migration chain `4/4`, the Directory harness `7/7`, and the two
@@ -110,13 +111,14 @@ or projection drift after observation is rejected as a terminal
 `resource_precondition_conflict` without creating a mapping or changing public
 link data. None of these focused runs is a production write or cutover proof.
 
-The remaining boundary is explicit. Authenticated, same-origin, CSRF-protected,
-default-off administrator routes for the private Directory and Project
-consumers are still absent. They must derive the actor from the authenticated
-server session and never accept actor identity from request JSON. Migration
-`0122` canonical Project guards still consult only legacy
-`project_alpha_directory_mappings`; recognizing acquired active mappings there
-requires a separately reviewed forward migration with explicit owner
-authorization. Until those gaps, production reconciliation, and a separately
-authorized rollout are complete, the new adoption state must not replace the
-legacy path or be described as portal migration progress.
+The remaining boundary is explicit. The private Directory and Project
+transport routes are authenticated, same-origin, CSRF-protected, and
+default-off, and derive actor identity from the authenticated server session;
+they never accept actor identity from request JSON. No production UI has yet
+made those actions normal operator workflows, and no production reconciliation
+or separately authorized rollout has completed. Forward migration `0131` now
+makes the three 0122 canonical customer-identity guards consult
+`project_alpha_active_directory_mappings`; it does not rewrite legacy rows or
+alter collision/history triggers. Until UI, reconciliation, and rollout are
+complete, the new adoption state must not replace the legacy path or be
+described as portal migration progress.

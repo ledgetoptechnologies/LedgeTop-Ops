@@ -5957,7 +5957,7 @@ pending; this requirement does not claim a deployed UI change.
 
 ### September 22 — private adoption foundation, still default-off
 
-- Operations commits through `1d520c0` add the private adoption foundation
+- Operations commits through `66f84b2` add the private adoption foundation
   only. Directory now has a
   strict existing-record binding transport, an immutable reviewed acquisition
   coordinator, inactive canonical/native-owner materialization, and a separate
@@ -5965,11 +5965,12 @@ pending; this requirement does not claim a deployed UI change.
   profile and binding-status reads. Project now has an immutable review-evidence
   producer plus reviewed reservation and bind-planning consumers, including
   active acquired-Directory mapping composition and authenticated-caller
-  binding. Every one of these consumers remains private, unmounted, and
-  default-off; no browser or administrator route invokes them.
+  binding. The authenticated same-origin administrator transport now exists,
+  but the consumers remain private and default-off; no production UI or
+  cutover invokes them.
 - Current focused evidence includes the complete Project adoption/evidence/bind
   suite `39/39`, its producer subset `10/10`, the populated migration chain
-  through `0130` `4/4`, and the private Directory acquisition-to-activation
+  through `0131` `4/4`, and the private Directory acquisition-to-activation
   harness `7/7`. Independent reruns passed the migration chain `4/4`, Directory
   harness `7/7`, and the final replay/race regressions `2/2`. Byte-exact PA
   evidence remains retained and hash-checked; replay excludes only the volatile
@@ -5982,12 +5983,11 @@ pending; this requirement does not claim a deployed UI change.
   or legacy mapping changed. PA managed mode and its generic API-v2 flags remain
   off. Legacy integrations and mappings remain active and authoritative; the
   portal migration and cutover have not started.
-- Important implementation gaps remain. No authenticated, same-origin,
-  CSRF-protected, default-off administrator route mounts the new Directory or
-  Project consumers. Any such route must derive the actor from the authenticated
-  server session rather than request JSON. Migration `0122` canonical Project guards
-  still recognize only `project_alpha_directory_mappings`, not acquired active
-  mappings. Changing that boundary requires a separate forward migration and
-  explicit owner authorization; neither `0126` nor the private adoption
-  consumers silently changes `0122`. Production enablement, reconciliation,
+- Important implementation gaps remain. The authenticated, same-origin,
+  CSRF-protected administrator transport is default-off and derives its actor
+  from the authenticated server session rather than request JSON, but no
+  production UI invokes it. Forward migration `0131` updates only the three
+  `0122` canonical customer-identity guards to recognize the reviewed active
+  Directory mapping view; it does not rewrite legacy rows, alter Delivery or
+  public-link data, or enable cutover. Production enablement, reconciliation,
   portal migration, legacy retirement, and cutover therefore remain pending.

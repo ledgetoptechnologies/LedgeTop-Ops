@@ -94,6 +94,21 @@ beforeAll(async () => {
   await migrate("0119_project_alpha_project_v2_persistence_ledger.sql"); await migrate("0120_project_alpha_project_v2_canonical_settlement.sql");
   await migrate("0121_project_alpha_project_v2_settlement_proof_expiry.sql");
   await migrate("0122_project_alpha_project_v2_canonical_activation.sql");
+  await db.batch(splitD1MigrationStatements(`CREATE TABLE project_alpha_existing_directory_binding_activation_receipts(
+    activation_id TEXT PRIMARY KEY,source_id TEXT,source_instance_id TEXT,application_id TEXT,
+    history_epoch_id TEXT,resource_type TEXT,external_id TEXT,project_alpha_public_id TEXT,activated_at TEXT
+  ); CREATE TABLE project_alpha_acquired_canonical_mappings(
+    record_id TEXT,source_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,
+    resource_type TEXT,external_id TEXT,project_alpha_public_id TEXT,activation_state TEXT
+  ); CREATE VIEW project_alpha_active_directory_mappings AS
+    SELECT source_id,resource_type,external_id,project_alpha_public_id,source_instance_id,application_id,
+      history_epoch_id,'legacy' provenance_id,'legacy' mapping_kind,NULL created_at
+    FROM project_alpha_directory_mappings
+    UNION ALL
+    SELECT source_id,resource_type,external_id,project_alpha_public_id,source_instance_id,application_id,
+      history_epoch_id,activation_id provenance_id,'acquired' mapping_kind,activated_at created_at
+    FROM project_alpha_existing_directory_binding_activation_receipts;`).map(statement => db.prepare(statement)));
+  await migrate("0131_project_alpha_project_active_directory_mapping_guards.sql");
 });
 afterAll(async () => runtime.dispose());
 
@@ -196,7 +211,7 @@ describe("dormant project v2 private read settlement", () => {
 });
 
 describe("unmounted project v2 canonical activation", () => {
-  async function settled(verifiedUntil = "2999-01-01T00:00:00.000Z") {
+  async function settled(verifiedUntil = "2999-01-01T00:00:00.000Z", mappingKind: "legacy" | "acquired" = "legacy") {
     const value = command(), staff = await native(value, verifiedUntil), selectedPublicId = createHash("sha256").update(value.commandId).digest("hex").slice(0, 32);
     const selectedOrganizationPublicId = createHash("sha256").update(`${value.commandId}:organization`).digest("hex").slice(0, 32);
     const acknowledgedBody = acknowledgement(value);
@@ -211,12 +226,17 @@ describe("unmounted project v2 canonical activation", () => {
     const result = await settleProjectAlphaProjectV2Read({ OPS_DB: db }, commandResult.receiptId, connection, reader(canonicalRead));
     if (result.status !== "settled") throw new Error(`settlement failed: ${JSON.stringify(result)}`);
     const organizationRecordId = uuid();
-    await db.batch([
-      db.prepare("INSERT INTO operations_directory_records(record_id,record_kind) VALUES(?,'organization')").bind(organizationRecordId),
-      db.prepare(`INSERT INTO project_alpha_directory_mappings(source_id,source_instance_id,application_id,history_epoch_id,
+    await db.prepare("INSERT INTO operations_directory_records(record_id,record_kind) VALUES(?,'organization')").bind(organizationRecordId).run();
+    if (mappingKind === "legacy") {
+      await db.prepare(`INSERT INTO project_alpha_directory_mappings(source_id,source_instance_id,application_id,history_epoch_id,
         resource_type,external_id,project_alpha_public_id) VALUES('project-alpha:primary',?,?,?,'organization',?,?)`)
-        .bind(source, application, epoch, organizationRecordId, selectedOrganizationPublicId),
-    ]);
+        .bind(source, application, epoch, organizationRecordId, selectedOrganizationPublicId).run();
+    } else {
+      await db.prepare(`INSERT INTO project_alpha_existing_directory_binding_activation_receipts(
+        activation_id,source_id,source_instance_id,application_id,history_epoch_id,resource_type,external_id,project_alpha_public_id,activated_at)
+        VALUES(?,?,?,?,?,'organization',?,?,?)`).bind(uuid(), "project-alpha:primary", source, application, epoch,
+          organizationRecordId, selectedOrganizationPublicId, "2026-09-22T12:00:00.000Z").run();
+    }
     return { value, staff, receiptId: commandResult.receiptId, selectedPublicId, selectedOrganizationPublicId,
       settlementId: result.settlementId, organizationRecordId };
   }
@@ -260,6 +280,40 @@ describe("unmounted project v2 canonical activation", () => {
     await expect(db.prepare("UPDATE project_alpha_project_v2_canonical_activation_receipts SET resulting_local_version=2").run()).rejects.toThrow(/immutable/);
     await expect(db.prepare("DELETE FROM project_alpha_project_v2_canonical_activation_receipts WHERE settlement_id=?")
       .bind(setup.settlementId).run()).rejects.toThrow(/durable/);
+  });
+
+  it("accepts an acquired active Directory mapping, rejects an unrelated mapping, and preserves public/delivery bytes", async () => {
+    const setup = await settled("2999-01-01T00:00:00.000Z", "acquired");
+    const publicBefore = await db.prepare("SELECT id,url,hex(payload) payload FROM delivery_public_shares ORDER BY id").all();
+    const deliveryBefore = await db.prepare("SELECT id,hex(payload) payload FROM delivery_records ORDER BY id").all();
+    const result = await activateProjectAlphaProjectV2Canonical({ OPS_DB: db }, setup.settlementId);
+    expect(result).toMatchObject({ status: "activated", version: 1 });
+    expect((await db.prepare("SELECT mapping_kind FROM project_alpha_active_directory_mappings WHERE external_id=?")
+      .bind(setup.organizationRecordId).first())).toEqual({ mapping_kind: "acquired" });
+    expect((await db.prepare("SELECT id,url,hex(payload) payload FROM delivery_public_shares ORDER BY id").all()).results)
+      .toEqual(publicBefore.results);
+    expect((await db.prepare("SELECT id,hex(payload) payload FROM delivery_records ORDER BY id").all()).results)
+      .toEqual(deliveryBefore.results);
+
+    const inactiveRecordId = uuid();
+    await db.prepare("INSERT INTO operations_directory_records(record_id,record_kind) VALUES(?,'organization')")
+      .bind(inactiveRecordId).run();
+    await db.prepare(`INSERT INTO project_alpha_acquired_canonical_mappings(
+      record_id,source_id,source_instance_id,application_id,history_epoch_id,resource_type,external_id,project_alpha_public_id,activation_state)
+      VALUES(?,?,?,?,?,'organization',?,?,?)`).bind(inactiveRecordId, "project-alpha:primary", source, application, epoch,
+        inactiveRecordId, "b".repeat(32), "inactive").run();
+    await expect(db.prepare(`INSERT INTO operations_shared_projects(
+      external_project_id,name,lifecycle,scopes_json,source_id,source_instance_id,application_id,history_epoch_id,
+      project_alpha_public_id,pa_revision,current_version,canonical_projection_sha256,organization_record_id)
+      VALUES('inactive-project','Inactive','active','[]',?,?,?,?,?,?,1,?,?)`)
+      .bind(source, source, application, epoch, setup.selectedPublicId, "1", projection, inactiveRecordId).run())
+      .rejects.toThrow(/not authorized/);
+    await expect(db.prepare(`INSERT INTO operations_shared_projects(
+      external_project_id,name,lifecycle,scopes_json,source_id,source_instance_id,application_id,history_epoch_id,
+      project_alpha_public_id,pa_revision,current_version,canonical_projection_sha256,organization_record_id)
+      VALUES('unrelated-project','Unrelated','active','[]',?,?,?,?,?,?,1,?,?)`)
+      .bind(source, source, application, epoch, setup.selectedPublicId, "1", projection, "missing-organization").run())
+      .rejects.toThrow(/not authorized/);
   });
 
   it("rolls back every canonical/outbox mutation when the final immutable receipt fails", async () => {
