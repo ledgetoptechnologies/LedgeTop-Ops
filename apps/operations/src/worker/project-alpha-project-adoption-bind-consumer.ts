@@ -47,6 +47,7 @@ type Candidate = Readonly<{
   reviewer_email: string;
 }>;
 type Receipt = Readonly<{ bridge_id: string; reservation_id: string; command_id: string; request_sha256: string }>;
+type Database = ReturnType<D1Database["withSession"]>;
 type DetailData = Readonly<{
   name: string;
   description: string | null;
@@ -127,12 +128,12 @@ async function detail(candidate: Candidate): Promise<DetailData | null> {
     return data as DetailData;
   } catch { return null; }
 }
-async function stored(db: D1Database, reservationId: string): Promise<Receipt | null> {
+async function stored(db: Database, reservationId: string): Promise<Receipt | null> {
   return db.prepare(`SELECT bridge_id,reservation_id,command_id,request_sha256
     FROM project_alpha_project_adoption_bind_receipts WHERE reservation_id=?`)
     .bind(reservationId).first<Receipt>();
 }
-async function currentReplay(db: D1Database, receipt: Receipt, caller: ProjectAlphaProjectAdoptionBindActor): Promise<boolean> {
+async function currentReplay(db: Database, receipt: Receipt, caller: ProjectAlphaProjectAdoptionBindActor): Promise<boolean> {
   return !!await db.prepare(`SELECT 1 current
     FROM project_alpha_project_adoption_bind_receipts bridge
     JOIN project_alpha_project_adoption_review_reservations reservation
@@ -175,14 +176,14 @@ async function currentReplay(db: D1Database, receipt: Receipt, caller: ProjectAl
     .bind(receipt.bridge_id, receipt.reservation_id, receipt.command_id, receipt.request_sha256,
       caller.staffId, caller.accessSubject).first("current");
 }
-async function currentActor(db: D1Database, source: Candidate): Promise<boolean> {
+async function currentActor(db: Database, source: Candidate): Promise<boolean> {
   return !!await db.prepare(`SELECT 1 current FROM native_staff_admissions admission
     JOIN native_staff_profiles profile ON profile.staff_id=admission.staff_id
     WHERE admission.staff_id=? AND admission.active=1 AND admission.bound_access_subject=?
       AND admission.version=? AND profile.version=?`).bind(source.reviewer_staff_id,
     source.reviewer_access_subject, source.reviewer_admission_version, source.reviewer_profile_version).first("current");
 }
-async function candidate(db: D1Database, reservationId: string): Promise<Candidate | null> {
+async function candidate(db: Database, reservationId: string): Promise<Candidate | null> {
   return db.prepare(`SELECT reservation.reservation_id,reservation.source_id,reservation.source_instance_id,
       reservation.application_id,reservation.history_epoch_id,reservation.external_project_id,
       reservation.project_alpha_public_id,reservation.project_alpha_revision,reservation.projection_sha256,
