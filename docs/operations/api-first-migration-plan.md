@@ -55,12 +55,19 @@ Updated September 22, 2026. The owner approved implementation and resumption aft
   command; the staging bootstrap also creates a mapped record. Neither is a
   safe acquisition fixture. A second Ops source pointed at the same PA staging
   installation is rejected by unique origin/source/application/history-epoch
-  constraints. Live acquisition acceptance needs an isolated second PA staging
-  installation plus governed staging-only native-only and unbound-PA fixture
-  creation, each with revision/audit evidence and no portal, Delivery, public
-  link, mapping, or outbound command side effects. Do not raw-insert D1 rows or
-  treat local row deletion as compensation for an accepted PA bind. Design and
-  review this fixture mechanism before opening the bounded v4 authority window.
+  constraints. A separate PA installation is **not** required: in a quiet
+  staging window, a fresh unbound PA organization created in the existing
+  installation can pair with a fresh Operations native-only organization in
+  the existing source/application namespace. The missing prerequisite is a
+  governed, staging-only native-only fixture path that records admission,
+  revision and audit evidence but creates no enrollment destination,
+  materialization, outbox, mapping, client, portal, Delivery or public-link
+  side effect. Confirm both exact IDs, PA revision and absence of bindings or
+  mapping collisions before provisioning the record-pinned v4 authority.
+  Accepted PA binds and Ops review/receipt rows remain durable even after
+  temporary authority is revoked; do not raw-insert or hard-delete D1 rows as
+  fixture setup/compensation. Remote-success/local-persistence failure still
+  needs explicit recovery evidence before claiming rollback acceptance.
 - Green PR CI does not substitute for joined staging or production cutover
   acceptance. Neither PR is deployed to either production PA instance.
 - A private pre-migration staging D1 backup was recorded before applying remote
