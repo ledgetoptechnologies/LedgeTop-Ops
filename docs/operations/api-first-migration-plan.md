@@ -5,8 +5,10 @@ Updated September 22, 2026. The owner approved implementation and resumption aft
 ### September 22, 2026 — authoritative PR and staging acceptance status
 
 - Latest read-only release check: Operations PR #107 head
-  `137ad4c97c78cbfd1dc809c27ea076fa6b612fda` passed all ten
-  exact-head CI jobs (run `35776783077`). PA PR #188 head
+  `ad7f2348eb97f41ae3dd202a85ed302afb5bc9b5` passed all ten
+  exact-head CI jobs. The newer local fixture commits `78972f9` and
+  `792938a` passed focused tests and typecheck but are not yet exact-head CI
+  evidence. PA PR #188 head
   `731677dda1821c53f93dd0b38f1504f184c320d9` passed exact-head CI,
   CodeQL and gitleaks, including its real-MySQL cutover gate. These replace
   the earlier commit/check snapshots below; neither PR is merged. An
@@ -58,8 +60,8 @@ Updated September 22, 2026. The owner approved implementation and resumption aft
   constraints. A separate PA installation is **not** required: in a quiet
   staging window, a fresh unbound PA organization created in the existing
   installation can pair with a fresh Operations native-only organization in
-  the existing source/application namespace. The missing prerequisite is a
-  governed, staging-only native-only fixture path that records admission,
+  the existing source/application namespace. This requires a governed,
+  staging-only native-only fixture path that records admission,
   revision and audit evidence but creates no enrollment destination,
   materialization, outbox, mapping, client, portal, Delivery or public-link
   side effect. Confirm both exact IDs, PA revision and absence of bindings or
@@ -68,16 +70,25 @@ Updated September 22, 2026. The owner approved implementation and resumption aft
   temporary authority is revoked; do not raw-insert or hard-delete D1 rows as
   fixture setup/compensation. Remote-success/local-persistence failure still
   needs explicit recovery evidence before claiming rollback acceptance.
-- The existing native create fence could technically accept an empty
-  destination list and write zero intents, but it would still persist a
-  `native_directory_enrollments` row containing `[]`. Application routes
-  currently prohibit that create. A staging-only endpoint draft was stopped
-  by safety review because the durable enrollment row may conflict with the
-  original no-enrollment fixture constraint; the draft was removed without a
-  commit or deployment. Do not loosen the route or database guards until the
-  owner explicitly decides whether a source-less, empty enrollment row is an
-  acceptable staging fixture. This decision does not grant production write
-  authority or change the separate PA staging revision/rollback gates.
+- The owner explicitly approved an isolated, source-less staging fixture with
+  one durable `native_directory_enrollments` row containing `[]`; this is not
+  a PA enrollment. Local candidate commits `78972f9` and `792938a` implement
+  one fixed synthetic organization behind a staging-only, default-off route,
+  current native staff authority, a pinned active business area, and the
+  normal create-admission/write fences. Normal Directory create still requires
+  at least one PA destination. Additive migration `0139` atomically rechecks
+  `directory.enrollment.manage` for this exact fixture and mutation; it
+  closes an independent QA finding where the route's earlier grant read could
+  race a revocation. Local route tests pass 5/5, migrated-D1 writer tests
+  15/15 (including revocation immediately before the batch, replay and
+  byte-preserved Delivery/public-link rows), and Operations typecheck passes.
+  The fixture has not been deployed or invoked against staging; `0139` is not
+  applied remotely, and no PA organization has been created for it. Neither
+  this source-less record nor local retry tests prove joined acquisition or
+  remote-bind compensation. A fresh backup/readback, exact PA target/revision,
+  temporary authority and enabled-route review remain required for the live
+  staging window. The ordinary production authority and PA rollout gates are
+  unchanged.
 - Green PR CI does not substitute for joined staging or production cutover
   acceptance. Neither PR is deployed to either production PA instance.
 - A private pre-migration staging D1 backup was recorded before applying remote
