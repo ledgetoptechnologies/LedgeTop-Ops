@@ -19,3 +19,5 @@ apps/*/wrangler.staging.json
 apps/*/wrangler.staging.*.json
 apps/*/.staging-bootstrap/
 apps/*/.staging-native-authority/
+apps/*/wrangler.production.native-authority.*.json
+apps/*/.production-native-authority/

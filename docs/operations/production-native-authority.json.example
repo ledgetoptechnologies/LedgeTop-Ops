@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "production": {
+    "worker": {
+      "name": "REPLACE_WITH_REVIEWED_PRODUCTION_WORKER_NAME",
+      "environment": "production",
+      "workers_dev": false
+    },
+    "d1_databases": [
+      {
+        "binding": "DELIVERY_DB",
+        "database_name": "REPLACE_WITH_REVIEWED_DELIVERY_DATABASE_NAME",
+        "database_id": "REPLACE_WITH_REVIEWED_DELIVERY_DATABASE_UUID"
+      },
+      {
+        "binding": "OPS_DB",
+        "database_name": "REPLACE_WITH_REVIEWED_OPERATIONS_DATABASE_NAME",
+        "database_id": "REPLACE_WITH_REVIEWED_OPERATIONS_DATABASE_UUID"
+      }
+    ]
+  },
+  "packet": {
+    "packetId": "production-authority-project-v2-001",
+    "mode": "create",
+    "staffId": "REPLACE_WITH_REVIEWED_OWNER_STAFF_ID",
+    "email": "REPLACE_WITH_REVIEWED_NORMALIZED_OWNER_EMAIL",
+    "displayName": "REPLACE_WITH_REVIEWED_OWNER_DISPLAY_NAME",
+    "accessSubject": "REPLACE_WITH_REVIEWED_ACCESS_SUBJECT",
+    "issuedAt": "2026-09-22T15:00:00.000Z",
+    "expiresAt": "2026-09-22T17:00:00.000Z",
+    "reason": "Bounded production native Directory and Project authority window",
+    "expected": {
+      "admissionVersion": 0,
+      "profileVersion": 0,
+      "directoryGrantVersion": 0,
+      "directoryGrantGeneration": 0,
+      "projectGrantVersion": 0,
+      "projectGrantGeneration": 0
+    },
+    "evidence": {
+      "changeTicket": "REPLACE_WITH_APPROVED_CHANGE_TICKET",
+      "reviewer": "REPLACE_WITH_INDEPENDENT_REVIEWER_REFERENCE",
+      "bindingEvidenceSha256": "REPLACE_WITH_64_LOWERCASE_HEX_CHARACTERS"
+    }
+  }
+}
