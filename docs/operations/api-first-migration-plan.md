@@ -6104,3 +6104,22 @@ pending; this requirement does not claim a deployed UI change.
   until the Operations create/update/relationship delivery path, reconciliation
   and both-instance acceptance are complete; activating the policy earlier
   would strand normal customer administration.
+
+### September 22 — bounded native Directory outbox drain
+
+- Operations commit `f4654f0` mounts a dedicated, default-off five-minute
+  drain for the profile and relationship outboxes. It selects only due pending
+  or expired-lease work for enabled, deployment-pinned PA sources, rotates
+  fairly across sources and both queue kinds, and starts no more than twelve
+  commands or twenty seconds of work per invocation. Existing dispatchers keep
+  ownership of leases, retry/uncertain handling, terminal conflicts and exact
+  PA response validation.
+- The disabled path returns before reading D1 or the connection envelope. Logs
+  contain aggregate outcomes only; credential values, command bodies and
+  private profiles are never emitted. An unexpected dispatch failure leaves the
+  durable row recoverable rather than treating absence as delivery success.
+- The focused scheduler suite passed `5/5` both in the implementation run and
+  an independent rerun. The implementation run also passed the production
+  Operations build, pinned Wrangler generated-type check and scoped TypeScript
+  diagnostics. The flag remains `false`; no cron delivery, D1 migration,
+  connection, credential, PA instance or public link was changed.
