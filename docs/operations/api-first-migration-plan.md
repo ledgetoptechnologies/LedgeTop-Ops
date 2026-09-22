@@ -35,6 +35,13 @@ Updated September 22, 2026. The owner approved implementation and resumption aft
   staging authority packet also lacks `directory.identity.link`, which this
   route requires. A separately reviewed, temporary grant and an unmapped,
   disposable staging source/record are required before live acquisition.
+- A purpose-pinned schema-v4 staging authority packet is prepared for that
+  separate window. It limits `directory.identity.link` to one reviewed native
+  record ID/kind/version and atomically revokes it with the packet's existing
+  profile-edit and Project-sync authority; the schema-v3 path remains intact.
+  Its local lifecycle and drift suite passes 22/22. No packet has been applied
+  to staging; the exact fixture, PA revision, contextual read grant, remote
+  bind compensation and joined rollback remain separate acceptance gates.
 - Green PR CI does not substitute for joined staging or production cutover
   acceptance. Neither PR is deployed to either production PA instance.
 - A private pre-migration staging D1 backup was recorded before applying remote

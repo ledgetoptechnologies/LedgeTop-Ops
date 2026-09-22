@@ -22,6 +22,32 @@ or `exact_project` grants cannot authorize those creates. No other directory,
 staff-management, integration-control, workforce, or delegation authority is
 created.
 
+### Existing-directory acquisition packet (schema v4)
+
+The normal schema-v3 packet remains profile-edit/Project-sync only. A schema-v4
+packet with the exact `purpose: "existing-directory-acquisition"` is the sole
+exception: it provisions global `directory.profile.edit` plus
+`directory.identity.link` scoped to one exact reviewed native record ID, kind,
+and current version. The purpose and record selection are fixed; the input
+never accepts a permission list or arbitrary additional grant. The packet does
+not grant `directory.profile.view`; the reconciliation-panel context endpoint
+has a separate global read-authority gate.
+
+Use [the v4 example](staging-native-directory-acquisition-authority.json.example)
+only after independently verifying the disposable native record and its exact
+version, an unmapped PA target in a staging-only source/application, the PA
+staging revision, and the generated provision *and* revoke artifacts. This
+packet does not create the fixture, enable a PA route, compensate a successful
+remote bind after a later local failure, or authorize production cutover.
+
+Schema v4 records the exact prior Directory state as `absent`,
+`v3-profile-only-inactive`, or `v4-acquisition-inactive`. This permits one
+audited transition from the old durable schema-v3 row, then requires the
+complete two-row inactive set for later reactivation. Provision and revoke
+verify the complete set, and revoke deactivates both rows atomically. Any
+additional, missing, changed, denied, scoped, or active-state-drift row aborts
+the packet; do not delete a row to force recovery.
+
 ## Safety model
 
 The checked-in generator validates the exact staging account, Operations D1 ID,
