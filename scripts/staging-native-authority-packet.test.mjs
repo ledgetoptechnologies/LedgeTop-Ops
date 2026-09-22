@@ -114,6 +114,11 @@ test("builds separate one-migration configs with a dedicated ledger and sanitize
   assert.match(artifact.provision.sql, /directory\.profile\.edit/);
   assert.match(artifact.provision.sql, /scope_kind='global'|,'global'/);
   assert.match(artifact.provision.sql, /SELECT count\(\*\) FROM d1_migrations/);
+  assert.deepEqual(artifact.provision.manifest.canonicalOperationsLedger, {
+    count: 138,
+    finalMigration: "0138_project_alpha_directory_reconciliation_review.sql",
+    chainSha256: "6d442c6d38832c769892e08923587983da5180ef60d582998299e9b3d460c697",
+  });
   assert.deepEqual(artifact.provision.manifest.directoryGrant, {
     id: `staging-directory-profile-edit:${owner.operationsStaffId}`,
     permission: "directory.profile.edit", effect: "allow", scopeKind: "global",
@@ -245,7 +250,7 @@ test("revoke fails atomically while an actor command is pending", () => {
 
 test("provision rejects canonical-ledger drift before writing authority", () => {
   const db = canonicalDatabase(), artifact = buildAuthorityArtifacts(fixture(), input(), "provision");
-  db.prepare("DELETE FROM d1_migrations WHERE name='0122_project_alpha_project_v2_canonical_activation.sql'").run();
+  db.prepare("DELETE FROM d1_migrations WHERE name='0138_project_alpha_directory_reconciliation_review.sql'").run();
   assert.throws(() => applyMigration(db, artifact.provision.sql, artifact.provision.name, AUTHORITY_MIGRATIONS_TABLE));
   assert.equal(queryOne(db, "SELECT count(*) count FROM native_staff_admissions WHERE staff_id=?", owner.operationsStaffId).count, 0);
   assert.equal(queryOne(db, "SELECT count(*) count FROM native_directory_grants WHERE staff_id=?", owner.operationsStaffId).count, 0);
@@ -324,14 +329,19 @@ test("late revoke failure rolls every authority change and audit write back", ()
   db.close();
 });
 
-test("provision fails closed on pre-existing directory authority", () => {
+test("provision fails closed on a pre-existing directory authority state", () => {
   const db = canonicalDatabase(), artifact = buildAuthorityArtifacts(fixture(), input(), "provision");
+  // The current canonical chain records grant history. A valid pre-existing
+  // grant therefore requires an admission, which itself proves the packet is
+  // not creating authority from the exact expected zero-version state.
+  db.prepare(`INSERT INTO native_staff_admissions(staff_id,bound_access_subject,active,admitted_by)
+    VALUES(?,?,1,?)`).run(owner.operationsStaffId, subject, owner.operationsStaffId);
   db.prepare(`INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,active,granted_by)
     VALUES('pre-existing-directory-grant',?,'directory.profile.view','allow','global',1,?)`)
     .run(owner.operationsStaffId, owner.operationsStaffId);
   assert.throws(() => applyMigration(db, artifact.provision.sql, artifact.provision.name, AUTHORITY_MIGRATIONS_TABLE));
   assert.equal(queryOne(db, "SELECT count(*) count FROM native_directory_grants WHERE staff_id=?", owner.operationsStaffId).count, 1);
-  assert.equal(queryOne(db, "SELECT count(*) count FROM native_staff_admissions WHERE staff_id=?", owner.operationsStaffId).count, 0);
+  assert.equal(queryOne(db, "SELECT count(*) count FROM native_staff_admissions WHERE staff_id=?", owner.operationsStaffId).count, 1);
   assert.equal(queryOne(db, "SELECT count(*) count FROM native_staff_bootstrap_receipts").count, 0);
   assert.equal(queryOne(db, `SELECT count(*) count FROM ${AUTHORITY_MIGRATIONS_TABLE}`).count, 0);
   db.close();
