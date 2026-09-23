@@ -60,6 +60,13 @@ describe("route-less catalog staging coordinator",()=>{
     expect(stage).not.toHaveBeenCalled();
   });
 
+  it("blocks PA-valid names beyond the Client canonical limit before staging",async()=>{
+    const {env,stage}=harness(),snapshot={...complete(1),items:[{...item(1),name:"N".repeat(161)}]};
+    await expect(stageConfiguredProjectAlphaCatalogSnapshot(env,{registryId:1,sourceId},{readSnapshot:async()=>snapshot}))
+      .resolves.toEqual({status:"blocked",reason:"catalog_contract"});
+    expect(stage).not.toHaveBeenCalled();
+  });
+
   it("stops on the first failed receipt and reports only bounded diagnostics",async()=>{
     const {env,stage}=harness();stage.mockResolvedValueOnce({ok:false,protocolVersion:1,code:"source-unavailable",retryable:false});
     const result=await stageConfiguredProjectAlphaCatalogSnapshot(env,{registryId:1,sourceId},{readSnapshot:async()=>complete(1)});
@@ -97,7 +104,7 @@ describe("route-less catalog staging coordinator",()=>{
   it("promotes only after staging with exact operator registry/source/checkpoint authority",async()=>{
     const {env,promote,pages}=harness();
     const result=await stageConfiguredProjectAlphaCatalogSnapshot({...env,PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED:"true"},
-      {registryId:17,sourceId,expectedSourceSequence:8},{readSnapshot:async()=>complete(1)});
+      {registryId:17,sourceId,expectedSnapshotId:"a".repeat(64),expectedSourceSequence:8},{readSnapshot:async()=>complete(1)});
     expect(result).toMatchObject({status:"complete",promotion:{status:"promoted",sourceSequence:9}});
     expect(pages[0]).toMatchObject({registryId:17,sourceId});
     expect(promote).toHaveBeenCalledOnce();
@@ -118,11 +125,11 @@ describe("route-less catalog staging coordinator",()=>{
     await expect(stageConfiguredProjectAlphaCatalogSnapshot(enabled,{registryId:1,sourceId},{readSnapshot:async()=>complete(1)}))
       .resolves.toEqual({status:"rejected",reason:"invalid_command"});
     promote.mockResolvedValueOnce({ok:false,protocolVersion:1,code:"stale",retryable:false});
-    await expect(stageConfiguredProjectAlphaCatalogSnapshot(enabled,{registryId:1,sourceId,expectedSourceSequence:3},{readSnapshot:async()=>complete(1)}))
+    await expect(stageConfiguredProjectAlphaCatalogSnapshot(enabled,{registryId:1,sourceId,expectedSnapshotId:"a".repeat(64),expectedSourceSequence:3},{readSnapshot:async()=>complete(1)}))
       .resolves.toEqual({status:"blocked",reason:"promotion",promotionCode:"stale",retryable:false});
     expect(promote).toHaveBeenLastCalledWith(expect.objectContaining({registryId:1,sourceId,expectedSourceSequence:3}));
     promote.mockRejectedValueOnce(new Error("database detail"));
-    await expect(stageConfiguredProjectAlphaCatalogSnapshot(enabled,{registryId:1,sourceId,expectedSourceSequence:3},{readSnapshot:async()=>complete(1)}))
+    await expect(stageConfiguredProjectAlphaCatalogSnapshot(enabled,{registryId:1,sourceId,expectedSnapshotId:"a".repeat(64),expectedSourceSequence:3},{readSnapshot:async()=>complete(1)}))
       .resolves.toEqual({status:"blocked",reason:"promotion",promotionCode:"temporarily-unavailable",retryable:true});
   });
 
@@ -131,8 +138,16 @@ describe("route-less catalog staging coordinator",()=>{
     first.promote.mockImplementation(async authority=>{const status=winner?"duplicate":"promoted" as const;winner=true;
       return{ok:true,protocolVersion:1,status,generationId:`ops-inventory:${authority.registryId}:${authority.snapshotId}`,sourceSequence:1};});
     const results=await Promise.all([0,1].map(()=>stageConfiguredProjectAlphaCatalogSnapshot(enabled,
-      {registryId:1,sourceId,expectedSourceSequence:0},{readSnapshot:async()=>complete(1)})));
+      {registryId:1,sourceId,expectedSnapshotId:"a".repeat(64),expectedSourceSequence:0},{readSnapshot:async()=>complete(1)})));
     expect(results.map(result=>result.status==="complete"?result.promotion?.status:null).sort()).toEqual(["duplicate","promoted"]);
     expect(first.promote).toHaveBeenCalledTimes(2);
+  });
+
+  it("blocks a changed source snapshot before every staging and promotion RPC",async()=>{
+    const {env,stage,promote}=harness(),enabled={...env,PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED:"true"};
+    await expect(stageConfiguredProjectAlphaCatalogSnapshot(enabled,
+      {registryId:1,sourceId,expectedSnapshotId:"f".repeat(64),expectedSourceSequence:0},{readSnapshot:async()=>complete(1)}))
+      .resolves.toEqual({status:"blocked",reason:"snapshot_mismatch"});
+    expect(stage).not.toHaveBeenCalled();expect(promote).not.toHaveBeenCalled();
   });
 });

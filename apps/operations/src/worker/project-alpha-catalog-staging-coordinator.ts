@@ -6,6 +6,7 @@ import type { ProjectAlphaApiV2Connection } from "./project-alpha-api-v2";
 
 const SOURCE_ID=/^[a-z][a-z0-9_.:-]{0,127}$/;
 const PROJECT_ALPHA_SOURCE_ID=/^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/;
+const SNAPSHOT_ID=/^[0-9a-f]{64}$/;
 // Match the established Client catalog projection contract before staging.
 const MAX_PAGE_ITEMS=50;
 const MAX_SNAPSHOT_ITEMS=500;
@@ -35,7 +36,7 @@ export type ProjectAlphaCatalogStagingEnvironment=ProjectAlphaApiV2ConnectionEnv
 export type ProjectAlphaCatalogStagingOutcome=
   |Readonly<{status:"disabled"}>
   |Readonly<{status:"rejected";reason:"invalid_command"}>
-  |Readonly<{status:"blocked";reason:"configuration"|"source_disabled"|"source_read"|"catalog_limit"|"page_too_large"|"staging"|"promotion";stageCode?:"disabled"|"invalid"|"source-unavailable"|"conflict"|"temporarily-unavailable";promotionCode?:"disabled"|"invalid"|"source-unavailable"|"incomplete"|"stale"|"conflict"|"temporarily-unavailable";retryable?:boolean}>
+  |Readonly<{status:"blocked";reason:"configuration"|"source_disabled"|"source_read"|"snapshot_mismatch"|"catalog_contract"|"catalog_limit"|"page_too_large"|"staging"|"promotion";stageCode?:"disabled"|"invalid"|"source-unavailable"|"conflict"|"temporarily-unavailable";promotionCode?:"disabled"|"invalid"|"source-unavailable"|"incomplete"|"stale"|"conflict"|"temporarily-unavailable";retryable?:boolean}>
   |Readonly<{status:"complete";snapshotId:string;totalCount:number;pageCount:number;stagedCount:number;duplicateCount:number;
     promotion?:Readonly<{status:"promoted"|"duplicate";generationId:string;sourceSequence:number}>}>;
 
@@ -90,19 +91,22 @@ async function paginate(registryId:number,sourceId:string,connection:Readonly<Pr
  * serialized into the RPC payload or returned in its outcome.
  */
 export async function stageConfiguredProjectAlphaCatalogSnapshot(env:ProjectAlphaCatalogStagingEnvironment,
-  command:Readonly<{registryId:number;sourceId:string;expectedSourceSequence?:number}>,dependencies:Partial<Dependencies>={}):Promise<ProjectAlphaCatalogStagingOutcome>{
+  command:Readonly<{registryId:number;sourceId:string;expectedSnapshotId?:string;expectedSourceSequence?:number}>,dependencies:Partial<Dependencies>={}):Promise<ProjectAlphaCatalogStagingOutcome>{
   if(env.PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED!=="true")return{status:"disabled"};
   const promotionEnabled=env.PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED==="true",keys=command&&typeof command==="object"?Object.keys(command):[];
-  if(!command||!keys.every(key=>key==="registryId"||key==="sourceId"||key==="expectedSourceSequence")
+  if(!command||!keys.every(key=>key==="registryId"||key==="sourceId"||key==="expectedSnapshotId"||key==="expectedSourceSequence")
     ||!Number.isSafeInteger(command.registryId)||command.registryId<1||typeof command.sourceId!=="string"||!SOURCE_ID.test(command.sourceId)
-    ||(promotionEnabled&&(!PROJECT_ALPHA_SOURCE_ID.test(command.sourceId)||!Number.isSafeInteger(command.expectedSourceSequence)||command.expectedSourceSequence!<0))
-    ||(!promotionEnabled&&command.expectedSourceSequence!==undefined))return{status:"rejected",reason:"invalid_command"};
+    ||(promotionEnabled&&(!PROJECT_ALPHA_SOURCE_ID.test(command.sourceId)||typeof command.expectedSnapshotId!=="string"||!SNAPSHOT_ID.test(command.expectedSnapshotId)
+      ||!Number.isSafeInteger(command.expectedSourceSequence)||command.expectedSourceSequence!<0))
+    ||(!promotionEnabled&&(command.expectedSnapshotId!==undefined||command.expectedSourceSequence!==undefined)))return{status:"rejected",reason:"invalid_command"};
   if(!env.OPS_INVENTORY_CATALOG_STAGING)return{status:"blocked",reason:"configuration"};
   if(promotionEnabled&&!env.OPS_INVENTORY_CATALOG_PROMOTION)return{status:"blocked",reason:"configuration"};
   const readSnapshot=dependencies.readSnapshot??(connection=>readProjectAlphaCatalogSnapshot(connection));
   const selected=await withEnabledConfiguredProjectAlphaApiV2Connection(env,command.sourceId,async connection=>{
     const snapshot=await readSnapshot(connection);
     if(snapshot.status!=="complete")return{status:"blocked",reason:"source_read"} as const;
+    if(promotionEnabled&&snapshot.snapshotId!==command.expectedSnapshotId)return{status:"blocked",reason:"snapshot_mismatch"} as const;
+    if(snapshot.items.some(item=>[...item.name].length>160))return{status:"blocked",reason:"catalog_contract"} as const;
     if(snapshot.items.length>MAX_SNAPSHOT_ITEMS)return{status:"blocked",reason:"catalog_limit"} as const;
     const pages=await paginate(command.registryId,command.sourceId,connection,snapshot);
     if(!pages)return{status:"blocked",reason:"page_too_large"} as const;

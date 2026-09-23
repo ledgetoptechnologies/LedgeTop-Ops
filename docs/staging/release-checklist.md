@@ -280,9 +280,10 @@ staging Worker that binds `OPS_INVENTORY_CATALOG_STAGING` to
 `OpsInventoryCatalogPromotionCoordinator`. Keep both
 `PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED=false` and
 `PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED=false`; bindings alone
-do not authorize a catalog run or promotion. A deliberate invocation must pin
-the operator-selected registry ID, source ID, and expected Client checkpoint
-sequence; it must never discover or advance that authority automatically.
+do not authorize a catalog run or promotion. A deliberate promotion must pin
+the operator-selected registry ID, source ID, reviewed snapshot ID, and
+expected Client checkpoint sequence; it must never discover or advance that
+authority automatically.
 Promotion still does not activate client access, public links, draft quotes,
 or portal catalog reads. Use the same Client-before-Operations order for
 production.
@@ -306,19 +307,32 @@ deployment but before enabling any catalog flag, trigger a unique default-off
 instance and inspect its step history:
 
 ```powershell
-npx wrangler workflows trigger ledgetop-ops-catalog-promotion-staging '{"protocolVersion":1,"registryId":17,"sourceId":"project-alpha:primary","expectedSourceSequence":8,"approvalId":"CHG-2026-0917-RETRY-GATE"}' --config apps/operations/wrangler.staging.json --id catalog-CHG-2026-0917-retry-gate-4f2c1a
-npx wrangler workflows instances describe ledgetop-ops-catalog-promotion-staging catalog-CHG-2026-0917-retry-gate-4f2c1a --config apps/operations/wrangler.staging.json
+npx wrangler workflows trigger ledgetop-ops-catalog-promotion-staging '{"protocolVersion":1,"action":"stage","registryId":17,"sourceId":"project-alpha:primary","approvalId":"CHG-2026-0917-RETRY-GATE"}' --config apps/operations/wrangler.staging.json --id catalog-stage-CHG-2026-0917-retry-gate-4f2c1a
+npx wrangler workflows instances describe ledgetop-ops-catalog-promotion-staging catalog-stage-CHG-2026-0917-retry-gate-4f2c1a --config apps/operations/wrangler.staging.json
 ```
 
 Record a nested `disabled` outcome and exactly one attempt of
-`stage-and-promote-project-alpha-catalog`, with no retry entry. Do not enable
+`stage-project-alpha-catalog`, with no retry entry. Do not enable
 the flags if the deployed runtime reports any retry. After this runtime gate
 and a separately reviewed staging deployment enables both Operations catalog
-flags and the Client promotion flag, invoke exactly one new instance:
+flags and the Client promotion flag, invoke a `stage` instance first:
 
 ```powershell
-npx wrangler workflows trigger ledgetop-ops-catalog-promotion-staging '{"protocolVersion":1,"registryId":17,"sourceId":"project-alpha:primary","expectedSourceSequence":8,"approvalId":"CHG-2026-0917"}' --config apps/operations/wrangler.staging.json --id catalog-CHG-2026-0917-4f2c1a
+npx wrangler workflows trigger ledgetop-ops-catalog-promotion-staging '{"protocolVersion":1,"action":"stage","registryId":17,"sourceId":"project-alpha:primary","approvalId":"CHG-2026-0917-STAGE"}' --config apps/operations/wrangler.staging.json --id catalog-stage-CHG-2026-0917-4f2c1a
 ```
+
+Record and review the exact nested `snapshotId` returned by that stage action.
+Read the checkpoint again, then promote only that reviewed snapshot hash:
+
+```powershell
+npx wrangler d1 execute client-data-staging --remote --command "SELECT source_id,active_generation_id,source_generation,source_sequence FROM pa_service_catalog_checkpoint WHERE source_id='project-alpha:primary';"
+npx wrangler workflows trigger ledgetop-ops-catalog-promotion-staging '{"protocolVersion":1,"action":"promote","registryId":17,"sourceId":"project-alpha:primary","expectedSnapshotId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","expectedSourceSequence":8,"approvalId":"CHG-2026-0917-PROMOTE"}' --config apps/operations/wrangler.staging.json --id catalog-promote-CHG-2026-0917-8b7d2e
+```
+
+The promote action reads Project Alpha again and compares its snapshot hash
+before any staging RPC. A mismatch is a bounded `snapshot_mismatch` result with
+zero staging or promotion calls; the operator must restart the stage/review
+ceremony rather than accept the new snapshot implicitly.
 
 The Workflow performs one non-retrying step and returns only the approval
 correlation plus the bounded staging/promotion outcome. It must not log or
@@ -330,6 +344,13 @@ inspect the nested outcome and promotion status before recording success. A
 disabled result requires configuration review; a stale result
 requires a fresh human read and a new approved invocation, never an automatic
 retry with a newer checkpoint.
+
+The generic Project Alpha inventory contract permits service names through 255
+characters, while this Operations-to-Client catalog consumer is currently
+canonicalized at 160. A valid Project Alpha name of 161–255 characters produces
+`catalog_contract` before staging and blocks this consumer until the source is
+normalized or an explicit canonical expansion is separately reviewed. Do not
+narrow the generic Project Alpha API contract to work around this gate.
 
 Client migration `0189_primary_staff_folder_bindings.sql` must be applied and
 verified before deploying the Operations build that exposes primary Client
