@@ -1,8 +1,9 @@
 /**
- * Private, unmounted producer for one short-lived 0124 Project adoption review.
+ * Private producer for one short-lived 0124 Project adoption review.
  * The caller supplies an authenticated actor and a deliberate server selection;
  * deployment configuration, native authority, Directory identity, and every PA
- * observation are loaded here. No route, queue, or scheduler imports this file.
+ * observation are loaded here. Its default-off private administrator transport
+ * derives actor and source context before invoking this producer.
  */
 import {
   resolveProjectAlphaApiV2Connection,

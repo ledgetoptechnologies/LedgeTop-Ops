@@ -10,6 +10,7 @@ import { acquireProjectAlphaDirectoryReconciliationFinding,
   listProjectAlphaDirectoryReconciliationRecords,
   readProjectAlphaDirectoryReconciliationFindingContext } from "./project-alpha-directory-reconciliation-review";
 import { reserveProjectAlphaProjectAdoptionReview } from "./project-alpha-project-adoption-review-consumer";
+import { produceProjectAlphaProjectAdoptionReview } from "./project-alpha-project-adoption-review-producer";
 import { planProjectAlphaProjectAdoptionBind } from "./project-alpha-project-adoption-bind-consumer";
 import type { Env, StaffPrincipal } from "./types";
 
@@ -36,6 +37,11 @@ const acquireSchema = z.object({
 }).strict();
 const activationSchema = z.object({ reviewItemId: UUID, idempotencyKey: IDEMPOTENCY }).strict();
 const reservationSchema = z.object({ reviewItemId: UUID, idempotencyKey: IDEMPOTENCY }).strict();
+const reviewSchema = z.object({
+  idempotencyKey: IDEMPOTENCY,
+  externalProjectId: RECORD_ID,
+  projectAlphaPublicId: PUBLIC_ID,
+}).strict();
 const bindSchema = z.object({ reservationId: UUID }).strict();
 const reconciliationAdoptionSchema = z.object({
   findingId: UUID,
@@ -90,6 +96,12 @@ async function requireGlobalDirectoryProfileView(env: Env, staffId: string): Pro
 
 function principalActor(principal: StaffPrincipal): { staffId: string; accessSubject: string } {
   return { staffId: principal.id, accessSubject: principal.accessSubject };
+}
+
+async function projectSource(env: Env, externalProjectId: string): Promise<string | null> {
+  const row = await env.OPS_DB.prepare(`SELECT source_id sourceId FROM project_alpha_project_destinations
+    WHERE external_project_id=?`).bind(externalProjectId).first<{ sourceId: string }>();
+  return row && SOURCE_ID.safeParse(row.sourceId).success ? row.sourceId : null;
 }
 
 async function guard(c: AppContext, next: () => Promise<void>): Promise<void> {
@@ -187,6 +199,16 @@ export function registerProjectAlphaPrivateAdminRoutes(app: App): void {
     await currentReviewer(c.env, c.get("principal"));
     return c.json(await reserveProjectAlphaProjectAdoptionReview(c.env,
       principalActor(c.get("principal")), input));
+  });
+
+  app.post(`${PROJECT_ALPHA_PRIVATE_ADMIN_ROUTE}/projects/adoption/review`, async c => {
+    const input = await json(c.req.raw, reviewSchema, "Project adoption review");
+    requireIdempotency(c.req.raw, input.idempotencyKey);
+    await currentReviewer(c.env, c.get("principal"));
+    const sourceId = await projectSource(c.env, input.externalProjectId);
+    if (!sourceId) throw new HTTPException(409, { message: "Project adoption destination is unavailable" });
+    return c.json(await produceProjectAlphaProjectAdoptionReview(c.env,
+      principalActor(c.get("principal")), { ...input, sourceId }, fetch));
   });
 
   app.post(`${PROJECT_ALPHA_PRIVATE_ADMIN_ROUTE}/projects/adoption/bind`, async c => {

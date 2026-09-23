@@ -427,7 +427,7 @@ describe("private project adoption review producer", () => {
     expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_evidence").first("count")).toBe(1);
   });
 
-  it("accepts only exact server selection and actor objects and remains unmounted", async () => {
+  it("accepts only exact server selection and actor objects and stays out of the root dispatcher", async () => {
     const send = producerSend();
     await expect(produceReview(send, producerSelection, null))
       .resolves.toEqual({ status: "rejected", reason: "invalid_actor" });

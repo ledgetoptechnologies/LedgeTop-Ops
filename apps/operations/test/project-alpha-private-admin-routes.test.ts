@@ -4,7 +4,7 @@ import { csrfToken, requireMutationSecurity } from "../src/worker/request-securi
 import type { Env, StaffPrincipal } from "../src/worker/types";
 
 const mocks = vi.hoisted(() => ({
-  scope: vi.fn(), acquire: vi.fn(), activate: vi.fn(), reserve: vi.fn(), bind: vi.fn(), first: vi.fn(),
+  scope: vi.fn(), acquire: vi.fn(), activate: vi.fn(), produce: vi.fn(), reserve: vi.fn(), bind: vi.fn(), first: vi.fn(),
   reconciliationList: vi.fn(), reconciliationAcquire: vi.fn(),
   reconciliationRecords: vi.fn(),
   reconciliationContext: vi.fn(),
@@ -25,6 +25,9 @@ vi.mock("../src/worker/project-alpha-directory-reconciliation-review", () => ({
 vi.mock("../src/worker/project-alpha-project-adoption-review-consumer", () => ({
   reserveProjectAlphaProjectAdoptionReview: mocks.reserve,
 }));
+vi.mock("../src/worker/project-alpha-project-adoption-review-producer", () => ({
+  produceProjectAlphaProjectAdoptionReview: mocks.produce,
+}));
 vi.mock("../src/worker/project-alpha-project-adoption-bind-consumer", () => ({
   planProjectAlphaProjectAdoptionBind: mocks.bind,
 }));
@@ -43,6 +46,7 @@ const commandId = "10000000-0000-4000-8000-000000000002";
 const key = "10000000-0000-4000-8000-000000000003";
 const reservationId = "10000000-0000-4000-8000-000000000004";
 const publicId = "a".repeat(32);
+const externalProjectId = "project-1";
 
 function fixture(options: { enabled?: boolean; administrator?: boolean; global?: boolean; denied?: boolean; directoryView?: boolean } = {}) {
   const app = new Hono<{ Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } }>();
@@ -59,7 +63,9 @@ function fixture(options: { enabled?: boolean; administrator?: boolean; global?:
     OPERATIONS_ORIGINS: "https://ops.example.test",
     OPS_DB: { prepare: vi.fn((sql: string) => ({ bind: vi.fn(() => ({
       first: sql.includes("FROM native_directory_grants allowed")
-        ? vi.fn().mockResolvedValue(options.directoryView === false ? null : { ok: 1 }) : mocks.first,
+        ? vi.fn().mockResolvedValue(options.directoryView === false ? null : { ok: 1 })
+        : sql.includes("FROM project_alpha_project_destinations")
+          ? vi.fn().mockResolvedValue({ sourceId: "project-alpha:primary" }) : mocks.first,
     })) })) },
   } as unknown as Env;
   mocks.first.mockResolvedValue({ admissionVersion: 3, profileVersion: 4, grantGeneration: 5 });
@@ -86,6 +92,7 @@ describe("private Project Alpha administrator transport", () => {
     mocks.acquire.mockResolvedValue({ status: "acquired", reviewReceiptId: reviewId, commandId, acquiredReceiptId: key, replayed: false });
     mocks.activate.mockResolvedValue({ status: "activated", activationId: key, reviewItemId: reviewId, idempotencyKey: key, replayed: false });
     mocks.reserve.mockResolvedValue({ status: "reserved", reservationId, reviewItemId: reviewId, idempotencyKey: key, replayed: false });
+    mocks.produce.mockResolvedValue({ status: "reviewed", reviewItemId: reviewId, requestSha256: "c".repeat(64), replayed: false });
     mocks.bind.mockResolvedValue({ status: "planned", bridgeId: key, reservationId, commandId, requestSha256: "b".repeat(64), replayed: false });
     mocks.reconciliationList.mockResolvedValue({ items: [], nextCursor: null });
     mocks.reconciliationRecords.mockResolvedValue({ items: [], nextCursor: null });
@@ -145,6 +152,31 @@ describe("private Project Alpha administrator transport", () => {
     expect((await send("/projects/adoption/reserve", { reviewItemId: reviewId, idempotencyKey: key }, key)).status).toBe(200);
     expect(mocks.reserve).toHaveBeenCalledWith(expect.anything(), { staffId: principal.id, accessSubject: principal.accessSubject },
       { reviewItemId: reviewId, idempotencyKey: key });
+  });
+
+  it("derives project source and actor server-side for an exact adoption review selection", async () => {
+    const { send } = fixture();
+    const input = { idempotencyKey: key, externalProjectId, projectAlphaPublicId: publicId };
+    expect((await send("/projects/adoption/review", { ...input, sourceId: "project-alpha:secondary" }, key)).status).toBe(400);
+    expect((await send("/projects/adoption/review", { ...input, actor: { staffId: "attacker" } }, key)).status).toBe(400);
+    expect((await send("/projects/adoption/review", input, commandId)).status).toBe(400);
+    const response = await send("/projects/adoption/review", input, key);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: "reviewed", reviewItemId: reviewId,
+      requestSha256: "c".repeat(64), replayed: false });
+    expect(mocks.produce).toHaveBeenCalledWith(expect.anything(),
+      { staffId: principal.id, accessSubject: principal.accessSubject },
+      { ...input, sourceId: "project-alpha:primary" }, fetch);
+  });
+
+  it("fails closed before production when the exact project destination is unavailable", async () => {
+    const fixtureValue = fixture();
+    (fixtureValue.env.OPS_DB.prepare as ReturnType<typeof vi.fn>).mockImplementation((sql: string) => ({ bind: vi.fn(() => ({
+      first: sql.includes("FROM project_alpha_project_destinations") ? vi.fn().mockResolvedValue(null) : mocks.first,
+    })) }));
+    expect((await fixtureValue.send("/projects/adoption/review",
+      { idempotencyKey: key, externalProjectId, projectAlphaPublicId: publicId }, key)).status).toBe(409);
+    expect(mocks.produce).not.toHaveBeenCalled();
   });
 
   it("routes activation and bind actions with replay-safe identifiers", async () => {
