@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CLIENT_PROFILE_ONBOARDING_LIMITS, EMPTY_CLIENT_PROFILE_ONBOARDING_VALUES, clientProfileOnboardingFieldMaxLength, clientProfileOnboardingSubmission, organizationNameRequired, valuesForClientProfileType } from "../src/client/ClientProfileOnboardingForm";
+import { CLIENT_PROFILE_ONBOARDING_LIMITS, EMPTY_CLIENT_PROFILE_ONBOARDING_VALUES, clientProfileOnboardingFieldMaxLength, clientProfileOnboardingSubmission, organizationNameRequired, valuesForClientProfileType } from "@ltds/ui/client-profile-onboarding";
 
 describe("ClientProfileOnboardingForm contract", () => {
   it("uses native writer limits", () => {

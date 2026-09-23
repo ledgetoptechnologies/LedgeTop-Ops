@@ -9,6 +9,7 @@
   },
   "exports": {
     ".": "./src/index.tsx",
+    "./client-profile-onboarding": "./src/ClientProfileOnboardingForm.tsx",
     "./styles.css": "./src/styles.css"
   }
 }
