@@ -14,9 +14,9 @@ export const BOOTSTRAP_APPS = Object.freeze({
     binding: "DELIVERY_DB",
     databaseName: "client-data-staging",
     seed: "0002_seed_initial_staff.sql",
-    migrationCount: 132,
-    migrationNamesSha256: "b81e6d679711da90f85ce9413e9627ee205f9b294173c70fdc0148376b158e4e",
-    migrationContentsSha256: "c5b6271f9edff677237c45734bbf1b6eeebaaf1c7256b6b561ea1e2c03adb4a0",
+    migrationCount: 133,
+    migrationNamesSha256: "cc894e956eee368da2bfdbe1e90f8f0f2698b42c111f2e01e31837fb8ab6552d",
+    migrationContentsSha256: "918cb7b5772e7a489854818fc167f62e4f20899be62a3f6b22c6fc756ab91210",
   }),
   operations: Object.freeze({
     source: "operations",

@@ -316,8 +316,8 @@ test("requires every portal-v2 and Operations capability to be explicitly false"
   }
 });
 
-test("pins the native portal, Operations 0054-0122, both 0199 files, and the 0200-0213 release contract", () => {
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-31), [
+test("pins the native portal, Operations 0054-0139, both 0199 files, and the 0200-0214 release contract", () => {
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-32), [
     "0184_native_client_feedback.sql",
     "0185_native_service_request_ownership.sql",
     "0186_delivery_notification_authority_provenance.sql",
@@ -349,14 +349,28 @@ test("pins the native portal, Operations 0054-0122, both 0199 files, and the 020
     "0211_incoming_upload_verification_lifecycle.sql",
     "0212_incoming_upload_archive_inventory.sql",
     "0213_incoming_rclone_promotion.sql",
+    "0214_ops_inventory_catalog_staging.sql",
   ]);
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(-4), [
-    "0119_project_alpha_project_v2_persistence_ledger.sql",
-    "0120_project_alpha_project_v2_canonical_settlement.sql",
-    "0121_project_alpha_project_v2_settlement_proof_expiry.sql",
-    "0122_project_alpha_project_v2_canonical_activation.sql",
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(-17), [
+    "0123_native_directory_authority_history.sql",
+    "0124_project_alpha_project_adoption_review_evidence.sql",
+    "0125_project_alpha_existing_directory_binding_activation.sql",
+    "0126_project_alpha_project_active_directory_mapping_bridge.sql",
+    "0127_project_alpha_existing_directory_binding_activation_evidence_transition.sql",
+    "0128_project_alpha_project_adoption_bind_bridge.sql",
+    "0129_project_alpha_existing_directory_binding_activation_relationship.sql",
+    "0130_project_alpha_project_adoption_review_producer.sql",
+    "0131_project_alpha_project_active_directory_mapping_guards.sql",
+    "0132_operations_directory_acquired_relationship_dependencies.sql",
+    "0133_project_alpha_directory_relationship_outbox.sql",
+    "0134_native_directory_create_admission_relationships.sql",
+    "0135_operations_directory_relationship_canonical_ids.sql",
+    "0136_project_alpha_directory_reconciliation.sql",
+    "0137_project_alpha_directory_reconciliation_scheduler.sql",
+    "0138_project_alpha_directory_reconciliation_review.sql",
+    "0139_native_directory_staging_empty_enrollment_fixture_guard.sql",
   ]);
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(-69, -66), [
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(-86, -83), [
     "0054_project_alpha_directory_outbox.sql",
     "0055_operations_directory_authority.sql",
     "0056_operations_directory_materialization.sql",

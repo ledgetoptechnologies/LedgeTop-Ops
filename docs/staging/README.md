@@ -124,8 +124,8 @@ changes only Client `0002_seed_initial_staff.sql` and Operations
 digest, and emits source/derived SHA-256 manifests. Apply a fresh
 empty database only with the generated `wrangler.staging.bootstrap.json` for
 that application. Do not use these configs for an existing database. Confirm
-the full 132-row Client ledger (both `0199` filenames once, final `0213`) and
-122-row Operations ledger (final `0122`), a second list/apply with no pending
+the full 133-row Client ledger (both `0199` filenames once, final `0214`) and
+139-row Operations ledger (final `0139`), a second list/apply with no pending
 migrations, one synthetic owner in each database, the Operations owner role and
 portable ACL catalog, and an empty `PRAGMA foreign_key_check`. Record those
 results in `migrations.freshBootstrap` without storing the owner email.
@@ -135,7 +135,7 @@ Cloudflare's remote D1 migration transport does not accept a nested
 SQLite does. The canonical chains use the equivalent portable form
 `SELECT RAISE(...) WHERE <predicate>`, and the source-layout invariant rejects
 reintroducing the remote-incompatible form. The September 18, 2026 fresh-chain
-rehearsal applied all 132 Client and 122 Operations migrations through Wrangler
+rehearsal applied all 133 Client and 139 Operations migrations through Wrangler
 to isolated staging D1 databases, confirmed no pending migrations on a second
 list, and returned an empty foreign-key check. Existing databases continue to
 skip those already-recorded migration names; never remove or replay their
