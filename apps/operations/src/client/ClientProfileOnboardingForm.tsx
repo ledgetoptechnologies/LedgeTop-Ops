@@ -14,8 +14,8 @@ export const CLIENT_PROFILE_ONBOARDING_LIMITS = {
   addressLine1: 255,
   addressLine2: 255,
   city: 100,
-  region: 2,
-  postalCode: 20,
+  region: { individual: 2, organization: 100 },
+  postalCode: { individual: 20, organization: 32 },
   country: 100,
 } as const;
 
@@ -54,6 +54,11 @@ export function organizationNameRequired(profileType: ClientProfileType): boolea
   return profileType === "organization";
 }
 
+export function clientProfileOnboardingFieldMaxLength(field: Exclude<keyof ClientProfileOnboardingValues, "profileType">, profileType: ClientProfileType): number {
+  const bound = CLIENT_PROFILE_ONBOARDING_LIMITS[field];
+  return typeof bound === "number" ? bound : bound[profileType];
+}
+
 /** No values are shortened: callers receive exactly what the browser validated. */
 export function clientProfileOnboardingSubmission(values: ClientProfileOnboardingValues): ClientProfileOnboardingValues {
   return values.profileType === "organization" ? { ...values } : valuesForClientProfileType(values, "individual");
@@ -79,7 +84,10 @@ export function ClientProfileOnboardingForm({ initialValues, onSubmit, submitLab
     setValues(previous => ({ ...previous, [field]: value }));
     setValidationMessage("");
   };
-  const selectProfileType = (profileType: ClientProfileType) => setValues(previous => valuesForClientProfileType(previous, profileType));
+  const selectProfileType = (profileType: ClientProfileType) => {
+    setValues(previous => valuesForClientProfileType(previous, profileType));
+    setValidationMessage("");
+  };
   const invalid = (event: InvalidEvent<HTMLFormElement>) => {
     event.preventDefault();
     const control = event.target as HTMLInputElement;
@@ -96,7 +104,7 @@ export function ClientProfileOnboardingForm({ initialValues, onSubmit, submitLab
   } = {}) => <label className="client-profile-onboarding-field" htmlFor={`${formId}-${field}`}>
     <span>{label}{options.required && <em aria-hidden="true"> *</em>}</span>
     <input id={`${formId}-${field}`} name={field} type={options.type || "text"} autoComplete={options.autoComplete}
-      maxLength={CLIENT_PROFILE_ONBOARDING_LIMITS[field]} required={options.required} value={values[field]}
+      maxLength={clientProfileOnboardingFieldMaxLength(field, values.profileType)} required={options.required} value={values[field]}
       onChange={event => change(field, event.target.value)} />
   </label>;
 

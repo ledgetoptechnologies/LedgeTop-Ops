@@ -1,11 +1,39 @@
-import { readFileSync } from "node:fs";
-import { expect, test } from "@playwright/test";
+import { buildSync } from "esbuild";
+import { fileURLToPath } from "node:url";
+import { expect, test, type Page } from "@playwright/test";
 
-const stylesheet = readFileSync(new URL("../../src/client/ClientProfileOnboardingForm.css", import.meta.url), "utf8");
-const markup = `<meta name="viewport" content="width=device-width, initial-scale=1"><style>${stylesheet}</style><main class="client-profile-onboarding"><section class="client-profile-onboarding-card"><header><p class="client-profile-onboarding-eyebrow">Ledge Top Client Portal</p><h1>Client profile onboarding</h1></header><form class="client-profile-onboarding-form"><fieldset class="client-profile-onboarding-type"><legend>Profile type</legend><div><label><input type="radio" checked> Individual</label><label><input type="radio"> Organization</label></div></fieldset><div class="client-profile-onboarding-grid"><label class="client-profile-onboarding-field">Contact name <input required></label><label class="client-profile-onboarding-field">Email address <input type="email" required></label><label class="client-profile-onboarding-field">Phone <input></label><label class="client-profile-onboarding-field">Organization name <input required></label><div class="client-profile-onboarding-span-two"><label class="client-profile-onboarding-field">Address line 1 <input></label></div><div class="client-profile-onboarding-span-two"><label class="client-profile-onboarding-field">Address line 2 <input></label></div><label class="client-profile-onboarding-field">City <input></label><label class="client-profile-onboarding-field">Region / state <input maxlength="2"></label><label class="client-profile-onboarding-field">Postal code <input maxlength="20"></label><label class="client-profile-onboarding-field">Country <input></label></div><button>Continue</button></form></section></main>`;
+const fixture = new URL("./client-profile-onboarding-fixture.tsx", import.meta.url);
+const bundle = buildSync({ entryPoints: [fileURLToPath(fixture)], bundle: true, format: "iife", platform: "browser", write: false, outdir: "out", jsx: "automatic" });
+const script = bundle.outputFiles.find(file => file.path.endsWith(".js"))?.text;
+const stylesheet = bundle.outputFiles.find(file => file.path.endsWith(".css"))?.text;
+if (!script || !stylesheet) throw new Error("Client onboarding browser fixture did not compile.");
 
-test("onboarding form stays contained and collapses to one column at 320px", async ({ page }) => {
-  await page.setContent(markup);
+async function render(page: Page) {
+  await page.setContent('<meta name="viewport" content="width=device-width, initial-scale=1"><div id="root"></div>');
+  await page.addStyleTag({ content: stylesheet });
+  await page.addScriptTag({ content: script });
+  await expect(page.getByRole("heading", { name: "Client profile onboarding" })).toBeVisible();
+}
+
+test("real onboarding form switches profile fields, clears stale values and stays responsive", async ({ page }) => {
+  await render(page);
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect(page.getByRole("alert")).toBeVisible();
+  await page.getByLabel("Organization").check();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(page.getByLabel("Organization name")).toHaveAttribute("required", "");
+  await expect(page.getByLabel("Region / state")).toHaveAttribute("maxlength", "100");
+  await expect(page.getByLabel("Postal code")).toHaveAttribute("maxlength", "32");
+  await page.getByLabel("Organization name").fill("Ledge Top");
+  await page.getByLabel("General company email").fill("office@example.test");
+  await page.getByLabel("Individual").check();
+  await expect(page.getByLabel("Organization name")).toHaveCount(0);
+  await page.getByLabel("Contact name").fill("Pat Lee");
+  await page.getByLabel("Email address").fill("pat@example.test");
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect.poll(() => page.evaluate(() => (window as Window & { onboardingSubmission?: unknown }).onboardingSubmission)).toMatchObject({
+    profileType: "individual", organizationName: "", generalEmail: "", generalPhone: "",
+  });
   for (const width of [320, 768, 1440]) {
     await page.setViewportSize({ width, height: 900 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
@@ -16,7 +44,4 @@ test("onboarding form stays contained and collapses to one column at 320px", asy
   }));
   expect(new Set(fields.map(field => field.x)).size).toBe(1);
   expect(new Set(fields.map(field => field.width)).size).toBe(1);
-  await expect(page.getByLabel("Email address")).toHaveAttribute("required", "");
-  await expect(page.getByLabel("Organization name")).toHaveAttribute("required", "");
-  await expect(page.getByLabel("Region / state")).toHaveAttribute("maxlength", "2");
 });
