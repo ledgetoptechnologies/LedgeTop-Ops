@@ -8,6 +8,7 @@ import { matchesEtag } from "./prepared-images";
 import { serveAuthorizedThumbnail, thumbnailFieldsForObject, type ThumbnailJobRow } from "./thumbnails";
 import { recordFirstAccessNotification } from "./notifications";
 export { OpsSyncPortalProjectionIngress } from "./ops-sync-portal-entrypoint";
+export { OpsInventoryCatalogStagingIngress } from "./ops-inventory-catalog-staging";
 import { friendlyBulkFailure } from "./bulk-download-errors";
 import type { Env, ShareRow } from "./types";
 export { BulkDownloadWorkflow } from "./workflow";
