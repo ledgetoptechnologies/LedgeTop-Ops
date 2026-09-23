@@ -1,8 +1,22 @@
 # API-first migration — current implementation objective and work register
 
-Updated September 22, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+Updated September 23, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
 
 ### September 22, 2026 — authoritative PR and staging acceptance status
+
+- September 23 follow-up: Operations PR #107 now points to
+  `11cccfd879b61cc6cc699dbc32d923cf0275a3f5`, and all ten GitHub CI
+  checks passed at that exact head. The final relationship-replay test also
+  passed locally at this head (11/11 with a 30-second per-test timeout); its
+  initial default-timeout run had six 5-second timeouts, not assertion failures.
+  This supersedes the earlier #107 CI-head snapshot below, but does not close
+  its live Directory reservation/acquisition, post-bind compensation, joined
+  rollback, both-instance reconciliation, deployment-order or existing
+  public-link compatibility gates. The stacked Operations PR #108 and PA
+  PR #189 remain separate review branches; PA #189 passed the local full
+  PHPUnit suite (985 tests, 8,027 assertions, 94 skipped), but has no automatic
+  checks on its feature-branch PR target. This checkpoint did not enable
+  production authority.
 
 - Latest read-only release check: Operations PR #107 head
   `303da4809d96bb331497be7d85d463e985be2c84` passed all ten
