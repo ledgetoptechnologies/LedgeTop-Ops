@@ -77,6 +77,7 @@ import { drainNativeDirectoryOutboxes } from "./native-directory-outbox-schedule
 import { runNativeDirectoryReconciliationScheduler } from "./native-directory-reconciliation-scheduler";
 import { handleProjectAlphaApiV2MonitorControlHttp,
   projectAlphaApiV2MonitorControlHttpRequest } from "./project-alpha-api-v2-monitor-control-http";
+import { handleClientOnboardingStaffHttp } from "./client-onboarding-staff-http";
 import { consumeNativeStaffOnboardingRateLimit } from "./native-staff-onboarding-rate-limit";
 import {
   auditStatement,
@@ -446,6 +447,23 @@ async function dispatchProjectAlphaApiV2MonitorControl(c: any) {
 }
 app.use("/api/native-integrations/monitor", dispatchProjectAlphaApiV2MonitorControl);
 app.use("/api/native-integrations/monitor/*", dispatchProjectAlphaApiV2MonitorControl);
+// Native client-profile onboarding is deliberately dispatched before the
+// legacy /api staff middleware. It never accepts legacy PA/portal identity.
+async function dispatchClientOnboardingStaff(c: any) {
+  return handleClientOnboardingStaffHttp(c.req.raw, {
+    configuration: {
+      enabled: c.env.CLIENT_ONBOARDING_ADMIN_ENABLED === "true",
+      issuer: c.env.TEAM_DOMAIN ?? "",
+      staffAudience: c.env.OPERATIONS_AUD,
+      origin: c.env.CLIENT_ONBOARDING_ADMIN_ORIGIN ?? "",
+      csrfSecret: c.env.OPERATIONS_SESSION_SECRET,
+    },
+    database: c.env.OPS_DB,
+    handoffKeyringJson: c.env.CLIENT_ONBOARDING_HANDOFF_KEYRING,
+  });
+}
+app.use("/api/client-onboarding/staff", dispatchClientOnboardingStaff);
+app.use("/api/client-onboarding/staff/*", dispatchClientOnboardingStaff);
 // This is intentionally before staff authentication. A disabled staging
 // fixture must be indistinguishable from an absent route, even to a request
 // without a valid Operations session.
@@ -3530,5 +3548,6 @@ export { ThumbnailRendererContainer } from "./thumbnail-renderer-container";
 export { dispatchThumbnailRendererApi } from "./thumbnail-renderer-api";
 export { ClientDelegatedShareSigner } from "./client-delegated-share-signer";
 export { ViewerSessionIssuer } from "./viewer-session-issuer-entrypoint";
+export { ClientOnboardingRecipientBridge } from "./client-onboarding-recipient-entrypoint";
 export { ProjectAlphaDeliveryIntentIngress } from "./project-alpha-delivery-intent-entrypoint";
 export { ProjectAlphaCatalogPromotionWorkflow } from "./project-alpha-catalog-promotion-workflow";

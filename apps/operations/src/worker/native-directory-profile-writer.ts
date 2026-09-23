@@ -1,3 +1,4 @@
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const REVISION = /^(?:0|[1-9][0-9]{0,18})$/;
 const SOURCE_ID = /^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -49,6 +50,13 @@ export type NativeDirectoryProfileWrite = NativeDirectoryCreateWrite | NativeDir
 export type NativeDirectoryProfileWriteOutcome =
   | Readonly<{ status: "written"; replayed: boolean; mutationId: string; recordId: string; kind: NativeDirectoryProfileKind; version: number; commandIds: readonly string[] }>
   | Readonly<{ status: "rejected" | "blocked" | "conflict"; reason: string }>;
+/**
+ * An opaque native Directory plan. Only the approved composer can atomically
+ * execute it with another writer plan.
+ */
+type NativeDirectoryProfileWritePlan = Readonly<{ status: "planned";
+  outcome: Extract<NativeDirectoryProfileWriteOutcome, { status: "written" }>; statements: readonly D1PreparedStatement[] }>;
+type NativeDirectoryProfileWritePlanningResult = NativeDirectoryProfileWriteOutcome | NativeDirectoryProfileWritePlan;
 
 /** These constants deliberately make the only empty-enrollment write a single staging fixture. */
 export const STAGING_EMPTY_ENROLLMENT_FIXTURE_MUTATION_ID = "6d0da70c-f4f5-4b10-8988-6639b8e01531";
@@ -65,6 +73,7 @@ type NormalizedWrite = Readonly<{
   scopes: readonly NativeDirectoryScope[]; destinations: readonly NativeDirectoryDestinationAuthority[];
   createAdmissionId: string | null; relationship: NativeDirectoryClientRelationship | null;
 }>;
+type DirectoryWriteD1 = Pick<D1Database, "prepare" | "batch">;
 type DestinationIdentity = Omit<NativeDirectoryDestinationAuthority, "expectedAuthorizationGeneration">;
 type GrantRow = Readonly<{ id: string; effect: string; scope_kind: string; business_area_id: string | null; division_id: string | null; resource_id: string | null }>;
 
@@ -173,7 +182,7 @@ function applies(grant: GrantRow, write: NormalizedWrite, scopes: readonly Nativ
     || (grant.scope_kind === "business_area" && scopes.some(scope => scope.businessAreaId === grant.business_area_id))
     || (grant.scope_kind === "division" && scopes.some(scope => scope.divisionId === grant.division_id));
 }
-async function authority(db: D1Database, write: NormalizedWrite, permission = "directory.profile.edit", grantId = write.actor.selectedGrantId): Promise<boolean> {
+async function authority(db: DirectoryWriteD1, write: NormalizedWrite, permission = "directory.profile.edit", grantId = write.actor.selectedGrantId): Promise<boolean> {
   const selected = await db.prepare(`SELECT grant.id,grant.effect,grant.scope_kind,grant.business_area_id,grant.division_id,grant.resource_id
     FROM native_directory_grants grant JOIN native_staff_admissions admission ON admission.staff_id=grant.staff_id
     JOIN staff_users actor ON actor.id=grant.staff_id JOIN native_staff_profiles profile ON profile.staff_id=grant.staff_id
@@ -209,7 +218,7 @@ type RelationshipEvidence = Readonly<{
   parentAckOutcomeJson: string | null;
 }>;
 
-async function linkedRelationshipEvidence(db: D1Database, relationship: RelationshipState,
+async function linkedRelationshipEvidence(db: DirectoryWriteD1, relationship: RelationshipState,
   destinationValue: NativeDirectoryDestinationAuthority): Promise<RelationshipEvidence | null> {
   if (relationship.organizationRecordId === null || relationship.organizationRecordVersion === null) return {
     evidenceKind: "unlinked", parentPublicId: null, parentIntentId: null, parentMappingCommandId: null,
@@ -313,7 +322,7 @@ async function linkedRelationshipEvidence(db: D1Database, relationship: Relation
     parentAckOutcomeJson: legacy.parentAckOutcomeJson,
   } : null;
 }
-async function updateRemoteState(db: D1Database, write: NormalizedWrite, destinationValue: NativeDirectoryDestinationAuthority): Promise<RemoteState | null> {
+async function updateRemoteState(db: DirectoryWriteD1, write: NormalizedWrite, destinationValue: NativeDirectoryDestinationAuthority): Promise<RemoteState | null> {
   const pending = await db.prepare(`SELECT 1 present FROM project_alpha_directory_outbox WHERE source_id=? AND expected_source_instance_id=?
     AND application_id=? AND expected_history_epoch_id=? AND resource_type=? AND external_id=? AND state<>'acknowledged' LIMIT 1`)
     .bind(destinationValue.sourceId, destinationValue.sourceInstanceUUID, destinationValue.applicationUUID, destinationValue.historyEpoch, write.kind, write.recordId).first();
@@ -418,8 +427,8 @@ async function updateRemoteState(db: D1Database, write: NormalizedWrite, destina
  * legacy-mapping, or acquired-mapping evidence. Relationship fields remain
  * transport-only and never enter the canonical profile revision.
  */
-async function writeNativeDirectoryProfileInternal(db: D1Database, input: NativeDirectoryProfileWrite,
-  allowEmptyDestinations = false): Promise<NativeDirectoryProfileWriteOutcome> {
+async function planNativeDirectoryProfileWriteInternal(db: DirectoryWriteD1, input: NativeDirectoryProfileWrite,
+  allowEmptyDestinations = false): Promise<NativeDirectoryProfileWritePlanningResult> {
   const write = normalize(input, allowEmptyDestinations); if (!write) return { status: "rejected", reason: "invalid_write" };
   const auditJson = auditCommand(write);
   const replay = await db.prepare(`SELECT audit.command_json,audit.actor_id,audit.original_verified_access_subject,revision.record_id,
@@ -580,14 +589,22 @@ async function writeNativeDirectoryProfileInternal(db: D1Database, input: Native
   }
   statements.push(...materializations);
   statements.push(db.prepare(`DELETE FROM operations_directory_write_fences WHERE mutation_id=?`).bind(write.mutationId));
-  try { await db.batch(statements); }
+  return { status: "planned", outcome: { status: "written", replayed: false,
+    mutationId: write.mutationId, recordId: write.recordId, kind: write.kind, version: nextVersion, commandIds }, statements };
+}
+
+async function executeNativeDirectoryProfileWrite(db: D1Database, input: NativeDirectoryProfileWrite,
+  allowEmptyDestinations = false): Promise<NativeDirectoryProfileWriteOutcome> {
+  const planned = await planNativeDirectoryProfileWriteInternal(db, input, allowEmptyDestinations);
+  if (planned.status !== "planned") return planned;
+  try { await db.batch([...planned.statements]); }
   catch { return { status: "blocked", reason: "authority_or_atomic_write" }; }
-  return { status: "written", replayed: false, mutationId: write.mutationId, recordId: write.recordId, kind: write.kind, version: nextVersion, commandIds };
+  return planned.outcome;
 }
 
 /** Normal profile routes always require PA destinations. */
 export async function writeNativeDirectoryProfile(db: D1Database, input: NativeDirectoryProfileWrite): Promise<NativeDirectoryProfileWriteOutcome> {
-  return writeNativeDirectoryProfileInternal(db, input);
+  return executeNativeDirectoryProfileWrite(db, input);
 }
 
 /**
@@ -605,5 +622,5 @@ export async function writeStagingEmptyEnrollmentOrganizationFixture(db: D1Datab
     || JSON.stringify(input.profile) !== JSON.stringify(STAGING_EMPTY_ENROLLMENT_FIXTURE_PROFILE)
     || input.scopes.length !== 1 || input.scopes[0]!.divisionId !== null)
     return { status: "rejected", reason: "invalid_staging_fixture" };
-  return writeNativeDirectoryProfileInternal(db, input, true);
+  return executeNativeDirectoryProfileWrite(db, input, true);
 }

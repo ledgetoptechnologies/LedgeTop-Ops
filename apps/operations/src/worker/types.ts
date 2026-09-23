@@ -23,8 +23,12 @@ export type Env = Omit<
   | "NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED"
   | "NATIVE_INTEGRATION_CONTROL_ENABLED"
   | "NATIVE_INTEGRATION_CONTROL_ORIGIN"
+  | "CLIENT_ONBOARDING_ADMIN_ENABLED"
+  | "CLIENT_ONBOARDING_ADMIN_ORIGIN"
+  | "CLIENT_ONBOARDING_HANDOFF_KEYRING"
   | "DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED"
   | "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED"
+  | "CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED"
   | "CLIENT_PORTAL_HIERARCHY_V2_ENABLED"
   | "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED"
   | "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED"
@@ -86,6 +90,12 @@ export type Env = Omit<
   NATIVE_INTEGRATION_CONTROL_ENABLED?: string;
   /** Exact same-origin native monitor-control UI origin; no implicit fallback. */
   NATIVE_INTEGRATION_CONTROL_ORIGIN?: string;
+  /** Default-off native staff issuance/reveal boundary for client profile onboarding. */
+  CLIENT_ONBOARDING_ADMIN_ENABLED?: string;
+  /** Exact HTTPS Operations origin for the native onboarding staff boundary. */
+  CLIENT_ONBOARDING_ADMIN_ORIGIN?: string;
+  /** Deployment secret containing the bounded AES-GCM handoff keyring. */
+  CLIENT_ONBOARDING_HANDOFF_KEYRING?: string;
   PROJECT_ALPHA_CONNECTOR_SNAPSHOT_CREDENTIALS?: string;
   PROJECT_ALPHA_CONNECTOR_EVENT_CREDENTIALS?: string;
   /** Deploy-managed source manifest; selects configured credential references and is never browser-administered. */
@@ -123,6 +133,8 @@ export type Env = Omit<
   DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED?: string;
   /** Defense-in-depth gate for the private Client -> Operations share signer RPC. */
   CLIENT_DELEGATED_SHARE_SIGNER_ENABLED?: string;
+  /** Default-off private Client -> Operations onboarding recipient bridge. */
+  CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED?: string;
   /** Enables staff recovery for the additive client workspace hierarchy. */
   CLIENT_PORTAL_HIERARCHY_V2_ENABLED?: string;
   /** Must match the Client deployment before publishing relation-backed grants. */

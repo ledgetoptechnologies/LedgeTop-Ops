@@ -6,8 +6,12 @@ import "./styles.css";
 import "./request-workflow.css";
 import { OperationsApp } from "./OperationsApp";
 import { OperationsViewerShell, parseOperationsViewerShellRoute } from "./OperationsViewerShell";
+import { ClientOnboardingStaff } from "./ClientOnboardingStaff";
 
 const viewerShellRoute = parseOperationsViewerShellRoute(window.location.pathname);
-createRoot(document.getElementById("root")!).render(<StrictMode>{viewerShellRoute
+const onboardingStaffRoute = window.location.pathname === "/administration/client-onboarding";
+createRoot(document.getElementById("root")!).render(<StrictMode>{onboardingStaffRoute
+  ? <ClientOnboardingStaff />
+  : viewerShellRoute
   ? <OperationsViewerShell route={viewerShellRoute} />
   : <OperationsApp />}</StrictMode>);

@@ -65,6 +65,7 @@
     "CLIENT_PORTAL_INVITATION_FROM_NAME": "Ledge Top Client Portal",
     "CLIENT_DELEGATED_SHARES_ENABLED": "false",
     "CLIENT_DELEGATED_SHARE_KEY_ID": "staging-v1",
+    "CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED": "false",
     "CLIENT_PORTAL_ORIGIN": "https://client-staging.ledgetopdroneservices.com",
     "CLIENT_PORTAL_ORIGINS": "https://client-staging.ledgetopdroneservices.com,https://portal-staging.ledgetoptechnologies.com",
     "CLIENT_ACCESS_TEAM_DOMAIN": "https://ledgetoptechnologies.cloudflareaccess.com",
@@ -103,7 +104,8 @@
   "d1_databases": [{ "binding": "DELIVERY_DB", "database_name": "client-data-staging", "database_id": "b6f653ab-9acd-4421-9ad0-207754b59aeb", "migrations_dir": "migrations" }],
   "services": [
     { "binding": "CLIENT_DELEGATED_SHARE_SIGNER", "service": "ledgetop-ops-staging", "entrypoint": "ClientDelegatedShareSigner" },
-    { "binding": "VIEWER_SESSION_ISSUER", "service": "ledgetop-ops-staging", "entrypoint": "ViewerSessionIssuer" }
+    { "binding": "VIEWER_SESSION_ISSUER", "service": "ledgetop-ops-staging", "entrypoint": "ViewerSessionIssuer" },
+    { "binding": "CLIENT_ONBOARDING_RECIPIENT_BRIDGE", "service": "ledgetop-ops-staging", "entrypoint": "ClientOnboardingRecipientBridge" }
   ],
   "stream": { "binding": "STREAM" },
   "workflows": [

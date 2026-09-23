@@ -1,4 +1,4 @@
-import type { ClientDelegatedShareSignerBinding, ViewerSessionIssuerBinding } from "@ltds/shared";
+import type { ClientDelegatedShareSignerBinding, ClientOnboardingRecipientBinding, ViewerSessionIssuerBinding } from "@ltds/shared";
 
 export interface Env {
   DELIVERY_DB: D1Database;
@@ -114,6 +114,9 @@ export interface Env {
    * Operations DELIVERY_TOKEN_SECRET into this Worker.
   */
   CLIENT_DELEGATED_SHARES_ENABLED?: string;
+  /** Default-off private Client -> Operations onboarding recipient bridge. */
+  CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED?: string;
+  CLIENT_ONBOARDING_RECIPIENT_BRIDGE?: ClientOnboardingRecipientBinding;
   CLIENT_DELEGATED_SHARE_SIGNER?: ClientDelegatedShareSignerBinding;
   /** Default-off portal Viewer launch surface; the HMAC key stays in Operations. */
   CLIENT_VIEWER_ENABLED?: string;

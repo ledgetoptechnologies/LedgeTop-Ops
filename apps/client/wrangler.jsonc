@@ -80,6 +80,7 @@
     "CLIENT_PORTAL_INVITATION_FROM": "",
     "CLIENT_PORTAL_INVITATION_FROM_NAME": "LTDS Client Portal",
     "CLIENT_DELEGATED_SHARES_ENABLED": "false",
+    "CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED": "false",
     "CLIENT_DELEGATED_SHARE_KEY_ID": "v1",
     "CLIENT_PORTAL_ORIGIN": "https://portal.ledgetopdroneservices.com",
     "CLIENT_PORTAL_ORIGINS": "https://portal.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com",
@@ -166,6 +167,11 @@
       "binding": "VIEWER_SESSION_ISSUER",
       "service": "ledgetop-ops",
       "entrypoint": "ViewerSessionIssuer"
+    },
+    {
+      "binding": "CLIENT_ONBOARDING_RECIPIENT_BRIDGE",
+      "service": "ledgetop-ops",
+      "entrypoint": "ClientOnboardingRecipientBridge"
     }
   ],
   "stream": { "binding": "STREAM" }
