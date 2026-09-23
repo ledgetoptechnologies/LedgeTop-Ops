@@ -28,6 +28,7 @@
     "PUBLIC_SHARE_ORIGIN": "https://delivery-staging.ledgetopdroneservices.com",
     "PROJECT_ALPHA_BASE_URL": "https://pa-staging.ledgetoptechnologies.com",
     "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED": "false",
+    "PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED": "false",
     "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED": "false",
     "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ENABLED": "false",
     "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_SOURCE_ID": "<STAGING_PROJECT_ALPHA_SOURCE_ID>",
@@ -102,6 +103,9 @@
     ]
   },
   "stream": { "binding": "STREAM" },
+  "services": [
+    { "binding": "OPS_INVENTORY_CATALOG_STAGING", "service": "ledgetop-clients-staging", "entrypoint": "OpsInventoryCatalogStagingIngress" }
+  ],
   "durable_objects": {
     "bindings": [{ "name": "THUMBNAIL_RENDERER", "class_name": "ThumbnailRendererContainer" }]
   },

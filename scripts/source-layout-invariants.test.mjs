@@ -258,8 +258,8 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   // The digest intentionally moved with the reviewed canonical portal hosts
   // and explicit legacy compatibility origin. Keep the field assertions so a future config change
   // cannot hide behind a digest refresh.
-  // Reviewed addition: the notification migration maintenance switch is off by default.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "936b0b8960e24ecc0fb0f7a2adc11b1f0c447abd8ff49d7a4d5871c58e476151");
+  // Reviewed addition: the Operations catalog staging switch is off by default.
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "8dd0938faede1a38868dfdbaa62a3e1db6622b633187377ec6f8abe870756022");
   const config = readJson("apps/client/wrangler.jsonc");
   assert.equal(config.name, "ledgetop-clients");
   assert.equal(config.main, "src/worker/index.ts");
@@ -317,6 +317,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.equal(config.vars.CLIENT_PORTAL_ACCESS_ENROLLMENT_READY, "false");
   assert.equal(config.vars.CLIENT_DELEGATED_SHARES_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_SYNC_ENABLED, "false");
+  assert.equal(config.vars.OPS_INVENTORY_CATALOG_SYNC_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_PORTAL_SYNC_ENABLED, "true");
   assert.equal(config.vars.PROJECT_ALPHA_SERVICE_ASSIGNMENT_SYNC_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_SERVICE_ASSIGNMENT_POLICY_ENABLED, "false");
@@ -356,6 +357,18 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
     { name: "ltds-cloud-transfer", binding: "CLOUD_TRANSFER_WORKFLOW", class_name: "CloudTransferWorkflow" },
   ]);
   assert.deepEqual(config.ratelimits.map((item) => [item.name, item.namespace_id, item.simple.limit]), expectedRateLimits);
+});
+
+test("the deployed Operations Worker keeps catalog staging private and default-off", () => {
+  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "8c996c56f1268728eb3ea6a811f1cb330a0054e8b80bc4f9eeb90fdc8eb978cd");
+  const config = readJson("apps/operations/wrangler.jsonc");
+  assert.equal(config.vars.PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED, "false");
+  assert.deepEqual(config.services?.find((service) => service.binding === "OPS_INVENTORY_CATALOG_STAGING"), {
+    binding: "OPS_INVENTORY_CATALOG_STAGING",
+    service: "ledgetop-clients",
+    entrypoint: "OpsInventoryCatalogStagingIngress",
+  });
+  assert(!config.triggers.crons.some((cron) => /catalog/i.test(cron)));
 });
 
 test("public route, host-namespace guard, health, and isolated cookie contracts remain reviewed", () => {
