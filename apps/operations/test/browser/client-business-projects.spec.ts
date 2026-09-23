@@ -8,12 +8,13 @@ function project(id: string, status: string | null = "active") {
     created_at: "2026-07-31T12:00:00Z", client_id: null, organization_id: "42", manager_user_id: "manager-one" };
 }
 function metadata(more = true, limit = 5) { return { available: true, reason: null as string | null, hasMore: more, nextCursor: more ? "next-business-page" : null, limit, returned: 1 }; }
-function detail() {
+function detail(projectAdoptionAvailable = false) {
   return { client: { workspace_id: null, public_id: "42", kind: "organization", route_kind: "organizations", source_id: canonicalRoot.sourceId,
     root_namespace: "business", pa_public_id: null, detail_path: path, display_name: "Acme Construction", status: "active", portal_status: "mapping_unavailable",
     account_count: 1, project_count: 1, request_count: 0, contact_count: 0 }, contextVersion: "context-one",
     contacts: [], accounts: [], projects: [{ id: "shared-one", row_key: "account-one:shared-one", account_id: "account-one", project_name: "Explicitly shared site", client_name: "Acme", active: 1, can_request_service: 0 }],
     requests: [], deliveryGrants: [], authenticatedDeliveryGrants: [], viewerGrants: [], businessProjects: [project("initial")], pages: { businessProjects: metadata() },
+    projectAdoptionAvailable,
     capabilities: { directory: true, requests: false, delivery: false, viewer: false },
     portalIdentities: { items: [], page: { ...metadata(false), available: false, reason: "workspace_unavailable", returned: 0 }, contextVersion: "context-one",
       refreshedAt: "2026-08-25T12:00:00Z", capabilities: { canManagePortal: false, canManageEligibilityBlocks: false } } };
@@ -110,4 +111,44 @@ test("business projects unavailable on this root do not fetch or expose meaningl
   await expect(section(page)).toContainText("does not apply");
   await expect(page.getByRole("combobox", { name: "Project status", exact: true })).toHaveCount(0);
   expect(requests.some(url => url.pathname.includes("/collections/"))).toBe(false);
+});
+
+test("authorized staff explicitly review, reserve and bind one exact existing project", async ({ page }) => {
+  const calls: Array<{ path: string; key: string | undefined; body: Record<string, unknown> }> = [];
+  await mock(page, async (route, url) => {
+    const request = route.request();
+    if (!url.pathname.startsWith("/api/admin/project-alpha/private/projects/adoption/"))
+      return route.fulfill({ status: 503, json: { error: "Unexpected request" } });
+    const body = request.postDataJSON() as Record<string, unknown>;
+    calls.push({ path: url.pathname, key: request.headers()["idempotency-key"], body });
+    if (url.pathname.endsWith("/review")) return route.fulfill({ json: { status: "reviewed", reviewItemId: "review-one" } });
+    if (url.pathname.endsWith("/reserve")) return route.fulfill({ json: { status: "reserved", reservationId: "reservation-one" } });
+    return route.fulfill({ json: { status: "planned", commandId: "command-one" } });
+  }, detail(true));
+  page.once("dialog", dialog => dialog.accept());
+  await page.goto(path);
+  const action = section(page).getByRole("button", { name: "Link existing project", exact: true });
+  await expect(action).toBeVisible();
+  await action.click();
+  await expect(section(page).getByRole("button", { name: "Bind queued", exact: true })).toBeDisabled();
+  expect(calls.map(call => call.path)).toEqual([
+    "/api/admin/project-alpha/private/projects/adoption/review",
+    "/api/admin/project-alpha/private/projects/adoption/reserve",
+    "/api/admin/project-alpha/private/projects/adoption/bind",
+  ]);
+  const review = calls[0]!, reserve = calls[1]!, bind = calls[2]!;
+  expect(review.key).toMatch(/^[0-9a-f-]{36}$/);
+  expect(review.body).toEqual({ idempotencyKey: review.key, externalProjectId: "initial", clientContext: {
+    sourceId: canonicalRoot.sourceId, rootNamespace: "business", kind: "organization", publicId: "42",
+    expectedContextVersion: "context-one",
+  } });
+  expect(reserve.body).toEqual({ reviewItemId: "review-one", idempotencyKey: reserve.key });
+  expect(bind).toMatchObject({ key: "reservation-one", body: { reservationId: "reservation-one" } });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+});
+
+test("project linking is absent without the server-issued staff capability", async ({ page }) => {
+  await mock(page, route => route.fulfill({ status: 503 }), detail(false));
+  await page.goto(path);
+  await expect(section(page).getByRole("button", { name: "Link existing project", exact: true })).toHaveCount(0);
 });

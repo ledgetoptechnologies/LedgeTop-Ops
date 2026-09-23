@@ -236,7 +236,8 @@ export async function verifyClientHubDetailContext(env: Env, principal: StaffPri
   return verifyContext(env, principal, context);
 }
 
-async function clientHubDetail(env: Env, principal: StaffPrincipal, kind: ClientKind, publicId: string, sourceId?: string, rootNamespace?: string) {
+async function clientHubDetail(env: Env, principal: StaffPrincipal, administrator: boolean,
+  kind: ClientKind, publicId: string, sourceId?: string, rootNamespace?: string) {
   const context = await resolveDetailContext(env, principal, kind, publicId, sourceId, rootNamespace);
   const workspace = context.root, access = context.access;
   const contactRolesAvailable = projectAlphaContactRolesEnabled(env) && workspace.root_namespace === "business";
@@ -263,6 +264,10 @@ async function clientHubDetail(env: Env, principal: StaffPrincipal, kind: Client
   const [nativeDirectoryProfile, nativeDirectoryLinkedClients] = nativeDirectoryProfileWritesEnabled(env)
     ? await Promise.all([nativeDirectoryProfileEditorRecord(env, workspace), nativeDirectoryLinkedClientEditorRecords(env, workspace, principal.id)])
     : [null, []];
+  const adoptionScope = env.PROJECT_ALPHA_PRIVATE_ADMIN_TRANSPORT_ENABLED === "true"
+    ? await sqlScope(env, principal, "integrations.manage") : null;
+  const projectAdoptionAvailable = workspace.root_namespace === "business" && administrator
+    && adoptionScope?.global === true && !adoptionScope.deniedGlobal;
   await verifyContext(env, principal, context);
   return {
     ...party,
@@ -287,6 +292,7 @@ async function clientHubDetail(env: Env, principal: StaffPrincipal, kind: Client
     projectAlphaContactRolesAvailable: contactRolesAvailable,
     projectAlphaContactRoles,
     projectManagementAvailable: workspace.root_namespace === "business",
+    projectAdoptionAvailable,
     businessActivityAvailable: workspace.root_namespace === "business",
     auditTimelineAvailable: true,
     nativeDirectoryProfile,
@@ -608,16 +614,16 @@ export function registerClientHubRoutes(app: App): void {
   app.get("/api/client-hub/sources/:sourceId/:kind/:publicId", async c => {
     const kind = routeKind(c.req.param("kind"));
     if (!kind) throw new HTTPException(404, { message: "Client not found" });
-    return c.json(await clientHubDetail(c.env, c.get("principal"), kind, c.req.param("publicId"), c.req.param("sourceId")));
+    return c.json(await clientHubDetail(c.env, c.get("principal"), c.get("administrator"), kind, c.req.param("publicId"), c.req.param("sourceId")));
   });
   app.get("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId", async c => {
     const kind = routeKind(c.req.param("kind"));
     if (!kind) throw new HTTPException(404, { message: "Client not found" });
-    return c.json(await clientHubDetail(c.env, c.get("principal"), kind, c.req.param("publicId"), c.req.param("sourceId"), c.req.param("rootNamespace")));
+    return c.json(await clientHubDetail(c.env, c.get("principal"), c.get("administrator"), kind, c.req.param("publicId"), c.req.param("sourceId"), c.req.param("rootNamespace")));
   });
   app.get("/api/client-hub/:kind/:publicId", async c => {
     const kind = routeKind(c.req.param("kind"));
     if (!kind) throw new HTTPException(404, { message: "Client not found" });
-    return c.json(await clientHubDetail(c.env, c.get("principal"), kind, c.req.param("publicId")));
+    return c.json(await clientHubDetail(c.env, c.get("principal"), c.get("administrator"), kind, c.req.param("publicId")));
   });
 }

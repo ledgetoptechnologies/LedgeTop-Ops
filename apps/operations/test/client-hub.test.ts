@@ -7,7 +7,7 @@ import { applyBusinessPartySchema, applyBusinessPartyStaffSchema } from "./helpe
 import rootAccessMigration from "../../client/migrations/0197_portal_root_access_policy.sql?raw";
 
 const acl = vi.hoisted(() => ({
-  sqlScope: vi.fn(async () => ({ global: true, deniedGlobal: false })),
+  sqlScope: vi.fn(async (_env?: unknown, _principal?: unknown, _permission?: string) => ({ global: true, deniedGlobal: false })),
   hasPermission: vi.fn(async (_env: unknown, _principal: unknown, permission: string) =>
     ["delivery.share.audit", "viewer.view"].includes(permission)),
   isAdministrator: vi.fn(async () => true),
@@ -498,12 +498,26 @@ describe("Client Hub bounded detail collections", () => {
     expect(body).toHaveProperty("businessProjects");
     expect(body).toHaveProperty("organizationOperationalContactsAvailable", true);
     expect(body).toHaveProperty("projectManagementAvailable", true);
+    expect(body).toHaveProperty("projectAdoptionAvailable", false);
     expect(body).toHaveProperty("businessActivityAvailable", true);
     expect(body).toHaveProperty("auditTimelineAvailable", true);
     expect(body).toHaveProperty("portalIdentities");
     expect(body).toHaveProperty("pages.businessProjects", expect.objectContaining({ available: false, reason: "permission_required" }));
     expect((await app.request(organizationPath + "/collections/businessProjects", {}, env)).status).toBe(403);
     expect((await app.request(organizationPath + "/collections/businessProjects?filter=unknown", {}, env)).status).toBe(400);
+  });
+
+  it("exposes project adoption only behind the private flag and deny-aware administrator authority", async () => {
+    const { app, env } = await fixture();
+    env.PROJECT_ALPHA_PRIVATE_ADMIN_TRANSPORT_ENABLED = "true";
+    let response = await app.request(organizationPath, {}, env);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toHaveProperty("projectAdoptionAvailable", true);
+    acl.sqlScope.mockImplementation(async (_env, _principal, permission) => permission === "integrations.manage"
+      ? { global: true, deniedGlobal: true } : { global: true, deniedGlobal: false });
+    response = await app.request(organizationPath, {}, env);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toHaveProperty("projectAdoptionAvailable", false);
   });
 
   it("routes exact-root service assignment pages and rechecks the live Client Hub context", async () => {
