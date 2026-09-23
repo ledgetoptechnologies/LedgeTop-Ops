@@ -6553,3 +6553,52 @@ pending; this requirement does not claim a deployed UI change.
   no deployment, feature enablement, migration, remote PA write, canonical
   mapping rewrite, Delivery row or public-link mutation had been performed;
   the later staging-only deployment is recorded above.
+
+### September 23 — client onboarding implementation reconciliation
+
+- The September 12 onboarding sections above record historical local
+  implementation checkpoints, not a live release claim. At the current
+  `codex/client-catalog-promotion` head (`e6a076e`), a fresh source-file
+  inventory finds the dedicated Operations D1 migrations `0077`–`0080`,
+  `0083`, `0094`–`0095` and `0103`–`0107`, but no client-onboarding runtime,
+  public form/page, or corresponding source tests under `apps/*/src` or
+  `apps/*/test`. Sampled short historical commit IDs cited above (`277f82`,
+  `65b06b`, `754940`) are not reachable objects in this checkout. Those test
+  counts therefore cannot establish current branch readiness.
+- Treat the D1 schema and `client-onboarding-native-contract.md` as the
+  implementation contract, not as proof that a client can presently use an
+  onboarding link. Rebuild or recover and independently audit the separate
+  profile-proposal path before enabling it: current-authorized issuance,
+  encrypted one-time handoff, SHA-256-only invitation storage, bounded
+  anonymous submission, staff review and native Directory decision, then a
+  PA-inspired responsive form and both-business portal acceptance. The
+  `portal_v2_invitations` access flow is a distinct capability and must not be
+  reused to turn profile submission into portal membership or delivery access.
+- Current client-portal priority is the profile onboarding and exact project
+  linking flow. Workforce time-entry UI is intentionally lower priority per
+  the owner's September 23 direction. No onboarding route, client access,
+  Project Alpha write, production configuration or public link was changed by
+  this reconciliation.
+
+### September 23 — Incoming upload email remains unverified
+
+- A read-only source audit traced upload notification creation to the public
+  completion transition into `quarantined`, not to `ready/` publication or
+  TrueNAS pickup. Migration `0198` aggregates by request and contributor with
+  a two-minute quiet window; the Operations notification cron runs every five
+  minutes. Server pickup therefore proves neither that a digest was created
+  nor that an email was accepted.
+- The digest targets the request's original `created_by` staff ID. At send
+  time that account must still be active, have a valid email, and retain
+  `file_requests.view`; otherwise the digest is suppressed. The checked-in
+  Operations configuration selects Gmail SMTP from
+  `no-reply@ledgetoptechnologies.com`. Transport failures retry twice and then
+  become terminal after the third attempt. These are code/configuration facts,
+  not a diagnosis of the owner's specific test upload.
+- The production `client-data` D1 read was denied (`7403`), so the test
+  digest's existence, recipient, status, attempt count and last error remain
+  unknown. Before resending or changing recipient behavior, obtain an
+  authorized read-only correlation of the test upload's completion row,
+  matching digest status/error, current owner/grant and scheduled-worker mail
+  outcome. No manual retry, email send, retention change or production setting
+  change was made during this audit.
