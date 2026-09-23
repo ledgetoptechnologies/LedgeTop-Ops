@@ -25,6 +25,6 @@ describe("private client onboarding recipient bridge", () => {
     expect(config("docs/staging/delivery.wrangler.json.example")).toContain('"entrypoint": "ClientOnboardingRecipientBridge"');
     expect(config("docs/staging/operations.wrangler.json.example")).toContain('"CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED": "false"');
     expect(config("apps/client/src/worker/index.ts")).not.toContain("client-onboarding");
-    expect(config("apps/operations/src/worker/index.ts")).not.toContain("/api/client-onboarding");
+    expect(config("apps/operations/src/worker/index.ts")).not.toContain('"/api/client-onboarding/recipient"');
   });
 });

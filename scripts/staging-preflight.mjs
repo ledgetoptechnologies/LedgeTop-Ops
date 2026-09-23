@@ -107,6 +107,17 @@ export function validateApp(app, staging, production) {
     }
   }
   if (app === "operations") {
+    if (vars.CLIENT_ONBOARDING_ADMIN_ENABLED === "false" && vars.CLIENT_ONBOARDING_ADMIN_ORIGIN !== "")
+      errors.push("operations client onboarding admin origin must remain empty while disabled");
+    if (vars.CLIENT_ONBOARDING_ADMIN_ENABLED === "true") {
+      try {
+        const adminOrigin = new URL(vars.CLIENT_ONBOARDING_ADMIN_ORIGIN);
+        if (adminOrigin.protocol !== "https:" || adminOrigin.origin !== vars.CLIENT_ONBOARDING_ADMIN_ORIGIN
+          || !/(?:^|[.-])staging(?:[.-]|$)/i.test(adminOrigin.hostname)) throw new Error();
+      } catch {
+        errors.push("operations enabled client onboarding admin requires an exact HTTPS staging origin");
+      }
+    }
     if (vars.NATIVE_INTEGRATION_CONTROL_ENABLED === "false" && vars.NATIVE_INTEGRATION_CONTROL_ORIGIN !== "")
       errors.push("operations native integration control origin must remain empty while control is disabled");
     if (vars.NATIVE_INTEGRATION_CONTROL_ENABLED === "true") {
@@ -151,6 +162,8 @@ export function validateApp(app, staging, production) {
     if (!/(?:EXPECTED_HOST|BASE_URL|_ORIGIN)$/.test(key)) continue;
     if (app === "operations" && key === "NATIVE_INTEGRATION_CONTROL_ORIGIN"
       && vars.NATIVE_INTEGRATION_CONTROL_ENABLED === "false" && vars[key] === "") continue;
+    if (app === "operations" && key === "CLIENT_ONBOARDING_ADMIN_ORIGIN"
+      && vars.CLIENT_ONBOARDING_ADMIN_ENABLED === "false" && vars[key] === "") continue;
     complete(vars[key], `${app} vars.${key}`, errors);
     if (vars[key] === production.vars[key]) errors.push(`${app} vars.${key} reuses production`);
   }
