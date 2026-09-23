@@ -19,6 +19,21 @@ CREATE TABLE client_onboarding_reveal_consumptions (
     CHECK(length(consumed_at)=24 AND strftime('%Y-%m-%dT%H:%M:%fZ',consumed_at) IS consumed_at)
 );
 
+-- A pre-existing handoff may already have been revealed under the earlier
+-- audited re-reveal policy. Preserve the first disclosure as its consumption
+-- so migration cannot grant a fresh reveal to an old command.
+INSERT INTO client_onboarding_reveal_consumptions
+  (command_id,reveal_id,actor_staff_id,actor_access_subject,auth_verified_until,consumed_at)
+SELECT audit.command_id,audit.reveal_id,audit.actor_staff_id,
+  audit.actor_access_subject,audit.auth_verified_until,audit.revealed_at
+FROM client_onboarding_reveal_audit audit
+WHERE NOT EXISTS (
+  SELECT 1 FROM client_onboarding_reveal_audit prior
+  WHERE prior.command_id=audit.command_id
+    AND (prior.revealed_at<audit.revealed_at
+      OR (prior.revealed_at=audit.revealed_at AND prior.reveal_id<audit.reveal_id))
+);
+
 CREATE TRIGGER client_onboarding_reveal_consumptions_insert_guard BEFORE INSERT ON client_onboarding_reveal_consumptions
 WHEN EXISTS(SELECT 1 FROM client_onboarding_reveal_consumptions prior WHERE prior.command_id=NEW.command_id)
   OR NEW.auth_verified_until<=strftime('%Y-%m-%dT%H:%M:%fZ','now')
