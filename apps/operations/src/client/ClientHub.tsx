@@ -51,6 +51,7 @@ interface ClientDetailResponse {
   internalNotesAvailable?: boolean;
   organizationOperationalContactsAvailable?: boolean;
   projectManagementAvailable?: boolean;
+  projectAdoptionAvailable?: boolean;
   businessActivityAvailable?: boolean;
   auditTimelineAvailable?: boolean;
   projectAlphaContactRolesAvailable?: boolean;
@@ -264,6 +265,59 @@ function ProjectManagementRouting({ client, contextVersion, contextSignal, onInv
   </section>;
 }
 
+type ProjectAdoptionAttempt = { reviewKey: string; reservationKey: string };
+function ProjectAdoptionAction({ project, client, contextVersion, contextSignal, onInvalidated }: {
+  project: BusinessProject; client: ClientSummary; contextVersion?: string; contextSignal: AbortSignal;
+  onInvalidated: (message: string) => void;
+}) {
+  const [state, setState] = useState<{ busy: boolean; error: string; complete: boolean }>({ busy: false, error: "", complete: false });
+  const attempt = useRef<ProjectAdoptionAttempt | null>(null);
+  const run = async () => {
+    if (state.busy || state.complete || contextSignal.aborted || !client.source_id
+      || client.root_namespace !== "business" || !contextVersion) return;
+    if (!attempt.current && !window.confirm(`Link “${project.name}” to Operations? The current Project Alpha project will be reviewed before a bind is queued. This does not grant portal or delivery access.`)) return;
+    attempt.current ??= { reviewKey: crypto.randomUUID(), reservationKey: crypto.randomUUID() };
+    const keys = attempt.current;
+    setState({ busy: true, error: "", complete: false });
+    try {
+      const review = await api<{ status: string; reviewItemId?: string; reason?: string }>("/api/admin/project-alpha/private/projects/adoption/review", {
+        method: "POST", headers: { "Idempotency-Key": keys.reviewKey }, signal: contextSignal,
+        body: JSON.stringify({ idempotencyKey: keys.reviewKey, externalProjectId: project.id, clientContext: {
+          sourceId: client.source_id, rootNamespace: "business", kind: client.kind, publicId: client.public_id,
+          expectedContextVersion: contextVersion,
+        } }),
+      });
+      if (review.status !== "reviewed" || !review.reviewItemId)
+        throw new Error(`Project review ${review.reason || review.status || "failed"}. Refresh and try again.`);
+      const reservation = await api<{ status: string; reservationId?: string; reason?: string }>("/api/admin/project-alpha/private/projects/adoption/reserve", {
+        method: "POST", headers: { "Idempotency-Key": keys.reservationKey }, signal: contextSignal,
+        body: JSON.stringify({ reviewItemId: review.reviewItemId, idempotencyKey: keys.reservationKey }),
+      });
+      if (reservation.status !== "reserved" || !reservation.reservationId)
+        throw new Error(`Project reservation ${reservation.reason || reservation.status || "failed"}. Refresh and try again.`);
+      const bind = await api<{ status: string; reason?: string }>("/api/admin/project-alpha/private/projects/adoption/bind", {
+        method: "POST", headers: { "Idempotency-Key": reservation.reservationId }, signal: contextSignal,
+        body: JSON.stringify({ reservationId: reservation.reservationId }),
+      });
+      if (bind.status !== "planned")
+        throw new Error(`Project bind ${bind.reason || bind.status || "failed"}. Refresh and try again.`);
+      attempt.current = null;
+      setState({ busy: false, error: "", complete: true });
+    } catch (caught) {
+      if (contextSignal.aborted) return;
+      const message = caught instanceof Error ? caught.message : "Project linking could not be completed.";
+      setState({ busy: false, error: message, complete: false });
+      if (caught instanceof ApiError && [401, 403, 404, 409].includes(caught.status)) onInvalidated(message);
+    }
+  };
+  return <div className="client-project-adoption-action">
+    <button type="button" className="button-ghost button-small" aria-label={`Link existing project: ${project.name}`}
+      disabled={state.busy || state.complete} onClick={() => void run()}>
+      {state.busy ? "Reviewing and linking…" : state.complete ? "Bind queued" : "Link existing project"}</button>
+    {state.error && <p role="alert">{state.error} <button type="button" className="button-ghost button-small" onClick={() => void run()}>Retry link</button></p>}
+  </div>;
+}
+
 function ClientCollection<T extends CollectionItem>({ collection, label, initial, page: initialPage, client, contextVersion,
   contextSignal, onInvalidated, emptyTitle, emptyDetail, children, requestParams }: {
   collection: ClientCollectionName; label: string; initial: T[]; page?: ClientCollectionPage; client: ClientSummary;
@@ -353,10 +407,12 @@ function ContactList({ contacts }: { contacts: ClientContact[] }) {
   })}</div>;
 }
 
-function BusinessProjects({ initial, page, client, contextVersion, contextSignal, onInvalidated, onWorkspaceRefresh, projectManagementAvailable }: {
+function BusinessProjects({ initial, page, client, contextVersion, contextSignal, onInvalidated, onWorkspaceRefresh,
+  projectManagementAvailable, projectAdoptionAvailable }: {
   initial: BusinessProject[]; page?: ClientCollectionPage; client: ClientSummary; contextVersion?: string;
   contextSignal: AbortSignal; onInvalidated: (message: string) => void; onWorkspaceRefresh: () => void;
   projectManagementAvailable?: boolean;
+  projectAdoptionAvailable?: boolean;
 }) {
   const readFilter = () => {
     const value = new URLSearchParams(location.search).get("business_status");
@@ -428,7 +484,9 @@ function BusinessProjects({ initial, page, client, contextVersion, contextSignal
           {href ? <a className="client-hub-project-link" href={href}><strong>{project.name}</strong></a> : <strong>{project.name}</strong>}
           <small>{project.manager_name ? `Manager: ${project.manager_name}` : "Manager not recorded"}</small>
           <small>Start: {calendarDate(project.start_date)} · End: {calendarDate(project.end_date)}</small>
-          {project.created_at && <small>Project created: {date(project.created_at)}</small>}</div>
+          {project.created_at && <small>Project created: {date(project.created_at)}</small>}
+          {projectAdoptionAvailable === true && <ProjectAdoptionAction project={project} client={client}
+            contextVersion={contextVersion} contextSignal={contextSignal} onInvalidated={onInvalidated} />}</div>
           <StatusPill tone={project.status === "overdue" ? "warning" : tone(project.status || "")}>{project.status?.replaceAll("_", " ") || "Status not recorded"}</StatusPill></div>;
         })}</div>}
       </ClientCollection>}
@@ -520,7 +578,8 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess, nativeDir
         <div className="client-hub-primary-panel"><OrganizationOperationalContacts root={{ sourceId: data.client.source_id, rootNamespace: "business", kind: "organization", publicId: data.client.public_id }}
           contextVersion={data.contextVersion} contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} /></div>}
       {data.businessProjects && <div id="client-business-projects" className="client-hub-primary-panel"><BusinessProjects {...collectionProps} initial={data.businessProjects} page={data.pages?.businessProjects}
-        onWorkspaceRefresh={refresh} projectManagementAvailable={data.projectManagementAvailable} /></div>}
+        onWorkspaceRefresh={refresh} projectManagementAvailable={data.projectManagementAvailable}
+        projectAdoptionAvailable={data.projectAdoptionAvailable} /></div>}
       </div>
       <div className="dashboard-grid client-hub-detail-grid client-hub-work-band" aria-label="Client work and delivery">
       <Card title="Shared projects" className="client-hub-primary-panel"><ClientCollection {...collectionProps} collection="projects" label="Shared projects" initial={data.projects} page={data.pages?.projects}

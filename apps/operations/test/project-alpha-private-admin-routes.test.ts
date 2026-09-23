@@ -4,10 +4,11 @@ import { csrfToken, requireMutationSecurity } from "../src/worker/request-securi
 import type { Env, StaffPrincipal } from "../src/worker/types";
 
 const mocks = vi.hoisted(() => ({
-  scope: vi.fn(), acquire: vi.fn(), activate: vi.fn(), reserve: vi.fn(), bind: vi.fn(), first: vi.fn(),
+  scope: vi.fn(), acquire: vi.fn(), activate: vi.fn(), produce: vi.fn(), reserve: vi.fn(), bind: vi.fn(), first: vi.fn(),
   reconciliationList: vi.fn(), reconciliationAcquire: vi.fn(),
   reconciliationRecords: vi.fn(),
   reconciliationContext: vi.fn(),
+  resolveHub: vi.fn(), verifyHub: vi.fn(), projectPolicy: vi.fn(),
 }));
 vi.mock("../src/worker/acl", () => ({ sqlScope: mocks.scope }));
 vi.mock("../src/worker/project-alpha-existing-directory-acquisition-coordinator", () => ({
@@ -25,8 +26,21 @@ vi.mock("../src/worker/project-alpha-directory-reconciliation-review", () => ({
 vi.mock("../src/worker/project-alpha-project-adoption-review-consumer", () => ({
   reserveProjectAlphaProjectAdoptionReview: mocks.reserve,
 }));
+vi.mock("../src/worker/project-alpha-project-adoption-review-producer", () => ({
+  produceProjectAlphaProjectAdoptionReview: mocks.produce,
+}));
 vi.mock("../src/worker/project-alpha-project-adoption-bind-consumer", () => ({
   planProjectAlphaProjectAdoptionBind: mocks.bind,
+}));
+vi.mock("../src/worker/client-hub", () => ({
+  resolveClientHubDetailContext: mocks.resolveHub,
+  verifyClientHubDetailContext: mocks.verifyHub,
+}));
+vi.mock("../src/worker/client-hub-business-projects", () => ({
+  clientHubBusinessProjectOwnership: () => ({ sql: "p.organization_id=?", values: ["organization-1"] }),
+}));
+vi.mock("../src/worker/client-hub-project-policy", () => ({
+  readClientHubBusinessProjectPolicy: mocks.projectPolicy,
 }));
 
 import {
@@ -43,6 +57,7 @@ const commandId = "10000000-0000-4000-8000-000000000002";
 const key = "10000000-0000-4000-8000-000000000003";
 const reservationId = "10000000-0000-4000-8000-000000000004";
 const publicId = "a".repeat(32);
+const externalProjectId = "project-1";
 
 function fixture(options: { enabled?: boolean; administrator?: boolean; global?: boolean; denied?: boolean; directoryView?: boolean } = {}) {
   const app = new Hono<{ Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } }>();
@@ -59,8 +74,12 @@ function fixture(options: { enabled?: boolean; administrator?: boolean; global?:
     OPERATIONS_ORIGINS: "https://ops.example.test",
     OPS_DB: { prepare: vi.fn((sql: string) => ({ bind: vi.fn(() => ({
       first: sql.includes("FROM native_directory_grants allowed")
-        ? vi.fn().mockResolvedValue(options.directoryView === false ? null : { ok: 1 }) : mocks.first,
-    })) })) },
+        ? vi.fn().mockResolvedValue(options.directoryView === false ? null : { ok: 1 })
+        : sql.includes("FROM project_alpha_project_destinations")
+          ? vi.fn().mockResolvedValue({ sourceId: "project-alpha:primary" }) : mocks.first,
+    })) })), withSession: vi.fn(() => ({ prepare: vi.fn(() => ({ bind: vi.fn(() => ({
+      all: vi.fn().mockResolvedValue({ results: [{ id: externalProjectId, projectAlphaPublicId: publicId }] }),
+    })) })) })) },
   } as unknown as Env;
   mocks.first.mockResolvedValue({ admissionVersion: 3, profileVersion: 4, grantGeneration: 5 });
   mocks.scope.mockResolvedValue({ global: options.global ?? true, deniedGlobal: options.denied ?? false });
@@ -86,6 +105,7 @@ describe("private Project Alpha administrator transport", () => {
     mocks.acquire.mockResolvedValue({ status: "acquired", reviewReceiptId: reviewId, commandId, acquiredReceiptId: key, replayed: false });
     mocks.activate.mockResolvedValue({ status: "activated", activationId: key, reviewItemId: reviewId, idempotencyKey: key, replayed: false });
     mocks.reserve.mockResolvedValue({ status: "reserved", reservationId, reviewItemId: reviewId, idempotencyKey: key, replayed: false });
+    mocks.produce.mockResolvedValue({ status: "reviewed", reviewItemId: reviewId, requestSha256: "c".repeat(64), replayed: false });
     mocks.bind.mockResolvedValue({ status: "planned", bridgeId: key, reservationId, commandId, requestSha256: "b".repeat(64), replayed: false });
     mocks.reconciliationList.mockResolvedValue({ items: [], nextCursor: null });
     mocks.reconciliationRecords.mockResolvedValue({ items: [], nextCursor: null });
@@ -93,6 +113,9 @@ describe("private Project Alpha administrator transport", () => {
       displayName: "Example Organization", contactEmail: "contact@example.test", organizationPublicId: null });
     mocks.reconciliationAcquire.mockResolvedValue({ status: "acquired", actionId: key,
       findingId: reviewId, acquiredReceiptId: reservationId, replayed: false });
+    mocks.resolveHub.mockResolvedValue({ contextVersion: "x".repeat(43) });
+    mocks.verifyHub.mockResolvedValue(undefined);
+    mocks.projectPolicy.mockResolvedValue({ allowed: true, proof: "proof", filter: { sql: "1=1", values: [] } });
   });
 
   it("is default-off before parsing or invoking a consumer", async () => {
@@ -145,6 +168,58 @@ describe("private Project Alpha administrator transport", () => {
     expect((await send("/projects/adoption/reserve", { reviewItemId: reviewId, idempotencyKey: key }, key)).status).toBe(200);
     expect(mocks.reserve).toHaveBeenCalledWith(expect.anything(), { staffId: principal.id, accessSubject: principal.accessSubject },
       { reviewItemId: reviewId, idempotencyKey: key });
+  });
+
+  it("derives project source and actor server-side for an exact adoption review selection", async () => {
+    const { send } = fixture();
+    const input = { idempotencyKey: key, externalProjectId, projectAlphaPublicId: publicId };
+    expect((await send("/projects/adoption/review", { ...input, sourceId: "project-alpha:secondary" }, key)).status).toBe(400);
+    expect((await send("/projects/adoption/review", { ...input, actor: { staffId: "attacker" } }, key)).status).toBe(400);
+    expect((await send("/projects/adoption/review", input, commandId)).status).toBe(400);
+    const response = await send("/projects/adoption/review", input, key);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: "reviewed", reviewItemId: reviewId,
+      requestSha256: "c".repeat(64), replayed: false });
+    expect(mocks.produce).toHaveBeenCalledWith(expect.anything(),
+      { staffId: principal.id, accessSubject: principal.accessSubject },
+      { ...input, sourceId: "project-alpha:primary" }, fetch);
+  });
+
+  it("re-queries exact Client Hub context, ownership and policy for browser project adoption", async () => {
+    const { send } = fixture();
+    const clientContext = { sourceId: "project-alpha:primary", rootNamespace: "business", kind: "organization",
+      publicId: "organization-1", expectedContextVersion: "x".repeat(43) };
+    const response = await send("/projects/adoption/review", { idempotencyKey: key, externalProjectId, clientContext }, key);
+    expect(response.status).toBe(200);
+    const replay = await send("/projects/adoption/review", { idempotencyKey: key, externalProjectId, clientContext }, key);
+    expect(replay.status).toBe(200);
+    expect(mocks.resolveHub).toHaveBeenCalledWith(expect.anything(), principal, "organization", "organization-1",
+      "project-alpha:primary", "business");
+    expect(mocks.projectPolicy).toHaveBeenCalledWith(expect.anything(), principal);
+    expect(mocks.verifyHub).toHaveBeenCalled();
+    expect(mocks.produce).toHaveBeenCalledTimes(2);
+    expect(mocks.produce).toHaveBeenLastCalledWith(expect.anything(),
+      { staffId: principal.id, accessSubject: principal.accessSubject },
+      { idempotencyKey: key, externalProjectId, projectAlphaPublicId: publicId, sourceId: "project-alpha:primary" }, fetch);
+  });
+
+  it("rejects stale Client Hub context before producing review evidence", async () => {
+    const { send } = fixture();
+    const response = await send("/projects/adoption/review", { idempotencyKey: key, externalProjectId,
+      clientContext: { sourceId: "project-alpha:primary", rootNamespace: "business", kind: "organization",
+        publicId: "organization-1", expectedContextVersion: "y".repeat(43) } }, key);
+    expect(response.status).toBe(409);
+    expect(mocks.produce).not.toHaveBeenCalled();
+  });
+
+  it("fails closed before production when the exact project destination is unavailable", async () => {
+    const fixtureValue = fixture();
+    (fixtureValue.env.OPS_DB.prepare as ReturnType<typeof vi.fn>).mockImplementation((sql: string) => ({ bind: vi.fn(() => ({
+      first: sql.includes("FROM project_alpha_project_destinations") ? vi.fn().mockResolvedValue(null) : mocks.first,
+    })) }));
+    expect((await fixtureValue.send("/projects/adoption/review",
+      { idempotencyKey: key, externalProjectId, projectAlphaPublicId: publicId }, key)).status).toBe(409);
+    expect(mocks.produce).not.toHaveBeenCalled();
   });
 
   it("routes activation and bind actions with replay-safe identifiers", async () => {
