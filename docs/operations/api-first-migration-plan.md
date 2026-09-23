@@ -4,12 +4,13 @@ Updated September 23, 2026. The owner approved implementation and resumption aft
 
 ### September 22, 2026 — authoritative PR and staging acceptance status
 
-- September 23 follow-up: Operations PR #107 now points to
-  `11cccfd879b61cc6cc699dbc32d923cf0275a3f5`, and all ten GitHub CI
-  checks passed at that exact head. The final relationship-replay test also
-  passed locally at this head (11/11 with a 30-second per-test timeout); its
+- September 23 follow-up: Operations PR #107 source checkpoint
+  `11cccfd879b61cc6cc699dbc32d923cf0275a3f5` passed all ten GitHub CI
+  checks at that exact head. The final relationship-replay test also
+  passed locally there (11/11 with a 30-second per-test timeout); its
   initial default-timeout run had six 5-second timeouts, not assertion failures.
-  This supersedes the earlier #107 CI-head snapshot below, but does not close
+  This supersedes the earlier #107 CI-head snapshot below; later documentation
+  commits do not change that tested source. It does not close
   its live Directory reservation/acquisition, post-bind compensation, joined
   rollback, both-instance reconciliation, deployment-order or existing
   public-link compatibility gates. The stacked Operations PR #108 and PA
