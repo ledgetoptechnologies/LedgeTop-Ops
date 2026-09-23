@@ -100,6 +100,7 @@ import {
 import { MapAreaSelector } from "./MapAreaSelector";
 import { ImageLocationMap } from "./ImageLocationMap";
 import { ServiceLibrary } from "./ServiceLibrary";
+import { PortalServiceOverview } from "./PortalServiceOverview";
 import { canBeginRequest, RequestAvailabilityMessage, useRequestAvailability, type RequestAvailability } from "./RequestAvailability";
 import { RequestScopeBoundary } from "./RequestScopeBoundary";
 import { LeaveFeedback, PortalFeedback } from "./PortalFeedback";
@@ -2901,7 +2902,14 @@ export function ClientPortalApp({
   const selectedWorkspaceId = gate.data.selectedWorkspaceId ?? null;
   const selectedWorkspaceSourceId = native?.workspace.sourceId
     ?? workspaces.find(workspace => workspace.id === selectedWorkspaceId)?.sourceId
+    ?? (!native && selectedWorkspaceId ? "project-alpha:primary" : null)
     ?? null;
+  const selectedWorkspace = native?.workspace ?? workspaces.find(workspace => workspace.id === selectedWorkspaceId) ?? null;
+  const serviceAssignment = selectedWorkspaceSourceId && selectedWorkspace ? {
+    sourceId: selectedWorkspaceSourceId,
+    subjectType: selectedWorkspace.rootType,
+    subjectPublicId: selectedWorkspace.rootPublicId,
+  } as const : null;
   const switchWorkspace = async (workspaceId: string) => {
     if (workspaceId === selectedWorkspaceId) return;
     bootstrapController.current?.abort(); const controller = new AbortController(); bootstrapController.current = controller;
@@ -3059,6 +3067,10 @@ export function ClientPortalApp({
       onInvalid={caught => { bootstrapController.current?.abort(); const status = (caught as RequestError).status; setGate(status === 409 ? {status: "blocked", title: "Workspace changed", detail: "Your workspace changed. Refresh the portal before continuing."} : status === 404 || status === 410 ? {status: "blocked", title: "Shared item unavailable", detail: "This shared item or its access has changed. Refresh the portal to check your current workspace."} : blockedPortal(caught)); }}
       renderTeam={native.capabilities.workspaceMembershipManagement ? () => <Card title="Team access" className="portal-team-card"><WorkspaceTeamPanel initialWorkspaceId={native.workspace.id} workspaceMode="native" expectedSourceId={native.workspace.sourceId} invitationEmailDelivery={native.capabilities.invitationEmailDelivery} hierarchyScopedInvitations={native.capabilities.hierarchyScopedInvitations} /></Card> : undefined}
       renderRequests={renderRequestSurface}
+      renderDashboardServices={() => <PortalServiceOverview contextKey={requestContextKey!}
+        workspaceId={selectedWorkspaceId} expectedAssignment={serviceAssignment}
+        requestV2={capabilities.requestV2} availability={requestAvailability}
+        onStartRequest={() => openNewRequest()} />}
       renderModels={id => <ProjectViewerModels projectId={id} initialDisplayUnits={readClientViewerUnits()}
         loadModels={project => loadNativeViewerModels(native,project)}
         shellPath={model=>nativeClientViewerShellPath({workspaceId:native.workspace.id,projectId:id,associationId:model.associationId,modelId:model.modelId})}
@@ -3185,6 +3197,9 @@ export function ClientPortalApp({
             />
           )}
         </Card>
+        <PortalServiceOverview contextKey={requestContextKey!} workspaceId={selectedWorkspaceId}
+          expectedAssignment={serviceAssignment} requestV2={capabilities.requestV2}
+          availability={requestAvailability} onStartRequest={() => openNewRequest()} />
         <Card title="Recent requests">
           <RequestList requests={requests} projects={projects} limit={4} />
         </Card>

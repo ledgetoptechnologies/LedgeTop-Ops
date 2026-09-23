@@ -90,6 +90,68 @@ test("native refresh discovers identity without the selected workspace header an
   await expect(page.getByRole("button", {name: /notifications/i})).toHaveCount(1);
 });
 
+test("native Home shows only exact source-qualified assigned services", async ({page}) => {
+  const calls = await mock(page, (route, call) => {
+    if (call.path.endsWith("workspace-b/context")) return route.fulfill({json: requestContext("workspace-b")});
+    if (call.path === "/api/client/request-readiness") return route.fulfill({json: {mode: "catalog", workspaceId: "workspace-b",
+      target: {kind: "root", projectId: null}, canStartRequest: true, reason: "ready", root: {canStartRequest: true, reason: "ready"},
+      projectRequestsSupported: true, refreshedAt: date}});
+    if (call.path === "/api/client/service-catalog/page") return route.fulfill({json: {services: [{publicId: "coastal-mapping",
+      sourceVersion: "v1", name: "Coastal drone mapping", summary: "Current assigned aerial mapping service.", category: "Drone data",
+      displayOrder: 1, geometryRequirement: "required", questions: []}], nextCursor: null, complete: true,
+      source: {generation: "catalog-b", sequence: 1}, assignment: {sourceId: "project-alpha:coastal", generation: "assignment-b",
+        sequence: 1, subjectType: "organization", subjectPublicId: "org-shared"}}});
+  });
+  await page.goto("/portal?workspace=workspace-b");
+  await expect(page.getByRole("heading", {name: "Assigned services"})).toBeVisible();
+  await expect(page.getByText("Coastal drone mapping", {exact: true})).toBeVisible();
+  expect(calls.filter(call => call.path === "/api/client/service-catalog/page").every(call => call.workspace === "workspace-b")).toBe(true);
+});
+
+for (const assignment of [undefined, {sourceId: "project-alpha:mountain", generation: "wrong", sequence: 1,
+  subjectType: "organization", subjectPublicId: "org-shared"}]) test(`native Home hides ${assignment ? "wrong-source" : "unproven"} catalog services`, async ({page}) => {
+  await mock(page, (route, call) => {
+    if (call.path.endsWith("workspace-b/context")) return route.fulfill({json: requestContext("workspace-b")});
+    if (call.path === "/api/client/request-readiness") return route.fulfill({json: {mode: "catalog", workspaceId: "workspace-b",
+      target: {kind: "root", projectId: null}, canStartRequest: true, reason: "ready", root: {canStartRequest: true, reason: "ready"},
+      projectRequestsSupported: true, refreshedAt: date}});
+    if (call.path === "/api/client/service-catalog/page") return route.fulfill({json: {services: [{publicId: "private-service",
+      sourceVersion: "v1", name: "Unproven service", summary: "Must not be labeled assigned.", category: "Hidden",
+      displayOrder: 1, geometryRequirement: "none", questions: []}], nextCursor: null, complete: true,
+      source: {generation: "catalog", sequence: 1}, ...(assignment ? {assignment} : {})}});
+  });
+  await page.goto("/portal?workspace=workspace-b");
+  await expect(page.getByText("Coastal seawall construction documentation", {exact: true})).toBeVisible();
+  await expect(page.getByRole("heading", {name: "Assigned services"})).toHaveCount(0);
+  await expect(page.getByText("Unproven service", {exact: true})).toHaveCount(0);
+});
+
+test("workspace switching never renders a late assigned-service response from the old source", async ({page}) => {
+  let releaseOld!: () => void, oldRoute: Route | null = null;
+  const oldPending = new Promise<void>(resolve => { releaseOld = resolve; });
+  await mock(page, (route, call) => {
+    if (call.path.endsWith("/context")) return route.fulfill({json: requestContext(call.path.includes("workspace-c") ? "workspace-c" : "workspace-b")});
+    if (call.path === "/api/client/request-readiness") return route.fulfill({json: {mode: "catalog", workspaceId: call.workspace,
+      target: {kind: "root", projectId: null}, canStartRequest: true, reason: "ready", root: {canStartRequest: true, reason: "ready"},
+      projectRequestsSupported: true, refreshedAt: date}});
+    if (call.path === "/api/client/service-catalog/page") {
+      if (call.workspace === "workspace-b") { oldRoute = route; return oldPending.then(() => late(route, {services: [{publicId: "old",
+        sourceVersion: "v1", name: "Old coastal service", summary: "Must stay hidden.", category: "Old", displayOrder: 1,
+        geometryRequirement: "none", questions: []}], nextCursor: null, complete: true, source: {generation: "old", sequence: 1},
+        assignment: {sourceId: "project-alpha:coastal", generation: "old", sequence: 1, subjectType: "organization", subjectPublicId: "org-shared"}})); }
+      return route.fulfill({json: {services: [{publicId: "current", sourceVersion: "v1", name: "Mountain website service",
+        summary: "Current workspace service.", category: "Technology", displayOrder: 1, geometryRequirement: "none", questions: []}],
+        nextCursor: null, complete: true, source: {generation: "current", sequence: 1}, assignment: {sourceId: "project-alpha:mountain",
+          generation: "current", sequence: 1, subjectType: "organization", subjectPublicId: "org-shared"}}});
+    }
+  });
+  await page.goto("/portal?workspace=workspace-b");
+  await expect.poll(() => oldRoute !== null).toBe(true);
+  await page.getByRole("combobox", {name: "Client workspace"}).selectOption("workspace-c");
+  await expect(page.getByText("Mountain website service", {exact: true})).toBeVisible();
+  releaseOld(); await expect(page.getByText("Old coastal service", {exact: true})).toHaveCount(0);
+});
+
 test("primary compatibility and native workspace switching preserve independent projects and Back/Forward", async ({page}) => {
   const calls = await mock(page); await page.goto("/portal?workspace=workspace-a");
   await expect(page.getByText("Primary-only project", {exact: true})).toBeVisible();
