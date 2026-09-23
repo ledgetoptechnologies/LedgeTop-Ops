@@ -4,8 +4,8 @@ Updated September 23, 2026. The owner approved implementation and resumption aft
 
 ### September 23, 2026 — client-profile onboarding foundation, not activation
 
-- Draft Operations PR #116 (`codex/client-profile-onboarding-runtime`, head
-  `b62d3b9`) stacks on draft PR #114. Its exact-head CI run `35867045803`
+- Draft Operations PR #116 (`codex/client-profile-onboarding-runtime`, source
+  checkpoint `b62d3b9`) stacks on draft PR #114. Its exact-head CI run `35867045803`
   passed all ten checks. This adds the PA-compatible shared profile form,
   immutable one-shot proposal submission and bounded invitation issuance,
   native-staff-only create/reveal routes, and a migration that prevents a
@@ -2516,6 +2516,15 @@ broader client navigation, service journeys and live acceptance remain open.
 - Credential-policy QA now exercises the actual production pure predicate used by API authentication: missing/disabled/revoked application, malformed/expired/exact-bound credentials and legacy compatibility. Focused combined run passed 14 tests/70 assertions. This is not HTTP/session-cookie acceptance, rate-limit validation or proof of durable audit behavior on response exits; those remain explicit follow-up work.
 - Controlled upload follow-up: the owner's small MP3 appeared in the live staff browser as **Ready for server pickup**, with its private object present (5.5 MB). The authenticated Download file action was exercised without a browser-tool error, but the tool supplied no completed-download receipt or byte/hash evidence. Local TrueNAS arrival and actual notification-email receipt still need owner confirmation. Do not infer receipt from subsequent object disappearance. This supersedes the earlier not-yet-tested upload status, not the outstanding end-to-end gates.
 - The owner subsequently confirmed the MP3 **downloaded to the local server through the hourly task**. This is actual human-confirmed pickup evidence, not inference from R2 absence. The owner reported no upload email in either checked inbox and no corresponding message in the no-reply sender's sent mail. This establishes a missing observed notification, not whether the digest was queued, suppressed, retried, or failed; inspect the live digest status and deployed revision before changing the mail path. The owner requested readable folders based on the submitted contributor name instead of request/upload IDs. A separate path-planning change is now in progress for newly journaled uploads: sanitized name, persisted upload date and a short stable discriminator, original safe filename. Existing journal paths/publication fences remain immutable; no existing object is renamed or republished, no retention change, and TrueNAS remains at `ready/`.
+- September 23 owner-authorized, read-only production D1 check found one
+  Incoming notification digest: `failed`, `mail-transport-failed`, three
+  attempts, created September 11 00:49:26 UTC and last updated 01:30:48 UTC.
+  The deployed Worker has an `SMTP_PASSWORD` secret binding by name, and
+  source configuration selects Gmail SMTP. No secret value or message body was
+  read. This proves the digest was created and delivery attempts exhausted;
+  it does not distinguish a network, authentication, provider, or mailer-code
+  failure. Do not requeue/send a real-client digest or rotate credentials
+  before obtaining safe transport diagnostics and a controlled test.
 - Owner screenshots exposed an inline dropzone layout defect and an access-code input on an unprotected public link. A separate Incoming form patch is in progress: responsive block layout, centered primary actions, and conditional rendering from the server-resolved link requirement. Server code enforcement must remain intact. Do not amend the already-running PR49 head with this change.
 - The form fix now has 12 focused page/route tests, including real correct/wrong access-code checks, plus eight desktop/mobile browser cases. A genuine failed-upload/reload/reselect case verifies the same persisted client upload ID is reused. Parent visually reviewed synthetic desktop, narrow protected/widget-placeholder, and long-filename mobile screenshots. Real Turnstile verification is not claimed from the placeholder fixture. Final isolated release checks and PR preparation are in progress, separate from readable-folder naming.
 - Final form release candidate is isolated at `Incoming-Form-Access-Code`, branch `codex/incoming-form-access-code`, commit `15fe0c1a77a1da4f3c50ac8961f1cdbe5f04bb77`, based on PR49 merge `80bc4e0`. Exactly five intended files; isolated 12 page/route and eight browser tests, typecheck, production build and diff checks passed. Parent reviewed source diff and rendered screenshots. Push/PR was explicitly rejected by the platform as source export needing informed payload/destination approval despite the broader Ops permission. No retry through another surface, push, PR or deployment was performed. Ask owner approval for this exact export to `ledgetoptechnologies/LedgeTop-Ops` on GitHub before publishing. This is not evidence of a code failure or a three-turn overall-goal impasse.
