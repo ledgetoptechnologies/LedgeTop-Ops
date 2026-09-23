@@ -593,15 +593,6 @@ async function planNativeDirectoryProfileWriteInternal(db: DirectoryWriteD1, inp
     mutationId: write.mutationId, recordId: write.recordId, kind: write.kind, version: nextVersion, commandIds }, statements };
 }
 
-/** Trusted composition hook: validates and prepares only this writer's canonical statements. */
-export async function stageNativeDirectoryProfileWrite(db: DirectoryWriteD1, input: NativeDirectoryProfileWrite,
-  stage: (statements: readonly D1PreparedStatement[]) => void): Promise<NativeDirectoryProfileWriteOutcome> {
-  const planned = await planNativeDirectoryProfileWriteInternal(db, input);
-  if (planned.status !== "planned") return planned;
-  stage(planned.statements);
-  return planned.outcome;
-}
-
 async function executeNativeDirectoryProfileWrite(db: D1Database, input: NativeDirectoryProfileWrite,
   allowEmptyDestinations = false): Promise<NativeDirectoryProfileWriteOutcome> {
   const planned = await planNativeDirectoryProfileWriteInternal(db, input, allowEmptyDestinations);

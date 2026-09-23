@@ -328,15 +328,6 @@ async function planNativeDirectoryRelationshipWriteInternal(db: DirectoryWriteD1
     mutationId: write.mutationId, relationshipVersion: nextVersion, reservations }, statements };
 }
 
-/** Trusted composition hook: validates and prepares only this writer's canonical statements. */
-export async function stageNativeDirectoryRelationshipWrite(db: DirectoryWriteD1, input: NativeDirectoryRelationshipWrite,
-  stage: (statements: readonly D1PreparedStatement[]) => void): Promise<NativeDirectoryRelationshipWriteOutcome> {
-  const planned = await planNativeDirectoryRelationshipWriteInternal(db, input);
-  if (planned.status !== "planned") return planned;
-  stage(planned.statements);
-  return planned.outcome;
-}
-
 export async function writeNativeDirectoryRelationship(db: D1Database,
   input: NativeDirectoryRelationshipWrite): Promise<NativeDirectoryRelationshipWriteOutcome> {
   const planned = await planNativeDirectoryRelationshipWriteInternal(db, input);
