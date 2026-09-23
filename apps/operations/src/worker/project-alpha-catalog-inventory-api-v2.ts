@@ -13,7 +13,7 @@ export type ProjectAlphaCatalogQuestion = Readonly<{
   helpText?: string | null; options?: readonly ProjectAlphaCatalogQuestionOption[]; minimum?: number; maximum?: number;
 }>;
 export type ProjectAlphaCatalogInventoryItem = Readonly<{
-  publicId: string; version: string; name: string; summary: string | null; category: string; displayOrder: number;
+  publicId: string; sourceVersion: string; name: string; summary: string | null; category: string; displayOrder: number;
   geometryRequirement: "none" | "optional" | "required"; questions: readonly ProjectAlphaCatalogQuestion[];
 }>;
 export type ProjectAlphaCatalogInventory = Readonly<{
@@ -29,6 +29,7 @@ export type ProjectAlphaCatalogInventoryOutcome =
 export type ProjectAlphaCatalogSnapshotOutcome =
   | Readonly<{ status: "complete"; snapshotId: string; totalCount: number; items: readonly ProjectAlphaCatalogInventoryItem[]; pageCount: number; attemptCount: number }>
   | Readonly<{ status: "incomplete"; reason: "too_large"; totalCount: number; maxItems: number; accumulatedBytes: number; maxBytes: number }>
+  | Readonly<{ status: "incomplete"; reason: "pagination_limit"; totalCount: number; maxPages: number }>
   | ProjectAlphaProjectFailure;
 export const PROJECT_ALPHA_CATALOG_SNAPSHOT_MAX_ITEMS = 10_000;
 export const PROJECT_ALPHA_CATALOG_SNAPSHOT_MAX_BYTES = 16 * 1024 * 1024;
@@ -72,8 +73,9 @@ function validQuestion(value: unknown): value is ProjectAlphaCatalogQuestion {
   return !(hasMinimum && hasMaximum && (value.minimum as number) > (value.maximum as number));
 }
 function validItem(value: unknown): value is ProjectAlphaCatalogInventoryItem {
-  if (!plain(value) || !exact(value, ["publicId", "version", "name", "summary", "category", "displayOrder", "geometryRequirement", "questions"])
-    || !publicId(value.publicId) || !hash(value.version) || !safeText(value.name, 1, 255) || !safeText(value.summary, 1, 1000, true)
+  if (!plain(value) || !exact(value, ["publicId", "sourceVersion", "name", "summary", "category", "displayOrder", "geometryRequirement", "questions"])
+    || !publicId(value.publicId) || typeof value.sourceVersion !== "string" || !/^sha256-[0-9a-f]{64}$/.test(value.sourceVersion)
+    || !safeText(value.name, 1, 255) || !safeText(value.summary, 1, 1000, true)
     || !safeText(value.category, 1, 100) || !Number.isInteger(value.displayOrder) || (value.displayOrder as number) < 0 || (value.displayOrder as number) > 1_000_000
     || !["none", "optional", "required"].includes(value.geometryRequirement as string) || !Array.isArray(value.questions) || value.questions.length > 10) return false;
   const questionIds = new Set<string>();
@@ -161,7 +163,7 @@ export async function readProjectAlphaCatalogSnapshot(connectionInput: ProjectAl
       snapshotId ??= current.snapshotId; totalCount ??= current.totalCount;
       if (totalCount > maxItems) return { status: "incomplete", reason: "too_large", totalCount, maxItems, accumulatedBytes, maxBytes };
       for (const item of current.items) {
-        const pair = `${item.publicId}:${item.version}`;
+        const pair = `${item.publicId}:${item.sourceVersion}`;
         if (ids.has(item.publicId) || pairs.has(pair) || lastPublicId !== null && item.publicId <= lastPublicId) return { status: "uncertain", reason: "invalid_contract", httpStatus: 200, requestId: current.requestId };
         const itemBytes = new TextEncoder().encode(JSON.stringify(item)).byteLength;
         if (accumulatedBytes + itemBytes > maxBytes) return { status: "incomplete", reason: "too_large", totalCount, maxItems, accumulatedBytes, maxBytes };
@@ -177,7 +179,7 @@ export async function readProjectAlphaCatalogSnapshot(connectionInput: ProjectAl
       if (current.nextCursor === cursor) return { status: "uncertain", reason: "invalid_contract", httpStatus: 200, requestId: current.requestId };
       cursor = current.nextCursor;
     }
-    if (!retry) return { status: "uncertain", reason: "response_limit" };
+    if (!retry) return { status: "incomplete", reason: "pagination_limit", totalCount: totalCount ?? 0, maxPages };
   }
   return { status: "conflict", reason: "http_status", httpStatus: 409 };
 }

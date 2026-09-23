@@ -5,7 +5,7 @@ const source = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", application = "bbbbbbbb-b
 const epoch = "cccccccc-cccc-4ccc-8ccc-cccccccccccc", request = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const connection = { baseUrl: "https://alpha.example.test", apiKey: "test-secret", expectedSourceInstanceId: source, expectedApplicationId: application, expectedHistoryEpoch: epoch };
 const route = { method: "GET", path: "/api/v2/catalog/inventory", requiredCapability: "catalog.inventory.read", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true };
-const item = (id: string, version = "a".repeat(64)): Record<string, unknown> => ({ publicId: id, version, name: `Service ${id}`, summary: null, category: "Survey", displayOrder: 0, geometryRequirement: "optional", questions: [{ id: "area", label: "Area", type: "number", required: true, minimum: 0 }] });
+const item = (id: string, digest = "a".repeat(64)): Record<string, unknown> => ({ publicId: id, sourceVersion: `sha256-${digest}`, name: `Service ${id}`, summary: null, category: "Survey", displayOrder: 0, geometryRequirement: "optional", questions: [{ id: "area", label: "Area", type: "number", required: true, minimum: 0 }] });
 const largeItem = (id: string): Record<string, unknown> => ({ ...item(id), summary: "x".repeat(1000), questions: Array.from({ length: 10 }, (_, q) => ({ id: `q${q}`, label: "x".repeat(200), type: "select", required: true, options: Array.from({ length: 50 }, (_, o) => ({ value: `v${o}`, label: "x".repeat(200) })) })) });
 function json(value: unknown, status = 200) { return new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", "X-Request-ID": request } }); }
 function capabilities() { return { apiVersion: "2", sourceInstanceId: source, applicationId: application, historyEpoch: epoch, requestId: request, grantedCapabilities: [{ name: "api.capabilities.read" }, { name: "catalog.inventory.read" }], implementedEndpoints: [{ method: "GET", path: "/api/v2/capabilities", requiredCapability: "api.capabilities.read" }, route] }; }
@@ -64,6 +64,11 @@ describe("read-only PA catalog v2 inventory", () => {
     expect(send).toHaveBeenCalledTimes(2);
   });
 
+  it("reports a page cap separately from a response-byte cap", async () => {
+    const send = vi.fn<typeof fetch>(async url => String(url).endsWith("/capabilities") ? json(capabilities()) : json(inventory([item("1".repeat(32))], "next", "d".repeat(64), 2)));
+    await expect(readProjectAlphaCatalogSnapshot(connection, { limit: 1, maxPages: 1 }, send)).resolves.toEqual({ status: "incomplete", reason: "pagination_limit", totalCount: 2, maxPages: 1 });
+  });
+
   it("bounds accumulated serialized bytes without repeatedly serializing prior pages", async () => {
     const items = Array.from({ length: 20 }, (_, index) => largeItem(index.toString(16).padStart(32, "0")));
     let page = 0;
@@ -74,7 +79,7 @@ describe("read-only PA catalog v2 inventory", () => {
     });
     const outcome = await readProjectAlphaCatalogSnapshot(connection, { limit: 5, maxBytes: 600_000 }, send);
     expect(outcome).toMatchObject({ status: "incomplete", reason: "too_large", totalCount: 20, maxBytes: 600_000 });
-    if (outcome.status === "incomplete") expect(outcome.accumulatedBytes).toBeLessThanOrEqual(outcome.maxBytes);
+    if (outcome.status === "incomplete" && outcome.reason === "too_large") expect(outcome.accumulatedBytes).toBeLessThanOrEqual(outcome.maxBytes);
     expect(page).toBe(2);
   });
 });
