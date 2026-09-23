@@ -15,6 +15,7 @@ const ID = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,190}$/;
 const KEY_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const HEX = /^[0-9a-f]+$/;
 const encoder = new TextEncoder();
+const MAX_INVITATION_LIFETIME_MS = 7 * 24 * 60 * 60 * 1000;
 const issueDenied = (): never => { throw Error("client_onboarding_handoff_issue_denied"); };
 const revealDenied = (): never => { throw Error("client_onboarding_handoff_reveal_denied"); };
 function record(value: unknown, names: readonly string[]): Record<string, unknown> | null {
@@ -70,6 +71,7 @@ function baseRequest(value: unknown) {
   const row = record(value, ["commandId", "expiresAt", "targetClientRecordId", "scopes"]);
   if (!row || typeof row.commandId !== "string" || !UUID.test(row.commandId)
     || !instant(row.expiresAt) || Date.parse(row.expiresAt) <= Date.now()
+    || Date.parse(row.expiresAt) > Date.now() + MAX_INVITATION_LIFETIME_MS
     || (row.targetClientRecordId !== null && (typeof row.targetClientRecordId !== "string" || !ID.test(row.targetClientRecordId)))) return null;
   if (row.targetClientRecordId !== null && row.scopes !== null) return null;
   const rawScopes = denseArray(row.scopes, 128);
@@ -196,16 +198,28 @@ export async function revealClientOnboardingSecret(database: D1Database, raw: un
     if (!row || Date.parse(row.expires_at) <= Date.now()) throw Error();
     const invitationSecret = await decrypt(row, ring);
     const revealId = crypto.randomUUID();
-    const inserted = await db.prepare(`INSERT INTO client_onboarding_reveal_audit
-      (reveal_id,command_id,actor_staff_id,actor_access_subject,auth_verified_until)
-      SELECT ?,handoff.command_id,?,?,? FROM client_onboarding_handoffs handoff
-      JOIN client_onboarding_invitations invitation ON invitation.invitation_id=handoff.invitation_id
-      JOIN client_onboarding_live_issuances live ON live.invitation_id=invitation.invitation_id
-      WHERE handoff.command_id=? AND handoff.actor_staff_id=? AND handoff.actor_access_subject=?
-        AND invitation.state='pending' AND invitation.version=1 RETURNING reveal_id`)
-      .bind(revealId, identity.staffId, identity.verifiedAccessSubject, authenticated.verifiedUntil,
-        row.command_id, identity.staffId, identity.verifiedAccessSubject).first("reveal_id");
-    if (inserted !== revealId) throw Error();
+    const results = await db.batch([
+      db.prepare(`INSERT INTO client_onboarding_reveal_consumptions
+        (command_id,reveal_id,actor_staff_id,actor_access_subject,auth_verified_until)
+        SELECT handoff.command_id,?,?,?,? FROM client_onboarding_handoffs handoff
+        JOIN client_onboarding_invitations invitation ON invitation.invitation_id=handoff.invitation_id
+        JOIN client_onboarding_live_issuances live ON live.invitation_id=invitation.invitation_id
+        JOIN native_staff_profiles profile ON profile.staff_id=handoff.actor_staff_id AND profile.version=? AND profile.login_email=?
+        WHERE handoff.command_id=? AND handoff.actor_staff_id=? AND handoff.actor_access_subject=?
+          AND invitation.state='pending' AND invitation.version=1
+          AND NOT EXISTS(SELECT 1 FROM client_onboarding_reveal_consumptions consumed
+            WHERE consumed.command_id=handoff.command_id)`)
+        .bind(revealId, identity.staffId, identity.verifiedAccessSubject, authenticated.verifiedUntil,
+          identity.profileVersion, identity.email, row.command_id, identity.staffId, identity.verifiedAccessSubject),
+      db.prepare(`INSERT INTO client_onboarding_reveal_audit
+        (reveal_id,command_id,actor_staff_id,actor_access_subject,auth_verified_until)
+        SELECT ?,consumed.command_id,consumed.actor_staff_id,consumed.actor_access_subject,consumed.auth_verified_until
+        FROM client_onboarding_reveal_consumptions consumed
+        WHERE consumed.command_id=? AND consumed.reveal_id=? AND consumed.actor_staff_id=?
+          AND consumed.actor_access_subject=?`)
+        .bind(revealId, row.command_id, revealId, identity.staffId, identity.verifiedAccessSubject),
+    ]);
+    if (results[0]?.meta.changes !== 1 || results[1]?.meta.changes !== 1) throw Error();
     return Object.freeze({ commandId: row.command_id, invitationId: row.invitation_id,
       expiresAt: row.expires_at, invitationSecret });
   } catch { return revealDenied(); }

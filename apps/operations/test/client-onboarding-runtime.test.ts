@@ -12,7 +12,7 @@ let runtime: Miniflare | undefined;
 let db: D1Database;
 let serial = 0;
 const uuid = () => `00000000-0000-4000-8000-${(++serial).toString(16).padStart(12, "0")}`;
-const expiresAt = "2099-01-01T00:00:00.000Z";
+const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
 const actor = { identity: { kind: "native" as const, staffId: "client-onboarding-issuer",
   verifiedAccessSubject: "access|client-onboarding-issuer", email: "issuer@example.test",
   displayName: "Client Onboarding Issuer", profileVersion: 1 }, verifiedUntil: expiresAt };
@@ -29,7 +29,7 @@ describe("bounded client profile onboarding runtime", () => {
     db = await runtime.getD1Database("OPS_DB") as D1Database;
     const directory = new URL("../migrations/", import.meta.url);
     for (const name of readdirSync(directory).filter(item => /^\d{4}_.+\.sql$/.test(item)
-      && item.slice(0, 4) <= "0080").sort()) {
+      && (item.slice(0, 4) <= "0080" || item.startsWith("0140_"))).sort()) {
       await db.batch(splitD1MigrationStatements(readFileSync(new URL(name, directory), "utf8"))
         .map(statement => db.prepare(statement)));
     }
@@ -99,6 +99,24 @@ describe("bounded client profile onboarding runtime", () => {
     expect(await db.prepare("SELECT count(*) n FROM pa_application_entitlements").first("n")).toBe(entitlementsBefore);
   });
 
+  it("allows exactly one concurrent reveal before submission", async () => {
+    const commandId = uuid();
+    const receipt = await issueClientOnboardingWithHandoff(db, { authenticatedNativeStaff: actor,
+      request: { commandId, expiresAt, targetClientRecordId: null,
+        scopes: [{ businessAreaId: "area:onboarding", divisionId: null }] } }, keyring);
+    const outcomes = await Promise.allSettled([
+      revealClientOnboardingSecret(db, { authenticatedNativeStaff: actor, commandId }, keyring),
+      revealClientOnboardingSecret(db, { authenticatedNativeStaff: actor, commandId }, keyring),
+    ]);
+    expect(outcomes.filter(outcome => outcome.status === "fulfilled")).toHaveLength(1);
+    expect(outcomes.filter(outcome => outcome.status === "rejected")).toHaveLength(1);
+    expect(await db.prepare("SELECT count(*) n FROM client_onboarding_reveal_consumptions WHERE command_id=?")
+      .bind(commandId).first("n")).toBe(1);
+    expect(await db.prepare("SELECT count(*) n FROM client_onboarding_reveal_audit WHERE command_id=?")
+      .bind(commandId).first("n")).toBe(1);
+    expect(receipt.state).toBe("pending");
+  });
+
   it("enforces current issuer authority and a separate atomic public quota", async () => {
     const rateKey = `client-onboarding:ip:${"1".padStart(64, "0")}`;
     const outcomes = await Promise.all(Array.from({ length: 8 }, () =>
@@ -108,6 +126,10 @@ describe("bounded client profile onboarding runtime", () => {
       .rejects.toThrow("client_onboarding_rate_limit_unavailable");
     await expect(issueClientOnboardingWithHandoff(db, { authenticatedNativeStaff: actor,
       request: { commandId: uuid(), expiresAt: "2020-01-01T00:00:00.000Z", targetClientRecordId: null,
+        scopes: [{ businessAreaId: "area:onboarding", divisionId: null }] } }, keyring))
+      .rejects.toThrow("client_onboarding_handoff_issue_denied");
+    await expect(issueClientOnboardingWithHandoff(db, { authenticatedNativeStaff: actor,
+      request: { commandId: uuid(), expiresAt: new Date(Date.now() + 8 * 24 * 60 * 60 * 1000).toISOString(), targetClientRecordId: null,
         scopes: [{ businessAreaId: "area:onboarding", divisionId: null }] } }, keyring))
       .rejects.toThrow("client_onboarding_handoff_issue_denied");
     await db.prepare("UPDATE native_directory_grants SET active=0 WHERE id='client-onboarding-edit'").run();

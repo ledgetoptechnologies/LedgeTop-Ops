@@ -15,6 +15,7 @@ const ID = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,190}$/;
 const HEX = /^[0-9a-f]+$/;
 const KEY_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const encoder = new TextEncoder();
+const MAX_INVITATION_LIFETIME_MS = 7 * 24 * 60 * 60 * 1000;
 const denied = (): never => { throw Error("client_onboarding_issuance_denied"); };
 function record(value: unknown, names: readonly string[]): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)
@@ -59,6 +60,7 @@ async function evidence(raw: unknown) {
     || typeof request.invitationId !== "string" || !UUID.test(request.invitationId)
     || typeof request.invitationSecret !== "string" || !SECRET.test(request.invitationSecret)
     || !instant(request.expiresAt) || Date.parse(request.expiresAt) <= Date.now()
+    || Date.parse(request.expiresAt) > Date.now() + MAX_INVITATION_LIFETIME_MS
     || (request.targetClientRecordId !== null && (typeof request.targetClientRecordId !== "string" || !ID.test(request.targetClientRecordId)))) return denied();
   let scopes: ClientOnboardingProposedScope[] | null = null;
   if (request.targetClientRecordId === null) {
