@@ -361,8 +361,9 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
 });
 
 test("the deployed Operations Worker keeps catalog staging and promotion private and default-off", () => {
-  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "00757fc2e19443a0808aeae171daf7dcb16d177ff73fe0237035d2074902258d");
+  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "8c1775cb40ead8b2c7df42e9caaac4b8ae5d9e24dcc44643fc6d747238c074a2");
   const config = readJson("apps/operations/wrangler.jsonc");
+  assert.equal(config.vars.CLIENT_ONBOARDING_ADMIN_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED, "false");
   assert.deepEqual(config.services?.find((service) => service.binding === "OPS_INVENTORY_CATALOG_STAGING"), {
