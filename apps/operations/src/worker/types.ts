@@ -23,6 +23,8 @@ export type Env = Omit<
   | "NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED"
   | "NATIVE_INTEGRATION_CONTROL_ENABLED"
   | "NATIVE_INTEGRATION_CONTROL_ORIGIN"
+  | "NATIVE_WORKFORCE_TIME_RECORD_ENABLED"
+  | "NATIVE_WORKFORCE_TIME_RECORD_ORIGIN"
   | "DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED"
   | "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED"
   | "CLIENT_PORTAL_HIERARCHY_V2_ENABLED"
@@ -74,6 +76,10 @@ export type Env = Omit<
   NATIVE_INTEGRATION_CONTROL_ENABLED?: string;
   /** Exact same-origin native monitor-control UI origin; no implicit fallback. */
   NATIVE_INTEGRATION_CONTROL_ORIGIN?: string;
+  /** Default-off native time-record command surface. */
+  NATIVE_WORKFORCE_TIME_RECORD_ENABLED?: string;
+  /** Exact same-origin native time UI origin; blank while disabled. */
+  NATIVE_WORKFORCE_TIME_RECORD_ORIGIN?: string;
   PROJECT_ALPHA_CONNECTOR_SNAPSHOT_CREDENTIALS?: string;
   PROJECT_ALPHA_CONNECTOR_EVENT_CREDENTIALS?: string;
   /** Deploy-managed source manifest; selects configured credential references and is never browser-administered. */

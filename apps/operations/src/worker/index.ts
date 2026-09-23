@@ -78,6 +78,7 @@ import { runNativeDirectoryReconciliationScheduler } from "./native-directory-re
 import { handleProjectAlphaApiV2MonitorControlHttp,
   projectAlphaApiV2MonitorControlHttpRequest } from "./project-alpha-api-v2-monitor-control-http";
 import { consumeNativeStaffOnboardingRateLimit } from "./native-staff-onboarding-rate-limit";
+import { handleNativeWorkforceTimeRecordHttp, nativeWorkforceTimeRecordHttpRequest } from "./native-workforce-time-record-http";
 import {
   auditStatement,
   csrfToken,
@@ -446,6 +447,26 @@ async function dispatchProjectAlphaApiV2MonitorControl(c: any) {
 }
 app.use("/api/native-integrations/monitor", dispatchProjectAlphaApiV2MonitorControl);
 app.use("/api/native-integrations/monitor/*", dispatchProjectAlphaApiV2MonitorControl);
+// Native workforce identity is independent of the legacy Operations principal.
+// Keep the exact, default-off namespace ahead of legacy /api authentication.
+async function dispatchNativeWorkforceTimeRecord(c: any) {
+  if (!nativeWorkforceTimeRecordHttpRequest(c.req.method, c.req.path))
+    return c.json({ error: "not_found" }, 404);
+  return handleNativeWorkforceTimeRecordHttp(c.req.raw, {
+    configuration: {
+      enabled: c.env.NATIVE_WORKFORCE_TIME_RECORD_ENABLED === "true",
+      issuer: c.env.TEAM_DOMAIN ?? "",
+      staffAudience: c.env.OPERATIONS_AUD,
+      origin: c.env.NATIVE_WORKFORCE_TIME_RECORD_ORIGIN ?? "",
+      csrfSecret: c.env.OPERATIONS_SESSION_SECRET,
+    },
+    database: c.env.OPS_DB,
+    consumeRateLimit: (key, limit, periodSeconds) =>
+      consumeNativeStaffOnboardingRateLimit(c.env.OPS_DB, `workforce-time:${key}`, limit, periodSeconds),
+  });
+}
+app.use("/api/native-workforce/time-record", dispatchNativeWorkforceTimeRecord);
+app.use("/api/native-workforce/time-record/*", dispatchNativeWorkforceTimeRecord);
 // This is intentionally before staff authentication. A disabled staging
 // fixture must be indistinguishable from an absent route, even to a request
 // without a valid Operations session.
