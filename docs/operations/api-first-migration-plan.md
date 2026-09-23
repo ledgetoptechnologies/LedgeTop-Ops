@@ -4,14 +4,17 @@ Updated September 23, 2026. The owner approved implementation and resumption aft
 
 ### September 23, 2026 — client-profile onboarding foundation, not activation
 
-- Draft Operations PR #116 (`codex/client-profile-onboarding-runtime`, source
-  checkpoint `b62d3b9`) stacks on draft PR #114. Its exact-head CI run `35867045803`
-  passed all ten checks. This adds the PA-compatible shared profile form,
+- Draft Operations PR #116 (`codex/client-profile-onboarding-runtime`) stacks
+  on draft PR #114. CI run `35874519670` passed all ten checks at source
+  checkpoint `179ce8b`. This adds the PA-compatible shared profile form,
   immutable one-shot proposal submission and bounded invitation issuance,
-  native-staff-only create/reveal routes, and a migration that prevents a
-  previously revealed handoff from being revealed again after upgrade.
-  Focused real-D1 tests and an independent security diff review passed. These
-  are source and test results, not evidence of a usable client invitation.
+  native-staff-only create/reveal routes and responsive staff issuance UI, and
+  a migration that prevents a previously revealed handoff from being revealed
+  again after upgrade. Focused real-D1 and browser tests passed. The earlier
+  independent security review covered the foundation at `b62d3b9`; a new
+  security scan for later UI/contract changes did not run because its required
+  Python preflight was unavailable. Do not call that later review passed.
+  These are source and test results, not evidence of a usable client invitation.
 - The Client-to-Operations service binding is declared but default-off. The
   named Operations recipient entrypoint still returns `unavailable` for
   session, submit and status; no public recipient route or working invitation
@@ -20,15 +23,21 @@ Updated September 23, 2026. The owner approved implementation and resumption aft
   no client access or existing Delivery/public link has been changed.
 - Before an invitation can be issued for use: implement and test the
   staging-only recipient session/submission/status protocol, fragment-bearing
-  URL handling, per-invitation and network rate limits, a staff issuance UI,
-  review-to-Directory disposition, and end-to-end staging acceptance. Keep
+  URL handling, per-invitation and network rate limits, and end-to-end staging
+  acceptance. The staff UI does not create a usable URL. Keep the subsequent
+  review-to-Directory disposition as its own authority checkpoint. Keep
   recipient activation and production secret provisioning as separate release
   checkpoints; do not infer them from the presence of the binding.
-- A separate local, unpublished review-to-Directory adapter candidate was
-  withheld after independent review found exported write-plan internals could
-  be forged or cross-paired. Its rollback tests do not remove that integrity
-  issue. Do not integrate it until the transaction composer owns private,
-  single-use, same-provenance statements and the negative tests pass.
+- The review-to-Directory transaction-composer candidate was revised in an
+  isolated worktree: exported staging callbacks that disclosed raw D1 prepared
+  statements were removed, and both high-level writer plans now execute in
+  one final first-primary batch. Focused writer/rollback tests and typecheck
+  passed there; independent functional review found no definite issue. Its
+  four commits are now on this draft branch after `179ce8b`. Combined focused
+  onboarding and Directory tests passed **41/41 across six files**; Operations
+  typecheck and build passed. CI for the newer head remains a release gate.
+  The composer is not yet wired into a live review disposition route and
+  grants no client access.
 
 ### September 22, 2026 — authoritative PR and staging acceptance status
 
