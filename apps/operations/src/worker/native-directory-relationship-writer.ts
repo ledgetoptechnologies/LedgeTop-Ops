@@ -223,8 +223,16 @@ export async function writeNativeDirectoryRelationship(db: D1Database, input: Na
     .bind(write.mutationId).all<Record<string, unknown>>()).results;
   if (replayRows.length) {
     if (replayRows.some(row => row.request_json !== body || row.action !== relationshipAction || typeof row.command_json !== "string"
-      || typeof row.command_id !== "string" || typeof row.source_id !== "string" || typeof row.relationship_version !== "number"))
+      || typeof row.command_id !== "string" || typeof row.source_id !== "string" || typeof row.relationship_version !== "number"
+      || row.relationship_version !== replayRows[0]!.relationship_version))
       return { status: "conflict", reason: "idempotency_body_conflict" };
+    // A replay is a fresh disclosure of still-actionable reservation IDs. Do
+    // not return them from stale history: every destination must still satisfy
+    // the same live admission, profile, deny-aware grants, relationship and
+    // exact mapping evidence used by the dispatcher.
+    const current = await db.prepare(`SELECT count(*) total FROM project_alpha_directory_live_relationship_commands
+      WHERE mutation_id=?`).bind(write.mutationId).first<number>("total");
+    if (current !== replayRows.length) return { status: "blocked", reason: "authority_or_race" };
     return { status: "written", replayed: true, mutationId: write.mutationId,
       relationshipVersion: replayRows[0]!.relationship_version as number,
       reservations: replayRows.map(row => ({ commandId: row.command_id as string, sourceId: row.source_id as string,

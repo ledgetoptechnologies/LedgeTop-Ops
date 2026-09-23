@@ -117,6 +117,16 @@ describe("native Directory relationship writer and outbox",()=>{
     expect(await db.prepare("SELECT count(*) n FROM project_alpha_directory_relationship_outbox WHERE client_record_id=?").bind(client.recordId).first("n")).toBe(0);
   });
 
+  it("fails replay closed after a deny-aware grant revocation without returning reservation identifiers",async()=>{
+    const organization=await create("organization"),client=await create("client");await acknowledge(organization,"organization","1");await acknowledge(client,"client","2");
+    const input=writeInput(client.recordId,1,null,{recordId:organization.recordId,expectedRecordVersion:1});
+    const written=await writeNativeDirectoryRelationship(db,input);expect(written).toMatchObject({status:"written",replayed:false});
+    const deny=`deny-${uuid()}`;await db.prepare("INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,business_area_id,granted_by) VALUES(?,?,'directory.identity.link','deny','business_area','area','owner')").bind(deny,actor.staffId).run();
+    await expect(writeNativeDirectoryRelationship(db,input)).resolves.toEqual({status:"blocked",reason:"authority_or_race"});
+    await db.prepare("UPDATE native_directory_grants SET active=0 WHERE id=?").bind(deny).run();
+    await expect(writeNativeDirectoryRelationship(db,input)).resolves.toMatchObject({status:"written",replayed:true});
+  });
+
   it("accepts an organization with a superset of client destinations and canonical non-UUID IDs",async()=>{const organization=await create("organization",true,"ops/org/adopted-1001"),client=await create("client",false,"ops/client/adopted-1001");
     const organizationPublic=await acknowledge(organization,"organization","1"),clientPublic=await acknowledge(client,"client","2");
     const written=await writeNativeDirectoryRelationship(db,writeInput(client.recordId,1,null,{recordId:organization.recordId,expectedRecordVersion:1}));
