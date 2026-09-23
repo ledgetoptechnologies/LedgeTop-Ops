@@ -45,6 +45,8 @@ export interface Env {
   PROJECT_ALPHA_CATALOG_HMAC_SECRET?: string;
   PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_KEY_ID?: string;
   PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_SECRET?: string;
+  /** Dormant Operations service-binding inventory staging. Never authorizes public reads. */
+  OPS_INVENTORY_CATALOG_SYNC_ENABLED?: string;
   /** Server-only PA portal hierarchy/entitlement projection. Independent and default-off. */
   PROJECT_ALPHA_PORTAL_SYNC_ENABLED?: string;
   /** Emergency-only legacy HTTP receiver. Production keeps this false; Ops Sync RPC remains independently enabled. */
