@@ -293,9 +293,22 @@ there is no HTTP or scheduled trigger. Before any activation, use a dedicated,
 least-privilege staging Cloudflare profile to read the exact authority:
 
 ```powershell
-npx wrangler d1 execute client-data-staging --remote --command "SELECT registry_id,source_id,source_instance_id,application_id,history_epoch,state FROM ops_inventory_catalog_staging_sources WHERE source_id='project-alpha:primary' ORDER BY registry_id;"
-npx wrangler d1 execute client-data-staging --remote --command "SELECT source_id,active_generation_id,source_generation,source_sequence FROM pa_service_catalog_checkpoint WHERE source_id='project-alpha:primary';"
+npx wrangler d1 execute client-data-staging --remote --config apps/client/wrangler.staging.json --command "SELECT registry_id,source_id,source_instance_id,application_id,history_epoch,state FROM ops_inventory_catalog_staging_sources WHERE source_id='project-alpha:primary' ORDER BY registry_id;"
+npx wrangler d1 execute client-data-staging --remote --config apps/client/wrangler.staging.json --command "SELECT source_id,active_generation_id,source_generation,source_sequence FROM pa_service_catalog_checkpoint WHERE source_id='project-alpha:primary';"
 ```
+
+Migration `0214` creates an **empty, disabled** catalog source registry. It does
+not enroll the PA source. If the first query has no exact row, stop: after the
+PA catalog endpoint and its scoped key pass staging acceptance, create one
+registry row through a separately reviewed D1 change using the source ID and
+source-instance/application/history-epoch UUIDs verified against both the
+bound PA capabilities response and the pinned Operations connection. Back up
+staging D1 first. Insert with `state='disabled'`, read it back, and activate
+only that exact row to `state='staging'` in a second reviewed action. A duplicate
+or different epoch/application is a conflict, never a reason to pick a row by
+name or let the Workflow enroll it. Do not use the example registry ID below
+until the readback supplies the real ID. No registry row was enrolled in the
+September 23 default-off infrastructure checkpoint.
 
 Have a human compare the selected staging registry identity with the pinned
 Operations connection and record the reviewed registry ID, source ID, current
@@ -325,7 +338,7 @@ Record and review the exact nested `snapshotId` returned by that stage action.
 Read the checkpoint again, then promote only that reviewed snapshot hash:
 
 ```powershell
-npx wrangler d1 execute client-data-staging --remote --command "SELECT source_id,active_generation_id,source_generation,source_sequence FROM pa_service_catalog_checkpoint WHERE source_id='project-alpha:primary';"
+npx wrangler d1 execute client-data-staging --remote --config apps/client/wrangler.staging.json --command "SELECT source_id,active_generation_id,source_generation,source_sequence FROM pa_service_catalog_checkpoint WHERE source_id='project-alpha:primary';"
 npx wrangler workflows trigger ledgetop-ops-catalog-promotion-staging '{"protocolVersion":1,"action":"promote","registryId":17,"sourceId":"project-alpha:primary","expectedSnapshotId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","expectedSourceSequence":8,"approvalId":"CHG-2026-0917-PROMOTE"}' --config apps/operations/wrangler.staging.json --id catalog-promote-CHG-2026-0917-8b7d2e
 ```
 
