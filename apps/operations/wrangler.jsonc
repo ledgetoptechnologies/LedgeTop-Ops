@@ -39,6 +39,7 @@
     "PROJECT_ALPHA_DIRECTORY_RECONCILIATION_ENABLED": "false",
     "PROJECT_ALPHA_API_V2_MONITOR_RECIPIENT": "",
     "PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ENABLED": "false",
+    "PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED": "false",
     "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED": "false",
     "PROJECT_ALPHA_PRIVATE_ADMIN_TRANSPORT_ENABLED": "false",
     "NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED": "false",
@@ -147,6 +148,13 @@
     ]
   },
   "stream": { "binding": "STREAM" },
+  "services": [
+    {
+      "binding": "OPS_INVENTORY_CATALOG_STAGING",
+      "service": "ledgetop-clients",
+      "entrypoint": "OpsInventoryCatalogStagingIngress"
+    }
+  ],
   "durable_objects": {
     "bindings": [
       { "name": "THUMBNAIL_RENDERER", "class_name": "ThumbnailRendererContainer" }

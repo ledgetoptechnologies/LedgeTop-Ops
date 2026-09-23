@@ -359,6 +359,18 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.deepEqual(config.ratelimits.map((item) => [item.name, item.namespace_id, item.simple.limit]), expectedRateLimits);
 });
 
+test("the deployed Operations Worker keeps catalog staging private and default-off", () => {
+  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "8c996c56f1268728eb3ea6a811f1cb330a0054e8b80bc4f9eeb90fdc8eb978cd");
+  const config = readJson("apps/operations/wrangler.jsonc");
+  assert.equal(config.vars.PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED, "false");
+  assert.deepEqual(config.services?.find((service) => service.binding === "OPS_INVENTORY_CATALOG_STAGING"), {
+    binding: "OPS_INVENTORY_CATALOG_STAGING",
+    service: "ledgetop-clients",
+    entrypoint: "OpsInventoryCatalogStagingIngress",
+  });
+  assert(!config.triggers.crons.some((cron) => /catalog/i.test(cron)));
+});
+
 test("public route, host-namespace guard, health, and isolated cookie contracts remain reviewed", () => {
   const worker = read("apps/client/src/worker/index.ts");
   const originPolicy = read("apps/client/src/worker/origin-policy.ts");

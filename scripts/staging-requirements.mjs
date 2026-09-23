@@ -797,6 +797,7 @@ export const STAGING_STATIC_VARS = Object.freeze({
     THUMBNAIL_RENDERER_EXPECTED_HOST: STAGING_HOSTS.incoming,
     APPLICATION_KEY: "ledgetop_ops_staging",
     PROJECT_ALPHA_DRAFT_QUOTES_ENABLED: "false",
+    PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED: "false",
     PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED: "false",
     PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ENABLED: "false",
     PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED: "false",
@@ -876,7 +877,7 @@ export const STAGING_ALLOWED_VAR_NAMES = Object.freeze({
     "ENVIRONMENT", "TEAM_DOMAIN", "OPERATIONS_AUD",
     "NATIVE_INTEGRATION_CONTROL_ENABLED", "NATIVE_INTEGRATION_CONTROL_ORIGIN",
     "DELIVERY_BASE_URL", "CLIENT_PORTAL_ORIGINS", "PUBLIC_SHARE_ORIGIN",
-    "PROJECT_ALPHA_BASE_URL", "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED", "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED",
+    "PROJECT_ALPHA_BASE_URL", "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED", "PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED", "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED",
     "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ENABLED", "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_SOURCE_ID", "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ORIGIN",
     "PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED", "PROJECT_ALPHA_DELIVERY_GUEST_ENABLED",
     "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED", "CLIENT_HUB_PA_CONTACT_ASSIGNMENTS_ENABLED", "CLIENT_PORTAL_HIERARCHY_V2_ENABLED",
@@ -962,7 +963,9 @@ export const STAGING_INVENTORY = Object.freeze({
       { name: "ledgetop-incoming-rclone-promotion-staging", binding: "INCOMING_RCLONE_PROMOTION_WORKFLOW", class_name: "IncomingRclonePromotionWorkflow" },
       { name: "ltds-dropbox-import-staging", binding: "DROPBOX_IMPORT_WORKFLOW", class_name: "DropboxImportWorkflow" },
     ],
-    services: [],
+    services: [
+      { binding: "OPS_INVENTORY_CATALOG_STAGING", service: "ledgetop-clients-staging", entrypoint: "OpsInventoryCatalogStagingIngress" },
+    ],
     queues: [
       { queue: "ltds-file-events-staging", max_batch_size: 25, max_batch_timeout: 10, max_retries: 5, dead_letter_queue: "ltds-file-events-staging-dlq" },
       { queue: "ltds-thumbnail-jobs-staging", max_batch_size: 10, max_batch_timeout: 5, max_retries: 5, max_concurrency: 1, dead_letter_queue: "ltds-thumbnail-jobs-staging-dlq" },

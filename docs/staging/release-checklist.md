@@ -273,6 +273,13 @@ Project Alpha catalog/portal Access audience, HMAC key ID, or portal HMAC
 secret; the catalog path must use the same Ops Sync audience and application
 key.
 
+Deploy the Client staging Worker export before deploying the Operations
+staging Worker that binds `OPS_INVENTORY_CATALOG_STAGING` to
+`ledgetop-clients-staging`/`OpsInventoryCatalogStagingIngress`. Keep
+`PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED=false`; the binding alone
+does not authorize a catalog run, publish staged rows, or activate portal
+catalog reads. Use the same Client-before-Operations order for production.
+
 Client migration `0189_primary_staff_folder_bindings.sql` must be applied and
 verified before deploying the Operations build that exposes primary Client
 Workspace folder linking. Keep authenticated-grant mutations disabled until
