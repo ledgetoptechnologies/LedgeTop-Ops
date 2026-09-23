@@ -2,6 +2,34 @@
 
 Updated September 23, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
 
+### September 23, 2026 — client-profile onboarding foundation, not activation
+
+- Draft Operations PR #116 (`codex/client-profile-onboarding-runtime`, head
+  `b62d3b9`) stacks on draft PR #114. Its exact-head CI run `35867045803`
+  passed all ten checks. This adds the PA-compatible shared profile form,
+  immutable one-shot proposal submission and bounded invitation issuance,
+  native-staff-only create/reveal routes, and a migration that prevents a
+  previously revealed handoff from being revealed again after upgrade.
+  Focused real-D1 tests and an independent security diff review passed. These
+  are source and test results, not evidence of a usable client invitation.
+- The Client-to-Operations service binding is declared but default-off. The
+  named Operations recipient entrypoint still returns `unavailable` for
+  session, submit and status; no public recipient route or working invitation
+  URL is mounted. The staff routes are separately default-off. No PR #116
+  migration or Worker version has been applied to staging or production, and
+  no client access or existing Delivery/public link has been changed.
+- Before an invitation can be issued for use: implement and test the
+  staging-only recipient session/submission/status protocol, fragment-bearing
+  URL handling, per-invitation and network rate limits, a staff issuance UI,
+  review-to-Directory disposition, and end-to-end staging acceptance. Keep
+  recipient activation and production secret provisioning as separate release
+  checkpoints; do not infer them from the presence of the binding.
+- A separate local, unpublished review-to-Directory adapter candidate was
+  withheld after independent review found exported write-plan internals could
+  be forged or cross-paired. Its rollback tests do not remove that integrity
+  issue. Do not integrate it until the transaction composer owns private,
+  single-use, same-provenance statements and the negative tests pass.
+
 ### September 22, 2026 — authoritative PR and staging acceptance status
 
 - September 23 source-contract audit: Project Alpha's current
