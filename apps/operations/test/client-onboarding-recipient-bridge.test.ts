@@ -11,10 +11,11 @@ const config = (name: string) => readFileSync(new URL(name, root), "utf8");
 describe("private client onboarding recipient bridge", () => {
   it("is a disabled, unavailable named entrypoint", async () => {
     const bridge = Object.create(ClientOnboardingRecipientBridge.prototype) as ClientOnboardingRecipientBridge;
-    await expect(bridge.session({ protocolVersion: 1 })).resolves.toEqual({ ok: false, protocolVersion: 1, code: "unavailable" });
+    await expect(bridge.session({ protocolVersion: 1, invitationId: "opaque", invitationSecret: "opaque" }))
+      .resolves.toEqual({ ok: false, protocolVersion: 1, code: "unavailable" });
     await expect(bridge.submit({ protocolVersion: 1, invitationId: "opaque", invitationSecret: "opaque", submissionId: "opaque", fields: {} }))
       .resolves.toEqual({ ok: false, protocolVersion: 1, code: "unavailable" });
-    await expect(bridge.status({ protocolVersion: 1, submissionId: "opaque" }))
+    await expect(bridge.status({ protocolVersion: 1, invitationId: "opaque", invitationSecret: "opaque", submissionId: "opaque" }))
       .resolves.toEqual({ ok: false, protocolVersion: 1, code: "unavailable" });
   });
 
