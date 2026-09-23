@@ -59,7 +59,7 @@ function validQuestion(value:unknown):value is InventoryQuestion{
 function validItem(value:unknown):value is OpsInventoryCatalogItem{
   if(!plain(value)||!exactKeys(value,["publicId","sourceVersion","name","summary","category","displayOrder","geometryRequirement","questions"]))return false;
   if(typeof value.publicId!=="string"||!PUBLIC_ID.test(value.publicId)||typeof value.sourceVersion!=="string"||!/^sha256-[0-9a-f]{64}$/.test(value.sourceVersion)
-    ||!text(value.name,1,255)||(value.summary!==null&&!text(value.summary,1,1000))||!text(value.category,1,100)
+    ||!text(value.name,1,160)||(value.summary!==null&&!text(value.summary,1,1000))||!text(value.category,1,100)
     ||!Number.isInteger(value.displayOrder)||Number(value.displayOrder)<0||Number(value.displayOrder)>1_000_000
     ||!["none","optional","required"].includes(String(value.geometryRequirement))||!Array.isArray(value.questions)||value.questions.length>10)return false;
   const ids=new Set<string>();for(const question of value.questions){if(!validQuestion(question)||ids.has(question.id))return false;ids.add(question.id);}return true;

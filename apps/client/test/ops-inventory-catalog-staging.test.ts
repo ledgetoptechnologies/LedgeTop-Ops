@@ -113,11 +113,18 @@ describe("route-less Operations inventory catalog staging",()=>{
 
   it("strictly rejects malformed items and bounded-page violations without partial writes",async()=>{
     await provision();
+    await expect(stageOpsInventoryCatalogPage(env(),{...page(),items:[{...item,name:"N".repeat(161)}]})).resolves.toMatchObject({ok:false,code:"invalid"});
     await expect(stageOpsInventoryCatalogPage(env(),{...page(),items:[{...item,extra:true}]})).resolves.toMatchObject({ok:false,code:"invalid"});
     await expect(stageOpsInventoryCatalogPage(env(),{...page(),items:[{...item,name:"<script>"}]})).resolves.toMatchObject({ok:false,code:"invalid"});
     await expect(stageOpsInventoryCatalogPage(env(),{...page(),nextCursor:"not+a+base64url"})).resolves.toMatchObject({ok:false,code:"invalid"});
     expect(await count("ops_inventory_catalog_staging_pages")).toBe(0);
     expect(await count("ops_inventory_catalog_staging_items")).toBe(0);
+  });
+
+  it("accepts the canonical 160-character service-name boundary",async()=>{
+    await provision();
+    await expect(stageOpsInventoryCatalogPage(env(),{...page(),items:[{...item,name:"N".repeat(160)}]}))
+      .resolves.toMatchObject({ok:true,status:"staged"});
   });
 
   it("reserves explicit RPC envelope headroom at the near-limit byte boundary",async()=>{

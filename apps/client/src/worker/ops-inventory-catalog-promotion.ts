@@ -85,12 +85,13 @@ export async function promoteOpsInventoryCatalogSnapshot(env:Pick<Env,"DELIVERY_
       return failure(existing.source_sequence<=(checkpoint?.source_sequence??0)?"stale":"conflict");
     }
     if(currentSequence!==input.expectedSourceSequence)return failure("stale");
-    const versionConflict=await db.prepare(`SELECT 1 FROM ops_inventory_catalog_staging_items staged
+    const versionConflictGuard=`EXISTS(SELECT 1 FROM ops_inventory_catalog_staging_items staged
       JOIN pa_service_catalog_items current ON current.source_id=? AND current.public_id=staged.public_id AND current.source_version=staged.content_version
       WHERE staged.registry_id=? AND staged.snapshot_id=? AND (current.name<>json_extract(staged.item_json,'$.name')
         OR COALESCE(current.summary,'')<>COALESCE(json_extract(staged.item_json,'$.summary'),'') OR current.category<>json_extract(staged.item_json,'$.category')
         OR current.display_order<>json_extract(staged.item_json,'$.displayOrder') OR current.geometry_requirement<>json_extract(staged.item_json,'$.geometryRequirement')
-        OR current.question_schema_json<>json_extract(staged.item_json,'$.questions')) LIMIT 1`)
+        OR current.question_schema_json<>json_extract(staged.item_json,'$.questions')))`;
+    const versionConflict=await db.prepare(`SELECT 1 WHERE ${versionConflictGuard}`)
       .bind(input.sourceId,input.registryId,input.snapshotId).first();
     if(versionConflict)return failure("conflict");
     const expectedSequence=input.expectedSourceSequence,expectedGeneration=checkpoint?.active_generation_id??null;
@@ -124,9 +125,10 @@ export async function promoteOpsInventoryCatalogSnapshot(env:Pick<Env,"DELIVERY_
       WHERE source_id=? AND state='staging' AND registry_id<>?) AND NOT EXISTS(SELECT 1 FROM pa_service_catalog_generations
       WHERE source_id=? AND (id=? OR source_generation=?)) AND COALESCE((SELECT source_sequence FROM pa_service_catalog_checkpoint WHERE source_id=?),0)=?
       AND COALESCE((SELECT active_generation_id FROM pa_service_catalog_checkpoint WHERE source_id=?),'')=COALESCE(?, '')
-      AND ${snapshotGuard}`;
+      AND NOT ${versionConflictGuard} AND ${snapshotGuard}`;
     const guardBindings=[input.registryId,input.sourceId,input.sourceInstanceId,input.applicationId,input.historyEpoch,input.sourceId,input.registryId,
       input.sourceId,identity.id,identity.sourceGeneration,input.sourceId,expectedSequence,input.sourceId,expectedGeneration,
+      input.sourceId,input.registryId,input.snapshotId,
       input.registryId,input.snapshotId,summary.page_count,summary.item_count];
     const statements:D1PreparedStatement[]=[
       db.prepare(`INSERT INTO pa_portal_source_write_fences(source_id,write_guard) VALUES(?,CASE WHEN ${authorityGuard} THEN 1 ELSE 0 END)

@@ -75,7 +75,7 @@ function validQuestion(value: unknown): value is ProjectAlphaCatalogQuestion {
 function validItem(value: unknown): value is ProjectAlphaCatalogInventoryItem {
   if (!plain(value) || !exact(value, ["publicId", "sourceVersion", "name", "summary", "category", "displayOrder", "geometryRequirement", "questions"])
     || !publicId(value.publicId) || typeof value.sourceVersion !== "string" || !/^sha256-[0-9a-f]{64}$/.test(value.sourceVersion)
-    || !safeText(value.name, 1, 255) || !safeText(value.summary, 1, 1000, true)
+    || !safeText(value.name, 1, 160) || !safeText(value.summary, 1, 1000, true)
     || !safeText(value.category, 1, 100) || !Number.isInteger(value.displayOrder) || (value.displayOrder as number) < 0 || (value.displayOrder as number) > 1_000_000
     || !["none", "optional", "required"].includes(value.geometryRequirement as string) || !Array.isArray(value.questions) || value.questions.length > 10) return false;
   const questionIds = new Set<string>();

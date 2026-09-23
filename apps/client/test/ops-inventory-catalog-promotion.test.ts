@@ -110,6 +110,23 @@ describe("route-less staged catalog promotion",()=>{
     expect(await tableCount("pa_service_catalog_items")).toBe(0);
     expect(await db.prepare("SELECT token FROM shares WHERE id='public-link'").first("token")).toBe("unchanged-token");
   });
+  it("rechecks reused source-version content inside the copy transaction",async()=>{await stage();let injected=false;
+    const racing=new Proxy(db,{get(target,property){if(property==="withSession")return()=>racing;
+      if(property==="batch")return async(statements:D1PreparedStatement[])=>{
+        if(!injected){injected=true;const conflicting=item("a","Conflicting aerial survey");
+          await db.prepare(`INSERT INTO pa_service_catalog_items
+            (source_id,public_id,source_version,name,summary,question_schema_json,active,source_generation,source_sequence,category,display_order,geometry_requirement)
+            VALUES(?,?,?,?,?,?,1,'concurrent',1,?,?,?)`)
+            .bind(authority.sourceId,conflicting.publicId,conflicting.sourceVersion,conflicting.name,conflicting.summary,
+              JSON.stringify(conflicting.questions),conflicting.category,conflicting.displayOrder,conflicting.geometryRequirement).run();}
+        return db.batch(statements);
+      };
+      const value=Reflect.get(target,property);return typeof value==="function"?value.bind(target):value;}});
+    expect(await promoteOpsInventoryCatalogSnapshot(env("true",racing),authority)).toMatchObject({ok:false,code:"conflict"});
+    expect(await tableCount("pa_service_catalog_generations")).toBe(0);
+    expect(await tableCount("pa_service_catalog_items")).toBe(1);
+    expect(await db.prepare("SELECT name FROM pa_service_catalog_items").first("name")).toBe("Conflicting aerial survey");
+  });
   it("rolls back every canonical write when the atomic batch fails",async()=>{await stage();
     const failing=new Proxy(db,{get(target,property){if(property==="withSession")return()=>failing;if(property==="batch")return async(statements:D1PreparedStatement[])=>
       db.batch([...statements,db.prepare("INSERT INTO table_that_does_not_exist VALUES(1)")]);const value=Reflect.get(target,property);return typeof value==="function"?value.bind(target):value;}});
