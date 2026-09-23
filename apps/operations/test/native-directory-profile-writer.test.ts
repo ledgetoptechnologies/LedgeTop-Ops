@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Miniflare } from "miniflare";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import {
+  planNativeDirectoryProfileWrite,
   writeNativeDirectoryProfile,
   writeStagingEmptyEnrollmentOrganizationFixture,
   STAGING_EMPTY_ENROLLMENT_FIXTURE_ADMISSION_ID,
@@ -14,6 +15,7 @@ import {
   type NativeDirectoryProfileWrite,
   type NativeDirectoryProfileWriteOutcome,
 } from "../src/worker/native-directory-profile-writer";
+import { planNativeDirectoryRelationshipWrite } from "../src/worker/native-directory-relationship-writer";
 
 let runtime: Miniflare;
 let db: D1Database;
@@ -210,6 +212,36 @@ describe("canonical native Directory profile writer", () => {
     const updateCommand = JSON.parse((await db.prepare("SELECT command_json FROM project_alpha_directory_outbox WHERE command_id=?")
       .bind(updated.commandIds[0]).first<string>("command_json"))!);
     expect(updateCommand.fields).toEqual({ ...updateProfile, organizationPublicId });
+  });
+
+  it("plans independent profile and relationship reservations for one caller-owned D1 batch", async () => {
+    const actor = await seedActor();
+    const organization = await create("organization", actor, uuid());
+    const client = await create("client", actor);
+    await acknowledgeCreate(organization.input, organization.outcome, "1");
+    await acknowledgeCreate(client.input, client.outcome, "2");
+    const relationship = await planNativeDirectoryRelationshipWrite(db, {
+      mutationId: uuid(), clientRecordId: client.input.recordId, expectedRelationshipVersion: 1,
+      expectedClientRecordVersion: 1, previousOrganization: null,
+      organization: { recordId: organization.input.recordId, expectedRecordVersion: 1 },
+      actor: { staffId: actor.staffId, accessSubject: actor.accessSubject, email: actor.loginEmail,
+        admissionVersion: actor.admissionVersion, profileVersion: actor.profileVersion },
+    });
+    expect(relationship.status).toBe("planned");
+    if (relationship.status !== "planned") throw new Error(JSON.stringify(relationship));
+    const profile = await planNativeDirectoryProfileWrite(db, {
+      operation: "update", mutationId: uuid(), recordId: organization.input.recordId,
+      expectedLocalVersion: 1, kind: "organization", profile: { ...organizationProfile, name: "Updated Organization" },
+      destinations: [destination(organization.input.recordId, "1")], actor,
+    });
+    expect(profile.status).toBe("planned");
+    if (profile.status !== "planned") throw new Error(JSON.stringify(profile));
+    await db.withSession("first-primary").batch([...relationship.statements, ...profile.statements]);
+    expect(await db.prepare(`SELECT organization_record_id,relationship_version
+      FROM operations_directory_client_organizations WHERE client_record_id=?`).bind(client.input.recordId).first())
+      .toEqual({ organization_record_id: organization.input.recordId, relationship_version: 2 });
+    expect(await db.prepare(`SELECT current_version FROM operations_directory_records WHERE record_id=?`)
+      .bind(organization.input.recordId).first("current_version")).toBe(2);
   });
 
   it("rejects a private client create whose relationship differs from the exact admission assertion", async () => {

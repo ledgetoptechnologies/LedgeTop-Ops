@@ -32,9 +32,17 @@ export type NativeDirectoryRelationshipWriteOutcome =
   | Readonly<{ status: "rejected"; reason: "invalid_write" | "no_change" }>
   | Readonly<{ status: "conflict"; reason: "idempotency_body_conflict" | "stale_relationship" | "stale_record" }>
   | Readonly<{ status: "blocked"; reason: "destination_mismatch" | "mapping_evidence" | "terminal_predecessor" | "authority_or_race" }>;
+/** A caller-owned D1 batch plan; it performs no mutation itself. */
+export type NativeDirectoryRelationshipWritePlan = Readonly<{
+  status: "planned";
+  outcome: Extract<NativeDirectoryRelationshipWriteOutcome, { status: "written" }>;
+  statements: readonly D1PreparedStatement[];
+}>;
+export type NativeDirectoryRelationshipWritePlanningResult = NativeDirectoryRelationshipWriteOutcome | NativeDirectoryRelationshipWritePlan;
 
 type Destination = Readonly<{ sourceId: string; sourceInstanceUUID: string; applicationUUID: string; historyEpoch: string; origin: string; externalCanonicalId: string }>;
 type Head = Readonly<{ publicId: string; revision: string }>;
+type DirectoryWriteD1 = Pick<D1Database, "prepare" | "batch">;
 
 function integer(value: unknown): value is number { return Number.isSafeInteger(value) && Number(value) >= 1; }
 function canonicalId(value: unknown): value is string {
@@ -114,7 +122,7 @@ export function maximumDirectoryRevisionEvidence(values: readonly unknown[], zer
   for (const value of values.slice(1) as string[]) if (greater(value,head)) head=value;
   return head;
 }
-async function activeHead(db: D1Database, recordId: string, kind: "client" | "organization", localVersion: number,
+async function activeHead(db: DirectoryWriteD1, recordId: string, kind: "client" | "organization", localVersion: number,
   destination: Destination): Promise<Head | null> {
   const record = await db.prepare("SELECT record_kind kind,current_version version FROM operations_directory_records WHERE record_id=?")
     .bind(recordId).first<{ kind: string; version: number }>();
@@ -184,7 +192,7 @@ async function activeHead(db: D1Database, recordId: string, kind: "client" | "or
   const head=maximumDirectoryRevisionEvidence(evidence.map(value => value.revision));if(head===null)return null;
   return { publicId: mapping.publicId, revision: head };
 }
-async function currentGeneration(db: D1Database, destination: Destination): Promise<string | null> {
+async function currentGeneration(db: DirectoryWriteD1, destination: Destination): Promise<string | null> {
   const rows = (await db.prepare(`SELECT generation FROM (
       SELECT json_extract(outcome_json,'$.response.result.authorizationGeneration') generation
       FROM project_alpha_directory_outbox WHERE source_id=? AND expected_source_instance_id=? AND application_id=?
@@ -207,14 +215,15 @@ async function currentGeneration(db: D1Database, destination: Destination): Prom
   if (rows.some(row => row.generation === MAX_REVISION)) return null;
   return maximumDirectoryRevisionEvidence(rows.map(row=>row.generation),true);
 }
-async function loadEnrollment(db: D1Database, recordId: string): Promise<Destination[] | null> {
+async function loadEnrollment(db: DirectoryWriteD1, recordId: string): Promise<Destination[] | null> {
   const row = await db.prepare("SELECT destinations_json FROM native_directory_enrollments WHERE record_id=?").bind(recordId).first<{ destinations_json: string }>();
   return row ? destinations(row.destinations_json, recordId) : null;
 }
 
 /** Canonically changes an existing native client relationship and reserves the
  * exact PA work in the same D1 batch.  This function performs no HTTP work. */
-export async function writeNativeDirectoryRelationship(db: D1Database, input: NativeDirectoryRelationshipWrite): Promise<NativeDirectoryRelationshipWriteOutcome> {
+async function planNativeDirectoryRelationshipWriteInternal(db: DirectoryWriteD1,
+  input: NativeDirectoryRelationshipWrite): Promise<NativeDirectoryRelationshipWritePlanningResult> {
   const write = normalize(input); if (!write) return { status: "rejected", reason: "invalid_write" };
   const relationshipAction = action(write); if (!relationshipAction) return { status: "rejected", reason: "no_change" };
   const body = requestJson(write);
@@ -319,8 +328,20 @@ export async function writeNativeDirectoryRelationship(db: D1Database, input: Na
         command.organization?.expectedRevision ?? null,supersededTerminalCommandId,JSON.stringify(command),body,Date.now()));
   }
   statements.push(db.prepare("DELETE FROM operations_directory_relationship_write_fences WHERE mutation_id=?").bind(write.mutationId));
-  try {
-    await db.batch(statements);
-  } catch { return { status: "blocked", reason: "authority_or_race" }; }
-  return { status: "written", replayed: false, mutationId: write.mutationId, relationshipVersion: nextVersion, reservations };
+  return { status: "planned", statements, outcome: { status: "written", replayed: false,
+    mutationId: write.mutationId, relationshipVersion: nextVersion, reservations } };
+}
+
+export async function planNativeDirectoryRelationshipWrite(db: D1Database,
+  input: NativeDirectoryRelationshipWrite): Promise<NativeDirectoryRelationshipWritePlanningResult> {
+  return planNativeDirectoryRelationshipWriteInternal(db, input);
+}
+
+export async function writeNativeDirectoryRelationship(db: D1Database,
+  input: NativeDirectoryRelationshipWrite): Promise<NativeDirectoryRelationshipWriteOutcome> {
+  const planned = await planNativeDirectoryRelationshipWriteInternal(db, input);
+  if (planned.status !== "planned") return planned;
+  try { await db.batch([...planned.statements]); }
+  catch { return { status: "blocked", reason: "authority_or_race" }; }
+  return planned.outcome;
 }
