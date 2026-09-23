@@ -4,6 +4,22 @@ Updated September 23, 2026. The owner approved implementation and resumption aft
 
 ### September 22, 2026 — authoritative PR and staging acceptance status
 
+- September 23 source-contract audit: Project Alpha's current
+  `portal.projection` producer still requires an enabled
+  `portal_integration_profiles` row and workspace allowlist; its outbox sender
+  uses the External Operations webhook, application key, Access credentials
+  and signed envelope. Ops Sync and Client receive that envelope. Current PA
+  API-v2 capabilities expose Directory and Projects only, so the legacy
+  connection cannot yet be removed without losing portal membership,
+  entitlements, catalog and assignment updates. The replacement must migrate
+  verified workspace identities and explicit grants/denials into Ops-native
+  authority, add a generic scoped PA catalog inventory (and billing-contact
+  inventory if PA retains that ownership), poll it from Ops, then fence and
+  drain the old outbox only after convergence and login/public-link proof.
+  Rewrapping the same custom projection behind a bearer-token endpoint is not
+  an API-first cutover. This is a source audit, not staging or production
+  acceptance.
+
 - September 23 read-only signed-in Cloudflare and staging D1 preflight for the
   **client-portal** path: the `ledgetop-clients-staging` Worker still serves only
   `delivery-staging.ledgetopdroneservices.com`; its deployed
