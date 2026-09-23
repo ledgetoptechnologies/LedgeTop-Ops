@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { expect, test, type Page } from "@playwright/test";
 
 const fixture = new URL("./client-profile-onboarding-fixture.tsx", import.meta.url);
-const bundle = buildSync({ entryPoints: [fileURLToPath(fixture)], bundle: true, format: "iife", platform: "browser", write: false, outdir: "out", jsx: "automatic" });
+const bundle = buildSync({ entryPoints: [fileURLToPath(fixture)], bundle: true, format: "iife", platform: "browser", write: false, outdir: "out", jsx: "automatic", nodePaths: [fileURLToPath(new URL("../../node_modules", import.meta.url))] });
 const script = bundle.outputFiles.find(file => file.path.endsWith(".js"))?.text;
 const stylesheet = bundle.outputFiles.find(file => file.path.endsWith(".css"))?.text;
 if (!script || !stylesheet) throw new Error("Client onboarding browser fixture did not compile.");
