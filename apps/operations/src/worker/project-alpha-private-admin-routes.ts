@@ -12,6 +12,9 @@ import { acquireProjectAlphaDirectoryReconciliationFinding,
 import { reserveProjectAlphaProjectAdoptionReview } from "./project-alpha-project-adoption-review-consumer";
 import { produceProjectAlphaProjectAdoptionReview } from "./project-alpha-project-adoption-review-producer";
 import { planProjectAlphaProjectAdoptionBind } from "./project-alpha-project-adoption-bind-consumer";
+import { resolveClientHubDetailContext, verifyClientHubDetailContext } from "./client-hub";
+import { clientHubBusinessProjectOwnership } from "./client-hub-business-projects";
+import { readClientHubBusinessProjectPolicy } from "./client-hub-project-policy";
 import type { Env, StaffPrincipal } from "./types";
 
 type Variables = { principal: StaffPrincipal; administrator: boolean };
@@ -37,11 +40,24 @@ const acquireSchema = z.object({
 }).strict();
 const activationSchema = z.object({ reviewItemId: UUID, idempotencyKey: IDEMPOTENCY }).strict();
 const reservationSchema = z.object({ reviewItemId: UUID, idempotencyKey: IDEMPOTENCY }).strict();
-const reviewSchema = z.object({
+const clientContextSchema = z.object({
+  sourceId: SOURCE_ID,
+  rootNamespace: z.literal("business"),
+  kind: z.enum(["organization", "standalone_client"]),
+  publicId: RECORD_ID,
+  expectedContextVersion: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+}).strict();
+const legacyReviewSchema = z.object({
   idempotencyKey: IDEMPOTENCY,
   externalProjectId: RECORD_ID,
   projectAlphaPublicId: PUBLIC_ID,
 }).strict();
+const contextualReviewSchema = z.object({
+  idempotencyKey: IDEMPOTENCY,
+  externalProjectId: RECORD_ID,
+  clientContext: clientContextSchema,
+}).strict();
+const reviewSchema = z.union([legacyReviewSchema, contextualReviewSchema]);
 const bindSchema = z.object({ reservationId: UUID }).strict();
 const reconciliationAdoptionSchema = z.object({
   findingId: UUID,
@@ -102,6 +118,31 @@ async function projectSource(env: Env, externalProjectId: string): Promise<strin
   const row = await env.OPS_DB.prepare(`SELECT source_id sourceId FROM project_alpha_project_destinations
     WHERE external_project_id=?`).bind(externalProjectId).first<{ sourceId: string }>();
   return row && SOURCE_ID.safeParse(row.sourceId).success ? row.sourceId : null;
+}
+
+async function contextualProject(env: Env, principal: StaffPrincipal,
+  input: z.infer<typeof contextualReviewSchema>): Promise<{ sourceId: string; projectAlphaPublicId: string }> {
+  const selected = input.clientContext;
+  const context = await resolveClientHubDetailContext(env, principal, selected.kind, selected.publicId,
+    selected.sourceId, selected.rootNamespace);
+  if (context.contextVersion !== selected.expectedContextVersion)
+    throw new HTTPException(409, { message: "Client mapping or permissions changed. Refresh the client workspace to continue" });
+  const policy = await readClientHubBusinessProjectPolicy(env, principal);
+  if (!policy.allowed) throw new HTTPException(403, { message: "Project view permission is required" });
+  const ownership = clientHubBusinessProjectOwnership(context);
+  const rows = await env.OPS_DB.withSession("first-primary").prepare(`SELECT p.id,
+      CASE WHEN json_valid(p.payload_json) AND json_type(p.payload_json,'$.public_id')='text'
+        THEN json_extract(p.payload_json,'$.public_id') END projectAlphaPublicId
+    FROM pa_projects p
+    LEFT JOIN pa_clients owner ON owner.id=p.client_id
+      AND owner.projection_source_id=p.projection_source_id AND owner.active=1
+    WHERE p.id=? AND p.projection_source_id=? AND (${ownership.sql}) AND (${policy.filter.sql})
+    ORDER BY p.id LIMIT 2`).bind(input.externalProjectId, selected.sourceId, ...ownership.values,
+      ...policy.filter.values).all<{ id: string; projectAlphaPublicId: string | null }>();
+  if (rows.results.length !== 1 || !PUBLIC_ID.safeParse(rows.results[0]?.projectAlphaPublicId).success)
+    throw new HTTPException(409, { message: "The selected Project Alpha project is no longer available for this client" });
+  await verifyClientHubDetailContext(env, principal, context);
+  return { sourceId: selected.sourceId, projectAlphaPublicId: rows.results[0]!.projectAlphaPublicId! };
 }
 
 async function guard(c: AppContext, next: () => Promise<void>): Promise<void> {
@@ -205,10 +246,14 @@ export function registerProjectAlphaPrivateAdminRoutes(app: App): void {
     const input = await json(c.req.raw, reviewSchema, "Project adoption review");
     requireIdempotency(c.req.raw, input.idempotencyKey);
     await currentReviewer(c.env, c.get("principal"));
-    const sourceId = await projectSource(c.env, input.externalProjectId);
+    const selection = "clientContext" in input
+      ? await contextualProject(c.env, c.get("principal"), input)
+      : { sourceId: await projectSource(c.env, input.externalProjectId), projectAlphaPublicId: input.projectAlphaPublicId };
+    const sourceId = selection.sourceId;
     if (!sourceId) throw new HTTPException(409, { message: "Project adoption destination is unavailable" });
     return c.json(await produceProjectAlphaProjectAdoptionReview(c.env,
-      principalActor(c.get("principal")), { ...input, sourceId }, fetch));
+      principalActor(c.get("principal")), { idempotencyKey: input.idempotencyKey,
+        externalProjectId: input.externalProjectId, projectAlphaPublicId: selection.projectAlphaPublicId, sourceId }, fetch));
   });
 
   app.post(`${PROJECT_ALPHA_PRIVATE_ADMIN_ROUTE}/projects/adoption/bind`, async c => {
