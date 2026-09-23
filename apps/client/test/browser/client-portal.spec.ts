@@ -30,6 +30,31 @@ const serviceCatalog = [{
   geometryRequirement: "optional" as const,
   questions: [{ id: "resolution", label: "Preferred resolution", type: "select", required: true, helpText: "Choose the best fit; LTDS will confirm feasibility.", options: [{ value: "standard", label: "Standard" }, { value: "survey", label: "Survey detail" }] }],
 }];
+
+test("primary Home shows exact assigned website services and starts the existing request flow", async ({page}) => {
+  await mockAuthorizedPortal(page);
+  await page.route("**/api/client/**", async route => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/client/session") return route.fulfill({json: {account, capabilities: {
+      requestV2: true, requestAttachments: false, workspaceHierarchyV2: true}}});
+    if (url.pathname === "/api/client/v2/workspaces") return route.fulfill({json: {workspaces: [
+      {id: "workspace-a", rootType: "organization", rootPublicId: "org-a", displayName: "Acme Surveying"}]}});
+    if (url.pathname === "/api/client/request-readiness") return route.fulfill({json: {mode: "catalog", workspaceId: "workspace-a",
+      target: {kind: "root", projectId: null}, canStartRequest: true, reason: "ready", root: {canStartRequest: true, reason: "ready"},
+      projectRequestsSupported: true, refreshedAt: "2026-08-25T12:00:00.000Z"}});
+    if (url.pathname === "/api/client/service-catalog/page") return route.fulfill({json: {services: [{...serviceCatalog[0],
+      publicId: "website", name: "Website care", category: "Technology", summary: "Managed website updates and support."}],
+      nextCursor: "more", complete: false, source: {generation: "catalog", sequence: 1}, assignment: {
+        sourceId: "project-alpha:primary", generation: "assignment", sequence: 1, subjectType: "organization", subjectPublicId: "org-a"}}});
+    return route.fallback();
+  });
+  await page.goto("/portal?workspace=workspace-a");
+  await expect(page.getByRole("heading", {name: "Assigned services"})).toBeVisible();
+  await expect(page.getByText("Website care", {exact: true})).toBeVisible();
+  await expect(page.getByText(/first page of assigned services/i)).toBeVisible();
+  await page.getByRole("button", {name: "Start a request"}).click();
+  await expect(page).toHaveURL(/\/portal\/requests\/new\?workspace=workspace-a/);
+});
 const notificationHistory = (items: unknown[] = []) => ({
   scope: { sourceId: "project-alpha:primary", workspaceId: null, rootType: "organization", rootPublicId: "org-a" },
   asOf: "2026-08-25T12:00:00.000Z",

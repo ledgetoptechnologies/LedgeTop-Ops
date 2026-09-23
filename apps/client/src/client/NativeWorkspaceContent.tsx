@@ -57,12 +57,13 @@ function FeatureReadiness({features}: {features: NativeWorkspaceFeatureReadiness
   </Card>;
 }
 
-export function NativeWorkspaceContent({ context, page, projectId, feedbackId, onInvalid, renderFiles, openProject, renderTeam, renderRequests, renderModels }: {
+export function NativeWorkspaceContent({ context, page, projectId, feedbackId, onInvalid, renderFiles, openProject, renderTeam, renderRequests, renderModels, renderDashboardServices }: {
   context: NativePortalBootstrap; page: ClientPortalPage; projectId: string | null; feedbackId?: string | null;
   onInvalid: (caught: unknown) => void; renderFiles: (options: NativeFileBrowserOptions) => ReactNode; openProject: (id: string) => void;
   renderTeam?: () => ReactNode;
   renderRequests?: (projects: PortalProject[], projectId?: string) => ReactNode;
   renderModels?: (projectId: string) => ReactNode;
+  renderDashboardServices?: () => ReactNode;
 }) {
   const [locationSearch, setLocationSearch] = useState(location.search);
   const [hierarchy, setHierarchy] = useState<NativeHierarchy["entries"]>([]);
@@ -159,7 +160,7 @@ export function NativeWorkspaceContent({ context, page, projectId, feedbackId, o
         </>}
         {context.capabilities.deliveryView && <a className="button button-orange" href={workspacePath("/portal/deliveries", context.workspace.id)}>Browse workspace deliveries</a>}
       </Card>
-      {page === "dashboard" && <FeatureReadiness features={context.features} />}
+      {page === "dashboard" && <>{renderDashboardServices?.()}<FeatureReadiness features={context.features} /></>}
     </> : page === "deliveries" ? !context.capabilities.deliveryView ? <Card title="Deliveries unavailable"><p>Delivery viewing is not included in your current workspace access.</p></Card> : <>
       {(folderId || linkedFile) && <Card title="Delivery files"><button className="button-ghost" onClick={() => navigateFolder(null)}>All delivery folders</button>{renderFiles({ folderId, load: filesLoad, loadExactFile: exactLoad, onFolderChange: navigateFolder, onLinkedFileChange: syncLinkedFile })}</Card>}
       {!folderId && !linkedFile && <Card title="Shared delivery folders">
