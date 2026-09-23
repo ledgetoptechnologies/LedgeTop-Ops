@@ -1,4 +1,6 @@
 import { createRoot } from "react-dom/client";
+import "@ltds/ui/styles.css";
+import "../../src/client/styles.css";
 import { ClientOnboardingStaff } from "../../src/client/ClientOnboardingStaff";
 
 const calls: Array<{ path: string; body: unknown }> = [];
