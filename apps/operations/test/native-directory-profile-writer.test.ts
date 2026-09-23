@@ -3,7 +3,6 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Miniflare } from "miniflare";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import {
-  planNativeDirectoryProfileWrite,
   writeNativeDirectoryProfile,
   writeStagingEmptyEnrollmentOrganizationFixture,
   STAGING_EMPTY_ENROLLMENT_FIXTURE_ADMISSION_ID,
@@ -15,7 +14,6 @@ import {
   type NativeDirectoryProfileWrite,
   type NativeDirectoryProfileWriteOutcome,
 } from "../src/worker/native-directory-profile-writer";
-import { planNativeDirectoryRelationshipWrite } from "../src/worker/native-directory-relationship-writer";
 import { planAndExecuteNativeDirectoryOnboardingWrites } from "../src/worker/native-directory-onboarding-write-composer";
 
 let runtime: Miniflare;

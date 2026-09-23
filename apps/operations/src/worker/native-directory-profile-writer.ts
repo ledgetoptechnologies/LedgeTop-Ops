@@ -1,4 +1,3 @@
-import { executeNativeDirectoryWritePlan, nativeDirectoryWritePlan, type OpaqueNativeDirectoryWritePlan } from "./native-directory-write-plan";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const REVISION = /^(?:0|[1-9][0-9]{0,18})$/;
@@ -55,8 +54,9 @@ export type NativeDirectoryProfileWriteOutcome =
  * An opaque native Directory plan. Only the approved composer can atomically
  * execute it with another writer plan.
  */
-export type NativeDirectoryProfileWritePlan = OpaqueNativeDirectoryWritePlan<Extract<NativeDirectoryProfileWriteOutcome, { status: "written" }>>;
-export type NativeDirectoryProfileWritePlanningResult = NativeDirectoryProfileWriteOutcome | NativeDirectoryProfileWritePlan;
+type NativeDirectoryProfileWritePlan = Readonly<{ status: "planned";
+  outcome: Extract<NativeDirectoryProfileWriteOutcome, { status: "written" }>; statements: readonly D1PreparedStatement[] }>;
+type NativeDirectoryProfileWritePlanningResult = NativeDirectoryProfileWriteOutcome | NativeDirectoryProfileWritePlan;
 
 /** These constants deliberately make the only empty-enrollment write a single staging fixture. */
 export const STAGING_EMPTY_ENROLLMENT_FIXTURE_MUTATION_ID = "6d0da70c-f4f5-4b10-8988-6639b8e01531";
@@ -589,21 +589,24 @@ async function planNativeDirectoryProfileWriteInternal(db: DirectoryWriteD1, inp
   }
   statements.push(...materializations);
   statements.push(db.prepare(`DELETE FROM operations_directory_write_fences WHERE mutation_id=?`).bind(write.mutationId));
-  return nativeDirectoryWritePlan("profile", { status: "written", replayed: false,
-    mutationId: write.mutationId, recordId: write.recordId, kind: write.kind, version: nextVersion, commandIds }, statements);
+  return { status: "planned", outcome: { status: "written", replayed: false,
+    mutationId: write.mutationId, recordId: write.recordId, kind: write.kind, version: nextVersion, commandIds }, statements };
 }
 
-/** Plans a normal non-empty-enrollment profile write without executing it. */
-export async function planNativeDirectoryProfileWrite(db: DirectoryWriteD1,
-  input: NativeDirectoryProfileWrite): Promise<NativeDirectoryProfileWritePlanningResult> {
-  return planNativeDirectoryProfileWriteInternal(db, input);
+/** Trusted composition hook: validates and prepares only this writer's canonical statements. */
+export async function stageNativeDirectoryProfileWrite(db: DirectoryWriteD1, input: NativeDirectoryProfileWrite,
+  stage: (statements: readonly D1PreparedStatement[]) => void): Promise<NativeDirectoryProfileWriteOutcome> {
+  const planned = await planNativeDirectoryProfileWriteInternal(db, input);
+  if (planned.status !== "planned") return planned;
+  stage(planned.statements);
+  return planned.outcome;
 }
 
 async function executeNativeDirectoryProfileWrite(db: D1Database, input: NativeDirectoryProfileWrite,
   allowEmptyDestinations = false): Promise<NativeDirectoryProfileWriteOutcome> {
   const planned = await planNativeDirectoryProfileWriteInternal(db, input, allowEmptyDestinations);
   if (planned.status !== "planned") return planned;
-  try { if (!await executeNativeDirectoryWritePlan(db, planned, "profile")) return { status: "blocked", reason: "authority_or_atomic_write" }; }
+  try { await db.batch([...planned.statements]); }
   catch { return { status: "blocked", reason: "authority_or_atomic_write" }; }
   return planned.outcome;
 }

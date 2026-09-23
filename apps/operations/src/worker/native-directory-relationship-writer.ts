@@ -1,5 +1,4 @@
 import type { ProjectAlphaDirectoryRelationshipAction, ProjectAlphaDirectoryRelationshipCommand } from "./project-alpha-directory-relationship-api-v2";
-import { executeNativeDirectoryWritePlan, nativeDirectoryWritePlan, type OpaqueNativeDirectoryWritePlan } from "./native-directory-write-plan";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MAX_REVISION = "9223372036854775807";
@@ -33,9 +32,9 @@ export type NativeDirectoryRelationshipWriteOutcome =
   | Readonly<{ status: "rejected"; reason: "invalid_write" | "no_change" }>
   | Readonly<{ status: "conflict"; reason: "idempotency_body_conflict" | "stale_relationship" | "stale_record" }>
   | Readonly<{ status: "blocked"; reason: "destination_mismatch" | "mapping_evidence" | "terminal_predecessor" | "authority_or_race" }>;
-/** An opaque native Directory plan; it performs no mutation itself. */
-export type NativeDirectoryRelationshipWritePlan = OpaqueNativeDirectoryWritePlan<Extract<NativeDirectoryRelationshipWriteOutcome, { status: "written" }>>;
-export type NativeDirectoryRelationshipWritePlanningResult = NativeDirectoryRelationshipWriteOutcome | NativeDirectoryRelationshipWritePlan;
+type NativeDirectoryRelationshipWritePlan = Readonly<{ status: "planned";
+  outcome: Extract<NativeDirectoryRelationshipWriteOutcome, { status: "written" }>; statements: readonly D1PreparedStatement[] }>;
+type NativeDirectoryRelationshipWritePlanningResult = NativeDirectoryRelationshipWriteOutcome | NativeDirectoryRelationshipWritePlan;
 
 type Destination = Readonly<{ sourceId: string; sourceInstanceUUID: string; applicationUUID: string; historyEpoch: string; origin: string; externalCanonicalId: string }>;
 type Head = Readonly<{ publicId: string; revision: string }>;
@@ -325,20 +324,24 @@ async function planNativeDirectoryRelationshipWriteInternal(db: DirectoryWriteD1
         command.organization?.expectedRevision ?? null,supersededTerminalCommandId,JSON.stringify(command),body,Date.now()));
   }
   statements.push(db.prepare("DELETE FROM operations_directory_relationship_write_fences WHERE mutation_id=?").bind(write.mutationId));
-  return nativeDirectoryWritePlan("relationship", { status: "written", replayed: false,
-    mutationId: write.mutationId, relationshipVersion: nextVersion, reservations }, statements);
+  return { status: "planned", outcome: { status: "written", replayed: false,
+    mutationId: write.mutationId, relationshipVersion: nextVersion, reservations }, statements };
 }
 
-export async function planNativeDirectoryRelationshipWrite(db: DirectoryWriteD1,
-  input: NativeDirectoryRelationshipWrite): Promise<NativeDirectoryRelationshipWritePlanningResult> {
-  return planNativeDirectoryRelationshipWriteInternal(db, input);
+/** Trusted composition hook: validates and prepares only this writer's canonical statements. */
+export async function stageNativeDirectoryRelationshipWrite(db: DirectoryWriteD1, input: NativeDirectoryRelationshipWrite,
+  stage: (statements: readonly D1PreparedStatement[]) => void): Promise<NativeDirectoryRelationshipWriteOutcome> {
+  const planned = await planNativeDirectoryRelationshipWriteInternal(db, input);
+  if (planned.status !== "planned") return planned;
+  stage(planned.statements);
+  return planned.outcome;
 }
 
 export async function writeNativeDirectoryRelationship(db: D1Database,
   input: NativeDirectoryRelationshipWrite): Promise<NativeDirectoryRelationshipWriteOutcome> {
   const planned = await planNativeDirectoryRelationshipWriteInternal(db, input);
   if (planned.status !== "planned") return planned;
-  try { if (!await executeNativeDirectoryWritePlan(db, planned, "relationship")) return { status: "blocked", reason: "authority_or_race" }; }
+  try { await db.batch([...planned.statements]); }
   catch { return { status: "blocked", reason: "authority_or_race" }; }
   return planned.outcome;
 }
