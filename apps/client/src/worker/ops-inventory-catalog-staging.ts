@@ -7,12 +7,18 @@ const PUBLIC_ID=/^[0-9a-f]{32}$/;
 const SOURCE_ID=/^[a-z][a-z0-9_.:-]{0,127}$/;
 const QUESTION_ID=/^[a-z][a-z0-9_:-]{0,63}$/;
 const CURSOR=/^[A-Za-z0-9_-]{1,512}$/;
-const MAX_PAGE_BYTES=1024*1024;
+export const OPS_INVENTORY_CATALOG_RPC_LIMIT_BYTES=1024*1024;
+export const OPS_INVENTORY_CATALOG_RPC_HEADROOM_BYTES=64*1024;
+/** Caller contract: re-page the snapshot so canonical page bytes stay at or
+ * below this value. The remaining 64 KiB is reserved for RPC framing and any
+ * future transport metadata; the caller never attempts a near-limit call. */
+export const OPS_INVENTORY_CATALOG_MAX_PAGE_BYTES=
+  OPS_INVENTORY_CATALOG_RPC_LIMIT_BYTES-OPS_INVENTORY_CATALOG_RPC_HEADROOM_BYTES;
 
 type InventoryOption={value:string;label:string};
 type InventoryQuestion={id:string;label:string;type:"text"|"number"|"boolean"|"select"|"multi-select";required:boolean;
   helpText?:string|null;options?:InventoryOption[];minimum?:number;maximum?:number};
-export type OpsInventoryCatalogItem={publicId:string;version:string;name:string;summary:string|null;category:string;
+export type OpsInventoryCatalogItem={publicId:string;sourceVersion:string;name:string;summary:string|null;category:string;
   displayOrder:number;geometryRequirement:"none"|"optional"|"required";questions:InventoryQuestion[]};
 export type OpsInventoryCatalogPage={protocolVersion:1;sourceId:string;pageIndex:number;apiVersion:"2";sourceInstanceId:string;
   applicationId:string;historyEpoch:string;requestId:string;snapshotId:string;totalCount:number;
@@ -51,8 +57,8 @@ function validQuestion(value:unknown):value is InventoryQuestion{
   return true;
 }
 function validItem(value:unknown):value is OpsInventoryCatalogItem{
-  if(!plain(value)||!exactKeys(value,["publicId","version","name","summary","category","displayOrder","geometryRequirement","questions"]))return false;
-  if(typeof value.publicId!=="string"||!PUBLIC_ID.test(value.publicId)||typeof value.version!=="string"||!SHA256.test(value.version)
+  if(!plain(value)||!exactKeys(value,["publicId","sourceVersion","name","summary","category","displayOrder","geometryRequirement","questions"]))return false;
+  if(typeof value.publicId!=="string"||!PUBLIC_ID.test(value.publicId)||typeof value.sourceVersion!=="string"||!/^sha256-[0-9a-f]{64}$/.test(value.sourceVersion)
     ||!text(value.name,1,255)||(value.summary!==null&&!text(value.summary,1,1000))||!text(value.category,1,100)
     ||!Number.isInteger(value.displayOrder)||Number(value.displayOrder)<0||Number(value.displayOrder)>1_000_000
     ||!["none","optional","required"].includes(String(value.geometryRequirement))||!Array.isArray(value.questions)||value.questions.length>10)return false;
@@ -62,6 +68,9 @@ function canonical(value:unknown):string{
   if(Array.isArray(value))return`[${value.map(canonical).join(",")}]`;
   if(plain(value))return`{${Object.keys(value).sort().map(key=>`${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`;
   return JSON.stringify(value);
+}
+export function opsInventoryCatalogPageBytes(value:OpsInventoryCatalogPage):number{
+  return new TextEncoder().encode(canonical(value)).byteLength;
 }
 async function sha256(value:string):Promise<string>{return[...new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(value)))]
   .map(byte=>byte.toString(16).padStart(2,"0")).join("");}
@@ -80,42 +89,56 @@ function validPage(input:unknown):input is OpsInventoryCatalogPage{
 export async function stageOpsInventoryCatalogPage(env:Pick<Env,"DELIVERY_DB"|"OPS_INVENTORY_CATALOG_SYNC_ENABLED">,input:unknown):Promise<OpsInventoryCatalogStageResult>{
   if(env.OPS_INVENTORY_CATALOG_SYNC_ENABLED!=="true")return{ok:false,protocolVersion:1,code:"disabled",retryable:true};
   if(!validPage(input))return{ok:false,protocolVersion:1,code:"invalid",retryable:false};
-  const serialized=canonical(input);if(new TextEncoder().encode(serialized).byteLength>MAX_PAGE_BYTES)return{ok:false,protocolVersion:1,code:"invalid",retryable:false};
+  const serialized=canonical(input);if(new TextEncoder().encode(serialized).byteLength>OPS_INVENTORY_CATALOG_MAX_PAGE_BYTES)return{ok:false,protocolVersion:1,code:"invalid",retryable:false};
   const receiptHash=await sha256(serialized),db=env.DELIVERY_DB.withSession("first-primary");
   try{
-    const source=await db.prepare(`SELECT state FROM ops_inventory_catalog_staging_sources
+    const source=await db.prepare(`SELECT registry_id,state FROM ops_inventory_catalog_staging_sources
       WHERE source_id=? AND source_instance_id=? AND application_id=? AND history_epoch=? AND authority_kind='operations-worker'`)
-      .bind(input.sourceId,input.sourceInstanceId,input.applicationId,input.historyEpoch).first<{state:string}>();
+      .bind(input.sourceId,input.sourceInstanceId,input.applicationId,input.historyEpoch).first<{registry_id:number;state:string}>();
     if(source?.state!=="staging")return{ok:false,protocolVersion:1,code:"source-unavailable",retryable:false};
     const existing=await db.prepare(`SELECT receipt_hash FROM ops_inventory_catalog_staging_pages
-      WHERE source_id=? AND snapshot_id=? AND page_index=?`).bind(input.sourceId,input.snapshotId,input.pageIndex).first<{receipt_hash:string}>();
+      WHERE registry_id=? AND snapshot_id=? AND page_index=?`).bind(source.registry_id,input.snapshotId,input.pageIndex).first<{receipt_hash:string}>();
     if(existing)return existing.receipt_hash===receiptHash?{ok:true,protocolVersion:1,status:"duplicate",receiptHash}
       :{ok:false,protocolVersion:1,code:"conflict",retryable:false};
     const snapshot=await db.prepare(`SELECT total_count FROM ops_inventory_catalog_staging_pages
-      WHERE source_id=? AND snapshot_id=? LIMIT 1`).bind(input.sourceId,input.snapshotId).first<{total_count:number}>();
+      WHERE registry_id=? AND snapshot_id=? LIMIT 1`).bind(source.registry_id,input.snapshotId).first<{total_count:number}>();
     if(snapshot&&snapshot.total_count!==input.totalCount)return{ok:false,protocolVersion:1,code:"conflict",retryable:false};
     const stagedCount=Number(await db.prepare(`SELECT COUNT(*) count FROM ops_inventory_catalog_staging_items
-      WHERE source_id=? AND snapshot_id=?`).bind(input.sourceId,input.snapshotId).first("count"));
+      WHERE registry_id=? AND snapshot_id=?`).bind(source.registry_id,input.snapshotId).first("count"));
     if(stagedCount+input.items.length>input.totalCount)return{ok:false,protocolVersion:1,code:"conflict",retryable:false};
     if(input.items.length){
       const placeholders=input.items.map(()=>"?").join(",");
       const duplicate=await db.prepare(`SELECT public_id FROM ops_inventory_catalog_staging_items
-        WHERE source_id=? AND snapshot_id=? AND public_id IN (${placeholders}) LIMIT 1`)
-        .bind(input.sourceId,input.snapshotId,...input.items.map(item=>item.publicId)).first();
+        WHERE registry_id=? AND snapshot_id=? AND public_id IN (${placeholders}) LIMIT 1`)
+        .bind(source.registry_id,input.snapshotId,...input.items.map(item=>item.publicId)).first();
       if(duplicate)return{ok:false,protocolVersion:1,code:"conflict",retryable:false};
     }
-    await db.batch([
+    const results=await db.batch([
       db.prepare(`INSERT INTO ops_inventory_catalog_staging_pages
-        (source_id,snapshot_id,page_index,request_id,total_count,item_count,next_cursor,receipt_hash) VALUES(?,?,?,?,?,?,?,?)`)
-        .bind(input.sourceId,input.snapshotId,input.pageIndex,input.requestId,input.totalCount,input.items.length,input.nextCursor,receiptHash),
+        (registry_id,source_id,snapshot_id,page_index,request_id,total_count,item_count,next_cursor,receipt_hash)
+        SELECT registry_id,?,?,?,?,?,?,?,? FROM ops_inventory_catalog_staging_sources
+        WHERE registry_id=? AND source_id=? AND source_instance_id=? AND application_id=? AND history_epoch=?
+          AND authority_kind='operations-worker' AND state='staging'`)
+        .bind(input.sourceId,input.snapshotId,input.pageIndex,input.requestId,input.totalCount,input.items.length,input.nextCursor,receiptHash,
+          source.registry_id,input.sourceId,input.sourceInstanceId,input.applicationId,input.historyEpoch),
       ...input.items.map(item=>db.prepare(`INSERT INTO ops_inventory_catalog_staging_items
-        (source_id,snapshot_id,public_id,page_index,content_version,item_json) VALUES(?,?,?,?,?,?)`)
-        .bind(input.sourceId,input.snapshotId,item.publicId,input.pageIndex,item.version,canonical(item))),
+        (registry_id,snapshot_id,public_id,page_index,content_version,item_json) VALUES(?,?,?,?,?,?)`)
+        .bind(source.registry_id,input.snapshotId,item.publicId,input.pageIndex,item.sourceVersion,canonical(item))),
     ]);
+    if(Number(results[0]?.meta.changes??0)!==1)return{ok:false,protocolVersion:1,code:"source-unavailable",retryable:false};
     return{ok:true,protocolVersion:1,status:"staged",receiptHash};
   }catch(error){
     const message=error instanceof Error?error.message:"";
-    if(/UNIQUE|constraint/i.test(message))return{ok:false,protocolVersion:1,code:"conflict",retryable:false};
+    if(/UNIQUE|constraint/i.test(message)){
+      const source=await db.prepare(`SELECT registry_id,state FROM ops_inventory_catalog_staging_sources
+        WHERE source_id=? AND source_instance_id=? AND application_id=? AND history_epoch=? AND authority_kind='operations-worker'`)
+        .bind(input.sourceId,input.sourceInstanceId,input.applicationId,input.historyEpoch).first<{registry_id:number;state:string}>();
+      if(!source||source.state!=="staging")return{ok:false,protocolVersion:1,code:"source-unavailable",retryable:false};
+      const replay=await db.prepare(`SELECT receipt_hash FROM ops_inventory_catalog_staging_pages
+        WHERE registry_id=? AND snapshot_id=? AND page_index=?`).bind(source.registry_id,input.snapshotId,input.pageIndex).first<{receipt_hash:string}>();
+      if(replay?.receipt_hash===receiptHash)return{ok:true,protocolVersion:1,status:"duplicate",receiptHash};
+      return{ok:false,protocolVersion:1,code:"conflict",retryable:false};
+    }
     return{ok:false,protocolVersion:1,code:"temporarily-unavailable",retryable:true};
   }
 }

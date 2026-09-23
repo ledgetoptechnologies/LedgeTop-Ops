@@ -2,13 +2,14 @@ import { readFileSync } from "node:fs";
 import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("cloudflare:workers",()=>({WorkerEntrypoint:class{}}));
-import { stageOpsInventoryCatalogPage, type OpsInventoryCatalogPage } from "../src/worker/ops-inventory-catalog-staging";
+import { OPS_INVENTORY_CATALOG_MAX_PAGE_BYTES, opsInventoryCatalogPageBytes,
+  stageOpsInventoryCatalogPage, type OpsInventoryCatalogItem, type OpsInventoryCatalogPage } from "../src/worker/ops-inventory-catalog-staging";
 import type { Env } from "../src/worker/types";
 import { splitD1MigrationStatements } from "./helpers/d1-migrations";
 
 const source={sourceId:"project-alpha:primary",sourceInstanceId:"11111111-1111-4111-8111-111111111111",
   applicationId:"22222222-2222-4222-8222-222222222222",historyEpoch:"33333333-3333-4333-8333-333333333333"};
-const item={publicId:"a".repeat(32),version:"b".repeat(64),name:"Site photography",summary:null,category:"Photography",
+const item={publicId:"a".repeat(32),sourceVersion:`sha256-${"b".repeat(64)}`,name:"Site photography",summary:null,category:"Photography",
   displayOrder:10,geometryRequirement:"optional" as const,questions:[{id:"notes",label:"Notes",type:"text" as const,required:false}]};
 const page=():OpsInventoryCatalogPage=>({protocolVersion:1,...source,pageIndex:0,apiVersion:"2",
   requestId:"44444444-4444-4444-8444-444444444444",snapshotId:"c".repeat(64),totalCount:1,items:[item],nextCursor:null});
@@ -64,6 +65,44 @@ describe("route-less Operations inventory catalog staging",()=>{
     expect(await count("ops_inventory_catalog_staging_items")).toBe(1);
   });
 
+  it("reconciles concurrent identical receipt insertion as an idempotent duplicate",async()=>{
+    await provision();
+    const results=await Promise.all([stageOpsInventoryCatalogPage(env(),page()),stageOpsInventoryCatalogPage(env(),page())]);
+    expect(results.map(result=>result.ok&&result.status).sort()).toEqual(["duplicate","staged"]);
+    expect(await count("ops_inventory_catalog_staging_pages")).toBe(1);
+    expect(await count("ops_inventory_catalog_staging_items")).toBe(1);
+  });
+
+  it("atomically rechecks staging authority inside the write batch",async()=>{
+    await provision();let revoked=false;
+    const racedDb=new Proxy(db,{get(target,property){
+      if(property==="withSession")return()=>racedDb;
+      if(property==="batch")return async(statements:D1PreparedStatement[])=>{
+        if(!revoked){revoked=true;await db.prepare("UPDATE ops_inventory_catalog_staging_sources SET state='disabled'").run();}
+        return db.batch(statements);
+      };
+      const value=Reflect.get(target,property);return typeof value==="function"?value.bind(target):value;
+    }});
+    await expect(stageOpsInventoryCatalogPage({DELIVERY_DB:racedDb,
+      OPS_INVENTORY_CATALOG_SYNC_ENABLED:"true"} as Env,page())).resolves.toMatchObject({ok:false,code:"source-unavailable"});
+    expect(await count("ops_inventory_catalog_staging_pages")).toBe(0);
+    expect(await count("ops_inventory_catalog_staging_items")).toBe(0);
+  });
+
+  it("qualifies snapshot keys by immutable registry generation across source rotation",async()=>{
+    await provision();await expect(stageOpsInventoryCatalogPage(env(),page())).resolves.toMatchObject({ok:true,status:"staged"});
+    await db.prepare("UPDATE ops_inventory_catalog_staging_sources SET state='disabled'").run();
+    const rotated={...source,sourceInstanceId:"77777777-7777-4777-8777-777777777777",
+      historyEpoch:"88888888-8888-4888-8888-888888888888"};
+    await db.prepare(`INSERT INTO ops_inventory_catalog_staging_sources
+      (source_id,source_instance_id,application_id,history_epoch,state) VALUES(?,?,?,?,?)`)
+      .bind(rotated.sourceId,rotated.sourceInstanceId,rotated.applicationId,rotated.historyEpoch,"staging").run();
+    await expect(stageOpsInventoryCatalogPage(env(),{...page(),...rotated,
+      requestId:"99999999-9999-4999-8999-999999999999"})).resolves.toMatchObject({ok:true,status:"staged"});
+    expect(await count("ops_inventory_catalog_staging_pages")).toBe(2);
+    expect(await count("ops_inventory_catalog_staging_items")).toBe(2);
+  });
+
   it("rejects duplicate IDs within a page and across distinct pages in one snapshot",async()=>{
     await provision();
     await expect(stageOpsInventoryCatalogPage(env(),{...page(),items:[item,{...item}]})).resolves.toMatchObject({ok:false,code:"invalid"});
@@ -79,6 +118,28 @@ describe("route-less Operations inventory catalog staging",()=>{
     await expect(stageOpsInventoryCatalogPage(env(),{...page(),nextCursor:"not+a+base64url"})).resolves.toMatchObject({ok:false,code:"invalid"});
     expect(await count("ops_inventory_catalog_staging_pages")).toBe(0);
     expect(await count("ops_inventory_catalog_staging_items")).toBe(0);
+  });
+
+  it("reserves explicit RPC envelope headroom at the near-limit byte boundary",async()=>{
+    await provision();
+    const largeItem=(index:number):OpsInventoryCatalogItem=>({
+      publicId:index.toString(16).padStart(32,"0"),sourceVersion:`sha256-${index.toString(16).padStart(64,"0")}`,
+      name:`Large service ${index}`,summary:"s".repeat(1000),category:"C".repeat(100),displayOrder:index,
+      geometryRequirement:"optional",questions:Array.from({length:10},(_,question)=>({
+        id:`question_${question}`,label:"Q".repeat(200),type:"select" as const,required:true,helpText:"H".repeat(500),
+        options:Array.from({length:50},(_,option)=>({value:`value_${option}`,label:"L".repeat(200)})),
+      })),
+    });
+    let accepted=page(),rejected=page();
+    for(let size=1;size<=200;size++){
+      const candidate={...page(),totalCount:size,items:Array.from({length:size},(_,index)=>largeItem(index+1))};
+      if(opsInventoryCatalogPageBytes(candidate)>OPS_INVENTORY_CATALOG_MAX_PAGE_BYTES){rejected=candidate;break;}
+      accepted=candidate;
+    }
+    expect(opsInventoryCatalogPageBytes(accepted)).toBeGreaterThan(OPS_INVENTORY_CATALOG_MAX_PAGE_BYTES*0.8);
+    expect(opsInventoryCatalogPageBytes(rejected)).toBeGreaterThan(OPS_INVENTORY_CATALOG_MAX_PAGE_BYTES);
+    await expect(stageOpsInventoryCatalogPage(env(),rejected)).resolves.toMatchObject({ok:false,code:"invalid"});
+    await expect(stageOpsInventoryCatalogPage(env(),accepted)).resolves.toMatchObject({ok:true,status:"staged"});
   });
 
   it("keeps staged rows invisible to the existing live catalog tables",async()=>{
