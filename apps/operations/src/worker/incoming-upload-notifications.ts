@@ -1,5 +1,5 @@
 import { hasPermission } from "./acl";
-import { sendNotificationMail } from "./mailer";
+import { NotificationMailDeliveryUncertain, sendNotificationMail } from "./mailer";
 import type { Env } from "./types";
 
 const MAX_ATTEMPTS = 3;
@@ -146,7 +146,17 @@ export async function processIncomingUploadNotifications(env: Env): Promise<numb
       await env.DELIVERY_DB.prepare(`UPDATE incoming_upload_notification_digests SET
         status='sent',delivered_at=datetime('now'),lease_expires_at=NULL,last_error_code=NULL,updated_at=datetime('now')
         WHERE id=? AND status='processing'`).bind(row.id).run();
-    } catch {
+    } catch (error) {
+      // The mail adapter reached an acceptance-ambiguous point. Retrying can
+      // deliver a duplicate, so retain a bounded terminal record for an
+      // operator to reconcile instead of treating it as a transport retry.
+      if (error instanceof NotificationMailDeliveryUncertain) {
+        await env.DELIVERY_DB.prepare(`UPDATE incoming_upload_notification_digests SET
+          status='failed',lease_expires_at=NULL,
+          last_error_code='mail-delivery-uncertain-reconciliation-required',updated_at=datetime('now')
+          WHERE id=? AND status='processing'`).bind(row.id).run();
+        continue;
+      }
       await retryOrFail(env, row.id, claimedRow.attempt_count, "mail-transport-failed");
     }
   }
