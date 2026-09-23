@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   probe: vi.fn(),
   directory: vi.fn(),
   projects: vi.fn(),
+  catalog: vi.fn(),
   audit: vi.fn(),
   batch: vi.fn(),
 }));
@@ -25,6 +26,10 @@ vi.mock("../src/worker/project-alpha-directory-command-api-v2", () => ({
 vi.mock("../src/worker/project-alpha-project-inventory-api-v2", () => ({
   PROJECT_ALPHA_PROJECT_INVENTORY_ENDPOINT: { method: "GET", path: "/api/v2/projects/inventory", requiredCapability: "projects.inventory.read" },
   readProjectAlphaProjectInventoryAfterVerifiedCapabilities: mocks.projects,
+}));
+vi.mock("../src/worker/project-alpha-catalog-inventory-api-v2", () => ({
+  PROJECT_ALPHA_CATALOG_INVENTORY_ENDPOINT: { method: "GET", path: "/api/v2/catalog/inventory", requiredCapability: "catalog.inventory.read" },
+  readProjectAlphaCatalogInventoryAfterVerifiedCapabilities: mocks.catalog,
 }));
 vi.mock("../src/worker/request-security", () => ({ auditStatement: mocks.audit }));
 
@@ -69,7 +74,7 @@ beforeEach(() => {
     expectedSourceInstanceId: sourceInstanceId, expectedApplicationId: applicationId, expectedHistoryEpoch: historyEpoch,
   }) }));
   mocks.probe.mockResolvedValue({ status: "verified", sourceInstanceId, applicationId, historyEpoch, requestId,
-    grantedCapabilities: ["api.capabilities.read", "directory.inventory.read", "projects.inventory.read"] });
+    grantedCapabilities: ["api.capabilities.read", "directory.inventory.read", "projects.inventory.read", "catalog.inventory.read"] });
   mocks.directory.mockResolvedValue({ status: "observed", inventory: {
     sourceId, sourceInstanceId, applicationId, historyEpoch, requestId,
     authorizationGeneration: "9", nextCursor: null, resources: [{ type: "organization", publicId: "e".repeat(32),
@@ -80,6 +85,10 @@ beforeEach(() => {
     apiVersion: "2", sourceInstanceId, applicationId, historyEpoch, requestId,
     authorizationGeneration: "12", nextCursor: null, projects: [{ externalId: "private-project-record",
       publicId: "a".repeat(32), revision: "2", projectionSha256: "b".repeat(64), status: "active", archived: false }],
+  } });
+  mocks.catalog.mockResolvedValue({ status: "observed", httpStatus: 200, response: {
+    apiVersion: "2", sourceInstanceId, applicationId, historyEpoch, requestId,
+    snapshotId: "c".repeat(64), totalCount: 1, items: [{ opaque: true }], nextCursor: null,
   } });
   mocks.audit.mockResolvedValue({});
   mocks.batch.mockResolvedValue([]);
@@ -92,6 +101,7 @@ describe("Project Alpha API-v2 read acceptance route", () => {
     expect(mocks.probe).not.toHaveBeenCalled();
     expect(mocks.directory).not.toHaveBeenCalled();
     expect(mocks.projects).not.toHaveBeenCalled();
+    expect(mocks.catalog).not.toHaveBeenCalled();
   });
 
   it("requires an administrator and deny-aware global integrations.manage", async () => {
@@ -110,21 +120,27 @@ describe("Project Alpha API-v2 read acceptance route", () => {
         expect.objectContaining({ method: "GET", path: "/api/v2/directory/inventory", requiredCapability: "directory.inventory.read" }),
         expect.objectContaining({ method: "GET", path: "/api/v2/projects/inventory", requiredCapability: "projects.inventory.read" }),
       ]));
+    expect(mocks.probe).toHaveBeenNthCalledWith(2, expect.objectContaining({ apiKey: "server-only-api-key" }), [], fetch,
+      [expect.objectContaining({ method: "GET", path: "/api/v2/catalog/inventory", requiredCapability: "catalog.inventory.read" })]);
     expect(mocks.probe.mock.invocationCallOrder[0]).toBeLessThan(mocks.directory.mock.invocationCallOrder[0]!);
     expect(mocks.probe.mock.invocationCallOrder[0]).toBeLessThan(mocks.projects.mock.invocationCallOrder[0]!);
+    expect(mocks.probe.mock.invocationCallOrder[0]).toBeLessThan(mocks.catalog.mock.invocationCallOrder[0]!);
     expect(mocks.directory).toHaveBeenCalledWith(expect.anything(), sourceId, { type: "all", limit: 200 }, fetch);
     expect(mocks.projects).toHaveBeenCalledWith(expect.anything(), { limit: 200 }, fetch);
+    expect(mocks.catalog).toHaveBeenCalledWith(expect.anything(), { limit: 200 }, fetch);
   });
 
   it("returns only safe status, request IDs, counts, hashes, and identity/contract matches", async () => {
     const body = await (await fixture().send()).json() as Record<string, any>;
     expect(body).toMatchObject({ sourceId, readOnly: true,
       capabilities: { status: "verified", requestId, sourceInstanceId, applicationId, historyEpoch,
-        capabilityCount: 3, exactIdentityMatch: true, exactContractMatch: true },
+        capabilityCount: 4, exactIdentityMatch: true, exactContractMatch: true },
       directory: { status: "observed", requestId, authorizationGeneration: "9", count: 1, hasMore: false,
         metadataSha256: expect.stringMatching(/^[0-9a-f]{64}$/) },
       projects: { status: "observed", requestId, authorizationGeneration: "12", count: 1, hasMore: false,
         metadataSha256: expect.stringMatching(/^[0-9a-f]{64}$/) },
+      catalog: { status: "observed", requestId, snapshotId: "c".repeat(64), totalCount: 1, pageCount: 1,
+        hasMore: false, envelopeSha256: expect.stringMatching(/^[0-9a-f]{64}$/) },
     });
     const serialized = JSON.stringify(body);
     for (const privateValue of ["server-only-api-key", "private-pa.example.test", "private-customer-record", "private-project-record", "e".repeat(32), "a".repeat(32)])
@@ -143,6 +159,21 @@ describe("Project Alpha API-v2 read acceptance route", () => {
     expect(body.projects).toEqual({ status: "not_attempted", reason: "capabilities" });
     expect(mocks.directory).not.toHaveBeenCalled();
     expect(mocks.projects).not.toHaveBeenCalled();
+    expect(mocks.catalog).not.toHaveBeenCalled();
+  });
+
+  it("keeps established inventories diagnostic when the additive catalog endpoint is unavailable", async () => {
+    mocks.probe.mockResolvedValueOnce({ status: "verified", sourceInstanceId, applicationId, historyEpoch, requestId,
+      grantedCapabilities: ["api.capabilities.read", "directory.inventory.read", "projects.inventory.read"] });
+    mocks.probe.mockResolvedValueOnce({ status: "incompatible", reason: "missing_endpoint", httpStatus: 404, requestId });
+    const body = await (await fixture().send()).json() as Record<string, any>;
+    expect(body.directory.status).toBe("observed");
+    expect(body.projects.status).toBe("observed");
+    expect(body.catalog).toEqual({ status: "not_attempted", reason: "capabilities", capability: {
+      status: "incompatible", reason: "missing_endpoint", httpStatus: 404, requestId,
+      exactIdentityMatch: false, exactContractMatch: false,
+    } });
+    expect(mocks.catalog).not.toHaveBeenCalled();
   });
 
   it("rejects unknown body members and reports a disabled selected deployment connection without secrets", async () => {
@@ -150,7 +181,7 @@ describe("Project Alpha API-v2 read acceptance route", () => {
     mocks.configured.mockResolvedValueOnce({ status: "disabled", sourceId });
     const body = await (await fixture().send()).json() as Record<string, any>;
     expect(body).toMatchObject({ capabilities: { status: "disabled", exactIdentityMatch: false, exactContractMatch: false },
-      directory: { status: "not_attempted", reason: "connection" }, projects: { status: "not_attempted", reason: "connection" } });
+      directory: { status: "not_attempted", reason: "connection" }, projects: { status: "not_attempted", reason: "connection" }, catalog: { status: "not_attempted", reason: "connection" } });
     expect(JSON.stringify(body)).not.toContain("browser-supplied-secret");
   });
 

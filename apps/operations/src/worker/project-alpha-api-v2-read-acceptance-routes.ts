@@ -16,6 +16,11 @@ import {
   readProjectAlphaProjectInventoryAfterVerifiedCapabilities,
   type ProjectAlphaProjectInventoryOutcome,
 } from "./project-alpha-project-inventory-api-v2";
+import {
+  PROJECT_ALPHA_CATALOG_INVENTORY_ENDPOINT,
+  readProjectAlphaCatalogInventoryAfterVerifiedCapabilities,
+  type ProjectAlphaCatalogInventoryOutcome,
+} from "./project-alpha-catalog-inventory-api-v2";
 import type { Env, StaffPrincipal } from "./types";
 
 type Variables = { principal: StaffPrincipal; administrator: boolean };
@@ -125,11 +130,26 @@ async function safeProject(outcome: ProjectAlphaProjectInventoryOutcome): Promis
   };
 }
 
+/** Item contents intentionally remain uninspected and unreturned until PA
+ * publishes its complete question schema. This proves only the immutable
+ * snapshot envelope required for a later, separately authorized sync. */
+async function safeCatalog(outcome: ProjectAlphaCatalogInventoryOutcome): Promise<Record<string, unknown>> {
+  if (outcome.status !== "observed") return outcomeFailure(outcome);
+  const inventory = outcome.response;
+  return {
+    status: "observed", requestId: inventory.requestId, snapshotId: inventory.snapshotId,
+    totalCount: inventory.totalCount, pageCount: inventory.items.length, hasMore: inventory.nextCursor !== null,
+    envelopeSha256: await sha256({ snapshotId: inventory.snapshotId, totalCount: inventory.totalCount,
+      itemCount: inventory.items.length, hasMore: inventory.nextCursor !== null }),
+  };
+}
+
 function acceptanceSummary(
   sourceIdValue: string,
   capabilities: Record<string, unknown>,
   directory: Record<string, unknown>,
   projects: Record<string, unknown>,
+  catalog: Record<string, unknown>,
 ): Record<string, unknown> {
   return {
     sourceId: sourceIdValue,
@@ -137,6 +157,7 @@ function acceptanceSummary(
     capabilities,
     directory,
     projects,
+    catalog,
   };
 }
 
@@ -167,16 +188,23 @@ export function registerProjectAlphaApiV2ReadAcceptanceRoutes(app: App): void {
         ]);
         if (probe.status !== "verified") {
           const unavailable = { status: "not_attempted", reason: "capabilities" };
-          return acceptanceSummary(requestedSourceId, safeProbe(probe), unavailable, unavailable);
+          return acceptanceSummary(requestedSourceId, safeProbe(probe), unavailable, unavailable, unavailable);
         }
         const directory = await readProjectAlphaDirectoryInventoryAfterVerifiedCapabilities(connection, requestedSourceId,
           { type: "all", limit: 200 }, fetch);
         const projects = await readProjectAlphaProjectInventoryAfterVerifiedCapabilities(connection, { limit: 200 }, fetch);
+        // Catalog inventory is additive. Its absence must not make the
+        // established directory/project acceptance diagnostics unavailable.
+        const catalogProbe = await probeProjectAlphaApiV2(connection, [], fetch, [PROJECT_ALPHA_CATALOG_INVENTORY_ENDPOINT]);
+        const catalog = catalogProbe.status === "verified"
+          ? await safeCatalog(await readProjectAlphaCatalogInventoryAfterVerifiedCapabilities(connection, { limit: 200 }, fetch))
+          : { status: "not_attempted", reason: "capabilities", capability: safeProbe(catalogProbe) };
         return acceptanceSummary(requestedSourceId, safeProbe(probe), await safeDirectory(directory),
-          await safeProject(projects));
+          await safeProject(projects), catalog);
       });
     const result = selected.status === "enabled" ? selected.value : acceptanceSummary(requestedSourceId,
       { status: selected.status, exactIdentityMatch: false, exactContractMatch: false },
+      { status: "not_attempted", reason: "connection" },
       { status: "not_attempted", reason: "connection" },
       { status: "not_attempted", reason: "connection" });
 
