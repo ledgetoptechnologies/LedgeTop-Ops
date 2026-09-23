@@ -275,10 +275,17 @@ key.
 
 Deploy the Client staging Worker export before deploying the Operations
 staging Worker that binds `OPS_INVENTORY_CATALOG_STAGING` to
-`ledgetop-clients-staging`/`OpsInventoryCatalogStagingIngress`. Keep
-`PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED=false`; the binding alone
-does not authorize a catalog run, publish staged rows, or activate portal
-catalog reads. Use the same Client-before-Operations order for production.
+`ledgetop-clients-staging`/`OpsInventoryCatalogStagingIngress` and
+`OPS_INVENTORY_CATALOG_PROMOTION` to the route-less
+`OpsInventoryCatalogPromotionCoordinator`. Keep both
+`PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED=false` and
+`PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED=false`; bindings alone
+do not authorize a catalog run or promotion. A deliberate invocation must pin
+the operator-selected registry ID, source ID, and expected Client checkpoint
+sequence; it must never discover or advance that authority automatically.
+Promotion still does not activate client access, public links, draft quotes,
+or portal catalog reads. Use the same Client-before-Operations order for
+production.
 
 Client migration `0189_primary_staff_folder_bindings.sql` must be applied and
 verified before deploying the Operations build that exposes primary Client

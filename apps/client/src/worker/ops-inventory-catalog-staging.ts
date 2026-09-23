@@ -20,7 +20,7 @@ type InventoryQuestion={id:string;label:string;type:"text"|"number"|"boolean"|"s
   helpText?:string|null;options?:InventoryOption[];minimum?:number;maximum?:number};
 export type OpsInventoryCatalogItem={publicId:string;sourceVersion:string;name:string;summary:string|null;category:string;
   displayOrder:number;geometryRequirement:"none"|"optional"|"required";questions:InventoryQuestion[]};
-export type OpsInventoryCatalogPage={protocolVersion:1;sourceId:string;pageIndex:number;apiVersion:"2";sourceInstanceId:string;
+export type OpsInventoryCatalogPage={protocolVersion:1;registryId:number;sourceId:string;pageIndex:number;apiVersion:"2";sourceInstanceId:string;
   applicationId:string;historyEpoch:string;requestId:string;snapshotId:string;totalCount:number;
   items:OpsInventoryCatalogItem[];nextCursor:string|null};
 export type OpsInventoryCatalogStageResult=
@@ -75,8 +75,8 @@ export function opsInventoryCatalogPageBytes(value:OpsInventoryCatalogPage):numb
 async function sha256(value:string):Promise<string>{return[...new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(value)))]
   .map(byte=>byte.toString(16).padStart(2,"0")).join("");}
 function validPage(input:unknown):input is OpsInventoryCatalogPage{
-  if(!plain(input)||!exactKeys(input,["protocolVersion","sourceId","pageIndex","apiVersion","sourceInstanceId","applicationId","historyEpoch","requestId","snapshotId","totalCount","items","nextCursor"]))return false;
-  if(input.protocolVersion!==1||input.apiVersion!=="2"||typeof input.sourceId!=="string"||!SOURCE_ID.test(input.sourceId)
+  if(!plain(input)||!exactKeys(input,["protocolVersion","registryId","sourceId","pageIndex","apiVersion","sourceInstanceId","applicationId","historyEpoch","requestId","snapshotId","totalCount","items","nextCursor"]))return false;
+  if(input.protocolVersion!==1||!Number.isSafeInteger(input.registryId)||Number(input.registryId)<1||input.apiVersion!=="2"||typeof input.sourceId!=="string"||!SOURCE_ID.test(input.sourceId)
     ||!Number.isInteger(input.pageIndex)||Number(input.pageIndex)<0||Number(input.pageIndex)>100_000
     ||typeof input.sourceInstanceId!=="string"||!UUID_V4.test(input.sourceInstanceId)||typeof input.applicationId!=="string"||!UUID_V4.test(input.applicationId)
     ||typeof input.historyEpoch!=="string"||!UUID_V4.test(input.historyEpoch)||typeof input.requestId!=="string"||!UUID_V4.test(input.requestId)
@@ -93,8 +93,8 @@ export async function stageOpsInventoryCatalogPage(env:Pick<Env,"DELIVERY_DB"|"O
   const receiptHash=await sha256(serialized),db=env.DELIVERY_DB.withSession("first-primary");
   try{
     const source=await db.prepare(`SELECT registry_id,state FROM ops_inventory_catalog_staging_sources
-      WHERE source_id=? AND source_instance_id=? AND application_id=? AND history_epoch=? AND authority_kind='operations-worker'`)
-      .bind(input.sourceId,input.sourceInstanceId,input.applicationId,input.historyEpoch).first<{registry_id:number;state:string}>();
+      WHERE registry_id=? AND source_id=? AND source_instance_id=? AND application_id=? AND history_epoch=? AND authority_kind='operations-worker'`)
+      .bind(input.registryId,input.sourceId,input.sourceInstanceId,input.applicationId,input.historyEpoch).first<{registry_id:number;state:string}>();
     if(source?.state!=="staging")return{ok:false,protocolVersion:1,code:"source-unavailable",retryable:false};
     const existing=await db.prepare(`SELECT receipt_hash FROM ops_inventory_catalog_staging_pages
       WHERE registry_id=? AND snapshot_id=? AND page_index=?`).bind(source.registry_id,input.snapshotId,input.pageIndex).first<{receipt_hash:string}>();
@@ -131,8 +131,8 @@ export async function stageOpsInventoryCatalogPage(env:Pick<Env,"DELIVERY_DB"|"O
     const message=error instanceof Error?error.message:"";
     if(/UNIQUE|constraint/i.test(message)){
       const source=await db.prepare(`SELECT registry_id,state FROM ops_inventory_catalog_staging_sources
-        WHERE source_id=? AND source_instance_id=? AND application_id=? AND history_epoch=? AND authority_kind='operations-worker'`)
-        .bind(input.sourceId,input.sourceInstanceId,input.applicationId,input.historyEpoch).first<{registry_id:number;state:string}>();
+        WHERE registry_id=? AND source_id=? AND source_instance_id=? AND application_id=? AND history_epoch=? AND authority_kind='operations-worker'`)
+        .bind(input.registryId,input.sourceId,input.sourceInstanceId,input.applicationId,input.historyEpoch).first<{registry_id:number;state:string}>();
       if(!source||source.state!=="staging")return{ok:false,protocolVersion:1,code:"source-unavailable",retryable:false};
       const replay=await db.prepare(`SELECT receipt_hash FROM ops_inventory_catalog_staging_pages
         WHERE registry_id=? AND snapshot_id=? AND page_index=?`).bind(source.registry_id,input.snapshotId,input.pageIndex).first<{receipt_hash:string}>();

@@ -360,14 +360,20 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.deepEqual(config.ratelimits.map((item) => [item.name, item.namespace_id, item.simple.limit]), expectedRateLimits);
 });
 
-test("the deployed Operations Worker keeps catalog staging private and default-off", () => {
-  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "8c996c56f1268728eb3ea6a811f1cb330a0054e8b80bc4f9eeb90fdc8eb978cd");
+test("the deployed Operations Worker keeps catalog staging and promotion private and default-off", () => {
+  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "a719e40f9e749253c89fed8e8edb1f2045da5d0fcfafb06bdd900f1fb69f020e");
   const config = readJson("apps/operations/wrangler.jsonc");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED, "false");
+  assert.equal(config.vars.PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED, "false");
   assert.deepEqual(config.services?.find((service) => service.binding === "OPS_INVENTORY_CATALOG_STAGING"), {
     binding: "OPS_INVENTORY_CATALOG_STAGING",
     service: "ledgetop-clients",
     entrypoint: "OpsInventoryCatalogStagingIngress",
+  });
+  assert.deepEqual(config.services?.find((service) => service.binding === "OPS_INVENTORY_CATALOG_PROMOTION"), {
+    binding: "OPS_INVENTORY_CATALOG_PROMOTION",
+    service: "ledgetop-clients",
+    entrypoint: "OpsInventoryCatalogPromotionCoordinator",
   });
   assert(!config.triggers.crons.some((cron) => /catalog/i.test(cron)));
 });
