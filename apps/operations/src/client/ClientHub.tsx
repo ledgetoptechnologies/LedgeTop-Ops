@@ -311,7 +311,8 @@ function ProjectAdoptionAction({ project, client, contextVersion, contextSignal,
     }
   };
   return <div className="client-project-adoption-action">
-    <button type="button" className="button-ghost button-small" disabled={state.busy || state.complete} onClick={() => void run()}>
+    <button type="button" className="button-ghost button-small" aria-label={`Link existing project: ${project.name}`}
+      disabled={state.busy || state.complete} onClick={() => void run()}>
       {state.busy ? "Reviewing and linking…" : state.complete ? "Bind queued" : "Link existing project"}</button>
     {state.error && <p role="alert">{state.error} <button type="button" className="button-ghost button-small" onClick={() => void run()}>Retry link</button></p>}
   </div>;

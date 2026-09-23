@@ -127,10 +127,11 @@ test("authorized staff explicitly review, reserve and bind one exact existing pr
   }, detail(true));
   page.once("dialog", dialog => dialog.accept());
   await page.goto(path);
-  const action = section(page).getByRole("button", { name: "Link existing project", exact: true });
+  const action = section(page).getByRole("button", { name: "Link existing project: Business project initial", exact: true });
   await expect(action).toBeVisible();
   await action.click();
-  await expect(section(page).getByRole("button", { name: "Bind queued", exact: true })).toBeDisabled();
+  await expect(action).toBeDisabled();
+  await expect(action).toHaveText("Bind queued");
   expect(calls.map(call => call.path)).toEqual([
     "/api/admin/project-alpha/private/projects/adoption/review",
     "/api/admin/project-alpha/private/projects/adoption/reserve",
@@ -150,5 +151,31 @@ test("authorized staff explicitly review, reserve and bind one exact existing pr
 test("project linking is absent without the server-issued staff capability", async ({ page }) => {
   await mock(page, route => route.fulfill({ status: 503 }), detail(false));
   await page.goto(path);
-  await expect(section(page).getByRole("button", { name: "Link existing project", exact: true })).toHaveCount(0);
+  await expect(section(page).getByRole("button", { name: /Link existing project:/ })).toHaveCount(0);
+});
+
+test("transient project review retry reuses the exact idempotency key", async ({ page }) => {
+  const reviewKeys: Array<string | undefined> = [];
+  let reviews = 0;
+  await mock(page, async (route, url) => {
+    const request = route.request();
+    if (url.pathname.endsWith("/review")) {
+      reviewKeys.push(request.headers()["idempotency-key"]);
+      if (++reviews === 1) return route.fulfill({ status: 503, json: { error: "Review temporarily unavailable" } });
+      return route.fulfill({ json: { status: "reviewed", reviewItemId: "review-one" } });
+    }
+    if (url.pathname.endsWith("/reserve")) return route.fulfill({ json: { status: "reserved", reservationId: "reservation-one" } });
+    if (url.pathname.endsWith("/bind")) return route.fulfill({ json: { status: "planned", commandId: "command-one" } });
+    return route.fulfill({ status: 503, json: { error: "Unexpected request" } });
+  }, detail(true));
+  page.once("dialog", dialog => dialog.accept());
+  await page.goto(path);
+  const action = section(page).getByRole("button", { name: "Link existing project: Business project initial" });
+  await action.click();
+  await expect(section(page).getByRole("alert")).toContainText("Review temporarily unavailable");
+  await section(page).getByRole("button", { name: "Retry link" }).click();
+  await expect(action).toBeDisabled();
+  await expect(action).toHaveText("Bind queued");
+  expect(reviewKeys).toHaveLength(2);
+  expect(reviewKeys[1]).toBe(reviewKeys[0]);
 });
