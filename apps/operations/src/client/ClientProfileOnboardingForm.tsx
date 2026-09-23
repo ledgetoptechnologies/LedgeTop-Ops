@@ -50,6 +50,10 @@ export function valuesForClientProfileType(values: ClientProfileOnboardingValues
   };
 }
 
+export function organizationNameRequired(profileType: ClientProfileType): boolean {
+  return profileType === "organization";
+}
+
 /** No values are shortened: callers receive exactly what the browser validated. */
 export function clientProfileOnboardingSubmission(values: ClientProfileOnboardingValues): ClientProfileOnboardingValues {
   return values.profileType === "organization" ? { ...values } : valuesForClientProfileType(values, "individual");
@@ -98,7 +102,7 @@ export function ClientProfileOnboardingForm({ initialValues, onSubmit, submitLab
 
   return <section className="client-profile-onboarding" aria-labelledby={`${formId}-title`}>
     <div className="client-profile-onboarding-card">
-      <header><p className="client-profile-onboarding-eyebrow">LedgeTop Ops Client Portal</p>
+      <header><p className="client-profile-onboarding-eyebrow">Ledge Top Client Portal</p>
         <h1 id={`${formId}-title`}>Client profile onboarding</h1>
         <p>Tell us how to reach you and where your services take place. You can review these details before they are submitted.</p>
       </header>
@@ -118,7 +122,7 @@ export function ClientProfileOnboardingForm({ initialValues, onSubmit, submitLab
           {input("email", "Email address", { autoComplete: "email", required: true, type: "email" })}
           {input("phone", "Phone", { autoComplete: "tel", type: "tel" })}
           {values.profileType === "organization" && <>
-            {input("organizationName", "Organization name", { autoComplete: "organization" })}
+            {input("organizationName", "Organization name", { autoComplete: "organization", required: organizationNameRequired(values.profileType) })}
             {input("generalEmail", "General company email", { autoComplete: "email", type: "email" })}
             {input("generalPhone", "General company phone", { autoComplete: "tel", type: "tel" })}
           </>}
