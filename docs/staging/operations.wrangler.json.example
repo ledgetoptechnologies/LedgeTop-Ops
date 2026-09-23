@@ -29,6 +29,7 @@
     "PROJECT_ALPHA_BASE_URL": "https://pa-staging.ledgetoptechnologies.com",
     "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED": "false",
     "PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED": "false",
+    "PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED": "false",
     "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED": "false",
     "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ENABLED": "false",
     "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_SOURCE_ID": "<STAGING_PROJECT_ALPHA_SOURCE_ID>",
@@ -104,7 +105,8 @@
   },
   "stream": { "binding": "STREAM" },
   "services": [
-    { "binding": "OPS_INVENTORY_CATALOG_STAGING", "service": "ledgetop-clients-staging", "entrypoint": "OpsInventoryCatalogStagingIngress" }
+    { "binding": "OPS_INVENTORY_CATALOG_STAGING", "service": "ledgetop-clients-staging", "entrypoint": "OpsInventoryCatalogStagingIngress" },
+    { "binding": "OPS_INVENTORY_CATALOG_PROMOTION", "service": "ledgetop-clients-staging", "entrypoint": "OpsInventoryCatalogPromotionCoordinator" }
   ],
   "durable_objects": {
     "bindings": [{ "name": "THUMBNAIL_RENDERER", "class_name": "ThumbnailRendererContainer" }]
@@ -126,6 +128,7 @@
     { "name": "ltds-r2-crud-staging", "binding": "R2_CRUD_WORKFLOW", "class_name": "R2CrudWorkflow" },
     { "name": "ltds-incoming-upload-lifecycle-staging", "binding": "INCOMING_LIFECYCLE_WORKFLOW", "class_name": "IncomingUploadLifecycleWorkflow" },
     { "name": "ledgetop-incoming-rclone-promotion-staging", "binding": "INCOMING_RCLONE_PROMOTION_WORKFLOW", "class_name": "IncomingRclonePromotionWorkflow" },
-    { "name": "ltds-dropbox-import-staging", "binding": "DROPBOX_IMPORT_WORKFLOW", "class_name": "DropboxImportWorkflow" }
+    { "name": "ltds-dropbox-import-staging", "binding": "DROPBOX_IMPORT_WORKFLOW", "class_name": "DropboxImportWorkflow" },
+    { "name": "ledgetop-ops-catalog-promotion-staging", "binding": "OPS_CATALOG_PROMOTION_WORKFLOW", "class_name": "ProjectAlphaCatalogPromotionWorkflow" }
   ]
 }

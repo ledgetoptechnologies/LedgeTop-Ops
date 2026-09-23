@@ -72,7 +72,7 @@ and warns that Bypass disables Access enforcement in
    `0177_domain_neutral_delivery_notifications.sql` and
    `0178_domain_neutral_delivery_notification_contract.sql`, plus the later
    `0179`-`0186` assignment/notification/native-portal sequence, and the complete
-   ordered Operations `0054`-`0122` suffix. Client migration `0113` is
+   ordered Operations `0054`-`0139` suffix. Client migration `0113` is
    intentionally reserved and absent. The
    release evidence validator compares the complete filename sets; do not
    shorten them to a range or infer success from a local migration run.
@@ -104,7 +104,7 @@ and warns that Bypass disables Access enforcement in
    drain proof. Only then apply `0180`-`0183` from the final input. Keep native
     capabilities unavailable while applying Client `0184`-`0195`, satisfying
     the separate `0187` content-audit and `0189` primary-binding barriers, then
-    apply Operations through `0122` only after the remote-ledger, open-fence,
+    apply Operations through `0139` only after the remote-ledger, open-fence,
     quiescence, populated-export/time-travel-recovery, and compatible-writer
     ordering evidence is recorded. The combined candidate is not an expand-only input; do not
    run one all-pending apply or execute raw migration SQL.

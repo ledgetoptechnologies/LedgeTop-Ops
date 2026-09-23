@@ -11,7 +11,7 @@ const source={sourceId:"project-alpha:primary",sourceInstanceId:"11111111-1111-4
   applicationId:"22222222-2222-4222-8222-222222222222",historyEpoch:"33333333-3333-4333-8333-333333333333"};
 const item={publicId:"a".repeat(32),sourceVersion:`sha256-${"b".repeat(64)}`,name:"Site photography",summary:null,category:"Photography",
   displayOrder:10,geometryRequirement:"optional" as const,questions:[{id:"notes",label:"Notes",type:"text" as const,required:false}]};
-const page=():OpsInventoryCatalogPage=>({protocolVersion:1,...source,pageIndex:0,apiVersion:"2",
+const page=():OpsInventoryCatalogPage=>({protocolVersion:1,registryId:1,...source,pageIndex:0,apiVersion:"2",
   requestId:"44444444-4444-4444-8444-444444444444",snapshotId:"c".repeat(64),totalCount:1,items:[item],nextCursor:null});
 
 describe("route-less Operations inventory catalog staging",()=>{
@@ -35,7 +35,7 @@ describe("route-less Operations inventory catalog staging",()=>{
   ]);});
   async function provision(state:"disabled"|"staging"="staging"){
     await db.prepare(`INSERT INTO ops_inventory_catalog_staging_sources
-      (source_id,source_instance_id,application_id,history_epoch,state) VALUES(?,?,?,?,?)`)
+      (registry_id,source_id,source_instance_id,application_id,history_epoch,state) VALUES(1,?,?,?,?,?)`)
       .bind(source.sourceId,source.sourceInstanceId,source.applicationId,source.historyEpoch,state).run();
   }
 
@@ -51,6 +51,8 @@ describe("route-less Operations inventory catalog staging",()=>{
     await provision("disabled");
     await expect(stageOpsInventoryCatalogPage(env(),page())).resolves.toMatchObject({ok:false,code:"source-unavailable"});
     await db.prepare("UPDATE ops_inventory_catalog_staging_sources SET state='staging'").run();
+    await expect(stageOpsInventoryCatalogPage(env(),{...page(),registryId:2}))
+      .resolves.toMatchObject({ok:false,code:"source-unavailable"});
     await expect(stageOpsInventoryCatalogPage(env(),{...page(),historyEpoch:"55555555-5555-4555-8555-555555555555"}))
       .resolves.toMatchObject({ok:false,code:"source-unavailable"});
     expect(await count("ops_inventory_catalog_staging_pages")).toBe(0);
@@ -95,9 +97,9 @@ describe("route-less Operations inventory catalog staging",()=>{
     const rotated={...source,sourceInstanceId:"77777777-7777-4777-8777-777777777777",
       historyEpoch:"88888888-8888-4888-8888-888888888888"};
     await db.prepare(`INSERT INTO ops_inventory_catalog_staging_sources
-      (source_id,source_instance_id,application_id,history_epoch,state) VALUES(?,?,?,?,?)`)
+      (registry_id,source_id,source_instance_id,application_id,history_epoch,state) VALUES(2,?,?,?,?,?)`)
       .bind(rotated.sourceId,rotated.sourceInstanceId,rotated.applicationId,rotated.historyEpoch,"staging").run();
-    await expect(stageOpsInventoryCatalogPage(env(),{...page(),...rotated,
+    await expect(stageOpsInventoryCatalogPage(env(),{...page(),registryId:2,...rotated,
       requestId:"99999999-9999-4999-8999-999999999999"})).resolves.toMatchObject({ok:true,status:"staged"});
     expect(await count("ops_inventory_catalog_staging_pages")).toBe(2);
     expect(await count("ops_inventory_catalog_staging_items")).toBe(2);
@@ -113,11 +115,18 @@ describe("route-less Operations inventory catalog staging",()=>{
 
   it("strictly rejects malformed items and bounded-page violations without partial writes",async()=>{
     await provision();
+    await expect(stageOpsInventoryCatalogPage(env(),{...page(),items:[{...item,name:"N".repeat(161)}]})).resolves.toMatchObject({ok:false,code:"invalid"});
     await expect(stageOpsInventoryCatalogPage(env(),{...page(),items:[{...item,extra:true}]})).resolves.toMatchObject({ok:false,code:"invalid"});
     await expect(stageOpsInventoryCatalogPage(env(),{...page(),items:[{...item,name:"<script>"}]})).resolves.toMatchObject({ok:false,code:"invalid"});
     await expect(stageOpsInventoryCatalogPage(env(),{...page(),nextCursor:"not+a+base64url"})).resolves.toMatchObject({ok:false,code:"invalid"});
     expect(await count("ops_inventory_catalog_staging_pages")).toBe(0);
     expect(await count("ops_inventory_catalog_staging_items")).toBe(0);
+  });
+
+  it("accepts the canonical 160-character service-name boundary",async()=>{
+    await provision();
+    await expect(stageOpsInventoryCatalogPage(env(),{...page(),items:[{...item,name:"N".repeat(160)}]}))
+      .resolves.toMatchObject({ok:true,status:"staged"});
   });
 
   it("reserves explicit RPC envelope headroom at the near-limit byte boundary",async()=>{

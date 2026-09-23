@@ -37,7 +37,9 @@ export type Env = Omit<
   | "CLIENT_HUB_PA_CONTACT_ASSIGNMENTS_ENABLED"
   | "CLIENT_PORTAL_NOTIFICATION_MIGRATION_MAINTENANCE"
   | "PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED"
+  | "PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED"
   | "OPS_INVENTORY_CATALOG_STAGING"
+  | "OPS_INVENTORY_CATALOG_PROMOTION"
 > & {
   PROJECT_ALPHA_API_KEY?: string;
   /** Temporary release barrier for the preserving client-notification table rebuild. */
@@ -48,8 +50,12 @@ export type Env = Omit<
   PROJECT_ALPHA_API_V2_CONNECTIONS?: string;
   /** Default-off, route-less PA catalog snapshot to Client staging coordinator. */
   PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED?: string;
+  /** Default-off, route-less promotion after an exact staged snapshot. */
+  PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED?: string;
   /** Private Client Worker RPC; receives catalog content only, never PA credentials. */
   OPS_INVENTORY_CATALOG_STAGING?: import("./project-alpha-catalog-staging-coordinator").OpsCatalogStagingBinding;
+  /** Private Client Worker RPC; accepts only explicit registry/source/checkpoint authority. */
+  OPS_INVENTORY_CATALOG_PROMOTION?: import("./project-alpha-catalog-staging-coordinator").OpsCatalogPromotionBinding;
   /** Default-off bounded API-v2 health/incident monitor. */
   PROJECT_ALPHA_API_V2_MONITOR_ENABLED?: string;
   /** Explicit deployment-owned owner mailbox for outage alerts; never inferred from Project Alpha data. */

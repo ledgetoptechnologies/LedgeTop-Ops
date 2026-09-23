@@ -21,10 +21,18 @@ describe("read-only PA catalog v2 inventory", () => {
   });
 
   it("fails closed for invalid item content and duplicate question identities", async () => {
-    for (const invalid of [item("not-an-id"), { ...item("1".repeat(32)), name: "<script>" }, { ...item("1".repeat(32)), questions: [{ id: "x", label: "X", type: "text", required: true }, { id: "x", label: "Again", type: "text", required: false }] }]) {
+    for (const invalid of [item("not-an-id"), { ...item("1".repeat(32)), name: "<script>" },
+      { ...item("1".repeat(32)), name: "N".repeat(256) },
+      { ...item("1".repeat(32)), questions: [{ id: "x", label: "X", type: "text", required: true }, { id: "x", label: "Again", type: "text", required: false }] }]) {
       const send = vi.fn<typeof fetch>(async url => String(url).endsWith("/capabilities") ? json(capabilities()) : json(inventory([invalid as ReturnType<typeof item>])));
       await expect(readProjectAlphaCatalogInventory(connection, {}, send)).resolves.toMatchObject({ status: "uncertain", reason: "invalid_contract" });
     }
+  });
+
+  it("accepts Project Alpha's generic 255-character service-name boundary", async () => {
+    const bounded = { ...item("1".repeat(32)), name: "N".repeat(255) };
+    const send = vi.fn<typeof fetch>(async url => String(url).endsWith("/capabilities") ? json(capabilities()) : json(inventory([bounded])));
+    await expect(readProjectAlphaCatalogInventory(connection, {}, send)).resolves.toMatchObject({ status: "observed" });
   });
 
   it("accepts a response above 256 KiB and below the documented 1 MiB cap", async () => {
