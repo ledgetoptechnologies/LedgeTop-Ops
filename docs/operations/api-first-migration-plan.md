@@ -5,11 +5,11 @@ Updated September 22, 2026. The owner approved implementation and resumption aft
 ### September 22, 2026 — authoritative PR and staging acceptance status
 
 - Latest read-only release check: Operations PR #107 head
-  `32edbafedad7c5cb6e081c081b2edfed52057a46` passed all ten
+  `303da4809d96bb331497be7d85d463e985be2c84` passed all ten
   exact-head CI jobs, including Operations and desktop/mobile browser checks.
-  The subsequent documentation-only commit `ceaa896` was still running its
-  CI recheck at the last observation; it does not change the reviewed Worker
-  source or the completed exact-head result for `32edbaf`.
+  The only intervening change after the reviewed Worker source was
+  documentation; one mobile browser test failure passed on a targeted retry
+  without a source or test change. Its cause was not established.
   PA PR #188 head
   `731677dda1821c53f93dd0b38f1504f184c320d9` passed exact-head CI,
   CodeQL and gitleaks, including its real-MySQL cutover gate. These replace
@@ -46,8 +46,9 @@ Updated September 22, 2026. The owner approved implementation and resumption aft
   smoke test or fixture invocation is claimed. Production Workers and D1 were
   not changed by this staging step. The newly deployed staging Worker then
   completed a scheduled connected PA reconciliation at
-  `2026-09-22T23:21:32.862Z`: one page, 14 remote items, one local item,
-  zero consecutive uncertain attempts. This is a live read-path/scheduler
+  `2026-09-22T23:21:32.862Z`, then again at
+  `2026-09-22T23:51:30.829Z`: each observed one page, 14 remote items,
+  one local item, and zero consecutive uncertain attempts. This is a live read-path/scheduler
   check, not evidence for the gated fixture or Directory write path.
 - Existing-record acquisition review found that a legacy mapping collision
   could reject the local acquired receipt *after* PA accepted a bind. The
@@ -135,6 +136,15 @@ Updated September 22, 2026. The owner approved implementation and resumption aft
   evidence of a new runtime deployment and was still running at last check.
 - Green PR CI does not substitute for joined staging or production cutover
   acceptance. Neither PR is deployed to either production PA instance.
+- A read-only public-link regression review found that PR #107 changes the
+  Delivery/public-link implementation, including public media hydration and
+  bulk-download resume behavior. Five focused suites passed 76/76 checks for
+  existing-link token/password, expiry, revocation, session-version, Range and
+  bulk-resume behavior plus delegated-share authorization. Those local tests
+  do not prove deployed D1/R2 streaming, browser cookie behavior, or a real
+  legacy link in production. Preserve live legacy-link smoke and rollback
+  evidence as release gates; do not infer compatibility merely from a green
+  build.
 - A private pre-migration staging D1 backup was recorded before applying remote
   Operations staging migrations 0123–0138. This records an **earlier** staging
   deployment snapshot: Worker version
