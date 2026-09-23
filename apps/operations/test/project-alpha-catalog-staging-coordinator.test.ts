@@ -29,9 +29,9 @@ describe("route-less catalog staging coordinator",()=>{
   it("reads one immutable snapshot and stages bounded pages without forwarding credentials",async()=>{
     const {env,pages}=harness();const readSnapshot=vi.fn(async()=>complete(201));
     await expect(stageConfiguredProjectAlphaCatalogSnapshot(env,{sourceId},{readSnapshot}))
-      .resolves.toMatchObject({status:"complete",totalCount:201,pageCount:2,stagedCount:2,duplicateCount:0});
-    expect(pages.map(value=>value.items.length)).toEqual([200,1]);
-    expect(pages.map(value=>value.nextCursor)).toEqual(["page_1",null]);
+      .resolves.toMatchObject({status:"complete",totalCount:201,pageCount:5,stagedCount:5,duplicateCount:0});
+    expect(pages.map(value=>value.items.length)).toEqual([50,50,50,50,1]);
+    expect(pages.map(value=>value.nextCursor)).toEqual(["page_1","page_2","page_3","page_4",null]);
     expect(pages.every(value=>JSON.stringify(value).includes("never-forward-this-secret")===false)).toBe(true);
     expect(pages[0]).toMatchObject({sourceId,sourceInstanceId,applicationId,historyEpoch,pageIndex:0});
   });
@@ -48,6 +48,13 @@ describe("route-less catalog staging coordinator",()=>{
     expect(pages.length).toBeGreaterThan(1);
     expect(pages.every(value=>new TextEncoder().encode(JSON.stringify(value)).byteLength<=1024*1024-64*1024)).toBe(true);
     expect(pages.flatMap(value=>value.items.map(entry=>entry.publicId))).toEqual(largeItems.map(value=>value.publicId));
+  });
+
+  it("rejects a snapshot above the canonical catalog limit before staging any page",async()=>{
+    const {env,stage}=harness();
+    await expect(stageConfiguredProjectAlphaCatalogSnapshot(env,{sourceId},{readSnapshot:async()=>complete(501)}))
+      .resolves.toEqual({status:"blocked",reason:"catalog_limit"});
+    expect(stage).not.toHaveBeenCalled();
   });
 
   it("stops on the first failed receipt and reports only bounded diagnostics",async()=>{
@@ -70,7 +77,7 @@ describe("route-less catalog staging coordinator",()=>{
     const readSnapshot=async()=>complete(201);
     await stageConfiguredProjectAlphaCatalogSnapshot(first.env,{sourceId},{readSnapshot});
     await expect(stageConfiguredProjectAlphaCatalogSnapshot(second.env,{sourceId},{readSnapshot}))
-      .resolves.toMatchObject({status:"complete",stagedCount:0,duplicateCount:2});
+      .resolves.toMatchObject({status:"complete",stagedCount:0,duplicateCount:5});
     expect(second.pages).toEqual(first.pages);
     expect(first.pages.every(value=>/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value.requestId))).toBe(true);
   });

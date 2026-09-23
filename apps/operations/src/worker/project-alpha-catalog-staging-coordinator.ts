@@ -5,7 +5,9 @@ import { withEnabledConfiguredProjectAlphaApiV2Connection,
 import type { ProjectAlphaApiV2Connection } from "./project-alpha-api-v2";
 
 const SOURCE_ID=/^[a-z][a-z0-9_.:-]{0,127}$/;
-const MAX_PAGE_ITEMS=200;
+// Match the established Client catalog projection contract before staging.
+const MAX_PAGE_ITEMS=50;
+const MAX_SNAPSHOT_ITEMS=500;
 const MAX_PAGE_BYTES=1024*1024-64*1024;
 
 export type OpsCatalogStagingPage=Readonly<{
@@ -24,7 +26,7 @@ export type ProjectAlphaCatalogStagingEnvironment=ProjectAlphaApiV2ConnectionEnv
 export type ProjectAlphaCatalogStagingOutcome=
   |Readonly<{status:"disabled"}>
   |Readonly<{status:"rejected";reason:"invalid_command"}>
-  |Readonly<{status:"blocked";reason:"configuration"|"source_disabled"|"source_read"|"page_too_large"|"staging";stageCode?:"disabled"|"invalid"|"source-unavailable"|"conflict"|"temporarily-unavailable";retryable?:boolean}>
+  |Readonly<{status:"blocked";reason:"configuration"|"source_disabled"|"source_read"|"catalog_limit"|"page_too_large"|"staging";stageCode?:"disabled"|"invalid"|"source-unavailable"|"conflict"|"temporarily-unavailable";retryable?:boolean}>
   |Readonly<{status:"complete";snapshotId:string;totalCount:number;pageCount:number;stagedCount:number;duplicateCount:number}>;
 
 type Dependencies=Readonly<{
@@ -86,6 +88,7 @@ export async function stageConfiguredProjectAlphaCatalogSnapshot(env:ProjectAlph
   const selected=await withEnabledConfiguredProjectAlphaApiV2Connection(env,command.sourceId,async connection=>{
     const snapshot=await readSnapshot(connection);
     if(snapshot.status!=="complete")return{status:"blocked",reason:"source_read"} as const;
+    if(snapshot.items.length>MAX_SNAPSHOT_ITEMS)return{status:"blocked",reason:"catalog_limit"} as const;
     const pages=await paginate(command.sourceId,connection,snapshot);
     if(!pages)return{status:"blocked",reason:"page_too_large"} as const;
     let stagedCount=0,duplicateCount=0;
