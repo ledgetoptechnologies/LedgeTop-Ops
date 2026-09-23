@@ -4,6 +4,29 @@ Updated September 23, 2026. The owner approved implementation and resumption aft
 
 ### September 22, 2026 — authoritative PR and staging acceptance status
 
+- September 23 read-only signed-in Cloudflare and staging D1 preflight for the
+  **client-portal** path: the `ledgetop-clients-staging` Worker still serves only
+  `delivery-staging.ledgetopdroneservices.com`; its deployed
+  `PROJECT_ALPHA_PORTAL_SYNC_ENABLED`, hierarchy-v2, PA-identity eligibility,
+  identity denylist and root-access-policy variables are `false`. Its
+  `client-data-staging` D1 has canonical migrations through `0213` but zero
+  portal projection receipts, checkpoints and workspace-source rows. The
+  account Worker inventory returns no `ledgetop-ops-sync-staging` Worker, so
+  the documented private Ops Sync-to-Client staging binding cannot be live.
+  `ltds-ops-staging` D1 is through `0139`; its one native staff admission is
+  inactive, with zero active `directory.identity.link` grants. The signed-in
+  Ops staging administration page reports primary business-record sync
+  disabled and Client workflow gates unverified; those UI indicators are not
+  themselves proof of the signed portal projection path. These are bounded
+  readbacks, not an activation or a production observation. Prepare and verify
+  the pinned staging Client/Ops Sync deployment, exact service binding and
+  default-on eligibility profile before a pilot signed `portal.projection`.
+  Do not use the legacy `client-account-activation` POST as an API-first pilot:
+  it writes a primary-only `legacy-backfill` workspace rather than proving
+  the replacement PA API-v2/Directory and signed-projection path. The separate
+  v5 disposable fixture, inactive Directory acquisition, activation and real
+  public-link-preservation gates remain required.
+
 - September 23 follow-up: Operations PR #107 source checkpoint
   `11cccfd879b61cc6cc699dbc32d923cf0275a3f5` passed all ten GitHub CI
   checks at that exact head. The final relationship-replay test also
