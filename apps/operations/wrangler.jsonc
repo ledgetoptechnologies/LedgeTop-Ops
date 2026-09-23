@@ -200,6 +200,11 @@
       "name": "ltds-dropbox-import",
       "binding": "DROPBOX_IMPORT_WORKFLOW",
       "class_name": "DropboxImportWorkflow"
+    },
+    {
+      "name": "ledgetop-ops-catalog-promotion",
+      "binding": "OPS_CATALOG_PROMOTION_WORKFLOW",
+      "class_name": "ProjectAlphaCatalogPromotionWorkflow"
     }
   ]
 }

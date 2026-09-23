@@ -985,6 +985,7 @@ export const STAGING_INVENTORY = Object.freeze({
       { name: "ltds-incoming-upload-lifecycle-staging", binding: "INCOMING_LIFECYCLE_WORKFLOW", class_name: "IncomingUploadLifecycleWorkflow" },
       { name: "ledgetop-incoming-rclone-promotion-staging", binding: "INCOMING_RCLONE_PROMOTION_WORKFLOW", class_name: "IncomingRclonePromotionWorkflow" },
       { name: "ltds-dropbox-import-staging", binding: "DROPBOX_IMPORT_WORKFLOW", class_name: "DropboxImportWorkflow" },
+      { name: "ledgetop-ops-catalog-promotion-staging", binding: "OPS_CATALOG_PROMOTION_WORKFLOW", class_name: "ProjectAlphaCatalogPromotionWorkflow" },
     ],
     services: [
       { binding: "OPS_INVENTORY_CATALOG_STAGING", service: "ledgetop-clients-staging", entrypoint: "OpsInventoryCatalogStagingIngress" },

@@ -287,6 +287,50 @@ Promotion still does not activate client access, public links, draft quotes,
 or portal catalog reads. Use the same Client-before-Operations order for
 production.
 
+The only approved operator trigger is the authenticated Wrangler Workflow CLI;
+there is no HTTP or scheduled trigger. Before any activation, use a dedicated,
+least-privilege staging Cloudflare profile to read the exact authority:
+
+```powershell
+npx wrangler d1 execute client-data-staging --remote --command "SELECT registry_id,source_id,source_instance_id,application_id,history_epoch,state FROM ops_inventory_catalog_staging_sources WHERE source_id='project-alpha:primary' ORDER BY registry_id;"
+npx wrangler d1 execute client-data-staging --remote --command "SELECT source_id,active_generation_id,source_generation,source_sequence FROM pa_service_catalog_checkpoint WHERE source_id='project-alpha:primary';"
+```
+
+Have a human compare the selected staging registry identity with the pinned
+Operations connection and record the reviewed registry ID, source ID, current
+checkpoint sequence, and change/approval reference. Never discover, increment,
+or substitute these values inside the Workflow. `approvalId` and the Workflow
+instance ID are correlation fields only; Cloudflare/Wrangler authentication and
+the staging account role authorize the operator. After a separately reviewed
+deployment but before enabling any catalog flag, trigger a unique default-off
+instance and inspect its step history:
+
+```powershell
+npx wrangler workflows trigger ledgetop-ops-catalog-promotion-staging '{"protocolVersion":1,"registryId":17,"sourceId":"project-alpha:primary","expectedSourceSequence":8,"approvalId":"CHG-2026-0917-RETRY-GATE"}' --config apps/operations/wrangler.staging.json --id catalog-CHG-2026-0917-retry-gate-4f2c1a
+npx wrangler workflows instances describe ledgetop-ops-catalog-promotion-staging catalog-CHG-2026-0917-retry-gate-4f2c1a --config apps/operations/wrangler.staging.json
+```
+
+Record a nested `disabled` outcome and exactly one attempt of
+`stage-and-promote-project-alpha-catalog`, with no retry entry. Do not enable
+the flags if the deployed runtime reports any retry. After this runtime gate
+and a separately reviewed staging deployment enables both Operations catalog
+flags and the Client promotion flag, invoke exactly one new instance:
+
+```powershell
+npx wrangler workflows trigger ledgetop-ops-catalog-promotion-staging '{"protocolVersion":1,"registryId":17,"sourceId":"project-alpha:primary","expectedSourceSequence":8,"approvalId":"CHG-2026-0917"}' --config apps/operations/wrangler.staging.json --id catalog-CHG-2026-0917-4f2c1a
+```
+
+The Workflow performs one non-retrying step and returns only the approval
+correlation plus the bounded staging/promotion outcome. It must not log or
+return Project Alpha credentials, catalog item content, or claimed operator
+identity. The custom instance ID must be unique for this Workflow, must not be
+reused for another attempt, and must remain at most 100 characters. A top-level
+`completed` value means only that the Workflow step returned: the operator must
+inspect the nested outcome and promotion status before recording success. A
+disabled result requires configuration review; a stale result
+requires a fresh human read and a new approved invocation, never an automatic
+retry with a newer checkpoint.
+
 Client migration `0189_primary_staff_folder_bindings.sql` must be applied and
 verified before deploying the Operations build that exposes primary Client
 Workspace folder linking. Keep authenticated-grant mutations disabled until

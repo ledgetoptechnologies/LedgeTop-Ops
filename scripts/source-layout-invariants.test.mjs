@@ -361,7 +361,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
 });
 
 test("the deployed Operations Worker keeps catalog staging and promotion private and default-off", () => {
-  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "a719e40f9e749253c89fed8e8edb1f2045da5d0fcfafb06bdd900f1fb69f020e");
+  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "00757fc2e19443a0808aeae171daf7dcb16d177ff73fe0237035d2074902258d");
   const config = readJson("apps/operations/wrangler.jsonc");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED, "false");
@@ -375,6 +375,12 @@ test("the deployed Operations Worker keeps catalog staging and promotion private
     service: "ledgetop-clients",
     entrypoint: "OpsInventoryCatalogPromotionCoordinator",
   });
+  assert.deepEqual(config.workflows?.find((workflow) => workflow.binding === "OPS_CATALOG_PROMOTION_WORKFLOW"), {
+    name: "ledgetop-ops-catalog-promotion",
+    binding: "OPS_CATALOG_PROMOTION_WORKFLOW",
+    class_name: "ProjectAlphaCatalogPromotionWorkflow",
+  });
+  assert.equal(config.workflows?.find((workflow) => workflow.binding === "OPS_CATALOG_PROMOTION_WORKFLOW")?.schedules, undefined);
   assert(!config.triggers.crons.some((cron) => /catalog/i.test(cron)));
 });
 
