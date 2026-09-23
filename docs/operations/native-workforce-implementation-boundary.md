@@ -358,3 +358,52 @@ enabled.
   fixed/hourly/mixed billing, bonuses, corrections and replay after outages.
 - Keep the PA owner review/deployment gate. This audit authorizes no production
   schema change, credential broadening, automatic pay or one-sided cutover.
+
+## September 22 source-alignment checkpoint
+
+The current branch now contains the record, beneficiary-submit and independent
+review executors described below. This checkpoint supersedes only stale claims
+that those Worker files were absent; all earlier release evidence, activation
+gates and cross-system blockers above remain applicable.
+Earlier September 14 manager-queue and UI passages are preserved as historical
+evidence from another source checkpoint; no matching review-queue or time UI
+source exists in this checked-out branch, so they are not current-source claims.
+
+- `native-workforce-time-record.ts` atomically records revision one for
+  `internal` or active canonical `native_project` context. It derives the actor
+  from native Access admission and rechecks the exact admission version and
+  bound subject, active beneficiary, scoped self/on-behalf allow with deny
+  precedence, active project lifecycle and exact beneficiary-selection
+  delegation in the D1 batch that creates the entry, revision, command and
+  receipt.
+- `native-workforce-time-transitions.ts` makes submission beneficiary-only
+  attestation. An on-behalf recorder cannot submit for the beneficiary.
+  Independent approve/return requires a different admitted reviewer and a
+  current scoped `time.review` allow without an applicable deny. Owner or
+  administrator status supplies no bypass. A returned revision remains
+  immutable and cannot be resubmitted without a new correction revision.
+- Record, submit and review use command-specific request hashes and immutable
+  receipts. Current authority is checked before receipt or collision
+  classification and again around disclosure. Mutation authorization is
+  batch-atomic; replay reads are not one D1 transaction, so the final authority
+  read is their disclosure linearization point and controlled interleaving QA
+  remains an activation requirement. Ambiguous database outcomes without an
+  exact recoverable receipt return retryable unknown rather than claiming
+  rollback.
+- The native boundary reserves only `GET /api/native-workforce/time-record/session`
+  and `POST /api/native-workforce/time-record`, `/submit`, and `/review`. It is
+  mounted before legacy staff authentication with exact origin, purpose-bound
+  CSRF, bounded JSON and shared D1 rate limits. Checked-in
+  `NATIVE_WORKFORCE_TIME_RECORD_ENABLED` remains `false` and its origin remains
+  blank. No grant, selection, production flag, seed or deployment was added.
+- The focused real-D1 and HTTP suites pass 19/19, including self/internal and
+  native-project record, on-behalf selection, beneficiary-only submission,
+  independent approve/return, scoped deny precedence, exact replay, collision,
+  admission/grant/selection revocation and revoked mismatched-command denial.
+  Operations TypeScript and production build pass. This is local source
+  evidence only.
+
+Still excluded: manager review queue/UI, correction revision authoring, native
+job authority, bonuses, PA calls, payroll, billing, invoice, rate or payment
+effects, governed production grant bootstrap, staging acceptance and live
+activation.
