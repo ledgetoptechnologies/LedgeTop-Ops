@@ -16,6 +16,7 @@ import {
   type NativeDirectoryProfileWriteOutcome,
 } from "../src/worker/native-directory-profile-writer";
 import { planNativeDirectoryRelationshipWrite } from "../src/worker/native-directory-relationship-writer";
+import { planAndExecuteNativeDirectoryOnboardingWrites } from "../src/worker/native-directory-onboarding-write-composer";
 
 let runtime: Miniflare;
 let db: D1Database;
@@ -214,29 +215,56 @@ describe("canonical native Directory profile writer", () => {
     expect(updateCommand.fields).toEqual({ ...updateProfile, organizationPublicId });
   });
 
-  it("plans independent profile and relationship reservations for one caller-owned D1 batch", async () => {
+  it("executes opaque relationship then profile plans in one caller-owned first-primary batch", async () => {
     const actor = await seedActor();
     const organization = await create("organization", actor, uuid());
     const client = await create("client", actor);
     await acknowledgeCreate(organization.input, organization.outcome, "1");
     await acknowledgeCreate(client.input, client.outcome, "2");
-    const relationship = await planNativeDirectoryRelationshipWrite(db, {
+    const relationshipInput = {
       mutationId: uuid(), clientRecordId: client.input.recordId, expectedRelationshipVersion: 1,
       expectedClientRecordVersion: 1, previousOrganization: null,
       organization: { recordId: organization.input.recordId, expectedRecordVersion: 1 },
       actor: { staffId: actor.staffId, accessSubject: actor.accessSubject, email: actor.loginEmail,
         admissionVersion: actor.admissionVersion, profileVersion: actor.profileVersion },
-    });
-    expect(relationship.status).toBe("planned");
-    if (relationship.status !== "planned") throw new Error(JSON.stringify(relationship));
-    const profile = await planNativeDirectoryProfileWrite(db, {
+    };
+    const profileInput = {
       operation: "update", mutationId: uuid(), recordId: organization.input.recordId,
       expectedLocalVersion: 1, kind: "organization", profile: { ...organizationProfile, name: "Updated Organization" },
       destinations: [destination(organization.input.recordId, "1")], actor,
-    });
-    expect(profile.status).toBe("planned");
-    if (profile.status !== "planned") throw new Error(JSON.stringify(profile));
-    await db.withSession("first-primary").batch([...relationship.statements, ...profile.statements]);
+    } as const;
+    const outboxBeforeFailure = await count("project_alpha_directory_outbox");
+    let batches = 0;
+    const failingAtomicBatch = new Proxy(db, { get(target, key) {
+      if (key === "withSession") return (constraint: string) => {
+        expect(constraint).toBe("first-primary");
+        const primary = target.withSession(constraint);
+        return new Proxy(primary, { get(session, sessionKey) {
+          if (sessionKey === "batch") return async (statements: D1PreparedStatement[]) => {
+            batches++;
+            return session.batch([...statements, session.prepare("INSERT INTO missing_onboarding_atomic_table VALUES(1)")]);
+          };
+          const member = session[sessionKey as keyof D1DatabaseSession];
+          return typeof member === "function" ? member.bind(session) : member;
+        } });
+      };
+      const member = target[key as keyof D1Database];
+      return typeof member === "function" ? member.bind(target) : member;
+    } }) as D1Database;
+    await expect(planAndExecuteNativeDirectoryOnboardingWrites(failingAtomicBatch, relationshipInput, profileInput))
+      .resolves.toEqual({ status: "blocked", reason: "atomic_write" });
+    expect(batches).toBe(1);
+    expect(await db.prepare(`SELECT organization_record_id,relationship_version
+      FROM operations_directory_client_organizations WHERE client_record_id=?`).bind(client.input.recordId).first())
+      .toEqual({ organization_record_id: null, relationship_version: 1 });
+    expect(await db.prepare("SELECT 1 FROM operations_directory_relationship_write_fences WHERE mutation_id=?")
+      .bind(relationshipInput.mutationId).first()).toBeNull();
+    expect(await db.prepare("SELECT 1 FROM operations_directory_audit WHERE mutation_id=?")
+      .bind(profileInput.mutationId).first()).toBeNull();
+    expect(await count("project_alpha_directory_outbox")).toBe(outboxBeforeFailure);
+    expect(await db.prepare("SELECT current_version FROM operations_directory_records WHERE record_id=?")
+      .bind(organization.input.recordId).first("current_version")).toBe(1);
+    expect(await planAndExecuteNativeDirectoryOnboardingWrites(db, relationshipInput, profileInput)).toMatchObject({ status: "written" });
     expect(await db.prepare(`SELECT organization_record_id,relationship_version
       FROM operations_directory_client_organizations WHERE client_record_id=?`).bind(client.input.recordId).first())
       .toEqual({ organization_record_id: organization.input.recordId, relationship_version: 2 });

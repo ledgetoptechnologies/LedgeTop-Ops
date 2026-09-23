@@ -1,3 +1,5 @@
+import { executeNativeDirectoryWritePlan, nativeDirectoryWritePlan, type OpaqueNativeDirectoryWritePlan } from "./native-directory-write-plan";
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const REVISION = /^(?:0|[1-9][0-9]{0,18})$/;
 const SOURCE_ID = /^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -50,15 +52,10 @@ export type NativeDirectoryProfileWriteOutcome =
   | Readonly<{ status: "written"; replayed: boolean; mutationId: string; recordId: string; kind: NativeDirectoryProfileKind; version: number; commandIds: readonly string[] }>
   | Readonly<{ status: "rejected" | "blocked" | "conflict"; reason: string }>;
 /**
- * A caller-owned D1 batch plan. This is intentionally not an
- * HTTP route: a higher-level transaction may append its own fenced writes and
- * execute every statement exactly once.
+ * An opaque native Directory plan. Only the approved composer can atomically
+ * execute it with another writer plan.
  */
-export type NativeDirectoryProfileWritePlan = Readonly<{
-  status: "planned";
-  outcome: Extract<NativeDirectoryProfileWriteOutcome, { status: "written" }>;
-  statements: readonly D1PreparedStatement[];
-}>;
+export type NativeDirectoryProfileWritePlan = OpaqueNativeDirectoryWritePlan<Extract<NativeDirectoryProfileWriteOutcome, { status: "written" }>>;
 export type NativeDirectoryProfileWritePlanningResult = NativeDirectoryProfileWriteOutcome | NativeDirectoryProfileWritePlan;
 
 /** These constants deliberately make the only empty-enrollment write a single staging fixture. */
@@ -592,12 +589,12 @@ async function planNativeDirectoryProfileWriteInternal(db: DirectoryWriteD1, inp
   }
   statements.push(...materializations);
   statements.push(db.prepare(`DELETE FROM operations_directory_write_fences WHERE mutation_id=?`).bind(write.mutationId));
-  return { status: "planned", statements, outcome: { status: "written", replayed: false,
-    mutationId: write.mutationId, recordId: write.recordId, kind: write.kind, version: nextVersion, commandIds } };
+  return nativeDirectoryWritePlan("profile", { status: "written", replayed: false,
+    mutationId: write.mutationId, recordId: write.recordId, kind: write.kind, version: nextVersion, commandIds }, statements);
 }
 
 /** Plans a normal non-empty-enrollment profile write without executing it. */
-export async function planNativeDirectoryProfileWrite(db: D1Database,
+export async function planNativeDirectoryProfileWrite(db: DirectoryWriteD1,
   input: NativeDirectoryProfileWrite): Promise<NativeDirectoryProfileWritePlanningResult> {
   return planNativeDirectoryProfileWriteInternal(db, input);
 }
@@ -606,7 +603,7 @@ async function executeNativeDirectoryProfileWrite(db: D1Database, input: NativeD
   allowEmptyDestinations = false): Promise<NativeDirectoryProfileWriteOutcome> {
   const planned = await planNativeDirectoryProfileWriteInternal(db, input, allowEmptyDestinations);
   if (planned.status !== "planned") return planned;
-  try { await db.batch([...planned.statements]); }
+  try { if (!await executeNativeDirectoryWritePlan(db, planned, "profile")) return { status: "blocked", reason: "authority_or_atomic_write" }; }
   catch { return { status: "blocked", reason: "authority_or_atomic_write" }; }
   return planned.outcome;
 }
