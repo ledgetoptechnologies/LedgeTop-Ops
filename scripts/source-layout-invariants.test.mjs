@@ -259,7 +259,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   // and explicit legacy compatibility origin. Keep the field assertions so a future config change
   // cannot hide behind a digest refresh.
   // Reviewed additions: Operations catalog staging and promotion remain off by default.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "d79fbc605775d3aa83924651e6318672470ee5e1fbb6a4afc5cfd984daec3e36");
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "e2fe6bb3309c309cfe08b686e4acaf5c80ddf7b048586e3ab613d2d0caa7808f");
   const config = readJson("apps/client/wrangler.jsonc");
   assert.equal(config.name, "ledgetop-clients");
   assert.equal(config.main, "src/worker/index.ts");
@@ -350,6 +350,11 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
       service: "ledgetop-ops",
       entrypoint: "ViewerSessionIssuer",
     },
+    {
+      binding: "CLIENT_ONBOARDING_RECIPIENT_BRIDGE",
+      service: "ledgetop-ops",
+      entrypoint: "ClientOnboardingRecipientBridge",
+    },
   ]);
   assert.equal(config.images, undefined);
   assert.deepEqual(config.stream, { binding: "STREAM" });
@@ -361,9 +366,10 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
 });
 
 test("the deployed Operations Worker keeps catalog staging and promotion private and default-off", () => {
-  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "8c1775cb40ead8b2c7df42e9caaac4b8ae5d9e24dcc44643fc6d747238c074a2");
+  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "c2b79f85f8004b38964ff33b74f1ec568c18a72f69a05686b39bccf23d0dbc4c");
   const config = readJson("apps/operations/wrangler.jsonc");
   assert.equal(config.vars.CLIENT_ONBOARDING_ADMIN_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED, "false");
   assert.deepEqual(config.services?.find((service) => service.binding === "OPS_INVENTORY_CATALOG_STAGING"), {
