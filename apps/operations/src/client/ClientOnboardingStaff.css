@@ -15,6 +15,9 @@
 .onboarding-staff-form .wide { grid-column: 1 / -1; }
 .onboarding-staff-form fieldset { min-width: 0; margin: 0; padding: 1rem; border: 1px solid var(--line, #cbd2d8); border-radius: 10px; }
 .onboarding-staff-form legend { padding: 0 .35rem; font-weight: 850; }
+.onboarding-target-mode { display: flex; flex-wrap: wrap; gap: .75rem 1.25rem; }
+.onboarding-target-mode label { display: flex; align-items: center; gap: .45rem; }
+.onboarding-target-mode input { width: 1.1rem; min-height: 1.1rem; margin: 0; }
 .onboarding-scope { display: grid; grid-template-columns: 1fr 1fr auto; align-items: end; gap: .75rem; margin-bottom: .75rem; }
 .onboarding-created { display: grid; gap: .8rem; }
 .onboarding-created h2, .onboarding-created h3, .onboarding-created p { margin: 0; }

@@ -44,6 +44,32 @@ test("issues metadata and permits exactly one reveal without creating a recipien
   }
 });
 
+test("existing-client mode sends a client target with null scopes", async ({ page }) => {
+  await render(page);
+  await expect(page.getByRole("heading", { name: "Issue client profile onboarding" })).toBeVisible();
+  await page.getByLabel("Existing client record").check();
+  await expect(page.getByLabel("Business area ID")).toHaveCount(0);
+  await page.getByLabel("Existing client record ID").fill("client:existing-123");
+  await page.getByRole("button", { name: "Issue invitation metadata" }).click();
+  await expect(page.getByRole("heading", { name: "Invitation metadata issued" })).toBeVisible();
+  const body = await page.evaluate(() => (window as Window & { onboardingCalls?: Array<{path: string; body: Record<string, unknown>}> }).onboardingCalls
+    ?.find(call => call.path.endsWith("/create"))?.body);
+  expect(body).toMatchObject({ targetClientRecordId: "client:existing-123", scopes: null });
+});
+
+test("proposed-scope mode caps the UI below the backend limit", async ({ page }) => {
+  await render(page);
+  await expect(page.getByRole("heading", { name: "Issue client profile onboarding" })).toBeVisible();
+  const expiry = await page.getByLabel("Expires at").inputValue();
+  const lifetimeHours = (new Date(expiry).valueOf() - Date.now()) / 3_600_000;
+  expect(lifetimeHours).toBeGreaterThan(166);
+  expect(lifetimeHours).toBeLessThan(168);
+  for (let count = 1; count < 16; count += 1) await page.getByRole("button", { name: "Add scope" }).click();
+  await expect(page.getByText("Maximum 16 scopes per invitation.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Add scope" })).toBeDisabled();
+  await expect(page.getByLabel("Business area ID")).toHaveCount(16);
+});
+
 test("an uncertain reveal is locked and never repeated", async ({ page }) => {
   await render(page, "uncertain");
   await issue(page);
