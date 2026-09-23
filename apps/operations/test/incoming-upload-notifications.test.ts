@@ -3,8 +3,13 @@ import { Miniflare } from "miniflare";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "../src/worker/types";
 
-const mailer = vi.hoisted(() => ({ sendNotificationMail: vi.fn() }));
-vi.mock("../src/worker/mailer", () => ({ sendNotificationMail: mailer.sendNotificationMail }));
+const mailer = vi.hoisted(() => {
+  class NotificationMailDeliveryUncertain extends Error {
+    constructor() { super("notification_mail_delivery_uncertain"); this.name = "NotificationMailDeliveryUncertain"; }
+  }
+  return { sendNotificationMail: vi.fn(), NotificationMailDeliveryUncertain };
+});
+vi.mock("../src/worker/mailer", () => mailer);
 
 import {
   incomingUploadReceivedDigestStatement,
@@ -162,6 +167,24 @@ describe("incoming upload owner notification digests", () => {
       .toEqual(Array(3).fill("incoming-upload-digest:request-one:contributor-one:v1"));
     expect(await delivery.prepare("SELECT digest_version,file_count,total_bytes,status FROM incoming_upload_notification_digests WHERE digest_version=2").first())
       .toEqual({ digest_version: 2, file_count: 1, total_bytes: 5, status: "pending" });
+  });
+
+  it("requires reconciliation instead of resending after uncertain mail delivery", async () => {
+    await releaseQuietWindow();
+    const uncertain = new mailer.NotificationMailDeliveryUncertain();
+    uncertain.message = "transport detail that must not be persisted";
+    mailer.sendNotificationMail.mockRejectedValue(uncertain);
+
+    expect(await processIncomingUploadNotifications(env)).toBe(1);
+    expect(await delivery.prepare(`SELECT status,attempt_count,lease_expires_at,last_error_code
+      FROM incoming_upload_notification_digests`).first()).toEqual({
+      status: "failed", attempt_count: 1, lease_expires_at: null,
+      last_error_code: "mail-delivery-uncertain-reconciliation-required",
+    });
+    expect(await delivery.prepare("SELECT last_error_code FROM incoming_upload_notification_digests").first())
+      .not.toEqual({ last_error_code: uncertain.message });
+    expect(await processIncomingUploadNotifications(env)).toBe(0);
+    expect(mailer.sendNotificationMail).toHaveBeenCalledTimes(1);
   });
 
   it("preserves the existing request deletion cascade", async () => {
