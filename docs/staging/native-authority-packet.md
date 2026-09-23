@@ -22,17 +22,67 @@ or `exact_project` grants cannot authorize those creates. No other directory,
 staff-management, integration-control, workforce, or delegation authority is
 created.
 
+### Existing-directory acquisition packet (schema v4)
+
+The normal schema-v3 packet remains profile-edit/Project-sync only. A schema-v4
+packet with the exact `purpose: "existing-directory-acquisition"` is the sole
+exception: it provisions global `directory.profile.edit` plus
+`directory.identity.link` scoped to one exact reviewed native record ID, kind,
+and current version. The purpose and record selection are fixed; the input
+never accepts a permission list or arbitrary additional grant. The packet does
+not grant `directory.profile.view`; the reconciliation-panel context endpoint
+has a separate global read-authority gate.
+
+Use [the v4 example](staging-native-directory-acquisition-authority.json.example)
+only after independently verifying the disposable native record and its exact
+version, an unmapped PA target in a staging-only source/application, the PA
+staging revision, and the generated provision *and* revoke artifacts. This
+packet does not create the fixture, enable a PA route, compensate a successful
+remote bind after a later local failure, or authorize production cutover.
+
+Schema v4 records the exact prior Directory state as `absent`,
+`v3-profile-only-inactive`, or `v4-acquisition-inactive`. This permits one
+audited transition from the old durable schema-v3 row, then requires the
+complete two-row inactive set for later reactivation. Provision and revoke
+verify the complete set, and revoke deactivates both rows atomically. Any
+additional, missing, changed, denied, scoped, or active-state-drift row aborts
+the packet; do not delete a row to force recovery.
+
+### Empty-enrollment fixture and acquisition successor (schema v5)
+
+Schema v5 has two fixed staging-only purposes; it is not a configurable
+permission list. `staging-empty-enrollment-fixture` temporarily adds only
+global `directory.profile.edit` and one `directory.enrollment.manage` allow
+scoped to the reviewed active business area. It requires `mode: "reactivate"`
+from the exact inactive prior authority state, and the compiled fixture
+record, mutation, and create-admission IDs to be absent before provision. Its
+revoke requires the exact prior provision ledger, unrevoked approval and
+receipt, active admission and grant shapes, and no actor write fence or
+pending/leased Project or Directory work. The revoke deactivates both grants; it never
+deletes the durable enrollment-grant row.
+
+When the same owner later performs acquisition, use v5 purpose
+`existing-directory-acquisition-after-fixture` with the reviewed record and
+business-area IDs, `mode: "reactivate"`, and
+`directoryAuthorityState: "v5-fixture-inactive"`.
+It reactivates profile edit, adds only the record-scoped identity-link allow,
+and keeps enrollment management inactive through both acquisition provision
+and revoke. Do not use the v4 packet against this three-row durable state or
+delete the inactive row to make v4 fit. Generate and review both revoke
+artifacts before either staging-only authority window; keep the windows
+separate and disable the fixture route before fixture revoke.
+
 ## Safety model
 
 The checked-in generator validates the exact staging account, Operations D1 ID,
-complete D1 binding inventory, and the exact reviewed 122-file Operations
+complete D1 binding inventory, and the exact reviewed 139-file Operations
 migration chain. Generated files are ignored. Provision and revoke use separate
 Wrangler configs and separate one-file migration directories so applying the
 provision config cannot select the revoke migration.
 
 Both configs use the staging-only
 `staging_native_authority_migrations` migration table. They do not add rows to
-the canonical `d1_migrations` ledger. Each migration rechecks the exact 122-name
+the canonical `d1_migrations` ledger. Each migration rechecks the exact 139-name
 canonical ledger in D1 and its expected auxiliary-ledger predecessor before any
 authority mutation. Wrangler migration rollback, database constraints, final
 sentinel checks, immutable bootstrap approvals/receipts, admission versions, and
@@ -71,7 +121,7 @@ in the ignored local directory with operator-only filesystem access.
 ## Prepare and review
 
 1. Keep both acceptance-route flags and the selected PA connection disabled.
-2. Apply and verify the canonical Operations migrations through `0122`. Confirm
+2. Apply and verify the canonical Operations migrations through `0139`. Confirm
    that no native staff-management, directory, or Project command fence is open
    and neither Project nor Directory outbox has pending or leased actor work.
 3. Sign in once through the ordinary staging Operations Access application so

@@ -19,6 +19,16 @@ valid for at most four hours, pins the reviewer's exact bound Access subject and
 an existing global `role-owner` assignment, and carries a distinct evidence
 digest. It does not impose a permanent single-owner invariant.
 
+The reviewed production native-authority packet was provisioned on September
+21, 2026 after the canonical `0124` chain, private backup, exact owner binding,
+existing permission overrides, empty native state and zero pending actor work
+were rechecked. Sanitized readback proves admission/profile version `1`,
+Directory and Project grant generation/version `1`, the immutable Directory
+history row, approval and receipt. This satisfies the Operations authority
+prerequisite only. It does not make this read-acceptance route a write route,
+consume a Project-adoption review item, enable either PA connection or retire a
+legacy connection.
+
 ## Activation and authority
 
 - `PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ENABLED` is `false` by default.
@@ -56,3 +66,59 @@ connection entry back to `false`. A successful result does not enable
 synchronization, grant any PA write capability, alter client records, or make
 legacy connections safe to retire. Preserve public links and complete the
 separate legacy entitlement/outbox audit before retirement.
+
+## Production evidence
+
+On September 21, 2026, the bounded route completed once for LTDS primary and
+once for LTT secondary. Both capability probes returned `verified` with exact
+identity and contract matches. Directory inventory returned `47` LTDS records
+and `7` LTT records, with no additional page; both Project inventories returned
+an observed empty application-scoped set. The safe audit rows are retained in
+Operations D1. The empty Project inventories are an adoption boundary, not
+proof that PA has no historical Projects: existing Projects are not silently
+bound to the new application and require deliberate review/adoption. The
+acceptance made no PA mutation and does not authorize legacy retirement.
+
+## September 22 private adoption checkpoint
+
+The read acceptance above remains historical read-only evidence. Subsequent
+Operations commits through `1d520c0` implement private foundations for reviewed
+adoption without changing that production result. Directory existing-record
+binding now has a strict PA transport, immutable review/reservation/acquisition
+chain, inactive canonical mapping materialization, and an activation consumer
+that requires the exact authenticated reviewer, fresh PA profile and
+binding-status observations, and current native authority. Project adoption now
+has an immutable review-evidence producer, private reservation and bind-planning
+consumers, and can compose an explicitly activated acquired Directory mapping in
+those later workflows. The producer retains byte-exact PA evidence while using a
+stable semantic digest for idempotent replay, so a fresh transport request ID
+does not invalidate otherwise identical evidence.
+
+The private transport and authenticated administrator routes now exist behind
+default-off gates, but the private consumers remain unmounted from production
+UI and cutover. There is no production write, no PA flag or managed-mode
+change, and no public-link, Delivery, portal, or legacy-mapping change. PA
+managed mode remains off, legacy integrations remain active, and portal
+migration/cutover has not started.
+
+Focused verification is bounded to local code. The populated migration chain
+through `0131` passes `4/4`; the complete Project adoption/evidence/bind suite
+passes `39/39`; its producer subset passes `10/10`; and the dedicated private
+Directory acquisition-to-activation harness passes `7/7`. Independent reruns
+also passed the migration chain `4/4`, the Directory harness `7/7`, and the two
+final replay/race regressions `2/2`. The race regression proves that PA revision
+or projection drift after observation is rejected as a terminal
+`resource_precondition_conflict` without creating a mapping or changing public
+link data. None of these focused runs is a production write or cutover proof.
+
+The remaining boundary is explicit. The private Directory and Project
+transport routes are authenticated, same-origin, CSRF-protected, and
+default-off, and derive actor identity from the authenticated server session;
+they never accept actor identity from request JSON. No production UI has yet
+made those actions normal operator workflows, and no production reconciliation
+or separately authorized rollout has completed. Forward migration `0131` now
+makes the three 0122 canonical customer-identity guards consult
+`project_alpha_active_directory_mappings`; it does not rewrite legacy rows or
+alter collision/history triggers. Until UI, reconciliation, and rollout are
+complete, the new adoption state must not replace the legacy path or be
+described as portal migration progress.

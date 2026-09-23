@@ -32,6 +32,7 @@ import { DropboxImportDialog } from "./DropboxImportDialog";
 import { ClientHubWorkspaceRouter } from "./BusinessProjectWorkspace";
 import { DeliveryLinksPage } from "./DeliveryLinksPage";
 import { ProjectAlphaConnections } from "./ProjectAlphaConnections";
+import { ProjectAlphaDirectoryReconciliationReview } from "./ProjectAlphaDirectoryReconciliationReview";
 import { PortalWorkflowReadiness } from "./PortalWorkflowReadiness";
 import { ProjectAlphaAccessTokenExpiry } from "./ProjectAlphaAccessTokenExpiry";
 import { DeliveryChangeRecoveryStatus } from "./DeliveryChangeRecoveryStatus";
@@ -89,6 +90,8 @@ interface Session {
     portalIdentityDenials?: { enabled: boolean };
     authenticatedDeliveryGrants?: AuthenticatedDeliveryCapability;
     clientFeedback?: { enabled: boolean };
+    nativeDirectoryProfileWrites?: { enabled: boolean };
+    projectAlphaPrivateAdminTransport?: { enabled: boolean };
   };
 }
 type AuthenticatedDeliveryReadinessReason =
@@ -826,7 +829,8 @@ function ClientHubSurface({ session }: { session: Session }) {
     </nav>}
     {selected === "directory" && <ClientHubWorkspaceRouter mapToken={session.mapboxPublicToken} permissions={session.user.permissions}
       feedbackEnabled={session.capabilities?.clientFeedback?.enabled === true} invitationAccess={session.invitationAdministration}
-      canManagePortalSetup={session.user.isAdministrator && allowed(session.user, "operations.manage")} />}
+      canManagePortalSetup={session.user.isAdministrator && allowed(session.user, "operations.manage")}
+      nativeDirectoryProfileWrites={session.capabilities?.nativeDirectoryProfileWrites?.enabled === true} />}
     {selected === "feedback" && session.capabilities?.clientFeedback?.enabled === true && <OperationsFeedback />}
     {selected === "feedback" && session.capabilities?.clientFeedback?.enabled !== true && <Card><EmptyState title="Client feedback unavailable" detail="Feedback-review access is required." /></Card>}
     {selected === "invitation-requests" && <InvitationApprovals access={invitationAccess} />}
@@ -7172,6 +7176,8 @@ function Administration({ session }: { session: Session }) {
       </section>
       <div className="administration-panels">
         {canManageConnections && <section id="project-alpha-connections" className="administration-panel administration-panel-wide"><ProjectAlphaConnections /></section>}
+        {canManageConnections && session.capabilities?.projectAlphaPrivateAdminTransport?.enabled === true
+          && <section id="project-alpha-reconciliation-review" className="administration-panel administration-panel-wide"><ProjectAlphaDirectoryReconciliationReview /></section>}
         {canManageConnections && <section className="administration-panel"><PortalWorkflowReadiness /></section>}
         {canManageConnections && <section className="administration-panel"><ProjectAlphaAccessTokenExpiry /></section>}
         {canManageConnections && <section className="administration-panel administration-panel-wide"><DeliveryChangeRecoveryStatus /></section>}

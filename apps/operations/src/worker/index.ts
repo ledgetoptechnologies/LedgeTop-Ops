@@ -64,6 +64,7 @@ import { syncProjectAlpha } from "./project-alpha";
 import { runProjectAlphaSnapshotRecovery } from "./project-alpha-snapshot-recovery";
 import { registerProjectAlphaConnectorAdminRoutes, portalAuthorityErrorResponse } from "./project-alpha-connector-admin";
 import { registerProjectAlphaProjectV2AcceptanceRoutes } from "./project-alpha-project-v2-acceptance-routes";
+import { registerProjectAlphaPrivateAdminRoutes } from "./project-alpha-private-admin-routes";
 import { registerProjectAlphaApiV2ReadAcceptanceRoutes } from "./project-alpha-api-v2-read-acceptance-routes";
 import { PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ROUTE, projectAlphaDirectoryV2BootstrapAcceptanceEnabled, registerProjectAlphaDirectoryV2BootstrapAcceptanceRoutes } from "./project-alpha-directory-v2-bootstrap-acceptance-routes";
 import { PortalSourceAuthorityError } from "../../../client/src/worker/project-alpha-portal-authority";
@@ -72,6 +73,8 @@ import { ClientHubSourcesChangedError } from "./client-hub-directory";
 import { buildConnectionSummaries, projectAlphaHealthIsStale, projectAlphaQuoteFreshness } from "./integration-health";
 import { runProjectAlphaApiV2MonitorCycle } from "./project-alpha-api-v2-monitor-cycle";
 import { selectProjectAlphaApiV2MonitorSchedulerRevision } from "./project-alpha-api-v2-monitor-scheduler-selection";
+import { drainNativeDirectoryOutboxes } from "./native-directory-outbox-scheduler";
+import { runNativeDirectoryReconciliationScheduler } from "./native-directory-reconciliation-scheduler";
 import { handleProjectAlphaApiV2MonitorControlHttp,
   projectAlphaApiV2MonitorControlHttpRequest } from "./project-alpha-api-v2-monitor-control-http";
 import { consumeNativeStaffOnboardingRateLimit } from "./native-staff-onboarding-rate-limit";
@@ -159,6 +162,8 @@ import { registerProjectAlphaDraftQuoteRoutes } from "./project-alpha-draft-quot
 import { provePrimaryBusinessReferences } from "./project-alpha-primary-references";
 import { registerTeamAssignedWorkRoutes } from "./team-assigned-work";
 import { registerClientHubRoutes } from "./client-hub";
+import { NATIVE_DIRECTORY_PROFILE_ROUTE, nativeDirectoryProfileWritesEnabled, registerNativeDirectoryProfileRoutes } from "./native-directory-profile-routes";
+import { NATIVE_DIRECTORY_STAGING_EMPTY_ENROLLMENT_FIXTURE_ROUTE, nativeDirectoryStagingEmptyEnrollmentFixtureEnabled, registerNativeDirectoryStagingEmptyEnrollmentFixtureRoutes } from "./native-directory-staging-empty-enrollment-fixture-routes";
 import { registerBusinessPartyRoutes } from "./business-party-routes";
 import { registerNotificationCenterRoutes } from "./notification-center";
 import { registerStaffInboxRequestRoutes } from "./staff-inbox-requests";
@@ -447,6 +452,17 @@ app.use("/api/native-integrations/monitor/*", dispatchProjectAlphaApiV2MonitorCo
 app.use(PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ROUTE, async (c, next) => {
   if (c.req.path === PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ROUTE && !projectAlphaDirectoryV2BootstrapAcceptanceEnabled(c.env))
     return c.json({ error: "Not found" }, 404);
+  await next();
+});
+// Keep the default-off write surface absent before ordinary staff
+// authentication, matching other rollout-gated authenticated route families.
+app.use(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/*`, async (c, next) => {
+  if (!nativeDirectoryProfileWritesEnabled(c.env)) return c.json({ error: "Not found" }, 404);
+  await next();
+});
+app.use(NATIVE_DIRECTORY_STAGING_EMPTY_ENROLLMENT_FIXTURE_ROUTE, async (c, next) => {
+  if (c.req.path === NATIVE_DIRECTORY_STAGING_EMPTY_ENROLLMENT_FIXTURE_ROUTE
+    && !nativeDirectoryStagingEmptyEnrollmentFixtureEnabled(c.env)) return c.json({ error: "Not found" }, 404);
   await next();
 });
 app.use("/api/*", async (c, next) => {
@@ -796,10 +812,11 @@ app.get("/health", (c) => c.json({ status: "ok", service: "ltds-ops" }));
 app.get("/api/session", async (c) => {
   const principal = c.get("principal"),
     administrator = c.get("administrator");
-  const [permissions, globalScope, deliveryBrowseScope, displayUnits, clientFeedbackEnabled] = await Promise.all([
+  const [permissions, globalScope, deliveryBrowseScope, integrationsManageScope, displayUnits, clientFeedbackEnabled] = await Promise.all([
     permissionKeys(c.env, principal),
     sqlScope(c.env, principal, "dashboard.view"),
     sqlScope(c.env, principal, "delivery.browse"),
+    sqlScope(c.env, principal, "integrations.manage"),
     resolveViewerUnits(c.env, principal.id),
     staffFeedbackEntryEnabled(c.env, principal),
   ]);
@@ -830,6 +847,11 @@ app.get("/api/session", async (c) => {
     mapboxPublicToken: c.env.MAPBOX_PUBLIC_TOKEN || null,
     units: { default: defaultViewerUnits(c.env), resolved: displayUnits },
     capabilities: {
+      projectAlphaPrivateAdminTransport: {
+        enabled: c.env.PROJECT_ALPHA_PRIVATE_ADMIN_TRANSPORT_ENABLED === "true" && administrator
+          && integrationsManageScope.global && !integrationsManageScope.deniedGlobal,
+      },
+      nativeDirectoryProfileWrites: { enabled: nativeDirectoryProfileWritesEnabled(c.env) },
       clientFeedback: { enabled: clientFeedbackEnabled },
       dropboxImport: dropboxImportCapability(c.env),
       incomingUploads: incomingUploadsCapability(c.env),
@@ -1553,6 +1575,8 @@ registerClientRequestAttachmentRoutes(app);
 registerProjectAlphaDraftQuoteRoutes(app);
 registerTeamAssignedWorkRoutes(app);
 registerClientHubRoutes(app);
+registerNativeDirectoryProfileRoutes(app);
+registerNativeDirectoryStagingEmptyEnrollmentFixtureRoutes(app);
 registerBusinessPartyRoutes(app);
 registerNotificationCenterRoutes(app);
 registerStaffInboxRequestRoutes(app);
@@ -3176,6 +3200,7 @@ app.get("/api/admin/delivery-change-recovery", async (c) => {
 registerProjectAlphaConnectorAdminRoutes(app);
 registerProjectAlphaApiV2ReadAcceptanceRoutes(app);
 registerProjectAlphaProjectV2AcceptanceRoutes(app);
+registerProjectAlphaPrivateAdminRoutes(app);
 registerProjectAlphaDirectoryV2BootstrapAcceptanceRoutes(app);
 app.post("/api/admin/integrations/project-alpha/sync", async (c) => {
   const principal = c.get("principal");
@@ -3253,6 +3278,8 @@ const CLIENT_HUB_INDEX_CRON = "2-57/5 * * * *";
 const PROJECT_ALPHA_RECOVERY_CRON = "17 * * * *";
 const NATIVE_DELIVERY_NOTIFICATION_CRON = "4-59/15 * * * *";
 export const PROJECT_ALPHA_API_V2_MONITOR_CRON = "3-58/5 * * * *";
+export const NATIVE_DIRECTORY_OUTBOX_CRON = "1-56/5 * * * *";
+export const NATIVE_DIRECTORY_RECONCILIATION_CRON = "6-51/15 * * * *";
 
 export async function runScheduledPrimaryProjectAlphaSync(env: Env) {
   const result = await syncProjectAlpha(env);
@@ -3277,6 +3304,28 @@ async function scheduled(
   env: Env,
   ctx: ExecutionContext,
 ) {
+  if (event.cron === NATIVE_DIRECTORY_RECONCILIATION_CRON) {
+    try {
+      const result = await runNativeDirectoryReconciliationScheduler(env);
+      console.log(JSON.stringify({ event: "native_directory.reconciliation.tick", ...result }));
+    } catch {
+      // Never emit connection secrets, remote payloads, profile fields, or source identifiers.
+      console.error(JSON.stringify({ event: "native_directory.reconciliation.error" }));
+      throw new Error("Native Directory reconciliation failed");
+    }
+    return;
+  }
+  if (event.cron === NATIVE_DIRECTORY_OUTBOX_CRON) {
+    try {
+      const result = await drainNativeDirectoryOutboxes(env, { rotationTime: event.scheduledTime });
+      console.log(JSON.stringify({ event: "native_directory.outbox.tick", ...result }));
+    } catch {
+      // Never emit connection secrets, command payloads or private profiles.
+      console.error(JSON.stringify({ event: "native_directory.outbox.error" }));
+      throw new Error("Native Directory outbox drain failed");
+    }
+    return;
+  }
   if (event.cron === PROJECT_ALPHA_API_V2_MONITOR_CRON) {
     try {
       if (env.PROJECT_ALPHA_API_V2_MONITOR_ENABLED !== "true") {

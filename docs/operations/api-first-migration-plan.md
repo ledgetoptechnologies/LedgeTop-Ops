@@ -1,12 +1,439 @@
 # API-first migration — current implementation objective and work register
 
-Updated September 19, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+Updated September 23, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+
+### September 22, 2026 — authoritative PR and staging acceptance status
+
+- September 23 source-contract audit: Project Alpha's current
+  `portal.projection` producer still requires an enabled
+  `portal_integration_profiles` row and workspace allowlist; its outbox sender
+  uses the External Operations webhook, application key, Access credentials
+  and signed envelope. Ops Sync and Client receive that envelope. Current PA
+  API-v2 capabilities expose Directory and Projects only, so the legacy
+  connection cannot yet be removed without losing portal membership,
+  entitlements, catalog and assignment updates. The replacement must migrate
+  verified workspace identities and explicit grants/denials into Ops-native
+  authority, add a generic scoped PA catalog inventory (and billing-contact
+  inventory if PA retains that ownership), poll it from Ops, then fence and
+  drain the old outbox only after convergence and login/public-link proof.
+  Rewrapping the same custom projection behind a bearer-token endpoint is not
+  an API-first cutover. This is a source audit, not staging or production
+  acceptance.
+
+- September 23 read-only signed-in Cloudflare and staging D1 preflight for the
+  **client-portal** path: the `ledgetop-clients-staging` Worker still serves only
+  `delivery-staging.ledgetopdroneservices.com`; its deployed
+  `PROJECT_ALPHA_PORTAL_SYNC_ENABLED`, hierarchy-v2, PA-identity eligibility,
+  identity denylist and root-access-policy variables are `false`. Its
+  `client-data-staging` D1 has canonical migrations through `0213` but zero
+  portal projection receipts, checkpoints and workspace-source rows. The
+  account Worker inventory returns no `ledgetop-ops-sync-staging` Worker, so
+  the documented private Ops Sync-to-Client staging binding cannot be live.
+  `ltds-ops-staging` D1 is through `0139`; its one native staff admission is
+  inactive, with zero active `directory.identity.link` grants. The signed-in
+  Ops staging administration page reports primary business-record sync
+  disabled and Client workflow gates unverified; those UI indicators are not
+  themselves proof of the signed portal projection path. These are bounded
+  readbacks, not an activation or a production observation. Prepare and verify
+  the pinned staging Client/Ops Sync deployment, exact service binding and
+  default-on eligibility profile before a pilot signed `portal.projection`.
+  Do not use the legacy `client-account-activation` POST as an API-first pilot:
+  it writes a primary-only `legacy-backfill` workspace rather than proving
+  the replacement PA API-v2/Directory and signed-projection path. The separate
+  v5 disposable fixture, inactive Directory acquisition, activation and real
+  public-link-preservation gates remain required.
+
+- September 23 follow-up: Operations PR #107 source checkpoint
+  `11cccfd879b61cc6cc699dbc32d923cf0275a3f5` passed all ten GitHub CI
+  checks at that exact head. The final relationship-replay test also
+  passed locally there (11/11 with a 30-second per-test timeout); its
+  initial default-timeout run had six 5-second timeouts, not assertion failures.
+  This supersedes the earlier #107 CI-head snapshot below; later documentation
+  commits do not change that tested source. It does not close
+  its live Directory reservation/acquisition, post-bind compensation, joined
+  rollback, both-instance reconciliation, deployment-order or existing
+  public-link compatibility gates. The stacked Operations PR #108 and PA
+  PR #189 remain separate review branches; PA #189 passed the local full
+  PHPUnit suite (985 tests, 8,027 assertions, 94 skipped), but has no automatic
+  checks on its feature-branch PR target. This checkpoint did not enable
+  production authority.
+
+- Latest read-only release check: Operations PR #107 head
+  `303da4809d96bb331497be7d85d463e985be2c84` passed all ten
+  exact-head CI jobs, including Operations and desktop/mobile browser checks.
+  The only intervening change after the reviewed Worker source was
+  documentation; one mobile browser test failure passed on a targeted retry
+  without a source or test change. Its cause was not established.
+  PA PR #188 head
+  `731677dda1821c53f93dd0b38f1504f184c320d9` passed exact-head CI,
+  CodeQL and gitleaks, including its real-MySQL cutover gate. These replace
+  the earlier commit/check snapshots below; neither PR is merged. An
+  independent patch-risk review held the Ops merge for missing live
+  reservation/rollback and deployment-sequence evidence.
+- Read-only Wrangler inspection of the live production `ledgetop-ops` Worker
+  found a 100%-deployed version `9a2e6997-c8f0-4e7b-ad7a-7d09fff5b4af`
+  created 2026-09-22 04:06 UTC from Wrangler. Its binding inventory does
+  not contain the new native-directory/reconciliation flags. A remote D1
+  migration-list check found exactly `0125`–`0138` pending in `OPS_DB`; no
+  migration was applied. This is a deployment snapshot, not proof of the
+  exact source commit currently running or of any future deployment path.
+- PA staging public and LAN readiness plus its LAN control-API health returned
+  HTTP 200 with schema version 102 on September 22, but none attested the
+  deployed image digest or PR #188 exact head above. Host-specific
+  migrations/backfills, attestation, joined
+  API acceptance and rollback remain unproven. The owner has been asked for
+  a staging-only host update and sanitized evidence. Do not request either
+  production PA update or activate managed mode until these gates and the
+  coordinated release order are accepted.
+- Before any new staging authority window, a private staging D1 export was
+  retained with SHA-256
+  `01608c4476f4c4d9fc83b475166944b273e488c98c4cf6f0cb04b54823907a35`.
+  Canonical migration `0139` was then applied only to `ltds-ops-staging`;
+  the remote migration list reports no pending migrations and read-only D1
+  inspection found its exact staging fixture guard trigger once. The
+  CI-green Ops candidate was deployed only to the staging Worker. Cloudflare
+  reports version `e5469ba5-19ca-4982-9b0e-e0aa49c8e096` at 100% traffic,
+  replacing `0b703087-88b4-4e5a-8fbc-fd5e260e1ae4`. The 29 binding
+  names/types remained identical, existing variables/secrets were preserved,
+  and the fixture route flag remains absent/off. Public health requests from
+  the shell redirected to Cloudflare Access, so no authenticated application
+  smoke test or fixture invocation is claimed. Production Workers and D1 were
+  not changed by this staging step. The newly deployed staging Worker then
+  completed a scheduled connected PA reconciliation at
+  `2026-09-22T23:21:32.862Z`, then again at
+  `2026-09-22T23:51:30.829Z`: each observed one page, 14 remote items,
+  one local item, and zero consecutive uncertain attempts. This is a live read-path/scheduler
+  check, not evidence for the gated fixture or Directory write path.
+- Existing-record acquisition review found that a legacy mapping collision
+  could reject the local acquired receipt *after* PA accepted a bind. The
+  coordinator now checks legacy and prior acquired identity overlaps before
+  making the PA bind request; focused collision, replay and two-source tests
+  and Operations typecheck pass. This prevents the known staging fixture from
+  making an orphaning POST, but is not live rollback evidence or a substitute
+  for external-side-effect recovery after a later failure. The current
+  staging authority packet also lacks `directory.identity.link`, which this
+  route requires. A separately reviewed, temporary grant and an unmapped,
+  disposable staging source/record are required before live acquisition.
+- A purpose-pinned schema-v4 staging authority packet is prepared for that
+  separate window. It limits `directory.identity.link` to one reviewed native
+  record ID/kind/version and atomically revokes it with the packet's existing
+  profile-edit and Project-sync authority; the schema-v3 path remains intact.
+  Its local lifecycle and drift suite passes 22/22. No packet has been applied
+  to staging; the exact fixture, PA revision, contextual read grant, remote
+  bind compensation and joined rollback remain separate acceptance gates.
+- A read-only staging D1 check on September 22 found all 138 Operations
+  migrations applied, one native organization, one active legacy organization
+  mapping, no acquired mappings, no active native admissions, and no pending
+  Directory outbox. The only native organization is the mapped one; there are
+  zero eligible unmapped organizations. The staging authority history includes
+  one inactive admission (version 12) and one inactive global
+  `directory.profile.edit` grant, not live acquisition authority. No staging
+  record or grant was changed by this check.
+- Independent fixture review confirms that normal Operations organization
+  create requires at least one PA destination and durably queues a PA-create
+  command; the staging bootstrap also creates a mapped record. Neither is a
+  safe acquisition fixture. A second Ops source pointed at the same PA staging
+  installation is rejected by unique origin/source/application/history-epoch
+  constraints. A separate PA installation is **not** required: in a quiet
+  staging window, a fresh unbound PA organization created in the existing
+  installation can pair with a fresh Operations native-only organization in
+  the existing source/application namespace. This requires a governed,
+  staging-only native-only fixture path that records admission,
+  revision and audit evidence but creates no enrollment destination,
+  materialization, outbox, mapping, client, portal, Delivery or public-link
+  side effect. Confirm both exact IDs, PA revision and absence of bindings or
+  mapping collisions before provisioning the record-pinned v4 authority.
+  Accepted PA binds and Ops review/receipt rows remain durable even after
+  temporary authority is revoked; do not raw-insert or hard-delete D1 rows as
+  fixture setup/compensation. Remote-success/local-persistence failure still
+  needs explicit recovery evidence before claiming rollback acceptance.
+- The owner explicitly approved an isolated, source-less staging fixture with
+  one durable `native_directory_enrollments` row containing `[]`; this is not
+  a PA enrollment. Local candidate commits `78972f9` and `792938a` implement
+  one fixed synthetic organization behind a staging-only, default-off route,
+  current native staff authority, a pinned active business area, and the
+  normal create-admission/write fences. Normal Directory create still requires
+  at least one PA destination. Additive migration `0139` atomically rechecks
+  `directory.enrollment.manage` for this exact fixture and mutation; it
+  closes an independent QA finding where the route's earlier grant read could
+  race a revocation. Local route tests pass 5/5, migrated-D1 writer tests
+  15/15 (including revocation immediately before the batch, replay and
+  byte-preserved Delivery/public-link rows), and Operations typecheck passes.
+  At this earlier local implementation checkpoint, the fixture had not been
+  deployed or invoked and `0139` had not yet been applied remotely. Those
+  deployment facts were superseded by the later staging evidence above:
+  `0139` is now applied to staging and the staging Worker is on the reviewed
+  candidate with the route flag absent/off. The fixture still has **not** been
+  invoked, no PA organization has been created for it, and neither this
+  source-less record nor local retry tests prove joined acquisition or
+  remote-bind compensation. Exact PA target/revision evidence, temporary
+  authority review/provision/revoke, and enabled-route review remain required
+  for the live staging window. The ordinary production authority and PA rollout
+  gates are unchanged.
+- The schema-v5 staging authority packet now has purpose-pinned fixture and
+  same-owner post-fixture acquisition windows, with exact inactive-grant
+  preservation and independently reviewed revoke guards. The canonical
+  staging inventory is pinned to all 139 Operations migrations. Local
+  bootstrap and packet tests passed 38/38 (two Windows symlink tests skipped),
+  including a real-D1 v3-inactive → fixture provision/revoke → acquisition
+  provision/revoke lifecycle, a fixed-record collision, and atomic failure
+  when a Project command remains pending. No authority packet has been
+  applied remotely. A private pre-`0139` staging D1 export was verified at
+  1,360,004 bytes and SHA-256
+  `01608c4476f4c4d9fc83b475166944b273e488c98c4cf6f0cb04b54823907a35`;
+  its local ACL permits only the owner, Administrators, and SYSTEM. The
+  `0139` and the reviewed Ops Worker have since been staged with the fixture
+  route flag off, and `32edbaf` has passed its exact-head CI. The remaining
+  live gates are temporary packet review/provision/revoke, an authenticated
+  staging application smoke test, and exact PA staging revision evidence before
+  joined acquisition. The later `ceaa896` documentation-only CI recheck is not
+  evidence of a new runtime deployment and was still running at last check.
+- Green PR CI does not substitute for joined staging or production cutover
+  acceptance. Neither PR is deployed to either production PA instance.
+- A read-only public-link regression review found that PR #107 changes the
+  Delivery/public-link implementation, including public media hydration and
+  bulk-download resume behavior. Five focused suites passed 76/76 checks for
+  existing-link token/password, expiry, revocation, session-version, Range and
+  bulk-resume behavior plus delegated-share authorization. Those local tests
+  do not prove deployed D1/R2 streaming, browser cookie behavior, or a real
+  legacy link in production. Preserve live legacy-link smoke and rollback
+  evidence as release gates; do not infer compatibility merely from a green
+  build.
+- A private pre-migration staging D1 backup was recorded before applying remote
+  Operations staging migrations 0123–0138. This records an **earlier** staging
+  deployment snapshot: Worker version
+  `0b703087-88b4-4e5a-8fbc-fd5e260e1ae4` was subsequently replaced by
+  `e5469ba5-19ca-4982-9b0e-e0aa49c8e096` at 100% traffic after `0139` was
+  applied. The exact 29 existing binding names/types, including the three
+  secret bindings, were unchanged across that later rollout; no secret values
+  were inspected or recorded. The enabled, application-bound PA staging API-v2
+  connection remains an encrypted deployment secret.
+  Directory reconciliation and private-administrator review are the only
+  enabled migration behaviors in this window. The first connected scheduled
+  tick reached the scheduler but recorded an uncertain retry before a run row
+  existed. The production Web Crypto ID factory had been passed as an unbound
+  method while tests injected IDs; it is now receiver-safe, with a default-ID
+  regression test (18/18 focused). The next staging tick completed at
+  2026-09-22 19:36 UTC: one page, 14 remote items, one local item, 13
+  extra-remote findings (four clients, nine organizations), and zero actions.
+  The signed-in staging administration page displays those findings.
+- No live finding reservation, inactive mapping, ownership claim, mapping
+  activation, or client-access activation has been accepted in staging. The
+  sole staging native organization is already actively mapped to another PA
+  record, so it is not an eligible exact existing-record reservation target;
+  no automatic match or synthetic claim was made. Opening the staging chooser
+  also returned `Current directory authority is required`: the signed-in
+  staging administrator has no active native staff admission/profile/grant
+  generation in this isolated D1. A fresh reviewed native-authority admission
+  packet compatible with the current migration chain is required before
+  private reservation UI acceptance; legacy
+  administrator access is deliberately insufficient. A normal native
+  organization create on this same PA source is not a safe fixture shortcut:
+  it durably queues a future PA-create command even with draining disabled.
+  Live reservation acceptance therefore requires a separately scoped
+  staging-only fixture source/application or a later real unmapped Ops record;
+  local reservation tests do not claim this missing live proof.
+  The focused inactive-reservation and explicit-activation suite is green at
+  62/62 with an extended timeout, including stale evidence, collision,
+  authority-revocation and byte-preserved public-link cases.
+- Linked-client profile and relationship PATCH/POST mechanics are implemented
+  with exact mapping and relationship-version checks. Commit `fffb713` adds
+  an explicit linked-client selection coordinate within the organization
+  workspace, checking the exact source/application/epoch mapping and current
+  local relationship before mounting the existing editor. TypeScript and
+  focused tests passed. A subsequent correction applies per-client native
+  Directory view ACL (including explicit deny) before exposing linked-client
+  names in that selector; its focused D1 suite passed 6/6. Live end-to-end
+  editing acceptance remains pending because native writes are still off.
+- Production remains unchanged: PA is correctly still locally editable,
+  Operations production flags remain off, existing portal/Delivery/public-link
+  behavior is untouched, and no client access was activated. PR #188 implements
+  the server-enforced managed-directory mode, but deployment to both PA
+  instances and a separate explicit PA administrator activation are still
+  required after joined staging acceptance.
+
+### September 22, 2026 — default-off reconciliation scheduler checkpoint
+
+- Migration `0137` adds a scheduler-wide exact-token lease, fair source cursor
+  and per-source retry state without changing the reconciliation evidence or
+  any canonical, mapping, Delivery or public-link table. The scheduled entry is
+  present at a distinct fifteen-minute cadence, but
+  `PROJECT_ALPHA_DIRECTORY_RECONCILIATION_ENABLED` is checked in as exactly
+  `false`; no deployment setting was enabled.
+- Each tick parses only enabled generic API-v2 connections, selects at most one
+  due source in fair rotation, applies strict page/item/time bounds and records
+  only aggregate complete/uncertain scheduling state. Uncertain or thrown work
+  receives bounded exponential backoff. The fair cursor advances after every
+  attempted source, including a thrown reader, so one failing PA instance does
+  not starve the other.
+- Independent review found that a finite unrenewed lease could permit a second
+  tick during a delayed first run. The scheduler now renews the exact-token
+  lease while the reconciliation core is awaited, stops and awaits that
+  heartbeat before token-scoped release, and fences every post-result update.
+  A deferred-run regression holds the first core call beyond its original
+  lease and proves a second tick remains contended. The final focused suite
+  passes **9/9**; scheduler, reconciliation core and Directory write-drain pass
+  **33/33** together; and the production Operations bundle builds. This proves
+  dormant composition, not staged or production reconciliation acceptance.
+
+- A staging observation later showed that the original `0-55/5 * * * *`
+  expression was semantically identical to the existing `*/5 * * * *`
+  trigger, so Cloudflare emitted only the existing event at their shared
+  boundary and the reconciliation branch did not run. The worker and
+  checked-in Wrangler schedule now use the distinct `6-51/15 * * * *`
+  expression (minutes 6, 21, 36 and 51). A focused configuration regression
+  expands the minute fields and proves that no other checked-in schedule has
+  the same firing set. This correction changes no feature flag, activation,
+  Delivery or public-link behavior and was not deployed by this checkpoint.
+  The corrected focused scheduler suite passes **9/9**, and the production
+  Operations bundle builds.
+
+### September 22, 2026 — bounded read-only Directory reconciliation checkpoint
+
+- Forward migration `0136` adds a reconciliation-only ledger: immutable run
+  history, one durable checkpoint per PA source, paged remote observations and
+  reviewable drift findings. It has no foreign key, trigger or view that can
+  mutate native Directory records, PA mappings, Delivery/public-link state or
+  Project Alpha. Only a currently running run that owns the exact source
+  checkpoint may insert or enrich observations or create findings; stale-owner
+  writes fail closed.
+- The new reconciliation core reads one configured PA source at a time through
+  the generic API-v2 inventory, profile and binding-status readers. It bounds
+  page size, page count, total items and elapsed time; fences every page and
+  targeted read to the same source instance, application, history epoch and
+  authorization generation; rejects duplicate/out-of-order pages and cursor
+  loops; retains the previous complete snapshot when a run becomes uncertain;
+  and supports guarded takeover of an expired run without stealing a live
+  source lease.
+- Complete snapshots compare only exact-fence local mappings and classify
+  missing/extra remote resources, public/external-ID, revision, immutable
+  projection, presence, binding and client-parent relationship drift. The
+  reader creates review evidence only. It never repairs, remaps, creates,
+  updates, archives or deletes a PA record, and it does not treat an uncertain
+  transport result as a completed snapshot.
+- Independent review found and closed checkpoint-acquisition, completion-
+  ownership, stale-run takeover, exact-fence filtering, bounded-query and
+  deadline gaps. Root review then found and closed stale-owner observation
+  insert/update windows. The final focused suite passes **17/17** independently.
+  The default-off bounded scheduler is recorded above. An operator
+  review/adoption path and joined both-instance acceptance are still required
+  before either production instance can enter externally managed Directory
+  mode.
+
+### September 22, 2026 — linked-client write and relationship-recovery checkpoint
+
+- Operations now exposes the default-off, native-authority Client Hub path for
+  creating standalone or organization-linked clients, editing linked profiles,
+  and assigning, moving or removing a client relationship. Client creation
+  reserves the profile and exact initial relationship assertion in one D1
+  batch. Committed replays compare that durable assertion rather than trusting
+  a caller-supplied parent. PA destinations remain a deliberate subset of the
+  organization's enrolled destinations, so a client can be served by one PA
+  instance while its organization is enrolled in both. Existing Delivery and
+  public-link records are not rewritten.
+- Canonical imported record IDs are no longer incorrectly restricted to UUIDs.
+  They remain bounded to 191 Unicode scalar values and 764 UTF-8 bytes with
+  control characters rejected; mutation, application, instance, epoch and
+  transport command identifiers remain strict UUIDs. Forward migration `0135`
+  rebuilds only the current relationship table constraint. A populated
+  through-`0134` rehearsal preserves its row, relationship version, timestamps,
+  history, five guards and dependent live views, then proves bounded non-UUID
+  client and organization IDs work.
+- Relationship writes now derive the numeric maximum from coherent,
+  current-local-version profile, relationship, refresh and activation
+  evidence. Every source/application/history/origin/public-ID fence must match;
+  evidence from another origin cannot advance a command. A pending predecessor
+  blocks new work. A terminal predecessor also blocks the normal mutation
+  route; only the administrator recovery route can name the exact immediate
+  terminal command IDs, and those immutable supersession IDs are persisted on
+  the replacement outbox rows. Ownership of this recovery proof is therefore
+  server-side rather than a general editor permission.
+- Independent linked-client verification passed five files and **50/50** tests.
+  Relationship plus populated-`0135` verification passed **11/11** tests. The
+  first seven-file integration run correctly exposed one stale dispatcher
+  fixture that stopped before the new create-admission relationship table; the
+  fixture now runs through `0135`, creates the exact client relationship
+  assertion and pins the parent's current version. Its full dispatcher suite
+  passes **6/6** and the other six integrated files passed **50/50**. The
+  production Operations build also succeeds. These are local source and D1
+  results, not staging or production write acceptance.
+- No write, scheduler, monitor, reconciliation or managed-directory flag was
+  enabled. PA must remain locally editable until the read-only reconciliation
+  consumer, both-instance joined acceptance and coordinated owner deployment
+  prove that Operations can replace browser writes without hiding existing PA
+  changes or stranding terminal conflicts.
+
+### September 21, 2026 — production native-authority provision checkpoint
+
+- Operations PR106 merged to `main` as
+  `8115ce1ca7bf736bb37039f42338547da2617d92`. Its authoritative post-merge
+  workflow `35685511112` passed all ten Operations, Client, Ops Sync, browser,
+  source-invariant, Incoming and thumbnail jobs. The public change teaches the
+  production-only authority-packet generator to preserve and verify an exact
+  pre-existing permission-override set; it does not mount a route, enable a
+  connection or alter Project Alpha.
+- A fresh private D1 backup was retained before the authority work. Canonical
+  Operations migrations `0123` and `0124` were applied and independently
+  read back before authority provision. The isolated provision packet then
+  required exactly one pending migration and applied
+  `9000_production-authority-project-v2-001_provision.sql` to `ltds-ops`.
+  Wrangler reported all 12 statements successful; the packet migration ledger
+  now contains exactly that one row and has no pending migration.
+- Sanitized post-provision readback proves one active native admission and
+  profile at version `1`, one active global `directory.profile.edit` grant at
+  generation/version `1`, one immutable Directory history row at
+  generation/version `1`, and one active global `project.shared.sync` grant at
+  generation/version `1`. The exact approval and receipt are present. Pending
+  actor fences/outboxes and unrelated native authority remain zero.
+- The four existing Delivery permission overrides were re-read before and
+  after provision. Their canonical count remains `4` and their reviewed digest
+  remains `827c1e8ced874e5a1539e4c57e7cd41f56c1ce0dc373ce32a62e4a7de46d19b0`.
+  The packet targeted only `OPS_DB`; it did not bind `DELIVERY_DB`, rewrite a
+  public link, enable a PA connection or activate a write route. The reviewed
+  revoke packet remains unused and available only for a failed-postcondition
+  response; no rollback was required.
+- This establishes governed Operations-side authority, not client migration.
+  Production Directory and Project mutation callers remain unactivated. The
+  next gate is one-source-at-a-time write acceptance, beginning with a bounded
+  LTDS fixture or deliberate existing-record review, followed by exact replay,
+  stale/conflict, rollback and public-link-preservation evidence. LTT and
+  legacy connections remain unchanged until that gate passes. Migration
+  `0124` review evidence still needs its separately reviewed consumer before an
+  existing PA Project can be adopted through a browser action.
+
+### September 21, 2026 — two-instance production read acceptance
+
+- The production read-only acceptance route completed once for each configured
+  source before native write authority was provisioned. Both capability probes
+  returned `verified` with exact source/application/history identity and exact
+  contract matches. Each Directory and Project inventory GET returned
+  `observed`, not redirected, unauthorized, stale or uncertain.
+- LTDS primary reported Directory generation `0`, `47` Directory records, no
+  next page, and metadata digest
+  `e224612a24d58643abd1715cf367c3466a98eaa56cdb93fbb70861e578e9b26f`.
+  LTT secondary reported Directory generation `0`, `7` Directory records, no
+  next page, and metadata digest
+  `636c100cc3aa9a4f0bf4dc7df1b65dbdb542dd461e3e18d435158075a0dec680`.
+  The safe audit rows were written at `2026-09-21 23:10:27` and
+  `2026-09-21 23:10:42` UTC respectively.
+- Both application-scoped Project inventories were empty with the canonical
+  empty-array digest
+  `4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945`.
+  This does not contradict the PA backfill evidence: historical Project rows do
+  not become application-bound merely because a new API key/application was
+  created. Existing Projects require deliberate review/adoption; they must not
+  be guessed or automatically merged by name. This is the immediate reason the
+  `0124` consumer precedes Project write acceptance and portal migration.
+- The route performed GETs only and its stored evidence contains no API key,
+  Access credential, URL, client/organization/Project identifier, or profile
+  field. A successful read does not activate synchronization or make the
+  legacy integration safe to retire.
 
 ### September 19, 2026 — current joined-window gate recheck
 
 - The Ops staging Cloudflare Access policy **Ledge Top Staging Staff Access**
-  explicitly includes `beaukoltz@ledgetopdroneservices.com`. A live in-app
-  session loaded the authenticated administrator view for Beau Koltz. This
+  explicitly includes the approved owner account. A live in-app session loaded
+  the authenticated owner-administrator view. This
   confirms the authenticated delivery path, not Project-v2
   authority or acceptance.
 - The exact PA staging candidate remains
@@ -1837,7 +2264,7 @@ nor send financial mail. Contract/invoice reads and per-document allowlists
 follow after quote authorization tests; no PA code was changed in this audit.
 
 September 14 PA branch reconciliation: the generic API implementation is local
-and uncommitted in `C:\Projects\Project-Alpha\.worktrees\cron-preflight-diagnostics`,
+and uncommitted in a separate Project Alpha diagnostic worktree,
 not in PA `origin/main` or a published release artifact. That worktree includes
 untracked migrations 0088–0099, generic service/route tests and reference docs;
 its branch is ahead of the verified PA main by six commits and behind by one.
@@ -2046,7 +2473,7 @@ broader client navigation, service journeys and live acceptance remain open.
 - Ops compatibility baseline: six focused client suites passed 129 tests plus 9 preflight checks, covering public routes/lifecycle, legacy routing, authorization, file and bulk Range/If-Range behavior. Source/release invariant tests passed 35/35. No customer tokens or production download. An accidentally broad local browser invocation is not counted as completed acceptance.
 - Local application identity/expiry migration 0089 is now present but under lifecycle/authentication review. The disposable MySQL 8.4 scope-migration test caught unsupported `ADD COLUMN IF NOT EXISTS`; 0088/0089 syntax was corrected. Follow-up must verify actual runner sequencing, ledger reruns, runtime-repaired schemas and interrupted-DDL recovery. The identity foundation is not a usable administration UI or complete replacement API, and neither PA instance has received these changes.
 - The follow-up migration rehearsal passed **4 MySQL 8.4 tests, 43 assertions, zero skips**. Metadata-guarded DDL supports replay at all five durable 0089 boundaries, runtime schema repair before migrations, ledger reruns and preserved legacy/exact scopes. The isolated harness uses real migration-library helpers but reconstructs the apply loop; it is not the full production CLI/backup/restore rehearsal. Container cleanup verified empty afterward. Application lifecycle tests and independent credential-policy QA continue separately.
-- Live Incoming browser inspection confirmed staff can open the upload browser and Joe's record, which honestly reports no private object available and offers no archive/download. The old list still says awaiting verification and counts this reservation under awaiting pickup. Source review also found queued outbox records can claim basic checks passed before checks run. A separate local wording/count patch is in progress; do not change the verified PR48 head for it. PR48's exact CI run currently has nine successful jobs and the Operations test job still running; it has not been merged or activated.
+- Live Incoming browser inspection confirmed staff can open the upload browser and the affected uploader's record, which honestly reports no private object available and offers no archive/download. The old list still says awaiting verification and counts this reservation under awaiting pickup. Source review also found queued outbox records can claim basic checks passed before checks run. A separate local wording/count patch is in progress; do not change the verified PR48 head for it. PR48's exact CI run currently has nine successful jobs and the Operations test job still running; it has not been merged or activated.
 - PR48 CI run `34546318599` subsequently completed successfully: all ten jobs passed for exact head `3331a62f7047ba92a61a7fc24dfc2ddaf31f8978`. The approval system rejected the attempted merge because it requires PR48-specific authorization beyond PR47. No merge/deployment was performed; an explicit permission question was sent to the owner. Do not bypass this by direct deployment or another merge surface. Unaffected local API implementation continues.
 - The owner explicitly approved PR48 and its Cloudflare deployment. PR48 then merged successfully at `63425fc9758bb37037eb14ba181eb8f586e21636` (September 11, 00:37:22 UTC). Fresh fetch proves the merged tracked tree equals tested head `3331a62`. The first post-merge deployment read still showed old active version `1feb9d5c`; build/deployment verification is pending, so activation is not yet claimed.
 - Cloudflare build `f417102a-b643-4ad8-b5dd-c7e679f6884f` subsequently succeeded for merge `63425fc`. Parent Wrangler readback confirms active deployment `938e15c0-8818-4dac-8ff9-cb6675c60c02`, version `11bc24af-b36d-44b9-b6d9-808fef136987` at **100%**, created September 11, 00:39:11 UTC. Version bindings confirm Incoming bucket `ltds-incoming`, promotion Workflow, publication flag `true`, and SMTP notifications enabled. No manual deployment/restart was needed. This proves activation, not upload/MOVE/email acceptance. Post-merge GitHub CI run `34547269404` is separate and remains tracked.
@@ -5888,3 +6315,241 @@ pending; this requirement does not claim a deployed UI change.
   API-v2 feature flag or authority policy is enabled by this checkpoint.
   Verify the secret by name/value state only; never record or print its raw
   value.
+
+### September 22 — private adoption foundation, still default-off
+
+- Operations commits through `66f84b2` add the private adoption foundation
+  only. Directory now has a
+  strict existing-record binding transport, an immutable reviewed acquisition
+  coordinator, inactive canonical/native-owner materialization, and a separate
+  activation consumer with authenticated-actor binding plus fresh exact PA
+  profile and binding-status reads. Project now has an immutable review-evidence
+  producer plus reviewed reservation and bind-planning consumers, including
+  active acquired-Directory mapping composition and authenticated-caller
+  binding. The authenticated same-origin administrator transport now exists,
+  but the consumers remain private and default-off; no production UI or
+  cutover invokes them.
+- Current focused evidence includes the complete Project adoption/evidence/bind
+  suite `39/39`, its producer subset `10/10`, the populated migration chain
+  through `0131` `4/4`, and the private Directory acquisition-to-activation
+  harness `7/7`. Independent reruns passed the migration chain `4/4`, Directory
+  harness `7/7`, and the final replay/race regressions `2/2`. Byte-exact PA
+  evidence remains retained and hash-checked; replay excludes only the volatile
+  PA request ID from its stable semantic digest. A simulated post-observation PA
+  revision/projection change terminates as `resource_precondition_conflict`
+  without creating a mapping or changing public-link data. These are focused
+  local tests, not live production acceptance.
+- No migration in this increment was applied to production D1. No production
+  Worker, PA deployment, credential, feature flag, public link, Delivery row,
+  or legacy mapping changed. PA managed mode and its generic API-v2 flags remain
+  off. Legacy integrations and mappings remain active and authoritative; the
+  portal migration and cutover have not started.
+- Important implementation gaps remain. The authenticated, same-origin,
+  CSRF-protected administrator transport is default-off and derives its actor
+  from the authenticated server session rather than request JSON, but no
+  production UI invokes it. Forward migration `0131` updates only the three
+  `0122` canonical customer-identity guards to recognize the reviewed active
+  Directory mapping view; it does not rewrite legacy rows, alter Delivery or
+  public-link data, or enable cutover. Production enablement, reconciliation,
+  portal migration, legacy retirement, and cutover therefore remain pending.
+
+### September 22 — canonical Directory profile-write checkpoint
+
+- Operations commits `eaeff0b`, `dc4650b`, `8cc1dd4`, `06046bd`, and
+  `8acb55d1` now provide the default-off canonical Directory profile writer,
+  durable PA profile outbox dispatcher, acquired-parent relationship evidence,
+  and authenticated HTTP boundary. The HTTP route accepts only bounded business
+  intent; actor identity, active grants and deny precedence, connector state,
+  application identity, history epoch, origin and current Directory generation
+  are derived and revalidated server-side. Raw PA authority tuples are not a
+  browser contract.
+- Every client profile write carries an explicit relationship/version
+  assertion. Standalone is explicit `null`; linked clients pin the exact parent
+  identity per destination using a current parent intent, immutable legacy
+  mapping evidence or an acquired-binding activation receipt. The dispatcher
+  separately proves the parent's PA revision at the asserted local parent
+  version, so an original create/activation revision is never reused after a
+  later parent update. Relationship races, enrollment drift, missing or
+  ambiguous evidence, stale versions and public-ID/revision mismatches fail
+  closed.
+- Migration `0132_operations_directory_acquired_relationship_dependencies.sql`
+  extends the immutable dependency contract with `acquired_mapping` evidence
+  without fabricating legacy mappings or outbox history. Its populated upgrade
+  chain is `4/4` green. The parent-independent rerun of the guarded route,
+  writer and dispatcher suites is `28/28` green; the writer/dispatcher subset
+  is `19/19` and the route subset is `9/9`.
+- This is not a production authority cutover. The route flag remains `false`.
+  Create consumes a one-shot server-issued admission, but no authenticated
+  admission issuer or Client Hub form is connected yet. The standalone-client
+  update route deliberately rejects a linked client, and profile writes do not
+  change relationships. A linked-client HTTP update boundary, relationship
+  mutation coordinator/dispatcher, scheduler drain, production reconciliation,
+  both-instance acceptance and the coordinated PA managed-directory activation
+  remain required. PA browser writers therefore remain available until the
+  complete replacement is verified; enabling read-only mode now would strand
+  normal customer administration.
+
+### September 22 — guarded Client Hub editor and relationship-ledger checkpoint
+
+- Operations commits `d2a66ea`, `1a3c3cf`, and `b5e48e2` add the
+  authenticated create-admission issuer, a capability-gated Client Hub
+  organization/standalone-client profile editor, exact current-connection
+  mapping resolution, and the durable per-destination client/organization
+  relationship ledger. The browser supplies business intent only. The server
+  derives the authenticated actor, effective grants and deny precedence,
+  configured PA source/application/epoch, destination origin, current
+  authorization generation, and canonical Operations record identity.
+- Create uses a two-step, exact-body admission contract. Replays of the same
+  mutation/body recover the same prepared admission; changed bodies conflict.
+  Client Hub creation choices come from active server-owned business areas,
+  divisions, effective access and configured PA connections. The editor never
+  treats a projected PA public ID as an Operations record ID: it exposes an
+  editor coordinate only when exactly one mapping matches the currently
+  configured source instance, application and history epoch.
+- Migration `0133_project_alpha_directory_relationship_outbox.sql` keeps the
+  canonical local relationship revision and every per-instance PA reservation
+  in one D1 batch. The dispatcher is separately retryable and revalidates the
+  actor, exact relationship version, enrollment, mapping, source identity,
+  revisions and newest known authorization generation before transport. It
+  distinguishes retryable uncertainty from terminal conflict and preserves
+  Delivery/public-link rows byte-for-byte. Signed-64-bit revision and
+  generation bounds are enforced in both schema and writer.
+- Independent local evidence is green: the profile route/writer/dispatcher
+  suite is `34/34`; Client Hub route, exact-mapping and UI contracts are
+  `26/26`; relationship migration/writer plus the existing API-v2 command
+  transport are `10/10`; and the production Operations build succeeds. These
+  are focused local checks, not live staging or production acceptance.
+- Authority has **not** moved. `NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED`
+  remains `false`, PA managed-directory mode remains inactive, and no Worker,
+  D1 migration, PA instance, credential, public link or legacy connection was
+  changed by this checkpoint. Linked-client creation/editing is not yet
+  exposed through the Client Hub admission/profile route, and neither the
+  profile nor relationship dispatcher is wired to a bounded scheduler/drain.
+  The relationship writer also still needs an authenticated HTTP/UI boundary.
+  Reconciliation, both-instance staging acceptance, outage-monitor deployment
+  acceptance, the coordinated PA activation and legacy retirement remain
+  required before PA browser writers can be disabled safely.
+
+### September 22 — outage-monitor revalidation during Directory cutover work
+
+- The per-instance API-v2 outage monitor is already implemented and mounted on
+  its dedicated default-off five-minute cron. It is not a shutdown timer:
+  native Operations work remains available, the exact pinned PA identity is
+  monitored independently, queued mutations are retained, and owner mail is
+  eligible only strictly after ten continuous unhealthy minutes.
+- A fresh independent local rerun passed the pure incident policy suite `8/8`,
+  the durable D1 alert transition suite `10/10`, and the joined readiness-to-D1
+  health-cycle suite `1/1`. The durable cases cover exact monitor-revision CAS,
+  one logical alert across retry, lease reclaim, ambiguous attempted delivery,
+  recovery/disablement fencing, and transactional rollback on assertion failure.
+- This evidence confirms the existing implementation contract only. The
+  production monitor and owner-recipient configuration remain default-off, no
+  mail was sent, and no source health or production state was mutated. The
+  remaining outage gate is coordinated staging and production enablement with
+  both exact PA connections, not a new monitor implementation.
+
+### September 22 — Project Alpha managed-directory surface revalidation
+
+- The generic Project Alpha managed-directory policy remains implemented but
+  inactive. A fresh local rerun of its policy and activation suite passed
+  `17/17` tests with `182` assertions. That suite proves the capable-key,
+  route-flag, current-attestation, backfill-health and ownership-sentinel gates;
+  it also inventories the interactive browser writers and requires central and
+  controller-level enforcement for every projected writer.
+- The same suite verifies the neutral open-source label, guarded client and
+  organization list/create/edit/archive/onboarding/detail surfaces, degraded
+  behavior and explicit administrative release. The broader workflow source
+  suites also remained green at `40/40` tests and `799` assertions.
+- This is source-level and local policy evidence, not authorization to enable
+  production ownership. Both PA instances must continue permitting local edits
+  until the Operations create/update/relationship delivery path, reconciliation
+  and both-instance acceptance are complete; activating the policy earlier
+  would strand normal customer administration.
+
+### September 22 — bounded native Directory outbox drain
+
+- Operations commit `f4654f0` mounts a dedicated, default-off five-minute
+  drain for the profile and relationship outboxes. It selects only due pending
+  or expired-lease work for enabled, deployment-pinned PA sources, rotates
+  fairly across sources and both queue kinds, and starts no more than twelve
+  commands or twenty seconds of work per invocation. Existing dispatchers keep
+  ownership of leases, retry/uncertain handling, terminal conflicts and exact
+  PA response validation.
+- The disabled path returns before reading D1 or the connection envelope. Logs
+  contain aggregate outcomes only; credential values, command bodies and
+  private profiles are never emitted. An unexpected dispatch failure leaves the
+  durable row recoverable rather than treating absence as delivery success.
+- The focused scheduler suite initially passed `5/5`; after independent review
+  added malformed-disabled-sibling and in-flight deadline-abort/retry coverage,
+  the expanded suite passed `7/7` in both its implementation run and an
+  independent rerun. The implementation run also passed the production
+  Operations build, pinned Wrangler generated-type check and scoped TypeScript
+  diagnostics. The flag remains `false`; no cron delivery, D1 migration,
+  connection, credential, PA instance or public link was changed.
+
+### September 22 — administrator Directory reconciliation review checkpoint
+
+- The existing default-off private administrator transport now exposes a
+  bounded, keyset-paged review feed over only each selected PA source's stable
+  complete reconciliation run. It returns opaque/source/native/public IDs,
+  classification, review state and bounded inventory/binding metadata; it does
+  not select or return reconciliation details, profile JSON, names, email,
+  credentials, configured URLs or mutation controls.
+- An administrator with deny-aware global `integrations.manage` may explicitly
+  select one open mapping-related finding, one existing Operations record and
+  its exact current version. Migration `0138` durably pins that selection to
+  the current run, source instance, application, history epoch, authorization
+  generation, resource kind, PA public ID and revision. Action, review and
+  command IDs are generated server-side. Replays are exact, and same-source
+  record reuse is rejected across application, epoch and resource-kind changes;
+  the same native record remains independently eligible in a distinct PA
+  source namespace.
+- Before invoking the existing acquisition coordinator, the service re-reads
+  the remote profile through the configured API-v2 reader and matches every
+  pinned identity/generation/kind/revision field. The coordinator may create
+  only its existing inactive acquired-mapping and native-owner-claim chain.
+  This checkpoint does not activate client access, create native records,
+  guess by name/email, or change Delivery/public-link state.
+- Focused implementation evidence passed `15/15`; the final combined
+  reconciliation, acquisition, private-admin and scheduler run passed `59/59`.
+  An independent combined run passed `36/36`, the production Operations build
+  passed, and final independent review found no remaining P0-P2 issues. The
+  private administrator transport remains default-off; no deployment,
+  activation, credential, PA configuration, Delivery row or public link was
+  changed by this checkpoint.
+
+### September 22 — Operations reconciliation review panel checkpoint
+
+- The Operations Administration page now has a responsive reconciliation
+  review panel for the fixed Ledge Top Drone Services and Ledge Top
+  Technologies PA sources. It is rendered only when the authenticated session
+  is an administrator with deny-aware global `integrations.manage` and the
+  existing `PROJECT_ALPHA_PRIVATE_ADMIN_TRANSPORT_ENABLED` flag is exactly
+  `true`; the checked-in flag remains `false`.
+- The panel keyset-pages the existing sanitized current-complete finding feed.
+  For an open adoptable finding, an explicit operator action performs a
+  current, exact source-instance/application/history-epoch/authorization-
+  generation/revision-fenced PA profile read and returns only display name,
+  nullable contact email and organization public ID. Candidate Operations
+  records are keyset-paged in exact record-ID order and require current native
+  `directory.profile.view` authority with deny precedence. Only display name,
+  nullable contact email, exact record ID, kind and current version leave the
+  server; raw `profile_json`, configuration URLs, credentials and secrets do
+  not. Invalid stored summaries are skipped while the opaque cursor advances,
+  so a bounded empty page can still continue without looping or exposing the
+  malformed profile.
+- Nothing is suggested, similarity-ranked, auto-matched or preselected. The
+  operator must choose one exact matching-kind record and confirm the POST;
+  the browser sends only finding ID, record ID, current version and a UUID
+  idempotency key. Uncertain retry retains that UUID, while stale and conflict
+  outcomes are reported without claiming success. A successful result is
+  labeled inactive and pending separate activation review; the panel exposes
+  no activation, create or delete control.
+- Focused service and route evidence passed `19/19`; the responsive desktop
+  and mobile panel plus existing Administration/connection regressions passed
+  `16/16`; and the production Operations build passed. Commit `814380b`
+  resolved the six strict type errors in this slice; the repo-wide Operations
+  TypeScript check and production build now pass. At this historical checkpoint
+  no deployment, feature enablement, migration, remote PA write, canonical
+  mapping rewrite, Delivery row or public-link mutation had been performed;
+  the later staging-only deployment is recorded above.
