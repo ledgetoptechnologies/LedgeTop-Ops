@@ -42,7 +42,9 @@ export function parseClientOnboardingFields(input: unknown): ClientOnboardingFie
     for (const [key, maximum] of Object.entries(CLIENT_ONBOARDING_LIMITS)) {
       if (clientType === "consumer" && COMPANY.has(key)) { values[key] = ""; continue; }
       const raw = values[key]!;
-      if ((CODEPOINT_FIELDS.has(key) ? Array.from(raw).length : raw.length) > maximum || /\p{C}/u.test(raw)) throw Error();
+      const effectiveMaximum = clientType === "consumer" && key === "state" ? 2
+        : clientType === "consumer" && key === "postalCode" ? 20 : maximum;
+      if ((CODEPOINT_FIELDS.has(key) ? Array.from(raw).length : raw.length) > effectiveMaximum || /\p{C}/u.test(raw)) throw Error();
       values[key] = raw.trim();
     }
     values.email = values.email!.toLowerCase();

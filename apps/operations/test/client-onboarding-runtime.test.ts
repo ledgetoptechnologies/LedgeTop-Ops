@@ -20,7 +20,7 @@ const keyring = { activeKeyId: "current", keys: { current: "ab".repeat(32) } };
 const fields = { clientType: "consumer", name: " Example Person ", email: "PERSON@EXAMPLE.TEST",
   phone: "555-0100", organizationName: "stale", organizationEmail: "stale@example.test",
   organizationPhone: "stale", addressLine1: "1 Main St", addressLine2: "", city: "Example",
-  state: "Illinois", postalCode: "60601", country: "US" };
+  state: "IL", postalCode: "60601", country: "US" };
 
 describe("bounded client profile onboarding runtime", () => {
   beforeAll(async () => {
@@ -56,6 +56,13 @@ describe("bounded client profile onboarding runtime", () => {
     expect(Object.isFrozen(parsed)).toBe(true);
     expect(() => parseClientOnboardingFields({ ...fields, portalMembership: "forged" }))
       .toThrow("client_onboarding_fields_invalid");
+  });
+
+  it("keeps consumer address bounds narrow while accepting organization proposal bounds", () => {
+    expect(() => parseClientOnboardingFields({ ...fields, state: "USA" })).toThrow("client_onboarding_fields_invalid");
+    expect(() => parseClientOnboardingFields({ ...fields, postalCode: "1".repeat(21) })).toThrow("client_onboarding_fields_invalid");
+    expect(parseClientOnboardingFields({ ...fields, clientType: "business", organizationName: "Ledge Top", state: "S".repeat(100), postalCode: "1".repeat(32) }))
+      .toMatchObject({ clientType: "business", state: "S".repeat(100), postalCode: "1".repeat(32) });
   });
 
   it("atomically issues, encrypts, reveals with audit, and accepts one exact submission", async () => {
