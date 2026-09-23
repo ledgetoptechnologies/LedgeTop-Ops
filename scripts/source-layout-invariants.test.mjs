@@ -258,8 +258,8 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   // The digest intentionally moved with the reviewed canonical portal hosts
   // and explicit legacy compatibility origin. Keep the field assertions so a future config change
   // cannot hide behind a digest refresh.
-  // Reviewed addition: the Operations catalog staging switch is off by default.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "8dd0938faede1a38868dfdbaa62a3e1db6622b633187377ec6f8abe870756022");
+  // Reviewed additions: Operations catalog staging and promotion remain off by default.
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "d79fbc605775d3aa83924651e6318672470ee5e1fbb6a4afc5cfd984daec3e36");
   const config = readJson("apps/client/wrangler.jsonc");
   assert.equal(config.name, "ledgetop-clients");
   assert.equal(config.main, "src/worker/index.ts");
@@ -318,6 +318,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.equal(config.vars.CLIENT_DELEGATED_SHARES_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_SYNC_ENABLED, "false");
   assert.equal(config.vars.OPS_INVENTORY_CATALOG_SYNC_ENABLED, "false");
+  assert.equal(config.vars.OPS_INVENTORY_CATALOG_PROMOTION_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_PORTAL_SYNC_ENABLED, "true");
   assert.equal(config.vars.PROJECT_ALPHA_SERVICE_ASSIGNMENT_SYNC_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_SERVICE_ASSIGNMENT_POLICY_ENABLED, "false");
