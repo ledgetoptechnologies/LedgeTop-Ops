@@ -416,6 +416,7 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0137_project_alpha_directory_reconciliation_scheduler.sql",
     "0138_project_alpha_directory_reconciliation_review.sql",
     "0139_native_directory_staging_empty_enrollment_fixture_guard.sql",
+    "0140_client_onboarding_one_time_reveal.sql",
   ]),
 });
 
