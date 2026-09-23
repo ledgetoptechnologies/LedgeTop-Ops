@@ -391,9 +391,16 @@ source exists in this checked-out branch, so they are not current-source claims.
   exact recoverable receipt return retryable unknown rather than claiming
   rollback.
 - The native boundary reserves only `GET /api/native-workforce/time-record/session`
-  and `POST /api/native-workforce/time-record`, `/submit`, and `/review`. It is
-  mounted before legacy staff authentication with exact origin, purpose-bound
-  CSRF, bounded JSON and shared D1 rate limits. Checked-in
+  and `/review-queue`, plus `POST /api/native-workforce/time-record`, `/submit`,
+  and `/review`. The read-only queue returns at most 25 current-revision,
+  submitted internal or active native-project entries covered by the current
+  reviewer's exact `time.review` allow/deny scope. It excludes the reviewer as
+  beneficiary, rechecks active admissions on every page, returns no description,
+  change reason, access subject, recorder or finance data, and uses an opaque
+  authenticated-encrypted cursor bound to reviewer, Access subject and admission
+  version. Malformed stored pagination timestamps fail closed. It is
+  mounted before legacy staff authentication with exact origin and shared D1
+  rate limits; write routes retain purpose-bound CSRF and bounded JSON. Checked-in
   `NATIVE_WORKFORCE_TIME_RECORD_ENABLED` remains `false` and its origin remains
   blank. No grant, selection, production flag, seed or deployment was added.
 - The focused real-D1 and HTTP suites pass 19/19, including self/internal and
@@ -403,7 +410,6 @@ source exists in this checked-out branch, so they are not current-source claims.
   Operations TypeScript and production build pass. This is local source
   evidence only.
 
-Still excluded: manager review queue/UI, correction revision authoring, native
-job authority, bonuses, PA calls, payroll, billing, invoice, rate or payment
-effects, governed production grant bootstrap, staging acceptance and live
-activation.
+Still excluded: manager review UI, correction revision authoring, native job
+authority, bonuses, PA calls, payroll, billing, invoice, rate or payment effects,
+governed production grant bootstrap, staging acceptance and live activation.

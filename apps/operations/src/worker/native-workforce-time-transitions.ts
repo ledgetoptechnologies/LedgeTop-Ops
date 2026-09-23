@@ -43,7 +43,7 @@ async function hash(parts: unknown[]): Promise<string> {
   return Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
-const SCOPE = `EXISTS (SELECT 1 FROM native_workforce_authority_grants allow_grant
+export const NATIVE_WORKFORCE_TIME_SCOPE_SQL = `EXISTS (SELECT 1 FROM native_workforce_authority_grants allow_grant
     WHERE allow_grant.staff_id=actor.staff_id AND allow_grant.contract_version=1
       AND allow_grant.capability=? AND allow_grant.effect='allow' AND allow_grant.active=1
       AND ((revision.context_kind='internal' AND allow_grant.scope_kind='internal')
@@ -80,7 +80,7 @@ async function authorized(db: D1Database, auth: AuthenticatedNativeStaffWithAdmi
       OR ?='post_submit' AND entry.workflow_status IN ('submitted','reviewed','returned')
       OR entry.workflow_status=?)
       AND (?=0 AND actor.staff_id=entry.beneficiary_staff_id OR ?=1 AND actor.staff_id<>entry.beneficiary_staff_id)
-      AND ${SCOPE} LIMIT 1`).bind(revisionNumber, auth.identity.staffId,
+      AND ${NATIVE_WORKFORCE_TIME_SCOPE_SQL} LIMIT 1`).bind(revisionNumber, auth.identity.staffId,
       auth.identity.verifiedAccessSubject, auth.admissionVersion, entryId, revisionNumber,
       requiredStatus, requiredStatus, requiredStatus,
       independent ? 1 : 0, independent ? 1 : 0, capability, capability).first(); }
@@ -139,7 +139,7 @@ export async function submitNativeWorkforceTime(db: D1Database,
         JOIN native_staff_admissions beneficiary ON beneficiary.staff_id=entry.beneficiary_staff_id AND beneficiary.active=1
         LEFT JOIN operations_shared_projects project ON project.external_project_id=revision.context_id
         WHERE entry.entry_id=? AND entry.current_revision=? AND entry.workflow_status='draft'
-          AND actor.staff_id=entry.beneficiary_staff_id AND ${SCOPE}`).bind(auth.identity.verifiedAccessSubject,
+          AND actor.staff_id=entry.beneficiary_staff_id AND ${NATIVE_WORKFORCE_TIME_SCOPE_SQL}`).bind(auth.identity.verifiedAccessSubject,
           input.expectedRevision, auth.identity.staffId, auth.identity.verifiedAccessSubject, auth.admissionVersion,
           input.entryId, input.expectedRevision, "time.submit", "time.submit"),
       db.prepare(`INSERT INTO native_workforce_commands(command_id,command_kind,actor_staff_id,actor_access_subject,
@@ -196,7 +196,7 @@ export async function reviewNativeWorkforceTime(db: D1Database,
         JOIN native_staff_admissions beneficiary ON beneficiary.staff_id=entry.beneficiary_staff_id AND beneficiary.active=1
         LEFT JOIN operations_shared_projects project ON project.external_project_id=revision.context_id
         WHERE entry.entry_id=? AND entry.current_revision=? AND entry.workflow_status='submitted'
-          AND actor.staff_id<>entry.beneficiary_staff_id AND ${SCOPE}`).bind(input.reviewId,
+          AND actor.staff_id<>entry.beneficiary_staff_id AND ${NATIVE_WORKFORCE_TIME_SCOPE_SQL}`).bind(input.reviewId,
           auth.identity.verifiedAccessSubject, input.decision, input.reason, input.expectedRevision,
           auth.identity.staffId, auth.identity.verifiedAccessSubject, auth.admissionVersion, input.entryId,
           input.expectedRevision, "time.review", "time.review"),

@@ -6,6 +6,7 @@ import { authenticateNativeStaffWithAdmissionVersion,
 import { NativeWorkforceTimeRecordConflict, NativeWorkforceTimeRecordDenied,
   NativeWorkforceTimeRecordOutcomeUnknown, recordNativeWorkforceTime } from "./native-workforce-time-record";
 import { reviewNativeWorkforceTime, submitNativeWorkforceTime } from "./native-workforce-time-transitions";
+import { listNativeWorkforceTimeReviewQueue } from "./native-workforce-time-review-queue";
 
 export const NATIVE_WORKFORCE_TIME_RECORD_ROUTE = "/api/native-workforce/time-record";
 export type NativeWorkforceTimeRecordHttpDependencies = Readonly<{
@@ -54,8 +55,9 @@ function configuration(dependencies: NativeWorkforceTimeRecordHttpDependencies) 
   } catch { throw new HttpFailure(404, "not_found"); }
 }
 
-export function nativeWorkforceTimeRecordHttpRequest(method: string, path: string): "session" | "record" | "submit" | "review" | null {
+export function nativeWorkforceTimeRecordHttpRequest(method: string, path: string): "session" | "queue" | "record" | "submit" | "review" | null {
   if (method === "GET" && path === `${NATIVE_WORKFORCE_TIME_RECORD_ROUTE}/session`) return "session";
+  if (method === "GET" && path === `${NATIVE_WORKFORCE_TIME_RECORD_ROUTE}/review-queue`) return "queue";
   if (method === "POST" && path === NATIVE_WORKFORCE_TIME_RECORD_ROUTE) return "record";
   if (method === "POST" && path === `${NATIVE_WORKFORCE_TIME_RECORD_ROUTE}/submit`) return "submit";
   if (method === "POST" && path === `${NATIVE_WORKFORCE_TIME_RECORD_ROUTE}/review`) return "review";
@@ -69,11 +71,11 @@ export async function handleNativeWorkforceTimeRecordHttp(request: Request,
     if (!route) throw new HttpFailure(404, "not_found");
     const authority = configuration(dependencies);
     const url = new URL(request.url);
-    if (url.origin !== authority.origin || url.search || url.hash) throw new HttpFailure(403, "denied");
+    if (url.origin !== authority.origin || (route !== "queue" && url.search) || url.hash) throw new HttpFailure(403, "denied");
     const origin = request.headers.get("Origin");
     if (request.headers.get("Sec-Fetch-Site") !== null
       && request.headers.get("Sec-Fetch-Site") !== "same-origin") throw new HttpFailure(403, "denied");
-    if (route === "session") {
+    if (route === "session" || route === "queue") {
       if (request.headers.get("X-Native-Workforce-Request") !== "1"
         || (origin !== null && origin !== authority.origin)) throw new HttpFailure(403, "denied");
     } else if (origin !== authority.origin) throw new HttpFailure(403, "denied");
@@ -95,6 +97,23 @@ export async function handleNativeWorkforceTimeRecordHttp(request: Request,
       auth.admissionVersion, value]);
     if (route === "session") return response(200, { csrfToken: await hmac(authority.csrfSecret,
       csrfMessage(bucket)), staffId: auth.identity.staffId, verifiedUntil: auth.verifiedUntil });
+    if (route === "queue") {
+      if ([...url.searchParams.keys()].some(key => key !== "limit" && key !== "cursor")
+        || url.searchParams.getAll("limit").length > 1 || url.searchParams.getAll("cursor").length > 1)
+        throw new HttpFailure(400, "invalid_request");
+      const rawLimit = url.searchParams.get("limit");
+      const limit = rawLimit === null ? undefined : Number(rawLimit);
+      const cursor = url.searchParams.get("cursor") ?? undefined;
+      if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1 || limit > 25)
+        || cursor !== undefined && (cursor.length < 1 || cursor.length > 1024))
+        throw new HttpFailure(400, "invalid_request");
+      try { return response(200, await listNativeWorkforceTimeReviewQueue(authority.database, auth,
+        authority.csrfSecret, { limit, cursor })); }
+      catch (error) {
+        if (error instanceof NativeWorkforceTimeRecordDenied) throw new HttpFailure(403, "denied");
+        throw new HttpFailure(503, "outcome_unknown");
+      }
+    }
     const supplied = request.headers.get("X-CSRF-Token") ?? "";
     const current = await hmac(authority.csrfSecret, csrfMessage(bucket));
     const prior = await hmac(authority.csrfSecret, csrfMessage(bucket - 1));

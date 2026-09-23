@@ -2,9 +2,10 @@ import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Miniflare } from "miniflare";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
-import { NativeWorkforceTimeRecordConflict, NativeWorkforceTimeRecordDenied,
+import { NativeWorkforceTimeRecordConflict, NativeWorkforceTimeRecordDenied, NativeWorkforceTimeRecordOutcomeUnknown,
   recordNativeWorkforceTime, type NativeWorkforceTimeRecordCommand } from "../src/worker/native-workforce-time-record";
 import { reviewNativeWorkforceTime, submitNativeWorkforceTime } from "../src/worker/native-workforce-time-transitions";
+import { listNativeWorkforceTimeReviewQueue } from "../src/worker/native-workforce-time-review-queue";
 
 let runtime: Miniflare;
 let db: D1Database;
@@ -52,6 +53,7 @@ beforeEach(async () => {
 afterEach(() => runtime.dispose());
 
 describe("native workforce time record atomic D1 command", () => {
+  const queueSecret = "review-queue-test-secret-with-at-least-thirty-two-bytes";
   it("records self/internal once and exactly replays the immutable receipt", async () => {
     await grant("allow", "actor", "time.record.self", "allow", "internal");
     const first = await recordNativeWorkforceTime(db, auth(), command());
@@ -196,5 +198,89 @@ describe("native workforce time record atomic D1 command", () => {
     await expect(reviewNativeWorkforceTime(db, auth("reviewer"), review)).rejects.toBeInstanceOf(NativeWorkforceTimeRecordDenied);
     await expect(reviewNativeWorkforceTime(db, auth("reviewer"), { ...review, reason: "Changed reason" }))
       .rejects.toBeInstanceOf(NativeWorkforceTimeRecordDenied);
+  });
+
+  it("lists only current submitted rows in the reviewer's exact active scope with minimal fields", async () => {
+    await grant("record-internal", "actor", "time.record.self", "allow", "internal");
+    await grant("submit-internal", "actor", "time.submit", "allow", "internal");
+    await grant("record-project", "actor", "time.record.self", "allow", "native_project", "project-one");
+    await grant("submit-project", "actor", "time.submit", "allow", "native_project", "project-one");
+    await grant("review-internal", "reviewer", "time.review", "allow", "internal");
+    await grant("reviewer-record", "reviewer", "time.record.self", "allow", "internal");
+    await grant("reviewer-submit", "reviewer", "time.submit", "allow", "internal");
+    await recordNativeWorkforceTime(db, auth(), command({ commandId: "internal-record", entryId: "internal-entry" }));
+    await submitNativeWorkforceTime(db, auth(), { commandId: "internal-submit", entryId: "internal-entry", expectedRevision: 1 });
+    await recordNativeWorkforceTime(db, auth(), command({ commandId: "project-record", entryId: "project-entry",
+      context: { kind: "native_project", id: "project-one" }, description: "private project detail" }));
+    await submitNativeWorkforceTime(db, auth(), { commandId: "project-submit", entryId: "project-entry", expectedRevision: 1 });
+    await recordNativeWorkforceTime(db, auth("reviewer"), command({ commandId: "reviewer-record",
+      entryId: "reviewer-entry", beneficiaryStaffId: "reviewer" }));
+    await submitNativeWorkforceTime(db, auth("reviewer"), { commandId: "reviewer-submit",
+      entryId: "reviewer-entry", expectedRevision: 1 });
+    const page = await listNativeWorkforceTimeReviewQueue(db, auth("reviewer"), queueSecret);
+    expect(page.items).toHaveLength(1);
+    expect(page.items[0]).toEqual({ entryId: "internal-entry", revision: 1, beneficiaryStaffId: "actor",
+      workDate: "2026-09-22", durationMinutes: 60, context: { kind: "internal", id: null } });
+    expect(Object.keys(page.items[0]!).sort()).toEqual([
+      "beneficiaryStaffId", "context", "durationMinutes", "entryId", "revision", "workDate"]);
+    expect(JSON.stringify(page)).not.toContain("private project detail");
+    await grant("review-project", "reviewer", "time.review", "allow", "native_project", "project-one");
+    expect((await listNativeWorkforceTimeReviewQueue(db, auth("reviewer"), queueSecret)).items.map(item => item.entryId).sort())
+      .toEqual(["internal-entry", "project-entry"]);
+    await grant("review-project-deny", "reviewer", "time.review", "deny", "native_project", "project-one");
+    expect((await listNativeWorkforceTimeReviewQueue(db, auth("reviewer"), queueSecret)).items.map(item => item.entryId))
+      .toEqual(["internal-entry"]);
+  });
+
+  it("rechecks reviewer admission and grant revocation instead of disclosing stale queue rows", async () => {
+    await grant("record", "actor", "time.record.self", "allow", "internal");
+    await grant("submit", "actor", "time.submit", "allow", "internal");
+    await grant("review", "reviewer", "time.review", "allow", "internal");
+    await recordNativeWorkforceTime(db, auth(), command());
+    await submitNativeWorkforceTime(db, auth(), { commandId: "submit", entryId: "entry-one", expectedRevision: 1 });
+    expect((await listNativeWorkforceTimeReviewQueue(db, auth("reviewer"), queueSecret)).items).toHaveLength(1);
+    await db.prepare("UPDATE native_workforce_authority_grants SET active=0,version=version+1 WHERE id='review'").run();
+    expect((await listNativeWorkforceTimeReviewQueue(db, auth("reviewer"), queueSecret)).items).toEqual([]);
+    await db.prepare("UPDATE native_workforce_authority_grants SET active=1,version=version+1 WHERE id='review'").run();
+    await db.prepare("UPDATE native_staff_admissions SET active=0 WHERE staff_id='reviewer'").run();
+    expect((await listNativeWorkforceTimeReviewQueue(db, auth("reviewer"), queueSecret)).items).toEqual([]);
+  });
+
+  it("paginates by stable attestation and entry identity with a reviewer/subject-bound opaque cursor", async () => {
+    await grant("record", "actor", "time.record.self", "allow", "internal");
+    await grant("submit", "actor", "time.submit", "allow", "internal");
+    await grant("review", "reviewer", "time.review", "allow", "internal");
+    for (const suffix of ["a", "b", "c"]) {
+      await recordNativeWorkforceTime(db, auth(), command({ commandId: `record-${suffix}`, entryId: `entry-${suffix}` }));
+      await submitNativeWorkforceTime(db, auth(), { commandId: `submit-${suffix}`, entryId: `entry-${suffix}`, expectedRevision: 1 });
+    }
+    const first = await listNativeWorkforceTimeReviewQueue(db, auth("reviewer"), queueSecret, { limit: 2 });
+    expect(first.items.map(item => item.entryId)).toEqual(["entry-a", "entry-b"]);
+    expect(first.nextCursor).toMatch(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
+    expect(first.nextCursor).not.toContain("entry-b");
+    const visibleTokenBytes = first.nextCursor!.split(".").map(value => Buffer.from(value, "base64url").toString("utf8")).join("|");
+    expect(visibleTokenBytes).not.toContain("reviewer"); expect(visibleTokenBytes).not.toContain("access|reviewer");
+    expect(visibleTokenBytes).not.toContain("entry-b"); expect(visibleTokenBytes).not.toContain("2026-");
+    const second = await listNativeWorkforceTimeReviewQueue(db, auth("reviewer"), queueSecret,
+      { limit: 2, cursor: first.nextCursor! });
+    expect(second.items.map(item => item.entryId)).toEqual(["entry-c"]); expect(second.nextCursor).toBeNull();
+    await expect(listNativeWorkforceTimeReviewQueue(db, auth("actor"), queueSecret,
+      { limit: 2, cursor: first.nextCursor! })).rejects.toBeInstanceOf(NativeWorkforceTimeRecordDenied);
+    await expect(listNativeWorkforceTimeReviewQueue(db, { ...auth("reviewer"),
+      identity: { ...auth("reviewer").identity, verifiedAccessSubject: "access|rotated" } }, queueSecret,
+      { limit: 2, cursor: first.nextCursor! })).rejects.toBeInstanceOf(NativeWorkforceTimeRecordDenied);
+    await expect(listNativeWorkforceTimeReviewQueue(db, auth("reviewer", 2), queueSecret,
+      { limit: 2, cursor: first.nextCursor! })).rejects.toBeInstanceOf(NativeWorkforceTimeRecordDenied);
+  });
+
+  it("fails closed when a selected submission has a malformed pagination timestamp", async () => {
+    await grant("record", "actor", "time.record.self", "allow", "internal");
+    await grant("submit", "actor", "time.submit", "allow", "internal");
+    await grant("review", "reviewer", "time.review", "allow", "internal");
+    await recordNativeWorkforceTime(db, auth(), command());
+    await db.prepare(`INSERT INTO native_workforce_time_submissions(entry_id,revision,submitted_by_staff_id,
+      submitted_by_access_subject,attested_at) VALUES('entry-one',1,'actor','access|actor','malformed')`).run();
+    await expect(listNativeWorkforceTimeReviewQueue(db, auth("reviewer"), queueSecret))
+      .rejects.toBeInstanceOf(NativeWorkforceTimeRecordOutcomeUnknown);
   });
 });

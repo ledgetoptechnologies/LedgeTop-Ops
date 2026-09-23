@@ -4,7 +4,7 @@ import { handleNativeWorkforceTimeRecordHttp, nativeWorkforceTimeRecordHttpReque
 import { NativeWorkforceTimeRecordConflict, NativeWorkforceTimeRecordDenied,
   NativeWorkforceTimeRecordOutcomeUnknown } from "../src/worker/native-workforce-time-record";
 
-const calls = vi.hoisted(() => ({ auth: vi.fn(), record: vi.fn(), submit: vi.fn(), review: vi.fn(), quota: vi.fn() }));
+const calls = vi.hoisted(() => ({ auth: vi.fn(), record: vi.fn(), submit: vi.fn(), review: vi.fn(), queue: vi.fn(), quota: vi.fn() }));
 vi.mock("../src/worker/native-staff-auth", () => ({ authenticateNativeStaffWithAdmissionVersion: calls.auth }));
 vi.mock("../src/worker/native-workforce-time-record", async importOriginal => ({
   ...await importOriginal<typeof import("../src/worker/native-workforce-time-record")>(),
@@ -12,6 +12,9 @@ vi.mock("../src/worker/native-workforce-time-record", async importOriginal => ({
 }));
 vi.mock("../src/worker/native-workforce-time-transitions", () => ({
   submitNativeWorkforceTime: calls.submit, reviewNativeWorkforceTime: calls.review,
+}));
+vi.mock("../src/worker/native-workforce-time-review-queue", () => ({
+  listNativeWorkforceTimeReviewQueue: calls.queue,
 }));
 const origin = "https://ops.example.test";
 const auth = { admissionVersion: 2, verifiedUntil: "2099-01-01T00:00:00.000Z",
@@ -24,6 +27,7 @@ const deps = (enabled = true): NativeWorkforceTimeRecordHttpDependencies => ({ d
 const get = () => new Request(`${origin}/api/native-workforce/time-record/session`,
   { headers: { "X-Native-Workforce-Request": "1" } });
 beforeEach(() => { vi.clearAllMocks(); calls.quota.mockResolvedValue(true); calls.auth.mockResolvedValue(auth);
+  calls.queue.mockResolvedValue({ items: [], nextCursor: null, limit: 25 });
   calls.record.mockResolvedValue({ commandId: "command", entryId: "entry", revision: 1,
     beneficiaryStaffId: "actor", replayed: false, createdAt: "2026-09-22T00:00:00.000Z" }); });
 
@@ -31,6 +35,7 @@ describe("native workforce time-record HTTP boundary", () => {
   it("reserves only exact session and record routes and stays absent while disabled", async () => {
     expect(nativeWorkforceTimeRecordHttpRequest("POST", "/api/native-workforce/time-record")).toBe("record");
     expect(nativeWorkforceTimeRecordHttpRequest("GET", "/api/native-workforce/time-record/session")).toBe("session");
+    expect(nativeWorkforceTimeRecordHttpRequest("GET", "/api/native-workforce/time-record/review-queue")).toBe("queue");
     expect(nativeWorkforceTimeRecordHttpRequest("POST", "/api/native-workforce/time-record/submit")).toBe("submit");
     expect(nativeWorkforceTimeRecordHttpRequest("POST", "/api/native-workforce/time-record/review")).toBe("review");
     expect(nativeWorkforceTimeRecordHttpRequest("POST", "/api/native-workforce/time-record/")).toBeNull();
@@ -93,5 +98,25 @@ describe("native workforce time-record HTTP boundary", () => {
     expect(await (await execute("/api/native-workforce/time-record/review")).json()).toEqual({ action: "approved" });
     expect(calls.submit).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ identity: auth.identity }), {});
     expect(calls.review).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ identity: auth.identity }), {});
+  });
+
+  it("serves a read-only review queue with narrow query parsing and no CSRF requirement", async () => {
+    calls.queue.mockResolvedValue({ items: [{ entryId: "entry-one", revision: 1,
+      beneficiaryStaffId: "beneficiary", workDate: "2026-09-22", durationMinutes: 30,
+      context: { kind: "internal", id: null } }], nextCursor: "opaque", limit: 10 });
+    const request = (query = "") => handleNativeWorkforceTimeRecordHttp(new Request(
+      `${origin}/api/native-workforce/time-record/review-queue${query}`,
+      { headers: { "X-Native-Workforce-Request": "1" } }), deps());
+    const response = await request("?limit=10&cursor=signed");
+    expect(response.status).toBe(200); expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(calls.queue).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ identity: auth.identity }),
+      "x".repeat(48), { limit: 10, cursor: "signed" });
+    expect(await response.json()).toMatchObject({ items: [{ entryId: "entry-one" }], nextCursor: "opaque" });
+    expect((await request("?unexpected=1")).status).toBe(400);
+    expect((await request("?limit=1&limit=2")).status).toBe(400);
+    expect((await request("?limit=0")).status).toBe(400);
+    const foreign = new Request(`${origin}/api/native-workforce/time-record/review-queue`,
+      { headers: { Origin: "https://evil.example.test", "X-Native-Workforce-Request": "1" } });
+    expect((await handleNativeWorkforceTimeRecordHttp(foreign, deps())).status).toBe(403);
   });
 });
