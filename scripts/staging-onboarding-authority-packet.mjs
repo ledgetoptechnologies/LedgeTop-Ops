@@ -132,7 +132,8 @@ function sqlArtifacts(p, ids, names, migrationNames) {
     AND EXISTS(SELECT 1 FROM native_staff_profiles WHERE staff_id=${staff} AND login_email=${sql(p.email)} AND display_name=${sql(p.displayName)} AND version=${p.expected.profileVersion})
     AND EXISTS(SELECT 1 FROM native_business_areas WHERE id=${area} AND active=1)
     AND NOT EXISTS(SELECT 1 FROM native_directory_grants WHERE staff_id=${staff} AND active=1)
-    AND NOT EXISTS(SELECT 1 FROM native_directory_grants WHERE id=${sql(ids.grant)})
+    AND (NOT EXISTS(SELECT 1 FROM native_directory_grants WHERE id=${sql(ids.grant)} OR (staff_id=${staff} AND permission='directory.profile.edit' AND effect='allow' AND scope_kind='business_area' AND business_area_id=${area} AND division_id IS NULL AND resource_id IS NULL))
+      OR EXISTS(SELECT 1 FROM native_directory_grants WHERE id=${sql(ids.grant)} AND staff_id=${staff} AND permission='directory.profile.edit' AND effect='allow' AND scope_kind='business_area' AND business_area_id=${area} AND division_id IS NULL AND resource_id IS NULL AND active=0 AND granted_by=${staff}))
     AND NOT EXISTS(SELECT 1 FROM native_project_grants WHERE staff_id=${staff} AND active=1)
     AND ${noWork(staff)}`;
   const provision = `PRAGMA foreign_keys = ON;
@@ -141,7 +142,10 @@ CREATE TABLE ${provisionTable}(ok INTEGER NOT NULL CHECK(ok=1));
 ${guard(provisionTable, `${ledger(names)} AND NOT EXISTS(SELECT 1 FROM ${ONBOARDING_AUTHORITY_MIGRATIONS_TABLE} WHERE name IN (${sql(migrationNames.provision)},${sql(migrationNames.revoke)})) AND ${common} AND NOT EXISTS(SELECT 1 FROM native_staff_bootstrap_approvals WHERE approval_id IN (${sql(ids.provisionApproval)},${sql(ids.revokeApproval)})) AND NOT EXISTS(SELECT 1 FROM native_staff_bootstrap_receipts WHERE command_id IN (${sql(ids.provisionCommand)},${sql(ids.revokeCommand)})) AND ${sql(p.issuedAt)}<=strftime('%Y-%m-%dT%H:%M:%fZ','now') AND ${sql(p.expiresAt)}>strftime('%Y-%m-%dT%H:%M:%fZ','now')`)}
 ${approval(p, ids, "provision", pp, ppSha, verificationJson, verificationSha)}
 UPDATE native_staff_admissions SET active=1,version=version+1,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE staff_id=${staff} AND active=0 AND version=${p.expected.admissionVersion};
-INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,business_area_id,active,granted_by) VALUES(${sql(ids.grant)},${staff},'directory.profile.edit','allow','business_area',${area},1,${staff});
+INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,business_area_id,active,granted_by)
+SELECT ${sql(ids.grant)},${staff},'directory.profile.edit','allow','business_area',${area},0,${staff}
+WHERE NOT EXISTS(SELECT 1 FROM native_directory_grants WHERE id=${sql(ids.grant)});
+UPDATE native_directory_grants SET active=1 WHERE id=${sql(ids.grant)} AND staff_id=${staff} AND permission='directory.profile.edit' AND effect='allow' AND scope_kind='business_area' AND business_area_id=${area} AND division_id IS NULL AND resource_id IS NULL AND active=0 AND granted_by=${staff};
 ${receipt(p, ids, "provision", pp, ppSha, verificationJson, verificationSha, provisionResult)}
 ${guard(provisionTable, `EXISTS(SELECT 1 FROM native_staff_admissions WHERE staff_id=${staff} AND active=1 AND version=${activeVersion}) AND EXISTS(SELECT 1 FROM native_staff_profiles WHERE staff_id=${staff} AND version=${p.expected.profileVersion}) AND (SELECT count(*) FROM native_directory_grants WHERE staff_id=${staff} AND active=1)=1 AND EXISTS(SELECT 1 FROM native_directory_grants WHERE id=${sql(ids.grant)} AND staff_id=${staff} AND permission='directory.profile.edit' AND effect='allow' AND scope_kind='business_area' AND business_area_id=${area} AND division_id IS NULL AND resource_id IS NULL AND active=1 AND granted_by=${staff}) AND NOT EXISTS(SELECT 1 FROM native_project_grants WHERE staff_id=${staff} AND active=1) AND EXISTS(SELECT 1 FROM native_staff_bootstrap_receipts WHERE command_id=${sql(ids.provisionCommand)} AND canonical_plan_sha256=${sql(ppSha)})`)}
 DROP TABLE ${provisionTable};
@@ -165,7 +169,7 @@ export function buildOnboardingAuthorityArtifacts(base, input, phase) {
   const errors = validateOnboardingAuthorityInput(input); if (errors.length) throw new Error(errors.join("\n"));
   if (!['provision', 'revoke'].includes(phase)) throw new Error("phase must be provision or revoke");
   const { config, selected, names, chainSha256 } = canonicalOperations(base), p = structuredClone(input.packet);
-  const ids = { grant: `staging-onboarding-profile-edit:${p.staffId}:${sha256(p.businessAreaId).slice(0, 16)}`, provisionApproval: `${p.packetId}:provision:approval`, provisionCommand: `${p.packetId}:provision:command`, revokeApproval: `${p.packetId}:revoke:approval`, revokeCommand: `${p.packetId}:revoke:command` };
+  const ids = { grant: `staging-onboarding-profile-edit:${sha256(`${p.staffId}:${p.businessAreaId}`).slice(0, 32)}`, provisionApproval: `${p.packetId}:provision:approval`, provisionCommand: `${p.packetId}:provision:command`, revokeApproval: `${p.packetId}:revoke:approval`, revokeCommand: `${p.packetId}:revoke:command` };
   const migrationNames = { provision: `0001_${p.packetId.replaceAll('-', '_')}_provision.sql`, revoke: `0002_${p.packetId.replaceAll('-', '_')}_revoke.sql` };
   const built = sqlArtifacts(p, ids, names, migrationNames), configs = {};
   for (const action of ["provision", "revoke"]) { const output = structuredClone(config), db = output.d1_databases.find(row => row.binding === "OPS_DB"); db.migrations_dir = `${OUTPUT_ROOT}/${p.packetId}/${action}`; db.migrations_table = ONBOARDING_AUTHORITY_MIGRATIONS_TABLE; configs[action] = output; }

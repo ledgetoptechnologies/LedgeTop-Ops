@@ -11,8 +11,8 @@ active Project grants, one active selected business area, and no actor fences or
 pending/leased Directory or Project work. It then:
 
 - reactivates the reviewed admission;
-- inserts one `directory.profile.edit` allow scoped only to the selected
-  business area; and
+- creates one durable `directory.profile.edit` allow scoped only to the selected
+  business area, or reactivates that exact inactive row for a later packet; and
 - records immutable, hashed plan and result evidence.
 
 It does **not** reactivate the durable global profile-edit row left by earlier
@@ -25,6 +25,12 @@ approval and receipt, the exact active admission and business-area grant, no
 other active Directory or Project grants, and no actor work. It deactivates the
 new grant and admission, revokes the provision approval, and records its own
 immutable receipt. It never deletes authority or ledger rows.
+
+The scoped grant identity is deterministic for the staff/business-area pair.
+That matches the Directory grant table's unique scope identity and allows later
+packet IDs to open a new bounded window without deleting history. Reactivation
+requires the complete exact inactive row shape; an alternate ID, changed scope,
+active row, or competing same-scope row fails closed.
 
 ## Generate and review
 

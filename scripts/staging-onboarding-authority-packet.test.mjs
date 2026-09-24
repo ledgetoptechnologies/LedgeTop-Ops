@@ -42,6 +42,24 @@ test("reactivates only admission plus one business-area profile-edit allow, then
   assert.equal(row(db,`SELECT count(*) count FROM ${ONBOARDING_AUTHORITY_MIGRATIONS_TABLE}`).count,4);
 });
 
+test("opens and closes a second packet for the same staff and business area by safely reactivating the durable scoped grant", () => {
+  const base=fixture(), db=database(); priorInactive(db,base);
+  const first=buildOnboardingAuthorityArtifacts(base,input(),"revoke");
+  apply(db,first.provision.sql,first.provision.name,ONBOARDING_AUTHORITY_MIGRATIONS_TABLE);
+  apply(db,first.revoke.sql,first.revoke.name,ONBOARDING_AUTHORITY_MIGRATIONS_TABLE);
+  const second=buildOnboardingAuthorityArtifacts(base,input({packet:{packetId:"staging-onboarding-authority-positive-002",expected:{admissionVersion:4,profileVersion:1}}}),"revoke");
+  assert.equal(first.ids.grant,second.ids.grant);
+  apply(db,second.provision.sql,second.provision.name,ONBOARDING_AUTHORITY_MIGRATIONS_TABLE);
+  assert.deepEqual(row(db,"SELECT active,version FROM native_staff_admissions WHERE staff_id=?",owner.operationsStaffId),{active:1,version:5});
+  assert.deepEqual(row(db,"SELECT active FROM native_directory_grants WHERE id=?",second.ids.grant),{active:1});
+  apply(db,second.revoke.sql,second.revoke.name,ONBOARDING_AUTHORITY_MIGRATIONS_TABLE);
+  assert.deepEqual(row(db,"SELECT active,version FROM native_staff_admissions WHERE staff_id=?",owner.operationsStaffId),{active:0,version:6});
+  assert.deepEqual(row(db,"SELECT active FROM native_directory_grants WHERE id=?",first.ids.grant),{active:0});
+  assert.deepEqual(row(db,"SELECT active FROM native_directory_grants WHERE id=?",second.ids.grant),{active:0});
+  assert.equal(row(db,"SELECT count(*) count FROM native_directory_grants WHERE staff_id=?",owner.operationsStaffId).count,2);
+  assert.equal(row(db,`SELECT count(*) count FROM ${ONBOARDING_AUTHORITY_MIGRATIONS_TABLE}`).count,6);
+});
+
 test("fails closed on active unrelated Directory authority or Project authority", () => {
   for (const kind of ["directory","project"]) { const base=fixture(), db=database(), prior=priorInactive(db,base), artifact=buildOnboardingAuthorityArtifacts(base,input(),"provision"); if(kind==="directory") db.prepare("UPDATE native_directory_grants SET active=1 WHERE id=?").run(prior.ids.directoryGrant); else db.prepare("UPDATE native_project_grants SET active=1,version=version+1 WHERE id=?").run(prior.ids.grant); assert.throws(()=>apply(db,artifact.provision.sql,artifact.provision.name,ONBOARDING_AUTHORITY_MIGRATIONS_TABLE)); assert.deepEqual(row(db,"SELECT active,version FROM native_staff_admissions WHERE staff_id=?",owner.operationsStaffId),{active:0,version:2}); }
 });
