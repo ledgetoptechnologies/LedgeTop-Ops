@@ -6,8 +6,9 @@ import { authenticateNativeStaffWithAdmissionVersion,
   type NativeStaffAccessConfiguration } from "./native-staff-auth";
 import { issueClientOnboardingWithHandoff, revealClientOnboardingSecret,
   snapshotClientOnboardingKeyring, type ClientOnboardingKeyring } from "./client-onboarding-handoff";
+import { readClientOnboardingSubmissionForReview } from "./client-onboarding-review";
 
-export type ClientOnboardingStaffRoute = "session" | "create" | "reveal";
+export type ClientOnboardingStaffRoute = "session" | "create" | "reveal" | "review";
 export type ClientOnboardingStaffHttpDependencies = Readonly<{
   configuration: NativeStaffAccessConfiguration & Readonly<{ origin: string; csrfSecret: string }>;
   database: D1Database;
@@ -30,6 +31,7 @@ export function clientOnboardingStaffHttpRequest(method: string, path: string): 
   if (method === "GET" && path === "/api/client-onboarding/staff/session") return "session";
   if (method === "POST" && path === "/api/client-onboarding/staff/create") return "create";
   if (method === "POST" && path === "/api/client-onboarding/staff/reveal") return "reveal";
+  if (method === "POST" && path === "/api/client-onboarding/staff/review") return "review";
   return null;
 }
 
@@ -109,7 +111,7 @@ async function requireCsrf(request: Request, secret: string, origin: string,
 function unexpired(auth: AuthenticatedNativeStaffWithAdmissionVersion): void {
   if (Date.parse(auth.verifiedUntil) <= Date.now()) throw new HttpFailure(403, "client_onboarding_denied");
 }
-async function body(request: Request, route: "create" | "reveal"): Promise<Record<string, unknown>> {
+async function body(request: Request, route: "create" | "reveal" | "review"): Promise<Record<string, unknown>> {
   const contentType = request.headers.get("Content-Type");
   if (!contentType || !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(contentType))
     throw new HttpFailure(400, "invalid_request");
@@ -121,6 +123,11 @@ async function body(request: Request, route: "create" | "reveal"): Promise<Recor
     throw new HttpFailure(400, "invalid_request");
   }
   if (!plain(value)) throw new HttpFailure(400, "invalid_request");
+  if (route === "review") {
+    if (!exact(value, ["submissionId"]) || typeof value.submissionId !== "string")
+      throw new HttpFailure(400, "invalid_request");
+    return value;
+  }
   if (route === "reveal") {
     if (!exact(value, ["commandId"]) || typeof value.commandId !== "string")
       throw new HttpFailure(400, "invalid_request");
@@ -142,7 +149,7 @@ export async function handleClientOnboardingStaffHttp(request: Request,
     const route = clientOnboardingStaffHttpRequest(request.method, url.pathname);
     if (!route) throw new HttpFailure(404, "not_found");
     const authority = snapshot(dependencies);
-    const handoff = route === "session" ? undefined : keyring(dependencies.handoffKeyringJson);
+    const handoff = route === "create" || route === "reveal" ? keyring(dependencies.handoffKeyringJson) : undefined;
     if (url.origin !== authority.origin || url.search || url.hash)
       throw new HttpFailure(403, "client_onboarding_denied");
     const origin = request.headers.get("Origin");
@@ -167,6 +174,13 @@ export async function handleClientOnboardingStaffHttp(request: Request,
     unexpired(auth);
     const input = await body(request, route);
     unexpired(auth);
+    if (route === "review") {
+      try {
+        const review = await readClientOnboardingSubmissionForReview(authority.database, auth, input.submissionId);
+        unexpired(auth);
+        return response(200, review);
+      } catch { throw new HttpFailure(403, "client_onboarding_denied"); }
+    }
     if (route === "create") {
       try {
         const receipt = await issueClientOnboardingWithHandoff(authority.database,

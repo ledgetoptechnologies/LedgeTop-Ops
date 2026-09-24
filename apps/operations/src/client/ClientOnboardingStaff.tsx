@@ -6,6 +6,11 @@ type StaffSession = { csrfToken: string; verifiedUntil: string };
 type Scope = { businessAreaId: string; divisionId: string };
 type Created = { invitationId: string; expiresAt: string; requestSha256: string; state: string };
 type Revealed = { commandId: string; invitationId: string; expiresAt: string; invitationSecret: string };
+type Review = { invitationId: string; submissionId: string; fieldsSha256: string; submittedAt: string;
+  targetClientRecordId: string | null; scopes: Array<{ businessAreaId: string; divisionId: string | null }>;
+  fields: { clientType: "consumer" | "business"; name: string; email: string; phone: string;
+    organizationName: string; organizationEmail: string; organizationPhone: string; addressLine1: string;
+    addressLine2: string; city: string; state: string; postalCode: string; country: string } };
 type TargetMode = "proposed-scopes" | "existing-client";
 
 const endpoint = "/api/client-onboarding/staff";
@@ -48,6 +53,14 @@ function validCreated(value: Record<string, unknown>): value is Created & Record
 function validRevealed(value: Record<string, unknown>): value is Revealed & Record<string, unknown> {
   return typeof value.commandId === "string" && typeof value.invitationId === "string"
     && typeof value.expiresAt === "string" && typeof value.invitationSecret === "string";
+}
+function validReview(value: Record<string, unknown>): value is Review & Record<string, unknown> {
+  return typeof value.invitationId === "string" && typeof value.submissionId === "string"
+    && typeof value.fieldsSha256 === "string" && /^[0-9a-f]{64}$/.test(value.fieldsSha256)
+    && typeof value.submittedAt === "string" && Number.isFinite(Date.parse(value.submittedAt))
+    && (value.targetClientRecordId === null || typeof value.targetClientRecordId === "string")
+    && Array.isArray(value.scopes) && value.scopes.length > 0 && value.scopes.length <= 128
+    && record(value.fields) && typeof value.fields.name === "string" && typeof value.fields.email === "string";
 }
 
 export function ClientOnboardingStaff() {
@@ -150,5 +163,53 @@ export function ClientOnboardingIssuer({ session }: { session: StaffSession }) {
       {uncertain === "reveal" && <p className="onboarding-staff-error" role="alert"><strong>Reveal outcome is uncertain.</strong> Do not reveal again. The server may have consumed the one-time reveal; have an administrator inspect the audit state.</p>}
       {revealed && <div className="onboarding-secret"><h3>One-time secret</h3><p>This page will not reveal it again. No recipient URL or client access has been created.</p><output aria-label="Invitation secret">{revealed.invitationSecret}</output><button type="button" className="button-ghost" onClick={copy}>{copied ? "Copied" : "Copy secret"}</button></div>}
     </section></Card>}
+    <ClientOnboardingReview session={session} />
   </main></div>;
+}
+
+function ClientOnboardingReview({ session }: { session: StaffSession }) {
+  const [submissionId, setSubmissionId] = useState("");
+  const [review, setReview] = useState<Review | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const load = async (event: FormEvent) => {
+    event.preventDefault();
+    if (busy) return;
+    setBusy(true); setError(""); setReview(null);
+    try {
+      const value = await json(`${endpoint}/review`, { method: "POST",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": session.csrfToken },
+        body: JSON.stringify({ submissionId: submissionId.trim() }) });
+      if (!validReview(value) || value.submissionId !== submissionId.trim()) throw new Error("invalid_response");
+      setReview(value);
+    } catch { setError("Submission was not found or is outside your current authorized scope."); }
+    finally { setBusy(false); }
+  };
+  const fieldEntries = review ? [
+    ["Client type", review.fields.clientType], ["Name", review.fields.name], ["Email", review.fields.email],
+    ["Phone", review.fields.phone], ["Organization", review.fields.organizationName],
+    ["Organization email", review.fields.organizationEmail], ["Organization phone", review.fields.organizationPhone],
+    ["Address line 1", review.fields.addressLine1], ["Address line 2", review.fields.addressLine2],
+    ["City", review.fields.city], ["State", review.fields.state], ["Postal code", review.fields.postalCode],
+    ["Country", review.fields.country],
+  ] : [];
+  return <Card><section className="onboarding-created"><h2>Review submitted profile</h2>
+    <p>Read-only lookup. Approval and rejection are intentionally unavailable here.</p>
+    <form className="onboarding-staff-form" onSubmit={load}>
+      <label className="wide">Submission ID<input value={submissionId} required maxLength={36}
+        onChange={event => setSubmissionId(event.target.value)} /></label>
+      <button className="button-orange wide" disabled={busy}>{busy ? "Loading…" : "Load authorized submission"}</button>
+    </form>
+    {error && <p className="onboarding-staff-error" role="alert">{error}</p>}
+    {review && <div className="onboarding-review-detail"><dl>
+      <div><dt>Submission ID</dt><dd>{review.submissionId}</dd></div>
+      <div><dt>Invitation ID</dt><dd>{review.invitationId}</dd></div>
+      <div><dt>Submitted</dt><dd>{new Date(review.submittedAt).toLocaleString()}</dd></div>
+      <div><dt>Fields fingerprint</dt><dd><code>{review.fieldsSha256}</code></dd></div>
+      <div><dt>Target</dt><dd>{review.targetClientRecordId ?? "New client profile"}</dd></div>
+      {fieldEntries.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value || "—"}</dd></div>)}
+    </dl><h3>Authorized scope</h3><ul>{review.scopes.map(scope =>
+      <li key={`${scope.businessAreaId}:${scope.divisionId ?? ""}`}>{scope.businessAreaId}{scope.divisionId ? ` / ${scope.divisionId}` : ""}</li>)}</ul>
+    </div>}
+  </section></Card>;
 }
