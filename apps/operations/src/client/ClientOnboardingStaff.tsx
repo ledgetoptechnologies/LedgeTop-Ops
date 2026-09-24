@@ -6,6 +6,13 @@ type StaffSession = { csrfToken: string; verifiedUntil: string };
 type Scope = { businessAreaId: string; divisionId: string };
 type Created = { invitationId: string; expiresAt: string; requestSha256: string; state: string };
 type Revealed = { commandId: string; invitationId: string; expiresAt: string; invitationSecret: string };
+type Review = { invitationId: string; submissionId: string; fieldsSha256: string; submittedAt: string;
+  targetClientRecordId: string | null; scopes: Array<{ businessAreaId: string; divisionId: string | null }>;
+  fields: { clientType: "consumer" | "business"; name: string; email: string; phone: string;
+    organizationName: string; organizationEmail: string; organizationPhone: string; addressLine1: string;
+    addressLine2: string; city: string; state: string; postalCode: string; country: string } };
+type Approval = { decisionId: string; submissionId: string; clientRecordId: string;
+  clientRecordVersion: number; relationshipVersion: number; replayed: boolean };
 type TargetMode = "proposed-scopes" | "existing-client";
 
 const endpoint = "/api/client-onboarding/staff";
@@ -48,6 +55,19 @@ function validCreated(value: Record<string, unknown>): value is Created & Record
 function validRevealed(value: Record<string, unknown>): value is Revealed & Record<string, unknown> {
   return typeof value.commandId === "string" && typeof value.invitationId === "string"
     && typeof value.expiresAt === "string" && typeof value.invitationSecret === "string";
+}
+function validReview(value: Record<string, unknown>): value is Review & Record<string, unknown> {
+  return typeof value.invitationId === "string" && typeof value.submissionId === "string"
+    && typeof value.fieldsSha256 === "string" && /^[0-9a-f]{64}$/.test(value.fieldsSha256)
+    && typeof value.submittedAt === "string" && Number.isFinite(Date.parse(value.submittedAt))
+    && (value.targetClientRecordId === null || typeof value.targetClientRecordId === "string")
+    && Array.isArray(value.scopes) && value.scopes.length > 0 && value.scopes.length <= 128
+    && record(value.fields) && typeof value.fields.name === "string" && typeof value.fields.email === "string";
+}
+function validApproval(value: Record<string, unknown>): value is Approval & Record<string, unknown> {
+  return typeof value.decisionId === "string" && typeof value.submissionId === "string"
+    && typeof value.clientRecordId === "string" && Number.isSafeInteger(value.clientRecordVersion)
+    && Number.isSafeInteger(value.relationshipVersion) && typeof value.replayed === "boolean";
 }
 
 export function ClientOnboardingStaff() {
@@ -126,7 +146,7 @@ export function ClientOnboardingIssuer({ session }: { session: StaffSession }) {
   return <div className="onboarding-staff-shell"><header><Brand product="Operations" name="Ledge Top" /><a href="/">Exit onboarding</a></header><main>
     <div className="onboarding-staff-heading"><p className="eyebrow">Administrator tool</p><h1>Issue client profile onboarding</h1>
       <p>Create a bounded onboarding invitation, then reveal its secret once. This does not grant active client access.</p></div>
-    <aside className="onboarding-staff-warning" role="status"><strong>Recipient flow is disabled</strong><span>No recipient URL is produced here. The invitation secret is not usable until the separately controlled recipient flow is enabled.</span></aside>
+    <aside className="onboarding-staff-warning" role="status"><strong>Recipient flow is separately controlled</strong><span>This page reveals an invitation secret, not a recipient URL or client access. The recipient route must be enabled independently.</span></aside>
     <Card><form className="onboarding-staff-form" onSubmit={submit}>
       <label>Command ID<input value={commandId} readOnly /></label>
       <label>Expires at<input type="datetime-local" value={expiresAt} min={localDateTime(new Date(Date.now() + 60_000))} disabled={Boolean(created || uncertain)} onChange={event => setExpiresAt(event.target.value)} required /></label>
@@ -150,5 +170,80 @@ export function ClientOnboardingIssuer({ session }: { session: StaffSession }) {
       {uncertain === "reveal" && <p className="onboarding-staff-error" role="alert"><strong>Reveal outcome is uncertain.</strong> Do not reveal again. The server may have consumed the one-time reveal; have an administrator inspect the audit state.</p>}
       {revealed && <div className="onboarding-secret"><h3>One-time secret</h3><p>This page will not reveal it again. No recipient URL or client access has been created.</p><output aria-label="Invitation secret">{revealed.invitationSecret}</output><button type="button" className="button-ghost" onClick={copy}>{copied ? "Copied" : "Copy secret"}</button></div>}
     </section></Card>}
+    <ClientOnboardingReview session={session} />
   </main></div>;
+}
+
+function ClientOnboardingReview({ session }: { session: StaffSession }) {
+  const [submissionId, setSubmissionId] = useState("");
+  const [review, setReview] = useState<Review | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [approval, setApproval] = useState<Approval | null>(null);
+  const [approvalBusy, setApprovalBusy] = useState(false);
+  const [approvalUncertain, setApprovalUncertain] = useState(false);
+  const load = async (event: FormEvent) => {
+    event.preventDefault();
+    if (busy) return;
+    setBusy(true); setError(""); setReview(null); setApproval(null); setApprovalUncertain(false);
+    try {
+      const value = await json(`${endpoint}/review`, { method: "POST",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": session.csrfToken },
+        body: JSON.stringify({ submissionId: submissionId.trim() }) });
+      if (!validReview(value) || value.submissionId !== submissionId.trim()) throw new Error("invalid_response");
+      setReview(value);
+    } catch { setError("Submission was not found or is outside your current authorized scope."); }
+    finally { setBusy(false); }
+  };
+  const approve = async () => {
+    if (!review || approvalBusy || approval) return;
+    setApprovalBusy(true); setError("");
+    try {
+      const value = await json(`${endpoint}/approve`, { method: "POST",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": session.csrfToken },
+        body: JSON.stringify({ submissionId: review.submissionId, fieldsSha256: review.fieldsSha256 }) });
+      if (!validApproval(value) || value.submissionId !== review.submissionId) throw new Error("invalid_response");
+      setApproval(value); setApprovalUncertain(false);
+    } catch (caught) {
+      const status = caught instanceof Error && "status" in caught ? Number(caught.status) : 0;
+      if (!status || status >= 500 || (caught instanceof Error && caught.message === "invalid_response"))
+        setApprovalUncertain(true);
+      else setError("Approval was denied. Confirm this is a new consumer submission and that your current profile-edit and identity-link grants cover every scope.");
+    } finally { setApprovalBusy(false); }
+  };
+  const fieldEntries = review ? [
+    ["Client type", review.fields.clientType], ["Name", review.fields.name], ["Email", review.fields.email],
+    ["Phone", review.fields.phone], ["Organization", review.fields.organizationName],
+    ["Organization email", review.fields.organizationEmail], ["Organization phone", review.fields.organizationPhone],
+    ["Address line 1", review.fields.addressLine1], ["Address line 2", review.fields.addressLine2],
+    ["City", review.fields.city], ["State", review.fields.state], ["Postal code", review.fields.postalCode],
+    ["Country", review.fields.country],
+  ] : [];
+  const nativeOnlyEligible = review?.targetClientRecordId === null && review.fields.clientType === "consumer"
+    && !review.fields.organizationName && !review.fields.organizationEmail && !review.fields.organizationPhone;
+  return <Card><section className="onboarding-created"><h2>Review submitted profile</h2>
+    <p>Approval is limited to a new, unlinked consumer profile. It never enrolls Project Alpha, creates an organization, or activates portal access.</p>
+    <form className="onboarding-staff-form" onSubmit={load}>
+      <label className="wide">Submission ID<input value={submissionId} required maxLength={36}
+        onChange={event => setSubmissionId(event.target.value)} /></label>
+      <button className="button-orange wide" disabled={busy}>{busy ? "Loading…" : "Load authorized submission"}</button>
+    </form>
+    {error && <p className="onboarding-staff-error" role="alert">{error}</p>}
+    {review && <div className="onboarding-review-detail"><dl>
+      <div><dt>Submission ID</dt><dd>{review.submissionId}</dd></div>
+      <div><dt>Invitation ID</dt><dd>{review.invitationId}</dd></div>
+      <div><dt>Submitted</dt><dd>{new Date(review.submittedAt).toLocaleString()}</dd></div>
+      <div><dt>Fields fingerprint</dt><dd><code>{review.fieldsSha256}</code></dd></div>
+      <div><dt>Target</dt><dd>{review.targetClientRecordId ?? "New client profile"}</dd></div>
+      {fieldEntries.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value || "—"}</dd></div>)}
+    </dl><h3>Authorized scope</h3><ul>{review.scopes.map(scope =>
+      <li key={`${scope.businessAreaId}:${scope.divisionId ?? ""}`}>{scope.businessAreaId}{scope.divisionId ? ` / ${scope.divisionId}` : ""}</li>)}</ul>
+    </div>}
+    {review && !nativeOnlyEligible && <p className="onboarding-staff-error" role="status"><strong>Approval unavailable.</strong> Existing-client and business/organization submissions require the organization-aware review path so no submitted data is discarded.</p>}
+    {review && nativeOnlyEligible && !approval && <div className="onboarding-approval-action"><p>This creates one native Operations client record with no organization, Project Alpha destination, portal entitlement, or public link.</p>
+      <button type="button" className="button-orange" disabled={approvalBusy} onClick={approve}>{approvalBusy ? "Approving…" : approvalUncertain ? "Retry same approval" : "Approve native-only client"}</button>
+      {approvalUncertain && <p className="onboarding-staff-error" role="alert">The approval outcome is uncertain. Retrying sends the same immutable decision; do not load a different submission first.</p>}
+    </div>}
+    {approval && <div className="onboarding-approval-success" role="status"><h3>Native client approved</h3><p>Client record <code>{approval.clientRecordId}</code> is at version {approval.clientRecordVersion}. No client access or Project Alpha enrollment was activated.</p></div>}
+  </section></Card>;
 }

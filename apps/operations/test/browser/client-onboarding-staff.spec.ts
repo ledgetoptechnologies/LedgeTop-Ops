@@ -17,10 +17,16 @@ async function render(page: Page, mode = "success") {
 }
 async function issue(page: Page) {
   await expect(page.getByRole("heading", { name: "Issue client profile onboarding" })).toBeVisible();
-  await expect(page.getByText("Recipient flow is disabled")).toBeVisible();
+  await expect(page.getByText("Recipient flow is separately controlled")).toBeVisible();
   await page.getByLabel("Business area ID").fill("area:onboarding");
   await page.getByRole("button", { name: "Issue invitation metadata" }).click();
   await expect(page.getByRole("heading", { name: "Invitation metadata issued" })).toBeVisible();
+}
+async function review(page: Page) {
+  await expect(page.getByRole("heading", { name: "Review submitted profile" })).toBeVisible();
+  await page.getByLabel("Submission ID").fill("33333333-3333-4333-8333-333333333333");
+  await page.getByRole("button", { name: "Load authorized submission" }).click();
+  await expect(page.getByText("Reviewed Client", { exact: true })).toBeVisible();
 }
 
 test("capability remains hidden when the dedicated administrator session is disabled", async ({ page }) => {
@@ -78,4 +84,24 @@ test("an uncertain reveal is locked and never repeated", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Reveal secret once" })).toHaveCount(0);
   const calls = await page.evaluate(() => (window as Window & { onboardingCalls?: Array<{path: string}> }).onboardingCalls || []);
   expect(calls.filter(call => call.path.endsWith("/reveal"))).toHaveLength(1);
+});
+
+test("approves a reviewed new consumer with only immutable submission evidence", async ({ page }) => {
+  await render(page);
+  await review(page);
+  await expect(page.getByText(/never enrolls Project Alpha/i)).toBeVisible();
+  await page.getByRole("button", { name: "Approve native-only client" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Native client approved" })).toContainText(
+    "55555555-5555-4555-8555-555555555555");
+  const calls = await page.evaluate(() => (window as Window & { onboardingCalls?: Array<{path: string; body: unknown}> }).onboardingCalls || []);
+  expect(calls.find(call => call.path.endsWith("/approve"))?.body).toEqual({
+    submissionId: "33333333-3333-4333-8333-333333333333", fieldsSha256: "e".repeat(64),
+  });
+});
+
+test("does not offer native-only approval when organization data would be lost", async ({ page }) => {
+  await render(page, "business");
+  await review(page);
+  await expect(page.getByText(/organization-aware review path/i)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Approve native-only client" })).toHaveCount(0);
 });

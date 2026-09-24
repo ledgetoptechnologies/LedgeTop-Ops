@@ -2,27 +2,42 @@
 
 Updated September 24, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
 
-### September 24, 2026 — native-only onboarding decision prerequisite
+### September 24, 2026 — combined onboarding staging candidate, disabled
 
-- The exact head of draft Ops PR #116 (`c36532b`) passed all ten CI checks. Draft
-  PR #118 stacks on it and adds a private native-only client approval writer:
-  one first-primary D1 batch commits the decision fence, exact create
-  admission when needed, canonical client profile and relationship history,
-  immutable decision receipt, and fence completion. It does not create PA
-  enrollment, portal entitlement, Delivery access, or a public route.
-- In its isolated branch, Operations typecheck passed after restoring the
-  branch's own npm lockfile dependencies. The two focused full-D1 suites
-  passed **21/21**, including new unlinked client approval, existing-client
-  post-profile relationship version, stale revision, exact replay, denial
-  after reviewer authority revocation, and late-batch rollback. CI for PR
-  #118 and independent review remain gates; this is not staging acceptance.
-- A live staff review-disposition route and the recipient session/submit/status
-  path are still absent or default-off. Do not issue a usable invitation or
-  activate externally managed PA client mode from this source-only result.
-- The Sep 24 scoped security-diff scan of PR #118's two changed source files
-  (`c36532b..dfcb1da`) completed with no reportable findings. It inspected
-  the adjacent D1 decision and Directory authority guards, but did not cover
-  a future HTTP caller or prove staging behavior. Keep those as separate gates.
+- Draft Ops PR #118 adds a private native-only approval writer. Its first-primary
+  D1 batch commits the decision fence, exact create admission when needed,
+  canonical profile and relationship history, immutable receipt, and fence
+  completion. Its 21 focused full-D1 tests and all ten CI checks passed. The
+  scoped security-diff scan of its initial two changed source files reported no
+  findings; it did not cover a future HTTP caller or prove staging behavior.
+- The recipient runtime adds a same-origin Client API and fragment-secret-
+  scrubbing `/onboarding/:invitationId` page, backed by a private Operations
+  session/submit/status entrypoint. Independent QA corrected rate-limit key
+  separation, SPA asset-first gate bypass, unbounded body reads, and transient
+  retry UX. A joined local Client-router-to-Ops-bridge-to-D1 test then found
+  and fixed a protocol-envelope mismatch that prevented submission. It now
+  passes session, first submit, exact lost-response retry, status recovery,
+  single-write, altered-retry denial, and wrong-proof denial.
+- The two source branches are combined into one staging candidate, but both
+  deployment flags remain `false`. There is no live usable invitation, PA
+  write, portal entitlement, or Delivery/public-link change. A live staff
+  review-disposition HTTP route is still missing.
+- Isolated Operations staging D1 had exactly migration `0140` pending. A private
+  pre-migration export was checksum-verified; `0140` applied successfully, and
+  the second migration list found no pending files. Reconstructed ignored
+  staging configs pass strict preflight, and both Client and Operations
+  Wrangler dry runs pass with the new binding and disabled flags. The active
+  staging Worker versions are still older and have no onboarding binding;
+  this candidate has not been deployed there.
+- Before activation, deploy the exact combined candidate to isolated staging,
+  verify Worker-first routing, default-off behavior, exact recipient and
+  staff-review flows, rollback, and unchanged existing public links. The
+  review endpoint must derive actor, grants, scopes, versions, and immutable
+  submission fields server-side; the private writer DTO must never become a
+  browser request shape. The native-only writer intentionally does not handle
+  business submissions with organization fields, so those must receive an
+  explicit supported disposition rather than silently losing fields. Source
+  tests and PR CI do not replace those acceptance gates.
 
 ### September 23, 2026 — client-profile onboarding foundation, not activation
 
@@ -6621,3 +6636,102 @@ pending; this requirement does not claim a deployed UI change.
   no deployment, feature enablement, migration, remote PA write, canonical
   mapping rewrite, Delivery row or public-link mutation had been performed;
   the later staging-only deployment is recorded above.
+
+### September 24 — default-off recipient runtime staging smoke
+
+- Draft Operations PR119 at `06ac319` combines the recipient runtime and a
+  read-only staff submission-review surface. All ten PR CI checks passed.
+  Migration `0140_client_onboarding_one_time_reveal.sql` was applied to the
+  staging Operations D1 after a private backup; a subsequent migration list
+  reported no pending migrations. No production D1 or Project Alpha migration
+  was applied at this checkpoint.
+- Staging-only Operations version `8f87f4b5-2ad4-4c3c-90dc-4211225d77dc`
+  and Client version `4cdbae12-b995-4ac3-94e6-4f52cddb32ed` were deployed
+  after inactive version upload, config inspection, build and Wrangler dry run.
+  The recipient service binding targets only the staging Operations Worker.
+  All three new onboarding/recipient flags remain `false`; the signed-in Ops
+  Administration UI reports onboarding unavailable, and the Client staging
+  portal remains disabled. This proves only the default-off deployment smoke,
+  not a positive invitation/submission/approval workflow or public-link parity.
+- Read-only staging D1 prerequisites show one active business area, one bound
+  active legacy staff identity, one native staff profile, but zero active native
+  staff admissions or `directory.profile.edit` allows. An inactive admission
+  and inactive profile-edit allow exist, with no active deny. Positive synthetic
+  acceptance therefore needs a separately reviewed, least-privilege authority
+  reactivation and a staging-only handoff keyring before temporarily opening
+  the recipient flags. Do not activate real client access, PA enrollment, or
+  production ownership as a substitute for that test. The current review route
+  is read-only; it cannot approve a client or create a canonical Directory
+  record. The production PA owner-update checkpoint has not been reached.
+- Aggregate staging synchronization readback shows one acknowledged Directory
+  outbox command and one durable PA mapping, both for an organization in the
+  single staging PA source, plus complete reconciliation history. It shows no
+  client mapping. This is evidence of an organization-level round trip, not
+  proof that LTDS/LTT production client synchronization or the unified portal
+  is ready.
+- The PR119 Client routing diff adds only `/api/client-onboarding` and
+  `/onboarding/:invitationId`; it does not edit the existing public-share route
+  handlers. Four focused local public-share/location suites passed 26/26 tests
+  against the `06ac319` runtime code. This narrows regression risk but does
+  not replace a synthetic staging public-link parity check or production link
+  acceptance.
+
+### September 24 — bounded onboarding invitation acceptance (partial)
+
+- A private staging D1 export was saved before the authority window. The
+  reviewed, one-file provision packet reactivated only the exact signed-in
+  staff admission and one `directory.profile.edit` allow for the selected
+  staging business area. Readback showed one active admission and one scoped
+  edit allow, with zero `directory.identity.link` or Project grants. The
+  matching revoke packet was generated and checked before provision.
+- Staging Ops and Client versions were uploaded inactive with only their three
+  onboarding/recipient flags and the Ops admin origin changed. The Ops version
+  had the staging-only handoff keyring; no production secret was changed.
+  The first browser issuance returned a denial and wrote zero invitation or
+  handoff rows. The cause was an exact-shape mismatch: the staff HTTP handler
+  passed an extra admission-version property to the two-field handoff actor
+  parser. PR119 now adapts the authenticated actor at create/reveal and avoids
+  reporting a post-commit verification expiry as a definitive denial. Focused
+  routing tests and Operations typecheck passed after the fix.
+- With corrected staging Ops version `f399d93d-e5c1-420c-9f28-7b4d38359451`
+  and Client acceptance version `4b3951b7-8e16-48c0-befb-45bc6bb6af85`,
+  the signed-in staff UI issued one synthetic, new-client invitation and
+  consumed its one-time reveal. Readback showed one invitation and one
+  encrypted handoff, but zero submissions and zero native client records.
+  The recipient URL returned in-app-browser `ERR_BLOCKED_BY_CLIENT`, including
+  without its fragment; this is an acceptance blocker, not a successful
+  recipient submission. No bearer or profile values were retained in this
+  document. The original UI asset still displayed an inaccurate disabled
+  banner because the temporary Worker upload had not rebuilt the changed
+  client bundle; source copy and its browser assertion are corrected in PR119.
+- The window was closed in order: Client restored to default-off version
+  `4cdbae12-b995-4ac3-94e6-4f52cddb32ed`, Ops restored to default-off version
+  `8f87f4b5-2ad4-4c3c-90dc-4211225d77dc`, then the exact one-file authority
+  revoke migration applied. Final readback showed zero active admissions,
+  Directory grants, Project grants, and synthetic submissions. Migration
+  `0140` and immutable staging audit rows remain. No PA deployment, client
+  enrollment, entitlement, Delivery/public-link change, or production Worker
+  deployment occurred. Recipient submission/review and live public-link parity
+  are still open gates; the production PA update checkpoint remains ahead.
+
+### September 24 — guarded onboarding approval code, not live acceptance
+
+- Draft PR119 now contains a guarded staff approval route for a new consumer
+  submission without organization data. It re-reads the immutable submission
+  fingerprint and requires both scoped `directory.profile.edit` and
+  `directory.identity.link` authority before creating a native Directory
+  client. The earlier profile-edit-only staging packet cannot approve and was
+  revoked; approval needs a distinct, reviewed staging authority packet.
+  Existing-client targets, organization submissions, PA writes, portal
+  entitlements, and public links are not silently enabled by this route.
+- In the combined PR worktree, Operations typecheck, production build, 15/15
+  focused route/D1 tests, and 14/14 desktop/mobile staff UI tests passed.
+  Independent read-only review found no definite recipient/approval
+  composition defect. These checks are local evidence, not staging approval
+  acceptance. The latest full PR CI run was still in progress when recorded.
+- Retrying the synthetic no-fragment Client staging path with all temporary
+  onboarding flags off again returned in-app-browser `ERR_BLOCKED_BY_CLIENT`
+  before an HTTP response. The same browser restriction occurs independent of
+  the staging flag state. Do not work around it by transferring the one-time
+  fragment into another browser or tool. The recipient, approval, live
+  public-link parity, and both production PA client round trips remain open.

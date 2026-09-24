@@ -28,6 +28,7 @@ import { listPublicShareLocations, resolvePublicShareLocation } from "./public-l
 import { createClientPortalRouter } from "./client-portal/routes";
 import { acceptRequestAttachmentScanReceipt, cleanupExpiredRequestAttachments, readRequestAttachmentScanReceipt } from "./client-portal/request-attachments";
 import { createClientDelegatedPublicRouter } from "./client-delegated-public";
+import { clientOnboardingRecipientRouter } from "./client-onboarding-recipient";
 import { projectAlphaPricingHintProvider } from "./client-portal/project-alpha-pricing-hint";
 import { processInvitationEmailBatch } from "./client-portal/invitation-email";
 import { runClientDelegatedShareExpiryReconciliation } from "./client-portal/delegated-share-expiry-health";
@@ -1081,6 +1082,10 @@ app.post("/api/internal/client-request-attachments/:attachmentId/scanned", async
 });
 
 app.route("/api/client", createClientPortalRouter({ pricingHintProvider: projectAlphaPricingHintProvider }));
+app.route("/api/client-onboarding", clientOnboardingRecipientRouter);
+app.on(["GET", "HEAD"], "/onboarding/:invitationId", c => c.env.CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED === "true"
+  ? serveAppShell(c.req.raw, c.env.ASSETS)
+  : c.json({ error: "Not found" }, 404));
 app.on(["GET", "HEAD"], "/portal", c => serveAppShell(c.req.raw, c.env.ASSETS));
 app.on(["GET", "HEAD"], "/portal/*", c => serveAppShell(c.req.raw, c.env.ASSETS));
 app.on(["GET", "HEAD"], "/assets/*", c => {
