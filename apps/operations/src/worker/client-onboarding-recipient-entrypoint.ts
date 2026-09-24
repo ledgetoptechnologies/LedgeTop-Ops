@@ -55,7 +55,12 @@ export class ClientOnboardingRecipientBridge extends WorkerEntrypoint<Env> imple
   async submit(request: ClientOnboardingRecipientSubmitRequestV1): Promise<ClientOnboardingRecipientSubmitResultV1> {
     if (request.protocolVersion !== 1 || !await permit(this.env, request.invitationId, "submit", 8)) return unavailable;
     try {
-      const receipt = await submitClientOnboarding(this.env.OPS_DB, request);
+      const receipt = await submitClientOnboarding(this.env.OPS_DB, {
+        invitationId: request.invitationId,
+        invitationSecret: request.invitationSecret,
+        submissionId: request.submissionId,
+        fields: request.fields,
+      });
       return { ok: true, protocolVersion: 1, state: "submitted", submissionId: receipt.submissionId };
     } catch { return unavailable; }
   }
