@@ -3,6 +3,17 @@
 This specifies the native replacement behind the PA-style client form. It is
 not evidence that a public invitation or approval endpoint is deployed.
 
+## September 24 draft-branch boundary
+
+Draft Ops PR #118 has a private native-only approval writer with focused D1
+proof, but no HTTP review-disposition route. Its base PR #116 declares the
+Client-to-Ops recipient binding with disabled flags; the Operations recipient
+entrypoint returns `unavailable`, and the Client Worker mounts no public
+onboarding route. The staff create/reveal paths are also default-off. Older
+dated implementation notes below refer to other branches and are not proof
+that a usable invitation URL or client approval is deployed. Recheck the
+exact branch and staging runtime before issuing any link.
+
 ## September 14 current route recheck
 
 The existing multi-Worker tests were rerun against the current local Client

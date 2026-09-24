@@ -428,7 +428,7 @@ async function updateRemoteState(db: DirectoryWriteD1, write: NormalizedWrite, d
  * transport-only and never enter the canonical profile revision.
  */
 async function planNativeDirectoryProfileWriteInternal(db: DirectoryWriteD1, input: NativeDirectoryProfileWrite,
-  allowEmptyDestinations = false): Promise<NativeDirectoryProfileWritePlanningResult> {
+  allowEmptyDestinations = false, stagedOnboardingDecisionId: string | null = null): Promise<NativeDirectoryProfileWritePlanningResult> {
   const write = normalize(input, allowEmptyDestinations); if (!write) return { status: "rejected", reason: "invalid_write" };
   const auditJson = auditCommand(write);
   const replay = await db.prepare(`SELECT audit.command_json,audit.actor_id,audit.original_verified_access_subject,revision.record_id,
@@ -440,6 +440,9 @@ async function planNativeDirectoryProfileWriteInternal(db: DirectoryWriteD1, inp
     if (replay.command_json !== auditJson || replay.actor_id !== write.actor.staffId || replay.original_verified_access_subject !== write.actor.accessSubject
       || replay.record_id !== write.recordId || replay.record_kind !== write.kind || typeof replay.version !== "number")
       return { status: "conflict", reason: "idempotency_body_conflict" };
+    if (stagedOnboardingDecisionId !== null && (!await authority(db, write)
+      || !await authority(db, write, "directory.identity.link", write.actor.selectedIdentityGrantId)))
+      return { status: "blocked", reason: "native_directory_authority" };
     const ids = await Promise.all(write.destinations.map(value => commandId(write.mutationId, value)));
     return { status: "written", replayed: true, mutationId: write.mutationId, recordId: write.recordId, kind: write.kind, version: replay.version, commandIds: ids };
   }
@@ -448,7 +451,9 @@ async function planNativeDirectoryProfileWriteInternal(db: DirectoryWriteD1, inp
     return { status: "conflict", reason: write.operation === "create" ? "record_exists" : "stale_local_version" };
   if (!await authority(db, write)) return { status: "blocked", reason: "native_directory_authority" };
   const scopesJson = JSON.stringify(write.scopes), profileJson = JSON.stringify(write.profile);
-  if (write.operation === "create" && !await db.prepare(`SELECT 1 ok FROM native_directory_create_admissions
+  const stagedAdmission = write.operation === "create" && stagedOnboardingDecisionId !== null
+    && write.createAdmissionId === `client-onboarding:${stagedOnboardingDecisionId}:client`;
+  if (write.operation === "create" && !stagedAdmission && !await db.prepare(`SELECT 1 ok FROM native_directory_create_admissions
     WHERE id=? AND staff_id=? AND bound_access_subject=? AND record_id=? AND record_kind=? AND active=1
       AND consumed_mutation_id IS NULL AND consumed_at IS NULL AND json(scopes_json)=json(?)
       AND json(profile_json)=json(?) AND json(destinations_json)=json(?)
@@ -593,9 +598,9 @@ async function planNativeDirectoryProfileWriteInternal(db: DirectoryWriteD1, inp
     mutationId: write.mutationId, recordId: write.recordId, kind: write.kind, version: nextVersion, commandIds }, statements };
 }
 
-async function executeNativeDirectoryProfileWrite(db: D1Database, input: NativeDirectoryProfileWrite,
-  allowEmptyDestinations = false): Promise<NativeDirectoryProfileWriteOutcome> {
-  const planned = await planNativeDirectoryProfileWriteInternal(db, input, allowEmptyDestinations);
+async function executeNativeDirectoryProfileWrite(db: DirectoryWriteD1, input: NativeDirectoryProfileWrite,
+  allowEmptyDestinations = false, stagedOnboardingDecisionId: string | null = null): Promise<NativeDirectoryProfileWriteOutcome> {
+  const planned = await planNativeDirectoryProfileWriteInternal(db, input, allowEmptyDestinations, stagedOnboardingDecisionId);
   if (planned.status !== "planned") return planned;
   try { await db.batch([...planned.statements]); }
   catch { return { status: "blocked", reason: "authority_or_atomic_write" }; }
@@ -605,6 +610,22 @@ async function executeNativeDirectoryProfileWrite(db: D1Database, input: NativeD
 /** Normal profile routes always require PA destinations. */
 export async function writeNativeDirectoryProfile(db: D1Database, input: NativeDirectoryProfileWrite): Promise<NativeDirectoryProfileWriteOutcome> {
   return executeNativeDirectoryProfileWrite(db, input);
+}
+
+/**
+ * Narrow planning policy for the private onboarding-decision composer.  This
+ * is not a general source-less Directory write: the immutable decision id is
+ * part of every new-record admission identity, and no destination may be
+ * smuggled through this path.  The composer still has to establish the 0083
+ * decision fence and exact admission in the same batch; without those rows the
+ * database guards reject execution.
+ */
+export async function writeNativeOnlyClientOnboardingDecisionProfile(db: DirectoryWriteD1,
+  decisionId: string, input: NativeDirectoryProfileWrite): Promise<NativeDirectoryProfileWriteOutcome> {
+  if (!UUID.test(decisionId) || input.kind !== "client" || input.destinations.length !== 0
+    || (input.operation === "create" && input.createAdmissionId !== `client-onboarding:${decisionId}:client`))
+    return { status: "rejected", reason: "invalid_onboarding_decision_write" };
+  return executeNativeDirectoryProfileWrite(db, input, true, decisionId);
 }
 
 /**

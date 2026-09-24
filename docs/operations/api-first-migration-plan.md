@@ -1,6 +1,28 @@
 # API-first migration — current implementation objective and work register
 
-Updated September 23, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+Updated September 24, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+
+### September 24, 2026 — native-only onboarding decision prerequisite
+
+- The exact head of draft Ops PR #116 (`c36532b`) passed all ten CI checks. Draft
+  PR #118 stacks on it and adds a private native-only client approval writer:
+  one first-primary D1 batch commits the decision fence, exact create
+  admission when needed, canonical client profile and relationship history,
+  immutable decision receipt, and fence completion. It does not create PA
+  enrollment, portal entitlement, Delivery access, or a public route.
+- In its isolated branch, Operations typecheck passed after restoring the
+  branch's own npm lockfile dependencies. The two focused full-D1 suites
+  passed **21/21**, including new unlinked client approval, existing-client
+  post-profile relationship version, stale revision, exact replay, denial
+  after reviewer authority revocation, and late-batch rollback. CI for PR
+  #118 and independent review remain gates; this is not staging acceptance.
+- A live staff review-disposition route and the recipient session/submit/status
+  path are still absent or default-off. Do not issue a usable invitation or
+  activate externally managed PA client mode from this source-only result.
+- The Sep 24 scoped security-diff scan of PR #118's two changed source files
+  (`c36532b..dfcb1da`) completed with no reportable findings. It inspected
+  the adjacent D1 decision and Directory authority guards, but did not cover
+  a future HTTP caller or prove staging behavior. Keep those as separate gates.
 
 ### September 23, 2026 — client-profile onboarding foundation, not activation
 
