@@ -125,7 +125,7 @@ digest, and emits source/derived SHA-256 manifests. Apply a fresh
 empty database only with the generated `wrangler.staging.bootstrap.json` for
 that application. Do not use these configs for an existing database. Confirm
 the full 133-row Client ledger (both `0199` filenames once, final `0214`) and
-139-row Operations ledger (final `0139`), a second list/apply with no pending
+140-row Operations ledger (final `0140`), a second list/apply with no pending
 migrations, one synthetic owner in each database, the Operations owner role and
 portable ACL catalog, and an empty `PRAGMA foreign_key_check`. Record those
 results in `migrations.freshBootstrap` without storing the owner email.
