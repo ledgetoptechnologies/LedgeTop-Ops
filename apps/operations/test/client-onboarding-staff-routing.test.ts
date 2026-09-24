@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { HTTPException } from "hono/http-exception";
 import type { Env } from "../src/worker/types";
 
-const calls = vi.hoisted(() => ({ legacy: vi.fn(), native: vi.fn(), issue: vi.fn(), reveal: vi.fn(), review: vi.fn() }));
+const calls = vi.hoisted(() => ({ legacy: vi.fn(), native: vi.fn(), issue: vi.fn(), reveal: vi.fn(),
+  review: vi.fn(), approve: vi.fn() }));
 vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {}, DurableObject: class {} }));
 vi.mock("../src/worker/auth", () => ({ authenticateStaff: calls.legacy }));
 vi.mock("../src/worker/native-staff-auth", () => ({
@@ -15,6 +16,9 @@ vi.mock("../src/worker/client-onboarding-handoff", () => ({
 }));
 vi.mock("../src/worker/client-onboarding-review", () => ({
   readClientOnboardingSubmissionForReview: calls.review,
+}));
+vi.mock("../src/worker/client-onboarding-approval", () => ({
+  approveNewNativeOnlyClientOnboarding: calls.approve,
 }));
 import worker from "../src/worker/index";
 
@@ -68,6 +72,12 @@ beforeEach(() => {
       organizationName: "", organizationEmail: "", organizationPhone: "", addressLine1: "1 Main",
       addressLine2: "", city: "Town", state: "TX", postalCode: "75001", country: "US" },
   });
+  calls.approve.mockReset().mockResolvedValue({ status: "written", replayed: false,
+    decisionId: "44444444-4444-4444-8444-444444444444",
+    invitationId: "11111111-1111-4111-8111-111111111111",
+    submissionId: "33333333-3333-4333-8333-333333333333",
+    clientRecordId: "55555555-5555-4555-8555-555555555555",
+    clientRecordVersion: 1, relationshipVersion: 1 });
 });
 
 describe("native client onboarding staff route", () => {
@@ -181,6 +191,33 @@ describe("native client onboarding staff route", () => {
     expect(denied.status).toBe(403);
     expect(await denied.json()).toEqual({ error: "client_onboarding_denied" });
     expect(denied.headers.get("Cache-Control")).toBe("no-store");
+  });
+
+  it("approves through the server-owned native-only command and returns no authority material", async () => {
+    const csrf = await session(), submissionId = "33333333-3333-4333-8333-333333333333";
+    const reply = await send("/api/client-onboarding/staff/approve", "POST",
+      { submissionId, fieldsSha256: "e".repeat(64) }, csrf);
+    expect(reply.status).toBe(200);
+    expect(await reply.json()).toEqual({ decisionId: "44444444-4444-4444-8444-444444444444",
+      submissionId, clientRecordId: "55555555-5555-4555-8555-555555555555",
+      clientRecordVersion: 1, relationshipVersion: 1, replayed: false });
+    expect(calls.approve).toHaveBeenCalledWith(database, actor, submissionId, "e".repeat(64));
+    expect(reply.headers.get("Cache-Control")).toBe("no-store");
+  });
+
+  it("requires exact approval input, CSRF, and current server authority", async () => {
+    const csrf = await session(), submissionId = "33333333-3333-4333-8333-333333333333";
+    expect((await send("/api/client-onboarding/staff/approve", "POST",
+      { submissionId, fieldsSha256: "e".repeat(64) }, "bad")).status).toBe(403);
+    expect(calls.approve).not.toHaveBeenCalled();
+    expect((await send("/api/client-onboarding/staff/approve", "POST",
+      { submissionId, fieldsSha256: "e".repeat(64), recordId: "caller-owned" }, csrf)).status).toBe(400);
+    expect(calls.approve).not.toHaveBeenCalled();
+    calls.approve.mockRejectedValueOnce(Error("client_onboarding_approval_denied"));
+    const denied = await send("/api/client-onboarding/staff/approve", "POST",
+      { submissionId, fieldsSha256: "e".repeat(64) }, csrf);
+    expect(denied.status).toBe(403);
+    expect(await denied.json()).toEqual({ error: "client_onboarding_denied" });
   });
 
   it("reserves the exact namespace and leaves unrelated API paths to legacy auth", async () => {

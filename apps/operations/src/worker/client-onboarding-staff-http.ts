@@ -8,8 +8,9 @@ import { authenticateNativeStaffWithAdmissionVersion,
 import { issueClientOnboardingWithHandoff, revealClientOnboardingSecret,
   snapshotClientOnboardingKeyring, type ClientOnboardingKeyring } from "./client-onboarding-handoff";
 import { readClientOnboardingSubmissionForReview } from "./client-onboarding-review";
+import { approveNewNativeOnlyClientOnboarding } from "./client-onboarding-approval";
 
-export type ClientOnboardingStaffRoute = "session" | "create" | "reveal" | "review";
+export type ClientOnboardingStaffRoute = "session" | "create" | "reveal" | "review" | "approve";
 export type ClientOnboardingStaffHttpDependencies = Readonly<{
   configuration: NativeStaffAccessConfiguration & Readonly<{ origin: string; csrfSecret: string }>;
   database: D1Database;
@@ -33,6 +34,7 @@ export function clientOnboardingStaffHttpRequest(method: string, path: string): 
   if (method === "POST" && path === "/api/client-onboarding/staff/create") return "create";
   if (method === "POST" && path === "/api/client-onboarding/staff/reveal") return "reveal";
   if (method === "POST" && path === "/api/client-onboarding/staff/review") return "review";
+  if (method === "POST" && path === "/api/client-onboarding/staff/approve") return "approve";
   return null;
 }
 
@@ -115,7 +117,7 @@ function unexpired(auth: AuthenticatedNativeStaffWithAdmissionVersion): void {
 function handoffAuthentication(auth: AuthenticatedNativeStaffWithAdmissionVersion): AuthenticatedNativeStaff {
   return Object.freeze({ identity: auth.identity, verifiedUntil: auth.verifiedUntil });
 }
-async function body(request: Request, route: "create" | "reveal" | "review"): Promise<Record<string, unknown>> {
+async function body(request: Request, route: "create" | "reveal" | "review" | "approve"): Promise<Record<string, unknown>> {
   const contentType = request.headers.get("Content-Type");
   if (!contentType || !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(contentType))
     throw new HttpFailure(400, "invalid_request");
@@ -127,6 +129,12 @@ async function body(request: Request, route: "create" | "reveal" | "review"): Pr
     throw new HttpFailure(400, "invalid_request");
   }
   if (!plain(value)) throw new HttpFailure(400, "invalid_request");
+  if (route === "approve") {
+    if (!exact(value, ["submissionId", "fieldsSha256"])
+      || typeof value.submissionId !== "string" || typeof value.fieldsSha256 !== "string")
+      throw new HttpFailure(400, "invalid_request");
+    return value;
+  }
   if (route === "review") {
     if (!exact(value, ["submissionId"]) || typeof value.submissionId !== "string")
       throw new HttpFailure(400, "invalid_request");
@@ -183,6 +191,16 @@ export async function handleClientOnboardingStaffHttp(request: Request,
         const review = await readClientOnboardingSubmissionForReview(authority.database, auth, input.submissionId);
         unexpired(auth);
         return response(200, review);
+      } catch { throw new HttpFailure(403, "client_onboarding_denied"); }
+    }
+    if (route === "approve") {
+      try {
+        const approved = await approveNewNativeOnlyClientOnboarding(authority.database, auth,
+          input.submissionId, input.fieldsSha256);
+        unexpired(auth);
+        return response(200, { decisionId: approved.decisionId, submissionId: approved.submissionId,
+          clientRecordId: approved.clientRecordId, clientRecordVersion: approved.clientRecordVersion,
+          relationshipVersion: approved.relationshipVersion, replayed: approved.replayed });
       } catch { throw new HttpFailure(403, "client_onboarding_denied"); }
     }
     if (route === "create") {
