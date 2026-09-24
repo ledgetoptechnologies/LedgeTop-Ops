@@ -14,7 +14,8 @@ import {
   type NativeDirectoryProfileWrite,
   type NativeDirectoryProfileWriteOutcome,
 } from "../src/worker/native-directory-profile-writer";
-import { planAndExecuteNativeDirectoryOnboardingWrites } from "../src/worker/native-directory-onboarding-write-composer";
+import { approveNativeOnlyClientOnboarding,
+  planAndExecuteNativeDirectoryOnboardingWrites } from "../src/worker/native-directory-onboarding-write-composer";
 
 let runtime: Miniflare;
 let db: D1Database;
@@ -30,6 +31,12 @@ const clientProfile = { name: "Standalone Client", email: "client@example.test",
   addressLine1: "2 Main Street", addressLine2: "Suite 2", city: "Austin", state: "TX", postalCode: "78702", country: "US" } as const;
 
 function uuid(): string { return `00000000-0000-4000-8000-${String(sequence++).padStart(12, "0")}`; }
+async function derivedUuid(seed: string): Promise<string> {
+  const digest=new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(seed))).slice(0,16);
+  digest[6]=(digest[6]!&15)|64;digest[8]=(digest[8]!&63)|128;
+  const hex=[...digest].map(value=>value.toString(16).padStart(2,"0")).join("");
+  return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+}
 function publicId(): string { return (sequence++).toString(16).padStart(32, "0"); }
 function destination(recordId: string, expectedAuthorizationGeneration = "0"): NativeDirectoryDestinationAuthority {
   return { sourceId, sourceInstanceUUID, applicationUUID, historyEpoch, origin, externalCanonicalId: recordId, expectedAuthorizationGeneration };
@@ -93,6 +100,22 @@ async function acknowledgeCreate(input: NativeDirectoryProfileWrite, outcome: Na
   return id;
 }
 async function count(table: string): Promise<number> { return await db.prepare(`SELECT count(*) count FROM ${table}`).first<number>("count") ?? -1; }
+async function submittedOnboarding(actor: Awaited<ReturnType<typeof seedActor>>, target: string | null,
+  scopes: readonly { businessAreaId: string; divisionId: string | null }[]) {
+  const invitationId=uuid(),submissionId=uuid(),commandId=uuid(),fieldsSha256="a".repeat(64);
+  const expires=new Date(Date.now()+3_600_000).toISOString(),verified=new Date(Date.now()+300_000).toISOString();
+  await db.batch([
+    db.prepare(`INSERT INTO client_onboarding_invitations
+      (invitation_id,secret_sha256,issued_by,bound_access_subject,expires_at,target_client_record_id,state,version)
+      VALUES(?, ?, ?, ?, ?, ?, 'pending', 1)`).bind(invitationId,"b".repeat(64),actor.staffId,actor.accessSubject,expires,target),
+    db.prepare(`INSERT INTO client_onboarding_issuance_commands
+      (invitation_id,command_id,request_sha256,scopes_json,issuer_admission_version,issuer_profile_version,issuer_email,verified_until)
+      VALUES(?,?,?,?,1,1,?,?)`).bind(invitationId,commandId,"c".repeat(64),target===null?JSON.stringify(scopes):null,actor.loginEmail,verified),
+    db.prepare(`INSERT INTO client_onboarding_submissions(invitation_id,submission_id,fields_json,fields_sha256)
+      VALUES(?,?,'{}',?)`).bind(invitationId,submissionId,fieldsSha256),
+  ]);
+  return { invitationId,submissionId,fieldsSha256,verified };
+}
 
 beforeAll(async () => {
   runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06", script: "export default {fetch(){return new Response('ok')}}", d1Databases: ["OPS_DB"] });
@@ -423,5 +446,70 @@ describe("canonical native Directory profile writer", () => {
     expect(await db.prepare(`SELECT * FROM project_alpha_directory_mappings WHERE external_id=?`).bind(seeded.input.recordId).first()).toEqual(beforeMapping);
     expect(await db.prepare(`SELECT hex(payload) payload FROM delivery_rows WHERE id='delivery'`).first()).toEqual(beforeDelivery);
     expect(await db.prepare(`SELECT url,hex(payload) payload FROM delivery_public_links WHERE id='link'`).first()).toEqual(beforeLink);
+  });
+});
+
+describe("native-only client onboarding approval composer", () => {
+  async function newApproval(actor: Awaited<ReturnType<typeof seedActor>>) {
+    const scopes=[{businessAreaId:"area",divisionId:"division"}], submitted=await submittedOnboarding(actor,null,scopes);
+    const decisionId=uuid(),mutationId=uuid(),recordId=uuid();
+    const relationshipMutationId=await derivedUuid(`${mutationId}\0client-relationship\0unlinked`);
+    return { decisionId,...submitted,requestSha256:"d".repeat(64),reason:"Reviewed and approved",reviewedFieldsJson:"{}",scopes,
+      verifiedUntil:submitted.verified,relationship:{mode:"change" as const,expectedVersion:0,mutationId:relationshipMutationId},
+      profile:{operation:"create" as const,mutationId,recordId,expectedLocalVersion:0 as const,kind:"client" as const,
+        createAdmissionId:`client-onboarding:${decisionId}:client`,profile:clientProfile,scopes,destinations:[],actor,
+        relationship:{organizationRecordId:null,expectedRelationshipVersion:0}}};
+  }
+
+  it("atomically approves a new unlinked native-only client without PA, Delivery, or open fences", async () => {
+    const command=await newApproval(await seedActor()), paBefore=await count("project_alpha_directory_outbox");
+    await expect(approveNativeOnlyClientOnboarding(db,command)).resolves.toMatchObject({status:"written",replayed:false,
+      clientRecordId:command.profile.recordId,clientRecordVersion:1,relationshipVersion:1});
+    expect(await db.prepare("SELECT current_version FROM operations_directory_records WHERE record_id=?")
+      .bind(command.profile.recordId).first("current_version")).toBe(1);
+    expect(await db.prepare("SELECT relationship_version,organization_record_id FROM operations_directory_client_organizations WHERE client_record_id=?")
+      .bind(command.profile.recordId).first()).toEqual({relationship_version:1,organization_record_id:null});
+    expect(await count("project_alpha_directory_outbox")).toBe(paBefore);
+    expect(await db.prepare("SELECT count(*) count FROM operations_directory_intents WHERE mutation_id=?")
+      .bind(command.profile.mutationId).first("count")).toBe(0);
+    expect(await db.prepare("SELECT 1 FROM client_onboarding_decision_fences WHERE decision_id=?").bind(command.decisionId).first()).toBeNull();
+    expect(await db.prepare("SELECT active,consumed_mutation_id FROM native_directory_create_admissions WHERE id=?")
+      .bind(command.profile.createAdmissionId).first()).toEqual({active:0,consumed_mutation_id:command.profile.mutationId});
+  });
+
+  it("preserves the existing relationship at the post-profile decision revision, rejects stale input, and rechecks replay authority", async () => {
+    const actor=await seedActor(),created=await newApproval(actor);
+    expect((await approveNativeOnlyClientOnboarding(db,created)).status).toBe("written");
+    const submitted=await submittedOnboarding(actor,created.profile.recordId,created.scopes),decisionId=uuid(),mutationId=uuid();
+    const update={decisionId,...submitted,requestSha256:"e".repeat(64),reason:"Reviewed update",reviewedFieldsJson:"{}",scopes:created.scopes,
+      verifiedUntil:submitted.verified,relationship:{mode:"preserve" as const,expectedVersion:1,mutationId:created.relationship.mutationId},
+      profile:{operation:"update" as const,mutationId,recordId:created.profile.recordId,expectedLocalVersion:1,kind:"client" as const,
+        profile:{name:"Reviewed Client",email:clientProfile.email,phone:clientProfile.phone,addressLine1:clientProfile.addressLine1,
+          addressLine2:clientProfile.addressLine2,city:clientProfile.city,state:clientProfile.state,
+          postalCode:clientProfile.postalCode,country:clientProfile.country},destinations:[],actor,
+        relationship:{organizationRecordId:null,expectedRelationshipVersion:1}}};
+    await expect(approveNativeOnlyClientOnboarding(db,{...update,profile:{...update.profile,expectedLocalVersion:2}}))
+      .resolves.toMatchObject({status:"conflict"});
+    await expect(approveNativeOnlyClientOnboarding(db,update)).resolves.toMatchObject({status:"written",replayed:false,
+      clientRecordVersion:2,relationshipVersion:1});
+    expect(await db.prepare("SELECT client_record_version FROM operations_directory_client_organization_history WHERE mutation_id=?")
+      .bind(created.relationship.mutationId).first("client_record_version")).toBe(1);
+    await expect(approveNativeOnlyClientOnboarding(db,update)).resolves.toMatchObject({status:"written",replayed:true});
+    await db.prepare("UPDATE native_directory_grants SET active=0 WHERE id=?").bind(actor.selectedGrantId).run();
+    await expect(approveNativeOnlyClientOnboarding(db,update)).resolves.toEqual({status:"blocked",reason:"native_directory_authority"});
+  });
+
+  it("rolls back decision fence, admission, Directory rows, and audit after a late batch failure", async () => {
+    const command=await newApproval(await seedActor());
+    const failing=new Proxy(db,{get(target,key){if(key==="withSession")return (constraint:string)=>{
+      const session=target.withSession(constraint);return new Proxy(session,{get(inner,member){if(member==="batch")return async(statements:D1PreparedStatement[])=>
+        inner.batch([...statements,inner.prepare("INSERT INTO missing_onboarding_approval_table VALUES(1)")]);
+        const value=inner[member as keyof D1DatabaseSession];return typeof value==="function"?value.bind(inner):value;}});};
+      const value=target[key as keyof D1Database];return typeof value==="function"?value.bind(target):value;}}) as D1Database;
+    await expect(approveNativeOnlyClientOnboarding(failing,command)).resolves.toEqual({status:"blocked",reason:"authority_or_atomic_write"});
+    for(const [table,column,value] of [["client_onboarding_decision_fences","decision_id",command.decisionId],
+      ["client_onboarding_decisions","decision_id",command.decisionId],["native_directory_create_admissions","id",command.profile.createAdmissionId],
+      ["operations_directory_records","record_id",command.profile.recordId],["operations_directory_audit","mutation_id",command.profile.mutationId]] as const)
+      expect(await db.prepare(`SELECT 1 FROM ${table} WHERE ${column}=?`).bind(value).first()).toBeNull();
   });
 });
