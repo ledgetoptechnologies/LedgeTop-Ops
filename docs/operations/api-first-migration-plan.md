@@ -1,6 +1,23 @@
 # API-first migration — current implementation objective and work register
 
-Updated September 23, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+Updated September 24, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+
+### September 24, 2026 — recipient runtime draft, still disabled
+
+- The isolated recipient branch adds a same-origin Client API adapter and a
+  fragment-secret-scrubbing `/onboarding/:invitationId` page, backed by a
+  private Operations service entrypoint for session, one-shot submit and
+  status recovery. Both deployment flags remain `false`; there is no live
+  invitation URL, PA write, entitlement change, or Delivery/public-link edit.
+- Independent QA found and the branch corrected four pre-staging defects:
+  shared rate-limit keys with mismatched limits, SPA asset-first bypass of the
+  page gate, an unbounded body read when Content-Length was absent, and a
+  terminal UI state after a transient limit/error. Client and Operations
+  typechecks, **15 focused tests**, and the Client production build passed.
+- A signed-in staging exercise still must verify the Worker-first route,
+  exact recipient session and submission recovery, default-off behavior,
+  and no existing public-link change. The private native-only approval writer
+  remains in a separate draft branch; neither draft is a portal cutover.
 
 ### September 23, 2026 — client-profile onboarding foundation, not activation
 

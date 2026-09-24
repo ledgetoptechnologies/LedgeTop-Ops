@@ -3,6 +3,14 @@
 This specifies the native replacement behind the PA-style client form. It is
 not evidence that a public invitation or approval endpoint is deployed.
 
+The September 24 recipient-runtime draft wires a default-off Client page and
+same-origin API to a private Ops session/submit/status entrypoint. Its secret
+is removed from the URL fragment before React renders, and uncertain submit
+responses can be checked using the same in-memory submission ID. The owner
+must not issue a usable invitation until route, session, approval, and
+existing-link acceptance pass in staging; refreshing a scrubbed page currently
+requires reopening the original invitation URL.
+
 ## September 14 current route recheck
 
 The existing multi-Worker tests were rerun against the current local Client
