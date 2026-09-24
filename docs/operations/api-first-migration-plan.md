@@ -6713,3 +6713,25 @@ pending; this requirement does not claim a deployed UI change.
   enrollment, entitlement, Delivery/public-link change, or production Worker
   deployment occurred. Recipient submission/review and live public-link parity
   are still open gates; the production PA update checkpoint remains ahead.
+
+### September 24 — guarded onboarding approval code, not live acceptance
+
+- Draft PR119 now contains a guarded staff approval route for a new consumer
+  submission without organization data. It re-reads the immutable submission
+  fingerprint and requires both scoped `directory.profile.edit` and
+  `directory.identity.link` authority before creating a native Directory
+  client. The earlier profile-edit-only staging packet cannot approve and was
+  revoked; approval needs a distinct, reviewed staging authority packet.
+  Existing-client targets, organization submissions, PA writes, portal
+  entitlements, and public links are not silently enabled by this route.
+- In the combined PR worktree, Operations typecheck, production build, 15/15
+  focused route/D1 tests, and 14/14 desktop/mobile staff UI tests passed.
+  Independent read-only review found no definite recipient/approval
+  composition defect. These checks are local evidence, not staging approval
+  acceptance. The latest full PR CI run was still in progress when recorded.
+- Retrying the synthetic no-fragment Client staging path with all temporary
+  onboarding flags off again returned in-app-browser `ERR_BLOCKED_BY_CLIENT`
+  before an HTTP response. The same browser restriction occurs independent of
+  the staging flag state. Do not work around it by transferring the one-time
+  fragment into another browser or tool. The recipient, approval, live
+  public-link parity, and both production PA client round trips remain open.
