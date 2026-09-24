@@ -52,7 +52,10 @@ Project Alpha instances, existing public links, and Access policies unchanged.
    before the application sends a request. Submit a synthetic consumer profile
    with no organization fields. Record only the submission identifier and
    fields fingerprint. Retry only with the same in-memory submission ID when
-   testing idempotency; do not create a second proposal accidentally.
+   testing idempotency; do not create a second proposal accidentally. If the
+   browser blocks the route before navigation, stop and record that as a
+   separate access/browser acceptance blocker. Do not paste the fragment into
+   a different tool or claim submission/review passed.
 4. In the staff read-only review panel, fetch that submission and compare its
    invitation ID, submit time, fingerprint, exact proposed business-area
    scope, and rendered fields. There is no approval/rejection endpoint in this

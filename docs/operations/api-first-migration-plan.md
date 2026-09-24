@@ -6675,3 +6675,41 @@ pending; this requirement does not claim a deployed UI change.
   against the `06ac319` runtime code. This narrows regression risk but does
   not replace a synthetic staging public-link parity check or production link
   acceptance.
+
+### September 24 — bounded onboarding invitation acceptance (partial)
+
+- A private staging D1 export was saved before the authority window. The
+  reviewed, one-file provision packet reactivated only the exact signed-in
+  staff admission and one `directory.profile.edit` allow for the selected
+  staging business area. Readback showed one active admission and one scoped
+  edit allow, with zero `directory.identity.link` or Project grants. The
+  matching revoke packet was generated and checked before provision.
+- Staging Ops and Client versions were uploaded inactive with only their three
+  onboarding/recipient flags and the Ops admin origin changed. The Ops version
+  had the staging-only handoff keyring; no production secret was changed.
+  The first browser issuance returned a denial and wrote zero invitation or
+  handoff rows. The cause was an exact-shape mismatch: the staff HTTP handler
+  passed an extra admission-version property to the two-field handoff actor
+  parser. PR119 now adapts the authenticated actor at create/reveal and avoids
+  reporting a post-commit verification expiry as a definitive denial. Focused
+  routing tests and Operations typecheck passed after the fix.
+- With corrected staging Ops version `f399d93d-e5c1-420c-9f28-7b4d38359451`
+  and Client acceptance version `4b3951b7-8e16-48c0-befb-45bc6bb6af85`,
+  the signed-in staff UI issued one synthetic, new-client invitation and
+  consumed its one-time reveal. Readback showed one invitation and one
+  encrypted handoff, but zero submissions and zero native client records.
+  The recipient URL returned in-app-browser `ERR_BLOCKED_BY_CLIENT`, including
+  without its fragment; this is an acceptance blocker, not a successful
+  recipient submission. No bearer or profile values were retained in this
+  document. The original UI asset still displayed an inaccurate disabled
+  banner because the temporary Worker upload had not rebuilt the changed
+  client bundle; source copy and its browser assertion are corrected in PR119.
+- The window was closed in order: Client restored to default-off version
+  `4cdbae12-b995-4ac3-94e6-4f52cddb32ed`, Ops restored to default-off version
+  `8f87f4b5-2ad4-4c3c-90dc-4211225d77dc`, then the exact one-file authority
+  revoke migration applied. Final readback showed zero active admissions,
+  Directory grants, Project grants, and synthetic submissions. Migration
+  `0140` and immutable staging audit rows remain. No PA deployment, client
+  enrollment, entitlement, Delivery/public-link change, or production Worker
+  deployment occurred. Recipient submission/review and live public-link parity
+  are still open gates; the production PA update checkpoint remains ahead.
