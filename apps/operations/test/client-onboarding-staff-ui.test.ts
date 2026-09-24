@@ -15,5 +15,7 @@ describe("client onboarding staff UI security boundary", () => {
     expect(source).toContain('`${endpoint}/session`');
     expect(source).toContain('`${endpoint}/create`');
     expect(source).toContain('`${endpoint}/reveal`');
+    expect(source).toContain('`${endpoint}/review`');
+    expect(source).toContain("Approval and rejection are intentionally unavailable here.");
   });
 });

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { HTTPException } from "hono/http-exception";
 import type { Env } from "../src/worker/types";
 
-const calls = vi.hoisted(() => ({ legacy: vi.fn(), native: vi.fn(), issue: vi.fn(), reveal: vi.fn() }));
+const calls = vi.hoisted(() => ({ legacy: vi.fn(), native: vi.fn(), issue: vi.fn(), reveal: vi.fn(), review: vi.fn() }));
 vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {}, DurableObject: class {} }));
 vi.mock("../src/worker/auth", () => ({ authenticateStaff: calls.legacy }));
 vi.mock("../src/worker/native-staff-auth", () => ({
@@ -12,6 +12,9 @@ vi.mock("../src/worker/client-onboarding-handoff", () => ({
   snapshotClientOnboardingKeyring: (value: unknown) => value,
   issueClientOnboardingWithHandoff: calls.issue,
   revealClientOnboardingSecret: calls.reveal,
+}));
+vi.mock("../src/worker/client-onboarding-review", () => ({
+  readClientOnboardingSubmissionForReview: calls.review,
 }));
 import worker from "../src/worker/index";
 
@@ -56,6 +59,15 @@ beforeEach(() => {
   calls.reveal.mockReset().mockResolvedValue({ commandId: "22222222-2222-4222-8222-222222222222",
     invitationId: "11111111-1111-4111-8111-111111111111", expiresAt: "2099-01-01T00:00:00.000Z",
     invitationSecret: "d".repeat(64) });
+  calls.review.mockReset().mockResolvedValue({
+    invitationId: "11111111-1111-4111-8111-111111111111",
+    submissionId: "33333333-3333-4333-8333-333333333333", fieldsSha256: "e".repeat(64),
+    submittedAt: "2098-01-01T00:00:00.000Z", targetClientRecordId: null,
+    scopes: [{ businessAreaId: "area:onboarding", divisionId: null }],
+    fields: { clientType: "consumer", name: "Client", email: "client@example.test", phone: "",
+      organizationName: "", organizationEmail: "", organizationPhone: "", addressLine1: "1 Main",
+      addressLine2: "", city: "Town", state: "TX", postalCode: "75001", country: "US" },
+  });
 });
 
 describe("native client onboarding staff route", () => {
@@ -108,6 +120,33 @@ describe("native client onboarding staff route", () => {
     expect(reply.status).toBe(403);
     expect(await reply.json()).toEqual({ error: "client_onboarding_denied" });
     expect(calls.reveal).not.toHaveBeenCalled();
+  });
+
+  it("returns only authorized immutable submission details with no-store", async () => {
+    const csrf = await session();
+    const submissionId = "33333333-3333-4333-8333-333333333333";
+    const reply = await send("/api/client-onboarding/staff/review", "POST", { submissionId }, csrf);
+    expect(reply.status).toBe(200);
+    const text = await reply.text();
+    expect(text).toContain(submissionId);
+    expect(text).not.toContain("invitationSecret");
+    expect(reply.headers.get("Cache-Control")).toBe("no-store");
+    expect(reply.headers.get("Access-Control-Allow-Origin")).toBeNull();
+    expect(calls.review).toHaveBeenCalledWith(database, actor, submissionId);
+    expect(calls.issue).not.toHaveBeenCalled();
+    expect(calls.reveal).not.toHaveBeenCalled();
+  });
+
+  it("requires CSRF and collapses out-of-scope review to denial", async () => {
+    const submissionId = "33333333-3333-4333-8333-333333333333";
+    expect((await send("/api/client-onboarding/staff/review", "POST", { submissionId }, "bad")).status).toBe(403);
+    expect(calls.review).not.toHaveBeenCalled();
+    const csrf = await session();
+    calls.review.mockRejectedValueOnce(Error("client_onboarding_review_denied"));
+    const denied = await send("/api/client-onboarding/staff/review", "POST", { submissionId }, csrf);
+    expect(denied.status).toBe(403);
+    expect(await denied.json()).toEqual({ error: "client_onboarding_denied" });
+    expect(denied.headers.get("Cache-Control")).toBe("no-store");
   });
 
   it("reserves the exact namespace and leaves unrelated API paths to legacy auth", async () => {
