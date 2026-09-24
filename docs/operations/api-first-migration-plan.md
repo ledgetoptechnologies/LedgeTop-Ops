@@ -19,6 +19,10 @@ Updated September 24, 2026. The owner approved implementation and resumption aft
 - A live staff review-disposition route and the recipient session/submit/status
   path are still absent or default-off. Do not issue a usable invitation or
   activate externally managed PA client mode from this source-only result.
+- The Sep 24 scoped security-diff scan of PR #118's two changed source files
+  (`c36532b..dfcb1da`) completed with no reportable findings. It inspected
+  the adjacent D1 decision and Directory authority guards, but did not cover
+  a future HTTP caller or prove staging behavior. Keep those as separate gates.
 
 ### September 23, 2026 — client-profile onboarding foundation, not activation
 
