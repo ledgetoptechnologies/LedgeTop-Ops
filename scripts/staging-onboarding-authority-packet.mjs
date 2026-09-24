@@ -132,6 +132,9 @@ function sqlArtifacts(p, ids, names, migrationNames) {
     AND EXISTS(SELECT 1 FROM native_staff_profiles WHERE staff_id=${staff} AND login_email=${sql(p.email)} AND display_name=${sql(p.displayName)} AND version=${p.expected.profileVersion})
     AND EXISTS(SELECT 1 FROM native_business_areas WHERE id=${area} AND active=1)
     AND NOT EXISTS(SELECT 1 FROM native_directory_grants WHERE staff_id=${staff} AND active=1)
+    AND NOT EXISTS(SELECT 1 FROM native_directory_grants WHERE id<>${sql(ids.grant)} AND staff_id=${staff}
+      AND permission='directory.profile.edit' AND effect='allow' AND scope_kind='business_area'
+      AND business_area_id=${area} AND division_id IS NULL AND resource_id IS NULL)
     AND (NOT EXISTS(SELECT 1 FROM native_directory_grants WHERE id=${sql(ids.grant)} OR (staff_id=${staff} AND permission='directory.profile.edit' AND effect='allow' AND scope_kind='business_area' AND business_area_id=${area} AND division_id IS NULL AND resource_id IS NULL))
       OR EXISTS(SELECT 1 FROM native_directory_grants WHERE id=${sql(ids.grant)} AND staff_id=${staff} AND permission='directory.profile.edit' AND effect='allow' AND scope_kind='business_area' AND business_area_id=${area} AND division_id IS NULL AND resource_id IS NULL AND active=0 AND granted_by=${staff}))
     AND NOT EXISTS(SELECT 1 FROM native_project_grants WHERE staff_id=${staff} AND active=1)

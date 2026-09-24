@@ -64,6 +64,22 @@ test("fails closed on active unrelated Directory authority or Project authority"
   for (const kind of ["directory","project"]) { const base=fixture(), db=database(), prior=priorInactive(db,base), artifact=buildOnboardingAuthorityArtifacts(base,input(),"provision"); if(kind==="directory") db.prepare("UPDATE native_directory_grants SET active=1 WHERE id=?").run(prior.ids.directoryGrant); else db.prepare("UPDATE native_project_grants SET active=1,version=version+1 WHERE id=?").run(prior.ids.grant); assert.throws(()=>apply(db,artifact.provision.sql,artifact.provision.name,ONBOARDING_AUTHORITY_MIGRATIONS_TABLE)); assert.deepEqual(row(db,"SELECT active,version FROM native_staff_admissions WHERE staff_id=?",owner.operationsStaffId),{active:0,version:2}); }
 });
 
+test("rejects a competing inactive same-scope grant before reactivation and rolls back atomically", () => {
+  const base=fixture(), db=database(); priorInactive(db,base);
+  const first=buildOnboardingAuthorityArtifacts(base,input(),"revoke");
+  apply(db,first.provision.sql,first.provision.name,ONBOARDING_AUTHORITY_MIGRATIONS_TABLE);
+  apply(db,first.revoke.sql,first.revoke.name,ONBOARDING_AUTHORITY_MIGRATIONS_TABLE);
+  db.exec("DROP INDEX native_directory_grant_identity");
+  db.prepare("INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,business_area_id,active,granted_by) VALUES('staging-competing-onboarding-grant',?,'directory.profile.edit','allow','business_area','area-default',0,?)").run(owner.operationsStaffId,owner.operationsStaffId);
+  const second=buildOnboardingAuthorityArtifacts(base,input({packet:{packetId:"staging-onboarding-authority-positive-002",expected:{admissionVersion:4,profileVersion:1}}}),"provision");
+  assert.throws(()=>apply(db,second.provision.sql,second.provision.name,ONBOARDING_AUTHORITY_MIGRATIONS_TABLE));
+  assert.deepEqual(row(db,"SELECT active,version FROM native_staff_admissions WHERE staff_id=?",owner.operationsStaffId),{active:0,version:4});
+  assert.deepEqual(row(db,"SELECT active FROM native_directory_grants WHERE id=?",first.ids.grant),{active:0});
+  assert.deepEqual(row(db,"SELECT active FROM native_directory_grants WHERE id='staging-competing-onboarding-grant'"),{active:0});
+  assert.equal(row(db,"SELECT count(*) count FROM native_staff_bootstrap_approvals WHERE approval_id=?",second.ids.provisionApproval).count,0);
+  assert.equal(row(db,"SELECT count(*) count FROM native_staff_bootstrap_receipts WHERE command_id=?",second.ids.provisionCommand).count,0);
+});
+
 test("revoke requires no in-flight actor work and rolls back atomically", () => {
   const base=fixture(), db=database(); priorInactive(db,base); const artifact=buildOnboardingAuthorityArtifacts(base,input(),"revoke"); apply(db,artifact.provision.sql,artifact.provision.name,ONBOARDING_AUTHORITY_MIGRATIONS_TABLE);
   for (const trigger of db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='operations_directory_write_fences'").all()) db.exec(`DROP TRIGGER ${trigger.name}`);
