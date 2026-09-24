@@ -6663,3 +6663,9 @@ pending; this requirement does not claim a deployed UI change.
   production ownership as a substitute for that test. The current review route
   is read-only; it cannot approve a client or create a canonical Directory
   record. The production PA owner-update checkpoint has not been reached.
+- Aggregate staging synchronization readback shows one acknowledged Directory
+  outbox command and one durable PA mapping, both for an organization in the
+  single staging PA source, plus complete reconciliation history. It shows no
+  client mapping. This is evidence of an organization-level round trip, not
+  proof that LTDS/LTT production client synchronization or the unified portal
+  is ready.
