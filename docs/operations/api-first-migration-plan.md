@@ -6636,3 +6636,30 @@ pending; this requirement does not claim a deployed UI change.
   no deployment, feature enablement, migration, remote PA write, canonical
   mapping rewrite, Delivery row or public-link mutation had been performed;
   the later staging-only deployment is recorded above.
+
+### September 24 — default-off recipient runtime staging smoke
+
+- Draft Operations PR119 at `06ac319` combines the recipient runtime and a
+  read-only staff submission-review surface. All ten PR CI checks passed.
+  Migration `0140_client_onboarding_one_time_reveal.sql` was applied to the
+  staging Operations D1 after a private backup; a subsequent migration list
+  reported no pending migrations. No production D1 or Project Alpha migration
+  was applied at this checkpoint.
+- Staging-only Operations version `8f87f4b5-2ad4-4c3c-90dc-4211225d77dc`
+  and Client version `4cdbae12-b995-4ac3-94e6-4f52cddb32ed` were deployed
+  after inactive version upload, config inspection, build and Wrangler dry run.
+  The recipient service binding targets only the staging Operations Worker.
+  All three new onboarding/recipient flags remain `false`; the signed-in Ops
+  Administration UI reports onboarding unavailable, and the Client staging
+  portal remains disabled. This proves only the default-off deployment smoke,
+  not a positive invitation/submission/approval workflow or public-link parity.
+- Read-only staging D1 prerequisites show one active business area, one bound
+  active legacy staff identity, one native staff profile, but zero active native
+  staff admissions or `directory.profile.edit` allows. An inactive admission
+  and inactive profile-edit allow exist, with no active deny. Positive synthetic
+  acceptance therefore needs a separately reviewed, least-privilege authority
+  reactivation and a staging-only handoff keyring before temporarily opening
+  the recipient flags. Do not activate real client access, PA enrollment, or
+  production ownership as a substitute for that test. The current review route
+  is read-only; it cannot approve a client or create a canonical Directory
+  record. The production PA owner-update checkpoint has not been reached.
