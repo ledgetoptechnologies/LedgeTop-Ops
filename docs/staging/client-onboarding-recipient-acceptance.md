@@ -1,9 +1,11 @@
 # Client onboarding recipient staging acceptance
 
 This is a bounded, synthetic staging-only acceptance window for the native
-Operations invitation, Client recipient form, and read-only staff review in
-draft PR119. It is **not** client-portal enrollment, a Project Alpha write, or
-approval of a canonical customer record. Keep production Workers, databases,
+Operations invitation, Client recipient form, and staff review in draft PR119.
+Although that branch now contains a guarded approval route, this window does
+**not** exercise approval: its authority packet grants profile edit only, not
+identity link. It is **not** client-portal enrollment, a Project Alpha write,
+or approval of a canonical customer record. Keep production Workers, databases,
 Project Alpha instances, existing public links, and Access policies unchanged.
 
 ## Entry gates
@@ -58,9 +60,12 @@ Project Alpha instances, existing public links, and Access policies unchanged.
    a different tool or claim submission/review passed.
 4. In the staff read-only review panel, fetch that submission and compare its
    invitation ID, submit time, fingerprint, exact proposed business-area
-   scope, and rendered fields. There is no approval/rejection endpoint in this
-   PR. Verify no native Directory client, PA outbox item, entitlement, portal
-   membership, public link, or email was created by this sequence.
+   scope, and rendered fields. Do not invoke the approval route in this
+   profile-edit-only window. A later positive approval test needs a separately
+   reviewed, scoped `directory.identity.link` grant as well as profile edit;
+   it must not reuse this packet. Verify no native Directory client, PA outbox
+   item, entitlement, portal membership, public link, or email was created by
+   this sequence.
 
 ## Close and evidence
 
