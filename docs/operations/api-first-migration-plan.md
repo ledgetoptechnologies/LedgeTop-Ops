@@ -2,22 +2,30 @@
 
 Updated September 24, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
 
-### September 24, 2026 — recipient runtime draft, still disabled
+### September 24, 2026 — combined onboarding staging candidate, disabled
 
-- The isolated recipient branch adds a same-origin Client API adapter and a
-  fragment-secret-scrubbing `/onboarding/:invitationId` page, backed by a
-  private Operations service entrypoint for session, one-shot submit and
-  status recovery. Both deployment flags remain `false`; there is no live
-  invitation URL, PA write, entitlement change, or Delivery/public-link edit.
-- Independent QA found and the branch corrected four pre-staging defects:
-  shared rate-limit keys with mismatched limits, SPA asset-first bypass of the
-  page gate, an unbounded body read when Content-Length was absent, and a
-  terminal UI state after a transient limit/error. Client and Operations
-  typechecks, **15 focused tests**, and the Client production build passed.
-- A signed-in staging exercise still must verify the Worker-first route,
-  exact recipient session and submission recovery, default-off behavior,
-  and no existing public-link change. The private native-only approval writer
-  remains in a separate draft branch; neither draft is a portal cutover.
+- Draft Ops PR #118 adds a private native-only approval writer. Its first-primary
+  D1 batch commits the decision fence, exact create admission when needed,
+  canonical profile and relationship history, immutable receipt, and fence
+  completion. Its 21 focused full-D1 tests and all ten CI checks passed. The
+  scoped security-diff scan of its initial two changed source files reported no
+  findings; it did not cover a future HTTP caller or prove staging behavior.
+- The recipient runtime adds a same-origin Client API and fragment-secret-
+  scrubbing `/onboarding/:invitationId` page, backed by a private Operations
+  session/submit/status entrypoint. Independent QA corrected rate-limit key
+  separation, SPA asset-first gate bypass, unbounded body reads, and transient
+  retry UX. A joined local Client-router-to-Ops-bridge-to-D1 test then found
+  and fixed a protocol-envelope mismatch that prevented submission. It now
+  passes session, first submit, exact lost-response retry, status recovery,
+  single-write, altered-retry denial, and wrong-proof denial.
+- The two source branches are combined into one staging candidate, but both
+  deployment flags remain `false`. There is no live usable invitation, PA
+  write, portal entitlement, or Delivery/public-link change. A live staff
+  review-disposition HTTP route is still missing.
+- Before activation, deploy the exact combined candidate to isolated staging,
+  verify migration `0140`, Worker-first routing, default-off behavior, exact
+  recipient and staff-review flows, rollback, and unchanged existing public
+  links. Source tests and PR CI do not replace those acceptance gates.
 
 ### September 23, 2026 — client-profile onboarding foundation, not activation
 

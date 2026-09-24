@@ -3,13 +3,20 @@
 This specifies the native replacement behind the PA-style client form. It is
 not evidence that a public invitation or approval endpoint is deployed.
 
-The September 24 recipient-runtime draft wires a default-off Client page and
-same-origin API to a private Ops session/submit/status entrypoint. Its secret
-is removed from the URL fragment before React renders, and uncertain submit
-responses can be checked using the same in-memory submission ID. The owner
-must not issue a usable invitation until route, session, approval, and
-existing-link acceptance pass in staging; refreshing a scrubbed page currently
-requires reopening the original invitation URL.
+## September 24 combined staging-candidate boundary
+
+The combined candidate includes a private native-only approval writer and a
+default-off Client page and same-origin API bridged to private Operations
+session/submit/status methods. The invitation secret is removed from the URL
+fragment before React renders. A joined local test proves exact submit retry
+and status recovery against D1; this is not live staging acceptance. An
+uncertain response can be checked using the in-memory submission ID, but
+refreshing a scrubbed page currently requires reopening the original link.
+There is still no staff review-disposition HTTP route, and staff create/reveal
+and recipient features remain disabled. Do not issue a usable invitation until
+route, session, approval, and existing-link acceptance pass in staging. Older
+dated implementation notes below refer to other branches and are not proof
+that a public onboarding flow is deployed.
 
 ## September 14 current route recheck
 
