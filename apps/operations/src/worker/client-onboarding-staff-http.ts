@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import { timingSafeEqual } from "node:crypto";
 import { readBoundedJson } from "./bounded-json";
 import { authenticateNativeStaffWithAdmissionVersion,
+  type AuthenticatedNativeStaff,
   type AuthenticatedNativeStaffWithAdmissionVersion,
   type NativeStaffAccessConfiguration } from "./native-staff-auth";
 import { issueClientOnboardingWithHandoff, revealClientOnboardingSecret,
@@ -111,6 +112,9 @@ async function requireCsrf(request: Request, secret: string, origin: string,
 function unexpired(auth: AuthenticatedNativeStaffWithAdmissionVersion): void {
   if (Date.parse(auth.verifiedUntil) <= Date.now()) throw new HttpFailure(403, "client_onboarding_denied");
 }
+function handoffAuthentication(auth: AuthenticatedNativeStaffWithAdmissionVersion): AuthenticatedNativeStaff {
+  return Object.freeze({ identity: auth.identity, verifiedUntil: auth.verifiedUntil });
+}
 async function body(request: Request, route: "create" | "reveal" | "review"): Promise<Record<string, unknown>> {
   const contentType = request.headers.get("Content-Type");
   if (!contentType || !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(contentType))
@@ -184,16 +188,14 @@ export async function handleClientOnboardingStaffHttp(request: Request,
     if (route === "create") {
       try {
         const receipt = await issueClientOnboardingWithHandoff(authority.database,
-          { authenticatedNativeStaff: auth, request: input }, handoff!);
-        unexpired(auth);
+          { authenticatedNativeStaff: handoffAuthentication(auth), request: input }, handoff!);
         return response(200, { invitationId: receipt.invitationId, expiresAt: receipt.expiresAt,
           requestSha256: receipt.requestSha256, state: receipt.state });
       } catch { throw new HttpFailure(403, "client_onboarding_denied"); }
     }
     try {
       const revealed = await revealClientOnboardingSecret(authority.database,
-        { authenticatedNativeStaff: auth, commandId: input.commandId }, handoff!);
-      unexpired(auth);
+        { authenticatedNativeStaff: handoffAuthentication(auth), commandId: input.commandId }, handoff!);
       return response(200, { commandId: revealed.commandId, invitationId: revealed.invitationId,
         expiresAt: revealed.expiresAt, invitationSecret: revealed.invitationSecret });
     } catch { throw new HttpFailure(403, "client_onboarding_denied"); }

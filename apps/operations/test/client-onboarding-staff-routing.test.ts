@@ -99,7 +99,8 @@ describe("native client onboarding staff route", () => {
     expect(createText).not.toContain("invitationSecret");
     expect(createText).not.toContain("d".repeat(64));
     expect(created.headers.get("Cache-Control")).toBe("no-store");
-    expect(calls.issue).toHaveBeenCalledWith(database, { authenticatedNativeStaff: actor,
+    const handoffActor = { identity: actor.identity, verifiedUntil: actor.verifiedUntil };
+    expect(calls.issue).toHaveBeenCalledWith(database, { authenticatedNativeStaff: handoffActor,
       request: command }, keyring);
     const revealed = await send("/api/client-onboarding/staff/reveal", "POST",
       { commandId: command.commandId }, csrf);
@@ -107,6 +108,10 @@ describe("native client onboarding staff route", () => {
     expect(await revealed.json()).toMatchObject({ invitationSecret: "d".repeat(64) });
     expect(revealed.headers.get("Cache-Control")).toBe("no-store");
     expect(revealed.headers.get("Access-Control-Allow-Origin")).toBeNull();
+    expect(calls.reveal).toHaveBeenCalledWith(database, { authenticatedNativeStaff: handoffActor,
+      commandId: command.commandId }, keyring);
+    expect(calls.issue.mock.calls[0]?.[1].authenticatedNativeStaff).not.toHaveProperty("admissionVersion");
+    expect(calls.reveal.mock.calls[0]?.[1].authenticatedNativeStaff).not.toHaveProperty("admissionVersion");
     expect(calls.legacy).not.toHaveBeenCalled();
   });
 
@@ -120,6 +125,35 @@ describe("native client onboarding staff route", () => {
     expect(reply.status).toBe(403);
     expect(await reply.json()).toEqual({ error: "client_onboarding_denied" });
     expect(calls.reveal).not.toHaveBeenCalled();
+  });
+
+  it("returns committed create and reveal results when authentication expires during the service call", async () => {
+    vi.useFakeTimers();
+    try {
+      const startedAt = new Date("2098-01-01T00:00:00.000Z");
+      vi.setSystemTime(startedAt);
+      calls.native.mockResolvedValue({ ...actor,
+        verifiedUntil: new Date(startedAt.getTime() + 500).toISOString() });
+      const csrf = await session();
+      const command = { commandId: "22222222-2222-4222-8222-222222222222",
+        expiresAt: "2099-01-01T00:00:00.000Z", targetClientRecordId: null,
+        scopes: [{ businessAreaId: "area:onboarding", divisionId: null }] };
+      calls.issue.mockImplementationOnce(async () => {
+        vi.setSystemTime(new Date(startedAt.getTime() + 1_000));
+        return { invitationId: "11111111-1111-4111-8111-111111111111",
+          expiresAt: command.expiresAt, requestSha256: "c".repeat(64), state: "pending" };
+      });
+      expect((await send("/api/client-onboarding/staff/create", "POST", command, csrf)).status).toBe(200);
+
+      vi.setSystemTime(startedAt);
+      calls.reveal.mockImplementationOnce(async () => {
+        vi.setSystemTime(new Date(startedAt.getTime() + 1_000));
+        return { commandId: command.commandId, invitationId: "11111111-1111-4111-8111-111111111111",
+          expiresAt: command.expiresAt, invitationSecret: "d".repeat(64) };
+      });
+      expect((await send("/api/client-onboarding/staff/reveal", "POST",
+        { commandId: command.commandId }, csrf)).status).toBe(200);
+    } finally { vi.useRealTimers(); }
   });
 
   it("returns only authorized immutable submission details with no-store", async () => {
