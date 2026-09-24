@@ -18,7 +18,30 @@ function requireSameOrigin(request: Request): void {
 async function body(request: Request): Promise<Record<string, unknown>> {
   const length = Number(request.headers.get("Content-Length") || "0");
   if (!Number.isFinite(length) || length > MAX_BODY_BYTES) throw new HTTPException(413, { message: "Request is too large" });
-  const value: unknown = await request.json().catch(() => null);
+  const reader = request.body?.getReader();
+  if (!reader) throw new HTTPException(400, { message: "Invalid request" });
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  let actualLength = 0;
+  let json = "";
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      actualLength += chunk.value.byteLength;
+      if (actualLength > MAX_BODY_BYTES) {
+        await reader.cancel();
+        throw new HTTPException(413, { message: "Request is too large" });
+      }
+      json += decoder.decode(chunk.value, { stream: true });
+    }
+    json += decoder.decode();
+  } catch (error) {
+    if (error instanceof HTTPException) throw error;
+    throw new HTTPException(400, { message: "Invalid request" });
+  } finally { reader.releaseLock(); }
+  let value: unknown;
+  try { value = JSON.parse(json); }
+  catch { throw new HTTPException(400, { message: "Invalid request" }); }
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new HTTPException(400, { message: "Invalid request" });
   return value as Record<string, unknown>;
 }

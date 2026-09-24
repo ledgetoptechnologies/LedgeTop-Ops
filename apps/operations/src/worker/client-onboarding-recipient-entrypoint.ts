@@ -13,14 +13,14 @@ const unavailable = Object.freeze({ ok: false as const, protocolVersion: 1 as co
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const encoder = new TextEncoder();
 
-async function rateKey(invitationId: string): Promise<string> {
-  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(invitationId)));
+async function rateKey(invitationId: string, action: "read" | "submit"): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(`${action}:${invitationId}`)));
   return `client-onboarding:invitation:${Array.from(digest, byte => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
-async function permit(env: Env, invitationId: string, limit: number): Promise<boolean> {
+async function permit(env: Env, invitationId: string, action: "read" | "submit", limit: number): Promise<boolean> {
   if (!env || env.CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED !== "true" || !UUID.test(invitationId)) return false;
-  try { return await consumeClientOnboardingRateLimit(env.OPS_DB, await rateKey(invitationId), limit, 60); }
+  try { return await consumeClientOnboardingRateLimit(env.OPS_DB, await rateKey(invitationId, action), limit, 60); }
   catch { return false; }
 }
 
@@ -49,11 +49,11 @@ async function readState(env: Env, invitationId: string, invitationSecret: strin
 /** Private named entrypoint only. It is not mounted on the Operations fetch route. */
 export class ClientOnboardingRecipientBridge extends WorkerEntrypoint<Env> implements ClientOnboardingRecipientBinding {
   async session(request: ClientOnboardingRecipientSessionRequestV1): Promise<ClientOnboardingRecipientSessionResultV1> {
-    if (request.protocolVersion !== 1 || !await permit(this.env, request.invitationId, 20)) return unavailable;
+    if (request.protocolVersion !== 1 || !await permit(this.env, request.invitationId, "read", 20)) return unavailable;
     return readState(this.env, request.invitationId, request.invitationSecret);
   }
   async submit(request: ClientOnboardingRecipientSubmitRequestV1): Promise<ClientOnboardingRecipientSubmitResultV1> {
-    if (request.protocolVersion !== 1 || !await permit(this.env, request.invitationId, 8)) return unavailable;
+    if (request.protocolVersion !== 1 || !await permit(this.env, request.invitationId, "submit", 8)) return unavailable;
     try {
       const receipt = await submitClientOnboarding(this.env.OPS_DB, request);
       return { ok: true, protocolVersion: 1, state: "submitted", submissionId: receipt.submissionId };
@@ -61,7 +61,7 @@ export class ClientOnboardingRecipientBridge extends WorkerEntrypoint<Env> imple
   }
   async status(request: ClientOnboardingRecipientStatusRequestV1): Promise<ClientOnboardingRecipientStatusResultV1> {
     if (request.protocolVersion !== 1 || !UUID.test(request.submissionId)
-      || !await permit(this.env, request.invitationId, 20)) return unavailable;
+      || !await permit(this.env, request.invitationId, "read", 20)) return unavailable;
     return readState(this.env, request.invitationId, request.invitationSecret, request.submissionId);
   }
 }
