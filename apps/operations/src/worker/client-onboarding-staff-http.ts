@@ -197,7 +197,6 @@ export async function handleClientOnboardingStaffHttp(request: Request,
       try {
         const approved = await approveNewNativeOnlyClientOnboarding(authority.database, auth,
           input.submissionId, input.fieldsSha256);
-        unexpired(auth);
         return response(200, { decisionId: approved.decisionId, submissionId: approved.submissionId,
           clientRecordId: approved.clientRecordId, clientRecordVersion: approved.clientRecordVersion,
           relationshipVersion: approved.relationshipVersion, replayed: approved.replayed });

@@ -205,6 +205,29 @@ describe("native client onboarding staff route", () => {
     expect(reply.headers.get("Cache-Control")).toBe("no-store");
   });
 
+  it("returns the committed approval receipt when access expires after the atomic write", async () => {
+    const now = Date.now(), boundaryActor = { ...actor,
+      verifiedUntil: new Date(now + 60_000).toISOString() };
+    calls.native.mockResolvedValue(boundaryActor);
+    const csrf = await session(), submissionId = "33333333-3333-4333-8333-333333333333";
+    const clock = vi.spyOn(Date, "now");
+    calls.approve.mockImplementationOnce(async () => {
+      clock.mockReturnValue(now + 60_001);
+      return { status: "written", replayed: false,
+        decisionId: "44444444-4444-4444-8444-444444444444",
+        invitationId: "11111111-1111-4111-8111-111111111111", submissionId,
+        clientRecordId: "55555555-5555-4555-8555-555555555555",
+        clientRecordVersion: 1, relationshipVersion: 1 };
+    });
+    try {
+      const reply = await send("/api/client-onboarding/staff/approve", "POST",
+        { submissionId, fieldsSha256: "e".repeat(64) }, csrf);
+      expect(reply.status).toBe(200);
+      expect(await reply.json()).toMatchObject({ submissionId,
+        clientRecordId: "55555555-5555-4555-8555-555555555555" });
+    } finally { clock.mockRestore(); }
+  });
+
   it("requires exact approval input, CSRF, and current server authority", async () => {
     const csrf = await session(), submissionId = "33333333-3333-4333-8333-333333333333";
     expect((await send("/api/client-onboarding/staff/approve", "POST",
