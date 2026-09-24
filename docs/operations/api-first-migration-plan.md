@@ -22,10 +22,22 @@ Updated September 24, 2026. The owner approved implementation and resumption aft
   deployment flags remain `false`. There is no live usable invitation, PA
   write, portal entitlement, or Delivery/public-link change. A live staff
   review-disposition HTTP route is still missing.
+- Isolated Operations staging D1 had exactly migration `0140` pending. A private
+  pre-migration export was checksum-verified; `0140` applied successfully, and
+  the second migration list found no pending files. Reconstructed ignored
+  staging configs pass strict preflight, and both Client and Operations
+  Wrangler dry runs pass with the new binding and disabled flags. The active
+  staging Worker versions are still older and have no onboarding binding;
+  this candidate has not been deployed there.
 - Before activation, deploy the exact combined candidate to isolated staging,
-  verify migration `0140`, Worker-first routing, default-off behavior, exact
-  recipient and staff-review flows, rollback, and unchanged existing public
-  links. Source tests and PR CI do not replace those acceptance gates.
+  verify Worker-first routing, default-off behavior, exact recipient and
+  staff-review flows, rollback, and unchanged existing public links. The
+  review endpoint must derive actor, grants, scopes, versions, and immutable
+  submission fields server-side; the private writer DTO must never become a
+  browser request shape. The native-only writer intentionally does not handle
+  business submissions with organization fields, so those must receive an
+  explicit supported disposition rather than silently losing fields. Source
+  tests and PR CI do not replace those acceptance gates.
 
 ### September 23, 2026 — client-profile onboarding foundation, not activation
 

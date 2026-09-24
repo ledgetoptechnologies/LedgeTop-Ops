@@ -18,6 +18,14 @@ route, session, approval, and existing-link acceptance pass in staging. Older
 dated implementation notes below refer to other branches and are not proof
 that a public onboarding flow is deployed.
 
+The review coordinator remains a distinct implementation gate. It must load
+the immutable submission and derive actor identity, applicable native grants,
+scope, versions, mutation IDs, and the writer plan on the server; exposing the
+private writer input as an HTTP body would allow authority claims. The current
+native-only writer deliberately excludes organization creation/linking, while
+the recipient form accepts business organization fields. A reviewer must not
+silently approve such a submission as client-only or discard those fields.
+
 ## September 14 current route recheck
 
 The existing multi-Worker tests were rerun against the current local Client
