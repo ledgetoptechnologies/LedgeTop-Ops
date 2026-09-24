@@ -139,7 +139,7 @@ export function ClientOnboardingIssuer({ session }: { session: StaffSession }) {
   return <div className="onboarding-staff-shell"><header><Brand product="Operations" name="Ledge Top" /><a href="/">Exit onboarding</a></header><main>
     <div className="onboarding-staff-heading"><p className="eyebrow">Administrator tool</p><h1>Issue client profile onboarding</h1>
       <p>Create a bounded onboarding invitation, then reveal its secret once. This does not grant active client access.</p></div>
-    <aside className="onboarding-staff-warning" role="status"><strong>Recipient flow is disabled</strong><span>No recipient URL is produced here. The invitation secret is not usable until the separately controlled recipient flow is enabled.</span></aside>
+    <aside className="onboarding-staff-warning" role="status"><strong>Recipient flow is separately controlled</strong><span>This page reveals an invitation secret, not a recipient URL or client access. The recipient route must be enabled independently.</span></aside>
     <Card><form className="onboarding-staff-form" onSubmit={submit}>
       <label>Command ID<input value={commandId} readOnly /></label>
       <label>Expires at<input type="datetime-local" value={expiresAt} min={localDateTime(new Date(Date.now() + 60_000))} disabled={Boolean(created || uncertain)} onChange={event => setExpiresAt(event.target.value)} required /></label>

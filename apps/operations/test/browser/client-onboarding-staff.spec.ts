@@ -17,7 +17,7 @@ async function render(page: Page, mode = "success") {
 }
 async function issue(page: Page) {
   await expect(page.getByRole("heading", { name: "Issue client profile onboarding" })).toBeVisible();
-  await expect(page.getByText("Recipient flow is disabled")).toBeVisible();
+  await expect(page.getByText("Recipient flow is separately controlled")).toBeVisible();
   await page.getByLabel("Business area ID").fill("area:onboarding");
   await page.getByRole("button", { name: "Issue invitation metadata" }).click();
   await expect(page.getByRole("heading", { name: "Invitation metadata issued" })).toBeVisible();
