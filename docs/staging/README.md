@@ -162,12 +162,19 @@ authority. Before the separately approved Directory-v2 bootstrap and joined
 Project-v2 acceptance windows, follow the
 [staging native authority packet](native-authority-packet.md). Its generator
 creates ignored, reviewable provision and revoke migrations with separate
-configs and a dedicated staging-only migration ledger. Packet schema v2 creates
-exactly one global `directory.profile.edit` allow and one global
-`project.shared.sync` allow, records both in immutable approval/receipt evidence,
-and deactivates both during revoke. It does not expose an issuer route, alter a
-normal Access token, touch the canonical migration chain, or perform a remote
-action. Raw D1 inserts or updates are not an alternative.
+configs and a dedicated staging-only migration ledger. The baseline packet
+grants global `directory.profile.edit` and `project.shared.sync`; later
+purpose-bound packet schemas have distinct, documented grants and exact-state
+guards. Review the selected purpose and both generated artifacts rather than
+assuming baseline grants. Provision and revoke record immutable evidence and
+leave the canonical migration chain alone. The generator does not expose an
+issuer route, alter a normal Access token, or perform a remote action. Raw D1
+inserts or updates are not an alternative.
+
+The separate [client onboarding recipient acceptance](client-onboarding-recipient-acceptance.md)
+uses only a synthetic proposed client and read-only staff review. It requires
+a purpose-bound staging authority window and keyring; it does not activate
+portal access or prove two-instance Project Alpha synchronization.
 
 Evidence collection normally enables one staging flag. The Viewer processing,
 public-share, Client-session, and Client-share cases require exact multi-flag
