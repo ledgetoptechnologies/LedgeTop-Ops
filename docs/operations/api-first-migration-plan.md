@@ -6669,3 +6669,9 @@ pending; this requirement does not claim a deployed UI change.
   client mapping. This is evidence of an organization-level round trip, not
   proof that LTDS/LTT production client synchronization or the unified portal
   is ready.
+- The PR119 Client routing diff adds only `/api/client-onboarding` and
+  `/onboarding/:invitationId`; it does not edit the existing public-share route
+  handlers. Four focused local public-share/location suites passed 26/26 tests
+  against the `06ac319` runtime code. This narrows regression risk but does
+  not replace a synthetic staging public-link parity check or production link
+  acceptance.

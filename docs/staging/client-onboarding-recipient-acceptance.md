@@ -31,7 +31,10 @@ Project Alpha instances, existing public links, and Access policies unchanged.
    than an implicit production or unreviewed Worker deploy.
 5. Verify that client portal, invitation email, authenticated delivery,
    viewer, prefill, and public-share flags remain at their prior values. This
-   test must not grant access or send a launch invitation.
+   test must not grant access or send a launch invitation. Capture a
+   synthetic staging public-share baseline, including valid, invalid-password,
+   expired/revoked, and resumable range behavior where the existing fixture
+   supports each case. Never use a real client share URL as test evidence.
 
 ## Narrow test window
 
@@ -72,3 +75,6 @@ Project Alpha instances, existing public links, and Access policies unchanged.
    handoff fragments, private profile values, or raw tokens. A passing test
    advances only recipient submission/review readiness; native approval,
    two-instance PA sync, and real portal authorization remain separate gates.
+   Repeat the synthetic public-share checks against the deployed versions and
+   compare with the baseline; route-diff inspection and local unit tests alone
+   are not live-link parity evidence.
