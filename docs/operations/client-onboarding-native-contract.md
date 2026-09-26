@@ -3,16 +3,28 @@
 This specifies the native replacement behind the PA-style client form. It is
 not evidence that a public invitation or approval endpoint is deployed.
 
-## September 24 draft-branch boundary
+## September 24 combined staging-candidate boundary
 
-Draft Ops PR #118 has a private native-only approval writer with focused D1
-proof, but no HTTP review-disposition route. Its base PR #116 declares the
-Client-to-Ops recipient binding with disabled flags; the Operations recipient
-entrypoint returns `unavailable`, and the Client Worker mounts no public
-onboarding route. The staff create/reveal paths are also default-off. Older
+The combined candidate includes a private native-only approval writer and a
+default-off Client page and same-origin API bridged to private Operations
+session/submit/status methods. The invitation secret is removed from the URL
+fragment before React renders. A joined local test proves exact submit retry
+and status recovery against D1; this is not live staging acceptance. An
+uncertain response can be checked using the in-memory submission ID, but
+refreshing a scrubbed page currently requires reopening the original link.
+There is still no staff review-disposition HTTP route, and staff create/reveal
+and recipient features remain disabled. Do not issue a usable invitation until
+route, session, approval, and existing-link acceptance pass in staging. Older
 dated implementation notes below refer to other branches and are not proof
-that a usable invitation URL or client approval is deployed. Recheck the
-exact branch and staging runtime before issuing any link.
+that a public onboarding flow is deployed.
+
+The review coordinator remains a distinct implementation gate. It must load
+the immutable submission and derive actor identity, applicable native grants,
+scope, versions, mutation IDs, and the writer plan on the server; exposing the
+private writer input as an HTTP body would allow authority claims. The current
+native-only writer deliberately excludes organization creation/linking, while
+the recipient form accepts business organization fields. A reviewer must not
+silently approve such a submission as client-only or discard those fields.
 
 ## September 14 current route recheck
 

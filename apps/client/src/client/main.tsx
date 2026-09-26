@@ -7,6 +7,8 @@ import { parseClientPortalRoute } from "./portal-route";
 import { consumeInvitationToken } from "./invitation-acceptance";
 import { consumeDeliveryRoute, handoffLegacyPublicShare } from "./route";
 import { ClientViewerShell, parseClientViewerShellRoute } from "./ClientViewerShell";
+import { ClientOnboardingRecipientApp } from "./ClientOnboardingRecipientApp";
+import { consumeClientOnboardingRecipientRoute } from "./client-onboarding-recipient-route";
 
 const ClientPortalApp = lazy(async () => {
   const module = await import("./ClientPortalApp");
@@ -25,6 +27,7 @@ if (!handoffLegacyPublicShare(window.location, url => window.location.replace(ur
   const viewerShellRoute = parseClientViewerShellRoute(window.location.pathname);
   const isClientDelegatedShare = window.location.pathname.startsWith("/client-share/");
   const isInvitationAcceptance = window.location.pathname === "/portal/invitations/accept";
+  const onboardingRoute = consumeClientOnboardingRecipientRoute(window.location, window.history);
   const invitationToken = isInvitationAcceptance
     ? consumeInvitationToken(window.location, window.history)
     : null;
@@ -39,7 +42,9 @@ if (!handoffLegacyPublicShare(window.location, url => window.location.replace(ur
   createRoot(document.getElementById("root")!).render(
     <StrictMode>
       <Suspense fallback={<main className="portal-loading-shell" aria-busy="true" aria-label="Loading LTDS Client Portal" />}>
-        {viewerShellRoute
+        {onboardingRoute
+          ? <ClientOnboardingRecipientApp {...onboardingRoute} />
+          : viewerShellRoute
           ? <ClientViewerShell route={viewerShellRoute} />
           : isInvitationAcceptance
           ? <InvitationAcceptanceApp token={invitationToken} />

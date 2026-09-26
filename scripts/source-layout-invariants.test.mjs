@@ -191,6 +191,7 @@ const expectedPublicRoutes = [
   "GET|HEAD /api/public/shares/:publicId/items/:itemRef/preview",
   "GET|HEAD /api/public/shares/:publicId/items/:itemRef/source",
   "GET|HEAD /api/public/shares/:publicId/items/:itemRef/thumbnail",
+  "GET|HEAD /onboarding/:invitationId",
   "GET|HEAD /portal",
   "GET|HEAD /portal/*",
   "GET|HEAD /assets/*",
@@ -259,7 +260,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   // and explicit legacy compatibility origin. Keep the field assertions so a future config change
   // cannot hide behind a digest refresh.
   // Reviewed additions: Operations catalog staging and promotion remain off by default.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "e2fe6bb3309c309cfe08b686e4acaf5c80ddf7b048586e3ab613d2d0caa7808f");
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "fbe6e73d609437294191909f142dd69454e544f5eb61d587365f1003e35eac4b");
   const config = readJson("apps/client/wrangler.jsonc");
   assert.equal(config.name, "ledgetop-clients");
   assert.equal(config.main, "src/worker/index.ts");
@@ -277,7 +278,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
     binding: "ASSETS",
     directory: "./dist/client",
     not_found_handling: "single-page-application",
-    run_worker_first: ["/", "/api/*", "/s/*", "/client-share/*", "/portal*", "/assets/*", "/health"],
+    run_worker_first: ["/", "/api/*", "/s/*", "/client-share/*", "/portal*", "/onboarding/*", "/assets/*", "/health"],
   });
   assert.equal(config.vars.PUBLIC_BASE_URL, "https://portal.ledgetopdroneservices.com");
   assert.equal(config.vars.PUBLIC_SHARE_ORIGIN, "https://portal.ledgetopdroneservices.com");

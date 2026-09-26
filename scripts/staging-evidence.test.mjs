@@ -670,7 +670,6 @@ test("checked-in evidence example stays complete as migrations, flags, gates, an
   assert.deepEqual(example.migrations.freshBootstrap.applications.delivery.transformedFiles, ["0002_seed_initial_staff.sql"]);
   assert.deepEqual(example.migrations.freshBootstrap.applications.operations.transformedFiles, ["0002_seed_acl.sql"]);
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(-17), [
-    "0123_native_directory_authority_history.sql",
     "0124_project_alpha_project_adoption_review_evidence.sql",
     "0125_project_alpha_existing_directory_binding_activation.sql",
     "0126_project_alpha_project_active_directory_mapping_bridge.sql",
@@ -687,6 +686,7 @@ test("checked-in evidence example stays complete as migrations, flags, gates, an
     "0137_project_alpha_directory_reconciliation_scheduler.sql",
     "0138_project_alpha_directory_reconciliation_review.sql",
     "0139_native_directory_staging_empty_enrollment_fixture_guard.sql",
+    "0140_client_onboarding_one_time_reveal.sql",
   ]);
   assert.deepEqual(
     fs.readdirSync(path.join(root, "apps", "operations", "migrations")).filter((name) => REQUIRED_STAGING_MIGRATIONS.operations.includes(name)).sort().slice(-69),
