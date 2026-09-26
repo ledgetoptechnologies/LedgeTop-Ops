@@ -5,6 +5,25 @@ not evidence that a public invitation or approval endpoint is deployed.
 
 ## September 24 combined staging-candidate boundary
 
+### September 26 bounded business-approval checkpoint
+
+The private approval now accepts an eligible new business submission by
+atomically creating one native organization and one linked native client/contact,
+both with empty destination lists. The HTTP approval body remains exactly the
+immutable `submissionId` and `fieldsSha256`; record IDs, scopes, profiles,
+relationship mutations, actors, and grants are derived server-side. It creates
+no Project Alpha intent, portal entitlement, access grant, or public link.
+
+No new migration is required for this slice. Migration 0083 already reserves
+organization decision/fence/receipt columns and enforces current independent
+profile-edit and identity-link allows with deny precedence; migration 0134
+already guards the client create-admission parent assertion. The composer orders
+the single D1 batch as decision fence, organization admission/write, client
+admission/link/write, immutable decision, then fence removal. Real migrated-D1
+tests cover exact replay, revoked replay authority, scoped deny and split allows,
+and rollback after a deliberately late decision failure. Deployment and both
+recipient/staff feature switches remain separate release gates.
+
 The combined candidate includes a private native-only approval writer and a
 default-off Client page and same-origin API bridged to private Operations
 session/submit/status methods. The invitation secret is removed from the URL

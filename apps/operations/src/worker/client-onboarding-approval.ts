@@ -55,17 +55,31 @@ async function selectedCreateGrant(database: D1Database, staffId: string,
   return row.id;
 }
 
-function hasOrganizationProposal(fields: Awaited<ReturnType<typeof readClientOnboardingSubmissionForReview>>["fields"]): boolean {
-  return fields.clientType !== "consumer" || [fields.organizationName, fields.organizationEmail,
-    fields.organizationPhone].some(value => value.trim() !== "");
+function approvalKind(fields: Awaited<ReturnType<typeof readClientOnboardingSubmissionForReview>>["fields"]): "consumer" | "business" | null {
+  const organizationValues = [fields.organizationName, fields.organizationEmail, fields.organizationPhone];
+  if (fields.clientType === "consumer" && organizationValues.every(value => value.trim() === "")) return "consumer";
+  if (fields.clientType === "business" && fields.organizationName.trim() !== "") return "business";
+  return null;
+}
+
+async function consumerSourceHasOrganizationFields(database: D1Database, submissionId: string,
+  fieldsSha256: string): Promise<boolean> {
+  const row = await database.withSession("first-primary").prepare(`SELECT fields_json FROM client_onboarding_submissions
+    WHERE submission_id=? AND fields_sha256=? LIMIT 1`).bind(submissionId, fieldsSha256).first<{ fields_json: string }>();
+  if (!row) return true;
+  const value: unknown = JSON.parse(row.fields_json);
+  if (!value || typeof value !== "object" || Array.isArray(value)) return true;
+  const fields = value as Record<string, unknown>;
+  return [fields.organizationName, fields.organizationEmail, fields.organizationPhone]
+    .some(item => typeof item !== "string" || item.trim() !== "");
 }
 
 /**
- * Approves only the smallest native-only target supported by the private 0083
- * composer: a new unlinked consumer client. Browser input contributes no
+ * Approves the bounded native-only target supported by the private 0083
+ * composer: a new unlinked consumer client or a new business organization and
+ * linked client/contact. Browser input contributes no
  * identity, grants, target IDs, versions, scope, profile fields or PA
- * destinations. Business/organization proposals remain pending for a later
- * organization-aware disposition instead of silently losing submitted data.
+ * destinations.
  */
 export async function approveNewNativeOnlyClientOnboarding(database: D1Database,
   authenticated: AuthenticatedNativeStaffWithAdmissionVersion,
@@ -75,8 +89,10 @@ export async function approveNewNativeOnlyClientOnboarding(database: D1Database,
       || typeof expectedFieldsSha256 !== "string" || !HEX.test(expectedFieldsSha256)
       || Date.parse(authenticated.verifiedUntil) <= Date.now()) return denied();
     const review = await readClientOnboardingSubmissionForReview(database, authenticated, submissionId);
-    if (review.targetClientRecordId !== null || review.fieldsSha256 !== expectedFieldsSha256
-      || hasOrganizationProposal(review.fields)) return denied();
+    const kind = approvalKind(review.fields);
+    if (review.targetClientRecordId !== null || review.fieldsSha256 !== expectedFieldsSha256 || kind === null
+      || (kind === "consumer" && await consumerSourceHasOrganizationFields(database, review.submissionId,
+        review.fieldsSha256))) return denied();
     const issuance = await database.withSession("first-primary").prepare(`SELECT command.request_sha256
       FROM client_onboarding_issuance_commands command
       JOIN client_onboarding_invitations invitation ON invitation.invitation_id=command.invitation_id
@@ -86,7 +102,11 @@ export async function approveNewNativeOnlyClientOnboarding(database: D1Database,
     const decisionId = await deterministicUuid(`client-onboarding-approval:v1:decision:${review.submissionId}`);
     const mutationId = await deterministicUuid(`client-onboarding-approval:v1:profile:${review.submissionId}`);
     const recordId = await deterministicUuid(`client-onboarding-approval:v1:record:${review.submissionId}`);
-    const relationshipMutationId = await deterministicUuid(`${mutationId}\0client-relationship\0unlinked`);
+    const organizationMutationId = kind === "business"
+      ? await deterministicUuid(`client-onboarding-approval:v1:organization-profile:${review.submissionId}`) : null;
+    const organizationRecordId = kind === "business"
+      ? await deterministicUuid(`client-onboarding-approval:v1:organization-record:${review.submissionId}`) : null;
+    const relationshipMutationId = await deterministicUuid(`${mutationId}\0client-relationship\0${organizationRecordId ?? "unlinked"}`);
     const selectedGrantId = await selectedCreateGrant(database, authenticated.identity.staffId,
       "directory.profile.edit", recordId, review.scopes);
     const selectedIdentityGrantId = await selectedCreateGrant(database, authenticated.identity.staffId,
@@ -112,21 +132,37 @@ export async function approveNewNativeOnlyClientOnboarding(database: D1Database,
       postalCode: review.fields.postalCode,
       country: review.fields.country,
     } as const;
-    const reason = "Approved as a new native-only, unlinked client profile";
+    const reason = kind === "business"
+      ? "Approved as a new native-only organization with linked client/contact"
+      : "Approved as a new native-only, unlinked client profile";
     const reviewedFieldsJson = JSON.stringify(review.fields);
-    const requestSha256 = await sha256(JSON.stringify(["client-onboarding-native-only-approval-v1",
-      decisionId, review.invitationId, review.submissionId, review.fieldsSha256, issuance.request_sha256,
-      reason, reviewedFieldsJson, review.scopes, recordId, mutationId, relationshipMutationId,
-      authenticated.identity.staffId, authenticated.identity.verifiedAccessSubject,
-      authenticated.admissionVersion, authenticated.identity.profileVersion]));
+    const requestSha256 = await sha256(JSON.stringify(kind === "consumer"
+      ? ["client-onboarding-native-only-approval-v1", decisionId, review.invitationId, review.submissionId,
+        review.fieldsSha256, issuance.request_sha256, reason, reviewedFieldsJson, review.scopes, recordId,
+        mutationId, relationshipMutationId, authenticated.identity.staffId,
+        authenticated.identity.verifiedAccessSubject, authenticated.admissionVersion,
+        authenticated.identity.profileVersion]
+      : ["client-onboarding-native-business-approval-v2", decisionId, review.invitationId, review.submissionId,
+        review.fieldsSha256, issuance.request_sha256, reason, reviewedFieldsJson, review.scopes, recordId,
+        mutationId, organizationRecordId, organizationMutationId, relationshipMutationId,
+        authenticated.identity.staffId, authenticated.identity.verifiedAccessSubject,
+        authenticated.admissionVersion, authenticated.identity.profileVersion]));
     const outcome = await approveNativeOnlyClientOnboarding(database, {
       decisionId, invitationId: review.invitationId, submissionId: review.submissionId,
       fieldsSha256: review.fieldsSha256, requestSha256, reason, reviewedFieldsJson,
       scopes: review.scopes, verifiedUntil: authenticated.verifiedUntil,
       relationship: { mode: "change", expectedVersion: 0, mutationId: relationshipMutationId },
+      organizationProfile: kind === "business" ? { operation: "create", mutationId: organizationMutationId!,
+        recordId: organizationRecordId!, expectedLocalVersion: 0, kind: "organization",
+        createAdmissionId: `client-onboarding:${decisionId}:organization`, destinations: [], actor,
+        scopes: review.scopes, profile: { name: review.fields.organizationName,
+          generalEmail: review.fields.organizationEmail, generalPhone: review.fields.organizationPhone,
+          addressLine1: review.fields.addressLine1, addressLine2: review.fields.addressLine2,
+          city: review.fields.city, state: review.fields.state, postalCode: review.fields.postalCode,
+          country: review.fields.country } } : undefined,
       profile: { operation: "create", mutationId, recordId, expectedLocalVersion: 0, kind: "client",
         createAdmissionId: `client-onboarding:${decisionId}:client`, profile, scopes: review.scopes,
-        destinations: [], actor, relationship: { organizationRecordId: null, expectedRelationshipVersion: 0 } },
+        destinations: [], actor, relationship: { organizationRecordId, expectedRelationshipVersion: 0 } },
     });
     if (outcome.status !== "written") return denied();
     return outcome;

@@ -91,7 +91,7 @@ test("approves a reviewed new consumer with only immutable submission evidence",
   await review(page);
   await expect(page.getByText(/never enrolls Project Alpha/i)).toBeVisible();
   await page.getByRole("button", { name: "Approve native-only client" }).click();
-  await expect(page.getByRole("status").filter({ hasText: "Native client approved" })).toContainText(
+  await expect(page.getByRole("status").filter({ hasText: "Native onboarding approved" })).toContainText(
     "55555555-5555-4555-8555-555555555555");
   const calls = await page.evaluate(() => (window as Window & { onboardingCalls?: Array<{path: string; body: unknown}> }).onboardingCalls || []);
   expect(calls.find(call => call.path.endsWith("/approve"))?.body).toEqual({
@@ -99,9 +99,16 @@ test("approves a reviewed new consumer with only immutable submission evidence",
   });
 });
 
-test("does not offer native-only approval when organization data would be lost", async ({ page }) => {
+test("approves a reviewed business as one linked native organization and client", async ({ page }) => {
   await render(page, "business");
   await review(page);
-  await expect(page.getByText(/organization-aware review path/i)).toBeVisible();
-  await expect(page.getByRole("button", { name: "Approve native-only client" })).toHaveCount(0);
+  await expect(page.getByText(/atomically creates one native Operations organization/i)).toBeVisible();
+  await page.getByRole("button", { name: "Approve native organization and client" }).click();
+  const success = page.getByRole("status").filter({ hasText: "Native onboarding approved" });
+  await expect(success).toContainText("66666666-6666-4666-8666-666666666666");
+  await expect(success).toContainText("55555555-5555-4555-8555-555555555555");
+  const calls = await page.evaluate(() => (window as Window & { onboardingCalls?: Array<{path: string; body: unknown}> }).onboardingCalls || []);
+  expect(calls.find(call => call.path.endsWith("/approve"))?.body).toEqual({
+    submissionId: "33333333-3333-4333-8333-333333333333", fieldsSha256: "e".repeat(64),
+  });
 });

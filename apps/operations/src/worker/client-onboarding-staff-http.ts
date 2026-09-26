@@ -199,6 +199,10 @@ export async function handleClientOnboardingStaffHttp(request: Request,
           input.submissionId, input.fieldsSha256);
         return response(200, { decisionId: approved.decisionId, submissionId: approved.submissionId,
           clientRecordId: approved.clientRecordId, clientRecordVersion: approved.clientRecordVersion,
+          ...(approved.organizationRecordId === null ? {} : {
+            organizationRecordId: approved.organizationRecordId,
+            organizationRecordVersion: approved.organizationRecordVersion,
+          }),
           relationshipVersion: approved.relationshipVersion, replayed: approved.replayed });
       } catch { throw new HttpFailure(403, "client_onboarding_denied"); }
     }
