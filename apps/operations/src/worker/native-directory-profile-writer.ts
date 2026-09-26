@@ -428,7 +428,8 @@ async function updateRemoteState(db: DirectoryWriteD1, write: NormalizedWrite, d
  * transport-only and never enter the canonical profile revision.
  */
 async function planNativeDirectoryProfileWriteInternal(db: DirectoryWriteD1, input: NativeDirectoryProfileWrite,
-  allowEmptyDestinations = false, stagedOnboardingDecisionId: string | null = null): Promise<NativeDirectoryProfileWritePlanningResult> {
+  allowEmptyDestinations = false, stagedOnboardingDecisionId: string | null = null,
+  stagedOrganization: Readonly<{ recordId: string; version: number }> | null = null): Promise<NativeDirectoryProfileWritePlanningResult> {
   const write = normalize(input, allowEmptyDestinations); if (!write) return { status: "rejected", reason: "invalid_write" };
   const auditJson = auditCommand(write);
   const replay = await db.prepare(`SELECT audit.command_json,audit.actor_id,audit.original_verified_access_subject,revision.record_id,
@@ -452,7 +453,7 @@ async function planNativeDirectoryProfileWriteInternal(db: DirectoryWriteD1, inp
   if (!await authority(db, write)) return { status: "blocked", reason: "native_directory_authority" };
   const scopesJson = JSON.stringify(write.scopes), profileJson = JSON.stringify(write.profile);
   const stagedAdmission = write.operation === "create" && stagedOnboardingDecisionId !== null
-    && write.createAdmissionId === `client-onboarding:${stagedOnboardingDecisionId}:client`;
+    && write.createAdmissionId === `client-onboarding:${stagedOnboardingDecisionId}:${write.kind}`;
   if (write.operation === "create" && !stagedAdmission && !await db.prepare(`SELECT 1 ok FROM native_directory_create_admissions
     WHERE id=? AND staff_id=? AND bound_access_subject=? AND record_id=? AND record_kind=? AND active=1
       AND consumed_mutation_id IS NULL AND consumed_at IS NULL AND json(scopes_json)=json(?)
@@ -476,13 +477,17 @@ async function planNativeDirectoryProfileWriteInternal(db: DirectoryWriteD1, inp
       const organizationRecordId = write.relationship!.organizationRecordId;
       let organizationRecordVersion: number | null = null;
       if (organizationRecordId !== null) {
-        const parent = await db.prepare(`SELECT record.current_version version FROM operations_directory_records record
-          JOIN operations_directory_revisions revision ON revision.record_id=record.record_id AND revision.version=record.current_version
-          JOIN native_directory_enrollments enrollment ON enrollment.record_id=record.record_id
-          WHERE record.record_id=? AND record.record_kind='organization'`).bind(organizationRecordId).first<{ version: number }>();
-        if (!parent || !Number.isSafeInteger(parent.version) || parent.version < 1)
-          return { status: "blocked", reason: "client_relationship_parent_state" };
-        organizationRecordVersion = parent.version;
+        if (stagedOrganization?.recordId === organizationRecordId && stagedOrganization.version === 1) {
+          organizationRecordVersion = stagedOrganization.version;
+        } else {
+          const parent = await db.prepare(`SELECT record.current_version version FROM operations_directory_records record
+            JOIN operations_directory_revisions revision ON revision.record_id=record.record_id AND revision.version=record.current_version
+            JOIN native_directory_enrollments enrollment ON enrollment.record_id=record.record_id
+            WHERE record.record_id=? AND record.record_kind='organization'`).bind(organizationRecordId).first<{ version: number }>();
+          if (!parent || !Number.isSafeInteger(parent.version) || parent.version < 1)
+            return { status: "blocked", reason: "client_relationship_parent_state" };
+          organizationRecordVersion = parent.version;
+        }
       }
       relationshipState = { organizationRecordId, organizationRecordVersion, relationshipVersion: 1,
         relationshipMutationId: await deterministicUuid(`${write.mutationId}\0client-relationship\0${organizationRecordId ?? "unlinked"}`) };
@@ -599,8 +604,10 @@ async function planNativeDirectoryProfileWriteInternal(db: DirectoryWriteD1, inp
 }
 
 async function executeNativeDirectoryProfileWrite(db: DirectoryWriteD1, input: NativeDirectoryProfileWrite,
-  allowEmptyDestinations = false, stagedOnboardingDecisionId: string | null = null): Promise<NativeDirectoryProfileWriteOutcome> {
-  const planned = await planNativeDirectoryProfileWriteInternal(db, input, allowEmptyDestinations, stagedOnboardingDecisionId);
+  allowEmptyDestinations = false, stagedOnboardingDecisionId: string | null = null,
+  stagedOrganization: Readonly<{ recordId: string; version: number }> | null = null): Promise<NativeDirectoryProfileWriteOutcome> {
+  const planned = await planNativeDirectoryProfileWriteInternal(db, input, allowEmptyDestinations,
+    stagedOnboardingDecisionId, stagedOrganization);
   if (planned.status !== "planned") return planned;
   try { await db.batch([...planned.statements]); }
   catch { return { status: "blocked", reason: "authority_or_atomic_write" }; }
@@ -626,6 +633,19 @@ export async function writeNativeOnlyClientOnboardingDecisionProfile(db: Directo
     || (input.operation === "create" && input.createAdmissionId !== `client-onboarding:${decisionId}:client`))
     return { status: "rejected", reason: "invalid_onboarding_decision_write" };
   return executeNativeDirectoryProfileWrite(db, input, true, decisionId);
+}
+
+/** Private organization-aware variant. A staged parent is accepted only for the
+ * matching client in the same immutable onboarding decision transaction. */
+export async function writeNativeOnlyOnboardingDecisionProfile(db: DirectoryWriteD1,
+  decisionId: string, input: NativeDirectoryProfileWrite,
+  stagedOrganization: Readonly<{ recordId: string; version: 1 }> | null = null): Promise<NativeDirectoryProfileWriteOutcome> {
+  if (!UUID.test(decisionId) || input.destinations.length !== 0
+    || (input.operation === "create" && input.createAdmissionId !== `client-onboarding:${decisionId}:${input.kind}`)
+    || (stagedOrganization !== null && (input.kind !== "client" || input.operation !== "create"
+      || input.relationship.organizationRecordId !== stagedOrganization.recordId)))
+    return { status: "rejected", reason: "invalid_onboarding_decision_write" };
+  return executeNativeDirectoryProfileWrite(db, input, true, decisionId, stagedOrganization);
 }
 
 /**

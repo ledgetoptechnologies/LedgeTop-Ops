@@ -37,6 +37,20 @@ to satisfy this UI gate. The reviewed inactive Worker versions remain off and
 no invitation or authority packet was applied. A normal browser navigation to
 a no-secret synthetic path must succeed before the narrow window below opens.
 
+September 26 business-approval checkpoint: draft Ops PR120 at
+`5359c8b767107a0cbffa8efed8aaa034b61e03dd` passed all ten exact-head CI
+jobs and a changed-source security review with no findings. This is source and
+CI evidence, **not** staging acceptance: the active staging Worker versions
+above still run older code with onboarding flags off. PR120 adds no migration;
+its organization-plus-client approval relies on existing `0083` and `0134`.
+Before a positive business approval, upload and inspect the exact PR120 Ops
+staging version with flags off, verify migration state through `0140`, resolve
+the no-secret browser navigation block, and prepare a fresh, independently
+reviewed provision/revoke packet containing both `directory.profile.edit` and
+`directory.identity.link` for one chosen staging business-area scope. The
+profile-edit-only packet below must not be reused. Do not infer PA sync, portal
+enrollment, delivery/public-link parity, or production readiness from CI.
+
 This is a bounded, synthetic staging-only acceptance window for the native
 Operations invitation, Client recipient form, and staff review in draft PR119.
 Although that branch now contains a guarded approval route, this window does
