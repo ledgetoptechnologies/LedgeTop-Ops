@@ -13,6 +13,16 @@ the in-app browser blocked navigation to the download endpoint. No recipient
 invitation, submission, review, approval, client entitlement, or PA write was
 exercised in this preflight. The remaining steps below are still required.
 
+A later pre-window check prepared a new ignored provision/revoke packet and
+uploaded reviewed inactive acceptance versions (Ops
+`47138519-b0b1-48fe-80c7-201332375cd5`, Client
+`736635c7-4547-4637-97f1-7aef6a2e06f6`). They were **not deployed**,
+and the packet was **not applied**. The in-app browser still blocks a no-secret
+`/onboarding/` URL before navigation (`ERR_BLOCKED_BY_CLIENT`), whereas the
+disabled staging Worker itself returns 404 over an unauthenticated GET. Resolve
+the browser-side acceptance path before opening the time-bounded authority
+window; regenerate expired packet timestamps and recheck live D1 state then.
+
 This is a bounded, synthetic staging-only acceptance window for the native
 Operations invitation, Client recipient form, and staff review in draft PR119.
 Although that branch now contains a guarded approval route, this window does
