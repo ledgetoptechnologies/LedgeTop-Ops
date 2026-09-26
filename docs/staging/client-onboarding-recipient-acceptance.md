@@ -23,6 +23,20 @@ disabled staging Worker itself returns 404 over an unauthenticated GET. Resolve
 the browser-side acceptance path before opening the time-bounded authority
 window; regenerate expired packet timestamps and recheck live D1 state then.
 
+September 26 follow-up: the signed-in Operations staging administration page
+loaded successfully and still reported primary sync disabled and Client workflow
+gates unverified or blocked. A new, no-secret synthetic UUID route was then
+opened in both the Codex in-app browser and a connected Microsoft Edge session.
+Both blocked navigation to the Client staging `/onboarding/:invitationId` path
+with `ERR_BLOCKED_BY_CLIENT`; Edge displayed its own blocked-page message, not
+an Operations or Client application response. Client staging `/` remained
+reachable and showed its intentionally disabled portal. This independently
+reproduces a browser-side access blocker, not a failed recipient API response.
+Do not weaken browser protection or substitute a token-bearing shell request
+to satisfy this UI gate. The reviewed inactive Worker versions remain off and
+no invitation or authority packet was applied. A normal browser navigation to
+a no-secret synthetic path must succeed before the narrow window below opens.
+
 This is a bounded, synthetic staging-only acceptance window for the native
 Operations invitation, Client recipient form, and staff review in draft PR119.
 Although that branch now contains a guarded approval route, this window does
