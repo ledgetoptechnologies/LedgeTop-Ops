@@ -1,5 +1,18 @@
 # Client onboarding recipient staging acceptance
 
+## September 26 staging preflight result
+
+PR119 source `12aeff925425d310f5a0f3afd4a3120eec81beef` is deployed only
+to staging as Client version `f00c3a7f-307a-4ec1-802e-a15039173b3b`
+and Operations version `4892f7b6-81b8-4a47-9d9a-28642681f52c`, each at
+100%. Onboarding and recipient flags remain off. Staging-only Delivery secrets
+were installed through inactive versions; their values were not recorded.
+The synthetic protected-share wrong-code, correct-code listing, and revoked
+page checks passed; file download/range behavior remains unverified because
+the in-app browser blocked navigation to the download endpoint. No recipient
+invitation, submission, review, approval, client entitlement, or PA write was
+exercised in this preflight. The remaining steps below are still required.
+
 This is a bounded, synthetic staging-only acceptance window for the native
 Operations invitation, Client recipient form, and staff review in draft PR119.
 Although that branch now contains a guarded approval route, this window does

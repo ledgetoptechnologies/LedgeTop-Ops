@@ -1,6 +1,12 @@
 # API-first migration — current implementation objective and work register
 
-Updated September 24, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+Updated September 26, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+
+### September 26, 2026 — default-off staging versions and synthetic Delivery parity
+
+- Draft PR #119 at `12aeff925425d310f5a0f3afd4a3120eec81beef` passed all ten CI jobs in run `36075266802`. Exact combined candidate versions were uploaded, then staging-only Delivery secrets were added through inactive Worker versions without writing their values to source or documentation. The active Client staging version is `f00c3a7f-307a-4ec1-802e-a15039173b3b` and active Operations staging version is `4892f7b6-81b8-4a47-9d9a-28642681f52c`, both at 100%. The new onboarding and recipient flags remain `false`; client portal activation remains off. Production was not deployed.
+- Signed-in browser acceptance created only a synthetic, access-code-protected staging Delivery share for a synthetic file. An incorrect code was rejected, the correct code listed the single expected file, and subsequent revocation made the public page report that the link was revoked. The synthetic share is revoked. In-app-browser download navigation was blocked by the browser client, so successful file download and resumable/range parity are **not verified** by this exercise. No existing public link, real client record, portal membership, PA instance, retention rule, or production Worker was changed.
+- These checks do not establish joined PA API-v2 synchronization, recipient submission/review, native approval, client portal entitlement, or rollback acceptance. The owner production PA checkpoint remains **not ready**. Keep the flags off and complete those staging gates before requesting production PA updates.
 
 ### September 24, 2026 — combined onboarding staging candidate, disabled
 
