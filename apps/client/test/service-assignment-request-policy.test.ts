@@ -79,7 +79,9 @@ describe("exact-target service-assignment request policy", { timeout: 60_000 }, 
       compatibilityDate: "2026-08-06",
       modules: true,
       script: "export default {fetch(){return new Response('ok')}}",
-      d1Databases: Object.fromEntries(Array.from({ length: 28 }, (_, index) =>
+      // Each test receives an isolated D1 binding; keep capacity above the
+      // current case count so new cases do not request an undeclared binding.
+      d1Databases: Object.fromEntries(Array.from({ length: 40 }, (_, index) =>
         [`POLICY_DB_${index}`, `service-assignment-policy-${index}`])),
     });
   });

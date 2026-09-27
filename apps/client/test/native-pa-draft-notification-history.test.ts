@@ -49,13 +49,25 @@ describe("native PA draft notification history — migrated D1", { timeout: 240_
     // This read-only router test provides only bindings reached by its D1 paths.
     env = bindings as Env;
     await reservePrimaryPortalSigningKeys(env);
+    // All fixtures represent one PA producer with many workspaces. Reusing its
+    // authority also keeps this suite below the production 31-source limit.
+    await db.batch([
+      db.prepare(`INSERT INTO pa_portal_source_authorities
+        (source_id,producer_binding_id,snapshot_origin,snapshot_base_path,application_key,state,active_revision,version,connector_revision,connector_version)
+        VALUES('project-alpha:history','binding-history','https://native.example.test','/api/portal','native_history','pending',1,1,1,1)`),
+      db.prepare(`INSERT INTO pa_portal_source_authority_revisions
+        (source_id,revision,credential_ref,access_issuer,access_audience,access_subject,current_key_id,current_key_fingerprint,created_by)
+        VALUES('project-alpha:history',1,'history-credential','https://native.example.test','operations','history-subject','history-key',?,'test')`)
+        .bind("a".repeat(64)),
+      db.prepare("UPDATE pa_portal_source_authorities SET state='active',version=2 WHERE source_id='project-alpha:history'"),
+    ]);
   }, 180_000);
 
   afterAll(async () => runtime?.dispose());
 
   async function seed(label: string, principal: VerifiedClientPrincipal, sourceId?: string) {
     serial += 1;
-    const suffix = `${label}-${serial}`, source = sourceId ?? `project-alpha:history_${serial}`, account = `account-${suffix}`,
+    const suffix = `${label}-${serial}`, source = sourceId ?? "project-alpha:history", account = `account-${suffix}`,
       storage = `storage-${suffix}`, workspace = `workspace-${suffix}`, identity = `identity-${suffix}`,
       request = `request-${suffix}`, root = `org-${suffix}`, notification = `notice-${suffix}`, paGeneration=`pa-generation-${suffix}`;
     await db.batch([
@@ -64,13 +76,6 @@ describe("native PA draft notification history — migrated D1", { timeout: 240_
       db.prepare("INSERT INTO client_identity_links(id,account_id,issuer,subject,email) VALUES(?,?,?,?,?)")
         .bind(storage, account, principal.issuer, principal.subject, principal.email),
       db.prepare("INSERT INTO client_account_members(account_id,identity_id,role) VALUES(?,?, 'manager')").bind(account, storage),
-      ...(source==='project-alpha:primary'?[]:[db.prepare(`INSERT INTO pa_portal_source_authorities
-        (source_id,producer_binding_id,snapshot_origin,snapshot_base_path,application_key,state,active_revision,version,connector_revision,connector_version)
-        VALUES(?,?,'https://native.example.test','/api/portal','native_history','pending',1,1,1,1)`).bind(source, `binding-${suffix}`),
-      db.prepare(`INSERT INTO pa_portal_source_authority_revisions
-        (source_id,revision,credential_ref,access_issuer,access_audience,access_subject,current_key_id,current_key_fingerprint,created_by)
-        VALUES(?,1,'history-credential','https://native.example.test','operations','history-subject','history-key',?,'test')`).bind(source, "a".repeat(64)),
-      db.prepare("UPDATE pa_portal_source_authorities SET state='active',version=2 WHERE source_id=?").bind(source)]),
       db.prepare("INSERT INTO pa_portal_workspace_sources(workspace_id,projection_source_id,source_workspace_id) VALUES(?,?,?)")
         .bind(workspace, source, `source-workspace-${suffix}`),
       db.prepare(`INSERT INTO portal_v2_workspaces(id,root_type,pa_organization_public_id,display_name,status,project_alpha_source_id)
