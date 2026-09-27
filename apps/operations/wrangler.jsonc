@@ -42,6 +42,7 @@
     "PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED": "false",
     "PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED": "false",
     "CLIENT_PORTAL_ACCESS_AUTHORITY_OUTBOX_ENABLED": "false",
+    "CLIENT_PORTAL_AUTHORITY_V2_OUTBOX_ENABLED": "false",
     "CLIENT_AUTHORITY_WORKSPACE_BINDING_OUTBOX_ENABLED": "false",
     "CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ENABLED": "false",
     "CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ORIGIN": "",
@@ -176,6 +177,11 @@
       "binding": "CLIENT_PORTAL_ACCESS_AUTHORITY",
       "service": "ledgetop-clients",
       "entrypoint": "OpsPortalAccessAuthorityIngress"
+    },
+    {
+      "binding": "CLIENT_PORTAL_AUTHORITY_V2",
+      "service": "ledgetop-clients",
+      "entrypoint": "ClientPortalAuthorityV2Ingress"
     }
   ],
   "durable_objects": {

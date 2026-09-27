@@ -38,9 +38,10 @@ invitation policy, scope vocabulary, legacy-member disposition, approvers and
 rollback target below remain decisions to settle before active claims or
 grants can safely be implemented. Keep all authority writers off meanwhile.
 
-### September 27 — local portal-authority v2 control-plane draft
+### September 27 — portal-authority v2 control-plane and reader audit
 
-An isolated, unpublished Client draft adds migration `0219` and a private,
+Draft Ops PR124 at `c1e9da74d06d45d45fbc790b5b85fd976f88d89d` adds
+Client migration `0219` and a private,
 route-less v2 authority entrypoint. It accepts only an exact inactive `0218`
 workspace binding and empty grant scopes, records per-workspace ownership and
 per-issuer/person grant or revoke revisions with immutable audit and exact
@@ -49,13 +50,63 @@ recovery. Both new feature flags are checked in as `false` and are required
 disabled by the staging/release inventories. Focused tests cover replay,
 revision conflicts, issuer/person separation, revoke tombstones and atomic
 rollback on a receipt failure; the two focused suites passed 8/8, Client
-typecheck passed, and release-layout/staging checks passed 46/46. This is
+typecheck passed, release-layout/staging checks passed 46/46, and all ten
+exact-head CI jobs passed. The exact-diff security scan reported no findings;
+it did not inspect deployed Cloudflare state. This is
 authorization-inert: no Client authorization reader consumes the new tables,
 no Operations producer calls this entrypoint, and no portal membership,
 service scope, Delivery grant, or public link is created. It must not be
 enabled or described as a client-portal cutover. The owner's no-secret
 synthetic onboarding URL remains blocked by Edge before any Worker response;
 browser acceptance is still outstanding.
+
+Draft Ops PR125 at `c37e267` adds a local Edge fixture for the recipient
+path, stacked on PR124. Its four focused desktop/mobile cases passed and all
+ten exact-head CI jobs passed. They prove that the synthetic fragment is
+scrubbed before the first recipient API request, the same submission ID is
+used for status and submit, and a no-secret URL makes no recipient API call.
+The fixture bypasses the staging Worker and cannot clear Edge's live
+`ERR_BLOCKED_BY_CLIENT` gate or prove a real invitation flow.
+
+An isolated, unpublished Operations follow-on now adds migration `0145` and
+a private, default-off v2 authority outbox bound to the Client `0219`
+entrypoint. It requires the exact acknowledged inactive workspace binding,
+an explicitly selected recipient identity binding for the same Ops customer,
+current owner and directory authority, and per-person revision continuity.
+It records a durable command/audit and only acknowledges an exact Client
+receipt under a live claim lease. Lost or malformed responses trigger an
+exact status read; transient failures remain retryable. Active dispatch now
+rechecks staff permission, recipient status/expiry, and the current customer
+relation; revocation may continue when the original reviewer loses access.
+Focused local two-database tests cover first and second recipients, revoke
+and regrant, lost-response recovery, and recipient revocation between enqueue
+and dispatch. This does **not** mount an Ops administration action, enable
+grant issuance, or change Client effective-access readers. Staging release
+inventory and evidence examples now include the still-disabled binding and
+both migrations. The browser-side `ERR_BLOCKED_BY_CLIENT` was reproduced in
+the in-app browser using only the synthetic no-secret path; no staging Worker
+response or real invitation was obtained. Staging deployment, live authority
+acceptance, and production PA owner checkpoint remain open.
+
+The first direct-SQL inventory found 17 Client Worker source files referring
+to `portal_v2_workspace_memberships` or `portal_v2_entitlements`. They include
+the central authorization and identity-repair logic in `workspace-v2.ts`,
+`workspace-memberships.ts`, and `native-portal-eligibility.ts`; PA projection
+materialization in `project-alpha-portal.ts`; and independent delivery,
+delegated-share, feedback, request, notification, invitation, hierarchy,
+address-book, audit, and mutation-guard paths under `client-portal/`.
+This is a search inventory, **not** a complete effective-access audit. A
+central `workspace.view` switch alone would leave those direct paths with
+possibly different answers. Before any v2 grant is effective, classify every
+read and write boundary, preserve invitation/Delivery provenance separately,
+apply the exact workspace ownership epoch and principal grant revision at
+each sensitive D1 consumer, and test PA-member coexistence, deny-first
+revocation, stale-cookie/login repair, delegated-share issuance, notification
+history, Viewer/Delivery, and both business sources. Do not activate the
+deny-only `0216` claim as a shortcut: it would remove existing PA access
+before the replacement reader is ready. The v2 receiver currently requires
+`scopes: []`; nonempty service and content scopes still need a separate
+reviewed contract and atomic materialization before portal enrollment.
 
 ### September 27 — portal eligibility boundary for the API-first cutover
 
