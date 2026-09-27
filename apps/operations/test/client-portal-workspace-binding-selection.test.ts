@@ -224,6 +224,27 @@ describe("inactive Ops portal workspace binding selection",()=>{
     await db.prepare("UPDATE operations_directory_records SET current_version=5 WHERE record_id=?").bind(recordId).run();
     await expect(enqueuePortalWorkspaceBinding(db,actor,selected.selectionId)).rejects.toThrow("denied");
   });
+
+  it("does not expose prior outbox state after the reviewed owner's live authority is revoked",async()=>{
+    const selected=await selectPortalWorkspaceBinding(db,actor,command());
+    await enqueuePortalWorkspaceBinding(db,actor,selected.selectionId);
+    await db.prepare("UPDATE native_staff_admissions SET active=0 WHERE staff_id='owner'").run();
+    await expect(enqueuePortalWorkspaceBinding(db,actor,selected.selectionId)).rejects.toThrow("denied");
+    await db.prepare("UPDATE native_staff_admissions SET active=1 WHERE staff_id='owner'").run();
+    await db.prepare("UPDATE native_directory_grants SET active=0 WHERE staff_id='owner'").run();
+    await expect(enqueuePortalWorkspaceBinding(db,actor,selected.selectionId)).rejects.toThrow("denied");
+  });
+
+  it("does not expose prior outbox state after the frozen activation or record version becomes stale",async()=>{
+    const selected=await selectPortalWorkspaceBinding(db,actor,command());
+    await enqueuePortalWorkspaceBinding(db,actor,selected.selectionId);
+    await db.prepare("UPDATE operations_directory_records SET current_version=5 WHERE record_id=?").bind(recordId).run();
+    await expect(enqueuePortalWorkspaceBinding(db,actor,selected.selectionId)).rejects.toThrow("denied");
+    await db.prepare("UPDATE operations_directory_records SET current_version=4 WHERE record_id=?").bind(recordId).run();
+    await db.prepare("UPDATE project_alpha_existing_directory_binding_activation_receipts SET history_epoch_id='epoch-other' WHERE activation_id=?")
+      .bind(activationA).run();
+    await expect(enqueuePortalWorkspaceBinding(db,actor,selected.selectionId)).rejects.toThrow("denied");
+  });
 });
 
 describe("portal workspace selection full migration order",()=>{

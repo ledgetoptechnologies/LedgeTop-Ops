@@ -55,12 +55,51 @@ export async function enqueuePortalWorkspaceBinding(db:D1Database,
         SELECT operation_id,'inactive.binding.enqueued',reviewed_by_staff_id,reviewed_grant_generation
         FROM client_portal_workspace_binding_outbox WHERE operation_id=?`).bind(selectionId),
     ]);
-  }catch{
-    const prior=await db.withSession("first-primary").prepare(`SELECT operation_id,state,client_authority_id,
-      workspace_id,projection_source_id,source_workspace_id,root_type,root_public_id,
-      checkpoint_source_generation,checkpoint_source_sequence,checkpoint_snapshot_generation_id,
-      reviewed_by_staff_id,reviewed_access_subject,reviewed_admission_version,reviewed_profile_version,
-      reviewed_grant_generation FROM client_portal_workspace_binding_outbox WHERE operation_id=?`)
+  }catch(error){
+    // The insert guard runs before uniqueness checks and revalidates the live
+    // reviewer authority. Only an exact duplicate operation may take the
+    // replay path; a revoked/stale reviewer must not learn current outbox state.
+    if(!/UNIQUE constraint failed:\s*client_portal_workspace_binding_outbox\.(?:operation_id|workspace_id)/i.test(String(error)))return denied();
+    const prior=await db.withSession("first-primary").prepare(`SELECT outbox.operation_id,outbox.state,outbox.client_authority_id,
+      outbox.workspace_id,outbox.projection_source_id,outbox.source_workspace_id,outbox.root_type,outbox.root_public_id,
+      outbox.checkpoint_source_generation,outbox.checkpoint_source_sequence,outbox.checkpoint_snapshot_generation_id,
+      outbox.reviewed_by_staff_id,outbox.reviewed_access_subject,outbox.reviewed_admission_version,
+      outbox.reviewed_profile_version,outbox.reviewed_grant_generation
+      FROM client_portal_workspace_binding_outbox outbox
+      JOIN client_portal_workspace_binding_selections selection ON selection.selection_id=outbox.operation_id
+      JOIN project_alpha_existing_directory_binding_activation_receipts activation
+        ON activation.activation_id=selection.activation_id
+      JOIN operations_directory_records record ON record.record_id=selection.record_id
+      JOIN native_staff_admissions admission ON admission.staff_id=outbox.reviewed_by_staff_id
+      JOIN native_staff_profiles profile ON profile.staff_id=admission.staff_id
+      JOIN native_directory_grant_generations generation ON generation.staff_id=admission.staff_id
+      WHERE outbox.operation_id=? AND selection.verified_until>strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        AND activation.record_id=selection.record_id AND activation.source_id=selection.source_id
+        AND activation.source_instance_id=selection.source_instance_id
+        AND activation.application_id=selection.application_id
+        AND activation.history_epoch_id=selection.history_epoch_id
+        AND activation.project_alpha_public_id=selection.root_public_id
+        AND ((activation.resource_type='organization' AND selection.root_type='organization')
+          OR (activation.resource_type='client' AND selection.root_type='standalone_client'))
+        AND record.current_version=selection.record_version
+        AND record.current_version=activation.local_record_version
+        AND admission.active=1
+        AND admission.bound_access_subject=outbox.reviewed_access_subject
+        AND admission.version=outbox.reviewed_admission_version
+        AND profile.version=outbox.reviewed_profile_version
+        AND generation.generation=outbox.reviewed_grant_generation
+        AND EXISTS(SELECT 1 FROM staff_role_assignments role WHERE role.staff_id=admission.staff_id
+          AND role.role_id='role-owner' AND role.scope='global')
+        AND EXISTS(SELECT 1 FROM native_directory_grants grant WHERE grant.staff_id=admission.staff_id
+          AND grant.permission='directory.portal_access.manage' AND grant.effect='allow' AND grant.active=1
+          AND (grant.scope_kind='global' OR (grant.scope_kind='resource' AND grant.resource_id=selection.record_id)))
+        AND NOT EXISTS(SELECT 1 FROM native_directory_grants deny WHERE deny.staff_id=admission.staff_id
+          AND deny.permission='directory.portal_access.manage' AND deny.effect='deny' AND deny.active=1
+          AND (deny.scope_kind='global' OR (deny.scope_kind='resource' AND deny.resource_id=selection.record_id)
+            OR (deny.scope_kind='business_area' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes scope
+              WHERE scope.record_id=selection.record_id AND scope.active=1 AND scope.business_area_id=deny.business_area_id))
+            OR (deny.scope_kind='division' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes scope
+              WHERE scope.record_id=selection.record_id AND scope.active=1 AND scope.division_id=deny.division_id))))`)
       .bind(selectionId).first<OutboxRow&{state:string}>();
     if(!prior||prior.client_authority_id!==row.client_authority_id||prior.workspace_id!==row.workspace_id
       ||prior.projection_source_id!==row.source_id||prior.source_workspace_id!==row.source_workspace_id
