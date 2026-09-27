@@ -24,6 +24,10 @@ export interface Env {
   CLIENT_AUTHORITY_WORKSPACE_BINDING_WRITER_ENABLED?: string;
   /** Default-off private lost-response recovery read; never grants or activates access. */
   CLIENT_AUTHORITY_WORKSPACE_BINDING_STATUS_ENABLED?: string;
+  /** Route-less Operations authority v2 writer. Empty-scope and authorization-inert in its first release. */
+  CLIENT_PORTAL_AUTHORITY_V2_WRITER_ENABLED?: string;
+  /** Private exact-receipt recovery read for Operations authority v2. */
+  CLIENT_PORTAL_AUTHORITY_V2_STATUS_ENABLED?: string;
   CLIENT_PORTAL_ORIGIN?: string;
   CLIENT_PORTAL_ORIGINS?: string;
   /** Legacy delivery/portal origins retained only for compatible reads and canonical redirects. */

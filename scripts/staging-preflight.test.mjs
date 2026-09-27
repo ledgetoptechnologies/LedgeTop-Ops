@@ -332,8 +332,8 @@ test("requires every portal-v2 and Operations capability to be explicitly false"
   }
 });
 
-test("pins the native portal, Operations 0054-0144, both 0199 files, and the 0200-0218 release contract", () => {
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-36), [
+test("pins the native portal, Operations 0054-0144, both 0199 files, and the 0200-0219 release contract", () => {
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-37), [
     "0184_native_client_feedback.sql",
     "0185_native_service_request_ownership.sql",
     "0186_delivery_notification_authority_provenance.sql",
@@ -370,6 +370,7 @@ test("pins the native portal, Operations 0054-0144, both 0199 files, and the 020
     "0216_client_authority_workspace_ownership_claim.sql",
     "0217_client_authority_workspace_claim_evidence.sql",
     "0218_client_authority_workspace_binding.sql",
+    "0219_operations_portal_authority_v2.sql",
   ]);
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(-22), [
     "0123_native_directory_authority_history.sql",
