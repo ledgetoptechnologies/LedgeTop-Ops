@@ -28,6 +28,8 @@ export interface Env {
   CLIENT_PORTAL_AUTHORITY_V2_WRITER_ENABLED?: string;
   /** Private exact-receipt recovery read for Operations authority v2. */
   CLIENT_PORTAL_AUTHORITY_V2_STATUS_ENABLED?: string;
+  /** Default-off, non-content Operations enrollment-status reader. */
+  CLIENT_PORTAL_AUTHORITY_V2_ENROLLMENT_STATUS_ENABLED?: string;
   CLIENT_PORTAL_ORIGIN?: string;
   CLIENT_PORTAL_ORIGINS?: string;
   /** Legacy delivery/portal origins retained only for compatible reads and canonical redirects. */
