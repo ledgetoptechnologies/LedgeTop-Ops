@@ -9,6 +9,7 @@ import {projectAccessAuthorityHistoryReady,projectAccessInvitationEvent} from '.
 import {requireProjectAccessAuthorityMutations} from './project-access-mutation-gate';
 import { projectAccessCapacitySql } from './project-access-capacity';
 import { d1TablesPresent } from "../schema-readiness";
+import { activeClientAuthorityWorkspaceClaim } from "./client-authority-claim-read";
 import { bindNativePortalEligibility } from "./native-portal-eligibility";
 import { readPrimaryTermRetentionGrants } from './authenticated-delivery-grants';
 import { localOrPrimaryAlphaReference, primaryAlphaReference, primaryWorkspaceAccount, primaryLegacyWorkspaceMembership } from "./project-alpha-source";
@@ -521,6 +522,7 @@ export async function resolveEffectivePortalWorkspaceContext(
   workspaceId: string,
 ): Promise<EffectivePortalWorkspaceContext | null> {
   if (!portalHierarchyV2Enabled(env) || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(workspaceId)) return null;
+  if (await activeClientAuthorityWorkspaceClaim(env.DELIVERY_DB, workspaceId)) return null;
   const identity = await resolveGlobalIdentity(env, principal);
   if (!identity) return null;
   const workspace = await activeWorkspace(env, identity.id, workspaceId);
@@ -813,6 +815,7 @@ export async function authorizePortalWorkspaceCapability(
   options?:{retainedProjectId:string},
 ): Promise<boolean> {
   if (!portalHierarchyV2Enabled(env)) return false;
+  if (await activeClientAuthorityWorkspaceClaim(env.DELIVERY_DB, workspaceId)) return false;
   const identity = await resolveGlobalIdentity(env, principal);
   if (!identity) return false;
   const workspace = await activeWorkspace(env, identity.id, workspaceId);
@@ -848,6 +851,7 @@ export async function authorizePrimaryPortalTargetBatch(env:Env,principal:Verifi
   targets:Array<{target:PortalWorkspaceTarget;retainedProjectId?:string}>,capability:PortalWorkspaceCapability='delivery.view'):Promise<Map<string,NativeTargetScopes>>{
   const result=new Map<string,NativeTargetScopes>();
   if(!portalHierarchyV2Enabled(env)||!targets.length)return result;
+  if(await activeClientAuthorityWorkspaceClaim(env.DELIVERY_DB,workspaceId))return result;
   if(targets.length>100)throw new HTTPException(503,{message:'Project delivery access exceeds safe capacity. Contact support.'});
   const identity=await resolveGlobalIdentity(env,principal);if(!identity)return result;
   const workspace=await activeWorkspace(env,identity.id,workspaceId);if(!workspace||!await activeRootExists(env,workspace))return result;
@@ -891,6 +895,7 @@ export async function readLegacyInvitationCapabilityOptions(env:Env,principal:Ve
   if(tables.length||await projectAccessTermsReady(database))throw new HTTPException(503,{message:'Invitation scope metadata is unavailable.'});
   const result=new Map<PortalWorkspaceCapability,Set<string>>();
   if(!portalHierarchyV2Enabled(env)||!targets.length)return result;
+  if(await activeClientAuthorityWorkspaceClaim(env.DELIVERY_DB,workspaceId))return result;
   const identity=await resolveGlobalIdentity(env,principal);if(!identity)return result;
   const workspace=await activeWorkspace(env,identity.id,workspaceId);
   if(!workspace||!await activeRootExists(env,workspace))return result;
@@ -951,6 +956,7 @@ export async function resolveNativePortalWorkspaceReadContext(
 ): Promise<NativePortalReadContext | null> {
   if (!portalHierarchyV2Enabled(env) || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(workspaceId)
     || !await nativePortalSourceSchemaAvailable(env)) return null;
+  if (await activeClientAuthorityWorkspaceClaim(env.DELIVERY_DB, workspaceId)) return null;
   const identity = await resolveGlobalIdentity(env, principal, false);
   if (!identity) return null;
   const database = env.DELIVERY_DB.withSession("first-primary");
@@ -1103,6 +1109,8 @@ export interface EffectiveWorkspaceRequestMutationProof {
   denylistEnabled: boolean;
   rootAccessPolicyEnabled: boolean;
   projectAccessTermsReady: boolean;
+  /** Whether 0216 existed when the proof was assembled; repeats its deny in the write. */
+  claimTablePresent?: boolean;
   allowedRequestEntitlementIds: string[];
   allowedEntitlementIds?: string[];
   evaluatedAt: string;
@@ -1131,7 +1139,9 @@ export async function readEffectiveWorkspaceRequestProof(
   const expiresAt = new Date(Date.parse(evaluatedAt) + 30_000).toISOString();
   if (!portalHierarchyV2Enabled(env) || !validPrincipalPart(principal.issuer) ||
     !validPrincipalPart(principal.subject) || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(workspaceId)) return null;
+  if (await activeClientAuthorityWorkspaceClaim(env.DELIVERY_DB, workspaceId)) return null;
   const database = env.DELIVERY_DB.withSession("first-primary");
+  const claimTablePresent = await d1TablesPresent(env.DELIVERY_DB, ["portal_client_authority_workspace_claims"]);
   let compatibilityTables: Set<string> | null = null;
   const hasTable = (name: string) => compatibilityTables === null || compatibilityTables.has(name);
   async function inspectOptionalTables() {
@@ -1318,6 +1328,7 @@ export async function readEffectiveWorkspaceRequestProof(
       denylistEnabled: portalIdentityDenylistEnabled(env),
       rootAccessPolicyEnabled: env.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED === 'true',
       projectAccessTermsReady: requestTermsReady,
+      claimTablePresent,
       allowedRequestEntitlementIds: rules.results.filter(rule => rule.id && rule.capability === "request.create"
         && rule.effect === "allow" && targetScopesForMutation.has(`${rule.scope_type}:${rule.scope_public_id}`)
         && projectAccessRowAllows(rule, targetScopesForMutation, localProjectId ? expiredRequestProjects : []))
@@ -1339,6 +1350,7 @@ export async function readEffectiveWorkspaceNotificationMutationProof(
   notificationId: string,
 ): Promise<EffectiveWorkspaceRequestMutationProof | null> {
   if (!portalHierarchyV2Enabled(env)) return null;
+  if (await activeClientAuthorityWorkspaceClaim(env.DELIVERY_DB, context.workspaceId)) return null;
   const notification = await portalDb(env).prepare(`SELECT notification.source_type,request.project_id,
       association.scope_type folder_scope_type,association.project_id folder_project_id,
       binding.id folder_binding_id,binding.owner_scope_type,binding.owner_public_id,binding.source_version binding_source_version
@@ -1619,6 +1631,9 @@ export function effectiveWorkspaceRequestMutationGuardSql(
     AND (entitlement.expires_at IS NULL OR datetime(entitlement.expires_at)>datetime('now'))
     AND (entitlement.scope_type || ':' || entitlement.scope_public_id) IN (SELECT value FROM json_each(?))`;
   const localRequestGrantSql = proof.requireLocalRequestGrant === false ? "" : "AND local_grant.can_request_service=1";
+  const claimGuardSql = proof.claimTablePresent ? `AND NOT EXISTS(
+    SELECT 1 FROM portal_client_authority_workspace_claims claim
+    WHERE claim.workspace_id=workspace.id AND claim.state='active')` : "";
 
   return {
     sql: `EXISTS (
@@ -1640,6 +1655,7 @@ export function effectiveWorkspaceRequestMutationGuardSql(
         AND root.public_id=? AND root.source_version=? AND root.active=1
       WHERE identity.id=? AND identity.issuer=? AND identity.subject=?
         AND identity.status='active' AND identity.revoked_at IS NULL
+        ${claimGuardSql}
         AND membership.source_version IS ?
         AND datetime(?)<=datetime('now') AND datetime(?)>datetime('now')
         AND ${lineageSql}
@@ -1733,6 +1749,7 @@ export async function listPortalWorkspaces(
   if (candidates.results.length > 100) return [];
   const authorized: PortalWorkspaceSummary[] = [];
   for (const workspace of candidates.results) {
+    if (await activeClientAuthorityWorkspaceClaim(env.DELIVERY_DB, workspace.id)) continue;
     const shellEligible = await eligiblePortalShell(env, identity.id, workspace.id);
     if (!shellEligible && !(await authorizePortalWorkspaceCapability(
       env,
@@ -1772,6 +1789,7 @@ export async function listPortalWorkspaceHierarchy(
   workspaceId: string,
   search: string | null,
 ): Promise<PortalDirectoryEntry[] | null> {
+  if (await activeClientAuthorityWorkspaceClaim(env.DELIVERY_DB, workspaceId)) return null;
   const relationScoped = portalHierarchyRelationsEnabled(env);
   let relationAuthorization: { identityId: string; workspace: WorkspaceRow } | null = null;
   if (relationScoped) {

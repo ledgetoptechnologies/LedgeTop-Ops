@@ -172,15 +172,38 @@ source, release denial after PA tombstones, exact effective-row preservation,
 and missing-migration compatibility. These are **local source tests**, not
 live staging or production acceptance.
 
+Follow-on local source increment: native PA automatic eligibility now excludes
+an active-claimed workspace both at candidate discovery and inside its live
+write guard. Central workspace capability, legacy/native context, batch target
+and hierarchy readers deny historical PA access while a claim is active; the
+effective request and notification mutation guards repeat that denial at the
+write boundary. Pre-`0216` databases still use their established path. A
+focused first-login regression confirms no identity, eligibility binding,
+membership, entitlement or PA-principal link is created for a claimed native
+workspace; a separate legacy-workspace regression confirms claim denial and
+late-claim write denial. These are **deny-only compatibility fences**, not the
+Operations grant reader.
+
+Independent QA also found direct SQL paths outside the central reader. The
+local follow-up fences integration-owned authenticated Delivery candidates and
+prefixes; native feedback and notification state insert guards; and the native
+request authorization/storage batch. The native request batch repeats its
+current-claim predicate on account, storage-identity and binding inserts, so
+a claim arriving after the preliminary read cannot leave orphan active rows.
+Each SQL fragment is emitted only after `0216` presence is established, and
+the new tests cover active claims, pre-`0216` behavior or interleaved claims
+where their fixtures support it. Existing public-link routes and records are
+not changed by these source edits. This remains local evidence, not a live
+public-link parity test or complete direct-reader audit.
+
 This does **not** activate client access or finish the ownership cutover.
-Existing PA rows can remain active during a claim; runtime authorization does
-not yet deny them based on claim state. Native automatic eligibility, login
-repair, invitation-derived grants and legacy bridge writers also still need
-joined fences. An authenticated Ops producer, exact person/workspace binding,
-atomic Operations grant materialization and revocation, rollback protocol,
-cross-D1 recovery, and two-instance staging evidence remain release gates.
-Keep the claim writer flag off and create no active claims until these paths
-and the owner checkpoint have passed.
+Existing PA rows may remain stored during a claim. Direct SQL readers and
+remaining login/invitation repair paths still require a complete joined audit
+and fences before any active claim is safe. An authenticated Ops producer,
+exact person/workspace binding, atomic Operations grant materialization and
+revocation, rollback protocol, cross-D1 recovery, and two-instance staging
+evidence remain release gates. Keep the claim writer flag off and create no
+active claims until these paths and the owner checkpoint have passed.
 
 ### September 26, 2026 — default-off staging versions and synthetic Delivery parity
 

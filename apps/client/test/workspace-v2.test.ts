@@ -19,6 +19,7 @@ import {
   authorizePortalWorkspaceCapability,
   authorizeEffectiveWorkspaceNotification,
   authorizeEffectiveWorkspaceProject,
+  effectiveWorkspaceRequestMutationGuardSql,
   hashPortalInvitationToken,
   listPortalWorkspaces,
   readEffectiveWorkspaceRequestProof,
@@ -255,6 +256,28 @@ describe("client workspace hierarchy v2", () => {
       .replace(/\s*\n\s*/g, " "));
     expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_workspaces WHERE id='workspace-account-a'").first("count")).toBe(1);
     expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
+  });
+
+  it("denies historical PA access while its workspace has an active Operations claim", async () => {
+    const target = { scopeType: "project" as const, publicId: "pa-project-a" };
+    expect(await authorizePortalWorkspaceCapability(env, principal, "workspace-account-a", "request.create", target)).toBe(true);
+    expect((await listPortalWorkspaces(env, principal)).map(row => row.id)).toContain("workspace-account-a");
+    // This legacy fixture predates 0216. Exercise the read-side state switch
+    // without inventing a PA checkpoint or weakening the real migration guards.
+    await db.exec("CREATE TABLE portal_client_authority_workspace_claims (workspace_id TEXT PRIMARY KEY,state TEXT NOT NULL)");
+    try {
+      const proof = await readEffectiveWorkspaceRequestProof(env, principal, "workspace-account-a", "project-a");
+      expect(proof?.mutationProof.claimTablePresent).toBe(true);
+      const guard = effectiveWorkspaceRequestMutationGuardSql(proof!.mutationProof);
+      await db.prepare("INSERT INTO portal_client_authority_workspace_claims(workspace_id,state) VALUES('workspace-account-a','active')").run();
+      expect(await authorizePortalWorkspaceCapability(env, principal, "workspace-account-a", "request.create", target)).toBe(false);
+      expect((await listPortalWorkspaces(env, principal)).map(row => row.id)).not.toContain("workspace-account-a");
+      expect(await db.prepare(`SELECT 1 allowed WHERE ${guard.sql}`).bind(...guard.bindings).first("allowed")).toBeNull();
+      await db.prepare("UPDATE portal_client_authority_workspace_claims SET state='released' WHERE workspace_id='workspace-account-a'").run();
+      expect(await authorizePortalWorkspaceCapability(env, principal, "workspace-account-a", "request.create", target)).toBe(true);
+    } finally {
+      await db.exec("DROP TABLE portal_client_authority_workspace_claims");
+    }
   });
 
   it("uses legacy hierarchy only for an explicitly missing pre-0129 contract table", async () => {

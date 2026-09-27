@@ -6,6 +6,9 @@ import { createClientPortalRouter } from "../src/worker/client-portal/routes";
 import { d1ClientPortalRepository } from "../src/worker/client-portal/repository";
 import type { ClientPortalSession, VerifiedClientPrincipal } from "../src/worker/client-portal/types";
 import { mutateNativeDeliveryNotification } from "../src/worker/client-portal/notification-history";
+import { resolveNativePortalWorkspaceReadContext } from "../src/worker/client-portal/workspace-v2";
+import { resolveNativeFeedbackTarget } from "../src/worker/client-portal/native-feedback-target";
+import { createNativeFeedbackRecord } from "../src/worker/client-portal/native-feedback-store";
 import { reservePrimaryPortalSigningKeys } from "../src/worker/project-alpha-portal-authority";
 import type { Env } from "../src/worker/types";
 import { splitD1MigrationStatements } from "./helpers/d1-migrations";
@@ -54,7 +57,7 @@ describe("native PA draft notification history — migrated D1", { timeout: 240_
     serial += 1;
     const suffix = `${label}-${serial}`, source = sourceId ?? `project-alpha:history_${serial}`, account = `account-${suffix}`,
       storage = `storage-${suffix}`, workspace = `workspace-${suffix}`, identity = `identity-${suffix}`,
-      request = `request-${suffix}`, root = `org-${suffix}`, notification = `notice-${suffix}`;
+      request = `request-${suffix}`, root = `org-${suffix}`, notification = `notice-${suffix}`, paGeneration=`pa-generation-${suffix}`;
     await db.batch([
       db.prepare(`INSERT INTO client_accounts(id,display_name,status,project_alpha_organization_id,project_alpha_source_id)
         VALUES(?,?,'active',?,?)`).bind(account, `Account ${suffix}`, root, source),
@@ -86,6 +89,13 @@ describe("native PA draft notification history — migrated D1", { timeout: 240_
         .bind(`generation-${suffix}`, workspace),
       db.prepare("INSERT INTO portal_v2_directory_checkpoints(workspace_id,active_generation_id,source_sequence) VALUES(?,?,1)")
         .bind(workspace, `generation-${suffix}`),
+      db.prepare(`INSERT INTO pa_portal_projection_generations
+        (id,workspace_id,source_generation,source_sequence,snapshot_hash,page_count,record_count,workspace_root_type,
+         workspace_root_public_id,workspace_display_name,workspace_source_version,workspace_active,status,complete,activated_at,projection_source_id)
+        VALUES(?,?,?,1,?,1,1,'organization',?,'Native workspace','v1',1,'active',1,datetime('now'),?)`)
+        .bind(paGeneration,workspace,paGeneration,"a".repeat(64),root,source),
+      db.prepare(`INSERT INTO pa_portal_projection_checkpoints(workspace_id,source_generation,source_sequence,snapshot_generation_id)
+        VALUES(?,?,1,?)`).bind(workspace,paGeneration,paGeneration),
       ...[["workspace.view", "workspace", workspace], ["request.create", "organization", root]].map(([capability, scopeType, scopePublicId]) => db.prepare(`INSERT INTO portal_v2_entitlements
         (id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,source_type,status)
         VALUES(?,?,?,?,'allow',?,?,'project_alpha','active')`)
@@ -208,6 +218,15 @@ describe("native PA draft notification history — migrated D1", { timeout: 240_
     return {...mine,nativeOwner,session,binding,principalId,receipt,grant,event,entitlement,project,terms};
   }
   type DeliveryFixture=Awaited<ReturnType<typeof seedDelivery>>;
+  async function activateWorkspaceClaim(mine:DeliveryFixture){
+    await db.prepare(`INSERT INTO portal_client_authority_workspace_claims
+      (client_authority_id,workspace_id,projection_source_id,source_workspace_id,state,ownership_epoch,
+       reconciliation_source_generation,reconciliation_source_sequence,reconciliation_snapshot_generation_id,last_operation_id)
+      SELECT ?,source.workspace_id,source.projection_source_id,source.source_workspace_id,'active',1,
+        checkpoint.source_generation,checkpoint.source_sequence,checkpoint.snapshot_generation_id,?
+      FROM pa_portal_workspace_sources source JOIN pa_portal_projection_checkpoints checkpoint ON checkpoint.workspace_id=source.workspace_id
+      WHERE source.workspace_id=?`).bind(crypto.randomUUID(),`claim-${mine.event}`,mine.workspace).run();
+  }
   const mutateDelivery=(mine:DeliveryFixture,action:'read'|'dismiss',principal=mine.nativeOwner,bindings=env)=>new Hono().route('/api/client',
     createClientPortalRouter({resolvePrincipal:async()=>principal,repository:d1ClientPortalRepository}))
     .request(`${origin}/api/client/v2/workspaces/${mine.workspace}/native-delivery-notifications/${mine.event}`,
@@ -322,6 +341,54 @@ describe("native PA draft notification history — migrated D1", { timeout: 240_
     expect(await mutateNativeDeliveryNotification(env,mine.nativeOwner,mine.session,mine.event,'read',async()=>{reached=true;await race(mine);})).toBe(false);
     expect(reached).toBe(true);
     expect(await db.prepare('SELECT count(*) FROM native_delivery_recipient_event_state WHERE event_id=?').bind(mine.event).first('count(*)')).toBe(0);
+  });
+
+  it('atomically denies an active workspace claim introduced immediately before native delivery state write',async()=>{
+    const mine=await seedDelivery('race-active-claim');
+    let reached=false;
+    expect(await mutateNativeDeliveryNotification(env,mine.nativeOwner,mine.session,mine.event,'read',async()=>{
+      reached=true;await activateWorkspaceClaim(mine);
+    })).toBe(false);
+    expect(reached).toBe(true);
+    expect(await db.prepare('SELECT count(*) n FROM native_delivery_recipient_event_state WHERE event_id=?')
+      .bind(mine.event).first('n')).toBe(0);
+  });
+
+  it('atomically denies an active workspace claim introduced inside native feedback creation',async()=>{
+    const mine=await seedDelivery('feedback-race-active-claim',false,undefined,true);
+    await db.prepare(`INSERT INTO portal_v2_entitlements
+      (id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,source_type,status)
+      VALUES(?,?,?,'directory.read','allow','project',?,'project_alpha','active')`)
+      .bind(`directory-${mine.event}`,mine.workspace,mine.identity,mine.project).run();
+    const context=await resolveNativePortalWorkspaceReadContext(env,mine.nativeOwner,mine.workspace);expect(context).not.toBeNull();
+    const authorization=await resolveNativeFeedbackTarget(env,mine.nativeOwner,context!,{kind:'project',projectId:mine.project});
+    const before=await db.prepare('SELECT count(*) n FROM portal_native_feedback').first<number>('n');
+    const race={prepare:db.prepare.bind(db),batch:async<T>(statements:D1PreparedStatement[])=>{
+      await activateWorkspaceClaim(mine);return db.batch<T>(statements);
+    }};
+    await expect(createNativeFeedbackRecord(race,authorization,'Claimed during native feedback creation',`feedback-claim-${mine.event}`))
+      .rejects.toMatchObject({code:'changed'});
+    expect(await db.prepare('SELECT count(*) n FROM portal_native_feedback').first<number>('n')).toBe(before);
+  });
+
+  it('preserves native delivery and feedback writes before the workspace claim migration is present',async()=>{
+    await db.prepare(`ALTER TABLE portal_client_authority_workspace_claims
+      RENAME TO portal_client_authority_workspace_claims_pending_migration`).run();
+    try{
+      const mine=await seedDelivery('pre-claim-migration',false,undefined,true);
+      expect(await mutateNativeDeliveryNotification(env,mine.nativeOwner,mine.session,mine.event,'read')).toBe(true);
+      await db.prepare(`INSERT INTO portal_v2_entitlements
+        (id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,source_type,status)
+        VALUES(?,?,?,'directory.read','allow','project',?,'project_alpha','active')`)
+        .bind(`directory-${mine.event}`,mine.workspace,mine.identity,mine.project).run();
+      const context=await resolveNativePortalWorkspaceReadContext(env,mine.nativeOwner,mine.workspace);expect(context).not.toBeNull();
+      const authorization=await resolveNativeFeedbackTarget(env,mine.nativeOwner,context!,{kind:'project',projectId:mine.project});
+      expect((await createNativeFeedbackRecord(db,authorization,'Pre-migration native feedback',`feedback-pre-claim-${mine.event}`)).record.status)
+        .toBe('new');
+    }finally{
+      await db.prepare(`ALTER TABLE portal_client_authority_workspace_claims_pending_migration
+        RENAME TO portal_client_authority_workspace_claims`).run();
+    }
   });
 
   it.each(['version','email','rebind'])('denies stale eligibility %s before and during state writes',async change=>{
