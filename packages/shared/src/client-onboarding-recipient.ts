@@ -12,12 +12,18 @@ export interface ClientOnboardingRecipientStatusRequestV1 extends ClientOnboardi
   submissionId: string;
 }
 export interface ClientOnboardingRecipientUnavailableV1 { ok: false; protocolVersion: 1; code: "unavailable"; }
-export interface ClientOnboardingRecipientPendingV1 { ok: true; protocolVersion: 1; state: "pending"; }
+export interface ClientOnboardingRecipientPendingV1 {
+  ok: true; protocolVersion: 1; state: "pending"; invitationId: string; expiresAt: string;
+}
+export interface ClientOnboardingRecipientSessionSubmittedV1 {
+  ok: true; protocolVersion: 1; state: "submitted"; invitationId: string; expiresAt: string; submissionId: string;
+}
 export interface ClientOnboardingRecipientSubmittedV1 {
-  ok: true; protocolVersion: 1; state: "submitted"; submissionId: string;
+  ok: true; protocolVersion: 1; state: "submitted"; invitationId: string;
+  submissionId: string; fieldsSha256: string;
 }
 export type ClientOnboardingRecipientSessionResultV1 = ClientOnboardingRecipientPendingV1
-  | ClientOnboardingRecipientSubmittedV1 | ClientOnboardingRecipientUnavailableV1;
+  | ClientOnboardingRecipientSessionSubmittedV1 | ClientOnboardingRecipientUnavailableV1;
 export type ClientOnboardingRecipientSubmitResultV1 = ClientOnboardingRecipientSubmittedV1
   | ClientOnboardingRecipientUnavailableV1;
 export type ClientOnboardingRecipientStatusResultV1 = ClientOnboardingRecipientPendingV1
