@@ -10,7 +10,10 @@ export type WorkspaceBindingReceipt = Readonly<{ok:true;protocolVersion:1;status
   operationId:string;clientAuthorityId:string;workspaceId:string;projectionSourceId:string;sourceWorkspaceId:string;
   rootType:"organization"|"standalone_client";rootPublicId:string;checkpoint:Checkpoint;state:"inactive";revision:1}>
   | Readonly<{ok:false;protocolVersion:1;code:"disabled"|"invalid"|"conflict"|"temporarily-unavailable";retryable:boolean}>;
-export interface ClientAuthorityWorkspaceBindingBinding {bindWorkspace(input:WorkspaceBindingCommand):Promise<unknown>}
+export interface ClientAuthorityWorkspaceBindingBinding {
+  bindWorkspace(input:WorkspaceBindingCommand):Promise<unknown>;
+  getBindingStatus?(input:Readonly<{protocolVersion:1;operationId:string}>):Promise<unknown>;
+}
 export type WorkspaceBindingEnv = Pick<Env,"OPS_DB"|"CLIENT_AUTHORITY_WORKSPACE_BINDING"|"CLIENT_AUTHORITY_WORKSPACE_BINDING_OUTBOX_ENABLED">;
 
 interface SelectionRow {selection_id:string;client_authority_id:string;workspace_id:string;source_id:string;
@@ -141,10 +144,28 @@ function successReceipt(value:unknown,command:WorkspaceBindingCommand):value is 
     &&checkpoint.sourceSequence===command.expectedCheckpoint.sourceSequence
     &&checkpoint.snapshotGenerationId===command.expectedCheckpoint.snapshotGenerationId);
 }
+function successStatus(value:unknown,command:WorkspaceBindingCommand):boolean{
+  const row=plain(value,["ok","protocolVersion","status","operationId","clientAuthorityId","workspaceId",
+    "projectionSourceId","sourceWorkspaceId","rootType","rootPublicId","checkpoint","state","revision"]);
+  if(!row||row.ok!==true||row.protocolVersion!==1||row.status!=="recorded"
+    ||row.operationId!==command.operationId||row.clientAuthorityId!==command.clientAuthorityId
+    ||row.workspaceId!==command.workspaceId||row.projectionSourceId!==command.projectionSourceId
+    ||row.sourceWorkspaceId!==command.sourceWorkspaceId||row.rootType!==command.rootType
+    ||row.rootPublicId!==command.rootPublicId||row.state!=="inactive"||row.revision!==1)return false;
+  const checkpoint=plain(row.checkpoint,["sourceGeneration","sourceSequence","snapshotGenerationId"]);
+  return Boolean(checkpoint&&checkpoint.sourceGeneration===command.expectedCheckpoint.sourceGeneration
+    &&checkpoint.sourceSequence===command.expectedCheckpoint.sourceSequence
+    &&checkpoint.snapshotGenerationId===command.expectedCheckpoint.snapshotGenerationId);
+}
 function definitiveRejection(value:unknown):"invalid"|"conflict"|null{
   const row=plain(value,["ok","protocolVersion","code","retryable"]);
   return row&&row.ok===false&&row.protocolVersion===1&&row.retryable===false
     &&(row.code==="invalid"||row.code==="conflict")?row.code:null;
+}
+function explicitRetryableFailure(value:unknown):boolean{
+  const row=plain(value,["ok","protocolVersion","code","retryable"]);
+  return Boolean(row&&row.ok===false&&row.protocolVersion===1&&row.retryable===true
+    &&(row.code==="disabled"||row.code==="temporarily-unavailable"));
 }
 export type WorkspaceBindingDispatchResult={status:"disabled"|"idle"}
   |{status:"acknowledged"|"retry"|"rejected";operationId:string;code?:string};
@@ -179,10 +200,18 @@ export async function dispatchNextPortalWorkspaceBinding(env:WorkspaceBindingEnv
     sourceWorkspaceId:row.source_workspace_id,rootType:row.root_type,rootPublicId:row.root_public_id,
     expectedCheckpoint:{sourceGeneration:row.checkpoint_source_generation,
       sourceSequence:row.checkpoint_source_sequence,snapshotGenerationId:row.checkpoint_snapshot_generation_id}};
-  let response:unknown;
-  try{response=await env.CLIENT_AUTHORITY_WORKSPACE_BINDING.bindWorkspace(command);}catch{response=null;}
-  if(successReceipt(response,command)){
-    const receipt=response;
+  let response:unknown,ambiguous=false;
+  try{response=await env.CLIENT_AUTHORITY_WORKSPACE_BINDING.bindWorkspace(command);}catch{ambiguous=true;response=null;}
+  const directReceipt=successReceipt(response,command);
+  const rejected=definitiveRejection(response);
+  if(!directReceipt&&!rejected&&!explicitRetryableFailure(response))ambiguous=true;
+  let recovered=false;
+  if(ambiguous&&typeof env.CLIENT_AUTHORITY_WORKSPACE_BINDING.getBindingStatus==="function"){
+    try{recovered=successStatus(await env.CLIENT_AUTHORITY_WORKSPACE_BINDING.getBindingStatus(
+      {protocolVersion:1,operationId:command.operationId}),command);}catch{recovered=false;}
+  }
+  if(directReceipt||recovered){
+    const replayed=successReceipt(response,command)?response.status==="duplicate":true;
     try{await db.batch([
       db.prepare(`INSERT OR IGNORE INTO client_portal_workspace_binding_outbox_receipts
         (operation_id,client_authority_id,workspace_id,projection_source_id,source_workspace_id,
@@ -193,7 +222,7 @@ export async function dispatchNextPortalWorkspaceBinding(env:WorkspaceBindingEnv
           checkpoint_snapshot_generation_id,'inactive',1,?,? FROM client_portal_workspace_binding_outbox
         WHERE operation_id=? AND state='dispatching' AND claim_token=?
           AND claim_until>strftime('%Y-%m-%dT%H:%M:%fZ','now')`)
-        .bind(receipt.status==="duplicate"?1:0,claimToken,row.operation_id,claimToken),
+        .bind(replayed?1:0,claimToken,row.operation_id,claimToken),
       db.prepare(`UPDATE client_portal_workspace_binding_outbox SET state='acknowledged',
         attempt_count=attempt_count+1,last_error_code=NULL,claim_token=NULL,claim_until=NULL,
         acknowledged_claim_token=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
@@ -208,7 +237,6 @@ export async function dispatchNextPortalWorkspaceBinding(env:WorkspaceBindingEnv
     return acknowledged===1?{status:"acknowledged",operationId:row.operation_id}
       :{status:"retry",operationId:row.operation_id,code:"lease-lost"};
   }
-  const rejected=definitiveRejection(response);
   const attempts=row.attempt_count+1,delay=Math.min(3600,15*2**Math.min(attempts,8));
   await db.prepare(`UPDATE client_portal_workspace_binding_outbox
     SET state=?,attempt_count=attempt_count+1,last_error_code=?,

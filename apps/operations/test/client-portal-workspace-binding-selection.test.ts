@@ -216,6 +216,74 @@ describe("inactive Ops portal workspace binding selection",()=>{
       .first("count")).toBe(1);
   });
 
+  it("recovers an exact Client receipt after a null binding response",async()=>{
+    const selected=await selectPortalWorkspaceBinding(db,actor,command());
+    await enqueuePortalWorkspaceBinding(db,actor,selected.selectionId);
+    let statusCalls=0;
+    const env={OPS_DB:db,CLIENT_AUTHORITY_WORKSPACE_BINDING_OUTBOX_ENABLED:"true",
+      CLIENT_AUTHORITY_WORKSPACE_BINDING:{
+        bindWorkspace:async()=>null,
+        getBindingStatus:async(input:{protocolVersion:1;operationId:string})=>{
+          statusCalls++;
+          return {ok:true,protocolVersion:1,status:"recorded",operationId:input.operationId,
+            clientAuthorityId:selected.clientAuthorityId,workspaceId:selected.workspaceId,
+            projectionSourceId:selected.sourceId,sourceWorkspaceId:selected.sourceWorkspaceId,
+            rootType:selected.rootType,rootPublicId:selected.rootPublicId,
+            checkpoint:selected.checkpoint,state:"inactive",revision:1};
+        },
+      }} satisfies WorkspaceBindingEnv;
+    expect(await dispatchNextPortalWorkspaceBinding(env)).toEqual({status:"acknowledged",operationId:selected.selectionId});
+    expect(statusCalls).toBe(1);
+    expect(await db.prepare("SELECT replayed FROM client_portal_workspace_binding_outbox_receipts WHERE operation_id=?")
+      .bind(selected.selectionId).first("replayed")).toBe(1);
+  });
+
+  it.each(["missing","malformed","mismatched","unavailable"] as const)(
+    "retries when lost-response status is %s",async(kind)=>{
+      const selected=await selectPortalWorkspaceBinding(db,actor,command());
+      await enqueuePortalWorkspaceBinding(db,actor,selected.selectionId);
+      const env={OPS_DB:db,CLIENT_AUTHORITY_WORKSPACE_BINDING_OUTBOX_ENABLED:"true",
+        CLIENT_AUTHORITY_WORKSPACE_BINDING:{
+          bindWorkspace:async()=>{throw Error("response lost");},
+          getBindingStatus:async(input:{protocolVersion:1;operationId:string})=>{
+            if(kind==="unavailable")throw Error("status unavailable");
+            if(kind==="missing")return {ok:false,protocolVersion:1,code:"not_found",retryable:false};
+            if(kind==="malformed")return {ok:true,protocolVersion:1,status:"recorded",operationId:input.operationId};
+            return {ok:true,protocolVersion:1,status:"recorded",operationId:input.operationId,
+              clientAuthorityId:selected.clientAuthorityId,workspaceId:"wrong-workspace",
+              projectionSourceId:"project-alpha:primary",sourceWorkspaceId:"pa-workspace-a",
+              rootType:"organization",rootPublicId:rootA,checkpoint:selected.checkpoint,state:"inactive",revision:1};
+          },
+        }} satisfies WorkspaceBindingEnv;
+      expect(await dispatchNextPortalWorkspaceBinding(env)).toEqual({status:"retry",operationId:selected.selectionId,
+        code:"transport-or-ambiguous"});
+      expect(await db.prepare("SELECT count(*) count FROM client_portal_workspace_binding_outbox_receipts").first("count")).toBe(0);
+    });
+
+  it("does not acknowledge recovered status after the dispatch lease is lost",async()=>{
+    const selected=await selectPortalWorkspaceBinding(db,actor,command());
+    await enqueuePortalWorkspaceBinding(db,actor,selected.selectionId);
+    let sent:WorkspaceBindingCommand|undefined;
+    const env={OPS_DB:db,CLIENT_AUTHORITY_WORKSPACE_BINDING_OUTBOX_ENABLED:"true",
+      CLIENT_AUTHORITY_WORKSPACE_BINDING:{bindWorkspace:async(input:WorkspaceBindingCommand)=>{sent=input;throw Error("response lost");},
+        getBindingStatus:async()=>{
+          // Simulate wall-clock lease expiry without making the test sleep for two minutes.
+          await db.prepare("DROP TRIGGER client_portal_workspace_binding_outbox_control_guard").run();
+          await db.prepare(`UPDATE client_portal_workspace_binding_outbox
+            SET claim_until=strftime('%Y-%m-%dT%H:%M:%fZ','now','-1 second') WHERE operation_id=?`)
+            .bind(selected.selectionId).run();
+          if(!sent)throw Error("command not sent");
+          return {ok:true,protocolVersion:1,status:"recorded",operationId:sent.operationId,
+            clientAuthorityId:sent.clientAuthorityId,workspaceId:sent.workspaceId,
+            projectionSourceId:sent.projectionSourceId,sourceWorkspaceId:sent.sourceWorkspaceId,
+            rootType:sent.rootType,rootPublicId:sent.rootPublicId,checkpoint:sent.expectedCheckpoint,
+            state:"inactive",revision:1};
+        }}} satisfies WorkspaceBindingEnv;
+    expect(await dispatchNextPortalWorkspaceBinding(env)).toEqual({status:"retry",operationId:selected.selectionId,
+      code:"lease-lost"});
+    expect(await db.prepare("SELECT count(*) count FROM client_portal_workspace_binding_outbox_receipts").first("count")).toBe(0);
+  });
+
   it("dispatches only the explicitly requested operation",async()=>{
     const first=await selectPortalWorkspaceBinding(db,actor,command());
     const second=await selectPortalWorkspaceBinding(db,actor,command({

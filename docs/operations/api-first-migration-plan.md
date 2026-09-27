@@ -2,6 +2,32 @@
 
 Updated September 27, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
 
+### September 27 — local inactive-binding receipt recovery follow-on
+
+The default-off PR122 staging deployment and its exact-head ten-job CI run
+passed, but neither an inactive binding pilot nor client access has been
+accepted live. In a separate local follow-on, the Client named service
+entrypoint now offers a route-less, default-off `getBindingStatus` for an
+immutable `0218` operation receipt. Operations uses it only after an ambiguous
+`bindWorkspace` result and acknowledges the `0144` outbox only when the
+returned operation, authority/workspace/source/root tuple, checkpoint,
+inactive state and revision match the frozen selection under its live lease.
+`not_found`, malformed or mismatched status, an unavailable reader, and lease
+loss remain retryable; an explicit binding rejection remains a rejection.
+The recovery call reads evidence only and creates no membership, entitlement,
+claim, invitation, Delivery grant or public link. Focused local Client and
+Operations tests, typechecks and generated-type validation passed; the
+independent QA finding for a `null` binding response was fixed and covered by
+an additional regression. This follow-on has not been staged or enabled.
+
+The remaining end-state gap is **not** to create PA portal principals through
+the new API. That would preserve the legacy PA authority model. The agreed
+replacement is Operations-owned eligibility with a separately reviewed
+per-workspace v2 grant/revoke protocol and Client-side enforcement. The
+invitation policy, scope vocabulary, legacy-member disposition, approvers and
+rollback target below remain decisions to settle before active claims or
+grants can safely be implemented. Keep all authority writers off meanwhile.
+
 ### September 27 — portal eligibility boundary for the API-first cutover
 
 - Read-only PA/Client source audit found that Project Alpha already has

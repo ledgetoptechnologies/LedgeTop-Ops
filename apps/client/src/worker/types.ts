@@ -22,6 +22,8 @@ export interface Env {
   CLIENT_AUTHORITY_WORKSPACE_CLAIM_WRITER_ENABLED?: string;
   /** Route-less, inert Ops customer-to-workspace reservation writer. Default-off. */
   CLIENT_AUTHORITY_WORKSPACE_BINDING_WRITER_ENABLED?: string;
+  /** Default-off private lost-response recovery read; never grants or activates access. */
+  CLIENT_AUTHORITY_WORKSPACE_BINDING_STATUS_ENABLED?: string;
   CLIENT_PORTAL_ORIGIN?: string;
   CLIENT_PORTAL_ORIGINS?: string;
   /** Legacy delivery/portal origins retained only for compatible reads and canonical redirects. */

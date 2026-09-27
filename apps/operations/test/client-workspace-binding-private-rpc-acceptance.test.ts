@@ -3,7 +3,8 @@ import {Miniflare} from "miniflare";
 import {afterEach,beforeEach,describe,expect,it,vi} from "vitest";
 vi.mock("cloudflare:workers",()=>({WorkerEntrypoint:class{}}));
 import {splitD1MigrationStatements} from "../../client/test/helpers/d1-migrations";
-import {bindClientAuthorityWorkspace} from "../../client/src/worker/client-authority-workspace-binding-entrypoint";
+import {bindClientAuthorityWorkspace,getClientAuthorityWorkspaceBindingStatus} from
+  "../../client/src/worker/client-authority-workspace-binding-entrypoint";
 import {selectPortalWorkspaceBinding} from "../src/worker/client-portal-workspace-binding-selection";
 import {dispatchNextPortalWorkspaceBinding,enqueuePortalWorkspaceBinding,
   type WorkspaceBindingCommand,type WorkspaceBindingEnv} from "../src/worker/client-portal-workspace-binding-outbox";
@@ -87,18 +88,15 @@ describe("joined Operations to Client inactive workspace binding",()=>{
         CLIENT_AUTHORITY_WORKSPACE_BINDING_WRITER_ENABLED:"true"},command);
       if(loseFirstResponse){loseFirstResponse=false;throw new Error("response lost after Client commit");}
       return receipt;
-    }};
+    },getBindingStatus:(input:{protocolVersion:1;operationId:string})=>getClientAuthorityWorkspaceBindingStatus({
+      DELIVERY_DB:clientDb,CLIENT_AUTHORITY_WORKSPACE_BINDING_STATUS_ENABLED:"true"},input)};
     const env={OPS_DB:opsDb,CLIENT_AUTHORITY_WORKSPACE_BINDING_OUTBOX_ENABLED:"true",
       CLIENT_AUTHORITY_WORKSPACE_BINDING:binding} satisfies WorkspaceBindingEnv;
 
-    expect(await dispatchNextPortalWorkspaceBinding(env)).toEqual({status:"retry",operationId:selectionId,
-      code:"transport-or-ambiguous"});
+    expect(await dispatchNextPortalWorkspaceBinding(env)).toEqual({status:"acknowledged",operationId:selectionId});
     expect(await clientDb.prepare("SELECT state FROM portal_client_authority_workspace_bindings WHERE operation_id=?")
       .bind(selectionId).first("state")).toBe("inactive");
-    await opsDb.prepare(`UPDATE client_portal_workspace_binding_outbox
-      SET next_attempt_at=strftime('%Y-%m-%dT%H:%M:%fZ','now','-1 minute') WHERE operation_id=?`).bind(selectionId).run();
-    expect(await dispatchNextPortalWorkspaceBinding(env)).toEqual({status:"acknowledged",operationId:selectionId});
-    expect(sent).toEqual([selectionId,selectionId]);
+    expect(sent).toEqual([selectionId]);
 
     const client=await clientDb.prepare(`SELECT client_authority_id,workspace_id,projection_source_id,
       source_workspace_id,root_type,root_public_id,reconciliation_source_generation,
