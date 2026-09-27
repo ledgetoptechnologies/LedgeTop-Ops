@@ -68,7 +68,7 @@ used for status and submit, and a no-secret URL makes no recipient API call.
 The fixture bypasses the staging Worker and cannot clear Edge's live
 `ERR_BLOCKED_BY_CLIENT` gate or prove a real invitation flow.
 
-An isolated, unpublished Operations follow-on now adds migration `0145` and
+Draft Ops PR126, currently at `3f8def709ca3e6036ec4324c176ee4ab86348348`, adds migration `0145` and
 a private, default-off v2 authority outbox bound to the Client `0219`
 entrypoint. It requires the exact acknowledged inactive workspace binding,
 an explicitly selected recipient identity binding for the same Ops customer,
@@ -86,7 +86,12 @@ inventory and evidence examples now include the still-disabled binding and
 both migrations. The browser-side `ERR_BLOCKED_BY_CLIENT` was reproduced in
 the in-app browser using only the synthetic no-secret path; no staging Worker
 response or real invitation was obtained. Staging deployment, live authority
-acceptance, and production PA owner checkpoint remain open.
+acceptance, and production PA owner checkpoint remain open. Its first full CI
+run passed nine jobs and failed one stale migration-order assertion that still
+expected `0144` to be the last Ops migration. The assertion was updated to
+`0145`; the focused migration suite passed 22/22, and all ten corrected-head
+CI jobs subsequently passed. This is source/CI evidence only, not a staging
+authority or portal-access acceptance result.
 
 The first direct-SQL inventory found 17 Client Worker source files referring
 to `portal_v2_workspace_memberships` or `portal_v2_entitlements`. They include
@@ -107,6 +112,64 @@ deny-only `0216` claim as a shortcut: it would remove existing PA access
 before the replacement reader is ready. The v2 receiver currently requires
 `scopes: []`; nonempty service and content scopes still need a separate
 reviewed contract and atomic materialization before portal enrollment.
+
+The focused identity-to-authority audit traced the existing Cloudflare Access
+principal by exact `(issuer, subject)` to `portal_v2_identities`, but `0219`
+intentionally does not rely on that legacy identity table. The inactive `0218`
+binding proves a selected, source-qualified workspace and reconcile checkpoint;
+it is not a person's enrollment or an entitlement. `0219` holds an active or
+revoked workspace ownership head and per-principal grant head, but its empty
+scopes and lack of a material reader mean it cannot authorize even a portal
+home page. A default-off, authenticated status reader may safely prove receipt
+and revocation propagation by joining the exact `0218` binding, `0219`
+workspace head, principal head, ownership epoch and live workspace for the
+current Access issuer/subject. It must reveal no PA root, source, workspace
+content, links, membership, or billing data and is **not** client access.
+Before a material reader is enabled, define an explicit versioned capability
+and resource manifest, recipient lifecycle/expiry and source-checkpoint fences,
+then atomically apply them to every list, detail, mutation, download, session
+and notification consumer of the selected first content surface. Do not
+interpret an empty `0219` scope as `workspace.view`, reuse PA entitlements as
+fallback, or let a status result imply file/document access.
+
+The existing Operations Client Hub service-assignment list is still a read of
+PA-projected `pa_service_assignments` with receiver/source/checkpoint gates
+(`client-service-assignments.ts`), not an Operations-owned enrollment record.
+It cannot by itself decide which drone or website sections an Ops-authorized
+client may see. The replacement needs an explicit Ops customer/service
+enrollment decision and source-qualified capability projection; otherwise a
+generic v2 person grant would silently turn a PA sales/service assignment
+into portal eligibility. Keep service labels separate from document, Delivery,
+website-edit, billing and file grants.
+
+An independent delivery-path review ruled out simply pointing the existing
+authenticated Delivery reader at a v2 principal head. Its candidate and
+notification queries require `portal_v2_identities`, active legacy workspace
+memberships, and sometimes PA principal/recipient rows; claim guards
+deliberately exclude a claimed workspace. An Ops v2 principal is only an exact
+Access issuer/subject and must not be made into a legacy member to reuse that
+path. The first Ops-owned content release instead needs a versioned recipient
+binding, explicit Ops delivery grant to an exact folder/version/prefix, and
+event/handle state fenced by the workspace epoch and principal/grant revision,
+with final rechecks before bytes are returned. Existing anonymous public-link
+routes must stay independent. A service-aware home can precede that data slice,
+but it must honestly show unavailable content until those grants exist.
+
+For the service-aware home, the nearest existing Ops anchors are durable
+`operations_directory_records`, the exact Access `(issuer,subject)` recipient
+bindings, and the `directory.enrollment.manage` staff permission. A candidate
+additive model is a provider-qualified service definition (`ltds`/`ltt`), a
+customer-service enrollment with revisioned active/revoked state and immutable
+staff audit, and an explicit recipient-to-enrollment relation for each exact
+Ops customer. A person in both businesses can have two bindings; business-party
+display grouping does not merge or inherit service authority. Project Alpha
+service assignments remain read-only evidence. The Client projection must
+carry exact customer, recipient, workspace binding/epoch, service and decision
+revisions; a missing or revoked projection shows no service. One authorized
+enrollment action with current ACL and idempotent receipt is the ordinary
+workflow; do not impose compensation's independent-approver rule on basic
+service enrollment without a business decision. Service visibility alone must
+not authorize files, requests, website edits or billing.
 
 ### September 27 — portal eligibility boundary for the API-first cutover
 

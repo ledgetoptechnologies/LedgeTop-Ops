@@ -114,6 +114,7 @@
   "services": [
     { "binding": "CLIENT_AUTHORITY_WORKSPACE_BINDING", "service": "ledgetop-clients-staging", "entrypoint": "ClientAuthorityWorkspaceBindingIngress" },
     { "binding": "CLIENT_PORTAL_ACCESS_AUTHORITY", "service": "ledgetop-clients-staging", "entrypoint": "OpsPortalAccessAuthorityIngress" },
+    { "binding": "CLIENT_PORTAL_AUTHORITY_V2", "service": "ledgetop-clients-staging", "entrypoint": "ClientPortalAuthorityV2Ingress" },
     { "binding": "OPS_INVENTORY_CATALOG_STAGING", "service": "ledgetop-clients-staging", "entrypoint": "OpsInventoryCatalogStagingIngress" },
     { "binding": "OPS_INVENTORY_CATALOG_PROMOTION", "service": "ledgetop-clients-staging", "entrypoint": "OpsInventoryCatalogPromotionCoordinator" }
   ],

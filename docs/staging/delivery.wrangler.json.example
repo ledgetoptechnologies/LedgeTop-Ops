@@ -70,6 +70,7 @@
     "CLIENT_AUTHORITY_WORKSPACE_BINDING_STATUS_ENABLED": "false",
     "CLIENT_PORTAL_AUTHORITY_V2_WRITER_ENABLED": "false",
     "CLIENT_PORTAL_AUTHORITY_V2_STATUS_ENABLED": "false",
+    "CLIENT_PORTAL_AUTHORITY_V2_ENROLLMENT_STATUS_ENABLED": "false",
     "CLIENT_PORTAL_ORIGIN": "https://client-staging.ledgetopdroneservices.com",
     "CLIENT_PORTAL_ORIGINS": "https://client-staging.ledgetopdroneservices.com,https://portal-staging.ledgetoptechnologies.com",
     "CLIENT_ACCESS_TEAM_DOMAIN": "https://ledgetoptechnologies.cloudflareaccess.com",
