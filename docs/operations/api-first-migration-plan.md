@@ -54,6 +54,111 @@ Updated September 26, 2026. The owner approved implementation and resumption aft
   the existing Client membership uniqueness and PA repair path can otherwise
   steal or resurrect a revoked Ops-owned membership.
 
+#### Next-stage design: per-workspace portal ownership claim (not implemented)
+
+The next increment must establish ownership before the shadow binding can affect
+authorization. Migration `0215` cannot do that as written: its authority key is
+only `(client_authority_id, issuer, subject)`, and its command contains no
+`workspaceId`. It therefore cannot say which workspace Operations owns, fence a
+PA writer for that workspace, or distinguish the same person receiving different
+decisions in different workspaces. The present shadow tables remain useful as
+receipt/audit evidence only; they must not be read as proof of an authorization
+claim or live readiness.
+
+The collision is narrower than a blanket statement that every PA membership
+upsert is unsafe, but it is still release-blocking. The normal PA projection
+refresh in `project-alpha-portal.ts` and the native auto-enrollment membership
+upsert only update a conflict when the existing membership is already
+`source_type='project_alpha'`. By contrast, the legacy login-repair path in
+`workspace-v2.ts` explicitly changes an Operations eligibility membership to
+`project_alpha`, and both automatic-eligibility paths can restore PA
+entitlements with an unconditional same-ID conflict update. Those login repair
+and entitlement writes are not protected by an Operations ownership claim.
+Consequently, merely teaching authorization to read `0215` could allow a PA
+login/repair or later projection to regain access after an Operations revoke.
+
+Implement the ownership boundary as a Client-local, per-workspace claim and
+epoch/fence, with these properties:
+
+- The versioned Ops command must identify the canonical Client `workspaceId`,
+  stable Operations client authority ID, exact Access `(issuer, subject)`, the
+  desired grant/revoke state, and the expected claim epoch/revision. Client must
+  validate an explicitly reviewed one-to-one workspace/authority mapping before
+  acquisition; that mapping does not exist in `0215` and must be created by a
+  separate guarded step. Email and PA IDs remain non-authoritative metadata and
+  cannot select the workspace.
+- Client must store one current ownership record for the workspace plus
+  immutable claim history/receipts. An increasing claim epoch is the fencing
+  token. Memberships, entitlements and any repairable login bridge created under
+  the claim must carry or be provably joined to that exact workspace, owner and
+  epoch. Every PA projection refresh, automatic-eligibility write, entitlement
+  repair and login-repair mutation must reject or no-op when the current
+  workspace claim is Operations-owned or when its observed epoch is stale.
+- Claim acquisition, its Client membership/entitlement materialization, and
+  Client receipt/audit writes must commit in one first-primary Client D1 batch.
+  Revocation must first install a newer deny/tombstone fence, then revoke all
+  materialized grant paths for that claim in the same Client transaction. Reads
+  must deny closed when the claim is revoked, missing its required materialized
+  state, ahead of a worker's understood protocol, or internally inconsistent.
+  Rollback is a new, owner-approved epoch transition, never deletion of the
+  tombstone or replay of an older PA state.
+- Operations D1 and Client D1 have no cross-D1 atomic transaction. The Ops
+  outbox therefore remains an at-least-once coordinator, not the commit point:
+  retain the pending intent until a matching Client receipt for the exact
+  workspace/epoch is recorded, retry idempotently after lost responses, and
+  expose conflicts for reconciliation. Do not mark Ops activation complete or
+  invite a user while Client is unacknowledged. For revoke or rollback,
+  Operations must deny locally before dispatch and remain deny-closed while the
+  Client receipt is missing; an operator-visible stuck state is safer than
+  restoring prior access. Client access cannot be promised revoked while its
+  D1 is unreachable and the revoke has not committed there; this is an explicit
+  cross-system availability limit, not a successful revoke.
+- Keep every new producer, claim reader and PA-writer fence separately
+  default-off. Enabling the shadow outbox alone must still have no authorization
+  effect. Rollout must claim explicitly selected workspaces only; unclaimed
+  workspaces retain current behavior. Do not rewrite, rotate, revoke or recreate
+  existing Delivery/public-link rows as a side effect. Prove instead that legacy
+  password/cookie, expiry, revocation, Range/resume and already-issued links
+  behave unchanged across claim, revoke and rollback. New public links remain
+  outside this ownership command.
+
+Required tests and acceptance before any default-on decision:
+
+- Migration/contract tests reject missing or mismatched `workspaceId`, stale or
+  skipped epochs, altered idempotency replay, authority remapping, PA IDs and
+  email-selected claims. Real-D1 concurrency tests prove one winner for claim,
+  activation, revoke and rollback and immutable receipts/tombstones.
+- Joined Client tests exercise every competing writer: PA snapshot/delta
+  membership refresh, native automatic eligibility, legacy login repair,
+  entitlement repair and invitation-derived access. After an Operations revoke,
+  repeated login and newer PA projection delivery must not resurrect membership,
+  entitlement, legacy bridge or effective authorization. A stale worker/epoch
+  and missing materialization must deny closed.
+- Cross-D1 fault tests cover delivery before/after Ops commit, malformed or lost
+  Client responses, duplicate delivery, Client commit with lost receipt, retry,
+  conflict, and reconciliation. Rollback tests must show that only a new
+  approved epoch with a PA checkpoint newer than the claim can restore the
+  selected prior owner, and that old queued PA or Ops messages remain fenced.
+- Staging acceptance must use a disposable workspace first, verify flags off,
+  claim/activate/login/revoke/re-login/rollback end to end, verify both D1
+  receipts and effective authorization, and run the existing-public-link parity
+  canary without changing its records. Repeat against both PA instances where
+  their data can affect the workspace. Record exact Worker versions, migrations,
+  flags, claim epochs and rollback evidence.
+
+The owner PA checkpoint remains a hard stop after that evidence: the owner must
+approve the exact workspace set, which PA producer(s) are fenced, the observed
+epoch and rollback target, and the order for enabling Client enforcement and
+draining the legacy PA outbox. Until that checkpoint is signed off, keep the
+claim/enforcement flags off, do not drain PA, and do not describe the shadow
+channel, source tests or a disposable staging exercise as a live portal cutover.
+
+Migration `0216` is only an inert, one-way claim-head foundation. Its released
+heads cannot be reactivated, and it has no command writer, audit receipt,
+membership conversion, runtime reader or PA repair fence. A successor migration
+and joined tests must implement the reviewed rollback protocol before any
+workspace is actually claimed; applying `0216` alone is not cutover readiness.
+
 ### September 26, 2026 — default-off staging versions and synthetic Delivery parity
 
 - Draft PR #119 at `12aeff925425d310f5a0f3afd4a3120eec81beef` passed all ten CI jobs in run `36075266802`. Exact combined candidate versions were uploaded, then staging-only Delivery secrets were added through inactive Worker versions without writing their values to source or documentation. The active Client staging version is `f00c3a7f-307a-4ec1-802e-a15039173b3b` and active Operations staging version is `4892f7b6-81b8-4a47-9d9a-28642681f52c`, both at 100%. The new onboarding and recipient flags remain `false`; client portal activation remains off. Production was not deployed.
