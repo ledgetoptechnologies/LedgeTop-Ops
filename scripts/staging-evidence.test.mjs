@@ -669,7 +669,7 @@ test("checked-in evidence example stays complete as migrations, flags, gates, an
   assert.equal(example.migrations.freshBootstrap.mode, "generated-empty-d1");
   assert.deepEqual(example.migrations.freshBootstrap.applications.delivery.transformedFiles, ["0002_seed_initial_staff.sql"]);
   assert.deepEqual(example.migrations.freshBootstrap.applications.operations.transformedFiles, ["0002_seed_acl.sql"]);
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(-21), [
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(-22), [
     "0124_project_alpha_project_adoption_review_evidence.sql",
     "0125_project_alpha_existing_directory_binding_activation.sql",
     "0126_project_alpha_project_active_directory_mapping_bridge.sql",
@@ -691,12 +691,13 @@ test("checked-in evidence example stays complete as migrations, flags, gates, an
     "0142_client_portal_access_authority_outbox.sql",
     "0143_client_portal_workspace_binding_selection.sql",
     "0144_client_portal_workspace_binding_outbox.sql",
+    "0145_client_portal_authority_v2_outbox.sql",
   ]);
   assert.deepEqual(
     fs.readdirSync(path.join(root, "apps", "operations", "migrations")).filter((name) => REQUIRED_STAGING_MIGRATIONS.operations.includes(name)).sort().slice(-69),
     REQUIRED_STAGING_MIGRATIONS.operations.slice(-69),
   );
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-33), [
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-34), [
     "0187_authenticated_content_audit.sql",
     "0188_native_feedback_completion_notices.sql",
     "0189_primary_staff_folder_bindings.sql",
@@ -730,6 +731,7 @@ test("checked-in evidence example stays complete as migrations, flags, gates, an
     "0216_client_authority_workspace_ownership_claim.sql",
     "0217_client_authority_workspace_claim_evidence.sql",
     "0218_client_authority_workspace_binding.sql",
+    "0219_operations_portal_authority_v2.sql",
   ]);
   for (const app of ["delivery", "operations", "ops-sync"]) assert.deepEqual(new Set(example.deployments[app].disabledFeatureFlags), new Set(REQUIRED_DISABLED_FEATURE_FLAGS[app]), `deployments.${app}.disabledFeatureFlags`);
   assert.deepEqual(new Set(Object.keys(example.externalGates)), new Set(REQUIRED_EXTERNAL_GATES));
@@ -795,7 +797,7 @@ test("migration reapply evidence uses Wrangler's ledger instead of replaying raw
   }
 });
 
-test("pins both Client 0199 filenames and the ordered 0200-0218 migration suffix in the release contract", () => {
+test("pins both Client 0199 filenames and the ordered 0200-0219 migration suffix in the release contract", () => {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const suffix = [
     "0200_native_feedback_workspace_history.sql",
@@ -817,6 +819,7 @@ test("pins both Client 0199 filenames and the ordered 0200-0218 migration suffix
     "0216_client_authority_workspace_ownership_claim.sql",
     "0217_client_authority_workspace_claim_evidence.sql",
     "0218_client_authority_workspace_binding.sql",
+    "0219_operations_portal_authority_v2.sql",
   ];
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-suffix.length), suffix);
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.filter((name) => name.startsWith("0199_")), [

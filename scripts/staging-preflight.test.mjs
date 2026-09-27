@@ -332,7 +332,7 @@ test("requires every portal-v2 and Operations capability to be explicitly false"
   }
 });
 
-test("pins the native portal, Operations 0054-0144, both 0199 files, and the 0200-0219 release contract", () => {
+test("pins the native portal, Operations 0054-0145, both 0199 files, and the 0200-0219 release contract", () => {
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-37), [
     "0184_native_client_feedback.sql",
     "0185_native_service_request_ownership.sql",
@@ -372,7 +372,7 @@ test("pins the native portal, Operations 0054-0144, both 0199 files, and the 020
     "0218_client_authority_workspace_binding.sql",
     "0219_operations_portal_authority_v2.sql",
   ]);
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(-22), [
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(-23), [
     "0123_native_directory_authority_history.sql",
     "0124_project_alpha_project_adoption_review_evidence.sql",
     "0125_project_alpha_existing_directory_binding_activation.sql",
@@ -395,6 +395,7 @@ test("pins the native portal, Operations 0054-0144, both 0199 files, and the 020
     "0142_client_portal_access_authority_outbox.sql",
     "0143_client_portal_workspace_binding_selection.sql",
     "0144_client_portal_workspace_binding_outbox.sql",
+    "0145_client_portal_authority_v2_outbox.sql",
   ]);
   const nativeDirectoryStart = REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0054_project_alpha_directory_outbox.sql");
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(nativeDirectoryStart, nativeDirectoryStart + 3), [

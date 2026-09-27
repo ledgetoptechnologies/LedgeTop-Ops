@@ -45,6 +45,7 @@ export type Env = Omit<
   | "OPS_INVENTORY_CATALOG_STAGING"
   | "OPS_INVENTORY_CATALOG_PROMOTION"
   | "CLIENT_PORTAL_ACCESS_AUTHORITY"
+  | "CLIENT_PORTAL_AUTHORITY_V2"
   | "CLIENT_AUTHORITY_WORKSPACE_BINDING"
   | "CLIENT_AUTHORITY_WORKSPACE_BINDING_OUTBOX_ENABLED"
   | "CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ENABLED"
@@ -68,6 +69,8 @@ export type Env = Omit<
   /** Private shadow-authority RPC. It cannot materialize portal access. */
   CLIENT_PORTAL_ACCESS_AUTHORITY?: import("./client-portal-access-authority-outbox").ClientPortalAuthorityBinding;
   CLIENT_PORTAL_ACCESS_AUTHORITY_OUTBOX_ENABLED?: string;
+  CLIENT_PORTAL_AUTHORITY_V2?: import("./client-portal-authority-v2-outbox").ClientPortalAuthorityV2Binding;
+  CLIENT_PORTAL_AUTHORITY_V2_OUTBOX_ENABLED?: string;
   /** Private, default-off inactive Client workspace-binding RPC. No portal grant is created. */
   CLIENT_AUTHORITY_WORKSPACE_BINDING?: import("./client-portal-workspace-binding-outbox").ClientAuthorityWorkspaceBindingBinding;
   CLIENT_AUTHORITY_WORKSPACE_BINDING_OUTBOX_ENABLED?: string;
