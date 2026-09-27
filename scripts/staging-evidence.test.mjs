@@ -743,8 +743,11 @@ test("checked-in evidence example stays complete as migrations, flags, gates, an
   assert.deepEqual(example.activationPlan, { requestedFlags: [], approvalGranted: false });
 });
 
-test("Viewer processing cannot disappear from the staging release inventory", () => {
+test("recipient handoff keyring remains in the staging secret inventory", () => {
   assert(REQUIRED_STAGING_SECRETS.operations.includes("CLIENT_ONBOARDING_HANDOFF_KEYRING"));
+});
+
+test("Viewer processing cannot disappear from the staging release inventory", () => {
   assert(REQUIRED_STAGING_MIGRATIONS.operations.includes("0027_viewer_processing_control_plane.sql"));
   assert(REQUIRED_STAGING_SECRETS.operations.includes("VIEWER_SERVICE_HMAC_SECRET"));
   assert(REQUIRED_STAGING_SECRETS.operations.includes("VIEWER_EVENT_HMAC_SECRET"));
