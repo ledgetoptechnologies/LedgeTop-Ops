@@ -1,6 +1,7 @@
 import {WorkerEntrypoint} from "cloudflare:workers";
 import {
   writeClientAuthorityWorkspaceBinding,
+  readClientAuthorityWorkspaceBindingStatus,
   type ClientAuthorityWorkspaceBindingCommand,
 } from "./client-authority-workspace-binding";
 import type {Env} from "./types";
@@ -11,6 +12,8 @@ const CHECKPOINT_FIELDS=["sourceGeneration","sourceSequence","snapshotGeneration
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const ROOT_PUBLIC_ID=/^[0-9a-f]{32}$/;
 const MAX_BYTES=16*1024;
+const STATUS_FIELDS=["protocolVersion","operationId"] as const;
+const STATUS_MAX_BYTES=1024;
 
 export type ClientAuthorityWorkspaceBindingRpcCommand=Readonly<ClientAuthorityWorkspaceBindingCommand&{protocolVersion:1}>;
 export type ClientAuthorityWorkspaceBindingRpcReceipt=
@@ -19,6 +22,12 @@ export type ClientAuthorityWorkspaceBindingRpcReceipt=
     rootPublicId:string;checkpoint:{sourceGeneration:string;sourceSequence:number;snapshotGenerationId:string};
     state:"inactive";revision:1}>
   |Readonly<{ok:false;protocolVersion:1;code:"disabled"|"invalid"|"conflict"|"temporarily-unavailable";retryable:boolean}>;
+export type ClientAuthorityWorkspaceBindingStatusRpcReceipt=
+  |Readonly<{ok:true;protocolVersion:1;status:"recorded";operationId:string;clientAuthorityId:string;
+    workspaceId:string;projectionSourceId:string;sourceWorkspaceId:string;rootType:"organization"|"standalone_client";
+    rootPublicId:string;checkpoint:{sourceGeneration:string;sourceSequence:number;snapshotGenerationId:string};
+    state:"inactive";revision:1}>
+  |Readonly<{ok:false;protocolVersion:1;code:"not_found"|"disabled"|"invalid"|"temporarily-unavailable";retryable:boolean}>;
 
 function plainRecord(input:unknown,fields:readonly string[]):Record<string,unknown>|null{
   try{
@@ -45,6 +54,24 @@ function parse(input:unknown):ClientAuthorityWorkspaceBindingRpcCommand|null{
 const failure=(code:"disabled"|"invalid"|"conflict"|"temporarily-unavailable",retryable=false):ClientAuthorityWorkspaceBindingRpcReceipt=>
   ({ok:false,protocolVersion:1,code,retryable});
 
+export async function getClientAuthorityWorkspaceBindingStatus(
+  env:Pick<Env,"DELIVERY_DB"|"CLIENT_AUTHORITY_WORKSPACE_BINDING_STATUS_ENABLED">,input:unknown,
+):Promise<ClientAuthorityWorkspaceBindingStatusRpcReceipt>{
+  const value=plainRecord(input,STATUS_FIELDS);
+  if(!value||value.protocolVersion!==1||!bounded(value.operationId))return {ok:false,protocolVersion:1,code:"invalid",retryable:false};
+  try{
+    if(new TextEncoder().encode(JSON.stringify(value)).byteLength>STATUS_MAX_BYTES)
+      return {ok:false,protocolVersion:1,code:"invalid",retryable:false};
+    const result=await readClientAuthorityWorkspaceBindingStatus(env,value.operationId);
+    if(!result)return {ok:false,protocolVersion:1,code:"not_found",retryable:false};
+    return {ok:true,protocolVersion:1,status:"recorded",...result};
+  }catch(error){
+    return error instanceof Error&&error.message==="client-authority-workspace-binding-status-disabled"
+      ?{ok:false,protocolVersion:1,code:"disabled",retryable:true}
+      :{ok:false,protocolVersion:1,code:"temporarily-unavailable",retryable:true};
+  }
+}
+
 /** Private, route-less Operations adapter. The writer's independent release flag remains the final gate. */
 export async function bindClientAuthorityWorkspace(
   env:Pick<Env,"DELIVERY_DB"|"CLIENT_AUTHORITY_WORKSPACE_BINDING_WRITER_ENABLED">,input:unknown,
@@ -69,4 +96,5 @@ export async function bindClientAuthorityWorkspace(
 
 export class ClientAuthorityWorkspaceBindingIngress extends WorkerEntrypoint<Env>{
   bindWorkspace(input:unknown){return bindClientAuthorityWorkspace(this.env,input);}
+  getBindingStatus(input:unknown){return getClientAuthorityWorkspaceBindingStatus(this.env,input);}
 }

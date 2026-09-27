@@ -44,6 +44,7 @@ const receiptQuery=`SELECT receipt.request_fingerprint,audit.client_authority_id
   audit.reconciliation_snapshot_generation_id FROM portal_client_authority_workspace_binding_receipts receipt
   JOIN portal_client_authority_workspace_binding_audit audit ON audit.operation_id=receipt.operation_id
   WHERE receipt.operation_id=?`;
+export type ClientAuthorityWorkspaceBindingStatusResult=Omit<ClientAuthorityWorkspaceBindingResult,"replayed">;
 const result=(operationId:string,row:Evidence,replayed:boolean):ClientAuthorityWorkspaceBindingResult=>({
   operationId,clientAuthorityId:row.client_authority_id,workspaceId:row.workspace_id,
   projectionSourceId:row.projection_source_id,sourceWorkspaceId:row.source_workspace_id,
@@ -51,6 +52,18 @@ const result=(operationId:string,row:Evidence,replayed:boolean):ClientAuthorityW
   checkpoint:{sourceGeneration:row.reconciliation_source_generation,sourceSequence:row.reconciliation_source_sequence,
     snapshotGenerationId:row.reconciliation_snapshot_generation_id},state:"inactive",revision:1,replayed,
 });
+
+/** Read-only recovery evidence for the private RPC boundary. */
+export async function readClientAuthorityWorkspaceBindingStatus(
+  env:Pick<Env,"DELIVERY_DB"|"CLIENT_AUTHORITY_WORKSPACE_BINDING_STATUS_ENABLED">,operationId:string,
+):Promise<ClientAuthorityWorkspaceBindingStatusResult|null>{
+  if(env.CLIENT_AUTHORITY_WORKSPACE_BINDING_STATUS_ENABLED!=="true")
+    throw new Error("client-authority-workspace-binding-status-disabled");
+  const row=await env.DELIVERY_DB.withSession("first-primary").prepare(receiptQuery).bind(operationId).first<Evidence>();
+  if(!row)return null;
+  const {replayed:_replayed,...status}=result(operationId,row,false);
+  return status;
+}
 
 /** Private control-plane reservation. Deliberately not mounted by the Worker router or scheduler. */
 export async function writeClientAuthorityWorkspaceBinding(

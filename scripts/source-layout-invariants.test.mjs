@@ -260,8 +260,8 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   // and explicit legacy compatibility origin. Keep the field assertions so a future config change
   // cannot hide behind a digest refresh.
   // Reviewed additions: catalog coordination, portal authority and inactive
-  // workspace-binding writers remain off by default.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "b8c431a2334b0ebb65979bb8cb1a4a3665a875ed23e61444385cbfad59a26c39");
+  // workspace-binding writers and receipt reads remain off by default.
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "9c22c6b43ac30f0f99813ff9761b1c11209c17eb8fcc9f10dd6eb996e349d46b");
   const config = readJson("apps/client/wrangler.jsonc");
   assert.equal(config.name, "ledgetop-clients");
   assert.equal(config.main, "src/worker/index.ts");
@@ -291,6 +291,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.equal(config.vars.CLIENT_PORTAL_ENABLED, "true");
   assert.equal(config.vars.CLIENT_AUTHORITY_WORKSPACE_CLAIM_WRITER_ENABLED, "false");
   assert.equal(config.vars.CLIENT_AUTHORITY_WORKSPACE_BINDING_WRITER_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_AUTHORITY_WORKSPACE_BINDING_STATUS_ENABLED, "false");
   assert.equal(config.vars.OPS_PORTAL_ACCESS_AUTHORITY_SHADOW_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_CONTENT_AUDIT_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_NOTIFICATION_MIGRATION_MAINTENANCE, "false");
