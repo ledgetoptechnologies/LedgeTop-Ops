@@ -26,6 +26,15 @@ normal browser session outside the debugging connection. With the recipient
 flag currently off, a permitted request should return the Worker's 404;
 the invalid-invitation UI is only expected during a later controlled enabled
 window.
+Local Edge fixture coverage now exercises the no-secret unavailable state and
+a synthetic fragment-bearing recipient session/submission on desktop and
+mobile (four browser cases passed). It confirms the fragment is removed before
+the first recipient API request and an exact submission ID is reused across
+status and submit calls. This fixture bypasses the staging Worker and does not
+resolve the `ERR_BLOCKED_BY_CLIENT` navigation or prove live recipient
+acceptance. The screenshot's active browser-debugging banner makes a normal
+navigation outside that debugging session especially useful for separating a
+browser/client block from a staging response; do not weaken protections.
 Do not share an actual invitation URL or fragment. Keep all authority and
 recipient flags off until this gate and the exact-scope staging packet are
 reviewed.
