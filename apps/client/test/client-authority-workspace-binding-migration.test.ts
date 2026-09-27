@@ -2,10 +2,15 @@ import {readFileSync} from "node:fs";
 import {Miniflare} from "miniflare";
 import {afterEach,beforeEach,describe,expect,it} from "vitest";
 import {splitD1MigrationStatements} from "./helpers/d1-migrations";
+import {writeClientAuthorityWorkspaceBinding} from "../src/worker/client-authority-workspace-binding";
 
 describe("inert client authority workspace binding migration",()=>{
   let mf:Miniflare,db:D1Database;
   const authority="22222222-2222-4222-8222-222222222222";
+  const command={operationId:"bind-1",clientAuthorityId:authority,workspaceId:"workspace-a",
+    projectionSourceId:"project-alpha:east",sourceWorkspaceId:"source-workspace-17",
+    expectedCheckpoint:{sourceGeneration:"generation-7",sourceSequence:7,snapshotGenerationId:"snapshot-7"}};
+  const env=(enabled="true")=>({DELIVERY_DB:db,CLIENT_AUTHORITY_WORKSPACE_BINDING_WRITER_ENABLED:enabled});
   const head=(id=authority,workspace="workspace-a",source="source-workspace-17",sequence=7)=>
     db.prepare(`INSERT INTO portal_client_authority_workspace_bindings
       (client_authority_id,workspace_id,projection_source_id,source_workspace_id,
@@ -29,8 +34,11 @@ describe("inert client authority workspace binding migration",()=>{
       db.prepare("INSERT INTO pa_portal_projection_generations VALUES('snapshot-7','workspace-a','generation-7',7,'project-alpha:east')"),
       db.prepare("INSERT INTO pa_portal_projection_checkpoints VALUES('workspace-a','generation-7',7,'snapshot-7')"),
     ]);
-    const sql=readFileSync(new URL("../migrations/0218_client_authority_workspace_binding.sql",import.meta.url),"utf8");
-    await db.batch(splitD1MigrationStatements(sql).map(statement=>db.prepare(statement)));
+    for(const migration of ["0216_client_authority_workspace_ownership_claim.sql",
+      "0217_client_authority_workspace_claim_evidence.sql","0218_client_authority_workspace_binding.sql"]){
+      const sql=readFileSync(new URL(`../migrations/${migration}`,import.meta.url),"utf8");
+      await db.batch(splitD1MigrationStatements(sql).map(statement=>db.prepare(statement)));
+    }
   });
   afterEach(async()=>mf.dispose());
 
@@ -82,5 +90,57 @@ describe("inert client authority workspace binding migration",()=>{
       (operation_id,request_fingerprint,client_authority_id,workspace_id) VALUES(?,?,?,?)`)
       .bind(`bind-${authority}`,fingerprint,authority,"workspace-a").run();
     await expect(db.prepare("UPDATE portal_client_authority_workspace_binding_receipts SET request_fingerprint=?").bind("b".repeat(64)).run()).rejects.toThrow("immutable");
+  });
+
+  it("keeps the private writer disabled, unmounted, and access-neutral by default",async()=>{
+    await expect(writeClientAuthorityWorkspaceBinding(env("false"),command)).rejects.toThrow("writer-disabled");
+    expect(await db.prepare("SELECT count(*) count FROM portal_client_authority_workspace_bindings").first("count")).toBe(0);
+    expect(readFileSync(new URL("../src/worker/index.ts",import.meta.url),"utf8"))
+      .not.toContain('from "./client-authority-workspace-binding"');
+  });
+
+  it("writes one exact inactive mapping with atomic evidence and exact replay",async()=>{
+    const first=await writeClientAuthorityWorkspaceBinding(env(),command);
+    expect(first).toEqual({operationId:command.operationId,clientAuthorityId:command.clientAuthorityId,
+      workspaceId:command.workspaceId,projectionSourceId:command.projectionSourceId,
+      sourceWorkspaceId:command.sourceWorkspaceId,checkpoint:command.expectedCheckpoint,
+      state:"inactive",revision:1,replayed:false});
+    expect((await writeClientAuthorityWorkspaceBinding(env(),command)).replayed).toBe(true);
+    await expect(writeClientAuthorityWorkspaceBinding(env(),{...command,workspaceId:"other"}))
+      .rejects.toThrow("operation-conflict");
+    expect(await db.prepare("SELECT count(*) count FROM portal_client_authority_workspace_binding_audit").first("count")).toBe(1);
+    expect(await db.prepare("SELECT count(*) count FROM portal_client_authority_workspace_binding_receipts").first("count")).toBe(1);
+    expect(await db.prepare("SELECT token FROM portal_v2_public_links").first("token")).toBe("unchanged");
+  });
+
+  it("rejects stale checkpoints and wrong sources without leaving partial evidence",async()=>{
+    await expect(writeClientAuthorityWorkspaceBinding(env(),{...command,sourceWorkspaceId:"wrong"})).rejects.toThrow("binding-conflict");
+    await expect(writeClientAuthorityWorkspaceBinding(env(),{...command,expectedCheckpoint:{...command.expectedCheckpoint,sourceSequence:6}}))
+      .rejects.toThrow("binding-conflict");
+    await db.prepare("UPDATE pa_portal_projection_checkpoints SET source_sequence=8 WHERE workspace_id='workspace-a'").run();
+    await expect(writeClientAuthorityWorkspaceBinding(env(),command)).rejects.toThrow("binding-conflict");
+    for(const table of ["portal_client_authority_workspace_bindings","portal_client_authority_workspace_binding_audit",
+      "portal_client_authority_workspace_binding_receipts"])
+      expect(await db.prepare(`SELECT count(*) count FROM ${table}`).first("count")).toBe(0);
+  });
+
+  it("allows only one concurrent root to bind the workspace",async()=>{
+    const other={...command,operationId:"bind-2",clientAuthorityId:"33333333-3333-4333-8333-333333333333"};
+    const settled=await Promise.allSettled([writeClientAuthorityWorkspaceBinding(env(),command),
+      writeClientAuthorityWorkspaceBinding(env(),other)]);
+    expect(settled.filter(item=>item.status==="fulfilled")).toHaveLength(1);
+    expect(settled.filter(item=>item.status==="rejected")).toHaveLength(1);
+    expect(await db.prepare("SELECT count(*) count FROM portal_client_authority_workspace_bindings").first("count")).toBe(1);
+    expect(await db.prepare("SELECT count(*) count FROM portal_client_authority_workspace_binding_audit").first("count")).toBe(1);
+  });
+
+  it("does not bind a workspace with an existing ownership claim",async()=>{
+    await db.prepare(`INSERT INTO portal_client_authority_workspace_claims
+      (client_authority_id,workspace_id,projection_source_id,source_workspace_id,state,ownership_epoch,
+        reconciliation_source_generation,reconciliation_source_sequence,reconciliation_snapshot_generation_id,last_operation_id)
+      VALUES(?,?,?,?,'active',1,'generation-7',7,'snapshot-7','older-claim')`)
+      .bind("33333333-3333-4333-8333-333333333333","workspace-a","project-alpha:east","source-workspace-17").run();
+    await expect(writeClientAuthorityWorkspaceBinding(env(),command)).rejects.toThrow("binding-conflict");
+    expect(await db.prepare("SELECT count(*) count FROM portal_client_authority_workspace_bindings").first("count")).toBe(0);
   });
 });

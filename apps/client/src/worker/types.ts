@@ -20,6 +20,8 @@ export interface Env {
   CLIENT_PORTAL_ENABLED?: string;
   /** Route-less ownership evidence writer. Default-off; does not fence PA reads or grant access. */
   CLIENT_AUTHORITY_WORKSPACE_CLAIM_WRITER_ENABLED?: string;
+  /** Route-less, inert Ops customer-to-workspace reservation writer. Default-off. */
+  CLIENT_AUTHORITY_WORKSPACE_BINDING_WRITER_ENABLED?: string;
   CLIENT_PORTAL_ORIGIN?: string;
   CLIENT_PORTAL_ORIGINS?: string;
   /** Legacy delivery/portal origins retained only for compatible reads and canonical redirects. */
