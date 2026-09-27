@@ -54,4 +54,16 @@ describe("client onboarding recipient Worker boundary", () => {
     expect(await response.json()).toMatchObject({ ok: true, state: "pending" });
     expect(session).toHaveBeenCalledWith({ protocolVersion: 1, invitationId, invitationSecret });
   });
+
+  it("preserves the submitted session recovery id without exposing recipient fields", async () => {
+    const { env, session } = environment(true);
+    const submissionId = "00000000-0000-4000-8000-000000000002";
+    session.mockResolvedValueOnce({ ok: true, protocolVersion: 1, state: "submitted", invitationId,
+      expiresAt: "2099-01-01T00:00:00.000Z", submissionId });
+    const response = await clientOnboardingRecipientRouter.request(path,
+      request(JSON.stringify({ invitationSecret })), env);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, protocolVersion: 1, state: "submitted", invitationId,
+      expiresAt: "2099-01-01T00:00:00.000Z", submissionId });
+  });
 });
