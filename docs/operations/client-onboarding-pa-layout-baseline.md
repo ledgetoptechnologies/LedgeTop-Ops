@@ -16,6 +16,12 @@
   portal membership, delivery grants, or existing public links. The staging
   acceptance record in `docs/staging/client-onboarding-recipient-acceptance.md`
   remains the release-status source for this path.
+- The local enrollment preparation branch now validates an explicit canonical
+  source-ID selection and offers a staff-only, read-only choice query bound to
+  a submitted onboarding record. Its single current-authority D1 read requires
+  both profile viewing and enrollment management across every relevant scope;
+  only enabled source IDs are returned. This is not wired into approval, has
+  not been deployed to staging, and does not prove PA availability.
 
 ## Current implementation and release status (September 14)
 

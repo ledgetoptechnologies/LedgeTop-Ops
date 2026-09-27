@@ -18,4 +18,18 @@ describe("client onboarding enrollment source selection", () => {
   ])("rejects non-canonical, duplicate, or unbounded selection %#", value => {
     expect(parseClientOnboardingEnrollmentSourceIds(value)).toBeNull();
   });
+
+  it("rejects sparse, accessor-backed, and throwing arrays without invoking an accessor", () => {
+    const sparse = new Array<string>(1);
+    expect(parseClientOnboardingEnrollmentSourceIds(sparse)).toBeNull();
+    const accessor = ["project-alpha:primary"];
+    let accessed = false;
+    Object.defineProperty(accessor, 0, { get() { accessed = true; return "project-alpha:primary"; } });
+    expect(parseClientOnboardingEnrollmentSourceIds(accessor)).toBeNull();
+    expect(accessed).toBe(false);
+    const throwing = new Proxy(["project-alpha:primary"], {
+      getOwnPropertyDescriptor() { throw Error("untrusted trap"); },
+    });
+    expect(parseClientOnboardingEnrollmentSourceIds(throwing)).toBeNull();
+  });
 });

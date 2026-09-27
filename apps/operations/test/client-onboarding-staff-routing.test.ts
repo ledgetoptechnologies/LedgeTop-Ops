@@ -3,7 +3,7 @@ import { HTTPException } from "hono/http-exception";
 import type { Env } from "../src/worker/types";
 
 const calls = vi.hoisted(() => ({ legacy: vi.fn(), native: vi.fn(), issue: vi.fn(), reveal: vi.fn(),
-  review: vi.fn(), approve: vi.fn() }));
+  review: vi.fn(), approve: vi.fn(), enrollmentChoices: vi.fn() }));
 vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {}, DurableObject: class {} }));
 vi.mock("../src/worker/auth", () => ({ authenticateStaff: calls.legacy }));
 vi.mock("../src/worker/native-staff-auth", () => ({
@@ -19,6 +19,9 @@ vi.mock("../src/worker/client-onboarding-review", () => ({
 }));
 vi.mock("../src/worker/client-onboarding-approval", () => ({
   approveNewNativeOnlyClientOnboarding: calls.approve,
+}));
+vi.mock("../src/worker/client-onboarding-enrollment-discovery", () => ({
+  readClientOnboardingEnrollmentChoices: calls.enrollmentChoices,
 }));
 import worker from "../src/worker/index";
 
@@ -78,6 +81,7 @@ beforeEach(() => {
     submissionId: "33333333-3333-4333-8333-333333333333",
     clientRecordId: "55555555-5555-4555-8555-555555555555",
     clientRecordVersion: 1, relationshipVersion: 1 });
+  calls.enrollmentChoices.mockReset().mockResolvedValue({ sourceIds: ["project-alpha:primary"] });
 });
 
 describe("native client onboarding staff route", () => {
@@ -241,6 +245,38 @@ describe("native client onboarding staff route", () => {
       { submissionId, fieldsSha256: "e".repeat(64) }, csrf);
     expect(denied.status).toBe(403);
     expect(await denied.json()).toEqual({ error: "client_onboarding_denied" });
+  });
+
+  it("discovers only server-configured enrollment choices through the native CSRF boundary", async () => {
+    const csrf = await session();
+    const request = { submissionId: "11111111-1111-4111-8111-111111111111" };
+    const reply = await send("/api/client-onboarding/staff/enrollment-choices", "POST", request, csrf);
+    expect(reply.status).toBe(200);
+    expect(await reply.json()).toEqual({ sourceIds: ["project-alpha:primary"] });
+    expect(reply.headers.get("Cache-Control")).toBe("no-store");
+    expect(calls.enrollmentChoices).toHaveBeenCalledWith(database,
+      { PROJECT_ALPHA_API_V2_CONNECTIONS: undefined }, actor, request);
+    expect(calls.legacy).not.toHaveBeenCalled();
+    expect(calls.issue).not.toHaveBeenCalled();
+    expect(calls.reveal).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed or CSRF-invalid enrollment discovery before the read service", async () => {
+    const csrf = await session();
+    const request = { submissionId: "11111111-1111-4111-8111-111111111111" };
+    expect((await send("/api/client-onboarding/staff/enrollment-choices", "POST", request, "bad")).status).toBe(403);
+    expect((await send("/api/client-onboarding/staff/enrollment-choices", "POST", { ...request, scopes: [] }, csrf)).status).toBe(400);
+    expect(calls.enrollmentChoices).not.toHaveBeenCalled();
+  });
+
+  it("does not expose deployment configuration failures from enrollment discovery", async () => {
+    const csrf = await session();
+    calls.enrollmentChoices.mockRejectedValueOnce(Error("client_onboarding_enrollment_discovery_unavailable"));
+    const reply = await send("/api/client-onboarding/staff/enrollment-choices", "POST", {
+      submissionId: "11111111-1111-4111-8111-111111111111",
+    }, csrf);
+    expect(reply.status).toBe(503);
+    expect(await reply.json()).toEqual({ error: "client_onboarding_unavailable" });
   });
 
   it("reserves the exact namespace and leaves unrelated API paths to legacy auth", async () => {

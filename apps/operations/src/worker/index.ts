@@ -460,6 +460,7 @@ async function dispatchClientOnboardingStaff(c: any) {
     },
     database: c.env.OPS_DB,
     handoffKeyringJson: c.env.CLIENT_ONBOARDING_HANDOFF_KEYRING,
+    projectAlphaApiV2Connections: c.env.PROJECT_ALPHA_API_V2_CONNECTIONS,
   });
 }
 app.use("/api/client-onboarding/staff", dispatchClientOnboardingStaff);

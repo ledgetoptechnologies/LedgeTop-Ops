@@ -6,8 +6,19 @@ const MAX_SOURCES = 16;
  * It returns a new canonical list; destination identity remains server-owned.
  */
 export function parseClientOnboardingEnrollmentSourceIds(value: unknown): readonly string[] | null {
-  if (!Array.isArray(value) || value.length > MAX_SOURCES
-    || value.some(sourceId => typeof sourceId !== "string" || !SOURCE_ID.test(sourceId))) return null;
-  const canonical = [...value].sort() as string[];
-  return new Set(canonical).size === canonical.length ? Object.freeze(canonical) : null;
+  try {
+    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) return null;
+    const length: unknown = Object.getOwnPropertyDescriptor(value, "length")?.value;
+    if (typeof length !== "number" || !Number.isInteger(length) || length > MAX_SOURCES) return null;
+    const canonical: string[] = [];
+    for (let index = 0; index < length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, index);
+      if (!descriptor || !Object.hasOwn(descriptor, "value")) return null;
+      const sourceId: unknown = descriptor.value;
+      if (typeof sourceId !== "string" || !SOURCE_ID.test(sourceId)) return null;
+      canonical.push(sourceId);
+    }
+    canonical.sort();
+    return new Set(canonical).size === canonical.length ? Object.freeze(canonical) : null;
+  } catch { return null; }
 }
