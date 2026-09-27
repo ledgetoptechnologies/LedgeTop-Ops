@@ -6745,3 +6745,39 @@ pending; this requirement does not claim a deployed UI change.
   the staging flag state. Do not work around it by transferring the one-time
   fragment into another browser or tool. The recipient, approval, live
   public-link parity, and both production PA client round trips remain open.
+
+### September 26 — explicit onboarding enrollment source checkpoint
+
+- Local Ops feature-branch commit `84831ce` adds an explicit staff choice of
+  neither, one, or both configured PA instances at onboarding approval. The
+  browser submits canonical source IDs only; the Worker derives each enabled
+  destination identity and current authorization generation from server-owned
+  API-v2 configuration and a live Directory inventory. An approval replay uses
+  the saved choice and pinned destination evidence, not mutable configuration.
+  No portal entitlement, Delivery/public-link permission, or production PA
+  setting is changed by approval.
+- A business organization's PA create is sent before its linked client's
+  deferred create. Migration `0141` adds only a bounded waiting-intent index
+  and durable scan cursor; it does not rewrite the deployed relationship view.
+  The deferred materializer and the final outbox dispatcher recheck current
+  `directory.enrollment.manage` authority, in addition to the existing actor,
+  scope, relationship, admission, profile-edit, and identity-link guards.
+  The dispatcher stores a validated `result.data.publicId` compatibility
+  projection alongside the canonical PA `result.resource.publicId`; a focused
+  test protects that contract.
+- Operations TypeScript check, production build, and a combined six-suite
+  focused run passed (63/63 tests); a subsequent focused dispatcher run passed
+  7/7 after the compatibility assertion. These are local code checks, not
+  joined staging or production acceptance. The commit is local only: it was
+  not pushed, merged, deployed, or applied to D1. PR119, PR120, and PR121 remain
+  separate draft branches; their dependency/order must be resolved before
+  staging a combined exact-head version.
+- On September 26, a no-secret synthetic `/onboarding/` URL still failed in
+  the in-app browser with `ERR_BLOCKED_BY_CLIENT` before an HTTP response.
+  Client staging `/` reached `/portal` and displayed its expected default-off
+  state. Do not infer a recipient API failure or bypass browser protection.
+  The next gate remains a controlled staging-only invitation, submission,
+  approval, selected-source PA acknowledgement/mapping, and revoke rehearsal
+  using a freshly reviewed scoped authority packet and rollback versions.
+  Production PA owner update, portal activation, and public-link parity remain
+  unverified and are not authorized by this checkpoint.
