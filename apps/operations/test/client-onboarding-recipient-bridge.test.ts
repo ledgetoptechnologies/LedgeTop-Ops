@@ -5,7 +5,7 @@ import { ClientOnboardingRecipientBridge } from "../src/worker/client-onboarding
 import { consumeClientOnboardingRateLimit } from "../src/worker/client-onboarding-rate-limit";
 
 vi.mock("cloudflare:workers", () => ({ WorkerEntrypoint: class {} }));
-vi.mock("../src/worker/client-onboarding-rate-limit", () => ({ consumeClientOnboardingRateLimit: vi.fn().mockResolvedValue(true) }));
+vi.mock("../src/worker/client-onboarding-rate-limit", () => ({ consumeClientOnboardingRateLimit: vi.fn().mockResolvedValue(false) }));
 
 const root = new URL("../../../", import.meta.url);
 const config = (name: string) => readFileSync(new URL(name, root), "utf8");
@@ -33,21 +33,60 @@ describe("private client onboarding recipient bridge", () => {
     expect(config("apps/operations/src/worker/index.ts")).not.toContain('"/api/client-onboarding/recipient"');
   });
 
-  it("uses separate invitation counters for read and submit while sharing the read counter with status", async () => {
-    const bridge = Object.assign(Object.create(ClientOnboardingRecipientBridge.prototype), {
-      env: { CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED: "true", OPS_DB: {} },
-    }) as ClientOnboardingRecipientBridge;
+  it("does not touch D1 or quota under disabled or weak-key configuration", async () => {
+    const withSession = vi.fn(() => { throw Error("must not read"); });
+    const request = { protocolVersion: 1 as const,
+      invitationId: "00000000-0000-4000-8000-000000000001", invitationSecret: "ab".repeat(32) };
+    for (const env of [
+      { CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED: "false", AUDIT_IP_SECRET: "q".repeat(32), OPS_DB: { withSession } },
+      { CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED: "true", AUDIT_IP_SECRET: "short", OPS_DB: { withSession } },
+    ]) {
+      const bridge = Object.assign(Object.create(ClientOnboardingRecipientBridge.prototype), { env }) as
+        ClientOnboardingRecipientBridge;
+      await expect(bridge.session(request)).resolves.toEqual(unavailableResult());
+    }
+    expect(withSession).not.toHaveBeenCalled();
+    expect(consumeClientOnboardingRateLimit).not.toHaveBeenCalled();
+  });
+
+  it("rejects non-exact envelopes before storage or quota access", async () => {
+    const withSession = vi.fn(() => { throw Error("must not read"); });
+    const bridge = Object.assign(Object.create(ClientOnboardingRecipientBridge.prototype), { env: {
+      CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED: "true", AUDIT_IP_SECRET: "q".repeat(32), OPS_DB: { withSession },
+    } }) as ClientOnboardingRecipientBridge;
+    const valid = { protocolVersion: 1 as const, invitationId: "00000000-0000-4000-8000-000000000001",
+      invitationSecret: "ab".repeat(32) };
+    vi.mocked(consumeClientOnboardingRateLimit).mockClear();
+    await expect(bridge.session({ ...valid, extra: true } as never)).resolves.toEqual(unavailableResult());
+    await expect(bridge.session(Object.create(valid) as never)).resolves.toEqual(unavailableResult());
+    await expect(bridge.status({ ...valid, submissionId: "not-a-uuid" })).resolves.toEqual(unavailableResult());
+    expect(withSession).not.toHaveBeenCalled();
+    expect(consumeClientOnboardingRateLimit).not.toHaveBeenCalled();
+  });
+
+  it("validates the bearer before consuming a keyed invitation quota", async () => {
+    const first = vi.fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ state: "pending", expires_at: "2099-01-01T00:00:00.000Z",
+        submission_id: null, fields_sha256: null });
+    const bridge = Object.assign(Object.create(ClientOnboardingRecipientBridge.prototype), { env: {
+      CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED: "true", AUDIT_IP_SECRET: "q".repeat(32),
+      OPS_DB: { withSession: () => ({ prepare: () => ({ bind: () => ({ first }) }) }) },
+    } }) as ClientOnboardingRecipientBridge;
     const invitationId = "00000000-0000-4000-8000-000000000001";
     const invitationSecret = "ab".repeat(32);
-    const submissionId = "00000000-0000-4000-8000-000000000002";
     vi.mocked(consumeClientOnboardingRateLimit).mockClear();
+    await expect(bridge.session({ protocolVersion: 1, invitationId, invitationSecret }))
+      .resolves.toEqual(unavailableResult());
+    expect(consumeClientOnboardingRateLimit).not.toHaveBeenCalled();
+    vi.mocked(consumeClientOnboardingRateLimit).mockResolvedValueOnce(true);
     await bridge.session({ protocolVersion: 1, invitationId, invitationSecret });
-    await bridge.status({ protocolVersion: 1, invitationId, invitationSecret, submissionId });
-    await bridge.submit({ protocolVersion: 1, invitationId, invitationSecret, submissionId, fields: {} });
-    const calls = vi.mocked(consumeClientOnboardingRateLimit).mock.calls;
-    expect(calls).toHaveLength(3);
-    expect(calls[0]?.[1]).toBe(calls[1]?.[1]);
-    expect(calls[0]?.[1]).not.toBe(calls[2]?.[1]);
-    expect(calls.map(call => call[2])).toEqual([20, 20, 8]);
+    expect(consumeClientOnboardingRateLimit).toHaveBeenCalledWith(expect.anything(),
+      expect.stringMatching(/^client-onboarding:invitation:[0-9a-f]{64}$/), 20, 60);
+    expect(vi.mocked(consumeClientOnboardingRateLimit).mock.calls[0]?.[1]).not.toContain(invitationId);
   });
 });
+
+function unavailableResult() {
+  return { ok: false, protocolVersion: 1, code: "unavailable" };
+}

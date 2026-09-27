@@ -68,23 +68,33 @@ describe("local recipient invitation acceptance", () => {
     const { invitationSecret } = await revealClientOnboardingSecret(database,
       { authenticatedNativeStaff: actor, commandId }, keyring);
     const bridge = Object.assign(Object.create(ClientOnboardingRecipientBridge.prototype), { env: {
-      CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED: "true", OPS_DB: database,
+      CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED: "true", AUDIT_IP_SECRET: "q".repeat(32), OPS_DB: database,
     } }) as ClientOnboardingRecipientBridge;
     const base = `/${receipt.invitationId}`;
 
     const session = await post(`${base}/session`, { invitationSecret }, bridge);
     expect(session.status).toBe(200);
-    expect(await session.json()).toMatchObject({ ok: true, state: "pending" });
+    expect(await session.json()).toEqual({ ok: true, protocolVersion: 1, state: "pending",
+      invitationId: receipt.invitationId, expiresAt });
 
     // The server commits, but the client never observes this response.
     await post(`${base}/submit`, { invitationSecret, submissionId, fields }, bridge);
     const recovered = await post(`${base}/submit`, { invitationSecret, submissionId, fields }, bridge);
     expect(recovered.status).toBe(200);
-    expect(await recovered.json()).toMatchObject({ ok: true, state: "submitted", submissionId });
+    const submitted = await database.prepare("SELECT fields_sha256 FROM client_onboarding_submissions WHERE invitation_id=?")
+      .bind(receipt.invitationId).first<{ fields_sha256: string }>();
+    expect(await recovered.json()).toEqual({ ok: true, protocolVersion: 1, state: "submitted",
+      invitationId: receipt.invitationId, submissionId, fieldsSha256: submitted!.fields_sha256 });
+
+    const reopened = await post(`${base}/session`, { invitationSecret }, bridge);
+    expect(reopened.status).toBe(200);
+    expect(await reopened.json()).toEqual({ ok: true, protocolVersion: 1, state: "submitted",
+      invitationId: receipt.invitationId, expiresAt, submissionId });
 
     const status = await post(`${base}/status`, { invitationSecret, submissionId }, bridge);
     expect(status.status).toBe(200);
-    expect(await status.json()).toMatchObject({ ok: true, state: "submitted", submissionId });
+    expect(await status.json()).toEqual({ ok: true, protocolVersion: 1, state: "submitted",
+      invitationId: receipt.invitationId, submissionId, fieldsSha256: submitted!.fields_sha256 });
     expect(await database.prepare("SELECT count(*) n FROM client_onboarding_submissions WHERE invitation_id=?")
       .bind(receipt.invitationId).first("n")).toBe(1);
 
