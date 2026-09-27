@@ -7083,3 +7083,40 @@ pending; this requirement does not claim a deployed UI change.
   using a freshly reviewed scoped authority packet and rollback versions.
   Production PA owner update, portal activation, and public-link parity remain
   unverified and are not authorized by this checkpoint.
+
+### September 27 — inactive workspace-binding transport (source checkpoint)
+
+- The isolated Ops enrollment branch adds a **private, default-off** Client
+  `WorkerEntrypoint` for the already-guarded inactive workspace-binding writer.
+  Its protocol-v1 command and receipt carry exact permanent IDs, PA source and
+  root, and projection checkpoint; the Client writer still independently
+  verifies current source ownership and persists only an inactive mapping.
+  There is no public route, portal entitlement, membership, Delivery grant, or
+  change to an existing public link in this increment.
+- Ops migration `0144` adds a durable, immutable outbox, enqueue audit and
+  exact Client receipt. At most one pending, retrying, dispatching, or
+  acknowledged command may occupy a workspace. A definitive non-commit
+  rejection permits a newly reviewed selection with a **new** authority ID;
+  ambiguous transport failure does not free the workspace. The dispatcher
+  retries the same operation ID after lost responses, verifies the entire
+  returned tuple and checkpoint, fences expired leases, and cannot reopen
+  terminal states. Enqueue repeats current PA activation/record and owner
+  grant checks at D1 insertion. Both Worker release flags are checked-in off.
+- Focused local Client RPC tests passed 7/7; Ops selection/outbox tests passed
+  13/13 including the complete Ops migration chain. A joined two-D1 local
+  acceptance passed with the real Client writer and a lost response after
+  commit: the same operation replayed, and Ops acknowledged the exact inactive
+  Client mapping receipt. Client and Ops TypeScript checks passed after the
+  isolated Client dependencies were restored from its checked-in lockfile;
+  this also eliminated a local cross-package `jose` version mismatch.
+  Generated Worker binding types were refreshed with the lockfile-pinned
+  Wrangler. An independent review found
+  and prompted lease, terminal-state, and control-field guard hardening.
+- This is source and local-test evidence only. No dispatcher is mounted on a
+  route or scheduled drain, no D1 production migration was applied, and no
+  Client binding was written in staging or production. The browser still
+  blocks a no-secret synthetic `/onboarding/:invitationId` URL before HTTP,
+  so recipient onboarding acceptance remains open. Next: finish the
+  owner-authorized dispatch scheduling/administration boundary, joined
+  staging replay/conflict tests, exact-version release checks, and the normal
+  PA owner production-update checkpoint before any authority cutover.

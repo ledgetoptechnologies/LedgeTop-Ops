@@ -3,6 +3,8 @@ import {Miniflare} from "miniflare";
 import {afterEach,beforeEach,describe,expect,it} from "vitest";
 import {splitD1MigrationStatements} from "../../client/test/helpers/d1-migrations";
 import {selectPortalWorkspaceBinding} from "../src/worker/client-portal-workspace-binding-selection";
+import {dispatchNextPortalWorkspaceBinding,enqueuePortalWorkspaceBinding,
+  type WorkspaceBindingCommand,type WorkspaceBindingEnv} from "../src/worker/client-portal-workspace-binding-outbox";
 import type {AuthenticatedNativeStaffWithAdmissionVersion} from "../src/worker/native-staff-auth";
 
 describe("inactive Ops portal workspace binding selection",()=>{
@@ -67,6 +69,8 @@ describe("inactive Ops portal workspace binding selection",()=>{
     ]);
     const sql=readFileSync(new URL("../migrations/0143_client_portal_workspace_binding_selection.sql",import.meta.url),"utf8");
     await db.batch(splitD1MigrationStatements(sql).map(statement=>db.prepare(statement)));
+    const outboxSql=readFileSync(new URL("../migrations/0144_client_portal_workspace_binding_outbox.sql",import.meta.url),"utf8");
+    await db.batch(splitD1MigrationStatements(outboxSql).map(statement=>db.prepare(statement)));
   });
   afterEach(async()=>mf.dispose());
 
@@ -164,6 +168,62 @@ describe("inactive Ops portal workspace binding selection",()=>{
     await expect(selectPortalWorkspaceBinding(db,{...actor,verifiedUntil:new Date(Date.now()-1000).toISOString()},command()))
       .rejects.toThrow("portal_workspace_binding_selection_denied");
   });
+
+  it("enqueues one frozen inactive command and acknowledges only an exact Client tuple",async()=>{
+    const selected=await selectPortalWorkspaceBinding(db,actor,command());
+    const first=await enqueuePortalWorkspaceBinding(db,actor,selected.selectionId);
+    expect(first).toEqual({operationId:selected.selectionId,state:"pending",replayed:false});
+    expect(await enqueuePortalWorkspaceBinding(db,actor,selected.selectionId))
+      .toEqual({...first,replayed:true});
+    const binding={bindWorkspace:async(input:WorkspaceBindingCommand)=>({ok:true,protocolVersion:1,
+      status:"recorded",operationId:input.operationId,clientAuthorityId:input.clientAuthorityId,
+      workspaceId:input.workspaceId,projectionSourceId:input.projectionSourceId,
+      sourceWorkspaceId:input.sourceWorkspaceId,rootType:input.rootType,rootPublicId:input.rootPublicId,
+      checkpoint:input.expectedCheckpoint,state:"inactive",revision:1})};
+    const env={OPS_DB:db,CLIENT_AUTHORITY_WORKSPACE_BINDING_OUTBOX_ENABLED:"true",
+      CLIENT_AUTHORITY_WORKSPACE_BINDING:binding} satisfies WorkspaceBindingEnv;
+    expect(await dispatchNextPortalWorkspaceBinding(env)).toEqual({status:"acknowledged",operationId:selected.selectionId});
+    expect(await db.prepare("SELECT state FROM client_portal_workspace_binding_outbox WHERE operation_id=?")
+      .bind(selected.selectionId).first("state")).toBe("acknowledged");
+    expect(await db.prepare("SELECT count(*) count FROM client_portal_workspace_binding_outbox_receipts")
+      .first("count")).toBe(1);
+    expect(await db.prepare("SELECT token FROM existing_public_links").first("token")).toBe("unchanged");
+    await expect(db.prepare("UPDATE client_portal_workspace_binding_outbox SET state='rejected', acknowledged_claim_token=NULL WHERE operation_id=?")
+      .bind(selected.selectionId).run()).rejects.toThrow("transition denied");
+  });
+
+  it("keeps an ambiguously delivered command occupied and retries its original operation",async()=>{
+    const selected=await selectPortalWorkspaceBinding(db,actor,command());
+    await enqueuePortalWorkspaceBinding(db,actor,selected.selectionId);
+    const second=await selectPortalWorkspaceBinding(db,actor,command({
+      selectionId:"77777777-7777-4777-8777-777777777777",
+      checkpoint:{sourceGeneration:"generation-8",sourceSequence:8,snapshotGenerationId:"snapshot-8"},
+    }));
+    await expect(enqueuePortalWorkspaceBinding(db,actor,second.selectionId)).rejects.toThrow("denied");
+    const sent:string[]=[];
+    const env={OPS_DB:db,CLIENT_AUTHORITY_WORKSPACE_BINDING_OUTBOX_ENABLED:"true",
+      CLIENT_AUTHORITY_WORKSPACE_BINDING:{bindWorkspace:async(input:WorkspaceBindingCommand)=>{
+        sent.push(input.operationId); throw Error("reply lost after Client commit");
+      }}} satisfies WorkspaceBindingEnv;
+    expect(await dispatchNextPortalWorkspaceBinding(env)).toMatchObject({status:"retry",operationId:selected.selectionId});
+    expect(await db.prepare("SELECT state FROM client_portal_workspace_binding_outbox WHERE operation_id=?")
+      .bind(selected.selectionId).first("state")).toBe("retry");
+    await db.prepare("UPDATE client_portal_workspace_binding_outbox SET next_attempt_at=strftime('%Y-%m-%dT%H:%M:%fZ','now','-1 minute') WHERE operation_id=?")
+      .bind(selected.selectionId).run();
+    expect(await dispatchNextPortalWorkspaceBinding(env)).toMatchObject({status:"retry",operationId:selected.selectionId});
+    expect(sent).toEqual([selected.selectionId,selected.selectionId]);
+    expect(await db.prepare("SELECT count(*) count FROM client_portal_workspace_binding_outbox WHERE workspace_id='workspace-a'")
+      .first("count")).toBe(1);
+  });
+
+  it("denies stale owner or record changes at enqueue",async()=>{
+    const selected=await selectPortalWorkspaceBinding(db,actor,command());
+    await db.prepare("UPDATE native_staff_admissions SET active=0 WHERE staff_id='owner'").run();
+    await expect(enqueuePortalWorkspaceBinding(db,actor,selected.selectionId)).rejects.toThrow("denied");
+    await db.prepare("UPDATE native_staff_admissions SET active=1 WHERE staff_id='owner'").run();
+    await db.prepare("UPDATE operations_directory_records SET current_version=5 WHERE record_id=?").bind(recordId).run();
+    await expect(enqueuePortalWorkspaceBinding(db,actor,selected.selectionId)).rejects.toThrow("denied");
+  });
 });
 
 describe("portal workspace selection full migration order",()=>{
@@ -174,7 +234,7 @@ describe("portal workspace selection full migration order",()=>{
       const database=await runtime.getD1Database("OPS_DB") as unknown as D1Database;
       const directory=new URL("../migrations/",import.meta.url);
       const names=readdirSync(directory).filter(name=>/^\d{4}_.+\.sql$/.test(name)).sort();
-      expect(names.at(-1)).toBe("0143_client_portal_workspace_binding_selection.sql");
+      expect(names.at(-1)).toBe("0144_client_portal_workspace_binding_outbox.sql");
       for(const name of names){
         const statements=splitD1MigrationStatements(readFileSync(new URL(name,directory),"utf8"));
         await database.batch(statements.map(statement=>database.prepare(statement)));
@@ -182,6 +242,8 @@ describe("portal workspace selection full migration order",()=>{
       expect(await database.prepare("SELECT count(*) count FROM client_portal_workspace_binding_selections")
         .first("count")).toBe(0);
       expect(await database.prepare("SELECT count(*) count FROM sqlite_master WHERE type='table' AND name='client_portal_workspace_binding_selections'")
+        .first("count")).toBe(1);
+      expect(await database.prepare("SELECT count(*) count FROM sqlite_master WHERE type='table' AND name='client_portal_workspace_binding_outbox'")
         .first("count")).toBe(1);
     } finally { await runtime.dispose(); }
   });
