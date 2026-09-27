@@ -232,6 +232,21 @@ membership in place merely to represent a new Ops grant: the current
 `(workspace_id,identity_id)` uniqueness would erase provenance. Until the
 protocol and joined staging tests exist, keep all authority writers off.
 
+The next buildable v2 prerequisite is an **inactive workspace binding**, not
+an active `0216` claim or a person grant. Add a separate, expand-only Client
+mapping keyed one-to-one by Operations client authority ID and Client workspace
+ID, pinned to the exact PA projection source and source workspace. Its guarded
+bootstrap must prove the current source reservation and reconciliation
+checkpoint, reject remaps and altered idempotency replay, and append immutable
+audit/receipt evidence. A binding alone must not create or change memberships,
+entitlements, invitations, Delivery/public links, or any effective access.
+Test concurrent one-to-one claims, stale checkpoints, exact replay, absent
+migration compatibility and unchanged public-link state before exposing even a
+private writer. Only after that mapping is reviewed should v2 define
+per-issuer/subject grant revisions, scoped materialization and Ops outbox
+recovery. Do not repurpose `0216` acquisition as a mapping shortcut: an active
+claim already fences PA access while the replacement grant reader is missing.
+
 Before enabling version 2, resolve the policy choices for invitation access
 under an Ops-owned workspace, who may approve a mapping/acquisition, the
 service-scope vocabulary and whether eligibility grants any content, the

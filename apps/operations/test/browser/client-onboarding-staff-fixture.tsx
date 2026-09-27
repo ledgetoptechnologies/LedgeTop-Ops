@@ -26,6 +26,9 @@ window.fetch = async (input, init) => {
       organizationEmail: "", organizationPhone: "", addressLine1: "1 Main", addressLine2: "",
       city: "Town", state: "TX", postalCode: "75001", country: "US" },
   });
+  if (path.endsWith("/enrollment-choices")) return Response.json({
+    sourceIds: mode === "with-source" ? ["project-alpha:primary"] : [],
+  });
   if (path.endsWith("/approve")) return Response.json({
     decisionId: "44444444-4444-4444-8444-444444444444", submissionId: body.submissionId,
     clientRecordId: "55555555-5555-4555-8555-555555555555", clientRecordVersion: 1,
