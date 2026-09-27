@@ -2,40 +2,43 @@
 
 Updated September 26, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
 
-### September 26 — portal eligibility boundary for the API-first cutover
+### September 27 — portal eligibility boundary for the API-first cutover
 
 - Read-only PA/Client source audit found that Project Alpha already has
   internal workspace, principal and entitlement services and an outbound
-  signed projection, but **no generic API-v2 command** to ensure portal
-  eligibility, manage principals/grants or revoke them. API-v2 currently
-  exposes Directory/Projects, not portal authority. The existing PA portal
-  producer still depends on enabled integration profiles and workspace
-  allowlists; replacing that with a different credential alone would retain
-  the custom-integration coupling.
-- The Client Worker already validates signed, source-qualified PA principal
+  signed projection, but those are the **legacy portal authority**. API-v2
+  currently exposes Directory/Projects, not portal authority. The producer
+  depends on enabled integration profiles, workspace allowlists and webhook
+  credentials. Adding an API-v2 command that simply drives that producer would
+  preserve the custom integration and contradict the agreed ownership split.
+- The Client Worker currently validates signed, source-qualified PA principal
   and entitlement projections and keeps PA grants separate from invitation
   grants. Its automatic identity binding requires a unique active signed
   principal matched to a verified email, current source/root access, complete
-  Directory state and no denial. Email/contact similarity by itself is not
-  authority. Four Client/Ops feature gates currently prevent default-on
+  Directory state and no denial. That protects today's path but is not the
+  final Operations-owned enrollment model. Email/contact similarity alone is
+  never authority. Four Client/Ops feature gates currently prevent default-on
   eligibility; an Ops onboarding approval or PA client-create receipt must
-  not write Client entitlement or invitation tables directly.
-- Next generic PA contract: a default-off, scoped, idempotent **eligibility
-  ensure** command after an exact acknowledged Directory client-create or
-  explicit existing-client binding. Pin source instance, client resource ID,
-  expected version and command identity. Commit workspace/profile linkage,
-  audit, receipt and a complete signed projection enqueue atomically. Same
-  command/body may recover its receipt; conflicting replay must fail closed.
-  This first command creates no principal, content grant, invitation, email or
-  public link. Define separate explicit principal/grant and revocation commands
-  before calling the unified portal ready; Client continues to materialize
-  only signed PA intent under its existing source and denial fences.
-- Acceptance must cover wrong source/version, unacknowledged client, lost
-  response replay, failed transaction rollback, signed projection delivery,
-  root revocation/reactivation and already-materialized grant behavior. One
-  LTDS source must never grant LTT scope (or vice versa). Keep existing manual
-  invitations and Delivery/public links unchanged. This is an implementation
-  design gate, not evidence of a staging or production portal cutover.
+  not directly write Client entitlement or invitation tables.
+- Replacement direction: Operations owns source-qualified client portal
+  eligibility, person-to-client membership, service scope and revocation.
+  Client receives those decisions through a narrowly authenticated,
+  versioned Ops-to-Client authority channel and enforces them at every
+  request. PA API-v2 supplies customer/project identity and financial data,
+  not portal login authority. PA-specific data access still requires exact
+  source/resource mappings, acknowledged records and explicit file/billing
+  grants; default-on eligibility must not imply document or Delivery access.
+  Existing PA-projected memberships remain compatibility-only until the new
+  channel is proven and fenced; they cannot silently compete with Ops grants.
+- Implement and rehearse durable Ops outbox/Client receipts with idempotency,
+  revision fences, negative tombstones, local deny-first revocation, delayed
+  or lost-response recovery and explicit source/root separation. Verify root
+  revocation/reactivation and already-materialized grant behavior, no
+  unsolicited invitations, no cross-business scope, no new public links,
+  and preserved manual invitation and Delivery permissions. Do not retire PA's
+  legacy producer until source data, enrollment, revocation and both-instance
+  staging/production acceptance converge. This is a design correction, not
+  evidence of a completed portal cutover.
 
 ### September 26, 2026 — default-off staging versions and synthetic Delivery parity
 
