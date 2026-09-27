@@ -259,8 +259,9 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   // The digest intentionally moved with the reviewed canonical portal hosts
   // and explicit legacy compatibility origin. Keep the field assertions so a future config change
   // cannot hide behind a digest refresh.
-  // Reviewed additions: Operations catalog staging and promotion remain off by default.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "fbe6e73d609437294191909f142dd69454e544f5eb61d587365f1003e35eac4b");
+  // Reviewed additions: Operations catalog coordination and portal authority
+  // shadow/claim writers remain off by default.
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "bd497fcfaece678e8fcf286cce62e8fdda79ee966153f93218cdef43ba089f50");
   const config = readJson("apps/client/wrangler.jsonc");
   assert.equal(config.name, "ledgetop-clients");
   assert.equal(config.main, "src/worker/index.ts");
@@ -288,6 +289,8 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.equal(config.vars.LEGACY_CLIENT_ORIGINS, "https://client.ledgetopdroneservices.com");
   assert.equal(config.vars.CLIENT_ACCESS_AUDS, `${config.vars.CLIENT_ACCESS_AUD},3bc9637846ccf4e1343b969cc8f14ed2cb0628956293463cf164c4080fa47e57`);
   assert.equal(config.vars.CLIENT_PORTAL_ENABLED, "true");
+  assert.equal(config.vars.CLIENT_AUTHORITY_WORKSPACE_CLAIM_WRITER_ENABLED, "false");
+  assert.equal(config.vars.OPS_PORTAL_ACCESS_AUTHORITY_SHADOW_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_CONTENT_AUDIT_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_NOTIFICATION_MIGRATION_MAINTENANCE, "false");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_HMAC_KEY_ID, "");
@@ -367,12 +370,13 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
 });
 
 test("the deployed Operations Worker keeps catalog staging and promotion private and default-off", () => {
-  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "c2b79f85f8004b38964ff33b74f1ec568c18a72f69a05686b39bccf23d0dbc4c");
+  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "4ecd7e7c925e7e59e75460c382f71314a821a5f4077f8ff9d1d712a2e32f2d8e");
   const config = readJson("apps/operations/wrangler.jsonc");
   assert.equal(config.vars.CLIENT_ONBOARDING_ADMIN_ENABLED, "false");
   assert.equal(config.vars.CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_ACCESS_AUTHORITY_OUTBOX_ENABLED, "false");
   assert.deepEqual(config.services?.find((service) => service.binding === "OPS_INVENTORY_CATALOG_STAGING"), {
     binding: "OPS_INVENTORY_CATALOG_STAGING",
     service: "ledgetop-clients",
@@ -382,6 +386,11 @@ test("the deployed Operations Worker keeps catalog staging and promotion private
     binding: "OPS_INVENTORY_CATALOG_PROMOTION",
     service: "ledgetop-clients",
     entrypoint: "OpsInventoryCatalogPromotionCoordinator",
+  });
+  assert.deepEqual(config.services?.find((service) => service.binding === "CLIENT_PORTAL_ACCESS_AUTHORITY"), {
+    binding: "CLIENT_PORTAL_ACCESS_AUTHORITY",
+    service: "ledgetop-clients",
+    entrypoint: "OpsPortalAccessAuthorityIngress",
   });
   assert.deepEqual(config.workflows?.find((workflow) => workflow.binding === "OPS_CATALOG_PROMOTION_WORKFLOW"), {
     name: "ledgetop-ops-catalog-promotion",
