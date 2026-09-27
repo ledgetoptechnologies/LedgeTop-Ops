@@ -2,6 +2,41 @@
 
 Updated September 26, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
 
+### September 26 — portal eligibility boundary for the API-first cutover
+
+- Read-only PA/Client source audit found that Project Alpha already has
+  internal workspace, principal and entitlement services and an outbound
+  signed projection, but **no generic API-v2 command** to ensure portal
+  eligibility, manage principals/grants or revoke them. API-v2 currently
+  exposes Directory/Projects, not portal authority. The existing PA portal
+  producer still depends on enabled integration profiles and workspace
+  allowlists; replacing that with a different credential alone would retain
+  the custom-integration coupling.
+- The Client Worker already validates signed, source-qualified PA principal
+  and entitlement projections and keeps PA grants separate from invitation
+  grants. Its automatic identity binding requires a unique active signed
+  principal matched to a verified email, current source/root access, complete
+  Directory state and no denial. Email/contact similarity by itself is not
+  authority. Four Client/Ops feature gates currently prevent default-on
+  eligibility; an Ops onboarding approval or PA client-create receipt must
+  not write Client entitlement or invitation tables directly.
+- Next generic PA contract: a default-off, scoped, idempotent **eligibility
+  ensure** command after an exact acknowledged Directory client-create or
+  explicit existing-client binding. Pin source instance, client resource ID,
+  expected version and command identity. Commit workspace/profile linkage,
+  audit, receipt and a complete signed projection enqueue atomically. Same
+  command/body may recover its receipt; conflicting replay must fail closed.
+  This first command creates no principal, content grant, invitation, email or
+  public link. Define separate explicit principal/grant and revocation commands
+  before calling the unified portal ready; Client continues to materialize
+  only signed PA intent under its existing source and denial fences.
+- Acceptance must cover wrong source/version, unacknowledged client, lost
+  response replay, failed transaction rollback, signed projection delivery,
+  root revocation/reactivation and already-materialized grant behavior. One
+  LTDS source must never grant LTT scope (or vice versa). Keep existing manual
+  invitations and Delivery/public links unchanged. This is an implementation
+  design gate, not evidence of a staging or production portal cutover.
+
 ### September 26, 2026 — default-off staging versions and synthetic Delivery parity
 
 - Draft PR #119 at `12aeff925425d310f5a0f3afd4a3120eec81beef` passed all ten CI jobs in run `36075266802`. Exact combined candidate versions were uploaded, then staging-only Delivery secrets were added through inactive Worker versions without writing their values to source or documentation. The active Client staging version is `f00c3a7f-307a-4ec1-802e-a15039173b3b` and active Operations staging version is `4892f7b6-81b8-4a47-9d9a-28642681f52c`, both at 100%. The new onboarding and recipient flags remain `false`; client portal activation remains off. Production was not deployed.
@@ -6768,10 +6803,13 @@ pending; this requirement does not claim a deployed UI change.
 - Operations TypeScript check, production build, and a combined six-suite
   focused run passed (63/63 tests); a subsequent focused dispatcher run passed
   7/7 after the compatibility assertion. These are local code checks, not
-  joined staging or production acceptance. The commit is local only: it was
-  not pushed, merged, deployed, or applied to D1. PR119, PR120, and PR121 remain
-  separate draft branches; their dependency/order must be resolved before
-  staging a combined exact-head version.
+  joined staging or production acceptance. The combined enrollment branch was
+  pushed at `d041a38a6decab7ec43c23d85af02d6325c409d4`, but its draft PR
+  could not be created: the configured GitHub integration returned HTTP 403
+  `Resource not accessible by integration`. No CI run, merge, deployment, or
+  D1 migration followed that push. PR119, PR120, and PR121 remain separate
+  draft branches; their dependency/order must be resolved before staging a
+  combined exact-head version.
 - On September 26, a no-secret synthetic `/onboarding/` URL still failed in
   the in-app browser with `ERR_BLOCKED_BY_CLIENT` before an HTTP response.
   Client staging `/` reached `/portal` and displayed its expected default-off
