@@ -257,6 +257,16 @@ suite passes. It does not prove the Ops customer record exists or connect two
 business workspaces to one customer; the authorized
 Ops selection/approval producer and joined staging proof remain outstanding.
 No authorization reader is mounted and no access follows from a binding.
+Ops migration `0143` now provides a separate inactive selection ledger. It
+allows two PA sources for one canonical Ops record, pins each selection to a
+current activated PA mapping and record version, and requires a current owner
+admission, profile, grant generation and portal-access-management permission.
+Its four focused tests and full migration-order smoke test pass. It is not yet
+written by a route or dispatcher, and it cannot itself prove the Client-side
+workspace tuple; that exact proof is required from the `0218` writer's receipt.
+The eventual Ops producer must generate the workspace-scoped authority ID,
+recheck the selected mapping and actor authority at dispatch, and persist a
+matching Client receipt before treating the selection as usable.
 Test concurrent one-to-one claims, stale checkpoints, exact replay, absent
 migration compatibility and unchanged public-link state before exposing even a
 private writer. Only after that mapping is reviewed should v2 define
