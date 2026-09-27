@@ -49,6 +49,8 @@ export interface Env {
   OPS_INVENTORY_CATALOG_SYNC_ENABLED?: string;
   /** Route-less promotion of a complete staged Operations inventory snapshot. Default-off. */
   OPS_INVENTORY_CATALOG_PROMOTION_ENABLED?: string;
+  /** Shadow-only Operations portal authority ledger. Never consulted for access. */
+  OPS_PORTAL_ACCESS_AUTHORITY_SHADOW_ENABLED?: string;
   /** Server-only PA portal hierarchy/entitlement projection. Independent and default-off. */
   PROJECT_ALPHA_PORTAL_SYNC_ENABLED?: string;
   /** Emergency-only legacy HTTP receiver. Production keeps this false; Ops Sync RPC remains independently enabled. */

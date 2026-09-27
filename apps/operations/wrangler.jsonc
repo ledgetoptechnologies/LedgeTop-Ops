@@ -41,6 +41,7 @@
     "PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ENABLED": "false",
     "PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED": "false",
     "PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED": "false",
+    "CLIENT_PORTAL_ACCESS_AUTHORITY_OUTBOX_ENABLED": "false",
     "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED": "false",
     "PROJECT_ALPHA_PRIVATE_ADMIN_TRANSPORT_ENABLED": "false",
     "NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED": "false",
@@ -162,6 +163,11 @@
       "binding": "OPS_INVENTORY_CATALOG_PROMOTION",
       "service": "ledgetop-clients",
       "entrypoint": "OpsInventoryCatalogPromotionCoordinator"
+    },
+    {
+      "binding": "CLIENT_PORTAL_ACCESS_AUTHORITY",
+      "service": "ledgetop-clients",
+      "entrypoint": "OpsPortalAccessAuthorityIngress"
     }
   ],
   "durable_objects": {

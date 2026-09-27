@@ -44,6 +44,7 @@ export type Env = Omit<
   | "PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED"
   | "OPS_INVENTORY_CATALOG_STAGING"
   | "OPS_INVENTORY_CATALOG_PROMOTION"
+  | "CLIENT_PORTAL_ACCESS_AUTHORITY"
 > & {
   PROJECT_ALPHA_API_KEY?: string;
   /** Temporary release barrier for the preserving client-notification table rebuild. */
@@ -60,6 +61,9 @@ export type Env = Omit<
   OPS_INVENTORY_CATALOG_STAGING?: import("./project-alpha-catalog-staging-coordinator").OpsCatalogStagingBinding;
   /** Private Client Worker RPC; accepts only explicit registry/source/checkpoint authority. */
   OPS_INVENTORY_CATALOG_PROMOTION?: import("./project-alpha-catalog-staging-coordinator").OpsCatalogPromotionBinding;
+  /** Private shadow-authority RPC. It cannot materialize portal access. */
+  CLIENT_PORTAL_ACCESS_AUTHORITY?: import("./client-portal-access-authority-outbox").ClientPortalAuthorityBinding;
+  CLIENT_PORTAL_ACCESS_AUTHORITY_OUTBOX_ENABLED?: string;
   /** Default-off bounded API-v2 health/incident monitor. */
   PROJECT_ALPHA_API_V2_MONITOR_ENABLED?: string;
   /** Explicit deployment-owned owner mailbox for outage alerts; never inferred from Project Alpha data. */

@@ -39,6 +39,20 @@ Updated September 26, 2026. The owner approved implementation and resumption aft
   legacy producer until source data, enrollment, revocation and both-instance
   staging/production acceptance converge. This is a design correction, not
   evidence of a completed portal cutover.
+- Local shadow-channel increment: Client migration `0215` and Ops migration
+  `0142` add a source-neutral, revisioned authority intent ledger, immutable
+  audit/receipt evidence and an Ops leased outbox. The route-less Client RPC
+  accepts only a stable Ops client authority ID and exact issuer/subject,
+  never a PA ID, email, bearer or workspace ID. Both feature flags are checked
+  in as `false`. No HTTP route or scheduler invokes the channel; Client
+  authorization does not read its ledger, and it creates no membership,
+  entitlement, invitation or public link. Focused Client 6/6 and Ops 8/8
+  tests and both app typechecks passed locally. Independent QA found a
+  malformed-RPC-response retry gap; it was fixed before this checkpoint.
+  This is **not** default-on eligibility or cutover acceptance. Next build
+  the authorized Ops producer and atomic per-workspace ownership claim/fence:
+  the existing Client membership uniqueness and PA repair path can otherwise
+  steal or resurrect a revoked Ops-owned membership.
 
 ### September 26, 2026 — default-off staging versions and synthetic Delivery parity
 

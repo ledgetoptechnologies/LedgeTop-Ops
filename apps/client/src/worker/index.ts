@@ -10,6 +10,7 @@ import { recordFirstAccessNotification } from "./notifications";
 export { OpsSyncPortalProjectionIngress } from "./ops-sync-portal-entrypoint";
 export { OpsInventoryCatalogStagingIngress } from "./ops-inventory-catalog-staging";
 export { OpsInventoryCatalogPromotionCoordinator } from "./ops-inventory-catalog-promotion";
+export { OpsPortalAccessAuthorityIngress } from "./ops-portal-access-authority";
 import { friendlyBulkFailure } from "./bulk-download-errors";
 import type { Env, ShareRow } from "./types";
 export { BulkDownloadWorkflow } from "./workflow";
