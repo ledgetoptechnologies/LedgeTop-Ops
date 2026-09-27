@@ -1,8 +1,13 @@
 import { readFileSync, readdirSync } from "node:fs";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { Miniflare } from "miniflare";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import { approveNewNativeOnlyClientOnboarding } from "../src/worker/client-onboarding-approval";
+
+const inventoryRead = vi.hoisted(() => vi.fn());
+vi.mock("../src/worker/project-alpha-directory-inventory-api-v2", () => ({
+  readConfiguredProjectAlphaDirectoryInventory: inventoryRead,
+}));
 
 let runtime: Miniflare | undefined;
 let db: D1Database;
@@ -21,6 +26,21 @@ const business = Object.freeze({ ...consumer, clientType: "business", name: "Ave
   email: "avery@example.test", organizationName: "Example LLC",
   organizationEmail: "", organizationPhone: "" });
 const uuid = () => `70000000-0000-4000-8000-${(++sequence).toString(16).padStart(12, "0")}`;
+const selectedSourceId = "project-alpha:primary";
+const secondSourceId = "project-alpha:secondary";
+const selectedConnection = JSON.stringify({ version: 1, instances: {
+  [selectedSourceId]: { sourceId: selectedSourceId, enabled: true, baseUrl: "https://pa-primary.example.test",
+    apiKey: "test-only-api-key", sourceInstanceId: "a0000000-0000-4000-8000-000000000001",
+    applicationId: "b0000000-0000-4000-8000-000000000002",
+    historyEpoch: "c0000000-0000-4000-8000-000000000003" },
+} });
+const dualConnection = JSON.stringify({ version: 1, instances: {
+  ...JSON.parse(selectedConnection).instances,
+  [secondSourceId]: { sourceId: secondSourceId, enabled: true, baseUrl: "https://pa-secondary.example.test",
+    apiKey: "test-only-secondary-api-key", sourceInstanceId: "d0000000-0000-4000-8000-000000000004",
+    applicationId: "e0000000-0000-4000-8000-000000000005",
+    historyEpoch: "f0000000-0000-4000-8000-000000000006" },
+} });
 async function sha256(value: string): Promise<string> {
   return [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)))]
     .map(byte => byte.toString(16).padStart(2, "0")).join("");
@@ -81,6 +101,9 @@ describe("native-only client onboarding approval against migrated D1", () => {
       db.prepare(`INSERT INTO native_directory_grants
         (id,staff_id,permission,effect,scope_kind,active,granted_by)
         VALUES('approve-identity',?,'directory.identity.link','allow','global',1,?)`).bind(staffId, staffId),
+      db.prepare(`INSERT INTO native_directory_grants
+        (id,staff_id,permission,effect,scope_kind,active,granted_by)
+        VALUES('approve-enrollment',?,'directory.enrollment.manage','allow','global',1,?)`).bind(staffId, staffId),
     ]);
   }, 240_000);
   afterAll(async () => runtime?.dispose());
@@ -118,6 +141,44 @@ describe("native-only client onboarding approval against migrated D1", () => {
       first.clientRecordId, immutable?.mutation_id, immutable?.relationship_mutation_id, staffId,
       actor.identity.verifiedAccessSubject, actor.admissionVersion, actor.identity.profileVersion,
     ])));
+  });
+
+  it("pins selected server-owned PA identity and replays without resolving changed configuration", async () => {
+    const item = await submission();
+    inventoryRead.mockResolvedValue({ status: "observed", inventory: { authorizationGeneration: "7" } });
+    const first = await approveNewNativeOnlyClientOnboarding(db, actor, item.submissionId,
+      item.fieldsSha256, [selectedSourceId], selectedConnection);
+    expect(first).toMatchObject({ status: "written", replayed: false });
+    const stored = await db.prepare(`SELECT destinations_json FROM native_directory_enrollments WHERE record_id=?`)
+      .bind(first.clientRecordId).first<string>("destinations_json");
+    expect(JSON.parse(stored ?? "null")).toEqual([{ sourceId: selectedSourceId,
+      sourceInstanceUUID: "a0000000-0000-4000-8000-000000000001",
+      applicationUUID: "b0000000-0000-4000-8000-000000000002",
+      historyEpoch: "c0000000-0000-4000-8000-000000000003",
+      origin: "https://pa-primary.example.test", externalCanonicalId: first.clientRecordId }]);
+    expect(await db.prepare(`SELECT count(*) count FROM operations_directory_intents WHERE record_id=?`)
+      .bind(first.clientRecordId).first<number>("count")).toBe(1);
+    inventoryRead.mockReset().mockRejectedValue(new Error("must_not_probe_replay"));
+    const replay = await approveNewNativeOnlyClientOnboarding(db, actor, item.submissionId,
+      item.fieldsSha256, [selectedSourceId]);
+    expect(replay).toEqual({ ...first, replayed: true });
+    expect(inventoryRead).not.toHaveBeenCalled();
+  });
+
+  it("binds one consumer record to both explicitly selected PA instances", async () => {
+    const item = await submission();
+    inventoryRead.mockReset().mockResolvedValue({ status: "observed",
+      inventory: { authorizationGeneration: "8" } });
+    const first = await approveNewNativeOnlyClientOnboarding(db, actor, item.submissionId,
+      item.fieldsSha256, [secondSourceId, selectedSourceId], dualConnection);
+    expect(first).toMatchObject({ status: "written", replayed: false });
+    const stored = await db.prepare(`SELECT destinations_json FROM native_directory_enrollments WHERE record_id=?`)
+      .bind(first.clientRecordId).first<string>("destinations_json");
+    expect((JSON.parse(stored ?? "null") as Array<{ sourceId: string }>).map(item => item.sourceId))
+      .toEqual([selectedSourceId, secondSourceId]);
+    expect(await db.prepare(`SELECT count(*) count FROM operations_directory_intents WHERE record_id=?`)
+      .bind(first.clientRecordId).first<number>("count")).toBe(2);
+    expect(inventoryRead).toHaveBeenCalledTimes(2);
   });
 
   it("rejects stale review fingerprints and existing targets without writes", async () => {

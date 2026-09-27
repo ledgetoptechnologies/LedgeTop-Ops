@@ -205,7 +205,7 @@ describe("native client onboarding staff route", () => {
     expect(await reply.json()).toEqual({ decisionId: "44444444-4444-4444-8444-444444444444",
       submissionId, clientRecordId: "55555555-5555-4555-8555-555555555555",
       clientRecordVersion: 1, relationshipVersion: 1, replayed: false });
-    expect(calls.approve).toHaveBeenCalledWith(database, actor, submissionId, "e".repeat(64));
+    expect(calls.approve).toHaveBeenCalledWith(database, actor, submissionId, "e".repeat(64), [], undefined);
     expect(reply.headers.get("Cache-Control")).toBe("no-store");
   });
 
@@ -239,12 +239,33 @@ describe("native client onboarding staff route", () => {
     expect(calls.approve).not.toHaveBeenCalled();
     expect((await send("/api/client-onboarding/staff/approve", "POST",
       { submissionId, fieldsSha256: "e".repeat(64), recordId: "caller-owned" }, csrf)).status).toBe(400);
+    expect((await send("/api/client-onboarding/staff/approve", "POST",
+      { submissionId, fieldsSha256: "e".repeat(64), sourceIds: ["project-alpha:primary", "project-alpha:primary"] }, csrf)).status).toBe(400);
     expect(calls.approve).not.toHaveBeenCalled();
     calls.approve.mockRejectedValueOnce(Error("client_onboarding_approval_denied"));
     const denied = await send("/api/client-onboarding/staff/approve", "POST",
       { submissionId, fieldsSha256: "e".repeat(64) }, csrf);
     expect(denied.status).toBe(403);
     expect(await denied.json()).toEqual({ error: "client_onboarding_denied" });
+  });
+
+  it("accepts an explicit empty or canonical enrollment selection and passes server config to approval", async () => {
+    const csrf = await session();
+    const submissionId = "33333333-3333-4333-8333-333333333333";
+    const fieldsSha256 = "e".repeat(64);
+    const empty = await send("/api/client-onboarding/staff/approve", "POST",
+      { submissionId, fieldsSha256, sourceIds: [] }, csrf);
+    expect(empty.status).toBe(200);
+    expect(calls.approve).toHaveBeenCalledWith(database, actor, submissionId, fieldsSha256, [], undefined);
+
+    calls.approve.mockClear();
+    const configured = { ...env(), PROJECT_ALPHA_API_V2_CONNECTIONS: "server-owned-config" } as Env;
+    const selectedSourceIds = ["project-alpha:primary", "project-alpha:secondary"];
+    const selected = await send("/api/client-onboarding/staff/approve", "POST",
+      { submissionId, fieldsSha256, sourceIds: selectedSourceIds }, csrf, configured);
+    expect(selected.status).toBe(200);
+    expect(calls.approve).toHaveBeenCalledWith(database, actor, submissionId, fieldsSha256,
+      selectedSourceIds, "server-owned-config");
   });
 
   it("discovers only server-configured enrollment choices through the native CSRF boundary", async () => {

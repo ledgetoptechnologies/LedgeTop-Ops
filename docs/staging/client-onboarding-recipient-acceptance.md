@@ -61,6 +61,20 @@ destinations. Explicit, authority-fenced PA enrollment and a subsequent
 verified-identity portal membership remain separate implementation and live
 acceptance gates; neither follows from approval alone.
 
+September 26 local enrollment draft (not published or deployed): staff approval
+can now select zero, one, or both configured PA source IDs. The server derives
+each destination from the configured API-v2 connection and live Directory
+inventory; it never accepts a browser-supplied PA URL, application ID, or
+authorization generation. The approval decision persists the exact selection,
+and a retry reuses that decision without silently selecting a different source.
+Consumer enrollment passed an isolated migrated-D1 approval test for each
+selected-source shape, including replay. Business enrollment requires a
+deferred child-intent step after the organization is acknowledged by PA; this
+step and its permission-revocation and queue-liveness tests remain under local
+review. None of this is staging evidence or client portal access. Existing
+public links remain outside the new approval path. Keep all onboarding and
+portal flags off until the full safety review and the entry gates below pass.
+
 This is a bounded, synthetic staging-only acceptance window for the native
 Operations invitation, Client recipient form, and staff review in draft PR119.
 Although that branch now contains a guarded approval route, this window does

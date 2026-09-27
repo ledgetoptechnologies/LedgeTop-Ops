@@ -16,7 +16,10 @@ describe("client onboarding staff UI security boundary", () => {
     expect(source).toContain('`${endpoint}/create`');
     expect(source).toContain('`${endpoint}/reveal`');
     expect(source).toContain('`${endpoint}/review`');
+    expect(source).toContain('`${endpoint}/enrollment-choices`');
     expect(source).toContain('`${endpoint}/approve`');
+    expect(source).toContain('sourceIds })');
+    expect(source).toContain('approvalUncertain && frozenSources ? frozenSources : selectedSources');
     expect(source).not.toContain('`${endpoint}/reject`');
   });
 });

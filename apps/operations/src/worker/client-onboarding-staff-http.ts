@@ -10,6 +10,7 @@ import { issueClientOnboardingWithHandoff, revealClientOnboardingSecret,
 import { readClientOnboardingSubmissionForReview } from "./client-onboarding-review";
 import { approveNewNativeOnlyClientOnboarding } from "./client-onboarding-approval";
 import { readClientOnboardingEnrollmentChoices } from "./client-onboarding-enrollment-discovery";
+import { parseClientOnboardingEnrollmentSourceIds } from "./client-onboarding-enrollment-selection";
 
 export type ClientOnboardingStaffRoute = "session" | "create" | "reveal" | "review" | "approve" | "enrollment-choices";
 export type ClientOnboardingStaffHttpDependencies = Readonly<{
@@ -134,8 +135,10 @@ async function body(request: Request, route: Exclude<ClientOnboardingStaffRoute,
   }
   if (!plain(value)) throw new HttpFailure(400, "invalid_request");
   if (route === "approve") {
-    if (!exact(value, ["submissionId", "fieldsSha256"])
-      || typeof value.submissionId !== "string" || typeof value.fieldsSha256 !== "string")
+    if (!(exact(value, ["submissionId", "fieldsSha256"])
+        || exact(value, ["submissionId", "fieldsSha256", "sourceIds"]))
+      || typeof value.submissionId !== "string" || typeof value.fieldsSha256 !== "string"
+      || (Object.hasOwn(value, "sourceIds") && parseClientOnboardingEnrollmentSourceIds(value.sourceIds) === null))
       throw new HttpFailure(400, "invalid_request");
     return value;
   }
@@ -220,7 +223,7 @@ export async function handleClientOnboardingStaffHttp(request: Request,
     if (route === "approve") {
       try {
         const approved = await approveNewNativeOnlyClientOnboarding(authority.database, auth,
-          input.submissionId, input.fieldsSha256);
+          input.submissionId, input.fieldsSha256, input.sourceIds ?? [], projectAlphaApiV2Connections);
         return response(200, { decisionId: approved.decisionId, submissionId: approved.submissionId,
           clientRecordId: approved.clientRecordId, clientRecordVersion: approved.clientRecordVersion,
           ...(approved.organizationRecordId === null ? {} : {

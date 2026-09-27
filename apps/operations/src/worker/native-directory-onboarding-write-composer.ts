@@ -1,6 +1,6 @@
 import { writeNativeDirectoryProfile, type NativeDirectoryProfileWrite,
   writeNativeOnlyClientOnboardingDecisionProfile, writeNativeOnlyOnboardingDecisionProfile,
-  type NativeDirectoryProfileWriteOutcome } from "./native-directory-profile-writer";
+  type NativeDirectoryDestinationAuthority, type NativeDirectoryProfileWriteOutcome } from "./native-directory-profile-writer";
 import { writeNativeDirectoryRelationship, type NativeDirectoryRelationshipWrite,
   type NativeDirectoryRelationshipWriteOutcome } from "./native-directory-relationship-writer";
 
@@ -57,8 +57,12 @@ export type NativeOnlyClientOnboardingApproval = Readonly<{
   reason: string; reviewedFieldsJson: string; scopes: readonly Readonly<{ businessAreaId: string; divisionId: string | null }>[];
   verifiedUntil: string; profile: NativeDirectoryProfileWrite;
   organizationProfile?: NativeDirectoryProfileWrite;
+  enrollmentSourceIds?: readonly string[];
   relationship: Readonly<{ mode: "change" | "preserve"; expectedVersion: number; mutationId: string }>;
 }>;
+export type NativeOnlyClientOnboardingDestination = Omit<NativeDirectoryDestinationAuthority, "externalCanonicalId">;
+export type NativeOnlyClientOnboardingDestinationResolver =
+  (sourceIds: readonly string[]) => Promise<readonly NativeOnlyClientOnboardingDestination[]>;
 export type NativeOnlyClientOnboardingApprovalOutcome = Readonly<{
   status: "written"; replayed: boolean; decisionId: string; invitationId: string; submissionId: string;
   clientRecordId: string; clientRecordVersion: number; organizationRecordId: string | null;
@@ -67,6 +71,23 @@ export type NativeOnlyClientOnboardingApprovalOutcome = Readonly<{
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SHA = /^[0-9a-f]{64}$/;
+const SOURCE_ID = /^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/;
+const MAX_DESTINATIONS = 16;
+function sourceIds(value: readonly string[] | undefined): readonly string[] | null {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > MAX_DESTINATIONS || !value.every(item => typeof item === "string" && SOURCE_ID.test(item))) return null;
+  const canonical = [...value].sort();
+  return new Set(canonical).size === canonical.length && canonical.every((item,index) => item === value[index]) ? canonical : null;
+}
+function destinationIdentity(value: NativeDirectoryDestinationAuthority): Omit<NativeDirectoryDestinationAuthority,"expectedAuthorizationGeneration"> {
+  return { sourceId:value.sourceId,sourceInstanceUUID:value.sourceInstanceUUID,applicationUUID:value.applicationUUID,
+    historyEpoch:value.historyEpoch,origin:value.origin,externalCanonicalId:value.externalCanonicalId };
+}
+function destinationsFromAudit(value: unknown): readonly NativeDirectoryDestinationAuthority[] | null {
+  try { const parsed=JSON.parse(String(value)) as Record<string,unknown>;
+    return Array.isArray(parsed.destinations) ? parsed.destinations as NativeDirectoryDestinationAuthority[] : null;
+  } catch { return null; }
+}
 async function deterministicUuid(seed: string): Promise<string> {
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(seed))).slice(0, 16);
   digest[6] = (digest[6]! & 0x0f) | 0x40; digest[8] = (digest[8]! & 0x3f) | 0x80;
@@ -105,12 +126,14 @@ function savedApprovalReceipt(value: unknown): Omit<Extract<NativeOnlyClientOnbo
  * remain outside this smallest staged-state prerequisite.
  */
 export async function approveNativeOnlyClientOnboarding(db: D1Database,
-  input: NativeOnlyClientOnboardingApproval): Promise<NativeOnlyClientOnboardingApprovalOutcome> {
-  const profile = input.profile;
-  const organization = input.organizationProfile;
+  input: NativeOnlyClientOnboardingApproval,
+  resolveDestinations?: NativeOnlyClientOnboardingDestinationResolver): Promise<NativeOnlyClientOnboardingApprovalOutcome> {
+  let profile = input.profile;
+  let organization = input.organizationProfile;
+  const selectedSourceIds = sourceIds(input.enrollmentSourceIds);
   if (!UUID.test(input.decisionId) || !UUID.test(input.invitationId) || !UUID.test(input.submissionId)
     || !SHA.test(input.fieldsSha256) || !SHA.test(input.requestSha256) || profile.kind !== "client"
-    || profile.destinations.length !== 0 || input.reason.length < 1 || input.reason.length > 1024
+    || profile.destinations.length !== 0 || selectedSourceIds === null || input.reason.length < 1 || input.reason.length > 1024
     || !Number.isSafeInteger(input.relationship.expectedVersion) || input.relationship.expectedVersion < 0
     || !UUID.test(input.relationship.mutationId)) return { status: "rejected", reason: "invalid_approval" };
   const actor = profile.actor;
@@ -142,10 +165,20 @@ export async function approveNativeOnlyClientOnboarding(db: D1Database,
       || saved.client_record_id !== profile.recordId || saved.organization_record_id !== (organization?.recordId ?? null))
       return { status: "conflict", reason: "idempotency_body_conflict" };
     if (organization) {
+      const savedOrganization = await session.prepare("SELECT command_json FROM operations_directory_audit WHERE mutation_id=?")
+        .bind(organization.mutationId).first<{command_json:string}>();
+      const destinations = destinationsFromAudit(savedOrganization?.command_json);
+      if (!destinations) return {status:"blocked",reason:"invalid_saved_receipt"};
+      organization={...organization,destinations};
       const organizationAuthority = await writeNativeOnlyOnboardingDecisionProfile(session,input.decisionId,organization);
       if (organizationAuthority.status !== "written") return { status: organizationAuthority.status,
         reason: "reason" in organizationAuthority ? organizationAuthority.reason : "current_reviewer_authority" };
     }
+    const savedClient = await session.prepare("SELECT command_json FROM operations_directory_audit WHERE mutation_id=?")
+      .bind(profile.mutationId).first<{command_json:string}>();
+    const replayDestinations=destinationsFromAudit(savedClient?.command_json);
+    if (!replayDestinations) return {status:"blocked",reason:"invalid_saved_receipt"};
+    profile={...profile,destinations:replayDestinations};
     const replayAuthority = await writeNativeOnlyClientOnboardingDecisionProfile(session,input.decisionId,profile);
     if (replayAuthority.status !== "written") return { status: replayAuthority.status,
       reason: "reason" in replayAuthority ? replayAuthority.reason : "current_reviewer_authority" };
@@ -153,6 +186,17 @@ export async function approveNativeOnlyClientOnboarding(db: D1Database,
     if (!receipt || receipt.decisionId!==input.decisionId || receipt.submissionId!==input.submissionId
       || receipt.clientRecordId!==profile.recordId) return { status:"blocked",reason:"invalid_saved_receipt" };
     return { status: "written", replayed: true, ...receipt };
+  }
+  if (selectedSourceIds.length > 0) {
+    if (!resolveDestinations) return {status:"blocked",reason:"destination_resolution"};
+    let resolved: readonly NativeOnlyClientOnboardingDestination[];
+    try { resolved=await resolveDestinations(selectedSourceIds); } catch { return {status:"blocked",reason:"destination_resolution"}; }
+    if (!Array.isArray(resolved) || resolved.length !== selectedSourceIds.length
+      || resolved.some((value,index) => !value || value.sourceId !== selectedSourceIds[index]))
+      return {status:"blocked",reason:"destination_resolution"};
+    profile={...profile,destinations:resolved.map(value=>({...value,externalCanonicalId:profile.recordId}))};
+    if (organization) organization={...organization,
+      destinations:resolved.map(value=>({...value,externalCanonicalId:organization!.recordId}))};
   }
   let organizationStatements: readonly D1PreparedStatement[] = [];
   if (organization) {
@@ -166,7 +210,8 @@ export async function approveNativeOnlyClientOnboarding(db: D1Database,
   const recording = recordingSession(session);
   const planned = organization
     ? await writeNativeOnlyOnboardingDecisionProfile(recording.db,input.decisionId,profile,
-      { recordId: organization.recordId, version: 1 })
+      { recordId: organization.recordId, version: 1, mutationId: organization.mutationId,
+        destinations: organization.destinations })
     : await writeNativeOnlyClientOnboardingDecisionProfile(recording.db,input.decisionId,profile);
   const profileStatements = recording.statements();
   if (planned.status !== "written" || profileStatements === null)
@@ -176,6 +221,8 @@ export async function approveNativeOnlyClientOnboarding(db: D1Database,
   const relationshipVersion = input.relationship.expectedVersion + (input.relationship.mode === "change" ? 1 : 0);
   const scopesJson = JSON.stringify(input.scopes), profileJson = JSON.stringify(profile.profile),
     organizationProfileJson = organization ? JSON.stringify(organization.profile) : null, reviewed = input.reviewedFieldsJson;
+  const clientDestinationsJson=JSON.stringify(profile.destinations.map(destinationIdentity));
+  const organizationDestinationsJson=organization ? JSON.stringify(organization.destinations.map(destinationIdentity)) : null;
   const receipt = approvalReceipt(input,clientVersion,relationshipVersion);
   const fence = session.prepare(`INSERT INTO client_onboarding_decision_fences
     (decision_id,invitation_id,submission_id,fields_sha256,expected_invitation_version,request_sha256,outcome,
@@ -185,30 +232,32 @@ export async function approveNativeOnlyClientOnboarding(db: D1Database,
      relationship_expected_version,relationship_previous_organization_record_id,relationship_previous_organization_record_version,
      organization_target_kind,organization_record_id,organization_expected_version,organization_mutation_id,
      organization_audit_id,organization_create_admission_id,organization_profile_json,organization_destinations_json)
-    VALUES(?,?,?,?,2,?,'approved',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'[]',?,?,?,NULL,NULL,?,?,?,?,?,?,?,?)`)
+    VALUES(?,?,?,?,2,?,'approved',
+      ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+      NULL,NULL,?,?,?,?,?,?,?,?)`)
     .bind(input.decisionId,input.invitationId,input.submissionId,input.fieldsSha256,input.requestSha256,actor.staffId,
       actor.accessSubject,actor.loginEmail,actor.admissionVersion,actor.profileVersion,input.verifiedUntil,input.reason,reviewed,
       scopesJson,profile.operation === "create" ? "new" : "existing",profile.recordId,profile.expectedLocalVersion,
       profile.mutationId,`${profile.mutationId}:audit`,profile.operation === "create" ? profile.createAdmissionId : null,
-      profileJson,input.relationship.mutationId,input.relationship.mode,input.relationship.expectedVersion,
+      profileJson,clientDestinationsJson,input.relationship.mutationId,input.relationship.mode,input.relationship.expectedVersion,
       organization ? "new" : null,organization?.recordId ?? null,organization?.expectedLocalVersion ?? null,
       organization?.mutationId ?? null,organization ? `${organization.mutationId}:audit` : null,
-      organization?.createAdmissionId ?? null,organizationProfileJson,organization ? "[]" : null);
+      organization?.operation === "create" ? organization.createAdmissionId : null,organizationProfileJson,organizationDestinationsJson);
   const clientAdmissionStatements: D1PreparedStatement[] = [];
   if (profile.operation === "create") {
     clientAdmissionStatements.push(session.prepare(`INSERT INTO native_directory_create_admissions
       (id,staff_id,bound_access_subject,record_id,record_kind,scopes_json,profile_json,destinations_json,issued_by)
-      VALUES(?,?,?,?,'client',?,?, '[]',?)`).bind(profile.createAdmissionId,actor.staffId,actor.accessSubject,
-      profile.recordId,scopesJson,profileJson,actor.staffId));
+      VALUES(?,?,?,?,'client',?,?,?,?)`).bind(profile.createAdmissionId,actor.staffId,actor.accessSubject,
+      profile.recordId,scopesJson,profileJson,clientDestinationsJson,actor.staffId));
     clientAdmissionStatements.push(session.prepare(`INSERT INTO native_directory_create_admission_relationships
       (create_admission_id,client_record_id,organization_record_id,organization_record_version)
       VALUES(?,?,?,?)`).bind(profile.createAdmissionId,profile.recordId,organization?.recordId ?? null,
         organization ? 1 : null));
   }
-  const organizationAdmissionStatements = organization ? [session.prepare(`INSERT INTO native_directory_create_admissions
+  const organizationAdmissionStatements = organization?.operation === "create" ? [session.prepare(`INSERT INTO native_directory_create_admissions
     (id,staff_id,bound_access_subject,record_id,record_kind,scopes_json,profile_json,destinations_json,issued_by)
-    VALUES(?,?,?,?,'organization',?,?,'[]',?)`).bind(organization.createAdmissionId,actor.staffId,
-      actor.accessSubject,organization.recordId,scopesJson,organizationProfileJson,actor.staffId)] : [];
+    VALUES(?,?,?,?,'organization',?,?,?,?)`).bind(organization.createAdmissionId,actor.staffId,
+      actor.accessSubject,organization.recordId,scopesJson,organizationProfileJson,organizationDestinationsJson,actor.staffId)] : [];
   const decision = session.prepare(`INSERT INTO client_onboarding_decisions
     (decision_id,invitation_id,submission_id,fields_sha256,request_sha256,outcome,reviewer_staff_id,reviewer_subject,
      reviewer_email,original_admission_version,original_profile_version,reason,reviewed_fields_json,client_record_id,
