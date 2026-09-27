@@ -7141,3 +7141,39 @@ has been verified for this follow-up, and no membership or Delivery/public
 link authority has been enabled. Next is independent code review, exact-head
 CI, backed-up staging migrations and default-off deployment, then the narrowly
 enabled one-workspace live acceptance and rollback proof.
+
+September 27 staging readback for exact Ops PR122 head
+`2861eeb35091977fa9c6cfa6b14fe3ee157a4512`: all ten exact-head CI jobs
+passed. Private, full SQL exports were made before migration for both staging
+D1 databases under the owner's local Codex staging-backups directory; their
+SHA-256 digests are `9b3b70424a9e688638727d0ae3f35b5a1e65e8cded298d08560571f821183ca9`
+(Ops) and `15abed5ce9dbdfe1b9c35f9332fa4907e13c253a6cb52256bff3da2fb0d6d93b`
+(Client). Wrangler's remote ledger showed Ops ending at `0140` and Client at
+`0214` before apply. Client `0215`–`0218` were applied first, then Ops
+`0141`–`0144`; both remote migration lists subsequently returned no pending
+entries. Read-only aggregate queries found zero new Client authority/claim/
+binding rows and zero new Ops access-command/selection/binding-command rows.
+No historical row was backfilled by this step.
+
+The staging config scaffold passed preflight and wrote ignored configs from
+previously validated staging-only values. The inspected inactive Client version
+`0497d73c-3435-4fab-8576-86da76fbfb11` keeps its workspace-binding writer
+flag `false`, targets only `client-data-staging`, and preserves the three prior
+secret binding names. The inspected inactive Ops version
+`27cf5e58-61dd-4338-b6ae-634ed26ad902` keeps admin/outbox flags `false`,
+targets only `ltds-ops-staging` and `client-data-staging`, points the private
+workspace-binding RPC at `ledgetop-clients-staging`, and preserves all six
+prior secret binding names. Both versions now serve staging at 100%; their
+recorded rollback versions are Client
+`f00c3a7f-307a-4ec1-802e-a15039173b3b` and Ops
+`4892f7b6-81b8-4a47-9d9a-28642681f52c`.
+
+This proves a **default-off staging deployment**, not the one-workspace
+positive/replay/conflict/rollback acceptance. A signed-in Ops staging
+administration page loaded, but in-app browser navigation to the synthetic
+disabled workspace-binding session path was blocked by the browser with
+`ERR_BLOCKED_BY_CLIENT` before an application response. Do not reinterpret
+that as a Worker denial or work around browser protection. No staging binding,
+portal membership, Delivery grant, public-link change, or production PA update
+occurred. Keep flags off pending a reviewed, exact-scope live acceptance window
+and separate real recipient browser acceptance.

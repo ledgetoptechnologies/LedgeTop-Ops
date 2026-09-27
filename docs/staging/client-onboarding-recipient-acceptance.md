@@ -1,5 +1,35 @@
 # Client onboarding recipient staging acceptance
 
+## September 27 current deployment and browser gate
+
+The exact PR122 head `2861eeb35091977fa9c6cfa6b14fe3ee157a4512` passed all ten
+CI checks. After private backups, Client staging migrations `0215`–`0218`
+and Operations staging migrations `0141`–`0144` applied successfully. New
+authority, claim, binding, and outbox tables were empty on readback. Client
+version `0497d73c-3435-4fab-8576-86da76fbfb11` and Operations version
+`27cf5e58-61dd-4338-b6ae-634ed26ad902` now serve staging at 100%,
+with their new workspace-binding writer, admin, and outbox flags still off.
+Their respective rollback versions are
+`f00c3a7f-307a-4ec1-802e-a15039173b3b` and
+`4892f7b6-81b8-4a47-9d9a-28642681f52c`. The older checkpoints below
+are retained as history; their deployment and migration counts are not the
+current staging state.
+
+The owner's Edge screenshot shows `ERR_BLOCKED_BY_CLIENT` on a no-secret
+synthetic `/onboarding/00000000-0000-4000-8000-000000000000` URL. The
+in-app browser independently blocks a synthetic disabled Operations API
+route before a Worker response. Neither result establishes whether a valid
+recipient invitation works. Do not disable browser protection or count an
+HTTP-only API test as browser acceptance. A safe next check is for the owner
+to navigate to a no-secret synthetic Client staging onboarding path in a
+normal browser session outside the debugging connection. With the recipient
+flag currently off, a permitted request should return the Worker's 404;
+the invalid-invitation UI is only expected during a later controlled enabled
+window.
+Do not share an actual invitation URL or fragment. Keep all authority and
+recipient flags off until this gate and the exact-scope staging packet are
+reviewed.
+
 ## September 26 staging preflight result
 
 PR119 source `12aeff925425d310f5a0f3afd4a3120eec81beef` is deployed only
