@@ -18,7 +18,17 @@ The recovery call reads evidence only and creates no membership, entitlement,
 claim, invitation, Delivery grant or public link. Focused local Client and
 Operations tests, typechecks and generated-type validation passed; the
 independent QA finding for a `null` binding response was fixed and covered by
-an additional regression. This follow-on has not been staged or enabled.
+an additional regression. Draft Ops PR123 at
+`c06190a127d82f8156022b104dc0e0db08428df3` passed all ten exact-head
+CI jobs. A completed security diff review of the seven changed source files
+found no reportable issue; its limitation is that deployed Cloudflare binding
+inventory, flags, and D1 state were outside the source review. This follow-on
+has not been staged or enabled. A remote staging D1 status read attempted with
+the configured Wrangler OAuth session returned Cloudflare code `7403`
+(`account not valid or not authorized`); do not substitute a different token
+or treat that failed read as acceptance evidence. The synthetic onboarding URL
+was independently blocked by Microsoft Edge with `ERR_BLOCKED_BY_CLIENT`
+before an application response. A real recipient submission remains unproven.
 
 The remaining end-state gap is **not** to create PA portal principals through
 the new API. That would preserve the legacy PA authority model. The agreed
@@ -27,6 +37,25 @@ per-workspace v2 grant/revoke protocol and Client-side enforcement. The
 invitation policy, scope vocabulary, legacy-member disposition, approvers and
 rollback target below remain decisions to settle before active claims or
 grants can safely be implemented. Keep all authority writers off meanwhile.
+
+### September 27 — local portal-authority v2 control-plane draft
+
+An isolated, unpublished Client draft adds migration `0219` and a private,
+route-less v2 authority entrypoint. It accepts only an exact inactive `0218`
+workspace binding and empty grant scopes, records per-workspace ownership and
+per-issuer/person grant or revoke revisions with immutable audit and exact
+operation receipts, and exposes a receipt-status read for lost-response
+recovery. Both new feature flags are checked in as `false` and are required
+disabled by the staging/release inventories. Focused tests cover replay,
+revision conflicts, issuer/person separation, revoke tombstones and atomic
+rollback on a receipt failure; the two focused suites passed 8/8, Client
+typecheck passed, and release-layout/staging checks passed 46/46. This is
+authorization-inert: no Client authorization reader consumes the new tables,
+no Operations producer calls this entrypoint, and no portal membership,
+service scope, Delivery grant, or public link is created. It must not be
+enabled or described as a client-portal cutover. The owner's no-secret
+synthetic onboarding URL remains blocked by Edge before any Worker response;
+browser acceptance is still outstanding.
 
 ### September 27 — portal eligibility boundary for the API-first cutover
 

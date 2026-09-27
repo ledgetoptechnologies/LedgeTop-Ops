@@ -523,7 +523,8 @@
         "0215_operations_portal_access_authority_shadow.sql",
         "0216_client_authority_workspace_ownership_claim.sql",
         "0217_client_authority_workspace_claim_evidence.sql",
-        "0218_client_authority_workspace_binding.sql"
+        "0218_client_authority_workspace_binding.sql",
+        "0219_operations_portal_authority_v2.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
@@ -719,8 +720,8 @@
           "configPath": "apps/client/wrangler.staging.bootstrap.json",
           "manifestPath": "apps/client/.staging-bootstrap/manifest.json",
           "transformedFiles": ["0002_seed_initial_staff.sql"],
-          "ledgerCount": 133,
-          "finalMigration": "0218_client_authority_workspace_binding.sql",
+          "ledgerCount": 134,
+          "finalMigration": "0219_operations_portal_authority_v2.sql",
           "sourceSeedSha256": "<CANONICAL_SEED_SHA256>",
           "generatedSeedSha256": "<GENERATED_SEED_SHA256>",
           "databaseWasEmpty": false,
