@@ -427,6 +427,7 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0143_client_portal_workspace_binding_selection.sql",
     "0144_client_portal_workspace_binding_outbox.sql",
     "0145_client_portal_authority_v2_outbox.sql",
+    "0146_ops_customer_service_enrollments.sql",
   ]),
 });
 

@@ -93,6 +93,37 @@ expected `0144` to be the last Ops migration. The assertion was updated to
 CI jobs subsequently passed. This is source/CI evidence only, not a staging
 authority or portal-access acceptance result.
 
+Draft Ops PR127 at `c465f3eacdb54e4da8420d18ad122745640160fd` adds the
+default-off exact-Access-principal enrollment-status reader described below.
+Its seven focused Miniflare cases, Client typecheck, canonical generated-type
+check, 38 release/layout tests and 78 staging-contract tests passed locally;
+all ten exact-head CI jobs also passed. Independent QA found one stale
+generated-type artifact, corrected with the repository's canonical typegen
+script before publication. The reader has no route and returns only bounded
+opaque authority/revision status, not service, customer or content data.
+PR127 is still draft and unmerged; no flag, D1 state, public link or production
+client access changed. The next local branch adds dormant Operations-owned
+customer service definitions and enrollment revisions in `0146`, plus a
+private, route-less writer. Its first independent review identified missing
+live staff authority, atomicity and exact-retry checks; these were corrected
+before publication. The writer and SQL guard now recheck active admission,
+Access subject, profile/grant generations and exact customer scope with deny
+precedence, use one transactional D1 batch and recover only an exact receipt.
+Provider/source identities and command IDs reject noncanonical whitespace;
+expiry and revision bounds fail closed. Ten focused cases, Operations
+typecheck, 32 combined focused/full-DDL migration cases and 95 staging/layout
+checks passed locally. The independent final combined enrollment/full-chain/
+workspace-binding run passed 34/34. A separate real-Miniflare full-chain writer exercise
+passed 2/2 with all ordered Operations migrations and their guards intact.
+Its customer is created through the existing Directory admission and profile
+writer, and exact replay is tested after a real grant-generation increment;
+revoke and inactive area/division denial also pass. Operations typecheck was
+rerun successfully. This closes that local schema-interaction gap, not live
+staging acceptance; no route, flag, deploy, PA record or
+portal permission is added by this foundation. The current service catalog
+definitions are immutable; catalog rename/retirement needs a later audited
+revision workflow rather than an unaudited update.
+
 The first direct-SQL inventory found 17 Client Worker source files referring
 to `portal_v2_workspace_memberships` or `portal_v2_entitlements`. They include
 the central authorization and identity-repair logic in `workspace-v2.ts`,
@@ -137,7 +168,7 @@ PA-projected `pa_service_assignments` with receiver/source/checkpoint gates
 (`client-service-assignments.ts`), not an Operations-owned enrollment record.
 It cannot by itself decide which drone or website sections an Ops-authorized
 client may see. The replacement needs an explicit Ops customer/service
-enrollment decision and source-qualified capability projection; otherwise a
+enrollment decision and a separately enforced content-capability contract; otherwise a
 generic v2 person grant would silently turn a PA sales/service assignment
 into portal eligibility. Keep service labels separate from document, Delivery,
 website-edit, billing and file grants.
@@ -163,13 +194,27 @@ customer-service enrollment with revisioned active/revoked state and immutable
 staff audit, and an explicit recipient-to-enrollment relation for each exact
 Ops customer. A person in both businesses can have two bindings; business-party
 display grouping does not merge or inherit service authority. Project Alpha
-service assignments remain read-only evidence. The Client projection must
-carry exact customer, recipient, workspace binding/epoch, service and decision
-revisions; a missing or revoked projection shows no service. One authorized
+service assignments remain read-only evidence. The private service-metadata
+read described below must carry exact recipient, workspace binding/epoch,
+service and decision revisions; missing, expired or revoked live authority
+shows no service. One authorized
 enrollment action with current ACL and idempotent receipt is the ordinary
 workflow; do not impose compensation's independent-approver rule on basic
 service enrollment without a business decision. Service visibility alone must
 not authorize files, requests, website edits or billing.
+
+For the first service-aware home, prefer a narrow private Client-to-Operations
+read RPC over another asynchronous service projection. It must read live Ops
+recipient expiry/revocation and exact customer/service enrollment, tied to the
+acknowledged workspace/authority receipt. Client must validate its own exact
+issuer/subject head before and after the RPC and return only bounded service
+metadata under `no-store`. This keeps PA outages out of the home read path and
+avoids service-revocation fan-out, but an Ops outage must honestly show services
+unavailable. The response is non-authorizing metadata: it cannot mint or imply
+file, website-edit, request or billing permissions. Cross-database revocation
+cannot be made linearizable by these reads; actual content capabilities still
+need their separately reviewed enforcement contract. No such RPC is mounted
+or deployed by PR127 or the local enrollment foundation.
 
 ### September 27 — portal eligibility boundary for the API-first cutover
 

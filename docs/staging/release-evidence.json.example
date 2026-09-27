@@ -690,7 +690,8 @@
         "0142_client_portal_access_authority_outbox.sql",
         "0143_client_portal_workspace_binding_selection.sql",
         "0144_client_portal_workspace_binding_outbox.sql",
-        "0145_client_portal_authority_v2_outbox.sql"
+        "0145_client_portal_authority_v2_outbox.sql",
+        "0146_ops_customer_service_enrollments.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
@@ -744,7 +745,7 @@
           "manifestPath": "apps/operations/.staging-bootstrap/manifest.json",
           "transformedFiles": ["0002_seed_acl.sql"],
           "ledgerCount": 141,
-          "finalMigration": "0145_client_portal_authority_v2_outbox.sql",
+          "finalMigration": "0146_ops_customer_service_enrollments.sql",
           "sourceSeedSha256": "<CANONICAL_SEED_SHA256>",
           "generatedSeedSha256": "<GENERATED_SEED_SHA256>",
           "databaseWasEmpty": false,
