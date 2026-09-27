@@ -7123,3 +7123,21 @@ pending; this requirement does not claim a deployed UI change.
   owner-authorized dispatch scheduling/administration boundary, joined
   staging replay/conflict tests, exact-version release checks, and the normal
   PA owner production-update checkpoint before any authority cutover.
+
+September 27 follow-up source candidate: a separately gated, native-owner
+Operations HTTP boundary now offers `session`, explicit `select`, and exact-ID
+`apply` for one **inactive** workspace binding in staging only. The selection
+returns a frozen tuple for owner review before enqueue; apply requires the
+independent outbox flag and a present private Client binding before any durable
+enqueue. Dispatch is constrained to that selection ID and does not drain an
+unrelated command. Production flags remain off and the host gate requires a
+staging Operations origin. Local focused route/selection/dispatcher tests pass
+24/24; staging manifest/preflight tests pass 29/29, with the staging service
+target pinned to `ledgetop-clients-staging` and Client `0218`/Ops `0144`
+required by the source migration inventory. This supersedes the preceding
+route-less source description, **not** its live-evidence limitations: no
+staging versions, remote migrations, credentialed request, or dual-D1 receipt
+has been verified for this follow-up, and no membership or Delivery/public
+link authority has been enabled. Next is independent code review, exact-head
+CI, backed-up staging migrations and default-off deployment, then the narrowly
+enabled one-workspace live acceptance and rollback proof.

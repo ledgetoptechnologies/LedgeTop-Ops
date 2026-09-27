@@ -39,6 +39,9 @@
     "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED": "false",
     "CLIENT_ONBOARDING_ADMIN_ENABLED": "false",
     "CLIENT_ONBOARDING_ADMIN_ORIGIN": "",
+    "CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ENABLED": "false",
+    "CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ORIGIN": "",
+    "CLIENT_AUTHORITY_WORKSPACE_BINDING_OUTBOX_ENABLED": "false",
     "CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED": "false",
     "CLIENT_PORTAL_HIERARCHY_V2_ENABLED": "false",
     "CLIENT_HUB_PA_CONTACT_ASSIGNMENTS_ENABLED": "false",
@@ -108,6 +111,8 @@
   },
   "stream": { "binding": "STREAM" },
   "services": [
+    { "binding": "CLIENT_AUTHORITY_WORKSPACE_BINDING", "service": "ledgetop-clients-staging", "entrypoint": "ClientAuthorityWorkspaceBindingIngress" },
+    { "binding": "CLIENT_PORTAL_ACCESS_AUTHORITY", "service": "ledgetop-clients-staging", "entrypoint": "OpsPortalAccessAuthorityIngress" },
     { "binding": "OPS_INVENTORY_CATALOG_STAGING", "service": "ledgetop-clients-staging", "entrypoint": "OpsInventoryCatalogStagingIngress" },
     { "binding": "OPS_INVENTORY_CATALOG_PROMOTION", "service": "ledgetop-clients-staging", "entrypoint": "OpsInventoryCatalogPromotionCoordinator" }
   ],

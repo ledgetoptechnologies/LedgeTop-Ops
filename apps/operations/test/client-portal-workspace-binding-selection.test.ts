@@ -216,6 +216,30 @@ describe("inactive Ops portal workspace binding selection",()=>{
       .first("count")).toBe(1);
   });
 
+  it("dispatches only the explicitly requested operation",async()=>{
+    const first=await selectPortalWorkspaceBinding(db,actor,command());
+    const second=await selectPortalWorkspaceBinding(db,actor,command({
+      selectionId:"77777777-7777-4777-8777-777777777777",workspaceId:"workspace-b",
+      sourceWorkspaceId:"source-workspace-b",
+    }));
+    await enqueuePortalWorkspaceBinding(db,actor,first.selectionId);
+    await enqueuePortalWorkspaceBinding(db,actor,second.selectionId);
+    const sent:string[]=[];
+    const env={OPS_DB:db,CLIENT_AUTHORITY_WORKSPACE_BINDING_OUTBOX_ENABLED:"true",
+      CLIENT_AUTHORITY_WORKSPACE_BINDING:{bindWorkspace:async(input:WorkspaceBindingCommand)=>{
+        sent.push(input.operationId);return {ok:true,protocolVersion:1,status:"recorded",
+          operationId:input.operationId,clientAuthorityId:input.clientAuthorityId,workspaceId:input.workspaceId,
+          projectionSourceId:input.projectionSourceId,sourceWorkspaceId:input.sourceWorkspaceId,
+          rootType:input.rootType,rootPublicId:input.rootPublicId,checkpoint:input.expectedCheckpoint,
+          state:"inactive",revision:1};
+      }}} satisfies WorkspaceBindingEnv;
+    expect(await dispatchNextPortalWorkspaceBinding(env,second.selectionId))
+      .toEqual({status:"acknowledged",operationId:second.selectionId});
+    expect(sent).toEqual([second.selectionId]);
+    expect(await db.prepare("SELECT state FROM client_portal_workspace_binding_outbox WHERE operation_id=?")
+      .bind(first.selectionId).first("state")).toBe("pending");
+  });
+
   it("denies stale owner or record changes at enqueue",async()=>{
     const selected=await selectPortalWorkspaceBinding(db,actor,command());
     await db.prepare("UPDATE native_staff_admissions SET active=0 WHERE staff_id='owner'").run();

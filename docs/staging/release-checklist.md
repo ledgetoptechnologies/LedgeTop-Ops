@@ -442,7 +442,7 @@ migration hashes. Set `RELEASE_CONTRACT_FINALIZED=true` only after independent
 comparison with those repositories. The verifier intentionally fails while any
 release-candidate placeholder remains.
 
-The current candidate inventory extends through Client `0214` (including both
+The earlier release candidate inventory extended through Client `0214` (including both
 distinct `0199` filenames), Operations `0139`, and Project Alpha `0102`. The
 reviewed Operations runtime boundary is commit
 `5ca70d4f5ec834bfddf7bff68ffc1d89c6fd32a7`, which adds default-off,
@@ -454,6 +454,17 @@ Keep `RELEASE_CONTRACT_FINALIZED=false` until independent cross-repository,
 image, migration, and live staging evidence is complete. Any runtime change
 after `5ca70d4` requires a newly reviewed non-circular boundary and coordinated
 evidence refresh.
+
+September 27 source-only update: the staging migration inventory and example
+packet now extend through Client `0218` and Operations `0144`, including the
+inactive workspace-binding command and private Client receipt. The generated
+Ops staging binding is pinned to `ledgetop-clients-staging`; its writer, outbox,
+and owner action remain default-off. These manifest changes are **not** proof
+that either staging D1 has applied the new migrations or that a Worker version
+has been deployed. Recheck the live migration list, exact Worker versions,
+binding target, and both-D1 backups before a bounded activation window. The
+older Project Alpha/Viewer release pins in this packet still require independent
+refresh and do not authorize a production cutover.
 
 The live Project Alpha staging instance reports `v31deb85`. API key ID `1`
 is bound to generic API-v2 application

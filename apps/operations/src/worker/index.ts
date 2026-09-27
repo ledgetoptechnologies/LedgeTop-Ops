@@ -78,6 +78,7 @@ import { runNativeDirectoryReconciliationScheduler } from "./native-directory-re
 import { handleProjectAlphaApiV2MonitorControlHttp,
   projectAlphaApiV2MonitorControlHttpRequest } from "./project-alpha-api-v2-monitor-control-http";
 import { handleClientOnboardingStaffHttp } from "./client-onboarding-staff-http";
+import { handleWorkspaceBindingAdminHttp } from "./client-portal-workspace-binding-admin-http";
 import { consumeNativeStaffOnboardingRateLimit } from "./native-staff-onboarding-rate-limit";
 import {
   auditStatement,
@@ -465,6 +466,25 @@ async function dispatchClientOnboardingStaff(c: any) {
 }
 app.use("/api/client-onboarding/staff", dispatchClientOnboardingStaff);
 app.use("/api/client-onboarding/staff/*", dispatchClientOnboardingStaff);
+// This staging-only native owner boundary is deliberately separate from the
+// general Operations administrator surface and runs before legacy PA auth.
+async function dispatchWorkspaceBindingAdmin(c: any) {
+  return handleWorkspaceBindingAdminHttp(c.req.raw, {
+    environment: c.env.ENVIRONMENT,
+    expectedHost: c.env.EXPECTED_HOST,
+    configuration: {
+      enabled: c.env.CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ENABLED === "true",
+      issuer: c.env.TEAM_DOMAIN ?? "",
+      staffAudience: c.env.OPERATIONS_AUD,
+      origin: c.env.CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ORIGIN ?? "",
+      csrfSecret: c.env.OPERATIONS_SESSION_SECRET,
+    },
+    database: c.env.OPS_DB,
+    dispatch: c.env,
+  });
+}
+app.use("/api/native-client-portal/workspace-binding", dispatchWorkspaceBindingAdmin);
+app.use("/api/native-client-portal/workspace-binding/*", dispatchWorkspaceBindingAdmin);
 // This is intentionally before staff authentication. A disabled staging
 // fixture must be indistinguishable from an absent route, even to a request
 // without a valid Operations session.

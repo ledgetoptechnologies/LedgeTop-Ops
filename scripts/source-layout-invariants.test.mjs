@@ -371,7 +371,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
 });
 
 test("the deployed Operations Worker keeps catalog and inactive binding transport private and default-off", () => {
-  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "5a7e1d12996f80f3cff7d58729e7cff5dd80cd4e24a831cd3f3321e4bf73455b");
+  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "bba9836aab261c0a814a8c6910973da66a291e9f5e957cebcd8ef1ec0558cabe");
   const config = readJson("apps/operations/wrangler.jsonc");
   assert.equal(config.vars.CLIENT_ONBOARDING_ADMIN_ENABLED, "false");
   assert.equal(config.vars.CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED, "false");
@@ -379,6 +379,8 @@ test("the deployed Operations Worker keeps catalog and inactive binding transpor
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_ACCESS_AUTHORITY_OUTBOX_ENABLED, "false");
   assert.equal(config.vars.CLIENT_AUTHORITY_WORKSPACE_BINDING_OUTBOX_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ORIGIN, "");
   assert.deepEqual(config.services?.find((service) => service.binding === "CLIENT_AUTHORITY_WORKSPACE_BINDING"), {
     binding: "CLIENT_AUTHORITY_WORKSPACE_BINDING",
     service: "ledgetop-clients",

@@ -107,6 +107,19 @@ export function validateApp(app, staging, production) {
     }
   }
   if (app === "operations") {
+    if (vars.CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ENABLED === "false"
+      && vars.CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ORIGIN !== "")
+      errors.push("operations workspace binding admin origin must remain empty while disabled");
+    if (vars.CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ENABLED === "true") {
+      try {
+        const bindingOrigin = new URL(vars.CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ORIGIN);
+        if (bindingOrigin.protocol !== "https:"
+          || bindingOrigin.origin !== vars.CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ORIGIN
+          || bindingOrigin.hostname !== STAGING_HOSTS.operations) throw new Error();
+      } catch {
+        errors.push("operations enabled workspace binding admin requires the exact Ops HTTPS staging origin");
+      }
+    }
     if (vars.CLIENT_ONBOARDING_ADMIN_ENABLED === "false" && vars.CLIENT_ONBOARDING_ADMIN_ORIGIN !== "")
       errors.push("operations client onboarding admin origin must remain empty while disabled");
     if (vars.CLIENT_ONBOARDING_ADMIN_ENABLED === "true") {
@@ -164,6 +177,8 @@ export function validateApp(app, staging, production) {
       && vars.NATIVE_INTEGRATION_CONTROL_ENABLED === "false" && vars[key] === "") continue;
     if (app === "operations" && key === "CLIENT_ONBOARDING_ADMIN_ORIGIN"
       && vars.CLIENT_ONBOARDING_ADMIN_ENABLED === "false" && vars[key] === "") continue;
+    if (app === "operations" && key === "CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ORIGIN"
+      && vars.CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ENABLED === "false" && vars[key] === "") continue;
     complete(vars[key], `${app} vars.${key}`, errors);
     if (vars[key] === production.vars[key]) errors.push(`${app} vars.${key} reuses production`);
   }

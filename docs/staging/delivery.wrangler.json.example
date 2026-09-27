@@ -66,6 +66,7 @@
     "CLIENT_DELEGATED_SHARES_ENABLED": "false",
     "CLIENT_DELEGATED_SHARE_KEY_ID": "staging-v1",
     "CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED": "false",
+    "CLIENT_AUTHORITY_WORKSPACE_BINDING_WRITER_ENABLED": "false",
     "CLIENT_PORTAL_ORIGIN": "https://client-staging.ledgetopdroneservices.com",
     "CLIENT_PORTAL_ORIGINS": "https://client-staging.ledgetopdroneservices.com,https://portal-staging.ledgetoptechnologies.com",
     "CLIENT_ACCESS_TEAM_DOMAIN": "https://ledgetoptechnologies.cloudflareaccess.com",

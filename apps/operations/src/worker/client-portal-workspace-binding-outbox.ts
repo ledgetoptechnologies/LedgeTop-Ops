@@ -150,19 +150,23 @@ export type WorkspaceBindingDispatchResult={status:"disabled"|"idle"}
   |{status:"acknowledged"|"retry"|"rejected";operationId:string;code?:string};
 
 /** One idempotent private delivery. Ambiguous outcomes retry the SAME command forever. */
-export async function dispatchNextPortalWorkspaceBinding(env:WorkspaceBindingEnv):Promise<WorkspaceBindingDispatchResult>{
+export async function dispatchNextPortalWorkspaceBinding(env:WorkspaceBindingEnv,
+  operationId?:string):Promise<WorkspaceBindingDispatchResult>{
   if(env.CLIENT_AUTHORITY_WORKSPACE_BINDING_OUTBOX_ENABLED!=="true")return {status:"disabled"};
   if(!env.CLIENT_AUTHORITY_WORKSPACE_BINDING)return {status:"retry",operationId:"configuration",code:"configuration"};
+  if(operationId!==undefined&&!UUID.test(operationId))return {status:"idle"};
   const db=env.OPS_DB.withSession("first-primary"),claimToken=crypto.randomUUID();
   await db.prepare(`UPDATE client_portal_workspace_binding_outbox
     SET state='dispatching',claim_token=?,claim_until=strftime('%Y-%m-%dT%H:%M:%fZ','now','+2 minutes'),
       updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
     WHERE operation_id=(SELECT operation_id FROM client_portal_workspace_binding_outbox
-      WHERE (state IN ('pending','retry') AND next_attempt_at<=strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-        OR (state='dispatching' AND claim_until<=strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+      WHERE (? IS NULL OR operation_id=?)
+        AND ((state IN ('pending','retry') AND next_attempt_at<=strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+        OR (state='dispatching' AND claim_until<=strftime('%Y-%m-%dT%H:%M:%fZ','now')))
       ORDER BY created_at,operation_id LIMIT 1)
       AND ((state IN ('pending','retry') AND next_attempt_at<=strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-        OR (state='dispatching' AND claim_until<=strftime('%Y-%m-%dT%H:%M:%fZ','now')))`).bind(claimToken).run();
+        OR (state='dispatching' AND claim_until<=strftime('%Y-%m-%dT%H:%M:%fZ','now')))`).bind(
+          claimToken,operationId??null,operationId??null).run();
   const row=await db.prepare(`SELECT operation_id,client_authority_id,workspace_id,projection_source_id source_id,
     source_workspace_id,root_type,root_public_id,checkpoint_source_generation,checkpoint_source_sequence,
     checkpoint_snapshot_generation_id,reviewed_by_staff_id,reviewed_access_subject,reviewed_admission_version,
