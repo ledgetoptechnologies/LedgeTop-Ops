@@ -44,6 +44,11 @@ export type Env = Omit<
   | "PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED"
   | "OPS_INVENTORY_CATALOG_STAGING"
   | "OPS_INVENTORY_CATALOG_PROMOTION"
+  | "CLIENT_PORTAL_ACCESS_AUTHORITY"
+  | "CLIENT_AUTHORITY_WORKSPACE_BINDING"
+  | "CLIENT_AUTHORITY_WORKSPACE_BINDING_OUTBOX_ENABLED"
+  | "CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ENABLED"
+  | "CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ORIGIN"
 > & {
   PROJECT_ALPHA_API_KEY?: string;
   /** Temporary release barrier for the preserving client-notification table rebuild. */
@@ -60,6 +65,15 @@ export type Env = Omit<
   OPS_INVENTORY_CATALOG_STAGING?: import("./project-alpha-catalog-staging-coordinator").OpsCatalogStagingBinding;
   /** Private Client Worker RPC; accepts only explicit registry/source/checkpoint authority. */
   OPS_INVENTORY_CATALOG_PROMOTION?: import("./project-alpha-catalog-staging-coordinator").OpsCatalogPromotionBinding;
+  /** Private shadow-authority RPC. It cannot materialize portal access. */
+  CLIENT_PORTAL_ACCESS_AUTHORITY?: import("./client-portal-access-authority-outbox").ClientPortalAuthorityBinding;
+  CLIENT_PORTAL_ACCESS_AUTHORITY_OUTBOX_ENABLED?: string;
+  /** Private, default-off inactive Client workspace-binding RPC. No portal grant is created. */
+  CLIENT_AUTHORITY_WORKSPACE_BINDING?: import("./client-portal-workspace-binding-outbox").ClientAuthorityWorkspaceBindingBinding;
+  CLIENT_AUTHORITY_WORKSPACE_BINDING_OUTBOX_ENABLED?: string;
+  /** Staging-only native-owner HTTP boundary for explicit inactive binding review and delivery. */
+  CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ENABLED?: string;
+  CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ORIGIN?: string;
   /** Default-off bounded API-v2 health/incident monitor. */
   PROJECT_ALPHA_API_V2_MONITOR_ENABLED?: string;
   /** Explicit deployment-owned owner mailbox for outage alerts; never inferred from Project Alpha data. */

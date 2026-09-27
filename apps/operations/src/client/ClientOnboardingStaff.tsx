@@ -12,7 +12,9 @@ type Review = { invitationId: string; submissionId: string; fieldsSha256: string
     organizationName: string; organizationEmail: string; organizationPhone: string; addressLine1: string;
     addressLine2: string; city: string; state: string; postalCode: string; country: string } };
 type Approval = { decisionId: string; submissionId: string; clientRecordId: string;
-  clientRecordVersion: number; relationshipVersion: number; replayed: boolean };
+  clientRecordVersion: number; organizationRecordId?: string; organizationRecordVersion?: number;
+  relationshipVersion: number; replayed: boolean };
+type EnrollmentChoices = { sourceIds: string[] };
 type TargetMode = "proposed-scopes" | "existing-client";
 
 const endpoint = "/api/client-onboarding/staff";
@@ -67,7 +69,15 @@ function validReview(value: Record<string, unknown>): value is Review & Record<s
 function validApproval(value: Record<string, unknown>): value is Approval & Record<string, unknown> {
   return typeof value.decisionId === "string" && typeof value.submissionId === "string"
     && typeof value.clientRecordId === "string" && Number.isSafeInteger(value.clientRecordVersion)
+    && ((value.organizationRecordId === undefined && value.organizationRecordVersion === undefined)
+      || (typeof value.organizationRecordId === "string" && Number.isSafeInteger(value.organizationRecordVersion)))
     && Number.isSafeInteger(value.relationshipVersion) && typeof value.replayed === "boolean";
+}
+function validEnrollmentChoices(value: Record<string, unknown>): value is EnrollmentChoices & Record<string, unknown> {
+  return Array.isArray(value.sourceIds) && value.sourceIds.length <= 16
+    && value.sourceIds.every((source: unknown) => typeof source === "string"
+      && /^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/.test(source))
+    && new Set(value.sourceIds).size === value.sourceIds.length;
 }
 
 export function ClientOnboardingStaff() {
@@ -182,33 +192,51 @@ function ClientOnboardingReview({ session }: { session: StaffSession }) {
   const [approval, setApproval] = useState<Approval | null>(null);
   const [approvalBusy, setApprovalBusy] = useState(false);
   const [approvalUncertain, setApprovalUncertain] = useState(false);
+  const [availableSources, setAvailableSources] = useState<readonly string[] | null>(null);
+  const [selectedSources, setSelectedSources] = useState<readonly string[]>([]);
+  const [frozenSources, setFrozenSources] = useState<readonly string[] | null>(null);
+  const [sourceError, setSourceError] = useState("");
   const load = async (event: FormEvent) => {
     event.preventDefault();
-    if (busy) return;
+    if (busy || approvalUncertain) return;
     setBusy(true); setError(""); setReview(null); setApproval(null); setApprovalUncertain(false);
+    setAvailableSources(null); setSelectedSources([]); setFrozenSources(null); setSourceError("");
     try {
       const value = await json(`${endpoint}/review`, { method: "POST",
         headers: { "Content-Type": "application/json", "X-CSRF-Token": session.csrfToken },
         body: JSON.stringify({ submissionId: submissionId.trim() }) });
       if (!validReview(value) || value.submissionId !== submissionId.trim()) throw new Error("invalid_response");
       setReview(value);
+      try {
+        const choices = await json(`${endpoint}/enrollment-choices`, { method: "POST",
+          headers: { "Content-Type": "application/json", "X-CSRF-Token": session.csrfToken },
+          body: JSON.stringify({ submissionId: value.submissionId }) });
+        if (!validEnrollmentChoices(choices)) throw new Error("invalid_response");
+        setAvailableSources(choices.sourceIds);
+      } catch {
+        setAvailableSources([]);
+        setSourceError("PA enrollment choices could not be verified. Only a native-only approval is available; retry loading the submission if enrollment is required.");
+      }
     } catch { setError("Submission was not found or is outside your current authorized scope."); }
     finally { setBusy(false); }
   };
   const approve = async () => {
-    if (!review || approvalBusy || approval) return;
+    if (!review || approvalBusy || approval || availableSources === null) return;
     setApprovalBusy(true); setError("");
+    const sourceIds = [...(approvalUncertain && frozenSources ? frozenSources : selectedSources)].sort();
+    setFrozenSources(sourceIds);
     try {
       const value = await json(`${endpoint}/approve`, { method: "POST",
         headers: { "Content-Type": "application/json", "X-CSRF-Token": session.csrfToken },
-        body: JSON.stringify({ submissionId: review.submissionId, fieldsSha256: review.fieldsSha256 }) });
+        body: JSON.stringify({ submissionId: review.submissionId, fieldsSha256: review.fieldsSha256, sourceIds }) });
       if (!validApproval(value) || value.submissionId !== review.submissionId) throw new Error("invalid_response");
       setApproval(value); setApprovalUncertain(false);
     } catch (caught) {
       const status = caught instanceof Error && "status" in caught ? Number(caught.status) : 0;
       if (!status || status >= 500 || (caught instanceof Error && caught.message === "invalid_response"))
         setApprovalUncertain(true);
-      else setError("Approval was denied. Confirm this is a new consumer submission and that your current profile-edit and identity-link grants cover every scope.");
+      else { setFrozenSources(null); setApprovalUncertain(false);
+        setError("Approval was denied. Confirm eligibility, current grants, and the selected PA sources."); }
     } finally { setApprovalBusy(false); }
   };
   const fieldEntries = review ? [
@@ -219,14 +247,15 @@ function ClientOnboardingReview({ session }: { session: StaffSession }) {
     ["City", review.fields.city], ["State", review.fields.state], ["Postal code", review.fields.postalCode],
     ["Country", review.fields.country],
   ] : [];
-  const nativeOnlyEligible = review?.targetClientRecordId === null && review.fields.clientType === "consumer"
-    && !review.fields.organizationName && !review.fields.organizationEmail && !review.fields.organizationPhone;
+  const nativeOnlyEligible = review?.targetClientRecordId === null && ((review.fields.clientType === "consumer"
+    && !review.fields.organizationName && !review.fields.organizationEmail && !review.fields.organizationPhone)
+    || (review.fields.clientType === "business" && review.fields.organizationName.trim().length > 0));
   return <Card><section className="onboarding-created"><h2>Review submitted profile</h2>
-    <p>Approval is limited to a new, unlinked consumer profile. It never enrolls Project Alpha, creates an organization, or activates portal access.</p>
+    <p>Approval is limited to a new consumer profile or a new business organization with its linked client/contact. It never enrolls Project Alpha or activates portal access.</p>
     <form className="onboarding-staff-form" onSubmit={load}>
       <label className="wide">Submission ID<input value={submissionId} required maxLength={36}
-        onChange={event => setSubmissionId(event.target.value)} /></label>
-      <button className="button-orange wide" disabled={busy}>{busy ? "Loading…" : "Load authorized submission"}</button>
+        disabled={approvalUncertain} onChange={event => setSubmissionId(event.target.value)} /></label>
+      <button className="button-orange wide" disabled={busy || approvalUncertain}>{busy ? "Loading…" : "Load authorized submission"}</button>
     </form>
     {error && <p className="onboarding-staff-error" role="alert">{error}</p>}
     {review && <div className="onboarding-review-detail"><dl>
@@ -239,11 +268,24 @@ function ClientOnboardingReview({ session }: { session: StaffSession }) {
     </dl><h3>Authorized scope</h3><ul>{review.scopes.map(scope =>
       <li key={`${scope.businessAreaId}:${scope.divisionId ?? ""}`}>{scope.businessAreaId}{scope.divisionId ? ` / ${scope.divisionId}` : ""}</li>)}</ul>
     </div>}
-    {review && !nativeOnlyEligible && <p className="onboarding-staff-error" role="status"><strong>Approval unavailable.</strong> Existing-client and business/organization submissions require the organization-aware review path so no submitted data is discarded.</p>}
-    {review && nativeOnlyEligible && !approval && <div className="onboarding-approval-action"><p>This creates one native Operations client record with no organization, Project Alpha destination, portal entitlement, or public link.</p>
-      <button type="button" className="button-orange" disabled={approvalBusy} onClick={approve}>{approvalBusy ? "Approving…" : approvalUncertain ? "Retry same approval" : "Approve native-only client"}</button>
+    {review && !nativeOnlyEligible && <p className="onboarding-staff-error" role="status"><strong>Approval unavailable.</strong> Existing-client submissions and incomplete organization proposals are not supported by this bounded approval.</p>}
+    {review && nativeOnlyEligible && !approval && <div className="onboarding-approval-action"><p>{review.fields.clientType === "business"
+      ? "This atomically creates one native Operations organization and one linked client/contact."
+      : "This creates one native Operations client record with no organization."} PA enrollment is optional and explicit; this action never grants portal or public-link access.</p>
+      {availableSources === null ? <p role="status">Checking PA enrollment choices…</p>
+        : <fieldset><legend>Project Alpha enrollment</legend>
+          {availableSources.length === 0 && <p>No eligible PA destinations are currently available.</p>}
+          {availableSources.map(sourceId => <label key={sourceId}><input type="checkbox"
+            checked={selectedSources.includes(sourceId)} disabled={approvalBusy || approvalUncertain}
+            onChange={event => setSelectedSources(current => event.target.checked
+              ? [...current, sourceId].sort() : current.filter(value => value !== sourceId))} />{sourceId}</label>)}
+          {sourceError && <p role="status">{sourceError}</p>}
+          <p>{selectedSources.length === 0 ? "No PA enrollment selected: approve in Operations only."
+            : "The selected PA records will be queued for synchronization; PA availability and authorization must be verified."}</p>
+        </fieldset>}
+      <button type="button" className="button-orange" disabled={approvalBusy || availableSources === null} onClick={approve}>{approvalBusy ? "Approving…" : approvalUncertain ? "Retry same approval" : selectedSources.length ? "Approve with selected PA enrollment" : "Approve in Operations only"}</button>
       {approvalUncertain && <p className="onboarding-staff-error" role="alert">The approval outcome is uncertain. Retrying sends the same immutable decision; do not load a different submission first.</p>}
     </div>}
-    {approval && <div className="onboarding-approval-success" role="status"><h3>Native client approved</h3><p>Client record <code>{approval.clientRecordId}</code> is at version {approval.clientRecordVersion}. No client access or Project Alpha enrollment was activated.</p></div>}
+    {approval && <div className="onboarding-approval-success" role="status"><h3>Onboarding approved</h3><p>{approval.organizationRecordId && <>Organization record <code>{approval.organizationRecordId}</code> is at version {approval.organizationRecordVersion}. </>}Client record <code>{approval.clientRecordId}</code> is at version {approval.clientRecordVersion}. {frozenSources?.length ? "Selected Project Alpha synchronization was queued; confirm its delivery separately." : "No Project Alpha enrollment was selected."} No portal or public-link access was activated.</p></div>}
   </section></Card>;
 }

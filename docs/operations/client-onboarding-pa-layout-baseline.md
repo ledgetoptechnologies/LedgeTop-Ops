@@ -1,5 +1,28 @@
 # Client onboarding: preserve the Project Alpha form
 
+## Current approval/enrollment checkpoint (September 26)
+
+- The recipient form layout remains the Project Alpha-inspired baseline below.
+  This document's older statement that browser enrollment selection was
+  implemented describes a previous local checkpoint, not the current approval
+  path. At the current `codex/business-onboarding-approval` baseline,
+  `client-onboarding-approval.ts` passes `destinations: []` for both a new
+  organization and client. `native-directory-onboarding-write-composer.ts`
+  rejects nonempty destinations, so approval creates native Operations records
+  only; it does **not** enroll either record in Project Alpha.
+- Explicit per-instance enrollment must be implemented and verified as one
+  authority-fenced decision with the organization/client relationship, before
+  any staging acceptance or production cutover claims. This must not activate
+  portal membership, delivery grants, or existing public links. The staging
+  acceptance record in `docs/staging/client-onboarding-recipient-acceptance.md`
+  remains the release-status source for this path.
+- The local enrollment preparation branch now validates an explicit canonical
+  source-ID selection and offers a staff-only, read-only choice query bound to
+  a submitted onboarding record. Its single current-authority D1 read requires
+  both profile viewing and enrollment management across every relevant scope;
+  only enabled source IDs are returned. This is not wired into approval, has
+  not been deployed to staging, and does not prove PA availability.
+
 ## Current implementation and release status (September 14)
 
 - The local Operations recipient form follows the checked-in PA public form's

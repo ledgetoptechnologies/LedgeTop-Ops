@@ -1,5 +1,35 @@
 # Client onboarding recipient staging acceptance
 
+## September 27 current deployment and browser gate
+
+The exact PR122 head `2861eeb35091977fa9c6cfa6b14fe3ee157a4512` passed all ten
+CI checks. After private backups, Client staging migrations `0215`–`0218`
+and Operations staging migrations `0141`–`0144` applied successfully. New
+authority, claim, binding, and outbox tables were empty on readback. Client
+version `0497d73c-3435-4fab-8576-86da76fbfb11` and Operations version
+`27cf5e58-61dd-4338-b6ae-634ed26ad902` now serve staging at 100%,
+with their new workspace-binding writer, admin, and outbox flags still off.
+Their respective rollback versions are
+`f00c3a7f-307a-4ec1-802e-a15039173b3b` and
+`4892f7b6-81b8-4a47-9d9a-28642681f52c`. The older checkpoints below
+are retained as history; their deployment and migration counts are not the
+current staging state.
+
+The owner's Edge screenshot shows `ERR_BLOCKED_BY_CLIENT` on a no-secret
+synthetic `/onboarding/00000000-0000-4000-8000-000000000000` URL. The
+in-app browser independently blocks a synthetic disabled Operations API
+route before a Worker response. Neither result establishes whether a valid
+recipient invitation works. Do not disable browser protection or count an
+HTTP-only API test as browser acceptance. A safe next check is for the owner
+to navigate to a no-secret synthetic Client staging onboarding path in a
+normal browser session outside the debugging connection. With the recipient
+flag currently off, a permitted request should return the Worker's 404;
+the invalid-invitation UI is only expected during a later controlled enabled
+window.
+Do not share an actual invitation URL or fragment. Keep all authority and
+recipient flags off until this gate and the exact-scope staging packet are
+reviewed.
+
 ## September 26 staging preflight result
 
 PR119 source `12aeff925425d310f5a0f3afd4a3120eec81beef` is deployed only
@@ -36,6 +66,44 @@ Do not weaken browser protection or substitute a token-bearing shell request
 to satisfy this UI gate. The reviewed inactive Worker versions remain off and
 no invitation or authority packet was applied. A normal browser navigation to
 a no-secret synthetic path must succeed before the narrow window below opens.
+
+September 26 business-approval checkpoint: draft Ops PR120 at
+`5359c8b767107a0cbffa8efed8aaa034b61e03dd` passed all ten exact-head CI
+jobs and a changed-source security review with no findings. This is source and
+CI evidence, **not** staging acceptance: the active staging Worker versions
+above still run older code with onboarding flags off. PR120 adds no migration;
+its organization-plus-client approval relies on existing `0083` and `0134`.
+Before a positive business approval, upload and inspect the exact PR120 Ops
+staging version with flags off, verify migration state through `0140`, resolve
+the no-secret browser navigation block, and prepare a fresh, independently
+reviewed provision/revoke packet containing both `directory.profile.edit` and
+`directory.identity.link` for one chosen staging business-area scope. The
+profile-edit-only packet below must not be reused. Do not infer PA sync, portal
+enrollment, delivery/public-link parity, or production readiness from CI.
+
+Later September 26 source checkpoint: PR121 recipient-bridge head `7811c4b`
+passed all ten CI jobs and an exact-diff security review with no findings.
+The local combined draft also passes focused recipient and approval tests;
+it has **not** been published or staged. The staging secret inventory now
+requires `CLIENT_ONBOARDING_HANDOFF_KEYRING`, but no keyring value was created
+or enabled. The approval route still creates native-only records with empty PA
+destinations. Explicit, authority-fenced PA enrollment and a subsequent
+verified-identity portal membership remain separate implementation and live
+acceptance gates; neither follows from approval alone.
+
+September 26 local enrollment draft (not published or deployed): staff approval
+can now select zero, one, or both configured PA source IDs. The server derives
+each destination from the configured API-v2 connection and live Directory
+inventory; it never accepts a browser-supplied PA URL, application ID, or
+authorization generation. The approval decision persists the exact selection,
+and a retry reuses that decision without silently selecting a different source.
+Consumer enrollment passed an isolated migrated-D1 approval test for each
+selected-source shape, including replay. Business enrollment requires a
+deferred child-intent step after the organization is acknowledged by PA; this
+step and its permission-revocation and queue-liveness tests remain under local
+review. None of this is staging evidence or client portal access. Existing
+public links remain outside the new approval path. Keep all onboarding and
+portal flags off until the full safety review and the entry gates below pass.
 
 This is a bounded, synthetic staging-only acceptance window for the native
 Operations invitation, Client recipient form, and staff review in draft PR119.

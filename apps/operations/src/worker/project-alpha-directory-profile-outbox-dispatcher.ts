@@ -88,6 +88,24 @@ async function permitted(db: D1Database, row: Row, value: Actor, permission: "di
     WHERE staff_id=? AND permission=? AND effect='deny' AND active=1`).bind(value.staffId, permission).all<Grant>()).results;
   return !denies.some(deny => applies(deny, row.record_id, scopes, assigned));
 }
+async function onboardingEnrollmentPermitted(db: D1Database, row: Row, value: Actor, createAdmissionId: string): Promise<boolean> {
+  if (!await db.prepare(`SELECT 1 ok FROM native_directory_create_admissions WHERE id=? AND staff_id=?
+    AND bound_access_subject=? AND record_id=? AND record_kind=? AND active=0 AND consumed_mutation_id=?`)
+    .bind(createAdmissionId,value.staffId,value.accessSubject,row.record_id,row.record_kind,row.mutation_id).first("ok")) return false;
+  const scopes = (await db.prepare(`SELECT business_area_id,division_id FROM native_directory_resource_scopes
+    WHERE record_id=? AND active=1`).bind(row.record_id).all<{ business_area_id: string; division_id: string | null }>()).results;
+  const assigned = !!await db.prepare(`SELECT 1 ok FROM native_directory_assignments WHERE record_id=? AND staff_id=? AND active=1`)
+    .bind(row.record_id, value.staffId).first("ok");
+  const grants = (await db.prepare(`SELECT grant.id,grant.effect,grant.scope_kind,grant.business_area_id,grant.division_id,grant.resource_id
+    FROM native_directory_grants grant JOIN native_staff_admissions admission ON admission.staff_id=grant.staff_id
+    JOIN native_staff_profiles profile ON profile.staff_id=grant.staff_id JOIN staff_users staff ON staff.id=grant.staff_id
+    WHERE grant.staff_id=? AND grant.permission='directory.enrollment.manage' AND grant.active=1
+      AND admission.active=1 AND admission.bound_access_subject=? AND admission.version=?
+      AND profile.login_email=? AND profile.version=? AND staff.status='active' AND staff.access_subject=?`)
+    .bind(value.staffId,value.accessSubject,value.admissionVersion,value.loginEmail,value.profileVersion,value.accessSubject).all<Grant>()).results;
+  return grants.some(grant => grant.effect === "allow" && applies(grant,row.record_id,scopes,assigned))
+    && !grants.some(grant => grant.effect === "deny" && applies(grant,row.record_id,scopes,assigned));
+}
 async function activeMapping(db: D1Database, row: Row): Promise<{ project_alpha_public_id: string; mapping_kind: string } | null> {
   return db.prepare(`SELECT project_alpha_public_id,mapping_kind FROM project_alpha_active_directory_mappings
     WHERE source_id=? AND source_instance_id=? AND application_id=? AND history_epoch_id=? AND resource_type=? AND external_id=?`)
@@ -184,7 +202,10 @@ async function exactReservation(db: D1Database, row: Row, connection: ProjectAlp
     && value.origin === row.destination_base_url && value.externalCanonicalId === row.external_id
     && value.expectedAuthorizationGeneration === command.expectedAuthorizationGeneration)) return "command";
   if (!await permitted(db, row, originalActor, "directory.profile.edit", originalActor.selectedGrantId)
-    || (row.resource_type === "client" && !await permitted(db, row, originalActor, "directory.identity.link", originalActor.selectedIdentityGrantId))) return "authority";
+    || (row.resource_type === "client" && !await permitted(db, row, originalActor, "directory.identity.link", originalActor.selectedIdentityGrantId))
+    || (audit.operation === "create" && typeof audit.createAdmissionId === "string"
+      && audit.createAdmissionId.startsWith("client-onboarding:")
+      && !await onboardingEnrollmentPermitted(db,row,originalActor,audit.createAdmissionId))) return "authority";
   const mapping = await activeMapping(db, row);
   if (command.operation === "create") {
     if (mapping || disposition.kind !== "authorized_create" || command.commandId !== row.command_id || command.resourceType !== row.resource_type

@@ -5,6 +5,7 @@ import {
 } from "./project-alpha-api-v2-connections";
 import { dispatchProjectAlphaDirectoryProfileOutboxCommand } from "./project-alpha-directory-profile-outbox-dispatcher";
 import { dispatchProjectAlphaDirectoryRelationshipCommand } from "./project-alpha-directory-relationship-outbox-dispatcher";
+import { materializeResolvedProjectAlphaDirectoryClientIntents } from "./project-alpha-directory-client-intent-materializer";
 
 const MAX_CONNECTION_BYTES = 256 * 1024;
 const MAX_SOURCES = 64;
@@ -175,6 +176,10 @@ export async function drainNativeDirectoryOutboxes(env: Environment,
   const now = options.now ?? Date.now;
   const rotationTime = Number.isSafeInteger(options.rotationTime) && options.rotationTime! >= 0
     ? options.rotationTime! : startedAt;
+  // A linked client create is intentionally not an outbox candidate until its
+  // pinned parent intent is acknowledged. Materialization is local, bounded,
+  // and guarded transactionally by the existing 0132 relationship triggers.
+  await materializeResolvedProjectAlphaDirectoryClientIntents(env.OPS_DB, sourceIds, maxCommands, startedAt);
   const candidates = await eligibleCandidates(env.OPS_DB, sourceIds, startedAt, maxCommands);
   const selected = fairOrder(candidates, sourceIds, rotationTime, maxCommands);
   const send = deadlineFetch(options.send ?? fetch, deadline, now);

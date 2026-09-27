@@ -18,6 +18,10 @@ export interface Env {
   PUBLIC_SHARE_ORIGIN?: string;
   EXPECTED_HOST: string;
   CLIENT_PORTAL_ENABLED?: string;
+  /** Route-less ownership evidence writer. Default-off; does not fence PA reads or grant access. */
+  CLIENT_AUTHORITY_WORKSPACE_CLAIM_WRITER_ENABLED?: string;
+  /** Route-less, inert Ops customer-to-workspace reservation writer. Default-off. */
+  CLIENT_AUTHORITY_WORKSPACE_BINDING_WRITER_ENABLED?: string;
   CLIENT_PORTAL_ORIGIN?: string;
   CLIENT_PORTAL_ORIGINS?: string;
   /** Legacy delivery/portal origins retained only for compatible reads and canonical redirects. */
@@ -49,6 +53,8 @@ export interface Env {
   OPS_INVENTORY_CATALOG_SYNC_ENABLED?: string;
   /** Route-less promotion of a complete staged Operations inventory snapshot. Default-off. */
   OPS_INVENTORY_CATALOG_PROMOTION_ENABLED?: string;
+  /** Shadow-only Operations portal authority ledger. Never consulted for access. */
+  OPS_PORTAL_ACCESS_AUTHORITY_SHADOW_ENABLED?: string;
   /** Server-only PA portal hierarchy/entitlement projection. Independent and default-off. */
   PROJECT_ALPHA_PORTAL_SYNC_ENABLED?: string;
   /** Emergency-only legacy HTTP receiver. Production keeps this false; Ops Sync RPC remains independently enabled. */

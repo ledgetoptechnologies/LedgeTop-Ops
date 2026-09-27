@@ -26,9 +26,14 @@ window.fetch = async (input, init) => {
       organizationEmail: "", organizationPhone: "", addressLine1: "1 Main", addressLine2: "",
       city: "Town", state: "TX", postalCode: "75001", country: "US" },
   });
+  if (path.endsWith("/enrollment-choices")) return Response.json({
+    sourceIds: mode === "with-source" ? ["project-alpha:primary"] : [],
+  });
   if (path.endsWith("/approve")) return Response.json({
     decisionId: "44444444-4444-4444-8444-444444444444", submissionId: body.submissionId,
     clientRecordId: "55555555-5555-4555-8555-555555555555", clientRecordVersion: 1,
+    ...(mode === "business" ? { organizationRecordId: "66666666-6666-4666-8666-666666666666",
+      organizationRecordVersion: 1 } : {}),
     relationshipVersion: 1, replayed: false,
   });
   if (mode === "uncertain") return new Response(JSON.stringify({ error: "client_onboarding_unavailable" }), { status: 503 });

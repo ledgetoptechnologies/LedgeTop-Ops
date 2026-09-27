@@ -85,6 +85,8 @@ describe("client-delegated public share foundation", () => {
         scope_public_id TEXT NOT NULL,entitlement_version INTEGER NOT NULL,
         status TEXT NOT NULL,valid_from TEXT NOT NULL,expires_at TEXT,revoked_at TEXT,
         UNIQUE(id,workspace_id,identity_id));
+      CREATE TABLE portal_client_authority_workspace_claims(
+        workspace_id TEXT PRIMARY KEY,state TEXT NOT NULL);
       CREATE TABLE portal_v2_folder_bindings(
         id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,owner_scope_type TEXT NOT NULL,
         owner_public_id TEXT NOT NULL,r2_prefix TEXT NOT NULL,source_version TEXT,
@@ -313,6 +315,53 @@ describe("client-delegated public share foundation", () => {
       db.prepare("DELETE FROM client_delegated_share_events WHERE share_id=?").bind(signerShareId),
       db.prepare("DELETE FROM client_delegated_shares WHERE id=?").bind(signerShareId),
       db.prepare("DELETE FROM client_delegated_share_rate_windows WHERE action='create'")
+    ]);
+  });
+
+  it("compensates a signer-created bearer and withholds it when an authority claim wins before finalization", async () => {
+    const signerSecret = "c".repeat(43);
+    const signerShareId = "client-share-claim-0001";
+    const signerPublicId = "cs_clientclaimpublic0001";
+    const signerReceiptId = "client-share-claim-receipt";
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const binding = {
+      createClientDelegatedShare: async (request: any) => {
+        await db.prepare(`INSERT INTO client_delegated_shares
+          (id,public_id,workspace_id,delegation_id,created_by_identity_id,folder_target_id,
+           token_hash,share_version,label,expires_at,status,signer_receipt_id,idempotency_key,request_fingerprint)
+          VALUES (?,?,?,?,?,?,?,1,?,?,'active',?,?,?)`).bind(
+          signerShareId, signerPublicId, request.workspaceId, request.delegationId,
+          request.createdByIdentityId, request.folderTargetId, await sha256(signerSecret),
+          request.label, request.expiresAt, signerReceiptId, request.idempotencyKey, "c".repeat(43),
+        ).run();
+        // Model a claim committed while the private signer was in flight.
+        await db.prepare("INSERT INTO portal_client_authority_workspace_claims(workspace_id,state) VALUES(?,'active')")
+          .bind(request.workspaceId).run();
+        return { ok: true as const, protocolVersion: 1 as const, receiptId: signerReceiptId, replayed: false,
+          share: { id: signerShareId, publicId: signerPublicId, path: `/client-share/${signerPublicId}`,
+            shareUrl: `https://delivery.test/client-share/${signerPublicId}#${signerSecret}`,
+            label: request.label, status: "active" as const, passwordProtected: false,
+            expiresAt: request.expiresAt, createdAt: new Date().toISOString() } };
+      },
+    };
+    const repository = { resolveSession: async () => ({
+      accountId: "legacy-account", identityId, displayName: "Organization", role: "manager", canViewBilling: false,
+    }) } as unknown as ClientPortalRepository;
+    const router = createClientPortalRouter({ resolvePrincipal: async () => principal, repository });
+    const response = await router.request(`https://client.test/v2/workspaces/${workspaceId}/delegated-shares`, {
+      method: "POST", headers: { Origin: "https://client.test", "Content-Type": "application/json", "Idempotency-Key": "create-claim-fenced-0001" },
+      body: JSON.stringify({ delegationId, folderTargetId: childTargetId, expiresAt }),
+    }, { ...env, CLIENT_PORTAL_ENABLED: "true", CLIENT_PORTAL_ORIGIN: "https://client.test", PUBLIC_SHARE_ORIGIN: "https://delivery.test",
+      CLIENT_DELEGATED_SHARES_ENABLED: "true", CLIENT_DELEGATED_SHARE_SIGNER: binding });
+    expect(response.status).toBe(503);
+    expect(await db.prepare("SELECT status FROM client_delegated_shares WHERE id=?").bind(signerShareId).first("status")).toBe("revoked");
+    expect(await db.prepare(`SELECT COUNT(*) count FROM client_delegated_share_events
+      WHERE share_id=? AND event_type='client_share.claim_fenced'`).bind(signerShareId).first("count")).toBe(1);
+    await db.batch([
+      db.prepare("DELETE FROM client_delegated_share_events WHERE share_id=?").bind(signerShareId),
+      db.prepare("DELETE FROM client_delegated_shares WHERE id=?").bind(signerShareId),
+      db.prepare("DELETE FROM portal_client_authority_workspace_claims WHERE workspace_id=?").bind(workspaceId),
+      db.prepare("DELETE FROM client_delegated_share_rate_windows WHERE action='create'"),
     ]);
   });
 

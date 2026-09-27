@@ -1,6 +1,305 @@
 # API-first migration — current implementation objective and work register
 
-Updated September 26, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+Updated September 27, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+
+### September 27 — portal eligibility boundary for the API-first cutover
+
+- Read-only PA/Client source audit found that Project Alpha already has
+  internal workspace, principal and entitlement services and an outbound
+  signed projection, but those are the **legacy portal authority**. API-v2
+  currently exposes Directory/Projects, not portal authority. The producer
+  depends on enabled integration profiles, workspace allowlists and webhook
+  credentials. Adding an API-v2 command that simply drives that producer would
+  preserve the custom integration and contradict the agreed ownership split.
+- The Client Worker currently validates signed, source-qualified PA principal
+  and entitlement projections and keeps PA grants separate from invitation
+  grants. Its automatic identity binding requires a unique active signed
+  principal matched to a verified email, current source/root access, complete
+  Directory state and no denial. That protects today's path but is not the
+  final Operations-owned enrollment model. Email/contact similarity alone is
+  never authority. Four Client/Ops feature gates currently prevent default-on
+  eligibility; an Ops onboarding approval or PA client-create receipt must
+  not directly write Client entitlement or invitation tables.
+- Replacement direction: Operations owns source-qualified client portal
+  eligibility, person-to-client membership, service scope and revocation.
+  Client receives those decisions through a narrowly authenticated,
+  versioned Ops-to-Client authority channel and enforces them at every
+  request. PA API-v2 supplies customer/project identity and financial data,
+  not portal login authority. PA-specific data access still requires exact
+  source/resource mappings, acknowledged records and explicit file/billing
+  grants; default-on eligibility must not imply document or Delivery access.
+  Existing PA-projected memberships remain compatibility-only until the new
+  channel is proven and fenced; they cannot silently compete with Ops grants.
+- Implement and rehearse durable Ops outbox/Client receipts with idempotency,
+  revision fences, negative tombstones, local deny-first revocation, delayed
+  or lost-response recovery and explicit source/root separation. Verify root
+  revocation/reactivation and already-materialized grant behavior, no
+  unsolicited invitations, no cross-business scope, no new public links,
+  and preserved manual invitation and Delivery permissions. Do not retire PA's
+  legacy producer until source data, enrollment, revocation and both-instance
+  staging/production acceptance converge. This is a design correction, not
+  evidence of a completed portal cutover.
+- Local shadow-channel increment: Client migration `0215` and Ops migration
+  `0142` add a source-neutral, revisioned authority intent ledger, immutable
+  audit/receipt evidence and an Ops leased outbox. The route-less Client RPC
+  accepts only a stable Ops client authority ID and exact issuer/subject,
+  never a PA ID, email, bearer or workspace ID. Both feature flags are checked
+  in as `false`. No HTTP route or scheduler invokes the channel; Client
+  authorization does not read its ledger, and it creates no membership,
+  entitlement, invitation or public link. Focused Client 6/6 and Ops 8/8
+  tests and both app typechecks passed locally. Independent QA found a
+  malformed-RPC-response retry gap; it was fixed before this checkpoint.
+  This is **not** default-on eligibility or cutover acceptance. Next build
+  the authorized Ops producer and atomic per-workspace ownership claim/fence:
+  the existing Client membership uniqueness and PA repair path can otherwise
+  steal or resurrect a revoked Ops-owned membership.
+
+#### Next-stage design: per-workspace portal ownership claim (partially implemented)
+
+The next increment must establish ownership before the shadow binding can affect
+authorization. Migration `0215` cannot do that as written: its authority key is
+only `(client_authority_id, issuer, subject)`, and its command contains no
+`workspaceId`. It therefore cannot say which workspace Operations owns, fence a
+PA writer for that workspace, or distinguish the same person receiving different
+decisions in different workspaces. The present shadow tables remain useful as
+receipt/audit evidence only; they must not be read as proof of an authorization
+claim or live readiness.
+
+The collision is narrower than a blanket statement that every PA membership
+upsert is unsafe, but it is still release-blocking. The normal PA projection
+refresh in `project-alpha-portal.ts` and the native auto-enrollment membership
+upsert only update a conflict when the existing membership is already
+`source_type='project_alpha'`. By contrast, the legacy login-repair path in
+`workspace-v2.ts` explicitly changes an Operations eligibility membership to
+`project_alpha`, and both automatic-eligibility paths can restore PA
+entitlements with an unconditional same-ID conflict update. Those login repair
+and entitlement writes are not protected by an Operations ownership claim.
+Consequently, merely teaching authorization to read `0215` could allow a PA
+login/repair or later projection to regain access after an Operations revoke.
+
+Implement the ownership boundary as a Client-local, per-workspace claim and
+epoch/fence, with these properties:
+
+- The versioned Ops command must identify the canonical Client `workspaceId`,
+  stable Operations client authority ID, exact Access `(issuer, subject)`, the
+  desired grant/revoke state, and the expected claim epoch/revision. Client must
+  validate an explicitly reviewed one-to-one workspace/authority mapping before
+  acquisition; that mapping does not exist in `0215` and must be created by a
+  separate guarded step. Email and PA IDs remain non-authoritative metadata and
+  cannot select the workspace.
+- Client must store one current ownership record for the workspace plus
+  immutable claim history/receipts. An increasing claim epoch is the fencing
+  token. Memberships, entitlements and any repairable login bridge created under
+  the claim must carry or be provably joined to that exact workspace, owner and
+  epoch. Every PA projection refresh, automatic-eligibility write, entitlement
+  repair and login-repair mutation must reject or no-op when the current
+  workspace claim is Operations-owned or when its observed epoch is stale.
+- Claim acquisition, its Client membership/entitlement materialization, and
+  Client receipt/audit writes must commit in one first-primary Client D1 batch.
+  Revocation must first install a newer deny/tombstone fence, then revoke all
+  materialized grant paths for that claim in the same Client transaction. Reads
+  must deny closed when the claim is revoked, missing its required materialized
+  state, ahead of a worker's understood protocol, or internally inconsistent.
+  Rollback is a new, owner-approved epoch transition, never deletion of the
+  tombstone or replay of an older PA state.
+- Operations D1 and Client D1 have no cross-D1 atomic transaction. The Ops
+  outbox therefore remains an at-least-once coordinator, not the commit point:
+  retain the pending intent until a matching Client receipt for the exact
+  workspace/epoch is recorded, retry idempotently after lost responses, and
+  expose conflicts for reconciliation. Do not mark Ops activation complete or
+  invite a user while Client is unacknowledged. For revoke or rollback,
+  Operations must deny locally before dispatch and remain deny-closed while the
+  Client receipt is missing; an operator-visible stuck state is safer than
+  restoring prior access. Client access cannot be promised revoked while its
+  D1 is unreachable and the revoke has not committed there; this is an explicit
+  cross-system availability limit, not a successful revoke.
+- Keep every new producer, claim reader and claim writer default-off. The
+  bounded PA projection fence is data-gated by an active claim row rather than
+  a separate flag; a claim must never be created before all competing writers
+  and runtime reads are safe. Enabling the shadow outbox alone must still have
+  no authorization effect. Rollout must claim explicitly selected workspaces
+  only; unclaimed workspaces retain current behavior. Do not rewrite, rotate, revoke or recreate
+  existing Delivery/public-link rows as a side effect. Prove instead that legacy
+  password/cookie, expiry, revocation, Range/resume and already-issued links
+  behave unchanged across claim, revoke and rollback. New public links remain
+  outside this ownership command.
+
+Required tests and acceptance before any default-on decision:
+
+- Migration/contract tests reject missing or mismatched `workspaceId`, stale or
+  skipped epochs, altered idempotency replay, authority remapping, PA IDs and
+  email-selected claims. Real-D1 concurrency tests prove one winner for claim,
+  activation, revoke and rollback and immutable receipts/tombstones.
+- Joined Client tests exercise every competing writer: PA snapshot/delta
+  membership refresh, native automatic eligibility, legacy login repair,
+  entitlement repair and invitation-derived access. After an Operations revoke,
+  repeated login and newer PA projection delivery must not resurrect membership,
+  entitlement, legacy bridge or effective authorization. A stale worker/epoch
+  and missing materialization must deny closed.
+- Cross-D1 fault tests cover delivery before/after Ops commit, malformed or lost
+  Client responses, duplicate delivery, Client commit with lost receipt, retry,
+  conflict, and reconciliation. Rollback tests must show that only a new
+  approved epoch with a PA checkpoint newer than the claim can restore the
+  selected prior owner, and that old queued PA or Ops messages remain fenced.
+- Staging acceptance must use a disposable workspace first, verify flags off,
+  claim/activate/login/revoke/re-login/rollback end to end, verify both D1
+  receipts and effective authorization, and run the existing-public-link parity
+  canary without changing its records. Repeat against both PA instances where
+  their data can affect the workspace. Record exact Worker versions, migrations,
+  flags, claim epochs and rollback evidence.
+
+The owner PA checkpoint remains a hard stop after that evidence: the owner must
+approve the exact workspace set, which PA producer(s) are fenced, the observed
+epoch and rollback target, and the order for enabling Client enforcement and
+draining the legacy PA outbox. Until that checkpoint is signed off, keep the
+claim/enforcement flags off, do not drain PA, and do not describe the shadow
+channel, source tests or a disposable staging exercise as a live portal cutover.
+
+Migration `0216` is an inert, one-way claim-head foundation; released heads
+cannot be reactivated. The next local increment adds `0217` immutable audit and
+receipt evidence and a private, default-off, unmounted claim/release writer.
+The writer resolves an exact PA source pair to the existing Client workspace
+and current checkpoint; it does not infer identity from email or mutate portal
+membership, entitlement, invitations or public links. PA snapshot and event
+refresh now preserve effective PA membership and entitlement rows for an active
+claim while continuing directory/principal/intent/checkpoint processing. The
+fence also retains pre-`0216` behavior if the table has not been migrated.
+Release fails closed while active PA-effective memberships or entitlements
+remain, so a tombstone received during a claim cannot expose stale permissions
+through a simple release. A separate trusted reconciliation path must retire
+such rows before release. The tests cover claim evidence, CAS/replay, stale
+source, release denial after PA tombstones, exact effective-row preservation,
+and missing-migration compatibility. These are **local source tests**, not
+live staging or production acceptance.
+
+Follow-on local source increment: native PA automatic eligibility now excludes
+an active-claimed workspace both at candidate discovery and inside its live
+write guard. Central workspace capability, legacy/native context, batch target
+and hierarchy readers deny historical PA access while a claim is active; the
+effective request and notification mutation guards repeat that denial at the
+write boundary. Pre-`0216` databases still use their established path. A
+focused first-login regression confirms no identity, eligibility binding,
+membership, entitlement or PA-principal link is created for a claimed native
+workspace; a separate legacy-workspace regression confirms claim denial and
+late-claim write denial. These are **deny-only compatibility fences**, not the
+Operations grant reader.
+
+Independent QA also found direct SQL paths outside the central reader. The
+local follow-up fences integration-owned authenticated Delivery candidates and
+prefixes; native feedback and notification state insert guards; and the native
+request authorization/storage batch. The native request batch repeats its
+current-claim predicate on account, storage-identity and binding inserts, so
+a claim arriving after the preliminary read cannot leave orphan active rows.
+Each SQL fragment is emitted only after `0216` presence is established, and
+the new tests cover active claims, pre-`0216` behavior or interleaved claims
+where their fixtures support it. Existing public-link routes and records are
+not changed by these source edits. This remains local evidence, not a live
+public-link parity test or complete direct-reader audit.
+
+The next local review found two more authority-issuing paths: ordinary login
+repair and acceptance of historical primary/secondary invitations. Both now
+exclude active claims at discovery and repeat the claim predicate inside their
+final write batches, including legacy bridge and entitlement inserts. The
+changed primary workspace test file passed 30/30, and the secondary membership
+file passed 10/10, including active-claim invitation regressions. The
+delegated-share signer response now withholds a newly minted bearer and revokes
+its exact row if a claim won before Client finalization; a focused interleaving
+test and the full delegated-share file passed 14/14. Client TypeScript checking
+passed. This is compensation, not a cross-Worker atomicity guarantee:
+claim activation must ultimately fence share creation in Client D1, and the
+Viewer issuer also needs an epoch-bound finalization contract before claims
+can be enabled. Existing canonical bearer links remain independently valid;
+the claim must not alter their lifecycle or credentials.
+
+The private claim writer now requires the exact existing Client workspace ID
+as well as the PA source pair and current checkpoint; an ambiguous source pair
+cannot select whichever workspace D1 returns first. The workspace ID is part
+of the immutable request fingerprint. Its focused local suite passed 8/8.
+This is still claim metadata only, not person access or an enabled route.
+
+The live authority channel must be **version 2**, alongside—not an activation
+of—the identity-only `0215`/`0142` shadow channel. It needs an explicitly
+reviewed one-to-one Ops authority/Client workspace/source mapping, a
+monotonic workspace epoch, per-exact-issuer/subject grant revisions, scoped
+grant facts, immutable command fingerprints/receipts, and a status read for
+Client-commit/lost-response recovery. Client must atomically apply each
+ownership transition, deny-first revoke and resulting grant state on its D1;
+Ops retains a local deny fence and durable outbox until it has an exact
+receipt. `0216` release is a terminal tombstone, **not rollback**. Rollback
+requires a separately approved newer-epoch transition and a PA checkpoint
+newer than the cutover checkpoint. Never overwrite a PA or invitation
+membership in place merely to represent a new Ops grant: the current
+`(workspace_id,identity_id)` uniqueness would erase provenance. Until the
+protocol and joined staging tests exist, keep all authority writers off.
+
+The next buildable v2 prerequisite is an **inactive workspace binding**, not
+an active `0216` claim or a person grant. Add a separate, expand-only Client
+mapping keyed one-to-one by Operations client authority ID and Client workspace
+ID, pinned to the exact PA projection source, source workspace, root type,
+and PA root public ID. Its guarded
+bootstrap must prove the current source reservation and reconciliation
+checkpoint, reject remaps and altered idempotency replay, and append immutable
+audit/receipt evidence. A binding alone must not create or change memberships,
+entitlements, invitations, Delivery/public links, or any effective access.
+Here `client_authority_id` identifies one workspace-scoped Ops authority handle,
+not the global Ops customer record or one Access person. A customer enrolled in
+both PA instances needs two distinct authority handles linked to the same
+canonical Ops directory record by the future authorized Ops producer. `0215`
+deliberately permits multiple `(issuer, subject)` decisions beneath each handle.
+Migration `0218` adds only the immutable, inactive workspace mapping and
+evidence schema. A private, route-less and default-off writer now requires
+the exact selected source tuple and current checkpoint, atomically records the
+head/audit/receipt, and exact-replays only the same command. The writer also
+checks the current native workspace and snapshot generation against the selected
+PA root public ID; a matching source alone cannot bind a different customer.
+Its focused 11-test
+suite passes. It does not prove the Ops customer record exists or connect two
+business workspaces to one customer; the authorized
+Ops selection/approval producer and joined staging proof remain outstanding.
+No authorization reader is mounted and no access follows from a binding.
+Ops migration `0143` now provides a separate inactive selection ledger. It
+allows two PA sources for one canonical Ops record, pins each selection to a
+current activated PA mapping and record version, and requires a current owner
+admission, profile, grant generation and portal-access-management permission.
+The private, unmounted producer now derives the PA source/root from the exact
+activated mapping, generates a distinct workspace-scoped authority handle,
+rechecks owner authority and record version, and returns the same handle only
+for an exact authenticated retry. Its ten focused tests, full Ops migration
+order, and TypeScript check pass locally; CI for the preceding migration-only
+head `86f336e` passed, but
+the producer head still needs CI. Selections are append-only attempts rather
+than a permanently unique record/source row: a changed checkpoint can receive
+a new explicit review without mutating an older selection. This does not
+authorize two bindings; the Client claim writer remains one-to-one. There is
+still no route or dispatcher, and Ops cannot itself prove the Client-side
+workspace tuple; that exact proof requires the `0218` writer's receipt.
+Dispatch must recheck the selected mapping, checkpoint and actor authority,
+persist a matching Client receipt, and resolve lost responses before treating
+the selection as usable. No production or staging activation followed.
+Test concurrent one-to-one claims, stale checkpoints, exact replay, absent
+migration compatibility and unchanged public-link state before exposing even a
+private writer. Only after that mapping is reviewed should v2 define
+per-issuer/subject grant revisions, scoped materialization and Ops outbox
+recovery. Do not repurpose `0216` acquisition as a mapping shortcut: an active
+claim already fences PA access while the replacement grant reader is missing.
+
+Before enabling version 2, resolve the policy choices for invitation access
+under an Ops-owned workspace, who may approve a mapping/acquisition, the
+service-scope vocabulary and whether eligibility grants any content, the
+existing PA-member disposition at acquisition, and the exact owner-approved
+rollback target. These choices do not justify activating the incomplete
+shadow channel. During a Client D1 outage, an Ops-local revoke can deny Ops
+actions immediately but cannot truthfully confirm remote portal revocation
+until Client commits and returns a matching receipt.
+
+This does **not** activate client access or finish the ownership cutover.
+Existing PA rows may remain stored during a claim. Direct SQL readers and
+remaining login/invitation repair paths still require a complete joined audit
+and fences before any active claim is safe. An authenticated Ops producer,
+exact person/workspace binding, atomic Operations grant materialization and
+revocation, rollback protocol, cross-D1 recovery, and two-instance staging
+evidence remain release gates. Keep the claim writer flag off and create no
+active claims until these paths and the owner checkpoint have passed.
 
 ### September 26, 2026 — default-off staging versions and synthetic Delivery parity
 
@@ -6745,3 +7044,136 @@ pending; this requirement does not claim a deployed UI change.
   the staging flag state. Do not work around it by transferring the one-time
   fragment into another browser or tool. The recipient, approval, live
   public-link parity, and both production PA client round trips remain open.
+
+### September 26 — explicit onboarding enrollment source checkpoint
+
+- Local Ops feature-branch commit `84831ce` adds an explicit staff choice of
+  neither, one, or both configured PA instances at onboarding approval. The
+  browser submits canonical source IDs only; the Worker derives each enabled
+  destination identity and current authorization generation from server-owned
+  API-v2 configuration and a live Directory inventory. An approval replay uses
+  the saved choice and pinned destination evidence, not mutable configuration.
+  No portal entitlement, Delivery/public-link permission, or production PA
+  setting is changed by approval.
+- A business organization's PA create is sent before its linked client's
+  deferred create. Migration `0141` adds only a bounded waiting-intent index
+  and durable scan cursor; it does not rewrite the deployed relationship view.
+  The deferred materializer and the final outbox dispatcher recheck current
+  `directory.enrollment.manage` authority, in addition to the existing actor,
+  scope, relationship, admission, profile-edit, and identity-link guards.
+  The dispatcher stores a validated `result.data.publicId` compatibility
+  projection alongside the canonical PA `result.resource.publicId`; a focused
+  test protects that contract.
+- Operations TypeScript check, production build, and a combined six-suite
+  focused run passed (63/63 tests); a subsequent focused dispatcher run passed
+  7/7 after the compatibility assertion. These are local code checks, not
+  joined staging or production acceptance. The combined enrollment branch was
+  pushed at `d041a38a6decab7ec43c23d85af02d6325c409d4`, but its draft PR
+  could not be created: the configured GitHub integration returned HTTP 403
+  `Resource not accessible by integration`. No CI run, merge, deployment, or
+  D1 migration followed that push. PR119, PR120, and PR121 remain separate
+  draft branches; their dependency/order must be resolved before staging a
+  combined exact-head version.
+- On September 26, a no-secret synthetic `/onboarding/` URL still failed in
+  the in-app browser with `ERR_BLOCKED_BY_CLIENT` before an HTTP response.
+  Client staging `/` reached `/portal` and displayed its expected default-off
+  state. Do not infer a recipient API failure or bypass browser protection.
+  The next gate remains a controlled staging-only invitation, submission,
+  approval, selected-source PA acknowledgement/mapping, and revoke rehearsal
+  using a freshly reviewed scoped authority packet and rollback versions.
+  Production PA owner update, portal activation, and public-link parity remain
+  unverified and are not authorized by this checkpoint.
+
+### September 27 — inactive workspace-binding transport (source checkpoint)
+
+- The isolated Ops enrollment branch adds a **private, default-off** Client
+  `WorkerEntrypoint` for the already-guarded inactive workspace-binding writer.
+  Its protocol-v1 command and receipt carry exact permanent IDs, PA source and
+  root, and projection checkpoint; the Client writer still independently
+  verifies current source ownership and persists only an inactive mapping.
+  There is no public route, portal entitlement, membership, Delivery grant, or
+  change to an existing public link in this increment.
+- Ops migration `0144` adds a durable, immutable outbox, enqueue audit and
+  exact Client receipt. At most one pending, retrying, dispatching, or
+  acknowledged command may occupy a workspace. A definitive non-commit
+  rejection permits a newly reviewed selection with a **new** authority ID;
+  ambiguous transport failure does not free the workspace. The dispatcher
+  retries the same operation ID after lost responses, verifies the entire
+  returned tuple and checkpoint, fences expired leases, and cannot reopen
+  terminal states. Enqueue repeats current PA activation/record and owner
+  grant checks at D1 insertion; an exact replay also rechecks those live
+  authorities before exposing prior outbox state. Both Worker release flags
+  are checked-in off.
+- Focused local Client RPC tests passed 7/7; Ops selection/outbox tests passed
+  15/15 including the complete Ops migration chain and revoked/stale replay
+  regressions. A joined two-D1 local
+  acceptance passed with the real Client writer and a lost response after
+  commit: the same operation replayed, and Ops acknowledged the exact inactive
+  Client mapping receipt. Client and Ops TypeScript checks passed after the
+  isolated Client dependencies were restored from its checked-in lockfile;
+  this also eliminated a local cross-package `jose` version mismatch.
+  Generated Worker binding types were refreshed with the lockfile-pinned
+  Wrangler. An independent review found
+  and prompted lease, terminal-state, and control-field guard hardening.
+- This is source and local-test evidence only. No dispatcher is mounted on a
+  route or scheduled drain, no D1 production migration was applied, and no
+  Client binding was written in staging or production. The browser still
+  blocks a no-secret synthetic `/onboarding/:invitationId` URL before HTTP,
+  so recipient onboarding acceptance remains open. Next: finish the
+  owner-authorized dispatch scheduling/administration boundary, joined
+  staging replay/conflict tests, exact-version release checks, and the normal
+  PA owner production-update checkpoint before any authority cutover.
+
+September 27 follow-up source candidate: a separately gated, native-owner
+Operations HTTP boundary now offers `session`, explicit `select`, and exact-ID
+`apply` for one **inactive** workspace binding in staging only. The selection
+returns a frozen tuple for owner review before enqueue; apply requires the
+independent outbox flag and a present private Client binding before any durable
+enqueue. Dispatch is constrained to that selection ID and does not drain an
+unrelated command. Production flags remain off and the host gate requires a
+staging Operations origin. Local focused route/selection/dispatcher tests pass
+24/24; staging manifest/preflight tests pass 29/29, with the staging service
+target pinned to `ledgetop-clients-staging` and Client `0218`/Ops `0144`
+required by the source migration inventory. This supersedes the preceding
+route-less source description, **not** its live-evidence limitations: no
+staging versions, remote migrations, credentialed request, or dual-D1 receipt
+has been verified for this follow-up, and no membership or Delivery/public
+link authority has been enabled. Next is independent code review, exact-head
+CI, backed-up staging migrations and default-off deployment, then the narrowly
+enabled one-workspace live acceptance and rollback proof.
+
+September 27 staging readback for exact Ops PR122 head
+`2861eeb35091977fa9c6cfa6b14fe3ee157a4512`: all ten exact-head CI jobs
+passed. Private, full SQL exports were made before migration for both staging
+D1 databases under the owner's local Codex staging-backups directory; their
+SHA-256 digests are `9b3b70424a9e688638727d0ae3f35b5a1e65e8cded298d08560571f821183ca9`
+(Ops) and `15abed5ce9dbdfe1b9c35f9332fa4907e13c253a6cb52256bff3da2fb0d6d93b`
+(Client). Wrangler's remote ledger showed Ops ending at `0140` and Client at
+`0214` before apply. Client `0215`–`0218` were applied first, then Ops
+`0141`–`0144`; both remote migration lists subsequently returned no pending
+entries. Read-only aggregate queries found zero new Client authority/claim/
+binding rows and zero new Ops access-command/selection/binding-command rows.
+No historical row was backfilled by this step.
+
+The staging config scaffold passed preflight and wrote ignored configs from
+previously validated staging-only values. The inspected inactive Client version
+`0497d73c-3435-4fab-8576-86da76fbfb11` keeps its workspace-binding writer
+flag `false`, targets only `client-data-staging`, and preserves the three prior
+secret binding names. The inspected inactive Ops version
+`27cf5e58-61dd-4338-b6ae-634ed26ad902` keeps admin/outbox flags `false`,
+targets only `ltds-ops-staging` and `client-data-staging`, points the private
+workspace-binding RPC at `ledgetop-clients-staging`, and preserves all six
+prior secret binding names. Both versions now serve staging at 100%; their
+recorded rollback versions are Client
+`f00c3a7f-307a-4ec1-802e-a15039173b3b` and Ops
+`4892f7b6-81b8-4a47-9d9a-28642681f52c`.
+
+This proves a **default-off staging deployment**, not the one-workspace
+positive/replay/conflict/rollback acceptance. A signed-in Ops staging
+administration page loaded, but in-app browser navigation to the synthetic
+disabled workspace-binding session path was blocked by the browser with
+`ERR_BLOCKED_BY_CLIENT` before an application response. Do not reinterpret
+that as a Worker denial or work around browser protection. No staging binding,
+portal membership, Delivery grant, public-link change, or production PA update
+occurred. Keep flags off pending a reviewed, exact-scope live acceptance window
+and separate real recipient browser acceptance.

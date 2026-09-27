@@ -4,11 +4,15 @@ import { Miniflare } from "miniflare";
 
 const profileDispatch = vi.hoisted(() => vi.fn());
 const relationshipDispatch = vi.hoisted(() => vi.fn());
+const materializeClients = vi.hoisted(() => vi.fn());
 vi.mock("../src/worker/project-alpha-directory-profile-outbox-dispatcher", () => ({
   dispatchProjectAlphaDirectoryProfileOutboxCommand: profileDispatch,
 }));
 vi.mock("../src/worker/project-alpha-directory-relationship-outbox-dispatcher", () => ({
   dispatchProjectAlphaDirectoryRelationshipCommand: relationshipDispatch,
+}));
+vi.mock("../src/worker/project-alpha-directory-client-intent-materializer", () => ({
+  materializeResolvedProjectAlphaDirectoryClientIntents: materializeClients,
 }));
 
 import { drainNativeDirectoryOutboxes } from "../src/worker/native-directory-outbox-scheduler";
@@ -57,6 +61,7 @@ beforeEach(async () => {
   ]);
   profileDispatch.mockReset().mockResolvedValue({ status: "acknowledged" });
   relationshipDispatch.mockReset().mockResolvedValue({ status: "acknowledged" });
+  materializeClients.mockReset().mockResolvedValue({ examined: 0, materialized: 0, blocked: 0 });
 });
 
 afterAll(async () => runtime.dispose());
@@ -76,6 +81,7 @@ describe("native Directory scheduled outbox drain", () => {
       attempted: 0, acknowledged: 0, conflicted: 0, uncertain: 0, blocked: 0, failed: 0, exhausted: false });
     expect(profileDispatch).not.toHaveBeenCalled();
     expect(relationshipDispatch).not.toHaveBeenCalled();
+    expect(materializeClients).not.toHaveBeenCalled();
   });
 
   it("rejects a malformed disabled sibling before database work or diagnostics", async () => {
@@ -123,6 +129,8 @@ describe("native Directory scheduled outbox drain", () => {
     expect(result).toMatchObject({ status: "drained", attempted: 3, acknowledged: 3, failed: 0 });
     expect(profileDispatch.mock.calls.map(call => call[2])).toEqual(["profile-due", "profile-expired"]);
     expect(relationshipDispatch.mock.calls.map(call => call[2])).toEqual(["relationship-due"]);
+    expect(materializeClients).toHaveBeenCalledTimes(1);
+    expect(materializeClients.mock.calls[0]!.slice(1)).toEqual([[sourceId], 12, dueAt]);
   });
 
   it("rotates fairly across enabled sources and queues while enforcing the work bound", async () => {

@@ -259,8 +259,9 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   // The digest intentionally moved with the reviewed canonical portal hosts
   // and explicit legacy compatibility origin. Keep the field assertions so a future config change
   // cannot hide behind a digest refresh.
-  // Reviewed additions: Operations catalog staging and promotion remain off by default.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "fbe6e73d609437294191909f142dd69454e544f5eb61d587365f1003e35eac4b");
+  // Reviewed additions: catalog coordination, portal authority and inactive
+  // workspace-binding writers remain off by default.
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "b8c431a2334b0ebb65979bb8cb1a4a3665a875ed23e61444385cbfad59a26c39");
   const config = readJson("apps/client/wrangler.jsonc");
   assert.equal(config.name, "ledgetop-clients");
   assert.equal(config.main, "src/worker/index.ts");
@@ -288,6 +289,9 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.equal(config.vars.LEGACY_CLIENT_ORIGINS, "https://client.ledgetopdroneservices.com");
   assert.equal(config.vars.CLIENT_ACCESS_AUDS, `${config.vars.CLIENT_ACCESS_AUD},3bc9637846ccf4e1343b969cc8f14ed2cb0628956293463cf164c4080fa47e57`);
   assert.equal(config.vars.CLIENT_PORTAL_ENABLED, "true");
+  assert.equal(config.vars.CLIENT_AUTHORITY_WORKSPACE_CLAIM_WRITER_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_AUTHORITY_WORKSPACE_BINDING_WRITER_ENABLED, "false");
+  assert.equal(config.vars.OPS_PORTAL_ACCESS_AUTHORITY_SHADOW_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_CONTENT_AUDIT_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_NOTIFICATION_MIGRATION_MAINTENANCE, "false");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_HMAC_KEY_ID, "");
@@ -366,13 +370,22 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.deepEqual(config.ratelimits.map((item) => [item.name, item.namespace_id, item.simple.limit]), expectedRateLimits);
 });
 
-test("the deployed Operations Worker keeps catalog staging and promotion private and default-off", () => {
-  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "c2b79f85f8004b38964ff33b74f1ec568c18a72f69a05686b39bccf23d0dbc4c");
+test("the deployed Operations Worker keeps catalog and inactive binding transport private and default-off", () => {
+  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "bba9836aab261c0a814a8c6910973da66a291e9f5e957cebcd8ef1ec0558cabe");
   const config = readJson("apps/operations/wrangler.jsonc");
   assert.equal(config.vars.CLIENT_ONBOARDING_ADMIN_ENABLED, "false");
   assert.equal(config.vars.CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_ACCESS_AUTHORITY_OUTBOX_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_AUTHORITY_WORKSPACE_BINDING_OUTBOX_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ORIGIN, "");
+  assert.deepEqual(config.services?.find((service) => service.binding === "CLIENT_AUTHORITY_WORKSPACE_BINDING"), {
+    binding: "CLIENT_AUTHORITY_WORKSPACE_BINDING",
+    service: "ledgetop-clients",
+    entrypoint: "ClientAuthorityWorkspaceBindingIngress",
+  });
   assert.deepEqual(config.services?.find((service) => service.binding === "OPS_INVENTORY_CATALOG_STAGING"), {
     binding: "OPS_INVENTORY_CATALOG_STAGING",
     service: "ledgetop-clients",
@@ -382,6 +395,11 @@ test("the deployed Operations Worker keeps catalog staging and promotion private
     binding: "OPS_INVENTORY_CATALOG_PROMOTION",
     service: "ledgetop-clients",
     entrypoint: "OpsInventoryCatalogPromotionCoordinator",
+  });
+  assert.deepEqual(config.services?.find((service) => service.binding === "CLIENT_PORTAL_ACCESS_AUTHORITY"), {
+    binding: "CLIENT_PORTAL_ACCESS_AUTHORITY",
+    service: "ledgetop-clients",
+    entrypoint: "OpsPortalAccessAuthorityIngress",
   });
   assert.deepEqual(config.workflows?.find((workflow) => workflow.binding === "OPS_CATALOG_PROMOTION_WORKFLOW"), {
     name: "ledgetop-ops-catalog-promotion",

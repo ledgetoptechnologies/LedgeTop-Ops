@@ -9,12 +9,16 @@ import { issueClientOnboardingWithHandoff, revealClientOnboardingSecret,
   snapshotClientOnboardingKeyring, type ClientOnboardingKeyring } from "./client-onboarding-handoff";
 import { readClientOnboardingSubmissionForReview } from "./client-onboarding-review";
 import { approveNewNativeOnlyClientOnboarding } from "./client-onboarding-approval";
+import { readClientOnboardingEnrollmentChoices } from "./client-onboarding-enrollment-discovery";
+import { parseClientOnboardingEnrollmentSourceIds } from "./client-onboarding-enrollment-selection";
 
-export type ClientOnboardingStaffRoute = "session" | "create" | "reveal" | "review" | "approve";
+export type ClientOnboardingStaffRoute = "session" | "create" | "reveal" | "review" | "approve" | "enrollment-choices";
 export type ClientOnboardingStaffHttpDependencies = Readonly<{
   configuration: NativeStaffAccessConfiguration & Readonly<{ origin: string; csrfSecret: string }>;
   database: D1Database;
   handoffKeyringJson?: string;
+  /** Deployment-owned secret passed only to the credential-free list helper. */
+  projectAlphaApiV2Connections?: string;
 }>;
 
 const BODY_LIMIT = 16_384;
@@ -35,6 +39,7 @@ export function clientOnboardingStaffHttpRequest(method: string, path: string): 
   if (method === "POST" && path === "/api/client-onboarding/staff/reveal") return "reveal";
   if (method === "POST" && path === "/api/client-onboarding/staff/review") return "review";
   if (method === "POST" && path === "/api/client-onboarding/staff/approve") return "approve";
+  if (method === "POST" && path === "/api/client-onboarding/staff/enrollment-choices") return "enrollment-choices";
   return null;
 }
 
@@ -117,7 +122,7 @@ function unexpired(auth: AuthenticatedNativeStaffWithAdmissionVersion): void {
 function handoffAuthentication(auth: AuthenticatedNativeStaffWithAdmissionVersion): AuthenticatedNativeStaff {
   return Object.freeze({ identity: auth.identity, verifiedUntil: auth.verifiedUntil });
 }
-async function body(request: Request, route: "create" | "reveal" | "review" | "approve"): Promise<Record<string, unknown>> {
+async function body(request: Request, route: Exclude<ClientOnboardingStaffRoute, "session">): Promise<Record<string, unknown>> {
   const contentType = request.headers.get("Content-Type");
   if (!contentType || !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(contentType))
     throw new HttpFailure(400, "invalid_request");
@@ -130,8 +135,10 @@ async function body(request: Request, route: "create" | "reveal" | "review" | "a
   }
   if (!plain(value)) throw new HttpFailure(400, "invalid_request");
   if (route === "approve") {
-    if (!exact(value, ["submissionId", "fieldsSha256"])
-      || typeof value.submissionId !== "string" || typeof value.fieldsSha256 !== "string")
+    if (!(exact(value, ["submissionId", "fieldsSha256"])
+        || exact(value, ["submissionId", "fieldsSha256", "sourceIds"]))
+      || typeof value.submissionId !== "string" || typeof value.fieldsSha256 !== "string"
+      || (Object.hasOwn(value, "sourceIds") && parseClientOnboardingEnrollmentSourceIds(value.sourceIds) === null))
       throw new HttpFailure(400, "invalid_request");
     return value;
   }
@@ -142,6 +149,11 @@ async function body(request: Request, route: "create" | "reveal" | "review" | "a
   }
   if (route === "reveal") {
     if (!exact(value, ["commandId"]) || typeof value.commandId !== "string")
+      throw new HttpFailure(400, "invalid_request");
+    return value;
+  }
+  if (route === "enrollment-choices") {
+    if (!exact(value, ["submissionId"]) || typeof value.submissionId !== "string")
       throw new HttpFailure(400, "invalid_request");
     return value;
   }
@@ -161,6 +173,9 @@ export async function handleClientOnboardingStaffHttp(request: Request,
     const route = clientOnboardingStaffHttpRequest(request.method, url.pathname);
     if (!route) throw new HttpFailure(404, "not_found");
     const authority = snapshot(dependencies);
+    // Capture deployment configuration before authentication/CSRF awaits so a
+    // mutable test or host object cannot change the selected destinations.
+    const projectAlphaApiV2Connections = dependencies.projectAlphaApiV2Connections;
     const handoff = route === "create" || route === "reveal" ? keyring(dependencies.handoffKeyringJson) : undefined;
     if (url.origin !== authority.origin || url.search || url.hash)
       throw new HttpFailure(403, "client_onboarding_denied");
@@ -186,6 +201,18 @@ export async function handleClientOnboardingStaffHttp(request: Request,
     unexpired(auth);
     const input = await body(request, route);
     unexpired(auth);
+    if (route === "enrollment-choices") {
+      try {
+        const choices = await readClientOnboardingEnrollmentChoices(authority.database,
+          { PROJECT_ALPHA_API_V2_CONNECTIONS: projectAlphaApiV2Connections }, auth, input);
+        unexpired(auth);
+        return response(200, choices);
+      } catch (error) {
+        if (error instanceof Error && error.message === "client_onboarding_enrollment_discovery_unavailable")
+          throw new HttpFailure(503, "client_onboarding_unavailable");
+        throw new HttpFailure(403, "client_onboarding_denied");
+      }
+    }
     if (route === "review") {
       try {
         const review = await readClientOnboardingSubmissionForReview(authority.database, auth, input.submissionId);
@@ -196,9 +223,13 @@ export async function handleClientOnboardingStaffHttp(request: Request,
     if (route === "approve") {
       try {
         const approved = await approveNewNativeOnlyClientOnboarding(authority.database, auth,
-          input.submissionId, input.fieldsSha256);
+          input.submissionId, input.fieldsSha256, input.sourceIds ?? [], projectAlphaApiV2Connections);
         return response(200, { decisionId: approved.decisionId, submissionId: approved.submissionId,
           clientRecordId: approved.clientRecordId, clientRecordVersion: approved.clientRecordVersion,
+          ...(approved.organizationRecordId === null ? {} : {
+            organizationRecordId: approved.organizationRecordId,
+            organizationRecordVersion: approved.organizationRecordVersion,
+          }),
           relationshipVersion: approved.relationshipVersion, replayed: approved.replayed });
       } catch { throw new HttpFailure(403, "client_onboarding_denied"); }
     }

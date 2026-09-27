@@ -76,6 +76,35 @@ async function create(kind: "organization" | "client", organizationRecordId: str
   const result = await writeNativeDirectoryProfile(db, input); if (result.status !== "written") throw new Error(result.reason);
   return { input, staff, commandId: result.commandIds[0]! };
 }
+function onboardingAuditDatabase(database: D1Database): D1Database {
+  return new Proxy(database,{get(target,property){
+    if(property==="prepare")return (sql:string)=>{
+      const prepared=target.prepare(sql);
+      if(sql.includes("FROM native_directory_create_admissions WHERE id=?"))return {
+        bind(){return this;},async first(column?:string){return column?1:{ok:1};}
+      } as D1PreparedStatement;
+      if(!sql.includes("SELECT outbox.*,intent.intent_id"))return prepared;
+      return new Proxy(prepared,{get(statement,member){
+        if(member==="bind")return (...values:unknown[])=>{
+          const bound=statement.bind(...values);
+          return new Proxy(bound,{get(current,key){
+            if(key==="first")return async()=>{
+              const row=await current.first<Record<string,unknown>>();
+              if(row&&typeof row.audit_command_json==="string"){
+                const audit=JSON.parse(row.audit_command_json);audit.createAdmissionId=`client-onboarding:${audit.mutationId}:organization`;
+                return {...row,audit_command_json:JSON.stringify(audit)};
+              }
+              return row;
+            };
+            const value=current[key as keyof D1PreparedStatement];return typeof value==="function"?value.bind(current):value;
+          }});
+        };
+        const value=statement[member as keyof D1PreparedStatement];return typeof value==="function"?value.bind(statement):value;
+      }});
+    };
+    const value=target[property as keyof D1Database];return typeof value==="function"?value.bind(target):value;
+  }}) as D1Database;
+}
 
 beforeAll(async () => {
   runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06", script: "export default {fetch(){return new Response('ok')}}", d1Databases: ["OPS_DB"] });
@@ -105,6 +134,10 @@ describe("native Directory profile outbox dispatcher", () => {
         ? { commandId: value.commandId, externalId: value.input.recordId, expectedAuthorizationGeneration: "0", profile: organizationProfile }
         : { commandId: value.commandId, externalId: value.input.recordId, expectedAuthorizationGeneration: "0", profile: clientProfile, organization: null }]);
       expect(await db.prepare("SELECT state FROM project_alpha_directory_outbox WHERE command_id=?").bind(value.commandId).first("state")).toBe("acknowledged");
+      const persistedOutcome=JSON.parse((await db.prepare("SELECT outcome_json FROM project_alpha_directory_outbox WHERE command_id=?")
+        .bind(value.commandId).first<string>("outcome_json"))!);
+      expect(persistedOutcome.response.result.resource.publicId).toBe(publicId);
+      expect(persistedOutcome.response.result.data.publicId).toBe(publicId);
       expect(await db.prepare("SELECT state FROM operations_directory_intents WHERE mutation_id=?").bind(value.input.mutationId).first("state")).toBe("acknowledged");
       expect(await db.prepare("SELECT project_alpha_public_id FROM project_alpha_directory_mappings WHERE command_id=?").bind(value.commandId).first("project_alpha_public_id")).toBe(publicId);
       const noSend = vi.fn<typeof fetch>();
@@ -244,5 +277,27 @@ describe("native Directory profile outbox dispatcher", () => {
     const wrong = JSON.parse(env().PROJECT_ALPHA_API_V2_CONNECTIONS); wrong.instances[sourceId].applicationId = "99999999-9999-4999-8999-999999999999";
     await expect(dispatchProjectAlphaDirectoryProfileOutboxCommand(env({ PROJECT_ALPHA_API_V2_CONNECTIONS: JSON.stringify(wrong) }), sourceId, mismatch.commandId, noSend))
       .resolves.toEqual({ status: "blocked", reason: "destination" });
+  });
+
+  it("rechecks enrollment authority only for onboarding-sourced create intents before send", async () => {
+    const value=await create("organization"),noSend=vi.fn<typeof fetch>(),onboardingDb=onboardingAuditDatabase(db);
+    await expect(dispatchProjectAlphaDirectoryProfileOutboxCommand({...env(),OPS_DB:onboardingDb},sourceId,value.commandId,noSend))
+      .resolves.toEqual({status:"blocked",reason:"authority"});
+    expect(noSend).not.toHaveBeenCalled();
+    await db.prepare(`INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,granted_by)
+      VALUES(?,?,'directory.enrollment.manage','allow','global','owner')`).bind(`enrollment-${value.staff.staffId}`,value.staff.staffId).run();
+    await expect(dispatchProjectAlphaDirectoryProfileOutboxCommand({...env(),OPS_DB:onboardingDb},sourceId,value.commandId,
+      transport("e".repeat(32),"1",[]))).resolves.toMatchObject({status:"acknowledged"});
+
+    const denied=await create("organization"),deniedDb=onboardingAuditDatabase(db);
+    await db.batch([
+      db.prepare(`INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,granted_by)
+        VALUES(?,?,'directory.enrollment.manage','allow','global','owner')`).bind(`enrollment-${denied.staff.staffId}`,denied.staff.staffId),
+      db.prepare(`INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,business_area_id,granted_by)
+        VALUES(?,?,'directory.enrollment.manage','deny','business_area','area','owner')`).bind(`enrollment-deny-${denied.staff.staffId}`,denied.staff.staffId),
+    ]);
+    await expect(dispatchProjectAlphaDirectoryProfileOutboxCommand({...env(),OPS_DB:deniedDb},sourceId,denied.commandId,noSend))
+      .resolves.toEqual({status:"blocked",reason:"authority"});
+    expect(noSend).not.toHaveBeenCalled();
   });
 });

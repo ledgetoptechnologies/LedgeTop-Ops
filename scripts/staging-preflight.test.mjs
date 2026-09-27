@@ -99,6 +99,22 @@ test("accepts the exact approved isolated staging inventory", () => {
     assert.deepEqual(validateApp(app, staging, productionFrom(staging)), []);
   }
 });
+test("pins the inactive workspace binding to staging and keeps its release flags off", () => {
+  const base = stagingConfig("operations");
+  const production = productionFrom(base);
+  const wrongTarget = structuredClone(base);
+  wrongTarget.services.find((item) => item.binding === "CLIENT_AUTHORITY_WORKSPACE_BINDING").service = "ledgetop-clients";
+  const targetErrors = validateApp("operations", wrongTarget, production);
+  assert(targetErrors.some((error) => error.includes("service") && error.includes("CLIENT_AUTHORITY_WORKSPACE_BINDING")), targetErrors.join(" | "));
+  const enabled = structuredClone(base);
+  enabled.vars.CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ENABLED = "true";
+  enabled.vars.CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ORIGIN = "https://ops.ledgetopdroneservices.com";
+  enabled.vars.CLIENT_AUTHORITY_WORKSPACE_BINDING_OUTBOX_ENABLED = "true";
+  const errors = validateApp("operations", enabled, production);
+  assert(errors.some((error) => error.includes("CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ENABLED")), errors.join(" | "));
+  assert(errors.some((error) => error.includes("CLIENT_AUTHORITY_WORKSPACE_BINDING_OUTBOX_ENABLED")), errors.join(" | "));
+  assert(errors.some((error) => error.includes("workspace binding admin requires the exact Ops HTTPS staging origin")), errors.join(" | "));
+});
 test("rejects missing, unexpected, or non-regular release migrations", () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-staging-migrations-"));
   for (const app of ["delivery", "operations"]) {
@@ -316,8 +332,8 @@ test("requires every portal-v2 and Operations capability to be explicitly false"
   }
 });
 
-test("pins the native portal, Operations 0054-0140, both 0199 files, and the 0200-0214 release contract", () => {
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-32), [
+test("pins the native portal, Operations 0054-0144, both 0199 files, and the 0200-0218 release contract", () => {
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-36), [
     "0184_native_client_feedback.sql",
     "0185_native_service_request_ownership.sql",
     "0186_delivery_notification_authority_provenance.sql",
@@ -350,8 +366,12 @@ test("pins the native portal, Operations 0054-0140, both 0199 files, and the 020
     "0212_incoming_upload_archive_inventory.sql",
     "0213_incoming_rclone_promotion.sql",
     "0214_ops_inventory_catalog_staging.sql",
+    "0215_operations_portal_access_authority_shadow.sql",
+    "0216_client_authority_workspace_ownership_claim.sql",
+    "0217_client_authority_workspace_claim_evidence.sql",
+    "0218_client_authority_workspace_binding.sql",
   ]);
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(-18), [
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(-22), [
     "0123_native_directory_authority_history.sql",
     "0124_project_alpha_project_adoption_review_evidence.sql",
     "0125_project_alpha_existing_directory_binding_activation.sql",
@@ -370,8 +390,13 @@ test("pins the native portal, Operations 0054-0140, both 0199 files, and the 020
     "0138_project_alpha_directory_reconciliation_review.sql",
     "0139_native_directory_staging_empty_enrollment_fixture_guard.sql",
     "0140_client_onboarding_one_time_reveal.sql",
+    "0141_deferred_directory_client_materialization.sql",
+    "0142_client_portal_access_authority_outbox.sql",
+    "0143_client_portal_workspace_binding_selection.sql",
+    "0144_client_portal_workspace_binding_outbox.sql",
   ]);
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(-87, -84), [
+  const nativeDirectoryStart = REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0054_project_alpha_directory_outbox.sql");
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(nativeDirectoryStart, nativeDirectoryStart + 3), [
     "0054_project_alpha_directory_outbox.sql",
     "0055_operations_directory_authority.sql",
     "0056_operations_directory_materialization.sql",

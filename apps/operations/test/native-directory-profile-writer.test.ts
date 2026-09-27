@@ -16,6 +16,7 @@ import {
 } from "../src/worker/native-directory-profile-writer";
 import { approveNativeOnlyClientOnboarding,
   planAndExecuteNativeDirectoryOnboardingWrites } from "../src/worker/native-directory-onboarding-write-composer";
+import { materializeResolvedProjectAlphaDirectoryClientIntents } from "../src/worker/project-alpha-directory-client-intent-materializer";
 
 let runtime: Miniflare;
 let db: D1Database;
@@ -121,7 +122,7 @@ beforeAll(async () => {
   runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06", script: "export default {fetch(){return new Response('ok')}}", d1Databases: ["OPS_DB"] });
   db = await runtime.getD1Database("OPS_DB") as D1Database;
   const directory = new URL("../migrations/", import.meta.url);
-  const migrations = readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0139").sort();
+  const migrations = readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0141").sort();
   for (const migration of migrations) await db.batch(splitD1MigrationStatements(readFileSync(new URL(migration, directory), "utf8")).map(sql => db.prepare(sql)));
   await db.batch([
     db.prepare(`INSERT INTO staff_users(id,email,display_name,access_subject,status) VALUES('owner','owner@example.test','Owner','access|owner','active')`),
@@ -497,6 +498,76 @@ describe("native-only client onboarding approval composer", () => {
     await expect(approveNativeOnlyClientOnboarding(db,update)).resolves.toMatchObject({status:"written",replayed:true});
     await db.prepare("UPDATE native_directory_grants SET active=0 WHERE id=?").bind(actor.selectedGrantId).run();
     await expect(approveNativeOnlyClientOnboarding(db,update)).resolves.toEqual({status:"blocked",reason:"native_directory_authority"});
+  });
+
+  it("lazily pins explicit PA destinations and replays without resolving current configuration", async () => {
+    const actor=await seedActor(),command=await newApproval(actor);
+    await db.prepare(`INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,active,granted_by)
+      VALUES(?,?,'directory.enrollment.manage','allow','global',1,'owner')`).bind(`enrollment-${actor.staffId}`,actor.staffId).run();
+    const enrolled={...command,enrollmentSourceIds:[sourceId]};
+    let resolutions=0;
+    const resolve=async () => { resolutions+=1; return [{sourceId,sourceInstanceUUID,applicationUUID,historyEpoch,origin,
+      expectedAuthorizationGeneration:"7"}] as const; };
+    await expect(approveNativeOnlyClientOnboarding(db,enrolled,resolve)).resolves.toMatchObject({status:"written",replayed:false,
+      clientRecordId:command.profile.recordId});
+    expect(resolutions).toBe(1);
+    const expectedClient=JSON.stringify([destination(command.profile.recordId,"7")].map(({expectedAuthorizationGeneration:_,...value})=>value));
+    expect(await db.prepare("SELECT destinations_json FROM native_directory_create_admissions WHERE id=?")
+      .bind(command.profile.createAdmissionId).first("destinations_json")).toBe(expectedClient);
+    expect(await db.prepare(`SELECT evidence_kind,parent_intent_id,parent_public_id FROM operations_directory_intent_relationship_dependencies
+      WHERE client_record_id=?`).bind(command.profile.recordId).first()).toEqual({evidence_kind:"unlinked",
+        parent_intent_id:null,parent_public_id:null});
+    await expect(approveNativeOnlyClientOnboarding(db,enrolled,async()=>{throw Error("must not resolve replay");}))
+      .resolves.toMatchObject({status:"written",replayed:true});
+    expect(resolutions).toBe(1);
+  });
+
+  it("commits a linked client's waiting intent with same-batch parent-intent evidence", async () => {
+    const actor=await seedActor(),command=await newApproval(actor),organizationRecordId=uuid(),organizationMutationId=uuid();
+    await db.prepare(`INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,active,granted_by)
+      VALUES(?,?,'directory.enrollment.manage','allow','global',1,'owner')`).bind(`enrollment-${actor.staffId}`,actor.staffId).run();
+    const relationshipMutationId=await derivedUuid(`${command.profile.mutationId}\0client-relationship\0${organizationRecordId}`);
+    const linked={...command,enrollmentSourceIds:[sourceId],
+      relationship:{mode:"change" as const,expectedVersion:0,mutationId:relationshipMutationId},
+      organizationProfile:{operation:"create" as const,mutationId:organizationMutationId,recordId:organizationRecordId,
+        expectedLocalVersion:0 as const,kind:"organization" as const,
+        createAdmissionId:`client-onboarding:${command.decisionId}:organization`,profile:organizationProfile,
+        scopes:command.scopes,destinations:[],actor},
+      profile:{...command.profile,relationship:{organizationRecordId,expectedRelationshipVersion:0}}};
+    const resolve=async () => [{sourceId,sourceInstanceUUID,applicationUUID,historyEpoch,origin,
+      expectedAuthorizationGeneration:"7"}] as const;
+    await expect(approveNativeOnlyClientOnboarding(db,linked,resolve)).resolves.toMatchObject({status:"written",replayed:false,
+      organizationRecordId,clientRecordId:command.profile.recordId});
+    expect(await db.prepare("SELECT state FROM operations_directory_intents WHERE intent_id=?")
+      .bind(`${command.profile.mutationId}:intent:0`).first("state")).toBe("waiting");
+    expect(await db.prepare("SELECT 1 FROM operations_directory_materializations WHERE intent_id=?")
+      .bind(`${command.profile.mutationId}:intent:0`).first()).toBeNull();
+    expect(await db.prepare("SELECT state FROM operations_directory_intents WHERE intent_id=?")
+      .bind(`${organizationMutationId}:intent:0`).first("state")).toBe("materialized");
+    expect(await db.prepare(`SELECT evidence_kind,parent_intent_id,parent_public_id FROM operations_directory_intent_relationship_dependencies
+      WHERE client_record_id=?`).bind(command.profile.recordId).first()).toEqual({evidence_kind:"parent_intent",
+        parent_intent_id:`${organizationMutationId}:intent:0`,parent_public_id:null});
+    await expect(materializeResolvedProjectAlphaDirectoryClientIntents(db,[sourceId],1,Date.now()))
+      .resolves.toEqual({examined:0,materialized:0,blocked:0});
+    const parentCommandId=await db.prepare("SELECT command_id FROM operations_directory_materializations WHERE intent_id=?")
+      .bind(`${organizationMutationId}:intent:0`).first<string>("command_id");
+    await acknowledgeCreate(linked.organizationProfile,{status:"written",replayed:false,mutationId:organizationMutationId,
+      recordId:organizationRecordId,kind:"organization",version:1,commandIds:[parentCommandId!]});
+    await db.prepare("UPDATE native_directory_grants SET active=0 WHERE id=?").bind(`enrollment-${actor.staffId}`).run();
+    await expect(materializeResolvedProjectAlphaDirectoryClientIntents(db,[sourceId],1,Date.now()))
+      .resolves.toEqual({examined:1,materialized:0,blocked:1});
+    expect(await db.prepare("SELECT state FROM operations_directory_intents WHERE intent_id=?")
+      .bind(`${command.profile.mutationId}:intent:0`).first("state")).toBe("waiting");
+    await db.prepare("UPDATE native_directory_grants SET active=1 WHERE id=?").bind(`enrollment-${actor.staffId}`).run();
+    await expect(materializeResolvedProjectAlphaDirectoryClientIntents(db,[sourceId],1,Date.now()))
+      .resolves.toEqual({examined:1,materialized:1,blocked:0});
+    expect(await db.prepare("SELECT state FROM operations_directory_intents WHERE intent_id=?")
+      .bind(`${command.profile.mutationId}:intent:0`).first("state")).toBe("materialized");
+    expect(await db.prepare(`SELECT json_extract(command_json,'$.fields.organizationPublicId') parentPublicId,state
+      FROM project_alpha_directory_outbox WHERE external_id=?`).bind(command.profile.recordId).first())
+      .toEqual({parentPublicId:expect.stringMatching(/^[0-9a-f]{32}$/),state:"pending"});
+    await expect(materializeResolvedProjectAlphaDirectoryClientIntents(db,[sourceId],1,Date.now()))
+      .resolves.toEqual({examined:0,materialized:0,blocked:0});
   });
 
   it("rolls back decision fence, admission, Directory rows, and audit after a late batch failure", async () => {
