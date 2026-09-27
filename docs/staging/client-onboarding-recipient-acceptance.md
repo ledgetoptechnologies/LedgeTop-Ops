@@ -51,6 +51,16 @@ reviewed provision/revoke packet containing both `directory.profile.edit` and
 profile-edit-only packet below must not be reused. Do not infer PA sync, portal
 enrollment, delivery/public-link parity, or production readiness from CI.
 
+Later September 26 source checkpoint: PR121 recipient-bridge head `7811c4b`
+passed all ten CI jobs and an exact-diff security review with no findings.
+The local combined draft also passes focused recipient and approval tests;
+it has **not** been published or staged. The staging secret inventory now
+requires `CLIENT_ONBOARDING_HANDOFF_KEYRING`, but no keyring value was created
+or enabled. The approval route still creates native-only records with empty PA
+destinations. Explicit, authority-fenced PA enrollment and a subsequent
+verified-identity portal membership remain separate implementation and live
+acceptance gates; neither follows from approval alone.
+
 This is a bounded, synthetic staging-only acceptance window for the native
 Operations invitation, Client recipient form, and staff review in draft PR119.
 Although that branch now contains a guarded approval route, this window does
