@@ -1,7 +1,9 @@
 PRAGMA foreign_keys = ON;
 
--- Inert, reviewed root mapping. A client authority ID identifies the Ops
--- customer root; issuer/subject grants remain separate per-person decisions.
+-- Inert, reviewed workspace mapping. A client authority ID identifies one
+-- Ops-managed workspace authority handle, not the global customer record;
+-- one customer may have separate handles in two Project Alpha instances.
+-- Issuer/subject grants remain separate per-person decisions.
 -- This table is not consulted by portal authorization and cannot grant access.
 CREATE TABLE portal_client_authority_workspace_bindings (
   client_authority_id TEXT PRIMARY KEY CHECK (
@@ -16,6 +18,8 @@ CREATE TABLE portal_client_authority_workspace_bindings (
   workspace_id TEXT NOT NULL UNIQUE,
   projection_source_id TEXT NOT NULL,
   source_workspace_id TEXT NOT NULL,
+  root_type TEXT NOT NULL CHECK(root_type IN ('organization','standalone_client')),
+  root_public_id TEXT NOT NULL CHECK(length(root_public_id)=32 AND root_public_id NOT GLOB '*[^0-9a-f]*'),
   state TEXT NOT NULL DEFAULT 'inactive' CHECK(state='inactive'),
   revision INTEGER NOT NULL DEFAULT 1 CHECK(revision=1),
   reconciliation_source_generation TEXT NOT NULL,
@@ -34,6 +38,13 @@ WHEN NOT EXISTS (
     AND source.projection_source_id=NEW.projection_source_id
     AND source.source_workspace_id=NEW.source_workspace_id
 ) OR NOT EXISTS (
+  SELECT 1 FROM portal_v2_workspaces workspace
+  WHERE workspace.id=NEW.workspace_id
+    AND workspace.project_alpha_source_id=NEW.projection_source_id
+    AND workspace.root_type=NEW.root_type
+    AND ((NEW.root_type='organization' AND workspace.pa_organization_public_id=NEW.root_public_id)
+      OR (NEW.root_type='standalone_client' AND workspace.pa_client_public_id=NEW.root_public_id))
+) OR NOT EXISTS (
   SELECT 1 FROM pa_portal_projection_checkpoints checkpoint
   JOIN pa_portal_projection_generations generation
     ON generation.id=checkpoint.snapshot_generation_id
@@ -44,6 +55,8 @@ WHEN NOT EXISTS (
     AND checkpoint.snapshot_generation_id=NEW.reconciliation_snapshot_generation_id
     AND generation.source_generation=NEW.reconciliation_source_generation
     AND generation.projection_source_id=NEW.projection_source_id
+    AND generation.workspace_root_type=NEW.root_type
+    AND generation.workspace_root_public_id=NEW.root_public_id
 )
 BEGIN SELECT RAISE(ABORT,'client authority workspace binding requires current explicit source ownership'); END;
 
@@ -63,6 +76,8 @@ CREATE TABLE portal_client_authority_workspace_binding_audit (
   workspace_id TEXT NOT NULL,
   projection_source_id TEXT NOT NULL,
   source_workspace_id TEXT NOT NULL,
+  root_type TEXT NOT NULL,
+  root_public_id TEXT NOT NULL,
   reconciliation_source_generation TEXT NOT NULL,
   reconciliation_source_sequence INTEGER NOT NULL,
   reconciliation_snapshot_generation_id TEXT NOT NULL,
@@ -78,6 +93,8 @@ WHEN NOT EXISTS (
     AND binding.workspace_id=NEW.workspace_id
     AND binding.projection_source_id=NEW.projection_source_id
     AND binding.source_workspace_id=NEW.source_workspace_id
+    AND binding.root_type=NEW.root_type
+    AND binding.root_public_id=NEW.root_public_id
     AND binding.reconciliation_source_generation=NEW.reconciliation_source_generation
     AND binding.reconciliation_source_sequence=NEW.reconciliation_source_sequence
     AND binding.reconciliation_snapshot_generation_id=NEW.reconciliation_snapshot_generation_id

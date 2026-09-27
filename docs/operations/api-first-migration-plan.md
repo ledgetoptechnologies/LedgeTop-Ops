@@ -235,18 +235,26 @@ protocol and joined staging tests exist, keep all authority writers off.
 The next buildable v2 prerequisite is an **inactive workspace binding**, not
 an active `0216` claim or a person grant. Add a separate, expand-only Client
 mapping keyed one-to-one by Operations client authority ID and Client workspace
-ID, pinned to the exact PA projection source and source workspace. Its guarded
+ID, pinned to the exact PA projection source, source workspace, root type,
+and PA root public ID. Its guarded
 bootstrap must prove the current source reservation and reconciliation
 checkpoint, reject remaps and altered idempotency replay, and append immutable
 audit/receipt evidence. A binding alone must not create or change memberships,
 entitlements, invitations, Delivery/public links, or any effective access.
-Here `client_authority_id` identifies a customer root, not one Access person:
-`0215` deliberately permits multiple `(issuer, subject)` decisions beneath that
-root. Migration `0218` adds only the immutable, inactive root mapping and
+Here `client_authority_id` identifies one workspace-scoped Ops authority handle,
+not the global Ops customer record or one Access person. A customer enrolled in
+both PA instances needs two distinct authority handles linked to the same
+canonical Ops directory record by the future authorized Ops producer. `0215`
+deliberately permits multiple `(issuer, subject)` decisions beneath each handle.
+Migration `0218` adds only the immutable, inactive workspace mapping and
 evidence schema. A private, route-less and default-off writer now requires
 the exact selected source tuple and current checkpoint, atomically records the
-head/audit/receipt, and exact-replays only the same command. Its focused ten-test
-suite passes. It does not prove the Ops customer record exists; the authorized
+head/audit/receipt, and exact-replays only the same command. The writer also
+checks the current native workspace and snapshot generation against the selected
+PA root public ID; a matching source alone cannot bind a different customer.
+Its focused 11-test
+suite passes. It does not prove the Ops customer record exists or connect two
+business workspaces to one customer; the authorized
 Ops selection/approval producer and joined staging proof remain outstanding.
 No authorization reader is mounted and no access follows from a binding.
 Test concurrent one-to-one claims, stale checkpoints, exact replay, absent
