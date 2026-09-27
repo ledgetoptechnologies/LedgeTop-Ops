@@ -4,8 +4,8 @@ import type {Env} from "./types";
 const bounded=z.string().trim().min(1).max(200);
 const uuid=z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 const commandSchema=z.discriminatedUnion("action",[
-  z.object({action:z.literal("claim"),operationId:bounded,clientAuthorityId:uuid,projectionSourceId:bounded,sourceWorkspaceId:bounded,expectedOwnershipEpoch:z.literal(0)}).strict(),
-  z.object({action:z.literal("release"),operationId:bounded,clientAuthorityId:uuid,projectionSourceId:bounded,sourceWorkspaceId:bounded,expectedOwnershipEpoch:z.number().int().positive()}).strict(),
+  z.object({action:z.literal("claim"),operationId:bounded,clientAuthorityId:uuid,workspaceId:bounded,projectionSourceId:bounded,sourceWorkspaceId:bounded,expectedOwnershipEpoch:z.literal(0)}).strict(),
+  z.object({action:z.literal("release"),operationId:bounded,clientAuthorityId:uuid,workspaceId:bounded,projectionSourceId:bounded,sourceWorkspaceId:bounded,expectedOwnershipEpoch:z.number().int().positive()}).strict(),
 ]);
 
 export type ClientAuthorityWorkspaceClaimCommand=z.infer<typeof commandSchema>;
@@ -13,7 +13,7 @@ export type ClientAuthorityWorkspaceClaimResult={operationId:string;clientAuthor
 type SourceCheckpoint={workspace_id:string;projection_source_id:string;source_workspace_id:string;source_generation:string;source_sequence:number;snapshot_generation_id:string};
 type Receipt={request_fingerprint:string;client_authority_id:string;workspace_id:string;projection_source_id:string;source_workspace_id:string;ownership_epoch:number;resulting_state:"active"|"released";reconciliation_source_generation:string;reconciliation_source_sequence:number;reconciliation_snapshot_generation_id:string};
 
-const canonical=(value:ClientAuthorityWorkspaceClaimCommand)=>JSON.stringify({action:value.action,operationId:value.operationId,clientAuthorityId:value.clientAuthorityId,projectionSourceId:value.projectionSourceId,sourceWorkspaceId:value.sourceWorkspaceId,expectedOwnershipEpoch:value.expectedOwnershipEpoch});
+const canonical=(value:ClientAuthorityWorkspaceClaimCommand)=>JSON.stringify({action:value.action,operationId:value.operationId,clientAuthorityId:value.clientAuthorityId,workspaceId:value.workspaceId,projectionSourceId:value.projectionSourceId,sourceWorkspaceId:value.sourceWorkspaceId,expectedOwnershipEpoch:value.expectedOwnershipEpoch});
 async function sha256(value:string){return [...new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(value)))].map(byte=>byte.toString(16).padStart(2,"0")).join("");}
 const result=(operationId:string,row:Receipt,replayed:boolean):ClientAuthorityWorkspaceClaimResult=>({operationId,clientAuthorityId:row.client_authority_id,workspaceId:row.workspace_id,projectionSourceId:row.projection_source_id,sourceWorkspaceId:row.source_workspace_id,ownershipEpoch:row.ownership_epoch,state:row.resulting_state,checkpoint:{sourceGeneration:row.reconciliation_source_generation,sourceSequence:row.reconciliation_source_sequence,snapshotGenerationId:row.reconciliation_snapshot_generation_id},replayed});
 const receiptColumns="request_fingerprint,client_authority_id,workspace_id,projection_source_id,source_workspace_id,ownership_epoch,resulting_state,reconciliation_source_generation,reconciliation_source_sequence,reconciliation_snapshot_generation_id";
@@ -30,8 +30,9 @@ export async function writeClientAuthorityWorkspaceClaim(env:Pick<Env,"DELIVERY_
   const source=await db.prepare(`SELECT source.workspace_id,source.projection_source_id,source.source_workspace_id,checkpoint.source_generation,checkpoint.source_sequence,checkpoint.snapshot_generation_id
     FROM pa_portal_workspace_sources source JOIN pa_portal_projection_checkpoints checkpoint ON checkpoint.workspace_id=source.workspace_id
     JOIN pa_portal_projection_generations generation ON generation.id=checkpoint.snapshot_generation_id AND generation.workspace_id=checkpoint.workspace_id
-    WHERE source.projection_source_id=? AND source.source_workspace_id=? AND generation.source_generation=checkpoint.source_generation AND generation.projection_source_id=source.projection_source_id`)
-    .bind(command.projectionSourceId,command.sourceWorkspaceId).first<SourceCheckpoint>();
+    WHERE source.workspace_id=? AND source.projection_source_id=? AND source.source_workspace_id=?
+      AND generation.source_generation=checkpoint.source_generation AND generation.projection_source_id=source.projection_source_id`)
+    .bind(command.workspaceId,command.projectionSourceId,command.sourceWorkspaceId).first<SourceCheckpoint>();
   if(!source)throw new Error("client-authority-workspace-claim-source-missing");
   const epoch=command.expectedOwnershipEpoch+1,state=command.action==="claim"?"active" as const:"released" as const;
   const head=command.action==="claim"

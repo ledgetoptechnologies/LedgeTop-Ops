@@ -1,6 +1,6 @@
 # API-first migration — current implementation objective and work register
 
-Updated September 26, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+Updated September 27, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
 
 ### September 27 — portal eligibility boundary for the API-first cutover
 
@@ -195,6 +195,51 @@ the new tests cover active claims, pre-`0216` behavior or interleaved claims
 where their fixtures support it. Existing public-link routes and records are
 not changed by these source edits. This remains local evidence, not a live
 public-link parity test or complete direct-reader audit.
+
+The next local review found two more authority-issuing paths: ordinary login
+repair and acceptance of historical primary/secondary invitations. Both now
+exclude active claims at discovery and repeat the claim predicate inside their
+final write batches, including legacy bridge and entitlement inserts. The
+changed primary workspace test file passed 30/30, and the secondary membership
+file passed 10/10, including active-claim invitation regressions. The
+delegated-share signer response now withholds a newly minted bearer and revokes
+its exact row if a claim won before Client finalization; a focused interleaving
+test and the full delegated-share file passed 14/14. Client TypeScript checking
+passed. This is compensation, not a cross-Worker atomicity guarantee:
+claim activation must ultimately fence share creation in Client D1, and the
+Viewer issuer also needs an epoch-bound finalization contract before claims
+can be enabled. Existing canonical bearer links remain independently valid;
+the claim must not alter their lifecycle or credentials.
+
+The private claim writer now requires the exact existing Client workspace ID
+as well as the PA source pair and current checkpoint; an ambiguous source pair
+cannot select whichever workspace D1 returns first. The workspace ID is part
+of the immutable request fingerprint. Its focused local suite passed 8/8.
+This is still claim metadata only, not person access or an enabled route.
+
+The live authority channel must be **version 2**, alongside—not an activation
+of—the identity-only `0215`/`0142` shadow channel. It needs an explicitly
+reviewed one-to-one Ops authority/Client workspace/source mapping, a
+monotonic workspace epoch, per-exact-issuer/subject grant revisions, scoped
+grant facts, immutable command fingerprints/receipts, and a status read for
+Client-commit/lost-response recovery. Client must atomically apply each
+ownership transition, deny-first revoke and resulting grant state on its D1;
+Ops retains a local deny fence and durable outbox until it has an exact
+receipt. `0216` release is a terminal tombstone, **not rollback**. Rollback
+requires a separately approved newer-epoch transition and a PA checkpoint
+newer than the cutover checkpoint. Never overwrite a PA or invitation
+membership in place merely to represent a new Ops grant: the current
+`(workspace_id,identity_id)` uniqueness would erase provenance. Until the
+protocol and joined staging tests exist, keep all authority writers off.
+
+Before enabling version 2, resolve the policy choices for invitation access
+under an Ops-owned workspace, who may approve a mapping/acquisition, the
+service-scope vocabulary and whether eligibility grants any content, the
+existing PA-member disposition at acquisition, and the exact owner-approved
+rollback target. These choices do not justify activating the incomplete
+shadow channel. During a Client D1 outage, an Ops-local revoke can deny Ops
+actions immediately but cannot truthfully confirm remote portal revocation
+until Client commits and returns a matching receipt.
 
 This does **not** activate client access or finish the ownership cutover.
 Existing PA rows may remain stored during a claim. Direct SQL readers and

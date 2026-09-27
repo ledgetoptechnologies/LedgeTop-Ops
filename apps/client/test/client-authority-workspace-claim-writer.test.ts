@@ -7,7 +7,7 @@ import {splitD1MigrationStatements} from "./helpers/d1-migrations";
 describe("private client authority workspace claim writer",()=>{
   let mf:Miniflare,db:D1Database;
   const authority="22222222-2222-4222-8222-222222222222";
-  const base={action:"claim" as const,operationId:"claim-1",clientAuthorityId:authority,projectionSourceId:"project-alpha:east",sourceWorkspaceId:"source-workspace-17",expectedOwnershipEpoch:0 as const};
+  const base={action:"claim" as const,operationId:"claim-1",clientAuthorityId:authority,workspaceId:"workspace-a",projectionSourceId:"project-alpha:east",sourceWorkspaceId:"source-workspace-17",expectedOwnershipEpoch:0 as const};
   const env=(enabled="true")=>({DELIVERY_DB:db,CLIENT_AUTHORITY_WORKSPACE_CLAIM_WRITER_ENABLED:enabled});
   beforeEach(async()=>{
     mf=new Miniflare({compatibilityDate:"2026-07-16",modules:true,script:"export default {}",d1Databases:{DELIVERY_DB:crypto.randomUUID()}});
@@ -43,7 +43,8 @@ describe("private client authority workspace claim writer",()=>{
   });
 
   it("claims only the exact existing source and current checkpoint, with immutable evidence",async()=>{
-    await expect(writeClientAuthorityWorkspaceClaim(env(),{...base,workspaceId:"caller-selected"})).rejects.toThrow("invalid");
+    const {workspaceId:_,...missingWorkspace}=base;
+    await expect(writeClientAuthorityWorkspaceClaim(env(),missingWorkspace)).rejects.toThrow("invalid");
     const written=await writeClientAuthorityWorkspaceClaim(env(),base);
     expect(written).toEqual({operationId:"claim-1",clientAuthorityId:authority,workspaceId:"workspace-a",projectionSourceId:"project-alpha:east",sourceWorkspaceId:"source-workspace-17",ownershipEpoch:1,state:"active",checkpoint:{sourceGeneration:"generation-7",sourceSequence:7,snapshotGenerationId:"snapshot-7"},replayed:false});
     expect(await db.prepare("SELECT projection_source_id||'/'||source_workspace_id source FROM portal_client_authority_workspace_claims").first("source")).toBe("project-alpha:east/source-workspace-17");
@@ -57,6 +58,7 @@ describe("private client authority workspace claim writer",()=>{
     await writeClientAuthorityWorkspaceClaim(env(),base);
     expect((await writeClientAuthorityWorkspaceClaim(env(),base)).replayed).toBe(true);
     await expect(writeClientAuthorityWorkspaceClaim(env(),{...base,sourceWorkspaceId:"other"})).rejects.toThrow("operation-conflict");
+    await expect(writeClientAuthorityWorkspaceClaim(env(),{...base,workspaceId:"workspace-b"})).rejects.toThrow("operation-conflict");
     expect(await db.prepare("SELECT count(*) count FROM portal_client_authority_workspace_claim_audit").first("count")).toBe(1);
   });
 
@@ -66,10 +68,22 @@ describe("private client authority workspace claim writer",()=>{
       expect(await db.prepare(`SELECT count(*) count FROM ${table}`).first("count")).toBe(0);
   });
 
+  it("selects the explicit workspace when a source pair is duplicated and rejects a mismatched workspace",async()=>{
+    await db.batch([
+      db.prepare("INSERT INTO portal_v2_workspaces VALUES('workspace-b')"),
+      db.prepare("INSERT INTO pa_portal_workspace_sources VALUES('workspace-b','project-alpha:east','source-workspace-17')"),
+      db.prepare("INSERT INTO pa_portal_projection_generations VALUES('snapshot-8','workspace-b','generation-8',8,'project-alpha:east')"),
+      db.prepare("INSERT INTO pa_portal_projection_checkpoints VALUES('workspace-b','generation-8',8,'snapshot-8')"),
+    ]);
+    expect((await writeClientAuthorityWorkspaceClaim(env(),base)).workspaceId).toBe("workspace-a");
+    await expect(writeClientAuthorityWorkspaceClaim(env(),{...base,operationId:"wrong-workspace",workspaceId:"workspace-missing"}))
+      .rejects.toThrow("source-missing");
+  });
+
   it("releases through exact CAS at a newer current checkpoint and leaves a terminal tombstone",async()=>{
     await writeClientAuthorityWorkspaceClaim(env(),base);
     await db.prepare("UPDATE pa_portal_projection_checkpoints SET source_sequence=8 WHERE workspace_id='workspace-a'").run();
-    const release={action:"release" as const,operationId:"release-1",clientAuthorityId:authority,projectionSourceId:base.projectionSourceId,sourceWorkspaceId:base.sourceWorkspaceId,expectedOwnershipEpoch:1};
+    const release={action:"release" as const,operationId:"release-1",clientAuthorityId:authority,workspaceId:base.workspaceId,projectionSourceId:base.projectionSourceId,sourceWorkspaceId:base.sourceWorkspaceId,expectedOwnershipEpoch:1};
     expect((await writeClientAuthorityWorkspaceClaim(env(),release)).state).toBe("released");
     await expect(writeClientAuthorityWorkspaceClaim(env(),{...release,operationId:"release-2",expectedOwnershipEpoch:1})).rejects.toThrow("cas-conflict");
     expect(await db.prepare("SELECT state||':'||ownership_epoch value FROM portal_client_authority_workspace_claims").first("value")).toBe("released:2");
@@ -82,7 +96,7 @@ describe("private client authority workspace claim writer",()=>{
       db.prepare("INSERT INTO portal_v2_entitlements VALUES('workspace-a','stale-pa-grant','project_alpha','active')"),
       db.prepare("UPDATE pa_portal_projection_checkpoints SET source_sequence=8 WHERE workspace_id='workspace-a'"),
     ]);
-    const release={action:"release" as const,operationId:"release-after-tombstone",clientAuthorityId:authority,projectionSourceId:base.projectionSourceId,sourceWorkspaceId:base.sourceWorkspaceId,expectedOwnershipEpoch:1};
+    const release={action:"release" as const,operationId:"release-after-tombstone",clientAuthorityId:authority,workspaceId:base.workspaceId,projectionSourceId:base.projectionSourceId,sourceWorkspaceId:base.sourceWorkspaceId,expectedOwnershipEpoch:1};
     await expect(writeClientAuthorityWorkspaceClaim(env(),release)).rejects.toThrow("release-blocked-effective-authorization");
     expect(await db.prepare("SELECT state||':'||ownership_epoch value FROM portal_client_authority_workspace_claims").first("value")).toBe("active:1");
     expect(await db.prepare("SELECT count(*) count FROM portal_client_authority_workspace_claim_audit").first("count")).toBe(1);
