@@ -240,6 +240,12 @@ bootstrap must prove the current source reservation and reconciliation
 checkpoint, reject remaps and altered idempotency replay, and append immutable
 audit/receipt evidence. A binding alone must not create or change memberships,
 entitlements, invitations, Delivery/public links, or any effective access.
+Here `client_authority_id` identifies a customer root, not one Access person:
+`0215` deliberately permits multiple `(issuer, subject)` decisions beneath that
+root. Migration `0218` adds only the immutable, inactive root mapping and
+evidence schema; no writer or authorization reader is mounted. Its focused
+five-test schema suite passes. The private binding writer, atomic evidence,
+exact replay, and joined staging proof still need to be built and reviewed.
 Test concurrent one-to-one claims, stale checkpoints, exact replay, absent
 migration compatibility and unchanged public-link state before exposing even a
 private writer. Only after that mapping is reviewed should v2 define
