@@ -7101,9 +7101,12 @@ pending; this requirement does not claim a deployed UI change.
   retries the same operation ID after lost responses, verifies the entire
   returned tuple and checkpoint, fences expired leases, and cannot reopen
   terminal states. Enqueue repeats current PA activation/record and owner
-  grant checks at D1 insertion. Both Worker release flags are checked-in off.
+  grant checks at D1 insertion; an exact replay also rechecks those live
+  authorities before exposing prior outbox state. Both Worker release flags
+  are checked-in off.
 - Focused local Client RPC tests passed 7/7; Ops selection/outbox tests passed
-  13/13 including the complete Ops migration chain. A joined two-D1 local
+  15/15 including the complete Ops migration chain and revoked/stale replay
+  regressions. A joined two-D1 local
   acceptance passed with the real Client writer and a lost response after
   commit: the same operation replayed, and Ops acknowledged the exact inactive
   Client mapping receipt. Client and Ops TypeScript checks passed after the
