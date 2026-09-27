@@ -15,7 +15,7 @@ CREATE TABLE client_portal_workspace_binding_selections (
     AND substr(client_authority_id,19,1)='-' AND substr(client_authority_id,24,1)='-'
     AND replace(client_authority_id,'-','') NOT GLOB '*[^0-9a-f]*'),
   record_id TEXT NOT NULL REFERENCES operations_directory_records(record_id) ON DELETE RESTRICT,
-  activation_id TEXT NOT NULL UNIQUE REFERENCES project_alpha_existing_directory_binding_activation_receipts(activation_id) ON DELETE RESTRICT,
+  activation_id TEXT NOT NULL REFERENCES project_alpha_existing_directory_binding_activation_receipts(activation_id) ON DELETE RESTRICT,
   record_version INTEGER NOT NULL CHECK(record_version>=1),
   source_id TEXT NOT NULL CHECK(substr(source_id,1,14)='project-alpha:' AND length(source_id) BETWEEN 15 AND 78),
   source_instance_id TEXT NOT NULL CHECK(length(source_instance_id) BETWEEN 1 AND 200),
@@ -23,7 +23,7 @@ CREATE TABLE client_portal_workspace_binding_selections (
   history_epoch_id TEXT NOT NULL CHECK(length(history_epoch_id) BETWEEN 1 AND 200),
   root_type TEXT NOT NULL CHECK(root_type IN ('organization','standalone_client')),
   root_public_id TEXT NOT NULL CHECK(length(root_public_id)=32 AND root_public_id NOT GLOB '*[^0-9a-f]*'),
-  workspace_id TEXT NOT NULL UNIQUE CHECK(length(trim(workspace_id)) BETWEEN 1 AND 200),
+  workspace_id TEXT NOT NULL CHECK(length(trim(workspace_id)) BETWEEN 1 AND 200),
   source_workspace_id TEXT NOT NULL CHECK(length(trim(source_workspace_id)) BETWEEN 1 AND 200),
   checkpoint_source_generation TEXT NOT NULL CHECK(length(trim(checkpoint_source_generation)) BETWEEN 1 AND 200),
   checkpoint_source_sequence INTEGER NOT NULL CHECK(checkpoint_source_sequence>=1),
@@ -37,9 +37,13 @@ CREATE TABLE client_portal_workspace_binding_selections (
     AND strftime('%Y-%m-%dT%H:%M:%fZ',verified_until) IS verified_until),
   state TEXT NOT NULL DEFAULT 'inactive' CHECK(state='inactive'),
   created_at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-  UNIQUE(record_id,source_id),
   CHECK(client_authority_id<>record_id)
 );
+
+-- A stale, never-dispatched review may need a fresh checkpoint. Selections are
+-- append-only attempts; only a later exact Client receipt can claim a workspace.
+CREATE INDEX client_portal_workspace_binding_selections_record_source
+  ON client_portal_workspace_binding_selections(record_id,source_id,created_at,selection_id);
 
 CREATE TRIGGER client_portal_workspace_binding_selection_guard
 BEFORE INSERT ON client_portal_workspace_binding_selections

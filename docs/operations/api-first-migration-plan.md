@@ -261,12 +261,21 @@ Ops migration `0143` now provides a separate inactive selection ledger. It
 allows two PA sources for one canonical Ops record, pins each selection to a
 current activated PA mapping and record version, and requires a current owner
 admission, profile, grant generation and portal-access-management permission.
-Its four focused tests and full migration-order smoke test pass. It is not yet
-written by a route or dispatcher, and it cannot itself prove the Client-side
-workspace tuple; that exact proof is required from the `0218` writer's receipt.
-The eventual Ops producer must generate the workspace-scoped authority ID,
-recheck the selected mapping and actor authority at dispatch, and persist a
-matching Client receipt before treating the selection as usable.
+The private, unmounted producer now derives the PA source/root from the exact
+activated mapping, generates a distinct workspace-scoped authority handle,
+rechecks owner authority and record version, and returns the same handle only
+for an exact authenticated retry. Its ten focused tests, full Ops migration
+order, and TypeScript check pass locally; CI for the preceding migration-only
+head `86f336e` passed, but
+the producer head still needs CI. Selections are append-only attempts rather
+than a permanently unique record/source row: a changed checkpoint can receive
+a new explicit review without mutating an older selection. This does not
+authorize two bindings; the Client claim writer remains one-to-one. There is
+still no route or dispatcher, and Ops cannot itself prove the Client-side
+workspace tuple; that exact proof requires the `0218` writer's receipt.
+Dispatch must recheck the selected mapping, checkpoint and actor authority,
+persist a matching Client receipt, and resolve lost responses before treating
+the selection as usable. No production or staging activation followed.
 Test concurrent one-to-one claims, stale checkpoints, exact replay, absent
 migration compatibility and unchanged public-link state before exposing even a
 private writer. Only after that mapping is reviewed should v2 define

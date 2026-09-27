@@ -1,15 +1,28 @@
-import {readFileSync} from "node:fs";
+import {readFileSync,readdirSync} from "node:fs";
 import {Miniflare} from "miniflare";
 import {afterEach,beforeEach,describe,expect,it} from "vitest";
 import {splitD1MigrationStatements} from "../../client/test/helpers/d1-migrations";
+import {selectPortalWorkspaceBinding} from "../src/worker/client-portal-workspace-binding-selection";
+import type {AuthenticatedNativeStaffWithAdmissionVersion} from "../src/worker/native-staff-auth";
 
 describe("inactive Ops portal workspace binding selection",()=>{
   let mf:Miniflare,db:D1Database;
   const recordId="11111111-1111-4111-8111-111111111111";
+  const activationA="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const activationB="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
   const rootA="a".repeat(32),rootB="b".repeat(32);
+  const actor:AuthenticatedNativeStaffWithAdmissionVersion={identity:{kind:"native",
+    staffId:"owner",verifiedAccessSubject:"access|owner",email:"owner@example.test",
+    displayName:"Owner",profileVersion:3},admissionVersion:2,
+    verifiedUntil:new Date(Date.now()+30*60_000).toISOString()};
+  const command=(overrides:Record<string,unknown>={})=>({
+    selectionId:"22222222-2222-4222-8222-222222222222",recordId,activationId:activationA,
+    workspaceId:"workspace-a",sourceWorkspaceId:"pa-workspace-a",
+    checkpoint:{sourceGeneration:"generation-7",sourceSequence:7,snapshotGenerationId:"snapshot-7"},
+    ...overrides});
   const insert=(overrides:Record<string,string|number|undefined>={})=>{
     const value={selectionId:"22222222-2222-4222-8222-222222222222",
-      authorityId:"33333333-3333-4333-8333-333333333333",activationId:"activation-a",
+      authorityId:"33333333-3333-4333-8333-333333333333",activationId:activationA,
       sourceId:"project-alpha:primary",sourceInstanceId:"source-instance-a",applicationId:"application-a",
       historyEpochId:"epoch-a",rootPublicId:rootA,workspaceId:"workspace-a",sourceWorkspaceId:"pa-workspace-a",
       recordVersion:4,staffId:"owner",subject:"access|owner",admissionVersion:2,profileVersion:3,grantGeneration:5,
@@ -43,8 +56,8 @@ describe("inactive Ops portal workspace binding selection",()=>{
       db.prepare("CREATE TABLE native_directory_resource_scopes(record_id TEXT,active INTEGER,business_area_id TEXT,division_id TEXT)"),
       db.prepare("CREATE TABLE existing_public_links(id TEXT PRIMARY KEY,token TEXT)"),
       db.prepare("INSERT INTO operations_directory_records VALUES(?,'organization',4)").bind(recordId),
-      db.prepare("INSERT INTO project_alpha_existing_directory_binding_activation_receipts VALUES('activation-a',?,'project-alpha:primary','source-instance-a','application-a','epoch-a',?,'organization',4)").bind(recordId,rootA),
-      db.prepare("INSERT INTO project_alpha_existing_directory_binding_activation_receipts VALUES('activation-b',?,'project-alpha:secondary','source-instance-b','application-b','epoch-b',?,'organization',4)").bind(recordId,rootB),
+      db.prepare("INSERT INTO project_alpha_existing_directory_binding_activation_receipts VALUES(? ,?,'project-alpha:primary','source-instance-a','application-a','epoch-a',?,'organization',4)").bind(activationA,recordId,rootA),
+      db.prepare("INSERT INTO project_alpha_existing_directory_binding_activation_receipts VALUES(? ,?,'project-alpha:secondary','source-instance-b','application-b','epoch-b',?,'organization',4)").bind(activationB,recordId,rootB),
       db.prepare("INSERT INTO native_staff_admissions VALUES('owner','access|owner',1,2)"),
       db.prepare("INSERT INTO native_staff_profiles VALUES('owner',3)"),
       db.prepare("INSERT INTO native_directory_grant_generations VALUES('owner',5)"),
@@ -85,14 +98,91 @@ describe("inactive Ops portal workspace binding selection",()=>{
   it("allows distinct LTDS/LTT handles for one Ops customer but rejects duplicate handles",async()=>{
     await insert().run();
     await insert({selectionId:"44444444-4444-4444-8444-444444444444",
-      authorityId:"55555555-5555-4555-8555-555555555555",activationId:"activation-b",
+      authorityId:"55555555-5555-4555-8555-555555555555",activationId:activationB,
       sourceId:"project-alpha:secondary",sourceInstanceId:"source-instance-b",applicationId:"application-b",
       historyEpochId:"epoch-b",rootPublicId:rootB,workspaceId:"workspace-b",sourceWorkspaceId:"pa-workspace-b"}).run();
     expect(await db.prepare("SELECT count(*) count FROM client_portal_workspace_binding_selections WHERE record_id=?")
       .bind(recordId).first("count")).toBe(2);
     await expect(insert({selectionId:"66666666-6666-4666-8666-666666666666",
-      activationId:"activation-b",sourceId:"project-alpha:secondary",sourceInstanceId:"source-instance-b",
+      activationId:activationB,sourceId:"project-alpha:secondary",sourceInstanceId:"source-instance-b",
       applicationId:"application-b",historyEpochId:"epoch-b",rootPublicId:rootB,workspaceId:"workspace-c"}).run())
       .rejects.toThrow("UNIQUE");
+  });
+
+  it("permits append-only re-review after a checkpoint changes without changing public links",async()=>{
+    await insert().run();
+    await insert({selectionId:"77777777-7777-4777-8777-777777777777",
+      authorityId:"88888888-8888-4888-8888-888888888888"}).run();
+    expect(await db.prepare("SELECT count(*) count FROM client_portal_workspace_binding_selections")
+      .first("count")).toBe(2);
+    expect(await db.prepare("SELECT token FROM existing_public_links").first("token")).toBe("unchanged");
+  });
+
+  it("produces a private inactive selection and exact replay with the same handle",async()=>{
+    const first=await selectPortalWorkspaceBinding(db,actor,command());
+    expect(first).toMatchObject({recordId,activationId:activationA,workspaceId:"workspace-a",
+      sourceId:"project-alpha:primary",rootType:"organization",rootPublicId:rootA,
+      state:"inactive",replayed:false});
+    expect(first.clientAuthorityId).not.toBe(recordId);
+    expect(await selectPortalWorkspaceBinding(db,actor,command())).toEqual({...first,replayed:true});
+    expect(await db.prepare("SELECT token FROM existing_public_links").first("token")).toBe("unchanged");
+  });
+
+  it("can re-review a changed checkpoint without reusing the stale authority handle",async()=>{
+    const first=await selectPortalWorkspaceBinding(db,actor,command());
+    const second=await selectPortalWorkspaceBinding(db,actor,command({
+      selectionId:"77777777-7777-4777-8777-777777777777",
+      checkpoint:{sourceGeneration:"generation-8",sourceSequence:8,snapshotGenerationId:"snapshot-8"},
+    }));
+    expect(second.clientAuthorityId).not.toBe(first.clientAuthorityId);
+    expect(second.workspaceId).toBe(first.workspaceId);
+    expect(second.checkpoint.sourceSequence).toBe(8);
+    expect(await db.prepare("SELECT count(*) count FROM client_portal_workspace_binding_selections")
+      .first("count")).toBe(2);
+  });
+
+  it("rejects a reused selection ID with different scope or reviewer",async()=>{
+    await selectPortalWorkspaceBinding(db,actor,command());
+    await expect(selectPortalWorkspaceBinding(db,actor,command({workspaceId:"other"})))
+      .rejects.toThrow("portal_workspace_binding_selection_denied");
+    await expect(selectPortalWorkspaceBinding(db,{...actor,identity:{...actor.identity,
+      verifiedAccessSubject:"access|other"}},command()))
+      .rejects.toThrow("portal_workspace_binding_selection_denied");
+  });
+
+  it("rejects stale record versions, revoked grants, and expired authentication",async()=>{
+    await db.prepare("UPDATE operations_directory_records SET current_version=5 WHERE record_id=?")
+      .bind(recordId).run();
+    await expect(selectPortalWorkspaceBinding(db,actor,command()))
+      .rejects.toThrow("portal_workspace_binding_selection_denied");
+    await db.prepare("UPDATE operations_directory_records SET current_version=4 WHERE record_id=?")
+      .bind(recordId).run();
+    await db.prepare("UPDATE native_directory_grants SET active=0").run();
+    await expect(selectPortalWorkspaceBinding(db,actor,command()))
+      .rejects.toThrow("portal_workspace_binding_selection_denied");
+    await db.prepare("UPDATE native_directory_grants SET active=1").run();
+    await expect(selectPortalWorkspaceBinding(db,{...actor,verifiedUntil:new Date(Date.now()-1000).toISOString()},command()))
+      .rejects.toThrow("portal_workspace_binding_selection_denied");
+  });
+});
+
+describe("portal workspace selection full migration order",()=>{
+  it("applies every Ops migration without granting portal access",async()=>{
+    const runtime=new Miniflare({compatibilityDate:"2026-07-16",modules:true,
+      script:"export default {}",d1Databases:{OPS_DB:crypto.randomUUID()}});
+    try {
+      const database=await runtime.getD1Database("OPS_DB") as unknown as D1Database;
+      const directory=new URL("../migrations/",import.meta.url);
+      const names=readdirSync(directory).filter(name=>/^\d{4}_.+\.sql$/.test(name)).sort();
+      expect(names.at(-1)).toBe("0143_client_portal_workspace_binding_selection.sql");
+      for(const name of names){
+        const statements=splitD1MigrationStatements(readFileSync(new URL(name,directory),"utf8"));
+        await database.batch(statements.map(statement=>database.prepare(statement)));
+      }
+      expect(await database.prepare("SELECT count(*) count FROM client_portal_workspace_binding_selections")
+        .first("count")).toBe(0);
+      expect(await database.prepare("SELECT count(*) count FROM sqlite_master WHERE type='table' AND name='client_portal_workspace_binding_selections'")
+        .first("count")).toBe(1);
+    } finally { await runtime.dispose(); }
   });
 });
