@@ -225,6 +225,11 @@ async function directoryContractTablePresent(db: PortalAuthorityDatabase): Promi
     WHERE type='table' AND name='portal_v2_directory_generation_contracts'`).first<number>("present")) === 1;
 }
 
+async function clientAuthorityWorkspaceClaimTablePresent(db: PortalAuthorityDatabase): Promise<boolean> {
+  return (await db.prepare(`SELECT 1 present FROM sqlite_master
+    WHERE type='table' AND name='portal_client_authority_workspace_claims'`).first<number>("present")) === 1;
+}
+
 async function contactAssignmentContractTablesPresent(db: PortalAuthorityDatabase): Promise<boolean> {
   const count = await db.prepare(`SELECT COUNT(*) count FROM sqlite_master WHERE type='table'
     AND name IN ('pa_portal_projection_contact_assignment_contracts','portal_v2_contact_assignment_contracts',
@@ -744,7 +749,20 @@ async function stagedResources(db: PortalAuthorityDatabase, generationId: string
   };
 }
 
-function authorizationRefreshStatements(db: PortalAuthorityDatabase, workspaceId: string, sourceSequence: number): D1PreparedStatement[] {
+function authorizationRefreshStatements(db: PortalAuthorityDatabase, workspaceId: string, sourceSequence: number,
+  claimTablePresent: boolean): D1PreparedStatement[] {
+  const membershipClaimGuard = claimTablePresent ? `AND NOT EXISTS (
+    SELECT 1 FROM portal_client_authority_workspace_claims claim
+    WHERE claim.workspace_id=portal_v2_workspace_memberships.workspace_id AND claim.state='active')` : "";
+  const principalClaimGuard = claimTablePresent ? `AND NOT EXISTS (
+    SELECT 1 FROM portal_client_authority_workspace_claims claim
+    WHERE claim.workspace_id=p.workspace_id AND claim.state='active')` : "";
+  const entitlementClaimGuard = claimTablePresent ? `AND NOT EXISTS (
+    SELECT 1 FROM portal_client_authority_workspace_claims claim
+    WHERE claim.workspace_id=portal_v2_entitlements.workspace_id AND claim.state='active')` : "";
+  const intentClaimGuard = claimTablePresent ? `AND NOT EXISTS (
+    SELECT 1 FROM portal_client_authority_workspace_claims claim
+    WHERE claim.workspace_id=intent.workspace_id AND claim.state='active')` : "";
   return [
     db.prepare(`UPDATE portal_v2_identity_eligibility_bindings AS eligibility
       SET principal_source_version=(SELECT principal.source_version FROM pa_portal_principals principal
@@ -758,13 +776,18 @@ function authorizationRefreshStatements(db: PortalAuthorityDatabase, workspaceId
           AND principal.status='active' AND lower(principal.email_hint)=lower(eligibility.verified_email)
           AND lower(identity.verified_email)=lower(eligibility.verified_email)
       )`).bind(workspaceId),
-    db.prepare("UPDATE portal_v2_workspace_memberships SET status='suspended',updated_at=datetime('now') WHERE workspace_id=? AND source_type='project_alpha'").bind(workspaceId),
+    db.prepare(`UPDATE portal_v2_workspace_memberships SET status='suspended',updated_at=datetime('now')
+      WHERE workspace_id=? AND source_type='project_alpha'
+        ${membershipClaimGuard}`).bind(workspaceId),
     db.prepare(`INSERT INTO portal_v2_workspace_memberships(id,workspace_id,identity_id,source_type,status,source_version)
       SELECT 'pa-membership:' || p.workspace_id || ':' || p.public_id,p.workspace_id,p.identity_id,'project_alpha','active',p.source_version
       FROM pa_portal_principals p JOIN portal_v2_identities i ON i.id=p.identity_id AND i.status='active' AND i.revoked_at IS NULL AND lower(i.verified_email)=lower(p.email_hint)
       WHERE p.workspace_id=? AND p.status='active' AND p.identity_id IS NOT NULL
+        ${principalClaimGuard}
       ON CONFLICT(workspace_id,identity_id) DO UPDATE SET status='active',source_version=excluded.source_version,revoked_at=NULL,updated_at=datetime('now') WHERE portal_v2_workspace_memberships.source_type='project_alpha'`).bind(workspaceId),
-    db.prepare("UPDATE portal_v2_entitlements SET status='revoked',revoked_at=datetime('now') WHERE workspace_id=? AND source_type='project_alpha' AND status<>'revoked'").bind(workspaceId),
+    db.prepare(`UPDATE portal_v2_entitlements SET status='revoked',revoked_at=datetime('now')
+      WHERE workspace_id=? AND source_type='project_alpha' AND status<>'revoked'
+        ${entitlementClaimGuard}`).bind(workspaceId),
     db.prepare(`INSERT INTO portal_v2_entitlements
       (id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,entitlement_version,source_type,source_version,status,valid_from,expires_at)
       SELECT 'pa-entitlement:' || intent.workspace_id || ':' || intent.public_id,intent.workspace_id,principal.identity_id,intent.capability,intent.effect,intent.scope_type,intent.scope_public_id,?,'project_alpha',intent.source_version,'active',intent.valid_from,intent.expires_at
@@ -773,12 +796,14 @@ function authorizationRefreshStatements(db: PortalAuthorityDatabase, workspaceId
       JOIN portal_v2_identities identity ON identity.id=principal.identity_id AND identity.status='active' AND identity.revoked_at IS NULL AND lower(identity.verified_email)=lower(principal.email_hint)
       JOIN portal_v2_workspace_memberships membership ON membership.workspace_id=intent.workspace_id AND membership.identity_id=principal.identity_id AND membership.status='active' AND membership.source_type='project_alpha'
       WHERE intent.workspace_id=? AND intent.status='active'
+        ${intentClaimGuard}
       ON CONFLICT(id) DO UPDATE SET identity_id=excluded.identity_id,capability=excluded.capability,effect=excluded.effect,scope_type=excluded.scope_type,scope_public_id=excluded.scope_public_id,entitlement_version=excluded.entitlement_version,source_version=excluded.source_version,status='active',valid_from=excluded.valid_from,expires_at=excluded.expires_at,revoked_at=NULL`).bind(sourceSequence, workspaceId),
   ];
 }
 
 async function activateSnapshot(env: Env, delivery: SnapshotActivateDelivery, payloadHash: string, source: PortalWorkspaceSource, db: PortalAuthorityDatabase): Promise<"completed" | "ignored"> {
   const contractTablePresent = await directoryContractTablePresent(db);
+  const claimTablePresent = await clientAuthorityWorkspaceClaimTablePresent(db);
   const contactAssignmentTablesAvailable = await contactAssignmentContractTablesPresent(db);
   if (delivery.schemaVersion === 4 && !contactAssignmentTablesAvailable)
     throw new Error("portal-contact-assignment-contract-migration-missing");
@@ -857,7 +882,7 @@ async function activateSnapshot(env: Env, delivery: SnapshotActivateDelivery, pa
       SELECT ?,public_id,principal_public_id,capability,effect,scope_type,scope_public_id,source_version,CASE active WHEN 1 THEN 'active' ELSE 'suspended' END,valid_from,expires_at FROM pa_portal_projection_entitlements WHERE generation_id=?
       ON CONFLICT(workspace_id,public_id) DO UPDATE SET principal_public_id=excluded.principal_public_id,capability=excluded.capability,effect=excluded.effect,scope_type=excluded.scope_type,scope_public_id=excluded.scope_public_id,source_version=excluded.source_version,status=excluded.status,valid_from=excluded.valid_from,expires_at=excluded.expires_at,updated_at=datetime('now')`)
       .bind(workspace.publicId, generation.id),
-    ...authorizationRefreshStatements(db, workspace.publicId, delivery.sourceSequence),
+    ...authorizationRefreshStatements(db, workspace.publicId, delivery.sourceSequence, claimTablePresent),
     db.prepare("UPDATE pa_portal_projection_generations SET status='superseded' WHERE workspace_id=? AND status='active' AND id<>?").bind(workspace.publicId, generation.id),
     db.prepare("UPDATE pa_portal_projection_generations SET status='active',complete=1,activated_at=datetime('now') WHERE id=? AND status='staging'").bind(generation.id),
     db.prepare(`INSERT INTO pa_portal_projection_checkpoints(workspace_id,source_generation,source_sequence,snapshot_generation_id) VALUES(?,?,?,?)
@@ -1020,6 +1045,7 @@ function closeRelationStateForTombstone(
 }
 
 async function applyEvent(env: Env, delivery: EventDelivery, payloadHash: string, source: PortalWorkspaceSource, db: PortalAuthorityDatabase): Promise<"completed"> {
+  const claimTablePresent = await clientAuthorityWorkspaceClaimTablePresent(db);
   const checkpoint = await db.prepare("SELECT source_generation,source_sequence,snapshot_generation_id FROM pa_portal_projection_checkpoints WHERE workspace_id=?").bind(delivery.workspaceId).first<ProjectionCheckpoint>();
   if (!checkpoint || checkpoint.source_generation !== delivery.sourceGeneration) throw new Error("portal-event-generation-mismatch");
   if (delivery.sourceSequence !== checkpoint.source_sequence + 1) throw new Error("portal-event-sequence-gap");
@@ -1228,7 +1254,7 @@ async function applyEvent(env: Env, delivery: EventDelivery, payloadHash: string
   }
   if (event.action === "tombstone" && event.resource === "principal") statements.push(db.prepare("UPDATE pa_portal_entitlement_intents SET status='suspended',updated_at=datetime('now') WHERE workspace_id=? AND principal_public_id=?").bind(delivery.workspaceId, event.publicId));
   statements.push(
-    ...authorizationRefreshStatements(db, delivery.workspaceId, delivery.sourceSequence),
+    ...authorizationRefreshStatements(db, delivery.workspaceId, delivery.sourceSequence, claimTablePresent),
     db.prepare(`UPDATE portal_v2_directory_checkpoints SET active_generation_id=?,source_sequence=?,updated_at=datetime('now') WHERE workspace_id=? AND source_sequence=?`)
       .bind(directoryGenerationId, delivery.sourceSequence, delivery.workspaceId, checkpoint.source_sequence),
     db.prepare("UPDATE pa_portal_projection_checkpoints SET source_sequence=?,updated_at=datetime('now') WHERE workspace_id=? AND source_generation=? AND source_sequence=?")

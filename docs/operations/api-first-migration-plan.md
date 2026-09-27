@@ -54,7 +54,7 @@ Updated September 26, 2026. The owner approved implementation and resumption aft
   the existing Client membership uniqueness and PA repair path can otherwise
   steal or resurrect a revoked Ops-owned membership.
 
-#### Next-stage design: per-workspace portal ownership claim (not implemented)
+#### Next-stage design: per-workspace portal ownership claim (partially implemented)
 
 The next increment must establish ownership before the shadow binding can affect
 authorization. Migration `0215` cannot do that as written: its authority key is
@@ -113,10 +113,12 @@ epoch/fence, with these properties:
   restoring prior access. Client access cannot be promised revoked while its
   D1 is unreachable and the revoke has not committed there; this is an explicit
   cross-system availability limit, not a successful revoke.
-- Keep every new producer, claim reader and PA-writer fence separately
-  default-off. Enabling the shadow outbox alone must still have no authorization
-  effect. Rollout must claim explicitly selected workspaces only; unclaimed
-  workspaces retain current behavior. Do not rewrite, rotate, revoke or recreate
+- Keep every new producer, claim reader and claim writer default-off. The
+  bounded PA projection fence is data-gated by an active claim row rather than
+  a separate flag; a claim must never be created before all competing writers
+  and runtime reads are safe. Enabling the shadow outbox alone must still have
+  no authorization effect. Rollout must claim explicitly selected workspaces
+  only; unclaimed workspaces retain current behavior. Do not rewrite, rotate, revoke or recreate
   existing Delivery/public-link rows as a side effect. Prove instead that legacy
   password/cookie, expiry, revocation, Range/resume and already-issued links
   behave unchanged across claim, revoke and rollback. New public links remain
@@ -153,11 +155,32 @@ draining the legacy PA outbox. Until that checkpoint is signed off, keep the
 claim/enforcement flags off, do not drain PA, and do not describe the shadow
 channel, source tests or a disposable staging exercise as a live portal cutover.
 
-Migration `0216` is only an inert, one-way claim-head foundation. Its released
-heads cannot be reactivated, and it has no command writer, audit receipt,
-membership conversion, runtime reader or PA repair fence. A successor migration
-and joined tests must implement the reviewed rollback protocol before any
-workspace is actually claimed; applying `0216` alone is not cutover readiness.
+Migration `0216` is an inert, one-way claim-head foundation; released heads
+cannot be reactivated. The next local increment adds `0217` immutable audit and
+receipt evidence and a private, default-off, unmounted claim/release writer.
+The writer resolves an exact PA source pair to the existing Client workspace
+and current checkpoint; it does not infer identity from email or mutate portal
+membership, entitlement, invitations or public links. PA snapshot and event
+refresh now preserve effective PA membership and entitlement rows for an active
+claim while continuing directory/principal/intent/checkpoint processing. The
+fence also retains pre-`0216` behavior if the table has not been migrated.
+Release fails closed while active PA-effective memberships or entitlements
+remain, so a tombstone received during a claim cannot expose stale permissions
+through a simple release. A separate trusted reconciliation path must retire
+such rows before release. The tests cover claim evidence, CAS/replay, stale
+source, release denial after PA tombstones, exact effective-row preservation,
+and missing-migration compatibility. These are **local source tests**, not
+live staging or production acceptance.
+
+This does **not** activate client access or finish the ownership cutover.
+Existing PA rows can remain active during a claim; runtime authorization does
+not yet deny them based on claim state. Native automatic eligibility, login
+repair, invitation-derived grants and legacy bridge writers also still need
+joined fences. An authenticated Ops producer, exact person/workspace binding,
+atomic Operations grant materialization and revocation, rollback protocol,
+cross-D1 recovery, and two-instance staging evidence remain release gates.
+Keep the claim writer flag off and create no active claims until these paths
+and the owner checkpoint have passed.
 
 ### September 26, 2026 — default-off staging versions and synthetic Delivery parity
 
