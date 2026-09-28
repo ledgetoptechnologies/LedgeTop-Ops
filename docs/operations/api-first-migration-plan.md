@@ -4,10 +4,10 @@ Updated September 28, 2026. The owner approved implementation and resumption aft
 
 ### September 28 — staging-only owner-action acceptance remains open
 
-Last CI-verified integrated baseline is `213bd576ce56039c39a3d37edbf6a09858e6cde9`.
-Its exact-head CI run `36395319220` passed all ten jobs, with terminal
-readback at September 28 08:24:55 UTC. Subsequent local portal-composition
-and diagnostic test changes are not covered by that committed-head result.
+Last CI-verified integrated baseline is `1a49be7aa5448e9c88a12c7f780f0b7242b6b32a`.
+Its exact-head CI run `36399345552` passed all ten jobs, with terminal
+readback at September 28 09:02:01 UTC. This includes the success-only portal
+composition, not subsequent local diagnostic test changes or live recipients.
 Independent local focused validation passes Client 39/39 and Ops 34/34.
 Earlier CI run `36390923313` completed successfully for `9eea3e6`: all ten jobs
 passed, with terminal readback at September 28 07:31:21 UTC. Its predecessor
@@ -24,14 +24,17 @@ complete release failure remains open. The current portal review branch now
 also contains the reviewed Incoming repair from `18ed16a`, copied exactly at
 base `d23972a` with 27/27 target-focused tests and successful typecheck. This
 integration did not change configuration, authority, migrations or public
-links. Exact integrated-head CI now passes, but the complete local 41-test
-follow-up exited 1 with 40 passing tests and the same 120-second feedback
-timeout. The single-case pass cannot clear that repeated full-file failure.
-Default-off diagnostic phase timing retains every assertion and the original
-timeout; investigate before changing the fixture or claiming release success.
+links. The complete local 41-test follow-up initially exited 1 with 40 passing
+tests and the same 120-second feedback timeout. Phase timing identified
+accumulated fixture and authorization work; a reviewed test-only split retains
+every assertion and the original 120-second case limits. Its complete file now
+passes 43/43 in 855.75 seconds. A subsequent callback-type correction emits
+byte-identical JavaScript and Operations typecheck passes. Final-source CI for
+that correction remains required; this does not make the original broad release
+command successful.
 
-The service-home UI at that baseline is metadata-only. A
-bounded follow-on local composition slice now passes for both legacy and native
+The service-home UI at the last verified baseline composes independently
+authorized legacy and native
 Client dashboards: only verified Operations success may initiate the existing
 independently authorized Client bootstrap. Denied Operations responses never
 start Client reads; denied Client bootstrap keeps only descriptive Operations
@@ -39,11 +42,15 @@ metadata. Service labels neither select workspaces nor grant resource access.
 Client typecheck/build pass; root's parser/bootstrap suite passes 15/15 and
 desktop/mobile browser matrix 26/26. Independent QA identified and then cleared
 an invalid-workspace recovery loop; recovery now reloads the root and rechecks
-Operations before any further Client bootstrap. This candidate still needs its
-own exact-head CI; baseline CI does not verify follow-on edits.
+Operations before any further Client bootstrap. Exact-head CI now passes for
+this UI slice; it does not verify subsequent local edits.
 See `unified-portal-composition-gaps.md` for the launch matrix and missing
 website-report, financial-summary and recipient-binding prerequisites. This
 slice is not final unified-portal or live recipient acceptance.
+The proposal-only `unified-portal-feature-contracts.md` records the additional
+person-profile, website-edit, report, finance and notification contracts needed
+for the requested end state; existing quote/feedback fixtures do not fulfill
+those features.
 
 The concrete portal prerequisite is a missing verified-recipient workflow:
 there is no runtime creator for the existing recipient identity-binding table,

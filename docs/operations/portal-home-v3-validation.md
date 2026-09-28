@@ -2,6 +2,26 @@
 
 ## September 28 owner-action review checkpoint
 
+- The success-only UI slice is committed and pushed as
+  `1a49be7aa5448e9c88a12c7f780f0b7242b6b32a`. Exact-head CI run
+  `36399345552` passed all ten jobs; terminal GitHub readback reports success at
+  September 28 09:02:01 UTC. This verifies that committed head, not live
+  recipient acceptance or subsequent local changes. The complete feedback
+  follow-up passed 43/43 in 855.75 seconds with the original case timeouts and
+  all original assertions retained. After its terminal result, the diagnostic
+  helper callback type was corrected from `Promise<T>` to `T | Promise<T>` to
+  accept synchronous Hono responses. Pre/post emitted JavaScript is byte-identical
+  (SHA-256 `9fdd22ce8e0271b41407edacf65629cccddc088a5857935c09122ccbfbe6a24f`);
+  subsequent Operations typecheck passes. This resolves the complete-file
+  follow-up, not the still-live original broad release command. Final-source CI
+  remains required for the test-only correction.
+- A source audit and the proposal-only
+  [remaining feature contracts](unified-portal-feature-contracts.md) distinguish
+  existing account/workspace greetings, generic requests and request-level
+  quotes from missing verified person profiles, website-specific edits, monthly
+  reports, account finance and read-only PA action links. None of the proposed
+  contracts adds routes, authority, grants or production behavior.
+
 - A follow-on UI-only candidate now composes the verified service summary with
   independently authorized legacy/native Client dashboards. Client denial
   retains descriptive metadata only, and an explicit recovery action clears
@@ -20,9 +40,10 @@
   about 99.4 seconds and exceeds the remaining original 120-second case budget.
   Vitest reports failure despite the npm wrapper's zero exit status; the failure
   is authoritative. A test-only split with one explicit real-POST fixture and
-  three focused cases is under review, preserving all original assertions and
-  each original 120-second limit. It is not yet validated and does not clear
-  the full-file or broader release failure.
+  three focused cases preserved all original assertions and each original
+  120-second limit; its complete 43-case file now passes as recorded above.
+  Earlier failed runs remain historical evidence and the original broad release
+  command still needs its own terminal result.
 
 - Exact integrated head `213bd576ce56039c39a3d37edbf6a09858e6cde9`
   passed all ten CI jobs in run `36395319220`; the terminal GitHub REST
