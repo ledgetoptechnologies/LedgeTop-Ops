@@ -2,6 +2,47 @@
 
 ## September 28 owner-action review checkpoint
 
+- Current reviewed runtime candidate is `c337d78f4994583c04267bc86cfdb7a6f1b8b006`,
+  published as draft PR133 against the bootstrap branch; it is not merged or
+  deployed. The owner HTTP repairs are committed in ancestor `a218692` and
+  strict current-bootstrap evidence in `c337d78`. Earlier unfinished/uncommitted
+  observations below describe the preceding review, not this candidate's state.
+- Independent GPT-5.6 read-only cumulative review found no actionable material
+  regression in Client 0220, Ops 0147, the owner HTTP handler and service-home
+  reads. This is static QA, not an additional executed acceptance suite.
+- Read-only Client staging D1 verification on September 28 confirmed migration
+  0220 is recorded, no migrations are pending, all three altered tables default
+  protocol version to `2` and permissions to `[]`, and all four updated guard
+  triggers contain protocol and permission checks. The aggregate count of
+  permission-bearing grants is zero. These queries wrote no rows and exposed
+  no recipient records. Reviewed local staging writer, status, outbox, owner
+  action and service-home flags remain `false`.
+- Full local release preparation initially stopped because the isolated
+  Ops Sync checkout lacked dependencies. Restoring its existing npm lockfile
+  with install scripts disabled resolved that prerequisite without changing
+  dependency manifests. The subsequent full preparation is still running;
+  a clean typecheck and focused tests do not substitute for its terminal result.
+- Exact-candidate PR133 CI run `36384130097` reached nine successful checks;
+  the remaining Operations job was still executing its test step at the last
+  successful observation. A subsequent GitHub read hit the account API rate
+  limit, so polling stopped rather than changing credentials or treating the
+  unavailable result as success. Full local preparation and terminal CI status
+  remain pending; no release gate has been bypassed.
+- Added a portable full-chain local regression in
+  `apps/client/test/staging-bootstrap-full-chain.test.ts`. The smaller agent's
+  focused run passed, and root independently reran the same test: one file,
+  one test passed, exit 0, duration 69.99 seconds. It applies the actual 139/147
+  reviewed chains to initially empty local Miniflare databases, including both
+  Client 0199 filenames and final 0220/0147. Only the two owner seed derivatives
+  differ from canonical migrations. Ordered ledgers, one synthetic owner per
+  application, retained ACL catalogs, foreign keys, protocol/permission schema
+  guards, and empty portal grant/audit/receipt/outbox tables are verified.
+  A ledger-aware synthetic reapply finds no pending files or schema changes.
+  This is neither a remote empty-D1 rehearsal nor the checklist's actual
+  Wrangler `migrations apply` idempotency proof. Temporary fixture cleanup
+  validates its exact owned directory before removal. No remote resource,
+  production configuration, canonical migration or public link was changed.
+
 - Independent rerun against the clean bootstrap checkout passed 28/28 Client
   authority and service-home tests (`client-portal-authority-v2.test.ts` and
   `operations-service-home.test.ts`). These exercise migration 0220, populated

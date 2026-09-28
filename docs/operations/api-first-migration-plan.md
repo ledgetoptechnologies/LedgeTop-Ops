@@ -1,6 +1,6 @@
 # API-first migration — current implementation objective and work register
 
-Updated September 27, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+Updated September 28, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
 
 ### September 28 — staging-only owner-action acceptance remains open
 
@@ -39,9 +39,22 @@ skips. These local tests are not a new remote empty-D1 rehearsal. Existing
 immutable runtime pins/finalization are not silently advanced. Full clean
 release gates and live staging acceptance remain required.
 
-The unfinished normal owner action requires exact-operation replay with
-pinned actor/intent and exact workspace/principal receipt selection before
-joined acceptance. Its staging restriction remains intact after an explicit
+The normal owner action and exact-operation replay fences are committed in
+the draft PR133 candidate `c337d78f4994583c04267bc86cfdb7a6f1b8b006`, against
+the bootstrap branch, not deployed. Independent cumulative read-only QA found
+no actionable material guard regression. Exact-head CI run `36384130097`
+reached nine successful checks while Operations tests were still running;
+GitHub account rate limiting prevented a later terminal readback. Full local
+release preparation remains live after lockfile-only Ops Sync dependency
+restoration. The complete-chain isolated local D1 regression now passes the
+agent's focused run and root's independent rerun (one test, exit 0, 69.99s).
+It proves actual Client 139/Ops 147 SQL chains, synthetic seeding, foreign-key
+integrity, schema guards and no grant/outbox creation; its ledger-aware local
+reapply is not remote bootstrap or actual Wrangler reapply proof.
+Read-only Client staging queries reconfirmed all three 0220 column pairs,
+four updated triggers and zero permission-bearing grants, with no pending
+migrations. Live owner-action and recipient acceptance remain open.
+Its staging restriction remains intact after an explicit
 approval rejection of removing it. Local staging-only correctness repairs
 can proceed; production-capable source authorization is an open owner
 question, not a rollout authorization. The production PA update checkpoint
