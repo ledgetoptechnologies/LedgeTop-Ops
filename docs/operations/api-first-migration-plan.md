@@ -4,6 +4,24 @@ Updated September 28, 2026. The owner approved implementation and resumption aft
 
 ### September 28 — staging-only owner-action acceptance remains open
 
+Latest exact-head CI readback: `d60d41e5096675cd4f7460ab08ff8716f8efce69`,
+run `36409637024`, is terminal successful (updated 10:43:50 UTC).
+This clears that committed candidate's CI gate, not the subsequent uncommitted
+test-fixture changes or live recipient acceptance. The initial sources fixture
+refactor passed all three behavior cases in 214.22 seconds. Afterward, the
+immediate-ownership/memoized-disposer correction passed its pure regression
+and Operations typecheck; independent QA cleared the normal hook-timeout
+cleanup race while noting the regression does not simulate Vitest's timeout.
+The final-source complete four-case rerun passed 4/4 in 213.89 seconds.
+The final-source ordering follow-up passed 2/2 in 76.62 seconds, and Operations
+typecheck passed. Independent review verified both original minimal Delivery
+fixtures, seeds, sync/webhook ordering, assertions and 30-second behavior
+deadlines, with separate full Operations migration hooks and immediate
+memoized teardown ownership. Root's source-layout invariants passed 17/17.
+These repairs clear the two focused local files, not the failed/incomplete
+historical broad run or live recipient acceptance. Publication of this test-only
+follow-up requires fresh exact-head CI; no deployment is part of the change.
+
 Latest read-only checkpoint: exact reviewed head
 `d7de8f0494e3d444bf4081adcd63c2457c93bd72` is published in draft PR133.
 CI run `36407328635` is terminal successful at that exact head; all ten jobs
@@ -18,6 +36,36 @@ No broad run was restarted. A current-source isolated rerun of the two affected
 files with unchanged assertions and timeouts is the next diagnostic step;
 neither a focused pass nor CI success substitutes for the old run's result.
 No production deployment, public-link change, or client activation occurred.
+
+The bounded follow-up now has terminal local results: the isolated source
+snapshot file failed all three cases at 60/90/60 seconds (212.38-second run),
+and the subsequently isolated ordering file failed both cases at 30 seconds
+(61.26-second run). No additional assertion/provider error was emitted.
+Resource contention is therefore not established as the explanation. Next,
+default-off test-only timing probes measure initialization, full-chain D1
+migration batches, sync and cleanup without exposing payloads or changing
+coverage, assertions, worker logic or case deadlines. The current neutral-UI
+head `d60d41e5096675cd4f7460ab08ff8716f8efce69` CI run `36409637024` is live;
+the earlier all-green d7 result is not acceptance of this newer head.
+
+The first diagnostic case now measures 29,268 ms for all 147 Ops migrations,
+22,486 ms for all 139 Client migrations, and 51,945 ms total fixture setup.
+Its first sync takes another 6,362 ms, leaving about 1.7 seconds of the existing
+60-second deadline for replay/assertions. Setup dominates this case, rather
+than a missing external response. A bounded fixture-hook refactor is planned
+after the same diagnostic run finishes: keep separate databases, full chains,
+all assertions and the 60/90/60-second behavior deadlines. This measured cause
+for one case is not a passing result or proof about every remaining case.
+The complete instrumented pre-refactor run also failed 3/3. It confirmed late
+asynchronous work after a case timeout and approximately 52-second setup in
+each case. The new independent-fixture hook run is pending. Root review found
+a setup-timeout cleanup gap: assigning the fixture only after initialization
+can leave `afterAll` without its owned runtime. Immediate runtime ownership
+and one memoized disposer must be verified before publishing this test change.
+See `client-proposed-project-approval-plan.md` for the actual project-proposal
+handoff and acceptance blueprint, including the unresolved standalone-client
+create contract and preservation of permanent financial mappings. It does not
+implement or authorize new routes, schemas, grants or deployment.
 
 A bounded project/request source audit at `d7de8f0` confirms optional-project
 requests are implemented (`routes.ts:145,2051`, `request-readiness.ts:168`),
