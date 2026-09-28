@@ -29,6 +29,7 @@ import type { CloudProvider, CloudTransferEnv } from "./cloud-transfer/types";
 import { listDownloadableObjects, summarizeDownloadableObjects } from "./downloadable-files";
 import { listPublicShareLocations, resolvePublicShareLocation } from "./public-locations";
 import { createClientPortalRouter } from "./client-portal/routes";
+import { createOperationsHomeRouter } from "./client-portal/operations-home-routes";
 import { acceptRequestAttachmentScanReceipt, cleanupExpiredRequestAttachments, readRequestAttachmentScanReceipt } from "./client-portal/request-attachments";
 import { createClientDelegatedPublicRouter } from "./client-delegated-public";
 import { clientOnboardingRecipientRouter } from "./client-onboarding-recipient";
@@ -1084,6 +1085,9 @@ app.post("/api/internal/client-request-attachments/:attachmentId/scanned", async
   return c.json({ ok: true, status });
 });
 
+// Mount before legacy PA-backed admission; the independent router still
+// verifies client Access and an exact explicit Operations home permission.
+app.route("/api/client/v2/operations", createOperationsHomeRouter());
 app.route("/api/client", createClientPortalRouter({ pricingHintProvider: projectAlphaPricingHintProvider }));
 app.route("/api/client-onboarding", clientOnboardingRecipientRouter);
 app.on(["GET", "HEAD"], "/onboarding/:invitationId", c => c.env.CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED === "true"

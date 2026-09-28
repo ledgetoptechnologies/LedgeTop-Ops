@@ -293,6 +293,7 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0217_client_authority_workspace_claim_evidence.sql",
     "0218_client_authority_workspace_binding.sql",
     "0219_operations_portal_authority_v2.sql",
+    "0220_operations_portal_authority_v3_permissions.sql",
   ]),
   operations: Object.freeze([
     "0014_staff_acl_controls.sql",
@@ -428,6 +429,7 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0144_client_portal_workspace_binding_outbox.sql",
     "0145_client_portal_authority_v2_outbox.sql",
     "0146_ops_customer_service_enrollments.sql",
+    "0147_client_portal_authority_v3_permissions.sql",
   ]),
 });
 

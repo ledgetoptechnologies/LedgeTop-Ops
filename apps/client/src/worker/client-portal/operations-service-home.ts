@@ -38,8 +38,19 @@ async function currentAuthority(env: OperationsServiceHomeEnv, principal: Pick<V
           AND binding.operation_id=workspace_head.binding_operation_id
           AND binding.state='inactive' AND binding.revision=1
       JOIN portal_v2_workspaces workspace ON workspace.id=binding.workspace_id AND workspace.status='active'
+      JOIN portal_operations_authority_v2_receipts receipt
+        ON receipt.operation_id=grant_head.last_operation_id
+          AND receipt.client_authority_id=grant_head.client_authority_id
+          AND receipt.workspace_id=grant_head.workspace_id
+          AND receipt.issuer=grant_head.issuer AND receipt.subject=grant_head.subject
+          AND receipt.ownership_epoch=grant_head.ownership_epoch
+          AND receipt.grant_revision=grant_head.grant_revision
+          AND receipt.resulting_state='active' AND receipt.protocol_version=3
+          AND receipt.permissions_json=grant_head.permissions_json
       WHERE binding.client_authority_id=? AND grant_head.issuer=? AND grant_head.subject=?
-        AND grant_head.state='active' LIMIT 2`).bind(authorityId, principal.issuer, principal.subject).all<AuthorityRow>();
+        AND grant_head.state='active' AND grant_head.protocol_version=3
+        AND grant_head.permissions_json='["operations.service_home.read"]'
+      LIMIT 2`).bind(authorityId, principal.issuer, principal.subject).all<AuthorityRow>();
     if (!result.success || result.results.length !== 1) return null;
     const row = result.results[0]!;
     return UUID.test(row.authority_id) && typeof row.workspace_id === "string" && row.workspace_id.length >= 1
@@ -93,7 +104,7 @@ async function boundedRpc(binding: OperationsServiceMetadataBinding, request: Cl
   } finally { if (timer !== undefined) clearTimeout(timer); }
 }
 
-/** Descriptive service metadata only; this result never authorizes portal content. */
+/** Requires explicit home permission; descriptive metadata never authorizes files or financial content. */
 export async function readOperationsServiceHome(env: OperationsServiceHomeEnv,
   principal: Pick<VerifiedClientPrincipal, "issuer" | "subject">, authorityId: string): Promise<OperationsServiceHomeResult> {
   if (env.CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED !== "true" || !env.CLIENT_PORTAL_SERVICE_METADATA_READER)

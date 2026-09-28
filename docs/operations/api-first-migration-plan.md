@@ -129,8 +129,8 @@ The enrollment foundation is published as draft Ops PR128 at
 `36359873563` passed all ten exact-head jobs. This remains source/CI evidence,
 not live staging acceptance. Draft PR129 contains the descriptive service reader;
 its latest commit `0c20f223ae9a3bdd6eb02c87f9e282ea14cd57b7` is a whitespace-only
-cleanup. Exact-head CI run `36362178573` currently has nine passing jobs and the
-Operations job still running. The next
+cleanup. Exact-head CI run `36362178573` now passed all ten jobs, including
+Operations. The next
 branch isolates the descriptive service reader and its private transport from
 the enrollment commit. It adds no public HTTP route, UI or deployment yet.
 
@@ -178,6 +178,71 @@ to the exact authority/workspace/issuer/subject/epoch/revision and checked befor
 and after the private read. Financial, Delivery and request permissions stay
 separate. Joined guarded positive staging, browser recipient acceptance and
 the coordinated production authority cutover remain open.
+
+September 27 follow-up: the private metadata transport is published in draft
+PR130 at `1fba21a741c8ac8419648e6d97a6d0bbbe8cf740`. Exact-head run
+`36362993026` now passed all ten jobs at that exact head, including Operations
+and both Operations browser jobs. This is not live acceptance or permission to
+enable the transport. The next isolated branch is
+`codex/portal-home-permission-v3`. Its implementation keeps one authority
+revision stream: protocol 3 adds the explicit bounded
+`operations.service_home.read` permission to the existing principal CAS,
+outbox, audit and receipt, rather than creating a competing permission head.
+Historical protocol-2 records stay permissionless, their canonical replay
+fingerprints stay unchanged, and a subsequent protocol-2 command must clear
+any previously granted home permission. Protocol-3 permission removal and
+principal revocation advance the same revision. These are implementation
+requirements, not completed evidence; SQL guards, atomic rollback, cross-version
+operation conflicts and joined receipt recovery must be tested before a home
+HTTP/UI consumer is accepted. Home permission does not authorize financial,
+Delivery, project or request resources. No production setting or public link
+changed in this follow-up.
+
+The earlier permission-bearing migration attempt was blocked by the approval
+system. The owner subsequently explicitly authorized Client migration `0220`
+to alter the three existing grant/audit/receipt tables and their guards for
+`operations.service_home.read`, acknowledging the authorization-boundary change.
+That migration is now implemented locally alongside Ops `0147` on the isolated
+draft branch; it is not released. Writer, dispatcher, receipt and revocation acceptance is in
+progress. Six isolated home-route admission tests passed;
+those adapter tests are not full-schema or live staging acceptance. An
+independent read-only review found no concrete blocker and identified further
+permission mismatch and SQL tamper cases to test. The new route checks explicit
+home permission and never falls back to PA sessions or Delivery grants.
+All feature defaults remain off. The checkpoint authorizes local and staging
+implementation/testing only, not production deployment, public-link changes,
+a production PA update, or production client-access activation.
+
+Authorized migration checkpoint evidence: the configured OAuth session now
+successfully reads staging D1, superseding the earlier `7403` access failure
+for this session only. Before any apply, fresh full SQL exports were saved
+privately under the owner's local staging-backups directory. SHA-256:
+Client `eb9846768ff703d9560edc287a5ae611acfc7caaf7b01c9fe40a4bcf8accc167`;
+Ops `201018679fc2cfb8afb7b31877cd96f292746a19e476ef8b6664909a6755a074`.
+Verified pending sets were Client `0219`–`0220` and Ops `0145`–`0147`; those
+sets applied successfully to `client-data-staging` and `ltds-ops-staging`
+only. Post-apply ledger readback confirms those terminal migrations. Client
+readback confirms all four replacement guards and retained immutable audit,
+receipt and grant-delete guards. Client grant-head/receipt counts and Ops
+outbox/receipt counts are all zero. No authority was provisioned by migration.
+The current Client staging Worker remains PR122 version
+`0497d73c-3435-4fab-8576-86da76fbfb11`; no Worker deployment or flag change
+was performed. This is schema acceptance, not live protocol-3 RPC/browser
+acceptance or a completed cutover.
+
+Local evidence for the draft: Client authority writer tests 12/12 include a
+genuine populated pre-0220 receipt migration, unchanged legacy fingerprint
+and replay, permission grant/removal/revoke, stale CAS, atomic receipt-failure
+rollback and direct guard tampering. Home reader/HTTP tests passed 18/18.
+Enrollment status and full migration-chain metadata regression passed 8/8
+after correcting the older fixture to include `0220`. Both app typechecks
+passed; staging preflight/evidence tests passed 58/58 with migration inventory
+and example updated through Client `0220` and Ops `0147`. Joined dispatcher
+tests passed 3/3, including exact v3 receipt acknowledgement, mismatched
+status permissions retaining a retry, and subsequent permission removal.
+Existing public-share route/lifecycle regressions passed 20/20. Exact-head CI,
+runtime deployment readback and live synthetic-recipient acceptance remain
+outstanding. Local passing tests do not replace those gates.
 
 The first direct-SQL inventory found 17 Client Worker source files referring
 to `portal_v2_workspace_memberships` or `portal_v2_entitlements`. They include

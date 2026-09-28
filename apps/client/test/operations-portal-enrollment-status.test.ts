@@ -39,7 +39,7 @@ describe("Operations portal enrollment status reader", () => {
       db.prepare("INSERT INTO portal_v2_workspace_memberships VALUES(?, 'legacy-identity', 'active')").bind(workspaceId),
       db.prepare("INSERT INTO portal_v2_entitlements VALUES(?, 'legacy-identity', 'active')").bind(workspaceId),
     ]);
-    for (const migration of ["0216_client_authority_workspace_ownership_claim.sql", "0217_client_authority_workspace_claim_evidence.sql", "0218_client_authority_workspace_binding.sql", "0219_operations_portal_authority_v2.sql"]) {
+    for (const migration of ["0216_client_authority_workspace_ownership_claim.sql", "0217_client_authority_workspace_claim_evidence.sql", "0218_client_authority_workspace_binding.sql", "0219_operations_portal_authority_v2.sql", "0220_operations_portal_authority_v3_permissions.sql"]) {
       const sql = readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8");
       await db.batch(splitD1MigrationStatements(sql).map(statement => db.prepare(statement)));
     }

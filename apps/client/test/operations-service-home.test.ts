@@ -3,7 +3,7 @@ import { Miniflare } from "miniflare";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { splitD1MigrationStatements } from "./helpers/d1-migrations";
 import { writeClientAuthorityWorkspaceBinding } from "../src/worker/client-authority-workspace-binding";
-import { writeClientPortalAuthorityV2 } from "../src/worker/client-portal-authority-v2";
+import { writeClientPortalAuthorityV2, writeClientPortalAuthorityV3 } from "../src/worker/client-portal-authority-v2";
 import { readOperationsServiceHome, type OperationsServiceHomeEnv } from "../src/worker/client-portal/operations-service-home";
 
 const authorityId = "11111111-1111-4111-8111-111111111111";
@@ -79,7 +79,7 @@ describe("Operations service home private helper", () => {
   });
 });
 
-describe("Operations service home against 0218/0219", () => {
+describe("Operations service home against explicit permission ledger", () => {
   let runtime: Miniflare;
   let db: D1Database;
   const bindingOperationId = "binding-operation-one";
@@ -91,6 +91,10 @@ describe("Operations service home against 0218/0219", () => {
     expectedOwnershipEpoch: desiredState === "active" && expectedGrantRevision === 0 ? 0 : 1,
     expectedGrantRevision, scopes: [] as [],
   });
+  const homeGrant = (operationId: string, expectedGrantRevision = 0, permission = true) => {
+    const { scopes: _scopes, ...command } = grant(operationId, "active", expectedGrantRevision);
+    return { ...command, permissions: permission ? ["operations.service_home.read"] : [] };
+  };
 
   beforeEach(async () => {
     runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06", script: "export default {}",
@@ -107,7 +111,8 @@ describe("Operations service home against 0218/0219", () => {
       db.prepare("INSERT INTO pa_portal_projection_checkpoints VALUES('workspace-one','generation-one',1,'snapshot-one')"),
     ]);
     for (const migration of ["0216_client_authority_workspace_ownership_claim.sql", "0217_client_authority_workspace_claim_evidence.sql",
-      "0218_client_authority_workspace_binding.sql", "0219_operations_portal_authority_v2.sql"]) {
+      "0218_client_authority_workspace_binding.sql", "0219_operations_portal_authority_v2.sql",
+      "0220_operations_portal_authority_v3_permissions.sql"]) {
       const sql = readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8");
       await db.batch(splitD1MigrationStatements(sql).map(statement => db.prepare(statement)));
     }
@@ -116,7 +121,7 @@ describe("Operations service home against 0218/0219", () => {
       projectionSourceId: "project-alpha:east", sourceWorkspaceId: "source-one", rootType: "organization", rootPublicId: root,
       expectedCheckpoint: { sourceGeneration: "generation-one", sourceSequence: 1, snapshotGenerationId: "snapshot-one" },
     });
-    await writeClientPortalAuthorityV2(writerEnv(), grant("grant-one"));
+    await writeClientPortalAuthorityV3(writerEnv(), homeGrant("grant-one"));
   });
   afterEach(async () => runtime.dispose());
 
@@ -133,6 +138,31 @@ describe("Operations service home against 0218/0219", () => {
       .resolves.toEqual({ ok: false, code: "denied" });
   });
 
+  it("never infers home permission from a legacy v2 active enrollment", async () => {
+    await writeClientPortalAuthorityV2(writerEnv(), grant("legacy-two", "active", 1));
+    const read = vi.fn(async () => response({ grantRevision: 2 }));
+    await expect(readOperationsServiceHome(realEnv(read), principal, authorityId))
+      .resolves.toEqual({ ok: false, code: "denied" });
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it("removes home permission without revoking the inert enrollment", async () => {
+    await writeClientPortalAuthorityV3(writerEnv(), homeGrant("remove-two", 1, false));
+    expect(await db.prepare("SELECT state FROM portal_operations_principal_grant_heads").first("state")).toBe("active");
+    const read = vi.fn(async () => response({ grantRevision: 2 }));
+    await expect(readOperationsServiceHome(realEnv(read), principal, authorityId))
+      .resolves.toEqual({ ok: false, code: "denied" });
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it("drops a result when only the home permission is removed during the RPC", async () => {
+    const binding = realEnv(async () => {
+      await writeClientPortalAuthorityV3(writerEnv(), homeGrant("remove-two", 1, false));
+      return response({ grantRevision: 1 });
+    });
+    await expect(readOperationsServiceHome(binding, principal, authorityId)).resolves.toEqual({ ok: false, code: "denied" });
+  });
+
   it("drops a result when the exact grant is revoked during the RPC", async () => {
     const binding = realEnv(async () => {
       await writeClientPortalAuthorityV2(writerEnv(), grant("revoke-two", "revoked", 1));
@@ -144,7 +174,7 @@ describe("Operations service home against 0218/0219", () => {
   it("drops an old response when the grant is revoked and regranted during the RPC", async () => {
     const binding = realEnv(async () => {
       await writeClientPortalAuthorityV2(writerEnv(), grant("revoke-two", "revoked", 1));
-      await writeClientPortalAuthorityV2(writerEnv(), grant("regrant-three", "active", 2));
+      await writeClientPortalAuthorityV3(writerEnv(), homeGrant("regrant-three", 2));
       return response({ grantRevision: 1 });
     });
     await expect(readOperationsServiceHome(binding, principal, authorityId)).resolves.toEqual({ ok: false, code: "denied" });
