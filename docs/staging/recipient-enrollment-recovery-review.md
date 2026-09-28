@@ -43,9 +43,12 @@ Operations migrations `0148` and `0149`.
   lost response. Reject changed digests, stale revisions, expired owner proof,
   changed generations, scoped denies, and cancellation/confirmation races.
   Enforce operation-ID uniqueness across the existing enrollment operations and
-  the additive cancellation audit, not merely within each table. Preserve the
-  original result of historical issue/redeem retries without granting a new
-  action against a cancelled intent.
+  the additive cancellation audit, not merely within each table. Historical
+  issue/redeem retries after terminal cancellation must deny and require a fresh
+  intent; returning the old issued/pending success would misrepresent the current
+  state. Preserve the original immutable operations for audit, not as permission
+  to resume the cancelled workflow. This supersedes the earlier historical-result
+  replay proposal; exact cancellation-receipt replay remains supported separately.
 - List issued intents for authorized owners without revealing their token.
   Show cancellation in the owner UI and preserve the same operation ID on
   uncertain retry. After cancellation, explicitly issue a new intent and obtain
@@ -53,6 +56,17 @@ Operations migrations `0148` and `0149`.
 
 ## Acceptance gates
 
+- In-progress candidate review found three additional requirements: pending
+  requests need an explicit cancel control; destructive cancel acknowledgement
+  must be separate from confirm acknowledgement; and durable cancelled history
+  must not exhaust the actionable-list bound. Test at least 101 cancelled
+  historical intents alongside a fresh pending request without deleting history.
+- Exact historical cancellation retries may return a minimal immutable receipt
+  to the same currently authenticated actor without repeating a mutation. Keep
+  current signed-staff authentication/admission mandatory, and return full
+  customer/principal review only if current target visibility still permits it.
+  Deny revoked sessions/admissions; do not restore access using old authority.
+  Make the response contract and privacy tests explicit.
 - Test issued cancellation, expired pending proof, expired intent, replay,
   stale-revision denial, unauthorized/current-authority denial, direct SQL
   bypass attempts, and cancellation versus confirmation. Assert zero new

@@ -114,10 +114,11 @@ function seedAcquisitionRecord(db, record = acquisitionRecord) {
     .run(record.id, record.kind, record.version);
 }
 
-function seedActivationReceipt(db, id = activationId, record = acquisitionRecord, directoryGrantGeneration = 4) {
+function seedActivationReceipt(db, id = activationId, record = acquisitionRecord, directoryGrantGeneration = 4,
+  activatedBy = owner.operationsStaffId, bypassGuards = true) {
   // The activation consumer is independently covered. This authority test
   // inserts only its durable output so v6/v8 can prove they pin the exact UUID.
-  db.exec(`DROP TRIGGER project_alpha_existing_directory_binding_activation_exact;
+  if (bypassGuards) db.exec(`DROP TRIGGER project_alpha_existing_directory_binding_activation_exact;
     DROP TRIGGER project_alpha_existing_directory_binding_activation_authority;
     DROP TRIGGER project_alpha_existing_directory_binding_activation_relationship;
     PRAGMA foreign_keys=OFF;`);
@@ -132,7 +133,7 @@ function seedActivationReceipt(db, id = activationId, record = acquisitionRecord
       "10000000-0000-4000-8000-000000000004", "10000000-0000-4000-8000-000000000005",
       record.id, "project-alpha:staging", "source-instance", "application", "history-epoch", record.kind,
       "external-record", "a".repeat(32), "revision-1", record.version, "1".repeat(64), "2".repeat(64),
-      "3".repeat(64), "4".repeat(64), owner.operationsStaffId, directoryGrantGeneration,
+      "3".repeat(64), "4".repeat(64), activatedBy, directoryGrantGeneration,
     );
   db.exec("PRAGMA foreign_keys=ON;");
 }
@@ -653,6 +654,60 @@ test("v8 rejects a wrong activation and blocks revoke on altered evidence or in-
     }
     db.close();
   }
+});
+
+test("v8 rejects receipt actor, record kind, version, and missing receipt drift atomically", () => {
+  for (const scenario of [
+    { activatedBy: "different-reviewed-owner" },
+    { record: { ...acquisitionRecord, kind: "client" } },
+    { record: { ...acquisitionRecord, version: acquisitionRecord.version + 1 } },
+    { missing: true },
+  ]) {
+    const db = canonicalDatabase(), base = fixture(); establishReviewedOnboardingLineage(db);
+    const acquisition = buildAuthorityArtifacts(base, preservativeAcquisitionInput(), "revoke");
+    applyMigration(db, acquisition.provision.sql, acquisition.provision.name, AUTHORITY_MIGRATIONS_TABLE);
+    if (!scenario.missing) seedActivationReceipt(db, activationId, scenario.record ?? acquisitionRecord, 6,
+      scenario.activatedBy ?? owner.operationsStaffId);
+    applyMigration(db, acquisition.revoke.sql, acquisition.revoke.name, AUTHORITY_MIGRATIONS_TABLE);
+    const before = db.prepare("SELECT * FROM native_directory_grant_history ORDER BY grant_id,grant_version")
+      .all().map(row => ({ ...row }));
+    const portal = buildAuthorityArtifacts(base, preservativeRecipientEnrollmentInput(), "provision");
+    assert.throws(() => applyMigration(db, portal.provision.sql, portal.provision.name, AUTHORITY_MIGRATIONS_TABLE));
+    assert.deepEqual(queryOne(db, "SELECT count(*) count FROM native_directory_grants WHERE permission='directory.portal_access.manage'"), { count: 0 });
+    assert.deepEqual(queryOne(db, `SELECT count(*) count FROM ${AUTHORITY_MIGRATIONS_TABLE} WHERE name=?`, portal.provision.name), { count: 0 });
+    assert.deepEqual(db.prepare("SELECT * FROM native_directory_grant_history ORDER BY grant_id,grant_version")
+      .all().map(row => ({ ...row })), before);
+    db.close();
+  }
+});
+
+test("canonical receipt guards reject synthetic direct insertion and duplicate activation IDs", () => {
+  const db = canonicalDatabase(), base = fixture(); establishReviewedOnboardingLineage(db);
+  const acquisition = buildAuthorityArtifacts(base, preservativeAcquisitionInput(), "provision");
+  applyMigration(db, acquisition.provision.sql, acquisition.provision.name, AUTHORITY_MIGRATIONS_TABLE);
+  // No normal acquisition/review evidence exists: the real guards must reject
+  // this fixture output. A successful reduced fixture is not live acceptance.
+  assert.throws(() => seedActivationReceipt(db, activationId, acquisitionRecord, 6, owner.operationsStaffId, false));
+  assert.deepEqual(queryOne(db, "SELECT count(*) count FROM project_alpha_existing_directory_binding_activation_receipts"), { count: 0 });
+  seedActivationReceipt(db, activationId, acquisitionRecord, 6);
+  // Isolate the activation primary key: all other unique coordinates differ.
+  // Foreign keys are disabled only for this reduced in-memory receipt fixture;
+  // the real guard rejection above remains a separate assertion.
+  const duplicate = { ...queryOne(db, "SELECT * FROM project_alpha_existing_directory_binding_activation_receipts"),
+    review_receipt_id: "20000000-0000-4000-8000-000000000002",
+    idempotency_key: "20000000-0000-4000-8000-000000000003",
+    acquired_receipt_id: "20000000-0000-4000-8000-000000000004",
+    native_owner_claim_id: "20000000-0000-4000-8000-000000000005",
+    source_id: "project-alpha:other-synthetic-source" };
+  const columns = Object.keys(duplicate);
+  db.exec("PRAGMA foreign_keys=OFF;");
+  try {
+    assert.throws(() => db.prepare(`INSERT INTO project_alpha_existing_directory_binding_activation_receipts
+      (${columns.join(",")}) VALUES(${columns.map(() => "?").join(",")})`).run(...Object.values(duplicate)),
+      /UNIQUE constraint failed: project_alpha_existing_directory_binding_activation_receipts\.activation_id/);
+  } finally { db.exec("PRAGMA foreign_keys=ON;"); }
+  assert.deepEqual(queryOne(db, "SELECT count(*) count FROM project_alpha_existing_directory_binding_activation_receipts"), { count: 1 });
+  db.close();
 });
 
 test("v5 fixture provision fails closed when its fixed fixture identity is already present", () => {

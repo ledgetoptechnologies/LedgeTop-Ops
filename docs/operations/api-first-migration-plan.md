@@ -4,7 +4,51 @@ Updated September 28, 2026. The owner approved implementation and resumption aft
 
 ### Current checkpoint — September 28, 2026
 
-- Published local authority preparation is now at
+- Current local cancellation candidate failed two of 28 focused tests
+  (`68.60s`, exit 1): cancelled-intent inspection is denied where the owner
+  audit test expects a read, and the client response parser rejects the new
+  cancelled state. The other 26 ledger/owner HTTP/API/joined tests passed.
+  Neither failure is waived; runtime/API corrections and independent review
+  are in progress. Candidate schema remains outside the canonical migration
+  inventory and no cancellation deployment has occurred.
+- A read-only [verified-recipient delivery-sharing plan](../staging/verified-recipient-delivery-sharing-plan.md)
+  now records the exact data-access mismatch: existing authenticated delivery
+  recipients require a current PA principal, whereas enrollment captures an
+  Access issuer/subject. A separate resource-authority contract with exact
+  folder selection and coupled full revocation is proposed, not implemented.
+  Separate staging-only authorization was requested and is still pending;
+  home-only v3, production access, and public links remain unchanged.
+- Recovery decision: terminal cancellation denies historical issue/redeem
+  application retries, while preserving immutable audit history. Exact
+  cancellation retries should return only a minimal receipt to the same
+  currently authenticated/admitted actor when target visibility is lost.
+  Stale issued/pending success must not imply a cancelled workflow can resume.
+- Independently reviewed schema-v7/v8 preparation is published to draft PR133
+  at `fc13498ca4abf473b0f272d99f5966feef8f0585`. Exact-head CI
+  `36443316070` finished successfully with all ten jobs passed, verified against
+  that exact head rather than inferred from the prior green head. The commit contains preparation/docs only, not unfinished
+  cancellation runtime or its candidate schema. No remote authority packet,
+  flag activation, recipient access, production deployment, or public-link
+  change followed publication.
+- Two additional local receipt-negative tests passed (`2/2`, `4.68s`): the
+  portal packet rejects receipt-actor/kind/version/missing-receipt drift atomically,
+  and canonical receipt guards reject direct synthetic insertion. Duplicate
+  receipt insertion is rejected too. Root's new full packet run passed `37/37`
+  (`58.24s`); the production/preparation source is unchanged. Independent
+  review of the final test-only follow-up cleared preparation-only publication
+  on the exact test hash below. A subsequent focused rerun
+  passed `2/2` (`4.54s`) after isolating duplicate activation-ID rejection from
+  all other uniqueness constraints. Actor pinning uses a reduced receipt fixture;
+  the generic direct-insertion rejection proves the combined canonical guard
+  boundary, not each trigger independently or the normal activation workflow;
+  the latest complete root rerun passed `37/37` (`55.98s`, exit 0) with test
+  SHA-256 `a3741bd246bd8c20d53274eafe04bb950b5509e468ac8bf888e99644c2e1aa2e`
+  and unchanged preparation-source SHA-256
+  `e78c371e0140de5afe9dc5a4a9fbcc220154869b71db635c1a1a375fcdc94d59`.
+  these cases do not prove the normal deployed acquisition/review/activation
+  path. Cancellation schema/runtime and its remaining privacy/race/SQL tests
+  are unpublished and are not included in the green CI head above.
+- Earlier published local authority preparation was at
   `e703a2fef67e86620bfccc584eaa3f538bc3a2f9`, draft PR133. Exact-head CI
   `36436173049` finished successfully with all ten jobs passed. This clears
   the previous fixture failures for this exact head, not live enrollment or
