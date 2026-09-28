@@ -124,6 +124,33 @@ portal permission is added by this foundation. The current service catalog
 definitions are immutable; catalog rename/retirement needs a later audited
 revision workflow rather than an unaudited update.
 
+The enrollment foundation is published as draft Ops PR128 at
+`492c6a3575597de8debec94b4a18fb2443e0df0f`, stacked on PR127. CI run
+`36359873563` is still in progress at this checkpoint; passing local checks
+are not a substitute for its final result or live staging acceptance. The
+next branch, `codex/portal-service-metadata`, isolates the descriptive service
+reader from that enrollment commit. It adds no HTTP route or deployment yet.
+
+The service-metadata source candidate now reads exact acknowledged workspace
+and principal receipts, live recipient expiry/revocation and current customer
+relation, and active customer/service enrollments in one SQLite statement.
+A newer principal command fences the old receipt immediately. Organization
+membership validates only that recipient's customer relation and never
+inherits sibling services. It returns at most 100 provider-qualified labels
+and enrollment revisions, or an explicit unavailable result; no PA URLs,
+content capabilities, customer PII or financial documents are returned.
+Ten focused cases pass, including a higher-ownership-epoch pending-command
+fence suggested by independent QA. An independent combined run passed 13/13, including
+direct execution of the exported query against the full real Operations DDL
+and denial of an unprovisioned principal; Operations typecheck passed after
+the source was stable. An earlier overlapping validation caught a missing
+query export before completion and failed; the stable rerun supersedes that
+result. Positive receipt/enrollment cases still use reduced fixture tables,
+so this is not full guarded positive acceptance or live staging evidence.
+Private transport, Client-side before/after authority checks, the service-home
+HTTP/UI boundary and real recipient acceptance remain next; the function is
+not yet wired to any entrypoint or fetch handler.
+
 The first direct-SQL inventory found 17 Client Worker source files referring
 to `portal_v2_workspace_memberships` or `portal_v2_entitlements`. They include
 the central authorization and identity-repair logic in `workspace-v2.ts`,
