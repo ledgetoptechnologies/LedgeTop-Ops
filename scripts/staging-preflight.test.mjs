@@ -210,14 +210,16 @@ test("keeps native integration control inert", () => {
 test("requires shared staging resources to agree", () => {
   const configs = { delivery: stagingConfig("delivery"), operations: stagingConfig("operations"), "ops-sync": stagingConfig("ops-sync") };
   configs.operations.d1_databases[1].database_id = "wrong";
-  configs.delivery.services[0].service = "wrong-ops-staging";
-  configs.delivery.services[1].entrypoint = "WrongViewerIssuer";
+  configs.delivery.services.find(service => service.binding === "CLIENT_DELEGATED_SHARE_SIGNER").service = "wrong-ops-staging";
+  configs.delivery.services.find(service => service.binding === "VIEWER_SESSION_ISSUER").entrypoint = "WrongViewerIssuer";
+  configs.delivery.services.find(service => service.binding === "CLIENT_PORTAL_SERVICE_METADATA_READER").entrypoint = "WrongMetadataReader";
   configs["ops-sync"].services[0].entrypoint = "WrongPortalIngress";
   configs.delivery.vars.PROJECT_ALPHA_PORTAL_APPLICATION_KEY = "wrong-application-key";
   const errors = validateCrossApp(configs);
   assert(errors.some((error) => error.includes("DELIVERY_DB")));
   assert(errors.some((error) => error.includes("delegated-share signer")));
   assert(errors.some((error) => error.includes("Viewer session issuer")));
+  assert(errors.some((error) => error.includes("service metadata reader")));
   assert(errors.some((error) => error.includes("portal projection ingress")));
   assert(errors.some((error) => error.includes("application key")));
 });

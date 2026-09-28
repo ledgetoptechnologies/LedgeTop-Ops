@@ -45,6 +45,7 @@
     "CLIENT_PORTAL_AUTHORITY_V2_WRITER_ENABLED": "false",
     "CLIENT_PORTAL_AUTHORITY_V2_STATUS_ENABLED": "false",
     "CLIENT_PORTAL_AUTHORITY_V2_ENROLLMENT_STATUS_ENABLED": "false",
+    "CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED": "false",
     "CLIENT_PORTAL_CONTENT_AUDIT_ENABLED": "false",
     "CLIENT_PORTAL_NOTIFICATION_MIGRATION_MAINTENANCE": "false",
     "CLIENT_PORTAL_REQUEST_V2_ENABLED": "false",
@@ -165,6 +166,11 @@
     }
   ],
   "services": [
+    {
+      "binding": "CLIENT_PORTAL_SERVICE_METADATA_READER",
+      "service": "ledgetop-ops",
+      "entrypoint": "ClientPortalServiceMetadataReader"
+    },
     {
       "binding": "CLIENT_DELEGATED_SHARE_SIGNER",
       "service": "ledgetop-ops",
