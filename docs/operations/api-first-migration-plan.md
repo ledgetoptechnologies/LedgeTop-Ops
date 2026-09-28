@@ -2,7 +2,44 @@
 
 Updated September 28, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
 
-### September 28 — staging-only owner-action acceptance remains open
+### Current checkpoint — September 28, 2026
+
+- Before this documentation-only freshness update, the review branch was clean
+  at `93738ef3605399ff3a6ea07d84c317202cbfa301`. That head is published in
+  draft PR133; it is not merged to `main` or deployed.
+- The submitted-service readback at published head
+  `0bcce70c52d6d4d689048f7b0081afd48f5d3c1f` passed exact-head CI run
+  `36417217894`: all ten jobs completed successfully at
+  `2026-09-28T11:59:40Z`. The newer joined-D1 outage test at `93738ef` passed
+  its controlled local run `1/1` in `46.30s`, and TypeScript checking exited
+  `0` with no errors.
+- Exact-head CI run `36419850239` for `93738ef` is terminal successful, updated
+  `2026-09-28T12:25:30Z`; exact-run readback confirmed all ten jobs successful.
+  That result covers the published head, not the new
+  uncommitted enrollment implementation.
+- The owner explicitly approved the normal verified-recipient enrollment and
+  full-revocation workflow for local/staging implementation and testing only.
+  Migration `0148` and its ledger are under implementation and independent
+  review; they are not yet release-ready or remotely applied. Review identified
+  required atomic CAS guards, current owner authorization, single-use replay
+  handling, and separation of enrollment-token expiry from access lifetime.
+  The Client enrollment verifier's focused identity suite passed `25/25` locally
+  in `319ms`, Client TypeScript checking exited `0`, and independent source QA
+  cleared that verifier and its tests. It does not alter legacy principal reads.
+  This alone does not prove a mounted or joined enrollment workflow. Migration
+  `0220` was applied only to local/staging; the new authority and home-capability
+  flags remain default-off, and public links are unchanged. The real website-edit,
+  report, finance, and proposed-project workflows remain incomplete end-state
+  capabilities; existing aliases do not satisfy them.
+- The currently configured incoming-D1 CLI read failed with error `7403`. The
+  September 11 mail row below is retained as historical evidence, not a current
+  transport diagnosis. No credential fallback was approved.
+
+### Historical checkpoint log — September 28 staging-only owner action
+
+The dated paragraphs in this section are retained as chronological evidence.
+They are not declarations of the current process, branch, CI, deployment, or
+acceptance state; the checkpoint above is authoritative for those fields.
 
 The uncommitted Client candidate now wires submitted-service **detail readback**
 through the existing independently authorized native detail route, public DTO,
