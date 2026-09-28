@@ -55,7 +55,9 @@ home-only enrollment still does not authorize delivery access.
   tests but failed two configuration tests that depended on private ignored
   staging files absent from CI. Those tests now use committed templates and
   the real generator's non-secret fixtures: all three corrected tests and Ops
-  typecheck passed locally. A new exact-head CI run is required.
+  typecheck passed locally. The corrected checkpoint `b701296` passed all ten
+  jobs in exact-head run `36495685524`. That result does not attest later local
+  commits, live staging activation or full recipient delivery acceptance.
 - The canonical prerequisite test now passes three cases through all
   151 Ops and 140 Client migrations. A normal UUID organization is written via
   the real native writer, its primary PA create is acknowledged by the real

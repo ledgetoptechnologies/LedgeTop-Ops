@@ -8,7 +8,8 @@ Updated September 28, 2026. The owner approved implementation and resumption aft
   RPC implementation (`2703d4b`) and hermetic acceptance fixtures (`b701296`).
   The prior CI failure was confined to tests reading private ignored staging
   configs; the corrected tests passed 3/3 locally. Exact-head run `36495685524`
-  is still in progress, so complete CI acceptance is not yet established.
+  finished successfully: all ten jobs passed for `b701296`. Later local
+  test/evidence commits are not covered by that CI result and await a new run.
 - Canonical prerequisite coverage now passes three cases against the real
   151/140 migration chains, including clean reviewed v3/v4/v6 acquisition,
   activation and inactive selection. Identical selection replay succeeds;
