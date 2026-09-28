@@ -447,6 +447,35 @@ test("current bootstrap evidence contract matches the canonical generator and mi
   }
 });
 
+test("accepts only truthful run-scoped disposable D1 evidence in the existing bootstrap gate", () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-evidence-disposable-bootstrap-"));
+  const item = fixture(base), proof = item.evidence.migrations.freshBootstrap, runId = "portal-home-20260928";
+  proof.mode = "generated-empty-d1-disposable";
+  proof.runId = runId;
+  for (const [app, source, databaseName, databaseId] of [
+    ["delivery", "client", "client-data-staging", "11111111-1111-4111-8111-111111111111"],
+    ["operations", "operations", "ltds-ops-staging", "22222222-2222-4222-8222-222222222222"],
+  ]) Object.assign(proof.applications[app], {
+    configPath: `apps/${source}/wrangler.staging.bootstrap.${runId}.json`,
+    manifestPath: `apps/${source}/.staging-bootstrap/rehearsals/${runId}/manifest.json`,
+    targetKind: "disposable-staging-d1", targetDatabaseName: `${databaseName}-rehearsal-${runId}`, targetDatabaseId: databaseId,
+    creationEvidenceRef: `ticket:${app}:create`, applyEvidenceRef: `ticket:${app}:apply`, readbackEvidenceRef: `ticket:${app}:readback`,
+  });
+  assert.deepEqual(validateEvidence(item.evidence, { base, head: item.evidence.releaseCommit, configs: item.configs,
+    configHashes: item.configHashes, now, sourceControlVerified: true }), []);
+
+  proof.applications.operations.targetDatabaseId = proof.applications.delivery.targetDatabaseId;
+  proof.applications.delivery.targetDatabaseName = STAGING_INVENTORY.delivery.d1_databases[0].database_name;
+  proof.applications.operations.targetDatabaseName = "ltds-ops";
+  proof.applications.operations.creationEvidenceRef = "";
+  proof.applications.delivery.configPath = "apps/client/wrangler.staging.bootstrap.json";
+  const errors = validateEvidence(item.evidence, { base, head: item.evidence.releaseCommit, configs: item.configs,
+    configHashes: item.configHashes, now, sourceControlVerified: true });
+  for (const expected of ["generated config and manifest", "exact run-scoped staging D1 target", "canonical staging D1 identity",
+    "production D1 identity", "creationEvidenceRef", "database names and IDs must be distinct"])
+    assert(errors.some(error => error.includes(expected)), errors.join(" | "));
+});
+
 test("binds every staff Access application readback to the rendered staging audience and host", () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-evidence-staff-access-"));
   const { configs, evidence } = fixture(base);
@@ -694,13 +723,20 @@ test("checked-in evidence example stays complete as migrations, flags, gates, an
   const example = JSON.parse(fs.readFileSync(path.join(root, "docs", "staging", "release-evidence.json.example"), "utf8"));
   for (const app of ["delivery", "operations"]) assert.deepEqual(example.migrations[app].expected, [...REQUIRED_STAGING_MIGRATIONS[app]], `migrations.${app}`);
   assert.equal(example.migrations.freshBootstrap.schemaVersion, 2);
-  assert.equal(example.migrations.freshBootstrap.mode, "generated-empty-d1");
+  assert.equal(example.migrations.freshBootstrap.mode, "generated-empty-d1-disposable");
+  assert.match(example.migrations.freshBootstrap.runId, /^[a-z0-9-]+$/);
   assert.deepEqual(example.migrations.freshBootstrap.applications.delivery.transformedFiles, ["0002_seed_initial_staff.sql"]);
   assert.deepEqual(example.migrations.freshBootstrap.applications.operations.transformedFiles, ["0002_seed_acl.sql"]);
   assert.equal(example.migrations.freshBootstrap.applications.delivery.ledgerCount, BOOTSTRAP_APPS.delivery.migrationCount);
   assert.equal(example.migrations.freshBootstrap.applications.delivery.finalMigration, "0220_operations_portal_authority_v3_permissions.sql");
   assert.equal(example.migrations.freshBootstrap.applications.operations.ledgerCount, BOOTSTRAP_APPS.operations.migrationCount);
   assert.equal(example.migrations.freshBootstrap.applications.operations.finalMigration, "0147_client_portal_authority_v3_permissions.sql");
+  for (const app of ["delivery", "operations"]) {
+    const proof = example.migrations.freshBootstrap.applications[app];
+    assert.equal(proof.targetKind, "disposable-staging-d1");
+    assert(proof.configPath.includes(example.migrations.freshBootstrap.runId));
+    assert(proof.manifestPath.includes(example.migrations.freshBootstrap.runId));
+  }
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0124_project_alpha_project_adoption_review_evidence.sql")), [
     "0124_project_alpha_project_adoption_review_evidence.sql",
     "0125_project_alpha_existing_directory_binding_activation.sql",

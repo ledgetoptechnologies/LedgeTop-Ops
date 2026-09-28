@@ -621,6 +621,18 @@ The September 18 schema-version-1 proof remains historical evidence for the
 satisfy the current schema-version-2 release gate and must not be relabeled as
 a new rehearsal.
 
+When the canonical staging databases are already populated, do not reset or
+reuse them for this proof. Create two new run-scoped staging-only D1 databases,
+record their returned names and IDs in the local disposable-target input, and
+generate the run-scoped bootstrap artifacts with `--disposable-targets`. The
+generator must first validate the ordinary canonical staging config and full
+migration digests, then reject any target that reuses a configured staging or
+production database identity. Apply each minimal generated config only to its
+single disposable database; record target-specific creation, apply, and
+readback references in the existing schema-version-2 `freshBootstrap` gate.
+This disposable proof does not replace or rename the historical rehearsal and
+does not authorize any production or canonical-staging reset.
+
 It also requires the pushed source ref, exact deployed version/config hashes,
 an ordered remote migration-ledger readback, a pre-migration open-fence and
 writer/scheduler-quiescence check, compatible-writer ordering evidence,

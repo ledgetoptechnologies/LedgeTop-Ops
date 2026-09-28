@@ -2,6 +2,33 @@
 
 ## September 28 owner-action review checkpoint
 
+- A bounded GPT-5.6 implementation adds opt-in disposable remote-rehearsal
+  artifacts without resetting populated staging databases. Root reviewed the
+  canonical-before-target validation, production/staging identity exclusion,
+  input/output path guards and migration-only single-binding configs, then
+  independently reran the focused bootstrap/evidence suites: exit 0, 55 passed
+  and four Windows file-symlink capability skips. Junction cases execute and
+  pass. Current evidence version 2 retains every existing proof requirement;
+  no remote resource was created or migrated by these helper tests.
+
+- Additional actual Wrangler 4.118.0 **local-only** rehearsal now passes:
+  both databases were confirmed empty before application; Client applied all
+  139 files (including both 0199 names and 0220), and Ops applied all 147
+  files through 0147. Both commands exited 0. Repeating the identical local
+  `migrations apply` commands exited 0 with `No migrations to apply`.
+  Readback confirms ledger counts 139/147, empty foreign-key checks, zero
+  Client principal grants/audits/receipts and zero Ops outbox/receipts.
+  This supplements, but does not replace, a fresh **remote** D1 rehearsal.
+  Existing populated staging databases were not reset or used for this run.
+- Explicit staging-config bundle dry runs also pass for all three applications
+  (Client, Ops and Ops Sync). These compiled locally without version upload or
+  deployment; the authority flags remain off. The broader release preparation
+  is still running and has not produced a terminal result.
+- PR133 now includes local-regression/documentation commit
+  `b77a65e57dee4e5bc496c893d21e5401ae7d46a1`; runtime remains the reviewed
+  `c337d78` code. The nine-check CI observation below belongs to the older
+  c337d78 head and must not be treated as b77a65e's current CI result.
+
 - Current reviewed runtime candidate is `c337d78f4994583c04267bc86cfdb7a6f1b8b006`,
   published as draft PR133 against the bootstrap branch; it is not merged or
   deployed. The owner HTTP repairs are committed in ancestor `a218692` and

@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { APP_SOURCE_DIRS, FEATURE_FLAG_ACTIVATION_POLICIES, FEATURE_FLAG_DEPENDENCY_WINDOWS, PROJECT_ALPHA_STAGING, RELEASE_CANDIDATES, RELEASE_CONTRACT_FINALIZED, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_EXTERNAL_GATES, REQUIRED_EXTERNAL_GATE_PROOFS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_SECRETS, STAGING_ACCOUNT_ID, STAGING_CLIENT_PORTAL, STAGING_HOSTS, STAGING_INVENTORY, STAGING_STATIC_VARS, STAGING_VIEWER } from "./staging-requirements.mjs";
 import { validateFiles as validateStagingFiles } from "./staging-preflight.mjs";
-import { BOOTSTRAP_APPS } from "./staging-bootstrap.mjs";
+import { BOOTSTRAP_APPS, PRODUCTION_DATABASE_IDENTITIES } from "./staging-bootstrap.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const defaultEvidence = path.join(root, ".backups", "staging-release-evidence.json");
@@ -16,9 +16,11 @@ const apps = ["delivery", "operations", "ops-sync"];
 // must never satisfy the current release gate.
 const CURRENT_FRESH_BOOTSTRAP_SCHEMA_VERSION = 2;
 const CURRENT_FRESH_BOOTSTRAP_APPLICATIONS = Object.freeze({
-  delivery: Object.freeze({ configPath: "apps/client/wrangler.staging.bootstrap.json", manifestPath: "apps/client/.staging-bootstrap/manifest.json", seed: "0002_seed_initial_staff.sql", ledgerCount: BOOTSTRAP_APPS.delivery.migrationCount, finalMigration: "0220_operations_portal_authority_v3_permissions.sql" }),
-  operations: Object.freeze({ configPath: "apps/operations/wrangler.staging.bootstrap.json", manifestPath: "apps/operations/.staging-bootstrap/manifest.json", seed: "0002_seed_acl.sql", ledgerCount: BOOTSTRAP_APPS.operations.migrationCount, finalMigration: "0147_client_portal_authority_v3_permissions.sql" }),
+  delivery: Object.freeze({ source: "client", databaseName: BOOTSTRAP_APPS.delivery.databaseName, configPath: "apps/client/wrangler.staging.bootstrap.json", manifestPath: "apps/client/.staging-bootstrap/manifest.json", seed: "0002_seed_initial_staff.sql", ledgerCount: BOOTSTRAP_APPS.delivery.migrationCount, finalMigration: "0220_operations_portal_authority_v3_permissions.sql" }),
+  operations: Object.freeze({ source: "operations", databaseName: BOOTSTRAP_APPS.operations.databaseName, configPath: "apps/operations/wrangler.staging.bootstrap.json", manifestPath: "apps/operations/.staging-bootstrap/manifest.json", seed: "0002_seed_acl.sql", ledgerCount: BOOTSTRAP_APPS.operations.migrationCount, finalMigration: "0147_client_portal_authority_v3_permissions.sql" }),
 });
+const DISPOSABLE_RUN_ID = /^[a-z0-9](?:[a-z0-9-]{1,18}[a-z0-9])$/;
+const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const populated = (value) => typeof value === "string" && value.length > 0 && !marker.test(value);
 const sha256Digest = (value) => /^sha256:[a-f0-9]{64}$/i.test(value ?? "");
 const sha256Hex = (value) => /^[a-f0-9]{64}$/i.test(value ?? "");
@@ -365,15 +367,20 @@ export function validateEvidence(evidence, options = {}) {
 
   const migrations = evidence.migrations ?? {};
   const freshBootstrap = migrations.freshBootstrap ?? {};
-  if (freshBootstrap.schemaVersion !== CURRENT_FRESH_BOOTSTRAP_SCHEMA_VERSION || freshBootstrap.mode !== "generated-empty-d1") {
-    errors.push(`current fresh bootstrap evidence must use schemaVersion ${CURRENT_FRESH_BOOTSTRAP_SCHEMA_VERSION} and generated-empty-d1 mode; historical schemaVersion 1 evidence cannot satisfy this release gate`);
+  const disposableBootstrap = freshBootstrap.mode === "generated-empty-d1-disposable";
+  if (freshBootstrap.schemaVersion !== CURRENT_FRESH_BOOTSTRAP_SCHEMA_VERSION
+    || (!disposableBootstrap && freshBootstrap.mode !== "generated-empty-d1")) {
+    errors.push(`current fresh bootstrap evidence must use schemaVersion ${CURRENT_FRESH_BOOTSTRAP_SCHEMA_VERSION} and an approved generated-empty-d1 mode; historical schemaVersion 1 evidence cannot satisfy this release gate`);
   }
+  if (disposableBootstrap && !DISPOSABLE_RUN_ID.test(freshBootstrap.runId ?? "")) errors.push("disposable fresh bootstrap requires a strict runId");
   if (freshBootstrap.canonicalMigrationsUnchanged !== true) errors.push("fresh bootstrap must prove canonical migrations remained unchanged");
   if (!/^[a-f0-9]{64}$/i.test(freshBootstrap.ownerEmailSha256 ?? "")) errors.push("fresh bootstrap must record the normalized owner email SHA-256, not the email");
   if (!recentDate(freshBootstrap.generatedAt, now) || !populated(freshBootstrap.generatorEvidenceRef)) errors.push("fresh bootstrap generation must be current and referenced");
   for (const [app, expected] of Object.entries(CURRENT_FRESH_BOOTSTRAP_APPLICATIONS)) {
     const proof = freshBootstrap.applications?.[app] ?? {};
-    if (proof.configPath !== expected.configPath || proof.manifestPath !== expected.manifestPath) errors.push(`${app} fresh bootstrap must identify the generated config and manifest`);
+    const expectedConfigPath = disposableBootstrap ? `apps/${expected.source}/wrangler.staging.bootstrap.${freshBootstrap.runId}.json` : expected.configPath;
+    const expectedManifestPath = disposableBootstrap ? `apps/${expected.source}/.staging-bootstrap/rehearsals/${freshBootstrap.runId}/manifest.json` : expected.manifestPath;
+    if (proof.configPath !== expectedConfigPath || proof.manifestPath !== expectedManifestPath) errors.push(`${app} fresh bootstrap must identify the generated config and manifest`);
     if (!sameSequence(proof.transformedFiles, [expected.seed])) errors.push(`${app} fresh bootstrap must transform exactly ${expected.seed}`);
     if (proof.ledgerCount !== expected.ledgerCount || proof.finalMigration !== expected.finalMigration) errors.push(`${app} fresh bootstrap ledger count and final migration must match the full canonical chain`);
     if (!/^[a-f0-9]{64}$/i.test(proof.sourceSeedSha256 ?? "") || !/^[a-f0-9]{64}$/i.test(proof.generatedSeedSha256 ?? "") || proof.sourceSeedSha256 === proof.generatedSeedSha256) errors.push(`${app} fresh bootstrap must record distinct source and generated seed SHA-256 values`);
@@ -382,7 +389,24 @@ export function validateEvidence(evidence, options = {}) {
     }
     if (app === "delivery" && proof.both0199FilenamesExactlyOnce !== true) errors.push("delivery fresh bootstrap must prove both 0199 filenames exactly once");
     if (app === "operations" && proof.portableCatalogSeedVerified !== true) errors.push("operations fresh bootstrap must prove the portable ACL catalog seed");
+    if (disposableBootstrap) {
+      const expectedTargetName = `${expected.databaseName}-rehearsal-${freshBootstrap.runId}`;
+      if (proof.targetKind !== "disposable-staging-d1" || proof.targetDatabaseName !== expectedTargetName || !UUID_V4.test(proof.targetDatabaseId ?? "")) {
+        errors.push(`${app} disposable fresh bootstrap must identify its exact run-scoped staging D1 target`);
+      }
+      const reserved = Object.values(STAGING_INVENTORY).flatMap(inventory => inventory.d1_databases ?? []);
+      if (reserved.some(item => item.database_name === proof.targetDatabaseName || item.database_id === proof.targetDatabaseId)) errors.push(`${app} disposable fresh bootstrap must not reuse a canonical staging D1 identity`);
+      if (PRODUCTION_DATABASE_IDENTITIES.some(item => item.databaseName === proof.targetDatabaseName || item.databaseId === proof.targetDatabaseId)) errors.push(`${app} disposable fresh bootstrap must not reuse a production D1 identity`);
+      for (const field of ["creationEvidenceRef", "applyEvidenceRef", "readbackEvidenceRef"])
+        if (!populated(proof[field])) errors.push(`${app} disposable fresh bootstrap needs ${field}`);
+    }
     if (!populated(proof.evidenceRef)) errors.push(`${app} fresh bootstrap needs an evidence reference`);
+  }
+  if (disposableBootstrap) {
+    const deliveryTarget = freshBootstrap.applications?.delivery ?? {}, operationsTarget = freshBootstrap.applications?.operations ?? {};
+    if (deliveryTarget.targetDatabaseName === operationsTarget.targetDatabaseName || deliveryTarget.targetDatabaseId === operationsTarget.targetDatabaseId) {
+      errors.push("disposable fresh bootstrap database names and IDs must be distinct");
+    }
   }
   for (const app of ["delivery", "operations"]) {
     const migration = migrations[app] ?? {};

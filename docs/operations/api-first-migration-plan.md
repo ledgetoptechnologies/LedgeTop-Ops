@@ -4,6 +4,16 @@ Updated September 28, 2026. The owner approved implementation and resumption aft
 
 ### September 28 — staging-only owner-action acceptance remains open
 
+Actual Wrangler **local** full-chain application has now passed (Client 139,
+Ops 147), followed by successful no-op reapplication on both databases.
+Ledger readback includes both Client 0199 files and final 0220/0147; foreign-key
+checks are empty and no Client grant/audit/receipt or Ops outbox/receipt rows
+were created. This is local CLI proof, not the remaining remote empty-D1
+rehearsal. All three explicit staging-config bundle dry runs pass without
+upload/deployment. PR133 test/documentation head is now `b77a65e`; older
+`c337d78` CI observations below do not establish the new head's terminal CI.
+The broad local release preparation remains running; production is held.
+
 Client migration `0220` and Ops `0147` staging schema evidence is complete,
 but issuance and the full unified portal are not accepted. PR132 bootstrap
 head `5168e0faaac37d8b6b2326b67b8b6d3279fd33bf` has CI run

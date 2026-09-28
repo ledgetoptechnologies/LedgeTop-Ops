@@ -136,6 +136,29 @@ for these 139/147 chains. Preserve the September 18 schema-version-1 rehearsal
 empty-D1 rehearsal from generator/unit tests alone. Submit truthful new
 full-chain remote rehearsal evidence before claiming this release gate passed.
 
+If the canonical staging databases are populated, create two new disposable
+staging D1 resources instead of resetting them. Save their returned identities
+in an ignored local JSON file with exactly this shape (replace the example run
+and UUIDs):
+
+```json
+{"runId":"portal-home-yyyymmdd","applications":{"delivery":{"databaseName":"client-data-staging-rehearsal-portal-home-yyyymmdd","databaseId":"11111111-1111-4111-8111-111111111111"},"operations":{"databaseName":"ltds-ops-staging-rehearsal-portal-home-yyyymmdd","databaseId":"22222222-2222-4222-8222-222222222222"}}}
+```
+
+Generate and check with:
+
+```text
+npm run staging:bootstrap:generate -- --disposable-targets .backups/staging-bootstrap-targets.json
+npm run staging:bootstrap:check -- --disposable-targets .backups/staging-bootstrap-targets.json
+```
+
+This mode still validates the exact canonical
+staging source configuration and migration digests, additionally rejects every
+configured staging or production D1 identity, and emits run-scoped configs with
+exactly one disposable D1 binding. These configs are migration-only; do not use
+them to deploy a Worker. Attribute the resulting proof to the disposable names
+and IDs in the existing schema-version-2 evidence gate.
+
 Cloudflare's remote D1 migration transport does not accept a nested
 `SELECT CASE ... RAISE(...) END` statement inside a trigger even though local
 SQLite does. The canonical chains use the equivalent portable form
