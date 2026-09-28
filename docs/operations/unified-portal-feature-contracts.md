@@ -1,9 +1,28 @@
 # Unified portal feature contracts (design proposal)
 
-Status: **proposal only**. Nothing in this document is implemented, approved,
-enabled, deployed, or a grant of new authority. It does not authorize database,
+Status: **proposal only**, with the unused local data-shape foundation noted
+below. No end-to-end feature or new authority is implemented, enabled, or
+deployed by this document. It does not authorize database,
 schema, runtime, route, configuration, identity, recipient, permission, public
 link, Project Alpha (PA), or production changes.
+
+## Local data-shape foundation
+
+`packages/shared/src/website-monthly-report.ts` provides provisional, pure
+staff-draft and Client-publication DTO parsers plus scoped period-overlap checks.
+It has no runtime route imports or package export-barrel entry. Implementer and
+independent QA each passed all 12 focused contract tests; Client typecheck also
+passes. Regressions cover impossible calendar dates, fractional month
+boundaries, invalid unchecked overlaps, equivalent timezone aliases, detached
+input copies, DST, leap years, and year boundaries. Unknown metrics remain
+`null`; staff/internal fields and withdrawn-publication shapes are rejected.
+
+This is not a report feature or authority/publication proof. Source ownership,
+website and recipient bindings, reviewed publish commands, current revision and
+withdrawal lookup, storage uniqueness/CAS, provenance correctness, and live
+acceptance remain unimplemented dependencies. Before persistence, pin a timezone
+normalization policy/version across runtimes; `Intl` canonical alias spelling
+can vary with ICU/tzdata versions. Validated DTOs are detached, not runtime-frozen.
 
 ## Purpose and fixed boundaries
 

@@ -51,6 +51,11 @@ The proposal-only `unified-portal-feature-contracts.md` records the additional
 person-profile, website-edit, report, finance and notification contracts needed
 for the requested end state; existing quote/feedback fixtures do not fulfill
 those features.
+The unused monthly-report data-shape foundation now passes 12/12 focused tests
+from both implementer and independent QA plus Client typecheck. It adds no
+runtime import, route, schema, grant or deployment. Publication/withdrawal and
+exact resource/recipient authority remain open; this is not the monthly-report
+feature or portal launch acceptance.
 
 The concrete portal prerequisite is a missing verified-recipient workflow:
 there is no runtime creator for the existing recipient identity-binding table,
