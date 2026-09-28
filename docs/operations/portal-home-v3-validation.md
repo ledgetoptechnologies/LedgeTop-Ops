@@ -2,6 +2,19 @@
 
 ## September 28 owner-action review checkpoint
 
+- Independent GPT-5.6 focused rerun passed on runtime/test head
+  `102ed57aea7cff7e3c2b7929bea843f5a138a6fd` (the checkout moved only for
+  documentation commit `76947e9` during execution). Client: 39/39 across
+  authority-v2, its entrypoint, service-home and home-route suites, exit 0,
+  50.94 seconds. Ops: 34/34 across workspace-binding selection, authority-v3
+  owner HTTP and the joined private-RPC suite, exit 0, 111.37 seconds.
+  Both used `npm exec -- vitest run --config vitest.config.ts` with those exact
+  named test files. The initial sandboxed Client launch failed before tests
+  because esbuild could not traverse the worktree; the identical narrowly
+  approved local test command passed. These are local tests, not credentialed
+  deployed portal acceptance or full release CI. The separate release
+  preparation process was not interrupted or restarted.
+
 - The next live acceptance prerequisite is a missing application workflow,
   not another migration rehearsal. Independent read-only GPT-5.6 review found
   no runtime creator for `client_onboarding_recipient_identity_bindings`:
