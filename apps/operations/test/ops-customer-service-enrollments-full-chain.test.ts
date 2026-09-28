@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Miniflare } from "miniflare";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import { writeCustomerServiceEnrollment } from "../src/worker/ops-customer-service-enrollments";
+import { clientPortalServiceMetadataQuery, readClientPortalServiceMetadata } from "../src/worker/client-portal-service-metadata";
 import { writeNativeDirectoryProfile, type NativeDirectoryCreateWrite } from "../src/worker/native-directory-profile-writer";
 import type { AuthenticatedNativeStaffWithAdmissionVersion } from "../src/worker/native-staff-auth";
 
@@ -90,6 +91,18 @@ describe("0146 customer service enrollment writer on the full Operations schema"
     ]);
   }, 240_000);
   afterAll(async () => { await runtime.dispose(); });
+
+  it("prepares the metadata query against the real schema and denies an unprovisioned principal", async () => {
+    const query = await db.prepare(clientPortalServiceMetadataQuery)
+      .bind("55555555-5555-4555-8555-555555555555", "unprovisioned-workspace", 1, 1,
+        "https://access.example.test", "unprovisioned-person", 102).all();
+    expect(query.success).toBe(true);
+    expect(query.results).toEqual([]);
+    await expect(readClientPortalServiceMetadata(db, { protocolVersion: 1,
+      authorityId: "55555555-5555-4555-8555-555555555555", workspaceId: "unprovisioned-workspace",
+      ownershipEpoch: 1, grantRevision: 1, issuer: "https://access.example.test", subject: "unprovisioned-person" }))
+      .resolves.toEqual({ ok: false, protocolVersion: 1, code: "denied" });
+  });
 
   it("creates, replays through a legitimate generation change, and revokes", async () => {
     const create = command("full-chain-create", "full-chain-key-create", ltds, "active", 0);
