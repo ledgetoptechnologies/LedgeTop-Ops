@@ -331,7 +331,7 @@ test("portal identifies an unfinished schema update and retries cleanly on mobil
   await expect(page.getByText("Portal update in progress", { exact: true })).toBeVisible();
   await expect(page.getByText(/access is valid/i)).toBeVisible();
   await page.getByRole("button", { name: "Retry portal" }).click();
-  await expect(page.getByRole("heading", { name: "Hello, Acme Surveying" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Acme Surveying" })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
@@ -429,12 +429,12 @@ test("workspace-v2 selection scopes every authenticated resource request and swi
   });
 
   await page.goto("/portal");
-  await expect(page.getByRole("heading", { name: "Hello, Alpha" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Alpha" })).toBeVisible();
   await expect(page.getByRole("combobox", { name: "Client workspace" })).toHaveValue("workspace-a");
   expect(observed.filter(item => ["/api/client/projects", "/api/client/service-requests", "/api/client/map-config", "/api/client/notification-history"].includes(item.path)).every(item => item.workspace === "workspace-a")).toBe(true);
 
   await page.getByRole("combobox", { name: "Client workspace" }).selectOption("workspace-b");
-  await expect(page.getByRole("heading", { name: "Hello, Beta" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Beta" })).toBeVisible();
   await expect(page.getByText("Beta Site")).toBeVisible();
   expect(observed.filter(item => item.path === "/api/client/projects").at(-1)?.workspace).toBe("workspace-b");
   await expect(page).toHaveURL(/\/portal\?workspace=workspace-b$/);
@@ -443,7 +443,7 @@ test("workspace-v2 selection scopes every authenticated resource request and swi
 test("authorized portal supports project, delivery, and request workflows", async ({ page }) => {
   await mockAuthorizedPortal(page);
   await page.goto("/portal");
-  await expect(page.getByRole("heading", { name: "Hello, Acme Surveying" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Acme Surveying" })).toBeVisible();
   await expect(page.getByText("1", { exact: true }).first()).toBeVisible();
 
   await navigatePortal(page, "Projects");
@@ -1112,7 +1112,7 @@ for (const width of [320, 390, 768]) {
     await expect(page.getByRole("dialog", { name: "Navigation" })).toHaveCount(0);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     const headerBottom = await page.locator(".client-portal-header").evaluate((node) => node.getBoundingClientRect().bottom);
-    const headingTop = await page.getByRole("heading", { name: "Hello, Acme Surveying" }).evaluate((node) => node.getBoundingClientRect().top);
+    const headingTop = await page.getByRole("heading", { name: "Acme Surveying" }).evaluate((node) => node.getBoundingClientRect().top);
     expect(headingTop).toBeGreaterThanOrEqual(headerBottom);
   });
 }

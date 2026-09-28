@@ -67,8 +67,10 @@ bootstrap as a second, independent authorization step.
    stable-ID binding is reviewed and authorized.
 
 The neutral Operations-only heading should remain suitable when no Client
-account display name is independently authorized. A personal greeting may use
-the Client session's display name only after successful Client bootstrap.
+account display name is independently authorized. Successful Client bootstrap
+may display its account name as customer context, not as a person's name.
+A personal greeting requires a separately verified person-profile binding;
+neither the current account name nor an email-derived label establishes one.
 
 ## UI architecture caveats
 

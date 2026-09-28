@@ -4,6 +4,41 @@ Updated September 28, 2026. The owner approved implementation and resumption aft
 
 ### September 28 — staging-only owner-action acceptance remains open
 
+Latest read-only checkpoint: exact reviewed head
+`d7de8f0494e3d444bf4081adcd63c2457c93bd72` is published in draft PR133.
+CI run `36407328635` is terminal successful at that exact head; all ten jobs
+passed, including Client and Operations. This proves the CI gate, not live
+recipient acceptance or the original local release run. The original broad local
+release preparation reported all three
+`project-alpha-sources.test.ts` cases failing at their existing 60/90/60-second
+limits, then both `project-alpha-ordering.test.ts` cases at 30-second limits.
+The owned obsolete `c337d78` session was stopped after these concrete failures
+and returned exit 1; it is failed/incomplete evidence, not a full release pass.
+No broad run was restarted. A current-source isolated rerun of the two affected
+files with unchanged assertions and timeouts is the next diagnostic step;
+neither a focused pass nor CI success substitutes for the old run's result.
+No production deployment, public-link change, or client activation occurred.
+
+A bounded project/request source audit at `d7de8f0` confirms optional-project
+requests are implemented (`routes.ts:145,2051`, `request-readiness.ts:168`),
+but client-proposed projects and approval to one chosen PA project are not.
+The current `New or one-off service` option creates a root-scoped request;
+the staff `/pa-quote` outcome is a draft quote, not a project. Existing private
+PA-origin project adoption is not a substitute. The requested third form choice
+requires a durable proposal, independently authorized staff approval with one
+selected PA source, idempotent creation/mapping receipts, revision conflict
+checks, and no implicit delivery or portal-access grant. Preserve the one-off
+path while implementing that distinct workflow; it remains a launch gap.
+
+The next local UI follow-on removes the misleading `Hello, <account name>`
+claim: the account name remains customer context, with neutral welcome copy.
+No verified person profile is invented. Existing browser assertions now check
+the same exact customer heading, including its absence before denied bootstrap
+recovery. Root's three pure contract/UI suites pass 33/33 and Client TypeScript
+checking passes; independent source QA found no authorization, request-order,
+workspace, or navigation changes. Browser fixtures were updated but have not
+been freshly executed for this follow-on; it requires its own exact-head CI.
+
 Exact follow-on head `6c2cee317fa6839a2e2728a7e5cd685056919456` CI run
 `36404656600` completed with failure September 28 09:55:12 UTC: nine jobs
 passed, but Client's full suite reported 120/121 files and 1305/1306 tests

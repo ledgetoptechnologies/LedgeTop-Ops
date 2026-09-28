@@ -3119,10 +3119,10 @@ export function ClientPortalApp({
       <>
         <section className="portal-welcome">
           <span className="eyebrow">Client portal</span>
-          <h1>Hello, {account!.displayName}</h1>
+          <h1>{account!.displayName}</h1>
           <p>
-            Project progress, files, and service requests—all in one secure
-            workspace.
+            Welcome to the client portal. Project progress, files, and service
+            requests—all in one secure workspace.
           </p>
         </section>
         <div className="portal-stat-grid">

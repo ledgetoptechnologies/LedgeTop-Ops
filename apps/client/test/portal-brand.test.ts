@@ -42,4 +42,11 @@ describe("shared portal brand context", () => {
     expect(resolvePortalBrand("portal.ledgetopdroneservices.com").shortName).toBe("LTDS");
     expect(resolvePortalBrand("portal.ledgetoptechnologies.com").shortName).toBe("LTT");
   });
+
+  it("presents the account as customer context without claiming a verified person name", () => {
+    const portal = readFileSync(new URL("../src/client/ClientPortalApp.tsx", import.meta.url), "utf8");
+    expect(portal).toContain("<h1>{account!.displayName}</h1>");
+    expect(portal).toContain("Welcome to the client portal.");
+    expect(portal).not.toContain("Hello, {account!.displayName}");
+  });
 });

@@ -80,7 +80,7 @@ test("independently authorized client portal composes an actionless operations s
   });
   await page.goto("/portal");
 
-  await expect(page.getByRole("heading", { name: "Hello, Acme Surveying" })).toHaveCount(1);
+  await expect(page.getByRole("heading", { name: "Acme Surveying" })).toHaveCount(1);
   await expectAuthorizedNavigation(page, ["Requests", "Feedback"]);
   await expect(page.getByRole("link", { name: "Requests" })).toHaveCount(0);
   await expect(page.getByRole("link", { name: "Feedback" })).toHaveCount(0);
@@ -147,7 +147,7 @@ test("independently authorized native dashboard keeps its workspace distinct fro
   await expect(page.getByRole("heading", { name: "Native Resource Workspace" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Operations services" })).toBeVisible();
   await expect(page.getByText("Aerial operations", { exact: true })).toBeVisible();
-  await expect(page.getByRole("heading", { name: /Hello,/ })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Client portal" })).toHaveCount(0);
   await expectAuthorizedNavigation(page);
   expect(calls.some(call => call.path.endsWith("/context"))).toBe(true);
   expect(calls.every(call => call.workspace !== "workspace-one")).toBe(true);
@@ -164,11 +164,11 @@ test("invalid client workspace hint can recover through a fresh operations probe
   await expect(page.getByRole("heading", { name: "Client resources unavailable" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Your services" })).toBeVisible();
   await expect(page.getByRole("navigation")).toHaveCount(0);
-  await expect(page.getByRole("heading", { name: /Hello,/ })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Authorized Client" })).toHaveCount(0);
   expect(calls).not.toContain("/api/client/v2/workspaces/not-authorized/context");
   await page.getByRole("button", { name: "Try available client workspaces" }).click();
   await expect(page).toHaveURL(/\/portal$/);
-  await expect(page.getByRole("heading", { name: "Hello, Authorized Client" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Authorized Client" })).toBeVisible();
   await expectAuthorizedNavigation(page);
   expect(calls.filter(path => path === "/api/client/v2/operations/home")).toHaveLength(2);
 });

@@ -423,10 +423,16 @@
   boundaries before declaring the unified portal production-ready.
 - Retain the production PA owner-update checkpoint and existing public links.
 
-## Next normal owner action
+## Historical owner-action plan (implemented; live acceptance pending)
 
-- The private v3 outbox exists, but no normal owner HTTP action issues its
-  intent yet. Add a dedicated default-off native-owner boundary, separate from
+The owner HTTP handler described here is now implemented and independently
+reviewed, as recorded in the September 28 evidence above. These bullets retain
+the original design constraints, not an outstanding implementation request.
+Governed recipient binding and credentialed staging acceptance remain open;
+migration 0220 authorization does not authorize production access or deployment.
+
+- The original plan required a normal owner HTTP action to issue the private
+  v3 outbox intent through a dedicated default-off native-owner boundary, separate from
   the intentionally staging-only workspace-binding route.
 - Derive authority/workspace/principal IDs from the selected acknowledged
   inactive binding and explicit recipient binding. Derive revisions only on
