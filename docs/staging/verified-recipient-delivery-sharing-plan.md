@@ -60,6 +60,11 @@ home-only enrollment still does not authorize delivery access.
   and selection producers to create an inactive workspace-selection receipt.
   It creates no recipient-delivery command. All three cases passed together;
   these synthetic lineages do not substitute for actual staging v7/v8 history.
+  The clean selection case additionally proves identical replay, rejection of
+  a different workspace/checkpoint/activation or forged Access subject, and
+  rejection after the real reviewed v6 revoke. The saved inactive selection
+  remains historical; no delivery-authority command is created. The expanded
+  suite passed 3/3 and Operations typecheck passed.
 - Root added and passed six actual workerd named-service RPC tests without
   mocking `cloudflare:workers` or storage. The actual entrypoint module is
   bundled in-test (no prebuilt artifact dependency). Production, missing

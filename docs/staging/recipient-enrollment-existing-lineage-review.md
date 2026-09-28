@@ -77,6 +77,29 @@ Abort generation if any count, version, history row, scope, business-area bindin
 
 ## Required local tests
 
+### Canonical historical rehearsal plan
+
+The history cannot be reproduced by substituting the newer v5 fixture. The
+read-only producer trace identifies this sequence for an isolated test database:
+
+1. Apply the real canonical chain through
+   `0122_project_alpha_project_v2_canonical_activation.sql` and record its ledger.
+2. Generate reviewed v3 provision/revoke artifacts against a fixture repository
+   containing exactly that historical chain, then apply those real producers.
+3. Apply `0123_native_directory_authority_history.sql`; its lossless backfill
+   records the already-inactive global grant as version 1/generation 1.
+4. Apply the remaining canonical migrations without bypasses.
+5. Apply the real onboarding provision, write the organization and dispatch its
+   PA create while authorized, then apply the real onboarding revoke. The
+   history triggers must produce the observed generation 2/3/4 sequence.
+6. Rehearse v7 acquisition/activation/revoke and v8 selection using that exact
+   preserved history. Check provenance joins and revocation, not just outcomes.
+
+Only ordinary synthetic identity, business-area, create-admission and PA
+transport inputs may be supplied. Grants, history, approvals, receipts, mappings
+and activation must come from their real producers. This is a planned local
+rehearsal, not a successful test or authority to provision remote staging.
+
 - Reproduce exactly two inactive profile grants with global history `1` and business-area history `3`; acquisition provision/revoke succeeds and preserves the latter byte-for-byte and at history `3`.
 - Reject another permission, effect, scope, business area, ID, grant row, active state, missing/non-contiguous history revision, or changed history count.
 - Reject attempts to use existing `v3-profile-only-inactive`, v5 fixture, or ordinary v4 state names for this lineage.

@@ -1,7 +1,7 @@
 import {Miniflare} from "miniflare";
 import {afterAll,beforeAll,describe,expect,it,vi} from "vitest";
 import {applyCanonicalChain,authorizeCanonicalUuidAcquisition,canonicalUuidOrganization,createAcquisitionPrerequisite,establishGovernedEmptyEnrollmentFixture,
-  establishCleanV3Authority,transitionCleanV3ToV4Acquisition,transitionCleanV4ToV6PortalAuthority,
+  establishCleanV3Authority,transitionCleanV3ToV4Acquisition,transitionCleanV4ToV6PortalAuthority,revokeCleanV6PortalAuthority,
   writeGovernedCanonicalUuidOrganization} from "./helpers/verified-recipient-canonical-lineage";
 import {selectPortalWorkspaceBinding} from "../src/worker/client-portal-workspace-binding-selection";
 import {canonicalOwner} from "./helpers/verified-recipient-canonical-lineage";
@@ -178,14 +178,27 @@ describe("verified recipient authority canonical joined prerequisite",()=>{
         {staffId:canonicalOwner.operationsStaffId,accessSubject:canonicalOwner.accessSubject},fetcher);
       expect(activated).toMatchObject({status:"activated",replayed:false});if(activated.status!=="activated")throw Error(JSON.stringify(activated));
       const portal=await transitionCleanV4ToV6PortalAuthority(database,activated.activationId);
-      const selection=await selectPortalWorkspaceBinding(database,{identity:{kind:"native",staffId:canonicalOwner.operationsStaffId,
+      const actor={identity:{kind:"native" as const,staffId:canonicalOwner.operationsStaffId,
         verifiedAccessSubject:canonicalOwner.accessSubject,email:canonicalOwner.email,displayName:canonicalOwner.displayName,
-        profileVersion:portal.profileVersion},admissionVersion:portal.admissionVersion,verifiedUntil:new Date(Date.now()+30*60_000).toISOString()},
-        {selectionId:"70000000-0000-4000-8000-000000000004",recordId:canonicalUuidOrganization.recordId,
+        profileVersion:portal.profileVersion},admissionVersion:portal.admissionVersion,verifiedUntil:new Date(Date.now()+30*60_000).toISOString()};
+      const command={selectionId:"70000000-0000-4000-8000-000000000004",recordId:canonicalUuidOrganization.recordId,
           activationId:activated.activationId,workspaceId:"canonical-clean-workspace",sourceWorkspaceId:"canonical-clean-source",
-          checkpoint:{sourceGeneration:"generation-1",sourceSequence:1,snapshotGenerationId:"snapshot-1"}});
+          checkpoint:{sourceGeneration:"generation-1",sourceSequence:1,snapshotGenerationId:"snapshot-1"}};
+      const selection=await selectPortalWorkspaceBinding(database,actor,command);
       expect(selection).toMatchObject({recordId:canonicalUuidOrganization.recordId,activationId:activated.activationId,
         rootType:"organization",rootPublicId:canonicalUuidOrganization.publicId,state:"inactive",replayed:false});
+      await expect(selectPortalWorkspaceBinding(database,actor,command)).resolves.toEqual({...selection,replayed:true});
+      for(const altered of [{...command,workspaceId:"other-workspace"},
+        {...command,checkpoint:{...command.checkpoint,sourceSequence:2}},
+        {...command,activationId:"70000000-0000-4000-8000-000000000099"}]){
+        await expect(selectPortalWorkspaceBinding(database,actor,altered)).rejects.toThrow("portal_workspace_binding_selection_denied");
+      }
+      await expect(selectPortalWorkspaceBinding(database,{...actor,identity:{...actor.identity,
+        verifiedAccessSubject:"forged-staging-subject"}},command)).rejects.toThrow("portal_workspace_binding_selection_denied");
+      await revokeCleanV6PortalAuthority(database);
+      await expect(selectPortalWorkspaceBinding(database,actor,command)).rejects.toThrow("portal_workspace_binding_selection_denied");
+      expect(await database.prepare("SELECT count(*) count FROM client_portal_workspace_binding_selections")
+        .first("count")).toBe(1);
       expect(await database.prepare("SELECT count(*) count FROM verified_recipient_delivery_authority_commands")
         .first("count")).toBe(0);
     }finally{await isolated.dispose();}

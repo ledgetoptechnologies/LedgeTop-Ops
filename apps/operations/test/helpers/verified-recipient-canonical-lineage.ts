@@ -1,6 +1,7 @@
 import {cpSync,mkdirSync,mkdtempSync,readFileSync,readdirSync,copyFileSync} from "node:fs";
 import {tmpdir} from "node:os";
 import {join,resolve} from "node:path";
+import {fileURLToPath} from "node:url";
 import {splitD1MigrationStatements} from "../../../client/test/helpers/d1-migrations";
 // Test artifact generators are JavaScript CLI modules without declarations.
 // @ts-expect-error reviewed test-only JS module
@@ -36,7 +37,7 @@ export async function applyCanonicalChain(database:D1Database,app:"operations"|"
 }
 
 function artifactBase(){
-  const root=resolve(new URL("../../../../",import.meta.url).pathname.replace(/^\/(.:)/,"$1"));
+  const root=resolve(fileURLToPath(new URL("../../../../",import.meta.url)));
   const base=mkdtempSync(join(tmpdir(),"ltds-canonical-authority-")),app=join(base,"apps","operations");
   mkdirSync(app,{recursive:true});cpSync(join(root,"apps","operations","migrations"),join(app,"migrations"),{recursive:true});
   mkdirSync(join(base,"docs","staging"),{recursive:true});
@@ -51,6 +52,7 @@ async function applyArtifact(database:D1Database,sql:string,name:string){
 const evidence="0123456789abcdef".repeat(4);
 const fixtureArtifacts=new WeakMap<object,{base:string;v5:ReturnType<typeof buildAuthorityArtifacts>}>();
 const cleanArtifacts=new WeakMap<object,{base:string;v3:ReturnType<typeof buildAuthorityArtifacts>;v4?:ReturnType<typeof buildAuthorityArtifacts>}>();
+const cleanPortalArtifacts=new WeakMap<object,ReturnType<typeof buildAuthorityArtifacts>>();
 function packet(schemaVersion:number,purpose?:string,expected?:Record<string,unknown>){
   const now=Date.now();return{schemaVersion,packet:{packetId:schemaVersion===3?"staging-authority-canonical-joined-v3":"staging-authority-canonical-joined-v5",mode:schemaVersion===3?"create":"reactivate",operatorKind:"synthetic",
     staffId:canonicalOwner.operationsStaffId,email:canonicalOwner.email,displayName:canonicalOwner.displayName,accessSubject:canonicalOwner.accessSubject,
@@ -187,7 +189,14 @@ export async function transitionCleanV4ToV6PortalAuthority(database:D1Database,a
       profileGrantVersion:4,identityGrantVersion:2,portalGrantVersion:0,portalGrantState:"absent",directoryAuthorityState:"v4-acquisition-inactive"},
     evidence:{changeTicket:"canonical-clean-v6",reviewer:"canonical-reviewer",bindingEvidenceSha256:evidence}}};
   const v6=buildAuthorityArtifacts(saved.base,input,"provision");await applyArtifact(database,v6.provision.sql,v6.provision.name);
+  cleanPortalArtifacts.set(database as object,v6);
   return{admissionVersion:5,profileVersion:1};
+}
+
+/** Revoke through the reviewed producer, never by directly altering grants. */
+export async function revokeCleanV6PortalAuthority(database:D1Database){
+  const saved=cleanPortalArtifacts.get(database as object);if(!saved)throw Error("canonical-clean-v6-artifacts-missing");
+  await applyArtifact(database,saved.revoke.sql,saved.revoke.name);
 }
 
 /** The first reviewed-lineage prerequisite. Canonical triggers must decide
