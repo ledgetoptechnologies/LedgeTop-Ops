@@ -4,6 +4,48 @@ Updated September 28, 2026. The owner approved implementation and resumption aft
 
 ### September 28 — staging-only owner-action acceptance remains open
 
+Current follow-on head is `9eea3e6b0803211ccb9ba0f527ec82c5a888fcf9`.
+Independent local focused validation passes Client 39/39 and Ops 34/34.
+CI run `36390923313` completed successfully for that exact head: all ten jobs
+passed, with terminal readback at September 28 07:31:21 UTC. Its predecessor
+`36389712464` was cancelled by the documentation push, not accepted as a
+passing run. Broad local release preparation remains live: its Client suite
+passed 119 files / 1,292 tests, then advanced to the Operations suite. This is
+not terminal proof of the complete local release command or live portal
+acceptance.
+
+The concrete portal prerequisite is a missing verified-recipient workflow:
+there is no runtime creator for the existing recipient identity-binding table,
+and the worker-mounted workspace-binding/authority-v3 actions have no frontend
+caller. Do not bypass those gaps through D1 fixtures or infer identity-link or
+portal-management authority from profile-edit authority. A separate scoped
+staging-only workflow authorization is pending; migration 0220 remains off.
+
+Incoming-mail diagnosis now has live read-only evidence rather than mailbox
+guesswork. Production `DELIVERY_DB` maps to `client-data`; the latest query
+returns one recorded digest, `failed`, `mail-transport-failed`, attempt count
+3 (created September 11 00:49:26 UTC; updated 01:30:48 UTC). It contains no
+file or recipient details and wrote zero rows. Currently serving Ops version
+`9a2e6997-c8f0-4e7b-ad7a-7d09fff5b4af` is 100% deployed and explicitly selects
+Gmail SMTP with a provisioned `SMTP_PASSWORD` binding. Its value/validity was
+not inspected. The transport is not the Cloudflare email binding while that
+flag is true. This establishes a historical transport failure, not a new
+provider rejection reason or proof of current inbox delivery. Existing open
+PR117 now includes follow-on commit `18ed16a`: a joined test reproduced a
+duplicate after SMTP DATA acceptance followed by sent-receipt storage failure.
+The repair persists an exact-attempt marker before transport, fences stale
+claims/readbacks, and holds uncertain/accepted-but-unrecorded sends without
+blind retry. Implementer and independent QA each passed 27/27 focused tests;
+the orchestrator passed the same 27 in two bounded runs. TypeScript passed.
+Feature-branch publication is not merge, deployment, or owner inbox acceptance.
+No production resend, secret
+change, deployment, retention change, or public-link change is authorized by
+this diagnostic evidence.
+
+The paragraphs below retain earlier September 28 observations; the current
+snapshot above and `portal-home-v3-validation.md` supersede stale pending
+rehearsal and candidate-head statements without erasing their history.
+
 The new disposable **remote** full-chain rehearsal is complete at e626e10:
 Client 139/Ops 147 exact ordered ledgers, both Client 0199 files, final
 0220/0147, successful second list/apply with no pending files, synthetic owner

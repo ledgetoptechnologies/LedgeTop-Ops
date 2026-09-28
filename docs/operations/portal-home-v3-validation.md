@@ -30,11 +30,14 @@
   `directory.profile.edit` bootstrap authority implies neither. Do not insert
   live bindings or grants through D1 to bypass this gap. Migration 0220's
   authorization does not itself approve a new recipient-linking boundary.
-- Repaired-head CI run `36389712464` remains unverified at its terminal state.
-  The latest GitHub check read hit the account API rate limit; no credentials
-  were changed and no unavailable check was counted as successful. Local
-  release preparation remains live, with a newly observed test child process;
-  it has not yet returned its final result.
+- Exact-head CI run `36390923313` passed all ten jobs for
+  `9eea3e6b0803211ccb9ba0f527ec82c5a888fcf9`; the terminal GitHub REST
+  readback reports success at September 28 07:31:21 UTC. Earlier run
+  `36389712464` was cancelled after a documentation push, not passed.
+  Local release preparation remains live: its broad Client suite passed
+  119 files / 1,292 tests and advanced to Operations tests. The complete
+  release command has not returned its final result. No unavailable check
+  was counted as successful, and no credentials were changed.
 
 - Fresh **remote** migration transport is now verified at tooling commit
   `e626e102e976835fb0e3dbf6461ef4e46e161174`, run `home-20260928`.
