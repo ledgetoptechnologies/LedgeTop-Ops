@@ -4,8 +4,9 @@ export function OperationsServiceSummary({ response, embedded = false }: {
   response: PortalOperationsHomeResponse;
   embedded?: boolean;
 }) {
+  const hasServices = response.homes.some(home => home.services.length > 0);
   return <section className="portal-card" aria-label="Independent operations service summary">
-    <h2>{embedded ? "Operations services" : response.homes.length === 0 ? "No services available" : "Available services"}</h2>
+    <h2>{embedded ? "Operations services" : hasServices ? "Available services" : "No services available"}</h2>
     {embedded && <p>Your service summary. Files and requests follow the access for your selected workspace.</p>}
     {response.homes.length === 0
       ? <p>Your account has no active operations services.</p>

@@ -73,6 +73,25 @@ test("operations metadata remains the only surface when the independent client b
   expect(calls).toEqual(["/api/client/v2/operations/home", "/api/client/session"]);
 });
 
+for (const [name, emptyResponse, detail] of [
+  ["no authorized homes", { ...response, homes: [] }, "Your account has no active operations services."],
+  ["an authorized home with no listed services", { ...response, homes: [{ ...response.homes[0], services: [] }] }, "No services are currently listed for this access."],
+] as const) {
+  test(`operations-only home represents ${name} as unavailable`, async ({ page }) => {
+    const calls = await interceptClientApi(page, 200, emptyResponse);
+    await page.goto("/portal");
+
+    const summary = page.getByRole("region", { name: "Independent operations service summary" });
+    await expect(summary.getByRole("heading", { name: "No services available" })).toBeVisible();
+    await expect(summary.getByText(detail, { exact: true })).toBeVisible();
+    await expect(summary.getByRole("heading", { name: "Available services", exact: true })).toHaveCount(0);
+    await expect(summary.getByRole("link")).toHaveCount(0);
+    await expect(summary.getByRole("button")).toHaveCount(0);
+    await expect(page.getByRole("navigation")).toHaveCount(0);
+    expect(calls).toEqual(["/api/client/v2/operations/home", "/api/client/session"]);
+  });
+}
+
 test("independently authorized client portal composes an actionless operations summary in one shell", async ({ page }) => {
   const calls = await interceptClientApi(page, 200, response, {
     account: { id: "account-a", displayName: "Acme Surveying" },
@@ -96,6 +115,26 @@ test("independently authorized client portal composes an actionless operations s
     "/api/client/projects", "/api/client/service-requests", "/api/client/map-config",
     "/api/client/notification-history", "/api/client/request-readiness",
   ]));
+});
+
+test("combined portal keeps its operations heading when an authorized home has no listed services", async ({ page }) => {
+  const calls = await interceptClientApi(page, 200, {
+    ...response,
+    homes: [{ ...response.homes[0], services: [] }],
+  }, {
+    account: { id: "account-a", displayName: "Acme Surveying" },
+    capabilities: { requestV2: false, feedback: false },
+  });
+  await page.goto("/portal");
+
+  const summary = page.getByRole("region", { name: "Independent operations service summary" });
+  await expect(summary.getByRole("heading", { name: "Operations services" })).toBeVisible();
+  await expect(summary.getByText("No services are currently listed for this access.", { exact: true })).toBeVisible();
+  await expect(summary.getByRole("heading", { name: "No services available", exact: true })).toHaveCount(0);
+  await expect(summary.getByRole("link")).toHaveCount(0);
+  await expect(summary.getByRole("button")).toHaveCount(0);
+  await expectAuthorizedNavigation(page, ["Requests", "Feedback"]);
+  await expect.poll(() => calls.length).toBe(7);
 });
 
 test("independently authorized native dashboard keeps its workspace distinct from operations metadata", async ({ page }) => {

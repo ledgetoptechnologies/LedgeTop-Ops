@@ -3,7 +3,19 @@
 September 28, 2026. Source review only; no schema, authorization, deployment,
 recipient access, production settings, or public links are changed by this file.
 
-## Deployed 0148/0149 baseline, before the unpublished candidate
+## Staging checkpoint after local review
+
+Recovery revision `962bf021b371fd4a4fc31d54f7103f7d8b52fef1` passed all ten
+CI jobs in run `36457331628`. After a fresh private backup, canonical 0150 was
+applied only to Ops staging. Readback confirms 150 migration entries ending at
+0150, eleven additive schema objects, zero cancellation rows, clean foreign keys,
+and no pending migrations. Ops staging version
+`66e5b364-16ec-4da4-a379-18982a208197` now contains the reviewed recovery runtime.
+Enrollment, owner actions, authority dispatch, and workspace dispatch remain off;
+Client staging was not redeployed. No signed-in/live acceptance or production
+application is implied. Historical local evidence below predates this deployment.
+
+## Historical pre-0150 baseline
 
 - `0148_client_portal_recipient_enrollment.sql` allows only issued, pending,
   active, revoking, and revoked states. Operations and commit receipts are
@@ -25,7 +37,7 @@ Evidence: `apps/operations/src/worker/client-portal-recipient-enrollment-ledger.
 `apps/operations/test/client-portal-recipient-enrollment-ledger.test.ts`;
 Operations migrations `0148` and `0149`.
 
-## Candidate implementation contract
+## Implemented cancellation contract and pending extension
 
 - Add owner-authenticated, same-origin, CSRF-protected cancellation only for
   issued/pending intents. Pin the exact intent, expected revision, operation ID,
@@ -38,7 +50,7 @@ Operations migrations `0148` and `0149`.
   cancellation marker with audited CAS/commit evidence rather than rebuilding
   the existing ledger tables. Every read, redeem, confirm, raw-SQL transition,
   and associated command/commit guard must consult the marker; a UI-only filter
-  is insufficient. The reviewed candidate is now prepared locally as canonical
+  is insufficient. The reviewed implementation uses canonical
   additive migration 0150; the original example is retained locally for comparison
   and is excluded from feature-branch publication.
   Neither source artifact proves application to staging or production.
@@ -69,9 +81,10 @@ Operations migrations `0148` and `0149`.
 - Canonical migration 0150 is prepared locally with unchanged reviewed SQL body
   and a corrected provenance header; SHA-256
   `939ecb0d3413070cb9b1f2232993b9e02b0a9dda9538a5e28a95bce5c139d2c3`.
-  It has not been applied remotely. Canonical reduced-fixture rerun passed 33/33
-  across ledger/HTTP/API/joined suites (`171.16s`, exit 0). Fresh exact-head CI
-  remains a separate gate; the earlier
+  Its staging application is recorded above; it is not applied to production.
+  Canonical reduced-fixture rerun passed 33/33
+  across ledger/HTTP/API/joined suites (`171.16s`, exit 0). Exact-head CI has
+  since passed as recorded above; the earlier
   candidate results below are historical, not deployed acceptance.
 - Complete empty-database bootstrap and idempotent reapplication passed 1/1
   (`71.05s`, exit 0) for all 139 Client and 150 Ops migrations, with 9/9 Client
@@ -85,7 +98,7 @@ Operations migrations `0148` and `0149`.
   Only that full-chain fixture received a 120-second timeout; authorization
   assertions and other test timeouts were not relaxed. It also asserts exactly
   150 migration filenames and the final 0150 filename.
-- The candidate currently has owner issued/pending cancellation, immutable
+- The published recovery runtime has owner issued/pending cancellation, immutable
   cancellation markers, action-specific acknowledgement, cancelled audit reads,
   and actionable listing that excludes cancelled history. It preserves 0148/0149
   rows and constraints rather than rewriting those migrations.
@@ -110,16 +123,16 @@ Operations migrations `0148` and `0149`.
 - Owner browser matrix passed 14/14 desktop/mobile cases, including known-denial
   reset and uncertain-cancel exact retry; four visual checks passed. Strict client
   API validation passed 10/10. No live or production acceptance is implied.
-  Fresh exact-head CI, private staging
-  backup/apply/readback, and deployed default-off acceptance
-  remain before activation. Local canonical source preparation is not remote
-  application or deployment.
+  Exact-head CI, private backup, staging apply/readback, and default-off deployment
+  have since passed as recorded above. Real signed-in acceptance remains before
+  activation; local source tests alone do not prove that workflow.
 
-- In-progress candidate review found three additional requirements: pending
+- Earlier candidate review found three additional requirements: pending
   requests need an explicit cancel control; destructive cancel acknowledgement
   must be separate from confirm acknowledgement; and durable cancelled history
-  must not exhaust the actionable-list bound. Test at least 101 cancelled
-  historical intents alongside a fresh pending request without deleting history.
+  must not exhaust the actionable-list bound. These are implemented and locally
+  tested, including 105 cancelled historical intents alongside a fresh pending
+  request without deleting history. Real deployed acceptance remains required.
 - Exact historical cancellation retries may return a minimal immutable receipt
   to the same currently authenticated actor without repeating a mutation. Keep
   current signed-staff authentication/admission mandatory, and return full
@@ -127,21 +140,24 @@ Operations migrations `0148` and `0149`.
   Deny revoked sessions/admissions; do not restore access using old authority.
   Make the response contract and privacy tests explicit. This path is currently
   pending separate authorization and is not implemented server-side.
-- Test issued cancellation, expired pending proof, expired intent, replay,
+- Local tests cover issued cancellation, expired pending proof, expired intent, replay,
   stale-revision denial, unauthorized/current-authority denial, direct SQL
-  bypass attempts, and cancellation versus confirmation. Assert zero new
-  bindings, outbox commands, and grants for all cancelled requests.
-- Test HTTP and browser behavior, including issued listing and uncertain retry.
-- Rehearse the complete historical migration chain and record preservation.
+  bypass attempts, and cancellation versus confirmation. They assert zero new
+  bindings, outbox commands, and grants for cancelled requests.
+- HTTP/browser issued listing and uncertain retry passed locally; repeat the
+  applicable scenarios through real deployed owner/recipient sessions.
+- Complete-chain bootstrap and representative history preservation passed
+  locally as recorded above; these do not establish live recipient acceptance.
 - Independent review cleared the bounded local cancellation guards and ledger,
   canonical SQL equivalence, and inventory pins. This is not clearance to merge,
-  apply migrations, or enable a staging acceptance window. The
+  enable access or claim live acceptance. Separate exact-head review and backup
+  cleared staging schema application and default-off runtime deployment above. The
   permission-history packet inventories were updated coherently to 150 only
   after the prior 149 preparation run was terminal and canonical SQL equivalence
   was reviewed. Generate new run-scoped manifests; retain historical 149 evidence.
 - Keep implementation default-off/local and staging only. A positive live
   enrollment/revoke test may proceed with one fresh intent and promptly close
   it; do not describe that as cancellation/recovery acceptance.
-- Production readiness remains unproven until recovery is implemented and
-  independently tested. Separate emergency access revocation during unresolved
+- Production readiness remains unproven until deployed recovery, enrollment,
+  and revocation pass live acceptance. Separate emergency access revocation during unresolved
   in-flight work also remains open; normal cancellation is not that mechanism.

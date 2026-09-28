@@ -28,6 +28,13 @@ describe("operations home browser API", () => {
     expect(calls).toEqual([{ url: "/api/client/v2/operations/home", init: { signal, omitWorkspace: true } }]);
   });
 
+  it.each([
+    ["no authorized homes", { resourceMode: "operations_home", homes: [] }],
+    ["an authorized home with no listed services", { resourceMode: "operations_home", homes: [{ ...home, services: [] }] }],
+  ])("accepts %s as a verified empty service home", async (_name, response) => {
+    await expect(loadOperationsHome(requestReturning(response, []))).resolves.toEqual(response);
+  });
+
   it("accepts the server field boundaries and opaque identifiers containing slashes", async () => {
     const boundaryHome = {
       ...home,

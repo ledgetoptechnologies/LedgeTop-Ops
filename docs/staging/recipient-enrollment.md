@@ -22,6 +22,7 @@ Owner routes are under `/api/native-client-portal/recipient-enrollment`:
 - `GET /intents/:intentId`
 - `POST /intents`
 - `POST /intents/:intentId/confirm`
+- `POST /intents/:intentId/cancel`
 - `POST /intents/:intentId/revoke`
 - `POST /intents/:intentId/reconcile`
 
@@ -42,6 +43,27 @@ The Operations recipient bridge is a private service binding only. It must not b
 5. The owner reviews the now-visible verified principal and exact target before confirming. Confirmation creates the recipient binding and queues only the existing protocol-v3 `operations.service_home.read` grant for the exact authority/workspace.
 6. Treat a queued, retrying, unavailable, or uncertain dispatch as incomplete. Do not issue a replacement or manually modify D1 records merely because acknowledgement is delayed.
 
+## Cancel and fresh issuance
+
+An authorized owner may use `POST /intents/:intentId/cancel` only while the
+intent is `issued` or `pending`. Cancellation records a terminal, immutable
+marker; it does not create a recipient binding, authority command, or access.
+It preserves the original token digest, target, verified principal when one was
+recorded, and operation history. An `active`, `revoking`, or `revoked` intent is
+not cancellable; active access must use the full revoke workflow below.
+
+After cancellation, the old link and signed proof cannot resume enrollment.
+Create a fresh intent and deliver its new one-time link through the approved
+private channel. Historical issue or redeem retries for the cancelled intent
+fail closed rather than returning a stale `issued` or `pending` result.
+
+For an exact cancellation retry after an uncertain response, the server returns
+the full recorded review only after rechecking the currently authenticated
+owner and current authority to the exact target. A privacy-bounded minimal
+receipt after target visibility has been lost is not implemented server-side;
+do not weaken target authorization or add a public recovery route to work around
+that limitation.
+
 ## Full revoke and reconciliation
 
 Use `POST /intents/:intentId/revoke` for full recipient revocation. An active grant with an empty permission list is only permission removal and is not equivalent to full revoke.
@@ -50,7 +72,7 @@ Revocation moves the enrollment to `revoking`, immediately fences Operations ser
 
 ## Known gaps and acceptance limits
 
-- A recipient proof may expire after redemption but before owner confirmation. Confirmation then fails closed and creates no binding or authority outbox row. There is not yet a governed decline, cancellation, proof-refresh, or recovery transition for that durable `pending` intent. Do not repair it with direct SQL; hold it for a reviewed recovery design and issue a replacement only under an approved procedure.
-- Local joined acceptance uses actual relevant migrations over reduced prerequisite schemas; it is not evidence for the complete historical migration chain, deployed bindings, live Cloudflare Access, or a staging deployment.
+- A recipient proof may expire after redemption but before owner confirmation. Confirmation fails closed and creates no binding or authority outbox row. The owner may cancel that `pending` intent and issue a fresh one, but there is no proof-refresh transition and direct SQL repair remains prohibited.
+- Canonical additive migration `0150_client_portal_recipient_enrollment_cancellation.sql` is applied to Ops staging after private backup and successful exact-head CI. Readback verifies 150 migrations, no pending migrations, and clean foreign keys. Ops staging recovery version is `66e5b364-16ec-4da4-a379-18982a208197`, with enrollment and authority flags still off. Local tests separately cover fresh bootstrap and representative populated issued/pending history preservation. No production application or live Cloudflare Access workflow is established by this evidence.
 - On Windows, local Miniflare serial cross-D1 service-home reads can exceed the production 1.5-second transport deadline. The joined fixture freezes only timeout timers around that positive read while retaining real Client and Operations D1 queries. It therefore proves composition, not the transport deadline.
 - No live staging acceptance, production approval, public-link publication, email delivery, or recipient delivery is established by the local tests.

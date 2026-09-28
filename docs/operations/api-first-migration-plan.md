@@ -4,6 +4,62 @@ Updated September 28, 2026. The owner approved implementation and resumption aft
 
 ### Current checkpoint — September 28, 2026
 
+- The Client service-summary empty state is corrected locally: standalone homes
+  with no listed services show “No services available”; embedded summaries keep
+  “Operations services.” Parser tests passed 17/17, desktop/mobile browser tests
+  passed 32/32, and typecheck/build passed. Independent frozen-source QA found no
+  release-blocking issue. This presentation-only change adds no permissions,
+  navigation, actions, or client access and has not been deployed.
+- Recovery revision `962bf021b371fd4a4fc31d54f7103f7d8b52fef1` now has terminal
+  successful CI `36457331628`: all ten jobs passed. After the private backup and
+  corrected independent review, only canonical 0150 was applied to Ops staging.
+  Readback verified 150 ledger entries ending at 0150, all eleven additive schema
+  objects, zero cancellation rows, clean foreign keys, and no pending migrations.
+  The reviewed Ops package deployed default-off as version
+  `66e5b364-16ec-4da4-a379-18982a208197`, with container rollout disabled.
+  Version readback confirmed enrollment/owner/authority/workspace outbox flags
+  false and owner origin empty. Client staging was not redeployed; its pinned
+  version `91fcb61a-cce0-4362-bd4c-7cc19f6e7502` has portal/enrollment/writers
+  disabled. Previous rollback version `15683688-10db-46ea-8d56-a3b86385693b`
+  and the private backup remain preserved. Backup SHA-256:
+  `0282c48d74d5b9a20fd5b3139d9cf42243aed26d1d24d898d89e50e95dc53020`.
+  Client deployment readback confirms that unchanged version serves 100%.
+  This is staging schema/runtime proof,
+  not signed-in enrollment, recovery/revoke acceptance, delivery authority,
+  production deployment, or permission to alter public links.
+- Staging gate review initially reported a missing reverse operation-ID fence.
+  Root checked canonical 0150 directly: both existing-operation and commit
+  BEFORE INSERT guards reject `c.operation_id=NEW.operation_id`, in addition
+  to cancelled-intent checks. The reviewer rechecked and retracted the finding;
+  no redundant trigger or weakened check was added. Conditional schema-only
+  review cleared after exact CI success, preserved fresh export, and confirmation
+  of only 0150 pending. Keep enrollment flags off and schema before runtime,
+  and do not infer live activation or delivery authority from this clearance.
+- Historical pre-deployment observation (superseded by the current checkpoint
+  above): exact recovery CI `36457331628` had nine successful jobs while
+  Operations was running its `Test` step. Remote staging migration-list readback
+  then confirmed only canonical 0150 pending.
+  A fresh private ignored Ops staging export was saved without overwriting an
+  earlier backup; SHA-256
+  `0282c48d74d5b9a20fd5b3139d9cf42243aed26d1d24d898d89e50e95dc53020`.
+  Ops build and explicit staging dry run exited 0, with container rollout
+  disabled. Current remote rollback version remains
+  `15683688-10db-46ea-8d56-a3b86385693b`; readback confirmed recipient, owner,
+  authority outbox, and workspace outbox flags false and owner origin empty.
+  At that observation no migration apply or deployment had occurred; exact-head
+  CI and independent staging gate review subsequently cleared, as recorded above.
+- Recovery runtime, owner UI/API/HTTP, canonical 0150, coherent 150-file pins,
+  and the populated-history fixture are published together at
+  `962bf021b371fd4a4fc31d54f7103f7d8b52fef1` on draft PR133 (24 files).
+  At initial publication, exact-head CI `36457331628` was still running and no
+  deployment or migration application had occurred. The staging checkpoint above
+  supersedes those observations. No merge, flag activation, production PA update,
+  or public-link change occurred. The superseded SQL example remains local.
+- A [financial portal read gap audit](../staging/financial-portal-read-gap-audit.md)
+  records why installation-wide legacy finance reads cannot serve client billing.
+  It proposes a default-off project-scoped vertical slice, pure existing action
+  links, explicit recipient/document authority and currency handling. It is a
+  read-only proposal, not implementation or approval of a new security boundary.
 - Populated-history compatibility is now frozen and independently reviewed.
   Root rerun passed `1/1` (`35.22s`, exit 0); implementer run passed `1/1`
   (`35.28s`, exit 0), with typecheck exit 0. Test SHA-256:
@@ -18,8 +74,9 @@ Updated September 28, 2026. The owner approved implementation and resumption aft
   migration fixture. That fixture alone now has a 120-second timeout and an
   exact 150-file assertion; other timeouts and authorization checks are unchanged.
   Selective feature publication for fresh CI includes the now-reviewed populated
-  history test and excludes the superseded local SQL example. Fresh exact-head CI,
-  remote backup/apply/readback, and deployed acceptance remain required.
+  history test and excludes the superseded local SQL example. Exact-head CI and
+  remote backup/apply/readback have since passed as recorded above; signed-in
+  deployed acceptance remains required.
 - The 150-file canonical inventory and equivalent SQL body passed independent
   local review. Bootstrap/preflight/evidence/authority-packet Node suites finished
   with `119` passed, `4` Windows symlink skips, `0` failed (`57.918s`, exit 0).
@@ -31,7 +88,7 @@ Updated September 28, 2026. The owner approved implementation and resumption aft
   This proves fresh-bootstrap/idempotency, not populated enrollment-history or
   signed-in live client acceptance. Operations typecheck also exited 0.
 - Canonical cancellation migration `0150_client_portal_recipient_enrollment_cancellation.sql`
-  is now prepared locally, not remotely applied. SHA-256
+  was prepared locally and has since been applied only to Ops staging. SHA-256
   `939ecb0d3413070cb9b1f2232993b9e02b0a9dda9538a5e28a95bce5c139d2c3`;
   its SQL body is unchanged from the reviewed example, with a canonical provenance
   header. Old 0148/0149 remain unchanged. Local bootstrap/evidence pins were
@@ -42,8 +99,8 @@ Updated September 28, 2026. The owner approved implementation and resumption aft
   Populated-history setup initially failed an append-only Directory-generation
   guard (`30.8s`, exit 1); correcting the fixture must not weaken that guard.
   The corrected issued/pending/audit preservation test passed as recorded above,
-  without weakening that guard. Fresh exact-head CI and default-off backed-up
-  staging application remain required. Fresh bootstrap and populated-history
+  without weakening that guard. Exact-head CI and default-off backed-up staging
+  application have since passed. Fresh bootstrap and populated-history
   fixtures are separate local evidence, neither proving remote acceptance.
 - Final frozen recovery candidate verification passed `34/34` across five
   ledger/full-chain/owner HTTP/owner API/joined suites (`202.68s`, exit 0).
@@ -60,9 +117,9 @@ Updated September 28, 2026. The owner approved implementation and resumption aft
   not current blockers. This is not canonical promotion or deployment clearance:
   at that historical checkpoint candidate SQL was outside the 149-migration
   inventory. Local canonical preparation and fresh 150-chain bootstrap have since
-  passed as recorded above. Remaining gates include fresh CI,
-  backed-up default-off staging application/readback, and real
-  enrollment/recovery/revocation acceptance.
+  passed as recorded above, followed by exact-head CI and backed-up default-off
+  staging application/readback. Real enrollment/recovery/revocation acceptance
+  remains required.
   Minimal receipt replay after target visibility loss and the separate delivery
   resource-authority path remain separately approval-gated and unimplemented.
 - Reviewed preparation tests and design/status documents are now published at
