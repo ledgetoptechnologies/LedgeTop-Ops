@@ -7,7 +7,7 @@ const mailer = vi.hoisted(() => {
   class NotificationMailDeliveryUncertain extends Error {
     constructor() { super("notification_mail_delivery_uncertain"); this.name = "NotificationMailDeliveryUncertain"; }
   }
-  return { sendNotificationMail: vi.fn(), NotificationMailDeliveryUncertain };
+  return { sendNotificationMail: vi.fn(), validateNotificationMailTransport: vi.fn(), NotificationMailDeliveryUncertain };
 });
 vi.mock("../src/worker/mailer", () => mailer);
 
