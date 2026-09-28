@@ -10,11 +10,17 @@ export type Env = Omit<
   | "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED"
   | "PROJECT_ALPHA_API_V2_MONITOR_ENABLED"
   | "PROJECT_ALPHA_API_V2_MONITOR_RECIPIENT"
+  | "PROJECT_ALPHA_DIRECTORY_RECONCILIATION_ENABLED"
   | "PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ENABLED"
   | "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED"
+  | "PROJECT_ALPHA_PRIVATE_ADMIN_TRANSPORT_ENABLED"
   | "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ENABLED"
   | "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_SOURCE_ID"
   | "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ORIGIN"
+  | "NATIVE_DIRECTORY_STAGING_EMPTY_ENROLLMENT_FIXTURE_ENABLED"
+  | "NATIVE_DIRECTORY_STAGING_EMPTY_ENROLLMENT_FIXTURE_BUSINESS_AREA_ID"
+  | "NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED"
+  | "NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED"
   | "NATIVE_INTEGRATION_CONTROL_ENABLED"
   | "NATIVE_INTEGRATION_CONTROL_ORIGIN"
   | "DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED"
@@ -42,16 +48,28 @@ export type Env = Omit<
   PROJECT_ALPHA_API_V2_MONITOR_ENABLED?: string;
   /** Explicit deployment-owned owner mailbox for outage alerts; never inferred from Project Alpha data. */
   PROJECT_ALPHA_API_V2_MONITOR_RECIPIENT?: string;
+  /** Default-off bounded read-only PA Directory reconciliation scheduler. */
+  PROJECT_ALPHA_DIRECTORY_RECONCILIATION_ENABLED?: string;
   /** Default-off administrator-only API-v2 capabilities and inventory readiness check. */
   PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ENABLED?: string;
   /** Default-off, manually invoked administrator-only Project-v2 staging acceptance. */
   PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED?: string;
+  /** Default-off administrator transport for private PA Directory and Project consumers. */
+  PROJECT_ALPHA_PRIVATE_ADMIN_TRANSPORT_ENABLED?: string;
   /** Staging-only, manually invoked Directory bootstrap acceptance fixture. */
   PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ENABLED?: string;
   /** Staging-only immutable source pin for the Directory bootstrap fixture. */
   PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_SOURCE_ID?: string;
   /** Staging-only exact HTTPS origin pin for the Directory bootstrap fixture. */
   PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ORIGIN?: string;
+  /** Default-off, staging-only native organization fixture with no PA enrollment. */
+  NATIVE_DIRECTORY_STAGING_EMPTY_ENROLLMENT_FIXTURE_ENABLED?: string;
+  /** Deployment-pinned active business area for the native-only staging fixture. */
+  NATIVE_DIRECTORY_STAGING_EMPTY_ENROLLMENT_FIXTURE_BUSINESS_AREA_ID?: string;
+  /** Default-off authenticated native Directory profile create/update routes. */
+  NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED?: string;
+  /** Default-off bounded scheduled delivery for native Directory outboxes. */
+  NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED?: string;
   /** Default-off native, explicit-grant authority for monitor lifecycle control. */
   NATIVE_INTEGRATION_CONTROL_ENABLED?: string;
   /** Exact same-origin native monitor-control UI origin; no implicit fallback. */

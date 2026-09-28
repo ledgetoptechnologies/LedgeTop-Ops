@@ -18,6 +18,7 @@ import { OrganizationOperationalContacts } from "./OrganizationOperationalContac
 import { ClientInternalNotes } from "./ClientInternalNotes";
 import type { InvitationAdministrationAccess } from "./invitation-administration-api";
 import { ProjectAlphaContactRoles, type ProjectAlphaContactRolePage } from "./ProjectAlphaContactRoles";
+import { NativeDirectoryProfileEdit } from "./NativeDirectoryProfileEditor";
 
 interface CollectionItem { row_key?: string }
 interface ClientContact extends CollectionItem {
@@ -54,6 +55,8 @@ interface ClientDetailResponse {
   auditTimelineAvailable?: boolean;
   projectAlphaContactRolesAvailable?: boolean;
   projectAlphaContactRoles?: ProjectAlphaContactRolePage;
+  nativeDirectoryProfile?: { recordId: string; kind: "organization" | "client" } | null;
+  nativeDirectoryLinkedClients?: Array<{ recordId: string; name: string }>;
 }
 interface BusinessProject extends CollectionItem { id: string; name: string; status: string | null; start_date: string | null; end_date: string | null; manager_name: string | null; created_at: string | null }
 interface ProjectManagementResult {
@@ -432,10 +435,11 @@ function BusinessProjects({ initial, page, client, contextVersion, contextSignal
   </Card>;
 }
 
-function ClientWorkspace({ route, canReviewFeedback, invitationAccess }: { route: ClientRoute; canReviewFeedback: boolean; invitationAccess?: InvitationAdministrationAccess }) {
+function ClientWorkspace({ route, canReviewFeedback, invitationAccess, nativeDirectoryProfileWrites }: { route: ClientRoute; canReviewFeedback: boolean; invitationAccess?: InvitationAdministrationAccess; nativeDirectoryProfileWrites: boolean }) {
   const [revision, setRevision] = useState(0);
   const [invalidated, setInvalidated] = useState("");
   const [portalFeedback, setPortalFeedback] = useState("");
+  const [linkedClientRecordId, setLinkedClientRecordId] = useState("");
   const contextController = useRef<AbortController | null>(null);
   if (!contextController.current) contextController.current = new AbortController();
   const refresh = () => {
@@ -482,6 +486,18 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess }: { route
       <div className="client-hub-title-status"><StatusPill tone={portalStatus.tone}>{portalStatus.label}</StatusPill>
         {portalStatus.description && <small>{portalStatus.description}</small>}</div>
     </div>
+    {nativeDirectoryProfileWrites && data.nativeDirectoryProfile
+      && <NativeDirectoryProfileEdit kind={data.nativeDirectoryProfile.kind} recordId={data.nativeDirectoryProfile.recordId} />}
+    {nativeDirectoryProfileWrites && data.client.kind === "organization" && (data.nativeDirectoryLinkedClients?.length ?? 0) > 0 && <Card title="Edit linked client profile">
+      <p>Select a currently linked client. Client Hub verifies its exact Project Alpha mapping and organization relationship on every refresh.</p>
+      <label htmlFor="native-directory-linked-client">Linked client<select id="native-directory-linked-client" value={linkedClientRecordId}
+        onChange={event => setLinkedClientRecordId(event.target.value)}>
+        <option value="">Choose a linked client</option>
+        {data.nativeDirectoryLinkedClients!.map(client => <option key={client.recordId} value={client.recordId}>{client.name}</option>)}
+      </select></label>
+      {linkedClientRecordId && data.nativeDirectoryLinkedClients!.some(client => client.recordId === linkedClientRecordId)
+        && <NativeDirectoryProfileEdit kind="client" recordId={linkedClientRecordId} />}
+    </Card>}
     <SourceBusinessParty key={revision} client={data.client} party={data.businessParty} canManage={data.canManageBusinessParties}
       contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} onRefresh={refresh} />
     <p className="client-hub-inventory-note">{data.businessProjects ? "Business projects are separate from the work shared with this client and their portal access." : "These sections show work shared with this client. Full business project history is separate."}</p>
@@ -580,7 +596,7 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess }: { route
   </>;
 }
 
-export function ClientHub({ mapToken, permissions, feedbackEnabled=false, invitationAccess, canManagePortalSetup=false }: { mapToken: string | null; permissions: Permission[]; feedbackEnabled?: boolean; invitationAccess?: InvitationAdministrationAccess; canManagePortalSetup?: boolean }) {
+export function ClientHub({ mapToken, permissions, feedbackEnabled=false, invitationAccess, canManagePortalSetup=false, nativeDirectoryProfileWrites=false }: { mapToken: string | null; permissions: Permission[]; feedbackEnabled?: boolean; invitationAccess?: InvitationAdministrationAccess; canManagePortalSetup?: boolean; nativeDirectoryProfileWrites?: boolean }) {
   const [, setLocationRevision] = useState(0);
   useEffect(() => {
     const sync = () => setLocationRevision(value => value + 1);
@@ -600,12 +616,12 @@ export function ClientHub({ mapToken, permissions, feedbackEnabled=false, invita
   if (selectedRequest)
     return canReview ? <ClientRequestWorkflow mapToken={mapToken} basePath="/clients/requests" /> : <Card><EmptyState title="Request unavailable" detail="Request-review access is required." /></Card>;
   if (route && "invalid" in route) return <Card><EmptyState title="Client workspace unavailable" detail="This client link is invalid." /><a href={clientDirectoryReturnPath()}>Back to Client Hub</a></Card>;
-  if (route) return canViewDirectory ? <ClientWorkspace key={JSON.stringify([route.sourceId || "", route.rootNamespace || "", route.kind, route.publicId])} route={route} canReviewFeedback={feedbackEnabled} invitationAccess={invitationAccess} /> : <Card><EmptyState title="Client unavailable" detail="Client-directory access is required." /></Card>;
+  if (route) return canViewDirectory ? <ClientWorkspace key={JSON.stringify([route.sourceId || "", route.rootNamespace || "", route.kind, route.publicId])} route={route} canReviewFeedback={feedbackEnabled} invitationAccess={invitationAccess} nativeDirectoryProfileWrites={nativeDirectoryProfileWrites} /> : <Card><EmptyState title="Client unavailable" detail="Client-directory access is required." /></Card>;
   return <>
     {canReview && <section className="client-hub-queue"><ClientRequestWorkflow mapToken={mapToken} basePath="/clients/requests" pendingOnly hideWhenEmpty={canViewDirectory} /></section>}
     {canViewDirectory && <section>
       <div className="client-hub-section-heading"><div><h2>Clients</h2><p>Organizations and standalone clients with their contacts, access, and shared work.</p></div></div>
-      <ClientDirectory />
+      <ClientDirectory nativeDirectoryProfileWrites={nativeDirectoryProfileWrites} />
       {canReview && canManagePortalSetup && <ClientPortalBootstrap />}
     </section>}
   </>;

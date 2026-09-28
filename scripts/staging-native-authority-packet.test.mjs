@@ -19,6 +19,7 @@ const subject = "staging-access-subject-001";
 const evidenceSha = "0123456789abcdef".repeat(4);
 const issuedAt = new Date(Date.now() - 5 * 60 * 1000).toISOString();
 const expiresAt = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
+const acquisitionRecord = Object.freeze({ id: "staging-directory-acquisition-record", kind: "organization", version: 1 });
 
 function input(overrides = {}) {
   const value = {
@@ -34,6 +35,35 @@ function input(overrides = {}) {
     },
   };
   return { ...value, ...overrides, packet: { ...value.packet, ...(overrides.packet ?? {}) } };
+}
+
+function acquisitionInput(overrides = {}) {
+  const value = input({ schemaVersion: 4, packet: {
+    packetId: "staging-authority-directory-acquisition-001", purpose: "existing-directory-acquisition",
+    recordId: acquisitionRecord.id, recordKind: acquisitionRecord.kind, recordVersion: acquisitionRecord.version,
+    reason: "Bounded existing Directory acquisition staging acceptance",
+    expected: { admissionVersion: 0, profileVersion: 0, grantVersion: 0, grantGeneration: 0, directoryAuthorityState: "absent" },
+  } });
+  return { ...value, ...overrides, packet: { ...value.packet, ...(overrides.packet ?? {}) } };
+}
+
+function fixtureInput(overrides = {}) {
+  const value = input({ schemaVersion: 5, packet: {
+    packetId: "staging-authority-empty-enrollment-fixture-001", purpose: "staging-empty-enrollment-fixture",
+    businessAreaId: "area-default", mode: "reactivate", reason: "Bounded empty-enrollment fixture staging acceptance",
+    expected: { admissionVersion: 2, profileVersion: 1, grantVersion: 2, grantGeneration: 2 },
+  } });
+  return { ...value, ...overrides, packet: { ...value.packet, ...(overrides.packet ?? {}) } };
+}
+
+function seedAcquisitionRecord(db, record = acquisitionRecord) {
+  // This fixture models a record created before the temporary packet exists.  The
+  // authoritative create path would itself require the staff admission and
+  // directory.profile.edit grant that this test must prove starts absent, so only
+  // this isolated in-memory setup bypasses the two record-insert triggers.
+  db.exec("DROP TRIGGER operations_directory_records_write_guard_insert; DROP TRIGGER operations_directory_records_write_guard_insert_consume; DROP TRIGGER operations_directory_staging_empty_enrollment_fixture_enrollment_guard;");
+  db.prepare("INSERT INTO operations_directory_records(record_id,record_kind,current_version) VALUES(?,?,?)")
+    .run(record.id, record.kind, record.version);
 }
 
 function fixture() {
@@ -83,6 +113,7 @@ test("validates a narrow, non-secret packet contract", () => {
     operatorKind: "legacy-roster-staging", staffId: seededOwner.operationsStaffId,
     email: seededOwner.email, displayName: seededOwner.displayName,
   } })), []);
+  assert.deepEqual(validatePacketInput(acquisitionInput()), []);
   for (const invalid of [
     input({ extra: true }),
     { ...input(), schemaVersion: 2 },
@@ -97,7 +128,202 @@ test("validates a narrow, non-secret packet contract", () => {
       email: "kstirn@ledgetopdroneservices.com", displayName: "Kollins Stirn" } }),
     input({ packet: { expiresAt: new Date(Date.parse(issuedAt) + 5 * 60 * 60 * 1000).toISOString() } }),
     input({ packet: { evidence: { changeTicket: "REPLACE_ME", reviewer: "reviewer", bindingEvidenceSha256: "0".repeat(64) } } }),
+    acquisitionInput({ packet: { purpose: "arbitrary-directory-grants" } }),
+    acquisitionInput({ packet: { unexpectedGrant: "directory.identity.link" } }),
+    acquisitionInput({ packet: { expected: { admissionVersion: 0, profileVersion: 0, grantVersion: 0, grantGeneration: 0, directoryAuthorityState: "v4-acquisition-inactive" } } }),
+    fixtureInput({ packet: { mode: "create", expected: { admissionVersion: 0, profileVersion: 0, grantVersion: 0, grantGeneration: 0 } } }),
+    acquisitionInput({ schemaVersion: 5, packet: { purpose: "existing-directory-acquisition-after-fixture",
+      businessAreaId: "area-default" } }),
+    acquisitionInput({ schemaVersion: 5, packet: { purpose: "existing-directory-acquisition-after-fixture",
+      businessAreaId: "area-default", mode: "reactivate",
+      expected: { admissionVersion: 2, profileVersion: 1, grantVersion: 2, grantGeneration: 2,
+        directoryAuthorityState: "v3-profile-only-inactive" } } }),
   ]) assert(validatePacketInput(invalid).length > 0);
+});
+
+test("v4 acquisition packet activates, revokes, and reactivates only the exact two directory grants", () => {
+  const db = canonicalDatabase(), base = fixture();
+  seedAcquisitionRecord(db);
+  const first = buildAuthorityArtifacts(base, acquisitionInput(), "revoke");
+  applyMigration(db, first.provision.sql, first.provision.name, AUTHORITY_MIGRATIONS_TABLE);
+  assert.deepEqual(db.prepare(`SELECT permission,active,scope_kind,effect,resource_id FROM native_directory_grants WHERE staff_id=? ORDER BY permission`)
+    .all(owner.operationsStaffId).map(row => ({ ...row })), [
+    { permission: "directory.identity.link", active: 1, scope_kind: "resource", effect: "allow", resource_id: acquisitionRecord.id },
+    { permission: "directory.profile.edit", active: 1, scope_kind: "global", effect: "allow", resource_id: null },
+  ]);
+  assert.deepEqual(first.provision.manifest.directoryGrants.map(grant => grant.permission), ["directory.profile.edit", "directory.identity.link"]);
+  applyMigration(db, first.revoke.sql, first.revoke.name, AUTHORITY_MIGRATIONS_TABLE);
+  assert.deepEqual(db.prepare(`SELECT permission,active FROM native_directory_grants WHERE staff_id=? ORDER BY permission`)
+    .all(owner.operationsStaffId).map(row => ({ ...row })), [
+    { permission: "directory.identity.link", active: 0 }, { permission: "directory.profile.edit", active: 0 },
+  ]);
+  const second = buildAuthorityArtifacts(base, acquisitionInput({ packet: {
+    packetId: "staging-authority-directory-acquisition-002", mode: "reactivate",
+    expected: { admissionVersion: 2, profileVersion: 1, grantVersion: 2, grantGeneration: 2, directoryAuthorityState: "v4-acquisition-inactive" },
+  } }), "provision");
+  applyMigration(db, second.provision.sql, second.provision.name, AUTHORITY_MIGRATIONS_TABLE);
+  assert.deepEqual(db.prepare(`SELECT permission,active FROM native_directory_grants WHERE staff_id=? ORDER BY permission`)
+    .all(owner.operationsStaffId).map(row => ({ ...row })), [
+    { permission: "directory.identity.link", active: 1 }, { permission: "directory.profile.edit", active: 1 },
+  ]);
+  db.close();
+});
+
+test("v4 provision rejects a missing or stale reviewed directory record before granting authority", () => {
+  for (const record of [
+    { ...acquisitionRecord, version: acquisitionRecord.version + 1 },
+    { ...acquisitionRecord, kind: "client" },
+  ]) {
+    const db = canonicalDatabase(), artifact = buildAuthorityArtifacts(fixture(), acquisitionInput(), "revoke");
+    seedAcquisitionRecord(db, record);
+    assert.throws(() => applyMigration(db, artifact.provision.sql, artifact.provision.name, AUTHORITY_MIGRATIONS_TABLE));
+    assert.equal(db.prepare("SELECT count(*) count FROM native_directory_grants WHERE staff_id=?").get(owner.operationsStaffId).count, 0);
+    db.close();
+  }
+});
+
+test("v4 can make the one explicit audited transition from an inactive v3 packet", () => {
+  const db = canonicalDatabase(), base = fixture();
+  seedAcquisitionRecord(db);
+  const v3 = buildAuthorityArtifacts(base, input(), "revoke");
+  applyMigration(db, v3.provision.sql, v3.provision.name, AUTHORITY_MIGRATIONS_TABLE);
+  applyMigration(db, v3.revoke.sql, v3.revoke.name, AUTHORITY_MIGRATIONS_TABLE);
+  db.prepare("INSERT INTO native_business_areas(id,name,active) VALUES('area-default','Fixture area',1)").run();
+  const v4 = buildAuthorityArtifacts(base, acquisitionInput({ packet: {
+    mode: "reactivate",
+    expected: { admissionVersion: 2, profileVersion: 1, grantVersion: 2, grantGeneration: 2, directoryAuthorityState: "v3-profile-only-inactive" },
+  } }), "provision");
+  applyMigration(db, v4.provision.sql, v4.provision.name, AUTHORITY_MIGRATIONS_TABLE);
+  assert.deepEqual(db.prepare(`SELECT permission,active FROM native_directory_grants WHERE staff_id=? ORDER BY permission`)
+    .all(owner.operationsStaffId).map(row => ({ ...row })), [
+    { permission: "directory.identity.link", active: 1 }, { permission: "directory.profile.edit", active: 1 },
+  ]);
+  db.close();
+});
+
+test("v5 same-owner fixture lifecycle preserves inactive enrollment authority for its acquisition successor", () => {
+  const db = canonicalDatabase(), base = fixture();
+  db.prepare("INSERT INTO native_business_areas(id,name,active) VALUES('area-default','Fixture area',1)").run();
+  const v3 = buildAuthorityArtifacts(base, input(), "revoke");
+  applyMigration(db, v3.provision.sql, v3.provision.name, AUTHORITY_MIGRATIONS_TABLE);
+  applyMigration(db, v3.revoke.sql, v3.revoke.name, AUTHORITY_MIGRATIONS_TABLE);
+  const setup = buildAuthorityArtifacts(base, fixtureInput(), "revoke");
+  applyMigration(db, setup.provision.sql, setup.provision.name, AUTHORITY_MIGRATIONS_TABLE);
+  assert.equal(queryOne(db, "SELECT active FROM native_directory_grants WHERE id=?", setup.ids.enrollmentGrant).active, 1);
+  applyMigration(db, setup.revoke.sql, setup.revoke.name, AUTHORITY_MIGRATIONS_TABLE);
+  assert.deepEqual(queryOne(db, `SELECT json_extract(result_json,'$.schemaVersion') schema_version,
+    json_extract(result_json,'$.profileVersion') profile_version,
+    json_extract(result_json,'$.grantVersion') grant_version,
+    json_extract(result_json,'$.grantGeneration') grant_generation
+    FROM native_staff_bootstrap_receipts WHERE command_id=?`, setup.ids.revokeCommand),
+  { schema_version: 5, profile_version: 1, grant_version: 4, grant_generation: 4 });
+  seedAcquisitionRecord(db);
+  const acquisition = buildAuthorityArtifacts(base, acquisitionInput({ schemaVersion: 5, packet: {
+    packetId: "staging-authority-directory-acquisition-after-fixture-001", purpose: "existing-directory-acquisition-after-fixture",
+    businessAreaId: "area-default", mode: "reactivate",
+    expected: { admissionVersion: 4, profileVersion: 1, grantVersion: 4, grantGeneration: 4, directoryAuthorityState: "v5-fixture-inactive" },
+  } }), "revoke");
+  applyMigration(db, acquisition.provision.sql, acquisition.provision.name, AUTHORITY_MIGRATIONS_TABLE);
+  assert.equal(acquisition.provision.manifest.schemaVersion, 5);
+  assert.equal(acquisition.provision.manifest.directoryGrants.at(-1).businessAreaIdSha256.length, 64);
+  assert.deepEqual(db.prepare("SELECT permission,active FROM native_directory_grants WHERE staff_id=? ORDER BY permission").all(owner.operationsStaffId).map(row => ({ ...row })), [
+    { permission: "directory.enrollment.manage", active: 0 }, { permission: "directory.identity.link", active: 1 }, { permission: "directory.profile.edit", active: 1 },
+  ]);
+  applyMigration(db, acquisition.revoke.sql, acquisition.revoke.name, AUTHORITY_MIGRATIONS_TABLE);
+  assert.deepEqual(db.prepare("SELECT permission,active FROM native_directory_grants WHERE staff_id=? ORDER BY permission").all(owner.operationsStaffId).map(row => ({ ...row })), [
+    { permission: "directory.enrollment.manage", active: 0 }, { permission: "directory.identity.link", active: 0 }, { permission: "directory.profile.edit", active: 0 },
+  ]);
+  assert.deepEqual(db.prepare("SELECT json_extract(result_json,'$.schemaVersion') schema_version FROM native_staff_bootstrap_receipts WHERE command_id IN (?,?) ORDER BY command_id")
+    .all(acquisition.ids.provisionCommand, acquisition.ids.revokeCommand).map(row => ({ ...row })), [{ schema_version: 5 }, { schema_version: 5 }]);
+  db.close();
+});
+
+test("v5 fixture provision fails closed when its fixed fixture identity is already present", () => {
+  const db = canonicalDatabase(), base = fixture();
+  const v3 = buildAuthorityArtifacts(base, input(), "revoke");
+  applyMigration(db, v3.provision.sql, v3.provision.name, AUTHORITY_MIGRATIONS_TABLE);
+  applyMigration(db, v3.revoke.sql, v3.revoke.name, AUTHORITY_MIGRATIONS_TABLE);
+  db.prepare("INSERT INTO native_business_areas(id,name,active) VALUES('area-default','Fixture area',1)").run();
+  seedAcquisitionRecord(db, { id: "staging-native-empty-enrollment-organization-v1", kind: "organization", version: 1 });
+  const setup = buildAuthorityArtifacts(base, fixtureInput(), "provision");
+  assert.throws(() => applyMigration(db, setup.provision.sql, setup.provision.name, AUTHORITY_MIGRATIONS_TABLE));
+  assert.deepEqual(queryOne(db, "SELECT active,version FROM native_staff_admissions WHERE staff_id=?", owner.operationsStaffId), { active: 0, version: 2 });
+  assert.equal(queryOne(db, "SELECT count(*) count FROM native_directory_grants WHERE staff_id=?", owner.operationsStaffId).count, 1);
+  db.close();
+});
+
+test("v5 fixture revoke fails atomically while an actor Project command is pending", () => {
+  const db = canonicalDatabase(), base = fixture();
+  const v3 = buildAuthorityArtifacts(base, input(), "revoke");
+  applyMigration(db, v3.provision.sql, v3.provision.name, AUTHORITY_MIGRATIONS_TABLE);
+  applyMigration(db, v3.revoke.sql, v3.revoke.name, AUTHORITY_MIGRATIONS_TABLE);
+  db.prepare("INSERT INTO native_business_areas(id,name,active) VALUES('area-default','Fixture area',1)").run();
+  const setup = buildAuthorityArtifacts(base, fixtureInput(), "revoke");
+  applyMigration(db, setup.provision.sql, setup.provision.name, AUTHORITY_MIGRATIONS_TABLE);
+  const externalProjectId = "staging-v5-pending-project", commandId = "00000000-0000-4000-8000-000000000021";
+  const sourceId = "project-alpha:staging", applicationId = "00000000-0000-4000-8000-000000000022";
+  const instanceId = "00000000-0000-4000-8000-000000000023", epochId = "00000000-0000-4000-8000-000000000024", destination = "https://pa-staging.example.test";
+  db.prepare(`INSERT INTO project_alpha_project_destinations(external_project_id,source_id,application_id,destination_base_url,expected_source_instance_id,expected_history_epoch_id) VALUES(?,?,?,?,?,?)`)
+    .run(externalProjectId, sourceId, applicationId, destination, instanceId, epochId);
+  db.prepare(`INSERT INTO native_project_command_proofs(command_id,external_project_id,actor_staff_id,actor_access_subject,actor_admission_version,actor_profile_version,actor_email,verified_until,grant_generation,scopes_json) VALUES(?,?,?,?,?,?,?,?,?,?)`)
+    .run(commandId, externalProjectId, owner.operationsStaffId, subject, 3, 1, owner.email, expiresAt, 3, "[]");
+  db.prepare(`INSERT INTO project_alpha_project_outbox(command_id,external_project_id,operation,command_json,source_id,application_id,destination_base_url,expected_source_instance_id,origin_snapshot_json,state,attempts,next_attempt_at,expected_history_epoch_id) VALUES(?,?,'create','{}',?,?,?,?,?,'pending',0,0,?)`)
+    .run(commandId, externalProjectId, sourceId, applicationId, destination, instanceId, JSON.stringify({ actorId: owner.operationsStaffId }), epochId);
+  assert.throws(() => applyMigration(db, setup.revoke.sql, setup.revoke.name, AUTHORITY_MIGRATIONS_TABLE));
+  assert.deepEqual(queryOne(db, "SELECT active,version FROM native_staff_admissions WHERE staff_id=?", owner.operationsStaffId), { active: 1, version: 3 });
+  assert.deepEqual(db.prepare("SELECT permission,active FROM native_directory_grants WHERE staff_id=? ORDER BY permission").all(owner.operationsStaffId).map(row => ({ ...row })), [
+    { permission: "directory.enrollment.manage", active: 1 }, { permission: "directory.profile.edit", active: 1 },
+  ]);
+  assert.equal(queryOne(db, `SELECT count(*) count FROM ${AUTHORITY_MIGRATIONS_TABLE}`).count, 3);
+  db.close();
+});
+
+for (const [name, drift, identityActive = 1] of [
+  ["an inactive identity grant", (db, artifact) => db.prepare("UPDATE native_directory_grants SET active=0 WHERE id=?").run(artifact.ids.identityGrant), 0],
+  ["an added deny grant", (db) => db.prepare(`INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,active,granted_by)
+    VALUES('v4-directory-deny',?,'directory.identity.link','deny','global',1,?)`).run(owner.operationsStaffId, owner.operationsStaffId)],
+  ["an added non-global grant", (db) => db.prepare(`INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,active,granted_by)
+    VALUES('v4-directory-assigned',?,'directory.identity.link','allow','assigned',1,?)`).run(owner.operationsStaffId, owner.operationsStaffId), 1],
+]) test(`v4 revoke fails closed on ${name}`, () => {
+  const db = canonicalDatabase(), artifact = buildAuthorityArtifacts(fixture(), acquisitionInput(), "revoke");
+  seedAcquisitionRecord(db);
+  applyMigration(db, artifact.provision.sql, artifact.provision.name, AUTHORITY_MIGRATIONS_TABLE);
+  drift(db, artifact);
+  assert.throws(() => applyMigration(db, artifact.revoke.sql, artifact.revoke.name, AUTHORITY_MIGRATIONS_TABLE));
+  assert.deepEqual(queryOne(db, "SELECT active FROM native_staff_admissions WHERE staff_id=?", owner.operationsStaffId), { active: 1 });
+  assert.deepEqual(queryOne(db, "SELECT active FROM native_directory_grants WHERE id=?", artifact.ids.identityGrant), { active: identityActive });
+  db.close();
+});
+
+test("v4 reactivation rejects an asserted complete inactive set when the identity grant is absent", () => {
+  const db = canonicalDatabase(), base = fixture();
+  seedAcquisitionRecord(db);
+  const v3 = buildAuthorityArtifacts(base, input(), "revoke");
+  applyMigration(db, v3.provision.sql, v3.provision.name, AUTHORITY_MIGRATIONS_TABLE);
+  applyMigration(db, v3.revoke.sql, v3.revoke.name, AUTHORITY_MIGRATIONS_TABLE);
+  const v4 = buildAuthorityArtifacts(base, acquisitionInput({ packet: {
+    mode: "reactivate",
+    expected: { admissionVersion: 2, profileVersion: 1, grantVersion: 2, grantGeneration: 2, directoryAuthorityState: "v4-acquisition-inactive" },
+  } }), "provision");
+  assert.throws(() => applyMigration(db, v4.provision.sql, v4.provision.name, AUTHORITY_MIGRATIONS_TABLE));
+  assert.deepEqual(queryOne(db, "SELECT active FROM native_staff_admissions WHERE staff_id=?", owner.operationsStaffId), { active: 0 });
+  db.close();
+});
+
+test("v4 revoke fails atomically while an actor directory write fence survives", () => {
+  const db = canonicalDatabase(), artifact = buildAuthorityArtifacts(fixture(), acquisitionInput(), "revoke");
+  seedAcquisitionRecord(db);
+  applyMigration(db, artifact.provision.sql, artifact.provision.name, AUTHORITY_MIGRATIONS_TABLE);
+  db.prepare(`INSERT INTO operations_directory_write_fences(mutation_id,operation_kind,actor_id,bound_access_subject,
+    actor_admission_version,permission,record_id,record_kind,expected_version,selected_grant_id,scopes_json,
+    profile_json,command_json,destinations_json,intent_writes)
+    VALUES(?,'update',?,? ,1,'directory.profile.edit',?,'organization',1,?,'[]','{}','{}','[]',0)`)
+    .run("v4-surviving-directory-fence", owner.operationsStaffId, subject, "staging-v4-record", artifact.ids.directoryGrant);
+  assert.throws(() => applyMigration(db, artifact.revoke.sql, artifact.revoke.name, AUTHORITY_MIGRATIONS_TABLE));
+  assert.deepEqual(queryOne(db, "SELECT active FROM native_staff_admissions WHERE staff_id=?", owner.operationsStaffId), { active: 1 });
+  assert.deepEqual(queryOne(db, "SELECT active FROM native_directory_grants WHERE id=?", artifact.ids.identityGrant), { active: 1 });
+  assert.equal(queryOne(db, `SELECT count(*) count FROM ${AUTHORITY_MIGRATIONS_TABLE}`).count, 1);
+  db.close();
 });
 
 test("builds separate one-migration configs with a dedicated ledger and sanitized manifests", () => {
@@ -114,6 +340,11 @@ test("builds separate one-migration configs with a dedicated ledger and sanitize
   assert.match(artifact.provision.sql, /directory\.profile\.edit/);
   assert.match(artifact.provision.sql, /scope_kind='global'|,'global'/);
   assert.match(artifact.provision.sql, /SELECT count\(\*\) FROM d1_migrations/);
+  assert.deepEqual(artifact.provision.manifest.canonicalOperationsLedger, {
+    count: 139,
+    finalMigration: "0139_native_directory_staging_empty_enrollment_fixture_guard.sql",
+    chainSha256: "f5c0d8f3fd3c94e6364926311c66670d77df636a36a0ff2cc6ac8990b6175e36",
+  });
   assert.deepEqual(artifact.provision.manifest.directoryGrant, {
     id: `staging-directory-profile-edit:${owner.operationsStaffId}`,
     permission: "directory.profile.edit", effect: "allow", scopeKind: "global",
@@ -245,7 +476,7 @@ test("revoke fails atomically while an actor command is pending", () => {
 
 test("provision rejects canonical-ledger drift before writing authority", () => {
   const db = canonicalDatabase(), artifact = buildAuthorityArtifacts(fixture(), input(), "provision");
-  db.prepare("DELETE FROM d1_migrations WHERE name='0122_project_alpha_project_v2_canonical_activation.sql'").run();
+  db.prepare("DELETE FROM d1_migrations WHERE name='0138_project_alpha_directory_reconciliation_review.sql'").run();
   assert.throws(() => applyMigration(db, artifact.provision.sql, artifact.provision.name, AUTHORITY_MIGRATIONS_TABLE));
   assert.equal(queryOne(db, "SELECT count(*) count FROM native_staff_admissions WHERE staff_id=?", owner.operationsStaffId).count, 0);
   assert.equal(queryOne(db, "SELECT count(*) count FROM native_directory_grants WHERE staff_id=?", owner.operationsStaffId).count, 0);
@@ -324,14 +555,19 @@ test("late revoke failure rolls every authority change and audit write back", ()
   db.close();
 });
 
-test("provision fails closed on pre-existing directory authority", () => {
+test("provision fails closed on a pre-existing directory authority state", () => {
   const db = canonicalDatabase(), artifact = buildAuthorityArtifacts(fixture(), input(), "provision");
+  // The current canonical chain records grant history. A valid pre-existing
+  // grant therefore requires an admission, which itself proves the packet is
+  // not creating authority from the exact expected zero-version state.
+  db.prepare(`INSERT INTO native_staff_admissions(staff_id,bound_access_subject,active,admitted_by)
+    VALUES(?,?,1,?)`).run(owner.operationsStaffId, subject, owner.operationsStaffId);
   db.prepare(`INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,active,granted_by)
     VALUES('pre-existing-directory-grant',?,'directory.profile.view','allow','global',1,?)`)
     .run(owner.operationsStaffId, owner.operationsStaffId);
   assert.throws(() => applyMigration(db, artifact.provision.sql, artifact.provision.name, AUTHORITY_MIGRATIONS_TABLE));
   assert.equal(queryOne(db, "SELECT count(*) count FROM native_directory_grants WHERE staff_id=?", owner.operationsStaffId).count, 1);
-  assert.equal(queryOne(db, "SELECT count(*) count FROM native_staff_admissions WHERE staff_id=?", owner.operationsStaffId).count, 0);
+  assert.equal(queryOne(db, "SELECT count(*) count FROM native_staff_admissions WHERE staff_id=?", owner.operationsStaffId).count, 1);
   assert.equal(queryOne(db, "SELECT count(*) count FROM native_staff_bootstrap_receipts").count, 0);
   assert.equal(queryOne(db, `SELECT count(*) count FROM ${AUTHORITY_MIGRATIONS_TABLE}`).count, 0);
   db.close();
