@@ -84,8 +84,9 @@ read-only producer trace identifies this sequence for an isolated test database:
 
 1. Apply the real canonical chain through
    `0122_project_alpha_project_v2_canonical_activation.sql` and record its ledger.
-2. Generate reviewed v3 provision/revoke artifacts against a fixture repository
-   containing exactly that historical chain, then apply those real producers.
+2. Generate original schema-v2 bootstrap provision/revoke artifacts against a
+   fixture repository containing exactly that historical chain, then apply
+   those real producers. Today's schema-v3 producer is not interchangeable.
 3. Apply `0123_native_directory_authority_history.sql`; its lossless backfill
    records the already-inactive global grant as version 1/generation 1.
 4. Apply the remaining canonical migrations without bypasses.
@@ -103,7 +104,7 @@ rehearsal, not a successful test or authority to provision remote staging.
 The first focused attempt failed before authority mutation: the current
 generator correctly requires the exact complete 151-file chain and rejects a
 122-file repository. Do not alter that guard or fabricate ledger rows.
-Historical commit `332ffbb` carries the real 122-file producer/contract. The
+Historical commit `332ffbb` carries the real schema-v2 122-file producer/contract. The
 fixture must use reviewed immutable historical source and dependencies with
 recorded Git/content pins, not depend on a potentially shallow CI Git checkout
 or rewrite generated SQL. That historical fixture is still being assembled;

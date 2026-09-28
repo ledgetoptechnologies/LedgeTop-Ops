@@ -102,6 +102,27 @@ describe("verified-recipient Client resource authority",()=>{
     expect(await db.prepare("SELECT state,authority_revision FROM portal_verified_recipient_delivery_authority_heads").first()).toEqual({state:"revoked",authority_revision:2});
     await expect(db.prepare("DELETE FROM portal_verified_recipient_delivery_authority_receipts").run()).rejects.toThrow("immutable");
   });
+  it("denies renewal but permits exact revoke after owner proof expiry and publication loss",async()=>{
+    const create=command();
+    await applyVerifiedRecipientDeliveryAuthority(env(db),create);
+    await db.prepare("UPDATE portal_primary_staff_bindings SET state='revoked' WHERE binding_id=?")
+      .bind(folder).run();
+    const clock=vi.spyOn(Date,"now").mockReturnValue(Date.parse(create.ownerProof.verifiedUntil)+1);
+    try {
+      const renewal={...create,operationId:"13131313-1313-4313-8313-131313131313",
+        authority:{...create.authority,expectedRevision:1,resultingRevision:2}};
+      await expect(applyVerifiedRecipientDeliveryAuthority(env(db),renewal))
+        .rejects.toThrow("verified-recipient-delivery-authority-owner-proof-expired");
+      expect(await db.prepare("SELECT state,authority_revision,last_operation_id FROM portal_verified_recipient_delivery_authority_heads").first()).toEqual({
+        state:"active",authority_revision:1,last_operation_id:create.operationId});
+      const revoke={...create,action:"revoke" as const,operationId:"14141414-1414-4414-8414-141414141414",
+        authority:{...create.authority,expectedRevision:1,resultingRevision:2}};
+      await expect(applyVerifiedRecipientDeliveryAuthority(env(db),revoke)).resolves.toMatchObject({
+        resultingState:"revoked",resultingRevision:2,status:"recorded"});
+      expect(await db.prepare("SELECT state,authority_revision,last_operation_id FROM portal_verified_recipient_delivery_authority_heads").first()).toEqual({
+        state:"revoked",authority_revision:2,last_operation_id:revoke.operationId});
+    } finally { clock.mockRestore(); }
+  });
   it("rejects malformed command before any SQL write and preserves operation replay bytes",async()=>{
     const malformed={...command(),terms:{...command().terms,reasonCode:"bad/character"}};
     expect(parseVerifiedRecipientDeliveryAuthorityCommand(malformed)).toBeNull();
@@ -122,6 +143,12 @@ describe("verified-recipient Client resource authority",()=>{
       owner_staff_id:"staff-02",owner_profile_version:12,authority_revision:2});
     const wrongReviewer={...command("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","revoke",2),terms:renewed.terms};
     await expect(applyVerifiedRecipientDeliveryAuthority(env(db),wrongReviewer)).rejects.toThrow("cas-conflict");
+    expect(await db.prepare("SELECT state,authority_revision,last_operation_id,owner_staff_id FROM portal_verified_recipient_delivery_authority_heads").first()).toEqual({
+      state:"active",authority_revision:2,last_operation_id:renewed.operationId,owner_staff_id:"staff-02"});
+    expect(await db.prepare("SELECT count(*) count FROM portal_verified_recipient_delivery_authority_audit WHERE operation_id=?")
+      .bind(wrongReviewer.operationId).first("count")).toBe(0);
+    expect(await db.prepare("SELECT count(*) count FROM portal_verified_recipient_delivery_authority_receipts WHERE operation_id=?")
+      .bind(wrongReviewer.operationId).first("count")).toBe(0);
   });
   it("rejects a renewal command for a different immutable selection target",async()=>{
     await applyVerifiedRecipientDeliveryAuthority(env(db),command());

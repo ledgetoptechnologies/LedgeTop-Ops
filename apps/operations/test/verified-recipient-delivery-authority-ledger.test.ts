@@ -300,6 +300,72 @@ describe("verified recipient delivery authority ledger", () => {
       .bind(recipientBindingId).run()).resolves.toBeTruthy();
   });
 
+  it("recovers a lost revoke response after owner grants and publication are revoked", async () => {
+    const create = command(); await enqueueVerifiedRecipientDeliveryAuthority(opsDb, deliveryDb, create);
+    const recorded = { applyAuthority: async (input: VerifiedRecipientDeliveryAuthorityCommand) =>
+      ({ ok: true, receipt: createVerifiedRecipientDeliveryAuthorityReceipt(input, "recorded") }),
+      getAuthorityStatus: async () => ({ ok: false, protocol: "verified-recipient-delivery-authority",
+        protocolVersion: 1, code: "not_found", retryable: true }) };
+    await dispatchNextVerifiedRecipientDeliveryAuthority({ opsDatabase: opsDb, deliveryDatabase: deliveryDb,
+      binding: recorded, operationId: create.operationId });
+
+    const revoke = command("revoke", 1); await enqueueVerifiedRecipientDeliveryAuthority(opsDb, deliveryDb, revoke);
+    await opsDb.batch([
+      opsDb.prepare("UPDATE native_staff_admissions SET active=0 WHERE staff_id='owner'"),
+      opsDb.prepare("UPDATE native_directory_grants SET active=0 WHERE staff_id='owner'"),
+    ]);
+    await deliveryDb.prepare("UPDATE portal_primary_staff_bindings SET state='revoked' WHERE binding_id=?")
+      .bind(folderId).run();
+    let statusReads = 0;
+    const lostResponse = { applyAuthority: async () => { throw new Error("response lost after Client commit"); },
+      getAuthorityStatus: async (input: VerifiedRecipientDeliveryAuthorityCommand) => {
+        statusReads += 1;
+        return statusReads === 1
+          ? { ok: false, protocol: "verified-recipient-delivery-authority", protocolVersion: 1,
+            code: "not_found", retryable: true }
+          : { ok: true, receipt: createVerifiedRecipientDeliveryAuthorityReceipt(input, "replayed") };
+      } };
+    await expect(dispatchNextVerifiedRecipientDeliveryAuthority({ opsDatabase: opsDb, deliveryDatabase: deliveryDb,
+      binding: lostResponse, operationId: revoke.operationId }))
+      .resolves.toEqual({ operationId: revoke.operationId, state: "acknowledged" });
+    expect(statusReads).toBe(2);
+    expect(await opsDb.prepare("SELECT state FROM verified_recipient_delivery_authority_outbox WHERE operation_id=?")
+      .bind(revoke.operationId).first("state")).toBe("acknowledged");
+  });
+
+  it("dead-letters an upsert when its publication expires after enqueue", async () => {
+    const value = command(); await enqueueVerifiedRecipientDeliveryAuthority(opsDb, deliveryDb, value);
+    await deliveryDb.prepare("UPDATE portal_primary_staff_bindings SET state='revoked' WHERE binding_id=?")
+      .bind(folderId).run();
+    let applied = false;
+    const binding = { applyAuthority: async () => { applied = true; return null; },
+      getAuthorityStatus: async () => ({ ok: false, protocol: "verified-recipient-delivery-authority",
+        protocolVersion: 1, code: "not_found", retryable: true }) };
+    await expect(dispatchNextVerifiedRecipientDeliveryAuthority({ opsDatabase: opsDb, deliveryDatabase: deliveryDb,
+      binding, operationId: value.operationId }))
+      .resolves.toEqual({ operationId: value.operationId, state: "dead" });
+    expect(applied).toBe(false);
+  });
+
+  it("rejects a stale original reviewer revoke without a partial deny-first commit", async () => {
+    const create = command(); await enqueueVerifiedRecipientDeliveryAuthority(opsDb, deliveryDb, create);
+    const binding = { applyAuthority: async (input: VerifiedRecipientDeliveryAuthorityCommand) =>
+      ({ ok: true, receipt: createVerifiedRecipientDeliveryAuthorityReceipt(input, "recorded") }),
+      getAuthorityStatus: async () => ({ ok: false, protocol: "verified-recipient-delivery-authority",
+        protocolVersion: 1, code: "not_found", retryable: true }) };
+    await dispatchNextVerifiedRecipientDeliveryAuthority({ opsDatabase: opsDb, deliveryDatabase: deliveryDb,
+      binding, operationId: create.operationId });
+    const stale = { ...command("revoke", 1), ownerProof: { ...command().ownerProof,
+      verifiedUntil: "2000-01-01T00:00:00.000Z" } };
+    await expect(enqueueVerifiedRecipientDeliveryAuthority(opsDb, deliveryDb, stale)).rejects.toThrow("denied");
+    expect(await opsDb.prepare("SELECT state,revision,latest_operation_id FROM verified_recipient_delivery_authority_heads")
+      .first()).toEqual({ state: "active", revision: 1, latest_operation_id: create.operationId });
+    expect(await opsDb.prepare("SELECT count(*) n FROM verified_recipient_delivery_authority_commands WHERE operation_id=?")
+      .bind(stale.operationId).first("n")).toBe(0);
+    expect(await opsDb.prepare("SELECT count(*) n FROM verified_recipient_delivery_authority_tombstones")
+      .first("n")).toBe(0);
+  });
+
   it("never dead-letters a committed revoke with a corrupted stored command", async () => {
     const create = command(); await enqueueVerifiedRecipientDeliveryAuthority(opsDb, deliveryDb, create);
     const binding = { applyAuthority: async (input: VerifiedRecipientDeliveryAuthorityCommand) =>

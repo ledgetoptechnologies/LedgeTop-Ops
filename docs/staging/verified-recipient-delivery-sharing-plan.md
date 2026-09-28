@@ -28,11 +28,19 @@ home-only enrollment still does not authorize delivery access.
   original verification timestamp. Once Ops commits the revoked head,
   tombstone and command receipt, dispatch/reconciliation uses that durable
   chain and keeps retrying despite later publication/authority loss. However,
-  initiating a new Ops revoke still requires the original reviewer's current
-  admission, permission/generation and future verification. Substituting a
-  different reviewer fails Client's immutable owner tuple. This remains an
+  initiating a new Ops revoke requires the command reviewer's current
+  admission, permission/generation and future verification. Ops does not pin
+  that reviewer to the original head; Client does pin the original owner tuple,
+  so an alternate currently authorized reviewer can pass Ops and fail Client
+  CAS. Reusing an expired original proof fails Ops. This mismatch remains an
   unresolved revoke-initiation boundary, not complete revocation acceptance;
   changing it requires the separate reviewed approval, not an upsert bypass.
+  Focused test-only coverage passes 18 Ops and 14 Client cases, plus both
+  typechecks and nine Client preflight checks. Ops lost-response tests simulate
+  private bridge receipts; Client tests execute the actual writer/guards against
+  minimal D1 fixtures. They prove exact revoke after deterministic original-proof
+  expiry and publication loss, renewal rejection and alternate-reviewer Client
+  CAS atomicity—not a complete canonical/live cross-system revoke.
 - Fresh aggregate-only Ops staging readback confirms exactly two inactive
   `directory.profile.edit` grants (global and business-area), zero activation
   receipts and zero active native admissions. All queries reported zero writes
