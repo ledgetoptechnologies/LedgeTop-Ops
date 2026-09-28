@@ -138,6 +138,12 @@ test("Directory API-v2 staging contract suite remains a required CI check", () =
   assert(workflow.includes("scripts/pa-api-v2-directory-staging-acceptance.test.mjs"));
 });
 
+test("governed staging authority packets retain dependency-free local CI coverage", () => {
+  const workflow = read(".github/workflows/ci.yml");
+  assert(workflow.includes("name: Verify governed staging authority packets locally"));
+  assert(workflow.includes("run: node --test scripts/staging-native-authority-packet.test.mjs"));
+});
+
 test("Client Portal browser acceptance remains a required CI job", () => {
   const workflow = read(".github/workflows/ci.yml");
   assert(workflow.includes("client-browser:"));

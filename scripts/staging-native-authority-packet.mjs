@@ -10,6 +10,8 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const PACKET_SCHEMA_VERSION = 3;
 export const ACQUISITION_PACKET_SCHEMA_VERSION = 4;
 export const FIXTURE_PACKET_SCHEMA_VERSION = 5;
+export const RECIPIENT_ENROLLMENT_PACKET_SCHEMA_VERSION = 6;
+export const RECIPIENT_ENROLLMENT_PURPOSE = "recipient-enrollment-portal-access";
 export const AUTHORITY_MIGRATIONS_TABLE = "staging_native_authority_migrations";
 const OUTPUT_ROOT = ".staging-native-authority";
 const SUBJECT = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,190}$/;
@@ -19,6 +21,7 @@ const SHA256 = /^[0-9a-f]{64}$/;
 const EXACT_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const DIRECTORY_RECORD_ID = /^[^\p{C}]{1,191}$/u;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const FIXTURE_RECORD_ID = "staging-native-empty-enrollment-organization-v1";
 const FIXTURE_MUTATION_ID = "6d0da70c-f4f5-4b10-8988-6639b8e01531";
 const FIXTURE_ADMISSION_ID = `${FIXTURE_MUTATION_ID}:admission`;
@@ -89,15 +92,21 @@ export function validatePacketInput(input) {
   const acquisition = input.schemaVersion === ACQUISITION_PACKET_SCHEMA_VERSION
     || (input.schemaVersion === FIXTURE_PACKET_SCHEMA_VERSION && input?.packet?.purpose === "existing-directory-acquisition-after-fixture");
   const fixture = input.schemaVersion === FIXTURE_PACKET_SCHEMA_VERSION && input?.packet?.purpose === "staging-empty-enrollment-fixture";
-  if (input.schemaVersion !== PACKET_SCHEMA_VERSION && input.schemaVersion !== ACQUISITION_PACKET_SCHEMA_VERSION && input.schemaVersion !== FIXTURE_PACKET_SCHEMA_VERSION)
-    errors.push(`schemaVersion must be ${PACKET_SCHEMA_VERSION}, ${ACQUISITION_PACKET_SCHEMA_VERSION}, or ${FIXTURE_PACKET_SCHEMA_VERSION}`);
+  const recipientEnrollment = input.schemaVersion === RECIPIENT_ENROLLMENT_PACKET_SCHEMA_VERSION;
+  if (input.schemaVersion !== PACKET_SCHEMA_VERSION && input.schemaVersion !== ACQUISITION_PACKET_SCHEMA_VERSION
+    && input.schemaVersion !== FIXTURE_PACKET_SCHEMA_VERSION && !recipientEnrollment)
+    errors.push(`schemaVersion must be ${PACKET_SCHEMA_VERSION}, ${ACQUISITION_PACKET_SCHEMA_VERSION}, ${FIXTURE_PACKET_SCHEMA_VERSION}, or ${RECIPIENT_ENROLLMENT_PACKET_SCHEMA_VERSION}`);
   const packet = input.packet;
-  exactKeys(packet, acquisition
-    ? ["packetId", "purpose", "recordId", "recordKind", "recordVersion", ...(input.schemaVersion === FIXTURE_PACKET_SCHEMA_VERSION ? ["businessAreaId"] : []), "mode", "operatorKind", "staffId", "email", "displayName", "accessSubject", "issuedAt", "expiresAt", "reason", "expected", "evidence"]
+  exactKeys(packet, acquisition || recipientEnrollment
+    ? ["packetId", "purpose", "recordId", "recordKind", "recordVersion",
+      ...(recipientEnrollment ? ["activationId"] : input.schemaVersion === FIXTURE_PACKET_SCHEMA_VERSION ? ["businessAreaId"] : []),
+      "mode", "operatorKind", "staffId", "email", "displayName", "accessSubject", "issuedAt", "expiresAt", "reason", "expected", "evidence"]
     : fixture ? ["packetId", "purpose", "businessAreaId", "mode", "operatorKind", "staffId", "email", "displayName", "accessSubject", "issuedAt", "expiresAt", "reason", "expected", "evidence"]
       : ["packetId", "mode", "operatorKind", "staffId", "email", "displayName", "accessSubject", "issuedAt", "expiresAt", "reason", "expected", "evidence"], "packet", errors);
   if (!plain(packet)) return errors;
-  exactKeys(packet.expected, acquisition
+  exactKeys(packet.expected, recipientEnrollment
+    ? ["admissionVersion", "profileVersion", "grantVersion", "grantGeneration", "directoryGrantGeneration", "profileGrantVersion", "identityGrantVersion", "portalGrantVersion", "portalGrantState", "directoryAuthorityState"]
+    : acquisition
     ? ["admissionVersion", "profileVersion", "grantVersion", "grantGeneration", "directoryAuthorityState"]
     : ["admissionVersion", "profileVersion", "grantVersion", "grantGeneration"], "packet.expected", errors);
   exactKeys(packet.evidence, ["changeTicket", "reviewer", "bindingEvidenceSha256"], "packet.evidence", errors);
@@ -108,12 +117,16 @@ export function validatePacketInput(input) {
     errors.push("v5 acquisition purpose is invalid");
   if (input.schemaVersion === FIXTURE_PACKET_SCHEMA_VERSION && !fixture && !acquisition)
     errors.push("v5 packet.purpose is invalid");
-  if (acquisition && (!DIRECTORY_RECORD_ID.test(packet.recordId ?? "") || !["organization", "client"].includes(packet.recordKind)
+  if (recipientEnrollment && packet.purpose !== RECIPIENT_ENROLLMENT_PURPOSE)
+    errors.push(`v6 packet.purpose must be ${RECIPIENT_ENROLLMENT_PURPOSE}`);
+  if ((acquisition || recipientEnrollment) && (!DIRECTORY_RECORD_ID.test(packet.recordId ?? "") || !["organization", "client"].includes(packet.recordKind)
     || !Number.isSafeInteger(packet.recordVersion) || packet.recordVersion < 1))
-    errors.push("v4 packet record selection is invalid");
+    errors.push(`${recipientEnrollment ? "v6" : "v4"} packet record selection is invalid`);
+  if (recipientEnrollment && !UUID.test(packet.activationId ?? "")) errors.push("v6 packet.activationId must be an exact reviewed UUID");
   if ((fixture || (input.schemaVersion === FIXTURE_PACKET_SCHEMA_VERSION && acquisition)) && !DIRECTORY_RECORD_ID.test(packet.businessAreaId ?? "")) errors.push("v5 businessAreaId is invalid");
   if (!['create', 'reactivate'].includes(packet.mode)) errors.push("packet.mode must be create or reactivate");
   if (fixture && packet.mode !== "reactivate") errors.push("v5 fixture requires reactivation of existing inactive authority");
+  if (recipientEnrollment && packet.mode !== "reactivate") errors.push("v6 recipient enrollment requires reactivation after a separately revoked bootstrap/acquisition phase");
   if (input.schemaVersion === FIXTURE_PACKET_SCHEMA_VERSION && acquisition
     && (packet.mode !== "reactivate" || packet.expected?.directoryAuthorityState !== "v5-fixture-inactive"))
     errors.push("v5 acquisition requires exact inactive fixture authority");
@@ -142,7 +155,7 @@ export function validatePacketInput(input) {
     errors.push("packet authority window must be positive and no longer than four hours");
   if (plain(packet.expected)) {
     for (const [key, value] of Object.entries(packet.expected))
-      if (key !== "directoryAuthorityState" && (!Number.isSafeInteger(value) || value < 0)) errors.push(`packet.expected.${key} must be a nonnegative safe integer`);
+      if (!["directoryAuthorityState", "portalGrantState"].includes(key) && (!Number.isSafeInteger(value) || value < 0)) errors.push(`packet.expected.${key} must be a nonnegative safe integer`);
     const expected = packet.expected;
     if (packet.mode === "create" && [expected.admissionVersion, expected.profileVersion, expected.grantVersion, expected.grantGeneration].some(value => value !== 0))
       errors.push("create mode requires every expected version to be zero");
@@ -154,6 +167,16 @@ export function validatePacketInput(input) {
       errors.push("v4 create mode requires absent directory authority state");
     if (acquisition && packet.mode === "reactivate" && expected.directoryAuthorityState === "absent")
       errors.push("v4 reactivate mode requires an exact inactive directory authority state");
+    if (recipientEnrollment && expected.directoryAuthorityState !== "v4-acquisition-inactive")
+      errors.push("v6 recipient enrollment requires exact inactive v4 acquisition authority; v5 lineage is not supported");
+    if (recipientEnrollment && [expected.directoryGrantGeneration, expected.profileGrantVersion,
+      expected.identityGrantVersion].some(value => value < 1))
+      errors.push("v6 recipient enrollment requires positive existing Directory generation and history versions");
+    if (recipientEnrollment && !["absent", "inactive"].includes(expected.portalGrantState))
+      errors.push("v6 recipient enrollment portalGrantState must be absent or inactive");
+    if (recipientEnrollment && ((expected.portalGrantState === "absent" && expected.portalGrantVersion !== 0)
+      || (expected.portalGrantState === "inactive" && expected.portalGrantVersion < 2)))
+      errors.push("v6 recipient enrollment portal grant state/version is inconsistent");
   }
   if (plain(packet.evidence)) {
     for (const key of ["changeTicket", "reviewer"])
@@ -178,7 +201,27 @@ function versionState(packet) {
       grantActive: expected.grantVersion + 1, generationActive: expected.grantGeneration + 1 };
 }
 
+function recipientEnrollmentVersionState(packet) {
+  const expected = packet.expected;
+  return {
+    admissionBefore: expected.admissionVersion,
+    admissionActive: expected.admissionVersion + 1,
+    admissionRevoked: expected.admissionVersion + 2,
+    profile: expected.profileVersion,
+    grant: expected.grantVersion,
+    grantGeneration: expected.grantGeneration,
+    directoryGenerationBefore: expected.directoryGrantGeneration,
+    directoryGenerationActive: expected.directoryGrantGeneration + 1,
+    directoryGenerationRevoked: expected.directoryGrantGeneration + 2,
+    profileGrantVersion: expected.profileGrantVersion,
+    identityGrantVersion: expected.identityGrantVersion,
+    portalGrantVersionActive: expected.portalGrantVersion + 1,
+    portalGrantVersionRevoked: expected.portalGrantVersion + 2,
+  };
+}
+
 function plan(packet, action, ids, versions) {
+  if (packet.purpose === RECIPIENT_ENROLLMENT_PURPOSE) return planRecipientEnrollment(packet, action, ids, versions);
   if (packet.purpose === "existing-directory-acquisition" || packet.purpose === "existing-directory-acquisition-after-fixture") return planV4(packet, action, ids, versions);
   if (packet.purpose === "staging-empty-enrollment-fixture") return planV5Fixture(packet, action, ids, versions);
   const base = {
@@ -199,6 +242,44 @@ function plan(packet, action, ids, versions) {
       grantVersion: versions.grantActive, grantGeneration: versions.generationActive, directoryGrantActive: 1 },
     result: { admissionVersion: versions.admissionActive + 1, profileVersion: versions.profile,
       grantVersion: versions.grantActive + 1, grantGeneration: versions.generationActive + 1, directoryGrantActive: 0 } };
+}
+
+function planRecipientEnrollment(packet, action, ids, versions) {
+  const base = {
+    schemaVersion: RECIPIENT_ENROLLMENT_PACKET_SCHEMA_VERSION,
+    environment: "staging", packetId: packet.packetId, action, mode: packet.mode,
+    purpose: RECIPIENT_ENROLLMENT_PURPOSE, operatorKind: packet.operatorKind,
+    staffId: packet.staffId, emailSha256: sha256(packet.email), displayNameSha256: sha256(packet.displayName),
+    accessSubjectSha256: sha256(packet.accessSubject),
+    record: { idSha256: sha256(packet.recordId), kind: packet.recordKind, version: packet.recordVersion,
+      activationIdSha256: sha256(packet.activationId) },
+    portalAccessGrant: { id: ids.portalAccessGrant, permission: "directory.portal_access.manage", effect: "allow",
+      scopeKind: "resource", resourceIdSha256: sha256(packet.recordId) },
+    preservedInactiveGrants: [
+      { id: ids.directoryGrant, permission: "directory.profile.edit", effect: "allow", scopeKind: "global" },
+      { id: ids.identityGrant, permission: "directory.identity.link", effect: "allow", scopeKind: "resource",
+        resourceIdSha256: sha256(packet.recordId) },
+      { id: ids.grant, capability: "project.shared.sync", effect: "allow", scopeKind: "global" },
+    ],
+    issuedAt: packet.issuedAt, expiresAt: packet.expiresAt, reason: packet.reason, evidence: packet.evidence,
+  };
+  if (action === "provision") return { ...base, expected: packet.expected, result: {
+    admissionVersion: versions.admissionActive, profileVersion: versions.profile,
+    projectGrantVersion: versions.grant, projectGrantGeneration: versions.grantGeneration,
+    directoryGrantGeneration: versions.directoryGenerationActive, portalAccessGrantVersion: versions.portalGrantVersionActive,
+    portalAccessGrantActive: 1,
+  } };
+  return { ...base, provisionApprovalId: ids.provisionApproval, expected: {
+    admissionVersion: versions.admissionActive, profileVersion: versions.profile,
+    projectGrantVersion: versions.grant, projectGrantGeneration: versions.grantGeneration,
+    directoryGrantGeneration: versions.directoryGenerationActive, portalAccessGrantVersion: versions.portalGrantVersionActive,
+    portalAccessGrantActive: 1,
+  }, result: {
+    admissionVersion: versions.admissionRevoked, profileVersion: versions.profile,
+    projectGrantVersion: versions.grant, projectGrantGeneration: versions.grantGeneration,
+    directoryGrantGeneration: versions.directoryGenerationRevoked, portalAccessGrantVersion: versions.portalGrantVersionRevoked,
+    portalAccessGrantActive: 0,
+  } };
 }
 
 function planV4(packet, action, ids, versions) {
@@ -256,7 +337,7 @@ function v5FixtureProvisionResult(packet, ids, versions) {
 }
 
 function verification(packet) {
-  return canonicalJson({ schemaVersion: packet.purpose === "staging-empty-enrollment-fixture" || packet.purpose === "existing-directory-acquisition-after-fixture" ? FIXTURE_PACKET_SCHEMA_VERSION : packet.purpose === "existing-directory-acquisition" ? ACQUISITION_PACKET_SCHEMA_VERSION : PACKET_SCHEMA_VERSION, changeTicket: packet.evidence.changeTicket, reviewer: packet.evidence.reviewer,
+  return canonicalJson({ schemaVersion: packet.purpose === RECIPIENT_ENROLLMENT_PURPOSE ? RECIPIENT_ENROLLMENT_PACKET_SCHEMA_VERSION : packet.purpose === "staging-empty-enrollment-fixture" || packet.purpose === "existing-directory-acquisition-after-fixture" ? FIXTURE_PACKET_SCHEMA_VERSION : packet.purpose === "existing-directory-acquisition" ? ACQUISITION_PACKET_SCHEMA_VERSION : PACKET_SCHEMA_VERSION, changeTicket: packet.evidence.changeTicket, reviewer: packet.evidence.reviewer,
     bindingEvidenceSha256: packet.evidence.bindingEvidenceSha256, emailSha256: sha256(packet.email),
     accessSubjectSha256: sha256(packet.accessSubject) });
 }
@@ -727,6 +808,205 @@ ${guardInsert(table, final)}
 DROP TABLE ${table};`;
 }
 
+function directoryGrantHistoryState(id, staff, permission, scopeKind, resourceId, active, version) {
+  const resource = resourceId === null ? "resource_id IS NULL" : `resource_id=${sqlString(resourceId)}`;
+  return `(SELECT count(*) FROM native_directory_grant_history WHERE grant_id=${sqlString(id)})=${version}
+    AND EXISTS(SELECT 1 FROM native_directory_grant_history WHERE grant_id=${sqlString(id)} AND grant_version=${version}
+      AND staff_id=${staff} AND permission=${sqlString(permission)} AND effect='allow' AND scope_kind=${sqlString(scopeKind)}
+      AND business_area_id IS NULL AND division_id IS NULL AND ${resource} AND active=${active})`;
+}
+
+function recipientEnrollmentDirectoryState(packet, ids, versions, portalActive, portalVersion) {
+  const staff = sqlString(packet.staffId), portalGrant = `EXISTS(SELECT 1 FROM native_directory_grants
+    WHERE id=${sqlString(ids.portalAccessGrant)} AND staff_id=${staff} AND permission='directory.portal_access.manage'
+      AND effect='allow' AND scope_kind='resource' AND business_area_id IS NULL AND division_id IS NULL
+      AND resource_id=${sqlString(packet.recordId)} AND active=${portalActive} AND granted_by=${staff})`;
+  const existingCount = 2 + (packet.expected.portalGrantState === "absent" && portalVersion === 0 ? 0 : 1);
+  const portal = portalVersion === 0
+    ? `NOT EXISTS(SELECT 1 FROM native_directory_grants WHERE id=${sqlString(ids.portalAccessGrant)}
+        OR (staff_id=${staff} AND permission='directory.portal_access.manage'))`
+    : `${portalGrant} AND ${directoryGrantHistoryState(ids.portalAccessGrant, staff,
+      "directory.portal_access.manage", "resource", packet.recordId, portalActive, portalVersion)}`;
+  return `(SELECT count(*) FROM native_directory_grants WHERE staff_id=${staff})=${existingCount}
+    AND ${v4ProfileGrant(ids.directoryGrant, 0, staff)}
+    AND ${v4IdentityGrant(ids, 0, staff, packet.recordId)}
+    AND ${directoryGrantHistoryState(ids.directoryGrant, staff, "directory.profile.edit", "global", null, 0, versions.profileGrantVersion)}
+    AND ${directoryGrantHistoryState(ids.identityGrant, staff, "directory.identity.link", "resource", packet.recordId, 0, versions.identityGrantVersion)}
+    AND NOT EXISTS(SELECT 1 FROM native_directory_grants WHERE staff_id=${staff} AND permission='directory.enrollment.manage')
+    AND ${portal}`;
+}
+
+function recipientEnrollmentHistoryCount(versions, portalVersion) {
+  return versions.profileGrantVersion + versions.identityGrantVersion + portalVersion;
+}
+
+function recipientEnrollmentNoPendingWork(packet) {
+  const staff = sqlString(packet.staffId), record = sqlString(packet.recordId);
+  return `NOT EXISTS(SELECT 1 FROM operations_directory_write_fences WHERE actor_id=${staff})
+    AND NOT EXISTS(SELECT 1 FROM project_alpha_project_outbox outbox JOIN native_project_command_proofs proof
+      ON proof.command_id=outbox.command_id WHERE proof.actor_staff_id=${staff} AND outbox.state IN ('pending','leased'))
+    AND NOT EXISTS(SELECT 1 FROM project_alpha_directory_outbox
+      WHERE json_extract(origin_snapshot_json,'$.actorId')=${staff} AND state IN ('pending','leased'))
+    AND NOT EXISTS(SELECT 1 FROM client_portal_workspace_binding_outbox
+      WHERE reviewed_by_staff_id=${staff} AND state IN ('pending','retry','dispatching'))
+    AND NOT EXISTS(SELECT 1 FROM client_portal_authority_v2_outbox
+      WHERE authorized_by_staff_id=${staff} AND state IN ('pending','retry','dispatching'))
+    AND NOT EXISTS(SELECT 1 FROM client_portal_recipient_enrollment_intents intent
+      JOIN client_portal_workspace_binding_selections selection ON selection.selection_id=intent.selection_id
+      WHERE selection.record_id=${record} AND intent.state IN ('active','revoking'))`;
+}
+
+function recipientEnrollmentResult(packet, ids, versions, action) {
+  const revoke = action === "revoke";
+  return { schemaVersion: RECIPIENT_ENROLLMENT_PACKET_SCHEMA_VERSION, action, packetId: packet.packetId,
+    staffId: packet.staffId, portalAccessGrantId: ids.portalAccessGrant,
+    admissionVersion: revoke ? versions.admissionRevoked : versions.admissionActive,
+    profileVersion: versions.profile, projectGrantVersion: versions.grant,
+    projectGrantGeneration: versions.grantGeneration,
+    directoryGrantGeneration: revoke ? versions.directoryGenerationRevoked : versions.directoryGenerationActive,
+    portalAccessGrantVersion: revoke ? versions.portalGrantVersionRevoked : versions.portalGrantVersionActive,
+    portalAccessGrantActive: revoke ? 0 : 1 };
+}
+
+function provisionSqlRecipientEnrollment(packet, ids, versions, names, migrationNames) {
+  const table = guardTable(packet.packetId, "provision"), staff = sqlString(packet.staffId);
+  const canonicalPlan = canonicalJson(plan(packet, "provision", ids, versions)), planSha = sha256(canonicalPlan);
+  const verificationJson = verification(packet), verificationSha = sha256(verificationJson);
+  const recordCurrent = `EXISTS(SELECT 1 FROM operations_directory_records WHERE record_id=${sqlString(packet.recordId)}
+      AND record_kind=${sqlString(packet.recordKind)} AND current_version=${packet.recordVersion})
+    AND EXISTS(SELECT 1 FROM project_alpha_existing_directory_binding_activation_receipts
+      WHERE activation_id=${sqlString(packet.activationId)} AND record_id=${sqlString(packet.recordId)} AND resource_type=${sqlString(packet.recordKind)}
+        AND local_record_version=${packet.recordVersion} AND activated_by_staff_id=${staff})`;
+  const exactInactiveAuthority = `EXISTS(SELECT 1 FROM native_staff_admissions WHERE staff_id=${staff}
+      AND bound_access_subject=${sqlString(packet.accessSubject)} AND active=0 AND version=${versions.admissionBefore}
+      AND admitted_by=${staff})
+    AND EXISTS(SELECT 1 FROM native_staff_profiles WHERE staff_id=${staff} AND login_email=${sqlString(packet.email)}
+      AND display_name=${sqlString(packet.displayName)} AND version=${versions.profile})
+    AND ${recipientEnrollmentDirectoryState(packet, ids, versions,
+      packet.expected.portalGrantState === "inactive" ? 0 : 1, packet.expected.portalGrantVersion)}
+    AND EXISTS(SELECT 1 FROM native_directory_grant_generations WHERE staff_id=${staff}
+      AND generation=${versions.directoryGenerationBefore})
+    AND (SELECT count(*) FROM native_directory_grant_history WHERE staff_id=${staff})=${recipientEnrollmentHistoryCount(versions, packet.expected.portalGrantVersion)}
+    AND (SELECT count(*) FROM native_project_grants WHERE staff_id=${staff})=1
+    AND EXISTS(SELECT 1 FROM native_project_grants WHERE id=${sqlString(ids.grant)} AND staff_id=${staff}
+      AND capability='project.shared.sync' AND effect='allow' AND scope_kind='global'
+      AND business_area_id IS NULL AND division_id IS NULL AND external_project_id IS NULL
+      AND active=0 AND version=${versions.grant} AND granted_by=${staff})
+    AND EXISTS(SELECT 1 FROM native_project_grant_generations WHERE staff_id=${staff}
+      AND generation=${versions.grantGeneration})
+    AND NOT EXISTS(SELECT 1 FROM native_project_live_command_proofs WHERE actor_staff_id=${staff})`;
+  const portalMutation = packet.expected.portalGrantState === "absent"
+    ? `INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,resource_id,active,granted_by)
+VALUES(${sqlString(ids.portalAccessGrant)},${staff},'directory.portal_access.manage','allow','resource',${sqlString(packet.recordId)},1,${staff});`
+    : `UPDATE native_directory_grants SET active=1
+WHERE id=${sqlString(ids.portalAccessGrant)} AND staff_id=${staff} AND permission='directory.portal_access.manage'
+  AND effect='allow' AND scope_kind='resource' AND business_area_id IS NULL AND division_id IS NULL
+  AND resource_id=${sqlString(packet.recordId)} AND active=0 AND granted_by=${staff};`;
+  const result = recipientEnrollmentResult(packet, ids, versions, "provision");
+  const final = `EXISTS(SELECT 1 FROM native_staff_admissions WHERE staff_id=${staff}
+      AND bound_access_subject=${sqlString(packet.accessSubject)} AND active=1 AND version=${versions.admissionActive}
+      AND admitted_by=${staff})
+    AND EXISTS(SELECT 1 FROM native_staff_profiles WHERE staff_id=${staff} AND version=${versions.profile})
+    AND ${recipientEnrollmentDirectoryState(packet, ids, versions, 1, versions.portalGrantVersionActive)}
+    AND EXISTS(SELECT 1 FROM native_directory_grant_generations WHERE staff_id=${staff}
+      AND generation=${versions.directoryGenerationActive})
+    AND (SELECT count(*) FROM native_directory_grant_history WHERE staff_id=${staff})=${recipientEnrollmentHistoryCount(versions, versions.portalGrantVersionActive)}
+    AND EXISTS(SELECT 1 FROM native_project_grants WHERE id=${sqlString(ids.grant)} AND staff_id=${staff}
+      AND active=0 AND version=${versions.grant})
+    AND EXISTS(SELECT 1 FROM native_project_grant_generations WHERE staff_id=${staff}
+      AND generation=${versions.grantGeneration})
+    AND EXISTS(SELECT 1 FROM native_staff_bootstrap_receipts WHERE command_id=${sqlString(ids.provisionCommand)}
+      AND approval_id=${sqlString(ids.provisionApproval)} AND canonical_plan_sha256=${sqlString(planSha)})`;
+  return `PRAGMA foreign_keys = ON;
+-- Generated staging-only exact-resource recipient-enrollment portal authority packet.
+CREATE TABLE ${table}(ok INTEGER NOT NULL CHECK(ok=1));
+${guardInsert(table, `${canonicalLedger(names)}
+    AND NOT EXISTS(SELECT 1 FROM ${AUTHORITY_MIGRATIONS_TABLE} WHERE name IN (${sqlString(migrationNames.provision)},${sqlString(migrationNames.revoke)}))
+    AND ${commonPrecondition(packet, ids)}
+    AND EXISTS(SELECT 1 FROM staff_role_assignments WHERE staff_id=${staff} AND role_id='role-owner' AND scope='global')
+    AND ${recordCurrent} AND ${exactInactiveAuthority} AND ${recipientEnrollmentNoPendingWork(packet)}
+    AND ${sqlString(packet.issuedAt)}<=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+    AND ${sqlString(packet.expiresAt)}>strftime('%Y-%m-%dT%H:%M:%fZ','now')`)}
+${approvalSql(packet, ids, "provision", canonicalPlan, planSha, verificationJson, verificationSha)}
+UPDATE native_staff_admissions SET active=1,version=version+1,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+WHERE staff_id=${staff} AND active=0 AND version=${versions.admissionBefore};
+${portalMutation}
+${receiptSql(packet, ids, "provision", canonicalPlan, planSha, verificationJson, verificationSha, result)}
+${guardInsert(table, final)}
+DROP TABLE ${table};
+`;
+}
+
+function revokeSqlRecipientEnrollment(packet, ids, versions, provision, names, migrationNames) {
+  const table = guardTable(packet.packetId, "revoke"), staff = sqlString(packet.staffId);
+  const canonicalPlan = canonicalJson(plan(packet, "revoke", ids, versions)), planSha = sha256(canonicalPlan);
+  const verificationJson = verification(packet), verificationSha = sha256(verificationJson);
+  const result = recipientEnrollmentResult(packet, ids, versions, "revoke");
+  const precondition = `${canonicalLedger(names)}
+    AND EXISTS(SELECT 1 FROM ${AUTHORITY_MIGRATIONS_TABLE} WHERE name=${sqlString(migrationNames.provision)})
+    AND NOT EXISTS(SELECT 1 FROM ${AUTHORITY_MIGRATIONS_TABLE} WHERE name=${sqlString(migrationNames.revoke)})
+    AND EXISTS(SELECT 1 FROM native_staff_admissions WHERE staff_id=${staff}
+      AND bound_access_subject=${sqlString(packet.accessSubject)} AND active=1 AND version=${versions.admissionActive}
+      AND admitted_by=${staff})
+    AND EXISTS(SELECT 1 FROM native_staff_profiles WHERE staff_id=${staff} AND login_email=${sqlString(packet.email)}
+      AND display_name=${sqlString(packet.displayName)} AND version=${versions.profile})
+    AND ${recipientEnrollmentDirectoryState(packet, ids, versions, 1, versions.portalGrantVersionActive)}
+    AND EXISTS(SELECT 1 FROM native_directory_grant_generations WHERE staff_id=${staff}
+      AND generation=${versions.directoryGenerationActive})
+    AND (SELECT count(*) FROM native_directory_grant_history WHERE staff_id=${staff})=${recipientEnrollmentHistoryCount(versions, versions.portalGrantVersionActive)}
+    AND EXISTS(SELECT 1 FROM native_project_grants WHERE id=${sqlString(ids.grant)} AND staff_id=${staff}
+      AND capability='project.shared.sync' AND effect='allow' AND scope_kind='global' AND active=0
+      AND version=${versions.grant} AND granted_by=${staff})
+    AND EXISTS(SELECT 1 FROM native_project_grant_generations WHERE staff_id=${staff}
+      AND generation=${versions.grantGeneration})
+    AND EXISTS(SELECT 1 FROM native_staff_bootstrap_approvals WHERE approval_id=${sqlString(ids.provisionApproval)}
+      AND canonical_plan_json=${sqlString(provision.planJson)} AND canonical_plan_sha256=${sqlString(provision.planSha)}
+      AND approved_operator_staff_id=${staff} AND approved_operator_access_subject=${sqlString(packet.accessSubject)}
+      AND independent_binding_verification_json=${sqlString(provision.verificationJson)}
+      AND independent_binding_verification_sha256=${sqlString(provision.verificationSha)}
+      AND issued_by_staff_id=${staff} AND issued_by_access_subject=${sqlString(packet.accessSubject)}
+      AND issued_at=${sqlString(packet.issuedAt)} AND expires_at=${sqlString(packet.expiresAt)} AND revoked_at IS NULL)
+    AND EXISTS(SELECT 1 FROM native_staff_bootstrap_receipts WHERE command_id=${sqlString(ids.provisionCommand)}
+      AND approval_id=${sqlString(ids.provisionApproval)} AND operator_staff_id=${staff}
+      AND operator_access_subject=${sqlString(packet.accessSubject)}
+      AND canonical_plan_json=${sqlString(provision.planJson)} AND canonical_plan_sha256=${sqlString(provision.planSha)}
+      AND independent_binding_verification_json=${sqlString(provision.verificationJson)}
+      AND independent_binding_verification_sha256=${sqlString(provision.verificationSha)}
+      AND result_json=${sqlString(provision.resultJson)} AND result_sha256=${sqlString(provision.resultSha)})
+    AND NOT EXISTS(SELECT 1 FROM native_staff_bootstrap_approvals WHERE approval_id=${sqlString(ids.revokeApproval)})
+    AND NOT EXISTS(SELECT 1 FROM native_staff_bootstrap_receipts WHERE command_id=${sqlString(ids.revokeCommand)})
+    AND ${recipientEnrollmentNoPendingWork(packet)}`;
+  const final = `EXISTS(SELECT 1 FROM native_staff_admissions WHERE staff_id=${staff}
+      AND bound_access_subject=${sqlString(packet.accessSubject)} AND active=0 AND version=${versions.admissionRevoked}
+      AND admitted_by=${staff})
+    AND EXISTS(SELECT 1 FROM native_staff_profiles WHERE staff_id=${staff} AND version=${versions.profile})
+    AND ${recipientEnrollmentDirectoryState(packet, ids, versions, 0, versions.portalGrantVersionRevoked)}
+    AND EXISTS(SELECT 1 FROM native_directory_grant_generations WHERE staff_id=${staff}
+      AND generation=${versions.directoryGenerationRevoked})
+    AND (SELECT count(*) FROM native_directory_grant_history WHERE staff_id=${staff})=${recipientEnrollmentHistoryCount(versions, versions.portalGrantVersionRevoked)}
+    AND EXISTS(SELECT 1 FROM native_project_grants WHERE id=${sqlString(ids.grant)} AND active=0 AND version=${versions.grant})
+    AND EXISTS(SELECT 1 FROM native_project_grant_generations WHERE staff_id=${staff} AND generation=${versions.grantGeneration})
+    AND EXISTS(SELECT 1 FROM native_staff_bootstrap_approvals WHERE approval_id=${sqlString(ids.provisionApproval)} AND revoked_at IS NOT NULL)
+    AND EXISTS(SELECT 1 FROM native_staff_bootstrap_receipts WHERE command_id=${sqlString(ids.revokeCommand)}
+      AND approval_id=${sqlString(ids.revokeApproval)} AND canonical_plan_sha256=${sqlString(planSha)})`;
+  return `PRAGMA foreign_keys = ON;
+-- Generated staging-only exact-resource recipient-enrollment portal authority revocation packet.
+CREATE TABLE ${table}(ok INTEGER NOT NULL CHECK(ok=1));
+${guardInsert(table, precondition)}
+${approvalSql(packet, ids, "revoke", canonicalPlan, planSha, verificationJson, verificationSha)}
+UPDATE native_directory_grants SET active=0
+WHERE id=${sqlString(ids.portalAccessGrant)} AND staff_id=${staff} AND permission='directory.portal_access.manage'
+  AND effect='allow' AND scope_kind='resource' AND resource_id=${sqlString(packet.recordId)} AND active=1;
+UPDATE native_staff_admissions SET active=0,version=version+1,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+WHERE staff_id=${staff} AND active=1 AND version=${versions.admissionActive};
+UPDATE native_staff_bootstrap_approvals SET revoked_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+WHERE approval_id=${sqlString(ids.provisionApproval)} AND revoked_at IS NULL;
+${receiptSql(packet, ids, "revoke", canonicalPlan, planSha, verificationJson, verificationSha, result)}
+${guardInsert(table, final)}
+DROP TABLE ${table};
+`;
+}
+
 function canonicalOperations(base) {
   const appDir = path.join(base, "apps", "operations"), sourceConfigPath = path.join(appDir, "wrangler.staging.json");
   requireRegularFile(sourceConfigPath, "Operations staging config");
@@ -764,10 +1044,19 @@ export function buildAuthorityArtifacts(base, input, phase) {
   if (errors.length) throw new Error(errors.join("\n"));
   if (!['provision', 'revoke'].includes(phase)) throw new Error("phase must be provision or revoke");
   const { config, selected, chainSha256, names } = canonicalOperations(base);
-  const packet = structuredClone(input.packet), versions = versionState(packet);
+  const packet = structuredClone(input.packet);
+  const recipientEnrollment = packet.purpose === RECIPIENT_ENROLLMENT_PURPOSE;
+  const versions = recipientEnrollment ? recipientEnrollmentVersionState(packet) : versionState(packet);
   const acquisition = packet.purpose === "existing-directory-acquisition" || packet.purpose === "existing-directory-acquisition-after-fixture";
   const fixture = packet.purpose === "staging-empty-enrollment-fixture";
-  const ids = acquisition || fixture ? {
+  const ids = recipientEnrollment ? {
+    grant: `staging-project-sync:${packet.staffId}`,
+    directoryGrant: `staging-directory-profile-edit:${packet.staffId}`,
+    identityGrant: `staging-directory-identity-link:${packet.staffId}`,
+    portalAccessGrant: `staging-directory-portal-access:${packet.staffId}:${sha256(packet.recordId).slice(0, 32)}`,
+    provisionApproval: `${packet.packetId}:provision:approval`, provisionCommand: `${packet.packetId}:provision:command`,
+    revokeApproval: `${packet.packetId}:revoke:approval`, revokeCommand: `${packet.packetId}:revoke:command`,
+  } : acquisition || fixture ? {
     grant: `staging-project-sync:${packet.staffId}`,
     directoryGrant: `staging-directory-profile-edit:${packet.staffId}`,
     ...(acquisition ? { identityGrant: `staging-directory-identity-link:${packet.staffId}` } : {}),
@@ -783,16 +1072,24 @@ export function buildAuthorityArtifacts(base, input, phase) {
   for (const [label, value] of Object.entries(ids)) if (value.length > 191) throw new Error(`${label} exceeds the database identifier limit`);
   const provisionName = `9000_${packet.packetId}_provision.sql`, revokeName = `9001_${packet.packetId}_revoke.sql`;
   const migrationNames = { provision: provisionName, revoke: revokeName };
-  const provision = fixture ? provisionSqlV5Fixture(packet, ids, versions, names, migrationNames) : acquisition ? provisionSqlV4(packet, ids, versions, names, migrationNames)
+  const provision = recipientEnrollment ? provisionSqlRecipientEnrollment(packet, ids, versions, names, migrationNames)
+    : fixture ? provisionSqlV5Fixture(packet, ids, versions, names, migrationNames) : acquisition ? provisionSqlV4(packet, ids, versions, names, migrationNames)
     : provisionSql(packet, ids, versions, names, migrationNames);
   const provisionPlan = canonicalJson(plan(packet, "provision", ids, versions));
+  const recipientProvisionResult = recipientEnrollment ? canonicalJson(recipientEnrollmentResult(packet, ids, versions, "provision")) : null;
+  const recipientProvisionAudit = recipientEnrollment ? {
+    planJson: provisionPlan, planSha: sha256(provisionPlan),
+    verificationJson: verification(packet), verificationSha: sha256(verification(packet)),
+    resultJson: recipientProvisionResult, resultSha: sha256(recipientProvisionResult),
+  } : null;
   const fixtureProvisionAudit = fixture ? {
     planJson: provisionPlan, planSha: sha256(provisionPlan),
     verificationJson: verification(packet), verificationSha: sha256(verification(packet)),
     resultJson: canonicalJson(v5FixtureProvisionResult(packet, ids, versions)),
     resultSha: sha256(canonicalJson(v5FixtureProvisionResult(packet, ids, versions))),
   } : null;
-  const revoke = fixture ? revokeSqlV5Fixture(packet, ids, versions, fixtureProvisionAudit, names, migrationNames) : acquisition ? revokeSqlV4(packet, ids, versions, { planSha: sha256(provisionPlan) }, names, migrationNames)
+  const revoke = recipientEnrollment ? revokeSqlRecipientEnrollment(packet, ids, versions, recipientProvisionAudit, names, migrationNames)
+    : fixture ? revokeSqlV5Fixture(packet, ids, versions, fixtureProvisionAudit, names, migrationNames) : acquisition ? revokeSqlV4(packet, ids, versions, { planSha: sha256(provisionPlan) }, names, migrationNames)
     : revokeSql(packet, ids, versions, { planSha: sha256(provisionPlan) }, names, migrationNames);
   const configs = {};
   for (const action of ["provision", "revoke"]) {
@@ -804,12 +1101,19 @@ export function buildAuthorityArtifacts(base, input, phase) {
   }
   const identity = { staffId: packet.staffId, emailSha256: sha256(packet.email), displayNameSha256: sha256(packet.displayName),
     accessSubjectSha256: sha256(packet.accessSubject) };
-  const baseManifest = { schemaVersion: fixture || packet.purpose === "existing-directory-acquisition-after-fixture" ? FIXTURE_PACKET_SCHEMA_VERSION : acquisition ? ACQUISITION_PACKET_SCHEMA_VERSION : PACKET_SCHEMA_VERSION, environment: "staging", packetId: packet.packetId,
+  const baseManifest = { schemaVersion: recipientEnrollment ? RECIPIENT_ENROLLMENT_PACKET_SCHEMA_VERSION : fixture || packet.purpose === "existing-directory-acquisition-after-fixture" ? FIXTURE_PACKET_SCHEMA_VERSION : acquisition ? ACQUISITION_PACKET_SCHEMA_VERSION : PACKET_SCHEMA_VERSION, environment: "staging", packetId: packet.packetId,
     operatorKind: packet.operatorKind,
     databaseName: selected.database_name, databaseId: selected.database_id, migrationsTable: AUTHORITY_MIGRATIONS_TABLE,
     canonicalOperationsLedger: { count: names.length, finalMigration: names.at(-1), chainSha256 }, identity,
-    grant: { id: ids.grant, capability: "project.shared.sync", effect: "allow", scopeKind: "global" },
-    ...(fixture ? { purpose: packet.purpose, directoryGrants: [
+    grant: { id: ids.grant, capability: "project.shared.sync", effect: "allow", scopeKind: "global", ...(recipientEnrollment ? { active: false } : {}) },
+    ...(recipientEnrollment ? { purpose: packet.purpose, record: { idSha256: sha256(packet.recordId), kind: packet.recordKind,
+      version: packet.recordVersion, activationIdSha256: sha256(packet.activationId) }, directoryGrants: [
+      { id: ids.directoryGrant, permission: "directory.profile.edit", effect: "allow", scopeKind: "global", active: false },
+      { id: ids.identityGrant, permission: "directory.identity.link", effect: "allow", scopeKind: "resource",
+        resourceIdSha256: sha256(packet.recordId), active: false },
+      { id: ids.portalAccessGrant, permission: "directory.portal_access.manage", effect: "allow", scopeKind: "resource",
+        resourceIdSha256: sha256(packet.recordId) },
+    ] } : fixture ? { purpose: packet.purpose, directoryGrants: [
       { id: ids.directoryGrant, permission: "directory.profile.edit", effect: "allow", scopeKind: "global" },
       { id: ids.enrollmentGrant, permission: "directory.enrollment.manage", effect: "allow", scopeKind: "business_area", businessAreaIdSha256: sha256(packet.businessAreaId) },
     ] } : acquisition ? { purpose: packet.purpose, directoryGrants: [
@@ -818,7 +1122,13 @@ export function buildAuthorityArtifacts(base, input, phase) {
       ...(packet.purpose === "existing-directory-acquisition-after-fixture" ? [{ id: ids.enrollmentGrant, permission: "directory.enrollment.manage", effect: "allow", scopeKind: "business_area", businessAreaIdSha256: sha256(packet.businessAreaId), active: 0 }] : []),
     ] } : { directoryGrant: { id: ids.directoryGrant, permission: "directory.profile.edit", effect: "allow", scopeKind: "global" } }),
     issuedAt: packet.issuedAt, expiresAt: packet.expiresAt, reasonSha256: sha256(packet.reason) };
-  const manifests = acquisition ? {
+  const manifests = recipientEnrollment ? {
+    provision: { ...baseManifest, phase: "provision", mode: packet.mode, migration: { name: provisionName, sha256: sha256(provision) },
+      expected: packet.expected, result: recipientEnrollmentResult(packet, ids, versions, "provision") },
+    revoke: { ...baseManifest, phase: "revoke", migration: { name: revokeName, sha256: sha256(revoke) },
+      expected: plan(packet, "revoke", ids, versions).expected,
+      result: recipientEnrollmentResult(packet, ids, versions, "revoke") },
+  } : acquisition ? {
     provision: { ...baseManifest, phase: "provision", mode: packet.mode, migration: { name: provisionName, sha256: sha256(provision) },
       expected: packet.expected, result: { admissionVersion: versions.admissionActive, profileVersion: versions.profile,
         grantVersion: versions.grantActive, grantGeneration: versions.generationActive,

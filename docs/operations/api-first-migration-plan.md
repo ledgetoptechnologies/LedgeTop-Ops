@@ -4,12 +4,42 @@ Updated September 28, 2026. The owner approved implementation and resumption aft
 
 ### Current checkpoint — September 28, 2026
 
+- Fixture correction is published to draft PR133 at
+  `27d5aa6c07b57a26444156743669d2738331520e`; fresh CI run `36434849309`
+  was queued at readback. The two corrected suites passed `34/34` locally and
+  independently (`98.04s` / `97.93s`), and Ops typechecking passed. Root also
+  reran metadata alone: `12/12`, `23.38s`. The Windows full-chain runs used a
+  command-only 120-second ceiling; source/CI limits and runtime checks are
+  unchanged. No new staging deployment or authority activation followed this
+  test-only commit. Full exact-head CI is still required.
+- Enrollment implementation is published in draft PR133 at
+  `b6e4a6fd58567f4c127e7594dd5cc1b40e0ac156`; CI run `36431425399`
+  finished with nine jobs passed and the Operations job failed: 2,994 tests
+  passed, six failed in two fixture suites. Five service-metadata cases are
+  rejected by the new enrollment fence; one complete-chain assertion still pins
+  final migration `0148` rather than `0149`. Focused diagnosis found the reduced
+  metadata fixture lacked the new fence table. The correction and new deny
+  regressions are covered by the newer evidence above; runtime authorization
+  was not weakened.
+  This is not a green release head and is not merged to main.
+  Staging-only packages deployed successfully: Ops version
+  `15683688-10db-46ea-8d56-a3b86385693b` and Client version
+  `91fcb61a-cce0-4362-bd4c-7cc19f6e7502`. Exact-version readback verified
+  all new enrollment/owner flags false, owner origin empty, Client portal false,
+  and the named bridge targeting only `ledgetop-ops-staging`.
+- The signed-in Ops staging tab expired during post-deployment UI checking;
+  a new owner sign-in was requested. Staging has zero directory activation
+  receipts as well as the zero-authority/selection counts below. Existing
+  governed packets do not grant `directory.portal_access.manage`; a new bounded,
+  exact-resource testing purpose is prepared and locally reviewed, with no remote authority
+  provision. Do not substitute a global grant, raw SQL recipient binding, or
+  implicit owner-role authorization. Positive live acceptance remains open.
 - Independent final QA cleared `0149` for backed-up staging-only application
   and default-off package deployment. A fresh private staging backup preceded
   successful application; subsequent migration-list readback reported no pending
   Ops migrations. This is schema evidence only: enrollment remains disabled and
   the normal joined live flow still needs the bounded prerequisites below.
-- Corrective `0149` candidate: ledger `7/7`, local joined lifecycle `1/1`, and
+- Corrective `0149` local verification: ledger `7/7`, local joined lifecycle `1/1`, and
   Ops typecheck passed. Root complete historical chain rerun passed `1/1`
   (`70.56s`) for 139 Client / 149 Ops migrations. Configuration/bootstrap/
   evidence/source guards passed `104`, with four explicit Windows symlink
@@ -21,6 +51,48 @@ Updated September 28, 2026. The owner approved implementation and resumption aft
   Therefore local lifecycle results are not live enrollment evidence. The next
   gate is a reviewed, bounded staging owner-authority/selection fixture using
   governed workflows, not direct recipient-binding insertion or email matching.
+  Sanitized follow-up readback found one actor with two inactive profile grants:
+  the known global bootstrap family (history version/count `1`) and the known
+  business-area onboarding family (history version/count `3`). Existing v3/v4
+  acquisition tools intentionally require a narrower prior shape, so a reviewed
+  preservative transition is needed for this actual lineage. Counts are not a
+  substitute for exact ID/scope/history evidence. Do not delete inactive grants,
+  discard their history, or weaken row-count guards to enter the test window.
+  The proposed fixed-purpose preservative acquisition/portal transition and
+  required readback/tests are in
+  `docs/staging/recipient-enrollment-existing-lineage-review.md`; this is a
+  design-only next step, not implemented or applied authority.
+- The schema-v6 fixed-purpose authority preparation is local work only. Its
+  design preserves inactive profile/identity/Project grants and permits one
+  exact-resource `directory.portal_access.manage` allow after normal acquisition.
+  Implementer and independent packet suites passed `29/29` (`28.856s` /
+  `28.51s`); source/test syntax checks passed. QA cleared publishing local
+  preparation only, not remote grants or activation. A dedicated dependency-free
+  packet test is added to CI; the source-invariant coverage check passed `18/18`.
+  The migrated SQLite fixture seeds activation output with a test-only trigger/
+  foreign-key relaxation; it is not normal acquisition/activation evidence.
+  Actual generated provision/revoke artifacts still need exact live-lineage
+  review and prerequisite proof before any staging authority change. A valid packet issuance window
+  is not proof that runtime authority automatically expires; close the test
+  window and revoke through the reviewed artifacts.
+  Issued/pending intents do not grant Client access and must not permanently
+  prevent revoking temporary staff authority. Recipient/bridge flags must be
+  closed and read back before that revoke: redemption itself can otherwise
+  create a durable pending audit row without current owner authority. Owner
+  confirmation still requires current authority. There is no pending-intent
+  cancellation/proof-refresh recovery yet; that gap remains open before launch.
+- Website workflow ownership and manual-first, provenance-backed monthly
+  reporting are already agreed. The remaining website work is a real resource,
+  edit-request lifecycle, and reporting implementation, not a renamed generic
+  service-request page. Scoped registry administrators, team transition rights,
+  post-revocation history, and publication authority still need explicit policy.
+
+### Historical checkpoint log — September 28 staging-only owner action
+
+The dated paragraphs below are chronological evidence, including superseded
+candidate observations. They are not declarations of the current process,
+branch, CI, deployment, or acceptance status; the checkpoint above is current.
+
 - Recipient enrollment candidate: root reruns passed owner/private-entrypoint
   `26/26` and owner desktop/mobile browser `6/6` (`17.2s`). Recipient browser
   `8/8` passed on a fresh Client build (`17.4s`). The complete local historical
@@ -93,12 +165,6 @@ Updated September 28, 2026. The owner approved implementation and resumption aft
 - The currently configured incoming-D1 CLI read failed with error `7403`. The
   September 11 mail row below is retained as historical evidence, not a current
   transport diagnosis. No credential fallback was approved.
-
-### Historical checkpoint log — September 28 staging-only owner action
-
-The dated paragraphs in this section are retained as chronological evidence.
-They are not declarations of the current process, branch, CI, deployment, or
-acceptance state; the checkpoint above is authoritative for those fields.
 
 The uncommitted Client candidate now wires submitted-service **detail readback**
 through the existing independently authorized native detail route, public DTO,
