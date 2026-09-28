@@ -261,8 +261,11 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   // cannot hide behind a digest refresh.
   // Reviewed additions: catalog coordination, portal authority, inactive
   // workspace-binding writers, and the non-content enrollment reader remain off.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "1208284ab0960b83a9ea1b092c6d2c24492eb4b0562d43a648fb382099c941e5");
+  // Approved staging-only recipient bridge is present but remains default-off.
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "3bb0025b5cf6ea2c125acf77d336a6c68f530b1cd7c67232cac154d84460f689");
   const config = readJson("apps/client/wrangler.jsonc");
+  assert.equal(config.vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_CSRF_SECRET, undefined);
   assert.equal(config.name, "ledgetop-clients");
   assert.equal(config.main, "src/worker/index.ts");
   assert.deepEqual(config.routes, [
@@ -351,6 +354,11 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   }]);
   assert.deepEqual(config.services, [
     {
+      binding: "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_BRIDGE",
+      service: "ledgetop-ops",
+      entrypoint: "ClientPortalRecipientEnrollmentBridge",
+    },
+    {
       binding: "CLIENT_PORTAL_SERVICE_METADATA_READER",
       service: "ledgetop-ops",
       entrypoint: "ClientPortalServiceMetadataReader",
@@ -381,8 +389,11 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
 });
 
 test("the deployed Operations Worker keeps catalog and inactive binding transport private and default-off", () => {
-  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "45d56b79a3ef8500166059b20e8a14833ccf15fe28c1784a3fb21471a50aabca");
+  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "dc65f76aed8cf31b29fa6dc853f1096fa6c7e5a74cd65fb8500106dcc422fdc4");
   const config = readJson("apps/operations/wrangler.jsonc");
+  assert.equal(config.vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ORIGIN, "");
   assert.equal(config.vars.CLIENT_ONBOARDING_ADMIN_ENABLED, "false");
   assert.equal(config.vars.CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED, "false");

@@ -9,6 +9,8 @@ import { consumeDeliveryRoute, handoffLegacyPublicShare } from "./route";
 import { ClientViewerShell, parseClientViewerShellRoute } from "./ClientViewerShell";
 import { ClientOnboardingRecipientApp } from "./ClientOnboardingRecipientApp";
 import { consumeClientOnboardingRecipientRoute } from "./client-onboarding-recipient-route";
+import { ClientPortalRecipientEnrollmentApp } from "./ClientPortalRecipientEnrollmentApp";
+import { consumeClientPortalRecipientEnrollmentRoute } from "./client-portal-recipient-enrollment-route";
 
 const ClientPortalApp = lazy(async () => {
   const module = await import("./ClientPortalApp");
@@ -27,6 +29,7 @@ const InvitationAcceptanceApp = lazy(async () => {
   return { default: module.InvitationAcceptanceApp };
 });
 if (!handoffLegacyPublicShare(window.location, url => window.location.replace(url))) {
+  const recipientEnrollmentRoute = consumeClientPortalRecipientEnrollmentRoute(window.location, window.history);
   const portalRoute = parseClientPortalRoute(window.location.pathname);
   const isPortalRoot = window.location.pathname === "/portal" || window.location.pathname === "/portal/";
   const viewerShellRoute = parseClientViewerShellRoute(window.location.pathname);
@@ -47,7 +50,9 @@ if (!handoffLegacyPublicShare(window.location, url => window.location.replace(ur
   createRoot(document.getElementById("root")!).render(
     <StrictMode>
       <Suspense fallback={<main className="portal-loading-shell" aria-busy="true" aria-label="Loading Ledge Top client portal" />}>
-        {onboardingRoute
+        {recipientEnrollmentRoute
+          ? <ClientPortalRecipientEnrollmentApp {...recipientEnrollmentRoute} />
+          : onboardingRoute
           ? <ClientOnboardingRecipientApp {...onboardingRoute} />
           : viewerShellRoute
           ? <ClientViewerShell route={viewerShellRoute} />

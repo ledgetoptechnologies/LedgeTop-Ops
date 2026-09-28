@@ -65,6 +65,9 @@ export const clientPortalServiceMetadataQuery = `WITH matching_authority AS (
     AND identity.access_issuer=authority_receipt.issuer AND identity.access_subject=authority_receipt.subject
     AND identity.status='active'
     AND (identity.expires_at IS NULL OR identity.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    AND NOT EXISTS(SELECT 1 FROM client_portal_recipient_enrollment_intents enrollment_intent
+      WHERE enrollment_intent.binding_id=identity.binding_id
+        AND enrollment_intent.state IN ('revoking','revoked'))
     AND (selection.record_id=identity.target_client_record_id OR
       (selection.root_type='organization' AND EXISTS(
         SELECT 1 FROM operations_directory_client_organizations relation

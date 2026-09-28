@@ -53,6 +53,9 @@ export type Env = Omit<
   | "CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ORIGIN"
   | "CLIENT_PORTAL_AUTHORITY_V3_OWNER_ENABLED"
   | "CLIENT_PORTAL_AUTHORITY_V3_OWNER_ORIGIN"
+  | "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED"
+  | "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ENABLED"
+  | "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ORIGIN"
 > & {
   PROJECT_ALPHA_API_KEY?: string;
   /** Temporary release barrier for the preserving client-notification table rebuild. */
@@ -83,6 +86,11 @@ export type Env = Omit<
   /** Default-off native owner boundary for protocol-v3 service-home permission changes. */
   CLIENT_PORTAL_AUTHORITY_V3_OWNER_ENABLED?: string;
   CLIENT_PORTAL_AUTHORITY_V3_OWNER_ORIGIN?: string;
+  /** Staging-only verified recipient enrollment; independent and default-off. */
+  CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED?: string;
+  /** Separate default-off staging owner confirmation/revocation boundary. */
+  CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ENABLED?: string;
+  CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ORIGIN?: string;
   /** Default-off bounded API-v2 health/incident monitor. */
   PROJECT_ALPHA_API_V2_MONITOR_ENABLED?: string;
   /** Explicit deployment-owned owner mailbox for outage alerts; never inferred from Project Alpha data. */

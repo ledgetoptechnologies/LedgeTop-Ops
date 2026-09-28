@@ -4,6 +4,65 @@ Updated September 28, 2026. The owner approved implementation and resumption aft
 
 ### Current checkpoint — September 28, 2026
 
+- Independent final QA cleared `0149` for backed-up staging-only application
+  and default-off package deployment. A fresh private staging backup preceded
+  successful application; subsequent migration-list readback reported no pending
+  Ops migrations. This is schema evidence only: enrollment remains disabled and
+  the normal joined live flow still needs the bounded prerequisites below.
+- Corrective `0149` candidate: ledger `7/7`, local joined lifecycle `1/1`, and
+  Ops typecheck passed. Root complete historical chain rerun passed `1/1`
+  (`70.56s`) for 139 Client / 149 Ops migrations. Configuration/bootstrap/
+  evidence/source guards passed `104`, with four explicit Windows symlink
+  skips and no failures. The earlier hardcoded inventory failures are retained
+  below as superseded failures, not waived migration evidence.
+- Live prerequisite readback is aggregate-only: staging currently has zero
+  active native staff admissions, zero active portal-manage allow grants,
+  zero workspace selections, and zero acknowledged selection commands.
+  Therefore local lifecycle results are not live enrollment evidence. The next
+  gate is a reviewed, bounded staging owner-authority/selection fixture using
+  governed workflows, not direct recipient-binding insertion or email matching.
+- Recipient enrollment candidate: root reruns passed owner/private-entrypoint
+  `26/26` and owner desktop/mobile browser `6/6` (`17.2s`). Recipient browser
+  `8/8` passed on a fresh Client build (`17.4s`). The complete local historical
+  chain rehearsal passed `1/1` (`70.67s`) for 139 Client / 148 Ops migrations;
+  migration `0149` adds two independently identified SQL-time fences and needs
+  a fresh 149-migration rehearsal and review. Local joined lifecycle passed,
+  but its direct function wiring and controlled timeout timers do not prove
+  deployed named bindings or production transport deadlines.
+- Remote staging only: existing Wrangler authentication read back exactly one
+  pending Ops migration, `0148`; a private ignored staging backup was saved and
+  `0148` applied successfully. No recipient workflow was activated or deployed.
+  The dedicated Client staging CSRF secret was provisioned without storing its
+  value in source. Both staging candidate packages passed local dry runs;
+  Operations container build/rollout was disabled. Production and public links
+  remain unchanged. Live enrollment, full revoke, and corrective `0149`
+  acceptance remain open; pending expired-proof recovery is documented in
+  `docs/staging/recipient-enrollment.md`.
+- Latest published proof/documentation head is
+  `1117cb0e764124135b4c79bad23121686748d6ee` in draft PR133. Exact-head CI
+  `36423793081` completed successfully at `2026-09-28T12:59:45Z`; readback
+  confirmed all ten jobs successful. It does not cover the subsequent
+  uncommitted enrollment ledger, HTTP/RPC adapters, UI, and staging configuration.
+- Subsequent local candidate evidence: Client proof/HTTP/parser `45/45` passed
+  (`584ms`) and Client typecheck exited `0`; owner HTTP `8/8` passed (`187ms`);
+  existing workspace-selection/private-RPC plus new enrollment RPC regressions
+  `38/38` passed (`112.27s`); source-layout/release-default checks `38/38`
+  passed. The first source-invariant run failed on deliberately pinned config
+  hashes; reviewed default-off additions now have explicit field/binding checks
+  and refreshed pins. Initial recipient desktop/mobile browser checks passed
+  `8/8` (`18.1s`); the later fresh build/run is recorded above.
+  The first complete-chain rehearsal failed before SQL because its canonical
+  inventory still expected 147 Ops migrations; updating that inventory through
+  `0148` and rerunning is required, not waived.
+- Source review caught and corrected token-less historical replay, stale owner
+  replay authorization, generation/session expiry fencing, query-token scrubbing,
+  and Ops-versus-Client confirmation-link routing. Independent core review and
+  focused tests cleared the reviewed snapshot; newer proof-expiry-during-I/O
+  hardening and normal joined acceptance were still in progress at that snapshot.
+  The later local results and staging application of `0148` are recorded above;
+  there is no candidate deployment, production enrollment, or public-link change.
+  Full deployed joined and live staging acceptance,
+  including full revocation reconciliation, remain required.
 - Before this documentation-only freshness update, the review branch was clean
   at `93738ef3605399ff3a6ea07d84c317202cbfa301`. That head is published in
   draft PR133; it is not merged to `main` or deployed.
@@ -20,7 +79,7 @@ Updated September 28, 2026. The owner approved implementation and resumption aft
 - The owner explicitly approved the normal verified-recipient enrollment and
   full-revocation workflow for local/staging implementation and testing only.
   Migration `0148` and its ledger are under implementation and independent
-  review; they are not yet release-ready or remotely applied. Review identified
+  review; they were not yet release-ready or remotely applied at that snapshot. Review identified
   required atomic CAS guards, current owner authorization, single-use replay
   handling, and separation of enrollment-token expiry from access lifetime.
   The Client enrollment verifier's focused identity suite passed `25/25` locally

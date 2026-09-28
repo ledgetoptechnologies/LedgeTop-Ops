@@ -128,6 +128,43 @@ test("authority v3 owner origin is blank only while disabled and exact when enab
   enabled.vars.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ORIGIN = "https://wrong-staging.example.test";
   assert(validateApp("operations", enabled, productionFrom(stagingConfig("operations"))).some(error => error.includes("exact Ops HTTPS staging origin")));
 });
+test("recipient enrollment stays staging-only, separately gated, and secret-backed", () => {
+  const delivery = stagingConfig("delivery");
+  const operations = stagingConfig("operations");
+  const configs = { delivery, operations, "ops-sync": stagingConfig("ops-sync") };
+  const bridge = delivery.services.find(({ binding }) => binding === "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_BRIDGE");
+
+  assert.deepEqual(bridge, {
+    binding: "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_BRIDGE",
+    service: "ledgetop-ops-staging",
+    entrypoint: "ClientPortalRecipientEnrollmentBridge",
+  });
+  assert.equal(Object.hasOwn(delivery.vars, "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_CSRF_SECRET"), false);
+  assert(REQUIRED_STAGING_SECRETS.delivery.includes("CLIENT_PORTAL_RECIPIENT_ENROLLMENT_CSRF_SECRET"));
+  assert.match(FEATURE_FLAG_ACTIVATION_POLICIES.delivery.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED.prohibitedReason, /separately reviewed staging-only activation window/);
+  assert.match(FEATURE_FLAG_ACTIVATION_POLICIES.operations.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED.prohibitedReason, /independent from owner mutation authority/);
+  assert.match(FEATURE_FLAG_ACTIVATION_POLICIES.operations.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ENABLED.prohibitedReason, /separate reviewed activation/);
+
+  bridge.service = "ledgetop-ops";
+  let errors = validateApp("delivery", delivery, productionFrom(stagingConfig("delivery")));
+  assert(errors.some((error) => error.includes("services") || error.includes("service CLIENT_PORTAL_RECIPIENT_ENROLLMENT_BRIDGE")), errors.join(" | "));
+  errors = validateCrossApp(configs);
+  assert(errors.some((error) => error.includes("recipient enrollment bridge")), errors.join(" | "));
+
+  const disabledWithOrigin = stagingConfig("operations");
+  disabledWithOrigin.vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ORIGIN = `https://${STAGING_HOSTS.operations}`;
+  errors = validateApp("operations", disabledWithOrigin, productionFrom(stagingConfig("operations")));
+  assert(errors.some((error) => error.includes("owner origin must remain empty while disabled")), errors.join(" | "));
+
+  const enabled = stagingConfig("operations");
+  enabled.vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ENABLED = "true";
+  enabled.vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ORIGIN = `https://${STAGING_HOSTS.operations}`;
+  errors = validateApp("operations", enabled, productionFrom(stagingConfig("operations")));
+  assert(!errors.some((error) => error.includes("exact Ops HTTPS staging origin")), errors.join(" | "));
+  enabled.vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ORIGIN = "https://ops.ledgetopdroneservices.com";
+  errors = validateApp("operations", enabled, productionFrom(stagingConfig("operations")));
+  assert(errors.some((error) => error.includes("exact Ops HTTPS staging origin")), errors.join(" | "));
+});
 test("rejects missing, unexpected, or non-regular release migrations", () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-staging-migrations-"));
   for (const app of ["delivery", "operations"]) {
@@ -226,6 +263,7 @@ test("requires shared staging resources to agree", () => {
   configs.delivery.services.find(service => service.binding === "CLIENT_DELEGATED_SHARE_SIGNER").service = "wrong-ops-staging";
   configs.delivery.services.find(service => service.binding === "VIEWER_SESSION_ISSUER").entrypoint = "WrongViewerIssuer";
   configs.delivery.services.find(service => service.binding === "CLIENT_PORTAL_SERVICE_METADATA_READER").entrypoint = "WrongMetadataReader";
+  configs.delivery.services.find(service => service.binding === "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_BRIDGE").entrypoint = "WrongRecipientEnrollmentBridge";
   configs["ops-sync"].services[0].entrypoint = "WrongPortalIngress";
   configs.delivery.vars.PROJECT_ALPHA_PORTAL_APPLICATION_KEY = "wrong-application-key";
   const errors = validateCrossApp(configs);
@@ -233,6 +271,7 @@ test("requires shared staging resources to agree", () => {
   assert(errors.some((error) => error.includes("delegated-share signer")));
   assert(errors.some((error) => error.includes("Viewer session issuer")));
   assert(errors.some((error) => error.includes("service metadata reader")));
+  assert(errors.some((error) => error.includes("recipient enrollment bridge")));
   assert(errors.some((error) => error.includes("portal projection ingress")));
   assert(errors.some((error) => error.includes("application key")));
 });
@@ -347,7 +386,7 @@ test("requires every portal-v2 and Operations capability to be explicitly false"
   }
 });
 
-test("pins the native portal, Operations 0054-0147, both 0199 files, and the 0200-0220 release contract", () => {
+test("pins the native portal, Operations 0054-0149, both 0199 files, and the 0200-0220 release contract", () => {
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-38), [
     "0184_native_client_feedback.sql",
     "0185_native_service_request_ownership.sql",
@@ -414,6 +453,8 @@ test("pins the native portal, Operations 0054-0147, both 0199 files, and the 020
     "0145_client_portal_authority_v2_outbox.sql",
     "0146_ops_customer_service_enrollments.sql",
     "0147_client_portal_authority_v3_permissions.sql",
+    "0148_client_portal_recipient_enrollment.sql",
+    "0149_client_portal_recipient_enrollment_sql_fences.sql",
   ]);
   const nativeDirectoryStart = REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0054_project_alpha_directory_outbox.sql");
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(nativeDirectoryStart, nativeDirectoryStart + 3), [

@@ -693,7 +693,9 @@
         "0144_client_portal_workspace_binding_outbox.sql",
         "0145_client_portal_authority_v2_outbox.sql",
         "0146_ops_customer_service_enrollments.sql",
-        "0147_client_portal_authority_v3_permissions.sql"
+        "0147_client_portal_authority_v3_permissions.sql",
+        "0148_client_portal_recipient_enrollment.sql",
+        "0149_client_portal_recipient_enrollment_sql_fences.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
@@ -759,8 +761,8 @@
           "applyEvidenceRef": "<EVIDENCE_REFERENCE>",
           "readbackEvidenceRef": "<EVIDENCE_REFERENCE>",
           "transformedFiles": ["0002_seed_acl.sql"],
-          "ledgerCount": 147,
-          "finalMigration": "0147_client_portal_authority_v3_permissions.sql",
+          "ledgerCount": 149,
+          "finalMigration": "0149_client_portal_recipient_enrollment_sql_fences.sql",
           "sourceSeedSha256": "<CANONICAL_SEED_SHA256>",
           "generatedSeedSha256": "<GENERATED_SEED_SHA256>",
           "databaseWasEmpty": false,
@@ -958,6 +960,7 @@
       "CLIENT_PORTAL_AUTHORITY_V2_STATUS_ENABLED",
       "CLIENT_PORTAL_AUTHORITY_V2_ENROLLMENT_STATUS_ENABLED",
       "CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED",
+      "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED",
       "CLOUD_TRANSFER_DROPBOX_ENABLED",
       "CLOUD_TRANSFER_GOOGLE_ENABLED",
       "CLOUD_TRANSFER_GOOGLE_PICKER_CLIENT_ENABLED"
@@ -976,6 +979,8 @@
       "CLIENT_AUTHORITY_WORKSPACE_BINDING_OUTBOX_ENABLED",
       "CLIENT_PORTAL_AUTHORITY_V2_OUTBOX_ENABLED",
       "CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED",
+      "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED",
+      "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ENABLED",
       "CLIENT_HUB_PA_CONTACT_ASSIGNMENTS_ENABLED",
       "CLIENT_PORTAL_HIERARCHY_V2_ENABLED",
       "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED",

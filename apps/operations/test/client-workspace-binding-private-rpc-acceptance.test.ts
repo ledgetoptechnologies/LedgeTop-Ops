@@ -70,6 +70,7 @@ describe("joined Operations to Client inactive workspace binding",()=>{
     await migrate(opsDb,new URL("../migrations/0144_client_portal_workspace_binding_outbox.sql",import.meta.url));
     await migrate(opsDb,new URL("../migrations/0145_client_portal_authority_v2_outbox.sql",import.meta.url));
     await migrate(opsDb,new URL("../migrations/0147_client_portal_authority_v3_permissions.sql",import.meta.url));
+    await migrate(opsDb,new URL("../migrations/0148_client_portal_recipient_enrollment.sql",import.meta.url));
 
     await clientDb.batch([
       clientDb.prepare(`CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,root_type TEXT NOT NULL,

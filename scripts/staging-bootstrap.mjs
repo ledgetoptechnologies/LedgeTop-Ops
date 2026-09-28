@@ -25,9 +25,9 @@ export const BOOTSTRAP_APPS = Object.freeze({
     binding: "OPS_DB",
     databaseName: "ltds-ops-staging",
     seed: "0002_seed_acl.sql",
-    migrationCount: 147,
-    migrationNamesSha256: "41d6e34b1b156c2ad9965c6e2d96ed93b1fe2882db5d3635213a7c0411f4d686",
-    migrationContentsSha256: "494ce1a7f102a21a2355ecd61df8d12ff2486ee59b14549e34c2507777da5a8d",
+    migrationCount: 149,
+    migrationNamesSha256: "f95ad253db509316ee0a9f18265c129dfef37a489d7a3427a69c58bcc4085463",
+    migrationContentsSha256: "b492e627ee541180e102d7a35f297d243ef2498d4e5eff025c55e38824564859",
   }),
 });
 export const PRODUCTION_DATABASE_IDENTITIES = Object.freeze([
@@ -206,7 +206,8 @@ export function buildArtifacts(base, owner, options = {}) {
       if (item.name.endsWith(".sql") && (!item.isFile() || item.isSymbolicLink())) throw new Error(`${app} canonical migration ${item.name} must be a regular non-symlink file`);
     }
     const names = entries.filter((item) => item.isFile() && !item.isSymbolicLink() && item.name.endsWith(".sql")).map((item) => item.name).sort();
-    if (names.length !== entry.migrationCount || sha256(names.join("\n")) !== entry.migrationNamesSha256) throw new Error(`${app} canonical migration inventory must be the exact complete ordered ${entry.migrationCount}-file chain`);
+    const namesSha256 = sha256(names.join("\n"));
+    if (names.length !== entry.migrationCount || namesSha256 !== entry.migrationNamesSha256) throw new Error(`${app} canonical migration inventory must be the exact complete ordered ${entry.migrationCount}-file chain (found ${names.length} files, names sha256 ${namesSha256})`);
     if (!names.includes(entry.seed)) throw new Error(`${app} canonical seed ${entry.seed} is missing`);
     const canonicalFiles = names.map((name) => {
       const sourcePath = path.join(sourceDir, name);
