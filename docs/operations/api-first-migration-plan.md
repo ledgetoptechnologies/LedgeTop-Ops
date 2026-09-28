@@ -4,12 +4,35 @@ Updated September 28, 2026. The owner approved implementation and resumption aft
 
 ### Current checkpoint — September 28, 2026
 
+- After exact-head CI, Client build and explicit staging dry run passed, the
+  reviewed `ffbd2ed` Client package deployed to `ledgetop-clients-staging` as
+  `e35e9fdc-2beb-4a0e-be1b-fa4c372f6cc0`. Newest-deployment readback (sorted by
+  `created_on`, not list position) confirms 100% of traffic. Version annotation
+  pins the source; portal, recipient enrollment, authority/workspace writers,
+  service-home and authenticated-delivery flags remain false. Retained rollback
+  version is `91fcb61a-cce0-4362-bd4c-7cc19f6e7502`; Ops remains `66e5b364`.
+  No schema migration, grant, recipient activation, production deployment, or
+  public-link change occurred in this Client deployment.
+- Feature revision `ffbd2ed1bffe30d554e583b71c2c6d786aec9541` passed all ten CI
+  jobs in terminal run `36461995214`. This publishes the presentation-only empty
+  service summary fix and reconciled evidence documents; it is not new delivery
+  authority or live recipient acceptance. Ops recovery remains at its separately
+  reviewed `962bf02` runtime; Client's subsequent default-off deployment is
+  recorded above.
+- The owner explicitly authorized implementing/testing the separate default-off
+  [verified-recipient folder-sharing path](../staging/verified-recipient-delivery-sharing-plan.md)
+  in staging, and authorized staging migrations/tests. The signed-in Ops staging
+  owner session is available; the recipient page correctly remains unavailable
+  while its flags are off. Delivery authority implementation/integration and real
+  recipient activation/revocation remain required. Production client access and
+  existing public links remain unchanged and outside this staging authorization.
 - The Client service-summary empty state is corrected locally: standalone homes
   with no listed services show “No services available”; embedded summaries keep
   “Operations services.” Parser tests passed 17/17, desktop/mobile browser tests
   passed 32/32, and typecheck/build passed. Independent frozen-source QA found no
   release-blocking issue. This presentation-only change adds no permissions,
-  navigation, actions, or client access and has not been deployed.
+  navigation, actions, or client access. Its staging deployment is recorded above;
+  real authorized empty-state browser acceptance remains separate.
 - Recovery revision `962bf021b371fd4a4fc31d54f7103f7d8b52fef1` now has terminal
   successful CI `36457331628`: all ten jobs passed. After the private backup and
   corrected independent review, only canonical 0150 was applied to Ops staging.
@@ -18,12 +41,13 @@ Updated September 28, 2026. The owner approved implementation and resumption aft
   The reviewed Ops package deployed default-off as version
   `66e5b364-16ec-4da4-a379-18982a208197`, with container rollout disabled.
   Version readback confirmed enrollment/owner/authority/workspace outbox flags
-  false and owner origin empty. Client staging was not redeployed; its pinned
-  version `91fcb61a-cce0-4362-bd4c-7cc19f6e7502` has portal/enrollment/writers
-  disabled. Previous rollback version `15683688-10db-46ea-8d56-a3b86385693b`
-  and the private backup remain preserved. Backup SHA-256:
+  false and owner origin empty. At that recovery checkpoint, Client staging had
+  not been redeployed: version `91fcb61a-cce0-4362-bd4c-7cc19f6e7502` served
+  100% with portal/enrollment/writers disabled. The later Client deployment
+  recorded above supersedes that runtime observation. Previous Ops rollback
+  version `15683688-10db-46ea-8d56-a3b86385693b` and the private backup remain
+  preserved. Backup SHA-256:
   `0282c48d74d5b9a20fd5b3139d9cf42243aed26d1d24d898d89e50e95dc53020`.
-  Client deployment readback confirms that unchanged version serves 100%.
   This is staging schema/runtime proof,
   not signed-in enrollment, recovery/revoke acceptance, delivery authority,
   production deployment, or permission to alter public links.
@@ -120,8 +144,10 @@ Updated September 28, 2026. The owner approved implementation and resumption aft
   passed as recorded above, followed by exact-head CI and backed-up default-off
   staging application/readback. Real enrollment/recovery/revocation acceptance
   remains required.
-  Minimal receipt replay after target visibility loss and the separate delivery
-  resource-authority path remain separately approval-gated and unimplemented.
+  Minimal receipt replay after target visibility loss remains separately
+  approval-gated and unimplemented. The delivery resource-authority path is
+  approved for default-off staging implementation/testing but remains
+  unimplemented, with no live grant.
 - Reviewed preparation tests and design/status documents are now published at
   `33225907b55a308ac28ebe1e95112e593c5e349f` on draft PR133. Exact-head CI
   `36447732883` is now terminal successful: all ten jobs passed, verified
@@ -194,12 +220,13 @@ Updated September 28, 2026. The owner approved implementation and resumption aft
   are in progress. Candidate schema remains outside the canonical migration
   inventory and no cancellation deployment has occurred.
 - A read-only [verified-recipient delivery-sharing plan](../staging/verified-recipient-delivery-sharing-plan.md)
-  now records the exact data-access mismatch: existing authenticated delivery
+  records the exact data-access mismatch: existing authenticated delivery
   recipients require a current PA principal, whereas enrollment captures an
-  Access issuer/subject. A separate resource-authority contract with exact
-  folder selection and coupled full revocation is proposed, not implemented.
-  Separate staging-only authorization was requested and is still pending;
-  home-only v3, production access, and public links remain unchanged.
+  Access issuer/subject. The owner has since approved the separate
+  resource-authority contract, exact folder selection, and coupled full
+  revocation for default-off staging implementation/testing only. It remains
+  unimplemented with no live grant; home-only v3, production access, and public
+  links remain unchanged.
 - Recovery decision: terminal cancellation denies historical issue/redeem
   application retries, while preserving immutable audit history. Exact
   cancellation retries should return only a minimal receipt to the same

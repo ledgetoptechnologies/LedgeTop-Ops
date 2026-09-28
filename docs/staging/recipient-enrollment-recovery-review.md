@@ -12,7 +12,10 @@ applied only to Ops staging. Readback confirms 150 migration entries ending at
 and no pending migrations. Ops staging version
 `66e5b364-16ec-4da4-a379-18982a208197` now contains the reviewed recovery runtime.
 Enrollment, owner actions, authority dispatch, and workspace dispatch remain off;
-Client staging was not redeployed. No signed-in/live acceptance or production
+Client staging was not redeployed at that recovery checkpoint. It later received
+the CI-verified presentation-only `ffbd2ed` package as default-off version
+`e35e9fdc-2beb-4a0e-be1b-fa4c372f6cc0`; no recipient or resource access was enabled.
+No signed-in/live acceptance or production
 application is implied. Historical local evidence below predates this deployment.
 
 ## Historical pre-0150 baseline

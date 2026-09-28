@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./authenticated-delivery-authority": "./src/authenticated-delivery-authority.ts"
+    "./authenticated-delivery-authority": "./src/authenticated-delivery-authority.ts",
+    "./verified-recipient-delivery-authority": "./src/verified-recipient-delivery-authority.ts"
   }
 }

@@ -156,11 +156,15 @@ outbox may be pending, retrying, or dispatching; and no Directory or Project
 actor work may remain. Turn off and read back the Client recipient flag, the
 Operations recipient bridge flag, and the owner flag before applying revoke;
 the SQL packet cannot inspect deployed Worker flags. Issued and pending intents
-are not a grant of Client access and do not block authority revocation. They
-remain durable audit state: there is currently no cancel/expire transition, and
-an expired pending proof can remain stranded until a separately reviewed
-lifecycle is implemented. Closing the recipient bridge before revoke prevents
-a still-issued token from being redeemed after the authority window. Revoke
+are not a grant of Client access and do not block authority revocation. Canonical
+0150 and the default-off staging runtime now let an authorized owner cancel an
+issued or pending intent and create a fresh intent; cancellation preserves the
+durable audit record and does not refresh or extend the old proof or token.
+There is still no automatic expiry or proof-refresh transition. Active access
+must use the full revoke workflow, and cancellation does not close unresolved
+in-flight authority or replace the separately reviewed emergency-revoke design.
+Closing the recipient bridge before revoke prevents a still-issued token from
+being redeemed after the authority window. Revoke
 deactivates only the packet's exact
 portal-access grant, increments the native Directory generation/history, and
 deactivates the admission. Durable selections, receipts, enrollment audit,

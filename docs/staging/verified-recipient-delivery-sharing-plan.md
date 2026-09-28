@@ -1,14 +1,48 @@
 # Verified-recipient delivery sharing plan
 
-This is a read-only implementation plan for connecting an explicitly enrolled
+This is the implementation plan for connecting an explicitly enrolled
 Access principal to one explicitly reviewed delivery resource in the unified
-Client portal. It does not authorize implementation, a schema migration, a
-Worker flag, a remote read or write, a deployment, or production use.
+Client portal. This file does not apply a schema migration, enable a Worker
+flag, perform a remote read or write, deploy software, or authorize production
+use.
 
-Implementation requires separate user authorization after review of the new
-resource-authority boundary described below. The existing recipient-enrollment
-authorization covers only the current staging preparation and home-only
-enrollment path; it does not authorize delivery access.
+## Current authorization and evidence — September 28, 2026
+
+The owner explicitly approved implementing and testing this separate,
+default-off, audited recipient-to-folder sharing and revocation workflow in
+staging only. The owner also authorized staging migrations and testing. This
+supersedes the earlier pending implementation-authorization checkpoint, not the
+exact authority, review, backup, migration, or acceptance gates below. Production
+rollout and existing public-link changes remain prohibited for this work.
+
+The separate closed command/receipt contract and validation tests are now
+implemented locally. It is not yet an integrated or deployed delivery authority;
+no client file access or successful end-to-end acceptance is claimed. Existing
+home-only enrollment still does not authorize delivery access.
+
+### Local implementation review checkpoint
+
+- Independent review found incompatible native-owner identity, numeric
+  generation, access-term expiry, and expected/resulting revision semantics in
+  the initial parser. Those are corrected, with explicit package exports,
+  native reason-code parity, canonicalized receipts, and no active allows in
+  revoke receipts. An independent focused run passed 27 tests, including
+  package resolution and hostile-object rejection. This is contract evidence,
+  not runtime authority or live access evidence.
+- The staging-only readback helper passed an independent local run of 36 tests,
+  including execution of every bound query against the complete canonical
+  150-migration Operations schema. It has not queried staging or provisioned
+  authority. The artifact records the capture interval and explicitly declares
+  a non-atomic snapshot. Its readiness output is only preflight evidence, not
+  permission to activate an identity or share data; provisioning must recheck
+  the live state. An inactive referenced business area fails readiness.
+  It requires reviewed per-revision generation inputs, rejects uncancelled
+  issued/pending invitations as in-flight work, and labels remote ledger-name
+  checks separately from local SQL hashes. Independent review cleared this
+  helper for read-only staging capture, not provisioning or activation.
+- Remaining implementation includes the audited storage/outbox, exact Client
+  acknowledgement and current-identity data-plane checks, coupled revocation,
+  owner UI, and live staging acceptance. No production rollout is ready.
 
 ## Current boundary and evidence
 
@@ -177,7 +211,8 @@ to the selected workspace. The confirmation must show the exact Client,
 workspace, project, folder, issuer, subject, access duration, and the statement
 that no public link is created.
 
-Likely implementation touch points after separate authorization are:
+Likely implementation touch points under the staging-only authorization
+recorded above are:
 
 - `apps/operations/src/worker/native-delivery-bindings.ts`
 - `apps/operations/src/worker/native-delivery-binding-routes.ts`
@@ -288,9 +323,11 @@ lifecycle.
 
 ## Authorization checkpoint
 
-No implementation should begin from this plan alone. Before editing runtime,
-schema, configuration, or UI, obtain separate user authorization for the exact
-resource-authority contract, migration approach, default-off flags, private
-service binding, signed-session activation behavior, and full-revoke ordering.
-Remote identity reads, migration application, flag activation, and deployment
-remain separately controlled operations.
+No implementation should begin from this plan alone. The owner's separate
+staging-only implementation and testing approval is recorded above. Keep the
+resource-authority contract, additive migration approach, default-off flags,
+private service binding, signed-session activation, and full-revoke ordering
+explicitly reviewed. Obtain fresh private backups and exact schema/source
+readback before staging application; keep live test windows narrowly scoped
+and close them through the governed revoke procedure. Production authorization
+is not included.
