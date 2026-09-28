@@ -1,6 +1,6 @@
 # Recipient enrollment: existing staging lineage review
 
-This is a local design review only. It does not authorize or record a D1 mutation, grant, activation receipt, portal binding, deployment, or production change.
+This records the locally implemented and tested schema-v7/schema-v8 design. It does not prove or authorize a remote D1 mutation, grant, activation receipt, portal binding, deployment, or production change.
 
 ## Observed bounded state
 
@@ -25,13 +25,14 @@ The packet must accept only `reactivate` and must pin:
 
 - the existing global profile grant ID and exact history version `1`;
 - the existing onboarding profile grant ID, exact business-area ID, and exact history version `3`;
+- the exact per-revision `grant_generation` sequence for every preserved or reactivated grant history, taken from sanitized private readback rather than inferred from an aggregate generation;
 - the reviewed staff admission/profile/project-grant versions and generations;
 - one exact reviewed Directory record ID, kind, and current version;
 - absence of every other Directory grant, active grant, pending authority command, and prior packet receipt for this transition.
 
-Provision may reactivate the admission and global profile grant and create the one exact resource-scoped `directory.identity.link` grant. It must leave the onboarding profile row inactive and byte-for-byte equivalent in authority fields; its history count and maximum version must remain `3`. Revocation must deactivate only the global profile and identity-link grants, increment their normal history/generation state, and return admission to inactive. It must again prove that the onboarding row and all three history revisions are unchanged.
+Provision may reactivate the admission and global profile grant and create the one exact resource-scoped `directory.identity.link` grant. It must leave the onboarding profile row inactive and byte-for-byte equivalent in authority fields; its exact immutable history remains version 1 inactive, version 2 active, and version 3 inactive, with each reviewed `grant_generation` unchanged. Revocation must deactivate only the global profile and identity-link grants, increment their normal history/generation state in deterministic explicit order, and return admission to inactive. It must again prove that the onboarding row and all three history revisions are unchanged.
 
-The resulting acquisition state therefore contains exactly three inactive Directory grants: global profile, resource identity-link, and preserved business-area onboarding profile. It is not equivalent to current `v4-acquisition-inactive`, so v6 needs an explicit matching lineage variant. That variant must include the preserved onboarding row in exact row/history counts while activating only a resource-scoped `directory.portal_access.manage` grant. Portal revoke must deactivate only that portal grant and preserve all three prior grants and histories.
+The resulting acquisition state therefore contains exactly three inactive Directory grants: global profile, resource identity-link, and preserved business-area onboarding profile. It is not equivalent to current `v4-acquisition-inactive`, so it requires the isolated schema-v8 purpose `recipient-enrollment-portal-access-preserving-onboarding-profile`, not a broadening of schema v6. Schema v8 includes the preserved onboarding row in exact row/history counts while activating only a resource-scoped `directory.portal_access.manage` grant. Portal revoke deactivates only that portal grant and preserves all three prior grants and histories.
 
 ## Required activation sequence
 
@@ -39,7 +40,7 @@ The resulting acquisition state therefore contains exactly three inactive Direct
 2. Exercise the existing acquisition/review/activation workflow through `project-alpha-existing-directory-acquisition-coordinator.ts` and `project-alpha-existing-directory-binding-review-consumer.ts`. Do not insert an activation receipt directly.
 3. Read back the immutable activation receipt and exact record version.
 4. Revoke the temporary acquisition packet, proving the preserved onboarding lineage remains unchanged.
-5. Generate v6 portal access only against that exact inactive acquisition lineage and exact activation receipt.
+5. Generate schema-v8 portal access only against that exact inactive acquisition lineage and exact activation receipt.
 6. Run recipient enrollment through the mounted owner/recipient workflow. Do not insert a 0103 binding directly.
 
 Acquisition authority, Directory binding activation, portal-access authority, and recipient enrollment remain separate approvals and receipts.
@@ -68,8 +69,8 @@ Abort generation if any count, version, history row, scope, business-area bindin
 - Reject another permission, effect, scope, business area, ID, grant row, active state, missing/non-contiguous history revision, or changed history count.
 - Reject attempts to use existing `v3-profile-only-inactive`, v5 fixture, or ordinary v4 state names for this lineage.
 - Prove only global profile and identity-link histories advance during acquisition; onboarding history never advances.
-- Require the real acquisition/review/activation path and reject zero, wrong-record, wrong-version, wrong-reviewer, duplicate, or forged activation receipts before v6.
-- V6 accepts only the new exact inactive acquisition state, activates only the resource portal grant, and preserves all prior rows/histories through portal revoke.
+- Require the real acquisition/review/activation path and reject zero, wrong-record, wrong-version, wrong-reviewer, duplicate, or forged activation receipts before schema v8.
+- Schema v8 accepts only the new exact inactive acquisition state, activates only the resource portal grant, and preserves all prior rows/histories through portal revoke; schema v6 remains unchanged.
 - Repeated portal access reuses the same portal grant and contiguous history; it creates no parallel grant.
 - Normal acquisition/activation and recipient commands: lost-response/idempotent replay returns the recorded result without repeating a mutation. Packet SQL itself remains one-shot behind its dedicated migration ledger; a raw SQL replay must not repeat its grant mutation.
 - Joined acceptance reaches recipient enrollment without direct 0103 insertion and proves full revoke/reconcile removes home access.

@@ -4,6 +4,29 @@ Updated September 28, 2026. The owner approved implementation and resumption aft
 
 ### Current checkpoint — September 28, 2026
 
+- Published local authority preparation is now at
+  `e703a2fef67e86620bfccc584eaa3f538bc3a2f9`, draft PR133. Exact-head CI
+  `36436173049` finished successfully with all ten jobs passed. This clears
+  the previous fixture failures for this exact head, not live enrollment or
+  production-cutover acceptance.
+  Root reran enrollment ledger plus local joined lifecycle: `8/8`, `47.42s`;
+  source/config regressions: `23/23`, `134ms`; owner/private-handoff tests:
+  `26/26`, `447ms`. The joined fixture is local
+  evidence, not deployed named-binding or live-recipient acceptance.
+  Separate schema-v7 acquisition and schema-v8 portal preparation is locally
+  implemented for the actual inactive onboarding-profile lineage; existing
+  v3–v6 contracts remain unchanged. Root independently ran the complete packet
+  suite on the earlier snapshot: `35/35`, `41.44s`, with matching script/test
+  hashes before and after. Subsequent activation-receipt hardening changed the
+  bytes; independent review then found a repeated-cycle generation-fence
+  regression (`34/35`). The corrected contract pins the independently read
+  activation-receipt generation; implementer and root reruns now pass `35/35`
+  (`55.23s` / `55.83s`) on matching stable source/test hashes. Final independent
+  QA also passed `35/35` (`53.42s`) and cleared selective preparation-only
+  publication. Wrong-reviewer/duplicate/forged activation-receipt and full
+  deployed joined acceptance remain separate open gates. None of these runs is a normal
+  activation receipt or deployed enrollment. Exact private readback remains
+  required. No new packet has been applied remotely.
 - Fixture correction is published to draft PR133 at
   `27d5aa6c07b57a26444156743669d2738331520e`; fresh CI run `36434849309`
   was queued at readback. The two corrected suites passed `34/34` locally and
@@ -61,7 +84,7 @@ Updated September 28, 2026. The owner approved implementation and resumption aft
   The proposed fixed-purpose preservative acquisition/portal transition and
   required readback/tests are in
   `docs/staging/recipient-enrollment-existing-lineage-review.md`; this is a
-  design-only next step, not implemented or applied authority.
+  local preparation, not applied authority or normal live activation evidence.
 - The schema-v6 fixed-purpose authority preparation is local work only. Its
   design preserves inactive profile/identity/Project grants and permits one
   exact-resource `directory.portal_access.manage` allow after normal acquisition.
@@ -81,6 +104,14 @@ Updated September 28, 2026. The owner approved implementation and resumption aft
   create a durable pending audit row without current owner authority. Owner
   confirmation still requires current authority. There is no pending-intent
   cancellation/proof-refresh recovery yet; that gap remains open before launch.
+  A separate read-only recovery review confirmed that expired pending requests
+  grant no access but remain stranded and issued intents disappear from the
+  owner list. The proposed audited cancellation/fresh-issuance workflow and
+  required SQL/HTTP/UI/race tests are recorded in
+  `docs/staging/recipient-enrollment-recovery-review.md`. An additive candidate
+  cancellation marker and owner workflow are being implemented locally;
+  canonical migration inventories remain unchanged during packet review.
+  Independent verification and joined staging recovery acceptance remain open.
 - Website workflow ownership and manual-first, provenance-backed monthly
   reporting are already agreed. The remaining website work is a real resource,
   edit-request lifecycle, and reporting implementation, not a renamed generic

@@ -54,6 +54,47 @@ as an unexpected third row. Supporting that lineage would require a separate
 reviewed contract with its exact business-area identity and history; it is not
 silently tolerated by this packet.
 
+## Confirmed existing-lineage variants
+
+The reviewed staging actor instead has the deterministic global bootstrap
+profile grant at immutable history version 1 and the deterministic
+business-area onboarding profile grant at immutable history version 3. Two
+separate fixed-purpose contracts support only that exact lineage:
+
+- Schema v7, `existing-directory-acquisition-preserving-onboarding-profile`,
+  accepts either the first two-grant state
+  `v7-profile-plus-onboarding-inactive` (global history exactly 1, onboarding
+  history exactly 3, identity absent) or its own repeatable three-grant state
+  `v7-acquisition-plus-onboarding-inactive`. Provision activates only the
+  global profile grant and the exact resource identity-link grant. Revoke
+  deactivates those two. The deterministic onboarding grant ID is derived from
+  the reviewed staff and business-area IDs; its row and all three contiguous
+  immutable history revisions must remain unchanged. Its exact history is
+  version 1 inactive, version 2 active, and version 3 inactive; only the
+  current onboarding grant remains inactive throughout the new phases.
+- Schema v8,
+  `recipient-enrollment-portal-access-preserving-onboarding-profile`, consumes
+  only `v7-acquisition-plus-onboarding-inactive` plus the exact normal-workflow
+  activation receipt. It activates only the deterministic resource-scoped
+  portal-access grant. The global profile, resource identity-link, onboarding
+  profile, and Project grants remain inactive and unchanged.
+
+Use `staging-existing-directory-acquisition-preserving-onboarding-authority.json.example`
+for schema v7 and
+`staging-recipient-enrollment-preserving-onboarding-authority.json.example`
+for schema v8. Their packet IDs produce separate immutable approval/receipt
+lineages. Never substitute these inputs into schema v4 or v6.
+
+The `profileHistoryGenerations`, `onboardingHistoryGenerations`,
+`identityHistoryGenerations`, and (for schema v8) `portalHistoryGenerations`
+arrays are authority provenance, not counters to infer. Each contains the
+exact independently read `grant_generation` for every immutable revision in
+version order. The generator rejects a missing, duplicate, non-increasing,
+extra, or stale generation. The examples deliberately contain invalid readback
+placeholders. Their fixed history-version counts describe only the first
+supported lineage contract, not observed remote provenance; replace every
+placeholder from sanitized private readback before generation.
+
 Copy `staging-recipient-enrollment-authority.json.example` to the ignored
 `.backups/staging-native-authority.json`, replace every placeholder with exact
 independently reviewed readback, and generate both phases with the existing
@@ -85,14 +126,18 @@ it correctly rejects this current state; schema v6 also rejects it and cannot
 run without an exact activation receipt.
 
 Before any authority generation or remote flag window, obtain an independently
-reviewed sanitized readback of the current admission/profile versions,
-Directory generation, and every input required by the next packet. Add a
-separately reviewed, purpose-pinned transition that preserves the confirmed
-inactive onboarding row and its three-row history, or choose a different exact
-eligible synthetic actor. Do not weaken a count predicate, delete or zero the
-durable row/history, or relabel the current state as v3-only authority.
+reviewed sanitized readback of the current admission/profile/project versions,
+Directory generation, business-area ID, exact deterministic grant shapes, and
+every immutable history revision and per-revision grant generation required by
+schema v7. Abort on any mismatch.
+Schema v7 is the purpose-pinned preservative transition for this confirmed
+lineage; it does not authorize deleting, zeroing, relabeling, or activating the
+onboarding grant. Zero activation receipts remains the expected pre-v7 state.
+Schema v8 is unavailable until schema-v7 provision has supported the normal
+acquisition/review/activation workflow and its exact receipt is read back, then
+schema-v7 revoke has restored the exact three-grant inactive state.
 
-After schema-v6 provision, open only the independently reviewed exact-scope
+After the applicable schema-v6 or schema-v8 portal provision, open only the independently reviewed exact-scope
 workspace-binding window within the existing staging-testing authorization.
 From the same authenticated owner session, obtain the owner HTTP CSRF
 token, submit the exact record/activation/workspace/checkpoint tuple to
@@ -105,7 +150,7 @@ recipient bridge and ledger must create the `0103` identity-binding row after a
 verified Access subject redeems the opaque handoff. Never insert or update a
 `client_onboarding_recipient_identity_bindings` row directly.
 
-Before schema-v6 revoke, close the recipient flow normally: no active or
+Before the applicable schema-v6 or schema-v8 portal revoke, close the recipient flow normally: no active or
 revoking intent may remain for the reviewed record; no workspace or authority
 outbox may be pending, retrying, or dispatching; and no Directory or Project
 actor work may remain. Turn off and read back the Client recipient flag, the
