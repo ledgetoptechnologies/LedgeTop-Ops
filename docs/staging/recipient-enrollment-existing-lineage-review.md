@@ -4,6 +4,18 @@ This records the locally implemented and tested schema-v7/schema-v8 design. It d
 
 ## Observed bounded state
 
+September 28 aggregate-only remote revalidation confirmed the two inactive
+profile grants below, zero active native admissions and zero activation
+receipts. A separate history SELECT found exactly four revisions: global
+version 1 at Directory generation 1 inactive; business-area versions 1, 2, 3
+at Directory generations 2, 3, 4 respectively, with inactive/active/inactive
+states. Both readbacks reported zero writes and `changed_db=false`. These
+queries did not capture an identity or independently attest every grant shape,
+admission version, business-area identity, prior approval or receipt needed
+for provisioning. They therefore do not constitute authority to apply a
+packet. The synthetic v5 fixture's enrollment-management grant is a different
+lineage and cannot be substituted for this preserved profile-edit grant.
+
 The reviewed staging owner has two inactive `directory.profile.edit` allow grants:
 
 - the global native-bootstrap grant, with one immutable history revision;

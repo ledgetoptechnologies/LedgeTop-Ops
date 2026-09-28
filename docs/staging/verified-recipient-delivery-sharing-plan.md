@@ -15,13 +15,51 @@ supersedes the earlier pending implementation-authorization checkpoint, not the
 exact authority, review, backup, migration, or acceptance gates below. Production
 rollout and existing public-link changes remain prohibited for this work.
 
-The separate closed command/receipt contract and validation tests are now
-implemented locally. It is not yet an integrated or deployed delivery authority;
+The separate closed command/receipt contract, guarded Client storage, Ops
+outbox, and private staging-only RPC wiring are implemented locally. They are
+not yet a deployed or full-lineage accepted delivery authority;
 no client file access or successful end-to-end acceptance is claimed. Existing
 home-only enrollment still does not authorize delivery access.
 
 ### Local implementation review checkpoint
 
+- Fresh aggregate-only Ops staging readback confirms exactly two inactive
+  `directory.profile.edit` grants (global and business-area), zero activation
+  receipts and zero active native admissions. All queries reported zero writes
+  and `changed_db=false`. This is the preserved onboarding-profile lineage for
+  schema v7/v8, not the synthetic v5 fixture's durable
+  `directory.enrollment.manage` lineage. The latter cannot be relabeled as
+  v4/v6 or v7/v8. Use real reviewed onboarding producers to reproduce the
+  staging lineage before testing its acquisition and portal-access transition.
+  A second read-only history query confirmed global profile history
+  version/generation `1/1` inactive, and business-area profile history
+  `1/2` inactive, `2/3` active, `3/4` inactive. These are observed per-revision
+  generation pins, not inferred from an aggregate generation; no identity was
+  queried or logged and no authority was provisioned.
+- Draft PR 133 now contains feature checkpoint `2703d4b` and the reviewed
+  configuration-invariant correction `4f349b0`. The latter adds explicit
+  assertions that recipient writer/status/dispatch flags remain false and that
+  production has no recipient-authority binding; it does not relax deployment
+  gates. All 116 repository contract tests passed locally. Exact-head CI run
+  `36492752233` finished with nine successful jobs. Operations passed 3,079
+  tests but failed two configuration tests that depended on private ignored
+  staging files absent from CI. Those tests now use committed templates and
+  the real generator's non-secret fixtures: all three corrected tests and Ops
+  typecheck passed locally. A new exact-head CI run is required.
+- The canonical prerequisite test now passes three cases through all
+  151 Ops and 140 Client migrations. A normal UUID organization is written via
+  the real native writer, its primary PA create is acknowledged by the real
+  dispatcher using synthetic PA transport, then reviewed authority artifacts
+  permit secondary PA acquisition and activation via the actual producers.
+  Independent QA found no fabricated positive receipt/history rows or trigger
+  bypass. Activation does not infer portal permission: workspace selection is
+  still denied with no selection row. This is bounded schema/prerequisite
+  evidence, not real-identity verification or recipient/cutover acceptance;
+  exact stored receipt-chain joins also pass. A separate clean v3/v4/v6
+  fixture uses reviewed artifacts and real native/PA acquisition, activation
+  and selection producers to create an inactive workspace-selection receipt.
+  It creates no recipient-delivery command. All three cases passed together;
+  these synthetic lineages do not substitute for actual staging v7/v8 history.
 - Root added and passed six actual workerd named-service RPC tests without
   mocking `cloudflare:workers` or storage. The actual entrypoint module is
   bundled in-test (no prebuilt artifact dependency). Production, missing
@@ -79,9 +117,13 @@ home-only enrollment still does not authorize delivery access.
   issued/pending invitations as in-flight work, and labels remote ledger-name
   checks separately from local SQL hashes. Independent review cleared this
   helper for read-only staging capture, not provisioning or activation.
-- Remaining implementation includes the audited storage/outbox, exact Client
-  acknowledgement and current-identity data-plane checks, coupled revocation,
-  owner UI, and live staging acceptance. No production rollout is ready.
+- The audited storage/outbox, exact Client acknowledgement and current-identity
+  resource checks are implemented and covered by focused local tests, not live
+  acceptance. Remaining integration includes the canonical portal-authority
+  lineage, the reviewed API-v2 directory projection/source-authority adapter,
+  coupled revocation and owner UI acceptance, and live staging verification.
+  Pending authorization-boundary decisions remain prerequisites; no production
+  rollout is ready.
 
 ### Independent enrollment and home-grant pins
 
