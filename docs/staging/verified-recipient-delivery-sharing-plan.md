@@ -23,6 +23,16 @@ home-only enrollment still does not authorize delivery access.
 
 ### Local implementation review checkpoint
 
+- Revocation trace distinguishes initiation from recovery. Client revoke uses
+  exact-head CAS and does not require current publication or an unexpired
+  original verification timestamp. Once Ops commits the revoked head,
+  tombstone and command receipt, dispatch/reconciliation uses that durable
+  chain and keeps retrying despite later publication/authority loss. However,
+  initiating a new Ops revoke still requires the original reviewer's current
+  admission, permission/generation and future verification. Substituting a
+  different reviewer fails Client's immutable owner tuple. This remains an
+  unresolved revoke-initiation boundary, not complete revocation acceptance;
+  changing it requires the separate reviewed approval, not an upsert bypass.
 - Fresh aggregate-only Ops staging readback confirms exactly two inactive
   `directory.profile.edit` grants (global and business-area), zero activation
   receipts and zero active native admissions. All queries reported zero writes
