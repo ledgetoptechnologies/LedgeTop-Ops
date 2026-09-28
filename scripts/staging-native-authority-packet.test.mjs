@@ -813,9 +813,9 @@ test("builds separate one-migration configs with a dedicated ledger and sanitize
   assert.match(artifact.provision.sql, /scope_kind='global'|,'global'/);
   assert.match(artifact.provision.sql, /SELECT count\(\*\) FROM d1_migrations/);
   assert.deepEqual(artifact.provision.manifest.canonicalOperationsLedger, {
-    count: 150,
-    finalMigration: "0150_client_portal_recipient_enrollment_cancellation.sql",
-    chainSha256: "b69b652e46951ba764b281f39ca3ab07263c7a8795d638643a990af9dbbad92a",
+    count: 151,
+    finalMigration: "0151_verified_recipient_delivery_authority_outbox.sql",
+    chainSha256: "c9ca6374a7470a94e7cd3ec9aa047f38a6e841607840f2f8323325013178f9c2",
   });
   assert.deepEqual(artifact.provision.manifest.directoryGrant, {
     id: `staging-directory-profile-edit:${owner.operationsStaffId}`,

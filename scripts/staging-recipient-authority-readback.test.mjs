@@ -149,9 +149,9 @@ test("captures the exact known inactive two-grant lineage as ready without mutat
   assert.deepEqual(artifact.directory.history.map(row => [row.grant_id, row.grant_version, row.grant_generation]), [
     [globalId, 1, 2], [onboardingId, 1, 2], [onboardingId, 2, 3], [onboardingId, 3, 4],
   ]);
-  assert.equal(artifact.source.localCanonicalLedger.finalMigration, "0150_client_portal_recipient_enrollment_cancellation.sql");
+  assert.equal(artifact.source.localCanonicalLedger.finalMigration, "0151_verified_recipient_delivery_authority_outbox.sql");
   assert.equal(artifact.source.localCanonicalLedger.attestsRemoteAppliedSql, false);
-  assert.equal(artifact.checks.migrationLedgerNamesMatch150, true);
+  assert.equal(artifact.checks.migrationLedgerNamesMatchCanonical, true);
   assert.deepEqual(artifact.reviewedHistoryGenerations, reviewedHistoryGenerations);
   assert.equal(calls.length, READBACK_QUERIES.length + 2);
   for (const call of calls) {

@@ -4,6 +4,77 @@ Updated September 28, 2026. The owner approved implementation and resumption aft
 
 ### Current checkpoint — September 28, 2026
 
+- Six actual workerd named-RPC boundary tests now pass without a platform-class
+  shim: exact staging environment/host/flag gating and private HTTP denial are
+  preserved over a real service binding. Client typecheck passes. This is
+  transport evidence only, not positive recipient file access.
+- Current local staging validators pass 104 tests after the checked-in examples
+  were reconciled; both app builds pass. Client enrollment/service-home/scoped
+  delivery regressions pass 49 tests, and bootstrap/authority-packet checks
+  pass 56 with four explicit Windows symlink skips. Positive complete-lineage
+  recipient delivery and live staging acceptance are still not established.
+- The complete canonical prerequisite test now passes governed customer-fixture
+  acquisition using real audited authority artifacts and the native writer,
+  with all 151 Ops/140 Client migration rows present and unauthorized insertion
+  still denied. This is not yet complete selection/home/enrollment/delivery
+  acceptance; the next lineage phases continue locally.
+- Private recipient-delivery RPC wiring is implemented locally, staging-only
+  and default-off. Independent review confirmed no production service binding,
+  no HTTP authority route and no cron dispatcher. Staging generator checks and
+  locked-Wrangler type-generation checks pass; both app typechecks pass. Root
+  reran 33 compatibility/private-RPC tests after restoring npm-locked
+  dependencies. The stricter stage gate exposed four minimal joined fixture
+  failures; corrected staging test identities restored all 12 joined tests
+  without relaxing authorization. Ops joined/config/ledger passed 29/29 and
+  Client boundary/resource suites passed 23/23. Positive governed
+  canonical-lineage and live recipient acceptance remain outstanding. No
+  deployment, new migration apply, access activation or production PA update
+  checkpoint is claimed.
+- Recovered local acceptance now includes 63 passing staging evidence/preflight
+  checks, nine private-RPC boundary tests, 44 consent/service-home tests, Client
+  type-check, and 34 existing public-link compatibility tests. Independent QA
+  also passed the preserving 0150 historical-schema test. The Client resource
+  suite now passes 13 independently rerun Miniflare tests after restrictive
+  immutable-target CAS and full audit correlation fixes. The owner-approved
+  Ops trigger split resolves SQLite expression depth while retaining atomic
+  D1.batch; expired-lease recovery and live-lease tamper tests bring its focused
+  suite to 14 passing tests after receipt-first recovery, independently rerun,
+  with type-check passing. Exact historical Client receipts reconcile before
+  freshness checks; only definitive absence may reach a currently authorized
+  new apply. The minimal joined two-database suite passes 12 tests. Root also
+  passed 97 local release-default/evidence/preflight tests and the complete
+  140/151-chain empty-database, idempotency and foreign-key rehearsal. Bootstrap
+  and authority-packet checks passed 56 tests with four explicit Windows
+  symlink skips and zero failures. Reviewed
+  SQL fingerprints are pinned for local rehearsal; release finalization stays
+  false. No new remote migration or portal resource activation occurred, and no
+  production PA update checkpoint follows from these local tests. See the
+  verified-recipient delivery sharing plan for the unresolved authority and
+  API-first source-freshness gates.
+- After the desktop application crash, workspace access was restored and the
+  original objective was reread. The goal is active again. The isolated portal
+  worktree retains the uncommitted additive 0221/0151 implementation; no pending
+  pre-crash process is assumed live. Root reran the closed command/receipt
+  contract suite after recovery: 33/33 passed. Bounded Client/Ops implementation
+  and independent inventory review continue on smaller 5.6 agents. These local
+  results do not establish production readiness, file access, or permission to
+  enable portal flags. There is no new production PA update checkpoint.
+- Local recipient-delivery contract review found a missing independent home
+  grant pin. The closed command now includes the exact home ownership epoch,
+  grant revision, and grant operation ID, separately from the Operations
+  enrollment intent revision. Root's focused run passed 33 tests and the
+  Operations typecheck passed. The next additive Client/Ops ledgers and durable
+  dispatch are being implemented locally; they are not deployed, and this
+  parser evidence does not establish recipient file access. Current head and
+  receipt joins, data-plane checks, full revocation, owner UI, and live staging
+  acceptance remain required.
+- The isolated Viewer flag PR 134 passed all ten CI jobs and merged to main as
+  `aef94236e88f8c61992a92c4ed40a0ccca0cd2bc`. Deployment failed at the existing
+  incoming-upload Workflow lookup with Cloudflare authentication code `10000`;
+  production readback remains `9a2e6997-c8f0-4e7b-ad7a-7d09fff5b4af`, 100%.
+  The owner was asked to refresh appropriate Wrangler authorization. No
+  production flag enablement or fresh Viewer dialog acceptance is claimed.
+  This does not block independent default-off portal implementation.
 - After exact-head CI, Client build and explicit staging dry run passed, the
   reviewed `ffbd2ed` Client package deployed to `ledgetop-clients-staging` as
   `e35e9fdc-2beb-4a0e-be1b-fa4c372f6cc0`. Newest-deployment readback (sorted by

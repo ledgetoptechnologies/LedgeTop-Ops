@@ -42,10 +42,13 @@ const INACTIVE_WORKSPACE_FLAGS = Object.freeze({
   delivery: Object.freeze([
     "CLIENT_AUTHORITY_WORKSPACE_BINDING_WRITER_ENABLED",
     "CLIENT_AUTHORITY_WORKSPACE_BINDING_STATUS_ENABLED",
+    "CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_WRITER_ENABLED",
+    "CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_STATUS_ENABLED",
   ]),
   operations: Object.freeze([
     "CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ENABLED",
     "CLIENT_AUTHORITY_WORKSPACE_BINDING_OUTBOX_ENABLED",
+    "VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_DISPATCH_ENABLED",
   ]),
 });
 
@@ -60,6 +63,10 @@ function validateSourcePair(sources, productionConfigs) {
   const bridge = sources?.delivery?.services?.find(({ binding }) => binding === "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_BRIDGE");
   if (bridge?.service !== sources?.operations?.name || bridge?.entrypoint !== "ClientPortalRecipientEnrollmentBridge") {
     errors.push("delivery recipient enrollment bridge must target the exact Operations staging Worker and private named entrypoint");
+  }
+  const authority = sources?.operations?.services?.find(({ binding }) => binding === "VERIFIED_RECIPIENT_DELIVERY_AUTHORITY");
+  if (authority?.service !== sources?.delivery?.name || authority?.entrypoint !== "VerifiedRecipientDeliveryAuthorityIngress") {
+    errors.push("operations verified recipient authority must target the exact Client staging Worker and private named entrypoint");
   }
   const audiences = [sources?.delivery?.vars?.POLICY_AUD, sources?.delivery?.vars?.CLIENT_ACCESS_AUD,
     sources?.operations?.vars?.OPERATIONS_AUD];

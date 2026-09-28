@@ -33,6 +33,11 @@ const commandFixture = (overrides: Record<string, unknown> = {}) => ({
     projectSourceVersion: "project-source-v9",
     currentGenerationId: "generation-19",
   },
+  homeAuthority: {
+    ownershipEpoch: 1,
+    grantRevision: 1,
+    grantOperationId: "77777777-7777-4777-8777-777777777777",
+  },
   authority: {
     authorityId: "66666666-6666-4666-8666-666666666666",
     expectedRevision: 0,
@@ -99,6 +104,21 @@ describe("verified recipient delivery authority contract", () => {
     expect(parseVerifiedRecipientDeliveryAuthorityCommand({ ...commandFixture(), action: "revoke" })).toBeNull();
   });
 
+  it("pins home grant lineage independently from the enrollment revision", () => {
+    const command = parsedFixture();
+    expect(command.recipient.enrollmentRevision).toBe(4);
+    expect(command.homeAuthority.grantRevision).toBe(1);
+    const receipt = createVerifiedRecipientDeliveryAuthorityReceipt(command, "recorded");
+    expect(parseVerifiedRecipientDeliveryAuthorityReceipt({
+      ...receipt,
+      command: { ...command, homeAuthority: { ...command.homeAuthority, grantRevision: 4 } },
+    }, command)).toBeNull();
+    expect(parseVerifiedRecipientDeliveryAuthorityReceipt({
+      ...receipt,
+      command: { ...command, homeAuthority: { ...command.homeAuthority, grantOperationId: command.operationId } },
+    }, command)).toBeNull();
+  });
+
   it("creates receipts whose active allows and revoke affected scopes are disjoint", () => {
     const upsert = parsedFixture();
     const upsertReceipt = createVerifiedRecipientDeliveryAuthorityReceipt(upsert, "recorded");
@@ -122,6 +142,7 @@ describe("verified recipient delivery authority contract", () => {
       authority: command.authority,
       resource: command.resource,
       selection: command.selection,
+      homeAuthority: command.homeAuthority,
       recipient: command.recipient,
       operationId: command.operationId,
       action: command.action,
@@ -160,6 +181,11 @@ describe("verified recipient delivery authority contract", () => {
     ["malformed operation UUID", () => ({ ...commandFixture(), operationId: "not-a-uuid" })],
     ["wrong UUID version", () => ({ ...commandFixture(), operationId: "11111111-1111-5111-8111-111111111111" })],
     ["zero enrollment revision", () => ({ ...commandFixture(), recipient: { ...commandFixture().recipient, enrollmentRevision: 0 } })],
+    ["missing independent home pin", () => ({ ...commandFixture(), homeAuthority: undefined })],
+    ["zero home ownership epoch", () => ({ ...commandFixture(), homeAuthority: { ...commandFixture().homeAuthority, ownershipEpoch: 0 } })],
+    ["zero home grant revision", () => ({ ...commandFixture(), homeAuthority: { ...commandFixture().homeAuthority, grantRevision: 0 } })],
+    ["malformed home operation", () => ({ ...commandFixture(), homeAuthority: { ...commandFixture().homeAuthority, grantOperationId: "not-a-uuid" } })],
+    ["extra home authority capability", () => ({ ...commandFixture(), homeAuthority: { ...commandFixture().homeAuthority, permission: "delivery.view" } })],
     ["non-positive generation", () => ({ ...commandFixture(), ownerProof: { ...commandFixture().ownerProof, grantGeneration: 0 } })],
     ["reason punctuation", () => ({ ...commandFixture(), terms: { ...commandFixture().terms, reasonCode: "verified/<recipient>" } })],
     ["reason unicode", () => ({ ...commandFixture(), terms: { ...commandFixture().terms, reasonCode: "verified_recipient_✓" } })],

@@ -22,6 +22,45 @@ home-only enrollment still does not authorize delivery access.
 
 ### Local implementation review checkpoint
 
+- Root added and passed six actual workerd named-service RPC tests without
+  mocking `cloudflare:workers` or storage. The actual entrypoint module is
+  bundled in-test (no prebuilt artifact dependency). Production, missing
+  environment/flags, false flags and wrong-host cases remain disabled without a
+  database; malformed input in the exact enabled staging case is rejected.
+  Named-entrypoint HTTP access remains 404/no-store. Client typecheck passes.
+  This proves transport/default-off boundaries, not a successful resource grant.
+- Latest local wiring checkpoint: the named Client RPC entrypoint is now
+  exported, with a private service binding only in Operations staging configs.
+  Production has no new binding; writer, status and dispatch flags remain false
+  in every configuration. Independent review confirmed exact staging host and
+  environment gates before parsing/storage, HTTP 404, and no cron caller.
+  The staging generator passed five tests and its candidate check; both apps
+  passed locked-Wrangler type-generation checks and TypeScript checks. No
+  remote deployment, migration apply or access activation occurred.
+- After correcting the checked-in staging examples and validator fixtures,
+  root reran all 104 staging preflight/evidence/recipient-window/readback-helper
+  tests successfully. Both local app builds passed. Another 49 Client
+  enrollment/service-home/scoped-delivery tests passed, and the canonical
+  bootstrap/native authority-packet checks passed 56 tests with four explicit
+  Windows symlink skips and no failures. These results do not establish a
+  positive full-lineage recipient grant or live browser acceptance.
+- Both apps' dependencies were restored from their existing npm lockfiles
+  after an incidental pnpm reconciliation; tracked manifests and lockfiles
+  remain unchanged. Root reran 33 public-link/private-RPC tests successfully.
+  The minimal joined rerun initially exposed four fixture failures after the
+  stricter staging gate. Adding the required staging identity to those test
+  environments, without changing the gates, restored all 12 joined tests;
+  Ops joined/config/ledger passed 29/29, and Client boundary/resource suites
+  passed 23/23 on restored npm dependencies. The complete canonical-lineage
+  prerequisite test also passed: all 151 Ops/140 Client migrations are ledgered,
+  ungoverned customer insertion is denied, reviewed v3 provision/revoke and v5
+  fixture provision commit, and the real native fixture writer creates the
+  customer. The earlier v5 rejection was a missing active synthetic business
+  area, not missing onboarding lineage. This establishes governed customer
+  acquisition only, not selection, home/enrollment grants or recipient delivery.
+  Read-only remote migration inventories showed only Ops 0151 and Client 0221
+  pending. The release remains unfinalized; these local results do not create a
+  production PA update checkpoint.
 - Independent review found incompatible native-owner identity, numeric
   generation, access-term expiry, and expected/resulting revision semantics in
   the initial parser. Those are corrected, with explicit package exports,
@@ -43,6 +82,229 @@ home-only enrollment still does not authorize delivery access.
 - Remaining implementation includes the audited storage/outbox, exact Client
   acknowledgement and current-identity data-plane checks, coupled revocation,
   owner UI, and live staging acceptance. No production rollout is ready.
+
+### Independent enrollment and home-grant pins
+
+Code/schema review identified that Operations enrollment intent revisions and
+Client home-grant revisions are distinct counters. The separate command now
+requires `homeAuthority.ownershipEpoch`, `homeAuthority.grantRevision`, and
+`homeAuthority.grantOperationId`; none is inferred from the enrollment revision.
+The producer must pin the intent's acknowledged protocol-v3 home grant receipt.
+The consumer must independently join that exact current home head, audit, and
+receipt, plus the active resource head. The home permission remains a necessary
+enrollment prerequisite, never a file-access permission by itself.
+
+`selection.selectionId` is also the exact Client workspace binding operation ID,
+as proven by the existing Operations selection/outbox/receipt lineage.
+`resource.currentGenerationId` is the Client directory checkpoint's active
+generation ID, not a folder source version or a Project Alpha history epoch.
+These definitions must be checked against actual durable rows by both writers;
+parser success is not evidence of current authorization.
+
+### Storage review and native publication decision
+
+The additive Operations `0151` and Client `0221` implementations are under
+review and are not frozen, applied, or deployed. Focused parser evidence is now
+33 passing tests, with Operations type-check passing; that does not attest the
+new SQL, outbox, or runtime helpers.
+
+The unexported private RPC boundary now has nine passing isolated unit tests
+for default-off behavior, hostile/extra input rejection, exact receipt checking,
+full-command read-only recovery, restrictive revoke receipts, sanitized errors
+and HTTP denial, including hostile thrown-error objects. These tests mock storage; they do not prove D1 writes or live
+authorization. The helper's closed receipt types and D1 session parameters
+have been aligned; root independently verified Client type-check success.
+Neither the ingress nor a service binding has been added to deployed
+configuration. After crash recovery, root reran 33 contract tests, 44
+recipient-consent/service-home tests, nine private-RPC tests, and 63 staging
+evidence/preflight tests successfully; Client type-check also passed. These are local boundary
+tests, not joined resource-storage or live recipient acceptance.
+
+The Client helper's seven earlier Miniflare tests passed, but review found
+unresolved transactional proof, renewal and independent-reviewer revoke
+requirements. The legacy native grant/event dependency and original-reviewer
+revoke restriction remain intact after the safety guard rejected changing
+those boundaries. Explicit owner confirmation was requested; no workaround
+or retry of the rejected changes is authorized by this document. Restrictive
+proof-fence and renewal work continues separately.
+
+The canonical inventories require 140 Client and 151 Operations migrations.
+Reviewed SQL bytes are now pinned for the local complete-chain rehearsal:
+Client `0221` SHA-256 is
+`e497bfc54715248429817a674d8bf68443e69e0da80cbc3935887dac32e6e03f`;
+Ops `0151` SHA-256 is
+`02334ce63836b054370adda21722c629e848074467baf3912156ca53c38732a9`.
+Canonical chain content hashes are respectively
+`ab2727c3d4520f1bb8fc59195b0e74ffd9eeb965eff8fdfa198bbaecbebb13e1` and
+`c9ca6374a7470a94e7cd3ec9aa047f38a6e841607840f2f8323325013178f9c2`.
+Any further SQL edit invalidates this evidence and requires renewed review,
+fingerprints and tests. `RELEASE_CONTRACT_FINALIZED` remains false.
+Older 139/150-migration evidence cannot attest the changed schema.
+No new remote migration, Worker export, service binding or access activation
+is claimed.
+
+### Recovered database acceptance and remaining corrections
+
+- The Client-focused Miniflare suite passed ten tests after transactional
+  create/renewal fences, root-policy and owner-expiry checks, and mutable-proof
+  CAS renewal were added. This includes a real storage-backed private RPC
+  apply/status/replay/drift/revoke round trip; only the platform entrypoint
+  base class is shimmed. It is not a complete-chain or live acceptance run.
+- Independent review then found that a renewal can retain the old immutable
+  head target while recording a command/receipt naming another target. The
+  update currently compares only authority/revision/state; the audit guard
+  correlates only operation/revision/state. Passing those ten tests does not
+  clear this mismatch. Add immutable-target CAS predicates, permanent-folder
+  target guards, complete command-to-head audit correlation, and negative
+  helper/direct-SQL tests before freezing Client migration `0221`.
+- That Client correction is now implemented: renewal compares the complete
+  immutable target, SQL prevents permanent folder/source/project retargeting,
+  and audit JSON plus its Client-record metadata correlate with the post-CAS
+  head. Independent QA reran 13 Miniflare tests successfully, including
+  mismatched-target and forged-audit atomic rollback. This supersedes the
+  specific target/correlation gap above, not the separate pending legacy
+  publication and independent-revoker boundaries or full-chain/live gates.
+- The Ops-focused atomic enqueue suite currently fails four of six tests with
+  SQLite's expression-depth error. The owner separately approved splitting
+  oversized `0151` authorization triggers into smaller independently enforced
+  guards, preserving every predicate and the atomic `D1.batch` transaction.
+  This permits that structural fix only; it does not authorize sequential
+  production writes, weakened guards, or the other pending Client boundaries.
+- The approved structural split subsequently passed eight Ops Miniflare tests
+  and type-check, with independent review confirming exact receipt scopes,
+  deny-first revoke retries, and the enrollment drain fence. Root then found an
+  uncovered lease-recovery contradiction: a same-state control guard rejects
+  the expired `dispatching` claim replacement that dispatch explicitly supports.
+  The narrow expired-lease correction subsequently passed ten focused Ops
+  Miniflare tests and type-check: a reclaim requires an expired prior lease,
+  a new token, a future deadline and exactly one attempt increment, preserving
+  acknowledgement/error/schedule fields. Live-lease tampering remains denied.
+  Independent review then found that dispatch checks freshness before reading
+  an exact historical Client receipt. A lost response followed by proof expiry
+  can therefore dead-letter an already committed write. Receipt-first recovery
+  is now corrected and independently reviewed: exact historical receipts may
+  acknowledge; definitive `not_found` still gates fresh proof before new apply;
+  unavailable, malformed or mismatched status retries without apply. The Ops
+  suite passed 14 tests, independently rerun, and type-check passed.
+- Minimal synthetic joined protocol acceptance passed 12 tests using two real
+  Miniflare D1 databases, actual `0151`/`0221`, real Ops enqueue/dispatch and
+  Client apply/status helpers. Only the platform entrypoint base is shimmed.
+  Exact receipts, replay, lost responses, stale-proof historical recovery,
+  revoke acknowledgment/drain and wrong-recipient/folder denial are covered.
+  These reduced fixtures are not a populated canonical-schema or live test.
+- Root's complete local migration rehearsal passed: both reviewed 140/151
+  chains apply to empty databases, repeat idempotently and satisfy foreign-key
+  checks. Root's separate release-default/evidence/preflight run passed 97 tests.
+  A stale packet test expectation of 150 migrations was corrected to 151;
+  the full bootstrap/authority-packet rerun passed 56 tests with four Windows
+  symlink-creation cases explicitly skipped (`EPERM`), zero failures. This
+  does not attest those skipped cases. No guard was removed.
+- Live staging, populated canonical workflow acceptance, data-plane activation,
+  UI and remaining authority/source-freshness decisions are still required.
+  No resource path is active because of these local results.
+
+- Permit multiple independently reviewed folders under a workspace selection,
+  but at most one active resource authority per recipient binding and folder.
+  A selection-global unique constraint is incorrect, as is allowing a second
+  active authority to survive a single-folder revoke. Preserve revoked history.
+- Store the selected Operations Client record ID in immutable Client authority
+  evidence even though Client cannot independently resolve that Directory
+  record. Revoke and status correlation must preserve the exact target.
+- Command-to-head and head-to-receipt database guards must compare the complete
+  immutable target, home-grant pins, resource proof, terms, revisions, and
+  capability/scope names—not only a proof hash or JSON array length.
+- An exact immutable receipt replay precedes freshness checks. A new allow
+  requires a current owner proof. A committed restrictive revoke may finish
+  after the original review expires, using the exact active head and trusted
+  private ingress. A new revoking reviewer need not be the creating reviewer;
+  creation evidence stays immutable and the revoke actor is separately audited.
+- For a secondary/native folder, the new exact resource authority is the
+  explicit recipient-publication decision. Validate its immutable native
+  routing, active source authority and active revision, current workspace,
+  folder, project/source version and directory generation, plus Operations'
+  current resource-scoped share permissions. Do not depend on any old
+  `portal_native_staff_grants` recipient or published event. Such a grant is
+  PA-principal-specific and cannot supply authority for this new recipient.
+- Completing a full enrollment revoke requires exact Client acknowledgments
+  for every resource revoke, not just revoked Operations heads or queued work.
+  Report pending reconciliation honestly until those acknowledgments exist.
+
+The new canonical migrations also require updated complete-chain inventory
+counts, names/content digests, fixtures and readback gates after SQL freeze.
+The earlier 150-migration staging readback does not attest migration `0151`.
+
+### Data-plane integration gate
+
+Control-plane storage does not grant file access. Add a separate exact
+signed-session activation POST outside the legacy PA-backed router's accepted
+identity middleware, following the existing independently mounted enrollment
+and service-home routes. Do not add a blanket exception to legacy portal routes:
+this separate route must verify its own signed principal and exact current
+resource authority before materializing any access. Derive issuer,
+subject and verified email from that same signed principal; do not search by
+email. GET status remains read-only.
+
+Keep existing claimed-workspace fences intact for all legacy and PA-derived
+paths. A parallel verified-recipient resolver must require the current exact
+home head and receipt, active resource head, identity and membership, current
+denies, folder/source generation, publication authority and access terms.
+Workspace lists must include claimed workspaces only through that resolver.
+File listing, metadata, preview and download must repeat the live resource
+proof, including immediately before R2 access. Stale derived membership or
+entitlement rows alone never authorize. Directory hierarchy, service requests,
+feedback, team management, delegated shares and Viewer remain separately
+gated; the two minimum delivery capabilities do not enable those features.
+
+### API-first source freshness and retirement gate
+
+Source inspection confirms that the existing secondary availability metadata
+in `pa_portal_source_authorities` and its revision table was provisioned for the
+old connector-purpose portal projection. The new verified-recipient writer
+does not read HMAC credentials or create a PA principal, but validating these
+existing rows is not proof that the API-first projection replacement is ready.
+Migration `0214` defines a dormant staging catalog with explicit source instance,
+application and history-epoch identities; that catalog alone is not an active
+directory/project projection writer.
+
+Current code review confirms the narrower scope: the Operations
+`stageConfiguredProjectAlphaCatalogSnapshot` coordinator reads generic catalog
+inventory, and Client `promoteOpsInventoryCatalogSnapshot` promotes it into
+`pa_service_catalog_*` rows. Neither function replaces the workspace directory
+generation writer or `pa_portal_source_authorities` availability producer.
+Reusing catalog readiness as a substitute for that replacement would leave
+the old custom integration dependency in the requested final architecture.
+
+The existing projection writer's storage logic is reusable, but its producer
+authorization is not an API-first proof. In
+`project-alpha-portal-authority.ts`, primary writes are fenced by reserved HMAC
+key fingerprints; secondary writes are fenced by connector revision/version.
+The replacement must provide a separately reviewed Operations-owned source
+proof, pinning the selected API source instance, application and history epoch
+plus current explicit workspace ownership. Do not manufacture a signing-key
+proof from an API token or leave the old connector permanently enrolled merely
+to satisfy those fences. Preserve transactional generation/checkpoint and
+entity invariants when introducing the new proof path.
+
+Generic API inventory is paginated observation, not an automatically atomic
+snapshot. The adapter must bound page/profile reads, pin authorization
+generation and source identity across them, verify each project's revision and
+projection hash, and refuse incomplete, stale or mixed-identity activation.
+Promote only an explicitly selected workspace/root and mapped projects; do
+not infer workspace ownership, membership or portal sharing from the inventory.
+Record replay/CAS lineage and test source suspension, epoch/application change,
+partial pages and races before retiring either old producer.
+
+Before coordinated production authority cutover and legacy retirement, verify
+that current Client directory/project generations and availability are driven
+by the generic API-first source identity and current Operations ownership.
+Preserve explicit existing workspace/folder mappings and historical receipts;
+do not infer identity or ownership from names, email, source labels or old
+signing keys. Do not retire the producer and merely leave an indefinitely stale
+projection as the permanent replacement. Retain public-link behavior without
+restoring legacy enrollment authority. Source suspension, history-epoch change,
+new API application identity and generation drift need acceptance coverage on
+both business instances. Until this is verified, recipient-sharing tests prove
+only that separate workflow, not complete removal of custom integration.
 
 ## Current boundary and evidence
 
@@ -176,7 +438,8 @@ PA-principal foreign keys in migration 0137. Its active read proof must bind:
 - issuer, subject, Client identity ID, and native workspace membership;
 - exact folder binding and source version;
 - grant version, state, access terms, and expiry;
-- current native staff publication/binding receipt; and
+- exact primary binding receipt or the separate native recipient-publication
+  authority described above; and
 - the current source/workspace authority and applicable deny state.
 
 The Client projection may use existing `portal_v2_identities`,
@@ -233,8 +496,9 @@ recorded above are:
 - `apps/client/src/client/OperationsHomeApp.tsx`
 
 Once activation produces the exact workspace and folder authority, the current
-native Deliveries UI, file metadata, preview/download, and Viewer routes should
-remain unchanged.
+native Deliveries UI can be reused. File metadata, preview and download must
+use the new parallel live-authority resolver. Viewer access requires its own
+explicit authorization and is not implied by these delivery grants.
 
 ## Full-revoke coupling
 

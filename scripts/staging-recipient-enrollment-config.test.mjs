@@ -89,6 +89,7 @@ function productionFrom(staging) {
   production.r2_buckets = production.r2_buckets.map((item) => ({ ...item, bucket_name: `prod-${item.bucket_name}` }));
   production.workflows = production.workflows.map((item) => ({ ...item, name: `prod-${item.name}` }));
   production.services = production.services.map((item) => ({ ...item, service: item.service.replace("-staging", "") }));
+  production.services = production.services.filter((item) => item.binding !== "VERIFIED_RECIPIENT_DELIVERY_AUTHORITY");
   production.ratelimits = production.ratelimits.map((item) => ({ ...item, namespace_id: `prod-${item.namespace_id}` }));
   if (production.queues) {
     production.queues.consumers = production.queues.consumers.map((item) => ({ ...item, queue: `prod-${item.queue}` }));
@@ -131,6 +132,9 @@ test("builds only the explicit joined recipient-enrollment activation window", (
   assert.equal(candidates.operations.vars.CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ENABLED, "false");
   assert.equal(candidates.operations.vars.CLIENT_AUTHORITY_WORKSPACE_BINDING_OUTBOX_ENABLED, "false");
   assert.equal(candidates.operations.vars.CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ORIGIN, "");
+  assert.equal(candidates.delivery.vars.CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_WRITER_ENABLED, "false");
+  assert.equal(candidates.delivery.vars.CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_STATUS_ENABLED, "false");
+  assert.equal(candidates.operations.vars.VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_DISPATCH_ENABLED, "false");
   assert.equal(Object.hasOwn(candidates.delivery.vars, "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_CSRF_SECRET"), false);
 });
 

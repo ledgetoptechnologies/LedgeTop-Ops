@@ -8,7 +8,7 @@ type SchemaObject = {type:string;name:string;tbl_name:string;sql:string|null};
 
 // Candidate compatibility only: this does not promote a migration or prove a
 // positive enrollment/cancellation workflow against production records.
-describe("cancellation candidate after the complete canonical migration chain", () => {
+describe("0150 cancellation preserves history after all prior canonical migrations", () => {
   let runtime: Miniflare;
   let db: Awaited<ReturnType<Miniflare["getD1Database"]>>;
   const candidate = readFileSync(new URL("../migrations/0150_client_portal_recipient_enrollment_cancellation.sql", import.meta.url), "utf8");
@@ -27,9 +27,13 @@ describe("cancellation candidate after the complete canonical migration chain", 
     db = await runtime.getD1Database("DB");
     const directory = new URL("../migrations/", import.meta.url);
     const names = readdirSync(fileURLToPath(directory)).filter(name => /^\d{4}_.+\.sql$/.test(name)).sort();
-    expect(names).toHaveLength(150);
-    expect(names.at(-1)).toBe("0150_client_portal_recipient_enrollment_cancellation.sql");
-    const statements = names.slice(0, -1).flatMap(name => splitD1MigrationStatements(readFileSync(new URL(name, directory), "utf8")));
+    expect(names).toHaveLength(151);
+    expect(names.at(-1)).toBe("0151_verified_recipient_delivery_authority_outbox.sql");
+    const candidateIndex = names.indexOf("0150_client_portal_recipient_enrollment_cancellation.sql");
+    expect(candidateIndex).toBe(149);
+    // Exercise 0150 at its real position, not whichever migration is newest.
+    // The separate full-chain rehearsal includes subsequent migrations.
+    const statements = names.slice(0, candidateIndex).flatMap(name => splitD1MigrationStatements(readFileSync(new URL(name, directory), "utf8")));
     for (let offset = 0; offset < statements.length; offset += 100) {
       await db.batch(statements.slice(offset, offset + 100).map(sql => db.prepare(sql)));
     }

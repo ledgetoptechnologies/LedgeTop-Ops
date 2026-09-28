@@ -13,6 +13,7 @@ export { OpsInventoryCatalogPromotionCoordinator } from "./ops-inventory-catalog
 export { OpsPortalAccessAuthorityIngress } from "./ops-portal-access-authority";
 export { ClientAuthorityWorkspaceBindingIngress } from "./client-authority-workspace-binding-entrypoint";
 export { ClientPortalAuthorityV2Ingress } from "./client-portal-authority-v2-entrypoint";
+export { VerifiedRecipientDeliveryAuthorityIngress } from "./verified-recipient-delivery-authority-entrypoint";
 import { friendlyBulkFailure } from "./bulk-download-errors";
 import type { Env, ShareRow } from "./types";
 export { BulkDownloadWorkflow } from "./workflow";

@@ -223,8 +223,8 @@ function fixture(base) {
         schemaVersion: 2, mode: "generated-empty-d1", canonicalMigrationsUnchanged: true,
         ownerEmailSha256: "e".repeat(64), generatedAt: "2026-07-30T12:00:00Z", generatorEvidenceRef: "ticket:migrations:fresh-bootstrap:generator",
         applications: {
-          delivery: { configPath: "apps/client/wrangler.staging.bootstrap.json", manifestPath: "apps/client/.staging-bootstrap/manifest.json", transformedFiles: ["0002_seed_initial_staff.sql"], ledgerCount: 139, finalMigration: "0220_operations_portal_authority_v3_permissions.sql", sourceSeedSha256: "1".repeat(64), generatedSeedSha256: "2".repeat(64), databaseWasEmpty: true, generatedChainVerified: true, appliedWithBootstrapConfig: true, appliedExactlyOnce: true, singleSyntheticOwnerVerified: true, canonicalHumanRowsAbsent: true, ownerRoleVerified: true, ledgerMatchesGeneratedChain: true, both0199FilenamesExactlyOnce: true, secondListEmpty: true, idempotentReapplyPassed: true, foreignKeyCheckPassed: true, evidenceRef: "ticket:migrations:fresh-bootstrap:delivery" },
-          operations: { configPath: "apps/operations/wrangler.staging.bootstrap.json", manifestPath: "apps/operations/.staging-bootstrap/manifest.json", transformedFiles: ["0002_seed_acl.sql"], ledgerCount: 150, finalMigration: "0150_client_portal_recipient_enrollment_cancellation.sql", sourceSeedSha256: "3".repeat(64), generatedSeedSha256: "4".repeat(64), databaseWasEmpty: true, generatedChainVerified: true, appliedWithBootstrapConfig: true, appliedExactlyOnce: true, singleSyntheticOwnerVerified: true, canonicalHumanRowsAbsent: true, ownerRoleVerified: true, ledgerMatchesGeneratedChain: true, portableCatalogSeedVerified: true, secondListEmpty: true, idempotentReapplyPassed: true, foreignKeyCheckPassed: true, evidenceRef: "ticket:migrations:fresh-bootstrap:operations" },
+          delivery: { configPath: "apps/client/wrangler.staging.bootstrap.json", manifestPath: "apps/client/.staging-bootstrap/manifest.json", transformedFiles: ["0002_seed_initial_staff.sql"], ledgerCount: 140, finalMigration: "0221_verified_recipient_delivery_authority.sql", sourceSeedSha256: "1".repeat(64), generatedSeedSha256: "2".repeat(64), databaseWasEmpty: true, generatedChainVerified: true, appliedWithBootstrapConfig: true, appliedExactlyOnce: true, singleSyntheticOwnerVerified: true, canonicalHumanRowsAbsent: true, ownerRoleVerified: true, ledgerMatchesGeneratedChain: true, both0199FilenamesExactlyOnce: true, secondListEmpty: true, idempotentReapplyPassed: true, foreignKeyCheckPassed: true, evidenceRef: "ticket:migrations:fresh-bootstrap:delivery" },
+          operations: { configPath: "apps/operations/wrangler.staging.bootstrap.json", manifestPath: "apps/operations/.staging-bootstrap/manifest.json", transformedFiles: ["0002_seed_acl.sql"], ledgerCount: 151, finalMigration: "0151_verified_recipient_delivery_authority_outbox.sql", sourceSeedSha256: "3".repeat(64), generatedSeedSha256: "4".repeat(64), databaseWasEmpty: true, generatedChainVerified: true, appliedWithBootstrapConfig: true, appliedExactlyOnce: true, singleSyntheticOwnerVerified: true, canonicalHumanRowsAbsent: true, ownerRoleVerified: true, ledgerMatchesGeneratedChain: true, portableCatalogSeedVerified: true, secondListEmpty: true, idempotentReapplyPassed: true, foreignKeyCheckPassed: true, evidenceRef: "ticket:migrations:fresh-bootstrap:operations" },
         },
       },
       delivery: { expected: [...REQUIRED_STAGING_MIGRATIONS.delivery], appliedToStaging: true, listEvidenceRef: "ticket:migrations:delivery:list", applyEvidenceRef: "ticket:migrations:delivery:apply", secondListEmpty: true, foreignKeyCheckPassed: true, idempotentReapplyPassed: true, videoRecoveryCompleted: true, videoRowsPendingForTrueNas: true, legacyBridgeAcceptanceMatrixPassed: true, serviceAssignmentV2ExpandApplied: true, serviceAssignmentCompatibleWriterVersionId: "delivery-staging-compatible-writer-version", serviceAssignmentOldWritersDrained: true, serviceAssignmentContractMigrationsApplied: true, serviceAssignmentBarrierEvidenceRef: "ticket:migrations:delivery:service-assignment-barrier", nativePortalMigrationsAppliedBeforeFinalWorkers: true, nativePortalCapabilitiesDefaultOffAtDeploy: true, nativePortalRollbackDrainReviewed: true, nativePortalReleaseEvidenceRef: "ticket:migrations:native-portal-release", authenticatedContentMigrationAppliedBeforeFinalWorkers: true, authenticatedContentCollectionNotStarted: true, authenticatedContentRetentionGateClosed: true, authenticatedContentSecretProvisioned: true, authenticatedContentDefaultOffAtDeploy: true, authenticatedContentReleaseEvidenceRef: "ticket:migrations:authenticated-content-release", verifiedAt: "2026-07-30T12:00:00Z", verificationEvidenceRef: "ticket:migrations:delivery:verify" },
@@ -437,8 +437,8 @@ test("historical schema-version-1 bootstrap proof cannot satisfy the current rel
 test("current bootstrap evidence contract matches the canonical generator and migration tails", () => {
   const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   for (const [app, source, finalMigration] of [
-    ["delivery", "client", "0220_operations_portal_authority_v3_permissions.sql"],
-    ["operations", "operations", "0150_client_portal_recipient_enrollment_cancellation.sql"],
+    ["delivery", "client", "0221_verified_recipient_delivery_authority.sql"],
+    ["operations", "operations", "0151_verified_recipient_delivery_authority_outbox.sql"],
   ]) {
     const names = fs.readdirSync(path.join(repository, "apps", source, "migrations"))
       .filter(name => name.endsWith(".sql")).sort();
@@ -728,9 +728,9 @@ test("checked-in evidence example stays complete as migrations, flags, gates, an
   assert.deepEqual(example.migrations.freshBootstrap.applications.delivery.transformedFiles, ["0002_seed_initial_staff.sql"]);
   assert.deepEqual(example.migrations.freshBootstrap.applications.operations.transformedFiles, ["0002_seed_acl.sql"]);
   assert.equal(example.migrations.freshBootstrap.applications.delivery.ledgerCount, BOOTSTRAP_APPS.delivery.migrationCount);
-  assert.equal(example.migrations.freshBootstrap.applications.delivery.finalMigration, "0220_operations_portal_authority_v3_permissions.sql");
+  assert.equal(example.migrations.freshBootstrap.applications.delivery.finalMigration, "0221_verified_recipient_delivery_authority.sql");
   assert.equal(example.migrations.freshBootstrap.applications.operations.ledgerCount, BOOTSTRAP_APPS.operations.migrationCount);
-  assert.equal(example.migrations.freshBootstrap.applications.operations.finalMigration, "0150_client_portal_recipient_enrollment_cancellation.sql");
+  assert.equal(example.migrations.freshBootstrap.applications.operations.finalMigration, "0151_verified_recipient_delivery_authority_outbox.sql");
   for (const app of ["delivery", "operations"]) {
     const proof = example.migrations.freshBootstrap.applications[app];
     assert.equal(proof.targetKind, "disposable-staging-d1");
@@ -765,12 +765,13 @@ test("checked-in evidence example stays complete as migrations, flags, gates, an
     "0148_client_portal_recipient_enrollment.sql",
     "0149_client_portal_recipient_enrollment_sql_fences.sql",
     "0150_client_portal_recipient_enrollment_cancellation.sql",
+    "0151_verified_recipient_delivery_authority_outbox.sql",
   ]);
   assert.deepEqual(
-    fs.readdirSync(path.join(root, "apps", "operations", "migrations")).filter((name) => REQUIRED_STAGING_MIGRATIONS.operations.includes(name)).sort().slice(-69),
-    REQUIRED_STAGING_MIGRATIONS.operations.slice(-69),
+    fs.readdirSync(path.join(root, "apps", "operations", "migrations")).filter((name) => REQUIRED_STAGING_MIGRATIONS.operations.includes(name)).sort().slice(-70),
+    REQUIRED_STAGING_MIGRATIONS.operations.slice(-70),
   );
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-35), [
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-36), [
     "0187_authenticated_content_audit.sql",
     "0188_native_feedback_completion_notices.sql",
     "0189_primary_staff_folder_bindings.sql",
@@ -806,6 +807,7 @@ test("checked-in evidence example stays complete as migrations, flags, gates, an
     "0218_client_authority_workspace_binding.sql",
     "0219_operations_portal_authority_v2.sql",
     "0220_operations_portal_authority_v3_permissions.sql",
+    "0221_verified_recipient_delivery_authority.sql",
   ]);
   for (const app of ["delivery", "operations", "ops-sync"]) assert.deepEqual(new Set(example.deployments[app].disabledFeatureFlags), new Set(REQUIRED_DISABLED_FEATURE_FLAGS[app]), `deployments.${app}.disabledFeatureFlags`);
   assert.deepEqual(new Set(Object.keys(example.externalGates)), new Set(REQUIRED_EXTERNAL_GATES));
@@ -871,7 +873,7 @@ test("migration reapply evidence uses Wrangler's ledger instead of replaying raw
   }
 });
 
-test("pins both Client 0199 filenames and the ordered 0200-0220 migration suffix in the release contract", () => {
+test("pins both Client 0199 filenames and the ordered 0200-0221 migration suffix in the release contract", () => {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const suffix = [
     "0200_native_feedback_workspace_history.sql",
@@ -895,6 +897,7 @@ test("pins both Client 0199 filenames and the ordered 0200-0220 migration suffix
     "0218_client_authority_workspace_binding.sql",
     "0219_operations_portal_authority_v2.sql",
     "0220_operations_portal_authority_v3_permissions.sql",
+    "0221_verified_recipient_delivery_authority.sql",
   ];
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-suffix.length), suffix);
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.filter((name) => name.startsWith("0199_")), [

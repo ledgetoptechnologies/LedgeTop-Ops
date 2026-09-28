@@ -347,8 +347,8 @@ describe("portal workspace selection full migration order",()=>{
       const database=await runtime.getD1Database("OPS_DB") as unknown as D1Database;
       const directory=new URL("../migrations/",import.meta.url);
       const names=readdirSync(directory).filter(name=>/^\d{4}_.+\.sql$/.test(name)).sort();
-      expect(names).toHaveLength(150);
-      expect(names.at(-1)).toBe("0150_client_portal_recipient_enrollment_cancellation.sql");
+      expect(names).toHaveLength(151);
+      expect(names.at(-1)).toBe("0151_verified_recipient_delivery_authority_outbox.sql");
       for(const name of names){
         const statements=splitD1MigrationStatements(readFileSync(new URL(name,directory),"utf8"));
         await database.batch(statements.map(statement=>database.prepare(statement)));

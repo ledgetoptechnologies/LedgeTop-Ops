@@ -13,7 +13,7 @@ const EXPECTED_DATABASE_ID = "78b34173-b168-4e3d-9832-bb9d245cc6b8";
 const EXPECTED_DATABASE_NAME = "ltds-ops-staging";
 const EXPECTED_WORKER_NAME = "ledgetop-ops-staging";
 const EXPECTED_BINDING = "OPS_DB";
-const EXPECTED_FINAL_MIGRATION = "0150_client_portal_recipient_enrollment_cancellation.sql";
+const EXPECTED_FINAL_MIGRATION = "0151_verified_recipient_delivery_authority_outbox.sql";
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,190}$/;
 const SYNTHETIC_RECORD_ID = /^staging-[a-z0-9](?:[a-z0-9:._-]{0,182}[a-z0-9])?$/;
 const OUTPUT_NAME = /^recipient-authority-readback-\d{8}T\d{6}Z-[a-z0-9]{6,32}\.json$/;
@@ -274,7 +274,7 @@ function evaluateReadiness(data, selection, canonicalNames, expectations) {
     "pendingWorkspaceOutbox", "pendingAuthorityOutbox", "nonterminalRecipientIntents"];
   const historyGenerations = data.directoryHistory.map(row => row.grant_generation);
   const checks = {
-    migrationLedgerNamesMatch150: data.migrationLedger.length === canonicalNames.length
+    migrationLedgerNamesMatchCanonical: data.migrationLedger.length === canonicalNames.length
       && data.migrationLedger.every((row, index) => row.name === canonicalNames[index]),
     currentOwner: actor?.id === selection.staffId && actor.status === "active"
       && data.roles.some(row => row.role_id === "role-owner" && row.scope === "global")

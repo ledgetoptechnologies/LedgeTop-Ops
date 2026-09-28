@@ -43,10 +43,19 @@ export type VerifiedRecipientDeliveryAuthorityCommand = Readonly<{
     subject: string;
   }>;
   selection: Readonly<{
+    /** Exact Operations selection ID, also the acknowledged Client workspace
+     * binding operation ID. The producer must verify that receipt lineage. */
     selectionId: string;
     clientAuthorityId: string;
     clientRecordId: string;
     workspaceId: string;
+  }>;
+  /** Pin the independently stored home grant, not the unrelated enrollment
+   * intent revision. This prerequisite alone never authorizes file access. */
+  homeAuthority: Readonly<{
+    ownershipEpoch: number;
+    grantRevision: number;
+    grantOperationId: string;
   }>;
   resource: Readonly<{
     folderBindingId: string;
@@ -54,6 +63,8 @@ export type VerifiedRecipientDeliveryAuthorityCommand = Readonly<{
     sourceId: string;
     projectPublicId: string;
     projectSourceVersion: string;
+    /** Client portal_v2_directory_checkpoints.active_generation_id, not a
+     * folder source version, PA history epoch, or projection sequence. */
     currentGenerationId: string;
   }>;
   authority: Readonly<{
@@ -85,9 +96,10 @@ export type VerifiedRecipientDeliveryAuthorityReceipt = Readonly<{
   affectedScopes: readonly VerifiedRecipientDeliveryCapability[];
 }>;
 
-const COMMAND_KEYS = ["protocol", "protocolVersion", "action", "operationId", "recipient", "selection", "resource", "authority", "terms", "ownerProof"] as const;
+const COMMAND_KEYS = ["protocol", "protocolVersion", "action", "operationId", "recipient", "selection", "homeAuthority", "resource", "authority", "terms", "ownerProof"] as const;
 const RECIPIENT_KEYS = ["recipientBindingId", "enrollmentIntentId", "enrollmentRevision", "issuer", "subject"] as const;
 const SELECTION_KEYS = ["selectionId", "clientAuthorityId", "clientRecordId", "workspaceId"] as const;
+const HOME_AUTHORITY_KEYS = ["ownershipEpoch", "grantRevision", "grantOperationId"] as const;
 const RESOURCE_KEYS = ["folderBindingId", "folderBindingSourceVersion", "sourceId", "projectPublicId", "projectSourceVersion", "currentGenerationId"] as const;
 const AUTHORITY_KEYS = ["authorityId", "expectedRevision", "resultingRevision"] as const;
 const TERMS_KEYS = ["reasonCode", "expiresAt", "accessTerms"] as const;
@@ -183,6 +195,10 @@ function parseCommandInternal(value: unknown): VerifiedRecipientDeliveryAuthorit
   const clientAuthorityId = selectionRecord && uuidV4(selectionRecord.clientAuthorityId);
   const clientRecordId = selectionRecord && opaqueId(selectionRecord.clientRecordId);
   const workspaceId = selectionRecord && opaqueId(selectionRecord.workspaceId);
+  const homeRecord = exactObject(record.homeAuthority, HOME_AUTHORITY_KEYS);
+  const ownershipEpoch = homeRecord && positiveRevision(homeRecord.ownershipEpoch);
+  const grantRevision = homeRecord && positiveRevision(homeRecord.grantRevision);
+  const grantOperationId = homeRecord && uuidV4(homeRecord.grantOperationId);
   const resourceRecord = exactObject(record.resource, RESOURCE_KEYS);
   const folderBindingId = resourceRecord && opaqueId(resourceRecord.folderBindingId);
   const folderBindingSourceVersion = resourceRecord && opaqueId(resourceRecord.folderBindingSourceVersion, 128);
@@ -199,6 +215,7 @@ function parseCommandInternal(value: unknown): VerifiedRecipientDeliveryAuthorit
   const expiresAt = termsRecord && nullableCanonicalTime(termsRecord.expiresAt);
   const accessTerms = termsRecord && parseAccessTerms(termsRecord.accessTerms);
   const ownerProof = parseOwnerProof(record.ownerProof);
+  if (ownershipEpoch === null || grantRevision === null || !grantOperationId) return null;
   if (!operationId || !recipientBindingId || !enrollmentIntentId || enrollmentRevision === null || !issuer || !subject || !selectionId || !clientAuthorityId || !clientRecordId || !workspaceId || !folderBindingId || !folderBindingSourceVersion || !sourceId || !projectPublicId || !projectSourceVersion || !currentGenerationId || !authorityId || expected === null || resulting === null || resulting !== expected + 1 || (action === "revoke" && expected < 1) || !reasonCodeValue || expiresAt === undefined || !accessTerms || accessTerms.effectiveExpiresAt !== expiresAt || !ownerProof) return null;
   return Object.freeze({
     protocol: VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_PROTOCOL,
@@ -207,6 +224,7 @@ function parseCommandInternal(value: unknown): VerifiedRecipientDeliveryAuthorit
     operationId,
     recipient: Object.freeze({ recipientBindingId, enrollmentIntentId, enrollmentRevision, issuer, subject }),
     selection: Object.freeze({ selectionId, clientAuthorityId, clientRecordId, workspaceId }),
+    homeAuthority: Object.freeze({ ownershipEpoch, grantRevision, grantOperationId }),
     resource: Object.freeze({ folderBindingId, folderBindingSourceVersion, sourceId, projectPublicId, projectSourceVersion, currentGenerationId }),
     authority: Object.freeze({ authorityId, expectedRevision: expected, resultingRevision: resulting }),
     terms: Object.freeze({ reasonCode: reasonCodeValue, expiresAt, accessTerms }),
