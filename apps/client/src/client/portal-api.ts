@@ -136,6 +136,8 @@ export interface PortalServiceRequest {
   } | null;
   /** A current Project Alpha draft exists; no commercial artifact is exposed. */
   projectAlphaDraftCreated?: boolean;
+  submittedServices?: PortalSubmittedServiceReview[];
+  submittedServiceDetailsAvailable?: boolean;
   acceptedQuote?: PortalAcceptedQuote | null;
   operationalEstimate?: PortalOperationalEstimate | null;
   status: PortalServiceRequestStatus;
@@ -200,6 +202,16 @@ export interface PortalOperationsService {
   providerId: string;
   displayLabel: string;
   revision: number;
+}
+
+export interface PortalSubmittedServiceReview {
+  publicId: string;
+  sourceVersion: string;
+  name: string;
+  summary: string | null;
+  category: string;
+  geometryRequirement: "none" | "optional" | "required";
+  answers: Array<{ questionId: string; label: string; displayValue: string }>;
 }
 
 export interface PortalOperationsHome {
@@ -1034,6 +1046,11 @@ export async function loadPortalServiceRequests(
 ): Promise<PortalServiceRequest[]> {
   const response = await request<{ requests: PortalServiceRequest[] }>("/api/client/service-requests", { signal });
   return Array.isArray(response.requests) ? response.requests : [];
+}
+
+export async function loadPortalServiceRequest(requestId: string, request: PortalRequest = requestJson, signal?: AbortSignal): Promise<PortalServiceRequest> {
+  const response = await request<{ request: PortalServiceRequest }>(`/api/client/service-requests/${encodeURIComponent(requestId)}`, { signal });
+  return response.request;
 }
 
 export async function createPortalChangeRequest(

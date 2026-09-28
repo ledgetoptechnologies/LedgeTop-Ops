@@ -3,6 +3,25 @@
 September 28, 2026. Local-only repair on the existing PR117 branch,
 starting from `af938097cf0b789712e4af3e45c5b96fc77d6f41`.
 
+## September 28 current-source and live-diagnostic checkpoint
+
+- Reviewed candidate `dfad4267333de57918b2017dc9d911f7c064565c`
+  contains the notification processor, completion hook, scheduler and repair.
+  GitHub REST confirms current `main` is
+  `8115ce1ca7bf736bb37039f42338547da2617d92`; stale local `main` must not
+  be used as release evidence. Independent source comparison finds the
+  candidate's attempt-marker/uncertain-send processor repair is not in that
+  main processor, although its mailer and notification migration already match.
+  Neither Git reference alone proves the deployed Worker revision.
+- A fresh, authorized read-only query selected only status, error code,
+  attempt count and timestamps from the latest five production digests.
+  Configured Wrangler authentication was denied with Cloudflare API code
+  `7403` (account invalid or not authorized for this service). No digest
+  contents were obtained, and no reset, resend, migration or email send ran.
+- Historical transport failure below remains historical, not a fresh causal
+  diagnosis. Owner credential refresh/read access and deployed-version
+  correlation are still required before safe reconciliation or inbox acceptance.
+
 ## Reproduced failure
 
 The joined test uses the real notification processor and SMTP adapter,

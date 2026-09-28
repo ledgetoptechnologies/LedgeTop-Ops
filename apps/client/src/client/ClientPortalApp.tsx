@@ -33,6 +33,7 @@ import {
   loadPortalServiceCatalogPage,
   loadPortalServiceDraft,
   loadPortalServiceDrafts,
+  loadPortalServiceRequest,
   loadPortalServiceRequests,
   loadPortalWorkspaceAccess,
   loadPortalWorkspaces,
@@ -764,6 +765,35 @@ function RequestList({
   cancellingRequestId?: string | null;
   retryingCancellationRequestIds?: ReadonlySet<string>;
 }) {
+  const [detailCache, setDetailCache] = useState<{ basis: PortalServiceRequest[]; details: Record<string, PortalServiceRequest> }>(() => ({ basis: requests, details: {} }));
+  const [loadingDetailId, setLoadingDetailId] = useState<string | null>(null);
+  const [detailErrorId, setDetailErrorId] = useState<string | null>(null);
+  const detailGeneration = useRef(0);
+  const detailController = useRef<AbortController | null>(null);
+  useEffect(() => {
+    detailController.current?.abort();
+    detailGeneration.current += 1;
+    setDetailCache({ basis: requests, details: {} }); setLoadingDetailId(null); setDetailErrorId(null);
+    return () => detailController.current?.abort();
+  }, [requests]);
+  const showSubmittedServices = useCallback(async (requestId: string) => {
+    const generation = detailGeneration.current;
+    detailController.current?.abort();
+    const controller = new AbortController();
+    detailController.current = controller;
+    setLoadingDetailId(requestId);
+    setDetailErrorId(null);
+    try {
+      const detail = await loadPortalServiceRequest(requestId, undefined, controller.signal);
+      if (!controller.signal.aborted && detailController.current === controller && detailGeneration.current === generation && detail.id === requestId)
+        setDetailCache(current => current.basis === requests ? { ...current, details: { ...current.details, [requestId]: detail } } : current);
+    } catch {
+      if (!controller.signal.aborted && detailController.current === controller && detailGeneration.current === generation) setDetailErrorId(requestId);
+    } finally {
+      if (detailGeneration.current === generation) setLoadingDetailId(current => current === requestId ? null : current);
+    }
+  }, [requests]);
+  const requestDetails = detailCache.basis === requests ? detailCache.details : {};
   const projectNames = useMemo(
     () => new Map(projects.map((project) => [project.id, project.projectName])),
     [projects],
@@ -793,6 +823,20 @@ function RequestList({
             </div>
             <EstimateSummary request={request} onRespond={onEstimateRespond} />
             <QuoteSummary request={request} />
+            {requestDetails[request.id]?.submittedServices && (
+              <section className="portal-submitted-services" aria-label="Submitted services">
+                <h4>Submitted services</h4>
+                {requestDetails[request.id]!.submittedServices!.map(service => (
+                  <article key={`${service.publicId}:${service.sourceVersion}`}>
+                    <strong>{service.name}</strong>
+                    {service.summary && <p>{service.summary}</p>}
+                    {service.answers.length > 0 && <dl>{service.answers.map(answer => (
+                      <div key={answer.questionId}><dt>{answer.label}</dt><dd>{answer.displayValue}</dd></div>
+                    ))}</dl>}
+                  </article>
+                ))}
+              </section>
+            )}
             {request.projectAlphaDraftCreated && (
               <aside className="portal-pa-draft-created" role="status">
                 <strong>Project Alpha draft quote created</strong>
@@ -851,6 +895,12 @@ function RequestList({
                 </button>
               )}
             </div>
+          )}
+          {detailErrorId === request.id && <p role="alert">Submitted service details could not be loaded. Your access may have changed; try again.</p>}
+          {request.submittedServiceDetailsAvailable && !requestDetails[request.id] && (
+            <button type="button" className="button-ghost button-small" disabled={loadingDetailId === request.id} onClick={() => void showSubmittedServices(request.id)}>
+              {loadingDetailId === request.id ? "Loading submitted services…" : "View submitted services"}
+            </button>
           )}
         </article>
       ))}

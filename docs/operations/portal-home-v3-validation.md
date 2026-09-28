@@ -2,8 +2,8 @@
 
 ## Current readback — September 28
 
-- Exact review head `d60d41e5096675cd4f7460ab08ff8716f8efce69` passed CI
-  run `36409637024` (terminal success, updated 10:43:50 UTC). Earlier entries
+- Exact review head `dfad4267333de57918b2017dc9d911f7c064565c` passed CI
+  run `36412183385` (all ten jobs successful, updated 11:08:57 UTC). Earlier entries
   below are historical checkpoints, not the latest candidate state.
 - Migration `0220` remains within the approved three-table/four-guard scope.
   Existing rows default to protocol 2 with empty permissions. The recorded
@@ -16,7 +16,8 @@
   seconds; the final-source ordering follow-up passed 2/2 in 76.62 seconds.
   Operations typecheck and 17 source-layout invariants passed. Independent QA
   verified unchanged case assertions/deadlines and isolated full-chain setup.
-  Fresh exact-head CI is required after publishing this test-only follow-up.
+  That published test-only follow-up passed exact-head CI as recorded above;
+  subsequent uncommitted request-detail work is not covered by those results.
 - Governed verified-recipient binding/grant workflow approval and positive
   credentialed portal acceptance remain open. No production PA update
   checkpoint, client activation or public-link alteration follows from CI.

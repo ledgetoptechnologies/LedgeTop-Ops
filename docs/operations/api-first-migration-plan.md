@@ -4,6 +4,34 @@ Updated September 28, 2026. The owner approved implementation and resumption aft
 
 ### September 28 — staging-only owner-action acceptance remains open
 
+The uncommitted Client candidate now wires submitted-service **detail readback**
+through the existing independently authorized native detail route, public DTO,
+and explicit UI expansion. It retains exact request/workspace/identity/source/
+project checks and rechecks authority after the metadata read. Bounded immutable
+snapshot parsing omits raw/private fields and does not join the live catalog.
+List rows add only a native detail-availability hint; legacy detail and mutation
+behavior remain unchanged. Implementer evidence: Client typecheck/build pass;
+strict parser and route receiver/fallback tests 49/49; real Miniflare native
+detail test 1 passed/29 skipped (66.38 seconds), covering wrong workspace,
+identity and source, history after catalog rename/deactivation, suspension
+immediately after metadata read, and malformed/private answers. Desktop/mobile
+presentation and delayed-response/context-refresh checks passed 4/4 (5.6
+seconds). The latter waits for completed cancellation, the detail request's
+terminal event, and two rendered frames before asserting discarded answers.
+Client typecheck passed again after the final source edits. Independent review
+cleared the final source and hardened browser regression. Fresh exact-head CI
+is required after publication. These
+are local candidate results, not exact-head CI or credentialed live acceptance.
+This does not implement first-class website edits: those still require explicit
+website-resource, capability and routing contracts. Recipient binding approval
+and production acceptance remain separate gates.
+
+The fixture corrections and project-proposal blueprint are published as
+`dfad4267333de57918b2017dc9d911f7c064565c` in draft PR133. CI run
+`36412183385` is terminal successful (updated 11:08:57 UTC); all ten jobs
+passed, confirmed by exact-run job readback. Uncommitted readback work
+is not covered by its CI result. No merge or deployment occurred.
+
 Latest exact-head CI readback: `d60d41e5096675cd4f7460ab08ff8716f8efce69`,
 run `36409637024`, is terminal successful (updated 10:43:50 UTC).
 This clears that committed candidate's CI gate, not the subsequent uncommitted
