@@ -29,6 +29,7 @@ export type Env = Omit<
   | "DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED"
   | "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED"
   | "CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED"
+  | "CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED"
   | "CLIENT_PORTAL_HIERARCHY_V2_ENABLED"
   | "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED"
   | "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED"
@@ -152,6 +153,8 @@ export type Env = Omit<
   CLIENT_DELEGATED_SHARE_SIGNER_ENABLED?: string;
   /** Default-off private Client -> Operations onboarding recipient bridge. */
   CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED?: string;
+  /** Default-off private service metadata RPC; never grants content access. */
+  CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED?: string;
   /** Enables staff recovery for the additive client workspace hierarchy. */
   CLIENT_PORTAL_HIERARCHY_V2_ENABLED?: string;
   /** Must match the Client deployment before publishing relation-backed grants. */

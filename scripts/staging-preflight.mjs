@@ -246,6 +246,10 @@ export function validateCrossApp(configs, productionConfigs = {}) {
   const deliveryBucket = mapped(configs.delivery.r2_buckets, "bucket_name").get("DATA_BUCKET");
   if (deliveryBucket !== mapped(configs.operations.r2_buckets, "bucket_name").get("DATA_BUCKET")) errors.push("operations DATA_BUCKET must equal delivery staging DATA_BUCKET");
   const delegatedSigner = (configs.delivery.services ?? []).find((service) => service.binding === "CLIENT_DELEGATED_SHARE_SIGNER");
+  const serviceMetadataReader = (configs.delivery.services ?? []).find((service) => service.binding === "CLIENT_PORTAL_SERVICE_METADATA_READER");
+  if (serviceMetadataReader?.service !== configs.operations.name || serviceMetadataReader?.entrypoint !== "ClientPortalServiceMetadataReader") {
+    errors.push("delivery service metadata reader must target the Operations staging Worker and named metadata entrypoint");
+  }
   if (delegatedSigner?.service !== configs.operations.name || delegatedSigner?.entrypoint !== "ClientDelegatedShareSigner") {
     errors.push("delivery delegated-share signer must target the Operations staging Worker and named signer entrypoint");
   }

@@ -261,7 +261,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   // cannot hide behind a digest refresh.
   // Reviewed additions: catalog coordination, portal authority, inactive
   // workspace-binding writers, and the non-content enrollment reader remain off.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "e0002c5380772fc4cbdf6e8cfc3fd342a14abef20c3f291f867a25f6eab81216");
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "1208284ab0960b83a9ea1b092c6d2c24492eb4b0562d43a648fb382099c941e5");
   const config = readJson("apps/client/wrangler.jsonc");
   assert.equal(config.name, "ledgetop-clients");
   assert.equal(config.main, "src/worker/index.ts");
@@ -295,6 +295,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.equal(config.vars.CLIENT_PORTAL_AUTHORITY_V2_WRITER_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_AUTHORITY_V2_STATUS_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_AUTHORITY_V2_ENROLLMENT_STATUS_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED, "false");
   assert.equal(config.vars.OPS_PORTAL_ACCESS_AUTHORITY_SHADOW_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_CONTENT_AUDIT_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_NOTIFICATION_MIGRATION_MAINTENANCE, "false");
@@ -350,6 +351,11 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   }]);
   assert.deepEqual(config.services, [
     {
+      binding: "CLIENT_PORTAL_SERVICE_METADATA_READER",
+      service: "ledgetop-ops",
+      entrypoint: "ClientPortalServiceMetadataReader",
+    },
+    {
       binding: "CLIENT_DELEGATED_SHARE_SIGNER",
       service: "ledgetop-ops",
       entrypoint: "ClientDelegatedShareSigner",
@@ -375,10 +381,11 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
 });
 
 test("the deployed Operations Worker keeps catalog and inactive binding transport private and default-off", () => {
-  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "28a58f72f3202355be9dfecba4e4c052e7cb83bce1090181fdb4582cbb46a318");
+  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "274071c5e991f46cb7424bb3a7261db3e8004e0012892fff74519d30ee3c4b96");
   const config = readJson("apps/operations/wrangler.jsonc");
   assert.equal(config.vars.CLIENT_ONBOARDING_ADMIN_ENABLED, "false");
   assert.equal(config.vars.CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_ACCESS_AUTHORITY_OUTBOX_ENABLED, "false");

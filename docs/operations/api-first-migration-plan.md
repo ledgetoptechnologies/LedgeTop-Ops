@@ -126,10 +126,13 @@ revision workflow rather than an unaudited update.
 
 The enrollment foundation is published as draft Ops PR128 at
 `492c6a3575597de8debec94b4a18fb2443e0df0f`, stacked on PR127. CI run
-`36359873563` is still in progress at this checkpoint; passing local checks
-are not a substitute for its final result or live staging acceptance. The
-next branch, `codex/portal-service-metadata`, isolates the descriptive service
-reader from that enrollment commit. It adds no HTTP route or deployment yet.
+`36359873563` passed all ten exact-head jobs. This remains source/CI evidence,
+not live staging acceptance. Draft PR129 contains the descriptive service reader;
+its latest commit `0c20f223ae9a3bdd6eb02c87f9e282ea14cd57b7` is a whitespace-only
+cleanup. Exact-head CI run `36362178573` currently has nine passing jobs and the
+Operations job still running. The next
+branch isolates the descriptive service reader and its private transport from
+the enrollment commit. It adds no public HTTP route, UI or deployment yet.
 
 The service-metadata source candidate now reads exact acknowledged workspace
 and principal receipts, live recipient expiry/revocation and current customer
@@ -147,9 +150,34 @@ the source was stable. An earlier overlapping validation caught a missing
 query export before completion and failed; the stable rerun supersedes that
 result. Positive receipt/enrollment cases still use reduced fixture tables,
 so this is not full guarded positive acceptance or live staging evidence.
-Private transport, Client-side before/after authority checks, the service-home
-HTTP/UI boundary and real recipient acceptance remain next; the function is
-not yet wired to any entrypoint or fetch handler.
+The current transport branch adds a named, route-less Operations metadata RPC
+and a Client helper that derives the exact active `0218`/`0219`
+authority/workspace/ownership-epoch/grant-revision tuple for the current
+Access `(issuer, subject)`, then requires that same tuple both in the bounded
+RPC response and in a second local authority read before returning descriptive
+services. Both sides remain default-off. Focused Operations RPC tests pass 2/2;
+focused Client service-home tests pass 9/9, alongside 9/9 existing Client
+preflight checks. The Client acceptance fixture applies genuine migrations
+`0216` through `0219` with the real binding and authority writers, but uses
+reduced projection dependencies; it is not full-schema or live-environment
+acceptance. The first combined validation failed because the generated
+Operations cross-namespace Env contract and three staging/config expectations
+were stale. After correcting the cross-app binding type, reviewing the exact
+default-off configuration diff and replacing position-dependent test mutations,
+both app typechecks and both canonical generated-type checks pass. The root
+independent rerun passes 12/12 Ops reader/RPC cases, 9/9 Client home cases,
+9/9 Client preflight cases and 95/95 staging/layout cases. No public HTTP/UI surface, activated claim or access reader,
+deployment, PA write, content grant, or public-link change is included.
+
+The next end-to-end implementation boundary is an explicit, audited
+`operations.service_home.read` permission and an isolated Operations-home
+bootstrap/API/UI path. Existing `0219` empty-scope grants must remain
+permissionless: do not interpret them as `workspace.view`, reuse PA membership
+repair, or create a legacy account session. The home permission must be tied
+to the exact authority/workspace/issuer/subject/epoch/revision and checked before
+and after the private read. Financial, Delivery and request permissions stay
+separate. Joined guarded positive staging, browser recipient acceptance and
+the coordinated production authority cutover remain open.
 
 The first direct-SQL inventory found 17 Client Worker source files referring
 to `portal_v2_workspace_memberships` or `portal_v2_entitlements`. They include

@@ -30,6 +30,10 @@ export interface Env {
   CLIENT_PORTAL_AUTHORITY_V2_STATUS_ENABLED?: string;
   /** Default-off, non-content Operations enrollment-status reader. */
   CLIENT_PORTAL_AUTHORITY_V2_ENROLLMENT_STATUS_ENABLED?: string;
+  /** Default-off service metadata consumer, independent of content permissions. */
+  CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED?: string;
+  /** Named Service binding plus its reviewed RPC contract; Wrangler cannot resolve a remote entrypoint's methods. */
+  CLIENT_PORTAL_SERVICE_METADATA_READER?: Service & import("./client-portal/operations-service-home").OperationsServiceMetadataBinding;
   CLIENT_PORTAL_ORIGIN?: string;
   CLIENT_PORTAL_ORIGINS?: string;
   /** Legacy delivery/portal origins retained only for compatible reads and canonical redirects. */
