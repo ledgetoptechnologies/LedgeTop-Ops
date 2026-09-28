@@ -86,10 +86,12 @@ import {
   type PortalDelegatedShare,
   type PortalDelegatedShareCreated,
   type PortalDelegatedShareTarget,
+  type PortalOperationsHomeResponse,
 } from "./portal-api";
 import { BRAND } from "@ltds/shared";
 import { readClientViewerUnits, writeClientViewerUnits } from "./viewer-units-preference";
 import { clientViewerShellPath, nativeClientViewerShellPath } from "./ClientViewerShell";
+import { OperationsHomeApp, OperationsServiceSummary } from "./OperationsHomeApp";
 import {
   clientPortalPath,
   clientProjectPath,
@@ -2675,8 +2677,10 @@ function WorkspaceTeamPanel({ invitationEmailDelivery, hierarchyScopedInvitation
 
 export function ClientPortalApp({
   initialPage,
+  operationsHomeResponse,
 }: {
   initialPage: ClientPortalPage;
+  operationsHomeResponse?: PortalOperationsHomeResponse;
 }) {
   const initialRoute = parseClientPortalRoute(window.location.pathname);
   const [gate, setGate] = useState<PortalGate>({ status: "loading" });
@@ -2872,7 +2876,11 @@ export function ClientPortalApp({
         </Card>
       </PortalBoundary>
     );
-  if (gate.status === "blocked")
+  if (gate.status === "blocked") {
+    if (operationsHomeResponse) return <OperationsHomeApp response={operationsHomeResponse} clientUnavailable onRetryClient={() => {
+      setPortalWorkspaceSelection(null);
+      window.location.assign("/portal");
+    }} />;
     return (
       <PortalBoundary>
         <Card>
@@ -2890,6 +2898,7 @@ export function ClientPortalApp({
         </Card>
       </PortalBoundary>
     );
+  }
 
   const { capabilities } = gate.data;
   const native = gate.data.resourceMode === "native" ? gate.data : null;
@@ -3063,6 +3072,7 @@ export function ClientPortalApp({
         loadModels={project => loadNativeViewerModels(native,project)}
         shellPath={model=>nativeClientViewerShellPath({workspaceId:native.workspace.id,projectId:id,associationId:model.associationId,modelId:model.modelId})}
         persistUnits={null} />}
+      renderDashboardSupplement={operationsHomeResponse ? () => <OperationsServiceSummary response={operationsHomeResponse} embedded /> : undefined}
       renderFiles={options => <FileBrowser key={options.folderId ?? "linked-file"} {...options} feedback={native.capabilities.feedback} nativeFeedbackWorkspaceId={native.workspace.id} workspaceId={native.workspace.id} mapToken={null} locationScopeLabel="" emptyTitle="No files shown" emptyDetail={options.folderId ? "This shared folder has no files on this page." : "Open a delivery folder to browse its files."} />} />;
   else if (page === "project")
     content = selectedProject ? (
@@ -3188,6 +3198,7 @@ export function ClientPortalApp({
         <Card title="Recent requests">
           <RequestList requests={requests} projects={projects} limit={4} />
         </Card>
+        {operationsHomeResponse && <OperationsServiceSummary response={operationsHomeResponse} embedded />}
       </>
     );
   else if (page === "projects")

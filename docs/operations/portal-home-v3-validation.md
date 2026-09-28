@@ -2,6 +2,48 @@
 
 ## September 28 owner-action review checkpoint
 
+- A follow-on UI-only candidate now composes the verified service summary with
+  independently authorized legacy/native Client dashboards. Client denial
+  retains descriptive metadata only, and an explicit recovery action clears
+  stale Client workspace selection and reloads the root, rechecking Operations
+  before any Client bootstrap. Independent source QA cleared the initial
+  invalid-hint reload loop. Implementer Client typecheck/build pass; root's
+  focused parser/bootstrap suite passes 15/15 and its desktop/mobile browser
+  matrix passes 26/26 (26.5 seconds), including mobile menu open/close and focus
+  restoration. No Worker/API/schema/configuration/grant/public-link changes
+  are part of this slice. It remains a partial client-experience milestone,
+  not new recipient or credentialed staging acceptance.
+- The ordered diagnostic prefix confirms the earlier timeout is accumulated
+  test work: seven real submissions take about 35 seconds; Client first-page
+  verification 18.05 seconds; transition 5.83 seconds; second page 9.16 seconds;
+  Operations project histories 22.43/9.41 seconds. Root history starts after
+  about 99.4 seconds and exceeds the remaining original 120-second case budget.
+  Vitest reports failure despite the npm wrapper's zero exit status; the failure
+  is authoritative. A test-only split with one explicit real-POST fixture and
+  three focused cases is under review, preserving all original assertions and
+  each original 120-second limit. It is not yet validated and does not clear
+  the full-file or broader release failure.
+
+- Exact integrated head `213bd576ce56039c39a3d37edbf6a09858e6cde9`
+  passed all ten CI jobs in run `36395319220`; the terminal GitHub REST
+  readback reports success at September 28 08:24:55 UTC. This verifies that
+  committed candidate, not subsequent local UI or diagnostic edits, and is
+  not credentialed deployed portal acceptance. The separate complete
+  native-resource follow-up finished
+  with exit 1: 40/41 tests passed, and the same exact-source/workspace feedback
+  collision case timed out at 120,072 ms (full file 856.87 seconds). Its isolated
+  pass does not clear this repeated full-file failure. Investigation must retain
+  source-isolation, pagination and revocation assertions rather than increasing
+  the timeout solely to obtain green evidence.
+- The new [unified portal composition gap register](unified-portal-composition-gaps.md)
+  records that the successful service home is currently descriptive-only;
+  it is not the complete requested client experience. A bounded local UI slice
+  may compose existing Client features only after their independent bootstrap
+  succeeds. Operations denial/unavailability must still initiate no Client
+  fallback, and service labels must never confer resource authority. Financial
+  summaries, website reports and governed recipient linking remain separate
+  launch gates. No production update checkpoint is ready from these findings.
+
 - Incoming repair from `18ed16a` is now integrated locally into the portal
   review branch, starting at `d23972a`. Independent QA verified all four
   Incoming artifacts are Git-blob identical to the reviewed source; the

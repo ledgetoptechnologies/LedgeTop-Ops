@@ -4,9 +4,12 @@ Updated September 28, 2026. The owner approved implementation and resumption aft
 
 ### September 28 — staging-only owner-action acceptance remains open
 
-Current follow-on head is `9eea3e6b0803211ccb9ba0f527ec82c5a888fcf9`.
+Last CI-verified integrated baseline is `213bd576ce56039c39a3d37edbf6a09858e6cde9`.
+Its exact-head CI run `36395319220` passed all ten jobs, with terminal
+readback at September 28 08:24:55 UTC. Subsequent local portal-composition
+and diagnostic test changes are not covered by that committed-head result.
 Independent local focused validation passes Client 39/39 and Ops 34/34.
-CI run `36390923313` completed successfully for that exact head: all ten jobs
+Earlier CI run `36390923313` completed successfully for `9eea3e6`: all ten jobs
 passed, with terminal readback at September 28 07:31:21 UTC. Its predecessor
 `36389712464` was cancelled by the documentation push, not accepted as a
 passing run. Broad local release preparation remains live: its Client suite
@@ -21,8 +24,26 @@ complete release failure remains open. The current portal review branch now
 also contains the reviewed Incoming repair from `18ed16a`, copied exactly at
 base `d23972a` with 27/27 target-focused tests and successful typecheck. This
 integration did not change configuration, authority, migrations or public
-links. Its exact-head CI is new work; the earlier green run is not proof of
-the integrated candidate.
+links. Exact integrated-head CI now passes, but the complete local 41-test
+follow-up exited 1 with 40 passing tests and the same 120-second feedback
+timeout. The single-case pass cannot clear that repeated full-file failure.
+Default-off diagnostic phase timing retains every assertion and the original
+timeout; investigate before changing the fixture or claiming release success.
+
+The service-home UI at that baseline is metadata-only. A
+bounded follow-on local composition slice now passes for both legacy and native
+Client dashboards: only verified Operations success may initiate the existing
+independently authorized Client bootstrap. Denied Operations responses never
+start Client reads; denied Client bootstrap keeps only descriptive Operations
+metadata. Service labels neither select workspaces nor grant resource access.
+Client typecheck/build pass; root's parser/bootstrap suite passes 15/15 and
+desktop/mobile browser matrix 26/26. Independent QA identified and then cleared
+an invalid-workspace recovery loop; recovery now reloads the root and rechecks
+Operations before any further Client bootstrap. This candidate still needs its
+own exact-head CI; baseline CI does not verify follow-on edits.
+See `unified-portal-composition-gaps.md` for the launch matrix and missing
+website-report, financial-summary and recipient-binding prerequisites. This
+slice is not final unified-portal or live recipient acceptance.
 
 The concrete portal prerequisite is a missing verified-recipient workflow:
 there is no runtime creator for the existing recipient identity-binding table,
