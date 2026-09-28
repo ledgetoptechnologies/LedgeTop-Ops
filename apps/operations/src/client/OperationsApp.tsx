@@ -7196,10 +7196,12 @@ function Administration({ session }: { session: Session }) {
           </ul>
         </Card></section>
       </div>
-      {session.capabilities?.clientWorkspaceManagerRecovery?.enabled === true && allowed(session.user, "operations.manage") && <ClientWorkspaceManagerRecovery />}
-      {session.capabilities?.delegatedShareProvisioning?.enabled === true && session.user.isAdministrator && allowed(session.user, "delivery.share.audit") && <DelegatedShareAdministration />}
-      {session.capabilities?.portalIdentityDenials?.enabled === true && session.user.isAdministrator && <PortalIdentityDenyAdministration />}
-      {session.user.isAdministrator && allowed(session.user, "audit.view") && <AdminAuditHistory />}
+      <div className="administration-secondary-panels">
+        {session.capabilities?.clientWorkspaceManagerRecovery?.enabled === true && allowed(session.user, "operations.manage") && <section className="administration-panel"><ClientWorkspaceManagerRecovery /></section>}
+        {session.capabilities?.delegatedShareProvisioning?.enabled === true && session.user.isAdministrator && allowed(session.user, "delivery.share.audit") && <section className="administration-panel"><DelegatedShareAdministration /></section>}
+        {session.capabilities?.portalIdentityDenials?.enabled === true && session.user.isAdministrator && <section className="administration-panel"><PortalIdentityDenyAdministration /></section>}
+        {session.user.isAdministrator && allowed(session.user, "audit.view") && <section className="administration-panel"><AdminAuditHistory /></section>}
+      </div>
     </>
   );
 }

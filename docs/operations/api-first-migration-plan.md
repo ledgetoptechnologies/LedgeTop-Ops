@@ -4,6 +4,19 @@ Updated September 28, 2026. The owner approved implementation and resumption aft
 
 ### September 28 — staging-only owner-action acceptance remains open
 
+Local follow-on UI verification at review head `6c2cee3`: Incoming public-form
+tests pass 12/12 and desktop/mobile upload cases pass 8/8. Conditional access
+code, centered controls and long-filename wrapping are already implemented;
+this does not prove production release or received-email delivery.
+Administration's lower recovery/audit cards were outside the spaced panel grid.
+A local frontend-only correction preserves every existing authorization gate
+and panel order, adds containment/spacing, and constrains recovery dropdowns.
+A populated long-name fixture reproduced 320px overflow before the dropdown
+correction; the full desktop/mobile layout file now passes 4/4 and Operations
+build/typecheck pass. Independent source QA cleared the final correction.
+These local follow-ons await publication and exact-head CI; production,
+grants and public links remain unchanged.
+
 Last CI-verified integrated baseline is `1e572a0eebfe000fd4ed0df859e42e0867fe5a84`.
 Its exact-head CI run `36401610421` passed all ten jobs, with terminal
 readback at September 28 09:27:18 UTC. This includes the success-only portal

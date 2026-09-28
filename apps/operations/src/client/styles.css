@@ -190,6 +190,12 @@
   min-width: 0;
 }
 .administration-panel { min-width: 0; }
+.administration-secondary-panels { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1rem; min-width: 0; margin-top: 1rem; }
+.administration-secondary-panels:empty { display: none; }
+.administration-secondary-panels .delegated-share-admin-list { grid-template-columns: minmax(0, 1fr); min-width: 0; }
+.administration-secondary-panels .delegated-share-admin-list > label { min-width: 0; overflow-wrap: anywhere; }
+.administration-secondary-panels .delegated-share-admin-list select { display: block; width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box; }
+.administration-secondary-panels .delegated-share-admin-list > button { min-height: 44px; max-width: 100%; white-space: normal; }
 .administration-panel-wide { grid-column: 1 / -1; }
 .administration-panel > .ltds-card { height: 100%; min-width: 0; box-sizing: border-box; }
 .administration-panel :is(p, li, dd, small, code) { overflow-wrap: anywhere; }
