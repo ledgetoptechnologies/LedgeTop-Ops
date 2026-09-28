@@ -2,6 +2,19 @@
 
 ## September 28 owner-action review checkpoint
 
+- Follow-on CI at `6c2cee317fa6839a2e2728a7e5cd685056919456`, run
+  `36404656600`, is terminal **failure** at September 28 09:55:12 UTC:
+  nine jobs passed, Client tests reported 120/121 files and 1305/1306 tests
+  passing with one five-second integration-owned delivery/authority-claim
+  timeout. Do not treat that head as released or universally green.
+  A test-only repair preserves all six absent/active/released claim assertions
+  and makes each state explicit, with read-only point/list calls concurrent
+  only after its state write. Complete local file passes 9/9 under the existing
+  Windows configuration; implementer and root each passed all three claim
+  cases at five seconds. Client typecheck passes and independent QA cleared
+  the exact scoped diff. Unrelated test cases, runtime and timeout settings
+  remain unchanged. The repaired source needs its own exact-head CI.
+
 - Latest terminal CI baseline is `1e572a0eebfe000fd4ed0df859e42e0867fe5a84`:
   run `36401610421`, all ten jobs successful, terminal readback September 28
   09:27:18 UTC. It includes the diagnostic correction described below. The

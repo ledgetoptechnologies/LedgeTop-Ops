@@ -4,6 +4,22 @@ Updated September 28, 2026. The owner approved implementation and resumption aft
 
 ### September 28 — staging-only owner-action acceptance remains open
 
+Exact follow-on head `6c2cee317fa6839a2e2728a7e5cd685056919456` CI run
+`36404656600` completed with failure September 28 09:55:12 UTC: nine jobs
+passed, but Client's full suite reported 120/121 files and 1305/1306 tests
+passing. Its integration-owned delivery/active Client authority-claim case
+timed out at the existing Linux five-second limit. This is not a passing
+release. The scoped test-fixture repair now passes the complete file (9/9)
+under the existing Windows configuration, and all three integration-claim
+states pass separately at CI's five-second case limit from both implementer
+and root. Client typecheck passes; independent source QA confirms all six
+original authorization/prefix assertions, explicit state setup and ordered
+fixture restoration. Only that test block changed; runtime authorization and
+timeout configuration remain unchanged. An initial diagnostic forced five
+seconds across the entire Windows file and timed out in three cases, including
+two unrelated cases; those unrelated tests remain unchanged. The repair and
+local Administration correction `404e36d` still require new exact-head CI.
+
 Local follow-on UI verification at review head `6c2cee3`: Incoming public-form
 tests pass 12/12 and desktop/mobile upload cases pass 8/8. Conditional access
 code, centered controls and long-filename wrapping are already implemented;
