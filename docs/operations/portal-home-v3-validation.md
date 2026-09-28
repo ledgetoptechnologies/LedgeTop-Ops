@@ -2,6 +2,37 @@
 
 ## September 28 owner-action review checkpoint
 
+- Fresh **remote** migration transport is now verified at tooling commit
+  `e626e102e976835fb0e3dbf6461ef4e46e161174`, run `home-20260928`.
+  New Client target `client-data-staging-rehearsal-home-20260928`
+  (`2816ad75-1aab-49f6-98d0-0ff53e20d6d5`) and Ops target
+  `ltds-ops-staging-rehearsal-home-20260928`
+  (`1f47f5fc-dc4e-4747-a2e6-bfc085614b0a`) were confirmed empty before
+  application. Both remote applies exited 0; ordered ledger readbacks match
+  every generated filename (139/147), including both Client 0199 files and
+  final 0220/0147. Separate second list and apply commands report no migrations
+  to apply. Foreign-key checks are empty; each target has exactly its synthetic
+  owner, Ops retains the four original roles plus its evolved catalog, and
+  Client grant/audit/receipt and Ops outbox/audit/receipt counts are zero.
+  Exact manifests, readbacks and scoped references are retained in ignored
+  `.backups/remote-rehearsal-home-20260928.json`, with apply logs alongside it.
+  Generated-chain check still passes. Canonical staging and production
+  databases were not reset, and no Worker was uploaded/deployed. The new
+  rehearsal resources are retained; no cleanup deletion is authorized here.
+- Exact-head PR133 CI run `36388444179` at e626e10 exposed a new test-only
+  Client typecheck failure: missing declarations for the bootstrap module and
+  a non-const fixture tuple. A narrow `.d.mts` declaration and const tuple fix
+  preserve the test and strict typechecking. Agent and root Client checks now
+  exit 0; the agent's focused full-chain run passes 1/1 (69.83s), and root's
+  independent repaired-test rerun passes 1/1, exit 0 (69.84s).
+  Current CI must be rerun on the repaired pushed head before acceptance.
+- Live acceptance still needs a governed synthetic recipient and acknowledged
+  inactive workspace binding. The existing joined fixture mocks staff login
+  and seeds local recipient state; it cannot substitute for credentialed
+  staging owner-action/service-home acceptance. Do not provision live authority
+  through raw D1 or mark the broader release contract finalized from migration
+  evidence alone.
+
 - A bounded GPT-5.6 implementation adds opt-in disposable remote-rehearsal
   artifacts without resetting populated staging databases. Root reviewed the
   canonical-before-target validation, production/staging identity exclusion,

@@ -20,7 +20,7 @@ function portableFixture(): string {
   for (const [source, example] of [
     ["client", "delivery.wrangler.json.example"],
     ["operations", "operations.wrangler.json.example"],
-  ]) {
+  ] as const) {
     const directory = path.join(base, "apps", source);
     fs.mkdirSync(directory, { recursive: true });
     fs.cpSync(path.join(repositoryRoot, "apps", source, "migrations"), path.join(directory, "migrations"), { recursive: true });

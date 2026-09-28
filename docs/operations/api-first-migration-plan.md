@@ -4,6 +4,18 @@ Updated September 28, 2026. The owner approved implementation and resumption aft
 
 ### September 28 — staging-only owner-action acceptance remains open
 
+The new disposable **remote** full-chain rehearsal is complete at e626e10:
+Client 139/Ops 147 exact ordered ledgers, both Client 0199 files, final
+0220/0147, successful second list/apply with no pending files, synthetic owner
+roles/catalog, empty foreign-key checks and zero portal authority rows.
+Evidence is retained under `.backups/remote-rehearsal-home-20260928.json`.
+Neither populated staging nor production databases were reset; no Worker
+deployment or public-link change occurred. PR133's exact e626e10 CI found a
+test-only Client declaration/tuple typecheck regression, now repaired locally
+without suppressing checks; repaired-head CI remains required. Governed live
+synthetic recipient/binding acceptance is still open, and the PA production
+update checkpoint is not ready.
+
 Actual Wrangler **local** full-chain application has now passed (Client 139,
 Ops 147), followed by successful no-op reapplication on both databases.
 Ledger readback includes both Client 0199 files and final 0220/0147; foreign-key
