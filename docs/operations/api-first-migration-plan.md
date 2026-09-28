@@ -14,6 +14,16 @@ passed 119 files / 1,292 tests, then advanced to the Operations suite. This is
 not terminal proof of the complete local release command or live portal
 acceptance.
 
+The live Operations phase has now reported a 120-second native-feedback
+workspace-isolation timeout. The same case passed an isolated rerun with
+unchanged assertions/timeouts (one passed, 40 unselected, exit zero); the
+complete release failure remains open. The current portal review branch now
+also contains the reviewed Incoming repair from `18ed16a`, copied exactly at
+base `d23972a` with 27/27 target-focused tests and successful typecheck. This
+integration did not change configuration, authority, migrations or public
+links. Its exact-head CI is new work; the earlier green run is not proof of
+the integrated candidate.
+
 The concrete portal prerequisite is a missing verified-recipient workflow:
 there is no runtime creator for the existing recipient identity-binding table,
 and the worker-mounted workspace-binding/authority-v3 actions have no frontend

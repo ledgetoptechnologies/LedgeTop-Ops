@@ -2,6 +2,22 @@
 
 ## September 28 owner-action review checkpoint
 
+- Incoming repair from `18ed16a` is now integrated locally into the portal
+  review branch, starting at `d23972a`. Independent QA verified all four
+  Incoming artifacts are Git-blob identical to the reviewed source; the
+  mailer and relevant migrations match too. Target-focused tests passed
+  27/27 in 47.99 seconds and Operations typecheck exited zero. No migration,
+  configuration, authority, production or public-link changes were added by
+  this integration. Its new candidate still requires exact-head CI.
+- The broad local release process on clean runtime head `c337d78` is still
+  live, but has reported a 120-second timeout in native project-feedback
+  history's exact-source/workspace collision case. Do not count that release
+  run as passed. A separate unchanged-assertion focused rerun passed that
+  case (one passed, 40 unselected; exit zero; 178.17 seconds including setup).
+  This does not prove the entire 41-test file or clear the broad failure.
+  Keep the original process intact, collect its terminal result, and perform
+  the required complete follow-up validation before accepting a release.
+
 - Independent GPT-5.6 focused rerun passed on runtime/test head
   `102ed57aea7cff7e3c2b7929bea843f5a138a6fd` (the checkout moved only for
   documentation commit `76947e9` during execution). Client: 39/39 across
