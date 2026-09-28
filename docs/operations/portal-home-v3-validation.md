@@ -2,6 +2,27 @@
 
 ## September 28 owner-action review checkpoint
 
+- The next live acceptance prerequisite is a missing application workflow,
+  not another migration rehearsal. Independent read-only GPT-5.6 review found
+  no runtime creator for `client_onboarding_recipient_identity_bindings`:
+  migration 0103 defines explicit issuer/subject evidence, while current
+  consumers and local fixtures assume it already exists. Onboarding approval
+  alone must not manufacture a verified identity link. The workspace-binding
+  and authority-v3 HTTP endpoints are mounted in the Worker, but neither has
+  an Operations frontend caller. Implement a governed verified-recipient
+  binding lifecycle, a scoped eligible-recipient read, and the owner UI before
+  claiming credentialed end-to-end portal acceptance. Keep identity linking
+  (`directory.identity.link`) and exact-resource portal management
+  (`directory.portal_access.manage`) separately authorized; existing
+  `directory.profile.edit` bootstrap authority implies neither. Do not insert
+  live bindings or grants through D1 to bypass this gap. Migration 0220's
+  authorization does not itself approve a new recipient-linking boundary.
+- Repaired-head CI run `36389712464` remains unverified at its terminal state.
+  The latest GitHub check read hit the account API rate limit; no credentials
+  were changed and no unavailable check was counted as successful. Local
+  release preparation remains live, with a newly observed test child process;
+  it has not yet returned its final result.
+
 - Fresh **remote** migration transport is now verified at tooling commit
   `e626e102e976835fb0e3dbf6461ef4e46e161174`, run `home-20260928`.
   New Client target `client-data-staging-rehearsal-home-20260928`
