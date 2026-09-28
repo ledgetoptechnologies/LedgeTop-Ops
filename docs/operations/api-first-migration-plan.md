@@ -32,10 +32,12 @@ and applicable scope authority is rechecked. Pinned dead replay is 409 and
 unexpected storage failure is 503, without disguising known denial. Historical fresh-bootstrap evidence must remain
 distinct from a new full-chain rehearsal. Production/public links are held.
 
-A strict current-chain version-2 bootstrap evidence contract is in progress;
-the old version-1 proof must not satisfy a new release. Existing immutable
-runtime pins/finalization are not silently advanced. Full clean release gates
-and live staging acceptance remain required.
+A strict current-chain version-2 bootstrap evidence contract is implemented;
+the old version-1 proof cannot satisfy a new release. Root's combined evidence,
+bootstrap and authority-packet run passed 80 tests, with two Windows file-symlink
+skips. These local tests are not a new remote empty-D1 rehearsal. Existing
+immutable runtime pins/finalization are not silently advanced. Full clean
+release gates and live staging acceptance remain required.
 
 The unfinished normal owner action requires exact-operation replay with
 pinned actor/intent and exact workspace/principal receipt selection before

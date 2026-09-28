@@ -130,11 +130,11 @@ migrations, one synthetic owner in each database, the Operations owner role and
 portable ACL catalog, and an empty `PRAGMA foreign_key_check`. Record those
 results in `migrations.freshBootstrap` without storing the owner email.
 
-Release-gate follow-up: the current schema-version-1 evidence verifier still
-pins the September 18 rehearsal counts (133/139). Do not relabel that historical
-proof as a new 139/147 rehearsal or claim a current fresh-bootstrap release
-gate has passed. Reconcile the versioned evidence contract before submitting
-new full-chain evidence; the generator's local tests alone are not that proof.
+The current release gate requires schema-version-2 fresh-bootstrap evidence
+for these 139/147 chains. Preserve the September 18 schema-version-1 rehearsal
+(133/139) unchanged; it cannot satisfy the current gate. Do not claim a new
+empty-D1 rehearsal from generator/unit tests alone. Submit truthful new
+full-chain remote rehearsal evidence before claiming this release gate passed.
 
 Cloudflare's remote D1 migration transport does not accept a nested
 `SELECT CASE ... RAISE(...) END` statement inside a trigger even though local

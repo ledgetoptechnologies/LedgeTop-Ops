@@ -610,11 +610,16 @@ Generate and check the ignored bootstrap configs from the approved synthetic
 owner input, then use only those configs for the first full apply. The ordinary
 configs would replay the canonical named-human `0002` rows. A populated or
 partially migrated database must never use the bootstrap configs. Attach both
-generated manifests and complete `migrations.freshBootstrap`; the required
-proof includes 133/139 ledger rows, both Client `0199` filenames exactly once,
-final `0214`/`0139`, canonical-human absence, the one synthetic owner and its
-role, the retained Operations ACL catalog, no pending reapply, and an empty
-foreign-key check.
+generated manifests and complete `migrations.freshBootstrap`; the current
+schema-version-2 proof requires a new truthful empty-D1 rehearsal with 139/147
+ledger rows, both Client `0199` filenames exactly once, final `0220`/`0147`,
+canonical-human absence, the one synthetic owner and its role, the retained
+Operations ACL catalog, no pending reapply, and an empty foreign-key check.
+
+The September 18 schema-version-1 proof remains historical evidence for the
+133/139 chains through `0214`/`0139`. Preserve that record unchanged; it cannot
+satisfy the current schema-version-2 release gate and must not be relabeled as
+a new rehearsal.
 
 It also requires the pushed source ref, exact deployed version/config hashes,
 an ordered remote migration-ledger readback, a pre-migration open-fence and

@@ -713,7 +713,7 @@
       "verificationEvidenceRef": "<EVIDENCE_REFERENCE>"
     },
     "freshBootstrap": {
-      "schemaVersion": 1,
+      "schemaVersion": 2,
       "mode": "generated-empty-d1",
       "canonicalMigrationsUnchanged": false,
       "ownerEmailSha256": "<NORMALIZED_OWNER_EMAIL_SHA256>",
@@ -724,7 +724,7 @@
           "configPath": "apps/client/wrangler.staging.bootstrap.json",
           "manifestPath": "apps/client/.staging-bootstrap/manifest.json",
           "transformedFiles": ["0002_seed_initial_staff.sql"],
-          "ledgerCount": 134,
+          "ledgerCount": 139,
           "finalMigration": "0220_operations_portal_authority_v3_permissions.sql",
           "sourceSeedSha256": "<CANONICAL_SEED_SHA256>",
           "generatedSeedSha256": "<GENERATED_SEED_SHA256>",
@@ -746,7 +746,7 @@
           "configPath": "apps/operations/wrangler.staging.bootstrap.json",
           "manifestPath": "apps/operations/.staging-bootstrap/manifest.json",
           "transformedFiles": ["0002_seed_acl.sql"],
-          "ledgerCount": 141,
+          "ledgerCount": 147,
           "finalMigration": "0147_client_portal_authority_v3_permissions.sql",
           "sourceSeedSha256": "<CANONICAL_SEED_SHA256>",
           "generatedSeedSha256": "<GENERATED_SEED_SHA256>",

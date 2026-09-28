@@ -5,11 +5,20 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { APP_SOURCE_DIRS, FEATURE_FLAG_ACTIVATION_POLICIES, FEATURE_FLAG_DEPENDENCY_WINDOWS, PROJECT_ALPHA_STAGING, RELEASE_CANDIDATES, RELEASE_CONTRACT_FINALIZED, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_EXTERNAL_GATES, REQUIRED_EXTERNAL_GATE_PROOFS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_SECRETS, STAGING_ACCOUNT_ID, STAGING_CLIENT_PORTAL, STAGING_HOSTS, STAGING_INVENTORY, STAGING_STATIC_VARS, STAGING_VIEWER } from "./staging-requirements.mjs";
 import { validateFiles as validateStagingFiles } from "./staging-preflight.mjs";
+import { BOOTSTRAP_APPS } from "./staging-bootstrap.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const defaultEvidence = path.join(root, ".backups", "staging-release-evidence.json");
 const marker = /<[^>]+>|CHANGE[_-]?ME|REPLACE[_-]?ME|example\.invalid/i;
 const apps = ["delivery", "operations", "ops-sync"];
+// Schema version 1 is the immutable September 18 rehearsal (Client 133 through
+// 0214, Operations 139 through 0139). It remains historical evidence only and
+// must never satisfy the current release gate.
+const CURRENT_FRESH_BOOTSTRAP_SCHEMA_VERSION = 2;
+const CURRENT_FRESH_BOOTSTRAP_APPLICATIONS = Object.freeze({
+  delivery: Object.freeze({ configPath: "apps/client/wrangler.staging.bootstrap.json", manifestPath: "apps/client/.staging-bootstrap/manifest.json", seed: "0002_seed_initial_staff.sql", ledgerCount: BOOTSTRAP_APPS.delivery.migrationCount, finalMigration: "0220_operations_portal_authority_v3_permissions.sql" }),
+  operations: Object.freeze({ configPath: "apps/operations/wrangler.staging.bootstrap.json", manifestPath: "apps/operations/.staging-bootstrap/manifest.json", seed: "0002_seed_acl.sql", ledgerCount: BOOTSTRAP_APPS.operations.migrationCount, finalMigration: "0147_client_portal_authority_v3_permissions.sql" }),
+});
 const populated = (value) => typeof value === "string" && value.length > 0 && !marker.test(value);
 const sha256Digest = (value) => /^sha256:[a-f0-9]{64}$/i.test(value ?? "");
 const sha256Hex = (value) => /^[a-f0-9]{64}$/i.test(value ?? "");
@@ -356,16 +365,13 @@ export function validateEvidence(evidence, options = {}) {
 
   const migrations = evidence.migrations ?? {};
   const freshBootstrap = migrations.freshBootstrap ?? {};
-  if (freshBootstrap.schemaVersion !== 1 || freshBootstrap.mode !== "generated-empty-d1") {
-    errors.push("fresh bootstrap evidence must use schemaVersion 1 and generated-empty-d1 mode");
+  if (freshBootstrap.schemaVersion !== CURRENT_FRESH_BOOTSTRAP_SCHEMA_VERSION || freshBootstrap.mode !== "generated-empty-d1") {
+    errors.push(`current fresh bootstrap evidence must use schemaVersion ${CURRENT_FRESH_BOOTSTRAP_SCHEMA_VERSION} and generated-empty-d1 mode; historical schemaVersion 1 evidence cannot satisfy this release gate`);
   }
   if (freshBootstrap.canonicalMigrationsUnchanged !== true) errors.push("fresh bootstrap must prove canonical migrations remained unchanged");
   if (!/^[a-f0-9]{64}$/i.test(freshBootstrap.ownerEmailSha256 ?? "")) errors.push("fresh bootstrap must record the normalized owner email SHA-256, not the email");
   if (!recentDate(freshBootstrap.generatedAt, now) || !populated(freshBootstrap.generatorEvidenceRef)) errors.push("fresh bootstrap generation must be current and referenced");
-  for (const [app, expected] of Object.entries({
-    delivery: { configPath: "apps/client/wrangler.staging.bootstrap.json", manifestPath: "apps/client/.staging-bootstrap/manifest.json", seed: "0002_seed_initial_staff.sql", ledgerCount: 133, finalMigration: "0214_ops_inventory_catalog_staging.sql" },
-    operations: { configPath: "apps/operations/wrangler.staging.bootstrap.json", manifestPath: "apps/operations/.staging-bootstrap/manifest.json", seed: "0002_seed_acl.sql", ledgerCount: 139, finalMigration: "0139_native_directory_staging_empty_enrollment_fixture_guard.sql" },
-  })) {
+  for (const [app, expected] of Object.entries(CURRENT_FRESH_BOOTSTRAP_APPLICATIONS)) {
     const proof = freshBootstrap.applications?.[app] ?? {};
     if (proof.configPath !== expected.configPath || proof.manifestPath !== expected.manifestPath) errors.push(`${app} fresh bootstrap must identify the generated config and manifest`);
     if (!sameSequence(proof.transformedFiles, [expected.seed])) errors.push(`${app} fresh bootstrap must transform exactly ${expected.seed}`);

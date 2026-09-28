@@ -79,10 +79,13 @@
   rehearsal (Client 133/Ops 139), separately from the current ordered migration
   suffix. Its historical proof must not be relabeled as a new 139/147 empty-D1
   rehearsal. Current-generator/evidence-contract reconciliation remains an
-  explicit release follow-up, even though the evidence unit suite passes. A
-  strict version-2 current-chain contract is being implemented; old version-1
-  rehearsal proof must not satisfy the new candidate. Immutable release pins
-  and finalization remain deliberately unchanged pending candidate review.
+  explicit release follow-up. The strict version-2 current-chain contract is
+  now implemented and tested: old version-1 rehearsal proof cannot satisfy the
+  new candidate. Root independently reran the combined bootstrap, evidence and
+  two authority-packet suites: 80 passed, 0 failed, 2 Windows file-symlink skips.
+  No new remote empty-D1 rehearsal has been performed by these local tests.
+  Immutable release pins and finalization remain deliberately unchanged
+  pending candidate review.
 - Independent configuration-suite rerun found and then verified the repair of
   a default-off origin mismatch. Blank owner origin is allowed only when its
   flag is exactly `false`; enabled validation requires the exact canonical Ops
