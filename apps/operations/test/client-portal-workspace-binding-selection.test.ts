@@ -347,7 +347,8 @@ describe("portal workspace selection full migration order",()=>{
       const database=await runtime.getD1Database("OPS_DB") as unknown as D1Database;
       const directory=new URL("../migrations/",import.meta.url);
       const names=readdirSync(directory).filter(name=>/^\d{4}_.+\.sql$/.test(name)).sort();
-       expect(names.at(-1)).toBe("0149_client_portal_recipient_enrollment_sql_fences.sql");
+      expect(names).toHaveLength(150);
+      expect(names.at(-1)).toBe("0150_client_portal_recipient_enrollment_cancellation.sql");
       for(const name of names){
         const statements=splitD1MigrationStatements(readFileSync(new URL(name,directory),"utf8"));
         await database.batch(statements.map(statement=>database.prepare(statement)));
@@ -359,5 +360,7 @@ describe("portal workspace selection full migration order",()=>{
       expect(await database.prepare("SELECT count(*) count FROM sqlite_master WHERE type='table' AND name='client_portal_workspace_binding_outbox'")
         .first("count")).toBe(1);
     } finally { await runtime.dispose(); }
-  });
+  // This bounded full-chain rehearsal applies 150 migrations individually;
+  // keep ordinary authorization unit tests at their existing timeout.
+  },120_000);
 });

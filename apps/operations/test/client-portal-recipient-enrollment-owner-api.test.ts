@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { issueEnrollmentIntent, mutateEnrollmentIntent, newEnrollmentOperationId, openEnrollmentOwnerSession, type EnrollmentReview }
+import { issueEnrollmentIntent, listEnrollmentIntents, mutateEnrollmentIntent, newEnrollmentOperationId, openEnrollmentOwnerSession, type EnrollmentReview }
   from "../src/client/client-portal-recipient-enrollment-owner-api";
 
 const intentId = "22222222-2222-4222-8222-222222222222";
@@ -17,6 +17,16 @@ function response(value: unknown, status = 200) {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("recipient enrollment owner response correlation", () => {
+  it("rejects impossible lifecycle/principal shapes and nonpositive revisions in owner lists", async () => {
+    for (const changed of [{ ...pending, revision: 0 }, { ...pending, revision: -1 },
+      { ...pending, state: "issued" }, { ...pending, principal: null },
+      { ...pending, state: "active", principal: null }, { ...pending, state: "revoked", principal: null }]) {
+      response({ intents: [changed] });
+      await expect(listEnrollmentIntents()).rejects.toMatchObject({ uncertain: true });
+    }
+    response({ intents: [{ ...pending, state: "cancelled" }, { ...pending, state: "cancelled", principal: null }] });
+    await expect(listEnrollmentIntents()).resolves.toHaveLength(2);
+  });
   it("generates a standards-shaped v4 operation ID when randomUUID is unavailable", () => {
     vi.stubGlobal("crypto", { getRandomValues: <T extends ArrayBufferView>(value: T) => {
       new Uint8Array(value.buffer, value.byteOffset, value.byteLength).fill(0xab); return value;
@@ -86,5 +96,43 @@ describe("recipient enrollment owner response correlation", () => {
     });
     response({ review: { ...revoking, revision: 5, state: "active" }, replayed: false });
     await expect(mutateEnrollmentIntent("a".repeat(64), revoking, "reconcile", operationId)).rejects.toMatchObject({ uncertain: true });
+  });
+
+  it("correlates cancellation to an issued or pending intent and never accepts a grant state", async () => {
+    response({ operationId, status: "acknowledged", intent: { ...pending, revision: 3, state: "cancelled" }, receipt: null, replayed: false });
+    await expect(mutateEnrollmentIntent("a".repeat(64), pending, "cancel", operationId)).resolves.toMatchObject({
+      review: { intentId, revision: 3, state: "cancelled" }, status: "acknowledged",
+    });
+    response({ operationId, status: "acknowledged", intent: { ...pending, revision: 3, state: "active" }, replayed: false });
+    await expect(mutateEnrollmentIntent("a".repeat(64), pending, "cancel", operationId)).rejects.toMatchObject({ uncertain: true });
+  });
+
+  it("rejects ambiguous cancellation status and missing replay discrimination", async () => {
+    const valid = { operationId, status: "acknowledged", intent: { ...pending, revision: 3, state: "cancelled" }, receipt: null, replayed: false };
+    for (const changed of [ { ...valid, status: "pending" }, { ...valid, replayed: undefined }, { ...valid, replayed: "true" },
+      { ...valid, receipt: undefined }, { ...valid, receipt: { intentId, revision: 3, state: "cancelled" } } ]) {
+      response(changed);
+      await expect(mutateEnrollmentIntent("a".repeat(64), pending, "cancel", operationId)).rejects.toMatchObject({ uncertain: true });
+    }
+  });
+
+  it("parses only a correlated immutable cancellation replay receipt, never a new mutation", async () => {
+    // Parser-only contract: current runtime still denies loss-of-target-visibility
+    // retries until the separately requested authorization has been approved.
+    const valid = { operationId, status: "acknowledged", intent: null, replayed: true,
+      receipt: { intentId, revision: 3, state: "cancelled" } };
+    response(valid);
+    await expect(mutateEnrollmentIntent("a".repeat(64), pending, "cancel", operationId)).resolves.toMatchObject({
+      review: null, receipt: { intentId, revision: 3, state: "cancelled" }, status: "acknowledged" });
+    for (const changed of [ { ...valid, replayed: false }, { ...valid, replayed: undefined },
+      { ...valid, operationId: "44444444-4444-4444-8444-444444444444" },
+      { ...valid, receipt: { ...valid.receipt, revision: 4 } },
+      { ...valid, receipt: { ...valid.receipt, intentId: "55555555-5555-4555-8555-555555555555" } } ]) {
+      response(changed);
+      await expect(mutateEnrollmentIntent("a".repeat(64), pending, "cancel", operationId)).rejects.toMatchObject({ uncertain: true });
+    }
+    response(valid);
+    await expect(mutateEnrollmentIntent("a".repeat(64), { ...pending, state: "active" }, "cancel", operationId))
+      .rejects.toMatchObject({ uncertain: true });
   });
 });

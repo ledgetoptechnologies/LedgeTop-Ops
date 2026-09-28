@@ -75,7 +75,8 @@ describe("recipient enrollment joined acceptance", () => {
     await migrate(opsDb, ["0103_client_onboarding_recipient_identity_bindings.sql", "0143_client_portal_workspace_binding_selection.sql",
       "0144_client_portal_workspace_binding_outbox.sql", "0145_client_portal_authority_v2_outbox.sql",
       "0146_ops_customer_service_enrollments.sql", "0147_client_portal_authority_v3_permissions.sql",
-      "0148_client_portal_recipient_enrollment.sql", "0149_client_portal_recipient_enrollment_sql_fences.sql"], "operations");
+      "0148_client_portal_recipient_enrollment.sql", "0149_client_portal_recipient_enrollment_sql_fences.sql",
+      "0150_client_portal_recipient_enrollment_cancellation.sql"], "operations");
     await opsDb.batch([
       opsDb.prepare("INSERT INTO operations_directory_records VALUES(?,'organization',1)").bind(rootId),
       opsDb.prepare("INSERT INTO operations_directory_records VALUES(?,'client',1)").bind(clientId),

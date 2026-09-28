@@ -2,7 +2,7 @@ import {readFileSync} from "node:fs";
 import {afterEach,beforeEach,describe,expect,it} from "vitest";
 import {Miniflare} from "miniflare";
 import {splitD1MigrationStatements} from "../../client/test/helpers/d1-migrations";
-import {confirmRecipientEnrollmentIntent,inspectRecipientEnrollmentIntent,issueRecipientEnrollmentIntent,
+import {cancelRecipientEnrollmentIntent,confirmRecipientEnrollmentIntent,inspectRecipientEnrollmentIntent,issueRecipientEnrollmentIntent,
   listRecipientEnrollmentIntentsForOwner,readRecipientEnrollmentIntentForOwner,redeemRecipientEnrollmentIntent,
   revokeRecipientEnrollmentBinding} from "../src/worker/client-portal-recipient-enrollment-ledger";
 import {readClientPortalServiceMetadata} from "../src/worker/client-portal-service-metadata";
@@ -37,7 +37,8 @@ describe("recipient enrollment ledger",()=>{let mf:Miniflare,db:D1Database;
     for(const name of ["0103_client_onboarding_recipient_identity_bindings.sql","0143_client_portal_workspace_binding_selection.sql",
       "0144_client_portal_workspace_binding_outbox.sql","0145_client_portal_authority_v2_outbox.sql",
       "0146_ops_customer_service_enrollments.sql","0147_client_portal_authority_v3_permissions.sql",
-      "0148_client_portal_recipient_enrollment.sql","0149_client_portal_recipient_enrollment_sql_fences.sql"]){
+      "0148_client_portal_recipient_enrollment.sql","0149_client_portal_recipient_enrollment_sql_fences.sql",
+      "0150_client_portal_recipient_enrollment_cancellation.sql"]){
       const sql=readFileSync(new URL(`../migrations/${name}`,import.meta.url),"utf8");
       await db.batch(splitD1MigrationStatements(sql).map(statement=>db.prepare(statement)))}
     await db.batch([
@@ -247,4 +248,153 @@ describe("recipient enrollment ledger",()=>{let mf:Miniflare,db:D1Database;
     expect(replay).toMatchObject({replayed:true,review:{state:"pending",revision:2}});
     expect(await db.prepare("SELECT count(*) n FROM client_onboarding_recipient_identity_bindings").first("n")).toBe(1);
   },30_000);
+
+  it("cancels an issued intent with an immutable marker and requires a fresh issue",async()=>{
+    const issueId=operation(),issued=await issueRecipientEnrollmentIntent(db,{target:{clientRecordId:client,selectionId},expiresAt:future(),operationId:issueId,owner});
+    if(!("opaqueToken" in issued))throw Error("expected fresh issue");
+    const cancelId=operation(),cancelled=await cancelRecipientEnrollmentIntent(db,{intentId:issued.intentId,expectedRevision:1,operationId:cancelId,owner});
+    expect(cancelled).toMatchObject({replayed:false,operationId:cancelId,review:{state:"cancelled",revision:2,principal:null}});
+    expect(await readRecipientEnrollmentIntentForOwner(db,issued.intentId,owner)).toMatchObject({state:"cancelled",revision:2});
+    await expect(inspectRecipientEnrollmentIntent(db,issued.intentId,issued.opaqueToken)).rejects.toThrow("denied");
+    await expect(redeemRecipientEnrollmentIntent(db,{intentId:issued.intentId,opaqueToken:issued.opaqueToken,
+      principal:{issuer:"https://client.cloudflareaccess.com",subject:"access|old"},verifiedUntil:future(),operationId:operation(),
+      acknowledgedTarget:{clientRecordId:client,selectionId}})).rejects.toThrow("denied");
+    const replay=await cancelRecipientEnrollmentIntent(db,{intentId:issued.intentId,expectedRevision:1,operationId:cancelId,owner});
+    expect(replay).toMatchObject({replayed:true,review:{state:"cancelled",revision:2}});
+    await expect(cancelRecipientEnrollmentIntent(db,{intentId:issued.intentId,expectedRevision:1,operationId:operation(),owner})).rejects.toThrow("denied");
+    expect(await db.prepare("SELECT count(*) n FROM client_onboarding_recipient_identity_bindings").first("n")).toBe(0);
+    expect(await db.prepare("SELECT count(*) n FROM client_portal_authority_v2_outbox").first("n")).toBe(0);
+    const fresh=await issueRecipientEnrollmentIntent(db,{target:{clientRecordId:client,selectionId},expiresAt:future(),operationId:operation(),owner});
+    expect(fresh).toMatchObject({state:"issued",revision:1,replayed:false});
+  });
+
+  it("cancels pending verification after expiry without refreshing its signed principal",async()=>{
+    const issued=await issueRecipientEnrollmentIntent(db,{target:{clientRecordId:client,selectionId},expiresAt:future(),operationId:operation(),owner});
+    if(!("opaqueToken" in issued))throw Error("expected fresh issue");
+    const principal={issuer:"https://client.cloudflareaccess.com",subject:"access|expired"};
+    await redeemRecipientEnrollmentIntent(db,{intentId:issued.intentId,opaqueToken:issued.opaqueToken,principal,
+      verifiedUntil:new Date(Date.now()+1_500).toISOString(),operationId:operation(),acknowledgedTarget:{clientRecordId:client,selectionId}});
+    await new Promise(resolve=>setTimeout(resolve,1_600));
+    await expect(confirmRecipientEnrollmentIntent(db,{intentId:issued.intentId,expectedRevision:2,operationId:operation(),owner})).rejects.toThrow("denied");
+    const cancelled=await cancelRecipientEnrollmentIntent(db,{intentId:issued.intentId,expectedRevision:2,operationId:operation(),owner});
+    expect(cancelled.review).toMatchObject({state:"cancelled",revision:3,principal});
+    expect(await listRecipientEnrollmentIntentsForOwner(db,owner)).toEqual([]);
+    expect(await readRecipientEnrollmentIntentForOwner(db,issued.intentId,owner)).toMatchObject({state:"cancelled",revision:3,principal});
+    await expect(redeemRecipientEnrollmentIntent(db,{intentId:issued.intentId,opaqueToken:issued.opaqueToken,principal,
+      verifiedUntil:future(),operationId:operation(),acknowledgedTarget:{clientRecordId:client,selectionId}})).rejects.toThrow("denied");
+    expect(await db.prepare("SELECT count(*) n FROM client_onboarding_recipient_identity_bindings").first("n")).toBe(0);
+    expect(await db.prepare("SELECT count(*) n FROM client_portal_authority_v2_outbox").first("n")).toBe(0);
+  },30_000);
+
+  it("rejects stale owner cancellation and both operation ID namespaces cannot collide",async()=>{
+    const issueId=operation(),issued=await issueRecipientEnrollmentIntent(db,{target:{clientRecordId:client,selectionId},expiresAt:future(),operationId:issueId,owner});
+    if(!("opaqueToken" in issued))throw Error("expected fresh issue");
+    const expiredOwner={...owner,verifiedUntil:"2000-01-01T00:00:00.000Z"};
+    await expect(cancelRecipientEnrollmentIntent(db,{intentId:issued.intentId,expectedRevision:1,operationId:operation(),owner:expiredOwner})).rejects.toThrow("denied");
+    const redeemId=operation();
+    await db.prepare(`INSERT INTO client_portal_recipient_enrollment_operations(operation_id,intent_id,action,request_sha256,
+      resulting_revision,resulting_state) VALUES(?,?,'redeem',?,2,'pending')`).bind(redeemId,issued.intentId,"a".repeat(64)).run();
+    const cancelId=operation(),cancelled=await cancelRecipientEnrollmentIntent(db,{intentId:issued.intentId,expectedRevision:1,operationId:cancelId,owner});
+    expect(cancelled.review.state).toBe("cancelled");
+    await expect(db.prepare("UPDATE client_portal_recipient_enrollment_cancellations SET request_sha256=? WHERE intent_id=?")
+      .bind("c".repeat(64),issued.intentId).run()).rejects.toThrow();
+    await expect(db.prepare("DELETE FROM client_portal_recipient_enrollment_cancellations WHERE intent_id=?")
+      .bind(issued.intentId).run()).rejects.toThrow();
+    await expect(db.prepare(`UPDATE client_portal_recipient_enrollment_intents SET state='pending',revision=2,access_issuer=?,access_subject=?,
+      recipient_verified_until=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE intent_id=?`)
+      .bind("https://client.cloudflareaccess.com","access|late",future(),issued.intentId).run()).rejects.toThrow();
+    await expect(db.prepare(`INSERT INTO client_portal_recipient_enrollment_operations(operation_id,intent_id,action,request_sha256,
+      resulting_revision,resulting_state) VALUES(?,?,'redeem',?,2,'pending')`).bind(cancelId,issued.intentId,"b".repeat(64)).run()).rejects.toThrow();
+    const second=await issueRecipientEnrollmentIntent(db,{target:{clientRecordId:client,selectionId},expiresAt:future(),operationId:operation(),owner});
+    await expect(db.prepare(`INSERT INTO client_portal_recipient_enrollment_cancellations
+      (intent_id,operation_id,request_sha256,prior_state,prior_revision,resulting_revision,actor_staff_id,actor_access_subject,
+       actor_admission_version,actor_profile_version,actor_grant_generation,actor_verified_until,cancelled_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(second.intentId,operation(),"e".repeat(64),"issued",1,2,"owner","access|owner",2,3,5,future(),"9999-99-99T99:99:99.999Z").run()).rejects.toThrow();
+    await expect(db.prepare(`INSERT INTO client_portal_recipient_enrollment_cancellations
+      (intent_id,operation_id,request_sha256,prior_state,prior_revision,resulting_revision,actor_staff_id,actor_access_subject,
+       actor_admission_version,actor_profile_version,actor_grant_generation,actor_verified_until)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).bind(second.intentId,"-1111111-1111-4111-8111-111111111111","e".repeat(64),"issued",1,2,"owner","access|owner",2,3,5,future()).run()).rejects.toThrow();
+    await expect(db.prepare(`INSERT INTO client_portal_recipient_enrollment_cancellations
+      (intent_id,operation_id,request_sha256,prior_state,prior_revision,resulting_revision,actor_staff_id,actor_access_subject,
+       actor_admission_version,actor_profile_version,actor_grant_generation,actor_verified_until)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).bind(second.intentId,issueId,"d".repeat(64),"issued",1,2,"owner","access|owner",2,3,5,future()).run()).rejects.toThrow();
+    const other=await issueRecipientEnrollmentIntent(db,{target:{clientRecordId:client,selectionId},expiresAt:future(),operationId:operation(),owner});
+    await expect(db.prepare(`INSERT INTO client_portal_recipient_enrollment_operations(operation_id,intent_id,action,request_sha256,
+      resulting_revision,resulting_state) VALUES(?,?,'redeem',?,2,'pending')`).bind(cancelId,other.intentId,"f".repeat(64)).run()).rejects.toThrow();
+    const pending=await issueRecipientEnrollmentIntent(db,{target:{clientRecordId:client,selectionId},expiresAt:future(),operationId:operation(),owner});
+    const pendingRedeemId=operation();
+    await db.prepare(`INSERT INTO client_portal_recipient_enrollment_operations(operation_id,intent_id,action,request_sha256,
+      resulting_revision,resulting_state) VALUES(?,?,'redeem',?,2,'pending')`).bind(pendingRedeemId,pending.intentId,"1".repeat(64)).run();
+    await db.prepare(`UPDATE client_portal_recipient_enrollment_intents SET state='pending',revision=2,access_issuer=?,access_subject=?,
+      recipient_verified_until=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE intent_id=?`)
+      .bind("https://client.cloudflareaccess.com","access|pending",future(),pending.intentId).run();
+    await cancelRecipientEnrollmentIntent(db,{intentId:pending.intentId,expectedRevision:2,operationId:operation(),owner});
+    await expect(db.prepare("INSERT INTO client_portal_recipient_enrollment_operation_commits(operation_id,intent_id) VALUES(?,?)")
+      .bind(pendingRedeemId,pending.intentId).run()).rejects.toThrow();
+    const denied=await issueRecipientEnrollmentIntent(db,{target:{clientRecordId:client,selectionId},expiresAt:future(),operationId:operation(),owner});
+    await db.prepare("INSERT INTO native_directory_grants VALUES('owner','directory.portal_access.manage','deny',1,'resource',?,?,?)")
+      .bind(root,null,null).run();
+    await expect(cancelRecipientEnrollmentIntent(db,{intentId:denied.intentId,expectedRevision:1,operationId:operation(),owner})).rejects.toThrow("denied");
+    await db.prepare("DELETE FROM native_directory_grants WHERE staff_id='owner' AND effect='deny'").run();
+    const generation=await issueRecipientEnrollmentIntent(db,{target:{clientRecordId:client,selectionId},expiresAt:future(),operationId:operation(),owner});
+    await expect(db.prepare(`INSERT INTO client_portal_recipient_enrollment_cancellations
+      (intent_id,operation_id,request_sha256,prior_state,prior_revision,resulting_revision,actor_staff_id,actor_access_subject,
+       actor_admission_version,actor_profile_version,actor_grant_generation,actor_verified_until)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).bind(generation.intentId,operation(),"2".repeat(64),"issued",1,2,"owner","access|owner",2,3,4,future()).run()).rejects.toThrow();
+    expect(await db.prepare("SELECT state,revision FROM client_portal_recipient_enrollment_intents WHERE intent_id=?").bind(issued.intentId).first()).toEqual({state:"issued",revision:1});
+  });
+
+  it("fences pending cancel and confirm in either deterministic order",async()=>{
+    const cancelFirst=await issueRecipientEnrollmentIntent(db,{target:{clientRecordId:client,selectionId},expiresAt:future(),operationId:operation(),owner});
+    if(!("opaqueToken" in cancelFirst))throw Error("expected fresh issue");
+    await redeemRecipientEnrollmentIntent(db,{intentId:cancelFirst.intentId,opaqueToken:cancelFirst.opaqueToken,
+      principal:{issuer:"https://client.cloudflareaccess.com",subject:"access|order-cancel"},verifiedUntil:future(),operationId:operation(),acknowledgedTarget:{clientRecordId:client,selectionId}});
+    await cancelRecipientEnrollmentIntent(db,{intentId:cancelFirst.intentId,expectedRevision:2,operationId:operation(),owner});
+    await expect(confirmRecipientEnrollmentIntent(db,{intentId:cancelFirst.intentId,expectedRevision:2,operationId:operation(),owner})).rejects.toThrow("denied");
+    expect(await db.prepare("SELECT state FROM client_portal_recipient_enrollment_intents WHERE intent_id=?").bind(cancelFirst.intentId).first<string>("state")).toBe("pending");
+    expect(await db.prepare("SELECT count(*) n FROM client_onboarding_recipient_identity_bindings").first("n")).toBe(0);
+    expect(await db.prepare("SELECT count(*) n FROM client_portal_authority_v2_outbox").first("n")).toBe(0);
+
+    const confirmFirst=await issueRecipientEnrollmentIntent(db,{target:{clientRecordId:client,selectionId},expiresAt:future(),operationId:operation(),owner});
+    if(!("opaqueToken" in confirmFirst))throw Error("expected fresh issue");
+    await redeemRecipientEnrollmentIntent(db,{intentId:confirmFirst.intentId,opaqueToken:confirmFirst.opaqueToken,
+      principal:{issuer:"https://client.cloudflareaccess.com",subject:"access|order-confirm"},verifiedUntil:future(),operationId:operation(),acknowledgedTarget:{clientRecordId:client,selectionId}});
+    const confirmed=await confirmRecipientEnrollmentIntent(db,{intentId:confirmFirst.intentId,expectedRevision:2,operationId:operation(),owner});
+    await expect(cancelRecipientEnrollmentIntent(db,{intentId:confirmFirst.intentId,expectedRevision:2,operationId:operation(),owner})).rejects.toThrow("denied");
+    expect(confirmed.review.state).toBe("active");
+    expect(await db.prepare("SELECT state FROM client_portal_recipient_enrollment_intents WHERE intent_id=?").bind(confirmFirst.intentId).first<string>("state")).toBe("active");
+    expect(await db.prepare("SELECT count(*) n FROM client_onboarding_recipient_identity_bindings").first("n")).toBe(1);
+    expect(await db.prepare("SELECT count(*) n FROM client_portal_authority_v2_outbox").first("n")).toBe(1);
+  },60_000);
+
+  it("keeps more than 100 canceled audits from exhausting the actionable owner list",async()=>{
+    for(let index=0;index<105;index++){
+      const issued=await issueRecipientEnrollmentIntent(db,{target:{clientRecordId:client,selectionId},expiresAt:future(),operationId:operation(),owner});
+      await cancelRecipientEnrollmentIntent(db,{intentId:issued.intentId,expectedRevision:1,operationId:operation(),owner});
+    }
+    const fresh=await issueRecipientEnrollmentIntent(db,{target:{clientRecordId:client,selectionId},expiresAt:future(),operationId:operation(),owner});
+    if(!("opaqueToken" in fresh))throw Error("expected fresh issue");
+    await redeemRecipientEnrollmentIntent(db,{intentId:fresh.intentId,opaqueToken:fresh.opaqueToken,
+      principal:{issuer:"https://client.cloudflareaccess.com",subject:"access|fresh"},verifiedUntil:future(),operationId:operation(),
+      acknowledgedTarget:{clientRecordId:client,selectionId}});
+    expect(await listRecipientEnrollmentIntentsForOwner(db,owner)).toEqual([expect.objectContaining({intentId:fresh.intentId,state:"pending"})]);
+  },120_000);
+
+  it("serializes cancel and redeem without ever creating a grant",async()=>{
+    const issued=await issueRecipientEnrollmentIntent(db,{target:{clientRecordId:client,selectionId},expiresAt:future(),operationId:operation(),owner});
+    if(!("opaqueToken" in issued))throw Error("expected fresh issue");
+    const principal={issuer:"https://client.cloudflareaccess.com",subject:"access|race"};
+    const [cancelResult,redeemResult]=await Promise.allSettled([
+      cancelRecipientEnrollmentIntent(db,{intentId:issued.intentId,expectedRevision:1,operationId:operation(),owner}),
+      redeemRecipientEnrollmentIntent(db,{intentId:issued.intentId,opaqueToken:issued.opaqueToken,principal,verifiedUntil:future(),operationId:operation(),
+        acknowledgedTarget:{clientRecordId:client,selectionId}}),
+    ]);
+    const rawState=await db.prepare("SELECT state FROM client_portal_recipient_enrollment_intents WHERE intent_id=?").bind(issued.intentId).first<string>("state");
+    const effectiveState=(await readRecipientEnrollmentIntentForOwner(db,issued.intentId,owner)).state;
+    expect(["cancelled","pending"]).toContain(effectiveState);
+    if(effectiveState === "cancelled") { expect(rawState).toBe("issued"); expect(redeemResult.status).toBe("rejected"); }
+    if(effectiveState === "pending") { expect(rawState).toBe("pending"); expect(cancelResult.status).toBe("rejected"); }
+    expect(await db.prepare("SELECT count(*) n FROM client_onboarding_recipient_identity_bindings").first("n")).toBe(0);
+    expect(await db.prepare("SELECT count(*) n FROM client_portal_authority_v2_outbox").first("n")).toBe(0);
+  });
 });

@@ -433,6 +433,7 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0147_client_portal_authority_v3_permissions.sql",
     "0148_client_portal_recipient_enrollment.sql",
     "0149_client_portal_recipient_enrollment_sql_fences.sql",
+    "0150_client_portal_recipient_enrollment_cancellation.sql",
   ]),
 });
 

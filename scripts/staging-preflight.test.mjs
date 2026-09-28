@@ -386,7 +386,7 @@ test("requires every portal-v2 and Operations capability to be explicitly false"
   }
 });
 
-test("pins the native portal, Operations 0054-0149, both 0199 files, and the 0200-0220 release contract", () => {
+test("pins the native portal, Operations 0054-0150, both 0199 files, and the 0200-0220 release contract", () => {
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-38), [
     "0184_native_client_feedback.sql",
     "0185_native_service_request_ownership.sql",
@@ -455,6 +455,7 @@ test("pins the native portal, Operations 0054-0149, both 0199 files, and the 020
     "0147_client_portal_authority_v3_permissions.sql",
     "0148_client_portal_recipient_enrollment.sql",
     "0149_client_portal_recipient_enrollment_sql_fences.sql",
+    "0150_client_portal_recipient_enrollment_cancellation.sql",
   ]);
   const nativeDirectoryStart = REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0054_project_alpha_directory_outbox.sql");
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(nativeDirectoryStart, nativeDirectoryStart + 3), [

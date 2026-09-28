@@ -1,10 +1,10 @@
 import {beforeEach,describe,expect,it,vi} from "vitest";
-const calls=vi.hoisted(()=>({auth:vi.fn(),issue:vi.fn(),list:vi.fn(),read:vi.fn(),confirm:vi.fn(),revoke:vi.fn(),reconcile:vi.fn(),dispatch:vi.fn()}));
+const calls=vi.hoisted(()=>({auth:vi.fn(),issue:vi.fn(),list:vi.fn(),read:vi.fn(),confirm:vi.fn(),revoke:vi.fn(),reconcile:vi.fn(),cancel:vi.fn(),dispatch:vi.fn()}));
 vi.mock("../src/worker/native-staff-auth",()=>({authenticateNativeStaffWithAdmissionVersion:calls.auth}));
 vi.mock("../src/worker/client-portal-recipient-enrollment-ledger",()=>({issueRecipientEnrollmentIntent:calls.issue,
   listRecipientEnrollmentIntentsForOwner:calls.list,readRecipientEnrollmentIntentForOwner:calls.read,
   confirmRecipientEnrollmentIntent:calls.confirm,revokeRecipientEnrollmentBinding:calls.revoke,
-  reconcileRecipientEnrollmentRevocation:calls.reconcile}));
+  reconcileRecipientEnrollmentRevocation:calls.reconcile,cancelRecipientEnrollmentIntent:calls.cancel}));
 vi.mock("../src/worker/client-portal-authority-v2-outbox",()=>({dispatchNextClientPortalAuthorityV2:calls.dispatch}));
 import {handleRecipientEnrollmentOwnerHttp,type RecipientEnrollmentOwnerHttpDependencies} from
   "../src/worker/client-portal-recipient-enrollment-owner-http";
@@ -26,7 +26,9 @@ describe("recipient enrollment owner HTTP",()=>{beforeEach(()=>{vi.clearAllMocks
   calls.read.mockResolvedValue(review);calls.issue.mockResolvedValue({...review,state:"issued",revision:1,principal:null,opaqueToken:"f".repeat(64),replayed:false});
   calls.confirm.mockResolvedValue({review:{...review,state:"active",revision:3},operationId:op,replayed:false});
   calls.revoke.mockResolvedValue({review:{...review,state:"revoking",revision:4},operationId:op,replayed:false});
-  calls.reconcile.mockResolvedValue({review:{...review,state:"revoked",revision:5},replayed:false});calls.dispatch.mockResolvedValue({status:"acknowledged",operationId:op})});
+  calls.reconcile.mockResolvedValue({review:{...review,state:"revoked",revision:5},replayed:false});
+  calls.cancel.mockResolvedValue({review:{...review,state:"cancelled",revision:3},operationId:op,replayed:false});
+  calls.dispatch.mockResolvedValue({status:"acknowledged",operationId:op})});
   it("is absent unless the dedicated staging gate is enabled",async()=>{expect((await handleRecipientEnrollmentOwnerHttp(
     new Request(`${origin}/api/native-client-portal/recipient-enrollment/session`),deps(false))).status).toBe(404);expect(calls.auth).not.toHaveBeenCalled()});
   it("pins the recipient link to a separate deployment-owned HTTPS staging origin",async()=>{
@@ -53,6 +55,11 @@ describe("recipient enrollment owner HTTP",()=>{beforeEach(()=>{vi.clearAllMocks
     await handleRecipientEnrollmentOwnerHttp(new Request(`${origin}/api/native-client-portal/recipient-enrollment/intents/${intent}/${action}`,
       {method:"POST",headers:{...headers,"X-CSRF-Token":csrfToken},body:JSON.stringify({operationId:op,expectedRevision:2})}),d);
     expect(response.status).toBe(200);expect(calls.dispatch).toHaveBeenCalledWith(d.dispatch,op)});
+  it("cancels an issued or pending intent without dispatching authority",async()=>{const d=deps(),csrfToken=await session(d),response=
+    await handleRecipientEnrollmentOwnerHttp(new Request(`${origin}/api/native-client-portal/recipient-enrollment/intents/${intent}/cancel`,
+      {method:"POST",headers:{...headers,"X-CSRF-Token":csrfToken},body:JSON.stringify({operationId:op,expectedRevision:2})}),d);
+    expect(response.status).toBe(200);expect(calls.cancel).toHaveBeenCalledWith(expect.anything(),expect.objectContaining({intentId:intent,expectedRevision:2,operationId:op,owner:actor}));
+    expect(calls.dispatch).not.toHaveBeenCalled();expect(await response.json()).toMatchObject({status:"acknowledged",intent:{state:"cancelled"},operationId:op})});
   it("reconciles only by POST and never dispatches or mutates on reads",async()=>{const d=deps(),csrfToken=await session(d),response=await handleRecipientEnrollmentOwnerHttp(
     new Request(`${origin}/api/native-client-portal/recipient-enrollment/intents/${intent}/reconcile`,{method:"POST",headers:{...headers,"X-CSRF-Token":csrfToken},
       body:JSON.stringify({operationId:op,expectedRevision:4})}),d);expect(response.status).toBe(200);expect(calls.reconcile).toHaveBeenCalled();expect(calls.dispatch).not.toHaveBeenCalled();

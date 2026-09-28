@@ -695,7 +695,8 @@
         "0146_ops_customer_service_enrollments.sql",
         "0147_client_portal_authority_v3_permissions.sql",
         "0148_client_portal_recipient_enrollment.sql",
-        "0149_client_portal_recipient_enrollment_sql_fences.sql"
+        "0149_client_portal_recipient_enrollment_sql_fences.sql",
+        "0150_client_portal_recipient_enrollment_cancellation.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
@@ -761,8 +762,8 @@
           "applyEvidenceRef": "<EVIDENCE_REFERENCE>",
           "readbackEvidenceRef": "<EVIDENCE_REFERENCE>",
           "transformedFiles": ["0002_seed_acl.sql"],
-          "ledgerCount": 149,
-          "finalMigration": "0149_client_portal_recipient_enrollment_sql_fences.sql",
+          "ledgerCount": 150,
+          "finalMigration": "0150_client_portal_recipient_enrollment_cancellation.sql",
           "sourceSeedSha256": "<CANONICAL_SEED_SHA256>",
           "generatedSeedSha256": "<GENERATED_SEED_SHA256>",
           "databaseWasEmpty": false,

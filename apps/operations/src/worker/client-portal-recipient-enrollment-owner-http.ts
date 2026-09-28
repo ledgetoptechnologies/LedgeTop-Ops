@@ -2,7 +2,7 @@ import {Buffer} from "node:buffer";
 import {timingSafeEqual} from "node:crypto";
 import {readBoundedJson} from "./bounded-json";
 import {authenticateNativeStaffWithAdmissionVersion,type NativeStaffAccessConfiguration} from "./native-staff-auth";
-import {confirmRecipientEnrollmentIntent,issueRecipientEnrollmentIntent,listRecipientEnrollmentIntentsForOwner,
+import {cancelRecipientEnrollmentIntent,confirmRecipientEnrollmentIntent,issueRecipientEnrollmentIntent,listRecipientEnrollmentIntentsForOwner,
   readRecipientEnrollmentIntentForOwner,reconcileRecipientEnrollmentRevocation,revokeRecipientEnrollmentBinding}
   from "./client-portal-recipient-enrollment-ledger";
 import {dispatchNextClientPortalAuthorityV2,type AuthorityV2Env} from "./client-portal-authority-v2-outbox";
@@ -53,7 +53,7 @@ export async function handleRecipientEnrollmentOwnerHttp(request:Request,d:Recip
   if(request.headers.get("Sec-Fetch-Site")!=="same-origin")throw new Failure(403,"denied");
   const relative=url.pathname.slice(BASE.length),session=request.method==="GET"&&relative==="/session",listing=request.method==="GET"&&relative==="/intents";
   const read=request.method==="GET"&&/^\/intents\/[0-9a-f-]{36}$/.test(relative),issue=request.method==="POST"&&relative==="/intents";
-  const mutation=request.method==="POST"&&/^\/intents\/[0-9a-f-]{36}\/(confirm|revoke|reconcile)$/.test(relative);
+  const mutation=request.method==="POST"&&/^\/intents\/[0-9a-f-]{36}\/(confirm|revoke|reconcile|cancel)$/.test(relative);
   if(!session&&!listing&&!read&&!issue&&!mutation)throw new Failure(404,"not_found");
   if(session){if(request.headers.get("X-Native-Staff-Request")!=="1"||(request.headers.get("Origin")!==null&&request.headers.get("Origin")!==config.origin))throw new Failure(403,"denied")}
   else if((issue||mutation)&&request.headers.get("Origin")!==config.origin)throw new Failure(403,"denied");
@@ -76,6 +76,8 @@ export async function handleRecipientEnrollmentOwnerHttp(request:Request,d:Recip
   const input={intentId:intentId!,operationId:value.operationId,expectedRevision:value.expectedRevision,owner:actor};alive(actor.verifiedUntil);
   if(action==="reconcile"){const result=await reconcileRecipientEnrollmentRevocation(d.database,input);
     alive(actor.verifiedUntil);return json(200,result)}
+  if(action==="cancel"){const result=await cancelRecipientEnrollmentIntent(d.database,input);alive(actor.verifiedUntil);
+    return json(200,{operationId:result.operationId,status:"acknowledged",intent:result.review,receipt:result.receipt,replayed:result.replayed});}
   const result=action==="confirm"?await confirmRecipientEnrollmentIntent(d.database,input):await revokeRecipientEnrollmentBinding(d.database,input);
   alive(actor.verifiedUntil);let dispatched;try{dispatched=await dispatchNextClientPortalAuthorityV2(d.dispatch,result.operationId)}catch{throw new Failure(503,"unavailable")}
   alive(actor.verifiedUntil);

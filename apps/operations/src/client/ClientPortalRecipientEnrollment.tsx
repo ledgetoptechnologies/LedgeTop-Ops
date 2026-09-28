@@ -5,7 +5,7 @@ import { EnrollmentApiError, issueEnrollmentIntent, listEnrollmentIntents, mutat
   from "./client-portal-recipient-enrollment-owner-api";
 import "./ClientOnboardingStaff.css";
 
-type PendingMutation = { intent: EnrollmentReview; action: "confirm" | "revoke" | "reconcile"; operationId: string };
+type PendingMutation = { intent: EnrollmentReview; action: "confirm" | "revoke" | "reconcile" | "cancel"; operationId: string };
 type IssueAttempt = { operationId: string; selectionId: string; clientRecordId: string; expiresAt: string };
 const localDateTime = (date: Date) => {
   const part = (value: number) => String(value).padStart(2, "0");
@@ -92,11 +92,11 @@ function EnrollmentWorkspace({ session }: { session: OwnerSession }) {
   const act = async (intent: EnrollmentReview, action: PendingMutation["action"]) => {
     const key = `${intent.intentId}:${action}`;
     const reviewKey = `${intent.intentId}:${intent.revision}:${action}`;
-    if (busy || ((action === "confirm" || action === "revoke") && !reviewed.has(reviewKey))) return;
+    const retrying = uncertain.current?.intent.intentId === intent.intentId && uncertain.current.action === action;
+    if (busy || (!retrying && action !== "reconcile" && !reviewed.has(reviewKey))) return;
     const operationId = mutation.current.get(key) ?? newEnrollmentOperationId();
     mutation.current.set(key, operationId); setBusy(key); setError(""); setMessage("");
     try {
-      const retrying = uncertain.current?.intent.intentId === intent.intentId && uncertain.current.action === action;
       const requestSession = retrying ? await openEnrollmentOwnerSession() : activeSession;
       if (retrying) setActiveSession(requestSession);
       const result = await mutateEnrollmentIntent(requestSession.csrfToken, intent, action, operationId);
@@ -105,11 +105,17 @@ function EnrollmentWorkspace({ session }: { session: OwnerSession }) {
         ? "The durable change is recorded, but delivery is still pending. Retry the same action to check delivery."
         : action === "confirm" ? "Portal access confirmation was acknowledged."
         : action === "revoke" ? "Full revocation was acknowledged; reconcile it to close the local binding."
+        : action === "cancel" ? "The confirmation was canceled. Issue a fresh intent if access is still required."
         : "Revocation was reconciled and the local binding is closed.");
+      if (!result.review) { uncertain.current = null; await refresh(); return; }
       setIntents(current => current.map(item => item.intentId === intent.intentId ? result.review : item)
-        .filter(item => item.state !== "revoked"));
+        .filter((item): item is EnrollmentReview => item !== null && item.state !== "revoked"));
     } catch (caught) {
-      uncertain.current = { intent, action, operationId };
+      if (caught instanceof EnrollmentApiError && caught.uncertain) uncertain.current = { intent, action, operationId };
+      else {
+        uncertain.current = null; mutation.current.delete(key);
+        setReviewed(current => { const next = new Set(current); next.delete(reviewKey); return next; });
+      }
       setError(caught instanceof EnrollmentApiError && caught.uncertain
         ? "The mutation outcome is uncertain. Retry the same action; the operation ID will not change."
         : action === "reconcile" ? "The exact revocation receipt is not ready or current authority was denied. Retry the same reconciliation after reviewing status."
@@ -145,21 +151,30 @@ function EnrollmentWorkspace({ session }: { session: OwnerSession }) {
       <button type="button" className="button-ghost" disabled={Boolean(busy)} onClick={() => void refresh()}>Refresh requests</button></div>
       {intents.length === 0 ? <p>No recipient confirmations currently require action.</p> : intents.map(intent => {
         const pendingMutation = uncertain.current?.intent.intentId === intent.intentId ? uncertain.current : null;
-        const action = pendingMutation?.action ?? (intent.state === "pending" ? "confirm" : intent.state === "active" ? "revoke" : "reconcile");
         const pending = Boolean(pendingMutation);
         const reviewedIntent = pendingMutation?.intent ?? intent;
+        const action = pendingMutation?.action ?? (intent.state === "issued" ? "cancel" : intent.state === "pending" ? "confirm" : intent.state === "active" ? "revoke" : intent.state === "revoking" ? "reconcile" : null);
+        const cancelAction = intent.state === "pending" && !pending ? "cancel" : null;
         const reviewKey = `${reviewedIntent.intentId}:${reviewedIntent.revision}:${action}`;
-        return <article key={intent.intentId} className="onboarding-secret"><h3>{intent.state === "pending" ? "Review recipient" : intent.state === "active" ? "Active portal identity" : "Revocation pending receipt"}</h3>
+        const cancelReviewKey = `${intent.intentId}:${intent.revision}:cancel`;
+        return <article key={intent.intentId} className="onboarding-secret"><h3>{intent.state === "issued" ? "Issued confirmation" : intent.state === "pending" ? "Review recipient" : intent.state === "active" ? "Active portal identity" : intent.state === "revoking" ? "Revocation pending receipt" : "Canceled enrollment"}</h3>
           <dl><div><dt>Client record</dt><dd>{intent.target.clientRecordId}</dd></div><div><dt>Workspace selection</dt><dd>{intent.target.selectionId}</dd></div>
             <div><dt>Access issuer</dt><dd>{intent.principal?.issuer ?? "Not supplied"}</dd></div><div><dt>Access subject</dt><dd>{intent.principal?.subject ?? "Not supplied"}</dd></div>
             <div><dt>Revision</dt><dd>{intent.revision}</dd></div></dl>
-          {action !== "reconcile" && <label><input type="checkbox" checked={reviewed.has(reviewKey)} onChange={event => setReviewed(current => {
-            const next = new Set(current); if (event.target.checked) next.add(reviewKey); else next.delete(reviewKey); return next; })} />
-            I reviewed the exact client, selection, issuer, and subject.</label>}
-          <button type="button" className={action === "revoke" ? "button-danger" : "button-orange"}
+          {intent.state === "cancelled" && <p>This is a read-only audit record. The prior link cannot be reused; issue a fresh intent to restart enrollment.</p>}
+          {action !== "reconcile" && action !== null && <label><input type="checkbox" checked={reviewed.has(reviewKey)} onChange={event => setReviewed(current => {
+             const next = new Set(current); if (event.target.checked) next.add(reviewKey); else next.delete(reviewKey); return next; })} />
+            {action === "cancel" ? "I reviewed the exact client and selection and authorize cancellation." : `I reviewed the exact client, selection${intent.principal ? ", issuer, and subject" : ""}.`}</label>}
+          {cancelAction && <label><input type="checkbox" checked={reviewed.has(cancelReviewKey)} onChange={event => setReviewed(current => {
+             const next = new Set(current); if (event.target.checked) next.add(cancelReviewKey); else next.delete(cancelReviewKey); return next; })} />
+            I reviewed the exact client and selection and authorize cancellation.</label>}
+          {action !== null && <button type="button" className={action === "revoke" || action === "cancel" ? "button-danger" : "button-orange"}
             disabled={Boolean(busy) || (!pending && action !== "reconcile" && !reviewed.has(reviewKey))}
             onClick={() => void act(pendingMutation?.intent ?? intent, action)}>
-            {pending ? `Retry same ${action}` : action === "confirm" ? "Confirm portal access" : action === "revoke" ? "Revoke all portal access" : "Reconcile acknowledged revocation"}</button>
+            {pending ? `Retry same ${action}` : action === "confirm" ? "Confirm portal access" : action === "revoke" ? "Revoke all portal access" : action === "cancel" ? "Cancel confirmation" : "Reconcile acknowledged revocation"}</button>}
+          {cancelAction && <button type="button" className="button-danger"
+            disabled={Boolean(busy) || !reviewed.has(cancelReviewKey)}
+            onClick={() => void act(intent, cancelAction)}>Cancel confirmation</button>}
         </article>;
       })}
     </section></Card>

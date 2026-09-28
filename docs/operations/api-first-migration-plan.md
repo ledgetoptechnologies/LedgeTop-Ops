@@ -4,7 +4,132 @@ Updated September 28, 2026. The owner approved implementation and resumption aft
 
 ### Current checkpoint — September 28, 2026
 
-- Current local cancellation candidate failed two of 28 focused tests
+- Populated-history compatibility is now frozen and independently reviewed.
+  Root rerun passed `1/1` (`35.22s`, exit 0); implementer run passed `1/1`
+  (`35.28s`, exit 0), with typecheck exit 0. Test SHA-256:
+  `3c4540fa7667269bdf38f9488ccfa8e0c89700d220967a1e4d77454aa48313ff`.
+  It applies the predecessor chain through 0149, seeds distinct issued/pending
+  requests and immutable issue/redeem operations and commits under existing
+  constraints, then compares exact history, staff, roles, and schema after a
+  deliberately failing batch and successful additive 0150 application.
+  Local preservation is proven for this fixture, not real staging records.
+- Workspace selection rerun passed `22/22` (`75.57s`, exit 0). The first run
+  passed 21 tests and exceeded its 30-second timeout only in the complete-chain
+  migration fixture. That fixture alone now has a 120-second timeout and an
+  exact 150-file assertion; other timeouts and authorization checks are unchanged.
+  Selective feature publication for fresh CI includes the now-reviewed populated
+  history test and excludes the superseded local SQL example. Fresh exact-head CI,
+  remote backup/apply/readback, and deployed acceptance remain required.
+- The 150-file canonical inventory and equivalent SQL body passed independent
+  local review. Bootstrap/preflight/evidence/authority-packet Node suites finished
+  with `119` passed, `4` Windows symlink skips, `0` failed (`57.918s`, exit 0).
+  Root's isolated complete-chain rehearsal passed `1/1` (`71.05s`, exit 0),
+  after all `9/9` Client preflight checks. It applied all 139 Client and 150 Ops
+  generated migrations to empty databases, checked ordered migration ledgers and
+  foreign keys, transformed only the reviewed seeds, kept authority outboxes
+  empty, and proved no pending work or schema changes on a second application.
+  This proves fresh-bootstrap/idempotency, not populated enrollment-history or
+  signed-in live client acceptance. Operations typecheck also exited 0.
+- Canonical cancellation migration `0150_client_portal_recipient_enrollment_cancellation.sql`
+  is now prepared locally, not remotely applied. SHA-256
+  `939ecb0d3413070cb9b1f2232993b9e02b0a9dda9538a5e28a95bce5c139d2c3`;
+  its SQL body is unchanged from the reviewed example, with a canonical provenance
+  header. Old 0148/0149 remain unchanged. Local bootstrap/evidence pins were
+  updated together to the complete 150-file chain. Reduced ledger/joined fixtures
+  now load canonical 0150 exactly once rather than the example; root's four-suite
+  rerun passed `33/33` (`171.16s`, exit 0). The earlier five-suite candidate result
+  below is retained as historical evidence, not proof of this new canonical chain.
+  Populated-history setup initially failed an append-only Directory-generation
+  guard (`30.8s`, exit 1); correcting the fixture must not weaken that guard.
+  The corrected issued/pending/audit preservation test passed as recorded above,
+  without weakening that guard. Fresh exact-head CI and default-off backed-up
+  staging application remain required. Fresh bootstrap and populated-history
+  fixtures are separate local evidence, neither proving remote acceptance.
+- Final frozen recovery candidate verification passed `34/34` across five
+  ledger/full-chain/owner HTTP/owner API/joined suites (`202.68s`, exit 0).
+  Independent QA cleared the bounded local full-review cancellation contract,
+  including isolated candidate-specific SQL guards, valid negative controls,
+  scoped denies/generation changes, cross-namespace operation-ID collisions,
+  malformed timestamps/UUIDs, 105 cancelled records plus a fresh pending request,
+  and cancellation/confirmation ordering. Standalone Operations typecheck also
+  exited 0. Exact test SHA-256 values:
+  ledger `bdff3243ad10b8c367fbf2f322996030de48659112ebea72abe9d7d46539942f`;
+  full-chain `d892972d07bbd38f4247bbf2a80d85a066270000efb651e8bd79b0fd8b8c1417`;
+  SQL candidate `39f59ba1e2da27eb5adee080ef98a34df129f722c560950aa655ebaba11e8f04`.
+  The following earlier failures and partial runs are retained chronologically,
+  not current blockers. This is not canonical promotion or deployment clearance:
+  at that historical checkpoint candidate SQL was outside the 149-migration
+  inventory. Local canonical preparation and fresh 150-chain bootstrap have since
+  passed as recorded above. Remaining gates include fresh CI,
+  backed-up default-off staging application/readback, and real
+  enrollment/recovery/revocation acceptance.
+  Minimal receipt replay after target visibility loss and the separate delivery
+  resource-authority path remain separately approval-gated and unimplemented.
+- Reviewed preparation tests and design/status documents are now published at
+  `33225907b55a308ac28ebe1e95112e593c5e349f` on draft PR133. Exact-head CI
+  `36447732883` is now terminal successful: all ten jobs passed, verified
+  against that exact published head. It proves preparation-only CI, not the
+  unpublished recovery candidate or live recipient/data access.
+  The four-file commit excludes cancellation runtime and candidate SQL, and
+  caused no deployment or authority activation.
+- An earlier exact-head CI readback showed nine jobs successful with the
+  Operations job still running; no overall success is inferred from that partial
+  result. Local owner UI build and browser tests passed `10/10` (`18.5s`), five
+  cases on desktop and mobile Edge. Known-denial and uncertain-cancel browser
+  cases are being added; this does not prove deployed portal acceptance.
+  The expanded owner browser matrix now passed `14/14` (`20.2s`, exit 0),
+  including uncertain-cancel exact replay and known-denial fresh acknowledgement
+  on desktop/mobile. Fixture SHA-256
+  `c45b699dd9721b2350117122cfa0ad3b915c0f6cbcfbb3664f55aaf2ed1eaf45`;
+  spec SHA-256
+  `c312cbb11f9c8d2b730e7379637d14abae384ffb17c1f95c72408c2daa72177f`.
+  Root inspected both mobile rendered states: content wraps without horizontal
+  clipping, retry and denied controls are distinct, and denied acknowledgements
+  are cleared. This remains an exact-ID staging admin tool, not final customer
+  onboarding UX or deployed acceptance.
+- Candidate schema review found a UUID CHECK edge case: an extra hyphen could
+  leave only 31 hexadecimal digits while satisfying the existing raw length
+  and character checks. A local SQLite probe reproduced those component
+  predicates; an exact 32-digit constraint and otherwise-valid insertion
+  regression were requested. Canonical 0148/0149 are not being rewritten.
+- Root tightened cancellation response correlation: full responses require a
+  boolean replay discriminator; minimal receipt parsing requires an issued or
+  pending input and `replayed: true`, exact operation/intent/revision, and
+  acknowledged status. The expanded client API suite passed `9/9` (`164ms`,
+  exit 0). This parser-only contract does not implement the approval-gated
+  lost-target-visibility receipt read.
+  A further discriminator check rejects responses containing both a review and
+  a receipt (full responses require `receipt: null`); its rerun passed `9/9`
+  (`162ms`, exit 0). Typechecking produced no errors after the compatibility
+  test's explicit schema-result type annotations were added.
+  The latest API validation run passed `10/10` (`168ms`, exit 0), adding
+  rejection of nonpositive revisions and impossible lifecycle/principal
+  combinations. Cancelled audit results deliberately allow either no principal
+  (cancelled before redemption) or the retained signed principal (cancelled
+  after redemption). This changes client validation, not server authority.
+- A new local full-chain compatibility test is in progress, applying the
+  cancellation candidate only after all 149 canonical migrations. Its first
+  run exposed an overly broad trigger-count assertion that included twelve
+  preexisting cancellation-related triggers; exact schema snapshots now replace
+  that assertion. The corrected full-chain plus expanded ledger run passed
+  `14/14` across two files (`189.58s`, exit 0). The chain test preserves all
+  preexisting table/index/trigger definitions and seeded staff/role rows across
+  late batch rollback and successful additive application, and checks the exact
+  eleven new schema objects and foreign keys. Subsequent typechecking exposed
+  implicit callback types in the new test, now corrected and typechecked.
+  At that earlier checkpoint, separate ledger SQL negatives still needed candidate-specific controls
+  because older constraints can reject invalid fixtures without exercising the
+  new cancellation fences. This is not full guard or live acceptance.
+- The two observed recovery failures have local candidate corrections;
+  the root rerun passed all `28/28` tests across four ledger/owner HTTP/API/joined
+  suites (`69.94s`, exit 0). Missing direct-SQL, deterministic pending
+  confirmation/cancellation, history-bound, and browser recovery coverage
+  was still required then; the final frozen local run above now covers it.
+  Minimal cancellation-receipt replay after losing
+  target visibility was rejected by the permission boundary. Explicit user
+  authorization has been requested; current target-specific retry checks remain
+  in place, with no workaround or authority expansion.
+- The initial local cancellation candidate failed two of 28 focused tests
   (`68.60s`, exit 1): cancelled-intent inspection is denied where the owner
   audit test expects a read, and the client response parser rejects the new
   cancelled state. The other 26 ledger/owner HTTP/API/joined tests passed.
