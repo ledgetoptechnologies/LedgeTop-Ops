@@ -2,6 +2,27 @@
 
 Updated September 27, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
 
+### September 27 — Ops-only portal bootstrap and contract parity
+
+Client `0220` and companion Ops `0147` schema staging readback is recorded
+below; draft PR131 head `919e5ff01edbd5eebfb67d95b39189878d021678` now passes
+all ten CI jobs (run `36376711586`). A separate local candidate starts
+`/portal` with the new exact-principal Operations home discovery rather than
+requiring a legacy PA session. Only a disabled-route 404 admits the legacy
+bootstrap. Denied, uncertain, malformed and transport-failure responses stay
+closed. The service-label-only UI does not authorize files or finance.
+
+Independent QA found browser identifier limits inconsistent with the server;
+the correction and boundary fixtures passed UI unit tests 15/15, Client
+typecheck/build and local Edge desktop/mobile cases 18/18. Helper, HTTP and
+authority-writer tests passed 36/36, including full-snapshot revocation.
+These are local mocked/isolated results, not credentialed live acceptance.
+The next end-state gap is a normal, reviewed owner v3 issuance action reusing
+the exact acknowledged binding and existing CAS/outbox stream, followed by
+default-off runtime staging and live acceptance. No production deployment,
+client activation or public-link change has occurred. See
+`portal-home-v3-validation.md` for the remaining gates and staging config gap.
+
 ### September 27 — local inactive-binding receipt recovery follow-on
 
 The default-off PR122 staging deployment and its exact-head ten-job CI run

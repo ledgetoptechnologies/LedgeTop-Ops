@@ -23,6 +23,24 @@ function fixture(allowed = true) {
 const request = (suffix = path, headers?: HeadersInit) => new Request(`https://client.example.test${suffix}`, { headers });
 
 describe("independent Operations home HTTP admission", () => {
+  it("discovers an exact service-only envelope without legacy workspace admission", async () => {
+    const { env } = fixture();
+    const response = await createOperationsHomeRouter({ resolvePrincipal: async () => principal })
+      .fetch(request("/home", { "X-LTDS-Workspace-Id": "unrelated" }), env);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ resourceMode: "operations_home", homes: [{ authorityId: authority,
+      workspaceId: "workspace-one", ownershipEpoch: 1, grantRevision: 1,
+      services: [{ serviceId: "service-one", providerId: "provider-one", displayLabel: "Inspection", revision: 1 }] }] });
+  });
+
+  it("discovery distinguishes disabled from denied or unavailable without PA fallback", async () => {
+    const router = createOperationsHomeRouter({ resolvePrincipal: async () => principal });
+    const denied = fixture(false);
+    expect((await router.fetch(request("/home"), denied.env)).status).toBe(403);
+    const { env } = fixture();
+    expect((await router.fetch(request("/home"), { ...env, CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED: "false" })).status).toBe(404);
+    expect((await router.fetch(request("/home"), { ...env, CLIENT_PORTAL_SERVICE_METADATA_READER: undefined })).status).toBe(503);
+  });
   it("is default-off before any identity or storage lookup", async () => {
     const { env, rpc } = fixture();
     const resolvePrincipal = vi.fn(async () => principal);

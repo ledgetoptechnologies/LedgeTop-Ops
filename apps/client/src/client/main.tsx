@@ -14,6 +14,10 @@ const ClientPortalApp = lazy(async () => {
   const module = await import("./ClientPortalApp");
   return { default: module.ClientPortalApp };
 });
+const PortalBootstrapApp = lazy(async () => {
+  const module = await import("./PortalBootstrapApp");
+  return { default: module.PortalBootstrapApp };
+});
 const DeliveryApp = lazy(async () => {
   const module = await import("./DeliveryApp");
   return { default: module.DeliveryApp };
@@ -24,6 +28,7 @@ const InvitationAcceptanceApp = lazy(async () => {
 });
 if (!handoffLegacyPublicShare(window.location, url => window.location.replace(url))) {
   const portalRoute = parseClientPortalRoute(window.location.pathname);
+  const isPortalRoot = window.location.pathname === "/portal" || window.location.pathname === "/portal/";
   const viewerShellRoute = parseClientViewerShellRoute(window.location.pathname);
   const isClientDelegatedShare = window.location.pathname.startsWith("/client-share/");
   const isInvitationAcceptance = window.location.pathname === "/portal/invitations/accept";
@@ -48,6 +53,8 @@ if (!handoffLegacyPublicShare(window.location, url => window.location.replace(ur
           ? <ClientViewerShell route={viewerShellRoute} />
           : isInvitationAcceptance
           ? <InvitationAcceptanceApp token={invitationToken} />
+          : isPortalRoot
+          ? <PortalBootstrapApp />
           : portalRoute.isPortal
           ? <ClientPortalApp initialPage={portalRoute.page} />
           : isClientDelegatedShare

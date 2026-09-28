@@ -4,6 +4,7 @@ import type { VerifiedClientPrincipal } from "./types";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const TIMEOUT_MS = 1_500;
+const MAX_HOMES = 20;
 const responseKeys = ["ok", "protocolVersion", "authorityId", "workspaceId", "ownershipEpoch", "grantRevision", "issuer", "subject", "services"] as const;
 const serviceKeys = ["serviceId", "providerId", "displayLabel", "revision"] as const;
 
@@ -19,10 +20,16 @@ export type OperationsServiceHomeResult = Readonly<{ ok: true; authorityId: stri
   | Readonly<{ ok: false; code: "disabled" | "denied" | "unavailable" }>;
 
 type AuthorityRow = { authority_id: string; workspace_id: string; ownership_epoch: number; grant_revision: number };
-async function currentAuthority(env: OperationsServiceHomeEnv, principal: Pick<VerifiedClientPrincipal, "issuer" | "subject">,
-  authorityId: string): Promise<AuthorityRow | null> {
-  if (!UUID.test(authorityId) || principal.issuer.length < 1 || principal.issuer.length > 512 || principal.issuer.trim() !== principal.issuer
-    || principal.subject.length < 1 || principal.subject.length > 512 || principal.subject.trim() !== principal.subject) return null;
+function validAuthority(row: AuthorityRow): boolean {
+  return UUID.test(row.authority_id) && typeof row.workspace_id === "string" && row.workspace_id.length >= 1
+    && row.workspace_id.length <= 200 && row.workspace_id.trim() === row.workspace_id
+    && Number.isSafeInteger(row.ownership_epoch) && row.ownership_epoch >= 1
+    && Number.isSafeInteger(row.grant_revision) && row.grant_revision >= 1;
+}
+async function currentAuthorities(env: OperationsServiceHomeEnv, principal: Pick<VerifiedClientPrincipal, "issuer" | "subject">,
+  authorityId?: string): Promise<AuthorityRow[] | null> {
+  if ((authorityId !== undefined && !UUID.test(authorityId)) || principal.issuer.length < 1 || principal.issuer.length > 512 || principal.issuer.trim() !== principal.issuer
+    || principal.subject.length < 1 || principal.subject.length > 512 || principal.subject.trim() !== principal.subject) return [];
   try {
     const db = env.DELIVERY_DB.withSession?.("first-primary") ?? env.DELIVERY_DB;
     const result = await db.prepare(`SELECT binding.client_authority_id authority_id,binding.workspace_id,
@@ -47,17 +54,57 @@ async function currentAuthority(env: OperationsServiceHomeEnv, principal: Pick<V
           AND receipt.grant_revision=grant_head.grant_revision
           AND receipt.resulting_state='active' AND receipt.protocol_version=3
           AND receipt.permissions_json=grant_head.permissions_json
-      WHERE binding.client_authority_id=? AND grant_head.issuer=? AND grant_head.subject=?
+      WHERE ${authorityId === undefined ? "" : "binding.client_authority_id=? AND "}grant_head.issuer=? AND grant_head.subject=?
         AND grant_head.state='active' AND grant_head.protocol_version=3
         AND grant_head.permissions_json='["operations.service_home.read"]'
-      LIMIT 2`).bind(authorityId, principal.issuer, principal.subject).all<AuthorityRow>();
-    if (!result.success || result.results.length !== 1) return null;
-    const row = result.results[0]!;
-    return UUID.test(row.authority_id) && typeof row.workspace_id === "string" && row.workspace_id.length >= 1
-      && row.workspace_id.length <= 200 && row.workspace_id.trim() === row.workspace_id
-      && Number.isSafeInteger(row.ownership_epoch) && row.ownership_epoch >= 1
-      && Number.isSafeInteger(row.grant_revision) && row.grant_revision >= 1 ? row : null;
+      ORDER BY binding.client_authority_id
+      LIMIT ${authorityId === undefined ? MAX_HOMES + 1 : 2}`).bind(...(authorityId === undefined
+        ? [principal.issuer, principal.subject] : [authorityId, principal.issuer, principal.subject])).all<AuthorityRow>();
+    if (!result.success || result.results.length > MAX_HOMES || result.results.some(row => !validAuthority(row))
+      || new Set(result.results.map(row => row.authority_id)).size !== result.results.length) return null;
+    return result.results;
   } catch { return null; }
+}
+async function currentAuthority(env: OperationsServiceHomeEnv, principal: Pick<VerifiedClientPrincipal, "issuer" | "subject">,
+  authorityId: string): Promise<AuthorityRow | null> {
+  const rows = await currentAuthorities(env, principal, authorityId);
+  return rows?.length === 1 ? rows[0]! : null;
+}
+
+export type OperationsServiceHome = Omit<Extract<OperationsServiceHomeResult, { ok: true }>, "ok">;
+export type OperationsServiceHomesResult = Readonly<{ ok: true; homes: readonly OperationsServiceHome[] }>
+  | Readonly<{ ok: false; code: "disabled" | "denied" | "unavailable" }>;
+
+/** Discovery exposes only homes explicitly permitted to this verified person.
+ * Recheck the entire snapshot after all RPCs: a revoked earlier home must not
+ * survive while another home's read is in flight. No PA or email fallback. */
+export async function readOperationsServiceHomes(env: OperationsServiceHomeEnv,
+  principal: Pick<VerifiedClientPrincipal, "issuer" | "subject">): Promise<OperationsServiceHomesResult> {
+  if (env.CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED !== "true") return { ok: false, code: "disabled" };
+  if (!env.CLIENT_PORTAL_SERVICE_METADATA_READER) return { ok: false, code: "unavailable" };
+  const before = await currentAuthorities(env, principal);
+  if (!before) return { ok: false, code: "unavailable" };
+  if (!before.length) return { ok: false, code: "denied" };
+  // At most twenty private calls; each has its own bounded timeout.
+  const results = await Promise.all(before.map(row => readOperationsServiceHome(env, principal, row.authority_id)));
+  const homes: OperationsServiceHome[] = [];
+  for (let index = 0; index < results.length; index++) {
+    const result = results[index]!, expected = before[index]!;
+    if (!result.ok) return result;
+    if (result.authorityId !== expected.authority_id || result.workspaceId !== expected.workspace_id
+      || result.ownershipEpoch !== expected.ownership_epoch || result.grantRevision !== expected.grant_revision)
+      return { ok: false, code: "denied" };
+    const { ok: _ok, ...home } = result;
+    homes.push(home);
+  }
+  const after = await currentAuthorities(env, principal);
+  if (!after) return { ok: false, code: "unavailable" };
+  if (after.length !== before.length || after.some((row, index) => {
+    const expected = before[index]!;
+    return row.authority_id !== expected.authority_id || row.workspace_id !== expected.workspace_id
+      || row.ownership_epoch !== expected.ownership_epoch || row.grant_revision !== expected.grant_revision;
+  })) return { ok: false, code: "denied" };
+  return { ok: true, homes };
 }
 
 function exactObject(value: unknown, wanted: readonly string[]): Record<string, unknown> | null {

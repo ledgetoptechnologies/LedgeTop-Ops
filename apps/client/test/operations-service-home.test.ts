@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { splitD1MigrationStatements } from "./helpers/d1-migrations";
 import { writeClientAuthorityWorkspaceBinding } from "../src/worker/client-authority-workspace-binding";
 import { writeClientPortalAuthorityV2, writeClientPortalAuthorityV3 } from "../src/worker/client-portal-authority-v2";
-import { readOperationsServiceHome, type OperationsServiceHomeEnv } from "../src/worker/client-portal/operations-service-home";
+import { readOperationsServiceHome, readOperationsServiceHomes, type OperationsServiceHomeEnv } from "../src/worker/client-portal/operations-service-home";
 
 const authorityId = "11111111-1111-4111-8111-111111111111";
 const principal = { issuer: "https://access.example.test", subject: "person-one" };
@@ -27,6 +27,49 @@ function env(read: (input: unknown) => Promise<unknown>, rows: Array<typeof tupl
 }
 
 describe("Operations service home private helper", () => {
+  it("discovers the exact permitted homes and rechecks the complete snapshot", async () => {
+    const result = await readOperationsServiceHomes(env(async () => response()), principal);
+    expect(result).toEqual({ ok: true, homes: [{ authorityId, workspaceId: "workspace-one",
+      ownershipEpoch: 1, grantRevision: 3, services: response().services }] });
+    await expect(readOperationsServiceHomes(env(async () => response(), [tuple, tuple, tuple, null]), principal))
+      .resolves.toEqual({ ok: false, code: "denied" });
+  });
+
+  it("does not fall back when discovery is denied or its transport is missing", async () => {
+    const read = vi.fn(async () => response());
+    await expect(readOperationsServiceHomes(env(read, [null]), principal)).resolves.toEqual({ ok: false, code: "denied" });
+    expect(read).not.toHaveBeenCalled();
+    const { CLIENT_PORTAL_SERVICE_METADATA_READER: _reader, ...missing } = env(read);
+    await expect(readOperationsServiceHomes(missing, principal)).resolves.toEqual({ ok: false, code: "unavailable" });
+  });
+
+  it("rejects the entire multi-home result if an earlier home disappears during another read", async () => {
+    const second = { ...tuple, authority_id: "22222222-2222-4222-8222-222222222222", workspace_id: "workspace-two" };
+    let discovery = 0;
+    const statement = (selected?: string) => ({ bind: (...values: unknown[]) => statement(values.length === 3 ? String(values[0]) : undefined),
+      all: async () => ({ success: true, results: selected ? [selected === authorityId ? tuple : second]
+        : ++discovery === 1 ? [tuple, second] : [second] }) });
+    const base = env(async input => {
+      const request = input as { authorityId: string; workspaceId: string };
+      return response({ authorityId: request.authorityId, workspaceId: request.workspaceId });
+    });
+    await expect(readOperationsServiceHomes({ ...base,
+      DELIVERY_DB: { prepare: () => statement() } as unknown as D1Database }, principal))
+      .resolves.toEqual({ ok: false, code: "denied" });
+    expect(discovery).toBe(2);
+  });
+
+  it("rejects oversized or duplicate discovery snapshots before private calls", async () => {
+    const read = vi.fn(async () => response());
+    for (const results of [Array.from({ length: 21 }, () => tuple), [tuple, tuple]]) {
+      const statement = { bind: () => statement, all: async () => ({ success: true, results }) };
+      const base = env(read);
+      await expect(readOperationsServiceHomes({ ...base,
+        DELIVERY_DB: { prepare: () => statement } as unknown as D1Database }, principal))
+        .resolves.toEqual({ ok: false, code: "unavailable" });
+    }
+    expect(read).not.toHaveBeenCalled();
+  });
   it("rejects missing/disabled bindings before transport", async () => {
     const base = env(async () => response());
     await expect(readOperationsServiceHome({ ...base, CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED: "false" }, principal, authorityId))
@@ -144,6 +187,7 @@ describe("Operations service home against explicit permission ledger", () => {
     await expect(readOperationsServiceHome(realEnv(read), principal, authorityId))
       .resolves.toEqual({ ok: false, code: "denied" });
     expect(read).not.toHaveBeenCalled();
+    await expect(readOperationsServiceHomes(realEnv(read), principal)).resolves.toEqual({ ok: false, code: "denied" });
   });
 
   it("removes home permission without revoking the inert enrollment", async () => {
@@ -153,6 +197,7 @@ describe("Operations service home against explicit permission ledger", () => {
     await expect(readOperationsServiceHome(realEnv(read), principal, authorityId))
       .resolves.toEqual({ ok: false, code: "denied" });
     expect(read).not.toHaveBeenCalled();
+    await expect(readOperationsServiceHomes(realEnv(read), principal)).resolves.toEqual({ ok: false, code: "denied" });
   });
 
   it("drops a result when only the home permission is removed during the RPC", async () => {
