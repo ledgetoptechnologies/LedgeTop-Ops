@@ -2,6 +2,50 @@
 
 Updated September 27, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
 
+### September 28 — staging-only owner-action acceptance remains open
+
+Client migration `0220` and Ops `0147` staging schema evidence is complete,
+but issuance and the full unified portal are not accepted. PR132 bootstrap
+head `5168e0faaac37d8b6b2326b67b8b6d3279fd33bf` has CI run
+`36379942237`; all ten checks now pass. The final Operations job completed
+successfully at `2026-09-28T05:16:45Z`. Local explicit-staging Wrangler dry
+runs passed for both Workers without upload or deployment. Serving staging
+versions remain Client `0497d73c-3435-4fab-8576-86da76fbfb11` and Ops
+`27cf5e58-61dd-4338-b6ae-634ed26ad902`; required new RPC bindings exist
+in local release configs, not those older serving versions.
+
+Local joined HTTP/database acceptance now passes 4/4, with root's independent
+combined mock/real rerun passing 8/8. It covers exact replay, removal, revoked
+owner/recipient authority and dispatcher isolation, but mocks staff login and
+is not live staging acceptance. Full release preparation exposed stale exact
+bootstrap inventory pins; those are being updated to Client 139/Ops 147 while
+preserving existing-prefix digests and all drift guards. No remote rehearsal
+or production change is implied; a clean candidate must rerun the full gates.
+
+The repaired bootstrap/authority-packet/evidence unit suites pass with 78
+passed and two Windows file-symlink cases skipped. Independent owner-handler
+review then identified missing fresh fences on acknowledged replay, dead
+replay misreporting and storage-error classification; repairs now pass root's
+independent final focused run (12/12). Historical replay after permission
+removal preserves Client revision 2/empty permissions; stale owner, recipient
+and applicable scope authority is rechecked. Pinned dead replay is 409 and
+unexpected storage failure is 503, without disguising known denial. Historical fresh-bootstrap evidence must remain
+distinct from a new full-chain rehearsal. Production/public links are held.
+
+A strict current-chain version-2 bootstrap evidence contract is in progress;
+the old version-1 proof must not satisfy a new release. Existing immutable
+runtime pins/finalization are not silently advanced. Full clean release gates
+and live staging acceptance remain required.
+
+The unfinished normal owner action requires exact-operation replay with
+pinned actor/intent and exact workspace/principal receipt selection before
+joined acceptance. Its staging restriction remains intact after an explicit
+approval rejection of removing it. Local staging-only correctness repairs
+can proceed; production-capable source authorization is an open owner
+question, not a rollout authorization. The production PA update checkpoint
+is not ready. Existing public links and all production authority remain
+unchanged. See `portal-home-v3-validation.md` for current detailed evidence.
+
 ### September 27 — Ops-only portal bootstrap and contract parity
 
 Client `0220` and companion Ops `0147` schema staging readback is recorded

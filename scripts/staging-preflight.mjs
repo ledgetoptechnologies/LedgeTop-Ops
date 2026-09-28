@@ -107,6 +107,16 @@ export function validateApp(app, staging, production) {
     }
   }
   if (app === "operations") {
+    if (vars.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ENABLED === "false"
+      && vars.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ORIGIN !== "")
+      errors.push("operations authority v3 owner origin must remain empty while disabled");
+    if (vars.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ENABLED === "true") {
+      try {
+        const ownerOrigin = new URL(vars.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ORIGIN);
+        if (ownerOrigin.protocol !== "https:" || ownerOrigin.origin !== vars.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ORIGIN
+          || ownerOrigin.hostname !== STAGING_HOSTS.operations) throw new Error();
+      } catch { errors.push("operations enabled authority v3 owner requires the exact Ops HTTPS staging origin"); }
+    }
     if (vars.CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ENABLED === "false"
       && vars.CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ORIGIN !== "")
       errors.push("operations workspace binding admin origin must remain empty while disabled");
@@ -179,6 +189,8 @@ export function validateApp(app, staging, production) {
       && vars.CLIENT_ONBOARDING_ADMIN_ENABLED === "false" && vars[key] === "") continue;
     if (app === "operations" && key === "CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ORIGIN"
       && vars.CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ENABLED === "false" && vars[key] === "") continue;
+    if (app === "operations" && key === "CLIENT_PORTAL_AUTHORITY_V3_OWNER_ORIGIN"
+      && vars.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ENABLED === "false" && vars[key] === "") continue;
     complete(vars[key], `${app} vars.${key}`, errors);
     if (vars[key] === production.vars[key]) errors.push(`${app} vars.${key} reuses production`);
   }

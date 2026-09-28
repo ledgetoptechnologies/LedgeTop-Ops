@@ -1,5 +1,103 @@
 # Portal home permission: validation checkpoint
 
+## September 28 owner-action review checkpoint
+
+- Independent rerun against the clean bootstrap checkout passed 28/28 Client
+  authority and service-home tests (`client-portal-authority-v2.test.ts` and
+  `operations-service-home.test.ts`). These exercise migration 0220, populated
+  protocol-2 compatibility, CAS/receipt rollback, permission transitions and
+  fail-closed home reads in isolated local databases; they are not live staging
+  recipient acceptance.
+
+- Clean bootstrap staging preflight passed, and the local staging-preflight,
+  config-scaffold and Client release-profile suites passed 45/45. They cover
+  exact staging inventory, default-off capability bundles, distinct Access
+  audiences, migration order and activation drift. They do not prove live
+  recipient access or the unfinished owner-action HTTP boundary.
+
+- Local Wrangler 4.118.0 `versions upload --dry-run`, with each explicit
+  `wrangler.staging.json`, passed for the Client and Ops bootstrap candidate.
+  Both configs target staging D1/R2 resources and retain authority/home flags
+  off. Nothing was uploaded or deployed by these commands.
+- Read-only deployment inspection confirmed unchanged 100% staging versions:
+  Client `0497d73c-3435-4fab-8576-86da76fbfb11` and Ops
+  `27cf5e58-61dd-4338-b6ae-634ed26ad902`. These are current serving versions,
+  not merely historical version-list entries.
+- Exact-head PR132 CI run `36379942237` now passes all ten checks, including
+  both applications' desktop/mobile browser jobs. The last Operations job
+  `108793496035` completed successfully at `2026-09-28T05:16:45Z`.
+  This proves the bootstrap candidate's CI gates, not live access issuance.
+- Staging-only correctness repairs can proceed without removing the rejected
+  staging guard. The production-capable source question remains open and is
+  not implicit permission to deploy or enable production.
+- Filtered serving-version metadata confirms three Client and six Ops secret
+  binding names remain present (values were not retrieved). The current older
+  Client version lacks the new metadata-reader binding and current Ops lacks
+  the v2 authority ingress binding; those are present in the reviewed local
+  staging configs, not remotely deployed yet. New home/v2 flags are absent in
+  the older serving versions and therefore cannot be claimed enabled. Existing
+  workspace-writer/outbox and project-authority mutation flags read `false`.
+
+- PR132's corrected head is `5168e0faaac37d8b6b2326b67b8b6d3279fd33bf`.
+  Do not substitute earlier run results for its successful exact-head run.
+- The new native owner handler is unfinished and uncommitted. Review found
+  replay actor/intent pinning, exact-workspace latest-receipt lookup, callable
+  RPC validation and expiry rechecks. These local repairs compile and the
+  focused mock HTTP suite passes 4/4. The real joined database/HTTP suite now
+  passes 4/4; root independently reran both suites together (8/8, exit 0).
+  It covers grant, exact replay without another revision, permission removal,
+  owner-role removal, explicit deny, recipient expiry and exact-operation
+  queue isolation. The fixture applies the real authorization migration chains
+  to synthetic parent tables and mocks staff authentication; this is not live
+  Access-session or staging recipient acceptance.
+- Full release preparation at clean PR132 head stopped at the bootstrap test:
+  its reviewed migration inventory still pinned Client 133/Ops 140 rather than
+  current Client 139/Ops 147. The prior prefixes' content and name digests match
+  their old pins exactly. Local repairs update the exact whole-chain digests,
+  packet test expectations and current instructions; no canonical migration,
+  historical rehearsal evidence or remote state was changed. The remaining
+  full release gates still must run against a clean reviewed candidate.
+- Bootstrap, native-authority packet, onboarding-authority packet and release
+  evidence unit suites now pass together: 78 passed, 0 failed, 2 skipped
+  (Windows could not create file symlinks). Directory-junction rejection tests
+  did run and pass. Exact-count, filename, one-byte content drift, staging
+  identity, isolated-ledger and rollback checks remain enforced.
+- Independent owner-handler review found three local gaps:
+  acknowledged replay bypasses fresh owner/recipient checks, dead replay is
+  reported as pending, and enqueue/dispatch storage errors are classified as
+  denial. Repairs now pass root's independent final rerun: 12/12, exit 0.
+  Pinned dead replay returns 409 without enqueue/dispatch; unexpected storage
+  errors return 503 while known writer denial remains 403. Acknowledged replay
+  rechecks current owner/recipient authority and applicable global, resource,
+  business-area and division denies, then returns historical acknowledgement
+  without reissuing access. The joined business-area-deny regression passes.
+  Replaying a grant after later removal leaves Client revision 2 with empty
+  permissions and exactly two audit rows. TypeScript and generated-type checks
+  pass; the new route wiring uses a typed Hono Context. This remains local,
+  mocked-login evidence, not live staging or full-portal acceptance.
+- The release evidence verifier still describes the older fresh-bootstrap
+  rehearsal (Client 133/Ops 139), separately from the current ordered migration
+  suffix. Its historical proof must not be relabeled as a new 139/147 empty-D1
+  rehearsal. Current-generator/evidence-contract reconciliation remains an
+  explicit release follow-up, even though the evidence unit suite passes. A
+  strict version-2 current-chain contract is being implemented; old version-1
+  rehearsal proof must not satisfy the new candidate. Immutable release pins
+  and finalization remain deliberately unchanged pending candidate review.
+- Independent configuration-suite rerun found and then verified the repair of
+  a default-off origin mismatch. Blank owner origin is allowed only when its
+  flag is exactly `false`; enabled validation requires the exact canonical Ops
+  HTTPS staging origin. Inventory, example and generated-type wiring are
+  updated. Root independently reran staging preflight, config scaffold, Client
+  release profile and source-layout invariants: 63/63 passed, exit 0. This
+  replaces the earlier failing owner-candidate gate, not live access acceptance.
+- Removing its hardcoded staging restriction was explicitly denied by the
+  approval reviewer as exceeding the staging-only authorization. That change
+  was not made or worked around. Clarify whether reusable production-capable
+  source is authorized while all flags stay off and deployments remain
+  staging-only; no production rollout is implied.
+- Existing migration 0220 staging evidence remains valid, but does not prove
+  the new owner HTTP action or the full client portal is accepted.
+
 ## Scope and authorization
 
 - Owner approved Client migration `0220` changing the three existing grant,
@@ -77,3 +175,26 @@
   but its two newer PA source/origin keys are absent. Generation failed closed;
   no configuration was overwritten or deployed. Verify those values against
   current staging before producing a release configuration.
+
+September 27 continuation: independent review confirmed the corrected browser
+contract, and the bootstrap candidate is published as draft PR132 at
+`6794aac15d6e1a1185a9a36b059f8dcb37f8eb75`. Its CI run `36378679635` is live;
+it must complete before release. The prior schema/permission PR131 is fully
+green. Read-only staging D1 inspection verified source `project-alpha:staging`;
+the existing rendered staging config identifies the PA staging HTTPS origin.
+An ignored values overlay preserving the original approved file now passes
+the staging scaffold's validation without writes. This clears the renderer
+input gap, not the runtime/live-acceptance gates. No remote resource, authority
+grant or production deployment changed during these continuation checks.
+
+PR132's initial full desktop/mobile browser jobs each failed one legacy denial
+test: the exact request-order assertion did not yet include the new home
+discovery 404 before the legacy session 404. The desktop run otherwise passed
+220/221 cases. The test correction preserves the assertion that no account or
+resource reads follow either denial; it does not relax the runtime's fallback.
+Corrected two-viewport denial tests passed 2/2 and home browser coverage passed
+18/18. Draft PR132 now points to
+`cd384aa4352205f9d8bcc7783522e16f9ee665a6`; a fresh exact-head CI gate is
+required. A clean separate checkout was built/typechecked at the prior reviewed
+runtime commit, with validated ignored staging configs and every new authority
+flag off. No runtime upload or deployment was performed.

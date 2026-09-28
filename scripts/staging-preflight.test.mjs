@@ -115,6 +115,19 @@ test("pins the inactive workspace binding to staging and keeps its release flags
   assert(errors.some((error) => error.includes("CLIENT_AUTHORITY_WORKSPACE_BINDING_OUTBOX_ENABLED")), errors.join(" | "));
   assert(errors.some((error) => error.includes("workspace binding admin requires the exact Ops HTTPS staging origin")), errors.join(" | "));
 });
+
+test("authority v3 owner origin is blank only while disabled and exact when enabled", () => {
+  const disabled = stagingConfig("operations"), production = productionFrom(disabled);
+  assert.deepEqual(validateApp("operations", disabled, production), []);
+  disabled.vars.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ORIGIN = "https://ops-staging.example.test";
+  assert(validateApp("operations", disabled, production).some(error => error.includes("authority v3 owner origin")));
+  const enabled = stagingConfig("operations");
+  enabled.vars.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ENABLED = "true";
+  enabled.vars.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ORIGIN = `https://${STAGING_HOSTS.operations}`;
+  assert(!validateApp("operations", enabled, productionFrom(stagingConfig("operations"))).some(error => error.includes("exact Ops HTTPS staging origin")));
+  enabled.vars.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ORIGIN = "https://wrong-staging.example.test";
+  assert(validateApp("operations", enabled, productionFrom(stagingConfig("operations"))).some(error => error.includes("exact Ops HTTPS staging origin")));
+});
 test("rejects missing, unexpected, or non-regular release migrations", () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-staging-migrations-"));
   for (const app of ["delivery", "operations"]) {

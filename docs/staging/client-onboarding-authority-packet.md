@@ -50,7 +50,7 @@ npm.cmd run staging:onboarding-authority:test
 ```
 
 The generator pins the exact staging account, `ltds-ops-staging` D1 binding,
-and current 140-file canonical Operations migration chain. Generated SQL,
+and current 147-file canonical Operations migration chain. Generated SQL,
 manifests, and Wrangler configs are ignored and must remain operator-private.
 Apply only the generated one-file provision configuration. Immediately after
 the acceptance, disable the acceptance routes and apply only the generated

@@ -124,11 +124,17 @@ changes only Client `0002_seed_initial_staff.sql` and Operations
 digest, and emits source/derived SHA-256 manifests. Apply a fresh
 empty database only with the generated `wrangler.staging.bootstrap.json` for
 that application. Do not use these configs for an existing database. Confirm
-the full 133-row Client ledger (both `0199` filenames once, final `0214`) and
-140-row Operations ledger (final `0140`), a second list/apply with no pending
+the full 139-row Client ledger (both `0199` filenames once, final `0220`) and
+147-row Operations ledger (final `0147`), a second list/apply with no pending
 migrations, one synthetic owner in each database, the Operations owner role and
 portable ACL catalog, and an empty `PRAGMA foreign_key_check`. Record those
 results in `migrations.freshBootstrap` without storing the owner email.
+
+Release-gate follow-up: the current schema-version-1 evidence verifier still
+pins the September 18 rehearsal counts (133/139). Do not relabel that historical
+proof as a new 139/147 rehearsal or claim a current fresh-bootstrap release
+gate has passed. Reconcile the versioned evidence contract before submitting
+new full-chain evidence; the generator's local tests alone are not that proof.
 
 Cloudflare's remote D1 migration transport does not accept a nested
 `SELECT CASE ... RAISE(...) END` statement inside a trigger even though local
