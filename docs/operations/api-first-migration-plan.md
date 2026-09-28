@@ -7511,6 +7511,39 @@ pending; this requirement does not claim a deployed UI change.
   remaining outage gate is coordinated staging and production enablement with
   both exact PA connections, not a new monitor implementation.
 
+### September 28 — outage-monitor mounted-scheduler source audit
+
+- The currently mounted index scheduler resolves its audited lifecycle revision
+  through `selectProjectAlphaApiV2MonitorSchedulerRevision`; it does not trust
+  the obsolete environment revision. The runtime gate remains default-off and
+  also fails closed when the owner-recipient value is blank.
+- The exact-source policy keeps each Project Alpha identity independent. Alert
+  eligibility begins only when the unhealthy interval is strictly greater than
+  `600000` milliseconds. Verified recovery closes the current incident; a later
+  outage starts a new sequence. Durable lease plus uncertain-delivery state
+  holds ambiguous mail attempts instead of retrying them as though no delivery
+  occurred.
+- Root reran the existing incident-policy, monitor-cycle, and monitor-schedule
+  files at exact head `0bcce70`: `18/18` tests passed in `4.31s` with exit `0`.
+  The new joined-D1 outage test is implemented and source-QA clear at SHA-256
+  `72A8B9BE83D07A6F4EE7BA8E939D36D30A8D07CDE0C35C4FC2ED6E3BB7F0E21F`. A
+  single controlled run in session `89920` passed `1/1` with exit `0` in
+  `46.30s` (`15.520s` test case), starting at `2026-09-28 07:03:57` local time.
+  TypeScript check session `23018` also completed with exit `0` and no errors.
+  The joined test exercised the real D1, monitor, and mail-adapter path with only
+  transport faked. It does not prove the deployed cron, real-inbox receipt, or
+  queued-work retention behavior.
+- Published exact-head CI run `36417217894` for
+  `0bcce70c52d6d4d689048f7b0081afd48f5d3c1f` completed successfully at
+  `2026-09-28T11:59:40Z`; root REST readback verified all ten jobs completed
+  successfully. That result covers the published exact head only and does not
+  cover the new local joined-D1 test. The remaining acceptance gate is a
+  controlled deployed scheduler → Project Alpha → mail → request-detail staging
+  proof plus real-inbox receipt. A configured Cloudflare CLI read of the incoming
+  D1 database failed with error `7403`; no token fallback was approved. No
+  deployment, recipient activation, mail, credential, runtime configuration, or
+  schema change was performed by this checkpoint.
+
 ### September 22 — Project Alpha managed-directory surface revalidation
 
 - The generic Project Alpha managed-directory policy remains implemented but
