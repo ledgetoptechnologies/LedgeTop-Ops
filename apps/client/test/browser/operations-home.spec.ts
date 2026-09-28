@@ -3,7 +3,7 @@ import { expect, test, type Page } from "@playwright/test";
 const response = {
   resourceMode: "operations_home",
   homes: [{
-    authorityId: "authority-one",
+    authorityId: "12345678-1234-4123-8123-123456789abc",
     workspaceId: "workspace-one",
     ownershipEpoch: 2,
     grantRevision: 4,
@@ -34,6 +34,29 @@ test("unified portal shows only verified operations services", async ({ page }) 
   await expect(page.getByText("Infrastructure review", { exact: true })).toBeVisible();
   await expect(page.getByRole("navigation")).toHaveCount(0);
   await expect(page.getByText(/projects|files|billing/i)).toHaveCount(0);
+  expect(calls).toEqual(["/api/client/v2/operations/home"]);
+});
+
+test("unified portal accepts server metadata boundaries and opaque slash IDs", async ({ page }) => {
+  const label = "L".repeat(160);
+  const boundaryResponse = {
+    resourceMode: "operations_home",
+    homes: [{
+      authorityId: "abcdefab-cdef-4abc-8def-abcdefabcdef",
+      workspaceId: `/${"w".repeat(199)}`,
+      ownershipEpoch: 1,
+      grantRevision: 1,
+      services: [{
+        serviceId: `/${"s".repeat(190)}`,
+        providerId: `/${"p".repeat(127)}`,
+        displayLabel: label,
+        revision: 1,
+      }],
+    }],
+  };
+  const calls = await interceptClientApi(page, 200, boundaryResponse);
+  await page.goto("/portal");
+  await expect(page.getByText(label, { exact: true })).toBeVisible();
   expect(calls).toEqual(["/api/client/v2/operations/home"]);
 });
 

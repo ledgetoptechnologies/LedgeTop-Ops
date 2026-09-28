@@ -3,7 +3,7 @@ import { loadOperationsHome, type PortalRequest } from "../src/client/portal-api
 import { isUnifiedPortalRoot, operationsBootstrapOutcome } from "../src/client/PortalBootstrapApp";
 
 const home = {
-  authorityId: "authority-one",
+  authorityId: "12345678-1234-4123-8123-123456789abc",
   workspaceId: "workspace-one",
   ownershipEpoch: 2,
   grantRevision: 4,
@@ -28,6 +28,19 @@ describe("operations home browser API", () => {
     expect(calls).toEqual([{ url: "/api/client/v2/operations/home", init: { signal, omitWorkspace: true } }]);
   });
 
+  it("accepts the server field boundaries and opaque identifiers containing slashes", async () => {
+    const boundaryHome = {
+      ...home,
+      workspaceId: `/${"w".repeat(199)}`,
+      services: [
+        { serviceId: `/${"s".repeat(128)}`, providerId: `/${"p".repeat(127)}`, displayLabel: "L".repeat(160), revision: 1 },
+        { serviceId: `/${"t".repeat(190)}`, providerId: "provider/with/slash", displayLabel: "Service two", revision: 2 },
+      ],
+    };
+    await expect(loadOperationsHome(requestReturning({ resourceMode: "operations_home", homes: [boundaryHome] }, [])))
+      .resolves.toEqual({ resourceMode: "operations_home", homes: [boundaryHome] });
+  });
+
   it.each([
     ["extra envelope data", { resourceMode: "operations_home", homes: [home], token: "secret" }],
     ["wrong mode", { resourceMode: "legacy", homes: [home] }],
@@ -35,7 +48,10 @@ describe("operations home browser API", () => {
     ["duplicate service", { resourceMode: "operations_home", homes: [{ ...home, services: [home.services[0], home.services[0]] }] }],
     ["too many homes", { resourceMode: "operations_home", homes: Array.from({ length: 21 }, (_, index) => ({ ...home, authorityId: `authority-${index}` })) }],
     ["too many services", { resourceMode: "operations_home", homes: [{ ...home, services: Array.from({ length: 101 }, (_, index) => ({ ...home.services[0], serviceId: `service-${index}` })) }] }],
-    ["unbounded label", { resourceMode: "operations_home", homes: [{ ...home, services: [{ ...home.services[0], displayLabel: "x".repeat(201) }] }] }],
+    ["service ID over 191 characters", { resourceMode: "operations_home", homes: [{ ...home, services: [{ ...home.services[0], serviceId: "s".repeat(192) }] }] }],
+    ["provider ID over 128 characters", { resourceMode: "operations_home", homes: [{ ...home, services: [{ ...home.services[0], providerId: "p".repeat(129) }] }] }],
+    ["label over 160 characters", { resourceMode: "operations_home", homes: [{ ...home, services: [{ ...home.services[0], displayLabel: "x".repeat(161) }] }] }],
+    ["workspace over 200 characters", { resourceMode: "operations_home", homes: [{ ...home, workspaceId: "w".repeat(201) }] }],
     ["unsafe revision", { resourceMode: "operations_home", homes: [{ ...home, grantRevision: Number.MAX_SAFE_INTEGER + 1 }] }],
   ])("fails closed for %s", async (_name, response) => {
     await expect(loadOperationsHome(requestReturning(response, []))).rejects.toMatchObject({ status: 503 });

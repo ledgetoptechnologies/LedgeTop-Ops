@@ -215,7 +215,7 @@ export interface PortalOperationsHomeResponse {
   homes: PortalOperationsHome[];
 }
 
-const operationsIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const operationsAuthorityIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 function exactDataObject(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
@@ -233,8 +233,8 @@ function exactDataObject(value: unknown, keys: readonly string[]): value is Reco
   }
 }
 
-function boundedId(value: unknown): value is string {
-  return typeof value === "string" && operationsIdPattern.test(value);
+function boundedTrimmedString(value: unknown, maximumLength: number): value is string {
+  return typeof value === "string" && value.length >= 1 && value.length <= maximumLength && value.trim() === value;
 }
 
 function positiveSafeInteger(value: unknown): value is number {
@@ -257,7 +257,8 @@ function parseOperationsHomeResponse(value: unknown): PortalOperationsHomeRespon
     const ownershipEpoch = Object.getOwnPropertyDescriptor(item, "ownershipEpoch")!.value;
     const grantRevision = Object.getOwnPropertyDescriptor(item, "grantRevision")!.value;
     const servicesValue = Object.getOwnPropertyDescriptor(item, "services")!.value;
-    if (!boundedId(authorityId) || !boundedId(workspaceId) || !positiveSafeInteger(ownershipEpoch)
+    if (typeof authorityId !== "string" || !operationsAuthorityIdPattern.test(authorityId)
+      || !boundedTrimmedString(workspaceId, 200) || !positiveSafeInteger(ownershipEpoch)
       || !positiveSafeInteger(grantRevision) || !Array.isArray(servicesValue) || servicesValue.length > 100) return null;
     const tuple = `${authorityId}\0${workspaceId}\0${ownershipEpoch}\0${grantRevision}`;
     if (authorityIds.has(authorityId) || tuples.has(tuple)) return null;
@@ -272,9 +273,8 @@ function parseOperationsHomeResponse(value: unknown): PortalOperationsHomeRespon
       const providerId = Object.getOwnPropertyDescriptor(service, "providerId")!.value;
       const displayLabel = Object.getOwnPropertyDescriptor(service, "displayLabel")!.value;
       const revision = Object.getOwnPropertyDescriptor(service, "revision")!.value;
-      if (!boundedId(serviceId) || !boundedId(providerId) || typeof displayLabel !== "string"
-        || displayLabel.length < 1 || displayLabel.length > 200 || displayLabel.trim() !== displayLabel
-        || /[\u0000-\u001f\u007f]/.test(displayLabel) || !positiveSafeInteger(revision) || serviceIds.has(serviceId)) return null;
+      if (!boundedTrimmedString(serviceId, 191) || !boundedTrimmedString(providerId, 128)
+        || !boundedTrimmedString(displayLabel, 160) || !positiveSafeInteger(revision) || serviceIds.has(serviceId)) return null;
       serviceIds.add(serviceId);
       services.push({ serviceId, providerId, displayLabel, revision });
     }
