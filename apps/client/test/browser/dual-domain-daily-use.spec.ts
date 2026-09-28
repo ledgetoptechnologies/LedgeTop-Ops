@@ -113,7 +113,11 @@ test("J7 unauthorized identity and cross-tenant workspace hints fail closed", as
   const fixture = await installFixture(page, state);
   await page.goto("/portal?workspace=workspace-one");
   await expect(page.getByText("Access not provisioned", { exact: true })).toBeVisible();
-  expect(fixture.calls.map(call => call.path)).toEqual(["/api/client/session"]);
+  // The disabled Operations home returns its own 404 before the legacy
+  // session denial. Neither probe authorizes account or tenant data reads.
+  expect(fixture.calls.map(call => call.path)).toEqual([
+    "/api/client/v2/operations/home", "/api/client/session",
+  ]);
 
   state.session = 200;
   state.workspaces = [workspace];

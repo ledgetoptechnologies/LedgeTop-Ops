@@ -1502,7 +1502,7 @@ test("Viewer shell is openerless and keeps the iframe and idempotency key across
   await viewerPopup.close();
 });
 
-test("disabled or unavailable session stops before account data requests", async ({ page }) => {
+test("disabled Operations home and unavailable legacy session stop before account data requests", async ({ page }) => {
   const requestedPaths: string[] = [];
   await page.route("**/api/client/**", async route => {
     const path = new URL(route.request().url()).pathname;
@@ -1511,7 +1511,10 @@ test("disabled or unavailable session stops before account data requests", async
   });
   await page.goto("/portal");
   await expect(page.getByText("Portal unavailable", { exact: true })).toBeVisible();
-  expect(requestedPaths).toEqual(["/api/client/session"]);
+  // The unified root checks its separately authorized home first. Only the
+  // explicit disabled-route 404 permits legacy admission; neither response
+  // permits any account/resource data request.
+  expect(requestedPaths).toEqual(["/api/client/v2/operations/home", "/api/client/session"]);
 });
 
 test("map starts under the production CSP contract without policy errors", async ({ page }) => {

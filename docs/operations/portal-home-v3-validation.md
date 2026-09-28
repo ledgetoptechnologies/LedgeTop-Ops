@@ -98,6 +98,25 @@
 - Existing migration 0220 staging evidence remains valid, but does not prove
   the new owner HTTP action or the full client portal is accepted.
 
+## September 27 historical local verification
+
+- Re-ran the authority writer, entrypoint and service-home suites: 31/31
+  passed, including populated protocol-2 migration/replay and protocol-3
+  permission removal, stale CAS, immutable evidence and transactional rollback.
+- PR132 CI exposed an additional stale J7 denial expectation on both business
+  domains. Updated only the test's exact request sequence to include the
+  disabled home discovery 404 before the legacy session denial. It still
+  forbids account and cross-tenant resource requests after denial.
+- Full J7 browser coverage passed 16/16 locally across drone/technology
+  desktop/mobile. Fresh exact-head CI remains required; these local fixtures
+  are not credentialed live staging acceptance.
+- Client migration 0220 and companion Ops migration 0147 were already applied
+  to staging after private backups, with guard readback and no access issuance.
+  No production deployment, public-link change or client activation occurred.
+- The normal owner-action path remains a separate, default-off work in
+  progress. Do not declare the full portal or migration production-ready from
+  these schema and fixture results.
+
 ## Scope and authorization
 
 - Owner approved Client migration `0220` changing the three existing grant,
