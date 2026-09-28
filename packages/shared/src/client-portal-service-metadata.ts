@@ -18,4 +18,3 @@ export interface ClientPortalServiceMetadataV1 {
 export type ClientPortalServiceMetadataResultV1 =
   | Readonly<{ ok: true; protocolVersion: 1; services: readonly ClientPortalServiceMetadataV1[] }>
   | Readonly<{ ok: false; protocolVersion: 1; code: "invalid_request" | "denied" | "overflow" }>;
-
