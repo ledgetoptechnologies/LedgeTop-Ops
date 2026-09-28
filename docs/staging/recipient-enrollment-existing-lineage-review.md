@@ -100,6 +100,15 @@ transport inputs may be supplied. Grants, history, approvals, receipts, mappings
 and activation must come from their real producers. This is a planned local
 rehearsal, not a successful test or authority to provision remote staging.
 
+The first focused attempt failed before authority mutation: the current
+generator correctly requires the exact complete 151-file chain and rejects a
+122-file repository. Do not alter that guard or fabricate ledger rows.
+Historical commit `332ffbb` carries the real 122-file producer/contract. The
+fixture must use reviewed immutable historical source and dependencies with
+recorded Git/content pins, not depend on a potentially shallow CI Git checkout
+or rewrite generated SQL. That historical fixture is still being assembled;
+no v7/v8 full-lineage success is claimed.
+
 - Reproduce exactly two inactive profile grants with global history `1` and business-area history `3`; acquisition provision/revoke succeeds and preserves the latter byte-for-byte and at history `3`.
 - Reject another permission, effect, scope, business area, ID, grant row, active state, missing/non-contiguous history revision, or changed history count.
 - Reject attempts to use existing `v3-profile-only-inactive`, v5 fixture, or ordinary v4 state names for this lineage.
