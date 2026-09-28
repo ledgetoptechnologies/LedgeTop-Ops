@@ -524,7 +524,8 @@
         "0216_client_authority_workspace_ownership_claim.sql",
         "0217_client_authority_workspace_claim_evidence.sql",
         "0218_client_authority_workspace_binding.sql",
-        "0219_operations_portal_authority_v2.sql"
+        "0219_operations_portal_authority_v2.sql",
+        "0220_operations_portal_authority_v3_permissions.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
@@ -691,7 +692,8 @@
         "0143_client_portal_workspace_binding_selection.sql",
         "0144_client_portal_workspace_binding_outbox.sql",
         "0145_client_portal_authority_v2_outbox.sql",
-        "0146_ops_customer_service_enrollments.sql"
+        "0146_ops_customer_service_enrollments.sql",
+        "0147_client_portal_authority_v3_permissions.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
@@ -723,7 +725,7 @@
           "manifestPath": "apps/client/.staging-bootstrap/manifest.json",
           "transformedFiles": ["0002_seed_initial_staff.sql"],
           "ledgerCount": 134,
-          "finalMigration": "0219_operations_portal_authority_v2.sql",
+          "finalMigration": "0220_operations_portal_authority_v3_permissions.sql",
           "sourceSeedSha256": "<CANONICAL_SEED_SHA256>",
           "generatedSeedSha256": "<GENERATED_SEED_SHA256>",
           "databaseWasEmpty": false,
@@ -745,7 +747,7 @@
           "manifestPath": "apps/operations/.staging-bootstrap/manifest.json",
           "transformedFiles": ["0002_seed_acl.sql"],
           "ledgerCount": 141,
-          "finalMigration": "0146_ops_customer_service_enrollments.sql",
+          "finalMigration": "0147_client_portal_authority_v3_permissions.sql",
           "sourceSeedSha256": "<CANONICAL_SEED_SHA256>",
           "generatedSeedSha256": "<GENERATED_SEED_SHA256>",
           "databaseWasEmpty": false,
