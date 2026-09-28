@@ -4,6 +4,37 @@ Updated September 28, 2026. The owner approved implementation and resumption aft
 
 ### Current checkpoint — September 28, 2026
 
+- Draft PR 133 contains committed default-off recipient storage/outbox/private
+  RPC implementation (`2703d4b`) and hermetic acceptance fixtures (`b701296`).
+  The prior CI failure was confined to tests reading private ignored staging
+  configs; the corrected tests passed 3/3 locally. Exact-head run `36495685524`
+  is still in progress, so complete CI acceptance is not yet established.
+- Canonical prerequisite coverage now passes three cases against the real
+  151/140 migration chains, including clean reviewed v3/v4/v6 acquisition,
+  activation and inactive selection. Identical selection replay succeeds;
+  altered workspace/checkpoint/activation, forged subject and retry after the
+  real reviewed revoke fail. No recipient-delivery command is produced.
+  Operations typecheck passes. This remains prerequisite evidence, not a
+  signed-in client's successful folder/file access.
+- Fresh read-only staging history confirms the distinct preserved onboarding
+  lineage: global profile v1/generation1 inactive; business-area profile
+  v1/generation2 inactive, v2/generation3 active, v3/generation4 inactive.
+  Reproduce that through the historical pre-0123 producer and real 0123
+  backfill before v7/v8 live rehearsal; do not substitute v5 or fabricate
+  history. Full recipient enrollment, source-authority projection, delivery
+  activation, coupled revocation and owner/browser acceptance remain open.
+  Separate pending security-boundary replacement decisions are not implied
+  by the additive sharing approval. No production PA update is requested.
+- A bounded cross-system trace identifies the remaining publication boundary:
+  Ops `currentResourceProof`, Client resource preflight and 0221 atomic guards
+  still require a primary staff binding or the legacy secondary native
+  binding/grant/published-event/authenticated-delivery chain. The generic
+  API-v2 adapter must produce durable source-instance/application/history-epoch,
+  authorization-generation, complete snapshot/checkpoint, project, folder and
+  prefix-correlated publication proof. Cache presence alone is insufficient.
+  This contract, including a new accepted proof branch, remains subject to the
+  separate security-boundary checkpoint; the trace is not implementation or
+  full-chain acceptance evidence.
 - Six actual workerd named-RPC boundary tests now pass without a platform-class
   shim: exact staging environment/host/flag gating and private HTTP denial are
   preserved over a real service binding. Client typecheck passes. This is
