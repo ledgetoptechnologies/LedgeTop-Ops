@@ -317,6 +317,10 @@ replacement for existing public links.
 
 The required finance semantics and link separation are consistent with
 `docs/operations/operations-api-first-system-audit-2026-09-09.md:194-199`.
+The bounded PA source audit, including the distinction between the six approved
+default-on API-v2 read feature groups and the unrelated legacy `api-*` routes,
+is recorded in
+`docs/operations/pa-financial-api-gap-audit-2026-09-28.md`.
 
 ## 5. Notification ownership and logical deduplication
 

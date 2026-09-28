@@ -4,10 +4,11 @@ Updated September 28, 2026. The owner approved implementation and resumption aft
 
 ### September 28 — staging-only owner-action acceptance remains open
 
-Last CI-verified integrated baseline is `1a49be7aa5448e9c88a12c7f780f0b7242b6b32a`.
-Its exact-head CI run `36399345552` passed all ten jobs, with terminal
-readback at September 28 09:02:01 UTC. This includes the success-only portal
-composition, not subsequent local diagnostic test changes or live recipients.
+Last CI-verified integrated baseline is `1e572a0eebfe000fd4ed0df859e42e0867fe5a84`.
+Its exact-head CI run `36401610421` passed all ten jobs, with terminal
+readback at September 28 09:27:18 UTC. This includes the success-only portal
+composition and diagnostic test correction, not subsequent local changes or
+live recipients.
 Independent local focused validation passes Client 39/39 and Ops 34/34.
 Earlier CI run `36390923313` completed successfully for `9eea3e6`: all ten jobs
 passed, with terminal readback at September 28 07:31:21 UTC. Its predecessor
@@ -30,7 +31,7 @@ accumulated fixture and authorization work; a reviewed test-only split retains
 every assertion and the original 120-second case limits. Its complete file now
 passes 43/43 in 855.75 seconds. A subsequent callback-type correction emits
 byte-identical JavaScript and Operations typecheck passes. Final-source CI for
-that correction remains required; this does not make the original broad release
+that correction now passes; this does not make the original broad release
 command successful.
 
 The service-home UI at the last verified baseline composes independently
@@ -56,6 +57,15 @@ from both implementer and independent QA plus Client typecheck. It adds no
 runtime import, route, schema, grant or deployment. Publication/withdrawal and
 exact resource/recipient authority remain open; this is not the monthly-report
 feature or portal launch acceptance.
+
+The subsequent local report-foundation commit is `152a13335c062efedd2bed23531ebdeab5c98e21`.
+Neutral shared-portal copy now says Ledge Top while retaining source-specific
+LTDS/LTT branding and all protocol identifiers. Client typecheck/build and two
+desktop/mobile source-branding browser cases pass. Root independently passed
+32/32 report, branding and home-UI tests. These follow-on changes still require
+their own exact-head CI. The bounded PA financial-source audit is recorded in
+`pa-financial-api-gap-audit-2026-09-28.md`; it identifies missing generic scoped
+finance contracts without adding permissions, routes or public-link mutations.
 
 The concrete portal prerequisite is a missing verified-recipient workflow:
 there is no runtime creator for the existing recipient identity-binding table,

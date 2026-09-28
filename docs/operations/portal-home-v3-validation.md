@@ -2,6 +2,20 @@
 
 ## September 28 owner-action review checkpoint
 
+- Latest terminal CI baseline is `1e572a0eebfe000fd4ed0df859e42e0867fe5a84`:
+  run `36401610421`, all ten jobs successful, terminal readback September 28
+  09:27:18 UTC. It includes the diagnostic correction described below. The
+  subsequent `152a133` unused report validator and neutral shared-portal copy
+  remain local follow-ons awaiting exact-head CI. Root's combined report,
+  branding and home-UI suite passes 32/32; Client typecheck/build and two
+  desktop/mobile source-branding browser cases pass. Source-specific LTDS/LTT
+  branding and protocol identifiers remain unchanged. The original broad
+  release session remains live and is not accepted as a pass.
+- [PA financial source audit](pa-financial-api-gap-audit-2026-09-28.md)
+  distinguishes existing internal reads from missing scoped portal contracts.
+  No finance endpoint, recipient grant, production setting or public link was
+  changed. Governed recipient linking remains a separate approval checkpoint.
+
 - The success-only UI slice is committed and pushed as
   `1a49be7aa5448e9c88a12c7f780f0b7242b6b32a`. Exact-head CI run
   `36399345552` passed all ten jobs; terminal GitHub readback reports success at

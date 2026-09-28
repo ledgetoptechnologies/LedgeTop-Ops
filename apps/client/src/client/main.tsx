@@ -46,7 +46,7 @@ if (!handoffLegacyPublicShare(window.location, url => window.location.replace(ur
 
   createRoot(document.getElementById("root")!).render(
     <StrictMode>
-      <Suspense fallback={<main className="portal-loading-shell" aria-busy="true" aria-label="Loading LTDS Client Portal" />}>
+      <Suspense fallback={<main className="portal-loading-shell" aria-busy="true" aria-label="Loading Ledge Top client portal" />}>
         {onboardingRoute
           ? <ClientOnboardingRecipientApp {...onboardingRoute} />
           : viewerShellRoute

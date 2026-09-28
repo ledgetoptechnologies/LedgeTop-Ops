@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import { resolvePortalBrand } from "../src/client/portal-brand";
 
 describe("shared portal brand context", () => {
@@ -30,5 +31,15 @@ describe("shared portal brand context", () => {
     expect(resolvePortalBrand("portal.ledgetopdroneservices.com", "project-alpha:future")).toMatchObject({
       key: "generic", division: "Workspace", shortName: "Ledge Top", sourceId: null,
     });
+  });
+
+  it("keeps shared portal copy neutral while retaining explicit source divisions", () => {
+    const sharedCopy = ["ClientPortalApp.tsx", "main.tsx"]
+      .map(name => readFileSync(new URL(`../src/client/${name}`, import.meta.url), "utf8"))
+      .join("\n");
+    expect(sharedCopy).not.toMatch(/\bLTDS\b|Loading LedgeTop/);
+    expect(sharedCopy).toContain("Ledge Top");
+    expect(resolvePortalBrand("portal.ledgetopdroneservices.com").shortName).toBe("LTDS");
+    expect(resolvePortalBrand("portal.ledgetoptechnologies.com").shortName).toBe("LTT");
   });
 });
