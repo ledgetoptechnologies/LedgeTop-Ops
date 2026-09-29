@@ -10,9 +10,10 @@ Updated September 29, 2026. The owner approved implementation and resumption aft
   return and every 60 seconds while visible; the prior summary is hidden during
   revalidation and remains hidden on denial, malformed response, or transport
   failure. In this clean worktree, Client type-check and production build pass,
-  and the focused home browser suite passes 34/34 across desktop and mobile.
+  and the full Client browser matrix passes 462 tests (8 skipped), plus all
+  16 dual-domain daily-use checks.
   No access grant or public link changed. The change is not yet deployed.
-- Fresh read-only Wrangler deployment-list checks used the current generic
+- Fresh read-only Cloudflare Worker deployment inventory used the current generic
   worker names (not legacy `ltds-*` names): `ledgetop-ops-staging` exists at
   100% on version `66e5b364-16ec-4da4-a379-18982a208197`, and
   `ledgetop-clients-staging` exists at 100% on version
