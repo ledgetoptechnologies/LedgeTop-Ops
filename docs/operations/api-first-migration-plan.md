@@ -22,9 +22,18 @@ Updated September 29, 2026. The owner approved implementation and resumption aft
   Ops Worker settings do expose a valid `PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_SOURCE_ID`
   matching the already reviewed `project-alpha:staging` test source slug; this
   verifies the configured slug, not the PA source-instance/application/history
-  identity or a working API connection. Keep the Client and Ops portal/access
-  flags closed until the complete staging release is pinned, deployed, migrated,
-  and verified.
+  identity or a working API connection. Fresh Cloudflare Access inventory
+  resolves a documentation discrepancy: the staging self-hosted app
+  `Ledge Top Ops Sync Staging` already covers
+  `ops-sync-staging.ledgetopdroneservices.com` with the named PA staging
+  Service Auth policy. The Workers inventory still lists production
+  `ledgetop-ops-sync` and Client/Ops staging Workers, but no
+  `ledgetop-ops-sync-staging` Worker. Do not create a duplicate Access app;
+  read back and validate its exact audience/policy and reconcile the existing
+  staging group before considering a Worker baseline. The Worker baseline is
+  not harmless: it adds a route and scheduled group reconciliation.
+  Keep the Client and Ops portal/access flags closed until the complete staging
+  release is pinned, deployed, migrated, and verified.
 
 - The isolated `codex/staging-integration-reconcile` candidate now contains
   current local `origin/main` (`aef94236`) plus a local-only merge commit
