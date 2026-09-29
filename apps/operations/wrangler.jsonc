@@ -59,6 +59,7 @@
     "VIEWER_INTEGRATION_ENABLED": "true",
     "VIEWER_PROCESSING_ENABLED": "true",
     "VIEWER_PUBLIC_SHARES_ENABLED": "true",
+    "VIEWER_WORKSPACE_RENEWAL_CORS_ENABLED": "false",
     "VIEWER_BASE_URL": "https://viewer.ledgetopdroneservices.com",
     "VIEWER_SERVICE_KEY_ID": "ops-v1",
       "VIEWER_EVENT_KEY_ID": "viewer-v1",

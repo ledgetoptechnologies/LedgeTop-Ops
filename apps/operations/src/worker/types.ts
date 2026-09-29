@@ -26,6 +26,7 @@ export type Env = Omit<
   | "AUTHENTICATED_DELIVERY_CREATION_ENABLED"
   | "PROJECT_ACCESS_EXPIRY_NOTIFICATIONS_ENABLED"
   | "AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED"
+  | "VIEWER_WORKSPACE_RENEWAL_CORS_ENABLED"
   | "CLIENT_PORTAL_ORIGINS"
   | "OPERATIONS_ORIGINS"
   | "CLIENT_HUB_PA_CONTACT_ASSIGNMENTS_ENABLED"
@@ -183,6 +184,8 @@ export type Env = Omit<
   VIEWER_INTEGRATION_ENABLED?: string;
   /** Default-off administrative dataset and processing control plane. */
   VIEWER_PROCESSING_ENABLED?: string;
+  /** Default-off credentialed exact-origin Viewer background-session renewal transport. */
+  VIEWER_WORKSPACE_RENEWAL_CORS_ENABLED?: string;
   /** Default-off staff creation and revocation of bearer public Viewer links. */
   VIEWER_PUBLIC_SHARES_ENABLED?: string;
   VIEWER_BASE_URL?: string;
@@ -217,6 +220,8 @@ export interface StaffPrincipal {
   displayName: string;
   accessSubject: string;
   projectAlphaUserId: string | null;
+  /** Verified Cloudflare Access JWT expiry, when present on the assertion. */
+  accessExpiresAt?: number;
 }
 
 export interface GrantRow {
