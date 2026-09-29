@@ -81,6 +81,7 @@ import { handleClientOnboardingStaffHttp } from "./client-onboarding-staff-http"
 import { handleWorkspaceBindingAdminHttp } from "./client-portal-workspace-binding-admin-http";
 import { handleAuthorityV3OwnerHttp } from "./client-portal-authority-v3-owner-http";
 import { handleRecipientEnrollmentOwnerHttp } from "./client-portal-recipient-enrollment-owner-http";
+import { dispatchViewerWorkspaceRenewal } from "./viewer-workspace-renewal";
 import { consumeNativeStaffOnboardingRateLimit } from "./native-staff-onboarding-rate-limit";
 import {
   auditStatement,
@@ -525,6 +526,13 @@ app.use(NATIVE_DIRECTORY_STAGING_EMPTY_ENROLLMENT_FIXTURE_ROUTE, async (c, next)
     && !nativeDirectoryStagingEmptyEnrollmentFixtureEnabled(c.env)) return c.json({ error: "Not found" }, 404);
   await next();
 });
+// Viewer is a separate origin. This exact route family performs its own
+// credentialed CORS, bound-staff authentication, CSRF challenge, and rate
+// limiting, so it must terminate before the generic same-origin API guard.
+app.use("/api/viewer/workspace/session-renewal", async c =>
+  dispatchViewerWorkspaceRenewal(c.req.raw, c.env));
+app.use("/api/viewer/workspace/session-renewal/*", async c =>
+  dispatchViewerWorkspaceRenewal(c.req.raw, c.env));
 app.use("/api/*", async (c, next) => {
   if (viewerMachineEventRequest(c.req.method, c.req.path) || projectAlphaDeliveryMachineRequest(c.req.method, c.req.path)) {
     await next();

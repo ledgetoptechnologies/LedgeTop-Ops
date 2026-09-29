@@ -398,7 +398,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
 });
 
 test("the deployed Operations Worker keeps catalog and inactive binding transport private and default-off", () => {
-  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "0bb2b0680d1acd9eabb6e080e72193dc2c8f8b955448241ef00d97b58f47acfd");
+  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "8c04167cefc7ab5e3b716a0245315d2518da98e875678d418384beceea6cd252");
   const config = readJson("apps/operations/wrangler.jsonc");
   assert.equal(config.vars.VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_DISPATCH_ENABLED, "false");
   assert.equal(config.services?.find((service) => service.binding === "VERIFIED_RECIPIENT_DELIVERY_AUTHORITY"), undefined);
