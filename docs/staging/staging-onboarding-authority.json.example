@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "packet": {
+    "packetId": "staging-onboarding-authority-positive-001",
+    "purpose": "client-onboarding-positive-acceptance",
+    "operatorKind": "synthetic",
+    "staffId": "staging-operations-owner",
+    "email": "owner@staging.example.test",
+    "displayName": "Synthetic Staging Owner",
+    "accessSubject": "REPLACE_WITH_REVIEWED_ACCESS_SUBJECT",
+    "businessAreaId": "REPLACE_WITH_ACTIVE_STAGING_BUSINESS_AREA_ID",
+    "issuedAt": "2026-09-24T15:00:00.000Z",
+    "expiresAt": "2026-09-24T17:00:00.000Z",
+    "reason": "Bounded positive client-onboarding staging acceptance",
+    "expected": {
+      "admissionVersion": 2,
+      "profileVersion": 1
+    },
+    "evidence": {
+      "changeTicket": "REPLACE_WITH_APPROVED_CHANGE_TICKET",
+      "reviewer": "REPLACE_WITH_INDEPENDENT_REVIEWER_REFERENCE",
+      "bindingEvidenceSha256": "REPLACE_WITH_64_LOWERCASE_HEX_CHARACTERS"
+    }
+  }
+}

@@ -8,6 +8,14 @@ import { STAGING_ACCOUNT_ID, STAGING_INVENTORY } from "./staging-requirements.mj
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const PACKET_SCHEMA_VERSION = 3;
+export const ACQUISITION_PACKET_SCHEMA_VERSION = 4;
+export const FIXTURE_PACKET_SCHEMA_VERSION = 5;
+export const RECIPIENT_ENROLLMENT_PACKET_SCHEMA_VERSION = 6;
+export const RECIPIENT_ENROLLMENT_PURPOSE = "recipient-enrollment-portal-access";
+export const PRESERVATIVE_ACQUISITION_PACKET_SCHEMA_VERSION = 7;
+export const PRESERVATIVE_ACQUISITION_PURPOSE = "existing-directory-acquisition-preserving-onboarding-profile";
+export const PRESERVATIVE_RECIPIENT_ENROLLMENT_PACKET_SCHEMA_VERSION = 8;
+export const PRESERVATIVE_RECIPIENT_ENROLLMENT_PURPOSE = "recipient-enrollment-portal-access-preserving-onboarding-profile";
 export const AUTHORITY_MIGRATIONS_TABLE = "staging_native_authority_migrations";
 const OUTPUT_ROOT = ".staging-native-authority";
 const SUBJECT = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,190}$/;
@@ -16,6 +24,11 @@ const PACKET_ID = /^staging-authority-[a-z0-9]+(?:-[a-z0-9]+){1,7}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
 const EXACT_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const DIRECTORY_RECORD_ID = /^[^\p{C}]{1,191}$/u;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const FIXTURE_RECORD_ID = "staging-native-empty-enrollment-organization-v1";
+const FIXTURE_MUTATION_ID = "6d0da70c-f4f5-4b10-8988-6639b8e01531";
+const FIXTURE_ADMISSION_ID = `${FIXTURE_MUTATION_ID}:admission`;
 const canonicalPeople = new Set([
   "beaukoltz@ledgetopdroneservices.com", "kstirn@ledgetopdroneservices.com",
   "staff-beau-koltz", "staff-kollins-stirn", "initial-beau-koltz", "initial-kollins-stirn",
@@ -80,14 +93,57 @@ export function validatePacketInput(input) {
   const errors = [];
   exactKeys(input, ["schemaVersion", "packet"], "input", errors);
   if (!plain(input)) return errors;
-  if (input.schemaVersion !== PACKET_SCHEMA_VERSION) errors.push(`schemaVersion must be ${PACKET_SCHEMA_VERSION}`);
+  const acquisition = input.schemaVersion === ACQUISITION_PACKET_SCHEMA_VERSION
+    || (input.schemaVersion === FIXTURE_PACKET_SCHEMA_VERSION && input?.packet?.purpose === "existing-directory-acquisition-after-fixture");
+  const fixture = input.schemaVersion === FIXTURE_PACKET_SCHEMA_VERSION && input?.packet?.purpose === "staging-empty-enrollment-fixture";
+  const preservativeAcquisition = input.schemaVersion === PRESERVATIVE_ACQUISITION_PACKET_SCHEMA_VERSION;
+  const preservativeRecipientEnrollment = input.schemaVersion === PRESERVATIVE_RECIPIENT_ENROLLMENT_PACKET_SCHEMA_VERSION;
+  const recipientEnrollment = input.schemaVersion === RECIPIENT_ENROLLMENT_PACKET_SCHEMA_VERSION || preservativeRecipientEnrollment;
+  if (input.schemaVersion !== PACKET_SCHEMA_VERSION && input.schemaVersion !== ACQUISITION_PACKET_SCHEMA_VERSION
+    && input.schemaVersion !== FIXTURE_PACKET_SCHEMA_VERSION && !recipientEnrollment && !preservativeAcquisition)
+    errors.push(`schemaVersion must be ${PACKET_SCHEMA_VERSION}, ${ACQUISITION_PACKET_SCHEMA_VERSION}, ${FIXTURE_PACKET_SCHEMA_VERSION}, ${RECIPIENT_ENROLLMENT_PACKET_SCHEMA_VERSION}, ${PRESERVATIVE_ACQUISITION_PACKET_SCHEMA_VERSION}, or ${PRESERVATIVE_RECIPIENT_ENROLLMENT_PACKET_SCHEMA_VERSION}`);
   const packet = input.packet;
-  exactKeys(packet, ["packetId", "mode", "operatorKind", "staffId", "email", "displayName", "accessSubject", "issuedAt", "expiresAt", "reason", "expected", "evidence"], "packet", errors);
+  exactKeys(packet, acquisition || recipientEnrollment || preservativeAcquisition
+    ? ["packetId", "purpose", "recordId", "recordKind", "recordVersion",
+      ...(recipientEnrollment ? ["activationId"] : []),
+      ...(preservativeAcquisition || preservativeRecipientEnrollment || input.schemaVersion === FIXTURE_PACKET_SCHEMA_VERSION ? ["businessAreaId"] : []),
+      "mode", "operatorKind", "staffId", "email", "displayName", "accessSubject", "issuedAt", "expiresAt", "reason", "expected", "evidence"]
+    : fixture ? ["packetId", "purpose", "businessAreaId", "mode", "operatorKind", "staffId", "email", "displayName", "accessSubject", "issuedAt", "expiresAt", "reason", "expected", "evidence"]
+      : ["packetId", "mode", "operatorKind", "staffId", "email", "displayName", "accessSubject", "issuedAt", "expiresAt", "reason", "expected", "evidence"], "packet", errors);
   if (!plain(packet)) return errors;
-  exactKeys(packet.expected, ["admissionVersion", "profileVersion", "grantVersion", "grantGeneration"], "packet.expected", errors);
+  exactKeys(packet.expected, recipientEnrollment
+    ? ["admissionVersion", "profileVersion", "grantVersion", "grantGeneration", "directoryGrantGeneration", "profileGrantVersion", ...(preservativeRecipientEnrollment ? ["activationReceiptDirectoryGrantGeneration", "profileHistoryGenerations", "onboardingGrantVersion", "onboardingHistoryGenerations", "identityHistoryGenerations", "portalHistoryGenerations"] : []), "identityGrantVersion", "portalGrantVersion", "portalGrantState", "directoryAuthorityState"]
+    : preservativeAcquisition
+    ? ["admissionVersion", "profileVersion", "grantVersion", "grantGeneration", "directoryGrantGeneration", "profileGrantVersion", "profileHistoryGenerations", "onboardingGrantVersion", "onboardingHistoryGenerations", "identityGrantVersion", "identityHistoryGenerations", "identityGrantState", "directoryAuthorityState"]
+    : acquisition
+    ? ["admissionVersion", "profileVersion", "grantVersion", "grantGeneration", "directoryAuthorityState"]
+    : ["admissionVersion", "profileVersion", "grantVersion", "grantGeneration"], "packet.expected", errors);
   exactKeys(packet.evidence, ["changeTicket", "reviewer", "bindingEvidenceSha256"], "packet.evidence", errors);
   if (!PACKET_ID.test(packet.packetId ?? "")) errors.push("packet.packetId must be a bounded staging-authority identifier");
+  if (input.schemaVersion === ACQUISITION_PACKET_SCHEMA_VERSION && packet.purpose !== "existing-directory-acquisition")
+    errors.push("v4 packet.purpose must be existing-directory-acquisition");
+  if (input.schemaVersion === FIXTURE_PACKET_SCHEMA_VERSION && acquisition && packet.purpose !== "existing-directory-acquisition-after-fixture")
+    errors.push("v5 acquisition purpose is invalid");
+  if (input.schemaVersion === FIXTURE_PACKET_SCHEMA_VERSION && !fixture && !acquisition)
+    errors.push("v5 packet.purpose is invalid");
+  if (recipientEnrollment && packet.purpose !== RECIPIENT_ENROLLMENT_PURPOSE)
+    if (!preservativeRecipientEnrollment) errors.push(`v6 packet.purpose must be ${RECIPIENT_ENROLLMENT_PURPOSE}`);
+  if (preservativeAcquisition && packet.purpose !== PRESERVATIVE_ACQUISITION_PURPOSE)
+    errors.push(`v7 packet.purpose must be ${PRESERVATIVE_ACQUISITION_PURPOSE}`);
+  if (preservativeRecipientEnrollment && packet.purpose !== PRESERVATIVE_RECIPIENT_ENROLLMENT_PURPOSE)
+    errors.push(`v8 packet.purpose must be ${PRESERVATIVE_RECIPIENT_ENROLLMENT_PURPOSE}`);
+  if ((acquisition || recipientEnrollment || preservativeAcquisition) && (!DIRECTORY_RECORD_ID.test(packet.recordId ?? "") || !["organization", "client"].includes(packet.recordKind)
+    || !Number.isSafeInteger(packet.recordVersion) || packet.recordVersion < 1))
+    errors.push(`${preservativeRecipientEnrollment ? "v8" : preservativeAcquisition ? "v7" : recipientEnrollment ? "v6" : "v4"} packet record selection is invalid`);
+  if (recipientEnrollment && !UUID.test(packet.activationId ?? "")) errors.push(`${preservativeRecipientEnrollment ? "v8" : "v6"} packet.activationId must be an exact reviewed UUID`);
+  if ((fixture || preservativeAcquisition || preservativeRecipientEnrollment || (input.schemaVersion === FIXTURE_PACKET_SCHEMA_VERSION && acquisition)) && !DIRECTORY_RECORD_ID.test(packet.businessAreaId ?? "")) errors.push(`${preservativeRecipientEnrollment ? "v8" : preservativeAcquisition ? "v7" : "v5"} businessAreaId is invalid`);
   if (!['create', 'reactivate'].includes(packet.mode)) errors.push("packet.mode must be create or reactivate");
+  if (fixture && packet.mode !== "reactivate") errors.push("v5 fixture requires reactivation of existing inactive authority");
+  if (recipientEnrollment && packet.mode !== "reactivate") errors.push("v6 recipient enrollment requires reactivation after a separately revoked bootstrap/acquisition phase");
+  if (preservativeAcquisition && packet.mode !== "reactivate") errors.push("v7 preservative acquisition requires exact inactive reviewed authority");
+  if (input.schemaVersion === FIXTURE_PACKET_SCHEMA_VERSION && acquisition
+    && (packet.mode !== "reactivate" || packet.expected?.directoryAuthorityState !== "v5-fixture-inactive"))
+    errors.push("v5 acquisition requires exact inactive fixture authority");
   if (!['synthetic', 'legacy-roster-staging'].includes(packet.operatorKind))
     errors.push("packet.operatorKind must be synthetic or legacy-roster-staging");
   const legacyRosterStaging = packet.operatorKind === "legacy-roster-staging";
@@ -113,12 +169,55 @@ export function validatePacketInput(input) {
     errors.push("packet authority window must be positive and no longer than four hours");
   if (plain(packet.expected)) {
     for (const [key, value] of Object.entries(packet.expected))
-      if (!Number.isSafeInteger(value) || value < 0) errors.push(`packet.expected.${key} must be a nonnegative safe integer`);
+      if (!["directoryAuthorityState", "portalGrantState", "identityGrantState", "profileHistoryGenerations", "onboardingHistoryGenerations", "identityHistoryGenerations", "portalHistoryGenerations"].includes(key) && (!Number.isSafeInteger(value) || value < 0)) errors.push(`packet.expected.${key} must be a nonnegative safe integer`);
     const expected = packet.expected;
     if (packet.mode === "create" && [expected.admissionVersion, expected.profileVersion, expected.grantVersion, expected.grantGeneration].some(value => value !== 0))
       errors.push("create mode requires every expected version to be zero");
     if (packet.mode === "reactivate" && [expected.admissionVersion, expected.profileVersion, expected.grantVersion, expected.grantGeneration].some(value => value < 1))
       errors.push("reactivate mode requires positive expected versions");
+    if (acquisition && !["absent", "v3-profile-only-inactive", "v4-acquisition-inactive", ...(input.schemaVersion === FIXTURE_PACKET_SCHEMA_VERSION ? ["v5-fixture-inactive"] : [])].includes(expected.directoryAuthorityState))
+      errors.push("v4 packet.expected.directoryAuthorityState is invalid");
+    if (acquisition && packet.mode === "create" && expected.directoryAuthorityState !== "absent")
+      errors.push("v4 create mode requires absent directory authority state");
+    if (acquisition && packet.mode === "reactivate" && expected.directoryAuthorityState === "absent")
+      errors.push("v4 reactivate mode requires an exact inactive directory authority state");
+    if (recipientEnrollment && expected.directoryAuthorityState !== (preservativeRecipientEnrollment ? "v7-acquisition-plus-onboarding-inactive" : "v4-acquisition-inactive"))
+      errors.push(`${preservativeRecipientEnrollment ? "v8 recipient enrollment requires exact inactive v7 preservative acquisition authority" : "v6 recipient enrollment requires exact inactive v4 acquisition authority; v5 lineage is not supported"}`);
+    if (recipientEnrollment && [expected.directoryGrantGeneration, expected.profileGrantVersion,
+      expected.identityGrantVersion].some(value => value < 1))
+      errors.push(`${preservativeRecipientEnrollment ? "v8" : "v6"} recipient enrollment requires positive existing Directory generation and history versions`);
+    if (preservativeRecipientEnrollment && expected.onboardingGrantVersion !== 3)
+      errors.push("v8 recipient enrollment requires the exact preserved onboarding history version 3");
+    if (preservativeRecipientEnrollment && (!(expected.activationReceiptDirectoryGrantGeneration > 0)
+      || expected.activationReceiptDirectoryGrantGeneration > expected.directoryGrantGeneration))
+      errors.push("v8 recipient enrollment requires the exact reviewed activation-receipt Directory generation");
+    if (preservativeRecipientEnrollment && (!exactHistoryGenerations(expected.profileHistoryGenerations, expected.profileGrantVersion, expected.directoryGrantGeneration)
+      || !exactHistoryGenerations(expected.onboardingHistoryGenerations, 3, expected.directoryGrantGeneration)
+      || !exactHistoryGenerations(expected.identityHistoryGenerations, expected.identityGrantVersion, expected.directoryGrantGeneration)
+      || !exactHistoryGenerations(expected.portalHistoryGenerations, expected.portalGrantVersion, expected.directoryGrantGeneration)))
+      errors.push("v8 recipient enrollment requires exact reviewed Directory history generations");
+    if (recipientEnrollment && !["absent", "inactive"].includes(expected.portalGrantState))
+      errors.push("v6 recipient enrollment portalGrantState must be absent or inactive");
+    if (recipientEnrollment && ((expected.portalGrantState === "absent" && expected.portalGrantVersion !== 0)
+      || (expected.portalGrantState === "inactive" && expected.portalGrantVersion < 2)))
+      errors.push("v6 recipient enrollment portal grant state/version is inconsistent");
+    if (preservativeAcquisition) {
+      if (!["v7-profile-plus-onboarding-inactive", "v7-acquisition-plus-onboarding-inactive"].includes(expected.directoryAuthorityState))
+        errors.push("v7 preservative acquisition requires an exact supported inactive lineage state");
+      if (expected.directoryGrantGeneration < 1 || expected.onboardingGrantVersion !== 3)
+        errors.push("v7 preservative acquisition requires positive Directory generation and exact onboarding history version 3");
+      if (!exactHistoryGenerations(expected.profileHistoryGenerations, expected.profileGrantVersion, expected.directoryGrantGeneration)
+        || !exactHistoryGenerations(expected.onboardingHistoryGenerations, 3, expected.directoryGrantGeneration)
+        || !exactHistoryGenerations(expected.identityHistoryGenerations, expected.identityGrantVersion, expected.directoryGrantGeneration))
+        errors.push("v7 preservative acquisition requires exact reviewed Directory history generations");
+      if (!["absent", "inactive"].includes(expected.identityGrantState))
+        errors.push("v7 identityGrantState must be absent or inactive");
+      const first = expected.directoryAuthorityState === "v7-profile-plus-onboarding-inactive";
+      if ((first && (expected.profileGrantVersion !== 1 || expected.identityGrantState !== "absent" || expected.identityGrantVersion !== 0))
+        || (!first && (expected.profileGrantVersion < 3 || expected.profileGrantVersion % 2 !== 1
+          || expected.identityGrantState !== "inactive" || expected.identityGrantVersion < 2 || expected.identityGrantVersion % 2 !== 0)))
+        errors.push("v7 preservative acquisition state/history versions are inconsistent");
+    }
   }
   if (plain(packet.evidence)) {
     for (const key of ["changeTicket", "reviewer"])
@@ -143,7 +242,56 @@ function versionState(packet) {
       grantActive: expected.grantVersion + 1, generationActive: expected.grantGeneration + 1 };
 }
 
+function exactHistoryGenerations(value, count, currentGeneration) {
+  return Array.isArray(value) && value.length === count
+    && value.every((generation, index) => Number.isSafeInteger(generation) && generation > 0
+      && generation <= currentGeneration && (index === 0 || value[index - 1] < generation));
+}
+
+function recipientEnrollmentVersionState(packet) {
+  const expected = packet.expected;
+  return {
+    admissionBefore: expected.admissionVersion,
+    admissionActive: expected.admissionVersion + 1,
+    admissionRevoked: expected.admissionVersion + 2,
+    profile: expected.profileVersion,
+    grant: expected.grantVersion,
+    grantGeneration: expected.grantGeneration,
+    directoryGenerationBefore: expected.directoryGrantGeneration,
+    directoryGenerationActive: expected.directoryGrantGeneration + 1,
+    directoryGenerationRevoked: expected.directoryGrantGeneration + 2,
+    profileGrantVersion: expected.profileGrantVersion,
+    onboardingGrantVersion: expected.onboardingGrantVersion,
+    identityGrantVersion: expected.identityGrantVersion,
+    portalGrantVersionActive: expected.portalGrantVersion + 1,
+    portalGrantVersionRevoked: expected.portalGrantVersion + 2,
+  };
+}
+
+function preservativeAcquisitionVersionState(packet) {
+  const expected = packet.expected;
+  return {
+    admissionBefore: expected.admissionVersion, admissionActive: expected.admissionVersion + 1,
+    admissionRevoked: expected.admissionVersion + 2, profile: expected.profileVersion,
+    grant: expected.grantVersion, grantGeneration: expected.grantGeneration,
+    directoryGenerationBefore: expected.directoryGrantGeneration,
+    directoryGenerationActive: expected.directoryGrantGeneration + 2,
+    directoryGenerationRevoked: expected.directoryGrantGeneration + 4,
+    profileGrantVersionBefore: expected.profileGrantVersion,
+    profileGrantVersionActive: expected.profileGrantVersion + 1,
+    profileGrantVersionRevoked: expected.profileGrantVersion + 2,
+    onboardingGrantVersion: expected.onboardingGrantVersion,
+    identityGrantVersionBefore: expected.identityGrantVersion,
+    identityGrantVersionActive: expected.identityGrantVersion + 1,
+    identityGrantVersionRevoked: expected.identityGrantVersion + 2,
+  };
+}
+
 function plan(packet, action, ids, versions) {
+  if (packet.purpose === RECIPIENT_ENROLLMENT_PURPOSE || packet.purpose === PRESERVATIVE_RECIPIENT_ENROLLMENT_PURPOSE) return planRecipientEnrollment(packet, action, ids, versions);
+  if (packet.purpose === PRESERVATIVE_ACQUISITION_PURPOSE) return planPreservativeAcquisition(packet, action, ids, versions);
+  if (packet.purpose === "existing-directory-acquisition" || packet.purpose === "existing-directory-acquisition-after-fixture") return planV4(packet, action, ids, versions);
+  if (packet.purpose === "staging-empty-enrollment-fixture") return planV5Fixture(packet, action, ids, versions);
   const base = {
     schemaVersion: PACKET_SCHEMA_VERSION, environment: "staging", packetId: packet.packetId, action, mode: packet.mode,
     operatorKind: packet.operatorKind,
@@ -164,8 +312,127 @@ function plan(packet, action, ids, versions) {
       grantVersion: versions.grantActive + 1, grantGeneration: versions.generationActive + 1, directoryGrantActive: 0 } };
 }
 
+function planRecipientEnrollment(packet, action, ids, versions) {
+  const preservative = packet.purpose === PRESERVATIVE_RECIPIENT_ENROLLMENT_PURPOSE;
+  const base = {
+    schemaVersion: preservative ? PRESERVATIVE_RECIPIENT_ENROLLMENT_PACKET_SCHEMA_VERSION : RECIPIENT_ENROLLMENT_PACKET_SCHEMA_VERSION,
+    environment: "staging", packetId: packet.packetId, action, mode: packet.mode,
+    purpose: packet.purpose, operatorKind: packet.operatorKind,
+    staffId: packet.staffId, emailSha256: sha256(packet.email), displayNameSha256: sha256(packet.displayName),
+    accessSubjectSha256: sha256(packet.accessSubject),
+    record: { idSha256: sha256(packet.recordId), kind: packet.recordKind, version: packet.recordVersion,
+      activationIdSha256: sha256(packet.activationId) },
+    portalAccessGrant: { id: ids.portalAccessGrant, permission: "directory.portal_access.manage", effect: "allow",
+      scopeKind: "resource", resourceIdSha256: sha256(packet.recordId) },
+    preservedInactiveGrants: [
+      { id: ids.directoryGrant, permission: "directory.profile.edit", effect: "allow", scopeKind: "global" },
+      { id: ids.identityGrant, permission: "directory.identity.link", effect: "allow", scopeKind: "resource",
+        resourceIdSha256: sha256(packet.recordId) },
+      ...(preservative ? [{ id: ids.onboardingProfileGrant, permission: "directory.profile.edit", effect: "allow",
+        scopeKind: "business_area", businessAreaIdSha256: sha256(packet.businessAreaId), historyVersion: versions.onboardingGrantVersion }] : []),
+      { id: ids.grant, capability: "project.shared.sync", effect: "allow", scopeKind: "global" },
+    ],
+    issuedAt: packet.issuedAt, expiresAt: packet.expiresAt, reason: packet.reason, evidence: packet.evidence,
+  };
+  if (action === "provision") return { ...base, expected: packet.expected, result: {
+    admissionVersion: versions.admissionActive, profileVersion: versions.profile,
+    projectGrantVersion: versions.grant, projectGrantGeneration: versions.grantGeneration,
+    directoryGrantGeneration: versions.directoryGenerationActive, portalAccessGrantVersion: versions.portalGrantVersionActive,
+    portalAccessGrantActive: 1,
+  } };
+  return { ...base, provisionApprovalId: ids.provisionApproval, expected: {
+    admissionVersion: versions.admissionActive, profileVersion: versions.profile,
+    projectGrantVersion: versions.grant, projectGrantGeneration: versions.grantGeneration,
+    directoryGrantGeneration: versions.directoryGenerationActive, portalAccessGrantVersion: versions.portalGrantVersionActive,
+    portalAccessGrantActive: 1,
+  }, result: {
+    admissionVersion: versions.admissionRevoked, profileVersion: versions.profile,
+    projectGrantVersion: versions.grant, projectGrantGeneration: versions.grantGeneration,
+    directoryGrantGeneration: versions.directoryGenerationRevoked, portalAccessGrantVersion: versions.portalGrantVersionRevoked,
+    portalAccessGrantActive: 0,
+  } };
+}
+
+function planPreservativeAcquisition(packet, action, ids, versions) {
+  const base = {
+    schemaVersion: PRESERVATIVE_ACQUISITION_PACKET_SCHEMA_VERSION, environment: "staging",
+    packetId: packet.packetId, action, mode: packet.mode, purpose: packet.purpose, operatorKind: packet.operatorKind,
+    staffId: packet.staffId, emailSha256: sha256(packet.email), displayNameSha256: sha256(packet.displayName),
+    accessSubjectSha256: sha256(packet.accessSubject),
+    record: { idSha256: sha256(packet.recordId), kind: packet.recordKind, version: packet.recordVersion },
+    activatedGrants: [
+      { id: ids.directoryGrant, permission: "directory.profile.edit", effect: "allow", scopeKind: "global" },
+      { id: ids.identityGrant, permission: "directory.identity.link", effect: "allow", scopeKind: "resource", resourceIdSha256: sha256(packet.recordId) },
+    ],
+    preservedInactiveGrants: [
+      { id: ids.onboardingProfileGrant, permission: "directory.profile.edit", effect: "allow", scopeKind: "business_area",
+        businessAreaIdSha256: sha256(packet.businessAreaId), historyVersion: versions.onboardingGrantVersion },
+      { id: ids.grant, capability: "project.shared.sync", effect: "allow", scopeKind: "global" },
+    ],
+    issuedAt: packet.issuedAt, expiresAt: packet.expiresAt, reason: packet.reason, evidence: packet.evidence,
+  };
+  const result = action === "provision" ? preservativeAcquisitionResult(packet, ids, versions, "provision")
+    : preservativeAcquisitionResult(packet, ids, versions, "revoke");
+  return action === "provision" ? { ...base, expected: packet.expected, result }
+    : { ...base, provisionApprovalId: ids.provisionApproval, expected: preservativeAcquisitionResult(packet, ids, versions, "provision"), result };
+}
+
+function planV4(packet, action, ids, versions) {
+  const base = {
+    schemaVersion: packet.purpose === "existing-directory-acquisition-after-fixture" ? FIXTURE_PACKET_SCHEMA_VERSION : ACQUISITION_PACKET_SCHEMA_VERSION, environment: "staging", packetId: packet.packetId, action, mode: packet.mode,
+    purpose: packet.purpose, operatorKind: packet.operatorKind,
+    staffId: packet.staffId, emailSha256: sha256(packet.email), displayNameSha256: sha256(packet.displayName),
+    accessSubjectSha256: sha256(packet.accessSubject),
+    record: { idSha256: sha256(packet.recordId), kind: packet.recordKind, version: packet.recordVersion },
+    grant: { id: ids.grant, capability: "project.shared.sync", effect: "allow", scopeKind: "global" },
+    directoryGrants: [
+      { id: ids.directoryGrant, permission: "directory.profile.edit", effect: "allow", scopeKind: "global" },
+      { id: ids.identityGrant, permission: "directory.identity.link", effect: "allow", scopeKind: "resource", resourceIdSha256: sha256(packet.recordId) },
+    ...(packet.purpose === "existing-directory-acquisition-after-fixture" ? [{ id: ids.enrollmentGrant, permission: "directory.enrollment.manage", effect: "allow", scopeKind: "business_area", businessAreaIdSha256: sha256(packet.businessAreaId), active: 0 }] : [])],
+    issuedAt: packet.issuedAt, expiresAt: packet.expiresAt, reason: packet.reason, evidence: packet.evidence,
+  };
+  const active = { "directory.profile.edit": 1, "directory.identity.link": 1 };
+  const inactive = { "directory.profile.edit": 0, "directory.identity.link": 0 };
+  if (action === "provision") return { ...base, expected: packet.expected,
+    result: { admissionVersion: versions.admissionActive, profileVersion: versions.profile,
+      grantVersion: versions.grantActive, grantGeneration: versions.generationActive, directoryGrantActive: active } };
+  return { ...base, provisionApprovalId: ids.provisionApproval,
+    expected: { admissionVersion: versions.admissionActive, profileVersion: versions.profile,
+      grantVersion: versions.grantActive, grantGeneration: versions.generationActive, directoryGrantActive: active },
+    result: { admissionVersion: versions.admissionActive + 1, profileVersion: versions.profile,
+      grantVersion: versions.grantActive + 1, grantGeneration: versions.generationActive + 1, directoryGrantActive: inactive } };
+}
+
+function planV5Fixture(packet, action, ids, versions) {
+  const base = { schemaVersion: FIXTURE_PACKET_SCHEMA_VERSION, environment: "staging", packetId: packet.packetId, action, mode: packet.mode,
+    purpose: packet.purpose, operatorKind: packet.operatorKind, staffId: packet.staffId, emailSha256: sha256(packet.email),
+    displayNameSha256: sha256(packet.displayName), accessSubjectSha256: sha256(packet.accessSubject),
+    grant: { id: ids.grant, capability: "project.shared.sync", effect: "allow", scopeKind: "global" },
+    directoryGrants: [{ id: ids.directoryGrant, permission: "directory.profile.edit", effect: "allow", scopeKind: "global" },
+      { id: ids.enrollmentGrant, permission: "directory.enrollment.manage", effect: "allow", scopeKind: "business_area", businessAreaIdSha256: sha256(packet.businessAreaId) }],
+    issuedAt: packet.issuedAt, expiresAt: packet.expiresAt, reason: packet.reason, evidence: packet.evidence };
+  const active = { "directory.profile.edit": 1, "directory.enrollment.manage": 1 };
+  const inactive = { "directory.profile.edit": 0, "directory.enrollment.manage": 0 };
+  return action === "provision" ? { ...base, expected: packet.expected,
+    result: { admissionVersion: versions.admissionActive, profileVersion: versions.profile, grantVersion: versions.grantActive,
+      grantGeneration: versions.generationActive, directoryGrantActive: active } }
+    : { ...base, provisionApprovalId: ids.provisionApproval,
+      expected: { admissionVersion: versions.admissionActive, profileVersion: versions.profile, grantVersion: versions.grantActive,
+        grantGeneration: versions.generationActive, directoryGrantActive: active },
+      result: { admissionVersion: versions.admissionActive + 1, profileVersion: versions.profile, grantVersion: versions.grantActive + 1,
+        grantGeneration: versions.generationActive + 1, directoryGrantActive: inactive } };
+}
+
+function v5FixtureProvisionResult(packet, ids, versions) {
+  return { schemaVersion: FIXTURE_PACKET_SCHEMA_VERSION, action: "provision", packetId: packet.packetId,
+    staffId: packet.staffId, grantId: ids.grant, directoryGrantIds: [ids.directoryGrant, ids.enrollmentGrant],
+    admissionVersion: versions.admissionActive, profileVersion: versions.profile,
+    grantVersion: versions.grantActive, grantGeneration: versions.generationActive,
+    directoryGrantActive: { "directory.profile.edit": 1, "directory.enrollment.manage": 1 } };
+}
+
 function verification(packet) {
-  return canonicalJson({ schemaVersion: PACKET_SCHEMA_VERSION, changeTicket: packet.evidence.changeTicket, reviewer: packet.evidence.reviewer,
+  return canonicalJson({ schemaVersion: packet.purpose === PRESERVATIVE_RECIPIENT_ENROLLMENT_PURPOSE ? PRESERVATIVE_RECIPIENT_ENROLLMENT_PACKET_SCHEMA_VERSION : packet.purpose === PRESERVATIVE_ACQUISITION_PURPOSE ? PRESERVATIVE_ACQUISITION_PACKET_SCHEMA_VERSION : packet.purpose === RECIPIENT_ENROLLMENT_PURPOSE ? RECIPIENT_ENROLLMENT_PACKET_SCHEMA_VERSION : packet.purpose === "staging-empty-enrollment-fixture" || packet.purpose === "existing-directory-acquisition-after-fixture" ? FIXTURE_PACKET_SCHEMA_VERSION : packet.purpose === "existing-directory-acquisition" ? ACQUISITION_PACKET_SCHEMA_VERSION : PACKET_SCHEMA_VERSION, changeTicket: packet.evidence.changeTicket, reviewer: packet.evidence.reviewer,
     bindingEvidenceSha256: packet.evidence.bindingEvidenceSha256, emailSha256: sha256(packet.email),
     accessSubjectSha256: sha256(packet.accessSubject) });
 }
@@ -381,6 +648,694 @@ DROP TABLE ${table};
 `;
 }
 
+function v4ProfileGrant(id, active, staff) {
+  return `EXISTS(SELECT 1 FROM native_directory_grants WHERE id=${sqlString(id)} AND staff_id=${staff}
+    AND permission='directory.profile.edit' AND effect='allow' AND scope_kind='global' AND active=${active}
+    AND business_area_id IS NULL AND division_id IS NULL AND resource_id IS NULL AND granted_by=${staff})`;
+}
+function v4IdentityGrant(ids, active, staff, recordId) {
+  return `EXISTS(SELECT 1 FROM native_directory_grants WHERE id=${sqlString(ids.identityGrant)} AND staff_id=${staff}
+    AND permission='directory.identity.link' AND effect='allow' AND scope_kind='resource' AND resource_id=${sqlString(recordId)} AND active=${active}
+    AND business_area_id IS NULL AND division_id IS NULL AND granted_by=${staff})`;
+}
+function v4DirectorySet(ids, active, staff, recordId) {
+  return `(SELECT count(*) FROM native_directory_grants WHERE staff_id=${staff})=2
+    AND ${v4ProfileGrant(ids.directoryGrant, active, staff)}
+    AND ${v4IdentityGrant(ids, active, staff, recordId)}`;
+}
+function v5EnrollmentGrant(ids, active, staff, businessAreaId) {
+  return `EXISTS(SELECT 1 FROM native_directory_grants WHERE id=${sqlString(ids.enrollmentGrant)} AND staff_id=${staff}
+    AND permission='directory.enrollment.manage' AND effect='allow' AND scope_kind='business_area' AND business_area_id=${sqlString(businessAreaId)}
+    AND division_id IS NULL AND resource_id IS NULL AND active=${active} AND granted_by=${staff})`;
+}
+function v5FixtureDirectorySet(ids, active, staff, businessAreaId) {
+  return `(SELECT count(*) FROM native_directory_grants WHERE staff_id=${staff})=2
+    AND ${v4ProfileGrant(ids.directoryGrant, active, staff)} AND ${v5EnrollmentGrant(ids, active, staff, businessAreaId)}`;
+}
+function v5AcquisitionDirectorySet(ids, active, staff, recordId, businessAreaId) {
+  return `(SELECT count(*) FROM native_directory_grants WHERE staff_id=${staff})=3
+    AND ${v4ProfileGrant(ids.directoryGrant, active, staff)} AND ${v4IdentityGrant(ids, active, staff, recordId)}
+    AND ${v5EnrollmentGrant(ids, 0, staff, businessAreaId)}`;
+}
+
+function provisionSqlV4(packet, ids, versions, names, migrationNames) {
+  const table = guardTable(packet.packetId, "provision"), staff = sqlString(packet.staffId);
+  const afterFixture = packet.purpose === "existing-directory-acquisition-after-fixture";
+  const canonicalPlan = canonicalJson(plan(packet, "provision", ids, versions)), planSha = sha256(canonicalPlan);
+  const verificationJson = verification(packet), verificationSha = sha256(verificationJson);
+  const recordCurrent = `EXISTS(SELECT 1 FROM operations_directory_records WHERE record_id=${sqlString(packet.recordId)}
+    AND record_kind=${sqlString(packet.recordKind)} AND current_version=${packet.recordVersion})`;
+  const createState = `NOT EXISTS(SELECT 1 FROM native_staff_admissions WHERE staff_id=${staff})
+    AND NOT EXISTS(SELECT 1 FROM native_staff_profiles WHERE staff_id=${staff})
+    AND NOT EXISTS(SELECT 1 FROM native_directory_grants WHERE staff_id=${staff} OR id IN (${sqlString(ids.directoryGrant)},${sqlString(ids.identityGrant)}))
+    AND NOT EXISTS(SELECT 1 FROM native_project_grants WHERE staff_id=${staff} OR id=${sqlString(ids.grant)})
+    AND NOT EXISTS(SELECT 1 FROM native_project_grant_generations WHERE staff_id=${staff})
+    AND ${recordCurrent}`;
+  const v3Inactive = `(SELECT count(*) FROM native_directory_grants WHERE staff_id=${staff})=1
+    AND ${v4ProfileGrant(ids.directoryGrant, 0, staff)}
+      AND NOT EXISTS(SELECT 1 FROM native_directory_grants WHERE id=${sqlString(ids.identityGrant)})`;
+  const fixtureInactive = v5FixtureDirectorySet(ids, 0, staff, packet.businessAreaId);
+  const inactiveDirectory = packet.expected.directoryAuthorityState === "v3-profile-only-inactive" ? v3Inactive
+    : packet.expected.directoryAuthorityState === "v5-fixture-inactive" ? fixtureInactive : v4DirectorySet(ids, 0, staff, packet.recordId);
+  const reactivateState = `EXISTS(SELECT 1 FROM native_staff_admissions WHERE staff_id=${staff} AND bound_access_subject=${sqlString(packet.accessSubject)}
+      AND active=0 AND version=${versions.admissionBefore} AND admitted_by=${staff})
+    AND EXISTS(SELECT 1 FROM native_staff_profiles WHERE staff_id=${staff} AND login_email=${sqlString(packet.email)}
+      AND display_name=${sqlString(packet.displayName)} AND version=${versions.profile})
+    AND ${inactiveDirectory} AND ${recordCurrent}
+    AND (SELECT count(*) FROM native_project_grants WHERE staff_id=${staff})=1
+    AND EXISTS(SELECT 1 FROM native_project_grants WHERE id=${sqlString(ids.grant)} AND staff_id=${staff}
+      AND capability='project.shared.sync' AND effect='allow' AND scope_kind='global'
+      AND business_area_id IS NULL AND division_id IS NULL AND external_project_id IS NULL
+      AND active=0 AND version=${versions.grantBefore} AND granted_by=${staff})
+    AND EXISTS(SELECT 1 FROM native_project_grant_generations WHERE staff_id=${staff} AND generation=${versions.generationBefore})`;
+  const insertIdentity = `INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,resource_id,active,granted_by)
+VALUES(${sqlString(ids.identityGrant)},${staff},'directory.identity.link','allow','resource',${sqlString(packet.recordId)},1,${staff});`;
+  const updateIdentity = `UPDATE native_directory_grants SET active=1
+WHERE id=${sqlString(ids.identityGrant)} AND staff_id=${staff} AND permission='directory.identity.link'
+  AND effect='allow' AND scope_kind='resource' AND business_area_id IS NULL AND division_id IS NULL
+  AND resource_id=${sqlString(packet.recordId)} AND active=0 AND granted_by=${staff};`;
+  const mutations = packet.mode === "create" ? `INSERT INTO native_staff_admissions(staff_id,bound_access_subject,active,admitted_by)
+VALUES(${staff},${sqlString(packet.accessSubject)},1,${staff});
+INSERT INTO native_staff_profiles(staff_id,login_email,display_name)
+VALUES(${staff},${sqlString(packet.email)},${sqlString(packet.displayName)});
+INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,active,granted_by)
+VALUES(${sqlString(ids.directoryGrant)},${staff},'directory.profile.edit','allow','global',1,${staff});
+${insertIdentity}
+INSERT INTO native_project_grants(id,staff_id,capability,effect,scope_kind,active,granted_by)
+VALUES(${sqlString(ids.grant)},${staff},'project.shared.sync','allow','global',1,${staff});`
+    : `UPDATE native_staff_admissions SET active=1,version=version+1,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+WHERE staff_id=${staff} AND active=0 AND version=${versions.admissionBefore};
+UPDATE native_directory_grants SET active=1
+WHERE id=${sqlString(ids.directoryGrant)} AND staff_id=${staff} AND permission='directory.profile.edit'
+  AND effect='allow' AND scope_kind='global' AND business_area_id IS NULL AND division_id IS NULL
+  AND resource_id IS NULL AND active=0 AND granted_by=${staff};
+  ${packet.expected.directoryAuthorityState === "v4-acquisition-inactive" ? updateIdentity : insertIdentity}
+UPDATE native_project_grants SET active=1,version=version+1
+WHERE id=${sqlString(ids.grant)} AND staff_id=${staff} AND active=0 AND version=${versions.grantBefore};`;
+  const result = { schemaVersion: afterFixture ? FIXTURE_PACKET_SCHEMA_VERSION : ACQUISITION_PACKET_SCHEMA_VERSION, action: "provision", packetId: packet.packetId, staffId: packet.staffId,
+    grantId: ids.grant, directoryGrantIds: [ids.directoryGrant, ids.identityGrant], admissionVersion: versions.admissionActive,
+    profileVersion: versions.profile, grantVersion: versions.grantActive, grantGeneration: versions.generationActive,
+    directoryGrantActive: { "directory.profile.edit": 1, "directory.identity.link": 1 } };
+  const final = `(SELECT count(*) FROM native_staff_admissions WHERE staff_id=${staff} AND bound_access_subject=${sqlString(packet.accessSubject)}
+      AND active=1 AND version=${versions.admissionActive} AND admitted_by=${staff})=1
+    AND (SELECT count(*) FROM native_staff_profiles WHERE staff_id=${staff} AND login_email=${sqlString(packet.email)}
+      AND display_name=${sqlString(packet.displayName)} AND version=${versions.profile})=1
+    AND ${afterFixture ? v5AcquisitionDirectorySet(ids, 1, staff, packet.recordId, packet.businessAreaId) : v4DirectorySet(ids, 1, staff, packet.recordId)}
+    AND (SELECT count(*) FROM native_project_grants WHERE staff_id=${staff})=1
+    AND EXISTS(SELECT 1 FROM native_project_grants WHERE id=${sqlString(ids.grant)} AND staff_id=${staff}
+      AND capability='project.shared.sync' AND effect='allow' AND scope_kind='global' AND active=1
+      AND version=${versions.grantActive} AND granted_by=${staff})
+    AND EXISTS(SELECT 1 FROM native_project_grant_generations WHERE staff_id=${staff} AND generation=${versions.generationActive})
+    AND EXISTS(SELECT 1 FROM native_staff_bootstrap_receipts WHERE command_id=${sqlString(ids.provisionCommand)}
+      AND approval_id=${sqlString(ids.provisionApproval)} AND canonical_plan_sha256=${sqlString(planSha)})`;
+  return `PRAGMA foreign_keys = ON;
+-- Generated staging-only existing-directory acquisition authority packet.
+CREATE TABLE ${table}(ok INTEGER NOT NULL CHECK(ok=1));
+${guardInsert(table, `${canonicalLedger(names)}
+    AND NOT EXISTS(SELECT 1 FROM ${AUTHORITY_MIGRATIONS_TABLE} WHERE name IN (${sqlString(migrationNames.provision)},${sqlString(migrationNames.revoke)}))
+    AND ${commonPrecondition(packet, ids)} AND ${packet.mode === "create" ? createState : reactivateState}
+    AND ${sqlString(packet.issuedAt)}<=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+    AND ${sqlString(packet.expiresAt)}>strftime('%Y-%m-%dT%H:%M:%fZ','now')`)}
+${approvalSql(packet, ids, "provision", canonicalPlan, planSha, verificationJson, verificationSha)}
+${mutations}
+${receiptSql(packet, ids, "provision", canonicalPlan, planSha, verificationJson, verificationSha, result)}
+${guardInsert(table, final)}
+DROP TABLE ${table};
+`;
+}
+
+function revokeSqlV4(packet, ids, versions, provision, names, migrationNames) {
+  const table = guardTable(packet.packetId, "revoke"), staff = sqlString(packet.staffId);
+  const afterFixture = packet.purpose === "existing-directory-acquisition-after-fixture";
+  const canonicalPlan = canonicalJson(plan(packet, "revoke", ids, versions)), planSha = sha256(canonicalPlan);
+  const verificationJson = verification(packet), verificationSha = sha256(verificationJson);
+  const result = { schemaVersion: afterFixture ? FIXTURE_PACKET_SCHEMA_VERSION : ACQUISITION_PACKET_SCHEMA_VERSION, action: "revoke", packetId: packet.packetId, staffId: packet.staffId,
+    grantId: ids.grant, directoryGrantIds: [ids.directoryGrant, ids.identityGrant], admissionVersion: versions.admissionActive + 1,
+    profileVersion: versions.profile, grantVersion: versions.grantActive + 1, grantGeneration: versions.generationActive + 1,
+    directoryGrantActive: { "directory.profile.edit": 0, "directory.identity.link": 0 } };
+  const precondition = `${canonicalLedger(names)}
+    AND EXISTS(SELECT 1 FROM ${AUTHORITY_MIGRATIONS_TABLE} WHERE name=${sqlString(migrationNames.provision)})
+    AND NOT EXISTS(SELECT 1 FROM ${AUTHORITY_MIGRATIONS_TABLE} WHERE name=${sqlString(migrationNames.revoke)})
+    AND EXISTS(SELECT 1 FROM native_staff_admissions WHERE staff_id=${staff} AND bound_access_subject=${sqlString(packet.accessSubject)}
+      AND active=1 AND version=${versions.admissionActive} AND admitted_by=${staff})
+    AND EXISTS(SELECT 1 FROM native_staff_profiles WHERE staff_id=${staff} AND login_email=${sqlString(packet.email)}
+      AND display_name=${sqlString(packet.displayName)} AND version=${versions.profile})
+    AND ${afterFixture ? v5AcquisitionDirectorySet(ids, 1, staff, packet.recordId, packet.businessAreaId) : v4DirectorySet(ids, 1, staff, packet.recordId)}
+    AND (SELECT count(*) FROM native_project_grants WHERE staff_id=${staff})=1
+    AND EXISTS(SELECT 1 FROM native_project_grants WHERE id=${sqlString(ids.grant)} AND staff_id=${staff}
+      AND capability='project.shared.sync' AND effect='allow' AND scope_kind='global' AND active=1
+      AND version=${versions.grantActive} AND granted_by=${staff})
+    AND EXISTS(SELECT 1 FROM native_project_grant_generations WHERE staff_id=${staff} AND generation=${versions.generationActive})
+    AND EXISTS(SELECT 1 FROM native_staff_bootstrap_approvals WHERE approval_id=${sqlString(ids.provisionApproval)}
+      AND canonical_plan_sha256=${sqlString(provision.planSha)} AND revoked_at IS NULL)
+    AND EXISTS(SELECT 1 FROM native_staff_bootstrap_receipts WHERE command_id=${sqlString(ids.provisionCommand)}
+      AND approval_id=${sqlString(ids.provisionApproval)} AND canonical_plan_sha256=${sqlString(provision.planSha)})
+    AND NOT EXISTS(SELECT 1 FROM native_staff_bootstrap_approvals WHERE approval_id=${sqlString(ids.revokeApproval)})
+    AND NOT EXISTS(SELECT 1 FROM native_staff_bootstrap_receipts WHERE command_id=${sqlString(ids.revokeCommand)})
+    AND NOT EXISTS(SELECT 1 FROM operations_directory_write_fences WHERE actor_id=${staff})
+    AND NOT EXISTS(SELECT 1 FROM project_alpha_project_outbox outbox JOIN native_project_command_proofs proof ON proof.command_id=outbox.command_id
+      WHERE proof.actor_staff_id=${staff} AND outbox.state IN ('pending','leased'))
+    AND NOT EXISTS(SELECT 1 FROM project_alpha_directory_outbox
+      WHERE json_extract(origin_snapshot_json,'$.actorId')=${staff} AND state IN ('pending','leased'))`;
+  const final = `EXISTS(SELECT 1 FROM native_staff_admissions WHERE staff_id=${staff} AND bound_access_subject=${sqlString(packet.accessSubject)}
+      AND active=0 AND version=${versions.admissionActive + 1} AND admitted_by=${staff})
+    AND EXISTS(SELECT 1 FROM native_staff_profiles WHERE staff_id=${staff} AND version=${versions.profile})
+    AND ${afterFixture ? v5AcquisitionDirectorySet(ids, 0, staff, packet.recordId, packet.businessAreaId) : v4DirectorySet(ids, 0, staff, packet.recordId)}
+    AND EXISTS(SELECT 1 FROM native_project_grants WHERE id=${sqlString(ids.grant)} AND active=0 AND version=${versions.grantActive + 1})
+    AND EXISTS(SELECT 1 FROM native_project_grant_generations WHERE staff_id=${staff} AND generation=${versions.generationActive + 1})
+    AND NOT EXISTS(SELECT 1 FROM native_project_live_command_proofs WHERE actor_staff_id=${staff})
+    AND EXISTS(SELECT 1 FROM native_staff_bootstrap_approvals WHERE approval_id=${sqlString(ids.provisionApproval)} AND revoked_at IS NOT NULL)
+    AND EXISTS(SELECT 1 FROM native_staff_bootstrap_receipts WHERE command_id=${sqlString(ids.revokeCommand)}
+      AND approval_id=${sqlString(ids.revokeApproval)} AND canonical_plan_sha256=${sqlString(planSha)})`;
+  return `PRAGMA foreign_keys = ON;
+-- Generated staging-only existing-directory acquisition authority revocation packet.
+CREATE TABLE ${table}(ok INTEGER NOT NULL CHECK(ok=1));
+${guardInsert(table, precondition)}
+${approvalSql(packet, ids, "revoke", canonicalPlan, planSha, verificationJson, verificationSha)}
+UPDATE native_directory_grants SET active=0
+WHERE id IN (${sqlString(ids.directoryGrant)},${sqlString(ids.identityGrant)}) AND staff_id=${staff} AND active=1;
+UPDATE native_project_grants SET active=0,version=version+1
+WHERE id=${sqlString(ids.grant)} AND staff_id=${staff} AND active=1 AND version=${versions.grantActive};
+UPDATE native_staff_admissions SET active=0,version=version+1,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+WHERE staff_id=${staff} AND active=1 AND version=${versions.admissionActive};
+UPDATE native_staff_bootstrap_approvals SET revoked_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+WHERE approval_id=${sqlString(ids.provisionApproval)} AND revoked_at IS NULL;
+${receiptSql(packet, ids, "revoke", canonicalPlan, planSha, verificationJson, verificationSha, result)}
+${guardInsert(table, final)}
+DROP TABLE ${table};
+`;
+}
+
+function provisionSqlV5Fixture(packet, ids, versions, names, migrationNames) {
+  const table = guardTable(packet.packetId, "provision"), staff = sqlString(packet.staffId), area = sqlString(packet.businessAreaId);
+  const canonicalPlan = canonicalJson(plan(packet, "provision", ids, versions)), planSha = sha256(canonicalPlan);
+  const verificationJson = verification(packet), verificationSha = sha256(verificationJson);
+  const state = `EXISTS(SELECT 1 FROM native_staff_admissions WHERE staff_id=${staff} AND bound_access_subject=${sqlString(packet.accessSubject)} AND active=0 AND version=${versions.admissionBefore} AND admitted_by=${staff})
+    AND EXISTS(SELECT 1 FROM native_staff_profiles WHERE staff_id=${staff} AND login_email=${sqlString(packet.email)} AND display_name=${sqlString(packet.displayName)} AND version=${versions.profile})
+    AND (SELECT count(*) FROM native_directory_grants WHERE staff_id=${staff})=1 AND ${v4ProfileGrant(ids.directoryGrant, 0, staff)}
+    AND (SELECT count(*) FROM native_project_grants WHERE staff_id=${staff})=1 AND EXISTS(SELECT 1 FROM native_project_grants WHERE id=${sqlString(ids.grant)} AND active=0 AND version=${versions.grantBefore} AND granted_by=${staff})
+    AND EXISTS(SELECT 1 FROM native_project_grant_generations WHERE staff_id=${staff} AND generation=${versions.generationBefore})
+    AND EXISTS(SELECT 1 FROM native_business_areas WHERE id=${area} AND active=1)
+    AND NOT EXISTS(SELECT 1 FROM operations_directory_records WHERE record_id=${sqlString(FIXTURE_RECORD_ID)})
+    AND NOT EXISTS(SELECT 1 FROM native_directory_create_admissions WHERE id=${sqlString(FIXTURE_ADMISSION_ID)} OR record_id=${sqlString(FIXTURE_RECORD_ID)})
+    AND NOT EXISTS(SELECT 1 FROM operations_directory_write_fences WHERE mutation_id=${sqlString(FIXTURE_MUTATION_ID)} OR record_id=${sqlString(FIXTURE_RECORD_ID)})`;
+  const result = v5FixtureProvisionResult(packet, ids, versions);
+  const final = `EXISTS(SELECT 1 FROM native_staff_admissions WHERE staff_id=${staff} AND active=1 AND version=${versions.admissionActive})
+    AND ${v5FixtureDirectorySet(ids, 1, staff, packet.businessAreaId)}`;
+  return `PRAGMA foreign_keys = ON;
+CREATE TABLE ${table}(ok INTEGER NOT NULL CHECK(ok=1));
+${guardInsert(table, `${canonicalLedger(names)} AND NOT EXISTS(SELECT 1 FROM ${AUTHORITY_MIGRATIONS_TABLE} WHERE name IN (${sqlString(migrationNames.provision)},${sqlString(migrationNames.revoke)})) AND ${commonPrecondition(packet, ids)} AND ${state} AND ${sqlString(packet.issuedAt)}<=strftime('%Y-%m-%dT%H:%M:%fZ','now') AND ${sqlString(packet.expiresAt)}>strftime('%Y-%m-%dT%H:%M:%fZ','now')`)}
+${approvalSql(packet, ids, "provision", canonicalPlan, planSha, verificationJson, verificationSha)}
+UPDATE native_staff_admissions SET active=1,version=version+1 WHERE staff_id=${staff} AND active=0 AND version=${versions.admissionBefore};
+UPDATE native_directory_grants SET active=1 WHERE id=${sqlString(ids.directoryGrant)} AND active=0;
+INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,business_area_id,active,granted_by) VALUES(${sqlString(ids.enrollmentGrant)},${staff},'directory.enrollment.manage','allow','business_area',${area},1,${staff});
+UPDATE native_project_grants SET active=1,version=version+1 WHERE id=${sqlString(ids.grant)} AND active=0 AND version=${versions.grantBefore};
+${receiptSql(packet, ids, "provision", canonicalPlan, planSha, verificationJson, verificationSha, result)}
+${guardInsert(table, final)}
+DROP TABLE ${table};`;
+}
+
+function revokeSqlV5Fixture(packet, ids, versions, provision, names, migrationNames) {
+  const table = guardTable(packet.packetId, "revoke"), staff = sqlString(packet.staffId);
+  const canonicalPlan = canonicalJson(plan(packet, "revoke", ids, versions)), planSha = sha256(canonicalPlan);
+  const verificationJson = verification(packet), verificationSha = sha256(verificationJson);
+  const condition = `${canonicalLedger(names)} AND EXISTS(SELECT 1 FROM ${AUTHORITY_MIGRATIONS_TABLE} WHERE name=${sqlString(migrationNames.provision)}) AND NOT EXISTS(SELECT 1 FROM ${AUTHORITY_MIGRATIONS_TABLE} WHERE name=${sqlString(migrationNames.revoke)})
+    AND EXISTS(SELECT 1 FROM native_staff_admissions WHERE staff_id=${staff} AND bound_access_subject=${sqlString(packet.accessSubject)} AND active=1 AND version=${versions.admissionActive} AND admitted_by=${staff})
+    AND EXISTS(SELECT 1 FROM native_staff_profiles WHERE staff_id=${staff} AND login_email=${sqlString(packet.email)} AND display_name=${sqlString(packet.displayName)} AND version=${versions.profile})
+    AND ${v5FixtureDirectorySet(ids, 1, staff, packet.businessAreaId)}
+    AND EXISTS(SELECT 1 FROM native_project_grants WHERE id=${sqlString(ids.grant)} AND staff_id=${staff} AND active=1 AND version=${versions.grantActive} AND granted_by=${staff})
+    AND EXISTS(SELECT 1 FROM native_project_grant_generations WHERE staff_id=${staff} AND generation=${versions.generationActive})
+    AND EXISTS(SELECT 1 FROM native_staff_bootstrap_approvals WHERE approval_id=${sqlString(ids.provisionApproval)}
+      AND canonical_plan_json=${sqlString(provision.planJson)} AND canonical_plan_sha256=${sqlString(provision.planSha)}
+      AND approved_operator_staff_id=${staff} AND approved_operator_access_subject=${sqlString(packet.accessSubject)}
+      AND independent_binding_verification_json=${sqlString(provision.verificationJson)}
+      AND independent_binding_verification_sha256=${sqlString(provision.verificationSha)}
+      AND issued_by_staff_id=${staff} AND issued_by_access_subject=${sqlString(packet.accessSubject)}
+      AND issued_at=${sqlString(packet.issuedAt)} AND expires_at=${sqlString(packet.expiresAt)} AND revoked_at IS NULL)
+    AND EXISTS(SELECT 1 FROM native_staff_bootstrap_receipts WHERE command_id=${sqlString(ids.provisionCommand)}
+      AND approval_id=${sqlString(ids.provisionApproval)} AND operator_staff_id=${staff}
+      AND operator_access_subject=${sqlString(packet.accessSubject)}
+      AND canonical_plan_json=${sqlString(provision.planJson)} AND canonical_plan_sha256=${sqlString(provision.planSha)}
+      AND independent_binding_verification_json=${sqlString(provision.verificationJson)}
+      AND independent_binding_verification_sha256=${sqlString(provision.verificationSha)}
+      AND result_json=${sqlString(provision.resultJson)} AND result_sha256=${sqlString(provision.resultSha)})
+    AND NOT EXISTS(SELECT 1 FROM native_staff_bootstrap_approvals WHERE approval_id=${sqlString(ids.revokeApproval)})
+    AND NOT EXISTS(SELECT 1 FROM native_staff_bootstrap_receipts WHERE command_id=${sqlString(ids.revokeCommand)})
+    AND NOT EXISTS(SELECT 1 FROM operations_directory_write_fences WHERE actor_id=${staff})
+    AND NOT EXISTS(SELECT 1 FROM project_alpha_project_outbox outbox JOIN native_project_command_proofs proof ON proof.command_id=outbox.command_id WHERE proof.actor_staff_id=${staff} AND outbox.state IN ('pending','leased'))
+    AND NOT EXISTS(SELECT 1 FROM project_alpha_directory_outbox WHERE json_extract(origin_snapshot_json,'$.actorId')=${staff} AND state IN ('pending','leased'))`;
+  const result = { schemaVersion: FIXTURE_PACKET_SCHEMA_VERSION, action: "revoke", packetId: packet.packetId,
+    staffId: packet.staffId, grantId: ids.grant, directoryGrantIds: [ids.directoryGrant, ids.enrollmentGrant],
+    admissionVersion: versions.admissionActive + 1, profileVersion: versions.profile,
+    grantVersion: versions.grantActive + 1, grantGeneration: versions.generationActive + 1,
+    directoryGrantActive: { "directory.profile.edit": 0, "directory.enrollment.manage": 0 } };
+  const final = `EXISTS(SELECT 1 FROM native_staff_admissions WHERE staff_id=${staff} AND active=0 AND version=${versions.admissionActive + 1}) AND ${v5FixtureDirectorySet(ids, 0, staff, packet.businessAreaId)}`;
+  return `PRAGMA foreign_keys = ON;
+CREATE TABLE ${table}(ok INTEGER NOT NULL CHECK(ok=1));
+${guardInsert(table, condition)}
+${approvalSql(packet, ids, "revoke", canonicalPlan, planSha, verificationJson, verificationSha)}
+UPDATE native_directory_grants SET active=0 WHERE id IN (${sqlString(ids.directoryGrant)},${sqlString(ids.enrollmentGrant)}) AND staff_id=${staff} AND active=1;
+UPDATE native_project_grants SET active=0,version=version+1 WHERE id=${sqlString(ids.grant)} AND active=1 AND version=${versions.grantActive};
+UPDATE native_staff_admissions SET active=0,version=version+1 WHERE staff_id=${staff} AND active=1 AND version=${versions.admissionActive};
+UPDATE native_staff_bootstrap_approvals SET revoked_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE approval_id=${sqlString(ids.provisionApproval)} AND revoked_at IS NULL;
+${receiptSql(packet, ids, "revoke", canonicalPlan, planSha, verificationJson, verificationSha, result)}
+${guardInsert(table, final)}
+DROP TABLE ${table};`;
+}
+
+function directoryGrantHistoryState(id, staff, permission, scopeKind, resourceId, active, version) {
+  const resource = resourceId === null ? "resource_id IS NULL" : `resource_id=${sqlString(resourceId)}`;
+  return `(SELECT count(*) FROM native_directory_grant_history WHERE grant_id=${sqlString(id)})=${version}
+    AND EXISTS(SELECT 1 FROM native_directory_grant_history WHERE grant_id=${sqlString(id)} AND grant_version=${version}
+      AND staff_id=${staff} AND permission=${sqlString(permission)} AND effect='allow' AND scope_kind=${sqlString(scopeKind)}
+      AND business_area_id IS NULL AND division_id IS NULL AND ${resource} AND active=${active})`;
+}
+
+function onboardingProfileGrant(ids, staff, businessAreaId) {
+  return `EXISTS(SELECT 1 FROM native_directory_grants WHERE id=${sqlString(ids.onboardingProfileGrant)} AND staff_id=${staff}
+    AND permission='directory.profile.edit' AND effect='allow' AND scope_kind='business_area'
+    AND business_area_id=${sqlString(businessAreaId)} AND division_id IS NULL AND resource_id IS NULL
+    AND active=0 AND granted_by=${staff})
+    AND EXISTS(SELECT 1 FROM native_business_areas WHERE id=${sqlString(businessAreaId)} AND active=1)`;
+}
+
+function historyGenerationCase(generations) {
+  return `CASE grant_version ${generations.map((generation, index) => `WHEN ${index + 1} THEN ${generation}`).join(" ")} ELSE -1 END`;
+}
+
+function preservativeProfileHistoryState(ids, staff, version, generations, active) {
+  return `(SELECT count(*) FROM native_directory_grant_history WHERE grant_id=${sqlString(ids.directoryGrant)})=${version}
+    AND (SELECT min(grant_version) FROM native_directory_grant_history WHERE grant_id=${sqlString(ids.directoryGrant)})=1
+    AND (SELECT max(grant_version) FROM native_directory_grant_history WHERE grant_id=${sqlString(ids.directoryGrant)})=${version}
+    AND NOT EXISTS(SELECT 1 FROM native_directory_grant_history WHERE grant_id=${sqlString(ids.directoryGrant)}
+      AND (staff_id<>${staff} OR permission<>'directory.profile.edit' OR effect<>'allow' OR scope_kind<>'global'
+        OR business_area_id IS NOT NULL OR division_id IS NOT NULL OR resource_id IS NOT NULL
+        OR active<>CASE WHEN grant_version=1 THEN 0 WHEN grant_version%2=0 THEN 1 ELSE 0 END
+        OR grant_generation<>${historyGenerationCase(generations)}))
+    AND EXISTS(SELECT 1 FROM native_directory_grant_history WHERE grant_id=${sqlString(ids.directoryGrant)}
+      AND grant_version=${version} AND active=${active})`;
+}
+
+function preservativeResourceHistoryState(id, staff, permission, recordId, version, generations, active) {
+  return `(SELECT count(*) FROM native_directory_grant_history WHERE grant_id=${sqlString(id)})=${version}
+    AND (SELECT min(grant_version) FROM native_directory_grant_history WHERE grant_id=${sqlString(id)})=1
+    AND (SELECT max(grant_version) FROM native_directory_grant_history WHERE grant_id=${sqlString(id)})=${version}
+    AND NOT EXISTS(SELECT 1 FROM native_directory_grant_history WHERE grant_id=${sqlString(id)}
+      AND (staff_id<>${staff} OR permission<>${sqlString(permission)} OR effect<>'allow' OR scope_kind<>'resource'
+        OR business_area_id IS NOT NULL OR division_id IS NOT NULL OR resource_id IS NOT ${sqlString(recordId)}
+        OR active<>CASE WHEN grant_version%2=1 THEN 1 ELSE 0 END
+        OR grant_generation<>${historyGenerationCase(generations)}))
+    AND EXISTS(SELECT 1 FROM native_directory_grant_history WHERE grant_id=${sqlString(id)}
+      AND grant_version=${version} AND active=${active})`;
+}
+
+function onboardingProfileHistoryState(packet, ids, staff, businessAreaId, version = 3) {
+  return `(SELECT count(*) FROM native_directory_grant_history WHERE grant_id=${sqlString(ids.onboardingProfileGrant)})=${version}
+    AND (SELECT min(grant_version) FROM native_directory_grant_history WHERE grant_id=${sqlString(ids.onboardingProfileGrant)})=1
+    AND (SELECT max(grant_version) FROM native_directory_grant_history WHERE grant_id=${sqlString(ids.onboardingProfileGrant)})=${version}
+    AND NOT EXISTS(SELECT 1 FROM native_directory_grant_history WHERE grant_id=${sqlString(ids.onboardingProfileGrant)}
+      AND (staff_id<>${staff} OR permission<>'directory.profile.edit' OR effect<>'allow' OR scope_kind<>'business_area'
+        OR business_area_id IS NOT ${sqlString(businessAreaId)} OR division_id IS NOT NULL OR resource_id IS NOT NULL
+        OR active<>CASE grant_version WHEN 1 THEN 0 WHEN 2 THEN 1 WHEN 3 THEN 0 ELSE -1 END
+        OR grant_generation<>${historyGenerationCase(packet.expected.onboardingHistoryGenerations)}))`;
+}
+
+function recipientEnrollmentDirectoryState(packet, ids, versions, portalActive, portalVersion) {
+  const preservative = packet.purpose === PRESERVATIVE_RECIPIENT_ENROLLMENT_PURPOSE;
+  const staff = sqlString(packet.staffId), portalGrant = `EXISTS(SELECT 1 FROM native_directory_grants
+    WHERE id=${sqlString(ids.portalAccessGrant)} AND staff_id=${staff} AND permission='directory.portal_access.manage'
+      AND effect='allow' AND scope_kind='resource' AND business_area_id IS NULL AND division_id IS NULL
+      AND resource_id=${sqlString(packet.recordId)} AND active=${portalActive} AND granted_by=${staff})`;
+  const existingCount = 2 + (preservative ? 1 : 0) + (packet.expected.portalGrantState === "absent" && portalVersion === 0 ? 0 : 1);
+  const portalHistoryGenerations = !preservative ? [] : portalVersion === packet.expected.portalGrantVersion
+    ? packet.expected.portalHistoryGenerations
+    : portalVersion === versions.portalGrantVersionActive
+      ? [...packet.expected.portalHistoryGenerations, versions.directoryGenerationBefore + 1]
+      : [...packet.expected.portalHistoryGenerations, versions.directoryGenerationBefore + 1, versions.directoryGenerationActive + 1];
+  const portal = portalVersion === 0
+    ? `NOT EXISTS(SELECT 1 FROM native_directory_grants WHERE id=${sqlString(ids.portalAccessGrant)}
+        OR (staff_id=${staff} AND permission='directory.portal_access.manage'))`
+    : `${portalGrant} AND ${preservative
+      ? preservativeResourceHistoryState(ids.portalAccessGrant, staff, "directory.portal_access.manage", packet.recordId,
+        portalVersion, portalHistoryGenerations, portalActive)
+      : directoryGrantHistoryState(ids.portalAccessGrant, staff,
+        "directory.portal_access.manage", "resource", packet.recordId, portalActive, portalVersion)}`;
+  return `(SELECT count(*) FROM native_directory_grants WHERE staff_id=${staff})=${existingCount}
+    AND ${v4ProfileGrant(ids.directoryGrant, 0, staff)}
+    AND ${v4IdentityGrant(ids, 0, staff, packet.recordId)}
+    AND ${preservative ? preservativeProfileHistoryState(ids, staff, versions.profileGrantVersion,
+      packet.expected.profileHistoryGenerations, 0) : directoryGrantHistoryState(ids.directoryGrant, staff, "directory.profile.edit", "global", null, 0, versions.profileGrantVersion)}
+    AND ${preservative ? preservativeResourceHistoryState(ids.identityGrant, staff, "directory.identity.link", packet.recordId,
+      versions.identityGrantVersion, packet.expected.identityHistoryGenerations, 0)
+      : directoryGrantHistoryState(ids.identityGrant, staff, "directory.identity.link", "resource", packet.recordId, 0, versions.identityGrantVersion)}
+    ${preservative ? `AND ${onboardingProfileGrant(ids, staff, packet.businessAreaId)}
+    AND ${onboardingProfileHistoryState(packet, ids, staff, packet.businessAreaId, versions.onboardingGrantVersion)}` : ""}
+    AND NOT EXISTS(SELECT 1 FROM native_directory_grants WHERE staff_id=${staff} AND permission='directory.enrollment.manage')
+    AND ${portal}`;
+}
+
+function recipientEnrollmentHistoryCount(versions, portalVersion) {
+  return versions.profileGrantVersion + versions.identityGrantVersion + (versions.onboardingGrantVersion ?? 0) + portalVersion;
+}
+
+function recipientEnrollmentNoPendingWork(packet) {
+  const staff = sqlString(packet.staffId), record = sqlString(packet.recordId);
+  return `NOT EXISTS(SELECT 1 FROM operations_directory_write_fences WHERE actor_id=${staff})
+    AND NOT EXISTS(SELECT 1 FROM project_alpha_project_outbox outbox JOIN native_project_command_proofs proof
+      ON proof.command_id=outbox.command_id WHERE proof.actor_staff_id=${staff} AND outbox.state IN ('pending','leased'))
+    AND NOT EXISTS(SELECT 1 FROM project_alpha_directory_outbox
+      WHERE json_extract(origin_snapshot_json,'$.actorId')=${staff} AND state IN ('pending','leased'))
+    AND NOT EXISTS(SELECT 1 FROM client_portal_workspace_binding_outbox
+      WHERE reviewed_by_staff_id=${staff} AND state IN ('pending','retry','dispatching'))
+    AND NOT EXISTS(SELECT 1 FROM client_portal_authority_v2_outbox
+      WHERE authorized_by_staff_id=${staff} AND state IN ('pending','retry','dispatching'))
+    AND NOT EXISTS(SELECT 1 FROM client_portal_recipient_enrollment_intents intent
+      JOIN client_portal_workspace_binding_selections selection ON selection.selection_id=intent.selection_id
+      WHERE selection.record_id=${record} AND intent.state IN ('active','revoking'))`;
+}
+
+function preservativeAcquisitionDirectoryState(packet, ids, versions, active) {
+  const staff = sqlString(packet.staffId);
+  const identityAbsent = packet.expected.identityGrantState === "absent" && active === 0;
+  const identityVersion = active ? versions.identityGrantVersionActive : versions.identityGrantVersionBefore;
+  const identityHistoryGenerations = active
+    ? [...packet.expected.identityHistoryGenerations, versions.directoryGenerationBefore + 2]
+    : packet.expected.identityHistoryGenerations;
+  const identity = identityAbsent
+    ? `NOT EXISTS(SELECT 1 FROM native_directory_grants WHERE id=${sqlString(ids.identityGrant)}
+        OR (staff_id=${staff} AND permission='directory.identity.link'))`
+    : `${v4IdentityGrant(ids, active, staff, packet.recordId)}
+      AND ${preservativeResourceHistoryState(ids.identityGrant, staff, "directory.identity.link", packet.recordId,
+        identityVersion, identityHistoryGenerations, active)}`;
+  const count = identityAbsent ? 2 : 3;
+  const profileVersion = active ? versions.profileGrantVersionActive : versions.profileGrantVersionBefore;
+  const profileHistoryGenerations = active
+    ? [...packet.expected.profileHistoryGenerations, versions.directoryGenerationBefore + 1]
+    : packet.expected.profileHistoryGenerations;
+  return `(SELECT count(*) FROM native_directory_grants WHERE staff_id=${staff})=${count}
+    AND ${v4ProfileGrant(ids.directoryGrant, active, staff)}
+    AND ${preservativeProfileHistoryState(ids, staff, profileVersion, profileHistoryGenerations, active)}
+    AND ${onboardingProfileGrant(ids, staff, packet.businessAreaId)}
+    AND ${onboardingProfileHistoryState(packet, ids, staff, packet.businessAreaId, versions.onboardingGrantVersion)}
+    AND ${identity}
+    AND NOT EXISTS(SELECT 1 FROM native_directory_grants WHERE staff_id=${staff}
+      AND permission IN ('directory.enrollment.manage','directory.portal_access.manage'))`;
+}
+
+function preservativeAcquisitionResult(packet, ids, versions, action) {
+  const revoke = action === "revoke";
+  return { schemaVersion: PRESERVATIVE_ACQUISITION_PACKET_SCHEMA_VERSION, action, packetId: packet.packetId,
+    staffId: packet.staffId, directoryGrantIds: [ids.directoryGrant, ids.identityGrant, ids.onboardingProfileGrant],
+    admissionVersion: revoke ? versions.admissionRevoked : versions.admissionActive,
+    profileVersion: versions.profile, projectGrantVersion: versions.grant, projectGrantGeneration: versions.grantGeneration,
+    directoryGrantGeneration: revoke ? versions.directoryGenerationRevoked : versions.directoryGenerationActive,
+    profileGrantVersion: revoke ? versions.profileGrantVersionRevoked : versions.profileGrantVersionActive,
+    identityGrantVersion: revoke ? versions.identityGrantVersionRevoked : versions.identityGrantVersionActive,
+    onboardingGrantVersion: versions.onboardingGrantVersion,
+    activeGrants: revoke ? [] : [ids.directoryGrant, ids.identityGrant] };
+}
+
+function provisionSqlPreservativeAcquisition(packet, ids, versions, names, migrationNames) {
+  const table = guardTable(packet.packetId, "provision"), staff = sqlString(packet.staffId);
+  const canonicalPlan = canonicalJson(plan(packet, "provision", ids, versions)), planSha = sha256(canonicalPlan);
+  const verificationJson = verification(packet), verificationSha = sha256(verificationJson);
+  const recordCurrent = `EXISTS(SELECT 1 FROM operations_directory_records WHERE record_id=${sqlString(packet.recordId)}
+    AND record_kind=${sqlString(packet.recordKind)} AND current_version=${packet.recordVersion})`;
+  const exactInactiveAuthority = `EXISTS(SELECT 1 FROM native_staff_admissions WHERE staff_id=${staff}
+      AND bound_access_subject=${sqlString(packet.accessSubject)} AND active=0 AND version=${versions.admissionBefore} AND admitted_by=${staff})
+    AND EXISTS(SELECT 1 FROM native_staff_profiles WHERE staff_id=${staff} AND login_email=${sqlString(packet.email)}
+      AND display_name=${sqlString(packet.displayName)} AND version=${versions.profile})
+    AND ${preservativeAcquisitionDirectoryState(packet, ids, versions, 0)}
+    AND EXISTS(SELECT 1 FROM native_directory_grant_generations WHERE staff_id=${staff} AND generation=${versions.directoryGenerationBefore})
+    AND (SELECT count(*) FROM native_directory_grant_history WHERE staff_id=${staff})=${versions.profileGrantVersionBefore + versions.onboardingGrantVersion + versions.identityGrantVersionBefore}
+    AND (SELECT count(*) FROM native_project_grants WHERE staff_id=${staff})=1
+    AND EXISTS(SELECT 1 FROM native_project_grants WHERE id=${sqlString(ids.grant)} AND staff_id=${staff}
+      AND capability='project.shared.sync' AND effect='allow' AND scope_kind='global' AND business_area_id IS NULL
+      AND division_id IS NULL AND external_project_id IS NULL AND active=0 AND version=${versions.grant} AND granted_by=${staff})
+    AND EXISTS(SELECT 1 FROM native_project_grant_generations WHERE staff_id=${staff} AND generation=${versions.grantGeneration})
+    AND NOT EXISTS(SELECT 1 FROM native_project_live_command_proofs WHERE actor_staff_id=${staff})`;
+  const identityMutation = packet.expected.identityGrantState === "absent"
+    ? `INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,resource_id,active,granted_by)
+VALUES(${sqlString(ids.identityGrant)},${staff},'directory.identity.link','allow','resource',${sqlString(packet.recordId)},1,${staff});`
+    : `UPDATE native_directory_grants SET active=1 WHERE id=${sqlString(ids.identityGrant)} AND staff_id=${staff}
+  AND permission='directory.identity.link' AND effect='allow' AND scope_kind='resource' AND resource_id=${sqlString(packet.recordId)}
+  AND business_area_id IS NULL AND division_id IS NULL AND active=0 AND granted_by=${staff};`;
+  const result = preservativeAcquisitionResult(packet, ids, versions, "provision");
+  const final = `EXISTS(SELECT 1 FROM native_staff_admissions WHERE staff_id=${staff} AND active=1 AND version=${versions.admissionActive})
+    AND ${preservativeAcquisitionDirectoryState(packet, ids, versions, 1)}
+    AND EXISTS(SELECT 1 FROM native_directory_grant_generations WHERE staff_id=${staff} AND generation=${versions.directoryGenerationActive})
+    AND (SELECT count(*) FROM native_directory_grant_history WHERE staff_id=${staff})=${versions.profileGrantVersionActive + versions.onboardingGrantVersion + versions.identityGrantVersionActive}
+    AND EXISTS(SELECT 1 FROM native_project_grants WHERE id=${sqlString(ids.grant)} AND active=0 AND version=${versions.grant})
+    AND EXISTS(SELECT 1 FROM native_project_grant_generations WHERE staff_id=${staff} AND generation=${versions.grantGeneration})
+    AND EXISTS(SELECT 1 FROM native_staff_bootstrap_receipts WHERE command_id=${sqlString(ids.provisionCommand)}
+      AND approval_id=${sqlString(ids.provisionApproval)} AND canonical_plan_sha256=${sqlString(planSha)})`;
+  return `PRAGMA foreign_keys = ON;
+-- Generated staging-only preservative existing-directory acquisition authority packet.
+CREATE TABLE ${table}(ok INTEGER NOT NULL CHECK(ok=1));
+${guardInsert(table, `${canonicalLedger(names)}
+    AND NOT EXISTS(SELECT 1 FROM ${AUTHORITY_MIGRATIONS_TABLE} WHERE name IN (${sqlString(migrationNames.provision)},${sqlString(migrationNames.revoke)}))
+    AND ${commonPrecondition(packet, ids)}
+    AND EXISTS(SELECT 1 FROM staff_role_assignments WHERE staff_id=${staff} AND role_id='role-owner' AND scope='global')
+    AND ${recordCurrent} AND ${exactInactiveAuthority} AND ${recipientEnrollmentNoPendingWork(packet)}
+    AND ${sqlString(packet.issuedAt)}<=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+    AND ${sqlString(packet.expiresAt)}>strftime('%Y-%m-%dT%H:%M:%fZ','now')`)}
+${approvalSql(packet, ids, "provision", canonicalPlan, planSha, verificationJson, verificationSha)}
+UPDATE native_staff_admissions SET active=1,version=version+1,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+WHERE staff_id=${staff} AND active=0 AND version=${versions.admissionBefore};
+UPDATE native_directory_grants SET active=1 WHERE id=${sqlString(ids.directoryGrant)} AND staff_id=${staff}
+  AND permission='directory.profile.edit' AND effect='allow' AND scope_kind='global' AND active=0;
+${identityMutation}
+${receiptSql(packet, ids, "provision", canonicalPlan, planSha, verificationJson, verificationSha, result)}
+${guardInsert(table, final)}
+DROP TABLE ${table};
+`;
+}
+
+function revokeSqlPreservativeAcquisition(packet, ids, versions, provision, names, migrationNames) {
+  const table = guardTable(packet.packetId, "revoke"), staff = sqlString(packet.staffId);
+  const canonicalPlan = canonicalJson(plan(packet, "revoke", ids, versions)), planSha = sha256(canonicalPlan);
+  const verificationJson = verification(packet), verificationSha = sha256(verificationJson);
+  const result = preservativeAcquisitionResult(packet, ids, versions, "revoke");
+  const exactProvisionAudit = `EXISTS(SELECT 1 FROM native_staff_bootstrap_approvals WHERE approval_id=${sqlString(ids.provisionApproval)}
+      AND canonical_plan_json=${sqlString(provision.planJson)} AND canonical_plan_sha256=${sqlString(provision.planSha)}
+      AND approved_operator_staff_id=${staff} AND approved_operator_access_subject=${sqlString(packet.accessSubject)}
+      AND independent_binding_verification_json=${sqlString(provision.verificationJson)}
+      AND independent_binding_verification_sha256=${sqlString(provision.verificationSha)}
+      AND issued_by_staff_id=${staff} AND issued_by_access_subject=${sqlString(packet.accessSubject)}
+      AND issued_at=${sqlString(packet.issuedAt)} AND expires_at=${sqlString(packet.expiresAt)} AND revoked_at IS NULL)
+    AND EXISTS(SELECT 1 FROM native_staff_bootstrap_receipts WHERE command_id=${sqlString(ids.provisionCommand)}
+      AND approval_id=${sqlString(ids.provisionApproval)} AND operator_staff_id=${staff}
+      AND operator_access_subject=${sqlString(packet.accessSubject)} AND canonical_plan_json=${sqlString(provision.planJson)}
+      AND canonical_plan_sha256=${sqlString(provision.planSha)} AND independent_binding_verification_json=${sqlString(provision.verificationJson)}
+      AND independent_binding_verification_sha256=${sqlString(provision.verificationSha)}
+      AND result_json=${sqlString(provision.resultJson)} AND result_sha256=${sqlString(provision.resultSha)})`;
+  const precondition = `${canonicalLedger(names)}
+    AND EXISTS(SELECT 1 FROM ${AUTHORITY_MIGRATIONS_TABLE} WHERE name=${sqlString(migrationNames.provision)})
+    AND NOT EXISTS(SELECT 1 FROM ${AUTHORITY_MIGRATIONS_TABLE} WHERE name=${sqlString(migrationNames.revoke)})
+    AND EXISTS(SELECT 1 FROM native_staff_admissions WHERE staff_id=${staff} AND bound_access_subject=${sqlString(packet.accessSubject)}
+      AND active=1 AND version=${versions.admissionActive} AND admitted_by=${staff})
+    AND EXISTS(SELECT 1 FROM native_staff_profiles WHERE staff_id=${staff} AND login_email=${sqlString(packet.email)}
+      AND display_name=${sqlString(packet.displayName)} AND version=${versions.profile})
+    AND ${preservativeAcquisitionDirectoryState(packet, ids, versions, 1)}
+    AND EXISTS(SELECT 1 FROM native_directory_grant_generations WHERE staff_id=${staff} AND generation=${versions.directoryGenerationActive})
+    AND (SELECT count(*) FROM native_directory_grant_history WHERE staff_id=${staff})=${versions.profileGrantVersionActive + versions.onboardingGrantVersion + versions.identityGrantVersionActive}
+    AND EXISTS(SELECT 1 FROM native_project_grants WHERE id=${sqlString(ids.grant)} AND active=0 AND version=${versions.grant})
+    AND EXISTS(SELECT 1 FROM native_project_grant_generations WHERE staff_id=${staff} AND generation=${versions.grantGeneration})
+    AND ${exactProvisionAudit}
+    AND NOT EXISTS(SELECT 1 FROM native_staff_bootstrap_approvals WHERE approval_id=${sqlString(ids.revokeApproval)})
+    AND NOT EXISTS(SELECT 1 FROM native_staff_bootstrap_receipts WHERE command_id=${sqlString(ids.revokeCommand)})
+    AND ${recipientEnrollmentNoPendingWork(packet)}`;
+  const final = `EXISTS(SELECT 1 FROM native_staff_admissions WHERE staff_id=${staff} AND active=0 AND version=${versions.admissionRevoked})
+    AND ${v4ProfileGrant(ids.directoryGrant, 0, staff)}
+    AND ${preservativeProfileHistoryState(ids, staff, versions.profileGrantVersionRevoked,
+      [...packet.expected.profileHistoryGenerations, versions.directoryGenerationBefore + 1, versions.directoryGenerationActive + 1], 0)}
+    AND ${v4IdentityGrant(ids, 0, staff, packet.recordId)}
+    AND ${preservativeResourceHistoryState(ids.identityGrant, staff, "directory.identity.link", packet.recordId,
+      versions.identityGrantVersionRevoked,
+      [...packet.expected.identityHistoryGenerations, versions.directoryGenerationBefore + 2, versions.directoryGenerationActive + 2], 0)}
+    AND ${onboardingProfileGrant(ids, staff, packet.businessAreaId)}
+    AND ${onboardingProfileHistoryState(packet, ids, staff, packet.businessAreaId, versions.onboardingGrantVersion)}
+    AND (SELECT count(*) FROM native_directory_grants WHERE staff_id=${staff})=3
+    AND (SELECT count(*) FROM native_directory_grant_history WHERE staff_id=${staff})=${versions.profileGrantVersionRevoked + versions.onboardingGrantVersion + versions.identityGrantVersionRevoked}
+    AND EXISTS(SELECT 1 FROM native_directory_grant_generations WHERE staff_id=${staff} AND generation=${versions.directoryGenerationRevoked})
+    AND EXISTS(SELECT 1 FROM native_project_grants WHERE id=${sqlString(ids.grant)} AND active=0 AND version=${versions.grant})
+    AND EXISTS(SELECT 1 FROM native_staff_bootstrap_approvals WHERE approval_id=${sqlString(ids.provisionApproval)} AND revoked_at IS NOT NULL)
+    AND EXISTS(SELECT 1 FROM native_staff_bootstrap_receipts WHERE command_id=${sqlString(ids.revokeCommand)}
+      AND approval_id=${sqlString(ids.revokeApproval)} AND canonical_plan_sha256=${sqlString(planSha)})`;
+  return `PRAGMA foreign_keys = ON;
+-- Generated staging-only preservative existing-directory acquisition revocation packet.
+CREATE TABLE ${table}(ok INTEGER NOT NULL CHECK(ok=1));
+${guardInsert(table, precondition)}
+${approvalSql(packet, ids, "revoke", canonicalPlan, planSha, verificationJson, verificationSha)}
+UPDATE native_directory_grants SET active=0 WHERE id=${sqlString(ids.directoryGrant)} AND staff_id=${staff}
+  AND permission='directory.profile.edit' AND scope_kind='global' AND active=1;
+UPDATE native_directory_grants SET active=0 WHERE id=${sqlString(ids.identityGrant)} AND staff_id=${staff}
+  AND permission='directory.identity.link' AND scope_kind='resource' AND resource_id=${sqlString(packet.recordId)} AND active=1;
+UPDATE native_staff_admissions SET active=0,version=version+1,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+WHERE staff_id=${staff} AND active=1 AND version=${versions.admissionActive};
+UPDATE native_staff_bootstrap_approvals SET revoked_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+WHERE approval_id=${sqlString(ids.provisionApproval)} AND revoked_at IS NULL;
+${receiptSql(packet, ids, "revoke", canonicalPlan, planSha, verificationJson, verificationSha, result)}
+${guardInsert(table, final)}
+DROP TABLE ${table};
+`;
+}
+
+function recipientEnrollmentResult(packet, ids, versions, action) {
+  const revoke = action === "revoke";
+  return { schemaVersion: packet.purpose === PRESERVATIVE_RECIPIENT_ENROLLMENT_PURPOSE
+      ? PRESERVATIVE_RECIPIENT_ENROLLMENT_PACKET_SCHEMA_VERSION : RECIPIENT_ENROLLMENT_PACKET_SCHEMA_VERSION,
+    action, packetId: packet.packetId,
+    staffId: packet.staffId, portalAccessGrantId: ids.portalAccessGrant,
+    admissionVersion: revoke ? versions.admissionRevoked : versions.admissionActive,
+    profileVersion: versions.profile, projectGrantVersion: versions.grant,
+    projectGrantGeneration: versions.grantGeneration,
+    directoryGrantGeneration: revoke ? versions.directoryGenerationRevoked : versions.directoryGenerationActive,
+    portalAccessGrantVersion: revoke ? versions.portalGrantVersionRevoked : versions.portalGrantVersionActive,
+    portalAccessGrantActive: revoke ? 0 : 1 };
+}
+
+function provisionSqlRecipientEnrollment(packet, ids, versions, names, migrationNames) {
+  const table = guardTable(packet.packetId, "provision"), staff = sqlString(packet.staffId);
+  const canonicalPlan = canonicalJson(plan(packet, "provision", ids, versions)), planSha = sha256(canonicalPlan);
+  const verificationJson = verification(packet), verificationSha = sha256(verificationJson);
+  const recordCurrent = `EXISTS(SELECT 1 FROM operations_directory_records WHERE record_id=${sqlString(packet.recordId)}
+      AND record_kind=${sqlString(packet.recordKind)} AND current_version=${packet.recordVersion})
+    AND EXISTS(SELECT 1 FROM project_alpha_existing_directory_binding_activation_receipts
+      WHERE activation_id=${sqlString(packet.activationId)} AND record_id=${sqlString(packet.recordId)} AND resource_type=${sqlString(packet.recordKind)}
+        AND local_record_version=${packet.recordVersion} AND activated_by_staff_id=${staff}
+        ${packet.purpose === PRESERVATIVE_RECIPIENT_ENROLLMENT_PURPOSE
+          ? `AND directory_grant_generation=${packet.expected.activationReceiptDirectoryGrantGeneration}` : ""})`;
+  const exactInactiveAuthority = `EXISTS(SELECT 1 FROM native_staff_admissions WHERE staff_id=${staff}
+      AND bound_access_subject=${sqlString(packet.accessSubject)} AND active=0 AND version=${versions.admissionBefore}
+      AND admitted_by=${staff})
+    AND EXISTS(SELECT 1 FROM native_staff_profiles WHERE staff_id=${staff} AND login_email=${sqlString(packet.email)}
+      AND display_name=${sqlString(packet.displayName)} AND version=${versions.profile})
+    AND ${recipientEnrollmentDirectoryState(packet, ids, versions,
+      packet.expected.portalGrantState === "inactive" ? 0 : 1, packet.expected.portalGrantVersion)}
+    AND EXISTS(SELECT 1 FROM native_directory_grant_generations WHERE staff_id=${staff}
+      AND generation=${versions.directoryGenerationBefore})
+    AND (SELECT count(*) FROM native_directory_grant_history WHERE staff_id=${staff})=${recipientEnrollmentHistoryCount(versions, packet.expected.portalGrantVersion)}
+    AND (SELECT count(*) FROM native_project_grants WHERE staff_id=${staff})=1
+    AND EXISTS(SELECT 1 FROM native_project_grants WHERE id=${sqlString(ids.grant)} AND staff_id=${staff}
+      AND capability='project.shared.sync' AND effect='allow' AND scope_kind='global'
+      AND business_area_id IS NULL AND division_id IS NULL AND external_project_id IS NULL
+      AND active=0 AND version=${versions.grant} AND granted_by=${staff})
+    AND EXISTS(SELECT 1 FROM native_project_grant_generations WHERE staff_id=${staff}
+      AND generation=${versions.grantGeneration})
+    AND NOT EXISTS(SELECT 1 FROM native_project_live_command_proofs WHERE actor_staff_id=${staff})`;
+  const portalMutation = packet.expected.portalGrantState === "absent"
+    ? `INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,resource_id,active,granted_by)
+VALUES(${sqlString(ids.portalAccessGrant)},${staff},'directory.portal_access.manage','allow','resource',${sqlString(packet.recordId)},1,${staff});`
+    : `UPDATE native_directory_grants SET active=1
+WHERE id=${sqlString(ids.portalAccessGrant)} AND staff_id=${staff} AND permission='directory.portal_access.manage'
+  AND effect='allow' AND scope_kind='resource' AND business_area_id IS NULL AND division_id IS NULL
+  AND resource_id=${sqlString(packet.recordId)} AND active=0 AND granted_by=${staff};`;
+  const result = recipientEnrollmentResult(packet, ids, versions, "provision");
+  const final = `EXISTS(SELECT 1 FROM native_staff_admissions WHERE staff_id=${staff}
+      AND bound_access_subject=${sqlString(packet.accessSubject)} AND active=1 AND version=${versions.admissionActive}
+      AND admitted_by=${staff})
+    AND EXISTS(SELECT 1 FROM native_staff_profiles WHERE staff_id=${staff} AND version=${versions.profile})
+    AND ${recipientEnrollmentDirectoryState(packet, ids, versions, 1, versions.portalGrantVersionActive)}
+    AND EXISTS(SELECT 1 FROM native_directory_grant_generations WHERE staff_id=${staff}
+      AND generation=${versions.directoryGenerationActive})
+    AND (SELECT count(*) FROM native_directory_grant_history WHERE staff_id=${staff})=${recipientEnrollmentHistoryCount(versions, versions.portalGrantVersionActive)}
+    AND EXISTS(SELECT 1 FROM native_project_grants WHERE id=${sqlString(ids.grant)} AND staff_id=${staff}
+      AND active=0 AND version=${versions.grant})
+    AND EXISTS(SELECT 1 FROM native_project_grant_generations WHERE staff_id=${staff}
+      AND generation=${versions.grantGeneration})
+    AND EXISTS(SELECT 1 FROM native_staff_bootstrap_receipts WHERE command_id=${sqlString(ids.provisionCommand)}
+      AND approval_id=${sqlString(ids.provisionApproval)} AND canonical_plan_sha256=${sqlString(planSha)})`;
+  return `PRAGMA foreign_keys = ON;
+-- Generated staging-only exact-resource recipient-enrollment portal authority packet.
+CREATE TABLE ${table}(ok INTEGER NOT NULL CHECK(ok=1));
+${guardInsert(table, `${canonicalLedger(names)}
+    AND NOT EXISTS(SELECT 1 FROM ${AUTHORITY_MIGRATIONS_TABLE} WHERE name IN (${sqlString(migrationNames.provision)},${sqlString(migrationNames.revoke)}))
+    AND ${commonPrecondition(packet, ids)}
+    AND EXISTS(SELECT 1 FROM staff_role_assignments WHERE staff_id=${staff} AND role_id='role-owner' AND scope='global')
+    AND ${recordCurrent} AND ${exactInactiveAuthority} AND ${recipientEnrollmentNoPendingWork(packet)}
+    AND ${sqlString(packet.issuedAt)}<=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+    AND ${sqlString(packet.expiresAt)}>strftime('%Y-%m-%dT%H:%M:%fZ','now')`)}
+${approvalSql(packet, ids, "provision", canonicalPlan, planSha, verificationJson, verificationSha)}
+UPDATE native_staff_admissions SET active=1,version=version+1,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+WHERE staff_id=${staff} AND active=0 AND version=${versions.admissionBefore};
+${portalMutation}
+${receiptSql(packet, ids, "provision", canonicalPlan, planSha, verificationJson, verificationSha, result)}
+${guardInsert(table, final)}
+DROP TABLE ${table};
+`;
+}
+
+function revokeSqlRecipientEnrollment(packet, ids, versions, provision, names, migrationNames) {
+  const table = guardTable(packet.packetId, "revoke"), staff = sqlString(packet.staffId);
+  const canonicalPlan = canonicalJson(plan(packet, "revoke", ids, versions)), planSha = sha256(canonicalPlan);
+  const verificationJson = verification(packet), verificationSha = sha256(verificationJson);
+  const result = recipientEnrollmentResult(packet, ids, versions, "revoke");
+  const precondition = `${canonicalLedger(names)}
+    AND EXISTS(SELECT 1 FROM ${AUTHORITY_MIGRATIONS_TABLE} WHERE name=${sqlString(migrationNames.provision)})
+    AND NOT EXISTS(SELECT 1 FROM ${AUTHORITY_MIGRATIONS_TABLE} WHERE name=${sqlString(migrationNames.revoke)})
+    AND EXISTS(SELECT 1 FROM native_staff_admissions WHERE staff_id=${staff}
+      AND bound_access_subject=${sqlString(packet.accessSubject)} AND active=1 AND version=${versions.admissionActive}
+      AND admitted_by=${staff})
+    AND EXISTS(SELECT 1 FROM native_staff_profiles WHERE staff_id=${staff} AND login_email=${sqlString(packet.email)}
+      AND display_name=${sqlString(packet.displayName)} AND version=${versions.profile})
+    AND ${recipientEnrollmentDirectoryState(packet, ids, versions, 1, versions.portalGrantVersionActive)}
+    AND EXISTS(SELECT 1 FROM native_directory_grant_generations WHERE staff_id=${staff}
+      AND generation=${versions.directoryGenerationActive})
+    AND (SELECT count(*) FROM native_directory_grant_history WHERE staff_id=${staff})=${recipientEnrollmentHistoryCount(versions, versions.portalGrantVersionActive)}
+    AND EXISTS(SELECT 1 FROM native_project_grants WHERE id=${sqlString(ids.grant)} AND staff_id=${staff}
+      AND capability='project.shared.sync' AND effect='allow' AND scope_kind='global' AND active=0
+      AND version=${versions.grant} AND granted_by=${staff})
+    AND EXISTS(SELECT 1 FROM native_project_grant_generations WHERE staff_id=${staff}
+      AND generation=${versions.grantGeneration})
+    AND EXISTS(SELECT 1 FROM native_staff_bootstrap_approvals WHERE approval_id=${sqlString(ids.provisionApproval)}
+      AND canonical_plan_json=${sqlString(provision.planJson)} AND canonical_plan_sha256=${sqlString(provision.planSha)}
+      AND approved_operator_staff_id=${staff} AND approved_operator_access_subject=${sqlString(packet.accessSubject)}
+      AND independent_binding_verification_json=${sqlString(provision.verificationJson)}
+      AND independent_binding_verification_sha256=${sqlString(provision.verificationSha)}
+      AND issued_by_staff_id=${staff} AND issued_by_access_subject=${sqlString(packet.accessSubject)}
+      AND issued_at=${sqlString(packet.issuedAt)} AND expires_at=${sqlString(packet.expiresAt)} AND revoked_at IS NULL)
+    AND EXISTS(SELECT 1 FROM native_staff_bootstrap_receipts WHERE command_id=${sqlString(ids.provisionCommand)}
+      AND approval_id=${sqlString(ids.provisionApproval)} AND operator_staff_id=${staff}
+      AND operator_access_subject=${sqlString(packet.accessSubject)}
+      AND canonical_plan_json=${sqlString(provision.planJson)} AND canonical_plan_sha256=${sqlString(provision.planSha)}
+      AND independent_binding_verification_json=${sqlString(provision.verificationJson)}
+      AND independent_binding_verification_sha256=${sqlString(provision.verificationSha)}
+      AND result_json=${sqlString(provision.resultJson)} AND result_sha256=${sqlString(provision.resultSha)})
+    AND NOT EXISTS(SELECT 1 FROM native_staff_bootstrap_approvals WHERE approval_id=${sqlString(ids.revokeApproval)})
+    AND NOT EXISTS(SELECT 1 FROM native_staff_bootstrap_receipts WHERE command_id=${sqlString(ids.revokeCommand)})
+    AND ${recipientEnrollmentNoPendingWork(packet)}`;
+  const final = `EXISTS(SELECT 1 FROM native_staff_admissions WHERE staff_id=${staff}
+      AND bound_access_subject=${sqlString(packet.accessSubject)} AND active=0 AND version=${versions.admissionRevoked}
+      AND admitted_by=${staff})
+    AND EXISTS(SELECT 1 FROM native_staff_profiles WHERE staff_id=${staff} AND version=${versions.profile})
+    AND ${recipientEnrollmentDirectoryState(packet, ids, versions, 0, versions.portalGrantVersionRevoked)}
+    AND EXISTS(SELECT 1 FROM native_directory_grant_generations WHERE staff_id=${staff}
+      AND generation=${versions.directoryGenerationRevoked})
+    AND (SELECT count(*) FROM native_directory_grant_history WHERE staff_id=${staff})=${recipientEnrollmentHistoryCount(versions, versions.portalGrantVersionRevoked)}
+    AND EXISTS(SELECT 1 FROM native_project_grants WHERE id=${sqlString(ids.grant)} AND active=0 AND version=${versions.grant})
+    AND EXISTS(SELECT 1 FROM native_project_grant_generations WHERE staff_id=${staff} AND generation=${versions.grantGeneration})
+    AND EXISTS(SELECT 1 FROM native_staff_bootstrap_approvals WHERE approval_id=${sqlString(ids.provisionApproval)} AND revoked_at IS NOT NULL)
+    AND EXISTS(SELECT 1 FROM native_staff_bootstrap_receipts WHERE command_id=${sqlString(ids.revokeCommand)}
+      AND approval_id=${sqlString(ids.revokeApproval)} AND canonical_plan_sha256=${sqlString(planSha)})`;
+  return `PRAGMA foreign_keys = ON;
+-- Generated staging-only exact-resource recipient-enrollment portal authority revocation packet.
+CREATE TABLE ${table}(ok INTEGER NOT NULL CHECK(ok=1));
+${guardInsert(table, precondition)}
+${approvalSql(packet, ids, "revoke", canonicalPlan, planSha, verificationJson, verificationSha)}
+UPDATE native_directory_grants SET active=0
+WHERE id=${sqlString(ids.portalAccessGrant)} AND staff_id=${staff} AND permission='directory.portal_access.manage'
+  AND effect='allow' AND scope_kind='resource' AND resource_id=${sqlString(packet.recordId)} AND active=1;
+UPDATE native_staff_admissions SET active=0,version=version+1,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+WHERE staff_id=${staff} AND active=1 AND version=${versions.admissionActive};
+UPDATE native_staff_bootstrap_approvals SET revoked_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+WHERE approval_id=${sqlString(ids.provisionApproval)} AND revoked_at IS NULL;
+${receiptSql(packet, ids, "revoke", canonicalPlan, planSha, verificationJson, verificationSha, result)}
+${guardInsert(table, final)}
+DROP TABLE ${table};
+`;
+}
+
 function canonicalOperations(base) {
   const appDir = path.join(base, "apps", "operations"), sourceConfigPath = path.join(appDir, "wrangler.staging.json");
   requireRegularFile(sourceConfigPath, "Operations staging config");
@@ -403,7 +1358,7 @@ function canonicalOperations(base) {
   const names = entries.filter(entry => entry.isFile() && !entry.isSymbolicLink() && entry.name.endsWith(".sql")).map(entry => entry.name).sort();
   const contract = BOOTSTRAP_APPS.operations;
   if (names.length !== contract.migrationCount || sha256(names.join("\n")) !== contract.migrationNamesSha256)
-    throw new Error(`authority source must be the exact complete ${contract.migrationCount}-file Operations chain`);
+    throw new Error(`authority source must be the exact complete ${contract.migrationCount}-file Operations chain (found ${names.length}, names ${sha256(names.join("\n"))}, final ${names.at(-1)})`);
   const contents = names.map(name => {
     const file = path.join(directory, name); requireRegularFile(file, `Operations canonical migration ${name}`);
     return `${name}\0${sha256(fs.readFileSync(file, "utf8"))}`;
@@ -418,8 +1373,30 @@ export function buildAuthorityArtifacts(base, input, phase) {
   if (errors.length) throw new Error(errors.join("\n"));
   if (!['provision', 'revoke'].includes(phase)) throw new Error("phase must be provision or revoke");
   const { config, selected, chainSha256, names } = canonicalOperations(base);
-  const packet = structuredClone(input.packet), versions = versionState(packet);
-  const ids = {
+  const packet = structuredClone(input.packet);
+  const recipientEnrollment = packet.purpose === RECIPIENT_ENROLLMENT_PURPOSE || packet.purpose === PRESERVATIVE_RECIPIENT_ENROLLMENT_PURPOSE;
+  const preservativeAcquisition = packet.purpose === PRESERVATIVE_ACQUISITION_PURPOSE;
+  const versions = recipientEnrollment ? recipientEnrollmentVersionState(packet)
+    : preservativeAcquisition ? preservativeAcquisitionVersionState(packet) : versionState(packet);
+  const acquisition = packet.purpose === "existing-directory-acquisition" || packet.purpose === "existing-directory-acquisition-after-fixture";
+  const fixture = packet.purpose === "staging-empty-enrollment-fixture";
+  const ids = recipientEnrollment || preservativeAcquisition ? {
+    grant: `staging-project-sync:${packet.staffId}`,
+    directoryGrant: `staging-directory-profile-edit:${packet.staffId}`,
+    identityGrant: `staging-directory-identity-link:${packet.staffId}`,
+    ...((preservativeAcquisition || packet.purpose === PRESERVATIVE_RECIPIENT_ENROLLMENT_PURPOSE)
+      ? { onboardingProfileGrant: `staging-onboarding-profile-edit:${sha256(`${packet.staffId}:${packet.businessAreaId}`).slice(0, 32)}` } : {}),
+    ...(recipientEnrollment ? { portalAccessGrant: `staging-directory-portal-access:${packet.staffId}:${sha256(packet.recordId).slice(0, 32)}` } : {}),
+    provisionApproval: `${packet.packetId}:provision:approval`, provisionCommand: `${packet.packetId}:provision:command`,
+    revokeApproval: `${packet.packetId}:revoke:approval`, revokeCommand: `${packet.packetId}:revoke:command`,
+  } : acquisition || fixture ? {
+    grant: `staging-project-sync:${packet.staffId}`,
+    directoryGrant: `staging-directory-profile-edit:${packet.staffId}`,
+    ...(acquisition ? { identityGrant: `staging-directory-identity-link:${packet.staffId}` } : {}),
+    ...(fixture || packet.purpose === "existing-directory-acquisition-after-fixture" ? { enrollmentGrant: `staging-directory-enrollment-manage:${packet.staffId}` } : {}),
+    provisionApproval: `${packet.packetId}:provision:approval`, provisionCommand: `${packet.packetId}:provision:command`,
+    revokeApproval: `${packet.packetId}:revoke:approval`, revokeCommand: `${packet.packetId}:revoke:command`,
+  } : {
     grant: `staging-project-sync:${packet.staffId}`,
     directoryGrant: `staging-directory-profile-edit:${packet.staffId}`,
     provisionApproval: `${packet.packetId}:provision:approval`, provisionCommand: `${packet.packetId}:provision:command`,
@@ -428,9 +1405,28 @@ export function buildAuthorityArtifacts(base, input, phase) {
   for (const [label, value] of Object.entries(ids)) if (value.length > 191) throw new Error(`${label} exceeds the database identifier limit`);
   const provisionName = `9000_${packet.packetId}_provision.sql`, revokeName = `9001_${packet.packetId}_revoke.sql`;
   const migrationNames = { provision: provisionName, revoke: revokeName };
-  const provision = provisionSql(packet, ids, versions, names, migrationNames);
+  const provision = recipientEnrollment ? provisionSqlRecipientEnrollment(packet, ids, versions, names, migrationNames)
+    : preservativeAcquisition ? provisionSqlPreservativeAcquisition(packet, ids, versions, names, migrationNames)
+    : fixture ? provisionSqlV5Fixture(packet, ids, versions, names, migrationNames) : acquisition ? provisionSqlV4(packet, ids, versions, names, migrationNames)
+    : provisionSql(packet, ids, versions, names, migrationNames);
   const provisionPlan = canonicalJson(plan(packet, "provision", ids, versions));
-  const revoke = revokeSql(packet, ids, versions, { planSha: sha256(provisionPlan) }, names, migrationNames);
+  const governedProvisionResult = recipientEnrollment ? canonicalJson(recipientEnrollmentResult(packet, ids, versions, "provision"))
+    : preservativeAcquisition ? canonicalJson(preservativeAcquisitionResult(packet, ids, versions, "provision")) : null;
+  const recipientProvisionAudit = recipientEnrollment || preservativeAcquisition ? {
+    planJson: provisionPlan, planSha: sha256(provisionPlan),
+    verificationJson: verification(packet), verificationSha: sha256(verification(packet)),
+    resultJson: governedProvisionResult, resultSha: sha256(governedProvisionResult),
+  } : null;
+  const fixtureProvisionAudit = fixture ? {
+    planJson: provisionPlan, planSha: sha256(provisionPlan),
+    verificationJson: verification(packet), verificationSha: sha256(verification(packet)),
+    resultJson: canonicalJson(v5FixtureProvisionResult(packet, ids, versions)),
+    resultSha: sha256(canonicalJson(v5FixtureProvisionResult(packet, ids, versions))),
+  } : null;
+  const revoke = recipientEnrollment ? revokeSqlRecipientEnrollment(packet, ids, versions, recipientProvisionAudit, names, migrationNames)
+    : preservativeAcquisition ? revokeSqlPreservativeAcquisition(packet, ids, versions, recipientProvisionAudit, names, migrationNames)
+    : fixture ? revokeSqlV5Fixture(packet, ids, versions, fixtureProvisionAudit, names, migrationNames) : acquisition ? revokeSqlV4(packet, ids, versions, { planSha: sha256(provisionPlan) }, names, migrationNames)
+    : revokeSql(packet, ids, versions, { planSha: sha256(provisionPlan) }, names, migrationNames);
   const configs = {};
   for (const action of ["provision", "revoke"]) {
     const outputConfig = structuredClone(config);
@@ -441,14 +1437,61 @@ export function buildAuthorityArtifacts(base, input, phase) {
   }
   const identity = { staffId: packet.staffId, emailSha256: sha256(packet.email), displayNameSha256: sha256(packet.displayName),
     accessSubjectSha256: sha256(packet.accessSubject) };
-  const baseManifest = { schemaVersion: PACKET_SCHEMA_VERSION, environment: "staging", packetId: packet.packetId,
+  const baseManifest = { schemaVersion: packet.purpose === PRESERVATIVE_RECIPIENT_ENROLLMENT_PURPOSE ? PRESERVATIVE_RECIPIENT_ENROLLMENT_PACKET_SCHEMA_VERSION : preservativeAcquisition ? PRESERVATIVE_ACQUISITION_PACKET_SCHEMA_VERSION : recipientEnrollment ? RECIPIENT_ENROLLMENT_PACKET_SCHEMA_VERSION : fixture || packet.purpose === "existing-directory-acquisition-after-fixture" ? FIXTURE_PACKET_SCHEMA_VERSION : acquisition ? ACQUISITION_PACKET_SCHEMA_VERSION : PACKET_SCHEMA_VERSION, environment: "staging", packetId: packet.packetId,
     operatorKind: packet.operatorKind,
     databaseName: selected.database_name, databaseId: selected.database_id, migrationsTable: AUTHORITY_MIGRATIONS_TABLE,
     canonicalOperationsLedger: { count: names.length, finalMigration: names.at(-1), chainSha256 }, identity,
-    grant: { id: ids.grant, capability: "project.shared.sync", effect: "allow", scopeKind: "global" },
-    directoryGrant: { id: ids.directoryGrant, permission: "directory.profile.edit", effect: "allow", scopeKind: "global" },
+    grant: { id: ids.grant, capability: "project.shared.sync", effect: "allow", scopeKind: "global", ...(recipientEnrollment || preservativeAcquisition ? { active: false } : {}) },
+    ...(recipientEnrollment ? { purpose: packet.purpose, record: { idSha256: sha256(packet.recordId), kind: packet.recordKind,
+      version: packet.recordVersion, activationIdSha256: sha256(packet.activationId) }, directoryGrants: [
+      { id: ids.directoryGrant, permission: "directory.profile.edit", effect: "allow", scopeKind: "global", active: false },
+      { id: ids.identityGrant, permission: "directory.identity.link", effect: "allow", scopeKind: "resource",
+        resourceIdSha256: sha256(packet.recordId), active: false },
+      ...(packet.purpose === PRESERVATIVE_RECIPIENT_ENROLLMENT_PURPOSE ? [{ id: ids.onboardingProfileGrant,
+        permission: "directory.profile.edit", effect: "allow", scopeKind: "business_area",
+        businessAreaIdSha256: sha256(packet.businessAreaId), active: false }] : []),
+      { id: ids.portalAccessGrant, permission: "directory.portal_access.manage", effect: "allow", scopeKind: "resource",
+        resourceIdSha256: sha256(packet.recordId) },
+    ] } : preservativeAcquisition ? { purpose: packet.purpose, record: { idSha256: sha256(packet.recordId), kind: packet.recordKind,
+      version: packet.recordVersion }, directoryGrants: [
+      { id: ids.directoryGrant, permission: "directory.profile.edit", effect: "allow", scopeKind: "global" },
+      { id: ids.identityGrant, permission: "directory.identity.link", effect: "allow", scopeKind: "resource", resourceIdSha256: sha256(packet.recordId) },
+      { id: ids.onboardingProfileGrant, permission: "directory.profile.edit", effect: "allow", scopeKind: "business_area",
+        businessAreaIdSha256: sha256(packet.businessAreaId), active: false },
+    ] } : fixture ? { purpose: packet.purpose, directoryGrants: [
+      { id: ids.directoryGrant, permission: "directory.profile.edit", effect: "allow", scopeKind: "global" },
+      { id: ids.enrollmentGrant, permission: "directory.enrollment.manage", effect: "allow", scopeKind: "business_area", businessAreaIdSha256: sha256(packet.businessAreaId) },
+    ] } : acquisition ? { purpose: packet.purpose, directoryGrants: [
+      { id: ids.directoryGrant, permission: "directory.profile.edit", effect: "allow", scopeKind: "global" },
+      { id: ids.identityGrant, permission: "directory.identity.link", effect: "allow", scopeKind: "resource", resourceIdSha256: sha256(packet.recordId) },
+      ...(packet.purpose === "existing-directory-acquisition-after-fixture" ? [{ id: ids.enrollmentGrant, permission: "directory.enrollment.manage", effect: "allow", scopeKind: "business_area", businessAreaIdSha256: sha256(packet.businessAreaId), active: 0 }] : []),
+    ] } : { directoryGrant: { id: ids.directoryGrant, permission: "directory.profile.edit", effect: "allow", scopeKind: "global" } }),
     issuedAt: packet.issuedAt, expiresAt: packet.expiresAt, reasonSha256: sha256(packet.reason) };
-  const manifests = {
+  const manifests = recipientEnrollment ? {
+    provision: { ...baseManifest, phase: "provision", mode: packet.mode, migration: { name: provisionName, sha256: sha256(provision) },
+      expected: packet.expected, result: recipientEnrollmentResult(packet, ids, versions, "provision") },
+    revoke: { ...baseManifest, phase: "revoke", migration: { name: revokeName, sha256: sha256(revoke) },
+      expected: plan(packet, "revoke", ids, versions).expected,
+      result: recipientEnrollmentResult(packet, ids, versions, "revoke") },
+  } : preservativeAcquisition ? {
+    provision: { ...baseManifest, phase: "provision", mode: packet.mode, migration: { name: provisionName, sha256: sha256(provision) },
+      expected: packet.expected, result: preservativeAcquisitionResult(packet, ids, versions, "provision") },
+    revoke: { ...baseManifest, phase: "revoke", migration: { name: revokeName, sha256: sha256(revoke) },
+      expected: plan(packet, "revoke", ids, versions).expected,
+      result: preservativeAcquisitionResult(packet, ids, versions, "revoke") },
+  } : acquisition ? {
+    provision: { ...baseManifest, phase: "provision", mode: packet.mode, migration: { name: provisionName, sha256: sha256(provision) },
+      expected: packet.expected, result: { admissionVersion: versions.admissionActive, profileVersion: versions.profile,
+        grantVersion: versions.grantActive, grantGeneration: versions.generationActive,
+        directoryGrantActive: { "directory.profile.edit": 1, "directory.identity.link": 1 } } },
+    revoke: { ...baseManifest, phase: "revoke", migration: { name: revokeName, sha256: sha256(revoke) },
+      expected: { admissionVersion: versions.admissionActive, profileVersion: versions.profile,
+        grantVersion: versions.grantActive, grantGeneration: versions.generationActive,
+        directoryGrantActive: { "directory.profile.edit": 1, "directory.identity.link": 1 } },
+      result: { admissionVersion: versions.admissionActive + 1, profileVersion: versions.profile,
+        grantVersion: versions.grantActive + 1, grantGeneration: versions.generationActive + 1,
+        directoryGrantActive: { "directory.profile.edit": 0, "directory.identity.link": 0 } } },
+  } : {
     provision: { ...baseManifest, phase: "provision", mode: packet.mode, migration: { name: provisionName, sha256: sha256(provision) },
       expected: packet.expected, result: { admissionVersion: versions.admissionActive, profileVersion: versions.profile,
         grantVersion: versions.grantActive, grantGeneration: versions.generationActive, directoryGrantActive: 1 } },

@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 7,
+  "packet": {
+    "packetId": "staging-authority-preservative-acquisition-001",
+    "purpose": "existing-directory-acquisition-preserving-onboarding-profile",
+    "recordId": "REPLACE_WITH_REVIEWED_SYNTHETIC_RECORD_ID",
+    "recordKind": "organization",
+    "recordVersion": "REPLACE_WITH_REVIEWED_RECORD_VERSION_INTEGER",
+    "businessAreaId": "REPLACE_WITH_REVIEWED_BUSINESS_AREA_ID",
+    "mode": "reactivate",
+    "operatorKind": "synthetic",
+    "staffId": "staging-operations-owner",
+    "email": "owner@staging.example.test",
+    "displayName": "Synthetic Staging Owner",
+    "accessSubject": "REPLACE_WITH_REVIEWED_ACCESS_SUBJECT",
+    "issuedAt": "2026-09-28T15:00:00.000Z",
+    "expiresAt": "2026-09-28T17:00:00.000Z",
+    "reason": "Bounded existing Directory acquisition preserving reviewed onboarding history",
+    "expected": {
+      "admissionVersion": "REPLACE_WITH_REVIEWED_ADMISSION_VERSION_INTEGER",
+      "profileVersion": "REPLACE_WITH_REVIEWED_PROFILE_VERSION_INTEGER",
+      "grantVersion": "REPLACE_WITH_REVIEWED_PROJECT_GRANT_VERSION_INTEGER",
+      "grantGeneration": "REPLACE_WITH_REVIEWED_PROJECT_GRANT_GENERATION_INTEGER",
+      "directoryGrantGeneration": "REPLACE_WITH_REVIEWED_DIRECTORY_GENERATION_INTEGER",
+      "profileGrantVersion": 1,
+      "profileHistoryGenerations": ["REPLACE_WITH_REVIEWED_GLOBAL_PROFILE_HISTORY_GENERATION_1"],
+      "onboardingGrantVersion": 3,
+      "onboardingHistoryGenerations": [
+        "REPLACE_WITH_REVIEWED_ONBOARDING_HISTORY_GENERATION_1",
+        "REPLACE_WITH_REVIEWED_ONBOARDING_HISTORY_GENERATION_2",
+        "REPLACE_WITH_REVIEWED_ONBOARDING_HISTORY_GENERATION_3"
+      ],
+      "identityGrantVersion": 0,
+      "identityHistoryGenerations": [],
+      "identityGrantState": "absent",
+      "directoryAuthorityState": "v7-profile-plus-onboarding-inactive"
+    },
+    "evidence": {
+      "changeTicket": "REPLACE_WITH_APPROVED_CHANGE_TICKET",
+      "reviewer": "REPLACE_WITH_INDEPENDENT_REVIEWER_REFERENCE",
+      "bindingEvidenceSha256": "REPLACE_WITH_64_LOWERCASE_HEX_CHARACTERS"
+    }
+  }
+}

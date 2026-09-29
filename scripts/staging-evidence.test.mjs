@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { validateEvidence as validateEvidenceContract } from "./staging-evidence.mjs";
+import { BOOTSTRAP_APPS } from "./staging-bootstrap.mjs";
 import { FEATURE_FLAG_ACTIVATION_POLICIES, FEATURE_FLAG_DEPENDENCY_WINDOWS, PROJECT_ALPHA_STAGING, RELEASE_CANDIDATES, RELEASE_CONTRACT_FINALIZED, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_EXTERNAL_GATES, REQUIRED_EXTERNAL_GATE_PROOFS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_SECRETS, STAGING_ACCOUNT_ID, STAGING_CLIENT_PORTAL, STAGING_HOSTS, STAGING_INVENTORY, STAGING_STATIC_VARS, STAGING_VIEWER } from "./staging-requirements.mjs";
 
 const now = Date.parse("2026-07-30T12:30:00Z");
@@ -219,11 +220,11 @@ function fixture(base) {
     },
     migrations: {
       freshBootstrap: {
-        schemaVersion: 1, mode: "generated-empty-d1", canonicalMigrationsUnchanged: true,
+        schemaVersion: 2, mode: "generated-empty-d1", canonicalMigrationsUnchanged: true,
         ownerEmailSha256: "e".repeat(64), generatedAt: "2026-07-30T12:00:00Z", generatorEvidenceRef: "ticket:migrations:fresh-bootstrap:generator",
         applications: {
-          delivery: { configPath: "apps/client/wrangler.staging.bootstrap.json", manifestPath: "apps/client/.staging-bootstrap/manifest.json", transformedFiles: ["0002_seed_initial_staff.sql"], ledgerCount: 132, finalMigration: "0213_incoming_rclone_promotion.sql", sourceSeedSha256: "1".repeat(64), generatedSeedSha256: "2".repeat(64), databaseWasEmpty: true, generatedChainVerified: true, appliedWithBootstrapConfig: true, appliedExactlyOnce: true, singleSyntheticOwnerVerified: true, canonicalHumanRowsAbsent: true, ownerRoleVerified: true, ledgerMatchesGeneratedChain: true, both0199FilenamesExactlyOnce: true, secondListEmpty: true, idempotentReapplyPassed: true, foreignKeyCheckPassed: true, evidenceRef: "ticket:migrations:fresh-bootstrap:delivery" },
-          operations: { configPath: "apps/operations/wrangler.staging.bootstrap.json", manifestPath: "apps/operations/.staging-bootstrap/manifest.json", transformedFiles: ["0002_seed_acl.sql"], ledgerCount: 122, finalMigration: "0122_project_alpha_project_v2_canonical_activation.sql", sourceSeedSha256: "3".repeat(64), generatedSeedSha256: "4".repeat(64), databaseWasEmpty: true, generatedChainVerified: true, appliedWithBootstrapConfig: true, appliedExactlyOnce: true, singleSyntheticOwnerVerified: true, canonicalHumanRowsAbsent: true, ownerRoleVerified: true, ledgerMatchesGeneratedChain: true, portableCatalogSeedVerified: true, secondListEmpty: true, idempotentReapplyPassed: true, foreignKeyCheckPassed: true, evidenceRef: "ticket:migrations:fresh-bootstrap:operations" },
+          delivery: { configPath: "apps/client/wrangler.staging.bootstrap.json", manifestPath: "apps/client/.staging-bootstrap/manifest.json", transformedFiles: ["0002_seed_initial_staff.sql"], ledgerCount: 140, finalMigration: "0221_verified_recipient_delivery_authority.sql", sourceSeedSha256: "1".repeat(64), generatedSeedSha256: "2".repeat(64), databaseWasEmpty: true, generatedChainVerified: true, appliedWithBootstrapConfig: true, appliedExactlyOnce: true, singleSyntheticOwnerVerified: true, canonicalHumanRowsAbsent: true, ownerRoleVerified: true, ledgerMatchesGeneratedChain: true, both0199FilenamesExactlyOnce: true, secondListEmpty: true, idempotentReapplyPassed: true, foreignKeyCheckPassed: true, evidenceRef: "ticket:migrations:fresh-bootstrap:delivery" },
+          operations: { configPath: "apps/operations/wrangler.staging.bootstrap.json", manifestPath: "apps/operations/.staging-bootstrap/manifest.json", transformedFiles: ["0002_seed_acl.sql"], ledgerCount: 151, finalMigration: "0151_verified_recipient_delivery_authority_outbox.sql", sourceSeedSha256: "3".repeat(64), generatedSeedSha256: "4".repeat(64), databaseWasEmpty: true, generatedChainVerified: true, appliedWithBootstrapConfig: true, appliedExactlyOnce: true, singleSyntheticOwnerVerified: true, canonicalHumanRowsAbsent: true, ownerRoleVerified: true, ledgerMatchesGeneratedChain: true, portableCatalogSeedVerified: true, secondListEmpty: true, idempotentReapplyPassed: true, foreignKeyCheckPassed: true, evidenceRef: "ticket:migrations:fresh-bootstrap:operations" },
         },
       },
       delivery: { expected: [...REQUIRED_STAGING_MIGRATIONS.delivery], appliedToStaging: true, listEvidenceRef: "ticket:migrations:delivery:list", applyEvidenceRef: "ticket:migrations:delivery:apply", secondListEmpty: true, foreignKeyCheckPassed: true, idempotentReapplyPassed: true, videoRecoveryCompleted: true, videoRowsPendingForTrueNas: true, legacyBridgeAcceptanceMatrixPassed: true, serviceAssignmentV2ExpandApplied: true, serviceAssignmentCompatibleWriterVersionId: "delivery-staging-compatible-writer-version", serviceAssignmentOldWritersDrained: true, serviceAssignmentContractMigrationsApplied: true, serviceAssignmentBarrierEvidenceRef: "ticket:migrations:delivery:service-assignment-barrier", nativePortalMigrationsAppliedBeforeFinalWorkers: true, nativePortalCapabilitiesDefaultOffAtDeploy: true, nativePortalRollbackDrainReviewed: true, nativePortalReleaseEvidenceRef: "ticket:migrations:native-portal-release", authenticatedContentMigrationAppliedBeforeFinalWorkers: true, authenticatedContentCollectionNotStarted: true, authenticatedContentRetentionGateClosed: true, authenticatedContentSecretProvisioned: true, authenticatedContentDefaultOffAtDeploy: true, authenticatedContentReleaseEvidenceRef: "ticket:migrations:authenticated-content-release", verifiedAt: "2026-07-30T12:00:00Z", verificationEvidenceRef: "ticket:migrations:delivery:verify" },
@@ -419,6 +420,62 @@ test("requires complete generated empty-D1 bootstrap evidence", () => {
   }
 });
 
+test("historical schema-version-1 bootstrap proof cannot satisfy the current release gate", () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-evidence-bootstrap-v1-"));
+  const item = fixture(base);
+  const proof = item.evidence.migrations.freshBootstrap;
+  proof.schemaVersion = 1;
+  proof.applications.delivery.ledgerCount = 133;
+  proof.applications.delivery.finalMigration = "0214_ops_inventory_catalog_staging.sql";
+  proof.applications.operations.ledgerCount = 139;
+  proof.applications.operations.finalMigration = "0139_native_directory_staging_empty_enrollment_fixture_guard.sql";
+  const errors = validateEvidence(item.evidence, { base, head: item.evidence.releaseCommit, configs: item.configs, configHashes: item.configHashes, now, sourceControlVerified: true });
+  assert(errors.some(error => error.includes("historical schemaVersion 1 evidence cannot satisfy this release gate")), errors.join(" | "));
+  assert(errors.filter(error => error.includes("ledger count and final migration")).length >= 2, errors.join(" | "));
+});
+
+test("current bootstrap evidence contract matches the canonical generator and migration tails", () => {
+  const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  for (const [app, source, finalMigration] of [
+    ["delivery", "client", "0221_verified_recipient_delivery_authority.sql"],
+    ["operations", "operations", "0151_verified_recipient_delivery_authority_outbox.sql"],
+  ]) {
+    const names = fs.readdirSync(path.join(repository, "apps", source, "migrations"))
+      .filter(name => name.endsWith(".sql")).sort();
+    assert.equal(names.length, BOOTSTRAP_APPS[app].migrationCount, `${app} canonical count`);
+    assert.equal(names.at(-1), finalMigration, `${app} canonical final migration`);
+  }
+});
+
+test("accepts only truthful run-scoped disposable D1 evidence in the existing bootstrap gate", () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-evidence-disposable-bootstrap-"));
+  const item = fixture(base), proof = item.evidence.migrations.freshBootstrap, runId = "portal-home-20260928";
+  proof.mode = "generated-empty-d1-disposable";
+  proof.runId = runId;
+  for (const [app, source, databaseName, databaseId] of [
+    ["delivery", "client", "client-data-staging", "11111111-1111-4111-8111-111111111111"],
+    ["operations", "operations", "ltds-ops-staging", "22222222-2222-4222-8222-222222222222"],
+  ]) Object.assign(proof.applications[app], {
+    configPath: `apps/${source}/wrangler.staging.bootstrap.${runId}.json`,
+    manifestPath: `apps/${source}/.staging-bootstrap/rehearsals/${runId}/manifest.json`,
+    targetKind: "disposable-staging-d1", targetDatabaseName: `${databaseName}-rehearsal-${runId}`, targetDatabaseId: databaseId,
+    creationEvidenceRef: `ticket:${app}:create`, applyEvidenceRef: `ticket:${app}:apply`, readbackEvidenceRef: `ticket:${app}:readback`,
+  });
+  assert.deepEqual(validateEvidence(item.evidence, { base, head: item.evidence.releaseCommit, configs: item.configs,
+    configHashes: item.configHashes, now, sourceControlVerified: true }), []);
+
+  proof.applications.operations.targetDatabaseId = proof.applications.delivery.targetDatabaseId;
+  proof.applications.delivery.targetDatabaseName = STAGING_INVENTORY.delivery.d1_databases[0].database_name;
+  proof.applications.operations.targetDatabaseName = "ltds-ops";
+  proof.applications.operations.creationEvidenceRef = "";
+  proof.applications.delivery.configPath = "apps/client/wrangler.staging.bootstrap.json";
+  const errors = validateEvidence(item.evidence, { base, head: item.evidence.releaseCommit, configs: item.configs,
+    configHashes: item.configHashes, now, sourceControlVerified: true });
+  for (const expected of ["generated config and manifest", "exact run-scoped staging D1 target", "canonical staging D1 identity",
+    "production D1 identity", "creationEvidenceRef", "database names and IDs must be distinct"])
+    assert(errors.some(error => error.includes(expected)), errors.join(" | "));
+});
+
 test("binds every staff Access application readback to the rendered staging audience and host", () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-evidence-staff-access-"));
   const { configs, evidence } = fixture(base);
@@ -481,7 +538,7 @@ test("requires evidence for the 0179 compatible-writer drain before 0180-0186", 
     assert(errors.some((error) => error.includes(expected)), `${expected}: ${errors.join(" | ")}`);
   }
 });
-test("requires an ordered 0054-0122 remote ledger, a quiescent open-fence check, and compatible Operations writers", () => {
+test("requires an ordered 0054-0139 remote ledger, a quiescent open-fence check, and compatible Operations writers", () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-evidence-operations-migration-gate-"));
   const { evidence, configs, configHashes } = fixture(base);
   [evidence.migrations.operations.expected[40], evidence.migrations.operations.expected[41]] =
@@ -665,21 +722,56 @@ test("checked-in evidence example stays complete as migrations, flags, gates, an
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const example = JSON.parse(fs.readFileSync(path.join(root, "docs", "staging", "release-evidence.json.example"), "utf8"));
   for (const app of ["delivery", "operations"]) assert.deepEqual(example.migrations[app].expected, [...REQUIRED_STAGING_MIGRATIONS[app]], `migrations.${app}`);
-  assert.equal(example.migrations.freshBootstrap.schemaVersion, 1);
-  assert.equal(example.migrations.freshBootstrap.mode, "generated-empty-d1");
+  assert.equal(example.migrations.freshBootstrap.schemaVersion, 2);
+  assert.equal(example.migrations.freshBootstrap.mode, "generated-empty-d1-disposable");
+  assert.match(example.migrations.freshBootstrap.runId, /^[a-z0-9-]+$/);
   assert.deepEqual(example.migrations.freshBootstrap.applications.delivery.transformedFiles, ["0002_seed_initial_staff.sql"]);
   assert.deepEqual(example.migrations.freshBootstrap.applications.operations.transformedFiles, ["0002_seed_acl.sql"]);
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(-4), [
-    "0119_project_alpha_project_v2_persistence_ledger.sql",
-    "0120_project_alpha_project_v2_canonical_settlement.sql",
-    "0121_project_alpha_project_v2_settlement_proof_expiry.sql",
-    "0122_project_alpha_project_v2_canonical_activation.sql",
+  assert.equal(example.migrations.freshBootstrap.applications.delivery.ledgerCount, BOOTSTRAP_APPS.delivery.migrationCount);
+  assert.equal(example.migrations.freshBootstrap.applications.delivery.finalMigration, "0221_verified_recipient_delivery_authority.sql");
+  assert.equal(example.migrations.freshBootstrap.applications.operations.ledgerCount, BOOTSTRAP_APPS.operations.migrationCount);
+  assert.equal(example.migrations.freshBootstrap.applications.operations.finalMigration, "0151_verified_recipient_delivery_authority_outbox.sql");
+  for (const app of ["delivery", "operations"]) {
+    const proof = example.migrations.freshBootstrap.applications[app];
+    assert.equal(proof.targetKind, "disposable-staging-d1");
+    assert(proof.configPath.includes(example.migrations.freshBootstrap.runId));
+    assert(proof.manifestPath.includes(example.migrations.freshBootstrap.runId));
+  }
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0124_project_alpha_project_adoption_review_evidence.sql")), [
+    "0124_project_alpha_project_adoption_review_evidence.sql",
+    "0125_project_alpha_existing_directory_binding_activation.sql",
+    "0126_project_alpha_project_active_directory_mapping_bridge.sql",
+    "0127_project_alpha_existing_directory_binding_activation_evidence_transition.sql",
+    "0128_project_alpha_project_adoption_bind_bridge.sql",
+    "0129_project_alpha_existing_directory_binding_activation_relationship.sql",
+    "0130_project_alpha_project_adoption_review_producer.sql",
+    "0131_project_alpha_project_active_directory_mapping_guards.sql",
+    "0132_operations_directory_acquired_relationship_dependencies.sql",
+    "0133_project_alpha_directory_relationship_outbox.sql",
+    "0134_native_directory_create_admission_relationships.sql",
+    "0135_operations_directory_relationship_canonical_ids.sql",
+    "0136_project_alpha_directory_reconciliation.sql",
+    "0137_project_alpha_directory_reconciliation_scheduler.sql",
+    "0138_project_alpha_directory_reconciliation_review.sql",
+    "0139_native_directory_staging_empty_enrollment_fixture_guard.sql",
+    "0140_client_onboarding_one_time_reveal.sql",
+    "0141_deferred_directory_client_materialization.sql",
+    "0142_client_portal_access_authority_outbox.sql",
+    "0143_client_portal_workspace_binding_selection.sql",
+    "0144_client_portal_workspace_binding_outbox.sql",
+    "0145_client_portal_authority_v2_outbox.sql",
+    "0146_ops_customer_service_enrollments.sql",
+    "0147_client_portal_authority_v3_permissions.sql",
+    "0148_client_portal_recipient_enrollment.sql",
+    "0149_client_portal_recipient_enrollment_sql_fences.sql",
+    "0150_client_portal_recipient_enrollment_cancellation.sql",
+    "0151_verified_recipient_delivery_authority_outbox.sql",
   ]);
   assert.deepEqual(
-    fs.readdirSync(path.join(root, "apps", "operations", "migrations")).filter((name) => REQUIRED_STAGING_MIGRATIONS.operations.includes(name)).sort().slice(-69),
-    REQUIRED_STAGING_MIGRATIONS.operations.slice(-69),
+    fs.readdirSync(path.join(root, "apps", "operations", "migrations")).filter((name) => REQUIRED_STAGING_MIGRATIONS.operations.includes(name)).sort().slice(-70),
+    REQUIRED_STAGING_MIGRATIONS.operations.slice(-70),
   );
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-28), [
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-36), [
     "0187_authenticated_content_audit.sql",
     "0188_native_feedback_completion_notices.sql",
     "0189_primary_staff_folder_bindings.sql",
@@ -708,6 +800,14 @@ test("checked-in evidence example stays complete as migrations, flags, gates, an
     "0211_incoming_upload_verification_lifecycle.sql",
     "0212_incoming_upload_archive_inventory.sql",
     "0213_incoming_rclone_promotion.sql",
+    "0214_ops_inventory_catalog_staging.sql",
+    "0215_operations_portal_access_authority_shadow.sql",
+    "0216_client_authority_workspace_ownership_claim.sql",
+    "0217_client_authority_workspace_claim_evidence.sql",
+    "0218_client_authority_workspace_binding.sql",
+    "0219_operations_portal_authority_v2.sql",
+    "0220_operations_portal_authority_v3_permissions.sql",
+    "0221_verified_recipient_delivery_authority.sql",
   ]);
   for (const app of ["delivery", "operations", "ops-sync"]) assert.deepEqual(new Set(example.deployments[app].disabledFeatureFlags), new Set(REQUIRED_DISABLED_FEATURE_FLAGS[app]), `deployments.${app}.disabledFeatureFlags`);
   assert.deepEqual(new Set(Object.keys(example.externalGates)), new Set(REQUIRED_EXTERNAL_GATES));
@@ -727,6 +827,10 @@ test("checked-in evidence example stays complete as migrations, flags, gates, an
   assert.deepEqual(example.projectAlpha.migrations.sourceSha256, PROJECT_ALPHA_STAGING.migrations);
   assert.deepEqual(new Set(Object.keys(example.projectAlpha.defaultOff.settings)), new Set(PROJECT_ALPHA_STAGING.defaultOffSettings));
   assert.deepEqual(example.activationPlan, { requestedFlags: [], approvalGranted: false });
+});
+
+test("recipient handoff keyring remains in the staging secret inventory", () => {
+  assert(REQUIRED_STAGING_SECRETS.operations.includes("CLIENT_ONBOARDING_HANDOFF_KEYRING"));
 });
 
 test("Viewer processing cannot disappear from the staging release inventory", () => {
@@ -769,7 +873,7 @@ test("migration reapply evidence uses Wrangler's ledger instead of replaying raw
   }
 });
 
-test("pins both Client 0199 filenames and the ordered 0200-0213 migration suffix in the release contract", () => {
+test("pins both Client 0199 filenames and the ordered 0200-0221 migration suffix in the release contract", () => {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const suffix = [
     "0200_native_feedback_workspace_history.sql",
@@ -786,6 +890,14 @@ test("pins both Client 0199 filenames and the ordered 0200-0213 migration suffix
     "0211_incoming_upload_verification_lifecycle.sql",
     "0212_incoming_upload_archive_inventory.sql",
     "0213_incoming_rclone_promotion.sql",
+    "0214_ops_inventory_catalog_staging.sql",
+    "0215_operations_portal_access_authority_shadow.sql",
+    "0216_client_authority_workspace_ownership_claim.sql",
+    "0217_client_authority_workspace_claim_evidence.sql",
+    "0218_client_authority_workspace_binding.sql",
+    "0219_operations_portal_authority_v2.sql",
+    "0220_operations_portal_authority_v3_permissions.sql",
+    "0221_verified_recipient_delivery_authority.sql",
   ];
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-suffix.length), suffix);
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.filter((name) => name.startsWith("0199_")), [

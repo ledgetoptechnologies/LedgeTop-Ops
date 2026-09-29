@@ -9,6 +9,7 @@ import {
   resolveNativePortalWorkspaceReadContext,
 } from "./workspace-v2";
 import { portalRootAccessAllowedSql } from "./workspace-access-policy";
+import { d1TablesPresent } from "../schema-readiness";
 
 const SOURCE_ID = /^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/;
 const PUBLIC_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
@@ -34,6 +35,8 @@ export interface NativeRequestAuthorityProof {
   authority: PortalProjectionWriteProof;
   denylistEnabled: boolean;
   rootAccessPolicyEnabled: boolean;
+  /** 0216 was present when the proof was read; repeat its deny inside writes. */
+  claimTablePresent?: boolean;
   evaluatedAt: string;
   expiresAt: string;
 }
@@ -157,6 +160,7 @@ export async function resolveNativeRequestAuthority(
   const current = await resolveNativePortalWorkspaceReadContext(env, principal, context.workspaceId);
   if (!current || current.contextVersion !== context.contextVersion) return null;
   const evaluatedAt = new Date().toISOString();
+  const claimTablePresent = await d1TablesPresent(env.DELIVERY_DB, ["portal_client_authority_workspace_claims"]);
   return Object.freeze({
     sourceId: context.sourceId,
     workspaceId: context.workspaceId,
@@ -171,6 +175,7 @@ export async function resolveNativeRequestAuthority(
     authority: context.authority,
     denylistEnabled: portalIdentityDenylistEnabled(env),
     rootAccessPolicyEnabled: env.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED === "true",
+    claimTablePresent,
     evaluatedAt,
     expiresAt: new Date(Date.parse(evaluatedAt) + 30_000).toISOString(),
   });
@@ -197,6 +202,9 @@ export function nativeRequestMutationGuardSql(proof: NativeRequestAuthorityProof
       AND (denial.scope_type='global' OR (denial.workspace_id=workspace.id
         AND denial.scope_public_id IS NOT NULL
         AND (denial.scope_type || ':' || denial.scope_public_id) IN (SELECT value FROM json_each(?)))))` : "";
+  const claimSql = proof.claimTablePresent ? `AND NOT EXISTS(
+    SELECT 1 FROM portal_client_authority_workspace_claims claim
+    WHERE claim.workspace_id=workspace.id AND claim.state='active')` : "";
   return {
     sql: `EXISTS(
       SELECT 1 FROM portal_v2_workspaces workspace
@@ -214,6 +222,7 @@ export function nativeRequestMutationGuardSql(proof: NativeRequestAuthorityProof
         AND root.generation_id=checkpoint.active_generation_id AND root.entity_type=?
         AND root.public_id=? AND root.active=1
       WHERE workspace.id=? AND workspace.status='active' AND workspace.legacy_account_id IS NULL
+        ${claimSql}
         AND ${portalRootAccessAllowedSql(proof.rootAccessPolicyEnabled,"workspace")}
         AND workspace.project_alpha_source_id=? AND ${authority.sql}
         AND (membership.source_type<>'project_alpha' OR EXISTS(
@@ -270,8 +279,9 @@ export async function ensureNativeRequestStorage(
       AND account.project_alpha_source_id=binding.source_id
     JOIN client_identity_links identity ON identity.id=binding.storage_identity_id
       AND identity.account_id=binding.account_id AND identity.revoked_at IS NULL
-    WHERE binding.workspace_id=? AND binding.source_id=? AND binding.state='active'`)
-    .bind(proof.workspaceId, proof.sourceId)
+    WHERE binding.workspace_id=? AND binding.source_id=? AND binding.state='active'
+      AND ${currentGuard.sql}`)
+    .bind(proof.workspaceId, proof.sourceId, ...currentGuard.bindings)
     .first<{ account_id: string; storage_identity_id: string }>();
   if (existing) return { accountId: existing.account_id, storageIdentityId: existing.storage_identity_id };
   const suffix = (await sha256(`${proof.sourceId}\n${proof.workspaceId}`)).slice(0, 32);
@@ -286,13 +296,15 @@ export async function ensureNativeRequestStorage(
     await db.batch([
       db.prepare(`INSERT INTO client_accounts
         (id,display_name,status,project_alpha_client_id,project_alpha_organization_id,project_alpha_source_id)
-        VALUES (?,?,'active',?,?,?) ON CONFLICT(id) DO NOTHING`)
-        .bind(accountId, safeName, rootColumns.client, rootColumns.organization, proof.sourceId),
+        SELECT ?,?,'active',?,?,? WHERE ${currentGuard.sql}
+        ON CONFLICT(id) DO NOTHING`)
+        .bind(accountId, safeName, rootColumns.client, rootColumns.organization, proof.sourceId, ...currentGuard.bindings),
       db.prepare(`INSERT INTO client_identity_links(id,account_id,issuer,subject,email,last_seen_at)
         SELECT ?,?,'urn:ltds:native-request-storage',?,NULL,datetime('now')
         WHERE EXISTS(SELECT 1 FROM client_accounts account WHERE account.id=? AND account.status='active'
-          AND account.project_alpha_source_id=?) ON CONFLICT(id) DO NOTHING`)
-        .bind(storageIdentityId, accountId, `${proof.sourceId}:${proof.workspaceId}`, accountId, proof.sourceId),
+          AND account.project_alpha_source_id=?) AND ${currentGuard.sql}
+        ON CONFLICT(id) DO NOTHING`)
+        .bind(storageIdentityId, accountId, `${proof.sourceId}:${proof.workspaceId}`, accountId, proof.sourceId, ...currentGuard.bindings),
       db.prepare(`INSERT INTO portal_native_request_storage_bindings
         (workspace_id,source_id,account_id,storage_identity_id)
         SELECT ?,?,?,? WHERE ${currentGuard.sql}

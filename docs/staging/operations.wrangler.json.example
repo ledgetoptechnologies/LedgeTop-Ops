@@ -28,6 +28,8 @@
     "PUBLIC_SHARE_ORIGIN": "https://delivery-staging.ledgetopdroneservices.com",
     "PROJECT_ALPHA_BASE_URL": "https://pa-staging.ledgetoptechnologies.com",
     "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED": "false",
+    "PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED": "false",
+    "PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED": "false",
     "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED": "false",
     "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ENABLED": "false",
     "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_SOURCE_ID": "<STAGING_PROJECT_ALPHA_SOURCE_ID>",
@@ -35,6 +37,20 @@
     "PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED": "false",
     "PROJECT_ALPHA_DELIVERY_GUEST_ENABLED": "false",
     "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED": "false",
+    "CLIENT_ONBOARDING_ADMIN_ENABLED": "false",
+    "CLIENT_ONBOARDING_ADMIN_ORIGIN": "",
+    "CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ENABLED": "false",
+      "CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ORIGIN": "",
+      "CLIENT_PORTAL_AUTHORITY_V3_OWNER_ENABLED": "false",
+      "CLIENT_PORTAL_AUTHORITY_V3_OWNER_ORIGIN": "",
+      "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED": "false",
+      "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ENABLED": "false",
+      "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ORIGIN": "",
+      "VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_DISPATCH_ENABLED": "false",
+    "CLIENT_AUTHORITY_WORKSPACE_BINDING_OUTBOX_ENABLED": "false",
+    "CLIENT_PORTAL_AUTHORITY_V2_OUTBOX_ENABLED": "false",
+    "CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED": "false",
+    "CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED": "false",
     "CLIENT_PORTAL_HIERARCHY_V2_ENABLED": "false",
     "CLIENT_HUB_PA_CONTACT_ASSIGNMENTS_ENABLED": "false",
     "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED": "false",
@@ -52,6 +68,7 @@
     "VIEWER_INTEGRATION_ENABLED": "false",
     "VIEWER_PROCESSING_ENABLED": "false",
     "VIEWER_PUBLIC_SHARES_ENABLED": "false",
+    "VIEWER_WORKSPACE_RENEWAL_CORS_ENABLED": "false",
     "VIEWER_BASE_URL": "https://viewer-staging.ledgetopdroneservices.com",
     "VIEWER_SERVICE_KEY_ID": "ops-staging-v1",
     "VIEWER_EVENT_KEY_ID": "viewer-staging-v1",
@@ -102,6 +119,18 @@
     ]
   },
   "stream": { "binding": "STREAM" },
+  "services": [
+    {
+      "binding": "VERIFIED_RECIPIENT_DELIVERY_AUTHORITY",
+      "service": "ledgetop-clients-staging",
+      "entrypoint": "VerifiedRecipientDeliveryAuthorityIngress"
+    },
+    { "binding": "CLIENT_AUTHORITY_WORKSPACE_BINDING", "service": "ledgetop-clients-staging", "entrypoint": "ClientAuthorityWorkspaceBindingIngress" },
+    { "binding": "CLIENT_PORTAL_ACCESS_AUTHORITY", "service": "ledgetop-clients-staging", "entrypoint": "OpsPortalAccessAuthorityIngress" },
+    { "binding": "CLIENT_PORTAL_AUTHORITY_V2", "service": "ledgetop-clients-staging", "entrypoint": "ClientPortalAuthorityV2Ingress" },
+    { "binding": "OPS_INVENTORY_CATALOG_STAGING", "service": "ledgetop-clients-staging", "entrypoint": "OpsInventoryCatalogStagingIngress" },
+    { "binding": "OPS_INVENTORY_CATALOG_PROMOTION", "service": "ledgetop-clients-staging", "entrypoint": "OpsInventoryCatalogPromotionCoordinator" }
+  ],
   "durable_objects": {
     "bindings": [{ "name": "THUMBNAIL_RENDERER", "class_name": "ThumbnailRendererContainer" }]
   },
@@ -122,6 +151,7 @@
     { "name": "ltds-r2-crud-staging", "binding": "R2_CRUD_WORKFLOW", "class_name": "R2CrudWorkflow" },
     { "name": "ltds-incoming-upload-lifecycle-staging", "binding": "INCOMING_LIFECYCLE_WORKFLOW", "class_name": "IncomingUploadLifecycleWorkflow" },
     { "name": "ledgetop-incoming-rclone-promotion-staging", "binding": "INCOMING_RCLONE_PROMOTION_WORKFLOW", "class_name": "IncomingRclonePromotionWorkflow" },
-    { "name": "ltds-dropbox-import-staging", "binding": "DROPBOX_IMPORT_WORKFLOW", "class_name": "DropboxImportWorkflow" }
+    { "name": "ltds-dropbox-import-staging", "binding": "DROPBOX_IMPORT_WORKFLOW", "class_name": "DropboxImportWorkflow" },
+    { "name": "ledgetop-ops-catalog-promotion-staging", "binding": "OPS_CATALOG_PROMOTION_WORKFLOW", "class_name": "ProjectAlphaCatalogPromotionWorkflow" }
   ]
 }

@@ -10,6 +10,7 @@ import { HTTPException } from 'hono/http-exception';
 import { projectAccessTermsReady, projectAccessTermsSql } from './project-access-terms';
 import { projectAccessReadColumns, projectAccessRowAllows, type ProjectAccessReadRow } from './project-access-read';
 import { portalRootAccessAllowedSql } from './workspace-access-policy';
+import { activeClientAuthorityWorkspaceClaim } from './client-authority-claim-read';
 
 const OPAQUE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const AUTHORIZED_BINDING_LIMIT = 100;
@@ -59,14 +60,17 @@ async function candidates(
       AND map.projection_source_id=workspace.project_alpha_source_id)` : primaryWorkspaceAccount('workspace');
   const sourceBindings = native ? [native.sourceId] : [];
   const termsReady=native?.projectAccessTermsAvailable??await projectAccessTermsReady(env.DELIVERY_DB);
-  const [primaryReceiptReady,bindingSourceTypeReady]=await Promise.all([
+  const [primaryReceiptReady,bindingSourceTypeReady,claimTableReady]=await Promise.all([
     d1TablesPresent(env.DELIVERY_DB,["portal_primary_staff_bindings"]),
     d1ColumnPresent(env.DELIVERY_DB,"portal_v2_folder_bindings","source_type"),
+    d1TablesPresent(env.DELIVERY_DB,["portal_client_authority_workspace_claims"]),
   ]);
   // Operations-owned bindings are authority-bearing only while their immutable
   // primary staff receipt remains active. If migration 0189 is absent, fail
   // those bindings closed instead of treating old routing metadata as access.
   const primaryReceiptSql=primaryOperationsReceiptSql(primaryReceiptReady,bindingSourceTypeReady);
+  const claimSql=claimTableReady?`AND NOT EXISTS(SELECT 1 FROM portal_client_authority_workspace_claims claim
+    WHERE claim.workspace_id=workspace.id AND claim.state='active')`:'';
   const rootAccessSql=portalRootAccessAllowedSql(env.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED === "true", "workspace");
   const rows = await portalDb(env).prepare(`SELECT DISTINCT 'staff' source,binding.id folder_binding_id,binding.r2_prefix,
       grant_record.id grant_id,grant_record.grant_version,binding.source_version binding_source_version,
@@ -95,7 +99,7 @@ async function candidates(
       AND principal_record.source_version=recipient.principal_source_version
     WHERE identity.issuer=? AND identity.subject=? AND identity.status='active' AND identity.revoked_at IS NULL
       AND EXISTS(SELECT 1 FROM portal_v2_workspaces workspace WHERE workspace.id=membership.workspace_id
-        AND workspace.status='active' AND ${rootAccessSql} AND ${workspaceSource} AND ${primaryReceiptSql})
+        AND workspace.status='active' AND ${rootAccessSql} AND ${workspaceSource} AND ${primaryReceiptSql} ${claimSql})
       AND (grant_record.audience_type<>'principal' OR principal_record.public_id IS NOT NULL)
       ${termsReady?`AND ${projectAccessTermsSql({termsId:'grant_record.access_terms_id',workspaceId:'grant_record.workspace_id',projectId:'binding.owner_public_id',legacyRetained:'1'})}`:''}
       ${native ? `AND (grant_record.audience_type<>'principal' OR (recipient.principal_public_id=grant_record.audience_public_id
@@ -145,7 +149,7 @@ async function candidates(
       AND eligibility.verified_email=identity.verified_email
     WHERE identity.issuer=? AND identity.subject=? AND identity.status='active' AND identity.revoked_at IS NULL
       AND EXISTS(SELECT 1 FROM portal_v2_workspaces workspace WHERE workspace.id=membership.workspace_id
-        AND workspace.status='active' AND ${rootAccessSql} AND ${workspaceSource} AND ${primaryReceiptSql}
+        AND workspace.status='active' AND ${rootAccessSql} AND ${workspaceSource} AND ${primaryReceiptSql} ${claimSql}
         ${native ? `AND EXISTS(SELECT 1 FROM project_alpha_delivery_intent_receipts receipt
           WHERE receipt.receipt_id=grant_record.receipt_id AND receipt.project_alpha_source_id=workspace.project_alpha_source_id
             AND receipt.access_mode='portal' AND receipt.resource_id=grant_record.id AND receipt.status='accepted')` : ''})
@@ -244,6 +248,7 @@ export async function readNativeAuthenticatedDeliveryPage(env:Env,principal:Veri
 }
 
 async function integrationDenied(env:Env,principal:VerifiedClientPrincipal,workspaceId:string,row:GrantCandidate):Promise<boolean>{
+  if(await activeClientAuthorityWorkspaceClaim(env.DELIVERY_DB,workspaceId))return true;
   if(env.CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED!=="true")return false;
   const denied=await portalDb(env).prepare(`WITH RECURSIVE lineage(entity_type,public_id,parent_public_id,depth) AS (
     SELECT entity.entity_type,entity.public_id,entity.parent_public_id,0
@@ -323,6 +328,7 @@ export async function authorizeAuthenticatedDeliveryGrant(
   folderBindingId: string,
 ): Promise<boolean> {
   if (!authenticatedDeliveryGrantsEnabled(env) || !OPAQUE.test(workspaceId) || !OPAQUE.test(folderBindingId)) return false;
+  if (await activeClientAuthorityWorkspaceClaim(env.DELIVERY_DB,workspaceId)) return false;
   const rows = await candidates(env, principal, workspaceId, folderBindingId);
   if (!rows) return false;
   const termsReady=await projectAccessTermsReady(env.DELIVERY_DB);
@@ -355,6 +361,7 @@ export async function listAuthorizedAuthenticatedDeliveryPrefixes(
   workspaceId: string,
 ): Promise<Set<string>> {
   if (!authenticatedDeliveryGrantsEnabled(env) || !OPAQUE.test(workspaceId)) return new Set();
+  if (await activeClientAuthorityWorkspaceClaim(env.DELIVERY_DB,workspaceId)) return new Set();
   const termsReady=await projectAccessTermsReady(env.DELIVERY_DB);
   if(termsReady){
     const rows=await candidates(env,principal,workspaceId);
@@ -365,11 +372,14 @@ export async function listAuthorizedAuthenticatedDeliveryPrefixes(
       if(await audienceLiveAndContained(env,workspaceId,row)&&!await integrationDenied(env,principal,workspaceId,row))prefixes.add(row.r2_prefix);
     return prefixes;
   }
-  const [primaryReceiptReady,bindingSourceTypeReady]=await Promise.all([
+  const [primaryReceiptReady,bindingSourceTypeReady,claimTableReady]=await Promise.all([
     d1TablesPresent(env.DELIVERY_DB,["portal_primary_staff_bindings"]),
     d1ColumnPresent(env.DELIVERY_DB,"portal_v2_folder_bindings","source_type"),
+    d1TablesPresent(env.DELIVERY_DB,["portal_client_authority_workspace_claims"]),
   ]);
   const primaryReceiptSql=primaryOperationsReceiptSql(primaryReceiptReady,bindingSourceTypeReady);
+  const claimSql=claimTableReady?`AND NOT EXISTS(SELECT 1 FROM portal_client_authority_workspace_claims claim
+    WHERE claim.workspace_id=workspace.id AND claim.state='active')`:'';
   // Resolve every folder binding in one bounded authorization query. Calling
   // the single-binding resolver in a loop repeated identity, membership,
   // hierarchy, entitlement and denial reads up to 100 times on each listing.
@@ -388,6 +398,7 @@ export async function listAuthorizedAuthenticatedDeliveryPrefixes(
         ON workspace.id=membership.workspace_id AND workspace.status='active'
         AND ${portalRootAccessAllowedSql(env.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED === "true", "workspace")}
         AND ${primaryWorkspaceAccount("workspace")}
+        ${claimSql}
       JOIN portal_v2_authenticated_delivery_grants grant_record
         ON grant_record.workspace_id=workspace.id AND grant_record.status='active'
         AND grant_record.revoked_at IS NULL

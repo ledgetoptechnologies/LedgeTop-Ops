@@ -7,6 +7,7 @@ import { STAGING_ACCOUNT_ID, STAGING_INVENTORY } from "./staging-requirements.mj
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const BOOTSTRAP_SCHEMA_VERSION = 1;
+export const DISPOSABLE_REHEARSAL_SCHEMA_VERSION = 1;
 export const BOOTSTRAP_APPS = Object.freeze({
   delivery: Object.freeze({
     source: "client",
@@ -14,9 +15,9 @@ export const BOOTSTRAP_APPS = Object.freeze({
     binding: "DELIVERY_DB",
     databaseName: "client-data-staging",
     seed: "0002_seed_initial_staff.sql",
-    migrationCount: 132,
-    migrationNamesSha256: "b81e6d679711da90f85ce9413e9627ee205f9b294173c70fdc0148376b158e4e",
-    migrationContentsSha256: "c5b6271f9edff677237c45734bbf1b6eeebaaf1c7256b6b561ea1e2c03adb4a0",
+    migrationCount: 140,
+    migrationNamesSha256: "ab5da8fe595444f7a4db2d460d4ee51b3ccb66b94922df75ff858c6df0780e03",
+    migrationContentsSha256: "ab2727c3d4520f1bb8fc59195b0e74ffd9eeb965eff8fdfa198bbaecbebb13e1",
   }),
   operations: Object.freeze({
     source: "operations",
@@ -24,10 +25,25 @@ export const BOOTSTRAP_APPS = Object.freeze({
     binding: "OPS_DB",
     databaseName: "ltds-ops-staging",
     seed: "0002_seed_acl.sql",
-    migrationCount: 122,
-    migrationNamesSha256: "a4f9d709bfb3b1ba96bf3acadb370eac6465e2b5ec9fef7d8bb0db20792de71a",
-    migrationContentsSha256: "20f127ae3193884494a021ac2f1851f6c2db06834d6f94498850d315e02df5d7",
+    migrationCount: 151,
+    migrationNamesSha256: "3036d0ad8b754cc8956896260d3d83dfdc905fa67c0664acda9469ec1a5ff038",
+    migrationContentsSha256: "c9ca6374a7470a94e7cd3ec9aa047f38a6e841607840f2f8323325013178f9c2",
   }),
+});
+export const PRODUCTION_DATABASE_IDENTITIES = Object.freeze([
+  Object.freeze({ databaseName: "client-data", databaseId: "7f40a7b7-c3ec-470e-a626-e798867f71f8" }),
+  Object.freeze({ databaseName: "ltds-ops", databaseId: "6ebf7514-d306-4615-ae56-ad869c874dbd" }),
+]);
+const PRODUCTION_CONFIG_DATABASES = Object.freeze({
+  client: Object.freeze([{ binding: "DELIVERY_DB", database_name: PRODUCTION_DATABASE_IDENTITIES[0].databaseName, database_id: PRODUCTION_DATABASE_IDENTITIES[0].databaseId }]),
+  operations: Object.freeze([
+    { binding: "DELIVERY_DB", database_name: PRODUCTION_DATABASE_IDENTITIES[0].databaseName, database_id: PRODUCTION_DATABASE_IDENTITIES[0].databaseId },
+    { binding: "OPS_DB", database_name: PRODUCTION_DATABASE_IDENTITIES[1].databaseName, database_id: PRODUCTION_DATABASE_IDENTITIES[1].databaseId },
+  ]),
+  "ops-sync": Object.freeze([
+    { binding: "DELIVERY_DB", database_name: PRODUCTION_DATABASE_IDENTITIES[0].databaseName, database_id: PRODUCTION_DATABASE_IDENTITIES[0].databaseId },
+    { binding: "OPS_DB", database_name: PRODUCTION_DATABASE_IDENTITIES[1].databaseName, database_id: PRODUCTION_DATABASE_IDENTITIES[1].databaseId },
+  ]),
 });
 
 const canonicalPeople = Object.freeze([
@@ -54,19 +70,20 @@ function requireRegularDirectory(directory, label) {
   if (!stat || !stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`${label} must be a regular non-symlink directory`);
 }
 
-function validateOutputAncestors(base, target) {
+function validatePathAncestors(base, target, label) {
   const absoluteBase = path.resolve(base);
   const absoluteTarget = path.resolve(target);
   const relative = path.relative(absoluteBase, absoluteTarget);
-  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error(`generated output must remain below ${absoluteBase}`);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error(`${label} must remain below ${absoluteBase}`);
   let current = absoluteBase;
   const parentParts = path.dirname(relative).split(path.sep).filter((part) => part && part !== ".");
   for (const part of parentParts) {
     current = path.join(current, part);
     const stat = lstat(current);
-    if (stat && (!stat.isDirectory() || stat.isSymbolicLink())) throw new Error(`generated output ancestor ${path.relative(base, current)} must be a regular non-symlink directory`);
+    if (stat && (!stat.isDirectory() || stat.isSymbolicLink())) throw new Error(`${label} ancestor ${path.relative(base, current)} must be a regular non-symlink directory`);
   }
 }
+const validateOutputAncestors = (base, target) => validatePathAncestors(base, target, "generated output");
 
 function databaseIdentities(config) {
   if (!Array.isArray(config?.d1_databases)) return [];
@@ -123,9 +140,52 @@ function database(config, entry) {
   return config?.d1_databases?.find((item) => item?.binding === entry.binding);
 }
 
-export function buildArtifacts(base, owner) {
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const RUN_ID = /^[a-z0-9](?:[a-z0-9-]{1,18}[a-z0-9])$/;
+const exactKeys = (value, keys) => value && typeof value === "object" && !Array.isArray(value)
+  && isDeepStrictEqual(Object.keys(value).sort(), [...keys].sort());
+
+function reservedDatabaseIdentities(base) {
+  const identities = [];
+  for (const inventory of Object.values(STAGING_INVENTORY)) identities.push(...databaseIdentities(inventory));
+  for (const source of ["client", "operations", "ops-sync"]) {
+    const file = path.join(base, "apps", source, "wrangler.jsonc");
+    requireRegularFile(file, `${source} production config`);
+    let config;
+    try { config = readJson(file); }
+    catch { throw new Error(`${source} production config must be strict JSON`); }
+    const databases = databaseIdentities(config);
+    if (!isDeepStrictEqual(databases, [...PRODUCTION_CONFIG_DATABASES[source]].sort((left, right) => left.binding.localeCompare(right.binding))))
+      throw new Error(`${source} production config D1 identities differ from the reviewed production inventory`);
+    identities.push(...databases);
+  }
+  return identities;
+}
+
+export function validateDisposableTargets(base, targets) {
+  if (!exactKeys(targets, ["runId", "applications"]) || !RUN_ID.test(targets.runId ?? "")
+    || !exactKeys(targets.applications, Object.keys(BOOTSTRAP_APPS))) throw new Error("disposable rehearsal targets require a strict runId and exactly delivery and operations applications");
+  const reserved = reservedDatabaseIdentities(base), seenNames = new Set(), seenIds = new Set();
+  for (const [app, entry] of Object.entries(BOOTSTRAP_APPS)) {
+    const target = targets.applications[app];
+    const expectedName = `${entry.databaseName}-rehearsal-${targets.runId}`;
+    if (!exactKeys(target, ["databaseName", "databaseId"]) || target.databaseName !== expectedName || !UUID.test(target.databaseId ?? "")) {
+      throw new Error(`${app} disposable rehearsal target must use exact name ${expectedName} and a lowercase UUIDv4 ID`);
+    }
+    if (seenNames.has(target.databaseName) || seenIds.has(target.databaseId)) throw new Error("disposable rehearsal database names and IDs must be distinct");
+    if (reserved.some(({ database_name, database_id }) => database_name === target.databaseName || database_id === target.databaseId)) {
+      throw new Error(`${app} disposable rehearsal target must not reuse a configured staging or production database identity`);
+    }
+    seenNames.add(target.databaseName); seenIds.add(target.databaseId);
+  }
+  return targets;
+}
+
+export function buildArtifacts(base, owner, options = {}) {
   const errors = validateOwner(owner);
   if (errors.length) throw new Error(errors.join("\n"));
+  if (!exactKeys(options, []) && !exactKeys(options, ["disposableTargets"])) throw new Error("unexpected bootstrap build option");
+  const requestedDisposable = options.disposableTargets ?? null;
   const artifacts = {};
   for (const [app, entry] of Object.entries(BOOTSTRAP_APPS)) {
     const appDir = path.join(base, "apps", entry.source);
@@ -146,7 +206,8 @@ export function buildArtifacts(base, owner) {
       if (item.name.endsWith(".sql") && (!item.isFile() || item.isSymbolicLink())) throw new Error(`${app} canonical migration ${item.name} must be a regular non-symlink file`);
     }
     const names = entries.filter((item) => item.isFile() && !item.isSymbolicLink() && item.name.endsWith(".sql")).map((item) => item.name).sort();
-    if (names.length !== entry.migrationCount || sha256(names.join("\n")) !== entry.migrationNamesSha256) throw new Error(`${app} canonical migration inventory must be the exact complete ordered ${entry.migrationCount}-file chain`);
+    const namesSha256 = sha256(names.join("\n"));
+    if (names.length !== entry.migrationCount || namesSha256 !== entry.migrationNamesSha256) throw new Error(`${app} canonical migration inventory must be the exact complete ordered ${entry.migrationCount}-file chain (found ${names.length} files, names sha256 ${namesSha256})`);
     if (!names.includes(entry.seed)) throw new Error(`${app} canonical seed ${entry.seed} is missing`);
     const canonicalFiles = names.map((name) => {
       const sourcePath = path.join(sourceDir, name);
@@ -162,7 +223,7 @@ export function buildArtifacts(base, owner) {
     });
     const changed = files.filter(({ transformed }) => transformed).map(({ name }) => name);
     if (!isDeepStrictEqual(changed, [entry.seed])) throw new Error(`${app} bootstrap must transform exactly ${entry.seed}`);
-    const outputConfig = structuredClone(config);
+    const runDirectory = ".staging-bootstrap", outputConfig = structuredClone(config);
     database(outputConfig, entry).migrations_dir = ".staging-bootstrap/migrations";
     const manifest = {
       schemaVersion: BOOTSTRAP_SCHEMA_VERSION, app, workerName: entry.workerName,
@@ -171,18 +232,41 @@ export function buildArtifacts(base, owner) {
       sourceMigrationDirectory: `apps/${entry.source}/migrations`, sourceChainSha256, transformedFiles: changed,
       migrations: files.map(({ name, sourceSha256, generatedSha256, transformed }) => ({ name, sourceSha256, generatedSha256, transformed })),
     };
-    artifacts[app] = { entry, files, config: outputConfig, manifest };
+    artifacts[app] = { entry, files, config: outputConfig, manifest, runDirectory,
+      configFilename: "wrangler.staging.bootstrap.json" };
+  }
+  // Validate every canonical source config and migration byte before a target
+  // identity can influence any generated artifact.
+  if (requestedDisposable) {
+    const disposable = validateDisposableTargets(base, requestedDisposable);
+    for (const [app, artifact] of Object.entries(artifacts)) {
+      const { entry } = artifact, target = disposable.applications[app];
+      artifact.runDirectory = `.staging-bootstrap/rehearsals/${disposable.runId}`;
+      artifact.configFilename = `wrangler.staging.bootstrap.${disposable.runId}.json`;
+      artifact.config = {
+        name: `${entry.workerName}-rehearsal-${disposable.runId}`,
+        account_id: STAGING_ACCOUNT_ID,
+        vars: { ENVIRONMENT: "staging" },
+        d1_databases: [{ binding: entry.binding, database_name: target.databaseName, database_id: target.databaseId,
+          migrations_dir: `${artifact.runDirectory}/migrations` }],
+      };
+      const { workerName, databaseName, databaseId, ...commonManifest } = artifact.manifest;
+      artifact.manifest = { ...commonManifest, schemaVersion: DISPOSABLE_REHEARSAL_SCHEMA_VERSION,
+        mode: "disposable-remote-rehearsal", runId: disposable.runId,
+        canonicalSource: { workerName, databaseName, databaseId },
+        disposableTarget: { workerName: artifact.config.name, databaseName: target.databaseName, databaseId: target.databaseId } };
+    }
   }
   return artifacts;
 }
 
 function expectedFiles(base, artifacts) {
   const files = new Map();
-  for (const { entry, files: migrations, config, manifest } of Object.values(artifacts)) {
-    const generatedDir = path.join(base, "apps", entry.source, ".staging-bootstrap");
+  for (const { entry, files: migrations, config, manifest, runDirectory, configFilename } of Object.values(artifacts)) {
+    const generatedDir = path.join(base, "apps", entry.source, runDirectory);
     for (const migration of migrations) files.set(path.join(generatedDir, "migrations", migration.name), migration.generated);
     files.set(path.join(generatedDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
-    files.set(path.join(base, "apps", entry.source, "wrangler.staging.bootstrap.json"), `${JSON.stringify(config, null, 2)}\n`);
+    files.set(path.join(base, "apps", entry.source, configFilename), `${JSON.stringify(config, null, 2)}\n`);
   }
   return files;
 }
@@ -198,8 +282,8 @@ export function validateGenerated(base, artifacts) {
     else if (!stat.isFile() || stat.isSymbolicLink()) errors.push(`${path.relative(base, file)} must be a regular non-symlink file`);
     else if (fs.readFileSync(file, "utf8") !== content) errors.push(`${path.relative(base, file)} is stale or was edited`);
   }
-  for (const { entry, files } of Object.values(artifacts)) {
-    const directory = path.join(base, "apps", entry.source, ".staging-bootstrap", "migrations");
+  for (const { entry, files, runDirectory } of Object.values(artifacts)) {
+    const directory = path.join(base, "apps", entry.source, runDirectory, "migrations");
     const stat = lstat(directory);
     if (stat) {
       if (!stat.isDirectory() || stat.isSymbolicLink()) { errors.push(`${path.relative(base, directory)} must be a regular non-symlink directory`); continue; }
@@ -233,19 +317,31 @@ export function writeGenerated(base, artifacts) {
 function parseArguments(argv) {
   let mode = "";
   let valuesFile = "";
+  let targetsFile = "";
   for (let index = 0; index < argv.length; index += 1) {
     if (["--write", "--check"].includes(argv[index]) && !mode) mode = argv[index];
     else if (argv[index] === "--values" && argv[index + 1]) valuesFile = argv[++index];
+    else if (argv[index] === "--disposable-targets" && argv[index + 1]) targetsFile = argv[++index];
     else throw new Error(`unknown or incomplete argument ${argv[index]}`);
   }
-  if (!mode || !valuesFile) throw new Error("usage: node scripts/staging-bootstrap.mjs --write|--check --values <local-owner-json>");
-  return { mode, valuesFile };
+  if (!mode || !valuesFile) throw new Error("usage: node scripts/staging-bootstrap.mjs --write|--check --values <local-owner-json> [--disposable-targets <local-target-json>]");
+  return { mode, valuesFile, targetsFile };
+}
+
+function readLocalJson(base, filename, label) {
+  const resolvedBase = path.resolve(base), file = path.resolve(resolvedBase, filename), relative = path.relative(resolvedBase, file);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error(`${label} must remain below the repository root`);
+  validatePathAncestors(resolvedBase, file, label);
+  requireRegularFile(file, label);
+  try { return readJson(file); }
+  catch { throw new Error(`${label} must be strict JSON`); }
 }
 
 export function run(argv = process.argv.slice(2), base = root) {
-  const { mode, valuesFile } = parseArguments(argv);
+  const { mode, valuesFile, targetsFile } = parseArguments(argv);
   const owner = readJson(path.resolve(base, valuesFile)).owner;
-  const artifacts = buildArtifacts(base, owner);
+  const disposableTargets = targetsFile ? readLocalJson(base, targetsFile, "disposable rehearsal target input") : undefined;
+  const artifacts = buildArtifacts(base, owner, disposableTargets ? { disposableTargets } : {});
   if (mode === "--check") {
     const errors = validateGenerated(base, artifacts);
     if (errors.length) throw new Error(`fresh-staging bootstrap artifacts are invalid:\n${errors.map((error) => `- ${error}`).join("\n")}`);

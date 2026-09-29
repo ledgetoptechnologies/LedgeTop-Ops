@@ -1,4 +1,4 @@
-import type { ClientDelegatedShareSignerBinding, ViewerSessionIssuerBinding } from "@ltds/shared";
+import type { ClientDelegatedShareSignerBinding, ClientOnboardingRecipientBinding, ViewerSessionIssuerBinding } from "@ltds/shared";
 
 export interface Env {
   DELIVERY_DB: D1Database;
@@ -18,6 +18,28 @@ export interface Env {
   PUBLIC_SHARE_ORIGIN?: string;
   EXPECTED_HOST: string;
   CLIENT_PORTAL_ENABLED?: string;
+  /** Route-less ownership evidence writer. Default-off; does not fence PA reads or grant access. */
+  CLIENT_AUTHORITY_WORKSPACE_CLAIM_WRITER_ENABLED?: string;
+  /** Route-less, inert Ops customer-to-workspace reservation writer. Default-off. */
+  CLIENT_AUTHORITY_WORKSPACE_BINDING_WRITER_ENABLED?: string;
+  /** Default-off private lost-response recovery read; never grants or activates access. */
+  CLIENT_AUTHORITY_WORKSPACE_BINDING_STATUS_ENABLED?: string;
+  /** Route-less Operations authority v2 writer. Empty-scope and authorization-inert in its first release. */
+  CLIENT_PORTAL_AUTHORITY_V2_WRITER_ENABLED?: string;
+  /** Private exact-receipt recovery read for Operations authority v2. */
+  CLIENT_PORTAL_AUTHORITY_V2_STATUS_ENABLED?: string;
+  /** Default-off, non-content Operations enrollment-status reader. */
+  CLIENT_PORTAL_AUTHORITY_V2_ENROLLMENT_STATUS_ENABLED?: string;
+  /** Default-off service metadata consumer, independent of content permissions. */
+  CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED?: string;
+  /** Staging-only verified-recipient consent; independent and default-off. */
+  CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED?: string;
+  CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_WRITER_ENABLED?: string;
+  CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_STATUS_ENABLED?: string;
+  CLIENT_PORTAL_RECIPIENT_ENROLLMENT_CSRF_SECRET?: string;
+  CLIENT_PORTAL_RECIPIENT_ENROLLMENT_BRIDGE?: Service & import("./client-portal/recipient-enrollment-http").RecipientEnrollmentBinding;
+  /** Named Service binding plus its reviewed RPC contract; Wrangler cannot resolve a remote entrypoint's methods. */
+  CLIENT_PORTAL_SERVICE_METADATA_READER?: Service & import("./client-portal/operations-service-home").OperationsServiceMetadataBinding;
   CLIENT_PORTAL_ORIGIN?: string;
   CLIENT_PORTAL_ORIGINS?: string;
   /** Legacy delivery/portal origins retained only for compatible reads and canonical redirects. */
@@ -45,6 +67,12 @@ export interface Env {
   PROJECT_ALPHA_CATALOG_HMAC_SECRET?: string;
   PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_KEY_ID?: string;
   PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_SECRET?: string;
+  /** Dormant Operations service-binding inventory staging. Never authorizes public reads. */
+  OPS_INVENTORY_CATALOG_SYNC_ENABLED?: string;
+  /** Route-less promotion of a complete staged Operations inventory snapshot. Default-off. */
+  OPS_INVENTORY_CATALOG_PROMOTION_ENABLED?: string;
+  /** Shadow-only Operations portal authority ledger. Never consulted for access. */
+  OPS_PORTAL_ACCESS_AUTHORITY_SHADOW_ENABLED?: string;
   /** Server-only PA portal hierarchy/entitlement projection. Independent and default-off. */
   PROJECT_ALPHA_PORTAL_SYNC_ENABLED?: string;
   /** Emergency-only legacy HTTP receiver. Production keeps this false; Ops Sync RPC remains independently enabled. */
@@ -110,6 +138,9 @@ export interface Env {
    * Operations DELIVERY_TOKEN_SECRET into this Worker.
   */
   CLIENT_DELEGATED_SHARES_ENABLED?: string;
+  /** Default-off private Client -> Operations onboarding recipient bridge. */
+  CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED?: string;
+  CLIENT_ONBOARDING_RECIPIENT_BRIDGE?: ClientOnboardingRecipientBinding;
   CLIENT_DELEGATED_SHARE_SIGNER?: ClientDelegatedShareSignerBinding;
   /** Default-off portal Viewer launch surface; the HMAC key stays in Operations. */
   CLIENT_VIEWER_ENABLED?: string;
