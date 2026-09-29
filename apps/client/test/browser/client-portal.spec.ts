@@ -43,7 +43,7 @@ async function mockAuthorizedPortal(
   mapboxPublicToken: string | null = null,
   fixtureRequests = requests,
   workflowEvents?: { edited?: boolean; changeRequested?: boolean; estimateAccepted?: boolean; cancelled?: boolean;
-    cancellationKeys?: string[]; failFirstCancellation?: boolean },
+    cancellationKeys?: string[]; failFirstCancellation?: boolean; detailGate?: Promise<void>; detailStarted?: () => void },
   locationFixtures: { project: DeliveryLocationCollection; past: DeliveryLocationCollection } = {
     project: { points: [], imageCount: 0, truncated: false },
     past: { points: [], imageCount: 0, truncated: false },
@@ -68,6 +68,12 @@ async function mockAuthorizedPortal(
       await route.fulfill({ json: { projects } });
     } else if (request.method() === "GET" && path === "/api/client/service-requests") {
       await route.fulfill({ json: { requests: fixtureRequests } });
+    } else if (request.method() === "GET" && path === "/api/client/service-requests/request-a") {
+      workflowEvents?.detailStarted?.();
+      await workflowEvents?.detailGate;
+      await route.fulfill({ json: { request: { ...fixtureRequests[0], submittedServices: [{ publicId: "svc-2d-map",
+        sourceVersion: "pa-v4", name: "2D Mapping", summary: "Orthomosaic mapping and site coverage.", category: "Mapping",
+        geometryRequirement: "optional", answers: [{ questionId: "resolution", label: "Preferred resolution", displayValue: "Standard" }] }] } } });
     } else if (request.method() === "GET" && path === "/api/client/service-catalog") {
       await route.fulfill({ json: { services: serviceCatalog } });
     } else if (request.method() === "GET" && path === "/api/client/service-catalog/page") {
@@ -331,7 +337,7 @@ test("portal identifies an unfinished schema update and retries cleanly on mobil
   await expect(page.getByText("Portal update in progress", { exact: true })).toBeVisible();
   await expect(page.getByText(/access is valid/i)).toBeVisible();
   await page.getByRole("button", { name: "Retry portal" }).click();
-  await expect(page.getByRole("heading", { name: "Hello, Acme Surveying" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Acme Surveying" })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
@@ -429,12 +435,12 @@ test("workspace-v2 selection scopes every authenticated resource request and swi
   });
 
   await page.goto("/portal");
-  await expect(page.getByRole("heading", { name: "Hello, Alpha" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Alpha" })).toBeVisible();
   await expect(page.getByRole("combobox", { name: "Client workspace" })).toHaveValue("workspace-a");
   expect(observed.filter(item => ["/api/client/projects", "/api/client/service-requests", "/api/client/map-config", "/api/client/notification-history"].includes(item.path)).every(item => item.workspace === "workspace-a")).toBe(true);
 
   await page.getByRole("combobox", { name: "Client workspace" }).selectOption("workspace-b");
-  await expect(page.getByRole("heading", { name: "Hello, Beta" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Beta" })).toBeVisible();
   await expect(page.getByText("Beta Site")).toBeVisible();
   expect(observed.filter(item => item.path === "/api/client/projects").at(-1)?.workspace).toBe("workspace-b");
   await expect(page).toHaveURL(/\/portal\?workspace=workspace-b$/);
@@ -443,7 +449,7 @@ test("workspace-v2 selection scopes every authenticated resource request and swi
 test("authorized portal supports project, delivery, and request workflows", async ({ page }) => {
   await mockAuthorizedPortal(page);
   await page.goto("/portal");
-  await expect(page.getByRole("heading", { name: "Hello, Acme Surveying" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Acme Surveying" })).toBeVisible();
   await expect(page.getByText("1", { exact: true }).first()).toBeVisible();
 
   await navigatePortal(page, "Projects");
@@ -478,6 +484,47 @@ test("authorized portal supports project, delivery, and request workflows", asyn
   await expect(page.getByText("North Site spring imagery")).toBeVisible();
 
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test("submitted-service browser presentation renders immutable labeled answers after expansion", async ({ page }) => {
+  await mockAuthorizedPortal(page, null, [{ ...requests[0]!, submittedServiceDetailsAvailable: true }]);
+  await page.goto("/portal/requests");
+  await expect(page.getByRole("heading", { name: "Submitted services" })).toHaveCount(0);
+  await page.getByRole("button", { name: "View submitted services" }).first().click();
+  await expect(page.getByRole("heading", { name: "Submitted services" })).toBeVisible();
+  await expect(page.getByText("2D Mapping", { exact: true })).toBeVisible();
+  await expect(page.getByText("Preferred resolution", { exact: true })).toBeVisible();
+  await expect(page.getByText("Standard", { exact: true })).toBeVisible();
+});
+
+test("a late submitted-service detail cannot repopulate cache after the request context refreshes", async ({ page }) => {
+  let releaseDetail!: () => void;
+  let markStarted!: () => void;
+  const detailGate = new Promise<void>(resolve => { releaseDetail = resolve; });
+  const detailStarted = new Promise<void>(resolve => { markStarted = resolve; });
+  await mockAuthorizedPortal(page, null, [{ ...requests[0]!, submittedServiceDetailsAvailable: true }],
+    { cancellationKeys: [], detailGate, detailStarted: markStarted });
+  await page.goto("/portal/requests");
+  const detailSettled = new Promise<void>(resolve => {
+    const settled = (request: Request) => {
+      if (request.method() !== "GET" || new URL(request.url()).pathname !== "/api/client/service-requests/request-a") return;
+      page.off("requestfinished", settled);
+      page.off("requestfailed", settled);
+      resolve();
+    };
+    page.on("requestfinished", settled);
+    page.on("requestfailed", settled);
+  });
+  await page.getByRole("button", { name: "View submitted services" }).click();
+  await detailStarted;
+  page.once("dialog", dialog => dialog.accept());
+  await page.getByRole("button", { name: "Cancel request" }).click();
+  await expect(page.getByText("Cancelled", { exact: true })).toBeVisible();
+  releaseDetail();
+  await detailSettled;
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await expect(page.getByRole("heading", { name: "Submitted services" })).toHaveCount(0);
+  await expect(page.getByText("Preferred resolution", { exact: true })).toHaveCount(0);
 });
 
 test("native workspace branding identifies the selected source across compact viewports", async ({ page }) => {
@@ -1112,7 +1159,7 @@ for (const width of [320, 390, 768]) {
     await expect(page.getByRole("dialog", { name: "Navigation" })).toHaveCount(0);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     const headerBottom = await page.locator(".client-portal-header").evaluate((node) => node.getBoundingClientRect().bottom);
-    const headingTop = await page.getByRole("heading", { name: "Hello, Acme Surveying" }).evaluate((node) => node.getBoundingClientRect().top);
+    const headingTop = await page.getByRole("heading", { name: "Acme Surveying" }).evaluate((node) => node.getBoundingClientRect().top);
     expect(headingTop).toBeGreaterThanOrEqual(headerBottom);
   });
 }

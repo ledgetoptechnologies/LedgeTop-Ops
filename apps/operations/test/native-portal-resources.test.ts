@@ -264,32 +264,24 @@ describe('source-owned native portal resources with real signed projection and l
     expect(JSON.stringify(await collision.json())).not.toContain('Native completion.');
     await state(a,'suspended');expect((await request('/notification-history',{headers:{'X-LTDS-Workspace-Id':a.workspace}})).status).toBe(403);await state(a,'active');
   });
-  it('lists native project feedback by exact source and workspace when public IDs collide',async()=>{
+  describe('native feedback history with colliding public IDs',()=>{
+    const diagnostics=process.env.NATIVE_FEEDBACK_HISTORY_DIAGNOSTICS==='true';
+    let lastStarted='none',lastCompleted='none';
+    const phase=async<T>(label:string,action:()=>T|Promise<T>):Promise<T>=>{
+      lastStarted=label;const started=performance.now();
+      if(diagnostics)console.info(`[native-feedback-history] phase-start ${label}`);
+      const value=await action();lastCompleted=label;
+      if(diagnostics)console.info(`[native-feedback-history] phase-complete ${label} ${Math.round(performance.now()-started)}ms`);
+      return value;
+    };
+    const beginDiagnostics=()=>{lastStarted='none';lastCompleted='none';};
+    const finishDiagnostics=()=>{if(diagnostics)console.info(`[native-feedback-history] final last-started=${lastStarted} last-completed=${lastCompleted}`);};
+    const aIds:string[]= [];let bId='';
     const create=async(f:Fixture,index:number)=>{
-      const response=await request(`${base(f)}/feedback`,{method:'POST',headers:{Origin:'https://client.test','Content-Type':'application/json',
-        'Idempotency-Key':`native-history-${f.name}-${index}-${crypto.randomUUID()}`},body:JSON.stringify({target:{kind:'project',projectId},message:`Private ${f.name} ${index}`})});
+      const response=await phase(`post-${f.name}-${index}`,()=>request(`${base(f)}/feedback`,{method:'POST',headers:{Origin:'https://client.test','Content-Type':'application/json',
+        'Idempotency-Key':`native-history-${f.name}-${index}-${crypto.randomUUID()}`},body:JSON.stringify({target:{kind:'project',projectId},message:`Private ${f.name} ${index}`})}));
       expect(response.status).toBe(201);return (await response.json() as {feedback:{id:string}}).feedback.id;
     };
-    const aIds:string[]=[];for(let index=0;index<6;index++)aIds.push(await create(a,index));
-    const bId=await create(b,0);
-    const clientFirstResponse=await request(`${base(a)}/feedback`);expect(clientFirstResponse.status).toBe(200);
-    const clientFirst=await clientFirstResponse.json() as {scope:{sourceId:string;workspaceId:string;rootType:string;rootPublicId:string};
-      items:Array<{feedbackId:string;events:Array<{action:string}>}>;nextCursor:string|null};
-    expect(clientFirst.scope).toEqual({sourceId:a.source,workspaceId:a.workspace,rootType:'organization',rootPublicId:rootId});
-    expect(clientFirst.items.map(item=>item.feedbackId)).toEqual(expect.arrayContaining(aIds.slice(-5)));
-    expect(clientFirst.items.every(item=>item.events[0]?.action==='submitted')).toBe(true);
-    expect(JSON.stringify(clientFirst)).not.toMatch(/Private [ab]|message|completionNote|actor|note/);
-    expect(clientFirst.nextCursor).toMatch(/^fh1_/);
-    const clientPlan=await db.prepare(`EXPLAIN QUERY PLAN SELECT rowid,id,created_at FROM portal_native_feedback INDEXED BY idx_portal_native_feedback_author
-      WHERE source_id=? AND workspace_id=? AND creator_identity_id=? AND principal_issuer=? AND principal_subject=? AND rowid<=? AND created_at<=?
-      ORDER BY created_at DESC,id DESC LIMIT 6`).bind(a.source,a.workspace,'same-person',issuer,principal.subject,Number.MAX_SAFE_INTEGER,new Date().toISOString()).all<{detail:string}>();
-    expect(clientPlan.results.some(row=>row.detail.includes('idx_portal_native_feedback_author'))).toBe(true);
-    expect((await request(`${base(b)}/feedback?cursor=${encodeURIComponent(clientFirst.nextCursor!)}`)).status).toBe(409);
-    await new Promise(resolve=>setTimeout(resolve,5));
-    await transitionStaffFeedback(opsEnv,staff,aIds[0]!,{expectedRevision:1,status:'done',note:'Completed after page one'},`staff-${crypto.randomUUID()}`);
-    const stable=await request(`${base(a)}/feedback?cursor=${encodeURIComponent(clientFirst.nextCursor!)}`);expect(stable.status).toBe(200);
-    const stableItems=(await stable.json() as {items:Array<{feedbackId:string}>}).items;
-    expect(stableItems.every(item=>!aIds.includes(item.feedbackId))).toBe(true);
     const makeContext=async(f:Fixture):Promise<{context:ClientHubCollectionContext;localProject:string}>=>{
       const localRoot=(await opsDb.prepare(`SELECT id FROM pa_organizations WHERE projection_source_id=?
         AND json_extract(payload_json,'$.public_id')=?`).bind(f.source,rootId).first<string>('id'))!;
@@ -303,25 +295,64 @@ describe('source-owned native portal resources with real signed projection and l
         access:{directory:true,requests:true,delivery:true,viewer:false},contextVersion:(f.name==='a'?'a':'b').repeat(43)} as ClientHubCollectionContext;
       return {context,localProject};
     };
-    const ac=await makeContext(a),bc=await makeContext(b);
-    const historyEnv={...opsEnv,OPERATIONS_SESSION_SECRET:'native-history-session-secret-0123456789'};
-    const first=await listClientHubProjectFeedbackHistory(historyEnv,staff,ac.context,ac.localProject,{limit:5});
-    expect(first.items.map(item=>item.feedbackId)).toEqual(expect.arrayContaining(aIds.slice(-5)));
-    expect(JSON.stringify(first)).not.toContain(bId);expect(first.page.nextCursor).toBeTruthy();
-    await expect(listClientHubProjectFeedbackHistory(historyEnv,staff,bc.context,bc.localProject,{limit:5,cursor:first.page.nextCursor!}))
-      .rejects.toMatchObject({status:400});
-    const bp=await listClientHubProjectFeedbackHistory(historyEnv,staff,bc.context,bc.localProject,{limit:5});
-    expect(bp.items.map(item=>item.feedbackId)).toEqual([bId]);expect(JSON.stringify(bp)).not.toContain(aIds[0]);
-    expect(JSON.stringify([...first.items,...bp.items])).not.toMatch(/Private [ab]/);
-    const rootPage=await listClientHubFeedbackHistory(historyEnv,staff,ac.context,{limit:5});
-    expect(rootPage.items.map(item=>item.feedbackId)).toEqual(expect.arrayContaining(aIds.slice(-5)));
-    expect(JSON.stringify(rootPage)).not.toContain(bId);
-    await expect(listClientHubFeedbackHistory(historyEnv,staff,bc.context,{limit:5,cursor:rootPage.page.nextCursor!}))
-      .rejects.toMatchObject({status:400});
-    await db.prepare("UPDATE portal_v2_workspaces SET status='suspended' WHERE id=?").bind(a.workspace).run();
-    expect((await request(`${base(a)}/feedback?cursor=${encodeURIComponent(clientFirst.nextCursor!)}`)).status).toBe(404);
-    await db.prepare("UPDATE portal_v2_workspaces SET status='active' WHERE id=?").bind(a.workspace).run();
-  },120_000);
+    beforeAll(async()=>{beginDiagnostics();try{
+      for(let index=0;index<6;index++)aIds.push(await create(a,index));
+      bId=await create(b,0);
+    }finally{finishDiagnostics();}},120_000);
+
+    it('keeps Client history pagination, query planning, cursor scope, and workspace revocation exact',async()=>{
+      beginDiagnostics();try{
+        const clientFirstResponse=await phase('client-first-page',()=>request(`${base(a)}/feedback`));expect(clientFirstResponse.status).toBe(200);
+        const clientFirst=await clientFirstResponse.json() as {scope:{sourceId:string;workspaceId:string;rootType:string;rootPublicId:string};
+          items:Array<{feedbackId:string;events:Array<{action:string}>}>;nextCursor:string|null};
+        expect(clientFirst.scope).toEqual({sourceId:a.source,workspaceId:a.workspace,rootType:'organization',rootPublicId:rootId});
+        expect(clientFirst.items.map(item=>item.feedbackId)).toEqual(expect.arrayContaining(aIds.slice(-5)));
+        expect(clientFirst.items.every(item=>item.events[0]?.action==='submitted')).toBe(true);
+        expect(JSON.stringify(clientFirst)).not.toMatch(/Private [ab]|message|completionNote|actor|note/);
+        expect(clientFirst.nextCursor).toMatch(/^fh1_/);
+        const clientPlan=await db.prepare(`EXPLAIN QUERY PLAN SELECT rowid,id,created_at FROM portal_native_feedback INDEXED BY idx_portal_native_feedback_author
+          WHERE source_id=? AND workspace_id=? AND creator_identity_id=? AND principal_issuer=? AND principal_subject=? AND rowid<=? AND created_at<=?
+          ORDER BY created_at DESC,id DESC LIMIT 6`).bind(a.source,a.workspace,'same-person',issuer,principal.subject,Number.MAX_SAFE_INTEGER,new Date().toISOString()).all<{detail:string}>();
+        expect(clientPlan.results.some(row=>row.detail.includes('idx_portal_native_feedback_author'))).toBe(true);
+        expect((await request(`${base(b)}/feedback?cursor=${encodeURIComponent(clientFirst.nextCursor!)}`)).status).toBe(409);
+        await new Promise(resolve=>setTimeout(resolve,5));
+        await phase('staff-transition',()=>transitionStaffFeedback(opsEnv,staff,aIds[0]!,{expectedRevision:1,status:'done',note:'Completed after page one'},`staff-${crypto.randomUUID()}`));
+        const stable=await phase('client-second-page',()=>request(`${base(a)}/feedback?cursor=${encodeURIComponent(clientFirst.nextCursor!)}`));expect(stable.status).toBe(200);
+        const stableItems=(await stable.json() as {items:Array<{feedbackId:string}>}).items;
+        expect(stableItems.every(item=>!aIds.includes(item.feedbackId))).toBe(true);
+        await db.prepare("UPDATE portal_v2_workspaces SET status='suspended' WHERE id=?").bind(a.workspace).run();
+        try{expect((await request(`${base(a)}/feedback?cursor=${encodeURIComponent(clientFirst.nextCursor!)}`)).status).toBe(404);}
+        finally{await db.prepare("UPDATE portal_v2_workspaces SET status='active' WHERE id=?").bind(a.workspace).run();}
+      }finally{finishDiagnostics();}
+    },120_000);
+
+    it('keeps Operations project history source-qualified with collision-safe cursors and private content',async()=>{
+      beginDiagnostics();try{
+        const ac=await makeContext(a),bc=await makeContext(b);
+        const historyEnv={...opsEnv,OPERATIONS_SESSION_SECRET:'native-history-session-secret-0123456789'};
+        const first=await phase('operations-project-a',()=>listClientHubProjectFeedbackHistory(historyEnv,staff,ac.context,ac.localProject,{limit:5}));
+        expect(first.items.map(item=>item.feedbackId)).toEqual(expect.arrayContaining(aIds.slice(-5)));
+        expect(JSON.stringify(first)).not.toContain(bId);expect(first.page.nextCursor).toBeTruthy();
+        await expect(listClientHubProjectFeedbackHistory(historyEnv,staff,bc.context,bc.localProject,{limit:5,cursor:first.page.nextCursor!}))
+          .rejects.toMatchObject({status:400});
+        const bp=await phase('operations-project-b',()=>listClientHubProjectFeedbackHistory(historyEnv,staff,bc.context,bc.localProject,{limit:5}));
+        expect(bp.items.map(item=>item.feedbackId)).toEqual([bId]);expect(JSON.stringify(bp)).not.toContain(aIds[0]);
+        expect(JSON.stringify([...first.items,...bp.items])).not.toMatch(/Private [ab]/);
+      }finally{finishDiagnostics();}
+    },120_000);
+
+    it('keeps Operations root history source-qualified with collision-safe cursors and private content',async()=>{
+      beginDiagnostics();try{
+        const ac=await makeContext(a),bc=await makeContext(b);
+        const historyEnv={...opsEnv,OPERATIONS_SESSION_SECRET:'native-history-session-secret-0123456789'};
+        const rootPage=await phase('operations-root-a',()=>listClientHubFeedbackHistory(historyEnv,staff,ac.context,{limit:5}));
+        expect(rootPage.items.map(item=>item.feedbackId)).toEqual(expect.arrayContaining(aIds.slice(-5)));
+        expect(JSON.stringify(rootPage)).not.toContain(bId);
+        await expect(listClientHubFeedbackHistory(historyEnv,staff,bc.context,{limit:5,cursor:rootPage.page.nextCursor!}))
+          .rejects.toMatchObject({status:400});
+      }finally{finishDiagnostics();}
+    },120_000);
+  });
   it('lists only immediate children, hides internal objects, and returns no raw storage key',async()=>{
     const result=await files(b);expect(result.files.map(f=>f.name)).toEqual(['report.txt']);expect(result.folders?.map(f=>f.name)).toEqual(['child']);
     expect(result.prefix).toBe('');expect(JSON.stringify(result)).not.toContain('native/b/');expect(result.files[0]!.thumbnailPath).toBeNull();

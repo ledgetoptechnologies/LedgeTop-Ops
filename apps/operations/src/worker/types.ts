@@ -51,6 +51,13 @@ export type Env = Omit<
   | "CLIENT_AUTHORITY_WORKSPACE_BINDING_OUTBOX_ENABLED"
   | "CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ENABLED"
   | "CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ORIGIN"
+  | "CLIENT_PORTAL_AUTHORITY_V3_OWNER_ENABLED"
+  | "CLIENT_PORTAL_AUTHORITY_V3_OWNER_ORIGIN"
+  | "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED"
+  | "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ENABLED"
+  | "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ORIGIN"
+  | "VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_DISPATCH_ENABLED"
+  | "VERIFIED_RECIPIENT_DELIVERY_AUTHORITY"
 > & {
   PROJECT_ALPHA_API_KEY?: string;
   /** Temporary release barrier for the preserving client-notification table rebuild. */
@@ -78,6 +85,16 @@ export type Env = Omit<
   /** Staging-only native-owner HTTP boundary for explicit inactive binding review and delivery. */
   CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ENABLED?: string;
   CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ORIGIN?: string;
+  /** Default-off native owner boundary for protocol-v3 service-home permission changes. */
+  CLIENT_PORTAL_AUTHORITY_V3_OWNER_ENABLED?: string;
+  CLIENT_PORTAL_AUTHORITY_V3_OWNER_ORIGIN?: string;
+  /** Staging-only verified recipient enrollment; independent and default-off. */
+  CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED?: string;
+  /** Separate default-off staging owner confirmation/revocation boundary. */
+  CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ENABLED?: string;
+  CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ORIGIN?: string;
+  VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_DISPATCH_ENABLED?: string;
+  VERIFIED_RECIPIENT_DELIVERY_AUTHORITY?: Service & import("./verified-recipient-delivery-authority-ledger").DeliveryAuthorityBridge;
   /** Default-off bounded API-v2 health/incident monitor. */
   PROJECT_ALPHA_API_V2_MONITOR_ENABLED?: string;
   /** Explicit deployment-owned owner mailbox for outage alerts; never inferred from Project Alpha data. */

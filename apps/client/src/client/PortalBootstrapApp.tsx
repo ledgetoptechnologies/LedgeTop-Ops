@@ -1,5 +1,4 @@
 import { lazy, useEffect, useState } from "react";
-import { OperationsHomeApp } from "./OperationsHomeApp";
 import { loadOperationsHome, type PortalOperationsHomeResponse } from "./portal-api";
 
 type BootstrapState =
@@ -58,7 +57,7 @@ export function PortalBootstrapApp() {
   }, []);
 
   if (state.kind === "legacy") return <LegacyClientPortalApp initialPage="dashboard" />;
-  if (state.kind === "operations") return <OperationsHomeApp response={state.response} />;
+  if (state.kind === "operations") return <LegacyClientPortalApp initialPage="dashboard" operationsHomeResponse={state.response} />;
   if (state.kind === "loading") return <main className="portal-loading-shell" aria-busy="true" aria-label="Loading LedgeTop client portal" />;
   const copy = blockedCopy(state.status);
   return <div className="client-portal"><main className="portal-main"><section className="portal-card" role="alert"><h1>{copy.heading}</h1><p>{copy.detail}</p></section></main></div>;

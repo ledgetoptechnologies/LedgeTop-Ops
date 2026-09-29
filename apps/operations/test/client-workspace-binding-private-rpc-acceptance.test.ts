@@ -2,6 +2,8 @@ import {readFileSync} from "node:fs";
 import {Miniflare} from "miniflare";
 import {afterEach,beforeEach,describe,expect,it,vi} from "vitest";
 vi.mock("cloudflare:workers",()=>({WorkerEntrypoint:class{}}));
+const nativeAuth=vi.hoisted(()=>({authenticate:vi.fn()}));
+vi.mock("../src/worker/native-staff-auth",()=>({authenticateNativeStaffWithAdmissionVersion:nativeAuth.authenticate}));
 import {splitD1MigrationStatements} from "../../client/test/helpers/d1-migrations";
 import {bindClientAuthorityWorkspace,getClientAuthorityWorkspaceBindingStatus} from
   "../../client/src/worker/client-authority-workspace-binding-entrypoint";
@@ -13,6 +15,7 @@ import {dispatchNextPortalWorkspaceBinding,enqueuePortalWorkspaceBinding,
 import {dispatchNextClientPortalAuthorityV2,enqueueClientPortalAuthorityV2,enqueueClientPortalAuthorityV3,
   type AuthorityV2Env, type ClientPortalAuthorityV2Command, type ClientPortalAuthorityV3Command} from "../src/worker/client-portal-authority-v2-outbox";
 import type {AuthenticatedNativeStaffWithAdmissionVersion} from "../src/worker/native-staff-auth";
+import {handleAuthorityV3OwnerHttp} from "../src/worker/client-portal-authority-v3-owner-http";
 
 describe("joined Operations to Client inactive workspace binding",()=>{
   let runtime:Miniflare,opsDb:D1Database,clientDb:D1Database;
@@ -31,6 +34,7 @@ describe("joined Operations to Client inactive workspace binding",()=>{
   }
 
   beforeEach(async()=>{
+    nativeAuth.authenticate.mockReset().mockResolvedValue(actor);
     runtime=new Miniflare({compatibilityDate:"2026-07-16",modules:true,script:"export default {}",
       d1Databases:{OPS_DB:crypto.randomUUID(),CLIENT_DB:crypto.randomUUID()}});
     opsDb=await runtime.getD1Database("OPS_DB") as unknown as D1Database;
@@ -66,6 +70,7 @@ describe("joined Operations to Client inactive workspace binding",()=>{
     await migrate(opsDb,new URL("../migrations/0144_client_portal_workspace_binding_outbox.sql",import.meta.url));
     await migrate(opsDb,new URL("../migrations/0145_client_portal_authority_v2_outbox.sql",import.meta.url));
     await migrate(opsDb,new URL("../migrations/0147_client_portal_authority_v3_permissions.sql",import.meta.url));
+    await migrate(opsDb,new URL("../migrations/0148_client_portal_recipient_enrollment.sql",import.meta.url));
 
     await clientDb.batch([
       clientDb.prepare(`CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,root_type TEXT NOT NULL,
@@ -191,8 +196,14 @@ describe("joined Operations to Client inactive workspace binding",()=>{
     const v2=await enqueueClientPortalAuthorityV2(opsDb,actor,{operationId:"33333333-3333-4333-8333-333333333333",bindingOperationId:selectionId,recipientBindingId,clientAuthorityId:selected.clientAuthorityId,workspaceId:"workspace-a",issuer:"https://access.example.test",subject:"access|client-one",desiredState:"active",expectedOwnershipEpoch:0,expectedGrantRevision:0});
     const authority={applyAuthority:(command:ClientPortalAuthorityV2Command)=>applyClientPortalAuthorityV2({DELIVERY_DB:clientDb,CLIENT_PORTAL_AUTHORITY_V2_WRITER_ENABLED:"true"},command),getAuthorityStatus:(input:{protocolVersion:2;operationId:string})=>getClientPortalAuthorityV2Status({DELIVERY_DB:clientDb,CLIENT_PORTAL_AUTHORITY_V2_STATUS_ENABLED:"true"},input),applyAuthorityV3:(command:ClientPortalAuthorityV3Command)=>applyClientPortalAuthorityV3({DELIVERY_DB:clientDb,CLIENT_PORTAL_AUTHORITY_V2_WRITER_ENABLED:"true"},command),getAuthorityV3Status:(input:{protocolVersion:3;operationId:string})=>getClientPortalAuthorityV3Status({DELIVERY_DB:clientDb,CLIENT_PORTAL_AUTHORITY_V2_STATUS_ENABLED:"true"},input)};
     await expect(dispatchNextClientPortalAuthorityV2({OPS_DB:opsDb,CLIENT_PORTAL_AUTHORITY_V2_OUTBOX_ENABLED:"true",CLIENT_PORTAL_AUTHORITY_V2:authority} satisfies AuthorityV2Env)).resolves.toMatchObject({status:"acknowledged",operationId:v2.operationId});
+    const unrelatedBinding="66666666-6666-4666-8666-666666666666",unrelatedOperation="77777777-7777-4777-8777-777777777777";
+    await opsDb.prepare("INSERT INTO client_onboarding_recipient_identity_bindings VALUES(?,?,?,'access|unrelated','active',NULL,NULL)").bind(unrelatedBinding,clientRecordId,"https://access.example.test").run();
+    await enqueueClientPortalAuthorityV3(opsDb,actor,{operationId:unrelatedOperation,bindingOperationId:selectionId,recipientBindingId:unrelatedBinding,clientAuthorityId:selected.clientAuthorityId,workspaceId:"workspace-a",issuer:"https://access.example.test",subject:"access|unrelated",desiredState:"active",expectedOwnershipEpoch:1,expectedGrantRevision:0,permissions:["operations.service_home.read"]});
     const v3=await enqueueClientPortalAuthorityV3(opsDb,actor,{operationId:"44444444-4444-4444-8444-444444444444",bindingOperationId:selectionId,recipientBindingId,clientAuthorityId:selected.clientAuthorityId,workspaceId:"workspace-a",issuer:"https://access.example.test",subject:"access|client-one",desiredState:"active",expectedOwnershipEpoch:1,expectedGrantRevision:1,permissions:["operations.service_home.read"]});
-    await expect(dispatchNextClientPortalAuthorityV2({OPS_DB:opsDb,CLIENT_PORTAL_AUTHORITY_V2_OUTBOX_ENABLED:"true",CLIENT_PORTAL_AUTHORITY_V2:authority} satisfies AuthorityV2Env)).resolves.toMatchObject({status:"acknowledged",operationId:v3.operationId});
+    const dispatchEnv={OPS_DB:opsDb,CLIENT_PORTAL_AUTHORITY_V2_OUTBOX_ENABLED:"true",CLIENT_PORTAL_AUTHORITY_V2:authority} satisfies AuthorityV2Env;
+    await expect(dispatchNextClientPortalAuthorityV2(dispatchEnv,v3.operationId)).resolves.toMatchObject({status:"acknowledged",operationId:v3.operationId});
+    await expect(opsDb.prepare("SELECT state FROM client_portal_authority_v2_outbox WHERE operation_id=?").bind(unrelatedOperation).first("state")).resolves.toBe("pending");
+    await expect(dispatchNextClientPortalAuthorityV2(dispatchEnv)).resolves.toMatchObject({status:"acknowledged",operationId:unrelatedOperation});
     await expect(opsDb.prepare("SELECT protocol_version,permissions_json FROM client_portal_authority_v2_outbox_receipts WHERE operation_id=?").bind(v3.operationId).first()).resolves.toEqual({protocol_version:3,permissions_json:'["operations.service_home.read"]'});
     await expect(opsDb.prepare("UPDATE client_portal_authority_v2_outbox SET permissions_json='[]' WHERE operation_id=?").bind(v3.operationId).run()).rejects.toThrow();
     await expect(opsDb.prepare(`INSERT INTO client_portal_authority_v2_outbox_receipts(operation_id,client_authority_id,workspace_id,issuer,subject,ownership_epoch,grant_revision,resulting_state,acknowledged_claim_token,protocol_version,permissions_json) VALUES(?,?,?,?,?,?,?,?,?,?,?)`).bind(v3.operationId,selected.clientAuthorityId,"workspace-a","https://access.example.test","access|client-one",1,2,"active","forged",3,"[]").run()).rejects.toThrow();
@@ -203,5 +214,48 @@ describe("joined Operations to Client inactive workspace binding",()=>{
     await opsDb.prepare("UPDATE client_portal_authority_v2_outbox SET next_attempt_at='2000-01-01T00:00:00.000Z' WHERE operation_id=?").bind(removal.operationId).run();
     await expect(dispatchNextClientPortalAuthorityV2({OPS_DB:opsDb,CLIENT_PORTAL_AUTHORITY_V2_OUTBOX_ENABLED:"true",CLIENT_PORTAL_AUTHORITY_V2:authority} satisfies AuthorityV2Env)).resolves.toMatchObject({status:"acknowledged",operationId:removal.operationId});
     await expect(opsDb.prepare("SELECT permissions_json FROM client_portal_authority_v2_outbox_receipts WHERE operation_id=?").bind(removal.operationId).first("permissions_json")).resolves.toBe("[]");
+  });
+
+  it("applies and exactly replays owner HTTP v3 commands over the joined ledgers",async()=>{
+    const selected=await selectPortalWorkspaceBinding(opsDb,actor,{selectionId,recordId,activationId,workspaceId:"workspace-a",sourceWorkspaceId:"pa-workspace-a",checkpoint:{sourceGeneration:"generation-7",sourceSequence:7,snapshotGenerationId:"snapshot-7"}});
+    await enqueuePortalWorkspaceBinding(opsDb,actor,selectionId);
+    const workspaceBinding={bindWorkspace:(command:WorkspaceBindingCommand)=>bindClientAuthorityWorkspace({DELIVERY_DB:clientDb,CLIENT_AUTHORITY_WORKSPACE_BINDING_WRITER_ENABLED:"true"},command),getBindingStatus:(input:{protocolVersion:1;operationId:string})=>getClientAuthorityWorkspaceBindingStatus({DELIVERY_DB:clientDb,CLIENT_AUTHORITY_WORKSPACE_BINDING_STATUS_ENABLED:"true"},input)};
+    await dispatchNextPortalWorkspaceBinding({OPS_DB:opsDb,CLIENT_AUTHORITY_WORKSPACE_BINDING_OUTBOX_ENABLED:"true",CLIENT_AUTHORITY_WORKSPACE_BINDING:workspaceBinding});
+    const authority={applyAuthority:(command:ClientPortalAuthorityV2Command)=>applyClientPortalAuthorityV2({DELIVERY_DB:clientDb,CLIENT_PORTAL_AUTHORITY_V2_WRITER_ENABLED:"true"},command),getAuthorityStatus:(input:{protocolVersion:2;operationId:string})=>getClientPortalAuthorityV2Status({DELIVERY_DB:clientDb,CLIENT_PORTAL_AUTHORITY_V2_STATUS_ENABLED:"true"},input),applyAuthorityV3:(command:ClientPortalAuthorityV3Command)=>applyClientPortalAuthorityV3({DELIVERY_DB:clientDb,CLIENT_PORTAL_AUTHORITY_V2_WRITER_ENABLED:"true"},command),getAuthorityV3Status:(input:{protocolVersion:3;operationId:string})=>getClientPortalAuthorityV3Status({DELIVERY_DB:clientDb,CLIENT_PORTAL_AUTHORITY_V2_STATUS_ENABLED:"true"},input)};
+    const origin="https://ops-staging.example.test",dependencies={environment:"staging",expectedHost:"ops-staging.example.test",configuration:{enabled:true,issuer:"https://team.cloudflareaccess.com",staffAudience:"synthetic-staff-audience",origin,csrfSecret:"owner-http-joined-secret-at-least-thirty-two-bytes"},database:opsDb,dispatch:{OPS_DB:opsDb,CLIENT_PORTAL_AUTHORITY_V2_OUTBOX_ENABLED:"true",CLIENT_PORTAL_AUTHORITY_V2:authority}};
+    const session=await handleAuthorityV3OwnerHttp(new Request(`${origin}/api/native-client-portal/authority-v3/session`,{headers:{"X-Native-Staff-Request":"1","Sec-Fetch-Site":"same-origin",Origin:origin}}),dependencies);
+    const csrf=(await session.json() as {csrfToken:string}).csrfToken,operationId="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const post=(id:string,serviceHomeRead:boolean)=>handleAuthorityV3OwnerHttp(new Request(`${origin}/api/native-client-portal/authority-v3`,{method:"POST",headers:{Origin:origin,"Sec-Fetch-Site":"same-origin","Content-Type":"application/json","X-CSRF-Token":csrf},body:JSON.stringify({operationId:id,selectionId,recipientBindingId,serviceHomeRead})}),dependencies);
+    expect((await post(operationId,true)).status).toBe(200);
+    expect((await post(operationId,true)).status).toBe(200);
+    await expect(clientDb.prepare("SELECT grant_revision,protocol_version,permissions_json FROM portal_operations_principal_grant_heads WHERE subject='access|client-one'").first()).resolves.toEqual({grant_revision:1,protocol_version:3,permissions_json:'["operations.service_home.read"]'});
+    await expect(opsDb.prepare("SELECT COUNT(*) count FROM client_portal_authority_v2_outbox WHERE operation_id=?").bind(operationId).first("count")).resolves.toBe(1);
+    await expect(opsDb.prepare("SELECT COUNT(*) count FROM client_portal_authority_v2_outbox_receipts WHERE operation_id=?").bind(operationId).first("count")).resolves.toBe(1);
+    expect((await post(operationId,false)).status).toBe(403);
+    const removal="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";expect((await post(removal,false)).status).toBe(200);
+    await expect(clientDb.prepare("SELECT grant_revision,permissions_json FROM portal_operations_principal_grant_heads WHERE subject='access|client-one'").first()).resolves.toEqual({grant_revision:2,permissions_json:"[]"});
+    expect((await post(operationId,true)).status).toBe(200);
+    await expect(clientDb.prepare("SELECT grant_revision,permissions_json FROM portal_operations_principal_grant_heads WHERE subject='access|client-one'").first()).resolves.toEqual({grant_revision:2,permissions_json:"[]"});
+    await expect(clientDb.prepare("SELECT COUNT(*) count FROM portal_operations_authority_v2_audit WHERE subject='access|client-one'").first("count")).resolves.toBe(2);
+    await expect(opsDb.prepare("SELECT COUNT(*) count FROM client_portal_authority_v2_outbox WHERE operation_id=?").bind(operationId).first("count")).resolves.toBe(1);
+    await opsDb.prepare("DELETE FROM staff_role_assignments WHERE staff_id='owner'").run();
+    expect((await post("cccccccc-cccc-4ccc-8ccc-cccccccccccc",true)).status).toBe(403);
+    expect((await post(removal,false)).status).toBe(403);
+    await opsDb.prepare("INSERT INTO staff_role_assignments VALUES('owner','role-owner','global')").run();
+    await opsDb.prepare("INSERT INTO native_directory_grants VALUES('owner','directory.portal_access.manage','deny',1,'global',NULL,NULL,NULL)").run();
+    expect((await post("dddddddd-dddd-4ddd-8ddd-dddddddddddd",true)).status).toBe(403);
+    expect((await post(removal,false)).status).toBe(403);
+    await opsDb.prepare("DELETE FROM native_directory_grants WHERE effect='deny'").run();
+    await opsDb.batch([
+      opsDb.prepare("INSERT INTO native_directory_resource_scopes VALUES(?,1,'business-a','division-a')").bind(recordId),
+      opsDb.prepare("INSERT INTO native_directory_grants VALUES('owner','directory.portal_access.manage','deny',1,'business_area',NULL,'business-a',NULL)"),
+    ]);
+    expect((await post("ffffffff-ffff-4fff-8fff-ffffffffffff",true)).status).toBe(403);
+    expect((await post(removal,false)).status).toBe(403);
+    await opsDb.prepare("DELETE FROM native_directory_grants WHERE effect='deny'").run();
+    await opsDb.prepare("UPDATE client_onboarding_recipient_identity_bindings SET expires_at='2000-01-01T00:00:00.000Z' WHERE binding_id=?").bind(recipientBindingId).run();
+    expect((await post("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",true)).status).toBe(403);
+    expect((await post(removal,false)).status).toBe(403);
+    await expect(clientDb.prepare("SELECT grant_revision,permissions_json FROM portal_operations_principal_grant_heads WHERE subject='access|client-one'").first()).resolves.toEqual({grant_revision:2,permissions_json:"[]"});
   });
 });

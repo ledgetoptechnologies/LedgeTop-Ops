@@ -1165,6 +1165,12 @@
 .portal-request-row > div { display: grid; gap: .25rem; min-width: 0; }
 .portal-request-row strong, .portal-request-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .portal-request-row div span, .portal-request-row time { color: var(--muted); font-size: .79rem; }
+.portal-submitted-services { display: grid; gap: .75rem; min-width: 0; }
+.portal-submitted-services article, .portal-submitted-services dl, .portal-submitted-services div { min-width: 0; }
+.portal-submitted-services strong, .portal-submitted-services p, .portal-submitted-services dt, .portal-submitted-services dd {
+  overflow-wrap: anywhere; white-space: pre-wrap;
+}
+.portal-submitted-services dd { margin-inline-start: 0; }
 .portal-request-row time { text-align: right; }
 
 .portal-request-main { display: grid !important; gap: .55rem !important; }

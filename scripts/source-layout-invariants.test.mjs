@@ -138,6 +138,12 @@ test("Directory API-v2 staging contract suite remains a required CI check", () =
   assert(workflow.includes("scripts/pa-api-v2-directory-staging-acceptance.test.mjs"));
 });
 
+test("governed staging authority packets retain dependency-free local CI coverage", () => {
+  const workflow = read(".github/workflows/ci.yml");
+  assert(workflow.includes("name: Verify governed staging authority packets locally"));
+  assert(workflow.includes("run: node --test scripts/staging-native-authority-packet.test.mjs"));
+});
+
 test("Client Portal browser acceptance remains a required CI job", () => {
   const workflow = read(".github/workflows/ci.yml");
   assert(workflow.includes("client-browser:"));
@@ -261,8 +267,14 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   // cannot hide behind a digest refresh.
   // Reviewed additions: catalog coordination, portal authority, inactive
   // workspace-binding writers, and the non-content enrollment reader remain off.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "1208284ab0960b83a9ea1b092c6d2c24492eb4b0562d43a648fb382099c941e5");
+  // Approved staging-only recipient bridge is present but remains default-off.
+  // Reviewed recipient-delivery authority adds only explicit disabled flags.
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "fa3cee1b61b987eac8e158ed2561232df2358889679079e7dc12570b7db69d0a");
   const config = readJson("apps/client/wrangler.jsonc");
+  assert.equal(config.vars.CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_WRITER_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_STATUS_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_CSRF_SECRET, undefined);
   assert.equal(config.name, "ledgetop-clients");
   assert.equal(config.main, "src/worker/index.ts");
   assert.deepEqual(config.routes, [
@@ -351,6 +363,11 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   }]);
   assert.deepEqual(config.services, [
     {
+      binding: "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_BRIDGE",
+      service: "ledgetop-ops",
+      entrypoint: "ClientPortalRecipientEnrollmentBridge",
+    },
+    {
       binding: "CLIENT_PORTAL_SERVICE_METADATA_READER",
       service: "ledgetop-ops",
       entrypoint: "ClientPortalServiceMetadataReader",
@@ -381,8 +398,13 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
 });
 
 test("the deployed Operations Worker keeps catalog and inactive binding transport private and default-off", () => {
-  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "274071c5e991f46cb7424bb3a7261db3e8004e0012892fff74519d30ee3c4b96");
+  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "0bb2b0680d1acd9eabb6e080e72193dc2c8f8b955448241ef00d97b58f47acfd");
   const config = readJson("apps/operations/wrangler.jsonc");
+  assert.equal(config.vars.VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_DISPATCH_ENABLED, "false");
+  assert.equal(config.services?.find((service) => service.binding === "VERIFIED_RECIPIENT_DELIVERY_AUTHORITY"), undefined);
+  assert.equal(config.vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ORIGIN, "");
   assert.equal(config.vars.CLIENT_ONBOARDING_ADMIN_ENABLED, "false");
   assert.equal(config.vars.CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED, "false");
@@ -393,6 +415,8 @@ test("the deployed Operations Worker keeps catalog and inactive binding transpor
   assert.equal(config.vars.CLIENT_AUTHORITY_WORKSPACE_BINDING_OUTBOX_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ORIGIN, "");
+  assert.equal(config.vars.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ORIGIN, "");
   assert.deepEqual(config.services?.find((service) => service.binding === "CLIENT_AUTHORITY_WORKSPACE_BINDING"), {
     binding: "CLIENT_AUTHORITY_WORKSPACE_BINDING",
     service: "ledgetop-clients",

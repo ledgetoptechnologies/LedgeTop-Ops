@@ -32,6 +32,7 @@ describe("private client portal service metadata reader", () => {
         workspace_id TEXT,record_id TEXT,root_type TEXT)`,
       `CREATE TABLE client_onboarding_recipient_identity_bindings(binding_id TEXT PRIMARY KEY,target_client_record_id TEXT,
         access_issuer TEXT,access_subject TEXT,status TEXT,expires_at TEXT)`,
+      `CREATE TABLE client_portal_recipient_enrollment_intents(intent_id TEXT PRIMARY KEY,binding_id TEXT,state TEXT)`,
       `CREATE TABLE operations_directory_client_organizations(client_record_id TEXT PRIMARY KEY,organization_record_id TEXT)`,
       `CREATE TABLE operations_service_definitions(service_id TEXT PRIMARY KEY,provider_id TEXT,display_name TEXT)`,
       `CREATE TABLE operations_customer_service_enrollments(customer_record_id TEXT,service_id TEXT,state TEXT,revision INTEGER)`,
@@ -44,6 +45,7 @@ describe("private client portal service metadata reader", () => {
     for (const table of ["client_portal_authority_v2_outbox_receipts", "client_portal_authority_v2_outbox",
       "client_portal_workspace_binding_outbox_receipts", "client_portal_workspace_binding_outbox",
       "client_portal_workspace_binding_selections", "client_onboarding_recipient_identity_bindings",
+      "client_portal_recipient_enrollment_intents",
       "operations_directory_client_organizations", "operations_customer_service_enrollments",
       "operations_service_definitions"]) await db.prepare(`DELETE FROM ${table}`).run();
     await db.batch([
@@ -122,6 +124,28 @@ describe("private client portal service metadata reader", () => {
     await db.prepare(`INSERT INTO client_portal_authority_v2_outbox_receipts VALUES('revoke-op',?,?,?,?,1,2,'revoked')`)
       .bind(authorityId, workspaceId, issuer, subject).run();
     await expect(readClientPortalServiceMetadata(db, request())).resolves.toMatchObject({ ok: false, code: "denied" });
+  });
+
+  it("fences only the exact enrollment binding while it is revoking or revoked", async () => {
+    await db.prepare("INSERT INTO client_portal_recipient_enrollment_intents VALUES('active-intent',?,'active')")
+      .bind(recipientId).run();
+    await expect(readClientPortalServiceMetadata(db, request())).resolves.toMatchObject({ ok: true });
+    await db.prepare("UPDATE client_portal_recipient_enrollment_intents SET state='revoking' WHERE intent_id='active-intent'").run();
+    await expect(readClientPortalServiceMetadata(db, request())).resolves.toMatchObject({ ok: false, code: "denied" });
+    await db.prepare("UPDATE client_portal_recipient_enrollment_intents SET state='revoked' WHERE intent_id='active-intent'").run();
+    await expect(readClientPortalServiceMetadata(db, request())).resolves.toMatchObject({ ok: false, code: "denied" });
+    await db.prepare("UPDATE client_portal_recipient_enrollment_intents SET binding_id='unrelated-binding'").run();
+    await expect(readClientPortalServiceMetadata(db, request())).resolves.toMatchObject({ ok: true });
+  });
+
+  it("fails closed when the enrollment revocation fence table is unavailable", async () => {
+    await db.prepare("ALTER TABLE client_portal_recipient_enrollment_intents RENAME TO unavailable_enrollment_intents").run();
+    try {
+      await expect(readClientPortalServiceMetadata(db, request()))
+        .resolves.toEqual({ ok: false, protocolVersion: 1, code: "denied" });
+    } finally {
+      await db.prepare("ALTER TABLE unavailable_enrollment_intents RENAME TO client_portal_recipient_enrollment_intents").run();
+    }
   });
 
   it("fences an earlier receipt when a higher ownership epoch command is pending", async () => {

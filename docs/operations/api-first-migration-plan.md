@@ -1,6 +1,871 @@
 # API-first migration — current implementation objective and work register
 
-Updated September 27, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+Updated September 28, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+
+### Current checkpoint — September 28, 2026
+
+- Draft PR 133 contains committed default-off recipient storage/outbox/private
+  RPC implementation (`2703d4b`) and hermetic acceptance fixtures (`b701296`).
+  The prior CI failure was confined to tests reading private ignored staging
+  configs; the corrected tests passed 3/3 locally. Exact-head run `36495685524`
+  finished successfully: all ten jobs passed for `b701296`. Later local
+  test/evidence commits are not covered by that CI result and await a new run.
+- Canonical prerequisite coverage now passes three cases against the real
+  151/140 migration chains, including clean reviewed v3/v4/v6 acquisition,
+  activation and inactive selection. Identical selection replay succeeds;
+  altered workspace/checkpoint/activation, forged subject and retry after the
+  real reviewed revoke fail. No recipient-delivery command is produced.
+  Operations typecheck passes. This remains prerequisite evidence, not a
+  signed-in client's successful folder/file access.
+- Fresh read-only staging history confirms the distinct preserved onboarding
+  lineage: global profile v1/generation1 inactive; business-area profile
+  v1/generation2 inactive, v2/generation3 active, v3/generation4 inactive.
+  Reproduce that through the historical pre-0123 producer and real 0123
+  backfill before v7/v8 live rehearsal; do not substitute v5 or fabricate
+  history. Full recipient enrollment, source-authority projection, delivery
+  activation, coupled revocation and owner/browser acceptance remain open.
+  Separate pending security-boundary replacement decisions are not implied
+  by the additive sharing approval. No production PA update is requested.
+- A bounded cross-system trace identifies the remaining publication boundary:
+  Ops `currentResourceProof`, Client resource preflight and 0221 atomic guards
+  still require a primary staff binding or the legacy secondary native
+  binding/grant/published-event/authenticated-delivery chain. The generic
+  API-v2 adapter must produce durable source-instance/application/history-epoch,
+  authorization-generation, complete snapshot/checkpoint, project, folder and
+  prefix-correlated publication proof. Cache presence alone is insufficient.
+  This contract, including a new accepted proof branch, remains subject to the
+  separate security-boundary checkpoint; the trace is not implementation or
+  full-chain acceptance evidence.
+- Six actual workerd named-RPC boundary tests now pass without a platform-class
+  shim: exact staging environment/host/flag gating and private HTTP denial are
+  preserved over a real service binding. Client typecheck passes. This is
+  transport evidence only, not positive recipient file access.
+- Current local staging validators pass 104 tests after the checked-in examples
+  were reconciled; both app builds pass. Client enrollment/service-home/scoped
+  delivery regressions pass 49 tests, and bootstrap/authority-packet checks
+  pass 56 with four explicit Windows symlink skips. Positive complete-lineage
+  recipient delivery and live staging acceptance are still not established.
+- The complete canonical prerequisite test now passes governed customer-fixture
+  acquisition using real audited authority artifacts and the native writer,
+  with all 151 Ops/140 Client migration rows present and unauthorized insertion
+  still denied. This is not yet complete selection/home/enrollment/delivery
+  acceptance; the next lineage phases continue locally.
+- Private recipient-delivery RPC wiring is implemented locally, staging-only
+  and default-off. Independent review confirmed no production service binding,
+  no HTTP authority route and no cron dispatcher. Staging generator checks and
+  locked-Wrangler type-generation checks pass; both app typechecks pass. Root
+  reran 33 compatibility/private-RPC tests after restoring npm-locked
+  dependencies. The stricter stage gate exposed four minimal joined fixture
+  failures; corrected staging test identities restored all 12 joined tests
+  without relaxing authorization. Ops joined/config/ledger passed 29/29 and
+  Client boundary/resource suites passed 23/23. Positive governed
+  canonical-lineage and live recipient acceptance remain outstanding. No
+  deployment, new migration apply, access activation or production PA update
+  checkpoint is claimed.
+- Recovered local acceptance now includes 63 passing staging evidence/preflight
+  checks, nine private-RPC boundary tests, 44 consent/service-home tests, Client
+  type-check, and 34 existing public-link compatibility tests. Independent QA
+  also passed the preserving 0150 historical-schema test. The Client resource
+  suite now passes 13 independently rerun Miniflare tests after restrictive
+  immutable-target CAS and full audit correlation fixes. The owner-approved
+  Ops trigger split resolves SQLite expression depth while retaining atomic
+  D1.batch; expired-lease recovery and live-lease tamper tests bring its focused
+  suite to 14 passing tests after receipt-first recovery, independently rerun,
+  with type-check passing. Exact historical Client receipts reconcile before
+  freshness checks; only definitive absence may reach a currently authorized
+  new apply. The minimal joined two-database suite passes 12 tests. Root also
+  passed 97 local release-default/evidence/preflight tests and the complete
+  140/151-chain empty-database, idempotency and foreign-key rehearsal. Bootstrap
+  and authority-packet checks passed 56 tests with four explicit Windows
+  symlink skips and zero failures. Reviewed
+  SQL fingerprints are pinned for local rehearsal; release finalization stays
+  false. No new remote migration or portal resource activation occurred, and no
+  production PA update checkpoint follows from these local tests. See the
+  verified-recipient delivery sharing plan for the unresolved authority and
+  API-first source-freshness gates.
+- After the desktop application crash, workspace access was restored and the
+  original objective was reread. The goal is active again. The isolated portal
+  worktree retains the uncommitted additive 0221/0151 implementation; no pending
+  pre-crash process is assumed live. Root reran the closed command/receipt
+  contract suite after recovery: 33/33 passed. Bounded Client/Ops implementation
+  and independent inventory review continue on smaller 5.6 agents. These local
+  results do not establish production readiness, file access, or permission to
+  enable portal flags. There is no new production PA update checkpoint.
+- Local recipient-delivery contract review found a missing independent home
+  grant pin. The closed command now includes the exact home ownership epoch,
+  grant revision, and grant operation ID, separately from the Operations
+  enrollment intent revision. Root's focused run passed 33 tests and the
+  Operations typecheck passed. The next additive Client/Ops ledgers and durable
+  dispatch are being implemented locally; they are not deployed, and this
+  parser evidence does not establish recipient file access. Current head and
+  receipt joins, data-plane checks, full revocation, owner UI, and live staging
+  acceptance remain required.
+- The isolated Viewer flag PR 134 passed all ten CI jobs and merged to main as
+  `aef94236e88f8c61992a92c4ed40a0ccca0cd2bc`. Deployment failed at the existing
+  incoming-upload Workflow lookup with Cloudflare authentication code `10000`;
+  production readback remains `9a2e6997-c8f0-4e7b-ad7a-7d09fff5b4af`, 100%.
+  The owner was asked to refresh appropriate Wrangler authorization. No
+  production flag enablement or fresh Viewer dialog acceptance is claimed.
+  This does not block independent default-off portal implementation.
+- After exact-head CI, Client build and explicit staging dry run passed, the
+  reviewed `ffbd2ed` Client package deployed to `ledgetop-clients-staging` as
+  `e35e9fdc-2beb-4a0e-be1b-fa4c372f6cc0`. Newest-deployment readback (sorted by
+  `created_on`, not list position) confirms 100% of traffic. Version annotation
+  pins the source; portal, recipient enrollment, authority/workspace writers,
+  service-home and authenticated-delivery flags remain false. Retained rollback
+  version is `91fcb61a-cce0-4362-bd4c-7cc19f6e7502`; Ops remains `66e5b364`.
+  No schema migration, grant, recipient activation, production deployment, or
+  public-link change occurred in this Client deployment.
+- Feature revision `ffbd2ed1bffe30d554e583b71c2c6d786aec9541` passed all ten CI
+  jobs in terminal run `36461995214`. This publishes the presentation-only empty
+  service summary fix and reconciled evidence documents; it is not new delivery
+  authority or live recipient acceptance. Ops recovery remains at its separately
+  reviewed `962bf02` runtime; Client's subsequent default-off deployment is
+  recorded above.
+- The owner explicitly authorized implementing/testing the separate default-off
+  [verified-recipient folder-sharing path](../staging/verified-recipient-delivery-sharing-plan.md)
+  in staging, and authorized staging migrations/tests. The signed-in Ops staging
+  owner session is available; the recipient page correctly remains unavailable
+  while its flags are off. Delivery authority implementation/integration and real
+  recipient activation/revocation remain required. Production client access and
+  existing public links remain unchanged and outside this staging authorization.
+- The Client service-summary empty state is corrected locally: standalone homes
+  with no listed services show “No services available”; embedded summaries keep
+  “Operations services.” Parser tests passed 17/17, desktop/mobile browser tests
+  passed 32/32, and typecheck/build passed. Independent frozen-source QA found no
+  release-blocking issue. This presentation-only change adds no permissions,
+  navigation, actions, or client access. Its staging deployment is recorded above;
+  real authorized empty-state browser acceptance remains separate.
+- Recovery revision `962bf021b371fd4a4fc31d54f7103f7d8b52fef1` now has terminal
+  successful CI `36457331628`: all ten jobs passed. After the private backup and
+  corrected independent review, only canonical 0150 was applied to Ops staging.
+  Readback verified 150 ledger entries ending at 0150, all eleven additive schema
+  objects, zero cancellation rows, clean foreign keys, and no pending migrations.
+  The reviewed Ops package deployed default-off as version
+  `66e5b364-16ec-4da4-a379-18982a208197`, with container rollout disabled.
+  Version readback confirmed enrollment/owner/authority/workspace outbox flags
+  false and owner origin empty. At that recovery checkpoint, Client staging had
+  not been redeployed: version `91fcb61a-cce0-4362-bd4c-7cc19f6e7502` served
+  100% with portal/enrollment/writers disabled. The later Client deployment
+  recorded above supersedes that runtime observation. Previous Ops rollback
+  version `15683688-10db-46ea-8d56-a3b86385693b` and the private backup remain
+  preserved. Backup SHA-256:
+  `0282c48d74d5b9a20fd5b3139d9cf42243aed26d1d24d898d89e50e95dc53020`.
+  This is staging schema/runtime proof,
+  not signed-in enrollment, recovery/revoke acceptance, delivery authority,
+  production deployment, or permission to alter public links.
+- Staging gate review initially reported a missing reverse operation-ID fence.
+  Root checked canonical 0150 directly: both existing-operation and commit
+  BEFORE INSERT guards reject `c.operation_id=NEW.operation_id`, in addition
+  to cancelled-intent checks. The reviewer rechecked and retracted the finding;
+  no redundant trigger or weakened check was added. Conditional schema-only
+  review cleared after exact CI success, preserved fresh export, and confirmation
+  of only 0150 pending. Keep enrollment flags off and schema before runtime,
+  and do not infer live activation or delivery authority from this clearance.
+- Historical pre-deployment observation (superseded by the current checkpoint
+  above): exact recovery CI `36457331628` had nine successful jobs while
+  Operations was running its `Test` step. Remote staging migration-list readback
+  then confirmed only canonical 0150 pending.
+  A fresh private ignored Ops staging export was saved without overwriting an
+  earlier backup; SHA-256
+  `0282c48d74d5b9a20fd5b3139d9cf42243aed26d1d24d898d89e50e95dc53020`.
+  Ops build and explicit staging dry run exited 0, with container rollout
+  disabled. Current remote rollback version remains
+  `15683688-10db-46ea-8d56-a3b86385693b`; readback confirmed recipient, owner,
+  authority outbox, and workspace outbox flags false and owner origin empty.
+  At that observation no migration apply or deployment had occurred; exact-head
+  CI and independent staging gate review subsequently cleared, as recorded above.
+- Recovery runtime, owner UI/API/HTTP, canonical 0150, coherent 150-file pins,
+  and the populated-history fixture are published together at
+  `962bf021b371fd4a4fc31d54f7103f7d8b52fef1` on draft PR133 (24 files).
+  At initial publication, exact-head CI `36457331628` was still running and no
+  deployment or migration application had occurred. The staging checkpoint above
+  supersedes those observations. No merge, flag activation, production PA update,
+  or public-link change occurred. The superseded SQL example remains local.
+- A [financial portal read gap audit](../staging/financial-portal-read-gap-audit.md)
+  records why installation-wide legacy finance reads cannot serve client billing.
+  It proposes a default-off project-scoped vertical slice, pure existing action
+  links, explicit recipient/document authority and currency handling. It is a
+  read-only proposal, not implementation or approval of a new security boundary.
+- Populated-history compatibility is now frozen and independently reviewed.
+  Root rerun passed `1/1` (`35.22s`, exit 0); implementer run passed `1/1`
+  (`35.28s`, exit 0), with typecheck exit 0. Test SHA-256:
+  `3c4540fa7667269bdf38f9488ccfa8e0c89700d220967a1e4d77454aa48313ff`.
+  It applies the predecessor chain through 0149, seeds distinct issued/pending
+  requests and immutable issue/redeem operations and commits under existing
+  constraints, then compares exact history, staff, roles, and schema after a
+  deliberately failing batch and successful additive 0150 application.
+  Local preservation is proven for this fixture, not real staging records.
+- Workspace selection rerun passed `22/22` (`75.57s`, exit 0). The first run
+  passed 21 tests and exceeded its 30-second timeout only in the complete-chain
+  migration fixture. That fixture alone now has a 120-second timeout and an
+  exact 150-file assertion; other timeouts and authorization checks are unchanged.
+  Selective feature publication for fresh CI includes the now-reviewed populated
+  history test and excludes the superseded local SQL example. Exact-head CI and
+  remote backup/apply/readback have since passed as recorded above; signed-in
+  deployed acceptance remains required.
+- The 150-file canonical inventory and equivalent SQL body passed independent
+  local review. Bootstrap/preflight/evidence/authority-packet Node suites finished
+  with `119` passed, `4` Windows symlink skips, `0` failed (`57.918s`, exit 0).
+  Root's isolated complete-chain rehearsal passed `1/1` (`71.05s`, exit 0),
+  after all `9/9` Client preflight checks. It applied all 139 Client and 150 Ops
+  generated migrations to empty databases, checked ordered migration ledgers and
+  foreign keys, transformed only the reviewed seeds, kept authority outboxes
+  empty, and proved no pending work or schema changes on a second application.
+  This proves fresh-bootstrap/idempotency, not populated enrollment-history or
+  signed-in live client acceptance. Operations typecheck also exited 0.
+- Canonical cancellation migration `0150_client_portal_recipient_enrollment_cancellation.sql`
+  was prepared locally and has since been applied only to Ops staging. SHA-256
+  `939ecb0d3413070cb9b1f2232993b9e02b0a9dda9538a5e28a95bce5c139d2c3`;
+  its SQL body is unchanged from the reviewed example, with a canonical provenance
+  header. Old 0148/0149 remain unchanged. Local bootstrap/evidence pins were
+  updated together to the complete 150-file chain. Reduced ledger/joined fixtures
+  now load canonical 0150 exactly once rather than the example; root's four-suite
+  rerun passed `33/33` (`171.16s`, exit 0). The earlier five-suite candidate result
+  below is retained as historical evidence, not proof of this new canonical chain.
+  Populated-history setup initially failed an append-only Directory-generation
+  guard (`30.8s`, exit 1); correcting the fixture must not weaken that guard.
+  The corrected issued/pending/audit preservation test passed as recorded above,
+  without weakening that guard. Exact-head CI and default-off backed-up staging
+  application have since passed. Fresh bootstrap and populated-history
+  fixtures are separate local evidence, neither proving remote acceptance.
+- Final frozen recovery candidate verification passed `34/34` across five
+  ledger/full-chain/owner HTTP/owner API/joined suites (`202.68s`, exit 0).
+  Independent QA cleared the bounded local full-review cancellation contract,
+  including isolated candidate-specific SQL guards, valid negative controls,
+  scoped denies/generation changes, cross-namespace operation-ID collisions,
+  malformed timestamps/UUIDs, 105 cancelled records plus a fresh pending request,
+  and cancellation/confirmation ordering. Standalone Operations typecheck also
+  exited 0. Exact test SHA-256 values:
+  ledger `bdff3243ad10b8c367fbf2f322996030de48659112ebea72abe9d7d46539942f`;
+  full-chain `d892972d07bbd38f4247bbf2a80d85a066270000efb651e8bd79b0fd8b8c1417`;
+  SQL candidate `39f59ba1e2da27eb5adee080ef98a34df129f722c560950aa655ebaba11e8f04`.
+  The following earlier failures and partial runs are retained chronologically,
+  not current blockers. This is not canonical promotion or deployment clearance:
+  at that historical checkpoint candidate SQL was outside the 149-migration
+  inventory. Local canonical preparation and fresh 150-chain bootstrap have since
+  passed as recorded above, followed by exact-head CI and backed-up default-off
+  staging application/readback. Real enrollment/recovery/revocation acceptance
+  remains required.
+  Minimal receipt replay after target visibility loss remains separately
+  approval-gated and unimplemented. The delivery resource-authority path is
+  approved for default-off staging implementation/testing but remains
+  unimplemented, with no live grant.
+- Reviewed preparation tests and design/status documents are now published at
+  `33225907b55a308ac28ebe1e95112e593c5e349f` on draft PR133. Exact-head CI
+  `36447732883` is now terminal successful: all ten jobs passed, verified
+  against that exact published head. It proves preparation-only CI, not the
+  unpublished recovery candidate or live recipient/data access.
+  The four-file commit excludes cancellation runtime and candidate SQL, and
+  caused no deployment or authority activation.
+- An earlier exact-head CI readback showed nine jobs successful with the
+  Operations job still running; no overall success is inferred from that partial
+  result. Local owner UI build and browser tests passed `10/10` (`18.5s`), five
+  cases on desktop and mobile Edge. Known-denial and uncertain-cancel browser
+  cases are being added; this does not prove deployed portal acceptance.
+  The expanded owner browser matrix now passed `14/14` (`20.2s`, exit 0),
+  including uncertain-cancel exact replay and known-denial fresh acknowledgement
+  on desktop/mobile. Fixture SHA-256
+  `c45b699dd9721b2350117122cfa0ad3b915c0f6cbcfbb3664f55aaf2ed1eaf45`;
+  spec SHA-256
+  `c312cbb11f9c8d2b730e7379637d14abae384ffb17c1f95c72408c2daa72177f`.
+  Root inspected both mobile rendered states: content wraps without horizontal
+  clipping, retry and denied controls are distinct, and denied acknowledgements
+  are cleared. This remains an exact-ID staging admin tool, not final customer
+  onboarding UX or deployed acceptance.
+- Candidate schema review found a UUID CHECK edge case: an extra hyphen could
+  leave only 31 hexadecimal digits while satisfying the existing raw length
+  and character checks. A local SQLite probe reproduced those component
+  predicates; an exact 32-digit constraint and otherwise-valid insertion
+  regression were requested. Canonical 0148/0149 are not being rewritten.
+- Root tightened cancellation response correlation: full responses require a
+  boolean replay discriminator; minimal receipt parsing requires an issued or
+  pending input and `replayed: true`, exact operation/intent/revision, and
+  acknowledged status. The expanded client API suite passed `9/9` (`164ms`,
+  exit 0). This parser-only contract does not implement the approval-gated
+  lost-target-visibility receipt read.
+  A further discriminator check rejects responses containing both a review and
+  a receipt (full responses require `receipt: null`); its rerun passed `9/9`
+  (`162ms`, exit 0). Typechecking produced no errors after the compatibility
+  test's explicit schema-result type annotations were added.
+  The latest API validation run passed `10/10` (`168ms`, exit 0), adding
+  rejection of nonpositive revisions and impossible lifecycle/principal
+  combinations. Cancelled audit results deliberately allow either no principal
+  (cancelled before redemption) or the retained signed principal (cancelled
+  after redemption). This changes client validation, not server authority.
+- A new local full-chain compatibility test is in progress, applying the
+  cancellation candidate only after all 149 canonical migrations. Its first
+  run exposed an overly broad trigger-count assertion that included twelve
+  preexisting cancellation-related triggers; exact schema snapshots now replace
+  that assertion. The corrected full-chain plus expanded ledger run passed
+  `14/14` across two files (`189.58s`, exit 0). The chain test preserves all
+  preexisting table/index/trigger definitions and seeded staff/role rows across
+  late batch rollback and successful additive application, and checks the exact
+  eleven new schema objects and foreign keys. Subsequent typechecking exposed
+  implicit callback types in the new test, now corrected and typechecked.
+  At that earlier checkpoint, separate ledger SQL negatives still needed candidate-specific controls
+  because older constraints can reject invalid fixtures without exercising the
+  new cancellation fences. This is not full guard or live acceptance.
+- The two observed recovery failures have local candidate corrections;
+  the root rerun passed all `28/28` tests across four ledger/owner HTTP/API/joined
+  suites (`69.94s`, exit 0). Missing direct-SQL, deterministic pending
+  confirmation/cancellation, history-bound, and browser recovery coverage
+  was still required then; the final frozen local run above now covers it.
+  Minimal cancellation-receipt replay after losing
+  target visibility was rejected by the permission boundary. Explicit user
+  authorization has been requested; current target-specific retry checks remain
+  in place, with no workaround or authority expansion.
+- The initial local cancellation candidate failed two of 28 focused tests
+  (`68.60s`, exit 1): cancelled-intent inspection is denied where the owner
+  audit test expects a read, and the client response parser rejects the new
+  cancelled state. The other 26 ledger/owner HTTP/API/joined tests passed.
+  Neither failure is waived; runtime/API corrections and independent review
+  are in progress. Candidate schema remains outside the canonical migration
+  inventory and no cancellation deployment has occurred.
+- A read-only [verified-recipient delivery-sharing plan](../staging/verified-recipient-delivery-sharing-plan.md)
+  records the exact data-access mismatch: existing authenticated delivery
+  recipients require a current PA principal, whereas enrollment captures an
+  Access issuer/subject. The owner has since approved the separate
+  resource-authority contract, exact folder selection, and coupled full
+  revocation for default-off staging implementation/testing only. It remains
+  unimplemented with no live grant; home-only v3, production access, and public
+  links remain unchanged.
+- Recovery decision: terminal cancellation denies historical issue/redeem
+  application retries, while preserving immutable audit history. Exact
+  cancellation retries should return only a minimal receipt to the same
+  currently authenticated/admitted actor when target visibility is lost.
+  Stale issued/pending success must not imply a cancelled workflow can resume.
+- Independently reviewed schema-v7/v8 preparation is published to draft PR133
+  at `fc13498ca4abf473b0f272d99f5966feef8f0585`. Exact-head CI
+  `36443316070` finished successfully with all ten jobs passed, verified against
+  that exact head rather than inferred from the prior green head. The commit contains preparation/docs only, not unfinished
+  cancellation runtime or its candidate schema. No remote authority packet,
+  flag activation, recipient access, production deployment, or public-link
+  change followed publication.
+- Two additional local receipt-negative tests passed (`2/2`, `4.68s`): the
+  portal packet rejects receipt-actor/kind/version/missing-receipt drift atomically,
+  and canonical receipt guards reject direct synthetic insertion. Duplicate
+  receipt insertion is rejected too. Root's new full packet run passed `37/37`
+  (`58.24s`); the production/preparation source is unchanged. Independent
+  review of the final test-only follow-up cleared preparation-only publication
+  on the exact test hash below. A subsequent focused rerun
+  passed `2/2` (`4.54s`) after isolating duplicate activation-ID rejection from
+  all other uniqueness constraints. Actor pinning uses a reduced receipt fixture;
+  the generic direct-insertion rejection proves the combined canonical guard
+  boundary, not each trigger independently or the normal activation workflow;
+  the latest complete root rerun passed `37/37` (`55.98s`, exit 0) with test
+  SHA-256 `a3741bd246bd8c20d53274eafe04bb950b5509e468ac8bf888e99644c2e1aa2e`
+  and unchanged preparation-source SHA-256
+  `e78c371e0140de5afe9dc5a4a9fbcc220154869b71db635c1a1a375fcdc94d59`.
+  these cases do not prove the normal deployed acquisition/review/activation
+  path. Cancellation schema/runtime and its remaining privacy/race/SQL tests
+  are unpublished and are not included in the green CI head above.
+- Earlier published local authority preparation was at
+  `e703a2fef67e86620bfccc584eaa3f538bc3a2f9`, draft PR133. Exact-head CI
+  `36436173049` finished successfully with all ten jobs passed. This clears
+  the previous fixture failures for this exact head, not live enrollment or
+  production-cutover acceptance.
+  Root reran enrollment ledger plus local joined lifecycle: `8/8`, `47.42s`;
+  source/config regressions: `23/23`, `134ms`; owner/private-handoff tests:
+  `26/26`, `447ms`. The joined fixture is local
+  evidence, not deployed named-binding or live-recipient acceptance.
+  Separate schema-v7 acquisition and schema-v8 portal preparation is locally
+  implemented for the actual inactive onboarding-profile lineage; existing
+  v3–v6 contracts remain unchanged. Root independently ran the complete packet
+  suite on the earlier snapshot: `35/35`, `41.44s`, with matching script/test
+  hashes before and after. Subsequent activation-receipt hardening changed the
+  bytes; independent review then found a repeated-cycle generation-fence
+  regression (`34/35`). The corrected contract pins the independently read
+  activation-receipt generation; implementer and root reruns now pass `35/35`
+  (`55.23s` / `55.83s`) on matching stable source/test hashes. Final independent
+  QA also passed `35/35` (`53.42s`) and cleared selective preparation-only
+  publication. Wrong-reviewer/duplicate/forged activation-receipt and full
+  deployed joined acceptance remain separate open gates. None of these runs is a normal
+  activation receipt or deployed enrollment. Exact private readback remains
+  required. No new packet has been applied remotely.
+- Fixture correction is published to draft PR133 at
+  `27d5aa6c07b57a26444156743669d2738331520e`; fresh CI run `36434849309`
+  was queued at readback. The two corrected suites passed `34/34` locally and
+  independently (`98.04s` / `97.93s`), and Ops typechecking passed. Root also
+  reran metadata alone: `12/12`, `23.38s`. The Windows full-chain runs used a
+  command-only 120-second ceiling; source/CI limits and runtime checks are
+  unchanged. No new staging deployment or authority activation followed this
+  test-only commit. Full exact-head CI is still required.
+- Enrollment implementation is published in draft PR133 at
+  `b6e4a6fd58567f4c127e7594dd5cc1b40e0ac156`; CI run `36431425399`
+  finished with nine jobs passed and the Operations job failed: 2,994 tests
+  passed, six failed in two fixture suites. Five service-metadata cases are
+  rejected by the new enrollment fence; one complete-chain assertion still pins
+  final migration `0148` rather than `0149`. Focused diagnosis found the reduced
+  metadata fixture lacked the new fence table. The correction and new deny
+  regressions are covered by the newer evidence above; runtime authorization
+  was not weakened.
+  This is not a green release head and is not merged to main.
+  Staging-only packages deployed successfully: Ops version
+  `15683688-10db-46ea-8d56-a3b86385693b` and Client version
+  `91fcb61a-cce0-4362-bd4c-7cc19f6e7502`. Exact-version readback verified
+  all new enrollment/owner flags false, owner origin empty, Client portal false,
+  and the named bridge targeting only `ledgetop-ops-staging`.
+- The signed-in Ops staging tab expired during post-deployment UI checking;
+  a new owner sign-in was requested. Staging has zero directory activation
+  receipts as well as the zero-authority/selection counts below. Existing
+  governed packets do not grant `directory.portal_access.manage`; a new bounded,
+  exact-resource testing purpose is prepared and locally reviewed, with no remote authority
+  provision. Do not substitute a global grant, raw SQL recipient binding, or
+  implicit owner-role authorization. Positive live acceptance remains open.
+- Independent final QA cleared `0149` for backed-up staging-only application
+  and default-off package deployment. A fresh private staging backup preceded
+  successful application; subsequent migration-list readback reported no pending
+  Ops migrations. This is schema evidence only: enrollment remains disabled and
+  the normal joined live flow still needs the bounded prerequisites below.
+- Corrective `0149` local verification: ledger `7/7`, local joined lifecycle `1/1`, and
+  Ops typecheck passed. Root complete historical chain rerun passed `1/1`
+  (`70.56s`) for 139 Client / 149 Ops migrations. Configuration/bootstrap/
+  evidence/source guards passed `104`, with four explicit Windows symlink
+  skips and no failures. The earlier hardcoded inventory failures are retained
+  below as superseded failures, not waived migration evidence.
+- Live prerequisite readback is aggregate-only: staging currently has zero
+  active native staff admissions, zero active portal-manage allow grants,
+  zero workspace selections, and zero acknowledged selection commands.
+  Therefore local lifecycle results are not live enrollment evidence. The next
+  gate is a reviewed, bounded staging owner-authority/selection fixture using
+  governed workflows, not direct recipient-binding insertion or email matching.
+  Sanitized follow-up readback found one actor with two inactive profile grants:
+  the known global bootstrap family (history version/count `1`) and the known
+  business-area onboarding family (history version/count `3`). Existing v3/v4
+  acquisition tools intentionally require a narrower prior shape, so a reviewed
+  preservative transition is needed for this actual lineage. Counts are not a
+  substitute for exact ID/scope/history evidence. Do not delete inactive grants,
+  discard their history, or weaken row-count guards to enter the test window.
+  The proposed fixed-purpose preservative acquisition/portal transition and
+  required readback/tests are in
+  `docs/staging/recipient-enrollment-existing-lineage-review.md`; this is a
+  local preparation, not applied authority or normal live activation evidence.
+- The schema-v6 fixed-purpose authority preparation is local work only. Its
+  design preserves inactive profile/identity/Project grants and permits one
+  exact-resource `directory.portal_access.manage` allow after normal acquisition.
+  Implementer and independent packet suites passed `29/29` (`28.856s` /
+  `28.51s`); source/test syntax checks passed. QA cleared publishing local
+  preparation only, not remote grants or activation. A dedicated dependency-free
+  packet test is added to CI; the source-invariant coverage check passed `18/18`.
+  The migrated SQLite fixture seeds activation output with a test-only trigger/
+  foreign-key relaxation; it is not normal acquisition/activation evidence.
+  Actual generated provision/revoke artifacts still need exact live-lineage
+  review and prerequisite proof before any staging authority change. A valid packet issuance window
+  is not proof that runtime authority automatically expires; close the test
+  window and revoke through the reviewed artifacts.
+  Issued/pending intents do not grant Client access and must not permanently
+  prevent revoking temporary staff authority. Recipient/bridge flags must be
+  closed and read back before that revoke: redemption itself can otherwise
+  create a durable pending audit row without current owner authority. Owner
+  confirmation still requires current authority. There is no pending-intent
+  cancellation/proof-refresh recovery yet; that gap remains open before launch.
+  A separate read-only recovery review confirmed that expired pending requests
+  grant no access but remain stranded and issued intents disappear from the
+  owner list. The proposed audited cancellation/fresh-issuance workflow and
+  required SQL/HTTP/UI/race tests are recorded in
+  `docs/staging/recipient-enrollment-recovery-review.md`. An additive candidate
+  cancellation marker and owner workflow are being implemented locally;
+  canonical migration inventories remain unchanged during packet review.
+  Independent verification and joined staging recovery acceptance remain open.
+- Website workflow ownership and manual-first, provenance-backed monthly
+  reporting are already agreed. The remaining website work is a real resource,
+  edit-request lifecycle, and reporting implementation, not a renamed generic
+  service-request page. Scoped registry administrators, team transition rights,
+  post-revocation history, and publication authority still need explicit policy.
+
+### Historical checkpoint log — September 28 staging-only owner action
+
+The dated paragraphs below are chronological evidence, including superseded
+candidate observations. They are not declarations of the current process,
+branch, CI, deployment, or acceptance status; the checkpoint above is current.
+
+- Recipient enrollment candidate: root reruns passed owner/private-entrypoint
+  `26/26` and owner desktop/mobile browser `6/6` (`17.2s`). Recipient browser
+  `8/8` passed on a fresh Client build (`17.4s`). The complete local historical
+  chain rehearsal passed `1/1` (`70.67s`) for 139 Client / 148 Ops migrations;
+  migration `0149` adds two independently identified SQL-time fences and needs
+  a fresh 149-migration rehearsal and review. Local joined lifecycle passed,
+  but its direct function wiring and controlled timeout timers do not prove
+  deployed named bindings or production transport deadlines.
+- Remote staging only: existing Wrangler authentication read back exactly one
+  pending Ops migration, `0148`; a private ignored staging backup was saved and
+  `0148` applied successfully. No recipient workflow was activated or deployed.
+  The dedicated Client staging CSRF secret was provisioned without storing its
+  value in source. Both staging candidate packages passed local dry runs;
+  Operations container build/rollout was disabled. Production and public links
+  remain unchanged. Live enrollment, full revoke, and corrective `0149`
+  acceptance remain open; pending expired-proof recovery is documented in
+  `docs/staging/recipient-enrollment.md`.
+- Latest published proof/documentation head is
+  `1117cb0e764124135b4c79bad23121686748d6ee` in draft PR133. Exact-head CI
+  `36423793081` completed successfully at `2026-09-28T12:59:45Z`; readback
+  confirmed all ten jobs successful. It does not cover the subsequent
+  uncommitted enrollment ledger, HTTP/RPC adapters, UI, and staging configuration.
+- Subsequent local candidate evidence: Client proof/HTTP/parser `45/45` passed
+  (`584ms`) and Client typecheck exited `0`; owner HTTP `8/8` passed (`187ms`);
+  existing workspace-selection/private-RPC plus new enrollment RPC regressions
+  `38/38` passed (`112.27s`); source-layout/release-default checks `38/38`
+  passed. The first source-invariant run failed on deliberately pinned config
+  hashes; reviewed default-off additions now have explicit field/binding checks
+  and refreshed pins. Initial recipient desktop/mobile browser checks passed
+  `8/8` (`18.1s`); the later fresh build/run is recorded above.
+  The first complete-chain rehearsal failed before SQL because its canonical
+  inventory still expected 147 Ops migrations; updating that inventory through
+  `0148` and rerunning is required, not waived.
+- Source review caught and corrected token-less historical replay, stale owner
+  replay authorization, generation/session expiry fencing, query-token scrubbing,
+  and Ops-versus-Client confirmation-link routing. Independent core review and
+  focused tests cleared the reviewed snapshot; newer proof-expiry-during-I/O
+  hardening and normal joined acceptance were still in progress at that snapshot.
+  The later local results and staging application of `0148` are recorded above;
+  there is no candidate deployment, production enrollment, or public-link change.
+  Full deployed joined and live staging acceptance,
+  including full revocation reconciliation, remain required.
+- Before this documentation-only freshness update, the review branch was clean
+  at `93738ef3605399ff3a6ea07d84c317202cbfa301`. That head is published in
+  draft PR133; it is not merged to `main` or deployed.
+- The submitted-service readback at published head
+  `0bcce70c52d6d4d689048f7b0081afd48f5d3c1f` passed exact-head CI run
+  `36417217894`: all ten jobs completed successfully at
+  `2026-09-28T11:59:40Z`. The newer joined-D1 outage test at `93738ef` passed
+  its controlled local run `1/1` in `46.30s`, and TypeScript checking exited
+  `0` with no errors.
+- Exact-head CI run `36419850239` for `93738ef` is terminal successful, updated
+  `2026-09-28T12:25:30Z`; exact-run readback confirmed all ten jobs successful.
+  That result covers the published head, not the new
+  uncommitted enrollment implementation.
+- The owner explicitly approved the normal verified-recipient enrollment and
+  full-revocation workflow for local/staging implementation and testing only.
+  Migration `0148` and its ledger are under implementation and independent
+  review; they were not yet release-ready or remotely applied at that snapshot. Review identified
+  required atomic CAS guards, current owner authorization, single-use replay
+  handling, and separation of enrollment-token expiry from access lifetime.
+  The Client enrollment verifier's focused identity suite passed `25/25` locally
+  in `319ms`, Client TypeScript checking exited `0`, and independent source QA
+  cleared that verifier and its tests. It does not alter legacy principal reads.
+  This alone does not prove a mounted or joined enrollment workflow. Migration
+  `0220` was applied only to local/staging; the new authority and home-capability
+  flags remain default-off, and public links are unchanged. The real website-edit,
+  report, finance, and proposed-project workflows remain incomplete end-state
+  capabilities; existing aliases do not satisfy them.
+- The currently configured incoming-D1 CLI read failed with error `7403`. The
+  September 11 mail row below is retained as historical evidence, not a current
+  transport diagnosis. No credential fallback was approved.
+
+The uncommitted Client candidate now wires submitted-service **detail readback**
+through the existing independently authorized native detail route, public DTO,
+and explicit UI expansion. It retains exact request/workspace/identity/source/
+project checks and rechecks authority after the metadata read. Bounded immutable
+snapshot parsing omits raw/private fields and does not join the live catalog.
+List rows add only a native detail-availability hint; legacy detail and mutation
+behavior remain unchanged. Implementer evidence: Client typecheck/build pass;
+strict parser and route receiver/fallback tests 49/49; real Miniflare native
+detail test 1 passed/29 skipped (66.38 seconds), covering wrong workspace,
+identity and source, history after catalog rename/deactivation, suspension
+immediately after metadata read, and malformed/private answers. Desktop/mobile
+presentation and delayed-response/context-refresh checks passed 4/4 (5.6
+seconds). The latter waits for completed cancellation, the detail request's
+terminal event, and two rendered frames before asserting discarded answers.
+Client typecheck passed again after the final source edits. Independent review
+cleared the final source and hardened browser regression. Fresh exact-head CI
+is required after publication. These
+are local candidate results, not exact-head CI or credentialed live acceptance.
+This does not implement first-class website edits: those still require explicit
+website-resource, capability and routing contracts. Recipient binding approval
+and production acceptance remain separate gates.
+
+The fixture corrections and project-proposal blueprint are published as
+`dfad4267333de57918b2017dc9d911f7c064565c` in draft PR133. CI run
+`36412183385` is terminal successful (updated 11:08:57 UTC); all ten jobs
+passed, confirmed by exact-run job readback. Uncommitted readback work
+is not covered by its CI result. No merge or deployment occurred.
+
+Latest exact-head CI readback: `d60d41e5096675cd4f7460ab08ff8716f8efce69`,
+run `36409637024`, is terminal successful (updated 10:43:50 UTC).
+This clears that committed candidate's CI gate, not the subsequent uncommitted
+test-fixture changes or live recipient acceptance. The initial sources fixture
+refactor passed all three behavior cases in 214.22 seconds. Afterward, the
+immediate-ownership/memoized-disposer correction passed its pure regression
+and Operations typecheck; independent QA cleared the normal hook-timeout
+cleanup race while noting the regression does not simulate Vitest's timeout.
+The final-source complete four-case rerun passed 4/4 in 213.89 seconds.
+The final-source ordering follow-up passed 2/2 in 76.62 seconds, and Operations
+typecheck passed. Independent review verified both original minimal Delivery
+fixtures, seeds, sync/webhook ordering, assertions and 30-second behavior
+deadlines, with separate full Operations migration hooks and immediate
+memoized teardown ownership. Root's source-layout invariants passed 17/17.
+These repairs clear the two focused local files, not the failed/incomplete
+historical broad run or live recipient acceptance. Publication of this test-only
+follow-up requires fresh exact-head CI; no deployment is part of the change.
+
+Latest read-only checkpoint: exact reviewed head
+`d7de8f0494e3d444bf4081adcd63c2457c93bd72` is published in draft PR133.
+CI run `36407328635` is terminal successful at that exact head; all ten jobs
+passed, including Client and Operations. This proves the CI gate, not live
+recipient acceptance or the original local release run. The original broad local
+release preparation reported all three
+`project-alpha-sources.test.ts` cases failing at their existing 60/90/60-second
+limits, then both `project-alpha-ordering.test.ts` cases at 30-second limits.
+The owned obsolete `c337d78` session was stopped after these concrete failures
+and returned exit 1; it is failed/incomplete evidence, not a full release pass.
+No broad run was restarted. A current-source isolated rerun of the two affected
+files with unchanged assertions and timeouts is the next diagnostic step;
+neither a focused pass nor CI success substitutes for the old run's result.
+No production deployment, public-link change, or client activation occurred.
+
+The bounded follow-up now has terminal local results: the isolated source
+snapshot file failed all three cases at 60/90/60 seconds (212.38-second run),
+and the subsequently isolated ordering file failed both cases at 30 seconds
+(61.26-second run). No additional assertion/provider error was emitted.
+Resource contention is therefore not established as the explanation. Next,
+default-off test-only timing probes measure initialization, full-chain D1
+migration batches, sync and cleanup without exposing payloads or changing
+coverage, assertions, worker logic or case deadlines. The current neutral-UI
+head `d60d41e5096675cd4f7460ab08ff8716f8efce69` CI run `36409637024` is live;
+the earlier all-green d7 result is not acceptance of this newer head.
+
+The first diagnostic case now measures 29,268 ms for all 147 Ops migrations,
+22,486 ms for all 139 Client migrations, and 51,945 ms total fixture setup.
+Its first sync takes another 6,362 ms, leaving about 1.7 seconds of the existing
+60-second deadline for replay/assertions. Setup dominates this case, rather
+than a missing external response. A bounded fixture-hook refactor is planned
+after the same diagnostic run finishes: keep separate databases, full chains,
+all assertions and the 60/90/60-second behavior deadlines. This measured cause
+for one case is not a passing result or proof about every remaining case.
+The complete instrumented pre-refactor run also failed 3/3. It confirmed late
+asynchronous work after a case timeout and approximately 52-second setup in
+each case. The new independent-fixture hook run is pending. Root review found
+a setup-timeout cleanup gap: assigning the fixture only after initialization
+can leave `afterAll` without its owned runtime. Immediate runtime ownership
+and one memoized disposer must be verified before publishing this test change.
+See `client-proposed-project-approval-plan.md` for the actual project-proposal
+handoff and acceptance blueprint, including the unresolved standalone-client
+create contract and preservation of permanent financial mappings. It does not
+implement or authorize new routes, schemas, grants or deployment.
+
+A bounded project/request source audit at `d7de8f0` confirms optional-project
+requests are implemented (`routes.ts:145,2051`, `request-readiness.ts:168`),
+but client-proposed projects and approval to one chosen PA project are not.
+The current `New or one-off service` option creates a root-scoped request;
+the staff `/pa-quote` outcome is a draft quote, not a project. Existing private
+PA-origin project adoption is not a substitute. The requested third form choice
+requires a durable proposal, independently authorized staff approval with one
+selected PA source, idempotent creation/mapping receipts, revision conflict
+checks, and no implicit delivery or portal-access grant. Preserve the one-off
+path while implementing that distinct workflow; it remains a launch gap.
+
+The next local UI follow-on removes the misleading `Hello, <account name>`
+claim: the account name remains customer context, with neutral welcome copy.
+No verified person profile is invented. Existing browser assertions now check
+the same exact customer heading, including its absence before denied bootstrap
+recovery. Root's three pure contract/UI suites pass 33/33 and Client TypeScript
+checking passes; independent source QA found no authorization, request-order,
+workspace, or navigation changes. Browser fixtures were updated but have not
+been freshly executed for this follow-on; it requires its own exact-head CI.
+
+Exact follow-on head `6c2cee317fa6839a2e2728a7e5cd685056919456` CI run
+`36404656600` completed with failure September 28 09:55:12 UTC: nine jobs
+passed, but Client's full suite reported 120/121 files and 1305/1306 tests
+passing. Its integration-owned delivery/active Client authority-claim case
+timed out at the existing Linux five-second limit. This is not a passing
+release. The scoped test-fixture repair now passes the complete file (9/9)
+under the existing Windows configuration, and all three integration-claim
+states pass separately at CI's five-second case limit from both implementer
+and root. Client typecheck passes; independent source QA confirms all six
+original authorization/prefix assertions, explicit state setup and ordered
+fixture restoration. Only that test block changed; runtime authorization and
+timeout configuration remain unchanged. An initial diagnostic forced five
+seconds across the entire Windows file and timed out in three cases, including
+two unrelated cases; those unrelated tests remain unchanged. The repair and
+local Administration correction `404e36d` still require new exact-head CI.
+
+Local follow-on UI verification at review head `6c2cee3`: Incoming public-form
+tests pass 12/12 and desktop/mobile upload cases pass 8/8. Conditional access
+code, centered controls and long-filename wrapping are already implemented;
+this does not prove production release or received-email delivery.
+Administration's lower recovery/audit cards were outside the spaced panel grid.
+A local frontend-only correction preserves every existing authorization gate
+and panel order, adds containment/spacing, and constrains recovery dropdowns.
+A populated long-name fixture reproduced 320px overflow before the dropdown
+correction; the full desktop/mobile layout file now passes 4/4 and Operations
+build/typecheck pass. Independent source QA cleared the final correction.
+These local follow-ons await publication and exact-head CI; production,
+grants and public links remain unchanged.
+
+Last CI-verified integrated baseline is `1e572a0eebfe000fd4ed0df859e42e0867fe5a84`.
+Its exact-head CI run `36401610421` passed all ten jobs, with terminal
+readback at September 28 09:27:18 UTC. This includes the success-only portal
+composition and diagnostic test correction, not subsequent local changes or
+live recipients.
+Independent local focused validation passes Client 39/39 and Ops 34/34.
+Earlier CI run `36390923313` completed successfully for `9eea3e6`: all ten jobs
+passed, with terminal readback at September 28 07:31:21 UTC. Its predecessor
+`36389712464` was cancelled by the documentation push, not accepted as a
+passing run. Broad local release preparation remains live: its Client suite
+passed 119 files / 1,292 tests, then advanced to the Operations suite. This is
+not terminal proof of the complete local release command or live portal
+acceptance.
+
+The live Operations phase has now reported a 120-second native-feedback
+workspace-isolation timeout. The same case passed an isolated rerun with
+unchanged assertions/timeouts (one passed, 40 unselected, exit zero); the
+complete release failure remains open. The current portal review branch now
+also contains the reviewed Incoming repair from `18ed16a`, copied exactly at
+base `d23972a` with 27/27 target-focused tests and successful typecheck. This
+integration did not change configuration, authority, migrations or public
+links. The complete local 41-test follow-up initially exited 1 with 40 passing
+tests and the same 120-second feedback timeout. Phase timing identified
+accumulated fixture and authorization work; a reviewed test-only split retains
+every assertion and the original 120-second case limits. Its complete file now
+passes 43/43 in 855.75 seconds. A subsequent callback-type correction emits
+byte-identical JavaScript and Operations typecheck passes. Final-source CI for
+that correction now passes; this does not make the original broad release
+command successful.
+
+The service-home UI at the last verified baseline composes independently
+authorized legacy and native
+Client dashboards: only verified Operations success may initiate the existing
+independently authorized Client bootstrap. Denied Operations responses never
+start Client reads; denied Client bootstrap keeps only descriptive Operations
+metadata. Service labels neither select workspaces nor grant resource access.
+Client typecheck/build pass; root's parser/bootstrap suite passes 15/15 and
+desktop/mobile browser matrix 26/26. Independent QA identified and then cleared
+an invalid-workspace recovery loop; recovery now reloads the root and rechecks
+Operations before any further Client bootstrap. Exact-head CI now passes for
+this UI slice; it does not verify subsequent local edits.
+See `unified-portal-composition-gaps.md` for the launch matrix and missing
+website-report, financial-summary and recipient-binding prerequisites. This
+slice is not final unified-portal or live recipient acceptance.
+The proposal-only `unified-portal-feature-contracts.md` records the additional
+person-profile, website-edit, report, finance and notification contracts needed
+for the requested end state; existing quote/feedback fixtures do not fulfill
+those features.
+The unused monthly-report data-shape foundation now passes 12/12 focused tests
+from both implementer and independent QA plus Client typecheck. It adds no
+runtime import, route, schema, grant or deployment. Publication/withdrawal and
+exact resource/recipient authority remain open; this is not the monthly-report
+feature or portal launch acceptance.
+
+The subsequent local report-foundation commit is `152a13335c062efedd2bed23531ebdeab5c98e21`.
+Neutral shared-portal copy now says Ledge Top while retaining source-specific
+LTDS/LTT branding and all protocol identifiers. Client typecheck/build and two
+desktop/mobile source-branding browser cases pass. Root independently passed
+32/32 report, branding and home-UI tests. These follow-on changes still require
+their own exact-head CI. The bounded PA financial-source audit is recorded in
+`pa-financial-api-gap-audit-2026-09-28.md`; it identifies missing generic scoped
+finance contracts without adding permissions, routes or public-link mutations.
+
+The concrete portal prerequisite is a missing verified-recipient workflow:
+there is no runtime creator for the existing recipient identity-binding table,
+and the worker-mounted workspace-binding/authority-v3 actions have no frontend
+caller. Do not bypass those gaps through D1 fixtures or infer identity-link or
+portal-management authority from profile-edit authority. A separate scoped
+staging-only workflow authorization is pending; migration 0220 remains off.
+
+Incoming-mail diagnosis now has live read-only evidence rather than mailbox
+guesswork. Production `DELIVERY_DB` maps to `client-data`; the latest query
+returns one recorded digest, `failed`, `mail-transport-failed`, attempt count
+3 (created September 11 00:49:26 UTC; updated 01:30:48 UTC). It contains no
+file or recipient details and wrote zero rows. Currently serving Ops version
+`9a2e6997-c8f0-4e7b-ad7a-7d09fff5b4af` is 100% deployed and explicitly selects
+Gmail SMTP with a provisioned `SMTP_PASSWORD` binding. Its value/validity was
+not inspected. The transport is not the Cloudflare email binding while that
+flag is true. This establishes a historical transport failure, not a new
+provider rejection reason or proof of current inbox delivery. Existing open
+PR117 now includes follow-on commit `18ed16a`: a joined test reproduced a
+duplicate after SMTP DATA acceptance followed by sent-receipt storage failure.
+The repair persists an exact-attempt marker before transport, fences stale
+claims/readbacks, and holds uncertain/accepted-but-unrecorded sends without
+blind retry. Implementer and independent QA each passed 27/27 focused tests;
+the orchestrator passed the same 27 in two bounded runs. TypeScript passed.
+Feature-branch publication is not merge, deployment, or owner inbox acceptance.
+No production resend, secret
+change, deployment, retention change, or public-link change is authorized by
+this diagnostic evidence.
+
+The paragraphs below retain earlier September 28 observations; the current
+snapshot above and `portal-home-v3-validation.md` supersede stale pending
+rehearsal and candidate-head statements without erasing their history.
+
+The new disposable **remote** full-chain rehearsal is complete at e626e10:
+Client 139/Ops 147 exact ordered ledgers, both Client 0199 files, final
+0220/0147, successful second list/apply with no pending files, synthetic owner
+roles/catalog, empty foreign-key checks and zero portal authority rows.
+Evidence is retained under `.backups/remote-rehearsal-home-20260928.json`.
+Neither populated staging nor production databases were reset; no Worker
+deployment or public-link change occurred. PR133's exact e626e10 CI found a
+test-only Client declaration/tuple typecheck regression, now repaired locally
+without suppressing checks; repaired-head CI remains required. Governed live
+synthetic recipient/binding acceptance is still open, and the PA production
+update checkpoint is not ready.
+
+Actual Wrangler **local** full-chain application has now passed (Client 139,
+Ops 147), followed by successful no-op reapplication on both databases.
+Ledger readback includes both Client 0199 files and final 0220/0147; foreign-key
+checks are empty and no Client grant/audit/receipt or Ops outbox/receipt rows
+were created. This is local CLI proof, not the remaining remote empty-D1
+rehearsal. All three explicit staging-config bundle dry runs pass without
+upload/deployment. PR133 test/documentation head is now `b77a65e`; older
+`c337d78` CI observations below do not establish the new head's terminal CI.
+The broad local release preparation remains running; production is held.
+
+Client migration `0220` and Ops `0147` staging schema evidence is complete,
+but issuance and the full unified portal are not accepted. PR132 bootstrap
+head `5168e0faaac37d8b6b2326b67b8b6d3279fd33bf` has CI run
+`36379942237`; all ten checks now pass. The final Operations job completed
+successfully at `2026-09-28T05:16:45Z`. Local explicit-staging Wrangler dry
+runs passed for both Workers without upload or deployment. Serving staging
+versions remain Client `0497d73c-3435-4fab-8576-86da76fbfb11` and Ops
+`27cf5e58-61dd-4338-b6ae-634ed26ad902`; required new RPC bindings exist
+in local release configs, not those older serving versions.
+
+Local joined HTTP/database acceptance now passes 4/4, with root's independent
+combined mock/real rerun passing 8/8. It covers exact replay, removal, revoked
+owner/recipient authority and dispatcher isolation, but mocks staff login and
+is not live staging acceptance. Full release preparation exposed stale exact
+bootstrap inventory pins; those are being updated to Client 139/Ops 147 while
+preserving existing-prefix digests and all drift guards. No remote rehearsal
+or production change is implied; a clean candidate must rerun the full gates.
+
+The repaired bootstrap/authority-packet/evidence unit suites pass with 78
+passed and two Windows file-symlink cases skipped. Independent owner-handler
+review then identified missing fresh fences on acknowledged replay, dead
+replay misreporting and storage-error classification; repairs now pass root's
+independent final focused run (12/12). Historical replay after permission
+removal preserves Client revision 2/empty permissions; stale owner, recipient
+and applicable scope authority is rechecked. Pinned dead replay is 409 and
+unexpected storage failure is 503, without disguising known denial. Historical fresh-bootstrap evidence must remain
+distinct from a new full-chain rehearsal. Production/public links are held.
+
+A strict current-chain version-2 bootstrap evidence contract is implemented;
+the old version-1 proof cannot satisfy a new release. Root's combined evidence,
+bootstrap and authority-packet run passed 80 tests, with two Windows file-symlink
+skips. These local tests are not a new remote empty-D1 rehearsal. Existing
+immutable runtime pins/finalization are not silently advanced. Full clean
+release gates and live staging acceptance remain required.
+
+The normal owner action and exact-operation replay fences are committed in
+the draft PR133 candidate `c337d78f4994583c04267bc86cfdb7a6f1b8b006`, against
+the bootstrap branch, not deployed. Independent cumulative read-only QA found
+no actionable material guard regression. Exact-head CI run `36384130097`
+reached nine successful checks while Operations tests were still running;
+GitHub account rate limiting prevented a later terminal readback. Full local
+release preparation remains live after lockfile-only Ops Sync dependency
+restoration. The complete-chain isolated local D1 regression now passes the
+agent's focused run and root's independent rerun (one test, exit 0, 69.99s).
+It proves actual Client 139/Ops 147 SQL chains, synthetic seeding, foreign-key
+integrity, schema guards and no grant/outbox creation; its ledger-aware local
+reapply is not remote bootstrap or actual Wrangler reapply proof.
+Read-only Client staging queries reconfirmed all three 0220 column pairs,
+four updated triggers and zero permission-bearing grants, with no pending
+migrations. Live owner-action and recipient acceptance remain open.
+Its staging restriction remains intact after an explicit
+approval rejection of removing it. Local staging-only correctness repairs
+can proceed; production-capable source authorization is an open owner
+question, not a rollout authorization. The production PA update checkpoint
+is not ready. Existing public links and all production authority remain
+unchanged. See `portal-home-v3-validation.md` for current detailed evidence.
 
 ### September 27 — Ops-only portal bootstrap and contract parity
 
@@ -7194,6 +8059,39 @@ pending; this requirement does not claim a deployed UI change.
   mail was sent, and no source health or production state was mutated. The
   remaining outage gate is coordinated staging and production enablement with
   both exact PA connections, not a new monitor implementation.
+
+### September 28 — outage-monitor mounted-scheduler source audit
+
+- The currently mounted index scheduler resolves its audited lifecycle revision
+  through `selectProjectAlphaApiV2MonitorSchedulerRevision`; it does not trust
+  the obsolete environment revision. The runtime gate remains default-off and
+  also fails closed when the owner-recipient value is blank.
+- The exact-source policy keeps each Project Alpha identity independent. Alert
+  eligibility begins only when the unhealthy interval is strictly greater than
+  `600000` milliseconds. Verified recovery closes the current incident; a later
+  outage starts a new sequence. Durable lease plus uncertain-delivery state
+  holds ambiguous mail attempts instead of retrying them as though no delivery
+  occurred.
+- Root reran the existing incident-policy, monitor-cycle, and monitor-schedule
+  files at exact head `0bcce70`: `18/18` tests passed in `4.31s` with exit `0`.
+  The new joined-D1 outage test is implemented and source-QA clear at SHA-256
+  `72A8B9BE83D07A6F4EE7BA8E939D36D30A8D07CDE0C35C4FC2ED6E3BB7F0E21F`. A
+  single controlled run in session `89920` passed `1/1` with exit `0` in
+  `46.30s` (`15.520s` test case), starting at `2026-09-28 07:03:57` local time.
+  TypeScript check session `23018` also completed with exit `0` and no errors.
+  The joined test exercised the real D1, monitor, and mail-adapter path with only
+  transport faked. It does not prove the deployed cron, real-inbox receipt, or
+  queued-work retention behavior.
+- Published exact-head CI run `36417217894` for
+  `0bcce70c52d6d4d689048f7b0081afd48f5d3c1f` completed successfully at
+  `2026-09-28T11:59:40Z`; root REST readback verified all ten jobs completed
+  successfully. That result covers the published exact head only and does not
+  cover the new local joined-D1 test. The remaining acceptance gate is a
+  controlled deployed scheduler → Project Alpha → mail → request-detail staging
+  proof plus real-inbox receipt. A configured Cloudflare CLI read of the incoming
+  D1 database failed with error `7403`; no token fallback was approved. No
+  deployment, recipient activation, mail, credential, runtime configuration, or
+  schema change was performed by this checkpoint.
 
 ### September 22 — Project Alpha managed-directory surface revalidation
 

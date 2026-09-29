@@ -26,6 +26,7 @@ import { splitD1MigrationStatements } from "./helpers/d1-migrations";
 import {
   cancelNativeServiceRequest,
   createNativeServiceRequestDraft,
+  getNativeServiceRequestDetail,
   listNativeServiceCatalog,
   listNativeServiceRequests,
   submitNativeServiceRequestDraft,
@@ -743,6 +744,57 @@ describe("exact-target service-assignment request policy", { timeout: 60_000 }, 
       expect(response.status).toBe(501);
       expect(await response.json()).toMatchObject({ code: "native_operation_unavailable" });
     }
+  });
+
+  it("reads immutable native submitted services only for the exact current authority and source", async () => {
+    await seedSecondaryPolicyContext();
+    await enableSecondaryRequestPolicy();
+    const created = await d1ClientPortalRepository.createServiceRequest(env, secondarySession, {
+      idempotencyKey: "native-service-detail-readback", projectId: null, requestType: "service",
+      title: "Website care intake", details: "Preserve the reviewed service answers", location: null, preferredStartAt: null,
+      services: [{ publicId: "secondary-only", sourceVersion: "service-v1", answers: {} }],
+    });
+    if (!created || !("request" in created)) throw new Error("native request was not created");
+    const detail = await getNativeServiceRequestDetail(env, secondarySession, created.request.id);
+    expect(detail).toMatchObject({ id: created.request.id, submittedServiceDetailsAvailable: true,
+      submittedServices: [{ publicId: "secondary-only", sourceVersion: "service-v1" }] });
+    expect(await getNativeServiceRequestDetail(env, { ...secondarySession, workspaceId: workspaceId }, created.request.id)).toBeNull();
+    expect(await getNativeServiceRequestDetail(env, { ...secondarySession, nativePortalIdentityId: "wrong-identity" }, created.request.id)).toBeNull();
+    expect(await getNativeServiceRequestDetail(env, { ...secondarySession, nativeSourceId: sourceId }, created.request.id)).toBeNull();
+    await db.prepare(`UPDATE pa_service_catalog_items SET active=0,name='Renamed after submission' WHERE source_id=? AND public_id='secondary-only'`)
+      .bind(secondarySourceId).run();
+    expect(await getNativeServiceRequestDetail(env, secondarySession, created.request.id)).toMatchObject({
+      submittedServices: [{ name: "Secondary-only service" }],
+    });
+    let interleaved = false;
+    const wrapStatement = (statement: D1PreparedStatement): D1PreparedStatement => new Proxy(statement, {
+      get(target, property) {
+        if (property === "bind") return (...values: unknown[]) => wrapStatement(target.bind(...values));
+        if (property === "all") return async <T>() => {
+          const result = await target.all<T>();
+          if (!interleaved) {
+            interleaved = true;
+            await db.prepare(`UPDATE portal_v2_workspaces SET status='suspended' WHERE id=?`).bind(secondarySession.workspaceId!).run();
+          }
+          return result;
+        };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    let wrapped: D1Database;
+    wrapped = new Proxy(db, { get(target, property) {
+      if (property === "withSession") return () => wrapped;
+      if (property === "prepare") return (sql: string) => sql.includes("FROM client_service_request_services WHERE request_id")
+        ? wrapStatement(target.prepare(sql)) : target.prepare(sql);
+      const value = Reflect.get(target, property, target); return typeof value === "function" ? value.bind(target) : value;
+    } });
+    expect(await getNativeServiceRequestDetail({ ...env, DELIVERY_DB: wrapped }, secondarySession, created.request.id)).toBeNull();
+    expect(interleaved).toBe(true);
+    await db.prepare(`UPDATE portal_v2_workspaces SET status='active' WHERE id=?`).bind(secondarySession.workspaceId!).run();
+    await db.prepare(`UPDATE client_service_request_services SET answers_json='{"privatePrice":9000}' WHERE request_id=?`)
+      .bind(created.request.id).run();
+    expect(await getNativeServiceRequestDetail(env, secondarySession, created.request.id)).toBeNull();
   });
 
   it("leaves no native storage owner or binding when a workspace claim races the storage batch", async () => {

@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { backfillIncomingRcloneOutbox, drainIncomingRcloneOutbox } from "./incoming-rclone-outbox";
 import { reconcileIncomingRcloneDispatched } from "./incoming-rclone-reconcile";
 import { runIncomingRcloneRetention } from "./incoming-rclone-retention";
@@ -79,6 +79,8 @@ import { handleProjectAlphaApiV2MonitorControlHttp,
   projectAlphaApiV2MonitorControlHttpRequest } from "./project-alpha-api-v2-monitor-control-http";
 import { handleClientOnboardingStaffHttp } from "./client-onboarding-staff-http";
 import { handleWorkspaceBindingAdminHttp } from "./client-portal-workspace-binding-admin-http";
+import { handleAuthorityV3OwnerHttp } from "./client-portal-authority-v3-owner-http";
+import { handleRecipientEnrollmentOwnerHttp } from "./client-portal-recipient-enrollment-owner-http";
 import { consumeNativeStaffOnboardingRateLimit } from "./native-staff-onboarding-rate-limit";
 import {
   auditStatement,
@@ -485,6 +487,25 @@ async function dispatchWorkspaceBindingAdmin(c: any) {
 }
 app.use("/api/native-client-portal/workspace-binding", dispatchWorkspaceBindingAdmin);
 app.use("/api/native-client-portal/workspace-binding/*", dispatchWorkspaceBindingAdmin);
+async function dispatchAuthorityV3Owner(c:Context<{Bindings:Env;Variables:Variables}>){return handleAuthorityV3OwnerHttp(c.req.raw,{environment:c.env.ENVIRONMENT,
+  expectedHost:c.env.EXPECTED_HOST,configuration:{enabled:c.env.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ENABLED==="true",
+    issuer:c.env.TEAM_DOMAIN??"",staffAudience:c.env.OPERATIONS_AUD,origin:c.env.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ORIGIN??"",
+    csrfSecret:c.env.OPERATIONS_SESSION_SECRET},database:c.env.OPS_DB,dispatch:c.env});}
+app.use("/api/native-client-portal/authority-v3",dispatchAuthorityV3Owner);
+app.use("/api/native-client-portal/authority-v3/*",dispatchAuthorityV3Owner);
+async function dispatchRecipientEnrollmentOwner(c:Context<{Bindings:Env;Variables:Variables}>){
+  return handleRecipientEnrollmentOwnerHttp(c.req.raw,{
+    environment:c.env.ENVIRONMENT,expectedHost:c.env.EXPECTED_HOST,
+    configuration:{enabled:c.env.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED==="true"
+      &&c.env.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ENABLED==="true",
+      issuer:c.env.TEAM_DOMAIN??"",staffAudience:c.env.OPERATIONS_AUD,
+      origin:c.env.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ORIGIN??"",recipientOrigin:c.env.DELIVERY_BASE_URL,
+      csrfSecret:c.env.OPERATIONS_SESSION_SECRET},
+    database:c.env.OPS_DB,dispatch:c.env,
+  });
+}
+app.use("/api/native-client-portal/recipient-enrollment",dispatchRecipientEnrollmentOwner);
+app.use("/api/native-client-portal/recipient-enrollment/*",dispatchRecipientEnrollmentOwner);
 // This is intentionally before staff authentication. A disabled staging
 // fixture must be indistinguishable from an absent route, even to a request
 // without a valid Operations session.
@@ -3570,6 +3591,7 @@ export { dispatchThumbnailRendererApi } from "./thumbnail-renderer-api";
 export { ClientDelegatedShareSigner } from "./client-delegated-share-signer";
 export { ViewerSessionIssuer } from "./viewer-session-issuer-entrypoint";
 export { ClientOnboardingRecipientBridge } from "./client-onboarding-recipient-entrypoint";
+export { ClientPortalRecipientEnrollmentBridge } from "./client-portal-recipient-enrollment-entrypoint";
 export { ClientPortalServiceMetadataReader } from "./client-portal-service-metadata-entrypoint";
 export { ProjectAlphaDeliveryIntentIngress } from "./project-alpha-delivery-intent-entrypoint";
 export { ProjectAlphaCatalogPromotionWorkflow } from "./project-alpha-catalog-promotion-workflow";

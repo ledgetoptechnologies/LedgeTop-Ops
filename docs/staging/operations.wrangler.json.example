@@ -40,7 +40,13 @@
     "CLIENT_ONBOARDING_ADMIN_ENABLED": "false",
     "CLIENT_ONBOARDING_ADMIN_ORIGIN": "",
     "CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ENABLED": "false",
-    "CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ORIGIN": "",
+      "CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ORIGIN": "",
+      "CLIENT_PORTAL_AUTHORITY_V3_OWNER_ENABLED": "false",
+      "CLIENT_PORTAL_AUTHORITY_V3_OWNER_ORIGIN": "",
+      "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED": "false",
+      "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ENABLED": "false",
+      "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ORIGIN": "",
+      "VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_DISPATCH_ENABLED": "false",
     "CLIENT_AUTHORITY_WORKSPACE_BINDING_OUTBOX_ENABLED": "false",
     "CLIENT_PORTAL_AUTHORITY_V2_OUTBOX_ENABLED": "false",
     "CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED": "false",
@@ -113,6 +119,11 @@
   },
   "stream": { "binding": "STREAM" },
   "services": [
+    {
+      "binding": "VERIFIED_RECIPIENT_DELIVERY_AUTHORITY",
+      "service": "ledgetop-clients-staging",
+      "entrypoint": "VerifiedRecipientDeliveryAuthorityIngress"
+    },
     { "binding": "CLIENT_AUTHORITY_WORKSPACE_BINDING", "service": "ledgetop-clients-staging", "entrypoint": "ClientAuthorityWorkspaceBindingIngress" },
     { "binding": "CLIENT_PORTAL_ACCESS_AUTHORITY", "service": "ledgetop-clients-staging", "entrypoint": "OpsPortalAccessAuthorityIngress" },
     { "binding": "CLIENT_PORTAL_AUTHORITY_V2", "service": "ledgetop-clients-staging", "entrypoint": "ClientPortalAuthorityV2Ingress" },

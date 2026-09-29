@@ -107,6 +107,29 @@ export function validateApp(app, staging, production) {
     }
   }
   if (app === "operations") {
+    if (vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ENABLED === "false"
+      && vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ORIGIN !== "")
+      errors.push("operations recipient enrollment owner origin must remain empty while disabled");
+    if (vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ENABLED === "true") {
+      try {
+        const ownerOrigin = new URL(vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ORIGIN);
+        if (ownerOrigin.protocol !== "https:"
+          || ownerOrigin.origin !== vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ORIGIN
+          || ownerOrigin.hostname !== STAGING_HOSTS.operations) throw new Error();
+      } catch {
+        errors.push("operations enabled recipient enrollment owner requires the exact Ops HTTPS staging origin");
+      }
+    }
+    if (vars.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ENABLED === "false"
+      && vars.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ORIGIN !== "")
+      errors.push("operations authority v3 owner origin must remain empty while disabled");
+    if (vars.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ENABLED === "true") {
+      try {
+        const ownerOrigin = new URL(vars.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ORIGIN);
+        if (ownerOrigin.protocol !== "https:" || ownerOrigin.origin !== vars.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ORIGIN
+          || ownerOrigin.hostname !== STAGING_HOSTS.operations) throw new Error();
+      } catch { errors.push("operations enabled authority v3 owner requires the exact Ops HTTPS staging origin"); }
+    }
     if (vars.CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ENABLED === "false"
       && vars.CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ORIGIN !== "")
       errors.push("operations workspace binding admin origin must remain empty while disabled");
@@ -179,6 +202,10 @@ export function validateApp(app, staging, production) {
       && vars.CLIENT_ONBOARDING_ADMIN_ENABLED === "false" && vars[key] === "") continue;
     if (app === "operations" && key === "CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ORIGIN"
       && vars.CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ENABLED === "false" && vars[key] === "") continue;
+    if (app === "operations" && key === "CLIENT_PORTAL_AUTHORITY_V3_OWNER_ORIGIN"
+      && vars.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ENABLED === "false" && vars[key] === "") continue;
+    if (app === "operations" && key === "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ORIGIN"
+      && vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ENABLED === "false" && vars[key] === "") continue;
     complete(vars[key], `${app} vars.${key}`, errors);
     if (vars[key] === production.vars[key]) errors.push(`${app} vars.${key} reuses production`);
   }
@@ -247,11 +274,16 @@ export function validateCrossApp(configs, productionConfigs = {}) {
   if (deliveryBucket !== mapped(configs.operations.r2_buckets, "bucket_name").get("DATA_BUCKET")) errors.push("operations DATA_BUCKET must equal delivery staging DATA_BUCKET");
   const delegatedSigner = (configs.delivery.services ?? []).find((service) => service.binding === "CLIENT_DELEGATED_SHARE_SIGNER");
   const serviceMetadataReader = (configs.delivery.services ?? []).find((service) => service.binding === "CLIENT_PORTAL_SERVICE_METADATA_READER");
+  const recipientEnrollmentBridge = (configs.delivery.services ?? []).find((service) => service.binding === "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_BRIDGE");
   if (serviceMetadataReader?.service !== configs.operations.name || serviceMetadataReader?.entrypoint !== "ClientPortalServiceMetadataReader") {
     errors.push("delivery service metadata reader must target the Operations staging Worker and named metadata entrypoint");
   }
   if (delegatedSigner?.service !== configs.operations.name || delegatedSigner?.entrypoint !== "ClientDelegatedShareSigner") {
     errors.push("delivery delegated-share signer must target the Operations staging Worker and named signer entrypoint");
+  }
+  if (recipientEnrollmentBridge?.service !== configs.operations.name
+    || recipientEnrollmentBridge?.entrypoint !== "ClientPortalRecipientEnrollmentBridge") {
+    errors.push("delivery recipient enrollment bridge must target the Operations staging Worker and private named entrypoint");
   }
   const viewerSessionIssuer = (configs.delivery.services ?? []).find((service) => service.binding === "VIEWER_SESSION_ISSUER");
   if (viewerSessionIssuer?.service !== configs.operations.name || viewerSessionIssuer?.entrypoint !== "ViewerSessionIssuer") {

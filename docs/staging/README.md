@@ -124,11 +124,40 @@ changes only Client `0002_seed_initial_staff.sql` and Operations
 digest, and emits source/derived SHA-256 manifests. Apply a fresh
 empty database only with the generated `wrangler.staging.bootstrap.json` for
 that application. Do not use these configs for an existing database. Confirm
-the full 133-row Client ledger (both `0199` filenames once, final `0214`) and
-140-row Operations ledger (final `0140`), a second list/apply with no pending
+the full 139-row Client ledger (both `0199` filenames once, final `0220`) and
+147-row Operations ledger (final `0147`), a second list/apply with no pending
 migrations, one synthetic owner in each database, the Operations owner role and
 portable ACL catalog, and an empty `PRAGMA foreign_key_check`. Record those
 results in `migrations.freshBootstrap` without storing the owner email.
+
+The current release gate requires schema-version-2 fresh-bootstrap evidence
+for these 139/147 chains. Preserve the September 18 schema-version-1 rehearsal
+(133/139) unchanged; it cannot satisfy the current gate. Do not claim a new
+empty-D1 rehearsal from generator/unit tests alone. Submit truthful new
+full-chain remote rehearsal evidence before claiming this release gate passed.
+
+If the canonical staging databases are populated, create two new disposable
+staging D1 resources instead of resetting them. Save their returned identities
+in an ignored local JSON file with exactly this shape (replace the example run
+and UUIDs):
+
+```json
+{"runId":"portal-home-yyyymmdd","applications":{"delivery":{"databaseName":"client-data-staging-rehearsal-portal-home-yyyymmdd","databaseId":"11111111-1111-4111-8111-111111111111"},"operations":{"databaseName":"ltds-ops-staging-rehearsal-portal-home-yyyymmdd","databaseId":"22222222-2222-4222-8222-222222222222"}}}
+```
+
+Generate and check with:
+
+```text
+npm run staging:bootstrap:generate -- --disposable-targets .backups/staging-bootstrap-targets.json
+npm run staging:bootstrap:check -- --disposable-targets .backups/staging-bootstrap-targets.json
+```
+
+This mode still validates the exact canonical
+staging source configuration and migration digests, additionally rejects every
+configured staging or production D1 identity, and emits run-scoped configs with
+exactly one disposable D1 binding. These configs are migration-only; do not use
+them to deploy a Worker. Attribute the resulting proof to the disposable names
+and IDs in the existing schema-version-2 evidence gate.
 
 Cloudflare's remote D1 migration transport does not accept a nested
 `SELECT CASE ... RAISE(...) END` statement inside a trigger even though local

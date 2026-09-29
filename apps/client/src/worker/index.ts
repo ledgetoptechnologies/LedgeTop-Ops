@@ -13,6 +13,7 @@ export { OpsInventoryCatalogPromotionCoordinator } from "./ops-inventory-catalog
 export { OpsPortalAccessAuthorityIngress } from "./ops-portal-access-authority";
 export { ClientAuthorityWorkspaceBindingIngress } from "./client-authority-workspace-binding-entrypoint";
 export { ClientPortalAuthorityV2Ingress } from "./client-portal-authority-v2-entrypoint";
+export { VerifiedRecipientDeliveryAuthorityIngress } from "./verified-recipient-delivery-authority-entrypoint";
 import { friendlyBulkFailure } from "./bulk-download-errors";
 import type { Env, ShareRow } from "./types";
 export { BulkDownloadWorkflow } from "./workflow";
@@ -30,6 +31,7 @@ import { listDownloadableObjects, summarizeDownloadableObjects } from "./downloa
 import { listPublicShareLocations, resolvePublicShareLocation } from "./public-locations";
 import { createClientPortalRouter } from "./client-portal/routes";
 import { createOperationsHomeRouter } from "./client-portal/operations-home-routes";
+import { handleRecipientEnrollmentHttp } from "./client-portal/recipient-enrollment-http";
 import { acceptRequestAttachmentScanReceipt, cleanupExpiredRequestAttachments, readRequestAttachmentScanReceipt } from "./client-portal/request-attachments";
 import { createClientDelegatedPublicRouter } from "./client-delegated-public";
 import { clientOnboardingRecipientRouter } from "./client-onboarding-recipient";
@@ -1088,6 +1090,14 @@ app.post("/api/internal/client-request-attachments/:attachmentId/scanned", async
 // Mount before legacy PA-backed admission; the independent router still
 // verifies client Access and an exact explicit Operations home permission.
 app.route("/api/client/v2/operations", createOperationsHomeRouter());
+app.all("/api/client/v2/recipient-enrollment/*", c => handleRecipientEnrollmentHttp(c.req.raw, {
+  env: c.env,
+  enabled: c.env.CLIENT_PORTAL_ENABLED === "true" && c.env.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED === "true",
+  environment: c.env.ENVIRONMENT,
+  origin: c.env.CLIENT_PORTAL_ORIGIN ?? "",
+  csrfSecret: c.env.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_CSRF_SECRET ?? "",
+  binding: c.env.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_BRIDGE,
+}));
 app.route("/api/client", createClientPortalRouter({ pricingHintProvider: projectAlphaPricingHintProvider }));
 app.route("/api/client-onboarding", clientOnboardingRecipientRouter);
 app.on(["GET", "HEAD"], "/onboarding/:invitationId", c => c.env.CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED === "true"
