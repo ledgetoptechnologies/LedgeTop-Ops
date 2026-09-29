@@ -5888,3 +5888,28 @@ pending; this requirement does not claim a deployed UI change.
   API-v2 feature flag or authority policy is enabled by this checkpoint.
   Verify the secret by name/value state only; never record or print its raw
   value.
+
+### September 29 — Operations Viewer workspace-renewal transport CI
+
+- Clean-main Ops PR #138 (`b2e3c04fc840cf77fb997676a7608e40076c0867`) adds a
+  default-off, staging-only workspace-renewal endpoint and its Access identity,
+  CSRF, idempotency, rate-limit, permission-recheck, and expiry-cap tests.
+- Exact-head GitHub Actions run `36642532549` completed successfully across all
+  ten jobs. The Operations suite reported 264 test files and 2,576 tests
+  passing; its typecheck and deployable build also passed. Client, Ops Sync,
+  source-invariant, incoming, thumbnail, and browser jobs were green.
+- This is not end-to-end silent-renewal acceptance. The separate Viewer still
+  has no caller for the new endpoint; the existing Operations client continues
+  to use `/api/viewer/admin-grant`. Cross-origin behavior, session revocation,
+  retry/state preservation, and live staging acceptance remain unverified.
+- PR #138 therefore remains draft and the renewal feature gate remains off.
+  Do not deploy to production, update either PA instance, activate client
+  access, or change public links until the Viewer-side caller and staging
+  acceptance are coordinated and proven.
+- Live staging browser readback on September 29 confirms the remaining runtime
+  blockers: Operations shows Project Alpha and 3D Viewer as not configured and
+  reports Project Alpha data may be out of date; the authenticated Client
+  staging host renders “The client portal is not enabled for this site.” No
+  staging settings or client data were changed. The portal rollout checklist
+  intentionally keeps `CLIENT_PORTAL_ENABLED=false` until its independent
+  projection, parity, migration, and temporary-activation gates are satisfied.
