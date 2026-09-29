@@ -34,6 +34,14 @@ Updated September 29, 2026. The owner approved implementation and resumption aft
   not harmless: it adds a route and scheduled group reconciliation.
   Keep the Client and Ops portal/access flags closed until the complete staging
   release is pinned, deployed, migrated, and verified.
+- The candidate's local `npm run staging:check` was run after that live
+  inventory and failed only on missing ignored files:
+  `apps/client/wrangler.staging.json`,
+  `apps/operations/wrangler.staging.json`, and
+  `apps/ops-sync/wrangler.staging.json`. No release-preparation dry-runs,
+  migrations, version uploads, or deployments ran. Do not synthesize these
+  release configs from incomplete or stale values; the release contract and
+  Viewer image pin remain unresolved.
 
 - The isolated `codex/staging-integration-reconcile` candidate now contains
   current local `origin/main` (`aef94236`) plus a local-only merge commit
