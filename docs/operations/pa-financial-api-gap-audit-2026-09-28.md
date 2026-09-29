@@ -1,7 +1,7 @@
 # Project Alpha financial portal API gap audit
 
-Date: 2026-09-28  
-Status: bounded source audit; design input only  
+Date: 2026-09-28
+Status: bounded source audit; design input only
 Implementation status: no financial endpoint, permission, binding, schema, or
 runtime setting was added or approved by this audit.
 

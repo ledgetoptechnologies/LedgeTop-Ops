@@ -62,4 +62,3 @@ WHEN (NEW.protocol_version=2 AND NEW.permissions_json<>'[]') OR (NEW.resulting_s
      AND audit.resulting_state=NEW.resulting_state AND audit.protocol_version=NEW.protocol_version
      AND audit.permissions_json=NEW.permissions_json)
 BEGIN SELECT RAISE(ABORT,'operations portal authority receipt requires exact immutable protocol audit'); END;
-

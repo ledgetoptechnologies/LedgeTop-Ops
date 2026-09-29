@@ -17,9 +17,11 @@
 
 ## Safe next step
 
-- Obtain the owner's explicit approval to enable production public sharing. Do not bypass the feature gate just for an owner or change Viewer to infer missing authority.
+- The owner explicitly approved changing production `VIEWER_PUBLIC_SHARES_ENABLED` from `false` to `true` on September 28, including the owner, global administrators, and other staff already granted `viewer.share.create`. Read-only staff and clients receive no new permission. No actual public-link creation, publication, or revocation is authorized by this flag approval.
 - If approved, release only the reviewed production configuration change from an appropriate current production base, preserving unrelated portal work and emergency disable behavior. Keep staging-only recipient enrollment/folder-sharing work out of that release.
 - Confirm the deployed non-secret flag, reopen Viewer from Ops with a fresh session, and inspect the Share dialog without submitting it. An existing session does not retroactively acquire new permissions; fresh issuance or successful renewal is required.
 - Creating, publishing, or revoking an actual public link still requires explicit approval for the selected resource. Do not expose private measurements by default.
 
-No production settings, grants, public links, role assignments, publication state, or Viewer code were changed for this diagnosis.
+The isolated release is based on Ops main `8115ce1ca7bf736bb37039f42338547da2617d92`. Its only runtime configuration change is the approved sharing flag; it does not include staging-only recipient or portal work. On this release branch, all 31 focused tests, Operations typecheck, the existing release preflight, and the production build passed. Deployment and fresh-session dialog acceptance still require separate verification.
+
+No grants, public links, role assignments, publication state, or Viewer code were changed for this diagnosis or release preparation.
