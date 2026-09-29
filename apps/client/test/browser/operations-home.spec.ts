@@ -31,12 +31,17 @@ async function expectAuthorizedNavigation(page: Page, unavailableLinks: string[]
   }
 }
 
-async function interceptClientApi(page: Page, status: number, body: unknown, clientSession?: unknown) {
+async function interceptClientApi(page: Page, status: number, body: unknown, clientSession?: unknown,
+  operationsHomeForRead?: (read: number) => { status: number; body: unknown }) {
   const calls: string[] = [];
+  let operationsHomeReads = 0;
   await page.route("**/api/client/**", route => {
     const path = new URL(route.request().url()).pathname;
     calls.push(path);
-    if (path === "/api/client/v2/operations/home") return route.fulfill({ status, json: body });
+    if (path === "/api/client/v2/operations/home") {
+      const result = operationsHomeForRead?.(operationsHomeReads++);
+      return route.fulfill({ status: result?.status ?? status, json: result?.body ?? body });
+    }
     if (path === "/api/client/session") return clientSession
       ? route.fulfill({ json: clientSession })
       : route.fulfill({ status: 401, json: { error: "Sign in required" } });
@@ -115,6 +120,20 @@ test("independently authorized client portal composes an actionless operations s
     "/api/client/projects", "/api/client/service-requests", "/api/client/map-config",
     "/api/client/notification-history", "/api/client/request-readiness",
   ]));
+});
+
+test("removes a previously authorized service summary when foreground revalidation is denied", async ({ page }) => {
+  const calls = await interceptClientApi(page, 200, response, undefined, read => read === 0
+    ? { status: 200, body: response }
+    : { status: 403, body: { error: "service home access revoked" } });
+  await page.goto("/portal");
+  await expect(page.getByText("Aerial operations", { exact: true })).toBeVisible();
+
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await expect(page.getByText("Sign in required", { exact: true })).toBeVisible();
+  await expect(page.getByText("Aerial operations", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Infrastructure review", { exact: true })).toHaveCount(0);
+  expect(calls.filter(path => path === "/api/client/v2/operations/home").length).toBeGreaterThanOrEqual(2);
 });
 
 test("combined portal keeps its operations heading when an authorized home has no listed services", async ({ page }) => {

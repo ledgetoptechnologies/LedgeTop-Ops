@@ -1,6 +1,37 @@
 # API-first migration — current implementation objective and work register
 
-Updated September 28, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+Updated September 29, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+
+### Current checkpoint — September 29, 2026
+
+- Client portal revocation-freshness hardening is isolated on the exact open
+  PR #133 head `2a4e4d5053452b55ea8409f480a87f8ef6caa990`. It rechecks the
+  independently authorized Operations service-home summary on foreground
+  return and every 60 seconds while visible; the prior summary is hidden during
+  revalidation and remains hidden on denial, malformed response, or transport
+  failure. In this clean worktree, Client type-check and production build pass,
+  and the full Client browser matrix passes 462 tests (8 skipped), plus all
+  16 dual-domain daily-use checks.
+  No access grant or public link changed. The change is not yet deployed.
+- Fresh read-only Cloudflare Worker deployment inventory used the current generic
+  worker names (not legacy `ltds-*` names): `ledgetop-ops-staging` exists at
+  100% on version `66e5b364-16ec-4da4-a379-18982a208197`, and
+  `ledgetop-clients-staging` exists at 100% on version
+  `e35e9fdc-2beb-4a0e-be1b-fa4c372f6cc0`. The required
+  `ledgetop-ops-sync-staging` Worker does not exist (Cloudflare API 10007), so
+  staging cannot prove the joined Ops/Client/PA projection path. Earlier
+  `ltds-ops-staging` inventory was the wrong physical name and is superseded.
+- On this exact checkout, `npm run staging:check` stops because all three
+  ignored staging configs (`apps/client/wrangler.staging.json`,
+  `apps/operations/wrangler.staging.json`, and
+  `apps/ops-sync/wrangler.staging.json`) are missing;
+  `npm run staging:evidence:check` stops because
+  `.backups/staging-release-evidence.json` is missing. Validator tests pass
+  (27 preflight, 36 evidence). No staging migration, version upload, deployment,
+  flag change, recipient activation, or public-link operation was attempted.
+  Use the existing secured config/evidence source if available; do not
+  reconstruct deployment-critical values from stale copies or infer missing
+  secrets/identities.
 
 ### Current checkpoint — September 28, 2026
 
