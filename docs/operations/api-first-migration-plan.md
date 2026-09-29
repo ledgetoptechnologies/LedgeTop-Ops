@@ -1,8 +1,30 @@
 # API-first migration — current implementation objective and work register
 
-Updated September 28, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+Updated September 29, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
 
 ### Current checkpoint — September 29, 2026
+
+- Fresh read-only Cloudflare staging readback confirms the Client portal master,
+  enrollment, invitation, and Operations service-home flags are all false;
+  the existing Project Alpha portal-sync transport flag is true, but does not
+  activate the portal. Ops authority, owner, recipient-enrollment, workspace-
+  binding, service-metadata, and Viewer public-share flags are also false.
+  No staging flags or migrations were changed in this readback.
+- Current GitHub readback: PR 133 remains open and draft at head
+  `2a4e4d5053452b55ea8409f480a87f8ef6caa990`; the reconciled local candidate
+  `3814b49898c5390428f185a389d57894de6a2f9a` is not published. No combined
+  status checks were reported for either queried commit. Do not treat prior
+  CI on an earlier head as evidence for this candidate.
+- The release gate remains non-actionable until the contract, immutable Viewer
+  image, cross-repository pins, exact staging configs, and fresh evidence are
+  complete. Required ignored staging config inputs are operator/environment
+  identifiers that cannot be inferred safely from tracked source. Read-only
+  Ops Worker settings do expose a valid `PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_SOURCE_ID`
+  matching the already reviewed `project-alpha:staging` test source slug; this
+  verifies the configured slug, not the PA source-instance/application/history
+  identity or a working API connection. Keep the Client and Ops portal/access
+  flags closed until the complete staging release is pinned, deployed, migrated,
+  and verified.
 
 - The isolated `codex/staging-integration-reconcile` candidate now contains
   current local `origin/main` (`aef94236`) plus a local-only merge commit
