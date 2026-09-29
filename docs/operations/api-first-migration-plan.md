@@ -2,6 +2,42 @@
 
 Updated September 28, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
 
+### Current checkpoint — September 29, 2026
+
+- The isolated `codex/staging-integration-reconcile` candidate now contains
+  current local `origin/main` (`aef94236`) plus a local-only merge commit
+  `a3f4707`. The one add/add conflict in the Viewer owner-sharing checkpoint
+  was resolved using the newer main version, which records the owner's
+  previously approved production flag change. The migration EOF blank line
+  and financial-audit header trailing spaces were removed. No push or deploy
+  was made; the original conflicted worktree was not edited.
+- Local verification on the candidate: Client authority/enrollment suites
+  passed 101/101; Operations authority/enrollment/ledger suites passed
+  139/139; Viewer session/admin-permission/share-route suites passed 32/32.
+  Wrangler type generation and TypeScript checks passed for Client,
+  Operations, and Ops Sync. Client, Operations, and Ops Sync builds passed.
+  Staging config/preflight/evidence contract tests passed. The full monorepo
+  test and browser suites have not completed and are not claimed as passing.
+- Cloudflare read-only staging readback: Ops version `66e5b364`
+  (`962bf02` recipient-recovery default-off), Client version `e35e9fdc`
+  (`ffbd2ed` service-summary fix). Client `CLIENT_PORTAL_ENABLED`, recipient
+  enrollment, invitation email, and Operations service-home flags remain
+  false; `PROJECT_ALPHA_PORTAL_SYNC_ENABLED=true` does not activate the
+  Client portal. Ops recipient-owner, workspace-binding admin, and service
+  metadata flags remain false. The live Client page remains unavailable by
+  design while its master flag is off.
+- Actual staging release preparation is blocked: this isolated worktree lacks
+  all three ignored `wrangler.staging.json` configs and
+  `.backups/staging-release-evidence.json`. The release-contract finalization
+  flag is still false and the pinned cross-system candidate is not finalized.
+  A read-only merge simulation found no runtime-code conflict, but identified
+  the single documentation conflict that is now resolved. No remote migration,
+  deployment, staging flag change, access activation, or public-link change
+  occurred. Next staging action is to supply or securely reconstruct the exact
+  approved staging config inputs, finalize the exact cross-repository release
+  pins, pass the complete release-preparation/browser gates, then deploy and
+  migrate staging with access flags kept off until their separate acceptance.
+
 ### Current checkpoint — September 28, 2026
 
 - Draft PR 133 contains committed default-off recipient storage/outbox/private
