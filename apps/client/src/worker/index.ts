@@ -39,6 +39,8 @@ import { clientOnboardingRecipientRouter } from "./client-onboarding-recipient";
 import { projectAlphaPricingHintProvider } from "./client-portal/project-alpha-pricing-hint";
 import { processInvitationEmailBatch } from "./client-portal/invitation-email";
 import { runClientDelegatedShareExpiryReconciliation } from "./client-portal/delegated-share-expiry-health";
+import { BULK_CACHE_EXPIRED_ROW_LIMIT, BULK_CACHE_ORPHAN_CLAIM_LIMIT, BULK_CACHE_PENDING_DELETE_LIMIT }
+  from "./bulk-cache-limits";
 import { clientPortalEntryOrigin, configuredPublicRequestOrigins, legacyClientRedirectLocation, malformedPortalLaunchRedirect, requestHostAllowed, requirePublicShareOrigin } from "./origin-policy";
 import {
   classifyPublicShareLifecycle,
@@ -62,14 +64,6 @@ const app = new Hono<{ Bindings: Env; Variables: Variables }>();
 const COOKIE_NAME = "__Host-ltds_delivery";
 const PUBLIC_DELIVERY_PAGE_SIZE=150;
 const PUBLIC_MEDIA_LOOKUP_CHUNK_SIZE=50;
-const BULK_CACHE_PENDING_DELETE_LIMIT=50;
-const BULK_CACHE_EXPIRED_ROW_LIMIT=50;
-const BULK_CACHE_ORPHAN_CLAIM_LIMIT=50;
-// Fixed statements (job expiry/reads, candidate reads, pruning) plus the
-// worst case of one finalize statement per pending intent and three statements
-// (two-statement claim + finalize) per newly claimed generation.
-export const BULK_CACHE_CLEANUP_MAX_D1_QUERIES=9+BULK_CACHE_PENDING_DELETE_LIMIT
-  +3*BULK_CACHE_EXPIRED_ROW_LIMIT+3*BULK_CACHE_ORPHAN_CLAIM_LIMIT+6;
 
 function cloudEnv(env:Env):CloudTransferEnv{if(!env.CLOUD_TRANSFER_TOKEN_SECRET)throw new HTTPException(503,{message:"Cloud copy is not configured"});return env as CloudTransferEnv;}
 function cloudProvider(value:string):CloudProvider{if(value==="dropbox")return"dropbox";if(value==="google"||value==="google-drive")return"google";throw new HTTPException(404,{message:"Cloud provider not found"});}
