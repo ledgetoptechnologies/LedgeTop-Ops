@@ -33,7 +33,7 @@ export type ApiV2PortalPublicationProof = Readonly<{
     sourceInstanceId: string;
     applicationId: string;
     historyEpoch: string;
-    authorizationGeneration: number;
+    authorizationGeneration: string;
   }>;
   workspace: Readonly<{
     workspaceId: string;
@@ -107,6 +107,7 @@ const OPAQUE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/u;
 const PUBLIC_ID = /^[0-9a-f]{32}$/u;
 const DECIMAL = /^(?:0|[1-9][0-9]{0,18})$/u;
 const POSITIVE_DECIMAL = /^[1-9][0-9]{0,18}$/u;
+const MAX_API_INTEGER = "9223372036854775807";
 const MAX_SAFE_REVISION = 2_147_483_647;
 const RESERVED_PREFIX_SEGMENTS = new Set(["dump", "_ltds", ".previews"]);
 
@@ -135,14 +136,12 @@ function sha256(value: unknown): string | null { return typeof value === "string
 function revision(value: unknown): number | null {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 1 && value <= MAX_SAFE_REVISION ? value : null;
 }
-function nonNegativeRevision(value: unknown): number | null {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= MAX_SAFE_REVISION ? value : null;
-}
 function expectedRevision(value: unknown): number | null {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value < MAX_SAFE_REVISION ? value : null;
 }
 function decimal(value: unknown, positive = false): string | null {
-  return typeof value === "string" && (positive ? POSITIVE_DECIMAL : DECIMAL).test(value) ? value : null;
+  return typeof value === "string" && (positive ? POSITIVE_DECIMAL : DECIMAL).test(value)
+    && (value.length < MAX_API_INTEGER.length || value <= MAX_API_INTEGER) ? value : null;
 }
 function canonicalTime(value: unknown): string | null {
   if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(value)) return null;
@@ -178,12 +177,12 @@ function parseProofInternal(value: unknown): ApiV2PortalPublicationProof | null 
   const applicationId = sourceRecord && uuid(sourceRecord.applicationId);
   const historyEpoch = sourceRecord && uuid(sourceRecord.historyEpoch);
   const source = sourceRecord && sourceId(sourceRecord.sourceId);
-  const authorizationGeneration = sourceRecord && nonNegativeRevision(sourceRecord.authorizationGeneration);
+  const authorizationGeneration = sourceRecord && decimal(sourceRecord.authorizationGeneration);
   if (!sourceRecord || !source || !sourceInstanceId || !applicationId || !historyEpoch || authorizationGeneration === null) return null;
 
   const workspaceRecord = exactObject(record.workspace, WORKSPACE_KEYS);
   const workspaceId = workspaceRecord && boundedId(workspaceRecord.workspaceId);
-  const rootPublicId = workspaceRecord && boundedId(workspaceRecord.rootPublicId);
+  const rootPublicId = workspaceRecord && publicId(workspaceRecord.rootPublicId);
   const sourceWorkspaceId = workspaceRecord && boundedId(workspaceRecord.sourceWorkspaceId);
   const rootType = workspaceRecord?.rootType;
   if (!workspaceRecord || !workspaceId || !rootPublicId || !sourceWorkspaceId

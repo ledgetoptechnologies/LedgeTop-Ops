@@ -24,11 +24,35 @@ Updated September 29, 2026. The owner approved implementation and resumption aft
   (172.68 seconds), including both clean and preserved historical lineages.
   Operations `npm run check` also passes on the final feature branch. Draft
   PR #139 stacks on PR #136 for CI review; it is not a production cutover.
+- CI run `36670758127` completed successfully for `fd7e3ecefad263a12e6653e8e72667ef81edb931`,
+  with all ten jobs passing. This result covers that committed candidate only,
+  not the subsequent local 0222 revocation or Ops-native publication changes.
 - Added a default-inert, closed API-v2 publication proof/receipt contract with
   source, application, epoch, generation, complete snapshot, workspace, project,
-  folder and CAS pins. Its six focused tests and targeted TypeScript checks pass.
+  folder and CAS pins. Its eight focused tests and targeted TypeScript checks pass.
   No route consumes it yet: parsing is not publication authority, and the
   durable producer plus Client guard/revocation integration remain outstanding.
+- The replacement publication design is explicitly Ops-native: customer and
+  project topology, explicit project-folder reservations and live recipient
+  authority remain in Operations. PA is an optional linked-record freshness
+  fence and financial source, never the portal principal/entitlement owner.
+  A complete topology snapshot does not grant a recipient access to every
+  child customer, project or file. Real Client readers must join publication
+  receipts and current individual grants; no legacy authorization fallback.
+- Local cross-manager revoke work adds Client migration 0222, immutable
+  creation provenance and separate operation-actor audit fields. The exact
+  0221 renewal-current-proof trigger has been mechanically compared and is
+  unchanged after its metadata-backfill window. Independent review found and
+  corrected a missing-actor/null audit edge case; the negative runtime case
+  verifies atomic rollback. All 15 focused Client cases pass; the runtime,
+  entrypoint and actual Worker RPC aggregate passes 31 cases. Client and Ops
+  type-check pass, along with 18 existing Ops authorization/retry cases.
+  The full real-workerd 141/151 migration rehearsal passes, including provenance
+  columns, restored guards, empty authority ledgers, foreign keys and idempotency
+  (73.19 seconds for the final strengthened fixture). Bootstrap/preflight/evidence
+  tooling passes 82 cases with four Windows symlink-privilege skips; configuration
+  and acceptance tooling passes another 20 cases. The migration has not been
+  deployed; the remote 140-file inventory below remains historical.
 - Fresh remote inventory confirms Client staging at
   `e35e9fdc-2beb-4a0e-be1b-fa4c372f6cc0` and Operations staging at
   `f5a07171-cb05-4cf3-9251-afe087550920`, each at 100%. The latter's

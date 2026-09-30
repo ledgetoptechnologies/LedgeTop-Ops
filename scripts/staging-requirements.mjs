@@ -296,6 +296,7 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0219_operations_portal_authority_v2.sql",
     "0220_operations_portal_authority_v3_permissions.sql",
     "0221_verified_recipient_delivery_authority.sql",
+    "0222_verified_recipient_delivery_cross_manager_revoke.sql",
   ]),
   operations: Object.freeze([
     "0014_staff_acl_controls.sql",

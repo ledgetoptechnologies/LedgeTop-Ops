@@ -49,10 +49,13 @@ or enable unrelated features just to test native enrollment.
   inventory-catalog services. They do **not** include the new
   `VERIFIED_RECIPIENT_DELIVERY_AUTHORITY` service. An applied sharing migration
   is not evidence that its newer runtime or private transport is deployed.
-- The current staging migration lists have no pending files. Ledger counts
+- The last inspected deployed staging migration lists had no pending files. Ledger counts
   are Client 140 and Operations 151; both foreign-key checks are empty, with
   zero reported writes. Verify exact schema/trigger content before attributing
   current local SQL semantics to those remote names.
+  Local Client migration 0222 is tested but is not part of this deployed
+  inventory. An expired/stale existing-head backfill preserves provenance;
+  the full 141/151 runtime chain, foreign keys and idempotency checks pass.
 - The visible Client `/portal` screen says the portal is not enabled. This is
   consistent with default-off configuration, not successful recipient access.
 - Ops Sync staging is absent. Its old signed projection pipeline is not a
@@ -68,16 +71,36 @@ CHECK inside the same atomic batch; 47 packet/guard tests pass, including denial
 and rollback cases. The final full joined workerd suite passes all four cases. This is
 local runtime evidence, not live recipient enrollment or delivery acceptance.
 
-The generic API-v2 publication proof contract is now implemented and inert,
-with six focused tests passing. It neither creates nor validates live authority
-by itself; the durable producer and consuming Client guards are still required.
+The generic API-v2 publication proof contract is implemented and inert,
+with eight focused tests passing. It neither creates nor validates live authority
+by itself. The next publication path is Ops-native: Operations owns customer
+topology, projects, explicit folder reservations, recipient identity and grants.
+PA supplies optional linked-record freshness fences, not portal principals or
+entitlements. A complete workspace snapshot is not permission to browse it.
+Client readers must still apply current individual enrollment and resource
+grants, without falling back to legacy permissions.
+
+Implement and verify the replacement end to end:
+
+- Reserve an explicit Ops workspace root and exact project-to-folder targets;
+  never infer them from names, addresses, email or a PA-shaped cache.
+- Publish a bounded, immutable root/direct-client/project topology snapshot
+  with canonical hashes, counts, versions and exact authority-head references.
+- Atomically consume the snapshot into Client publication records and receipts;
+  do not write PA principals, entitlements or legacy projection grants.
+- Join real hierarchy and file readers to that publication receipt and live
+  recipient/delivery authority heads. Service-home access alone cannot expose
+  all customer details, projects or files in the workspace.
+- Verify retries, duplicate receipt replay, stale-version rejection, partial
+  write rollback, revocation without republishing and customer isolation.
 
 1. Reproduce the preserved historical pre-0123 bootstrap and onboarding
    generations through real producers; rehearse v7 acquisition and v8 selection.
    Do not seed approvals, grants, histories or activation receipts directly.
-2. Complete generic API-v2 publication proof and independent-manager revocation
-   across Ops, the private contract and Client atomic guards. Preserve source,
-   application, epoch, generation, checkpoint, project, folder and prefix pins.
+2. Complete Ops-native workspace publication and independent-manager revocation
+   across Ops, the private contract, Client atomic guards and actual readers.
+   Preserve native identity/version, recipient, project, folder and prefix pins,
+   plus source/application/epoch fences where a record is linked to PA.
 3. Check current-schema remote readback and private backups, then prepare exact
    current-lineage default-off versions with their new private binding. Never
    deploy the older onboarding-only candidate over the newer staged portal.

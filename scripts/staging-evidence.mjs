@@ -16,7 +16,7 @@ const apps = ["delivery", "operations", "ops-sync"];
 // must never satisfy the current release gate.
 const CURRENT_FRESH_BOOTSTRAP_SCHEMA_VERSION = 2;
 const CURRENT_FRESH_BOOTSTRAP_APPLICATIONS = Object.freeze({
-  delivery: Object.freeze({ source: "client", databaseName: BOOTSTRAP_APPS.delivery.databaseName, configPath: "apps/client/wrangler.staging.bootstrap.json", manifestPath: "apps/client/.staging-bootstrap/manifest.json", seed: "0002_seed_initial_staff.sql", ledgerCount: BOOTSTRAP_APPS.delivery.migrationCount, finalMigration: "0221_verified_recipient_delivery_authority.sql" }),
+  delivery: Object.freeze({ source: "client", databaseName: BOOTSTRAP_APPS.delivery.databaseName, configPath: "apps/client/wrangler.staging.bootstrap.json", manifestPath: "apps/client/.staging-bootstrap/manifest.json", seed: "0002_seed_initial_staff.sql", ledgerCount: BOOTSTRAP_APPS.delivery.migrationCount, finalMigration: "0222_verified_recipient_delivery_cross_manager_revoke.sql" }),
   operations: Object.freeze({ source: "operations", databaseName: BOOTSTRAP_APPS.operations.databaseName, configPath: "apps/operations/wrangler.staging.bootstrap.json", manifestPath: "apps/operations/.staging-bootstrap/manifest.json", seed: "0002_seed_acl.sql", ledgerCount: BOOTSTRAP_APPS.operations.migrationCount, finalMigration: "0151_verified_recipient_delivery_authority_outbox.sql" }),
 });
 const DISPOSABLE_RUN_ID = /^[a-z0-9](?:[a-z0-9-]{1,18}[a-z0-9])$/;

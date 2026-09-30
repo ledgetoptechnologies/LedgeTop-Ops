@@ -526,7 +526,8 @@
         "0218_client_authority_workspace_binding.sql",
         "0219_operations_portal_authority_v2.sql",
         "0220_operations_portal_authority_v3_permissions.sql",
-        "0221_verified_recipient_delivery_authority.sql"
+        "0221_verified_recipient_delivery_authority.sql",
+        "0222_verified_recipient_delivery_cross_manager_revoke.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
@@ -736,8 +737,8 @@
           "applyEvidenceRef": "<EVIDENCE_REFERENCE>",
           "readbackEvidenceRef": "<EVIDENCE_REFERENCE>",
           "transformedFiles": ["0002_seed_initial_staff.sql"],
-          "ledgerCount": 140,
-          "finalMigration": "0221_verified_recipient_delivery_authority.sql",
+          "ledgerCount": 141,
+          "finalMigration": "0222_verified_recipient_delivery_cross_manager_revoke.sql",
           "sourceSeedSha256": "<CANONICAL_SEED_SHA256>",
           "generatedSeedSha256": "<GENERATED_SEED_SHA256>",
           "databaseWasEmpty": false,

@@ -23,9 +23,9 @@ const fixture = (overrides: Record<string, unknown> = {}) => ({
     sourceInstanceId: "33333333-3333-4333-8333-333333333333",
     applicationId: "44444444-4444-4444-8444-444444444444",
     historyEpoch: "55555555-5555-4555-8555-555555555555",
-    authorizationGeneration: 9,
+    authorizationGeneration: "9",
   },
-  workspace: { workspaceId: "workspace-01", rootType: "organization", rootPublicId: "org-01", sourceWorkspaceId: "source-workspace-01" },
+  workspace: { workspaceId: "workspace-01", rootType: "organization", rootPublicId: "abcdef0123456789abcdef0123456789", sourceWorkspaceId: "source-workspace-01" },
   directory: {
     snapshotId: "66666666-6666-4666-8666-666666666666",
     generationId: "generation-01",
@@ -53,7 +53,7 @@ const parsedFixture = () => {
 describe("API-v2 portal publication proof contract", () => {
   it("accepts a complete source-qualified proof and canonicalizes property order", () => {
     const proof = parsedFixture();
-    expect(proof.source).toMatchObject({ sourceId: "project-alpha:secondary", authorizationGeneration: 9 });
+    expect(proof.source).toMatchObject({ sourceId: "project-alpha:secondary", authorizationGeneration: "9" });
     const shuffled = { ...fixture(), folder: fixture().folder, source: fixture().source };
     expect(canonicalApiV2PortalPublicationProof(shuffled)).toBe(canonicalApiV2PortalPublicationProof(proof));
   });
@@ -62,6 +62,23 @@ describe("API-v2 portal publication proof contract", () => {
     expect(parseApiV2PortalPublicationProof({ ...fixture(), resultingRevision: 3 })).toBeNull();
     expect(parseApiV2PortalPublicationProof({ ...fixture(), action: "revoke", state: "active" })).toBeNull();
     expect(parseApiV2PortalPublicationProof({ ...fixture(), action: "suspend", state: "suspended" })).not.toBeNull();
+  });
+
+  it("preserves PA signed-int64 authorization generations without numeric rounding", () => {
+    for (const authorizationGeneration of ["0", "2147483648", "9007199254740993", "9223372036854775807"]) {
+      expect(parseApiV2PortalPublicationProof({ ...fixture(), source: { ...fixture().source, authorizationGeneration } })?.source.authorizationGeneration)
+        .toBe(authorizationGeneration);
+    }
+    for (const authorizationGeneration of [9, "09", "-1", "1e3", "9223372036854775808"]) {
+      expect(parseApiV2PortalPublicationProof({ ...fixture(), source: { ...fixture().source, authorizationGeneration } })).toBeNull();
+    }
+    expect(parseApiV2PortalPublicationProof({ ...fixture(), project: { ...fixture().project, revision: "9223372036854775808" } })).toBeNull();
+  });
+
+  it("requires the exact public root identifier rather than a label or numeric ID", () => {
+    for (const rootPublicId of ["org-01", "1", "ABCDEF0123456789ABCDEF0123456789", fixture().workspace.rootPublicId + "0"]) {
+      expect(parseApiV2PortalPublicationProof({ ...fixture(), workspace: { ...fixture().workspace, rootPublicId } })).toBeNull();
+    }
   });
 
   it("requires ordered observed and verification times without claiming currentness", () => {

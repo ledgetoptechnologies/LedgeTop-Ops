@@ -142,6 +142,8 @@ test("governed staging authority packets retain dependency-free local CI coverag
   const workflow = read(".github/workflows/ci.yml");
   assert(workflow.includes("name: Verify governed staging authority packets locally"));
   assert(workflow.includes("run: node --test scripts/staging-native-authority-packet.test.mjs"));
+  assert(workflow.includes("scripts/staging-bounded-guards.test.mjs"));
+  assert(workflow.includes("scripts/staging-onboarding-authority-packet.test.mjs"));
 });
 
 test("Client Portal browser acceptance remains a required CI job", () => {
