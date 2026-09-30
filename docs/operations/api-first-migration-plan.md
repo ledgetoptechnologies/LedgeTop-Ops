@@ -4,6 +4,25 @@ Updated September 30, 2026. The owner approved implementation and resumption aft
 
 ### Current checkpoint — September 30, 2026 (UTC)
 
+Latest exact-head observation: PR #139 is pushed at
+`8f6feb0c33560e6075db2a9e88f7889f6d90483d`, not merged or deployed.
+CI `36705005064` completed its Client job with 133 passing files / 1 failing
+file (1,422 passing tests / 2 failing tests). Both failures are the HTTP
+adapter's old object-valued metadata mock; the new bounded primitive transport
+correctly rejects it. Update this fixture to the actual canonical string
+contract, retaining fail-closed route behavior and all authorization checks.
+The test-only correction is now independently verified: root session 67369
+passed 27 tests across HTTP routes, service-home validation and actual two-Worker
+RPC (25.01 seconds), plus receiver preflight 9/9 and Client type-check. The
+smaller reviewer separately passed route 9/9 and type-check. New HTTP assertions
+retain correlated denial as 403 and malformed transport as 503. No runtime,
+authorization or migration code changed in this correction.
+Other running jobs are not accepted until terminal. Native authority approvals,
+configured Ops staging access (7403), historical cleanup and live end-to-end
+acceptance remain separate blockers. No production update checkpoint is reached.
+
+The summaries below retain earlier observations as component history.
+
 Current release summary: draft PR #139 is pushed at
 `97178689c2f517fe49d86decd18bb56fdb0e8170`. Exact-head CI `36700393785`
 finished with nine successful jobs and an Operations test failure. Two full-chain

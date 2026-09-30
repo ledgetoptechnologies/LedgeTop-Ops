@@ -6,6 +6,22 @@ attestation of client access.
 
 ## Keep the workflows separate
 
+Latest exact-head observation: PR #139 is pushed at `8f6feb0`, not merged or
+deployed. CI `36705005064` completed Client with 133 passing files and one
+failing HTTP adapter fixture (1,422 passing tests / two failing tests). Its
+positive RPC mock still returns an object instead of the canonical bounded
+string required by the real transport. Correct the fixture, not the runtime
+authorization/validation guards. The corrected fixture now independently passes
+27 root tests (HTTP routes, service-home and real two-Worker RPC; 25.01 seconds),
+receiver preflight 9/9 and Client type-check. Smaller-reviewer route 9/9 and
+type-check also pass. Correlated denial remains 403; malformed wire remains
+503. This test-only change broadens no runtime permissions. Remaining original
+CI jobs are not yet terminal accepted.
+This finding does not clear native-authority approval stops, Ops staging 7403,
+historical cleanup or complete native client-workflow acceptance.
+
+The summaries below retain earlier observations as component history.
+
 Current summary: draft PR #139 is pushed at
 `97178689c2f517fe49d86decd18bb56fdb0e8170`. Exact-head CI `36700393785`
 finished with nine successful jobs; Operations failed in two stale full-chain

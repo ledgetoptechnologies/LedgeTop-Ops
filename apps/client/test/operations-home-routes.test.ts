@@ -5,13 +5,17 @@ import type { Env } from "../src/worker/types";
 const authority = "11111111-1111-4111-8111-111111111111";
 const principal = { issuer: "https://access.example.test", subject: "person-one", email: "person@example.test" };
 const path = `/home/${authority}`;
+const successWire = () => JSON.stringify({ ok: true, protocolVersion: 1, authorityId: authority,
+  workspaceId: "workspace-one", ownershipEpoch: 1, grantRevision: 1,
+  issuer: principal.issuer, subject: principal.subject,
+  services: [{ serviceId: "service-one", providerId: "provider-one", displayLabel: "Inspection", revision: 1 }] });
+const denialWire = () => JSON.stringify({ ok: false, protocolVersion: 1, authorityId: authority,
+  workspaceId: "workspace-one", ownershipEpoch: 1, grantRevision: 1,
+  issuer: principal.issuer, subject: principal.subject, code: "denied" });
 function fixture(allowed = true) {
   const statement = { bind: () => statement, all: vi.fn(async () => ({ success: true,
     results: allowed ? [{ authority_id: authority, workspace_id: "workspace-one", ownership_epoch: 1, grant_revision: 1 }] : [] })) };
-  const rpc = vi.fn(async () => ({ ok: true, protocolVersion: 1, authorityId: authority,
-    workspaceId: "workspace-one", ownershipEpoch: 1, grantRevision: 1,
-    issuer: principal.issuer, subject: principal.subject,
-    services: [{ serviceId: "service-one", providerId: "provider-one", displayLabel: "Inspection", revision: 1 }] }));
+  const rpc = vi.fn(async () => successWire());
   // Isolated HTTP adapter fixture; actual SQL permission checks are exercised
   // against genuine ledger migrations in operations-service-home.test.ts.
   const env = { CLIENT_PORTAL_ENABLED: "true", CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED: "true",
@@ -96,5 +100,15 @@ describe("independent Operations home HTTP admission", () => {
     expect((await router.fetch(request("/home/not-an-authority"), env)).status).toBe(403);
     rpc.mockRejectedValueOnce(new Error("transport lost"));
     expect((await router.fetch(request(), env)).status).toBe(503);
+  });
+
+  it("maps canonical correlated denial and malformed wires without weakening admission", async () => {
+    const router = createOperationsHomeRouter({ resolvePrincipal: async () => principal });
+    const denied = fixture();
+    denied.rpc.mockResolvedValueOnce(denialWire());
+    expect((await router.fetch(request(path), denied.env)).status).toBe(403);
+    const malformed = fixture();
+    malformed.rpc.mockResolvedValueOnce("{}");
+    expect((await router.fetch(request("/home"), malformed.env)).status).toBe(503);
   });
 });
