@@ -20,7 +20,8 @@ Updated September 29, 2026. The owner approved implementation and resumption aft
   atomic batch, without editing applied migrations or removing predicates.
   All 47 focused packet/guard tests pass, including drift and rollback cases;
   the new historical workerd case now passes through v7/v8 provision, selection,
-  replay and revoke. Full final joined-suite verification is still pending.
+  replay and revoke. The final four-case joined suite also passes in workerd
+  (172.68 seconds), including both clean and preserved historical lineages.
 - Added a default-inert, closed API-v2 publication proof/receipt contract with
   source, application, epoch, generation, complete snapshot, workspace, project,
   folder and CAS pins. Its six focused tests and targeted TypeScript checks pass.

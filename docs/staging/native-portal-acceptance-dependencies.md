@@ -65,7 +65,7 @@ or enable unrelated features just to test native enrollment.
 The new historical-lineage case now passes in actual workerd after the v7/v8
 generated guard split. The split retains every top-level predicate as its own
 CHECK inside the same atomic batch; 47 packet/guard tests pass, including denial
-and rollback cases. Final full joined-suite verification is pending. This is
+and rollback cases. The final full joined workerd suite passes all four cases. This is
 local runtime evidence, not live recipient enrollment or delivery acceptance.
 
 The generic API-v2 publication proof contract is now implemented and inert,
