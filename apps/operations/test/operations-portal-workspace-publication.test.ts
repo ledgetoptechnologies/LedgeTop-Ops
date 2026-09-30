@@ -3,6 +3,7 @@ import {
   OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_LIMITS,
   canonicalOperationsPortalWorkspacePublication,
   parseOperationsPortalWorkspacePublication,
+  parseOperationsPortalWorkspaceFolderPrefix,
   sha256OperationsPortalWorkspacePublication,
   sha256OperationsPortalWorkspaceSnapshot,
   verifyOperationsPortalWorkspacePublication,
@@ -159,6 +160,16 @@ function generatedUuid(value: number): string {
 }
 
 describe("Operations portal workspace publication contract", () => {
+  it("exposes one strict selected-folder syntax policy without inferring ownership", () => {
+    expect(parseOperationsPortalWorkspaceFolderPrefix("clients/acme/project/")).toBe("clients/acme/project/");
+    for (const prefix of ["../clients/", "./clients/", "clients/../acme/", "clients\\acme/",
+      "clients//acme/", "clients/DuMp/", "clients/_LTDS/", "clients/.previews/",
+      "clients/%2e%2e/", "clients/#private/", "clients/[glob]/", "clients/{glob}/",
+      "clients/*/", "clients/?/", " clients/acme/", "clients/acme", "/clients/acme/",
+      "x".repeat(1000) + "/", "clients/\u0000/", "clients/\u007f/"]) {
+      expect(parseOperationsPortalWorkspaceFolderPrefix(prefix)).toBeNull();
+    }
+  });
   it("preserves canonical opaque native Directory IDs instead of interpreting them as paths", async () => {
     const value = rawFixture();
     const root = "ops/organization/Acme..École";
@@ -229,6 +240,33 @@ describe("Operations portal workspace publication contract", () => {
     expect(await sha256OperationsPortalWorkspacePublication(shuffled))
       .toBe(await sha256OperationsPortalWorkspacePublication(first));
     expect(await verifyOperationsPortalWorkspacePublication(shuffled)).not.toBeNull();
+  });
+
+  it("preserves a standalone client's explicit NULL-parent relationship revision", async () => {
+    const raw = rawFixture(), client = raw.snapshot.directoryRecords[0]!;
+    const value = { ...raw, target: { ...raw.target, rootKind: "standalone_client", rootRecordId: client.recordId },
+      snapshot: { ...raw.snapshot, counts: { ...raw.snapshot.counts, directoryRecords: 1 },
+        directoryRecords: [{ ...client, parentRecordId: null }],
+        projects: raw.snapshot.projects.map(project => ({ ...project, organizationRecordId: null, externalFence: null })) } };
+    value.snapshot.snapshotSha256 = await sha256OperationsPortalWorkspaceSnapshot(value);
+    const verified = await verifyOperationsPortalWorkspacePublication(value);
+    expect(verified?.snapshot.directoryRecords[0]).toMatchObject({ kind: "client", parentRecordId: null,
+      relationshipVersion: "3" });
+    const missingRelationship = { ...value, snapshot: { ...value.snapshot,
+      directoryRecords: [{ ...value.snapshot.directoryRecords[0]!, relationshipVersion: null }] } };
+    expect(parseOperationsPortalWorkspacePublication(missingRelationship)).toBeNull();
+    const staleShape = { ...value, snapshot: { ...value.snapshot,
+      directoryRecords: [{ ...value.snapshot.directoryRecords[0]!, relationshipVersion: "0" }] } };
+    expect(parseOperationsPortalWorkspacePublication(staleShape)).toBeNull();
+  });
+
+  it("does not put client relationship pins on an organization record", () => {
+    const value = rawFixture();
+    value.snapshot.directoryRecords[1]!.relationshipVersion = "1";
+    expect(parseOperationsPortalWorkspacePublication(value)).toBeNull();
+    value.snapshot.directoryRecords[1]!.relationshipVersion = null;
+    value.snapshot.directoryRecords[1]!.parentRecordId = "another-organization";
+    expect(parseOperationsPortalWorkspacePublication(value)).toBeNull();
   });
 
   it("requires an exact complete root/direct-client closure", async () => {

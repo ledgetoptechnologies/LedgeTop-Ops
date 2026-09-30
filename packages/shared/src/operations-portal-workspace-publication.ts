@@ -43,6 +43,8 @@ export type OperationsPortalDirectoryRecord = Readonly<{
   kind: "organization" | "client";
   version: string;
   parentRecordId: string | null;
+  /** Every native client has an explicit relationship revision, including
+   * a verified NULL parent. Organizations have no client relationship. */
   relationshipVersion: string | null;
   displayName: string;
   /** Zero or more exact shared-record mirrors. Multiple PA instances may
@@ -275,6 +277,11 @@ function safePrefix(value: unknown): string | null {
     || RESERVED_PREFIX_SEGMENTS.has(segment.toLowerCase()))) return null;
   return value;
 }
+
+/** Shared syntax only: does not establish ownership, containment or access. */
+export function parseOperationsPortalWorkspaceFolderPrefix(value: unknown): string | null {
+  return safePrefix(value);
+}
 function headState(value: unknown): OperationsPortalHeadState | null {
   return value === "active" || value === "revoked" ? value : null;
 }
@@ -329,7 +336,8 @@ function parseDirectoryRecord(value: unknown): OperationsPortalDirectoryRecord |
   const displayName = boundedText(record.displayName, 240), externalFences = parseDirectoryFences(record.externalFences);
   if (!recordId || (record.kind !== "organization" && record.kind !== "client") || version === null
     || parentRecordId === undefined || relationshipVersion === undefined || !displayName || !externalFences) return null;
-  if ((parentRecordId === null) !== (relationshipVersion === null)) return null;
+  if (record.kind === "organization" && (parentRecordId !== null || relationshipVersion !== null)) return null;
+  if (record.kind === "client" && relationshipVersion === null) return null;
   return freeze({ recordId, kind: record.kind, version, parentRecordId, relationshipVersion, displayName, externalFences });
 }
 
@@ -411,7 +419,7 @@ function topologyValid(publication: OperationsPortalWorkspacePublication): boole
   const { target, snapshot } = publication;
   const directory = new Map(snapshot.directoryRecords.map(record => [record.recordId, record]));
   const root = directory.get(target.rootRecordId);
-  if (!root || root.parentRecordId !== null || root.relationshipVersion !== null
+  if (!root || root.parentRecordId !== null
     || root.kind !== (target.rootKind === "organization" ? "organization" : "client")) return false;
   for (const record of snapshot.directoryRecords) {
     if (record.recordId === target.rootRecordId) continue;
