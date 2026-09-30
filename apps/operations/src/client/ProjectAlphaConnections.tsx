@@ -3,7 +3,8 @@ import { Card } from "@ltds/ui";
 import { api, ApiError } from "./api";
 
 const ENDPOINT = "/api/admin/integrations/project-alpha/connectors";
-const READ_ACCEPTANCE_ENDPOINT = "/api/admin/integrations/project-alpha/api-v2/read-acceptance";
+const READ_ACCEPTANCE_ENDPOINT = "/api/admin/api-v2/project-alpha/read-acceptance";
+const READ_ACCEPTANCE_CONNECTIONS_ENDPOINT = `${READ_ACCEPTANCE_ENDPOINT}/connections`;
 const PRIMARY = "project-alpha:primary";
 type Connector = {
   sourceId: string; displayName: string; producerBindingId: string; snapshotOrigin: string; snapshotBasePath: string;
@@ -19,6 +20,8 @@ type PortalStatus = { available: boolean; authorities: PortalAuthority[];
 type ProjectManagementRoute = { sourceId: string; version: number; revision: number; enabled: boolean; reviewedUrlTemplate: string | null };
 type Directory = { connectors: Connector[]; health: Health[]; legacyPrimary: boolean; recovery?: Recovery[] | null;
   portal?: PortalStatus; projectManagement?: ProjectManagementRoute[] };
+type ApiV2ReadAcceptanceConfig = { status: "configured" | "unconfigured" | "misconfigured";
+  readAcceptanceEnabled: boolean; connections: Array<{ sourceId: string; enabled: boolean }> };
 type ReadAcceptancePart = { status: string; count?: number; exactIdentityMatch?: boolean; exactContractMatch?: boolean };
 type ReadAcceptance = { sourceId: string; readOnly: boolean; capabilities: ReadAcceptancePart;
   directory: ReadAcceptancePart; projects: ReadAcceptancePart };
@@ -43,14 +46,16 @@ function RecoveryStatus({ connector, recovery }: { connector: Connector; recover
   return <p><strong>Scheduled recovery</strong> · {connector.state === "active" ? "Eligible by deployment configuration" : `Paused by deployment configuration (${connector.state})`}<br />
     {recovery ? <>Last attempt: {labels[recovery.status]} · Last success: {date(recovery.lastSuccessAt)}{recovery.nextAttemptAt && <><br />Next attempt not before: {date(recovery.nextAttemptAt)}</>}{recovery.errorCode && <><br />Last recovery error: {recovery.errorCode}</>}{recovery.failureCount > 0 && <> · Failure count: {recovery.failureCount}</>}</> : "Recovery status unavailable."}</p>;
 }
-function ReadAcceptanceCheck({ connector, disabled }: { connector: Connector; disabled: boolean }) {
+function ReadAcceptanceCheck({ sourceId, connectionEnabled, acceptanceEnabled, disabled }: {
+  sourceId: string; connectionEnabled: boolean; acceptanceEnabled: boolean; disabled: boolean;
+}) {
   const [busy, setBusy] = useState(false), [result, setResult] = useState<ReadAcceptance | null>(null), [error, setError] = useState("");
   const verify = async () => {
-    if (busy || disabled || connector.state !== "active") return;
+    if (busy || disabled || !connectionEnabled || !acceptanceEnabled) return;
     setBusy(true); setResult(null); setError("");
     try {
       const response = await api<ReadAcceptance>(READ_ACCEPTANCE_ENDPOINT, {
-        method: "POST", body: JSON.stringify({ sourceId: connector.sourceId }),
+        method: "POST", body: JSON.stringify({ sourceId }),
       });
       setResult(response);
     } catch (caught) {
@@ -59,13 +64,15 @@ function ReadAcceptanceCheck({ connector, disabled }: { connector: Connector; di
         : caught instanceof Error ? caught.message : "The read-only API connection could not be verified.");
     } finally { setBusy(false); }
   };
-  const verified = result?.readOnly === true && result.sourceId === connector.sourceId
+  const verified = result?.readOnly === true && result.sourceId === sourceId
     && result.capabilities.status === "verified" && result.capabilities.exactIdentityMatch === true
     && result.capabilities.exactContractMatch === true && result.directory.status === "observed"
     && result.projects.status === "observed";
   return <div className="alpha-read-acceptance" role="group" aria-label="Read-only API verification">
-    <button type="button" className="button-ghost button-small" disabled={busy || disabled || connector.state !== "active"}
+    <button type="button" className="button-ghost button-small" disabled={busy || disabled || !connectionEnabled || !acceptanceEnabled}
       onClick={() => void verify()}>{busy ? "Verifying read connection…" : "Verify read-only API connection"}</button>
+    {!connectionEnabled && <p>Connection is disabled by deployment configuration.</p>}
+    {!acceptanceEnabled && <p>Read-only acceptance is disabled by deployment configuration.</p>}
     {result && <p role={verified ? "status" : "alert"} className="notice">{verified
       ? `API v2 read connection verified · Directory ${result.directory.count ?? 0} · Projects ${result.projects.count ?? 0}`
       : `API v2 read verification did not pass · Capabilities ${result.capabilities.status} · Directory ${result.directory.status} · Projects ${result.projects.status}`}</p>}
@@ -158,14 +165,25 @@ function PortalPurpose({ connector, status, primaryActive, disabled, onAction }:
  * never a browser form for source authority or credentials. */
 export function ProjectAlphaConnections() {
   const [data, setData] = useState<Directory | null>(null), [error, setError] = useState(""), [message, setMessage] = useState("");
-  const [loading, setLoading] = useState(true), [syncing, setSyncing] = useState<string | null>(null), [revision, setRevision] = useState(0);
+  const [apiV2Config, setApiV2Config] = useState<ApiV2ReadAcceptanceConfig | null>(null), [apiV2ConfigError, setApiV2ConfigError] = useState("");
+  const [legacyVisible, setLegacyVisible] = useState(false);
+  const [loading, setLoading] = useState(false), [syncing, setSyncing] = useState<string | null>(null), [revision, setRevision] = useState(0);
   const live = useRef(true);
   useEffect(() => { live.current = true; return () => { live.current = false; }; }, []);
   useEffect(() => {
+    if (!legacyVisible) { setLoading(false); return; }
     const controller = new AbortController(); setLoading(true);
     api<Directory>(ENDPOINT, { signal: controller.signal }).then(result => { if (!controller.signal.aborted) { setData(result); setError(""); } })
       .catch(caught => { if (!controller.signal.aborted) setError(caught instanceof Error ? caught.message : "Connection status could not be loaded."); })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => controller.abort();
+  }, [legacyVisible, revision]);
+  useEffect(() => {
+    const controller = new AbortController();
+    api<ApiV2ReadAcceptanceConfig>(READ_ACCEPTANCE_CONNECTIONS_ENDPOINT, { signal: controller.signal })
+      .then(result => { if (!controller.signal.aborted) { setApiV2Config(result); setApiV2ConfigError(""); } })
+      .catch(caught => { if (!controller.signal.aborted) setApiV2ConfigError(caught instanceof Error
+        ? caught.message : "API-v2 connection status could not be loaded."); });
     return () => controller.abort();
   }, [revision]);
   const refresh = () => { if (!loading && !syncing) { setMessage(""); setRevision(value => value + 1); } };
@@ -210,8 +228,24 @@ export function ProjectAlphaConnections() {
   const legacy: Connector = { sourceId: PRIMARY, displayName: "Primary connection", producerBindingId: "legacy", snapshotOrigin: "", snapshotBasePath: "", applicationKey: "", profile: "primary_legacy", state: "active", readVisible: true, activeRevision: 0, version: 0 };
   return <Card title="Project Alpha connections"><div className="alpha-connections">
     <p>Connection identities, destinations, and credentials are managed as deployment configuration. Operations can show status and request a sync, but cannot register, alter, or retire a source from the browser.</p>
-    {error && <p role="alert" className="notice">{error}</p>}{message && <p role="status" className="notice">{message}</p>}{!data && !error && <p role="status">Loading connections…</p>}
-    <button type="button" className="button-ghost button-small" disabled={loading || Boolean(syncing)} onClick={refresh}>Refresh connection status</button>
+    {error && <p role="alert" className="notice">{error}</p>}{message && <p role="status" className="notice">{message}</p>}{legacyVisible && !data && !error && <p role="status">Loading legacy connection tools…</p>}
+      <button type="button" className="button-ghost button-small" disabled={loading || Boolean(syncing)} onClick={refresh}>Refresh connection status</button>
+    <section className="alpha-connection" aria-label="Project Alpha API v2 read-only connections">
+      <h3>Project Alpha API v2 · read-only acceptance</h3>
+      <p>Checks the deployment-configured API-v2 connection directly. This does not use legacy snapshot sync or change either system.</p>
+      {apiV2ConfigError && <p role="alert" className="notice">{apiV2ConfigError}</p>}
+      {!apiV2Config && !apiV2ConfigError && <p role="status">Loading API-v2 connection status…</p>}
+      {apiV2Config?.status === "unconfigured" && <p>No API-v2 connections are configured for this deployment.</p>}
+      {apiV2Config?.status === "misconfigured" && <p role="alert">The API-v2 connection configuration is invalid or unavailable. Secret details are not shown here.</p>}
+      {apiV2Config?.status === "configured" && apiV2Config.connections.map(connection => <div key={connection.sourceId} className="alpha-connection-actions">
+        <span><strong>{connection.sourceId}</strong> · {connection.enabled ? "Enabled" : "Disabled"}</span>
+        <ReadAcceptanceCheck key={`${connection.sourceId}:${connection.enabled}:${apiV2Config.readAcceptanceEnabled}:${revision}`}
+          sourceId={connection.sourceId} connectionEnabled={connection.enabled}
+          acceptanceEnabled={apiV2Config.readAcceptanceEnabled} disabled={loading || Boolean(syncing)} />
+      </div>)}
+    </section>
+    {!legacyVisible && <button type="button" className="button-ghost button-small" disabled={loading || Boolean(syncing)} onClick={() => setLegacyVisible(true)}>Show legacy connection tools</button>}
+    {legacyVisible && <p className="notice">Legacy snapshot sync, portal controls, and project links are separate from API v2. These tools do not verify or change the API-v2 connection.</p>}
     {data?.legacyPrimary && <section className="alpha-connection" aria-label="Primary connection"><h3>Primary connection</h3><p><strong>Business record sync</strong> · Using the original deployment configuration. Add it to the deployment source manifest to migrate it to the same exact-source registry as additional Project Alpha instances.</p><SyncHealth health={data.health.find(row => row.sourceId === PRIMARY)} /><button type="button" disabled={loading || Boolean(syncing)} onClick={() => void sync(legacy)}>{syncing === PRIMARY ? "Synchronizing…" : "Sync primary now"}</button></section>}
     {data?.connectors.map(connector => {
       const management = data.projectManagement?.find(row => row.sourceId === connector.sourceId);
@@ -223,8 +257,7 @@ export function ProjectAlphaConnections() {
           disabled={loading || Boolean(syncing)} onAction={action => void portalAction(connector, action)} />
         <ProjectManagement connector={connector} route={management} disabled={loading || Boolean(syncing)} onRefresh={() => setRevision(value => value + 1)} />
         <div className="alpha-connection-actions"><button type="button" disabled={loading || Boolean(syncing) || connector.state !== "active"} onClick={() => void sync(connector)}>{syncing === connector.sourceId ? "Synchronizing…" : "Sync now"}</button>
-          <ReadAcceptanceCheck key={`${connector.sourceId}:${connector.version}:${connector.activeRevision}:${revision}`}
-            connector={connector} disabled={loading || Boolean(syncing)} /></div>
+        </div>
         <details><summary>Connection details</summary><dl><dt>Source</dt><dd>{connector.sourceId}</dd><dt>Producer</dt><dd>{connector.producerBindingId}</dd><dt>Destination</dt><dd>{connector.snapshotOrigin}{connector.snapshotBasePath}</dd><dt>Application</dt><dd>{connector.applicationKey}</dd><dt>Revision</dt><dd>{connector.activeRevision}</dd></dl><p>These values are read-only here. Change the reviewed deployment source manifest and deploy Operations; do not paste credentials into this page.</p></details>
       </section>;
     })}

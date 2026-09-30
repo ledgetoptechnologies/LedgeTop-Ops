@@ -398,6 +398,8 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0120_project_alpha_project_v2_canonical_settlement.sql",
     "0121_project_alpha_project_v2_settlement_proof_expiry.sql",
     "0122_project_alpha_project_v2_canonical_activation.sql",
+    "0123_native_directory_authority_history.sql",
+    "0124_project_alpha_project_adoption_review_evidence.sql",
   ]),
 });
 

@@ -34,7 +34,13 @@ digest. It does not impose a permanent single-owner invariant.
 
 ## What it verifies
 
-`POST /api/admin/integrations/project-alpha/api-v2/read-acceptance` with
+The Operations administration page obtains its API-v2 source inventory from
+`GET /api/admin/api-v2/project-alpha/read-acceptance/connections`. It returns
+only source IDs and enabled state; it does not return hostnames or identity
+UUIDs. Both endpoints are administrator-only and require global
+`integrations.manage`.
+
+`POST /api/admin/api-v2/project-alpha/read-acceptance` with
 `{"sourceId":"project-alpha:..."}` performs only these upstream GETs:
 
 1. `/api/v2/capabilities`, requiring the exact Directory and Project inventory
@@ -42,11 +48,13 @@ digest. It does not impose a permanent single-owner invariant.
 2. `/api/v2/directory/inventory?type=all&limit=200`.
 3. `/api/v2/projects/inventory?limit=200`.
 
-The response has no client, organization, project, public-ID, external-ID,
-URL, bearer, or Access credential data. It contains only safe statuses,
-correlated request IDs, configured identity-match/contract-match results,
-authorization generations, page counts, and aggregate SHA-256 metadata.
-The local audit event stores the same safe summary.
+These routes deliberately live outside the legacy Project Alpha connector
+namespace. Opening the API-v2 acceptance section or running a read check will
+not reconcile or materialize legacy connector state. The response and local
+audit event contain only safe statuses, correlated request IDs, exact-match
+booleans, authorization generations, page counts, and aggregate SHA-256
+metadata. They contain no client, organization, project, public-ID,
+external-ID, PA identity UUID, URL, bearer, or Access credential data.
 
 ## Operation and rollback
 
