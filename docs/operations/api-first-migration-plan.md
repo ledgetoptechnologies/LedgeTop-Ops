@@ -51,15 +51,24 @@ Updated September 29, 2026. The owner approved implementation and resumption aft
   columns, restored guards, empty authority ledgers, foreign keys and idempotency
   (73.19 seconds for the final strengthened fixture). Bootstrap/preflight/evidence
   tooling passes 82 cases with four Windows symlink-privilege skips; configuration
-  and acceptance tooling passes another 20 cases. The migration has not been
-  deployed; the remote 140-file inventory below remains historical.
+  and acceptance tooling passes another 20 cases. Migration 0222 has now been
+  applied to Client staging only after a checksum-verified private backup.
+  Readback confirms 141 migrations, no pending files, no foreign-key violations,
+  zero delivery heads/audits and exact parity for all nine reviewed triggers.
+  Staging runtime and access flags remain unchanged/default-off. Live positive
+  revocation acceptance remains outstanding; no production schema was changed.
+- The inert Ops-native publication contract passes 19 focused tests and Ops
+  type-check, including hostile object/array proxies, multi-PA directory fences,
+  current active-head pins and historical revoked-head pins. Its bounded snapshot
+  is not an access grant; explicit reservations, producer/consumer and current
+  individual reader authorization remain implementation gates.
 - Fresh remote inventory confirms Client staging at
   `e35e9fdc-2beb-4a0e-be1b-fa4c372f6cc0` and Operations staging at
   `f5a07171-cb05-4cf3-9251-afe087550920`, each at 100%. The latter's
   dashboard revisions followed the `962bf02` recovery runtime and keep API-v2
   read acceptance and all recipient/home activation flags false. Its source
   annotation alone does not attest newer local sharing implementation.
-- The current 140-file Client and 151-file Operations migration inventories
+- Before the September 30 staging-only 0222 apply, the 140-file Client and 151-file Operations migration inventories
   both report no pending staging migrations. Independent read-only queries
   confirm ledger counts 140/151 and empty `foreign_key_check` results, with
   zero rows written and `changed_db=false`. This supersedes older pending

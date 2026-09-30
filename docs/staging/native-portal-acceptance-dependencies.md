@@ -49,13 +49,17 @@ or enable unrelated features just to test native enrollment.
   inventory-catalog services. They do **not** include the new
   `VERIFIED_RECIPIENT_DELIVERY_AUTHORITY` service. An applied sharing migration
   is not evidence that its newer runtime or private transport is deployed.
-- The last inspected deployed staging migration lists had no pending files. Ledger counts
-  are Client 140 and Operations 151; both foreign-key checks are empty, with
-  zero reported writes. Verify exact schema/trigger content before attributing
-  current local SQL semantics to those remote names.
-  Local Client migration 0222 is tested but is not part of this deployed
-  inventory. An expired/stale existing-head backfill preserves provenance;
-  the full 141/151 runtime chain, foreign keys and idempotency checks pass.
+- Client migration 0222 was applied to `client-data-staging` on September 30
+  after a private, ignored 579,714-byte SQL export. Backup SHA-256:
+  `c9f63a892eaa7b565b72c7bcfe4cdcb472b473b9c5e20a248b37098689b2b7cf`.
+  Remote readback confirms 141 Client migrations, final filename 0222, no
+  pending migrations, an empty foreign-key check and zero delivery heads/audits.
+  All nine recreated/new authorization triggers match the reviewed migration
+  exactly after line-ending/terminal-semicolon normalization. Client staging
+  runtime remains `e35e9fdc-2beb-4a0e-be1b-fa4c372f6cc0`; recipient writer,
+  enrollment and portal flags remain false. This is schema acceptance, not
+  positive live revocation or an enabled portal. Last Ops ledger count is 151.
+  The full local 141/151 runtime chain, foreign keys and idempotency checks pass.
 - The visible Client `/portal` screen says the portal is not enabled. This is
   consistent with default-off configuration, not successful recipient access.
 - Ops Sync staging is absent. Its old signed projection pipeline is not a
@@ -79,6 +83,14 @@ PA supplies optional linked-record freshness fences, not portal principals or
 entitlements. A complete workspace snapshot is not permission to browse it.
 Client readers must still apply current individual enrollment and resource
 grants, without falling back to legacy permissions.
+
+The separate Ops-native publication contract now has 19 passing focused tests
+and a passing Ops type-check. Directory records support explicitly linked
+mirrors from both PA instances; projects retain one selected financial instance.
+Validated arrays and objects are copied from own data descriptors, so hostile
+proxy property reads cannot execute during parsing. This contract remains inert:
+producer reservations, atomic publication consumption and live readers are still
+required before it can support client access.
 
 Implement and verify the replacement end to end:
 
