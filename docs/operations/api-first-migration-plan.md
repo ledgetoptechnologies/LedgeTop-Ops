@@ -57,11 +57,15 @@ Updated September 29, 2026. The owner approved implementation and resumption aft
   zero delivery heads/audits and exact parity for all nine reviewed triggers.
   Staging runtime and access flags remain unchanged/default-off. Live positive
   revocation acceptance remains outstanding; no production schema was changed.
-- The inert Ops-native publication contract passes 19 focused tests and Ops
+- The inert Ops-native publication contract passes 22 focused tests and Ops
   type-check, including hostile object/array proxies, multi-PA directory fences,
   current active-head pins and historical revoked-head pins. Its bounded snapshot
   is not an access grant; explicit reservations, producer/consumer and current
   individual reader authorization remain implementation gates.
+  Canonical Ops IDs such as `ops/client/...` are opaque IDs, not paths. A review
+  against real native writer fixtures corrected the original ASCII-only parser;
+  native Unicode/code-point bounds and separate strict folder-prefix validation
+  now have positive and negative regressions.
 - Fresh remote inventory confirms Client staging at
   `e35e9fdc-2beb-4a0e-be1b-fa4c372f6cc0` and Operations staging at
   `f5a07171-cb05-4cf3-9251-afe087550920`, each at 100%. The latter's

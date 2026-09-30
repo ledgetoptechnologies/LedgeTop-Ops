@@ -159,6 +159,57 @@ function generatedUuid(value: number): string {
 }
 
 describe("Operations portal workspace publication contract", () => {
+  it("preserves canonical opaque native Directory IDs instead of interpreting them as paths", async () => {
+    const value = rawFixture();
+    const root = "ops/organization/Acme..École";
+    const client = "ops/client/service-enrollment-full-chain";
+    value.target.rootRecordId = root;
+    value.snapshot.directoryRecords[1]!.recordId = root;
+    value.snapshot.directoryRecords[0]!.parentRecordId = root;
+    value.snapshot.directoryRecords[0]!.recordId = client;
+    value.snapshot.projects[0]!.organizationRecordId = root;
+    value.snapshot.projects[0]!.clientRecordId = client;
+    value.snapshot.recipientAuthorityHeads[0]!.targetClientRecordId = client;
+    value.snapshot.projects[0]!.externalProjectId = "ops/project/football-2027";
+    value.snapshot.folderReservations[0]!.externalProjectId = "ops/project/football-2027";
+    value.snapshot.folderReservations[0]!.opsFolderProjectId = "ops/folder/base-2027";
+    value.snapshot.folderReservations[0]!.divisionId = "ops/division/drone";
+    value.actorProof.staffId = "ops/staff/manager";
+    value.target.workspaceId = "ops/workspace/acme";
+    value.snapshot.recipientAuthorityHeads[0]!.workspaceId = "ops/workspace/acme";
+    value.snapshot.deliveryAuthorityHeads[0]!.workspaceId = "ops/workspace/acme";
+    value.snapshot.folderReservations[0]!.clientFolderBindingId = "portal/binding/football";
+    value.snapshot.deliveryAuthorityHeads[0]!.folderBindingId = "portal/binding/football";
+    value.snapshot.snapshotSha256 = await sha256OperationsPortalWorkspaceSnapshot(value);
+    const parsed = await verifyOperationsPortalWorkspacePublication(value);
+    expect(parsed?.target.rootRecordId).toBe(root);
+    expect(parsed?.snapshot.recipientAuthorityHeads[0]?.targetClientRecordId).toBe(client);
+    // A selected folder is a path, so the same characters remain forbidden there.
+    value.snapshot.folderReservations[0]!.r2Prefix = "clients/../acme/";
+    expect(parseOperationsPortalWorkspacePublication(value)).toBeNull();
+  });
+
+  it("rejects oversized, control-containing and malformed Unicode opaque IDs", () => {
+    for (const id of ["x".repeat(192), "😀".repeat(192), "ops/client/\u0000bad", "ops/client/\u200dbad", "ops/client/\ud800bad", ""]) {
+      const value = rawFixture();
+      value.actorProof.staffId = id;
+      expect(parseOperationsPortalWorkspacePublication(value)).toBeNull();
+    }
+  });
+
+  it("uses native code-point bounds independently of portal workspace bounds", async () => {
+    const value = rawFixture();
+    value.actorProof.staffId = "😀".repeat(191);
+    const workspace = "😀".repeat(200);
+    value.target.workspaceId = workspace;
+    value.snapshot.recipientAuthorityHeads[0]!.workspaceId = workspace;
+    value.snapshot.deliveryAuthorityHeads[0]!.workspaceId = workspace;
+    value.snapshot.snapshotSha256 = await sha256OperationsPortalWorkspaceSnapshot(value);
+    expect(await verifyOperationsPortalWorkspacePublication(value)).not.toBeNull();
+    value.target.workspaceId = "😀".repeat(201);
+    expect(parseOperationsPortalWorkspacePublication(value)).toBeNull();
+  });
+
   it("accepts and verifies a complete Ops-owned topology without making it an authorization result", async () => {
     const value = await signedFixture();
     const publication = await verifyOperationsPortalWorkspacePublication(value);

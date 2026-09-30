@@ -185,7 +185,6 @@ const ACTOR_KEYS = ["staffId", "verifiedAccessSubject", "admissionVersion", "pro
 
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const SHA256 = /^[0-9a-f]{64}$/u;
-const PERMANENT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/u;
 const PA_SOURCE_ID = /^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/u;
 const PUBLIC_ID = /^[0-9a-f]{32}$/u;
 const DECIMAL = /^(?:0|[1-9][0-9]{0,18})$/u;
@@ -231,8 +230,15 @@ function exactArray(value: unknown, maximum: number): unknown[] | null {
 function uuid(value: unknown): string | null {
   return typeof value === "string" && UUID_V4.test(value) ? value : null;
 }
-function permanentId(value: unknown): string | null {
-  return typeof value === "string" && value === value.trim() && PERMANENT_ID.test(value) && !value.includes("..") ? value : null;
+function permanentId(value: unknown, maximum = 191): string | null {
+  // Canonical Operations IDs are opaque, not URL/path segments. Existing
+  // Directory IDs include `ops/client/...`; do not normalize, split or apply
+  // folder-path rules to them. Native persistence additionally enforces its
+  // own 191-code-point/764-byte bounds; workspace/binding IDs allow 200 here.
+  if (typeof value !== "string" || value.length === 0 || Array.from(value).length > maximum || /\p{C}/u.test(value)) return null;
+  const bytes = new TextEncoder().encode(value);
+  if (bytes.byteLength > maximum * 4 || new TextDecoder("utf-8", { fatal: true }).decode(bytes) !== value) return null;
+  return value;
 }
 function boundedText(value: unknown, maximum: number): string | null {
   if (typeof value !== "string" || value.length < 1 || value.length > maximum || value !== value.trim()) return null;
@@ -354,7 +360,7 @@ function parseFolder(value: unknown): OperationsPortalFolderReservation | null {
   if (!record) return null;
   const reservationId = uuid(record.reservationId), externalProjectId = permanentId(record.externalProjectId);
   const opsFolderProjectId = permanentId(record.opsFolderProjectId), divisionId = permanentId(record.divisionId);
-  const clientFolderBindingId = permanentId(record.clientFolderBindingId), bindingVersion = decimal(record.bindingVersion, true);
+  const clientFolderBindingId = permanentId(record.clientFolderBindingId, 200), bindingVersion = decimal(record.bindingVersion, true);
   const r2Prefix = safePrefix(record.r2Prefix), state = headState(record.state);
   return reservationId && externalProjectId && opsFolderProjectId && divisionId && clientFolderBindingId
     && bindingVersion !== null && r2Prefix && state ? freeze({ reservationId, externalProjectId, opsFolderProjectId,
@@ -374,7 +380,7 @@ function parseRecipient(value: unknown): OperationsPortalRecipientAuthorityHeadR
   if (!record) return null;
   const recipientBindingId = uuid(record.recipientBindingId), enrollmentIntentId = uuid(record.enrollmentIntentId);
   const targetClientRecordId = permanentId(record.targetClientRecordId), clientAuthorityId = uuid(record.clientAuthorityId);
-  const workspaceId = permanentId(record.workspaceId), issuer = boundedText(record.issuer, 512), subject = boundedText(record.subject, 512);
+  const workspaceId = permanentId(record.workspaceId, 200), issuer = boundedText(record.issuer, 512), subject = boundedText(record.subject, 512);
   const enrollmentRevision = decimal(record.enrollmentRevision, true), ownershipEpoch = decimal(record.ownershipEpoch, true);
   const grantRevision = decimal(record.grantRevision, true), state = headState(record.state), lastOperationId = uuid(record.lastOperationId);
   const permissions = state && parsePermissions(record.permissions, state);
@@ -390,10 +396,10 @@ function parseDelivery(value: unknown): OperationsPortalDeliveryAuthorityHeadRef
   if (!record) return null;
   const authorityId = uuid(record.authorityId), authorityRevision = decimal(record.authorityRevision, true);
   const state = headState(record.state), lastOperationId = uuid(record.lastOperationId), clientAuthorityId = uuid(record.clientAuthorityId);
-  const workspaceId = permanentId(record.workspaceId), recipientBindingId = uuid(record.recipientBindingId);
+  const workspaceId = permanentId(record.workspaceId, 200), recipientBindingId = uuid(record.recipientBindingId);
   const enrollmentIntentId = uuid(record.enrollmentIntentId), homeOwnershipEpoch = decimal(record.homeOwnershipEpoch, true);
   const homeGrantRevision = decimal(record.homeGrantRevision, true), folderReservationId = uuid(record.folderReservationId);
-  const folderBindingId = permanentId(record.folderBindingId), expiresAt = nullableTime(record.expiresAt);
+  const folderBindingId = permanentId(record.folderBindingId, 200), expiresAt = nullableTime(record.expiresAt);
   if (!authorityId || authorityRevision === null || !state || !lastOperationId || !clientAuthorityId || !workspaceId
     || !recipientBindingId || !enrollmentIntentId || homeOwnershipEpoch === null || homeGrantRevision === null
     || !folderReservationId || !folderBindingId || expiresAt === undefined) return null;
@@ -501,7 +507,7 @@ function parseInternal(value: unknown): OperationsPortalWorkspacePublication | n
   const targetRecord = exactObject(record.target, TARGET_KEYS);
   const targetId = targetRecord && uuid(targetRecord.targetId), targetRevision = targetRecord && decimal(targetRecord.targetRevision, true);
   const clientAuthorityId = targetRecord && uuid(targetRecord.clientAuthorityId);
-  const workspaceId = targetRecord && permanentId(targetRecord.workspaceId), rootRecordId = targetRecord && permanentId(targetRecord.rootRecordId);
+  const workspaceId = targetRecord && permanentId(targetRecord.workspaceId, 200), rootRecordId = targetRecord && permanentId(targetRecord.rootRecordId);
   const rootKind = targetRecord?.rootKind;
   if (!targetRecord || !targetId || targetRevision === null || !clientAuthorityId || !workspaceId || !rootRecordId
     || (rootKind !== "organization" && rootKind !== "standalone_client")) return null;

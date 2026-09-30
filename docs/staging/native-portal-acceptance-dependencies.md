@@ -84,13 +84,17 @@ entitlements. A complete workspace snapshot is not permission to browse it.
 Client readers must still apply current individual enrollment and resource
 grants, without falling back to legacy permissions.
 
-The separate Ops-native publication contract now has 19 passing focused tests
+The separate Ops-native publication contract now has 22 passing focused tests
 and a passing Ops type-check. Directory records support explicitly linked
 mirrors from both PA instances; projects retain one selected financial instance.
 Validated arrays and objects are copied from own data descriptors, so hostile
 proxy property reads cannot execute during parsing. This contract remains inert:
 producer reservations, atomic publication consumption and live readers are still
 required before it can support client access.
+Opaque native identifiers follow the actual Directory/project writer grammar:
+191 Unicode code points / 764 UTF-8 bytes, without trimming or treating slashes
+and dots as paths. Portal workspace/binding identifiers retain their 200 / 800
+bounds. Folder prefixes have independent traversal/reserved-segment checks.
 
 Implement and verify the replacement end to end:
 
