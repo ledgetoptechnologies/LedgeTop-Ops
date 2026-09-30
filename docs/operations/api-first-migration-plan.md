@@ -2,7 +2,54 @@
 
 Updated September 29, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
 
-### Current checkpoint — September 29, 2026
+### Current checkpoint — September 30, 2026 (UTC)
+
+- GitHub device authorization was verified successfully. Operations PR #138
+  merged to `main` as `bb8422c77bbcad9093662e8da9d235c40d27282d` after all
+  ten checks passed for `81e72799ca6e01511abcc7e4d92883f65befc5f4`.
+  The Operations-only Viewer renewal transport remains default-off. This is
+  source release evidence, not a successful live silent renewal or permission
+  to bypass Viewer authorization. Joined caller/CORS/Access/redeem acceptance
+  still precedes activation.
+- Fresh remote inventory confirms Client staging at
+  `e35e9fdc-2beb-4a0e-be1b-fa4c372f6cc0` and Operations staging at
+  `f5a07171-cb05-4cf3-9251-afe087550920`, each at 100%. The latter's
+  dashboard revisions followed the `962bf02` recovery runtime and keep API-v2
+  read acceptance and all recipient/home activation flags false. Its source
+  annotation alone does not attest newer local sharing implementation.
+- The current 140-file Client and 151-file Operations migration inventories
+  both report no pending staging migrations. Independent read-only queries
+  confirm ledger counts 140/151 and empty `foreign_key_check` results, with
+  zero rows written and `changed_db=false`. This supersedes older pending
+  0221/0151 observations, but ledger names/counts do not prove exact SQL bytes,
+  publication authority, runtime exports or positive recipient access.
+- Reconstructed, ignored staging configs for the current `9ee45c9` lineage
+  pass strict preflight. The generator and preflight suites pass 31 tests.
+  They use separately verified staging audiences and explicit Mapbox deferral;
+  no config or secret was deployed. The older `66e47c0` onboarding candidate
+  must not replace the newer staged enrollment/service-home code.
+- Secret-name readback confirms the actual native enrollment prerequisites
+  already exist: Client has its dedicated enrollment CSRF secret, Delivery
+  session secret and audit secret; Operations has session, audit, onboarding
+  keyring and API-v2 connection secrets. Presence does not prove usable values
+  or enabled/scoped PA connections. The complete old deployment manifest also
+  contains legacy integration credentials: their absence is not proof that
+  native enrollment/home RPC needs them. Do not obtain production credentials
+  or create obsolete integrations merely to fill that manifest.
+- `ledgetop-ops-sync-staging` is absent. It is an outstanding old signed
+  projection-path prerequisite, not a reason to force the new native private
+  recipient/home RPC through legacy PA webhooks. The remaining API-first
+  publication adapter must explicitly prove current source-qualified authority
+  rather than accepting cache presence or substituting a legacy grant.
+- Continue from an isolated current-lineage worktree: reproduce the real
+  historical pre-0123 bootstrap and preserved onboarding history before v7/v8
+  acquisition/selection and full recipient delivery/revocation. Existing
+  focused mocks and green CI do not replace this canonical-chain or live
+  owner/recipient acceptance. No production PA update checkpoint is ready;
+  no production client activation, public-link change or retention change was
+  performed during these checks.
+
+### Previous checkpoint — September 29, 2026
 
 - Client portal revocation-freshness hardening is isolated on the exact open
   PR #133 head `2a4e4d5053452b55ea8409f480a87f8ef6caa990`. It rechecks the
