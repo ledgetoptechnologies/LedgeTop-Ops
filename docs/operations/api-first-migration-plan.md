@@ -5888,3 +5888,42 @@ pending; this requirement does not claim a deployed UI change.
   API-v2 feature flag or authority policy is enabled by this checkpoint.
   Verify the secret by name/value state only; never record or print its raw
   value.
+
+### September 29 — portal staging readiness and API-v2 admin verification UI
+
+- A live authenticated read of Operations staging still shows only the legacy
+  primary connection, with sync disabled and no attempt/success recorded.
+  The client-staging `/portal` route still renders “The client portal is not
+  enabled for this site.” Workflow readiness for client feedback, service
+  requests, and request attachments is unverified; delegated sharing and
+  access-expiry notices remain blocked. Token-expiry reminders are not
+  configured for either PA instance. This is not a production-update
+  checkpoint.
+- The API-v2 read-acceptance endpoint existed but its admin UI exposed the
+  control only inside the legacy connector list, hiding API-v2-only configured
+  instances. An isolated Ops change now adds a separate redacted status
+  endpoint/UI projection, keeps the existing legacy panel usable if API-v2
+  status is unavailable, and clears prior verification state when a refresh
+  changes the same source's config or enabled status. It exposes no URLs,
+  credentials, Access secrets, application IDs, or identity pins in the status
+  response. The endpoint and read probe remain default-off; the explicit probe
+  is read-only and audits only bounded safe results.
+- Commit `1980d91` is pushed to branch
+  `codex/api-v2-admin-read-acceptance-ui`. Focused validation passed: Operations
+  typecheck; 53 backend tests; production build (existing large-chunk advisory);
+  and 16 desktop/mobile connection-page browser tests, including the
+  enabled-to-disabled refresh regression. `git diff --check` passed.
+  GitHub's repository integration returned 403 when asked to open the draft PR;
+  no alternate path was used. Exact-head CI and staging deploy/acceptance remain
+  pending.
+- The staging Operations browser currently runs a version without the new
+  API-v2 status section. The brief staging route gate previously enabled for a
+  UI check was restored to false; no API-v2 verifier call was made in that
+  window. No PA data, client access, public links, or production config changed.
+- Next: resolve the GitHub PR-creation permission through the configured
+  integration, run exact-head CI, then deploy the reviewed default-off change
+  to Ops staging. Only after the staging API-v2 envelope contains the explicit
+  LTDS and LTT staging entries, perform the bounded read-only capability and
+  Directory/Project inventory acceptance, restore the route gate to false,
+  then continue the client-portal joined acceptance. Production PA updates are
+  still owner-managed and not yet requested.
