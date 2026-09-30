@@ -23,7 +23,14 @@ function portableFixture(): string {
   ] as const) {
     const directory = path.join(base, "apps", source);
     fs.mkdirSync(directory, { recursive: true });
-    fs.cpSync(path.join(repositoryRoot, "apps", source, "migrations"), path.join(directory, "migrations"), { recursive: true });
+    const sourceMigrations = path.join(repositoryRoot, "apps", source, "migrations");
+    const destinationMigrations = path.join(directory, "migrations");
+    fs.mkdirSync(destinationMigrations);
+    const stoppedDraft = source === "client"
+      ? "0224_operations_portal_native_recipient_authority.sql"
+      : "0154_operations_portal_native_recipient_authority.sql";
+    for (const name of fs.readdirSync(sourceMigrations).filter(name => name.endsWith(".sql") && name !== stoppedDraft))
+      fs.copyFileSync(path.join(sourceMigrations, name), path.join(destinationMigrations, name));
     fs.copyFileSync(path.join(repositoryRoot, "docs", "staging", example), path.join(directory, "wrangler.staging.json"));
   }
   return base;
@@ -94,10 +101,10 @@ describe("local-only complete staging bootstrap migration rehearsal", () => {
   });
 
   it("applies both reviewed chains to empty local D1 databases and stays idempotent", async () => {
-    expect(artifacts.delivery.files).toHaveLength(142);
-    expect(artifacts.operations.files).toHaveLength(152);
-    expect(artifacts.delivery.files.at(-1)?.name).toBe("0223_operations_portal_workspace_publications.sql");
-    expect(artifacts.operations.files.at(-1)?.name).toBe("0152_operations_portal_workspace_reservations.sql");
+    expect(artifacts.delivery.files).toHaveLength(143);
+    expect(artifacts.operations.files).toHaveLength(154);
+    expect(artifacts.delivery.files.at(-1)?.name).toBe("0225_operations_portal_workspace_publication_cancellations.sql");
+    expect(artifacts.operations.files.at(-1)?.name).toBe("0155_operations_portal_workspace_publication_cancellations.sql");
     expect(artifacts.delivery.files.filter(file => file.name.startsWith("0199_")).map(file => file.name)).toEqual([
       "0199_incoming_upload_pickup_lifecycle.sql", "0199_native_viewer_grants.sql",
     ]);

@@ -298,6 +298,7 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0221_verified_recipient_delivery_authority.sql",
     "0222_verified_recipient_delivery_cross_manager_revoke.sql",
     "0223_operations_portal_workspace_publications.sql",
+    "0225_operations_portal_workspace_publication_cancellations.sql",
   ]),
   operations: Object.freeze([
     "0014_staff_acl_controls.sql",
@@ -439,6 +440,8 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0150_client_portal_recipient_enrollment_cancellation.sql",
     "0151_verified_recipient_delivery_authority_outbox.sql",
     "0152_operations_portal_workspace_reservations.sql",
+    "0153_operations_portal_workspace_publication_outbox.sql",
+    "0155_operations_portal_workspace_publication_cancellations.sql",
   ]),
 });
 

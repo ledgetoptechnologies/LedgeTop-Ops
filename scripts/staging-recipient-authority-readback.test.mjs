@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import test from "node:test";
+import test, { after } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   IDENTITY_COLLISIONS_QUERY,
@@ -33,13 +33,23 @@ const reviewedHistoryGenerations = Object.freeze({
   globalHistoryGeneration: 2,
   onboardingHistoryGenerations: Object.freeze([2, 3, 4]),
 });
+const canonicalNames = fs.readdirSync(path.join(repositoryRoot, "apps", "operations", "migrations"))
+  .filter(name => /^\d{4}_.+\.sql$/.test(name)
+    && name !== "0154_operations_portal_native_recipient_authority.sql").sort();
+const reviewedRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-recipient-readback-"));
+const reviewedOperations = path.join(reviewedRoot, "apps", "operations");
+fs.mkdirSync(path.join(reviewedOperations, "migrations"), { recursive: true });
+fs.copyFileSync(path.join(repositoryRoot, "apps", "operations", "wrangler.staging.json"),
+  path.join(reviewedOperations, "wrangler.staging.json"));
+for (const name of canonicalNames) fs.copyFileSync(
+  path.join(repositoryRoot, "apps", "operations", "migrations", name),
+  path.join(reviewedOperations, "migrations", name));
+after(() => fs.rmSync(reviewedRoot, { recursive: true, force: true }));
 const readbackInput = Object.freeze({
-  base: repositoryRoot,
+  base: reviewedRoot,
   selection: Object.freeze({ staffId, recordId }),
   expectations: reviewedHistoryGenerations,
 });
-const canonicalNames = fs.readdirSync(path.join(repositoryRoot, "apps", "operations", "migrations"))
-  .filter(name => /^\d{4}_.+\.sql$/.test(name)).sort();
 
 const grant = (overrides = {}) => ({
   id: globalId, staff_id: staffId, permission: "directory.profile.edit", effect: "allow", scope_kind: "global",
@@ -149,7 +159,7 @@ test("captures the exact known inactive two-grant lineage as ready without mutat
   assert.deepEqual(artifact.directory.history.map(row => [row.grant_id, row.grant_version, row.grant_generation]), [
     [globalId, 1, 2], [onboardingId, 1, 2], [onboardingId, 2, 3], [onboardingId, 3, 4],
   ]);
-  assert.equal(artifact.source.localCanonicalLedger.finalMigration, "0152_operations_portal_workspace_reservations.sql");
+  assert.equal(artifact.source.localCanonicalLedger.finalMigration, "0155_operations_portal_workspace_publication_cancellations.sql");
   assert.equal(artifact.source.localCanonicalLedger.attestsRemoteAppliedSql, false);
   assert.equal(artifact.checks.migrationLedgerNamesMatchCanonical, true);
   assert.deepEqual(artifact.reviewedHistoryGenerations, reviewedHistoryGenerations);
@@ -180,7 +190,7 @@ test("wrong positive reviewed generation inputs fail closed even when the rows a
   });
 });
 
-test("every readback query prepares and executes against the complete canonical 152-migration schema", () => {
+test("every readback query prepares and executes against the complete canonical 154-migration schema", () => {
   const database = canonicalDatabase();
   try {
     const selection = { staffId, recordId };
