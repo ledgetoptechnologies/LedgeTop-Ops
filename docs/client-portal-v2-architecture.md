@@ -2,6 +2,43 @@
 
 Status: **approved target architecture; not the current production contract**.
 
+## Current owner-approved direction — September 29, 2026
+
+This section supersedes conflicting ownership and workflow statements retained
+below from the older portal-v2 proposal. Operations is the normal source of
+truth and editor for shared customer identity, organizations and their
+operational units, service enrollment, portal access, service requests, and
+operational projects. Project Alpha remains authoritative for pricing, quotes,
+contracts, invoices, expenses, compensation/financial processing, payments,
+and the financial notices it already sends. It remains generic open-source
+software: no mandatory Operations labels, routes, or business-specific
+defaults.
+
+Project Alpha may expose a generic versioned API with fine-grained read/write
+scopes. Its optional externally-managed/read-only mode is separate from token
+scope, must be enforced server-side, and may be enabled only when a capable
+scoped API writer is configured and an administrator explicitly chooses it.
+The Operations authority migration is a coordinated cutover after staging and
+both-instance production acceptance, not indefinite dual authority. No
+existing Project Alpha custom integration is removed until the replacement
+has passed that gate.
+
+Operations may link one customer to one record in either or both PA instances
+only through explicit permanent mappings; never merge by matching name or
+email. A project has one shared name and stable Operations identity, with an
+explicit one-to-one link to the deliberately selected PA instance. Projects
+can be created from either staff surface, and a client proposal requires staff
+approval before becoming an accepted shared project. Project creation never
+publishes private financial documents. Existing PA public links, permissions,
+expiry, passwords, revocation, caching, and resumability must remain intact.
+
+Clients get one service-aware portal entry point. Show only enrolled services
+and their authorized data/actions; keep financial visibility allowlisted, do
+not duplicate PA financial email/receipt behavior, and do not send unsolicited
+launch invitations. Use the API-first migration plan for the full detailed
+gate register and current staging evidence. The sections below remain useful
+compatibility background only where they do not conflict with this direction.
+
 The current pilot remains read-only toward Project Alpha as documented in
 [the client request pilot](client-portal.md). This document locks the contract
 that both repositories must implement and validate before any v2 feature flag

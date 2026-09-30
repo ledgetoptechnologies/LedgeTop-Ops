@@ -1,5 +1,35 @@
 # Client and portal goal completion audit — 2026-09-08
 
+## Current continuation checkpoint — September 29, 2026
+
+This audit remains incomplete. Current live staging checks show:
+
+- Operations staging still displays only its original Primary connection;
+  business sync is disabled and has no successful attempt. Its workflow
+  readiness reports client feedback, service requests, and request attachments
+  as unverified; delegated sharing and access-expiry notices are blocked; and
+  token-expiry reminders are not configured for either PA instance.
+- The Client staging `/portal` route says the client portal is not enabled for
+  this site. No client portal cutover acceptance has occurred.
+- Ops feature branch `codex/api-v2-admin-read-acceptance-ui` is at
+  `0384cbc`. It adds a redacted API-v2 connection status and read-acceptance
+  control independent from legacy connectors, with refresh invalidation for
+  changed configuration. Focused typecheck, 53 backend tests, production
+  build, and 16 desktop/mobile browser tests passed. The branch has no PR yet:
+  the GitHub integration denied draft-PR creation with HTTP 403, and no
+  alternate route was used. Thus exact-head CI and staging deployment remain
+  unverified.
+- No production PA configuration, client access, or public link changed. The
+  owner-managed dual-PA production update checkpoint is not ready. The Daybreak
+  deep security scan is intentionally deferred until portal readiness is near
+  production.
+
+The older September 8 conclusion and remaining-gate list below are historical;
+the current ownership decision is recorded in
+[`client-portal-v2-architecture.md`](../client-portal-v2-architecture.md), and
+the active implementation/gate register is
+[`api-first-migration-plan.md`](api-first-migration-plan.md).
+
 ## Operations reliability follow-up — 2026-09-16
 
 The bounded API-v2 outage monitor is implemented locally in Operations and is

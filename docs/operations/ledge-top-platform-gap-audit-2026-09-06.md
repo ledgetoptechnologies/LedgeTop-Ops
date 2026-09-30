@@ -362,4 +362,20 @@ read-only service-principal slice and one website/context slice. Preserve the
 one Ops Sync endpoint, generic PA language, portal-domain compatibility, the
 local-server data authority, and the Viewer freeze. This document should be
 updated at each release gate with the actual commit, migration, deployment, and
-live-evidence references.
+
+### Current continuation checkpoint — September 29, 2026
+
+The older audit plan's assumption that Project Alpha owns the customer and
+project directory is superseded by the current owner-approved Operations-first
+architecture. Use the current API-first migration plan and
+[`client-portal-v2-architecture.md`](../client-portal-v2-architecture.md) for
+the active ownership contract. Current live staging evidence still contradicts
+portal readiness: Ops staging has only the legacy primary connection and its
+sync is disabled; the Client staging portal remains disabled; cross-app
+feedback, requests, and attachments are unverified; sharing and access-expiry
+workflow checks are blocked. The API-v2 admin verification UI is pushed on
+`codex/api-v2-admin-read-acceptance-ui` at `0384cbc`, but draft PR creation was
+denied by the GitHub integration (403), so it has no exact-head CI or staging
+deployment evidence yet. No production PA configuration, client access, or
+public link was changed. Deep Daybreak security scanning is intentionally
+deferred until portal readiness is near production.
