@@ -1,6 +1,6 @@
 # API-first migration — current implementation objective and work register
 
-Updated September 19, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+Updated September 30, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
 
 ### September 30 — priority reset and API-v2 read-acceptance UI correction
 
@@ -22,10 +22,22 @@ Updated September 19, 2026. The owner approved implementation and resumption aft
   was used to create PR #140. Merge remains gated on exact-head CI and staging
   acceptance. No production PA/Operations configuration, client access, or
   public links were changed.
+- The staging migration contract is being brought forward from Operations
+  `0122` to the checked-in `0124` endpoint. The release inventory, bootstrap
+  digest, generated-evidence schema, and tests were stale, so staging preflight
+  failed before deployment. After correcting the mismatch, focused preflight,
+  bootstrap, and evidence-contract suites pass (24, 13, and 32 tests; two
+  Windows symlink-only cases skip because the sandbox denies symlink creation).
+  `npm run staging:check` now reports only that the isolated worktree lacks the
+  three generated staging configs; no migrations or remote settings changed.
+  Resolve those from reviewed staging inputs before preparing a staging release.
 - Safe branch cleanup removed four branches already merged into main (two Ops,
-  two PA). The verified remote counts after cleanup were 51 Ops and 31 PA.
-  Further deletion is deferred for branches tied to open PRs or active
-  worktrees; `main` and `dev` remain protected.
+  two PA). A fresh audit finds 52 Ops and 31 PA remote branches (83 total):
+  remaining Ops branches are tied to open PRs/worktrees, while PA's otherwise
+  unreferenced branches contain unique commits. No additional branch is safe to
+  delete without first reviewing/archiving its worktree or resolving its PR;
+  `main` and `dev` remain protected. A later worktree cleanup/re-audit could
+  make up to 26 already-merged heads eligible, but no worktree was archived.
 
 ### September 19, 2026 — current joined-window gate recheck
 

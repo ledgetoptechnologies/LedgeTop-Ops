@@ -4,9 +4,10 @@
 
 The owner prioritizes verified PA↔Operations connectivity before client portal
 sign-in and data access. Ops PR #140 adds the missing API-v2 read-acceptance
-source inventory/UI independently of the legacy connector panel. Local focused
-checks pass, but the PR is not yet merged or deployed to staging, and its CI is
-still pending. This does not prove synchronization, dual-source parity, client
+source inventory/UI independently of the legacy connector panel and updates
+the staging migration contract through Operations `0124`. Local focused checks
+pass, but the PR is not yet merged or deployed to staging. This does not prove
+synchronization, dual-source parity, client
 enrollment, or portal data authorization. Keep client portal access disabled
 until the API-v2 reads are accepted against both PA instances and the existing
 portal rollout gates pass. Production PA changes remain an owner checkpoint.
