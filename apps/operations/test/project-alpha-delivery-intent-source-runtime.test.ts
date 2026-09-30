@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { Miniflare } from "miniflare";
@@ -6,6 +6,7 @@ import { Hono } from "hono";
 import { SignJWT, createLocalJWKSet, exportJWK, generateKeyPair, type JWTPayload, type JWTVerifyGetKey } from "jose";
 import { createCatalogSourceContext, PRIMARY_CATALOG_SOURCE } from "@ltds/shared";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
+import { reviewedClientMigrationNames } from "./helpers/reviewed-operations-migration-chain";
 import { applyProjectAlphaDeliveryIntent, applyProjectAlphaDeliveryIntentRevoke, handleProjectAlphaDeliveryIntent,
   handleRegisteredProjectAlphaDeliveryIntent, handleRegisteredProjectAlphaDeliveryIntentRevoke,
   handleRegisteredProjectAlphaDeliveryPreflight, verifyRegisteredDeliveryAccess } from "../src/worker/project-alpha-delivery-intents";
@@ -70,7 +71,7 @@ describe("source-owned delivery intent runtime and transaction races", () => {
     runtime = new Miniflare({ compatibilityDate: "2026-07-22", modules: true, script: "export default {fetch(){return new Response('ok')}}", d1Databases: { DELIVERY_DB: "intent-source-runtime" } });
     database = await runtime.getD1Database("DELIVERY_DB") as unknown as D1Database;
     const directory = new URL("../../client/migrations/", import.meta.url);
-    for (const name of readdirSync(directory).filter(value => /^\d+.*\.sql$/.test(value)).sort()) {
+    for (const name of reviewedClientMigrationNames(directory)) {
       await database.batch(splitD1MigrationStatements(readFileSync(new URL(name, directory), "utf8")).map(sql => database.prepare(sql)));
     }
     for(const name of ["0031_project_alpha_delivery_intent_rate_limits.sql","0035_project_alpha_connectors.sql",
@@ -421,7 +422,18 @@ describe("source-owned delivery intent runtime and transaction races", () => {
     const digest=(value:string)=>createHash("sha256").update(value).digest("hex");
     await database.prepare(`UPDATE pa_portal_source_authorities SET state='active',version=version+1,updated_at=datetime('now') WHERE source_id=?`)
       .bind(secondary.sourceId).run();
-    const registeredEnv={...env,PROJECT_ALPHA_CONNECTOR_CREDENTIALS:JSON.stringify({version:1,sets:{secondary:{portalCurrent:current,portalPrevious:previous}}})};
+    // Keep only the rate-limit SQL clock deterministic. Real signature/JWT time,
+    // authority checks and the SQLite UPSERT remain unchanged. A busy runner can
+    // otherwise start a new UTC minute between the 300th attempt and its denial.
+    let rateWindow="2026-09-30T00:00:00Z";
+    const rateDatabase=new Proxy(database,{get(target,property){
+      if(property==="prepare")return(sql:string)=>target.prepare(
+        sql.includes("project_alpha_delivery_intent_source_rate_limits")
+          ?sql.replaceAll("strftime('%Y-%m-%dT%H:%M:00Z','now')",`'${rateWindow}'`):sql);
+      const value=target[property as keyof D1Database];
+      return typeof value==="function"?value.bind(target):value;
+    }});
+    const registeredEnv={...env,OPS_DB:rateDatabase,PROJECT_ALPHA_CONNECTOR_CREDENTIALS:JSON.stringify({version:1,sets:{secondary:{portalCurrent:current,portalPrevious:previous}}})};
     const assertion=await accessToken();
     const verifyAccess=(request:Request,authority:Parameters<typeof verifyRegisteredDeliveryAccess>[1])=>
       verifyRegisteredDeliveryAccess(request,authority,accessJwks);
@@ -453,19 +465,28 @@ describe("source-owned delivery intent runtime and transaction races", () => {
 
     // Access-authenticated but invalid HMAC attempts use a separate coarse
     // budget and never consume the accepted-intent quota.
-    await database.prepare(`UPDATE project_alpha_delivery_intent_source_rate_limits SET request_count=299
+    await rateDatabase.prepare(`UPDATE project_alpha_delivery_intent_source_rate_limits SET request_count=299
       WHERE source_id=? AND scope='attempt_intent' AND window_start=strftime('%Y-%m-%dT%H:%M:00Z','now')`).bind(secondary.sourceId).run();
     const invalidKey={keyId:current.keyId,value:"incorrect-but-long-enough-signing-secret-value"};
     expect((await send(base,{...f.payload,deliveryId:"registered-invalid-hmac"},invalidKey)).status).toBe(401);
-    expect(await database.prepare(`SELECT request_count FROM project_alpha_delivery_intent_source_rate_limits
+    expect(await rateDatabase.prepare(`SELECT request_count FROM project_alpha_delivery_intent_source_rate_limits
       WHERE source_id=? AND scope='attempt_intent' AND window_start=strftime('%Y-%m-%dT%H:%M:00Z','now')`).bind(secondary.sourceId).first("request_count")).toBe(300);
-    // Accepted requests can straddle a UTC minute boundary on a contended CI
-    // runner. Sum the accepted-intent windows instead of assuming the query
-    // executes in the same minute as every accepted request.
+    // Assert accepted quota separately from the coarse attempt budget;
+    // invalid signatures must never consume accepted quota.
     expect(await database.prepare(`SELECT COALESCE(SUM(request_count),0) AS request_count
       FROM project_alpha_delivery_intent_source_rate_limits
       WHERE source_id=? AND scope='intent'`).bind(secondary.sourceId).first("request_count")).toBe(3);
     expect((await send(base,{...f.payload,deliveryId:"registered-attempt-limit"},invalidKey)).status).toBe(429);
+    // Advancing the window must restore only the coarse attempt budget: the
+    // invalid signature is still rejected and never consumes accepted quota.
+    rateWindow="2026-09-30T00:01:00Z";
+    expect((await send(base,{...f.payload,deliveryId:"registered-next-window"},invalidKey)).status).toBe(401);
+    expect(await rateDatabase.prepare(`SELECT request_count FROM project_alpha_delivery_intent_source_rate_limits
+      WHERE source_id=? AND scope='attempt_intent' AND window_start=strftime('%Y-%m-%dT%H:%M:00Z','now')`)
+      .bind(secondary.sourceId).first("request_count")).toBe(1);
+    expect(await database.prepare(`SELECT COALESCE(SUM(request_count),0) AS request_count
+      FROM project_alpha_delivery_intent_source_rate_limits WHERE source_id=? AND scope='intent'`)
+      .bind(secondary.sourceId).first("request_count")).toBe(3);
 
     expect((await app.request("/api/internal/project-alpha/sources/project-alpha%3Amissing/delivery-intents",{method:"POST",body:"{}"},registeredEnv)).status).toBe(404);
     await database.prepare("UPDATE pa_portal_source_authorities SET state='suspended',version=version+1 WHERE source_id=?").bind(secondary.sourceId).run();
