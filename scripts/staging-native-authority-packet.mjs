@@ -5,6 +5,7 @@ import { isDeepStrictEqual } from "node:util";
 import { fileURLToPath } from "node:url";
 import { BOOTSTRAP_APPS } from "./staging-bootstrap.mjs";
 import { STAGING_ACCOUNT_ID, STAGING_INVENTORY } from "./staging-requirements.mjs";
+import { boundedGuardInsert } from "./staging-bounded-guards.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const PACKET_SCHEMA_VERSION = 3;
@@ -1056,6 +1057,7 @@ function preservativeAcquisitionResult(packet, ids, versions, action) {
 }
 
 function provisionSqlPreservativeAcquisition(packet, ids, versions, names, migrationNames) {
+  const guardInsert = boundedGuardInsert;
   const table = guardTable(packet.packetId, "provision"), staff = sqlString(packet.staffId);
   const canonicalPlan = canonicalJson(plan(packet, "provision", ids, versions)), planSha = sha256(canonicalPlan);
   const verificationJson = verification(packet), verificationSha = sha256(verificationJson);
@@ -1112,6 +1114,7 @@ DROP TABLE ${table};
 }
 
 function revokeSqlPreservativeAcquisition(packet, ids, versions, provision, names, migrationNames) {
+  const guardInsert = boundedGuardInsert;
   const table = guardTable(packet.packetId, "revoke"), staff = sqlString(packet.staffId);
   const canonicalPlan = canonicalJson(plan(packet, "revoke", ids, versions)), planSha = sha256(canonicalPlan);
   const verificationJson = verification(packet), verificationSha = sha256(verificationJson);
@@ -1196,6 +1199,7 @@ function recipientEnrollmentResult(packet, ids, versions, action) {
 }
 
 function provisionSqlRecipientEnrollment(packet, ids, versions, names, migrationNames) {
+  const insertGuard = packet.purpose === PRESERVATIVE_RECIPIENT_ENROLLMENT_PURPOSE ? boundedGuardInsert : guardInsert;
   const table = guardTable(packet.packetId, "provision"), staff = sqlString(packet.staffId);
   const canonicalPlan = canonicalJson(plan(packet, "provision", ids, versions)), planSha = sha256(canonicalPlan);
   const verificationJson = verification(packet), verificationSha = sha256(verificationJson);
@@ -1249,7 +1253,7 @@ WHERE id=${sqlString(ids.portalAccessGrant)} AND staff_id=${staff} AND permissio
   return `PRAGMA foreign_keys = ON;
 -- Generated staging-only exact-resource recipient-enrollment portal authority packet.
 CREATE TABLE ${table}(ok INTEGER NOT NULL CHECK(ok=1));
-${guardInsert(table, `${canonicalLedger(names)}
+${insertGuard(table, `${canonicalLedger(names)}
     AND NOT EXISTS(SELECT 1 FROM ${AUTHORITY_MIGRATIONS_TABLE} WHERE name IN (${sqlString(migrationNames.provision)},${sqlString(migrationNames.revoke)}))
     AND ${commonPrecondition(packet, ids)}
     AND EXISTS(SELECT 1 FROM staff_role_assignments WHERE staff_id=${staff} AND role_id='role-owner' AND scope='global')
@@ -1261,12 +1265,13 @@ UPDATE native_staff_admissions SET active=1,version=version+1,updated_at=strftim
 WHERE staff_id=${staff} AND active=0 AND version=${versions.admissionBefore};
 ${portalMutation}
 ${receiptSql(packet, ids, "provision", canonicalPlan, planSha, verificationJson, verificationSha, result)}
-${guardInsert(table, final)}
+${insertGuard(table, final)}
 DROP TABLE ${table};
 `;
 }
 
 function revokeSqlRecipientEnrollment(packet, ids, versions, provision, names, migrationNames) {
+  const insertGuard = packet.purpose === PRESERVATIVE_RECIPIENT_ENROLLMENT_PURPOSE ? boundedGuardInsert : guardInsert;
   const table = guardTable(packet.packetId, "revoke"), staff = sqlString(packet.staffId);
   const canonicalPlan = canonicalJson(plan(packet, "revoke", ids, versions)), planSha = sha256(canonicalPlan);
   const verificationJson = verification(packet), verificationSha = sha256(verificationJson);
@@ -1321,7 +1326,7 @@ function revokeSqlRecipientEnrollment(packet, ids, versions, provision, names, m
   return `PRAGMA foreign_keys = ON;
 -- Generated staging-only exact-resource recipient-enrollment portal authority revocation packet.
 CREATE TABLE ${table}(ok INTEGER NOT NULL CHECK(ok=1));
-${guardInsert(table, precondition)}
+${insertGuard(table, precondition)}
 ${approvalSql(packet, ids, "revoke", canonicalPlan, planSha, verificationJson, verificationSha)}
 UPDATE native_directory_grants SET active=0
 WHERE id=${sqlString(ids.portalAccessGrant)} AND staff_id=${staff} AND permission='directory.portal_access.manage'
@@ -1331,7 +1336,7 @@ WHERE staff_id=${staff} AND active=1 AND version=${versions.admissionActive};
 UPDATE native_staff_bootstrap_approvals SET revoked_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
 WHERE approval_id=${sqlString(ids.provisionApproval)} AND revoked_at IS NULL;
 ${receiptSql(packet, ids, "revoke", canonicalPlan, planSha, verificationJson, verificationSha, result)}
-${guardInsert(table, final)}
+${insertGuard(table, final)}
 DROP TABLE ${table};
 `;
 }
