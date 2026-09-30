@@ -4,7 +4,301 @@ Updated September 30, 2026. The owner approved implementation and resumption aft
 
 ### Current checkpoint — September 30, 2026 (UTC)
 
-- Latest candidate is `9bb78d3212f820c8d2042393e7761c096d906fb0` on
+Current release summary: local head is
+`9b1831ef9b99289fabb03a84dd937148bb898acd`; remote draft PR #139 is still at
+`97908298a593b09d044e3619b0d9f241bc7e3932`. The ten-file staging-tooling update
+passed independent 119-test Node QA (four Windows symlink skips), Client
+type-check and full-chain Miniflare rehearsal (one test, 75.59 seconds), plus
+independent review. Old-head CI Client failed the stale 142/143 inventory pin;
+eight other jobs passed and Ops CI is still live. No exact-new-head CI, merge,
+staging rollout, native recipient activation or production cutover is claimed.
+
+The entries below retain chronological component evidence, including earlier
+failures and superseded pending states. Later explicit results supersede only
+the corresponding component checkpoint; they never establish full portal
+readiness. Native 0154/0224 and current-manager invocation approval stops remain
+separate from the reviewed data-only chain and must not be bypassed.
+
+#### Chronological component history — superseded where Current release summary says otherwise
+
+- Committed-only inventory review identified stale current staging release pins:
+  Client bootstrap/evidence expects 142/0223, Ops expects 152/0152. Exact candidate
+  inventory is Client 143/0225 and Ops 154/0155, excluding stopped 0224/0154.
+  At that checkpoint, the current-chain tooling/fixture update was underway. Preserve historical
+  evidence and reviewed-152 packet baselines; source-invariant CI alone does not
+  validate these runtime release gates. No migration application is authorized
+  by updating those pins, and no dirty physical-directory bootstrap may run.
+- Exact candidate `97908298a593b09d044e3619b0d9f241bc7e3932` is now pushed to
+  draft/open PR #139. CI run `36697340183` is live on that exact head; no terminal
+  result is claimed. This includes the inert publication/recovery commit and
+  verified Client startup fix, not stopped native authority, mounting or grants.
+  No merge, deployment or remote migration occurred.
+- Production-shaped local testing found a distinct release blocker: the actual
+  Vite-emitted Client main module retains the numeric export
+  `BULK_CACHE_CLEANUP_MAX_D1_QUERIES`, which workerd rejects at startup. The build
+  itself passes; the emitted-module startup test fails before RPC/storage.
+  Move unchanged cleanup limits/budget into an internal module and update the
+  existing test import, then require actual emitted-main startup and cleanup
+  regressions. Do not filter exports in the acceptance harness. This is evidence
+  about the local candidate, not a verified deployed production outage.
+  The bounded source move now passes independent root QA: 39 bulk backend tests,
+  Client type-check, and two actual emitted-main runtime tests (6.08 seconds).
+  The harness uses the checked-in build script in a fresh child process; an
+  in-process Vite build had reused stale output. No export filtering is used.
+  This resolves local startup only; exact-candidate CI/live staging remain gates.
+- The inert publication/recovery cohort is committed locally at
+  `86d30e6a10c31ccca87508050fb9d224048c01d3` (17 selected files), followed by startup
+  fix `97908298a593b09d044e3619b0d9f241bc7e3932`. Both are pushed, not merged or
+  deployed. Earlier successful CI for `ee934938526532de923403759972d039a88b0130`
+  does not attest these commits. Stopped native-authority
+  drafts and current-manager invocation work remain outside this commit.
+- Local frozen-byte Ops-to-Client transport/recovery acceptance now passed:
+  producer 350 / session 34409 and independent root 45796 each passed both
+  actual two-Worker cases. Root independently passed five Ops component tests
+  in run 12656 and Ops type-check in 19796; source-layout invariants passed
+  18/18. Exact receipt/head/snapshot/checkpoint evidence, lost-response recovery
+  without resend, cancellation and races are covered. This resolves the local
+  disposer transport failure, not the unmounted management caller, live staging,
+  native recipient authority, service/file readers or production cutover.
+  The binding fixture has empty project topology; project coverage remains
+  component evidence. Stopped 0154/0224 drafts stay excluded and unapplied.
+- The primitive private-RPC response fix passed independent Client QA: root
+  run 52940, five files / 36 tests in 34.72 seconds, plus Client type-check.
+  Named binding results are strings, not object envelopes with a platform
+  disposer; existing public-share regressions remain green. Fresh Ops caller-side
+  component and complete two-Worker recovery acceptance are recorded above.
+  Exact frozen file hashes are recorded in the native portal dependency sheet.
+  No SQL, runtime configuration, production grants or public links changed.
+- Actual Ops-to-Client binding testing exposed a transport-contract defect:
+  diagnostic cell 337 exited 1 (75.43 seconds; one diagnostic failure, one
+  skipped case). The real successful RPC result contained `ok`, `receipt` and
+  a platform-added `Symbol.dispose`; Ops's closed envelope parser rejected it
+  and retained an ambiguous retry. Phase-1 `Response.json` serialization had
+  hidden the extra symbol. A bounded primitive JSON **response** wire is being
+  implemented only at the private named entrypoint/caller boundary. Internal
+  object APIs, complete shared input validation, nested response closure,
+  exact fingerprints, permission checks and atomic claims remain unchanged.
+  No disposer exception, callback invocation, SQL change or access grant is
+  included. Earlier component hashes/results below are historical once those
+  runtime/test bytes changed; fresh independent local QA above supersedes them.
+  Production-main/config and live staging remain required for a release claim.
+- Delegated project-read audit confirmed legacy `divisions.id` and native
+  `native_business_divisions.id` are separate foreign-key namespaces, with no
+  durable bridge. Matching their text is forbidden. A future explicit native
+  read authority should use closed global/business-area/native-division-pair/
+  exact-project scopes, version/generation pins and deny precedence; sync
+  authority is not read authority, and native reads are not file grants.
+  Preserve assignment-free access for the protected owner through trusted
+  current server-side effective-policy resolution, never a caller role/email
+  flag. Ordinary managers require explicit native scopes; the protected owner
+  must not acquire a new manual-grant prerequisite. Legacy folder-reservation
+  permission checks remain independently required. Complete root publication
+  cannot silently omit projects the publisher is not authorized to include.
+  This is design-only: new native grants/issuance are not implemented or enabled.
+- Staging management-invocation review found a separate mount prerequisite:
+  0153 dispatch checks the immutable command creator; 0155 cancellation takes
+  no human actor and audits only the Client terminal receipt/claim. Do not mount
+  these helpers behind a route-only authorization SELECT. A reviewed current
+  invoker proof and immutable invocation audit must be coupled to the exact
+  dispatch/cancellation claim, preserving admission/profile/grant-generation,
+  current root/target and deny-winning permissions. Current-manager cleanup of
+  an ambiguous attempted command must not require an active original creator,
+  but it must never reauthorize publication of that creator's stale snapshot.
+  Exact existing remote commitment recovery and new publication authority are
+  distinct. Dispatch retains current checkpoint and original-creator authority;
+  a new invoker is never a substitute. Cancellation deliberately permits cleanup
+  after original creator, source or workspace drift: require a currently
+  authorized invoker scoped to the immutable command/reservation identity tuple,
+  not an active workspace, latest target revision or still-live source snapshot.
+  It is disposition-first and never invokes publication. Exact cancellation
+  receipt plus claim-bound audit remains mandatory before releasing the fence.
+  This is a read-only design finding, not an applied migration or
+  authorization to enable management routes; native 0154/0224 remains stopped.
+- The ignored Client staging config now explicitly contains
+  `CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED: "false"`, matching its
+  reviewed template. Parsed readback confirmed staging identity and disabled
+  value; scaffold/recipient-enrollment config tests passed 9/9. No deploy ran.
+- Runtime wiring audit: the new Ops publication and cancellation helpers are
+  not imported by a mounted Ops management route or scheduled drain, and the
+  checked-in staging Ops config has no publication service binding. Do not
+  equate the passing Client named-entrypoint harness with an operational
+  publisher. After complete helper/binding acceptance, add a separately gated
+  staging owner-management boundary and private binding with generated types,
+  current trusted admission/owner/root permission checks, strict origin/host
+  and disabled-before-write behavior, closed explicit-ID inputs, and exact
+  ledger readback. The caller must use the server-derived complete topology,
+  not accept a client-supplied source set. Positive staging dispatch, retries,
+  cancellation and default-off rollback remain mandatory before release.
+- Phase-1 actual Client named Worker-binding acceptance is now independently
+  passed: producer session 45217 passed 2/2 (33.29 seconds), and root session
+  91002 passed that harness plus three public-share compatibility files,
+  4 files / 25 tests (34.68 seconds). Root Client type-check passed (5.75 seconds).
+  Harness SHA-256 `04a1f3883f4bf1d040726523899095b35421c441abc2bc0ff711b0004770d865`.
+  It bundles the production ingress and exercises platform RPC serialization,
+  five disabled variants across four methods, exact terminal/replay receipts,
+  caller-discarded result recovery, durable row correlation and fetch 404/no-store.
+  Its migration set is exactly Client <=0223 plus 0225; stopped 0224 is absent,
+  and authority/grant tables stay empty. Compatibility tests cover existing
+  public-share sessions, expiry, revocation, passwords and location scoping.
+  This is local workerd evidence, not deployed staging or full Ops dispatcher
+  integration. The next transport gate is the actual Ops caller across that
+  binding using freshly accepted 0153 and paired 0155; no activation occurred.
+- Revised frozen 0153 coverage is independently accepted: producer session
+  52175 passed 2/2 (105.92 seconds); independent paired 0153/0155 session 16657
+  passed two files / five tests (208.27 seconds), with Operations type-check
+  session 90261 exit 0. Exact frozen 0153 hashes are SQL
+  `7eec18defdb2e22593dad0a5cbedc01615285c1b1b8f92cfe46ee945e1f33ad2`, runtime
+  `572995a6f7cbc8dec923644e7ff66a71057489ccfa9ec344004e26e7c50ec86d`, test
+  `f262b14ec09a367c7f08cb08080b2a34f9be2f1cdd22ee71c83ca2dd44112be9`.
+  Review proved full customer-owned project coverage without folder prerequisites,
+  standalone clients, foreign/mismatched ownership exclusion, changed relationships
+  and versions, and deny-winning global `projects.view`; 0155 recovery remains
+  compatible. Delegated native division/project read semantics remain a release
+  gate. The complete actual Ops dispatcher-to-Client binding test implementation
+  may now proceed; local component acceptance is not live staging or portal access.
+- Completed read-only PA provenance audit: empty directory fences and a null
+  project fence mean **no PA freshness assertion**, not proof of no mapping.
+  No mounted Client reader currently consumes those optional fields. Keep
+  native metadata available during PA outages; PA-derived reads must not infer
+  authority from missing evidence. Exact V2 project provenance can be traced
+  through current revision, settlement, success, activation and mapping rows.
+  Directory reconciliation proves upstream coordinates/relationship checks,
+  but does not persist a full PA profile digest tied to native profile bytes;
+  it cannot attest full profile congruence. Any future fence-dependent reader
+  needs explicit persisted evidence and currentness checks, not runtime-only
+  enrichment or an implied grant. No authority implementation or rollout ran.
+- Independent frozen Ops 0155 QA is now accepted: session 18876 passed all
+  three cases (102.82 seconds), and Operations type-check passed (13.56 seconds).
+  Exact SQL/runtime/test hashes match producer run 97900 recorded below.
+  Review confirmed the transition guard preserves 0153 mechanically except for
+  exact receipt-and-audit-gated cancellation of the current attempted claim.
+  This supersedes the historical pending 0155 local review statements, not live
+  Worker binding, full migration inventory/CI or portal sign-in acceptance.
+  The never-applied 0153 folderless-project coverage revision may now proceed;
+  editing it supersedes its frozen acceptance and requires new QA plus a paired
+  0155 rerun. No remote migration, deployment or authority implementation ran.
+- Freshness design clarification: the shared publication contract describes PA
+  fences as exact mirrors; PA does not own native portal identity, hierarchy or
+  grants. No currently mounted Client reader consumes these new fence fields.
+  Audit exact local mapping/settlement provenance before imposing a new gate.
+  Do not turn unavailable PA into a blanket denial of Ops-owned metadata/work:
+  the objective requires native Ops continuity during outages. PA-derived
+  financial/action reads remain separately scoped and honestly stale. Native
+  fields must not invent a PA mirror, silently erase a real mapping, or claim
+  fresh upstream authorization without its exact proof. The concrete producer
+  provenance adapter is under read-only review; no gate or authority was changed.
+- Folderless-project authority audit found no safe implicit division bridge:
+  shared project scopes use native business-area/division IDs; current effective
+  `projects.view` division scopes reference legacy divisions. Native project
+  grants authorize `project.shared.sync`, not project reads. Do not reinterpret
+  either as read authority. The existing 0153 producer is owner-only; its next
+  coverage revision must require current effective global project-read authority
+  (including the existing protected-owner policy), preserve deny/current-admission
+  checks, and select customer-owned projects independently of folder reservations.
+  This fixes that component's coverage without claiming delegated staff policy
+  complete. Full cutover still needs audited native project-read scope semantics
+  and exact freshness proof for explicitly mapped PA projects. Neither project
+  ownership nor an absent folder is an access grant. Scope design only so far;
+  frozen 0153 remains unchanged while independent 0155 QA runs.
+- Ops 0155 producer's exact-byte test run 97900 is terminal passed: three
+  cases, 102.79 seconds, plus Operations type-check. The real two-D1 case
+  exercises Client cancel-first/lost-response reconciliation, publish-first,
+  concurrent terminal XOR, late-publication exclusion and reservation release
+  without authority/grant writes. The other cases cover hostile descriptors,
+  raw SQL guards and historical acknowledgment after a newer head advances.
+  SQL SHA-256 `0ef7cf0a8ed92047d0856666f9edb0efbf107ca5473d1f9e51f0b624dc31d4f8`;
+  runtime `edabf09c1c2b57207736504657a540a72ac129b0e2681ea961bb4e1edaafd029`;
+  test `4a03282b98b827dfaf55df5f12e5e8892c32575b778411aab8c89882850b508d`.
+  Independent exact-byte QA is now assigned. This is local Miniflare evidence
+  with real databases and in-process calls, not live Worker RPC acceptance,
+  a full physical migration-chain seal, CI or deployment.
+- Service-home bridge audit found a concrete native-cutover dependency:
+  Client `operations-service-home.ts` resolves only legacy workspace/grant
+  heads plus authority-v2 receipts; Ops `client-portal-service-metadata.ts`
+  resolves only legacy authority-v2 and binding outbox receipts, identity
+  bindings and enrollment intents. Neither consumes the proposed native
+  authority. Changing only one side would fail remotely, not finish the portal.
+  Preserve the legacy V1 reader; add an explicitly versioned private native
+  proof carrying target, recipient binding, enrollment intent and customer
+  identity, with exact current native receipt/publication and revocation checks
+  on both sides. Reuse the bounded descriptive enrollment lookup only after
+  that proof resolves. This implementation belongs behind the stopped native
+  authority approval checkpoint, not an inferred legacy-row workaround.
+  Required tests include queued revocation, expiry, stale publication, sibling
+  isolation and revoke-during-RPC. Service metadata grants no file, request
+  mutation, PA assignment or financial authority. Audit only; no code changed.
+- Final independent Client 0225 review now accepts the frozen data-only
+  cancellation component. Producer session 14725 passed three files / 20 tests
+  (75.55 seconds); independent session 65211 passed the same 20 tests plus
+  preflight 9/9 (75.38 seconds Vitest), and both Client type-checks passed.
+  Nested missing/unknown/duplicate fields are rejected; full canonical bytes
+  are checked at readback. A valid-looking body tamper with the original
+  fingerprint yields replay mismatch/conflict, not false cancellation evidence.
+  SQL SHA-256 `1f878648bd575efa7e281073b9744a19838cc56c4460b48ce4f95d44609a3274`;
+  helper `eceb66603b8e97989c6ca4d424b01135c9ef057546c90da8d7839a3cba210b83`;
+  test `0bd299fce58643ad679858aaa514344d5edebc540581078cf5f9c1fc6bb85ce3`.
+  This supersedes the historical Client review holds below, not the pending
+  final Ops 0155/paired recovery release or native 0154/0224 approval stop.
+  No commits, migrations, deployment or recipient grants are implied.
+- Root cancellation-response regression now passes with all ten focused Client
+  endpoint tests (197 ms); Client type-check passes on these edits. It verifies
+  valid evidence plus rejection of hidden fields, changed target revisions,
+  noncanonical timestamps and extra fields. New 0225 source stores and compares
+  full canonical publication bytes before returning exact cancellation evidence;
+  nested raw-write guards and their tests are under final verification.
+- The earlier pre-coverage 0153 revision was folder-backed topology, not the
+  full service-aware portal. Its project set was derived from active folder
+  reservations, so metadata-only, website and pre-delivery projects are omitted.
+  Required next coverage extension: choose the current customer-owned project
+  set independently of folders; folders remain a selected subset, not a project
+  eligibility requirement. Keep internal financial documents independently
+  authorized. Existing PA provenance is currently emitted as empty/null fences;
+  use exact current source/mapping receipts where the downstream reader requires
+  PA freshness, never invented mappings or inferred grants. Service enrollments
+  and financial summaries need their own authorized read path; inspect existing
+  service-home bridges before expanding a wire protocol unnecessarily. A topology
+  receipt alone cannot prove these portal requirements complete.
+- New local recovery checkpoint (supersedes the historical 0153 hashes below):
+  the durable `remote_attempted`/settlement repair passed producer session 63990
+  (1/1, 97.82 seconds) and independent session 14066 (1/1, 97.51 seconds).
+  Independent Ops type-check passed. Frozen SQL SHA-256:
+  `70fbbe4d2fc66428de7924f209147e3a9f3006b42101508fb09480085ad857e1`;
+  runtime `346460bd82fb713d9086a1556faceaec1bbd0554ddd6cdbab4bf5cb12dc0ae40`;
+  test `602f7ca36e8f7ab6f5ba00ed1e30e3e67a0e9af19064052ae8b3cfeec0516bb4`.
+  The first independent rerun failed because Client's additive cancellation
+  helper did not recognize D1's qualified missing-table message against the
+  intentional Client-through-0223 fixture. The narrow compatibility correction
+  preserves existing receipt reads; cancellation inserts still fail closed
+  without their new table. This is component acceptance, not complete recovery.
+- Client cancellation/publication checks previously passed 18 cases and Client
+  type-check. Root then required enumerable data fields in both receipt parsers;
+  the actual Client-config endpoint rerun passes 9/9 including the new hidden-field
+  regression. The three-file suite is being rerun against those latest edits.
+- Root review of the new Ops 0155 helper found that historical acknowledgment
+  replay incorrectly depended on the current head still pointing at that
+  operation. Advancing a newer publication must not invalidate the old durable
+  receipt. A repair and regression are assigned, together with exact terminal
+  readback after committed settlement. The paired 0155/0225 implementation remains
+  unaccepted, uncommitted and not remotely applied. Native 0154/0224 stay stopped.
+- Independent Client 0225 review additionally found incomplete nested JSON
+  validation in the new raw-write cancellation guard: top-level counts and row
+  pins alone do not validate directory/project/folder/authority-head elements.
+  Acceptance is held while the producer adds equivalent nested validation and
+  raw altered-body regressions. SHA-256 is verified at the runtime boundary;
+  no database cryptographic verification is claimed. Ops-only mocked disposition
+  tests must not be reported as paired acceptance: a real two-database case is
+  required for publish/cancel races, lost responses and late publication.
+- At that checkpoint, the latest pushed candidate was `ee934938526532de923403759972d039a88b0130`,
+  verified on the remote branch and draft/open PR #139. Exact-head CI run
+  `36684423126` is terminal successful with all ten jobs passed, including
+  Operations type-check, tests and deployable build. The complete
+  native-resource regression is terminal passed: all 43 tests, 859.23 seconds
+  (session 63329). No merge or deployment is claimed.
+- The terminal Operations CI log independently confirms all 321 suites and
+  3,144 tests passed in 1,066.45 seconds (job 109786881687). This evidence covers
+  committed head `ee934938526532de923403759972d039a88b0130`, not the local
+  uncommitted 0153/0155/0225 recovery work or stopped 0154/0224 authority drafts.
+- Previous candidate was `9bb78d3212f820c8d2042393e7761c096d906fb0` on
   draft PR #139. Its exact-head CI run `36680957665` has nine successful jobs,
   including the corrected staging authority packets, Client tests/build and
   desktop/mobile browser suites; the Operations job is terminal failed with
@@ -13,7 +307,7 @@ Updated September 30, 2026. The owner approved implementation and resumption aft
   acceptance. Audit diagnosis found valid fixed-ten-minute-window behavior:
   the test crossed a real window boundary. The test-only Date pin passed its
   focused regression (1 passed, 42 deliberately filtered out; 107.44 seconds).
-  The complete affected suite is now running; production deduplication and
+  The complete affected suite passed all 43 cases; production deduplication and
   authority remain unchanged. The joined fixture's separate root cause is
   its 151-row ledger versus the current producer's required reviewed 152-chain;
   correcting only the test's forward tail preserves historical 122-chain pins.
@@ -23,7 +317,7 @@ Updated September 30, 2026. The owner approved implementation and resumption aft
   that explicit fixture. Independent QA accepted both corrections; the new
   joined rerun passed all four cases in 174.56 seconds. Drafts remain untouched and full-current-chain
   validation remains a separate unsatisfied gate.
-- The new 0153 data-only publication producer remains uncommitted, but final
+- At that checkpoint, the new 0153 publication producer was uncommitted, but final
   independent QA accepted its frozen candidate: focused canonical Miniflare
   1/1 passed in 94.46 seconds and Ops type-check passed. Verified exact JSON
   closure, primary reads, concurrent replay, current-source ambiguous retries
@@ -35,6 +329,52 @@ Updated September 30, 2026. The owner approved implementation and resumption aft
   data-only Client cancellation/tombstone CAS is required for complete recovery.
   This is safe component evidence, not completed rollout readiness or a new
   sealed migration inventory. No new remote apply or deployment was performed.
+- Subsequent root review supersedes that 0153 component acceptance pending a
+  retry correction: an ambiguous publish followed by a malformed/non-success
+  status response can overwrite its diagnostic marker, and a crashed dispatcher
+  can leave that marker NULL. An attempted invocation must remain unresolved
+  across every such path until exact durable publication/cancellation evidence
+  exists. Data-only runtime/test repair and the cancellation protocol are being
+  implemented separately; recipient-authority drafts remain stopped. The old
+  frozen hashes/test pass are historical, not acceptance for the repaired bytes.
+- Independent follow-up QA additionally requires a durable monotonic
+  `remote_attempted` fence committed before invoking Client, plus raw SQL
+  rejection of unsafe terminal transitions. Claims/diagnostic codes alone cannot
+  establish whether a remote call started. Malformed stored input after a prior
+  attempt must remain fenced, not become `dead`. The producer is updating its
+  uncommitted 0153 data-only schema/runtime/tests; no applied migration or native
+  recipient-authority file is changed. Exact cancellation evidence will be a
+  separate additive protocol, not a locally inferred non-commit.
+- Follow-up review caught two further pre-invocation/concurrency details in the
+  unpublished recovery candidate. Safe supersession must depend on
+  `remote_attempted=0`, not `attempt_count=0`: a failed pre-RPC marker update can
+  leave a retry with a nonzero claim count but no remote invocation. Conversely,
+  a zero-change claim-conditioned UPDATE must not report a successful terminal
+  state. Require its exact durable result or report claim conflict/retry. The
+  producer is adding regressions and independent QA is checking final bytes;
+  no new passing result is asserted yet.
+- Independent bounded reproduction against the actual dispatcher confirmed the
+  false-terminal path: a stored pending/remote-unattempted row, absent current
+  source and a guarded supersession UPDATE reporting zero changes still returned
+  `superseded`. No binding call occurred. Database fencing remained intact; the
+  incorrect caller result is a separate required repair, not accepted behavior.
+- The provisional local runtime now checks settlement row counts and reads back
+  durable terminal state instead of assuming a guarded UPDATE succeeded. It also
+  bounds raw reason length. The local SQL now permits pre-invocation retry
+  supersession using the durable marker rather than the claim count. Root read
+  the full files and confirmed these edits; focused regressions and a new
+  immutable hash/independent QA acceptance are still pending. These bytes have
+  not been committed, pushed, deployed or applied remotely.
+- The paired data-only recovery implementation is now assigned in parallel to
+  smaller agents: tentative Client 0225 (depends only on 0223) provides immutable
+  cancellation/disposition evidence; tentative Ops 0155 persists the exact
+  terminal receipt before releasing an attempted publication's single-flight
+  slot. The request reuses the full verified publication. Responses explicitly
+  distinguish committed, cancelled and lookup-only not-found; cancellation
+  receipts include the full target identity, expected/resulting revisions,
+  snapshot/checkpoint/hash and original request fingerprint. Unknown outcomes
+  remain fenced. Native 0154/0224 stay stopped; no remote apply is authorized by
+  this task assignment, and implementation/test acceptance remains pending.
 - Fresh private pre-0152/pre-0223 staging exports were saved and verified:
   Ops 1,899,629 bytes, SHA-256
   `7e8db09b695426ee30b4017000e8ea8f4d45d9f08473c97e06a2c9678792b893`;

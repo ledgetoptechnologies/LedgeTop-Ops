@@ -6,6 +6,262 @@ attestation of client access.
 
 ## Keep the workflows separate
 
+Current summary: local tooling-corrected head is
+`9b1831ef9b99289fabb03a84dd937148bb898acd`, not yet pushed. Remote PR #139 is
+at 9790829, whose Client CI failed the stale 142/143 bootstrap pin; eight other
+jobs passed, Ops still runs. Independent tooling QA, type-check and full-chain
+rehearsal passed locally, as detailed below. A new exact-head CI remains required.
+No remote migration/deployment or native recipient activation occurred.
+Later statements below are chronological checkpoints: retain failures and
+historical holds as history, and use the newest explicit component acceptance
+only for that component. They are not whole-portal acceptance.
+
+### Chronological component history — superseded where Current summary says otherwise
+
+Release observation: exact head `97908298a593b09d044e3619b0d9f241bc7e3932`
+is pushed to draft/open PR #139. CI `36697340183` is live, not terminal accepted.
+No merge, deployment, remote migration or recipient activation occurred.
+
+Committed-only inventory review found current release-tooling pins are stale:
+bootstrap/evidence/readback/preflight fixtures still expect Client 142/0223 and
+Ops 152/0152. The candidate contains Client 143 ending 0225 and Ops 154 ending
+0155; stopped 0224/0154 are not committed. Update only current-chain requirements
+and evidence fixtures; preserve historical 140/151 and reviewed-152 packet
+baselines. Do not generate/bootstrap from the dirty physical migration folders.
+This is a concrete release gate even when source-invariant CI passes.
+The first corrected-tooling Node run (`8d0021`) exited 1: bootstrap passed, but
+evidence fixtures admitted physical Client 0224 and the readback fixture correctly
+rejected physical Ops 0154. Fixture-only gap-aware copies and suffix-length
+corrections are being tested. Runtime inventory rejection remains unchanged;
+this initial failure is not accepted full-chain evidence.
+Corrected Node tooling tests now passed independently: producer `64832f` and
+root `cac7d1` each report 123 tests, 119 passes, zero failures and four Windows
+symlink skips (8.16/8.43 seconds). This covers bootstrap, preflight, evidence and
+readback, including exact 154-schema query execution and unknown-file rejection.
+The Client Miniflare full-chain rehearsal is still live as session 2713; no
+terminal migration-rehearsal acceptance is claimed from Node tests alone.
+That producer rehearsal subsequently passed as session 2713: preflight 9/9 and
+Vitest 1/1 (75.49 seconds), with Client type-check passing. Independent root
+full-chain session 66814 is now live; terminal independent acceptance is pending.
+CI Client job 109828349810 on head 9790829 failed only the stale bootstrap
+inventory gate (expected 142, found 143); 132 other Client files and 1,421 tests
+passed. The current ten-file correction is not yet committed/pushed, so that
+failed CI does not test it. Ops CI remains live; do not restart unchanged jobs.
+Independent root full-chain session 66814 is now terminal passed: one test,
+75.59 seconds, plus root Client type-check. Independent read-only review verified
+the exact committed name/content hashes, unchanged runtime rejection and
+historical baseline preservation. The ten-file tooling correction is locally
+committed after these gates; no remote apply or deployment follows from this.
+
+Production-main release gate: the actual Vite-emitted Client main module fails
+local workerd startup because it exports the numeric
+`BULK_CACHE_CLEANUP_MAX_D1_QUERIES`. Build success is not startup success. The
+bounded fix moves unchanged cleanup limits to an internal module and updates
+the backend-test import. Require emitted-main startup and cleanup regression
+tests; never omit/filter main exports to make the test pass. No deployed
+production outage is claimed from this candidate-only finding.
+The minimal move now passed producer emitted-main QA (two tests, 6.06 seconds)
+and independent root emitted-main QA (two tests, 6.08 seconds), plus independent
+39-test bulk backend regression and Client type-check. The harness invokes the
+checked-in build script in a fresh child process, rather than reusing stale
+in-process Vite output; the emitted Worker is not filtered. This is local startup
+and default-off/no-storage evidence, not live staging or production acceptance.
+
+The 17-file inert publication/recovery cohort is now locally committed as
+`86d30e6a10c31ccca87508050fb9d224048c01d3`, pushed with startup fix
+`97908298a593b09d044e3619b0d9f241bc7e3932`, not merged/deployed. Earlier
+green CI is for `ee934938526532de923403759972d039a88b0130` and does not cover it.
+Stopped 0154/0224/native-authority drafts are outside this commit.
+
+The data-only transport defect below is now resolved in local frozen-byte QA.
+Ops producer 67247 passed two files / five tests (216.83 seconds); root 12656
+independently passed the same cohort (217.39 seconds). Ops type-check passed
+independently in root 19796. The complete two-Worker binding harness passed
+producer 350 / session 34409 (two tests, 79.13 seconds) and independent root
+45796 (two tests, 79.35 seconds). Normal receipt correlation, lost publication
+response recovery without resend, cancellation recovery, race serialization,
+cross-database heads/receipts/snapshots and checkpoint digests were verified.
+The real-binding fixture has empty project topology; complete project coverage
+is separate component evidence, not a full portal/client acceptance claim.
+
+Frozen Ops SHA-256 values: outbox runtime
+`a12ca35fd27b1e75787c17f23106ca63d28486462ec80708a3dc2f170b9a7173`;
+cancellation runtime `30b6c97ddc5eb36ec0c93418ee99cff6c19b1d44ac4b291286341819d1928e61`;
+outbox test `30757a4351ce8fb4ba7afe847a0418df1def3e6c78c11610acbf3907fab1058e`;
+cancellation test `efcdbc86bf5b5e7996b963fdadd694ce5cba2fcff35ed9d37fb7e5cff2a6473c`;
+two-Worker test `2195cea529c4034b0cc16eb2a495bd9ee2e8a6f18d754046b3886ebb0fa197f2`;
+driver `0340af00b81146643fe3b13333f4f2b6b90e2bf7ad3bdf4fdfb6b807eb3e833f`.
+Source-layout invariants passed 18/18. SQL bytes remain unchanged. The stopped
+0154/0224 drafts are excluded from the tested selection and release staging;
+neither publication nor cancellation creates recipient/file authority.
+The proposed publisher management route/binding, production-main/config
+activation tests, current-invoker audit and live staging remain release gates.
+
+Fresh Client transport QA (September 30): the bounded primitive response wire
+passed independent root run 52940, five files / 36 tests, 34.72 seconds; Client
+`tsc --noEmit` also passed. This includes the named Worker binding and existing
+public-share routes, lifecycle and location regressions. Frozen SHA-256 values:
+shared contract `102b12c2cfa5887998322b54148b886f2846721c7a954980ddeed7019b950f58`;
+Client ingress `ac2f7fc7328b087d0304db9ed04ca685cdd1ccd4113dea3a98753e16a51a398a`;
+ingress test `f2b953af5928a6063bcbb37cfadde770e15eec45b640708bc5f494d4059a6505`;
+Client binding test `7fe638826418d2d862eedc6a412a2b8155a20b5bdbf74ea0d04f7816a367693b`.
+These supersede the older phase-1 test hash below. Fresh local Ops component
+and complete Ops-to-Client binding acceptance are recorded above; this does not
+prove live staging, client enrollment or production readiness.
+
+Historical pre-fix phase-2 runtime evidence: producer cell 316 exited 1 (75.61 seconds).
+Workspace reservation succeeded, but normal publication and cancellation
+recovery returned `retry`; the complete Ops-to-Client gate failed at that point.
+Diagnostic cells 328 and 333 also exited 1. Final diagnostic cell 337 exited 1
+(75.43 seconds; one intentionally diagnostic case failed, one skipped). The
+actual successful named RPC result had own keys `ok`, `receipt` and
+`Symbol(Symbol.dispose)`. Ops rejected that envelope and retained
+`retry:1:rpc-outcome-ambiguous`. No publication bytes, identity proofs or tokens
+were logged. This is a confirmed transport-contract defect, not a migration or
+recipient enrollment failure.
+
+RPC transport review identified the platform difference:
+Cloudflare adds a disposer to RPC object results, while the Ops response parsers
+reject additional own symbols. The earlier Client-only harness serialized the
+result with `Response.json`, masking the defect. The implemented scoped fix is
+a bounded primitive JSON response wire at the named ingress only; internal
+object APIs, strict nested closure, exact identity/fingerprint pins and every
+permission/CAS safeguard remain intact. No symbol exception or callback
+invocation was added. Prior component runtime/test hashes are superseded by
+the fresh frozen-byte component and actual binding evidence above.
+
+Mounted publisher gap: Ops currently has only unmounted publication/cancellation
+helpers, with no corresponding configured staging publication binding or drain.
+The real Client ingress test is not proof of that wiring. A reviewed staging-only
+owner management boundary, private binding/generated types, and live exact-ID
+dispatch/recovery/default-off rollback are separate release prerequisites.
+
+Current-invoker mount prerequisite: 0153 dispatch carries original creator
+authority; 0155 cancellation has no human-invoker argument and its audit records
+only the exact Client receipt/claim. A route-only preflight SELECT is not an
+atomic invocation guard. Before exposing owner POSTs, review a durable current
+invoker/claim audit with exact operation/root/target pins and deny-winning checks.
+Allowing a current manager to clean up ambiguous attempted work must not allow
+republishing a snapshot whose original authorization is no longer current.
+Dispatch must preserve current checkpoint and original-creator authority.
+Cancellation must instead retain cleanup after source/creator/workspace drift:
+prove current invoker scope against the exact immutable command/reservation
+identity tuple, without requiring active workspace state or latest revision.
+Disposition recovery/tombstoning never calls publish; exact durable Client
+receipt and claim-bound cancellation audit are required to release the fence.
+No implementation, grant or route activation is claimed for this design finding.
+
+Local configuration correction: the ignored Client staging config now explicitly
+sets `CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED` to `"false"`, matching
+the reviewed template. Parsed readback confirms the staging Worker/environment
+and disabled value. Scaffold and recipient-enrollment configuration regressions
+passed 9/9. This edit was not deployed and does not activate publication or access.
+
+Actual Client named-entrypoint binding harness now passes independently:
+producer 45217 passed 2/2; root 91002 passed four files / 25 tests including
+public-share compatibility, and root Client type-check passed. Exact harness
+SHA-256 `04a1f3883f4bf1d040726523899095b35421c441abc2bc0ff711b0004770d865`.
+It uses the bundled production ingress and real workerd RPC, not a mock.
+Only reviewed Client <=0223 +0225 is applied locally, with no grant side effects.
+This supersedes the harness-pending statement below, not live staging,
+the actual Ops dispatcher binding integration or recipient sign-in acceptance.
+
+Revised frozen 0153 coverage is independently accepted with paired 0155:
+producer session 52175 passed 2/2 (105.92 seconds); independent session 16657
+passed two files / five tests (208.27 seconds), and Operations type-check
+session 90261 exited 0. Exact 0153 SHA-256 pins:
+
+- SQL: `7eec18defdb2e22593dad0a5cbedc01615285c1b1b8f92cfe46ee945e1f33ad2`
+- runtime: `572995a6f7cbc8dec923644e7ff66a71057489ccfa9ec344004e26e7c50ec86d`
+- test: `f262b14ec09a367c7f08cb08080b2a34f9be2f1cdd22ee71c83ca2dd44112be9`
+
+Coverage includes complete customer-owned project sets without folders,
+standalone clients, cross-owner exclusion, current relationship/version drift
+and deny-winning global `projects.view`. It does not resolve delegated native
+division/project read semantics. The complete actual Ops dispatcher-to-Client
+binding harness is now being implemented; no terminal result is claimed yet.
+No remote migration, deployment, recipient grant or production activation ran.
+
+Phase-2 harness remains unaccepted. Its first producer runtime attempt (cell 301)
+exited 1 during `beforeAll` (71.67 seconds; two cases skipped) because a fixture
+destination referenced a root variable before definition. The fixture was fixed;
+earlier response-typing issues were fixed and Ops type-check passed (12.42 seconds).
+Review also required distinct legitimate root fixtures (0152 intentionally allows
+only one active workspace per root), exact cross-database tuples/audits, binding
+call counts proving no resend, terminal race reconciliation and unchanged grants.
+Do not count setup-skipped tests as runtime acceptance or weaken reservation
+uniqueness to make a fixture pass. Final expanded assertions need a fresh run.
+
+Local data-only migration selection readback: Operations has 154 selected files
+(`<=0153` plus exact `0155`); Client has 143 (`<=0223` plus exact `0225`).
+Stopped `0154` and `0224` drafts remain present but are **not selected**.
+Selected-content fingerprints (SHA-256 of each sorted filename, NUL, raw file
+bytes, NUL; exact extra appended after the reviewed prefix):
+
+- Operations: `313621f1d6825de58b5e4d7b93b4fae1e53710249538b93e728439a87d7391b4`
+- Client: `432f51f38ad9329ab6acb579ec11b88b4d72d5f75d7969de0ebddee69de5e131`
+
+These pin the harness inputs only. They are not full physical-directory seals,
+deployed ledgers, migration attestations or permission to apply stopped drafts.
+
+Optional PA fences are provenance only. Null/empty means no freshness
+assertion, not unmapped or authorized. Native metadata must continue through
+PA outages. Exact V2 project provenance is traceable, but the existing
+directory reconciliation does not establish full native/PA profile congruence.
+Do not enable PA-dependent readers on the strength of missing fence values.
+
+Final independent frozen Ops 0155 QA accepted: session 18876 passed 3/3 cases
+(102.82 seconds); Operations type-check passed. Exact hashes match producer
+97900 below. The receipt/audit release and paired local recovery component are
+accepted on those bytes, not deployed or accepted live. A subsequent 0153
+coverage edit must obtain fresh component QA and rerun paired recovery.
+
+Producer Ops 0155 session 97900 passed all three cases, including paired real
+Ops/Client D1 terminal races and lost responses; Operations type-check passed.
+Independent exact-byte QA remains pending. These local in-process RPC tests
+are not live staging Worker binding or client sign-in acceptance.
+
+Service-home cutover gap: the current Client authority resolver and Ops metadata
+query both require legacy authority-v2/binding/enrollment records. They do not
+consume native recipient heads. Both need exact native-proof adapters plus a
+versioned private correlation tuple before native enrollment can render the
+service-aware home. Do not synthesize legacy authority rows as a shortcut.
+Keep descriptive service visibility separate from file and financial authority;
+the native adaptation remains behind the existing approval stop.
+
+Final independent Client 0225 component acceptance supersedes the historical
+Client review holds below: producer session 14725 and independent session 65211
+both passed three files / 20 tests; Client type-check passed. Independent
+preflight passed 9/9. Nested closure and full canonical-body matching reject
+tampered cancellation evidence. Frozen SQL SHA-256:
+`1f878648bd575efa7e281073b9744a19838cc56c4460b48ce4f95d44609a3274`.
+This does not accept the final Ops 0155/paired recovery release, enable native
+authority, apply migrations or replace live staging workflow acceptance.
+
+Latest local recovery evidence: frozen repaired Ops 0153 passed producer
+session 63990 (1/1, 97.82 seconds), independent session 14066 (1/1, 97.51
+seconds), and independent Ops type-check. An additive Client missing-table
+compatibility failure was reproduced and corrected; it does not permit a
+cancellation success without the cancellation table. Root's closed enumerable
+receipt regression passes with all nine focused Client endpoint tests.
+Ops 0155 historical acknowledgment replay/readback and the complete paired
+0155/0225 acceptance remain pending. These results do not replace a current
+full migration inventory, CI, live staging acceptance, or the stopped native
+0154/0224 approval gate. No remote migration or rollout is claimed.
+
+Independent 0225 review holds cancellation acceptance pending complete nested
+JSON validation and raw altered-body regressions. Existing top-level counts and
+row pins alone are insufficient. Ops-only mocked disposition tests are not the
+required real two-database publish/cancel race and lost-response acceptance.
+
+Latest root endpoint evidence: 10/10 tests plus Client type-check pass after the
+exact cancellation-response regression. Full canonical cancellation readback
+is now implemented, but final 0225/paired acceptance is still pending.
+The earlier pre-coverage revision's folder-backed project selection omitted website,
+metadata-only and pre-delivery projects. Full portal acceptance must include
+customer-owned projects without folders, service-aware reads and independently
+authorized financial summaries; a publication receipt is not proof of those.
+
 - Customer onboarding collects a proposed profile through the private
   `CLIENT_ONBOARDING_RECIPIENT_BRIDGE`. Operations requires its session secret,
   onboarding handoff keyring and audit secret. The recipient bearer proof is
@@ -100,7 +356,7 @@ Standalone clients retain their explicit NULL-parent relationship revision;
 only organizations have no client relationship revision. A missing standalone
 relationship pin cannot silently become an unlinked-root proof.
 
-### Reviewed reservation/publication candidate (not staged)
+### Historical reservation/publication candidate chronology (not staged at that checkpoint)
 
 Ops migration `0152_operations_portal_workspace_reservations.sql` and its
 server-side writer are committed on the draft staging branch at
@@ -121,7 +377,7 @@ Only unused reservation tables are added by schema application. The full-chain
 rehearsal additionally checks that these tables start empty. No 0152 remote
 apply, runtime deployment or successful reservation acceptance is claimed yet.
 
-### Current CI and producer boundary
+### Historical CI and producer chronology
 
 Exact-head CI run `36679697001` has a completed failed `source-invariants`
 job. Its two failures are staging packet manifest assertions that still pin
@@ -149,11 +405,25 @@ reviewed 152-chain and verifies count/tail/names/content hashes before copying
 its isolated producer fixture; immutable 122-chain historical pins remain
 unchanged. An initial local rerun failed because the old recursive copy admitted
 uncommitted drafts; that failure is retained as setup evidence, not a pass.
-The full native-resource suite and new exact-head CI acceptance remain separate
-gates. No production guards or runtime behavior changed in these corrections.
+The full native-resource suite subsequently passed all 43 cases in 859.23
+seconds. New exact-head CI acceptance remains a separate gate. No production
+guards or runtime behavior changed in these corrections.
 
-The actual native publication producer/outbox is being implemented separately
-as migration `0153`. Its untracked draft is not included in the committed
+Corrections and the previously inert consent/contract component commit are now
+pushed as `ee934938526532de923403759972d039a88b0130`. Remote branch and
+draft/open PR #139 readback match that head. New exact-head CI run `36684423126`
+is terminal successful with all ten jobs passed;
+the complete local native-resource
+suite is terminal passed as session 63329. Neither a merge nor a deployment is
+implied by this push.
+
+Terminal Operations CI totals are 321 suites / 3,144 tests passed in 1,066.45
+seconds, read from job 109786881687. This proves the committed candidate's CI
+gate only; later local recovery files and native-authority drafts are outside
+that immutable commit and outside this passing evidence.
+
+At that checkpoint, the publication producer/outbox was being implemented
+as migration `0153`. Its then-untracked draft was not included in the committed
 152-chain digests below and must not be treated as reviewed or staged. Once
 stable, independently review the source-currentness guards, actual private
 Client RPC round trip, ambiguous-response reconciliation and atomic receipt
@@ -173,7 +443,10 @@ recovery implementation gate, not a claim of complete portal readiness.
 
 - Keep this data-only protocol separate from pending Ops 0154 / Client 0224
   recipient authority. Do not overwrite or reorder their incomplete drafts.
-  Assign the next canonical migration numbers after their explicit disposition.
+  The independent data-only Client draft may use tentative 0225, depending only
+  on reviewed 0223. Do not apply pending 0224 as a prerequisite or claim a sealed
+  full inventory. Final canonical numbering and complete-chain acceptance remain
+  required before any deployment.
 - Client stores an immutable cancellation tombstone keyed by the original
   operation ID and exact fingerprint, publication, target/revisions and snapshot
   tuple. Its first-primary cancel-or-status transaction returns an exact existing
@@ -192,8 +465,26 @@ recovery implementation gate, not a claim of complete portal readiness.
   exact replay and fingerprint mismatch. Prove a new current snapshot can reserve
   only after an acknowledged terminal outcome. Assert zero recipient/file grants.
 
-This protocol is planned, not implemented or deployed. It is required for
+At that checkpoint, this protocol was planned, not implemented or deployed. It is required for
 reliable recovery; do not describe indefinite fencing as the completed solution.
+
+Later root review found an additional unreleased 0153 gap: a status-response
+failure can erase a previous ambiguity diagnostic, while worker death after
+claiming can leave it NULL despite an attempted invocation. Diagnostic text
+cannot prove non-commit. Any attempted call requires exact durable terminal
+evidence before the single-flight slot is released. New regression cases and
+the data-only cancellation implementation are in progress; the earlier frozen
+0153 QA result is superseded until the corrected bytes pass independent review.
+No 0154/0224 grant/enrollment code is authorized by this data-only work.
+
+The replacement durable marker is monotonic: record `remote_attempted=1`
+under the current claim before RPC, never reset it on retries, and prohibit raw
+terminal release at 1 without exact publication/cancellation evidence. A
+nonzero claim count with marker 0 is still pre-invocation and may be superseded
+after source/authority drift. Claim-conditioned terminal updates must confirm
+one changed row or read back the exact durable terminal result; a racing worker
+must not receive a false `dead`/`superseded` success. These additional regression
+requirements are under implementation/review, not yet acceptance evidence.
 
 ### Native authorization boundary checkpoint
 
