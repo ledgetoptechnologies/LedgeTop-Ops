@@ -13,6 +13,10 @@
 export const OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_PROTOCOL =
   "operations-portal-workspace-publication" as const;
 export const OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_PROTOCOL_VERSION = 1 as const;
+/** Private Worker RPC results are deliberately a primitive JSON string.
+ * Cloudflare decorates object-valued RPC results with Symbol.dispose, so an
+ * object result cannot also satisfy the closed own-key wire contract. */
+export const OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_RPC_RESPONSE_MAX_BYTES = 16_384;
 
 export const OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_LIMITS = Object.freeze({
   directoryRecords: 500,
@@ -229,6 +233,19 @@ function exactArray(value: unknown, maximum: number): unknown[] | null {
       copy.push(descriptor.value);
     }
     return copy;
+  } catch { return null; }
+}
+
+/** Decode the primitive private-RPC transport only. The returned JSON value
+ * remains untrusted and must pass the existing closed result-specific parser. */
+export function parseOperationsPortalWorkspacePublicationRpcResponse(value: unknown): unknown | null {
+  if (typeof value !== "string" || value.length === 0
+    || value.length > OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_RPC_RESPONSE_MAX_BYTES) return null;
+  try {
+    if (new TextEncoder().encode(value).byteLength
+      > OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_RPC_RESPONSE_MAX_BYTES) return null;
+    const parsed: unknown = JSON.parse(value);
+    return JSON.stringify(parsed) === value ? parsed : null;
   } catch { return null; }
 }
 

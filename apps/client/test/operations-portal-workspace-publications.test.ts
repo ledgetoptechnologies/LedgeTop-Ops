@@ -88,7 +88,7 @@ describe("Operations-native portal workspace publication consumer", () => {
       CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED: "true" };
     const published = await publishOperationsPortalWorkspaceRpc(ingress, input);
     expect(published.ok).toBe(true);
-    if (!published.ok) throw new Error("joined publication failed");
+    if (!published.ok || !("receipt" in published)) throw new Error("joined publication failed");
     const first = published.receipt;
     expect(first).toMatchObject({ operationId: input.operationId, targetId: input.target.targetId,
       resultingRevision: "1", sourceSequence: "1", replayed: false });

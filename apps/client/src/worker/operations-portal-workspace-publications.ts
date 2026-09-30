@@ -4,6 +4,8 @@ import {
   verifyOperationsPortalWorkspacePublication,
   type OperationsPortalWorkspacePublication,
 } from "@ltds/shared/operations-portal-workspace-publication";
+import { getExactOperationsPortalWorkspacePublicationCancellation,
+  OperationsPortalWorkspacePublicationCancelledError } from "./operations-portal-workspace-publication-cancellations";
 
 export type OperationsPortalWorkspacePublicationReceipt = Readonly<{
   operationId: string; publicationId: string; requestFingerprint: string; targetId: string;
@@ -72,6 +74,8 @@ export async function consumeOperationsPortalWorkspacePublication(
     if (!receiptMatches(existing, publication, fingerprint)) return failure("replay_mismatch");
     return receipt(existing, true);
   }
+  const cancelled = await getExactOperationsPortalWorkspacePublicationCancellation(database, publication, fingerprint);
+  if (cancelled) throw new OperationsPortalWorkspacePublicationCancelledError(cancelled);
   const expected = integer(publication.expectedRevision), resulting = integer(publication.resultingRevision);
   const targetRevision = integer(publication.target.targetRevision);
   const sequence = integer(publication.snapshot.sourceSequence), counts = publication.snapshot.counts;
@@ -127,6 +131,8 @@ export async function consumeOperationsPortalWorkspacePublication(
       if (!receiptMatches(raced, publication, fingerprint)) return failure("conflict");
       return receipt(raced, true);
     }
+    const cancelledAfterRace = await getExactOperationsPortalWorkspacePublicationCancellation(database, publication, fingerprint);
+    if (cancelledAfterRace) throw new OperationsPortalWorkspacePublicationCancelledError(cancelledAfterRace);
     const headNow = await currentHead(database, publication.target.targetId);
     if (headNow && (headNow.revision !== expected || headNow.target_revision !== targetRevision
       || headNow.client_authority_id !== publication.target.clientAuthorityId
