@@ -15,6 +15,9 @@ export interface ClientPortalServiceMetadataV1 {
   revision: number;
 }
 
+/** Exact maximum UTF-8 bytes for 100 fully bounded v1 services plus tuple. */
+export const CLIENT_PORTAL_SERVICE_METADATA_MAX_RESPONSE_BYTES = 302_850;
+
 export type ClientPortalServiceMetadataResultV1 =
   | Readonly<{ ok: true; protocolVersion: 1; services: readonly ClientPortalServiceMetadataV1[] }>
   | Readonly<{ ok: false; protocolVersion: 1; code: "invalid_request" | "denied" | "overflow" }>;

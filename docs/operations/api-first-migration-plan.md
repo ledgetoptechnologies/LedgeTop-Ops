@@ -5,11 +5,20 @@ Updated September 30, 2026. The owner approved implementation and resumption aft
 ### Current checkpoint — September 30, 2026 (UTC)
 
 Current release summary: draft PR #139 is pushed at
-`c2202dbd2de1be73c830a6007e48dd4180d77e8f`. CI `36699286229` remains live,
-but source-invariants failed because historical reviewed-152 authority packet
-generators inherited the newer bootstrap contract. A bounded correction restores
-their immutable version-specific names/content pins without accepting a newer
-authority schema or weakening drift checks; focused verification is underway.
+`97178689c2f517fe49d86decd18bb56fdb0e8170`. Exact-head CI `36700393785`
+finished with nine successful jobs and an Operations test failure. Two full-chain
+tests still assert 152 migrations rather than the committed 154; a separate
+rate-limit case can cross the minute-window boundary between its assertions.
+The test-only corrections are pushed as `93521c01989c80af75919888e0addba566d8c809`:
+independent QA passed 25 migration/helper tests and 28 delivery-intent runtime
+tests, including explicit next-minute budget reset and unchanged accepted quota.
+The inventories are name/content-hash verified and exclude stopped authority
+drafts; no runtime authorization or SQL was changed. Fresh exact-head CI
+`36704572043` is confirmed in progress, not accepted. The historical
+reviewed-152 authority packet correction passed its CI source-invariant gate
+and 49 focused local tests; it preserves immutable version-specific schema pins.
+The previous c2202db source-invariant failure is superseded for this component,
+not for whole-portal acceptance.
 The ten-file current-chain tooling correction already passed independent 119-test
 Node QA (four Windows symlink skips), Client type-check, full-chain Miniflare
 rehearsal (one test, 75.59 seconds) and review. A clean committed-only c2202db
@@ -19,9 +28,33 @@ activation or production cutover is claimed.
 Root independently passed the exact failing gate (47/47, 53.95 seconds) and
 source-layout checks (18/18). Read-only review accepted version-specific 152
 pins; both added appended-0153 rejection tests passed independently (2/2,
-147 milliseconds). Close/revoke any temporary
-152 authority before advancing its ledger to 154. Historical packets reject
-154 intentionally; newer authority support needs explicitly versioned review.
+147 milliseconds). Before **any** staging ledger advance, inspect its actual
+current version and close temporary authority using that exact version's
+reviewed cleanup artifact. For a 151 ledger, cleanup must precede even 0152.
+For a 152 ledger, cleanup must precede advance to 154. Missing or mismatched
+cleanup artifacts are a stop; historical packets reject newer schemas intentionally.
+
+Fresh Client staging readback remains 141 migrations through 0222; the candidate
+is not deployed there. The configured Ops staging D1 read was rejected with
+Cloudflare code 7403, so its current ledger and temporary authority are unverified.
+Restore authorized configured access before remote preflight or writes.
+
+Independent service-home review found another real-binding coverage gap:
+the Operations metadata named RPC returns an object, while Client rejects
+the disposer symbol the platform adds to RPC object results. Existing helper,
+route and joined tests bypass the named transport. A real two-Worker regression
+and bounded primitive response fix now passed independent local QA: 18 Client
+tests (including real-binding authorized reads and correlated denial), three Ops entrypoint/joined
+tests, and both application type-checks. The untouched 971 candidate was first
+reproduced returning an RPC object with `Symbol.dispose`; the fix returns bounded
+canonical JSON while retaining tuple, permission and revocation validation.
+The final real-binding fixture now verifies initial denial, acknowledged grant,
+exact full-tuple service summary, acknowledged revoke and stale-tuple denial by
+both Ops and Client. Root final sessions 5839/16936 passed 18/3 tests (25.03/10.86
+seconds); both type-checks passed. The reduced reviewed legacy fixture is explicitly
+transport-only evidence, not native enrollment or a grant to file access.
+This verified transport update is still not deployed. This transport-only work
+does not authorize native recipient grants or current-manager route activation.
 
 The entries below retain chronological component evidence, including earlier
 failures and superseded pending states. Later explicit results supersede only

@@ -1,4 +1,5 @@
-import type { ClientPortalServiceMetadataRequestV1, ClientPortalServiceMetadataV1 } from "../../../../../packages/shared/src/client-portal-service-metadata";
+import { CLIENT_PORTAL_SERVICE_METADATA_MAX_RESPONSE_BYTES,
+  type ClientPortalServiceMetadataRequestV1, type ClientPortalServiceMetadataV1 } from "../../../../../packages/shared/src/client-portal-service-metadata";
 import type { Env } from "../types";
 import type { VerifiedClientPrincipal } from "./types";
 
@@ -9,7 +10,7 @@ const responseKeys = ["ok", "protocolVersion", "authorityId", "workspaceId", "ow
 const serviceKeys = ["serviceId", "providerId", "displayLabel", "revision"] as const;
 
 export interface OperationsServiceMetadataBinding {
-  readServiceMetadata(input: ClientPortalServiceMetadataRequestV1): Promise<unknown>;
+  readServiceMetadata(input: ClientPortalServiceMetadataRequestV1): Promise<string>;
 }
 export type OperationsServiceHomeEnv = Pick<Env, "DELIVERY_DB"> & {
   CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED?: string;
@@ -142,13 +143,22 @@ function validateResponse(value: unknown, request: ClientPortalServiceMetadataRe
   return services;
 }
 
-async function boundedRpc(binding: OperationsServiceMetadataBinding, request: ClientPortalServiceMetadataRequestV1): Promise<unknown> {
+async function boundedRpc(binding: OperationsServiceMetadataBinding, request: ClientPortalServiceMetadataRequestV1): Promise<string> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([binding.readServiceMetadata(request), new Promise<never>((_resolve, reject) => {
       timer = setTimeout(() => reject(Error("operations-service-metadata-timeout")), TIMEOUT_MS);
     })]);
   } finally { if (timer !== undefined) clearTimeout(timer); }
+}
+
+function decodeResponse(wire: unknown): unknown {
+  if (typeof wire !== "string" || wire.length > CLIENT_PORTAL_SERVICE_METADATA_MAX_RESPONSE_BYTES
+    || new TextEncoder().encode(wire).byteLength > CLIENT_PORTAL_SERVICE_METADATA_MAX_RESPONSE_BYTES) return null;
+  try {
+    const parsed: unknown = JSON.parse(wire);
+    return JSON.stringify(parsed) === wire ? parsed : null;
+  } catch { return null; }
 }
 
 /** Requires explicit home permission; descriptive metadata never authorizes files or financial content. */
@@ -162,7 +172,7 @@ export async function readOperationsServiceHome(env: OperationsServiceHomeEnv,
     workspaceId: before.workspace_id, ownershipEpoch: before.ownership_epoch, grantRevision: before.grant_revision,
     issuer: principal.issuer, subject: principal.subject };
   let raw: unknown;
-  try { raw = await boundedRpc(env.CLIENT_PORTAL_SERVICE_METADATA_READER, request); }
+  try { raw = decodeResponse(await boundedRpc(env.CLIENT_PORTAL_SERVICE_METADATA_READER, request)); }
   catch { return { ok: false, code: "unavailable" }; }
   const services = validateResponse(raw, request);
   if (!services) {

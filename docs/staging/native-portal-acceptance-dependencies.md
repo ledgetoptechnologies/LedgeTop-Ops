@@ -7,23 +7,44 @@ attestation of client access.
 ## Keep the workflows separate
 
 Current summary: draft PR #139 is pushed at
-`c2202dbd2de1be73c830a6007e48dd4180d77e8f`. Exact-head CI `36699286229`
-is still running, with source-invariants failed: historical authority-packet
-fixtures correctly contain the reviewed 152-file chain, but their generators
-inadvertently inherited the newer 154-file bootstrap contract. The correction
-separates immutable packet-version pins from current bootstrap pins; it must not
-silently authorize packets against a newer schema. Focused verification is
-underway. Independent current-chain tooling and full-chain rehearsal passed
+`97178689c2f517fe49d86decd18bb56fdb0e8170`. Exact-head CI `36700393785`
+finished with nine successful jobs; Operations failed in two stale full-chain
+inventory assertions and one minute-boundary rate-limit assertion. Test-only
+corrections are pushed as `93521c0`: independent QA passed
+25 migration/helper tests and 28 delivery-intent runtime tests. Their exact
+hash-verified inventories exclude stopped drafts, and the rate test verifies
+reset without signature bypass or accepted-quota consumption. Fresh exact-head
+CI `36704572043` is confirmed in progress; overall green CI is not claimed. Source-invariants
+now passes, and the immutable-152 authority-packet correction passed 49 focused
+local tests. It does not authorize packets against the newer schema.
+Independent current-chain tooling and full-chain rehearsal passed
 locally as detailed below. A clean committed-only c2202db checkout independently
 matches Client 143/0225 and Ops 154/0155 names/content hashes; stopped 0224/0154
 drafts are absent there. No remote migration/deployment or activation occurred.
 Root independent verification of the exact failing CI gate passed 47/47 tests
 (53.95 seconds), plus 18/18 source-layout checks. Independent read-only review
 accepted the immutable-152 separation. Both added appended-0153 rejection
-regressions passed independently (2/2, 147 milliseconds). Before advancing any staging ledger from 152 to
-154, inspect and close/revoke temporary 152 authority while its exact ledger
-still matches; historical packet versions intentionally cannot operate on 154.
+regressions passed independently (2/2, 147 milliseconds). Before any staging
+ledger advance, inspect and close temporary authority with its exact current
+version's reviewed cleanup artifact. A 151 ledger must be cleaned before 0152;
+a 152 ledger must be cleaned before 154. Missing/mismatched cleanup artifacts
+are a stop; historical packet versions intentionally cannot operate on 154.
 Any authority support on the newer chain requires explicit versioned review.
+Fresh Client staging remains 141/0222 with the new tables absent. Configured Ops
+staging D1 read failed with Cloudflare 7403; its current ledger is unverified.
+No remote migration may follow from the old Ops readback.
+
+Separate service-home transport review found a named-RPC object/disposer mismatch
+that mocked helper and joined tests do not cover. A real two-Worker reproduction
+and bounded primitive response fix passed independent local QA: 18 Client tests,
+three Ops tests and both type-checks. Final independent root sessions 5839/16936
+passed 18/3 tests (25.03/10.86 seconds), including exact correlated initial denial,
+an authorized summary and stale-tuple rejection by both Ops and Client after an
+acknowledged revoke. These use reviewed legacy transport prerequisites, not the
+stopped native enrollment replacement. Both final type-checks passed.
+The untouched 971 candidate first reproduced the RPC object's `Symbol.dispose`
+mismatch. No whole-portal acceptance or deployment is claimed. Permissions,
+native authority and current-manager activation stay unchanged.
 Later statements below are chronological checkpoints: retain failures and
 historical holds as history, and use the newest explicit component acceptance
 only for that component. They are not whole-portal acceptance.

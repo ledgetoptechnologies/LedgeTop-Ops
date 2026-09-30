@@ -1,5 +1,6 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
-import type { ClientPortalServiceMetadataRequestV1, ClientPortalServiceMetadataV1 } from "../../../../packages/shared/src/client-portal-service-metadata";
+import { CLIENT_PORTAL_SERVICE_METADATA_MAX_RESPONSE_BYTES,
+  type ClientPortalServiceMetadataRequestV1, type ClientPortalServiceMetadataV1 } from "../../../../packages/shared/src/client-portal-service-metadata";
 import { readClientPortalServiceMetadata } from "./client-portal-service-metadata";
 import type { Env } from "./types";
 
@@ -47,9 +48,16 @@ export async function readClientPortalServiceMetadataRpc(env: MetadataEntrypoint
     : { ok: false, ...echo(request), code: result.code };
 }
 
+function responseWire(value: ClientPortalServiceMetadataEnvelopeV1): string {
+  const wire = JSON.stringify(value);
+  if (new TextEncoder().encode(wire).byteLength > CLIENT_PORTAL_SERVICE_METADATA_MAX_RESPONSE_BYTES)
+    return JSON.stringify({ ok: false, protocolVersion: 1, code: "overflow" });
+  return wire;
+}
+
 /** Named private service-binding entrypoint. It is never mounted as HTTP. */
 export class ClientPortalServiceMetadataReader extends WorkerEntrypoint<Env> {
-  readServiceMetadata(input: unknown): Promise<ClientPortalServiceMetadataEnvelopeV1> {
-    return readClientPortalServiceMetadataRpc(this.env, input);
+  async readServiceMetadata(input: unknown): Promise<string> {
+    return responseWire(await readClientPortalServiceMetadataRpc(this.env, input));
   }
 }
