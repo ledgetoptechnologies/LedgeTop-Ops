@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   ProjectAlphaApiV2ConnectionConfigurationError,
+  listProjectAlphaApiV2ConnectionStatuses,
   probeConfiguredProjectAlphaApiV2Connection,
   resolveProjectAlphaApiV2Connection,
 } from "../src/worker/project-alpha-api-v2-connections";
@@ -26,6 +27,19 @@ function metadata(value: typeof ids.first) {
 }
 
 describe("deployment-owned Project Alpha API-v2 connections", () => {
+  it("returns only source IDs, enablement, and coarse configuration state", () => {
+    const env = environment({ [first]: entry(first, ids.first, "https://source-a.example.test"), [second]: entry(second, ids.second, "https://source-b.example.test", true) });
+    const value = listProjectAlphaApiV2ConnectionStatuses(env);
+    expect(value).toEqual([
+      { sourceId: first, enabled: false, configState: "configured" },
+      { sourceId: second, enabled: true, configState: "configured" },
+    ]);
+    const serialized = JSON.stringify(value);
+    for (const privateValue of ["https://source-a.example.test", "secret-for-project-alpha:source-a", ids.first.source, ids.first.application, ids.first.epoch])
+      expect(serialized).not.toContain(privateValue);
+    expect(listProjectAlphaApiV2ConnectionStatuses({})).toEqual([]);
+  });
+
   it("resolves isolated source-keyed instances and defaults omitted enablement to false", () => {
     const env = environment({ [first]: entry(first, ids.first, "https://source-a.example.test"), [second]: entry(second, ids.second, "https://source-b.example.test", true) });
     const one = resolveProjectAlphaApiV2Connection(env, first);

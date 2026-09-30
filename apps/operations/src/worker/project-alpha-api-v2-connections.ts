@@ -24,6 +24,15 @@ export type ProjectAlphaApiV2ConfiguredProbe =
   | { status: "disabled"; sourceId: string }
   | ProjectAlphaApiV2Probe;
 
+/** Safe deployment-only projection for the Operations administration surface.
+ * It intentionally contains no URL, credential, application, source-instance,
+ * or history identity data. */
+export type ProjectAlphaApiV2ConnectionStatus = Readonly<{
+  sourceId: string;
+  enabled: boolean;
+  configState: "configured";
+}>;
+
 /** Deliberately has no configuration detail: callers must not surface secret
  * envelope contents in logs, responses, or diagnostics. */
 export class ProjectAlphaApiV2ConnectionConfigurationError extends Error {
@@ -146,6 +155,28 @@ export function resolveProjectAlphaApiV2Connection(
 ): ProjectAlphaApiV2ConfiguredConnection {
   try { return parseProjectAlphaApiV2Connection(env, requestedSourceId).resolved; }
   catch { return invalid(); }
+}
+
+/**
+ * Lists only valid, deployment-configured API-v2 entries. A malformed or
+ * absent envelope is treated as unavailable rather than partially exposing
+ * configuration details. Disabled entries remain visible as disabled, but
+ * they are never probed and cannot be used by the read-acceptance control.
+ */
+export function listProjectAlphaApiV2ConnectionStatuses(
+  env: ProjectAlphaApiV2ConnectionEnvironment,
+): readonly ProjectAlphaApiV2ConnectionStatus[] {
+  if (typeof env.PROJECT_ALPHA_API_V2_CONNECTIONS !== "string") return [];
+  try {
+    const raw = parseDuplicateFreeJson(env.PROJECT_ALPHA_API_V2_CONNECTIONS);
+    if (!plain(raw) || raw.version !== 1 || !plain(raw.instances)) return [];
+    return Object.keys(raw.instances).map(source => {
+      const configured = parseProjectAlphaApiV2Connection(env, source).resolved;
+      return Object.freeze({ sourceId: configured.sourceId, enabled: configured.enabled, configState: "configured" as const });
+    });
+  } catch {
+    return [];
+  }
 }
 
 /** Explicit, one-shot probe bridge.  No scheduler or route calls this.  A

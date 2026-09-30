@@ -1,6 +1,8 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 
 const endpoint = "/api/admin/integrations/project-alpha/connectors";
+const apiV2Endpoint = "/api/admin/integrations/project-alpha/api-v2/connections";
+const readAcceptanceEndpoint = "/api/admin/integrations/project-alpha/api-v2/read-acceptance";
 const primary = "project-alpha:primary", secondary = "project-alpha:secondary";
 type Connector = { sourceId: string; displayName: string; producerBindingId: string; snapshotOrigin: string; snapshotBasePath: string;
   applicationKey: string; profile: "primary_legacy" | "business_data"; state: "pending" | "active" | "suspended" | "retired";
@@ -9,14 +11,25 @@ type Directory = { connectors: Connector[]; legacyPrimary: boolean; health: Arra
   recovery?: Array<{ sourceId: string; lastAttemptAt: string | null; lastSuccessAt: string | null; nextAttemptAt: string | null; status: "never" | "running" | "success" | "failed" | "deferred"; errorCode: string | null; failureCount: number }>;
   portal?: { available: boolean; authorities: Array<{ sourceId: string; state: Connector["state"]; connectorRevision: number }>; recovery: null };
   projectManagement?: Array<{ sourceId: string; version: number; revision: number; enabled: boolean; reviewedUrlTemplate: string | null }> };
+type ApiV2Status = { connections: Array<{ sourceId: string; enabled: boolean; configState: "configured" }> };
 const connector = (sourceId = secondary): Connector => ({ sourceId, displayName: sourceId === primary ? "LTDS Project Alpha" : "LTT Project Alpha", producerBindingId: sourceId === primary ? "ltds" : "ltt", snapshotOrigin: sourceId === primary ? "https://alpha.example.test" : "https://alpha-secondary.example.test", snapshotBasePath: "/", applicationKey: "ltds_ops", profile: sourceId === primary ? "primary_legacy" : "business_data", state: "active", readVisible: true, activeRevision: 1, version: 2 });
-async function fixture(page: Page, data: Directory) {
+async function fixture(page: Page, data: Directory, apiV2: ApiV2Status = { connections: [] }, apiV2Status = 200, apiV2Responses?: ApiV2Status[]) {
   const requests: Array<{ path: string; method: string; body: Record<string, unknown> | null }> = [];
+  let apiV2RequestCount = 0;
   await page.route("**/api/**", async route => {
     const path = new URL(route.request().url()).pathname;
     if (path === "/api/session") return route.fulfill({ json: { user: { id: "admin", email: "admin@example.test", displayName: "Admin", status: "Active", profileType: "Administrator", isAdministrator: true, permissions: ["administration.view", "integrations.manage"], divisions: [] }, csrfToken: "csrf", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: {} } });
     if (path === "/api/admin/audit") return route.fulfill({ json: { events: [] } });
     if (path === "/api/admin/portal-workflow-readiness") return route.fulfill({ json: { ready: false, workflows: {} } });
+    if (path === apiV2Endpoint && route.request().method() === "GET") {
+      const response = apiV2Responses?.[apiV2RequestCount++] ?? apiV2;
+      return route.fulfill({ status: apiV2Status, json: apiV2Status === 200 ? response : { error: "Forbidden" } });
+    }
+    if (path === readAcceptanceEndpoint && route.request().method() === "POST") {
+      requests.push({ path, method: route.request().method(), body: route.request().postDataJSON() as Record<string, unknown> });
+      return route.fulfill({ json: { sourceId: "project-alpha:secondary", readOnly: true,
+      capabilities: { status: "verified", exactIdentityMatch: true, exactContractMatch: true }, directory: { status: "observed", count: 7 }, projects: { status: "observed", count: 2 } } });
+    }
     if (!path.startsWith(endpoint)) return route.fulfill({ status: 404, json: { error: "Unexpected endpoint" } });
     const body = route.request().postData() ? route.request().postDataJSON() as Record<string, unknown> : null;
     requests.push({ path, method: route.request().method(), body });
@@ -68,4 +81,48 @@ test("keeps the original primary status and manual sync available while no sourc
   await card.getByRole("button", { name: "Sync primary now" }).click();
   await expect(page.getByRole("status").filter({ hasText: "Primary connection synchronization finished." })).toBeVisible();
   expect(requests.filter(request => request.method !== "GET")).toEqual([{ path: `${endpoint}/project-alpha%3Aprimary/sync`, method: "POST", body: {} }]);
+});
+
+test("renders API-v2 verification separately from legacy connectors and posts only the selected source", async ({ page }) => {
+  const requests = await fixture(page, { connectors: [], legacyPrimary: false, health: [], recovery: [], portal: { available: false, authorities: [], recovery: null }, projectManagement: [] },
+    { connections: [{ sourceId: secondary, enabled: true, configState: "configured" }] });
+  await page.goto("/administration");
+  const section = page.getByRole("region", { name: "Project Alpha API v2 connections" });
+  await expect(section).toContainText("project-alpha:secondary");
+  await section.getByRole("button", { name: `Verify read-only API connection` }).click();
+  await expect(section.getByRole("status")).toContainText("API v2 read connection verified");
+  expect(requests.filter(request => request.method === "POST")).toEqual([{ path: readAcceptanceEndpoint, method: "POST", body: { sourceId: secondary } }]);
+});
+
+test("keeps disabled API-v2 entries visible but non-actionable", async ({ page }) => {
+  await fixture(page, { connectors: [], legacyPrimary: false, health: [], recovery: [], portal: { available: false, authorities: [], recovery: null }, projectManagement: [] },
+    { connections: [{ sourceId: secondary, enabled: false, configState: "configured" }] });
+  await page.goto("/administration");
+  const section = page.getByRole("region", { name: "Project Alpha API v2 connections" });
+  await expect(section).toContainText("Disabled");
+  await expect(section.getByRole("button", { name: `Verify read-only API connection` })).toBeDisabled();
+});
+
+test("keeps legacy connection status visible when API-v2 status is unavailable", async ({ page }) => {
+  await fixture(page, { connectors: [], legacyPrimary: true, health: [], recovery: [], portal: { available: false, authorities: [], recovery: null }, projectManagement: [] },
+    { connections: [] }, 403);
+  await page.goto("/administration");
+  await expect(page.getByRole("region", { name: "Primary connection" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Project Alpha API v2 connections" })).toContainText("API v2 connection status is unavailable");
+});
+
+test("clears a prior verification when refresh changes the same connection's configuration", async ({ page }) => {
+  await fixture(page, { connectors: [], legacyPrimary: false, health: [], recovery: [], portal: { available: false, authorities: [], recovery: null }, projectManagement: [] },
+    { connections: [{ sourceId: secondary, enabled: true, configState: "configured" }] }, 200, [
+      { connections: [{ sourceId: secondary, enabled: true, configState: "configured" }] },
+      { connections: [{ sourceId: secondary, enabled: false, configState: "configured" }] },
+    ]);
+  await page.goto("/administration");
+  const section = page.getByRole("region", { name: "Project Alpha API v2 connections" });
+  await section.getByRole("button", { name: "Verify read-only API connection" }).click();
+  await expect(section.getByRole("status")).toContainText("API v2 read connection verified");
+  await page.getByRole("button", { name: "Refresh connection status" }).click();
+  await expect(section).toContainText("Disabled");
+  await expect(section.getByRole("status").filter({ hasText: "API v2 read connection verified" })).toHaveCount(0);
+  await expect(section.getByRole("button", { name: "Verify read-only API connection" })).toBeDisabled();
 });

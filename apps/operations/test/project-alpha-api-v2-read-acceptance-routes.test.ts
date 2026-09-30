@@ -6,6 +6,7 @@ import type { Env, StaffPrincipal } from "../src/worker/types";
 const mocks = vi.hoisted(() => ({
   scope: vi.fn(),
   configured: vi.fn(),
+  statuses: vi.fn(),
   probe: vi.fn(),
   directory: vi.fn(),
   projects: vi.fn(),
@@ -16,6 +17,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("../src/worker/acl", () => ({ sqlScope: mocks.scope }));
 vi.mock("../src/worker/project-alpha-api-v2-connections", () => ({
   withEnabledConfiguredProjectAlphaApiV2Connection: mocks.configured,
+  listProjectAlphaApiV2ConnectionStatuses: mocks.statuses,
 }));
 vi.mock("../src/worker/project-alpha-api-v2", () => ({ probeProjectAlphaApiV2: mocks.probe }));
 vi.mock("../src/worker/project-alpha-directory-command-api-v2", () => ({
@@ -30,6 +32,7 @@ vi.mock("../src/worker/request-security", () => ({ auditStatement: mocks.audit }
 
 import {
   PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ROUTE,
+  PROJECT_ALPHA_API_V2_CONNECTION_STATUS_ROUTE,
   registerProjectAlphaApiV2ReadAcceptanceRoutes,
 } from "../src/worker/project-alpha-api-v2-read-acceptance-routes";
 
@@ -58,7 +61,9 @@ function fixture(enabled = true, administrator = true) {
   const send = (body: unknown = { sourceId }) => app.request(
     `https://ops.example.test${PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ROUTE}`,
     { method: "POST", headers: { Origin: "https://ops.example.test", "Content-Type": "application/json", "X-CSRF-Token": "middleware-tested" }, body: JSON.stringify(body) }, env);
-  return { app, env, send };
+  const statuses = () => app.request(`https://ops.example.test${PROJECT_ALPHA_API_V2_CONNECTION_STATUS_ROUTE}`,
+    { method: "GET", headers: { Origin: "https://ops.example.test" } }, env);
+  return { app, env, send, statuses };
 }
 
 beforeEach(() => {
@@ -68,6 +73,7 @@ beforeEach(() => {
     baseUrl: "https://private-pa.example.test", apiKey: "server-only-api-key",
     expectedSourceInstanceId: sourceInstanceId, expectedApplicationId: applicationId, expectedHistoryEpoch: historyEpoch,
   }) }));
+  mocks.statuses.mockReturnValue([{ sourceId, enabled: true, configState: "configured" }]);
   mocks.probe.mockResolvedValue({ status: "verified", sourceInstanceId, applicationId, historyEpoch, requestId,
     grantedCapabilities: ["api.capabilities.read", "directory.inventory.read", "projects.inventory.read"] });
   mocks.directory.mockResolvedValue({ status: "observed", inventory: {
@@ -86,6 +92,30 @@ beforeEach(() => {
 });
 
 describe("Project Alpha API-v2 read acceptance route", () => {
+  it("projects only safe configured connection status, including disabled entries", async () => {
+    const value = await (await fixture().statuses()).json() as Record<string, unknown>;
+    expect(value).toEqual({ connections: [{ sourceId, enabled: true, configState: "configured" }] });
+    const serialized = JSON.stringify(value);
+    for (const privateValue of ["private-pa.example.test", "server-only-api-key", sourceInstanceId, applicationId, historyEpoch])
+      expect(serialized).not.toContain(privateValue);
+    mocks.statuses.mockReturnValueOnce([{ sourceId, enabled: false, configState: "configured" }]);
+    expect(await (await fixture().statuses()).json()).toEqual({ connections: [{ sourceId, enabled: false, configState: "configured" }] });
+  });
+
+  it("keeps the status projection and acceptance POST default-off", async () => {
+    const disabled = fixture(false);
+    expect((await disabled.statuses()).status).toBe(404);
+    expect((await disabled.send()).status).toBe(404);
+    expect(mocks.statuses).not.toHaveBeenCalled();
+    expect(mocks.configured).not.toHaveBeenCalled();
+  });
+
+  it("requires administrator and integrations.manage for the status projection", async () => {
+    expect((await fixture(true, false).statuses()).status).toBe(403);
+    mocks.scope.mockResolvedValueOnce({ global: true, deniedGlobal: true });
+    expect((await fixture().statuses()).status).toBe(403);
+  });
+
   it("is default-off before configuration or remote reads", async () => {
     expect((await fixture(false).send()).status).toBe(404);
     expect(mocks.configured).not.toHaveBeenCalled();

@@ -5,7 +5,7 @@ import { sqlScope } from "./acl";
 import { readBoundedJson } from "./bounded-json";
 import { auditStatement } from "./request-security";
 import { probeProjectAlphaApiV2, type ProjectAlphaApiV2Probe } from "./project-alpha-api-v2";
-import { withEnabledConfiguredProjectAlphaApiV2Connection } from "./project-alpha-api-v2-connections";
+import { listProjectAlphaApiV2ConnectionStatuses, withEnabledConfiguredProjectAlphaApiV2Connection } from "./project-alpha-api-v2-connections";
 import {
   PROJECT_ALPHA_DIRECTORY_INVENTORY_ENDPOINT,
   readProjectAlphaDirectoryInventoryAfterVerifiedCapabilities,
@@ -28,6 +28,8 @@ type App = Hono<{ Bindings: Env; Variables: Variables }>;
  */
 export const PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ROUTE =
   "/api/admin/integrations/project-alpha/api-v2/read-acceptance";
+export const PROJECT_ALPHA_API_V2_CONNECTION_STATUS_ROUTE =
+  "/api/admin/integrations/project-alpha/api-v2/connections";
 
 const sourceId = z.string().regex(/^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/);
 const requestSchema = z.object({ sourceId }).strict();
@@ -143,6 +145,17 @@ function acceptanceSummary(
 /** Mounted after Operations' authenticated /api mutation middleware. That
  * middleware supplies same-origin and CSRF protection before this route runs. */
 export function registerProjectAlphaApiV2ReadAcceptanceRoutes(app: App): void {
+  app.get(PROJECT_ALPHA_API_V2_CONNECTION_STATUS_ROUTE, async c => {
+    if (!projectAlphaApiV2ReadAcceptanceEnabled(c.env))
+      throw new HTTPException(404, { message: "Not found" });
+    if (!c.get("administrator"))
+      throw new HTTPException(403, { message: "Administrator access required" });
+    const permission = await sqlScope(c.env, c.get("principal"), "integrations.manage");
+    if (!permission.global || permission.deniedGlobal)
+      throw new HTTPException(403, { message: "Global integrations.manage permission required" });
+    c.header("Cache-Control", "no-store");
+    return c.json({ connections: listProjectAlphaApiV2ConnectionStatuses(c.env) });
+  });
   app.post(PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ROUTE, async c => {
     if (!projectAlphaApiV2ReadAcceptanceEnabled(c.env))
       throw new HTTPException(404, { message: "Not found" });
