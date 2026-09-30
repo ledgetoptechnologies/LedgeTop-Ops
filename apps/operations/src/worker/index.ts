@@ -74,6 +74,7 @@ import { runProjectAlphaApiV2MonitorCycle } from "./project-alpha-api-v2-monitor
 import { selectProjectAlphaApiV2MonitorSchedulerRevision } from "./project-alpha-api-v2-monitor-scheduler-selection";
 import { handleProjectAlphaApiV2MonitorControlHttp,
   projectAlphaApiV2MonitorControlHttpRequest } from "./project-alpha-api-v2-monitor-control-http";
+import { dispatchViewerWorkspaceRenewal } from "./viewer-workspace-renewal";
 import { consumeNativeStaffOnboardingRateLimit } from "./native-staff-onboarding-rate-limit";
 import {
   auditStatement,
@@ -449,6 +450,13 @@ app.use(PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ROUTE, async (c, next) =
     return c.json({ error: "Not found" }, 404);
   await next();
 });
+// Viewer is a separate origin. This exact route family performs its own
+// credentialed CORS, bound-staff authentication, CSRF challenge, and rate
+// limiting, so it must terminate before the generic same-origin API guard.
+app.use("/api/viewer/workspace/session-renewal", async c =>
+  dispatchViewerWorkspaceRenewal(c.req.raw, c.env));
+app.use("/api/viewer/workspace/session-renewal/*", async c =>
+  dispatchViewerWorkspaceRenewal(c.req.raw, c.env));
 app.use("/api/*", async (c, next) => {
   if (viewerMachineEventRequest(c.req.method, c.req.path) || projectAlphaDeliveryMachineRequest(c.req.method, c.req.path)) {
     await next();

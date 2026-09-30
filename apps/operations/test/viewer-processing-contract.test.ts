@@ -8,7 +8,7 @@ import type {
   ViewerOutputSummary, ViewerProcessingTask, ViewerProjectStorageResponse, ViewerProviderSummary,
   ViewerReviewSessionGrant, ViewerStorageSummary, ViewerTaskStorageResponse,
 } from "@ltds/shared";
-import { signViewerProcessingEvent } from "../src/worker/viewer-processing";
+import { signViewerProcessingEvent, viewerGrantAuthorizationExpiresAt } from "../src/worker/viewer-processing";
 
 const fixture = JSON.parse(readFileSync(fileURLToPath(new URL(
   "../../../packages/shared/test-fixtures/viewer-processing-contract-v1.json",
@@ -34,6 +34,18 @@ describe("Viewer processing cross-service contract", () => {
     expect(headers["X-LTDS-Content-SHA256"]).toBe(value.contentSha256);
     expect(headers["X-LTDS-Signature"]).toBe(value.signature);
     expect(JSON.parse(value.body)).toMatchObject({ displayUnits: "imperial" });
+  });
+
+  it("requires a valid, sufficiently long-lived Access expiry before deriving a Viewer grant deadline", () => {
+    const now = Date.parse("2026-09-29T12:00:00.000Z");
+    expect(() => viewerGrantAuthorizationExpiresAt(undefined, now)).toThrow(/missing or too close to expiry/i);
+    expect(() => viewerGrantAuthorizationExpiresAt(Number.NaN, now)).toThrow(/missing or too close to expiry/i);
+    expect(() => viewerGrantAuthorizationExpiresAt(Math.floor(now / 1000) + 60, now)).toThrow(/missing or too close to expiry/i);
+    expect(() => viewerGrantAuthorizationExpiresAt(8_640_000_000_001, now)).toThrow(/missing or too close to expiry/i);
+    expect(viewerGrantAuthorizationExpiresAt(Math.floor(now / 1000) + 10 * 60, now))
+      .toBe(new Date(now + 10 * 60_000).toISOString());
+    expect(viewerGrantAuthorizationExpiresAt(Math.floor(now / 1000) + 60 * 60, now))
+      .toBe(new Date(now + 30 * 60_000).toISOString());
   });
 
   it("pins the exact reverse event body and callback HMAC", async () => {

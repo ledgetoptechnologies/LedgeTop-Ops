@@ -52,6 +52,7 @@
     "VIEWER_INTEGRATION_ENABLED": "false",
     "VIEWER_PROCESSING_ENABLED": "false",
     "VIEWER_PUBLIC_SHARES_ENABLED": "false",
+    "VIEWER_WORKSPACE_RENEWAL_CORS_ENABLED": "false",
     "VIEWER_BASE_URL": "https://viewer-staging.ledgetopdroneservices.com",
     "VIEWER_SERVICE_KEY_ID": "ops-staging-v1",
     "VIEWER_EVENT_KEY_ID": "viewer-staging-v1",

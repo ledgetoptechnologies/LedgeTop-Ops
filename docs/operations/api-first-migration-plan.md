@@ -5888,3 +5888,61 @@ pending; this requirement does not claim a deployed UI change.
   API-v2 feature flag or authority policy is enabled by this checkpoint.
   Verify the secret by name/value state only; never record or print its raw
   value.
+
+### September 29 — Operations Viewer workspace-renewal transport CI
+
+- Clean-main Ops PR #138 (`b2e3c04fc840cf77fb997676a7608e40076c0867`) adds a
+  default-off, staging-only workspace-renewal endpoint and its Access identity,
+  CSRF, idempotency, rate-limit, permission-recheck, and expiry-cap tests.
+- Exact-head GitHub Actions run `36642532549` completed successfully across all
+  ten jobs. The Operations suite reported 264 test files and 2,576 tests
+  passing; its typecheck and deployable build also passed. Client, Ops Sync,
+  source-invariant, incoming, thumbnail, and browser jobs were green.
+- This is not end-to-end silent-renewal acceptance. The separate Viewer still
+  has no caller for the new endpoint; the existing Operations client continues
+  to use `/api/viewer/admin-grant`. Cross-origin behavior, session revocation,
+  retry/state preservation, and live staging acceptance remain unverified.
+- PR #138 therefore remains draft and the renewal feature gate remains off.
+  Do not deploy to production, update either PA instance, activate client
+  access, or change public links until the Viewer-side caller and staging
+  acceptance are coordinated and proven.
+- Live staging browser readback on September 29 confirms the remaining runtime
+  blockers: Operations shows Project Alpha and 3D Viewer as not configured and
+  reports Project Alpha data may be out of date; the authenticated Client
+  staging host renders “The client portal is not enabled for this site.” No
+  staging settings or client data were changed. The portal rollout checklist
+  intentionally keeps `CLIENT_PORTAL_ENABLED=false` until its independent
+  projection, parity, migration, and temporary-activation gates are satisfied.
+
+### September 29 — bounded staging read-acceptance gate check
+
+- A fresh authenticated read-only Administration check still shows the legacy
+  “Primary connection” as disabled, with no sync attempt or success recorded.
+  That panel belongs to the old deployment-source/HMAC mechanism and is not
+  evidence for the approved API-v2 migration. The portal workflow readiness
+  panel still reports feedback, requests, and attachments unverified; delegated
+  sharing/signing and access-expiry notices blocked. The Client staging portal
+  remains unavailable because its portal gate is off.
+- The Ops staging Worker was briefly given
+  `PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ENABLED=true` solely to check whether
+  the documented operator UI and route were usable. Temporary staging version
+  `4709fa0d` carried the true value at 100%; the UI did not expose an acceptance
+  action, and the in-app browser blocks direct navigation to the session API
+  while its page evaluation context has no `fetch`. No API-v2 acceptance route
+  was invoked, no credentials or client records were read, and no client access
+  or public link was changed. The gate was restored to explicit `false` and
+  safe-off version `f5a07171` is now active at 100%. Do not treat this as
+  acceptance evidence.
+- The expected `.backups/staging-release-evidence.json` packet is absent from
+  the isolated clean worktree, so `npm run staging:evidence:check` cannot pass
+  there. Recreate and review the packet from the current staging configuration
+  before relying on that release check. Do not include secret values or client
+  data in the packet.
+- Ops PR #138 head `68ca140c781309a3c3cdec77c8ef4a4b464634a5` has an exact-head
+  workflow run with all ten CI jobs passing, including the Operations suite,
+  typecheck/build, and browser jobs. The PR remains draft because the Viewer
+  caller and cross-origin/session-renewal acceptance are still absent. Green CI
+  does not satisfy the PA/API-v2 or client-portal staging gates.
+- No production PA update, client enrollment/activation, public-link change, or
+  production deployment was made. No production checkpoint should be issued
+  until staging proves the API-v2 sync and the portal rollout checklist gates.
