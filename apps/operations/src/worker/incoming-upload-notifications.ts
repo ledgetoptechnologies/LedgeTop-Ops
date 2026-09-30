@@ -1,5 +1,6 @@
 import { hasPermission } from "./acl";
-import { NotificationMailDeliveryUncertain, sendNotificationMail, validateNotificationMailTransport } from "./mailer";
+import { NotificationMailDeliveryUncertain, notificationMailFailureCode,
+  sendNotificationMail, validateNotificationMailTransport } from "./mailer";
 import type { Env } from "./types";
 
 const MAX_ATTEMPTS = 3;
@@ -116,7 +117,7 @@ export async function processIncomingUploadNotifications(env: Env): Promise<numb
 
     if (row.status === "processing" && row.attempt_count >= MAX_ATTEMPTS) {
       const exhausted = await env.DELIVERY_DB.prepare(`UPDATE incoming_upload_notification_digests SET
-          status='failed',lease_expires_at=NULL,last_error_code='mail-transport-failed',updated_at=datetime('now')
+          status='failed',lease_expires_at=NULL,last_error_code='mail-attempts-exhausted-without-send',updated_at=datetime('now')
         WHERE id=? AND status='processing' AND attempt_count=? AND last_error_code IS ?
           AND lease_expires_at IS ? AND datetime(lease_expires_at)<=datetime('now')`)
         .bind(row.id, row.attempt_count, row.last_error_code, row.lease_expires_at).run();
@@ -194,8 +195,8 @@ export async function processIncomingUploadNotifications(env: Env): Promise<numb
     const text = `${contributor} uploaded ${count} (${bytes}) for “${title}”. The files were received and are pending verification. They will remain quarantined until verification is complete.`;
     try {
       validateNotificationMailTransport(env);
-    } catch {
-      await retryOrFail(env, row.id, claimedRow.attempt_count, "mail-transport-failed");
+    } catch (error) {
+      await retryOrFail(env, row.id, claimedRow.attempt_count, notificationMailFailureCode(error));
       continue;
     }
     const marker = attemptMarker(claimedRow.attempt_count);
@@ -232,7 +233,7 @@ export async function processIncomingUploadNotifications(env: Env): Promise<numb
         await holdForReconciliation(env, row.id, claimedRow.attempt_count, marker);
         continue;
       }
-      await retryOrFail(env, row.id, claimedRow.attempt_count, "mail-transport-failed", marker);
+      await retryOrFail(env, row.id, claimedRow.attempt_count, notificationMailFailureCode(error), marker);
     }
   }
   return processed;

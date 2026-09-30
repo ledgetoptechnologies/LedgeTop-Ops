@@ -7,7 +7,8 @@ const mailer = vi.hoisted(() => {
   class NotificationMailDeliveryUncertain extends Error {
     constructor() { super("notification_mail_delivery_uncertain"); this.name = "NotificationMailDeliveryUncertain"; }
   }
-  return { sendNotificationMail: vi.fn(), validateNotificationMailTransport: vi.fn(), NotificationMailDeliveryUncertain };
+  return { sendNotificationMail: vi.fn(), validateNotificationMailTransport: vi.fn(),
+    notificationMailFailureCode: vi.fn(() => "mail-transport-unknown"), NotificationMailDeliveryUncertain };
 });
 vi.mock("../src/worker/mailer", () => mailer);
 
@@ -64,6 +65,8 @@ beforeEach(async () => {
   ]);
   await addCompletedUpload("upload-one", 4);
   mailer.sendNotificationMail.mockReset().mockResolvedValue(undefined);
+  mailer.validateNotificationMailTransport.mockReset();
+  mailer.notificationMailFailureCode.mockReset().mockReturnValue("mail-transport-unknown");
   env = { DELIVERY_DB: delivery, OPS_DB: ops } as unknown as Env;
 });
 
@@ -157,7 +160,7 @@ describe("incoming upload owner notification digests", () => {
       expect(await processIncomingUploadNotifications(env)).toBe(1);
       const row = await delivery.prepare("SELECT status,attempt_count,file_count,total_bytes,last_error_code FROM incoming_upload_notification_digests WHERE digest_version=1").first();
       expect(row).toEqual({ status: attempt === 3 ? "failed" : "retry", attempt_count: attempt,
-        file_count: 1, total_bytes: 4, last_error_code: "mail-transport-failed" });
+        file_count: 1, total_bytes: 4, last_error_code: "mail-transport-unknown" });
       if (attempt === 1) await addCompletedUpload("upload-after-failure", 5);
       await delivery.prepare("UPDATE incoming_upload_notification_digests SET next_attempt_at=datetime('now','-1 second') WHERE status='retry'").run();
     }
@@ -167,6 +170,19 @@ describe("incoming upload owner notification digests", () => {
       .toEqual(Array(3).fill("incoming-upload-digest:request-one:contributor-one:v1"));
     expect(await delivery.prepare("SELECT digest_version,file_count,total_bytes,status FROM incoming_upload_notification_digests WHERE digest_version=2").first())
       .toEqual({ digest_version: 2, file_count: 1, total_bytes: 5, status: "pending" });
+  });
+
+  it("stores only the closed configuration category when mail preflight fails", async () => {
+    await releaseQuietWindow();
+    const privateFailure = new Error("secret configuration detail");
+    mailer.validateNotificationMailTransport.mockImplementationOnce(() => { throw privateFailure; });
+    mailer.notificationMailFailureCode.mockReturnValueOnce("mail-configuration-invalid");
+
+    expect(await processIncomingUploadNotifications(env)).toBe(1);
+    expect(await delivery.prepare("SELECT status,attempt_count,last_error_code FROM incoming_upload_notification_digests").first())
+      .toEqual({ status: "retry", attempt_count: 1, last_error_code: "mail-configuration-invalid" });
+    expect(mailer.notificationMailFailureCode).toHaveBeenCalledWith(privateFailure);
+    expect(mailer.sendNotificationMail).not.toHaveBeenCalled();
   });
 
   it("requires reconciliation instead of resending after uncertain mail delivery", async () => {

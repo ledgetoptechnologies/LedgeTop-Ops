@@ -34,8 +34,30 @@ export class NotificationMailDeliveryUncertain extends Error {
   constructor() { super("notification_mail_delivery_uncertain"); this.name = "NotificationMailDeliveryUncertain"; }
 }
 
-class SmtpRejectedError extends Error {
-  constructor(code: number | undefined) { super(`SMTP server rejected the request (${code || "unknown"})`); }
+export type NotificationMailFailureCode = "mail-configuration-invalid" | "mail-smtp-authentication-failed"
+  | "mail-smtp-rejected" | "mail-connection-failed" | "mail-transport-timeout"
+  | "mail-smtp-protocol-failed" | "mail-transport-unknown";
+
+class NotificationMailTransportError extends Error {
+  readonly #failureCode: NotificationMailFailureCode;
+  constructor(failureCode: NotificationMailFailureCode, message: string) {
+    super(message); this.name = "NotificationMailTransportError"; this.#failureCode = failureCode;
+  }
+  static failureCode(error: unknown): NotificationMailFailureCode | null {
+    try { return error instanceof NotificationMailTransportError ? error.#failureCode : null; }
+    catch { return null; }
+  }
+}
+
+/** Maps only locally typed failures to a closed durable code; opaque errors remain safely unknown. */
+export function notificationMailFailureCode(error: unknown): NotificationMailFailureCode {
+  return NotificationMailTransportError.failureCode(error) ?? "mail-transport-unknown";
+}
+
+class SmtpRejectedError extends NotificationMailTransportError {
+  constructor(code: number | undefined, failureCode: "mail-smtp-authentication-failed" | "mail-smtp-rejected" = "mail-smtp-rejected") {
+    super(failureCode, `SMTP server rejected the request (${code || "unknown"})`);
+  }
 }
 
 function cleanHeader(value: string): string {
@@ -61,7 +83,8 @@ function encodedHeader(value: string): string {
 
 function requireEmail(value: string | undefined, field: string): string {
   const email = cleanHeader(value || "").toLowerCase();
-  if (!EMAIL.test(email)) throw new Error(`${field} is not configured with a valid email address`);
+  if (!EMAIL.test(email)) throw new NotificationMailTransportError("mail-configuration-invalid",
+    `${field} is not configured with a valid email address`);
   return email;
 }
 
@@ -71,10 +94,11 @@ export function smtpNotificationsEnabled(env: NotificationMailEnvironment): bool
 
 function smtpSettings(env: NotificationMailEnvironment): SmtpSettings {
   const host = (env.SMTP_HOST || "").trim().toLowerCase();
-  if (!/^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/.test(host) || !host.includes(".")) throw new Error("SMTP_HOST is not configured with a valid hostname");
+  if (!/^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/.test(host) || !host.includes("."))
+    throw new NotificationMailTransportError("mail-configuration-invalid", "SMTP_HOST is not configured with a valid hostname");
   const username = requireEmail(env.SMTP_USERNAME, "SMTP_USERNAME");
   const password = env.SMTP_PASSWORD || "";
-  if (!password.trim()) throw new Error("SMTP_PASSWORD is not configured");
+  if (!password.trim()) throw new NotificationMailTransportError("mail-configuration-invalid", "SMTP_PASSWORD is not configured");
   return { host, username, password, from: requireEmail(env.SMTP_FROM || env.SMTP_USERNAME, "SMTP_FROM") };
 }
 
@@ -113,7 +137,9 @@ export function buildSmtpMessage(mail: OutboundMail, from: string): string {
 async function sendWithSmtp(settings: SmtpSettings, mail: OutboundMail): Promise<void> {
   const deadline = Date.now() + SMTP_TOTAL_TIMEOUT_MS;
   const { connect } = await import("cloudflare:sockets");
-  const socket = connect({ hostname: settings.host, port: SMTP_PORT }, { secureTransport: "on", allowHalfOpen: false });
+  let socket: ReturnType<typeof connect>;
+  try { socket = connect({ hostname: settings.host, port: SMTP_PORT }, { secureTransport: "on", allowHalfOpen: false }); }
+  catch { throw new NotificationMailTransportError("mail-connection-failed", "SMTP connection failed"); }
   const reader = socket.readable.getReader();
   const writer = socket.writable.getWriter();
   const decoder = new TextDecoder();
@@ -130,13 +156,13 @@ async function sendWithSmtp(settings: SmtpSettings, mail: OutboundMail): Promise
     const remaining = deadline - Date.now();
     if (remaining <= 0) {
       close();
-      throw new Error("SMTP connection timed out");
+      throw new NotificationMailTransportError("mail-transport-timeout", "SMTP connection timed out");
     }
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([operation(), new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
-          reject(new Error("SMTP connection timed out"));
+          reject(new NotificationMailTransportError("mail-transport-timeout", "SMTP connection timed out"));
           // Settle the timeout first. Closing the socket also resolves a
           // pending read as EOF, which must not win the timeout race.
           close();
@@ -147,45 +173,54 @@ async function sendWithSmtp(settings: SmtpSettings, mail: OutboundMail): Promise
     }
   };
 
-  const response = async (allowed: number[]): Promise<void> => {
+  const response = async (allowed: number[], rejectionCode: "mail-smtp-authentication-failed" | "mail-smtp-rejected" = "mail-smtp-rejected"): Promise<void> => {
     let code: number | undefined;
     for (;;) {
       const newline = buffered.indexOf("\n");
       if (newline < 0) {
-        const next = await bounded(() => reader.read());
-        if (next.done) throw new Error("SMTP server closed the connection unexpectedly");
+        let next: ReadableStreamReadResult<Uint8Array>;
+        try { next = await bounded(() => reader.read()); }
+        catch (error) {
+          if (NotificationMailTransportError.failureCode(error)) throw error;
+          throw new NotificationMailTransportError("mail-connection-failed", "SMTP connection failed");
+        }
+        if (next.done) throw new NotificationMailTransportError("mail-connection-failed", "SMTP server closed the connection unexpectedly");
         responseBytes += next.value.byteLength;
-        if (responseBytes > SMTP_MAX_RESPONSE_BYTES) throw new Error("SMTP response exceeded the size limit");
+        if (responseBytes > SMTP_MAX_RESPONSE_BYTES) throw new NotificationMailTransportError("mail-smtp-protocol-failed", "SMTP response exceeded the size limit");
         buffered += decoder.decode(next.value, { stream: true });
         continue;
       }
       responseLines++;
-      if (responseLines > SMTP_MAX_RESPONSE_LINES) throw new Error("SMTP response exceeded the line limit");
+      if (responseLines > SMTP_MAX_RESPONSE_LINES) throw new NotificationMailTransportError("mail-smtp-protocol-failed", "SMTP response exceeded the line limit");
       const line = buffered.slice(0, newline).replace(/\r$/, "");
       buffered = buffered.slice(newline + 1);
       const match = /^(\d{3})([ -])/.exec(line);
-      if (!match) throw new Error("SMTP server returned an invalid response");
+      if (!match) throw new NotificationMailTransportError("mail-smtp-protocol-failed", "SMTP server returned an invalid response");
       const lineCode = Number(match[1]);
-      if (code !== undefined && lineCode !== code) throw new Error("SMTP server returned an invalid response");
+      if (code !== undefined && lineCode !== code) throw new NotificationMailTransportError("mail-smtp-protocol-failed", "SMTP server returned an invalid response");
       code = lineCode;
       if (match[2] === " ") break;
     }
     if (!code || !allowed.includes(code)) {
-      if (code && code >= 400 && code <= 599) throw new SmtpRejectedError(code);
-      throw new Error("SMTP server returned an invalid response");
+      if (code && code >= 400 && code <= 599) throw new SmtpRejectedError(code, rejectionCode);
+      throw new NotificationMailTransportError("mail-smtp-protocol-failed", "SMTP server returned an invalid response");
     }
   };
-  const command = async (line: string, allowed: number[]): Promise<void> => {
-    await bounded(() => writer.write(encoder.encode(`${line}\r\n`)));
-    await response(allowed);
+  const command = async (line: string, allowed: number[], rejectionCode?: "mail-smtp-authentication-failed"): Promise<void> => {
+    try { await bounded(() => writer.write(encoder.encode(`${line}\r\n`))); }
+    catch (error) {
+      if (NotificationMailTransportError.failureCode(error)) throw error;
+      throw new NotificationMailTransportError("mail-connection-failed", "SMTP connection failed");
+    }
+    await response(allowed, rejectionCode);
   };
 
   try {
     await response([220]);
     await command("EHLO ltds-ops", [250]);
-    await command("AUTH LOGIN", [334]);
-    await command(base64Utf8(settings.username), [334]);
-    await command(base64Utf8(settings.password), [235]);
+    await command("AUTH LOGIN", [334], "mail-smtp-authentication-failed");
+    await command(base64Utf8(settings.username), [334], "mail-smtp-authentication-failed");
+    await command(base64Utf8(settings.password), [235], "mail-smtp-authentication-failed");
     await command(`MAIL FROM:<${settings.from}>`, [250]);
     await command(`RCPT TO:<${requireEmail(mail.to, "notification recipient")}>`, [250, 251]);
     await command("DATA", [354]);
@@ -216,7 +251,7 @@ export function validateNotificationMailTransport(env: NotificationMailEnvironme
     return;
   }
   if (!env.NOTIFICATION_EMAIL || typeof env.NOTIFICATION_EMAIL.send !== "function")
-    throw new Error("Notification email transport is not configured");
+    throw new NotificationMailTransportError("mail-configuration-invalid", "Notification email transport is not configured");
   requireEmail(env.NOTIFICATION_FROM, "NOTIFICATION_FROM");
 }
 
@@ -226,7 +261,8 @@ export async function sendNotificationMail(env: NotificationMailEnvironment, mai
     await sendWithSmtp(smtpSettings(env), mail);
     return;
   }
-  if (!env.NOTIFICATION_EMAIL || !env.NOTIFICATION_FROM) throw new Error("Notification email transport is not configured");
+  if (!env.NOTIFICATION_EMAIL || !env.NOTIFICATION_FROM)
+    throw new NotificationMailTransportError("mail-configuration-invalid", "Notification email transport is not configured");
   const outgoing = { to: requireEmail(mail.to, "notification recipient"), from: { email: requireEmail(env.NOTIFICATION_FROM, "NOTIFICATION_FROM"), name: cleanHeader(mail.fromName) }, subject: cleanHeader(mail.subject), text: mail.text, html: mail.html };
   try { await env.NOTIFICATION_EMAIL.send(outgoing); }
   catch { throw new NotificationMailDeliveryUncertain(); }

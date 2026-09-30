@@ -16,7 +16,7 @@ let delivery: D1Database;
 let ops: D1Database;
 let env: Env;
 
-function scriptedSocket(options: { authCode?: number; suppressFinalReply?: boolean } = {}) {
+function scriptedSocket(options: { authCode?: number; suppressFinalReply?: boolean; greeting?: string } = {}) {
   const writes: string[] = [];
   let controller!: ReadableStreamDefaultController<Uint8Array>;
   let step = 0;
@@ -25,7 +25,7 @@ function scriptedSocket(options: { authCode?: number; suppressFinalReply?: boole
   const readable = new ReadableStream<Uint8Array>({
     start(value) {
       controller = value;
-      controller.enqueue(new TextEncoder().encode("220 Ready\r\n"));
+      controller.enqueue(new TextEncoder().encode(options.greeting ?? "220 Ready\r\n"));
     },
   });
   const writable = new WritableStream<Uint8Array>({
@@ -143,7 +143,7 @@ describe("incoming upload notification joined SMTP outcomes", () => {
 
     expect(await processIncomingUploadNotifications(env)).toBe(1);
     expect(await row()).toEqual({ status: "retry", attempt_count: 1,
-      delivered_at: null, last_error_code: "mail-transport-failed" });
+      delivered_at: null, last_error_code: "mail-smtp-authentication-failed" });
     expect(rejected.writes).toHaveLength(4);
   });
 
@@ -151,7 +151,7 @@ describe("incoming upload notification joined SMTP outcomes", () => {
     const missingPassword = { ...env, SMTP_PASSWORD: "" };
     expect(await processIncomingUploadNotifications(missingPassword)).toBe(1);
     expect(await row()).toEqual({ status: "retry", attempt_count: 1,
-      delivered_at: null, last_error_code: "mail-transport-failed" });
+      delivered_at: null, last_error_code: "mail-configuration-invalid" });
     expect(smtp.connect).not.toHaveBeenCalled();
   });
 
@@ -191,6 +191,21 @@ describe("incoming upload notification joined SMTP outcomes", () => {
     await makeDue();
     expect(await processIncomingUploadNotifications(env)).toBe(0);
     expect(smtp.connect).toHaveBeenCalledOnce();
+  });
+
+  it("distinguishes connection and protocol failures before DATA", async () => {
+    smtp.connect.mockImplementationOnce(() => { throw new Error("private connection detail"); });
+    expect(await processIncomingUploadNotifications(env)).toBe(1);
+    expect(await row()).toEqual({ status: "retry", attempt_count: 1,
+      delivered_at: null, last_error_code: "mail-connection-failed" });
+
+    await makeDue();
+    const invalid = scriptedSocket({ greeting: "not-an-smtp-response\r\n" });
+    smtp.connect.mockReturnValueOnce(invalid.socket);
+    expect(await processIncomingUploadNotifications(env)).toBe(1);
+    expect(await row()).toEqual({ status: "retry", attempt_count: 2,
+      delivered_at: null, last_error_code: "mail-smtp-protocol-failed" });
+    expect(invalid.writes).toHaveLength(0);
   });
 
   it("does not send when the exact-attempt marker CAS loses ownership", async () => {
@@ -268,7 +283,7 @@ describe("incoming upload notification joined SMTP outcomes", () => {
       lease_expires_at=datetime('now','-1 second'),last_error_code=NULL`).run();
     expect(await processIncomingUploadNotifications(env)).toBe(1);
     expect(await row()).toEqual({ status: "failed", attempt_count: 3,
-      delivered_at: null, last_error_code: "mail-transport-failed" });
+      delivered_at: null, last_error_code: "mail-attempts-exhausted-without-send" });
     expect(smtp.connect).not.toHaveBeenCalled();
 
     await delivery.prepare(`UPDATE incoming_upload_notification_digests SET status='processing',attempt_count=2,
