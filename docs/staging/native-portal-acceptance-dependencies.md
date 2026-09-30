@@ -6,6 +6,30 @@ attestation of client access.
 
 ## Keep the workflows separate
 
+Current pushed candidate is `311788aa10f29a3bfcddec349f98b5d121452054`,
+draft PR #139, not merged or deployed. CI `36706274796` is terminal successful,
+all ten jobs passed. New local diagnostics/fixtures are not included in that CI
+revision, and green CI is not a native portal staging or production acceptance.
+
+Local Incoming SMTP diagnostics passed independent reviewer and root 31-test
+verification (root session 72235, 51.87 seconds), plus Ops type-check. Failure
+categories are bounded; recipient checks, retry budgets and uncertain-send
+no-resend behavior stay intact. This is not remote email-delivery evidence.
+Two compatibility fixtures now use the existing name/content-hash reviewed
+migration helper; independent review confirms unchanged populated-upgrade and
+outage assertions and exclusion of stopped Client 0224 / Ops 0154 drafts.
+The compatibility run ended with 21 passing tests and one beforeEach loopback
+`EADDRINUSE` failure, not a SQL-budget assertion failure; the outage test passed.
+A bounded notification/helper rerun passed: root session 97763, 23/23 tests,
+108.19 seconds; root type-check passed. Mail diagnostics are locally committed
+as `0eccd42`. These new bytes need fresh CI on the existing draft PR before
+release; they authorize no remote migration or deployment. The earlier directory-enumeration
+run was stopped and is not counted as acceptance.
+
+These are local component changes only. Specific native-authority/current-manager
+approval stops, Ops staging 7403, historical cleanup, live recipient/file-access
+acceptance and the production owner checkpoint are not cleared.
+
 Latest exact-head observation: PR #139 is pushed at `8f6feb0`, not merged or
 deployed. CI `36705005064` completed Client with 133 passing files and one
 failing HTTP adapter fixture (1,422 passing tests / two failing tests). Its

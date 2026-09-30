@@ -4,6 +4,39 @@ Updated September 30, 2026. The owner approved implementation and resumption aft
 
 ### Current checkpoint — September 30, 2026 (UTC)
 
+Current pushed candidate is `311788aa10f29a3bfcddec349f98b5d121452054`
+on draft PR #139, not merged or deployed. Exact CI `36706274796` is terminal
+successful: all ten jobs passed. This applies to the pushed 311788a bytes only,
+not the newer local diagnostic/fixture changes or end-to-end staging acceptance.
+
+Local Incoming mail diagnostics passed independent reviewer and root verification
+of 31 tests (root session 72235, 51.87 seconds), plus Ops type-check. The frozen
+five-file patch retains retry, recipient authorization, pre-send markers and
+post-DATA uncertainty/no-resend behavior; only bounded failure categories become
+available for diagnosis. It is not deployed and does not establish the cause or
+delivery of the historically missing upload email.
+
+Two additional compatibility fixtures now use the existing hash-pinned reviewed
+migration inventory instead of enumerating physical SQL files. Independent
+review confirmed their populated-upgrade, outage/recovery and outbox assertions
+are unchanged and stopped Client 0224 / Ops 0154 cannot enter those fixtures.
+The local compatibility run ended with 21 passing tests and one Windows loopback
+failure (`EADDRINUSE`) in beforeEach, before the 100-recipient test body. The
+per-instance outage test passed. A bounded rerun of the notification fixture
+and correctly named helper suite passed: root session 97763, 23/23 tests,
+108.19 seconds. Root type-check also passed. The earlier physical-enumeration
+run was stopped and is not accepted evidence. No stopped draft, remote migration, production
+setting, public link or recipient access was changed.
+
+The verified mail diagnostic patch is locally committed as `0eccd42`; the
+fixture correction and these evidence updates are ready for publication to
+the existing draft PR. New bytes require their own CI before release. No main
+merge, staging migration, deployment or client activation is claimed.
+
+The observations below are chronological component history, not current release
+readiness. Native authority/current-manager approval stops, configured Ops staging
+access (7403), historical cleanup and live end-to-end acceptance remain unresolved.
+
 Latest exact-head observation: PR #139 is pushed at
 `8f6feb0c33560e6075db2a9e88f7889f6d90483d`, not merged or deployed.
 CI `36705005064` completed its Client job with 133 passing files / 1 failing
