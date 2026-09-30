@@ -661,7 +661,9 @@
         "0119_project_alpha_project_v2_persistence_ledger.sql",
         "0120_project_alpha_project_v2_canonical_settlement.sql",
         "0121_project_alpha_project_v2_settlement_proof_expiry.sql",
-        "0122_project_alpha_project_v2_canonical_activation.sql"
+        "0122_project_alpha_project_v2_canonical_activation.sql",
+        "0123_native_directory_authority_history.sql",
+        "0124_project_alpha_project_adoption_review_evidence.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
@@ -714,8 +716,8 @@
           "configPath": "apps/operations/wrangler.staging.bootstrap.json",
           "manifestPath": "apps/operations/.staging-bootstrap/manifest.json",
           "transformedFiles": ["0002_seed_acl.sql"],
-          "ledgerCount": 122,
-          "finalMigration": "0122_project_alpha_project_v2_canonical_activation.sql",
+          "ledgerCount": 124,
+          "finalMigration": "0124_project_alpha_project_adoption_review_evidence.sql",
           "sourceSeedSha256": "<CANONICAL_SEED_SHA256>",
           "generatedSeedSha256": "<GENERATED_SEED_SHA256>",
           "databaseWasEmpty": false,

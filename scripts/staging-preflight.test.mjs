@@ -316,7 +316,7 @@ test("requires every portal-v2 and Operations capability to be explicitly false"
   }
 });
 
-test("pins the native portal, Operations 0054-0122, both 0199 files, and the 0200-0213 release contract", () => {
+test("pins the native portal, Operations 0054-0124, both 0199 files, and the 0200-0213 release contract", () => {
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-31), [
     "0184_native_client_feedback.sql",
     "0185_native_service_request_ownership.sql",
@@ -350,13 +350,15 @@ test("pins the native portal, Operations 0054-0122, both 0199 files, and the 020
     "0212_incoming_upload_archive_inventory.sql",
     "0213_incoming_rclone_promotion.sql",
   ]);
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(-4), [
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(-6), [
     "0119_project_alpha_project_v2_persistence_ledger.sql",
     "0120_project_alpha_project_v2_canonical_settlement.sql",
     "0121_project_alpha_project_v2_settlement_proof_expiry.sql",
     "0122_project_alpha_project_v2_canonical_activation.sql",
+    "0123_native_directory_authority_history.sql",
+    "0124_project_alpha_project_adoption_review_evidence.sql",
   ]);
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(-69, -66), [
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(-71, -68), [
     "0054_project_alpha_directory_outbox.sql",
     "0055_operations_directory_authority.sql",
     "0056_operations_directory_materialization.sql",

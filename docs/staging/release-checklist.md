@@ -508,7 +508,7 @@ owner input, then use only those configs for the first full apply. The ordinary
 configs would replay the canonical named-human `0002` rows. A populated or
 partially migrated database must never use the bootstrap configs. Attach both
 generated manifests and complete `migrations.freshBootstrap`; the required
-proof includes 132/122 ledger rows, both Client `0199` filenames exactly once,
+proof includes 132/124 ledger rows, both Client `0199` filenames exactly once,
 final `0213`/`0122`, canonical-human absence, the one synthetic owner and its
 role, the retained Operations ACL catalog, no pending reapply, and an empty
 foreign-key check.
@@ -686,7 +686,7 @@ Confirm Operations
 `0014_staff_acl_controls.sql` through
 `0052_project_operational_reassignment_recovery.sql` and
 `0053_project_internal_notes.sql`, then Operations `0054` through
-`0122_project_alpha_project_v2_canonical_activation.sql` in
+`0124_project_alpha_project_adoption_review_evidence.sql` in
 that exact ledger order. Migration `0100` removes
 `share_version` from the delivery-grant parent key so existing share
 rotation/revocation updates cannot be blocked by a portal grant; the grant

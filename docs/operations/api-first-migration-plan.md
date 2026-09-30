@@ -5927,3 +5927,39 @@ pending; this requirement does not claim a deployed UI change.
   Directory/Project inventory acceptance, restore the route gate to false,
   then continue the client-portal joined acceptance. Production PA updates are
   still owner-managed and not yet requested.
+
+### September 29 — release-contract migration inventory repair
+
+- The staging release preparation gate found that its pinned Operations
+  migration inventory ended at `0122`, while the current Ops chain contains two
+  later migrations. An independent review confirmed `0123` and `0124` are
+  intentional ordered migrations required by the current portal authority
+  workflow; the release contract must track them rather than omit them.
+- Updated the staging contract, preflight/evidence validators, bootstrap pins,
+  example evidence, rollout manifest, checklist, and associated tests to
+  recognize all 124 Operations migrations through
+  `0124_project_alpha_project_adoption_review_evidence.sql`. Delivery's
+  migration chain is unchanged. Updated bootstrap name/content digests are
+  `70aa4ced9990c013a6d9badde983eaeb76918ae3e0126e102ecaedb2325c86e1` and
+  `3b0b07069ad42d8d22a925548ee4821b1c6718eeaaa0c03a39a695e18d08c323`.
+- Focused staging contract suite passed: 74 passed, 0 failed, 2 Windows
+  symlink tests skipped because the OS returned `EPERM`; explicit migration
+  inventory and `git diff --check` passed. No migrations were applied and no
+  staging or production deployment occurred.
+- Full staging release preparation is still blocked: generated staging
+  Wrangler configs and evidence packets are absent in this worktree. An older
+  local values file is incomplete for the current template because the
+  Project Alpha staging source ID and HTTPS origin are missing; do not infer
+  or substitute those values. No secret values were displayed or recorded.
+- Current live staging evidence remains unchanged from the preceding section:
+  Ops staging exposes only the legacy primary connection and the Client
+  staging portal is disabled. The Client portal therefore is not ready for
+  acceptance, and this is not a production PA update checkpoint.
+- The 11-file release-contract correction is uncommitted on
+  `codex/api-v2-admin-read-acceptance-ui`. Next actions are to source the two
+  verified non-secret staging identifiers/origin through the approved
+  configuration path, generate the staging configs/evidence, get the branch
+  through exact-head CI and an authorized PR review, deploy only the default-off
+  Ops change to staging, then run the bounded API-v2 and joined portal
+  acceptance matrix. Production PA remains owner-updated only after those gates
+  pass.
