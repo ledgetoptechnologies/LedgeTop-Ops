@@ -4,6 +4,37 @@ Updated September 30, 2026. The owner approved implementation and resumption aft
 
 ### Current checkpoint — September 30, 2026 (UTC)
 
+- Latest candidate is `9bb78d3212f820c8d2042393e7761c096d906fb0` on
+  draft PR #139. Its exact-head CI run `36680957665` has nine successful jobs,
+  including the corrected staging authority packets, Client tests/build and
+  desktop/mobile browser suites; the Operations job remains in progress.
+  This is not terminal CI acceptance, a merge, or live portal acceptance.
+- The new 0153 data-only publication producer is still an uncommitted candidate.
+  Review is strengthening exact JSON types/member sets, duplicate-ID rejection,
+  primary-session reads and ambiguous-response reconciliation. Its first local
+  two-database round trip passed, but those earlier bytes do not certify the
+  subsequent changes. Finish independent review and rerun before sealing the
+  153-chain inventory or applying anything remotely.
+- Ops-native enrollment/grant/revocation implementation has an explicit safety
+  reviewer stop pending direct owner approval for Ops 0154 and Client 0224,
+  default-off locally/staging only. Preserve the incomplete, untested drafts;
+  do not apply them or route around this stop. The inert native wire has 20
+  passing tests; native plus preserved legacy consent HTTP boundaries have
+  31 passing tests after independent consent review identified and corrected
+  hidden response-member acceptance. The exact route also rejects fragments;
+  Client type-check passes. No new route is mounted and these components do
+  not issue access. The two inert authority/publication contracts together
+  pass 45 focused tests on the current local files.
+- Production PA requires no owner update at this checkpoint. Successful joined
+  staging enrollment, reader/file authorization, revocation and synchronization
+  evidence still precedes the coordinated production checkpoint. Public links,
+  production grants and retention remain unchanged.
+- The previously live local full Client run is now terminal: 126 suites and
+  1,382 tests passed, but the complete-chain bootstrap suite failed because an
+  uncommitted 0153 file changed the inventory beyond the sealed 152-file chain
+  (one test skipped). This is a failed aggregate, not a full-suite pass.
+  Final complete-chain validation must wait for reviewed migration bytes and
+  a deliberate new inventory seal; do not hide drafts to manufacture a pass.
 - GitHub device authorization was verified successfully. Operations PR #138
   merged to `main` as `bb8422c77bbcad9093662e8da9d235c40d27282d` after all
   ten checks passed for `81e72799ca6e01511abcc7e4d92883f65befc5f4`.

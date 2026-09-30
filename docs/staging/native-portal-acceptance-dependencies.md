@@ -100,10 +100,11 @@ Standalone clients retain their explicit NULL-parent relationship revision;
 only organizations have no client relationship revision. A missing standalone
 relationship pin cannot silently become an unlinked-root proof.
 
-### Reservation candidate under review (not staged)
+### Reviewed reservation/publication candidate (not staged)
 
 Ops migration `0152_operations_portal_workspace_reservations.sql` and its
-server-side writer are an uncommitted candidate. They reserve exact roots and
+server-side writer are committed on the draft staging branch at
+`3c68dbd8628254ca660b2646e498261aaaf707d9`. They reserve exact roots and
 selected folders without creating recipients, grants, public links or PA
 identities. Current-chain tooling must pin 152 Ops migrations with 0152 as the
 tail; historical 151-migration evidence remains historical, not evidence for
@@ -120,7 +121,69 @@ Only unused reservation tables are added by schema application. The full-chain
 rehearsal additionally checks that these tables start empty. No 0152 remote
 apply, runtime deployment or successful reservation acceptance is claimed yet.
 
+### Current CI and producer boundary
+
+Exact-head CI run `36679697001` has a completed failed `source-invariants`
+job. Its two failures are staging packet manifest assertions that still pin
+151 Ops migrations, while the committed candidate has 152. The authority
+predicate and rollback cases in that job passed; this does not excuse the
+manifest failures or establish release readiness. Update and rerun the exact
+packet tests, preserving historical 151-chain fixtures where intentional.
+
+The two packet corrections are now committed and pushed as
+`9bb78d3212f820c8d2042393e7761c096d906fb0`. They independently verify the
+reviewed 152-chain names and content hashes before copying an isolated fixture,
+so concurrent uncommitted migrations do not silently change this historical
+acceptance window. All 44 focused packet tests passed. Exact-head CI run
+`36680957665` now has nine successful jobs, including `source-invariants` and
+its staging-packet checks; the Operations job remains in progress. Terminal
+CI acceptance for the complete candidate is still unproven.
+
+The actual native publication producer/outbox is being implemented separately
+as migration `0153`. Its untracked draft is not included in the committed
+152-chain digests below and must not be treated as reviewed or staged. Once
+stable, independently review the source-currentness guards, actual private
+Client RPC round trip, ambiguous-response reconciliation and atomic receipt
+acknowledgment before sealing a new 153-chain inventory. Initially empty
+recipient/delivery arrays do not replace the native enrollment/access work.
+
+### Native authorization boundary checkpoint
+
+The new separate `operations-portal-native-authority` v1 wire has 20 passing
+contract tests, including the independent review's actor-subject alignment
+correction. Its permission grammar remains version 3; it must never be
+interpreted as the legacy PA workspace authority protocol. The new native
+consent HTTP boundary and preserved legacy boundary pass 31 tests together;
+Client type-check passes. Independent consent review confirmed the origin,
+CSRF, signed proof, expiry and body bounds; its hidden-value-member finding
+was corrected with a negative test. Exact native routes also reject fragments.
+They capture signed Access issuer/subject server-side,
+use a separate CSRF domain and exact target/revision/client consent, and return
+pending owner review, not an access grant. No new route is mounted or enabled.
+
+The workspace safety reviewer rejected creation of the native recipient-grant
+consumer as an authorization-boundary expansion requiring direct human approval.
+That specific authority implementation is stopped pending approval for Ops
+0154 / Client 0224 and their default-off local/staging grant/revocation code.
+An accepted, uncommitted 0224 schema draft is not tested, applied, or authority
+acceptance evidence. Do not route around the denial, use publication as a
+substitute for grants, or enable production access. Data-only 0153 publication
+review can continue independently.
+
 ### Concrete consumer and reader integration boundaries
+
+Read-only reader mapping confirms that `workspace-v2.ts`'s existing native
+context is still PA-projection-backed, not Ops-owned. Service-home adapters
+must be separately joined to the current exact native recipient/workspace
+heads and publication receipt, then revalidated after metadata RPC. The new
+wire carries only `operations.service_home.read`: it cannot supply broad
+workspace/directory access or unlock file routes. Authenticated delivery needs
+its own individually scoped grant, exact folder/project/prefix pins, terms,
+deadlines and immutable file-event checks, including post-read revalidation.
+Keep `operations-home-routes.ts`/`operations-service-home.ts`, `workspace-v2.ts`,
+`authenticated-delivery-grants.ts` and `authenticated-delivery-resources.ts`
+as distinct implementation/acceptance gates. Do not seed PA-shaped principals
+or `portal_v2` memberships to bridge these real dependencies.
 
 The new Client `0223` publication-data consumer has four passing canonical-chain
 tests, including actual private RPC invocation against real local D1. It stores
