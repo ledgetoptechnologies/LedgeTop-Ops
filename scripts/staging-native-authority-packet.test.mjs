@@ -873,6 +873,15 @@ test("fails closed for wrong staging identity and canonical migration drift", ()
   assert.throws(() => buildAuthorityArtifacts(drift, input(), "provision"), /contents changed/);
 });
 
+test("reviewed authority packets reject an appended current-chain 0153 migration", () => {
+  const base = fixture();
+  fs.copyFileSync(
+    path.join(repositoryRoot, "apps", "operations", "migrations", "0153_operations_portal_workspace_publication_outbox.sql"),
+    path.join(base, "apps", "operations", "migrations", "0153_operations_portal_workspace_publication_outbox.sql"),
+  );
+  assert.throws(() => buildAuthorityArtifacts(base, input(), "provision"), /exact reviewed 152-file Operations chain/);
+});
+
 test("full canonical schema provisions, revokes, and reactivates exact native authority", () => {
   const db = canonicalDatabase();
   const base = fixture();

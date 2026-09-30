@@ -6,12 +6,24 @@ attestation of client access.
 
 ## Keep the workflows separate
 
-Current summary: local tooling-corrected head is
-`9b1831ef9b99289fabb03a84dd937148bb898acd`, not yet pushed. Remote PR #139 is
-at 9790829, whose Client CI failed the stale 142/143 bootstrap pin; eight other
-jobs passed, Ops still runs. Independent tooling QA, type-check and full-chain
-rehearsal passed locally, as detailed below. A new exact-head CI remains required.
-No remote migration/deployment or native recipient activation occurred.
+Current summary: draft PR #139 is pushed at
+`c2202dbd2de1be73c830a6007e48dd4180d77e8f`. Exact-head CI `36699286229`
+is still running, with source-invariants failed: historical authority-packet
+fixtures correctly contain the reviewed 152-file chain, but their generators
+inadvertently inherited the newer 154-file bootstrap contract. The correction
+separates immutable packet-version pins from current bootstrap pins; it must not
+silently authorize packets against a newer schema. Focused verification is
+underway. Independent current-chain tooling and full-chain rehearsal passed
+locally as detailed below. A clean committed-only c2202db checkout independently
+matches Client 143/0225 and Ops 154/0155 names/content hashes; stopped 0224/0154
+drafts are absent there. No remote migration/deployment or activation occurred.
+Root independent verification of the exact failing CI gate passed 47/47 tests
+(53.95 seconds), plus 18/18 source-layout checks. Independent read-only review
+accepted the immutable-152 separation. Both added appended-0153 rejection
+regressions passed independently (2/2, 147 milliseconds). Before advancing any staging ledger from 152 to
+154, inspect and close/revoke temporary 152 authority while its exact ledger
+still matches; historical packet versions intentionally cannot operate on 154.
+Any authority support on the newer chain requires explicit versioned review.
 Later statements below are chronological checkpoints: retain failures and
 historical holds as history, and use the newest explicit component acceptance
 only for that component. They are not whole-portal acceptance.

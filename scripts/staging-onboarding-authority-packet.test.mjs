@@ -107,3 +107,11 @@ test("builds a reviewed 152-migration, staging-only, sanitized, one-file packet"
   assert.equal(writeOnboardingAuthority(base,artifact).length,6);
   assert.deepEqual(validateGeneratedOnboardingAuthority(base,artifact),[]);
 });
+
+test("reviewed onboarding packets reject an appended current-chain 0153 migration", () => {
+  const base=fixture();
+  fs.copyFileSync(
+    path.join(repositoryRoot,"apps","operations","migrations","0153_operations_portal_workspace_publication_outbox.sql"),
+    path.join(base,"apps","operations","migrations","0153_operations_portal_workspace_publication_outbox.sql"));
+  assert.throws(()=>buildOnboardingAuthorityArtifacts(base,input(),"provision"),/exact reviewed 152-file Operations chain/);
+});

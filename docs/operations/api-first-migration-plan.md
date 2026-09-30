@@ -4,14 +4,24 @@ Updated September 30, 2026. The owner approved implementation and resumption aft
 
 ### Current checkpoint — September 30, 2026 (UTC)
 
-Current release summary: local head is
-`9b1831ef9b99289fabb03a84dd937148bb898acd`; remote draft PR #139 is still at
-`97908298a593b09d044e3619b0d9f241bc7e3932`. The ten-file staging-tooling update
-passed independent 119-test Node QA (four Windows symlink skips), Client
-type-check and full-chain Miniflare rehearsal (one test, 75.59 seconds), plus
-independent review. Old-head CI Client failed the stale 142/143 inventory pin;
-eight other jobs passed and Ops CI is still live. No exact-new-head CI, merge,
-staging rollout, native recipient activation or production cutover is claimed.
+Current release summary: draft PR #139 is pushed at
+`c2202dbd2de1be73c830a6007e48dd4180d77e8f`. CI `36699286229` remains live,
+but source-invariants failed because historical reviewed-152 authority packet
+generators inherited the newer bootstrap contract. A bounded correction restores
+their immutable version-specific names/content pins without accepting a newer
+authority schema or weakening drift checks; focused verification is underway.
+The ten-file current-chain tooling correction already passed independent 119-test
+Node QA (four Windows symlink skips), Client type-check, full-chain Miniflare
+rehearsal (one test, 75.59 seconds) and review. A clean committed-only c2202db
+release checkout independently matches both current migration inventories and
+excludes stopped 0224/0154 drafts. No merge, staging rollout, native recipient
+activation or production cutover is claimed.
+Root independently passed the exact failing gate (47/47, 53.95 seconds) and
+source-layout checks (18/18). Read-only review accepted version-specific 152
+pins; both added appended-0153 rejection tests passed independently (2/2,
+147 milliseconds). Close/revoke any temporary
+152 authority before advancing its ledger to 154. Historical packets reject
+154 intentionally; newer authority support needs explicitly versioned review.
 
 The entries below retain chronological component evidence, including earlier
 failures and superseded pending states. Later explicit results supersede only

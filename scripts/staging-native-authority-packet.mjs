@@ -3,11 +3,19 @@ import fs from "node:fs";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { fileURLToPath } from "node:url";
-import { BOOTSTRAP_APPS } from "./staging-bootstrap.mjs";
 import { STAGING_ACCOUNT_ID, STAGING_INVENTORY } from "./staging-requirements.mjs";
 import { boundedGuardInsert } from "./staging-bounded-guards.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+// Existing authority packet schemas were reviewed against this exact 152-file
+// chain. Advancing bootstrap must not silently authorize a newer schema: these
+// generators reject the current 154-file chain until explicitly versioned and reviewed.
+const REVIEWED_AUTHORITY_OPERATIONS_CHAIN = Object.freeze({
+  count: 152,
+  finalMigration: "0152_operations_portal_workspace_reservations.sql",
+  namesSha256: "a3eb1153187e13a1013b3d5ddd3dcc0c3d93ba2a272bb3650246df9ea9d8e109",
+  contentsSha256: "f854aa66e1bb1b3c81feb7a11b18d654b11232d5e3732234ebff12e779f6e3a9",
+});
 export const PACKET_SCHEMA_VERSION = 3;
 export const ACQUISITION_PACKET_SCHEMA_VERSION = 4;
 export const FIXTURE_PACKET_SCHEMA_VERSION = 5;
@@ -1361,15 +1369,16 @@ function canonicalOperations(base) {
   for (const entry of entries) if (entry.name.endsWith(".sql") && (!entry.isFile() || entry.isSymbolicLink()))
     throw new Error(`Operations canonical migration ${entry.name} must be a regular non-symlink file`);
   const names = entries.filter(entry => entry.isFile() && !entry.isSymbolicLink() && entry.name.endsWith(".sql")).map(entry => entry.name).sort();
-  const contract = BOOTSTRAP_APPS.operations;
-  if (names.length !== contract.migrationCount || sha256(names.join("\n")) !== contract.migrationNamesSha256)
-    throw new Error(`authority source must be the exact complete ${contract.migrationCount}-file Operations chain (found ${names.length}, names ${sha256(names.join("\n"))}, final ${names.at(-1)})`);
+  const contract = REVIEWED_AUTHORITY_OPERATIONS_CHAIN;
+  if (names.length !== contract.count || names.at(-1) !== contract.finalMigration
+    || sha256(names.join("\n")) !== contract.namesSha256)
+    throw new Error(`authority source must be the exact reviewed ${contract.count}-file Operations chain (found ${names.length}, names ${sha256(names.join("\n"))}, final ${names.at(-1)})`);
   const contents = names.map(name => {
     const file = path.join(directory, name); requireRegularFile(file, `Operations canonical migration ${name}`);
     return `${name}\0${sha256(fs.readFileSync(file, "utf8"))}`;
   });
   const chainSha256 = sha256(contents.join("\n"));
-  if (chainSha256 !== contract.migrationContentsSha256) throw new Error("Operations canonical migration contents changed");
+  if (chainSha256 !== contract.contentsSha256) throw new Error("Operations reviewed authority migration contents changed");
   return { config, selected, chainSha256, names };
 }
 
