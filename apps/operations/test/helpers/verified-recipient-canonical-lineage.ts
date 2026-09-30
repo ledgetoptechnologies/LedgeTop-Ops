@@ -1,5 +1,5 @@
 import {createHash} from "node:crypto";
-import {cpSync,mkdirSync,mkdtempSync,readFileSync,readdirSync,copyFileSync,writeFileSync} from "node:fs";
+import {mkdirSync,mkdtempSync,readFileSync,readdirSync,copyFileSync,writeFileSync} from "node:fs";
 import {tmpdir} from "node:os";
 import {join,resolve} from "node:path";
 import {fileURLToPath,pathToFileURL} from "node:url";
@@ -43,7 +43,15 @@ export async function applyCanonicalChain(database:D1Database,app:"operations"|"
 function artifactBase(){
   const root=resolve(fileURLToPath(new URL("../../../../",import.meta.url)));
   const base=mkdtempSync(join(tmpdir(),"ltds-canonical-authority-")),app=join(base,"apps","operations");
-  mkdirSync(app,{recursive:true});cpSync(join(root,"apps","operations","migrations"),join(app,"migrations"),{recursive:true});
+  const sourceMigrations=join(root,"apps","operations","migrations"),targetMigrations=join(app,"migrations");
+  const names=readdirSync(sourceMigrations).filter(name=>/^\d{4}_.+\.sql$/.test(name)&&name<="0152_operations_portal_workspace_reservations.sql").sort();
+  const contents=names.map(name=>`${name}\0${createHash("sha256").update(readFileSync(join(sourceMigrations,name))).digest("hex")}`);
+  if(names.length!==152||names.at(-1)!=="0152_operations_portal_workspace_reservations.sql"
+    ||createHash("sha256").update(names.join("\n")).digest("hex")!=="a3eb1153187e13a1013b3d5ddd3dcc0c3d93ba2a272bb3650246df9ea9d8e109"
+    ||createHash("sha256").update(contents.join("\n")).digest("hex")!=="f854aa66e1bb1b3c81feb7a11b18d654b11232d5e3732234ebff12e779f6e3a9")
+    throw Error("canonical-reviewed-0152-migration-contract-mismatch");
+  mkdirSync(targetMigrations,{recursive:true});
+  for(const name of names)copyFileSync(join(sourceMigrations,name),join(targetMigrations,name));
   mkdirSync(join(base,"docs","staging"),{recursive:true});
   copyFileSync(join(root,"docs","staging","operations.wrangler.json.example"),join(base,"docs","staging","operations.wrangler.json.example"));
   copyFileSync(join(root,"docs","staging","operations.wrangler.json.example"),join(app,"wrangler.staging.json"));
@@ -168,7 +176,7 @@ export async function establishHistoricalPreservedOnboardingLineage(database:D1D
   const historical=historicalProducer.buildAuthorityArtifacts(fixture.base,historicalInput,"revoke");
   await applyArtifact(database,historical.provision.sql,historical.provision.name);
   await applyArtifact(database,historical.revoke.sql,historical.revoke.name);
-  await applyCanonicalTail(database,fixture.bundle.operationsMigrationContract.finalMigration,"0151_verified_recipient_delivery_authority_outbox.sql");
+  await applyCanonicalTail(database,fixture.bundle.operationsMigrationContract.finalMigration,"0152_operations_portal_workspace_reservations.sql");
   await database.prepare("INSERT INTO native_business_areas(id,name,active) VALUES('area-default','Reviewed staging area',1)").run();
   const base=artifactBase(),onboardingInput={schemaVersion:1,packet:{packetId:"staging-onboarding-authority-canonical-history",
     purpose:"client-onboarding-positive-acceptance",operatorKind:"synthetic",staffId:canonicalOwner.operationsStaffId,

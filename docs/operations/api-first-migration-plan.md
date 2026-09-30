@@ -7,14 +7,41 @@ Updated September 30, 2026. The owner approved implementation and resumption aft
 - Latest candidate is `9bb78d3212f820c8d2042393e7761c096d906fb0` on
   draft PR #139. Its exact-head CI run `36680957665` has nine successful jobs,
   including the corrected staging authority packets, Client tests/build and
-  desktop/mobile browser suites; the Operations job remains in progress.
-  This is not terminal CI acceptance, a merge, or live portal acceptance.
-- The new 0153 data-only publication producer is still an uncommitted candidate.
-  Review is strengthening exact JSON types/member sets, duplicate-ID rejection,
-  primary-session reads and ambiguous-response reconciliation. Its first local
-  two-database round trip passed, but those earlier bytes do not certify the
-  subsequent changes. Finish independent review and rerun before sealing the
-  153-chain inventory or applying anything remotely.
+  desktop/mobile browser suites; the Operations job is terminal failed with
+  five failures in two suites (native content auditing and canonical joined
+  authorization fixtures). This is not CI acceptance, a merge, or live portal
+  acceptance. Audit diagnosis found valid fixed-ten-minute-window behavior:
+  the test crossed a real window boundary. The test-only Date pin passed its
+  focused regression (1 passed, 42 deliberately filtered out; 107.44 seconds).
+  The complete affected suite is now running; production deduplication and
+  authority remain unchanged. The joined fixture's separate root cause is
+  its 151-row ledger versus the current producer's required reviewed 152-chain;
+  correcting only the test's forward tail preserves historical 122-chain pins.
+  A first local joined rerun failed because its temporary producer fixture
+  recursively copied the uncommitted 0153/0154 drafts. The helper now independently
+  checks reviewed 152-chain count, names and content hashes before copying only
+  that explicit fixture. Independent QA accepted both corrections; the new
+  joined rerun passed all four cases in 174.56 seconds. Drafts remain untouched and full-current-chain
+  validation remains a separate unsatisfied gate.
+- The new 0153 data-only publication producer remains uncommitted, but final
+  independent QA accepted its frozen candidate: focused canonical Miniflare
+  1/1 passed in 94.46 seconds and Ops type-check passed. Verified exact JSON
+  closure, primary reads, concurrent replay, current-source ambiguous retries
+  and receipt/head CAS. SQL SHA-256 is
+  `5afa0ab9e45b5a6908fb4ebda3093242d26b1dc6a783ee1aaafa13f5e77f0383`;
+  runtime `55b47d56c613842efade19fc530e39fee79a924caf9b9fb25dad831a7666f812`;
+  test `13b653ded1a2d68bfd1c72ab2227b3036b47f2496fd3b894befde0733ad154ee`.
+  Stale ambiguous invoked RPCs still remain single-flight fenced: a separate
+  data-only Client cancellation/tombstone CAS is required for complete recovery.
+  This is safe component evidence, not completed rollout readiness or a new
+  sealed migration inventory. No new remote apply or deployment was performed.
+- Fresh private pre-0152/pre-0223 staging exports were saved and verified:
+  Ops 1,899,629 bytes, SHA-256
+  `7e8db09b695426ee30b4017000e8ea8f4d45d9f08473c97e06a2c9678792b893`;
+  Client 586,923 bytes, SHA-256
+  `754711f371d8d00077b9882d092368e46447984580deeebef0552abe505412a3`.
+  Both contain the migration ledger and remain ignored/private. Backups do not
+  establish migration or live workflow acceptance.
 - Ops-native enrollment/grant/revocation implementation has an explicit safety
   reviewer stop pending direct owner approval for Ops 0154 and Client 0224,
   default-off locally/staging only. Preserve the incomplete, untested drafts;

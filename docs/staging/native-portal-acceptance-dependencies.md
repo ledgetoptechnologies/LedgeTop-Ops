@@ -136,8 +136,21 @@ reviewed 152-chain names and content hashes before copying an isolated fixture,
 so concurrent uncommitted migrations do not silently change this historical
 acceptance window. All 44 focused packet tests passed. Exact-head CI run
 `36680957665` now has nine successful jobs, including `source-invariants` and
-its staging-packet checks; the Operations job remains in progress. Terminal
-CI acceptance for the complete candidate is still unproven.
+its staging-packet checks; the Operations job has now failed with five tests
+across the native resource audit and canonical joined fixture suites. Terminal
+CI acceptance for the complete candidate is contradicted by that failure.
+The audit test crossed a legitimate ten-minute dedupe boundary and needs a
+test-only fixed Date; joined fixture failures are being diagnosed separately.
+
+Both diagnoses now have test-only corrections and independent QA acceptance.
+The focused audit regression passed (1 case, 42 filtered cases), and the joined
+suite passed all four cases in 174.56 seconds. The latter now applies the exact
+reviewed 152-chain and verifies count/tail/names/content hashes before copying
+its isolated producer fixture; immutable 122-chain historical pins remain
+unchanged. An initial local rerun failed because the old recursive copy admitted
+uncommitted drafts; that failure is retained as setup evidence, not a pass.
+The full native-resource suite and new exact-head CI acceptance remain separate
+gates. No production guards or runtime behavior changed in these corrections.
 
 The actual native publication producer/outbox is being implemented separately
 as migration `0153`. Its untracked draft is not included in the committed
@@ -146,6 +159,41 @@ stable, independently review the source-currentness guards, actual private
 Client RPC round trip, ambiguous-response reconciliation and atomic receipt
 acknowledgment before sealing a new 153-chain inventory. Initially empty
 recipient/delivery arrays do not replace the native enrollment/access work.
+
+Final independent review accepts the frozen data-only 0153 component. Its
+canonical Miniflare test passed independently in 94.46 seconds and Ops
+type-check passed. All thrown publish invocations are treated as ambiguous;
+fresh exact-not-found/current-source retries resend the same immutable command.
+Stale ambiguous calls remain single-flight fenced, not safely cancelled. A
+separate Client tombstone/cancellation CAS must serialize publication versus
+cancellation before a stale slot can be released. This remains an explicit
+recovery implementation gate, not a claim of complete portal readiness.
+
+#### Required ambiguous-publication termination protocol
+
+- Keep this data-only protocol separate from pending Ops 0154 / Client 0224
+  recipient authority. Do not overwrite or reorder their incomplete drafts.
+  Assign the next canonical migration numbers after their explicit disposition.
+- Client stores an immutable cancellation tombstone keyed by the original
+  operation ID and exact fingerprint, publication, target/revisions and snapshot
+  tuple. Its first-primary cancel-or-status transaction returns an exact existing
+  publication receipt, or inserts a tombstone only while the expected head still
+  matches (including the absent-head/revision-zero case).
+- Publishing and cancelling must serialize through reciprocal raw-database
+  guards. Publish wins: cancellation returns the committed receipt. Cancellation
+  wins: a delayed publish cannot commit and returns the exact cancelled result.
+  Status-not-found, elapsed proof expiry and a local timeout are not cancellation.
+- Ops durably records the exact cancellation receipt before releasing the
+  single-flight slot. A lost response is reconciled through private disposition
+  lookup. Unknown, mismatched or unavailable outcomes stay fenced; an actual
+  publication receipt follows normal exact acknowledgment even after local drift.
+- Verify real two-database races in both orders, concurrent terminal outcome
+  exclusivity, late commit after timeout, lost cancellation response, stale head,
+  exact replay and fingerprint mismatch. Prove a new current snapshot can reserve
+  only after an acknowledged terminal outcome. Assert zero recipient/file grants.
+
+This protocol is planned, not implemented or deployed. It is required for
+reliable recovery; do not describe indefinite fencing as the completed solution.
 
 ### Native authorization boundary checkpoint
 
