@@ -6,6 +6,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./authenticated-delivery-authority": "./src/authenticated-delivery-authority.ts",
-    "./verified-recipient-delivery-authority": "./src/verified-recipient-delivery-authority.ts"
+    "./verified-recipient-delivery-authority": "./src/verified-recipient-delivery-authority.ts",
+    "./api-v2-portal-publication-proof": "./src/api-v2-portal-publication-proof.ts"
   }
 }
