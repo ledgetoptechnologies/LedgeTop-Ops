@@ -347,20 +347,24 @@ describe("portal workspace selection full migration order",()=>{
       const database=await runtime.getD1Database("OPS_DB") as unknown as D1Database;
       const directory=new URL("../migrations/",import.meta.url);
       const names=readdirSync(directory).filter(name=>/^\d{4}_.+\.sql$/.test(name)).sort();
-      expect(names).toHaveLength(151);
-      expect(names.at(-1)).toBe("0151_verified_recipient_delivery_authority_outbox.sql");
+      expect(names).toHaveLength(152);
+      expect(names.at(-1)).toBe("0152_operations_portal_workspace_reservations.sql");
       for(const name of names){
         const statements=splitD1MigrationStatements(readFileSync(new URL(name,directory),"utf8"));
         await database.batch(statements.map(statement=>database.prepare(statement)));
       }
       expect(await database.prepare("SELECT count(*) count FROM client_portal_workspace_binding_selections")
         .first("count")).toBe(0);
+      for (const table of ["operations_portal_workspace_reservation_commands",
+        "operations_portal_workspace_reservation_heads", "operations_portal_folder_reservation_heads"]) {
+        expect(await database.prepare(`SELECT count(*) count FROM ${table}`).first("count")).toBe(0);
+      }
       expect(await database.prepare("SELECT count(*) count FROM sqlite_master WHERE type='table' AND name='client_portal_workspace_binding_selections'")
         .first("count")).toBe(1);
       expect(await database.prepare("SELECT count(*) count FROM sqlite_master WHERE type='table' AND name='client_portal_workspace_binding_outbox'")
         .first("count")).toBe(1);
     } finally { await runtime.dispose(); }
-  // This bounded full-chain rehearsal applies 150 migrations individually;
+  // This bounded full-chain rehearsal applies 152 migrations individually;
   // keep ordinary authorization unit tests at their existing timeout.
   },120_000);
 });

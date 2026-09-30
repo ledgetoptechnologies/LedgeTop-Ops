@@ -1,6 +1,6 @@
 # API-first migration — current implementation objective and work register
 
-Updated September 29, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
+Updated September 30, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
 
 ### Current checkpoint — September 30, 2026 (UTC)
 
@@ -57,7 +57,7 @@ Updated September 29, 2026. The owner approved implementation and resumption aft
   zero delivery heads/audits and exact parity for all nine reviewed triggers.
   Staging runtime and access flags remain unchanged/default-off. Live positive
   revocation acceptance remains outstanding; no production schema was changed.
-- The inert Ops-native publication contract passes 22 focused tests and Ops
+- The inert Ops-native publication contract passes 25 focused tests and Ops
   type-check, including hostile object/array proxies, multi-PA directory fences,
   current active-head pins and historical revoked-head pins. Its bounded snapshot
   is not an access grant; explicit reservations, producer/consumer and current
@@ -65,7 +65,92 @@ Updated September 29, 2026. The owner approved implementation and resumption aft
   Canonical Ops IDs such as `ops/client/...` are opaque IDs, not paths. A review
   against real native writer fixtures corrected the original ASCII-only parser;
   native Unicode/code-point bounds and separate strict folder-prefix validation
-  now have positive and negative regressions.
+  now have positive and negative regressions. Standalone NULL-parent clients
+  retain a positive relationship revision; organizations alone have no client
+  relationship revision. This corrects a real native-writer contract mismatch.
+- Exact-head CI `36674272464` for `e49ab22` finished with nine successful jobs
+  and four failures in one joined Ops sharing fixture (318 other Ops test files
+  passed). That fixture applied only Client 0221 while invoking the 0222 writer.
+  The fixture correction applies 0221 then 0222 in canonical order; all 12 joined
+  sharing tests pass on the corrected fixture. Runtime checks are unchanged.
+  The correction and standalone-client contract fix are pushed as
+  `5f9ae0a1a718e2764f81e38d83ef926cd3f5012a`; PR #139 confirms that head.
+  Exact-head CI run `36676677575` completed successfully with all ten jobs
+  passing. This clears that committed candidate only, not the subsequent local
+  reservation/publication migrations or the production portal cutover.
+- The Ops-native reservation writer and additive migration 0152 are under
+  independent review, not deployed. The candidate preserves trusted owner
+  authority, explicit allow/deny scopes, immutable creation provenance and
+  separate revocation actors. Review identified malformed-expiry, missing audit
+  field, stale retry proof and delayed orphan-command activation edge cases;
+  all require raw-D1 and runtime regressions before acceptance. The current
+  candidate type-check passes, but that alone does not verify these guards.
+  Full-current-chain inventories now require 152 Ops migrations ending at 0152;
+  historical 151-migration evidence remains unchanged. Updated preflight and
+  release-evidence tooling passes 64 tests. Bootstrap content hashes remain
+  deliberately unsealed until SQL review is complete; no remote 0152 apply or
+  positive portal activation is claimed.
+- Client migration 0223 and its private, data-only publication consumer pass four
+  focused canonical-chain tests. Parent review requires stronger exact relational
+  guards: a receipt must match its command, target, snapshot and history, not
+  merely exist through a foreign key. Raw mismatch and initial-revision tests
+  remain before sealing. Current local inventory expects 142 Client migrations;
+  deployed Client staging remains 141/0222. No publication route or access grant
+  is added by this persistence component.
+- The new private publication ingress has six passing boundary tests and Client
+  type-check passes. Its exact staging-host/environment gate and dedicated
+  default-off flag run before input inspection or database access. It returns
+  only a closed durable receipt matching the complete publication fingerprint;
+  HTTP returns 404. No binding/config activation or production deployment was
+  performed. Actual RPC/database joined acceptance remains a separate gate.
+- The paired 142/152 local bootstrap and publication suites pass 11 tests on
+  the earlier SQL snapshot, including empty new ledgers, foreign keys and
+  idempotency. Subsequent review requires a final rerun after exact head-command
+  guards and independent target/publication revision pins are corrected.
+  The Ops reservation target revision is not the Client publication CAS revision:
+  repeated snapshots must advance publication revision without changing the
+  active workspace reservation. No remote new migration has been applied.
+- Final local checkpoint supersedes the provisional reservation/publication
+  review items above. Independent reservation QA accepted the commit-time
+  active-child recheck and all current 0152 guards: two focused real-D1 tests
+  pass, including the delayed workspace-revoke race and fresh-session replay.
+  Client 0223 now requires exact head/command and stored snapshot-body closure,
+  rejects reused historical receipts and keeps the reservation target revision
+  independent of the advancing publication revision; four joined tests pass.
+  The final paired 142/152 bootstrap, consumer and RPC rehearsal passes all
+  15 tests in 111.72 seconds on the final corrected SQL. Client and Ops baseline
+  type-check pass. Focused bootstrap,
+  evidence, preflight, readback, enrollment configuration and source invariants
+  pass 142 tests, with four Windows symlink skips and no failures.
+  Sealed Client chain contents SHA-256:
+  `b6f7434ac3a570c971f6ad74239a7cb20cc4a2381f88bae7a4f8dc139861a27e`;
+  Ops chain contents SHA-256:
+  `f854aa66e1bb1b3c81feb7a11b18d654b11232d5e3732234ebff12e779f6e3a9`.
+  These components remain local/default-off, not live portal acceptance.
+  Next implement the real transactional publication outbox and native recipient
+  lineage; legacy PA-backed enrollment rows cannot authorize the new topology.
+- Subsequent independent Client review found one additional 0223 ledger gap:
+  command columns were linked to heads/receipts, but canonical command JSON
+  top-level identity fields lacked their own database guard. The raw mismatch
+  must be rejected before committing this slice. Its command-shape/column guard
+  and regression are being added; the sealed Client digest and paired rehearsal
+  must be refreshed for those new bytes. The prior component passes above do
+  not certify that pending correction. Both current-chain Ops compatibility
+  suites pass all 23 tests in 110.94 seconds.
+- Those additional Client gaps are now corrected and independently accepted.
+  Fourteen focused consumer/RPC tests pass, including raw canonical-command
+  mismatch rollback, strict shape/type checks, primary-session concurrent exact
+  retry recovery, and full-publication read-only status reconciliation. A lost
+  response cannot be treated as absent or replaced with caller-supplied success.
+  Unknown storage failures remain retryable; demonstrated CAS/constraint errors
+  remain conflicts. Client type-check passes. The canonical payload cap is now
+  1,900,000 bytes, leaving relational-column room below D1's documented
+  2,000,000-byte row limit; all 25 shared-contract tests pass. The Client chain
+  digest above is the corrected final digest, not the earlier snapshot's digest.
+  Final paired rehearsal for these exact bytes passed all 15 tests in 111.72
+  seconds; the refreshed Node configuration suite passes 142 tests with four
+  Windows symlink skips. No new remote
+  migration, runtime, service binding or client activation is claimed.
 - Fresh remote inventory confirms Client staging at
   `e35e9fdc-2beb-4a0e-be1b-fa4c372f6cc0` and Operations staging at
   `f5a07171-cb05-4cf3-9251-afe087550920`, each at 100%. The latter's

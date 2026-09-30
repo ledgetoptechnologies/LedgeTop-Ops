@@ -14,6 +14,7 @@ export { OpsPortalAccessAuthorityIngress } from "./ops-portal-access-authority";
 export { ClientAuthorityWorkspaceBindingIngress } from "./client-authority-workspace-binding-entrypoint";
 export { ClientPortalAuthorityV2Ingress } from "./client-portal-authority-v2-entrypoint";
 export { VerifiedRecipientDeliveryAuthorityIngress } from "./verified-recipient-delivery-authority-entrypoint";
+export { OperationsPortalWorkspacePublicationIngress } from "./operations-portal-workspace-publication-entrypoint";
 import { friendlyBulkFailure } from "./bulk-download-errors";
 import type { Env, ShareRow } from "./types";
 export { BulkDownloadWorkflow } from "./workflow";

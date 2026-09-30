@@ -4,10 +4,10 @@
  * references to independently delivered Operations authority heads.
  *
  * Parsing, canonicalization, and hashing do not publish data or authorize
- * workspace, directory, or file access. No route, binding, migration, reader,
- * grant, or entitlement consumes this module yet. A future producer and
- * consumer must independently prove completeness/currentness and commit with
- * an atomic CAS before any runtime reader may rely on a publication.
+ * workspace, directory, or file access. The private data consumer stores
+ * snapshots and receipts, not membership or grants. The producer must prove
+ * completeness/currentness and commit with atomic CAS; readers additionally
+ * require current individual authority before relying on a publication.
  */
 
 export const OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_PROTOCOL =
@@ -21,7 +21,9 @@ export const OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_LIMITS = Object.freeze({
   folderReservations: 1_000,
   recipientAuthorityHeads: 1_000,
   deliveryAuthorityHeads: 2_000,
-  canonicalBytes: 2 * 1024 * 1024,
+  // D1 rows are capped at 2,000,000 bytes, not 2 MiB. Reserve room for
+  // relational identity/audit columns alongside the canonical JSON.
+  canonicalBytes: 1_900_000,
 });
 
 export type OperationsPortalRootKind = "organization" | "standalone_client";
@@ -128,6 +130,7 @@ export type OperationsPortalWorkspacePublication = Readonly<{
   resultingRevision: string;
   target: Readonly<{
     targetId: string;
+    /** Ops workspace reservation revision, independent of publication CAS. */
     targetRevision: string;
     clientAuthorityId: string;
     workspaceId: string;

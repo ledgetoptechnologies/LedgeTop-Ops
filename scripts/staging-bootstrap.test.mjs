@@ -60,7 +60,7 @@ test("builds full isolated chains, changes exactly 0002, and preserves staging c
   const base = fixture();
   const artifacts = buildArtifacts(base, owner);
   for (const [app, artifact] of Object.entries(artifacts)) {
-    assert.equal(artifact.files.length, app === "delivery" ? 141 : 151, app);
+    assert.equal(artifact.files.length, app === "delivery" ? 142 : 152, app);
     assert.deepEqual(artifact.manifest.transformedFiles, [artifact.entry.seed]);
     assert.equal(artifact.files.find(({ name }) => name.startsWith("0001_")).transformed, false);
     assert.equal(artifact.config.name.endsWith("-staging"), true);
@@ -108,10 +108,10 @@ test("rejects a mutated secondary Operations DELIVERY_DB binding", () => {
 test("rejects any missing or extra canonical migration filename", () => {
   const missing = fixture();
   fs.rmSync(path.join(missing, "apps", "client", "migrations", "0214_ops_inventory_catalog_staging.sql"));
-  assert.throws(() => buildArtifacts(missing, owner), /exact complete ordered 141-file chain/);
+  assert.throws(() => buildArtifacts(missing, owner), /exact complete ordered 142-file chain/);
   const extra = fixture();
   fs.writeFileSync(path.join(extra, "apps", "operations", "migrations", "0123_unreviewed.sql"), "-- unreviewed\n");
-  assert.throws(() => buildArtifacts(extra, owner), /exact complete ordered 151-file chain/);
+  assert.throws(() => buildArtifacts(extra, owner), /exact complete ordered 152-file chain/);
 });
 
 test("rejects one-byte content drift in an ordinary canonical migration", () => {
@@ -183,20 +183,20 @@ test("checked-in canonical 0002 migrations remain the reviewed source shapes", (
   assert.match(sourceOperations, /staff-beau-koltz/);
 });
 
-test("builds the complete checked-in 141/151 chains with both Client 0199 filenames", () => {
+test("builds the complete checked-in 142/152 chains with both Client 0199 filenames", () => {
   const base = fixture();
   const artifacts = buildArtifacts(base, owner);
-  assert.equal(artifacts.delivery.files.length, 141);
-  assert.equal(artifacts.operations.files.length, 151);
+  assert.equal(artifacts.delivery.files.length, 142);
+  assert.equal(artifacts.operations.files.length, 152);
   assert.deepEqual(artifacts.delivery.files.filter(({ name }) => name.startsWith("0199_")).map(({ name }) => name), [
     "0199_incoming_upload_pickup_lifecycle.sql", "0199_native_viewer_grants.sql",
   ]);
-  assert.equal(artifacts.delivery.files.at(-1).name, "0222_verified_recipient_delivery_cross_manager_revoke.sql");
-  assert.equal(artifacts.operations.files.at(-1).name, "0151_verified_recipient_delivery_authority_outbox.sql");
+  assert.equal(artifacts.delivery.files.at(-1).name, "0223_operations_portal_workspace_publications.sql");
+  assert.equal(artifacts.operations.files.at(-1).name, "0152_operations_portal_workspace_reservations.sql");
   assert.deepEqual(artifacts.delivery.manifest.transformedFiles, ["0002_seed_initial_staff.sql"]);
   assert.deepEqual(artifacts.operations.manifest.transformedFiles, ["0002_seed_acl.sql"]);
-  assert.equal(artifacts.delivery.manifest.sourceChainSha256, "9c91042808fefcb1913f2e689a5ed0842ca4c16cb0651b2cfaf300b69c12089b");
-  assert.equal(artifacts.operations.manifest.sourceChainSha256, "c9ca6374a7470a94e7cd3ec9aa047f38a6e841607840f2f8323325013178f9c2");
+  assert.equal(artifacts.delivery.manifest.sourceChainSha256, "b6f7434ac3a570c971f6ad74239a7cb20cc4a2381f88bae7a4f8dc139861a27e");
+  assert.equal(artifacts.operations.manifest.sourceChainSha256, "f854aa66e1bb1b3c81feb7a11b18d654b11232d5e3732234ebff12e779f6e3a9");
 });
 
 const disposableTargets = (runId = "portal-home-20260928") => ({ runId, applications: {

@@ -15,9 +15,9 @@ export const BOOTSTRAP_APPS = Object.freeze({
     binding: "DELIVERY_DB",
     databaseName: "client-data-staging",
     seed: "0002_seed_initial_staff.sql",
-    migrationCount: 141,
-    migrationNamesSha256: "eefe713a2692c9aab8f1bc497bb2ac4c14cc862782ce1172bf2b7f0d7d499f6a",
-    migrationContentsSha256: "9c91042808fefcb1913f2e689a5ed0842ca4c16cb0651b2cfaf300b69c12089b",
+    migrationCount: 142,
+    migrationNamesSha256: "3f372cd67f38631f86a0afc76a3e8015770ef27dd2d388195314960e388a3bf9",
+    migrationContentsSha256: "b6f7434ac3a570c971f6ad74239a7cb20cc4a2381f88bae7a4f8dc139861a27e",
   }),
   operations: Object.freeze({
     source: "operations",
@@ -25,9 +25,9 @@ export const BOOTSTRAP_APPS = Object.freeze({
     binding: "OPS_DB",
     databaseName: "ltds-ops-staging",
     seed: "0002_seed_acl.sql",
-    migrationCount: 151,
-    migrationNamesSha256: "3036d0ad8b754cc8956896260d3d83dfdc905fa67c0664acda9469ec1a5ff038",
-    migrationContentsSha256: "c9ca6374a7470a94e7cd3ec9aa047f38a6e841607840f2f8323325013178f9c2",
+    migrationCount: 152,
+    migrationNamesSha256: "a3eb1153187e13a1013b3d5ddd3dcc0c3d93ba2a272bb3650246df9ea9d8e109",
+    migrationContentsSha256: "f854aa66e1bb1b3c81feb7a11b18d654b11232d5e3732234ebff12e779f6e3a9",
   }),
 });
 export const PRODUCTION_DATABASE_IDENTITIES = Object.freeze([

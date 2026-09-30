@@ -271,7 +271,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   // workspace-binding writers, and the non-content enrollment reader remain off.
   // Approved staging-only recipient bridge is present but remains default-off.
   // Reviewed recipient-delivery authority adds only explicit disabled flags.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "fa3cee1b61b987eac8e158ed2561232df2358889679079e7dc12570b7db69d0a");
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "5fc6d63b984e4c03fe8e06a57fecc55793ccfe576dbe298a033b470ea66d8198");
   const config = readJson("apps/client/wrangler.jsonc");
   assert.equal(config.vars.CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_WRITER_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_STATUS_ENABLED, "false");
@@ -310,6 +310,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.equal(config.vars.CLIENT_PORTAL_AUTHORITY_V2_STATUS_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_AUTHORITY_V2_ENROLLMENT_STATUS_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED, "false");
   assert.equal(config.vars.OPS_PORTAL_ACCESS_AUTHORITY_SHADOW_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_CONTENT_AUDIT_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_NOTIFICATION_MIGRATION_MAINTENANCE, "false");

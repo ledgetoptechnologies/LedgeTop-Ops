@@ -297,6 +297,7 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0220_operations_portal_authority_v3_permissions.sql",
     "0221_verified_recipient_delivery_authority.sql",
     "0222_verified_recipient_delivery_cross_manager_revoke.sql",
+    "0223_operations_portal_workspace_publications.sql",
   ]),
   operations: Object.freeze([
     "0014_staff_acl_controls.sql",
@@ -437,6 +438,7 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0149_client_portal_recipient_enrollment_sql_fences.sql",
     "0150_client_portal_recipient_enrollment_cancellation.sql",
     "0151_verified_recipient_delivery_authority_outbox.sql",
+    "0152_operations_portal_workspace_reservations.sql",
   ]),
 });
 
@@ -483,6 +485,7 @@ export const REQUIRED_DISABLED_FEATURE_FLAGS = Object.freeze({
     "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED",
     "CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_WRITER_ENABLED",
     "CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_STATUS_ENABLED",
+    "CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED",
     "CLOUD_TRANSFER_DROPBOX_ENABLED",
     "CLOUD_TRANSFER_GOOGLE_ENABLED",
     "CLOUD_TRANSFER_GOOGLE_PICKER_CLIENT_ENABLED",
@@ -699,6 +702,7 @@ export const FEATURE_FLAG_ACTIVATION_POLICIES = Object.freeze({
     CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED: Object.freeze({ prohibitedReason: "Verified recipient enrollment requires a separately reviewed staging-only activation window with exact Client-to-Operations binding, consent, expiry, replay, and revocation evidence" }),
     CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_WRITER_ENABLED: Object.freeze({ prohibitedReason: "Verified recipient delivery authority writes remain default-off pending a separately reviewed staging activation" }),
     CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_STATUS_ENABLED: Object.freeze({ prohibitedReason: "Verified recipient delivery authority status remains default-off pending a separately reviewed staging activation" }),
+    CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED: Object.freeze({ prohibitedReason: "Ops-native publication ingestion requires exact-target staging acceptance; data publication never grants recipient access" }),
     CLOUD_TRANSFER_DROPBOX_ENABLED: Object.freeze({ prohibitedReason: "Dropbox client transfer is outside this release packet" }),
     CLOUD_TRANSFER_GOOGLE_ENABLED: Object.freeze({ prohibitedReason: "Google client transfer is outside this release packet" }),
     CLOUD_TRANSFER_GOOGLE_PICKER_CLIENT_ENABLED: Object.freeze({ prohibitedReason: "Google Picker is outside this release packet" }),
@@ -867,6 +871,7 @@ export const STAGING_STATIC_VARS = Object.freeze({
     CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED: "false",
     CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_WRITER_ENABLED: "false",
     CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_STATUS_ENABLED: "false",
+    CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED: "false",
     CLOUD_TRANSFER_DROPBOX_ENABLED: "false",
     CLOUD_TRANSFER_GOOGLE_ENABLED: "false",
     CLOUD_TRANSFER_GOOGLE_PICKER_CLIENT_ENABLED: "false",
@@ -980,6 +985,7 @@ export const STAGING_ALLOWED_VAR_NAMES = Object.freeze({
     "CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_WRITER_ENABLED",
     "CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_STATUS_ENABLED",
     "CLIENT_PORTAL_ORIGIN", "CLIENT_PORTAL_ORIGINS", "CLIENT_ACCESS_TEAM_DOMAIN", "CLIENT_ACCESS_AUD",
+    "CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED",
     "MAPBOX_PUBLIC_TOKEN", "MAPBOX_STAGING_ACCEPTANCE_DEFERRED", "SESSION_KEY_ID", "PREVIOUS_SESSION_KEY_ID",
     "STREAM_CUSTOMER_CODE", "R2_S3_ENDPOINT", "R2_BUCKET_NAME",
     "CLOUD_TRANSFER_DROPBOX_ENABLED", "CLOUD_TRANSFER_GOOGLE_ENABLED",

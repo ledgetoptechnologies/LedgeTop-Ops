@@ -94,10 +94,10 @@ describe("local-only complete staging bootstrap migration rehearsal", () => {
   });
 
   it("applies both reviewed chains to empty local D1 databases and stays idempotent", async () => {
-    expect(artifacts.delivery.files).toHaveLength(141);
-    expect(artifacts.operations.files).toHaveLength(151);
-    expect(artifacts.delivery.files.at(-1)?.name).toBe("0222_verified_recipient_delivery_cross_manager_revoke.sql");
-    expect(artifacts.operations.files.at(-1)?.name).toBe("0151_verified_recipient_delivery_authority_outbox.sql");
+    expect(artifacts.delivery.files).toHaveLength(142);
+    expect(artifacts.operations.files).toHaveLength(152);
+    expect(artifacts.delivery.files.at(-1)?.name).toBe("0223_operations_portal_workspace_publications.sql");
+    expect(artifacts.operations.files.at(-1)?.name).toBe("0152_operations_portal_workspace_reservations.sql");
     expect(artifacts.delivery.files.filter(file => file.name.startsWith("0199_")).map(file => file.name)).toEqual([
       "0199_incoming_upload_pickup_lifecycle.sql", "0199_native_viewer_grants.sql",
     ]);
@@ -117,6 +117,15 @@ describe("local-only complete staging bootstrap migration rehearsal", () => {
 
     expect(await rows(delivery, "PRAGMA foreign_key_check")).toEqual([]);
     expect(await rows(operations, "PRAGMA foreign_key_check")).toEqual([]);
+    for (const table of ["operations_portal_workspace_publication_commands",
+      "operations_portal_workspace_publication_heads", "operations_portal_workspace_publication_snapshots",
+      "operations_portal_workspace_publication_history", "operations_portal_workspace_publication_receipts"]) {
+      expect(await count(delivery, table)).toBe(0);
+    }
+    for (const table of ["operations_portal_workspace_reservation_commands",
+      "operations_portal_workspace_reservation_heads", "operations_portal_folder_reservation_heads"]) {
+      expect(await count(operations, table)).toBe(0);
+    }
     expect(await rows<{ id: string; email: string }>(delivery, "SELECT id,email FROM staff_users ORDER BY id"))
       .toEqual([{ id: owner.clientStaffId, email: owner.email }]);
     expect(await rows<{ role: string }>(delivery, "SELECT role FROM staff_users WHERE id=?", owner.clientStaffId))

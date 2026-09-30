@@ -386,8 +386,8 @@ test("requires every portal-v2 and Operations capability to be explicitly false"
   }
 });
 
-test("pins the native portal, Operations 0054-0151, both 0199 files, and the 0200-0222 release contract", () => {
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-40), [
+test("pins the native portal, Operations 0054-0152, both 0199 files, and the 0200-0223 release contract", () => {
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-41), [
     "0184_native_client_feedback.sql",
     "0185_native_service_request_ownership.sql",
     "0186_delivery_notification_authority_provenance.sql",
@@ -428,6 +428,7 @@ test("pins the native portal, Operations 0054-0151, both 0199 files, and the 020
     "0220_operations_portal_authority_v3_permissions.sql",
     "0221_verified_recipient_delivery_authority.sql",
     "0222_verified_recipient_delivery_cross_manager_revoke.sql",
+    "0223_operations_portal_workspace_publications.sql",
   ]);
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0123_native_directory_authority_history.sql")), [
     "0123_native_directory_authority_history.sql",
@@ -459,6 +460,7 @@ test("pins the native portal, Operations 0054-0151, both 0199 files, and the 020
     "0149_client_portal_recipient_enrollment_sql_fences.sql",
     "0150_client_portal_recipient_enrollment_cancellation.sql",
     "0151_verified_recipient_delivery_authority_outbox.sql",
+    "0152_operations_portal_workspace_reservations.sql",
   ]);
   const nativeDirectoryStart = REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0054_project_alpha_directory_outbox.sql");
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(nativeDirectoryStart, nativeDirectoryStart + 3), [

@@ -447,6 +447,7 @@ describe("Operations portal workspace publication contract", () => {
   });
 
   it("enforces declared counts, duplicate rejection, and a hard canonical byte bound", async () => {
+    expect(OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_LIMITS.canonicalBytes).toBe(1_900_000);
     const value = await signedFixture();
     const wrongCount = clone(value);
     wrongCount.snapshot.counts.projects = 2;
