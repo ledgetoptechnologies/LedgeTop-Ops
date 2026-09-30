@@ -2,6 +2,31 @@
 
 Updated September 19, 2026. The owner approved implementation and resumption after confirming the decisions recorded in this work register. This is the current scope for engineering work; it supersedes conflicting target-architecture recommendations in older handoffs, not the safety rules of the still-deployed system.
 
+### September 30 — priority reset and API-v2 read-acceptance UI correction
+
+- The owner reaffirmed sequencing: prove the PA↔Ops connection first, then make
+  the unified Client Portal usable for sign-in and scoped data access; lower
+  priority features may continue afterward. Staging is the validation venue.
+- Ops commit `825e44e70ccc2ad39e21e715fdde3ab3cdf908ad` adds an API-v2 source
+  inventory and bounded read-acceptance UI outside legacy connector middleware.
+  It also avoids serializing PA identity UUIDs in the acceptance response/audit.
+  The change is in Ops PR #140; exact-head CI run `36764970297` was queued at
+  this checkpoint. Local evidence: typecheck and deployable build passed,
+  focused Worker tests 64/64, browser tests 12/12, and `git diff --check` passed.
+- This is an operator-test affordance only: it is not a sync, reconciliation,
+  write, ownership cutover, or client access feature. No staging deployment or
+  live API-v2 probe is claimed from this commit. The September 29 live evidence
+  remains authoritative until a new staging release is explicitly prepared,
+  deployed under the staging runbook, and both PA origins are tested.
+- The GitHub connector could not create the PR (403); the signed-in GitHub UI
+  was used to create PR #140. Merge remains gated on exact-head CI and staging
+  acceptance. No production PA/Operations configuration, client access, or
+  public links were changed.
+- Safe branch cleanup removed four branches already merged into main (two Ops,
+  two PA). The verified remote counts after cleanup were 51 Ops and 31 PA.
+  Further deletion is deferred for branches tied to open PRs or active
+  worktrees; `main` and `dev` remain protected.
+
 ### September 19, 2026 — current joined-window gate recheck
 
 - The Ops staging Cloudflare Access policy **Ledge Top Staging Staff Access**
