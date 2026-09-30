@@ -62,6 +62,16 @@ or enable unrelated features just to test native enrollment.
 
 ## Next acceptance order
 
+The new historical-lineage case now passes in actual workerd after the v7/v8
+generated guard split. The split retains every top-level predicate as its own
+CHECK inside the same atomic batch; 47 packet/guard tests pass, including denial
+and rollback cases. Final full joined-suite verification is pending. This is
+local runtime evidence, not live recipient enrollment or delivery acceptance.
+
+The generic API-v2 publication proof contract is now implemented and inert,
+with six focused tests passing. It neither creates nor validates live authority
+by itself; the durable producer and consuming Client guards are still required.
+
 1. Reproduce the preserved historical pre-0123 bootstrap and onboarding
    generations through real producers; rehearse v7 acquisition and v8 selection.
    Do not seed approvals, grants, histories or activation receipts directly.

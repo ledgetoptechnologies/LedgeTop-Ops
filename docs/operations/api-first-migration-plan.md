@@ -11,6 +11,21 @@ Updated September 29, 2026. The owner approved implementation and resumption aft
   source release evidence, not a successful live silent renewal or permission
   to bypass Viewer authorization. Joined caller/CORS/Access/redeem acceptance
   still precedes activation.
+- Main CI run `36668921589` subsequently completed successfully for the merged
+  renewal commit. Deployment and live enabled renewal are separate acceptance
+  gates; this result does not prove either one.
+- A real workerd historical-chain test exposed the v7 generated guard's
+  expression-depth overflow. The approved staging-only repair separates exact
+  top-level conjunctions into individually enforced CHECK inserts in the same
+  atomic batch, without editing applied migrations or removing predicates.
+  All 47 focused packet/guard tests pass, including drift and rollback cases;
+  the new historical workerd case now passes through v7/v8 provision, selection,
+  replay and revoke. Full final joined-suite verification is still pending.
+- Added a default-inert, closed API-v2 publication proof/receipt contract with
+  source, application, epoch, generation, complete snapshot, workspace, project,
+  folder and CAS pins. Its six focused tests and targeted TypeScript checks pass.
+  No route consumes it yet: parsing is not publication authority, and the
+  durable producer plus Client guard/revocation integration remain outstanding.
 - Fresh remote inventory confirms Client staging at
   `e35e9fdc-2beb-4a0e-be1b-fa4c372f6cc0` and Operations staging at
   `f5a07171-cb05-4cf3-9251-afe087550920`, each at 100%. The latter's
