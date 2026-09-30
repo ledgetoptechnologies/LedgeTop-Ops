@@ -89,9 +89,9 @@ test("revoke requires no in-flight actor work and rolls back atomically", () => 
   assert.deepEqual(row(db,"SELECT active FROM native_directory_grants WHERE id=?",artifact.ids.grant),{active:1});
 });
 
-test("builds a 147-migration, staging-only, sanitized, one-file packet", () => {
+test("builds a 151-migration, staging-only, sanitized, one-file packet", () => {
   const base=fixture(), artifact=buildOnboardingAuthorityArtifacts(base,input(),"revoke");
-  assert.equal(artifact.provision.manifest.canonicalMigrationCount,147);
+  assert.equal(artifact.provision.manifest.canonicalMigrationCount,151);
   assert.equal(artifact.provision.sql.includes("project.shared.sync"),false);
   assert.equal(artifact.provision.sql.includes("'business_area'"),true);
   assert.equal(JSON.stringify(artifact.provision.manifest).includes(subject),false);
