@@ -766,7 +766,8 @@
         "0160_operations_portal_native_recipient_labels.sql",
         "0161_project_alpha_api_v2_inventory_observations.sql",
         "0162_project_alpha_directory_read_adoption_claims.sql",
-        "0163_project_alpha_directory_read_adoption_field_review_receipts.sql"
+        "0163_project_alpha_directory_read_adoption_field_review_receipts.sql",
+        "0164_project_alpha_directory_read_adoption_authority_recheck.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",

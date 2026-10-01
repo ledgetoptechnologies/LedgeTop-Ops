@@ -496,6 +496,7 @@ test("pins the native portal, Operations 0054-0160 gap-aware chain, both 0199 fi
     "0161_project_alpha_api_v2_inventory_observations.sql",
     "0162_project_alpha_directory_read_adoption_claims.sql",
     "0163_project_alpha_directory_read_adoption_field_review_receipts.sql",
+    "0164_project_alpha_directory_read_adoption_authority_recheck.sql",
   ]);
   const nativeDirectoryStart = REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0054_project_alpha_directory_outbox.sql");
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(nativeDirectoryStart, nativeDirectoryStart + 3), [

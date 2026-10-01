@@ -409,8 +409,8 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
 });
 
 test("the deployed Operations Worker keeps catalog and inactive binding transport private and default-off", () => {
-  // The only reviewed delta here is an explicit disabled native recipient home flag.
-  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "41427cfe4d94ae59ebe251397a2481b235958e44716c9c2d586fad6c7b887b39");
+  // Newly mounted PA adoption and binding-refresh routes remain disabled in production by default.
+  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "3f2cd2a5e3bd3de3cb1f949f5810b8a636e1ca610e67ff501ce8e9dac74e8b4d");
   const config = readJson("apps/operations/wrangler.jsonc");
   assert.equal(config.vars.CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED, "false");
   assert.equal(config.services?.find(service => service.binding === "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY"), undefined);
@@ -423,6 +423,8 @@ test("the deployed Operations Worker keeps catalog and inactive binding transpor
   assert.equal(config.vars.CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED, "false");
+  assert.equal(config.vars.PROJECT_ALPHA_PROJECT_ADOPTION_REVIEW_ENABLED, "false");
+  assert.equal(config.vars.PROJECT_ALPHA_PROJECT_BINDING_REVISION_REFRESH_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_ACCESS_AUTHORITY_OUTBOX_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_AUTHORITY_V2_OUTBOX_ENABLED, "false");
