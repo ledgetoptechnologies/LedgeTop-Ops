@@ -6,7 +6,9 @@ const ENDPOINT = "/api/admin/integrations/project-alpha/connectors";
 const READ_ACCEPTANCE_ENDPOINT = "/api/admin/integrations/project-alpha/api-v2/read-acceptance";
 const API_V2_SYNC_ENDPOINT = "/api/admin/integrations/project-alpha/api-v2/sync-page";
 const DIRECTORY_READ_ADOPTION_ENDPOINT = "/api/admin/integrations/project-alpha/api-v2/directory/read-adoptions";
+const PROJECT_BINDING_REFRESH_ENDPOINT = "/api/admin/project-alpha/private/projects/bindings/refresh";
 const PRIMARY = "project-alpha:primary";
+const STAGING = "project-alpha:staging";
 type Connector = {
   sourceId: string; displayName: string; producerBindingId: string; snapshotOrigin: string; snapshotBasePath: string;
   applicationKey: string; profile: "primary_legacy" | "business_data"; state: "pending" | "active" | "suspended" | "retired";
@@ -24,6 +26,7 @@ type Directory = { connectors: Connector[]; health: Health[]; legacyPrimary: boo
 type ReadAcceptancePart = { status: string; count?: number; exactIdentityMatch?: boolean; exactContractMatch?: boolean };
 type ReadAcceptance = { sourceId: string; readOnly: boolean; capabilities: ReadAcceptancePart;
   directory: ReadAcceptancePart; projects: ReadAcceptancePart };
+type BindingRefreshOutcome = { status: string; reason?: string };
 type InventoryPageSurface = { status: "persisted" | "conflicted"; itemCount: number; conflictCount: number; hasMore: boolean; continuationToken?: string };
 type InventoryRequestedSurface = InventoryPageSurface
   | { status: "blocked"; reason: "transport" | "contract" | "authorization" | "binding_stale" | "storage" | "cursor_stale" };
@@ -71,8 +74,23 @@ function RecoveryStatus({ connector, recovery }: { connector: Connector; recover
   return <p><strong>Scheduled recovery</strong> · {connector.state === "active" ? "Eligible by deployment configuration" : `Paused by deployment configuration (${connector.state})`}<br />
     {recovery ? <>Last attempt: {labels[recovery.status]} · Last success: {date(recovery.lastSuccessAt)}{recovery.nextAttemptAt && <><br />Next attempt not before: {date(recovery.nextAttemptAt)}</>}{recovery.errorCode && <><br />Last recovery error: {recovery.errorCode}</>}{recovery.failureCount > 0 && <> · Failure count: {recovery.failureCount}</>}</> : "Recovery status unavailable."}</p>;
 }
+function safeBindingRefreshOutcome(value: unknown): BindingRefreshOutcome | null {
+  if (!record(value) || typeof value.status !== "string") return null;
+  const allowedStatuses = ["refreshed", "current", "not_refreshed", "blocked", "rejected", "conflict", "uncertain"];
+  if (!allowedStatuses.includes(value.status)) return null;
+  const allowedReasons = ["source_disabled", "not_found", "binding_stale", "transport", "authorization", "contract", "storage"];
+  return { status: value.status, ...(typeof value.reason === "string" && allowedReasons.includes(value.reason) ? { reason: value.reason } : {}) };
+}
+function bindingRefreshMessage(outcome: BindingRefreshOutcome): string {
+  if (outcome.status === "refreshed") return "Binding refresh completed.";
+  if (outcome.status === "current") return "The binding is already current.";
+  if (outcome.status === "not_refreshed") return `Binding was not refreshed${outcome.reason ? ` (${outcome.reason.replaceAll("_", " ")})` : "."}`;
+  return `Binding refresh was not completed${outcome.reason ? ` (${outcome.reason.replaceAll("_", " ")})` : "."}`;
+}
 function ReadAcceptanceCheck({ connector, disabled }: { connector: Connector; disabled: boolean }) {
   const [busy, setBusy] = useState(false), [result, setResult] = useState<ReadAcceptance | null>(null), [error, setError] = useState("");
+  const [externalProjectId, setExternalProjectId] = useState(""), [confirmedExternalProjectId, setConfirmedExternalProjectId] = useState("");
+  const [refreshBusy, setRefreshBusy] = useState(false), [refreshOutcome, setRefreshOutcome] = useState<BindingRefreshOutcome | null>(null), [refreshError, setRefreshError] = useState("");
   const verify = async () => {
     if (busy || disabled || connector.state !== "active") return;
     setBusy(true); setResult(null); setError("");
@@ -91,6 +109,28 @@ function ReadAcceptanceCheck({ connector, disabled }: { connector: Connector; di
     && result.capabilities.status === "verified" && result.capabilities.exactIdentityMatch === true
     && result.capabilities.exactContractMatch === true && result.directory.status === "observed"
     && result.projects.status === "observed";
+  const staleStagingBinding = connector.sourceId === STAGING && result?.projects.status === "binding_stale";
+  const refresh = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const projectId = externalProjectId.trim(), confirmation = confirmedExternalProjectId.trim();
+    if (!staleStagingBinding || refreshBusy || disabled) return;
+    if (!projectId || projectId !== externalProjectId || confirmation !== confirmedExternalProjectId
+      || projectId.length > 191 || /\p{C}/u.test(projectId) || projectId !== confirmation) {
+      setRefreshError("Enter the exact external Project ID twice so it can be confirmed."); return;
+    }
+    setRefreshBusy(true); setRefreshError(""); setRefreshOutcome(null);
+    try {
+      const response = await api<{ outcome?: unknown }>(PROJECT_BINDING_REFRESH_ENDPOINT, {
+        method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({ sourceId: STAGING, externalProjectId: projectId }),
+      });
+      const outcome = safeBindingRefreshOutcome(response.outcome);
+      if (!outcome) throw new Error("The binding refresh response could not be verified.");
+      setRefreshOutcome(outcome);
+    } catch (caught) {
+      setRefreshError(operatorError(caught, "The staging binding refresh could not be completed."));
+    } finally { setRefreshBusy(false); }
+  };
   return <div className="alpha-read-acceptance" role="group" aria-label="Read-only API verification">
     <button type="button" className="button-ghost button-small" disabled={busy || disabled || connector.state !== "active"}
       onClick={() => void verify()}>{busy ? "Verifying read connection…" : "Verify read-only API connection"}</button>
@@ -98,6 +138,18 @@ function ReadAcceptanceCheck({ connector, disabled }: { connector: Connector; di
       ? `API v2 read connection verified · Directory ${result.directory.count ?? 0} · Projects ${result.projects.count ?? 0}`
       : `API v2 read verification did not pass · Capabilities ${result.capabilities.status} · Directory ${result.directory.status} · Projects ${result.projects.status}`}</p>}
     {error && <p role="alert" className="notice">{error}</p>}
+    {staleStagingBinding && <form onSubmit={refresh} aria-busy={refreshBusy} className="alpha-binding-refresh">
+      <p><strong>Staging project binding is stale.</strong> Confirm the exact external Project ID before requesting a guarded refresh.</p>
+      <label htmlFor="staging-binding-project-id">Exact external Project ID</label>
+      <input id="staging-binding-project-id" value={externalProjectId} disabled={refreshBusy || disabled}
+        onChange={event => { setExternalProjectId(event.target.value); setRefreshError(""); setRefreshOutcome(null); }} maxLength={191} autoCapitalize="none" autoCorrect="off" spellCheck={false} />
+      <label htmlFor="staging-binding-project-id-confirm">Confirm exact external Project ID</label>
+      <input id="staging-binding-project-id-confirm" value={confirmedExternalProjectId} disabled={refreshBusy || disabled}
+        onChange={event => { setConfirmedExternalProjectId(event.target.value); setRefreshError(""); setRefreshOutcome(null); }} maxLength={191} autoCapitalize="none" autoCorrect="off" spellCheck={false} />
+      <button type="submit" className="button-ghost button-small" disabled={refreshBusy || disabled}>{refreshBusy ? "Refreshing binding…" : "Refresh staging binding"}</button>
+      {refreshOutcome && <p role="status" className="notice">{bindingRefreshMessage(refreshOutcome)}</p>}
+      {refreshError && <p role="alert" className="notice">{refreshError}</p>}
+    </form>}
   </div>;
 }
 function record(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
