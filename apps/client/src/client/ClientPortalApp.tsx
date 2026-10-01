@@ -23,6 +23,7 @@ import {
   loadPortalAuthenticatedDeliveryFiles,
   loadPortalPastDeliveries,
   loadPortalPastDeliveryLocations,
+  loadPortalProjectFinancialSummary,
   loadPortalProjectFileLocations,
   loadPortalProjectFolderFiles,
   loadPortalViewerModels,
@@ -60,6 +61,7 @@ import {
   type PortalFolder,
   type PortalFileBreadcrumb,
   type PortalFilePage,
+  type PortalFinancialSummary,
   type PortalPoi,
   type PortalAreaGeoJson,
   type PortalPricingHint,
@@ -117,7 +119,21 @@ const PORTAL_FILE_RENDER_WINDOW = 450;
 const PORTAL_FILE_RENDER_STEP = 150;
 
 type TopPage = "dashboard" | "projects" | "deliveries" | "requests" | "feedback" | "account";
-type WorkspaceTab = "overview" | "files" | "models" | "requests";
+export type WorkspaceTab = "overview" | "files" | "models" | "billing" | "requests";
+
+export function projectWorkspaceTabs(
+  resourceMode: "legacy" | "native",
+  viewer: boolean,
+  viewBilling: boolean,
+): WorkspaceTab[] {
+  return [
+    "overview",
+    "files",
+    ...(viewer ? ["models" as const] : []),
+    ...(resourceMode === "legacy" && viewBilling === true ? ["billing" as const] : []),
+    "requests",
+  ];
+}
 type PortalGate =
   | { status: "loading" }
   | { status: "blocked"; title: string; detail: string }
@@ -2038,6 +2054,79 @@ function PortalViewerShares({
   </section>;
 }
 
+function ProjectFinancialSummary({ projectId }: { projectId: string }) {
+  const [pages, setPages] = useState<PortalFinancialSummary[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const activeRequest = useRef<AbortController | null>(null);
+
+  const loadPage = useCallback(async (cursor: string | null, append: boolean) => {
+    activeRequest.current?.abort();
+    const controller = new AbortController();
+    activeRequest.current = controller;
+    setLoading(true);
+    setError("");
+    try {
+      const summary = await loadPortalProjectFinancialSummary(projectId, cursor, undefined, controller.signal);
+      if (!controller.signal.aborted)
+        setPages(current => append ? [...current, summary] : [summary]);
+    } catch {
+      if (!controller.signal.aborted)
+        setError("Financial details could not be loaded. Try again.");
+    } finally {
+      if (activeRequest.current === controller) setLoading(false);
+    }
+  }, [projectId]);
+
+  useEffect(() => {
+    void loadPage(null, false);
+    return () => activeRequest.current?.abort();
+  }, [loadPage]);
+
+  const nextCursor = pages.at(-1)?.nextCursor ?? null;
+  const invoiceCount = pages.reduce((count, page) => count + page.invoices.length, 0);
+  const retry = () => void loadPage(pages.length ? nextCursor : null, pages.length > 0);
+
+  if (loading && !pages.length) return <Card title="Billing & invoices"><Loading /></Card>;
+  if (error && !pages.length) return <Card title="Billing & invoices">
+    <EmptyState title="Financial details unavailable" detail={error} />
+    <button type="button" className="button-orange" onClick={retry}>Retry</button>
+  </Card>;
+  if (!invoiceCount && !nextCursor) return <Card title="Billing & invoices">
+    <EmptyState title="No invoices available" detail="Invoices published for this project will appear here." />
+  </Card>;
+
+  return <Card title="Billing & invoices">
+    <p className="portal-card-intro">Totals apply only to the invoices returned on each page.</p>
+    {pages.map((page, pageIndex) => <section key={page.requestId} aria-labelledby={`financial-page-${pageIndex + 1}`}>
+      <h3 id={`financial-page-${pageIndex + 1}`}>Page {pageIndex + 1}</h3>
+      <dl className="portal-detail-list" aria-label={`Page ${pageIndex + 1} totals`}>
+        <div><dt>Invoice total</dt><dd>{page.returnedPageTotals.invoiceTotal}</dd></div>
+        <div><dt>Amount paid</dt><dd>{page.returnedPageTotals.amountPaid}</dd></div>
+        <div><dt>Balance due</dt><dd>{page.returnedPageTotals.balanceDue}</dd></div>
+      </dl>
+      {page.invoices.length ? <div className="portal-request-list" aria-label={`Page ${pageIndex + 1} invoices`}>
+        {page.invoices.map((invoice, invoiceIndex) => <article className="portal-request-row" key={`${pageIndex}:${invoice.documentNumber ?? "unassigned"}:${invoiceIndex}`}>
+          <div>
+            <strong>{invoice.documentNumber === null ? "Invoice" : `Invoice ${invoice.documentNumber}`}</strong>
+            <span>Status: {invoice.status.replaceAll("_", " ")}</span>
+            <span>Invoice total {invoice.total} · Paid {invoice.amountPaid} · Balance {invoice.balanceDue}</span>
+            <span>Document date: {invoice.documentDate ? formatDate(invoice.documentDate, false) : "Not provided"} · Due: {invoice.dueDate ? formatDate(invoice.dueDate, false) : "Not provided"}</span>
+          </div>
+          {(invoice.invoicePublicUrl || invoice.paymentPublicUrl) && <div className="portal-request-state">
+            {invoice.invoicePublicUrl && <a className="button-ghost button-small" href={invoice.invoicePublicUrl} target="_blank" rel="noreferrer">View invoice</a>}
+            {invoice.paymentPublicUrl && <a className="button-orange button-small" href={invoice.paymentPublicUrl} target="_blank" rel="noreferrer">Payment page</a>}
+          </div>}
+        </article>)}
+      </div> : <p className="muted">No invoices were returned on this page.</p>}
+    </section>)}
+    {error && <p className="portal-message error" role="alert">{error}</p>}
+    {nextCursor && <button type="button" className="button-ghost" disabled={loading} onClick={() => void loadPage(nextCursor, true)}>
+      {loading ? "Loading…" : error ? "Retry next page" : "Load more invoices"}
+    </button>}
+  </Card>;
+}
+
 function ProjectWorkspace({
   project,
   requests,
@@ -2049,6 +2138,7 @@ function ProjectWorkspace({
   requestWorkspaceId,
   feedback,
   viewer,
+  viewBilling,
   viewerDisplayUnits,
   onSaved,
   onCancelRequest,
@@ -2066,6 +2156,7 @@ function ProjectWorkspace({
   requestWorkspaceId: string | null;
   feedback: boolean;
   viewer: boolean;
+  viewBilling: boolean;
   viewerDisplayUnits: "imperial" | "metric";
   onSaved: (request: PortalServiceRequest) => void;
   onCancelRequest: (request: PortalServiceRequest) => void;
@@ -2077,7 +2168,8 @@ function ProjectWorkspace({
     const params = new URLSearchParams(window.location.search);
     const requestedTab = params.get("tab");
     const nextTab: WorkspaceTab = requestedTab === "files" || requestedTab === "requests" ||
-      (requestedTab === "models" && viewer) ? requestedTab : "overview";
+      (requestedTab === "models" && viewer) || (requestedTab === "billing" && viewBilling)
+      ? requestedTab : "overview";
     const candidateFolder = nextTab === "files" ? params.get("folder") : null;
     return { tab: nextTab, folderId: candidateFolder && candidateFolder.length <= 4096 ? candidateFolder : null };
   };
@@ -2105,7 +2197,7 @@ function ProjectWorkspace({
     updateFromLocation();
     window.addEventListener("popstate", updateFromLocation);
     return () => window.removeEventListener("popstate", updateFromLocation);
-  }, [project.id, viewer]);
+  }, [project.id, viewer, viewBilling]);
   const navigateTab = (nextTab: WorkspaceTab) => {
     const url = new URL(clientProjectPath(project.id), window.location.origin);
     if (nextTab !== "overview") url.searchParams.set("tab", nextTab);
@@ -2138,7 +2230,7 @@ function ProjectWorkspace({
       </section>
       {feedback && <LeaveFeedback key={project.id} target={{ kind: "project", projectId: project.id }} label={project.projectName} />}
       <nav className="portal-workspace-tabs" aria-label="Project workspace">
-        {(["overview", "files", ...(viewer ? ["models" as const] : []), "requests"] as WorkspaceTab[]).map((item) => (
+        {projectWorkspaceTabs("legacy", viewer, viewBilling).map((item) => (
           <button
             key={item}
             aria-current={tab === item ? "page" : undefined}
@@ -2233,6 +2325,7 @@ function ProjectWorkspace({
         </Card>
       )}
       {tab === "models" && viewer && <ProjectViewerModels projectId={project.id} initialDisplayUnits={viewerDisplayUnits} />}
+      {tab === "billing" && viewBilling && <ProjectFinancialSummary projectId={project.id} />}
       {tab === "requests" && (
         <>
           <Card title="Request additional service" className="portal-request-card">
@@ -3078,6 +3171,7 @@ export function ClientPortalApp({
         requestWorkspaceId={selectedWorkspaceId}
         feedback={capabilities.feedback}
         viewer={capabilities.viewer}
+        viewBilling={capabilities.viewBilling}
         viewerDisplayUnits={gate.data.resourceMode === "native" ? "imperial" : gate.data.viewerDisplayUnits}
         onSaved={onSaved}
         onCancelRequest={onCancelRequest}

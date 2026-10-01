@@ -107,6 +107,7 @@ import { readClientRequestReadiness } from "./request-readiness";
 import { createNativePortalWorkspaceRouter } from "./native-portal-resources";
 import {createWorkspaceAddressContact,deleteWorkspaceAddressContact,listWorkspaceAddressContacts,readWorkspaceAddressContact,
   updateWorkspaceAddressContact,workspaceAddressBookAvailable} from './workspace-address-book';
+import {fetchProjectAlphaFinancialSummary,resolveFinancialProjectAuthority,validFinancialSummaryCursor} from './project-alpha-financial-summary';
 
 interface ClientPortalDependencies {
   resolvePrincipal?: ResolveClientPrincipal;
@@ -1018,6 +1019,39 @@ export function createClientPortalRouter(
     if (!project)
       throw new HTTPException(404, { message: "Project not found" });
     return c.json({ project: { ...project, canRequestService: project.canRequestService && request } });
+  });
+
+  router.get("/projects/:projectId/financial-summary", async (c) => {
+    c.header("Cache-Control", "private, no-store");
+    const projectId = opaqueId.safeParse(c.req.param("projectId"));
+    const cursorValues = c.req.queries("cursor");
+    const cursorValue = cursorValues?.[0];
+    const cursor = cursorValue === undefined ? null : cursorValue;
+    if (!projectId.success || (cursorValues !== undefined && cursorValues.length !== 1)
+      || (cursor !== null && !validFinancialSummaryCursor(cursor)))
+      throw new HTTPException(404, { message: "Financial summary is unavailable" });
+    const workspace = selectedWorkspace(c);
+    if (!workspace) throw new HTTPException(404, { message: "Financial summary is unavailable" });
+    if (!workspace.canViewBilling) throw new HTTPException(403, { message: "Billing access is not permitted" });
+    // Portal-v2 entitlement and current hierarchy/deny state are re-evaluated
+    // independently of the local billing/project ACL resolver below.
+    if (!(await authorizeProject(c, "delivery.view", projectId.data)))
+      throw new HTTPException(404, { message: "Financial summary is unavailable" });
+    const authority = await resolveFinancialProjectAuthority(c.env, workspace, projectId.data);
+    if (!authority) throw new HTTPException(404, { message: "Financial summary is unavailable" });
+    const summary = await fetchProjectAlphaFinancialSummary(c.env, authority, cursor);
+    if (!summary) throw new HTTPException(503, { message: "Financial summary is temporarily unavailable" });
+    // Recheck after the network boundary so revocation while PA is responding
+    // cannot release a stale financial result.
+    const currentWorkspace = await resolveEffectivePortalWorkspaceContext(c.env, c.get("clientPrincipal"), workspace.workspaceId);
+    const currentAuthority = currentWorkspace?.canViewBilling
+      ? await resolveFinancialProjectAuthority(c.env, currentWorkspace, projectId.data) : null;
+    if (!currentWorkspace?.canViewBilling || !(await authorizeEffectiveWorkspaceProject(
+      c.env, c.get("clientPrincipal"), currentWorkspace, "delivery.view", projectId.data,
+    )) || !currentAuthority || currentAuthority.sourceId !== authority.sourceId
+      || currentAuthority.projectPublicId !== authority.projectPublicId)
+      throw new HTTPException(404, { message: "Financial summary is unavailable" });
+    return c.json(summary);
   });
 
   router.get("/projects/:projectId/files", async (c) => {

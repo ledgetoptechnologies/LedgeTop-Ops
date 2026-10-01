@@ -70,6 +70,9 @@ export interface Env {
   PROJECT_ALPHA_PRICING_HINT_HMAC_SECRET?: string;
   PROJECT_ALPHA_PRICING_HINT_APPLICATION_KEY?: string;
   PROJECT_ALPHA_PRICING_HINT_CURRENCIES?: string;
+  /** Default-off, server-only, source-qualified PA API-v2 financial reads. */
+  CLIENT_PORTAL_FINANCIAL_SUMMARY_ENABLED?: string;
+  CLIENT_PORTAL_FINANCIAL_API_V2_CONNECTIONS?: string;
   CLIENT_PORTAL_TEAM_ENABLED?: string;
   /** Additive PA-backed workspace hierarchy. Default-off until shadow parity is proven. */
   CLIENT_PORTAL_HIERARCHY_V2_ENABLED?: string;

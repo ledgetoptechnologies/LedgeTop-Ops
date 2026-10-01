@@ -72,6 +72,38 @@ export interface PortalFilePage {
   cursor: string | null;
 }
 
+export interface PortalFinancialInvoice {
+  documentNumber: number | null;
+  status: string;
+  total: string;
+  amountPaid: string;
+  balanceDue: string;
+  dueDate: string | null;
+  documentDate: string | null;
+  invoicePublicUrl: string | null;
+  paymentPublicUrl: string | null;
+}
+
+export interface PortalFinancialSummary {
+  apiVersion: "2";
+  sourceInstanceId: string;
+  applicationId: string;
+  historyEpoch: string;
+  requestId: string;
+  resource: {
+    type: "project";
+    externalId: string;
+    publicId: string;
+  };
+  returnedPageTotals: {
+    invoiceTotal: string;
+    amountPaid: string;
+    balanceDue: string;
+  };
+  invoices: PortalFinancialInvoice[];
+  nextCursor: string | null;
+}
+
 export type PortalServiceRequestStatus =
   | "submitted"
   | "under_review"
@@ -372,6 +404,19 @@ export async function loadPortalProjectFiles(
   const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
   return request<PortalFilePage>(
     `/api/client/projects/${encodeURIComponent(projectId)}/files${query}`,
+  );
+}
+
+export async function loadPortalProjectFinancialSummary(
+  projectId: string,
+  cursor: string | null = null,
+  request: PortalRequest = requestJson,
+  signal?: AbortSignal,
+): Promise<PortalFinancialSummary> {
+  const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
+  return request<PortalFinancialSummary>(
+    `/api/client/projects/${encodeURIComponent(projectId)}/financial-summary${query}`,
+    { cache: "no-store", ...(signal ? { signal } : {}) },
   );
 }
 

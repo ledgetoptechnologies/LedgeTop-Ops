@@ -89,6 +89,15 @@ this repository, a Wrangler config, or `staging-config-values.json`):
 }
 ```
 
+The Client Worker financial summary uses the separate
+`CLIENT_PORTAL_FINANCIAL_API_V2_CONNECTIONS` secret listed for `delivery` in
+`staging-secret-manifest.json`. It is Worker-local and must never be copied
+from, merged with, or substituted for the Operations-only
+`PROJECT_ALPHA_API_V2_CONNECTIONS` secret. The corresponding
+`CLIENT_PORTAL_FINANCIAL_SUMMARY_ENABLED` staging variable remains `false` by
+default; no secret value belongs in a Wrangler config or rendered ignored
+staging config.
+
 The separately authorized, disposable Project Alpha Directory API-v2
 rehearsal is documented in
 [pa-api-v2-directory-acceptance.md](pa-api-v2-directory-acceptance.md). It

@@ -12,6 +12,7 @@ import {
   loadPortalBootstrap,
   loadPortalPastDeliveries,
   loadPortalPricingHint,
+  loadPortalProjectFinancialSummary,
   loadPortalProjectFolderFiles,
   loadPortalProjectFiles,
   savePortalServiceDraft,
@@ -21,6 +22,7 @@ import {
   type PortalRequest,
   type PortalServiceRequestInput,
 } from "../src/client/portal-api";
+import { projectWorkspaceTabs } from "../src/client/ClientPortalApp";
 import { neutralMapLocation } from "../src/client/MapAreaSelector";
 import { clientPortalPath, clientProjectPath, clientRequestNewPath, parseClientPortalRoute } from "../src/client/portal-route";
 import { isSafeViewerSessionUrl } from "@ltds/ui";
@@ -139,6 +141,41 @@ describe("client portal browser API boundary", () => {
       "/api/client/projects/project%20a/files?folder=pf1_opaque&cursor=pc1_next",
       { signal: controller.signal },
     );
+  });
+
+  it("loads uncached financial pages without converting exact decimal strings or nullable public links", async () => {
+    const controller = new AbortController();
+    const response = {
+      apiVersion: "2" as const,
+      sourceInstanceId: "00000000-0000-4000-8000-000000000001",
+      applicationId: "00000000-0000-4000-8000-000000000002",
+      historyEpoch: "00000000-0000-4000-8000-000000000003",
+      requestId: "00000000-0000-4000-8000-000000000004",
+      resource: { type: "project" as const, externalId: "project-a", publicId: "a".repeat(32) },
+      returnedPageTotals: { invoiceTotal: "9999999999999.99", amountPaid: "0.00", balanceDue: "9999999999999.99" },
+      invoices: [{
+        documentNumber: 42, status: "partially_paid", total: "9999999999999.99", amountPaid: "0.00",
+        balanceDue: "9999999999999.99", dueDate: null, documentDate: "2026-09-30",
+        invoicePublicUrl: null, paymentPublicUrl: "https://pa.example.test/public/payment-a",
+      }],
+      nextCursor: "2147483647",
+    };
+    const request = vi.fn(async <T>(): Promise<T> => response as T) as PortalRequest;
+
+    const loaded = await loadPortalProjectFinancialSummary("project a", "17", request, controller.signal);
+
+    expect(request).toHaveBeenCalledWith(
+      "/api/client/projects/project%20a/financial-summary?cursor=17",
+      { cache: "no-store", signal: controller.signal },
+    );
+    expect(loaded.returnedPageTotals.invoiceTotal).toBe("9999999999999.99");
+    expect(loaded.invoices[0]).toMatchObject({
+      total: "9999999999999.99",
+      balanceDue: "9999999999999.99",
+      invoicePublicUrl: null,
+      paymentPublicUrl: "https://pa.example.test/public/payment-a",
+    });
+    expect(loaded.nextCursor).toBe("2147483647");
   });
 
   const input: PortalServiceRequestInput = {
@@ -297,6 +334,17 @@ describe("client portal browser API boundary", () => {
       { etag: "a".repeat(32), size: 8 },
       { parts: [{ partNumber: 1, etag: "a".repeat(32) }] },
     ]);
+  });
+});
+
+describe("project financial tab visibility", () => {
+  it("shows billing only for an explicitly billing-enabled legacy project workspace", () => {
+    expect(projectWorkspaceTabs("legacy", false, true)).toEqual(["overview", "files", "billing", "requests"]);
+    expect(projectWorkspaceTabs("legacy", true, false)).toEqual(["overview", "files", "models", "requests"]);
+  });
+
+  it("never exposes billing for a native workspace even if a capability is passed accidentally", () => {
+    expect(projectWorkspaceTabs("native", true, true)).toEqual(["overview", "files", "models", "requests"]);
   });
 });
 
