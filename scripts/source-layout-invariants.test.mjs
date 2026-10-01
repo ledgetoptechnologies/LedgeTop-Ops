@@ -138,6 +138,15 @@ test("Directory API-v2 staging contract suite remains a required CI check", () =
   assert(workflow.includes("scripts/pa-api-v2-directory-staging-acceptance.test.mjs"));
 });
 
+test("Project Alpha API-v2 staging profile remains a default-off guarded CI gate", () => {
+  const workflow = read(".github/workflows/ci.yml");
+  const packageJson = JSON.parse(read("package.json"));
+  assert(workflow.includes("scripts/staging-project-alpha-api-v2-acceptance-profile.test.mjs"));
+  assert(packageJson.scripts.test.includes("scripts/staging-project-alpha-api-v2-acceptance-profile.test.mjs"));
+  assert(packageJson.scripts["staging:project-alpha-api-v2-acceptance:generate"]);
+  assert(packageJson.scripts["staging:project-alpha-api-v2-acceptance:check"]);
+});
+
 test("governed staging authority packets retain dependency-free local CI coverage", () => {
   const workflow = read(".github/workflows/ci.yml");
   assert(workflow.includes("name: Verify governed staging authority packets locally"));

@@ -98,6 +98,12 @@ rehearsal is documented in
 requires an exact feature-flag/capability contract and an exactly scoped key;
 it does not enable an Operations connection or change source authority.
 
+The bounded Operations-side Project Alpha API-v2 read/sync and exact-record
+review window is documented in
+[project-alpha-api-v2-acceptance-profile.md](project-alpha-api-v2-acceptance-profile.md).
+Its five gates are enabled only in a separately generated ignored staging
+config; the base and production configs remain default-off.
+
 Preserve all fail-closed feature variables, then run:
 
 ```text
