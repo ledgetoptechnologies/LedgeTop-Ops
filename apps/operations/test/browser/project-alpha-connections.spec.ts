@@ -18,7 +18,9 @@ type ApiV2ReadAcceptanceConfig = { status: "configured" | "unconfigured" | "misc
 const connector = (sourceId = secondary): Connector => ({ sourceId, displayName: sourceId === primary ? "LTDS Project Alpha" : "LTT Project Alpha", producerBindingId: sourceId === primary ? "ltds" : "ltt", snapshotOrigin: sourceId === primary ? "https://alpha.example.test" : "https://alpha-secondary.example.test", snapshotBasePath: "/", applicationKey: "ltds_ops", profile: sourceId === primary ? "primary_legacy" : "business_data", state: "active", readVisible: true, activeRevision: 1, version: 2 });
 type OperatorResponse = Record<string, unknown>;
 type OperatorResponses = { inventory?: OperatorResponse | ((body: Record<string, unknown> | null, requestIndex: number) => OperatorResponse); reserve?: unknown; compare?: unknown; seal?: unknown };
-async function fixture(page: Page, data: Directory, operator: OperatorResponses = {}, apiV2Config: ApiV2ReadAcceptanceConfig = { status: "unconfigured", readAcceptanceEnabled: false, connections: [] }) {
+async function fixture(page: Page, data: Directory, operator: OperatorResponses = {}, apiV2Config: ApiV2ReadAcceptanceConfig = data.connectors.length
+  ? { status: "configured", readAcceptanceEnabled: false, connections: data.connectors.map(connection => ({ sourceId: connection.sourceId, enabled: connection.state === "active" })) }
+  : { status: "unconfigured", readAcceptanceEnabled: false, connections: [] }) {
   const requests: Array<{ path: string; method: string; body: Record<string, unknown> | null }> = [];
   let inventoryRequestIndex = 0;
   await page.route("**/api/**", async route => {

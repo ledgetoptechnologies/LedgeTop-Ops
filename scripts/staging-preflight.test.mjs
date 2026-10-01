@@ -112,8 +112,8 @@ test("rejects missing, unexpected, or non-regular release migrations", () => {
     }
   }
   assert.deepEqual(validateMigrationInventory(base), []);
-  fs.appendFileSync(path.join(base, "apps", "operations", "migrations", "0127_project_alpha_directory_read_adoption_field_review_receipts.sql"), "\n-- drift\n");
-  assert(validateMigrationInventory(base).some((error) => error.includes("0127_project_alpha_directory_read_adoption_field_review_receipts.sql SHA-256")));
+  fs.appendFileSync(path.join(base, "apps", "operations", "migrations", "0128_project_alpha_project_binding_revision_refresh_ledger.sql"), "\n-- drift\n");
+  assert(validateMigrationInventory(base).some((error) => error.includes("0128_project_alpha_project_binding_revision_refresh_ledger.sql SHA-256")));
   fs.rmSync(path.join(base, "apps", "client", "migrations", "0213_incoming_rclone_promotion.sql"));
   fs.writeFileSync(path.join(base, "apps", "client", "migrations", "0214_unreviewed.sql"), "-- unexpected\n");
   assert(validateMigrationInventory(base).some((error) => error.includes("delivery release migration inventory")));
@@ -327,7 +327,7 @@ test("requires every portal-v2 and Operations capability to be explicitly false"
   }
 });
 
-test("pins the native portal, Operations 0054-0127, both 0199 files, and the 0200-0213 release contract", () => {
+test("pins the native portal, Operations 0054-0128, both 0199 files, and the 0200-0213 release contract", () => {
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-31), [
     "0184_native_client_feedback.sql",
     "0185_native_service_request_ownership.sql",
@@ -361,7 +361,7 @@ test("pins the native portal, Operations 0054-0127, both 0199 files, and the 020
     "0212_incoming_upload_archive_inventory.sql",
     "0213_incoming_rclone_promotion.sql",
   ]);
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(-9), [
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(-10), [
     "0119_project_alpha_project_v2_persistence_ledger.sql",
     "0120_project_alpha_project_v2_canonical_settlement.sql",
     "0121_project_alpha_project_v2_settlement_proof_expiry.sql",
@@ -371,6 +371,7 @@ test("pins the native portal, Operations 0054-0127, both 0199 files, and the 020
     "0125_project_alpha_api_v2_inventory_observations.sql",
     "0126_project_alpha_directory_read_adoption_claims.sql",
     "0127_project_alpha_directory_read_adoption_field_review_receipts.sql",
+    "0128_project_alpha_project_binding_revision_refresh_ledger.sql",
   ]);
   const operationsStart = REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0054_project_alpha_directory_outbox.sql");
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(operationsStart, operationsStart + 3), [
@@ -384,7 +385,7 @@ test("pins the native portal, Operations 0054-0127, both 0199 files, and the 020
   assert.equal(STAGING_STATIC_VARS.delivery.CLIENT_PORTAL_CONTENT_AUDIT_ENABLED, "false");
   assert.equal(STAGING_STATIC_VARS.delivery.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED, "false");
   assert.equal(STAGING_STATIC_VARS.operations.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED, "false");
-  for (const flag of ["PROJECT_ALPHA_API_V2_SYNC_ENABLED", "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED"]) {
+  for (const flag of ["PROJECT_ALPHA_API_V2_SYNC_ENABLED", "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED", "PROJECT_ALPHA_PROJECT_BINDING_REFRESH_ENABLED"]) {
     assert(REQUIRED_DISABLED_FEATURE_FLAGS.operations.includes(flag), flag);
     assert(STAGING_ALLOWED_VAR_NAMES.operations.includes(flag), flag);
     assert.equal(STAGING_STATIC_VARS.operations[flag], "false", flag);

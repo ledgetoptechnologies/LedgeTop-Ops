@@ -215,8 +215,9 @@ window. Invoke the joined Project route only through
 `POST /api/admin/project-alpha/projects/v2/commands` with a command-matching
 `Idempotency-Key`; there is no scheduled or public/client invocation path.
 
-`PROJECT_ALPHA_API_V2_SYNC_ENABLED` and
-`PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED` are also required to be
+`PROJECT_ALPHA_API_V2_SYNC_ENABLED`,
+`PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED`, and
+`PROJECT_ALPHA_PROJECT_BINDING_REFRESH_ENABLED` are also required to be
 explicitly `false` in every release-preparation configuration. The sync window
 requires migration `0125`, a reviewed staging-only
 `PROJECT_ALPHA_API_V2_CONNECTIONS` envelope, and a separate activation version.
@@ -361,7 +362,7 @@ comparison with those repositories. The verifier intentionally fails while any
 release-candidate placeholder remains.
 
 The current candidate inventory extends through Client `0213` (including both
-distinct `0199` filenames), Operations `0127`, and Project Alpha `0102`. The
+distinct `0199` filenames), Operations `0128`, and Project Alpha `0102`. The
 Operations runtime candidate remains `PENDING_OPERATIONS_COMMIT` until the
 API-v2 sync/read-adoption branch is committed, pushed, and independently
 reviewed; do not substitute the dirty worktree HEAD. Project Alpha is pinned
@@ -516,8 +517,8 @@ owner input, then use only those configs for the first full apply. The ordinary
 configs would replay the canonical named-human `0002` rows. A populated or
 partially migrated database must never use the bootstrap configs. Attach both
 generated manifests and complete `migrations.freshBootstrap`; the required
-proof includes 132/127 ledger rows, both Client `0199` filenames exactly once,
-final `0213`/`0127`, canonical-human absence, the one synthetic owner and its
+proof includes 132/128 ledger rows, both Client `0199` filenames exactly once,
+final `0213`/`0128`, canonical-human absence, the one synthetic owner and its
 role, the retained Operations ACL catalog, no pending reapply, and an empty
 foreign-key check.
 
@@ -595,7 +596,7 @@ apply time and is the explicit exception to this packet's normal
 migration-first order. Confirm every predecessor is already applied; otherwise
 resolve those predecessors in a separately reviewed release.
 
-For Operations, preserve the full ordered `0054` through `0127` suffix in the
+For Operations, preserve the full ordered `0054` through `0128` suffix in the
 remote Wrangler ledger. Attach the list output that proves every filename is in
 the exact checked-in order, with no duplicate, renamed, skipped, or unexpected
 row. A local migration-chain run, a directory listing, or a successful raw SQL
@@ -606,7 +607,8 @@ The local preflight additionally locks the newly reviewed suffix bytes:
 `0124`=`b35a14babab1e10caf5420fe8d1209a81009b5bd55cfcb0361a4a3085c503a05`,
 `0125`=`1b6fbb3b3ce8b50dbb553fd38ec8544c25f88a2837d8523b5ddeb0494534bd45`,
 `0126`=`4bd97d25bd96a0a872bd3106ab936ab3fe1806b7456aec6cf02c92195715d1b0`,
-and `0127`=`ef4abf5411e8fd4e10d4daeb94dd4ca3469ae7d179d2b135a9d04ca4a0cf12aa`.
+`0127`=`ef4abf5411e8fd4e10d4daeb94dd4ca3469ae7d179d2b135a9d04ca4a0cf12aa`,
+and `0128`=`00ee73af4d5db881d959868d6b84b995753cb82c94964315f384f9ae6fd40f5a`.
 Any content change requires an explicit contract/checksum review; never edit an
 already-applied migration to make a later rollout pass.
 
@@ -616,7 +618,7 @@ all are terminal or deliberately cancelled, then close mutation ingress and
 drain HTTP requests, queue consumers, leases, schedulers, and reconciliation
 batches. The evidence must prove this quiescent state and name the compatible
 Operations writer version already handling all traffic. Do not apply `0054`-
-`0127` while an old writer, an in-flight fence, or a scheduled/retry worker can
+`0128` while an old writer, an in-flight fence, or a scheduled/retry worker can
 commit a pre-migration assumption. Keep the compatible writer in place through
 the final ledger readback; use a compatible fix forward, never a pre-suffix
 writer rollback.
@@ -703,7 +705,7 @@ Confirm Operations
 `0014_staff_acl_controls.sql` through
 `0052_project_operational_reassignment_recovery.sql` and
 `0053_project_internal_notes.sql`, then Operations `0054` through
-`0127_project_alpha_directory_read_adoption_field_review_receipts.sql` in
+`0128_project_alpha_project_binding_revision_refresh_ledger.sql` in
 that exact ledger order. Migration `0100` removes
 `share_version` from the delivery-grant parent key so existing share
 rotation/revocation updates cannot be blocked by a portal grant; the grant

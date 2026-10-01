@@ -24,6 +24,7 @@ type Directory = { connectors: Connector[]; health: Health[]; legacyPrimary: boo
   portal?: PortalStatus; projectManagement?: ProjectManagementRoute[] };
 type ApiV2ReadAcceptanceConfig = { status: "configured" | "unconfigured" | "misconfigured";
   readAcceptanceEnabled: boolean; connections: Array<{ sourceId: string; enabled: boolean }> };
+type ApiV2OperatorConnection = { sourceId: string; enabled: boolean };
 type ReadAcceptancePart = { status: string; count?: number; exactIdentityMatch?: boolean; exactContractMatch?: boolean };
 type ReadAcceptance = { sourceId: string; readOnly: boolean; capabilities: ReadAcceptancePart;
   directory: ReadAcceptancePart; projects: ReadAcceptancePart };
@@ -164,8 +165,9 @@ function inventorySurfaceText(label: string, surface: InventoryRequestedSurface)
 }
 function valueCell(value: string | null) { return value === null ? <em>Not set</em> : value === "" ? <em>Empty string</em> : <code>{value}</code>; }
 
-function ApiV2OperatorPanel({ connectors, disabled }: { connectors: Connector[]; disabled: boolean }) {
-  const active = connectors.filter(connector => connector.state === "active");
+function ApiV2OperatorPanel({ connections, disabled }: { connections: ApiV2OperatorConnection[]; disabled: boolean }) {
+  const active = connections.filter(connection => connection.enabled)
+    .map(connection => ({ sourceId: connection.sourceId, displayName: connection.sourceId }));
   const [inventorySource, setInventorySource] = useState(active[0]?.sourceId ?? "");
   const [inventoryBusy, setInventoryBusy] = useState<"initial" | "directory" | "projects" | null>(null);
   const [directoryInventory, setDirectoryInventory] = useState<InventoryDisplaySurface | null>(null);
@@ -289,7 +291,7 @@ function ApiV2OperatorPanel({ connectors, disabled }: { connectors: Connector[];
     } catch (caught) { setReviewError(operatorError(caught, "The field-review receipt could not be verified. Treat the seal outcome as uncertain and refresh before retrying.")); }
     finally { setReviewBusy(false); }
   };
-  if (connectors.length === 0) return null;
+  if (connections.length === 0) return null;
   const allDecided = Boolean(comparison) && comparison!.fields.every(field => Boolean(decisions[field.field]));
   return <details className="alpha-connection"><summary>Staging API-v2 operator review</summary>
     <p>This default-off panel reads and stores one bounded inventory page, then supports an explicit exact-record comparison. It never auto-matches records, changes access, publishes links, activates anything, or writes to Project Alpha.</p>
@@ -511,7 +513,7 @@ export function ProjectAlphaConnections() {
         <details><summary>Connection details</summary><dl><dt>Source</dt><dd>{connector.sourceId}</dd><dt>Producer</dt><dd>{connector.producerBindingId}</dd><dt>Destination</dt><dd>{connector.snapshotOrigin}{connector.snapshotBasePath}</dd><dt>Application</dt><dd>{connector.applicationKey}</dd><dt>Revision</dt><dd>{connector.activeRevision}</dd></dl><p>These values are read-only here. Change the reviewed deployment source manifest and deploy Operations; do not paste credentials into this page.</p></details>
       </section>;
     })}
-    {data && <ApiV2OperatorPanel connectors={data.connectors} disabled={loading || Boolean(syncing)} />}
+    {apiV2Config?.status === "configured" && <ApiV2OperatorPanel connections={apiV2Config.connections} disabled={loading || Boolean(syncing)} />}
     {data?.portal?.recovery && <div className="notice" role="status"><p>A prior portal coordination operation is unfinished. Recovery cancels that uncertain update and pauses affected client portals; it never registers a source or retries activation.</p><button type="button" disabled={loading || Boolean(syncing)} onClick={() => void recoverPortalUpdate()}>Recover unfinished portal update</button></div>}
   </div></Card>;
 }

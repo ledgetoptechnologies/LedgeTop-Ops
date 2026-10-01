@@ -14,6 +14,7 @@ export type Env = Omit<
   | "PROJECT_ALPHA_API_V2_SYNC_ENABLED"
   | "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED"
   | "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED"
+  | "PROJECT_ALPHA_PROJECT_BINDING_REFRESH_ENABLED"
   | "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ENABLED"
   | "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_SOURCE_ID"
   | "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ORIGIN"
@@ -53,6 +54,8 @@ export type Env = Omit<
   PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED?: string;
   /** Default-off, manually invoked administrator-only Project-v2 staging acceptance. */
   PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED?: string;
+  /** Staging-only, default-off refresh of an explicitly selected stale PA project binding. */
+  PROJECT_ALPHA_PROJECT_BINDING_REFRESH_ENABLED?: string;
   /** Staging-only, manually invoked Directory bootstrap acceptance fixture. */
   PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ENABLED?: string;
   /** Staging-only immutable source pin for the Directory bootstrap fixture. */

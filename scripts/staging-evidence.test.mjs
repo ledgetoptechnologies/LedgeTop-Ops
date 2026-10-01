@@ -481,7 +481,7 @@ test("requires evidence for the 0179 compatible-writer drain before 0180-0186", 
     assert(errors.some((error) => error.includes(expected)), `${expected}: ${errors.join(" | ")}`);
   }
 });
-test("requires an ordered 0054-0127 remote ledger, a quiescent open-fence check, and compatible Operations writers", () => {
+test("requires an ordered 0054-0128 remote ledger, a quiescent open-fence check, and compatible Operations writers", () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-evidence-operations-migration-gate-"));
   const { evidence, configs, configHashes } = fixture(base);
   [evidence.migrations.operations.expected[40], evidence.migrations.operations.expected[41]] =
@@ -669,7 +669,7 @@ test("checked-in evidence example stays complete as migrations, flags, gates, an
   assert.equal(example.migrations.freshBootstrap.mode, "generated-empty-d1");
   assert.deepEqual(example.migrations.freshBootstrap.applications.delivery.transformedFiles, ["0002_seed_initial_staff.sql"]);
   assert.deepEqual(example.migrations.freshBootstrap.applications.operations.transformedFiles, ["0002_seed_acl.sql"]);
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(-9), [
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(-10), [
     "0119_project_alpha_project_v2_persistence_ledger.sql",
     "0120_project_alpha_project_v2_canonical_settlement.sql",
     "0121_project_alpha_project_v2_settlement_proof_expiry.sql",
@@ -679,6 +679,7 @@ test("checked-in evidence example stays complete as migrations, flags, gates, an
     "0125_project_alpha_api_v2_inventory_observations.sql",
     "0126_project_alpha_directory_read_adoption_claims.sql",
     "0127_project_alpha_directory_read_adoption_field_review_receipts.sql",
+    "0128_project_alpha_project_binding_revision_refresh_ledger.sql",
   ]);
   const operationsDirectoryStart = REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0054_project_alpha_directory_outbox.sql");
   assert.deepEqual(
