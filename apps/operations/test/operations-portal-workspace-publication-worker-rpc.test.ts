@@ -31,10 +31,10 @@ async function bundle(url: URL) {
   return chunk.code;
 }
 async function apply(database: Awaited<ReturnType<Miniflare["getD1Database"]>>, directory: string,
-  through: string, exactAfter: string) {
+  through: string, exactAfter: string | readonly string[]) {
   const names = fs.readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/.test(name) && name <= through).sort();
   await database.prepare("CREATE TABLE d1_migrations(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL UNIQUE)").run();
-  for (const name of [...names, exactAfter]) {
+  for (const name of [...names, ...(typeof exactAfter === "string" ? [exactAfter] : exactAfter)]) {
     const statements = splitD1MigrationStatements(fs.readFileSync(path.join(directory, name), "utf8"));
     await database.batch([...statements.map(sql => database.prepare(sql)),
       database.prepare("INSERT INTO d1_migrations(name) VALUES(?)").bind(name)]);
@@ -69,7 +69,8 @@ describe("actual Ops publication helpers over a named Client Worker binding", ()
     const ops = await runtime.getD1Database("OPS_DB", "ops-driver");
     const clientDb = await runtime.getD1Database("DELIVERY_DB", "client-publication");
     expect(await apply(ops, opsMigrations, "0153_operations_portal_workspace_publication_outbox.sql",
-      "0155_operations_portal_workspace_publication_cancellations.sql")).toHaveLength(153);
+      ["0155_operations_portal_workspace_publication_cancellations.sql",
+        "0156_operations_portal_workspace_publication_invocations.sql"])).toHaveLength(153);
     expect(await apply(clientDb, clientMigrations, "0223_operations_portal_workspace_publications.sql",
       "0225_operations_portal_workspace_publication_cancellations.sql")).toHaveLength(142);
     await ops.batch([
@@ -277,7 +278,8 @@ describe("actual Ops publication helpers over a named Client Worker binding", ()
     const race = await (await request(runtime, "race", { operationId: raced.operationId })).json();
     expect(race).toMatchObject({ dispatch: expect.any(Object), cancellation: expect.any(Object) });
     const raceWire = JSON.stringify(race);
-    expect(raceWire.includes("claim_conflict") || raceWire.includes('"replayed":true')).toBe(true);
+    expect(raceWire.includes("claim_conflict") || raceWire.includes("invocation_denied")
+      || raceWire.includes('"replayed":true')).toBe(true);
     const clientKinds = Number(await client.prepare(`SELECT count(*) FROM operations_portal_workspace_publication_receipts
       WHERE operation_id=?`).bind(raced.operationId).first("count(*)"))
       + Number(await client.prepare(`SELECT count(*) FROM operations_portal_workspace_publication_cancellations

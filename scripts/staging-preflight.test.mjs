@@ -29,7 +29,7 @@ function stagingConfig(app) {
       ...(app === "delivery" ? {
         POLICY_AUD: audiences.delivery,
         PUBLIC_BASE_URL: `https://${STAGING_HOSTS.delivery}`,
-        CLIENT_PORTAL_ENABLED: "false",
+        CLIENT_PORTAL_ENABLED: "true",
         CLIENT_PORTAL_ORIGIN: `https://${STAGING_HOSTS.client}`,
         CLIENT_ACCESS_TEAM_DOMAIN: STAGING_STATIC_VARS.delivery.CLIENT_ACCESS_TEAM_DOMAIN,
         CLIENT_ACCESS_AUD: "a".repeat(64),
@@ -264,6 +264,10 @@ test("requires shared staging resources to agree", () => {
   configs.delivery.services.find(service => service.binding === "VIEWER_SESSION_ISSUER").entrypoint = "WrongViewerIssuer";
   configs.delivery.services.find(service => service.binding === "CLIENT_PORTAL_SERVICE_METADATA_READER").entrypoint = "WrongMetadataReader";
   configs.delivery.services.find(service => service.binding === "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_BRIDGE").entrypoint = "WrongRecipientEnrollmentBridge";
+  configs.delivery.services.find(service => service.binding === "OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT").entrypoint = "WrongNativeRecipientIngress";
+  configs.delivery.services.find(service => service.binding === "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER").entrypoint = "WrongNativeDeliveryReader";
+  configs.operations.services.find(service => service.binding === "OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY").entrypoint = "WrongNativeRecipientAuthority";
+  configs.operations.services.find(service => service.binding === "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY").entrypoint = "WrongNativeDeliveryAuthority";
   configs["ops-sync"].services[0].entrypoint = "WrongPortalIngress";
   configs.delivery.vars.PROJECT_ALPHA_PORTAL_APPLICATION_KEY = "wrong-application-key";
   const errors = validateCrossApp(configs);
@@ -272,6 +276,10 @@ test("requires shared staging resources to agree", () => {
   assert(errors.some((error) => error.includes("Viewer session issuer")));
   assert(errors.some((error) => error.includes("service metadata reader")));
   assert(errors.some((error) => error.includes("recipient enrollment bridge")));
+  assert(errors.some((error) => error.includes("native recipient enrollment")));
+  assert(errors.some((error) => error.includes("native authorization reader")));
+  assert(errors.some((error) => error.includes("native recipient authority")));
+  assert(errors.some((error) => error.includes("native delivery authority")));
   assert(errors.some((error) => error.includes("portal projection ingress")));
   assert(errors.some((error) => error.includes("application key")));
 });
@@ -344,10 +352,10 @@ test("resolves logical delivery staging files from apps/client", () => {
   fs.renameSync(path.join(base, "apps", "client"), path.join(base, "apps", "delivery"));
   assert(validateFiles(base).some((error) => error.includes(path.join("apps", "client", "wrangler.staging.json"))));
 });
-test("fails closed on client portal activation, host namespace origins, and audience reuse", () => {
+test("fails closed on client portal deactivation, host namespace origins, and audience reuse", () => {
   const staging = stagingConfig("delivery");
   const production = productionFrom(staging);
-  staging.vars.CLIENT_PORTAL_ENABLED = "true";
+  staging.vars.CLIENT_PORTAL_ENABLED = "false";
   staging.vars.CLIENT_PORTAL_ORIGIN = "https://other-staging.example";
   staging.vars.PUBLIC_SHARE_ORIGIN = `https://${STAGING_HOSTS.client}`;
   staging.vars.PUBLIC_BASE_URL = staging.vars.PUBLIC_SHARE_ORIGIN;
@@ -386,8 +394,8 @@ test("requires every portal-v2 and Operations capability to be explicitly false"
   }
 });
 
-test("pins the native portal, Operations 0054-0155 gap-aware chain, both 0199 files, and the 0200-0225 gap-aware release contract", () => {
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-42), [
+test("pins the native portal, Operations 0054-0160 gap-aware chain, both 0199 files, and the 0200-0228 gap-aware release contract", () => {
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-46), [
     "0184_native_client_feedback.sql",
     "0185_native_service_request_ownership.sql",
     "0186_delivery_notification_authority_provenance.sql",
@@ -429,7 +437,11 @@ test("pins the native portal, Operations 0054-0155 gap-aware chain, both 0199 fi
     "0221_verified_recipient_delivery_authority.sql",
     "0222_verified_recipient_delivery_cross_manager_revoke.sql",
     "0223_operations_portal_workspace_publications.sql",
+    "0224_operations_portal_native_recipient_authority.sql",
     "0225_operations_portal_workspace_publication_cancellations.sql",
+    "0226_operations_portal_native_workspace_cleanup.sql",
+    "0227_operations_portal_native_delivery_authority.sql",
+    "0228_operations_portal_native_content_start_audit.sql",
   ]);
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0123_native_directory_authority_history.sql")), [
     "0123_native_directory_authority_history.sql",
@@ -463,7 +475,13 @@ test("pins the native portal, Operations 0054-0155 gap-aware chain, both 0199 fi
     "0151_verified_recipient_delivery_authority_outbox.sql",
     "0152_operations_portal_workspace_reservations.sql",
     "0153_operations_portal_workspace_publication_outbox.sql",
+    "0154_operations_portal_native_recipient_authority.sql",
     "0155_operations_portal_workspace_publication_cancellations.sql",
+    "0156_operations_portal_workspace_publication_invocations.sql",
+    "0157_operations_portal_native_workspace_cleanup.sql",
+    "0158_operations_portal_native_delivery_authority.sql",
+    "0159_operations_portal_native_delivery_recovery_invocations.sql",
+    "0160_operations_portal_native_recipient_labels.sql",
   ]);
   const nativeDirectoryStart = REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0054_project_alpha_directory_outbox.sql");
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(nativeDirectoryStart, nativeDirectoryStart + 3), [

@@ -12,9 +12,9 @@ const proof = { principal: { issuer: "https://team.cloudflareaccess.com", subjec
   verifiedUntil: "2099-01-01T00:00:00.000Z" };
 function deps(): Dependencies { return { env: {} as Env, enabled: true, environment: "staging", origin,
   csrfSecret: "synthetic-native-consent-csrf-secret-long-enough", resolveProof: vi.fn().mockResolvedValue(proof), binding: {
-    inspectNativeEnrollment: vi.fn().mockResolvedValue({ intentId, revision: 1, state: "issued",
-      target: { ...target, displayLabel: "Example Customer" }, expiresAt: "2099-01-01T00:00:00.000Z" }),
-    redeemNativeEnrollment: vi.fn().mockResolvedValue({ intentId, revision: 2, state: "pending" }),
+    inspectNativeEnrollment: vi.fn().mockResolvedValue(JSON.stringify({ intentId, revision: 1, state: "issued",
+      target: { ...target, displayLabel: "Example Customer" }, expiresAt: "2099-01-01T00:00:00.000Z" })),
+    redeemNativeEnrollment: vi.fn().mockResolvedValue(JSON.stringify({ intentId, revision: 2, state: "pending" })),
   } }; }
 function request(path: string, body?: unknown, token?: string) { return new Request(`${base}/${path}`, {
   method: body === undefined ? "GET" : "POST", headers: { Origin: origin, "Sec-Fetch-Site": "same-origin",
@@ -26,7 +26,7 @@ async function session(d: Dependencies) { const r = await handle(request("sessio
 const consent = () => ({ intentId, opaqueToken, operationId, acknowledged: true, acknowledgedTarget: target });
 
 describe("Ops-native individual consent HTTP boundary", () => {
-  it("inspects only the explicit native target and sends server-derived subject, never email", async () => {
+  it("sends identity only as issuer+subject and a separate Access-asserted presentation label", async () => {
     const d = deps(), token = await session(d);
     const inspect = await handle(request("inspect", { intentId, opaqueToken }, token), d);
     expect(inspect.status).toBe(200); expect(inspect.headers.get("Cache-Control")).toBe("no-store");
@@ -36,7 +36,7 @@ describe("Ops-native individual consent HTTP boundary", () => {
     expect(redeem.status).toBe(200); expect(await redeem.json()).toEqual({ intentId, revision: 2, state: "pending" });
     expect(d.binding!.redeemNativeEnrollment).toHaveBeenCalledWith({ protocolVersion: 1, intentId, opaqueToken, operationId,
       acknowledged: true, acknowledgedTarget: target, principal: { issuer: proof.principal.issuer, subject: proof.principal.subject },
-      verifiedUntil: proof.verifiedUntil });
+      recipientLabel: proof.principal.email, verifiedUntil: proof.verifiedUntil });
   });
   it.each(["disabled", "production"])("is absent when %s", async mode => {
     const d = deps(); if (mode === "disabled") d.enabled = false; else d.environment = "production";
@@ -92,7 +92,8 @@ describe("Ops-native individual consent HTTP boundary", () => {
       const d = deps(), token = await session(d);
       d.binding!.inspectNativeEnrollment = vi.fn().mockImplementation(async () => {
         vi.setSystemTime(new Date("2099-01-01T00:00:00.001Z"));
-        return { intentId, revision: 1, state: "issued", target: { ...target, displayLabel: "Private Customer" }, expiresAt: proof.verifiedUntil };
+        return JSON.stringify({ intentId, revision: 1, state: "issued",
+          target: { ...target, displayLabel: "Private Customer" }, expiresAt: proof.verifiedUntil });
       });
       const r = await handle(request("inspect", { intentId, opaqueToken }, token), d);
       expect(r.status).toBe(401); expect(await r.text()).not.toContain("Private Customer");
@@ -102,14 +103,14 @@ describe("Ops-native individual consent HTTP boundary", () => {
     const d = deps(), token = await session(d);
     const selected = { ...target, displayLabel: "Private Customer" };
     Object.defineProperty(selected, "displayLabel", { value: "Private Customer", enumerable: false });
-    d.binding!.inspectNativeEnrollment = vi.fn().mockResolvedValue({ intentId, revision: 1, state: "issued",
-      target: selected, expiresAt: proof.verifiedUntil });
+    d.binding!.inspectNativeEnrollment = vi.fn().mockResolvedValue(JSON.stringify({ intentId, revision: 1, state: "issued",
+      target: selected, expiresAt: proof.verifiedUntil }));
     const inspect = await handle(request("inspect", { intentId, opaqueToken }, token), d);
     expect(inspect.status).toBe(403);
     expect(await inspect.text()).not.toContain("Private Customer");
     const result = { intentId, revision: 2, state: "pending" };
     Object.defineProperty(result, "state", { value: "pending", enumerable: false });
-    d.binding!.redeemNativeEnrollment = vi.fn().mockResolvedValue(result);
+    d.binding!.redeemNativeEnrollment = vi.fn().mockResolvedValue(JSON.stringify(result));
     expect((await handle(request("redeem", consent(), token), d)).status).toBe(403);
   });
 });

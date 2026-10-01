@@ -180,8 +180,19 @@ not become active deployments.
   feature version. Record credential fingerprints and secret names only, never
   `draftQuote.apiKey` or `draftQuote.hmacSecret` values;
 
-`CLIENT_PORTAL_ENABLED` and every feature listed in
-`REQUIRED_DISABLED_FEATURE_FLAGS` must be explicitly `false`;
+`CLIENT_PORTAL_ENABLED` must be explicitly `true` for the reviewed
+`staff-synthetic-acceptance` phase. The evidence packet must prove that only
+one approved staff tester can use a synthetic workspace, while client
+admission, invitation sending, automatic enrollment, and broad Access policies
+remain disabled. Every feature listed in `REQUIRED_DISABLED_FEATURE_FLAGS`
+must still be explicitly `false`;
+the admission evidence must bind the exact protected application and Allow
+policy IDs to the dedicated tester group, contain no additional include,
+exclude, require, or Bypass selectors, and match the one approved tester's
+hashed issuer/subject identity to the complete hashed group-membership set.
+Production Access before/after application IDs, ordered policy IDs, and
+canonical configuration hashes must be identical. The public-path Bypass
+application is validated separately and does not authorize portal admission.
 `CLIENT_PORTAL_ORIGIN` and Operations `DELIVERY_BASE_URL` must be the client
 staging origin. `PUBLIC_SHARE_ORIGIN` on both Workers and Client
 `PUBLIC_BASE_URL` must be the anonymous delivery staging origin.

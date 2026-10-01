@@ -4,6 +4,8 @@ import {
   verifyOperationsPortalWorkspacePublication,
   type OperationsPortalWorkspacePublication,
 } from "@ltds/shared/operations-portal-workspace-publication";
+import { claimOperationsPortalWorkspacePublicationInvocation } from
+  "./operations-portal-workspace-publication-invocations";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const RPC_TIMEOUT_MS = 15_000;
@@ -18,6 +20,7 @@ export type CancelOperationsPortalWorkspacePublicationInput = Readonly<{
   db: D1Database;
   binding: OperationsPortalWorkspacePublicationCancellationBinding;
   operationId: string;
+  invocationId: string;
 }>;
 export type OperationsPortalWorkspacePublicationCancellation = Readonly<{
   operationId: string; publicationId: string; requestFingerprint: string; targetId: string;
@@ -292,8 +295,9 @@ async function persistCancelled(db: PublicationDatabase, command: StoredCommand,
 export async function cancelOperationsPortalWorkspacePublication(
   input: CancelOperationsPortalWorkspacePublicationInput,
 ): Promise<OperationsPortalWorkspacePublicationCancellationResult> {
-  const normalized = exact(input, ["db", "binding", "operationId"]);
+  const normalized = exact(input, ["db", "binding", "operationId", "invocationId"]);
   if (!normalized || typeof normalized.operationId !== "string" || !UUID.test(normalized.operationId)
+    || typeof normalized.invocationId !== "string" || !UUID.test(normalized.invocationId)
     || !normalized.db || typeof normalized.db !== "object" || !normalized.binding
     || typeof normalized.binding !== "object") return fail("invalid_request");
   const database = normalized.db as D1Database;
@@ -305,13 +309,11 @@ export async function cancelOperationsPortalWorkspacePublication(
     return fail("not_cancelable");
   }
   const claim = crypto.randomUUID(), until = new Date(Date.now() + 60_000).toISOString();
-  const claimed = await db.prepare(`UPDATE operations_portal_workspace_publication_outbox SET state='dispatching',
-      attempt_count=attempt_count+1,claim_token=?,claim_until=?,last_error_code='cancellation-reconciling',
-      updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE operation_id=? AND remote_attempted=1
-      AND ((state='retry' AND next_attempt_at<=strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-        OR (state='dispatching' AND claim_until<=strftime('%Y-%m-%dT%H:%M:%fZ','now')))`)
-    .bind(claim, until, prior.operation_id).run();
-  if (claimed.meta.changes !== 1) return fail("claim_conflict");
+  try {
+    await claimOperationsPortalWorkspacePublicationInvocation({ db,
+      invocationId: normalized.invocationId as string, operationId: prior.operation_id, action: "cancel",
+      claimToken: claim, claimUntil: until, lastErrorCode: "cancellation-reconciling" });
+  } catch { return fail("invocation_denied"); }
 
   let parsed: unknown;
   try { parsed = JSON.parse(prior.canonical_publication_json); }

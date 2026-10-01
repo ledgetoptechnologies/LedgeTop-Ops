@@ -8,12 +8,14 @@ import { applyCanonicalChain } from "./helpers/verified-recipient-canonical-line
 import { writeNativeDirectoryProfile, type NativeDirectoryCreateWrite }
   from "../src/worker/native-directory-profile-writer";
 import { reserveOperationsPortalWorkspace } from "../src/worker/operations-portal-workspace-reservations";
-import { dispatchOperationsPortalWorkspacePublication, reserveOperationsPortalWorkspacePublication }
+import { dispatchOperationsPortalWorkspacePublication as guardedDispatch, reserveOperationsPortalWorkspacePublication }
   from "../src/worker/operations-portal-workspace-publication-outbox";
-import { cancelOperationsPortalWorkspacePublication,
+import { cancelOperationsPortalWorkspacePublication as guardedCancel,
   type OperationsPortalWorkspacePublicationCancellation,
   type OperationsPortalWorkspacePublicationCancellationBinding }
   from "../src/worker/operations-portal-workspace-publication-cancellations";
+import { reserveOperationsPortalWorkspacePublicationInvocation } from
+  "../src/worker/operations-portal-workspace-publication-invocations";
 import type { AuthenticatedNativeStaffWithAdmissionVersion } from "../src/worker/native-staff-auth";
 vi.mock("cloudflare:workers", () => ({ WorkerEntrypoint: class {} }));
 import { cancelOperationsPortalWorkspacePublicationRpc, getOperationsPortalWorkspacePublicationDispositionRpc,
@@ -94,6 +96,22 @@ function publicationInput(targetId: string, expectedRevision: number) {
   return { operationId: id(), publicationId: id(), targetId, snapshotId: id(), checkpointId: id(), expectedRevision,
     reason: "Publish complete topology before cancellation" };
 }
+async function dispatchOperationsPortalWorkspacePublication(
+  input: Omit<Parameters<typeof guardedDispatch>[0], "invocationId" | "action">,
+) {
+  const invocationId = id();
+  await reserveOperationsPortalWorkspacePublicationInvocation(input.db, actor(), { invocationId,
+    operationId: input.operationId, action: "publish", reason: "Test publication invocation" });
+  return guardedDispatch({ ...input, invocationId, action: "publish" });
+}
+async function cancelOperationsPortalWorkspacePublication(
+  input: Omit<Parameters<typeof guardedCancel>[0], "invocationId">,
+) {
+  const invocationId = id();
+  try { await reserveOperationsPortalWorkspacePublicationInvocation(input.db, actor(), { invocationId,
+    operationId: input.operationId, action: "cancel", reason: "Test cancellation invocation" }); } catch { /* terminal replay */ }
+  return guardedCancel({ ...input, invocationId });
+}
 async function attemptedPublication(targetId: string, expectedRevision: number) {
   const input = publicationInput(targetId, expectedRevision);
   await reserveOperationsPortalWorkspacePublication(db, actor(), input);
@@ -135,9 +153,10 @@ beforeAll(async () => {
   expect(await applyCanonicalChain(db, "operations",
     "0153_operations_portal_workspace_publication_outbox.sql", true)).toHaveLength(153);
   await applyExact(db, "operations", "0155_operations_portal_workspace_publication_cancellations.sql");
-  expect(await db.prepare("SELECT count(*) count FROM d1_migrations").first("count")).toBe(154);
+  await applyExact(db, "operations", "0156_operations_portal_workspace_publication_invocations.sql");
+  expect(await db.prepare("SELECT count(*) count FROM d1_migrations").first("count")).toBe(155);
   expect(await db.prepare("SELECT name FROM d1_migrations ORDER BY id DESC LIMIT 1").first("name"))
-    .toBe("0155_operations_portal_workspace_publication_cancellations.sql");
+    .toBe("0156_operations_portal_workspace_publication_invocations.sql");
   await seedAuthority();
   await seedRoot();
   expect(await applyCanonicalChain(client, "client", "0223_operations_portal_workspace_publications.sql"))

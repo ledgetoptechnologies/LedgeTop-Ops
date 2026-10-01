@@ -74,7 +74,8 @@ test("operations metadata remains the only surface when the independent client b
   await expect(page.getByText("Infrastructure review", { exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Client resources unavailable" })).toBeVisible();
   await expect(page.getByRole("navigation")).toHaveCount(0);
-  await expect(page.getByText(/projects|files|billing/i)).toHaveCount(0);
+  await expect(page.getByRole("link", { name: /projects|files|billing/i })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: /projects|files|billing/i })).toHaveCount(0);
   expect(calls).toEqual(["/api/client/v2/operations/home", "/api/client/session"]);
 });
 
@@ -198,6 +199,9 @@ test("independently authorized native dashboard keeps its workspace distinct fro
         authenticatedDelivery: "omitted_feature_disabled", delivery: "omitted_no_explicit_grant_authority",
       }, items: [], nextCursor: null,
     } });
+    if (path === "/api/client/operations/data/deliveries") return route.fulfill({ json: {
+      resourceMode: "operations_native_delivery", items: [{ id: "ond1_native_dashboard_delivery", displayName: "Native dashboard delivery" }], page: { nextCursor: null },
+    } });
     return route.fulfill({ status: 404, json: { error: "not found" } });
   });
 
@@ -207,6 +211,11 @@ test("independently authorized native dashboard keeps its workspace distinct fro
   await expect(page.getByText("Aerial operations", { exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Client portal" })).toHaveCount(0);
   await expectAuthorizedNavigation(page);
+  const nativeBrowser = page.getByRole("region", { name: "Shared deliveries" });
+  await expect(nativeBrowser.getByRole("button", { name: "Browse shared deliveries" })).toBeVisible();
+  expect(calls.some(call => call.path === "/api/client/operations/data/deliveries")).toBe(false);
+  await nativeBrowser.getByRole("button", { name: "Browse shared deliveries" }).click();
+  await expect(nativeBrowser.getByText("Native dashboard delivery", { exact: true })).toBeVisible();
   expect(calls.some(call => call.path.endsWith("/context"))).toBe(true);
   expect(calls.every(call => call.workspace !== "workspace-one")).toBe(true);
 });
@@ -322,4 +331,231 @@ test("legacy subroutes and public routes do not use the operations probe", async
   await page.goto("/portal/projects");
   await expect.poll(() => calls).toContain("/api/client/session");
   expect(calls).not.toContain("/api/client/v2/operations/home");
+});
+
+const deliveryAlpha = "ond1_delivery_alpha";
+const deliveryBeta = "ond1_delivery_beta";
+const rootFolder = deliveryAlpha;
+const childFolder = "ond1_folder_child";
+const fileOne = "ond1_file_one";
+const fileTwo = "ond1_file_two";
+
+function nativeFile(id: string, name: string) {
+  return {
+    id, name, size: 2048, uploadedAt: "2026-09-30T12:00:00.000Z", contentType: "application/pdf", kind: "pdf",
+    previewPath: `/api/client/operations/data/files/${id}/preview`, thumbnailPath: null,
+    downloadPath: `/api/client/operations/data/files/${id}/download`,
+  };
+}
+
+async function interceptOperationsNativeData(page: Page, native: (url: URL) => { status?: number; body: unknown } | Promise<{ status?: number; body: unknown }>) {
+  const calls: string[] = [];
+  await page.route("**/api/client/**", async route => {
+    const url = new URL(route.request().url());
+    calls.push(`${url.pathname}${url.search}`);
+    if (url.pathname === "/api/client/v2/operations/home") return route.fulfill({ json: response });
+    if (url.pathname === "/api/client/session") return route.fulfill({ status: 401, json: { error: "Sign in required" } });
+    if (url.pathname.startsWith("/api/client/operations/data/")) {
+      const result = await native(url);
+      return route.fulfill({ status: result.status ?? 200, json: result.body });
+    }
+    return route.fulfill({ status: 404, json: { error: "not found" } });
+  });
+  return calls;
+}
+
+test("native shared-delivery browser is opt-in and pages only through server-provided handles and actions", async ({ page }) => {
+  const calls = await interceptOperationsNativeData(page, url => {
+    if (url.pathname === "/api/client/operations/data/deliveries") return url.searchParams.has("cursor")
+      ? { body: { resourceMode: "operations_native_delivery", items: [{ id: deliveryBeta, displayName: "Beta delivery" }], page: { nextCursor: null } } }
+      : { body: { resourceMode: "operations_native_delivery", items: [{ id: deliveryAlpha, displayName: "Alpha delivery" }], page: { nextCursor: "ond1_cursor_deliveries" } } };
+    if (url.pathname === `/api/client/operations/data/folders/${rootFolder}`) return url.searchParams.has("cursor")
+      ? { body: { resourceMode: "operations_native_delivery", files: [nativeFile(fileTwo, "second-report.pdf")], folders: [], breadcrumbs: [{ id: "ond1_rotated_root_breadcrumb", name: "Alpha delivery" }], folderId: rootFolder, prefix: "", cursor: null } }
+      : { body: { resourceMode: "operations_native_delivery", files: [nativeFile(fileOne, "first-report.pdf")], folders: [{ id: childFolder, name: "Edited photographs" }], breadcrumbs: [{ id: rootFolder, name: "Alpha delivery" }], folderId: rootFolder, prefix: "", cursor: "ond1_cursor_files" } };
+    if (url.pathname === `/api/client/operations/data/folders/${childFolder}`) return {
+      body: { resourceMode: "operations_native_delivery", files: [], folders: [], breadcrumbs: [{ id: rootFolder, name: "Alpha delivery" }, { id: childFolder, name: "Edited photographs" }], folderId: childFolder, prefix: "", cursor: null },
+    };
+    return { status: 404, body: { error: "not found" } };
+  });
+
+  await page.goto("/portal");
+  const browser = page.getByRole("region", { name: "Shared deliveries" });
+  await expect(browser.getByRole("button", { name: "Browse shared deliveries" })).toBeVisible();
+  expect(calls.filter(call => call.startsWith("/api/client/operations/data/"))).toEqual([]);
+
+  await browser.getByRole("button", { name: "Browse shared deliveries" }).click();
+  await expect(browser.getByText("Alpha delivery", { exact: true })).toBeVisible();
+  await browser.getByRole("button", { name: "Load more deliveries" }).click();
+  await expect(browser.getByText("Beta delivery", { exact: true })).toBeVisible();
+
+  await browser.getByRole("button", { name: /Alpha delivery/ }).click();
+  await expect(browser.getByText("first-report.pdf", { exact: true })).toBeVisible();
+  await expect(browser.getByRole("link", { name: "Preview" })).toHaveAttribute("href", `/api/client/operations/data/files/${fileOne}/preview`);
+  await expect(browser.getByRole("link", { name: "Download" })).toHaveAttribute("href", `/api/client/operations/data/files/${fileOne}/download`);
+  await browser.getByRole("button", { name: "Load more files" }).click();
+  await expect(browser.getByText("second-report.pdf", { exact: true })).toBeVisible();
+
+  await browser.getByRole("button", { name: /Edited photographs/ }).click();
+  await expect(browser.getByRole("navigation", { name: "Shared delivery folders" })).toContainText("Alpha delivery");
+  await expect(browser.getByText("No files are available in this folder.", { exact: true })).toBeVisible();
+  expect(calls).toContain("/api/client/operations/data/deliveries?cursor=ond1_cursor_deliveries");
+  expect(calls).toContain(`/api/client/operations/data/folders/${rootFolder}?cursor=ond1_cursor_files`);
+});
+
+test("native shared-delivery browser retries an unavailable discovery without exposing a fallback", async ({ page }) => {
+  let reads = 0;
+  const calls = await interceptOperationsNativeData(page, url => {
+    if (url.pathname !== "/api/client/operations/data/deliveries") return { status: 404, body: { error: "not found" } };
+    return ++reads === 1
+      ? { status: 503, body: { error: "private upstream detail" } }
+      : { body: { resourceMode: "operations_native_delivery", items: [{ id: deliveryAlpha, displayName: "Recovered delivery" }], page: { nextCursor: null } } };
+  });
+  await page.goto("/portal");
+  const browser = page.getByRole("region", { name: "Shared deliveries" });
+  await browser.getByRole("button", { name: "Browse shared deliveries" }).click();
+  await expect(browser.getByText("Shared deliveries are temporarily unavailable.", { exact: true })).toBeVisible();
+  await browser.getByRole("button", { name: "Retry" }).click();
+  await expect(browser.getByText("Recovered delivery", { exact: true })).toBeVisible();
+  expect(calls).not.toContain("/api/client/projects");
+});
+
+for (const revokedStatus of [401, 403, 404, 410]) {
+  test(`native shared-delivery browser clears private data when access refresh returns ${revokedStatus}`, async ({ page }) => {
+    let reads = 0;
+    const calls = await interceptOperationsNativeData(page, url => {
+      if (url.pathname === "/api/client/operations/data/deliveries") return ++reads === 1
+        ? { body: { resourceMode: "operations_native_delivery", items: [{ id: deliveryAlpha, displayName: "Private delivery" }], page: { nextCursor: null } } }
+        : { status: revokedStatus, body: { error: "not available" } };
+      if (url.pathname === `/api/client/operations/data/folders/${deliveryAlpha}`) return {
+        body: { resourceMode: "operations_native_delivery", files: [nativeFile(fileOne, "private-report.pdf")], folders: [], breadcrumbs: [{ id: deliveryAlpha, name: "Private delivery" }], folderId: deliveryAlpha, prefix: "", cursor: null },
+      };
+      return { status: 404, body: { error: "not found" } };
+    });
+    await page.goto("/portal");
+    const browser = page.getByRole("region", { name: "Shared deliveries" });
+    await browser.getByRole("button", { name: "Browse shared deliveries" }).click();
+    await browser.getByRole("button", { name: /Private delivery/ }).click();
+    await expect(browser.getByText("private-report.pdf", { exact: true })).toBeVisible();
+
+    await browser.getByRole("button", { name: "Refresh access" }).click();
+    await expect(browser.getByText("private-report.pdf", { exact: true })).toHaveCount(0);
+    await expect(browser.getByText("Private delivery", { exact: true })).toHaveCount(0);
+    await expect(browser.getByRole("alert")).toContainText("could not be verified");
+    expect(reads).toBe(2);
+    expect(calls).not.toContain("/api/client/projects");
+  });
+}
+
+test("focus revalidation aborts an in-flight folder scope and ignores its late response", async ({ page }) => {
+  let discoveryReads = 0;
+  let releaseFolder: (() => void) | undefined;
+  const folderBlocked = new Promise<void>(resolve => { releaseFolder = resolve; });
+  const calls = await interceptOperationsNativeData(page, async url => {
+    if (url.pathname === "/api/client/operations/data/deliveries") return ++discoveryReads === 1
+      ? { body: { resourceMode: "operations_native_delivery", items: [{ id: deliveryAlpha, displayName: "Old delivery" }], page: { nextCursor: null } } }
+      : { body: { resourceMode: "operations_native_delivery", items: [{ id: deliveryBeta, displayName: "Revalidated delivery" }], page: { nextCursor: null } } };
+    if (url.pathname === `/api/client/operations/data/folders/${deliveryAlpha}`) {
+      await folderBlocked;
+      return { body: { resourceMode: "operations_native_delivery", files: [nativeFile(fileOne, "stale-private.pdf")], folders: [], breadcrumbs: [{ id: deliveryAlpha, name: "Old delivery" }], folderId: deliveryAlpha, prefix: "", cursor: null } };
+    }
+    return { status: 404, body: { error: "not found" } };
+  });
+  await page.goto("/portal");
+  const browser = page.getByRole("region", { name: "Shared deliveries" });
+  await browser.getByRole("button", { name: "Browse shared deliveries" }).click();
+  await browser.getByRole("button", { name: /Old delivery/ }).click();
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect(browser.getByRole("button", { name: "Browse shared deliveries" })).toBeVisible();
+  releaseFolder?.();
+  await expect(browser.getByText("stale-private.pdf", { exact: true })).toHaveCount(0);
+  expect(calls.filter(call => call === "/api/client/v2/operations/home").length).toBeGreaterThanOrEqual(2);
+});
+
+test("an Operations authority scope change remounts the browser and suppresses a prior scope response", async ({ page }) => {
+  let homeReads = 0;
+  let releaseFolder: (() => void) | undefined;
+  const folderBlocked = new Promise<void>(resolve => { releaseFolder = resolve; });
+  await page.route("**/api/client/**", async route => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/client/v2/operations/home") {
+      const body = ++homeReads === 1 ? response : {
+        ...response,
+        homes: [{ ...response.homes[0], authorityId: "abcdefab-cdef-4abc-8def-abcdefabcdef", workspaceId: "workspace-two", grantRevision: 5 }],
+      };
+      return route.fulfill({ json: body });
+    }
+    if (url.pathname === "/api/client/session") return route.fulfill({ status: 401, json: { error: "Sign in required" } });
+    if (url.pathname === "/api/client/operations/data/deliveries") return route.fulfill({ json: {
+      resourceMode: "operations_native_delivery", items: [{ id: deliveryAlpha, displayName: "Previous scope delivery" }], page: { nextCursor: null },
+    } });
+    if (url.pathname === `/api/client/operations/data/folders/${deliveryAlpha}`) {
+      await folderBlocked;
+      return route.fulfill({ json: {
+        resourceMode: "operations_native_delivery", files: [nativeFile(fileOne, "prior-scope-private.pdf")], folders: [],
+        breadcrumbs: [{ id: deliveryAlpha, name: "Previous scope delivery" }], folderId: deliveryAlpha, prefix: "", cursor: null,
+      } }).catch(() => undefined);
+    }
+    return route.fulfill({ status: 404, json: { error: "not found" } });
+  });
+
+  await page.goto("/portal");
+  let browser = page.getByRole("region", { name: "Shared deliveries" });
+  await browser.getByRole("button", { name: "Browse shared deliveries" }).click();
+  await browser.getByRole("button", { name: /Previous scope delivery/ }).click();
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await expect(page.getByText("Aerial operations", { exact: true })).toBeVisible();
+  browser = page.getByRole("region", { name: "Shared deliveries" });
+  await expect(browser.getByRole("button", { name: "Browse shared deliveries" })).toBeVisible();
+  releaseFolder?.();
+  await expect(browser.getByText("prior-scope-private.pdf", { exact: true })).toHaveCount(0);
+  expect(homeReads).toBeGreaterThanOrEqual(2);
+});
+
+test("combined portal remounts native data on a newly verified Operations authority scope", async ({ page }) => {
+  const changedHome = {
+    ...response,
+    homes: [{ ...response.homes[0], authorityId: "abcdefab-cdef-4abc-8def-abcdefabcdef", workspaceId: "workspace-new", grantRevision: 5 }],
+  };
+  const calls = await interceptClientApi(page, 200, response, {
+    account: { id: "account-a", displayName: "Authorized Client" }, capabilities: { requestV2: false, feedback: false },
+  }, read => ({ status: 200, body: read === 0 ? response : changedHome }));
+  let dataReads = 0;
+  await page.route("**/api/client/operations/data/deliveries", route => {
+    dataReads++;
+    return route.fulfill({ json: {
+      resourceMode: "operations_native_delivery", items: [{ id: deliveryAlpha, displayName: "Prior authority delivery" }], page: { nextCursor: null },
+    } });
+  });
+  await page.goto("/portal");
+  let browser = page.getByRole("region", { name: "Shared deliveries" });
+  await expect(browser.getByRole("button", { name: "Browse shared deliveries" })).toBeVisible();
+  expect(dataReads).toBe(0);
+  await browser.getByRole("button", { name: "Browse shared deliveries" }).click();
+  await expect(browser.getByText("Prior authority delivery", { exact: true })).toBeVisible();
+
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await expect.poll(() => calls.filter(path => path === "/api/client/v2/operations/home").length).toBeGreaterThanOrEqual(2);
+  browser = page.getByRole("region", { name: "Shared deliveries" });
+  await expect(browser.getByText("Prior authority delivery", { exact: true })).toHaveCount(0);
+  await expect(browser.getByRole("button", { name: "Browse shared deliveries" })).toBeVisible();
+  expect(dataReads).toBe(1);
+});
+
+test("combined portal hides native delivery data when Operations-home revalidation is denied", async ({ page }) => {
+  const calls = await interceptClientApi(page, 200, response, {
+    account: { id: "account-a", displayName: "Authorized Client" }, capabilities: { requestV2: false, feedback: false },
+  }, read => read === 0 ? { status: 200, body: response } : { status: 403, body: { error: "revoked" } });
+  await page.route("**/api/client/operations/data/deliveries", route => route.fulfill({ json: {
+    resourceMode: "operations_native_delivery", items: [{ id: deliveryAlpha, displayName: "Private combined delivery" }], page: { nextCursor: null },
+  } }));
+  await page.goto("/portal");
+  const browser = page.getByRole("region", { name: "Shared deliveries" });
+  await browser.getByRole("button", { name: "Browse shared deliveries" }).click();
+  await expect(browser.getByText("Private combined delivery", { exact: true })).toBeVisible();
+
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await expect(page.getByRole("heading", { name: "Operations services unavailable" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Shared deliveries" })).toHaveCount(0);
+  await expect(page.getByText("Private combined delivery", { exact: true })).toHaveCount(0);
+  expect(calls.filter(path => path === "/api/client/v2/operations/home").length).toBeGreaterThanOrEqual(2);
 });

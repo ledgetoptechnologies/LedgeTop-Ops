@@ -12,6 +12,8 @@ import {
   type OperationsPortalWorkspacePublication,
 } from "@ltds/shared/operations-portal-workspace-publication";
 import type { AuthenticatedNativeStaffWithAdmissionVersion } from "./native-staff-auth";
+import { claimOperationsPortalWorkspacePublicationInvocation } from
+  "./operations-portal-workspace-publication-invocations";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MAX_REASON = 500;
@@ -34,6 +36,7 @@ export interface OperationsPortalWorkspacePublicationBinding {
 }
 export type DispatchOperationsPortalWorkspacePublicationInput = Readonly<{
   db: D1Database; binding: OperationsPortalWorkspacePublicationBinding; operationId: string;
+  invocationId: string; action: "publish" | "recover";
 }>;
 export type OperationsPortalWorkspacePublicationDispatchResult = Readonly<{
   operationId: string; status: "acknowledged" | "retry" | "dead" | "superseded";
@@ -402,7 +405,8 @@ export async function dispatchOperationsPortalWorkspacePublication(
   input: DispatchOperationsPortalWorkspacePublicationInput,
 ): Promise<OperationsPortalWorkspacePublicationDispatchResult> {
   if (!input || typeof input !== "object" || typeof input.operationId !== "string"
-    || !UUID.test(input.operationId)) return fail("invalid_dispatch");
+    || !UUID.test(input.operationId) || typeof input.invocationId !== "string" || !UUID.test(input.invocationId)
+    || (input.action !== "publish" && input.action !== "recover")) return fail("invalid_dispatch");
   const db = input.db.withSession("first-primary");
   const prior = await stored(db, input.operationId); if (!prior) return fail("not_found");
   if (prior.state === "acknowledged") return { operationId: prior.operation_id, status: "acknowledged", replayed: true };
@@ -426,13 +430,10 @@ export async function dispatchOperationsPortalWorkspacePublication(
     }
   }
   const claim = crypto.randomUUID(), until = new Date(Date.now() + 60_000).toISOString();
-  const claimed = await db.prepare(`UPDATE operations_portal_workspace_publication_outbox SET state='dispatching',
-      attempt_count=attempt_count+1,claim_token=?,claim_until=?,last_error_code=NULL,
-      updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE operation_id=?
-      AND ((state IN ('pending','retry') AND next_attempt_at<=strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-        OR (state='dispatching' AND claim_until<=strftime('%Y-%m-%dT%H:%M:%fZ','now')))`)
-    .bind(claim, until, prior.operation_id).run();
-  if (claimed.meta.changes !== 1) return fail("claim_conflict");
+  try {
+    await claimOperationsPortalWorkspacePublicationInvocation({ db, invocationId: input.invocationId,
+      operationId: prior.operation_id, action: input.action, claimToken: claim, claimUntil: until, lastErrorCode: null });
+  } catch { return fail("invocation_denied"); }
   let parsed: unknown;
   try { parsed = JSON.parse(prior.canonical_publication_json); }
   catch {
@@ -458,6 +459,10 @@ export async function dispatchOperationsPortalWorkspacePublication(
     if (!receiptEnvelope(response, publication, prior.operation_fingerprint)) {
       const statusFailure = failureEnvelope(response);
       if (statusFailure?.code === "not-found") {
+        if (input.action === "recover") {
+          const changed = await finishFailure(db, prior.operation_id, claim, true, "recovery-not-found");
+          return confirmedState(db, prior.operation_id, "retry", changed);
+        }
         const current = await db.prepare(`SELECT 1 ok
           FROM operations_portal_workspace_publication_current_checkpoints WHERE checkpoint_id=?`)
           .bind(prior.checkpoint_id).first("ok");
@@ -478,6 +483,10 @@ export async function dispatchOperationsPortalWorkspacePublication(
     }
   }
   if (response === undefined) {
+    if (input.action === "recover") {
+      const changed = await finishFailure(db, prior.operation_id, claim, true, "recovery-not-found");
+      return confirmedState(db, prior.operation_id, "retry", changed);
+    }
     if (prior.remote_attempted === 0) {
       const current = await db.prepare(`SELECT 1 ok FROM operations_portal_workspace_publication_current_checkpoints
         WHERE checkpoint_id=?`).bind(prior.checkpoint_id).first("ok");

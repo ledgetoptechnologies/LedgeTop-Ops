@@ -30,6 +30,7 @@ export type Env = Omit<
   | "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED"
   | "CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED"
   | "CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED"
+  | "CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED"
   | "CLIENT_PORTAL_HIERARCHY_V2_ENABLED"
   | "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED"
   | "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED"
@@ -172,6 +173,14 @@ export type Env = Omit<
   CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED?: string;
   /** Default-off private service metadata RPC; never grants content access. */
   CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED?: string;
+  /** Default-off native authority selection; never falls back to PA-backed grants. */
+  CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED?: string;
+  CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED?: string;
+  /** Separate default-off staging manager HTTP surface; no legacy owner inference. */
+  CLIENT_PORTAL_NATIVE_RECIPIENT_OWNER_ENABLED?: string;
+  OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY_DISPATCH_ENABLED?: string;
+  /** Staging-only private audited grant/revoke transport; not a public HTTP endpoint. */
+  OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY?: Service & import("./operations-portal-native-recipient-authority-dispatch").OperationsPortalNativeRecipientAuthorityBinding;
   /** Enables staff recovery for the additive client workspace hierarchy. */
   CLIENT_PORTAL_HIERARCHY_V2_ENABLED?: string;
   /** Must match the Client deployment before publishing relation-backed grants. */

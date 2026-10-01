@@ -6,6 +6,168 @@ attestation of client access.
 
 ## Keep the workflows separate
 
+### Latest authoritative checkpoint
+
+- Latest native file work supersedes older unmounted/pending-cleanup notes:
+  Client native data routes and the private grant/status entrypoint are mounted
+  default-off. The complete Client Worker starts in a real two-Worker harness;
+  two RPC/startup checks plus 23 preserved public-link checks pass (25/25).
+  Six route/configuration invariants pass. Client generated types and type-check
+  pass; native flags remain false and the reader binding is staging-only.
+- Delivery discovery now pages beyond 25 grants with encrypted per-person,
+  authority-pinned cursors rather than failing on overflow. Discovery and folder
+  cursors cannot cross namespaces; changed-person, changed-boundary and revoked
+  cursors fail before listing. Forty route/selector tests pass; Client type-check
+  passes. These are local HTTP/crypto checks, not deployed acceptance.
+- Final ordered local schema rehearsal passes 158 Ops / 147 Client migrations,
+  with FK checks and frozen Ops0158 / Client0227–0228 hashes. Four real-D1 native
+  recipient/workspace cleanup cases pass, including topology drift and fresh
+  owner recovery. The previous 156/144 and pending-cleanup entries are historical.
+- The shared staging Worker has separate
+  public-delivery and client-portal origins. The native file host guard currently
+  uses exact primary CLIENT_PORTAL_ORIGIN, while EXPECTED_HOST remains public
+  delivery. Mounted-Worker tests reach Client Access only on the primary portal;
+  public/secondary/unrelated origins deny. Internal authorization/audit are aligned
+  with that primary origin; authorization unit tests and type-check pass. The real
+  audit database rerun remains queued behind populated Operations acceptance.
+- Populated Operations delivery issuance exposed D1 expression-depth rejection
+  in draft0158. Its previous freeze/full-chain evidence is superseded. The split
+  checks preserve the original conjunction, but need populated acceptance and a
+  newly hashed full-chain rehearsal before release. No remote apply occurred.
+
+- Latest local verification supersedes the repair-in-progress notes below:
+  the dispatcher now uses real 0153 command/checkpoint/snapshot lineage.
+  Root independently ran the four real-D1 authority cases and 28 owner HTTP
+  cases together: **32/32 passed**, exit 0. Frozen-wire replay, exact-operation
+  recovery and status-only reconciliation after publication drift are covered.
+- The ordered full-schema compatibility rehearsal passed **1/1** across 156
+  Ops and 144 Client migrations, with zero foreign-key violations. It validates
+  empty-schema DDL compatibility, not positive historical authority workflows.
+- Native manager UI passed independent verification: eight API tests and eighteen
+  mocked desktop/mobile browser tests. Network rejection is normalized to an
+  uncertain outcome; retries refresh CSRF and preserve the exact operation/body.
+  Reload cannot discard an unresolved mutation, and recovery uses only the
+  stored operation returned by an owner-authorized read.
+- These expanded UI checks include workspace cleanup and recovery after reload.
+  Owner HTTP boundary coverage separately passed 43 tests. The workspace HTTP
+  path now reserves a fresh, one-use manager recovery invocation and dispatches
+  the original stored command, including after a login refresh. Cleanup database
+  acceptance remains pending: fresh authentication must not strand retries, and
+  changed customer topology must not prevent an authorized historical revoke.
+- Existing public-share route, lifecycle and single-file regression suites
+  independently passed 23 tests. Their storage/database adapters are mocked;
+  this is compatibility evidence, not live production-link acceptance.
+- Root added three native home HTTP-adapter tests and independently passed them
+  alongside the nine existing home-route tests (12/12); Client type-check passed.
+  They cover native protocol selection, no legacy fallback on missing grant or
+  unavailable schema, and denial after in-flight revocation. Storage/principal
+  adapters are mocked, so this is not a real signed-in enrollment acceptance.
+- Recipient-only authority is not complete workspace lifecycle acceptance.
+  Workspace revoke after the final recipient, historical-pin cleanup after
+  topology drift, and explicit folder authority/browsing remain required.
+  Forward cleanup implementation is proceeding in staging-only scope. These
+  new bytes are not pushed, CI-accepted or deployed; production is unchanged.
+
+- Independent review supersedes the earlier draft-syntax checkpoint below.
+  The repaired component suites passed, but a synthetic Ops publication fixture
+  concealed a real schema mismatch: reviewed migration 0153 snapshots do not
+  have `operation_id`. The native authority dispatcher must use the actual
+  command/checkpoint/snapshot relationships. The implementation agent is fixing
+  this and replacing the stub with reviewed-schema acceptance.
+- Review also found confirm/revoke retries could be stranded after entering
+  transitional states. An exact-operation, current-owner HTTP recovery action
+  is now implemented; its boundary suite passed 28 tests, including revoke and
+  pending recovery. Independent review found no HTTP recovery safety blocker;
+  first-party manager UI and recovery discoverability after reload are still
+  needed. Ops type-check passed, and the prior 24-test owner suite plus metadata
+  passed 37 tests together. Core replay and
+  immutable-outbox recovery are under repair/review. No live readiness claim
+  follows from the earlier synthetic fixture results.
+- Native browser consent passed 14 desktop/mobile tests, including the unchanged
+  legacy consent flow; route parsing passed five tests. Client type-check and
+  build passed. Browser APIs were mocked: this proves protocol separation,
+  exact-target consent, URL scrubbing and uncertain retry behavior, not a live
+  grant or folder-access workflow. All new routes remain staging/default-off;
+  no remote migration/deployment, production activation or public-link change
+  has occurred.
+
+- Separate Ops native manager controls are implemented and mounted before legacy
+  PA staff admission, with independent staging/default-off gates. Issue, review,
+  cancel, confirm and revoke use the current native manager ledger checks;
+  confirmation/revocation dispatch only the exact durable operation. Root's
+  HTTP boundary suite passed 18 tests and Ops type-check passed. The recipient
+  agent reports 16 passing Client tests, but the joined Ops database run exposed
+  a syntax error in draft 0154's request guard; that repair and positive joined
+  acceptance are still in progress. No release/deployment acceptance is claimed.
+- Native Client consent is now mounted ahead of historical PA-backed admission,
+  using its separate staging service binding and dedicated server-only CSRF
+  secret. Global portal and native-enrollment flags must both be enabled;
+  the handler independently enforces staging, signed identity and consent.
+  The two route-mount source checks passed. These checks establish wiring only,
+  not live enrollment or database acceptance; the smaller implementation agents
+  are continuing the real-D1 authority/publication suites. No production
+  deployment, client activation or public-link mutation has occurred.
+- Native dashboard flag configuration and generated types are now present;
+  both apps passed type-check/typegen consistency before the next recipient test
+  additions. Separate staging consent/authority RPC bindings and default-off
+  flags are declared and their staging configs validate with Wrangler typegen.
+  These local declarations have not been remotely deployed. The new recipient
+  tests are in progress (an excess-property TypeScript error was returned to
+  their implementing agent); do not treat the evolving tree as release green.
+  Client native discovery additionally requires current publication
+  receipt/history closure. Live owner HTTP mounting and joined acceptance remain.
+- Local native dashboard selection is now wired in the Client reader and Ops
+  metadata helper, default-off and without legacy authority fallback. Root's
+  Client reader regression suite passed 18 tests and Client type-check passed;
+  Ops metadata/entrypoint suites passed 15 tests. Configuration/type generation,
+  positive real native grant-to-dashboard flow and revocation acceptance remain
+  pending. These new local bytes are not covered by the pushed candidate CI.
+- The owner has now explicitly authorized all necessary staging work, including
+  native recipient 0154/0224 and current-manager invocation guard implementation.
+  Those specific approval holds are cleared. Implementing, reviewing and testing
+  them is underway; approval itself is not acceptance. Production remains out of
+  scope. Historical hold statements below must not be treated as current.
+- Pushed candidate: `ccd85a62c59982d3f456a4cf60dce7f75bce2e03`, draft PR139;
+  not merged or deployed. Exact CI run `36708979711` is terminal successful:
+  all ten jobs passed. This accepts the candidate's CI, not live native client
+  enrollment, file access or production rollout. Later local documentation
+  edits are not part of that immutable CI revision.
+- Fresh read-only Ops staging: 151 migrations through 0151, exact migration-name
+  prefix matched; seven historical provision/revoke pairs, none unmatched.
+  Checked active authority domains, current acknowledged portal access, PA sync
+  work in flight, delivery commands/heads/receipts and foreign-key violations
+  are zero. This is baseline evidence, not full deployed schema attestation.
+- Rechecked the signed-in Cloudflare dashboard at 2026-09-30 13:11:28 UTC:
+  the fresh query confirms 151 migrations through 0151 and zero foreign-key
+  violations. Dashboard access is available; none of the new native cohort
+  migrations have been deployed. This readback does not repair CLI credentials.
+- Owner HTTP workspace read/revoke/recover is now wired to the cleanup core.
+  Its mocked boundary suite passed 41/41, including resulting-epoch fences,
+  exact stored recovery operations, pending status and production/default-off
+  denials. Root independently passed both application type-checks; real cleanup
+  migration/workflow acceptance is still running separately. Review additionally
+  requires same-operation retry after renewed staff authentication and recipient
+  cleanup after topology drift; those core cases must pass before rollout.
+- The explicit folder gap and required storage-authority adapter are recorded in
+  `native-folder-access-implementation.md`. Existing publication snapshots are
+  inert and service-home permission must not be promoted into file permission.
+- Fresh read-only Client staging: 141 migrations through 0222; exact name prefix
+  matched, foreign-key violations zero, new publication tables absent. Checked
+  active shadow, workspace, principal and delivery authorities are zero.
+- Configured CLI access remains rejected with 7403. Dashboard readback does not
+  restore CLI rollout access. No migration, deployment or access activation was
+  performed during these inspections.
+- Native recipient authority (0154/0224) and current-manager invocation guard
+  implementation is now authorized for local/staging work. These drafts remain
+  excluded from the last tested candidate until implemented and verified.
+  Positive client enrollment/browsing/revocation, cross-client
+  isolation and the production owner checkpoint are still incomplete.
+
+The remaining observations are historical component checkpoints. References to
+"current" below apply to their recorded revision, not the latest candidate.
+
+### Earlier component evidence
+
 Current pushed candidate is `311788aa10f29a3bfcddec349f98b5d121452054`,
 draft PR #139, not merged or deployed. CI `36706274796` is terminal successful,
 all ten jobs passed. New local diagnostics/fixtures are not included in that CI

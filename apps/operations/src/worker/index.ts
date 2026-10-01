@@ -81,6 +81,7 @@ import { handleClientOnboardingStaffHttp } from "./client-onboarding-staff-http"
 import { handleWorkspaceBindingAdminHttp } from "./client-portal-workspace-binding-admin-http";
 import { handleAuthorityV3OwnerHttp } from "./client-portal-authority-v3-owner-http";
 import { handleRecipientEnrollmentOwnerHttp } from "./client-portal-recipient-enrollment-owner-http";
+import { handleOperationsNativeRecipientOwnerHttp } from "./operations-portal-native-recipient-owner-http";
 import { consumeNativeStaffOnboardingRateLimit } from "./native-staff-onboarding-rate-limit";
 import {
   auditStatement,
@@ -506,6 +507,27 @@ async function dispatchRecipientEnrollmentOwner(c:Context<{Bindings:Env;Variable
 }
 app.use("/api/native-client-portal/recipient-enrollment",dispatchRecipientEnrollmentOwner);
 app.use("/api/native-client-portal/recipient-enrollment/*",dispatchRecipientEnrollmentOwner);
+// Native Operations enrollment has its own target model and authority ledger.
+// Dispatch before PA-backed staff admission; the handler verifies native staff.
+async function dispatchOperationsNativeRecipientOwner(c: Context<{ Bindings: Env; Variables: Variables }>) {
+  return handleOperationsNativeRecipientOwnerHttp(c.req.raw, {
+    environment: c.env.ENVIRONMENT,
+    expectedHost: c.env.EXPECTED_HOST,
+    configuration: {
+      enabled: c.env.CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED === "true"
+        && c.env.CLIENT_PORTAL_NATIVE_RECIPIENT_OWNER_ENABLED === "true",
+      issuer: c.env.TEAM_DOMAIN ?? "",
+      staffAudience: c.env.OPERATIONS_AUD,
+      origin: `https://${c.env.EXPECTED_HOST}`,
+      recipientOrigin: c.env.DELIVERY_BASE_URL,
+      csrfSecret: c.env.OPERATIONS_SESSION_SECRET,
+    },
+    database: c.env.OPS_DB,
+    dispatch: c.env,
+  });
+}
+app.use("/api/native-client-portal/operations-recipient-enrollment", dispatchOperationsNativeRecipientOwner);
+app.use("/api/native-client-portal/operations-recipient-enrollment/*", dispatchOperationsNativeRecipientOwner);
 // This is intentionally before staff authentication. A disabled staging
 // fixture must be indistinguishable from an absent route, even to a request
 // without a valid Operations session.
@@ -3592,6 +3614,7 @@ export { ClientDelegatedShareSigner } from "./client-delegated-share-signer";
 export { ViewerSessionIssuer } from "./viewer-session-issuer-entrypoint";
 export { ClientOnboardingRecipientBridge } from "./client-onboarding-recipient-entrypoint";
 export { ClientPortalRecipientEnrollmentBridge } from "./client-portal-recipient-enrollment-entrypoint";
+export { OperationsPortalNativeRecipientEnrollmentIngress } from "./operations-portal-native-recipient-enrollment-entrypoint";
 export { ClientPortalServiceMetadataReader } from "./client-portal-service-metadata-entrypoint";
 export { ProjectAlphaDeliveryIntentIngress } from "./project-alpha-delivery-intent-entrypoint";
 export { ProjectAlphaCatalogPromotionWorkflow } from "./project-alpha-catalog-promotion-workflow";

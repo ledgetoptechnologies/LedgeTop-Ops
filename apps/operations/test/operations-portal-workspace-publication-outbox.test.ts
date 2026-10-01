@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { Miniflare } from "miniflare";
 import { sha256OperationsPortalWorkspacePublication,
@@ -6,9 +7,15 @@ import { applyCanonicalChain } from "./helpers/verified-recipient-canonical-line
 import { writeNativeDirectoryProfile, type NativeDirectoryCreateWrite } from "../src/worker/native-directory-profile-writer";
 import { writeNativeDirectoryRelationship } from "../src/worker/native-directory-relationship-writer";
 import { reserveOperationsPortalFolder, reserveOperationsPortalWorkspace,
-  revokeOperationsPortalFolder } from "../src/worker/operations-portal-workspace-reservations";
-import { dispatchOperationsPortalWorkspacePublication, reserveOperationsPortalWorkspacePublication,
+  revokeOperationsPortalFolder, revokeOperationsPortalWorkspace }
+  from "../src/worker/operations-portal-workspace-reservations";
+import { dispatchOperationsPortalWorkspacePublication as guardedDispatch, reserveOperationsPortalWorkspacePublication,
   type OperationsPortalWorkspacePublicationBinding } from "../src/worker/operations-portal-workspace-publication-outbox";
+import { reserveOperationsPortalWorkspacePublicationInvocation } from
+  "../src/worker/operations-portal-workspace-publication-invocations";
+import { cancelOperationsPortalWorkspacePublication as guardedCancel } from
+  "../src/worker/operations-portal-workspace-publication-cancellations";
+import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 vi.mock("cloudflare:workers", () => ({ WorkerEntrypoint: class {} }));
 import { getOperationsPortalWorkspacePublicationStatusRpc, publishOperationsPortalWorkspaceRpc }
   from "../../client/src/worker/operations-portal-workspace-publication-entrypoint";
@@ -62,6 +69,28 @@ async function seedManager() {
         (id,staff_id,permission_key,effect,scope,division_id,scope_key,created_by)
         VALUES(?,?,?,'allow','global',NULL,'global','publication-owner')`)
         .bind(`publication-owner-permission-${index}`, "publication-owner", permission)),
+  ]);
+}
+function managerActor(staffId: string, profileVersion = 1, admissionVersion = 1): AuthenticatedNativeStaffWithAdmissionVersion {
+  return { identity: { kind: "native", staffId, verifiedAccessSubject: `access|${staffId}`,
+    email: `${staffId}@example.test`, displayName: staffId, profileVersion }, admissionVersion,
+    verifiedUntil: new Date(Date.now() + 3_600_000).toISOString() };
+}
+async function seedAdditionalManager(staffId: string) {
+  await operations.batch([
+    operations.prepare(`INSERT INTO staff_users(id,email,display_name,access_subject,status)
+      VALUES(?,?,?,?, 'active')`).bind(staffId, `${staffId}@example.test`, staffId, `access|${staffId}`),
+    operations.prepare(`INSERT INTO native_staff_admissions(staff_id,bound_access_subject,active,admitted_by)
+      VALUES(?,?,1,?)`).bind(staffId, `access|${staffId}`, staffId),
+    operations.prepare(`INSERT INTO native_staff_profiles(staff_id,login_email,display_name)
+      VALUES(?,?,?)`).bind(staffId, `${staffId}@example.test`, staffId),
+    operations.prepare(`INSERT INTO staff_role_assignments(id,staff_id,role_id,scope,division_id,scope_key,created_by)
+      VALUES(?,?,'role-owner','global',NULL,'global',?)`).bind(`${staffId}-role`, staffId, staffId),
+    operations.prepare(`INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,active,granted_by)
+      VALUES(?,?,'directory.portal_access.manage','allow','global',1,?)`).bind(`${staffId}-portal`, staffId, staffId),
+    ...["projects.view", "delivery.browse"].map((permission, index) => operations.prepare(`INSERT INTO staff_permission_overrides
+      (id,staff_id,permission_key,effect,scope,division_id,scope_key,created_by)
+      VALUES(?,?,?,'allow','global',NULL,'global',?)`).bind(`${staffId}-permission-${index}`, staffId, permission, staffId)),
   ]);
 }
 async function seedRecord(recordId: string, kind: "organization" | "client", parent: string | null = null) {
@@ -138,6 +167,21 @@ function publicationInput(targetId: string, expectedRevision: number) {
   return { operationId: id(), publicationId: id(), targetId, snapshotId: id(), checkpointId: id(), expectedRevision,
     reason: "Publish complete native topology snapshot" };
 }
+async function dispatchOperationsPortalWorkspacePublication(input: {
+  db: D1Database; binding: OperationsPortalWorkspacePublicationBinding; operationId: string;
+}) {
+  const invocationId = id();
+  let action: "publish" | "recover" = "publish";
+  try {
+    await reserveOperationsPortalWorkspacePublicationInvocation(input.db, actor(), { invocationId,
+      operationId: input.operationId, action, reason: "Test exact publication invocation" });
+  } catch {
+    action = "recover";
+    try { await reserveOperationsPortalWorkspacePublicationInvocation(input.db, actor(), { invocationId,
+      operationId: input.operationId, action, reason: "Test exact publication recovery" }); } catch { /* terminal */ }
+  }
+  return guardedDispatch({ ...input, invocationId, action });
+}
 
 beforeAll(async () => {
   runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06", script: "export default {}",
@@ -146,6 +190,11 @@ beforeAll(async () => {
   client = await runtime.getD1Database("CLIENT_DB") as unknown as D1Database;
   expect(await applyCanonicalChain(operations, "operations",
     "0153_operations_portal_workspace_publication_outbox.sql", true)).toHaveLength(153);
+  for (const name of ["0155_operations_portal_workspace_publication_cancellations.sql",
+    "0156_operations_portal_workspace_publication_invocations.sql"]) {
+    const sql = readFileSync(new URL(`../migrations/${name}`, import.meta.url), "utf8");
+    await operations.batch(splitD1MigrationStatements(sql).map(statement => operations.prepare(statement)));
+  }
   expect(await applyCanonicalChain(client, "client", "0223_operations_portal_workspace_publications.sql")).toHaveLength(142);
   await seedManager();
   await operations.batch([
@@ -530,4 +579,149 @@ describe("0153 native Operations workspace topology publication outbox", () => {
       operationId: publication.operationId })).resolves.toEqual({ operationId: publication.operationId,
       status: "superseded" });
   }, 60_000);
+
+  it("pins one-use current-manager invocations while separating publish, recovery, and stale cleanup", async () => {
+    for (const manager of ["publication-manager", "profile-stale-manager", "admission-stale-manager",
+      "generation-stale-manager", "denied-manager", "outscope-manager"]) await seedAdditionalManager(manager);
+    const crossRoot = "ops/organization/publication-invoker-cross";
+    const guardRoot = "ops/organization/publication-invoker-guard";
+    await acknowledgeCreate(await seedRecord(crossRoot, "organization"), "dddddddddddddddddddddddddddddddd");
+    await acknowledgeCreate(await seedRecord(guardRoot, "organization"), "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+    const crossProject = "ops/project/publication-invoker-cross";
+    await operations.batch([operations.prepare(`INSERT INTO operations_shared_projects
+      (external_project_id,name,lifecycle,organization_record_id,scopes_json)
+      VALUES(?,'Invoker Cross Project','active',?,'[]')`).bind(crossProject, crossRoot),
+    operations.prepare(`INSERT INTO operations_shared_project_revisions(external_project_id,version,read_json)
+      VALUES(?,1,'{}')`).bind(crossProject)]);
+    const makeCommand = async (rootRecordId: string, withFolder = false) => {
+      const workspace = workspaceInput({ kind: "organization", recordId: rootRecordId, relationshipVersion: null });
+      await reserveOperationsPortalWorkspace(operations, actor(), workspace);
+      const folder = withFolder ? { ...folderInput(workspace.targetId, `${base}guard-${id()}/`),
+        externalProjectId: crossProject } : null;
+      if (folder) await reserveOperationsPortalFolder(operations, actor(), folder);
+      const input = publicationInput(workspace.targetId, 0);
+      const command = await reserveOperationsPortalWorkspacePublication(operations, actor(), input);
+      return { workspace, folder, input, command };
+    };
+
+    const crossManager = await makeCommand(crossRoot, true);
+    const guardCandidate = await makeCommand(guardRoot);
+    await expect(reserveOperationsPortalWorkspacePublicationInvocation(operations, {
+      ...managerActor("publication-manager"), identity: { ...managerActor("publication-manager").identity,
+        verifiedAccessSubject: "access|forged-manager" } }, { invocationId: id(),
+      operationId: crossManager.command.operationId, action: "publish", reason: "Forged identity must fail" }))
+      .rejects.toThrow("operations_portal_workspace_publication_invocation_denied");
+    await operations.prepare(`DELETE FROM staff_role_assignments WHERE staff_id='outscope-manager'`).run();
+    await expect(reserveOperationsPortalWorkspacePublicationInvocation(operations, managerActor("outscope-manager"), {
+      invocationId: id(), operationId: crossManager.command.operationId, action: "publish",
+      reason: "Out-of-scope manager must fail",
+    })).rejects.toThrow("operations_portal_workspace_publication_invocation_denied");
+    const crossInvocation = id();
+    await reserveOperationsPortalWorkspacePublicationInvocation(operations, managerActor("publication-manager"), {
+      invocationId: crossInvocation, operationId: crossManager.command.operationId, action: "publish",
+      reason: "Different current manager publishes exact snapshot",
+    });
+    let attempted: OperationsPortalWorkspacePublication | null = null;
+    expect(await guardedDispatch({ db: operations, operationId: crossManager.command.operationId,
+      invocationId: crossInvocation, action: "publish", binding: {
+        async publishWorkspace(publication) { attempted = publication; throw new Error("ambiguous"); },
+        async getPublicationStatus() { throw new Error("not-before-publish"); },
+      } })).toEqual({ operationId: crossManager.command.operationId, status: "retry" });
+    expect(await operations.prepare(`SELECT action||':'||invoked_by_staff_id value
+      FROM operations_portal_workspace_publication_invocation_audit WHERE invocation_id=?`)
+      .bind(crossInvocation).first("value")).toBe("publish:publication-manager");
+
+    for (const [staffId, invalidate] of [
+      ["profile-stale-manager", async () => operations.prepare(`UPDATE native_staff_profiles
+        SET display_name='stale profile',version=version+1 WHERE staff_id='profile-stale-manager'`).run()],
+      ["admission-stale-manager", async () => operations.prepare(`UPDATE native_staff_admissions
+        SET active=0,version=version+1 WHERE staff_id='admission-stale-manager'`).run()],
+      ["generation-stale-manager", async () => operations.prepare(`INSERT INTO native_directory_grants
+        (id,staff_id,permission,effect,scope_kind,active,granted_by)
+        VALUES('generation-stale-extra','generation-stale-manager','directory.profile.view','allow','global',1,
+          'generation-stale-manager')`).run()],
+    ] as const) {
+      const invocationId = id();
+      await reserveOperationsPortalWorkspacePublicationInvocation(operations, managerActor(staffId), { invocationId,
+        operationId: guardCandidate.command.operationId, action: "publish", reason: `Invalidate ${staffId} proof` });
+      await invalidate();
+      let rpc = false;
+      await expect(guardedDispatch({ db: operations, operationId: guardCandidate.command.operationId,
+        invocationId, action: "publish", binding: { async publishWorkspace() { rpc = true; return {}; },
+          async getPublicationStatus() { rpc = true; return {}; } } })).rejects
+        .toThrow("operations_portal_workspace_publication_invocation_denied");
+      expect(rpc).toBe(false);
+    }
+
+    const deniedInvocation = id();
+    await reserveOperationsPortalWorkspacePublicationInvocation(operations, managerActor("denied-manager"), {
+      invocationId: deniedInvocation, operationId: guardCandidate.command.operationId, action: "publish",
+      reason: "Deny must win at claim",
+    });
+    await operations.prepare(`INSERT INTO staff_permission_overrides
+      (id,staff_id,permission_key,effect,scope,division_id,scope_key,created_by)
+      VALUES('denied-manager-deny','denied-manager','projects.view','deny','global',NULL,'global','denied-manager')`).run();
+    await expect(guardedDispatch({ db: operations, operationId: guardCandidate.command.operationId,
+      invocationId: deniedInvocation, action: "publish", binding: { async publishWorkspace() { return {}; },
+        async getPublicationStatus() { return {}; } } })).rejects
+      .toThrow("operations_portal_workspace_publication_invocation_denied");
+
+    const racedInvocation = id();
+    await reserveOperationsPortalWorkspacePublicationInvocation(operations, managerActor("publication-manager"), {
+      invocationId: racedInvocation, operationId: guardCandidate.command.operationId, action: "publish",
+      reason: "One invocation wins a concurrent claim",
+    });
+    const raceBinding: OperationsPortalWorkspacePublicationBinding = {
+      async publishWorkspace() { await new Promise(resolve => setTimeout(resolve, 20)); return { malformed: true }; },
+      async getPublicationStatus() { return { malformed: true }; },
+    };
+    const raceResults = await Promise.allSettled([guardedDispatch({ db: operations,
+      operationId: guardCandidate.command.operationId, invocationId: racedInvocation, action: "publish", binding: raceBinding }),
+    guardedDispatch({ db: operations, operationId: guardCandidate.command.operationId,
+      invocationId: racedInvocation, action: "publish", binding: raceBinding })]);
+    expect(raceResults.filter(result => result.status === "fulfilled")).toHaveLength(1);
+    expect(raceResults.filter(result => result.status === "rejected")).toHaveLength(1);
+    const recoveryInvocation = id();
+    await reserveOperationsPortalWorkspacePublicationInvocation(operations, managerActor("publication-manager"), {
+      invocationId: recoveryInvocation, operationId: guardCandidate.command.operationId, action: "recover",
+      reason: "Status-only recovery cannot publish",
+    });
+    let recoveryPublishes = 0;
+    expect(await guardedDispatch({ db: operations, operationId: guardCandidate.command.operationId,
+      invocationId: recoveryInvocation, action: "recover", binding: {
+        async publishWorkspace() { recoveryPublishes += 1; throw new Error("must-not-publish"); },
+        async getPublicationStatus() { return rpcResponse({ ok: false,
+          protocol: "operations-portal-workspace-publication", protocolVersion: 1,
+          code: "not-found", retryable: false }); },
+      } })).toEqual({ operationId: guardCandidate.command.operationId, status: "retry" });
+    expect(recoveryPublishes).toBe(0);
+
+    expect(attempted).not.toBeNull();
+    await revokeOperationsPortalFolder(operations, actor(), { operationId: id(), targetId: crossManager.workspace.targetId,
+      reservationId: crossManager.folder!.reservationId, expectedRevision: 1, reason: "Drift folder before cleanup" });
+    await revokeOperationsPortalWorkspace(operations, actor(), { operationId: id(), targetId: crossManager.workspace.targetId,
+      expectedRevision: 1, reason: "Drift workspace before cleanup" });
+    await operations.prepare(`UPDATE native_staff_admissions SET active=0,version=version+1
+      WHERE staff_id='publication-owner'`).run();
+    const cancelInvocation = id();
+    await reserveOperationsPortalWorkspacePublicationInvocation(operations, managerActor("publication-manager"), {
+      invocationId: cancelInvocation, operationId: crossManager.command.operationId, action: "cancel",
+      reason: "Current manager cleans stale creator attempt",
+    });
+    const publication = attempted!;
+    const requestFingerprint = await sha256OperationsPortalWorkspacePublication(publication);
+    const cancellation = { operationId: publication.operationId, publicationId: publication.publicationId,
+      requestFingerprint, targetId: publication.target.targetId, targetRevision: publication.target.targetRevision,
+      clientAuthorityId: publication.target.clientAuthorityId, workspaceId: publication.target.workspaceId,
+      rootKind: publication.target.rootKind, rootRecordId: publication.target.rootRecordId,
+      expectedRevision: publication.expectedRevision, resultingRevision: publication.resultingRevision,
+      sourceSequence: publication.snapshot.sourceSequence, snapshotId: publication.snapshot.snapshotId,
+      checkpointId: publication.snapshot.checkpointId, snapshotSha256: publication.snapshot.snapshotSha256,
+      cancelledAt: "2026-09-30T12:00:00.000Z", replayed: false };
+    expect(await guardedCancel({ db: operations, operationId: crossManager.command.operationId,
+      invocationId: cancelInvocation, binding: { async getPublicationDisposition() {
+        return rpcResponse({ ok: true, disposition: "not-found" }); }, async cancelWorkspacePublication() {
+        return rpcResponse({ ok: true, disposition: "cancelled", cancellation }); } } })).toMatchObject({
+      operationId: crossManager.command.operationId, status: "cancelled" });
+  }, 180_000);
 });

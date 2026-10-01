@@ -2,13 +2,13 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "ledgetop-ops-staging",
   "account_id": "846c924bf17bf4f3dd15c97a4c5d1d51",
-  "main": "src/worker/index.ts",
+  "main": "src/worker/staging-native-authority-entrypoint.ts",
   "compatibility_date": "2026-07-22",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": false,
   "preview_urls": false,
   "routes": [{ "pattern": "ops-staging.ledgetopdroneservices.com", "custom_domain": true }],
-  "assets": { "binding": "ASSETS", "directory": "./dist/client", "not_found_handling": "single-page-application", "run_worker_first": ["/api/*", "/health", "/r/*"] },
+  "assets": { "binding": "ASSETS", "directory": "./dist/client", "not_found_handling": "single-page-application", "run_worker_first": ["/api/*", "/health", "/r/*", "/administration/client-portal/operations-recipients", "/administration/client-portal/operations-delivery-authority"] },
   "vars": {
     "PUBLIC_BASE_URL": "https://ops-staging.ledgetopdroneservices.com",
     "EXPECTED_HOST": "ops-staging.ledgetopdroneservices.com",
@@ -36,6 +36,12 @@
     "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ORIGIN": "<STAGING_PROJECT_ALPHA_HTTPS_ORIGIN>",
     "PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED": "false",
     "PROJECT_ALPHA_DELIVERY_GUEST_ENABLED": "false",
+    "CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED": "true",
+    "CLIENT_PORTAL_NATIVE_RECIPIENT_OWNER_ENABLED": "true",
+    "OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY_DISPATCH_ENABLED": "true",
+    "OPERATIONS_PORTAL_NATIVE_DELIVERY_OWNER_ENABLED": "true",
+    "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_DISPATCH_ENABLED": "true",
+    "OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED": "true",
     "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED": "false",
     "CLIENT_ONBOARDING_ADMIN_ENABLED": "false",
     "CLIENT_ONBOARDING_ADMIN_ORIGIN": "",
@@ -51,6 +57,7 @@
     "CLIENT_PORTAL_AUTHORITY_V2_OUTBOX_ENABLED": "false",
     "CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED": "false",
     "CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED": "false",
+    "CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED": "false",
     "CLIENT_PORTAL_HIERARCHY_V2_ENABLED": "false",
     "CLIENT_HUB_PA_CONTACT_ASSIGNMENTS_ENABLED": "false",
     "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED": "false",
@@ -128,7 +135,9 @@
     { "binding": "CLIENT_PORTAL_ACCESS_AUTHORITY", "service": "ledgetop-clients-staging", "entrypoint": "OpsPortalAccessAuthorityIngress" },
     { "binding": "CLIENT_PORTAL_AUTHORITY_V2", "service": "ledgetop-clients-staging", "entrypoint": "ClientPortalAuthorityV2Ingress" },
     { "binding": "OPS_INVENTORY_CATALOG_STAGING", "service": "ledgetop-clients-staging", "entrypoint": "OpsInventoryCatalogStagingIngress" },
-    { "binding": "OPS_INVENTORY_CATALOG_PROMOTION", "service": "ledgetop-clients-staging", "entrypoint": "OpsInventoryCatalogPromotionCoordinator" }
+    { "binding": "OPS_INVENTORY_CATALOG_PROMOTION", "service": "ledgetop-clients-staging", "entrypoint": "OpsInventoryCatalogPromotionCoordinator" },
+    { "binding": "OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY", "service": "ledgetop-clients-staging", "entrypoint": "OperationsPortalNativeRecipientAuthorityIngress" },
+    { "binding": "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY", "service": "ledgetop-clients-staging", "entrypoint": "OperationsPortalNativeDeliveryAuthorityIngress" }
   ],
   "durable_objects": {
     "bindings": [{ "name": "THUMBNAIL_RENDERER", "class_name": "ThumbnailRendererContainer" }]

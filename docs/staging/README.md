@@ -21,6 +21,9 @@ Never reuse a production worker name, host, Access audience, D1 ID, R2 bucket, q
 The client portal release program is specified in
 [client-portal-rollout.md](client-portal-rollout.md). Its config is default-off;
 the existing Delivery staging Access app is not the client identity app.
+The separate three-gate service-home window is documented in
+[native-portal-service-home-acceptance.md](native-portal-service-home-acceptance.md);
+it never changes the default-off base or production configs.
 
 ## Prepare local configuration
 

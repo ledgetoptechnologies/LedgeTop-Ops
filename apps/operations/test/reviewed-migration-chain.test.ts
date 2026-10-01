@@ -27,15 +27,17 @@ afterEach(() => {
 });
 
 describe("reviewed release migration fixtures", () => {
-  it("selects only the immutable release inventories, not stopped physical drafts", () => {
+  it("selects the immutable release inventories including the promoted native portal migrations", () => {
     const operations = reviewedOperationsMigrationNames(new URL("../migrations/", import.meta.url));
     const client = reviewedClientMigrationNames(new URL("../../client/migrations/", import.meta.url));
-    expect(operations).toHaveLength(154);
-    expect(operations.at(-1)).toBe("0155_operations_portal_workspace_publication_cancellations.sql");
-    expect(operations).not.toContain("0154_operations_portal_native_recipient_authority.sql");
-    expect(client).toHaveLength(143);
-    expect(client.at(-1)).toBe("0225_operations_portal_workspace_publication_cancellations.sql");
-    expect(client).not.toContain("0224_operations_portal_native_recipient_authority.sql");
+    expect(operations).toHaveLength(160);
+    expect(operations.at(-1)).toBe("0160_operations_portal_native_recipient_labels.sql");
+    expect(operations).toContain("0154_operations_portal_native_recipient_authority.sql");
+    expect(operations).toContain("0158_operations_portal_native_delivery_authority.sql");
+    expect(client).toHaveLength(147);
+    expect(client.at(-1)).toBe("0228_operations_portal_native_content_start_audit.sql");
+    expect(client).toContain("0224_operations_portal_native_recipient_authority.sql");
+    expect(client).toContain("0227_operations_portal_native_delivery_authority.sql");
   });
 
   it("rejects changed or missing reviewed migration bytes", () => {

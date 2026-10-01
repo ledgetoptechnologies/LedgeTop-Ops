@@ -331,7 +331,8 @@
       "https://client-staging.ledgetopdroneservices.com",
       "https://portal-staging.ledgetoptechnologies.com"
     ],
-    "enabled": false,
+    "releasePhase": "staff-synthetic-acceptance",
+    "runtimeEnabled": true,
     "teamDomain": "https://ledgetoptechnologies.cloudflareaccess.com",
     "applicationName": "Ledge Top Client Portal Staging",
     "applicationId": "<CLIENT_PORTAL_ACCESS_APPLICATION_ID>",
@@ -356,6 +357,51 @@
     ],
     "accessReadbackEvidenceRef": "<ACCESS_APPLICATION_AUDIENCE_DESTINATION_POLICY_READBACK_REFERENCE>",
     "rollbackSnapshotRef": "<ACCESS_AND_CUSTOM_DOMAIN_ROLLBACK_SNAPSHOT_REFERENCE>",
+    "admission": {
+      "mode": "explicit-staff-synthetic-only",
+      "clientAdmissionEnabled": false,
+      "invitationSendingEnabled": false,
+      "automaticEnrollmentEnabled": false,
+      "syntheticWorkspaceOnly": true,
+      "approvedStaffTester": {
+        "issuer": "https://ledgetoptechnologies.cloudflareaccess.com",
+        "subjectSha256": "<SHA256_OF_APPROVED_ACCESS_SUBJECT>",
+        "issuerSubjectSha256": "<SHA256_OF_ISSUER_NEWLINE_LOWERCASE_SUBJECT_SHA256>",
+        "identityReadbackSha256": "<SHA256_OF_IDENTITY_READBACK>",
+        "activeOperationsUser": false,
+        "evidenceRef": "<VERIFIED_ISSUER_SUBJECT_READBACK_REFERENCE>"
+      },
+      "protectedAccessPolicy": {
+        "applicationId": "<CLIENT_PORTAL_ACCESS_APPLICATION_ID>",
+        "policyId": "<CLIENT_PORTAL_ALLOW_POLICY_ID>",
+        "decision": "allow",
+        "bypass": false,
+        "includeSelectors": [{ "type": "group", "id": "<DEDICATED_CLIENT_PORTAL_STAGING_GROUP_ID>" }],
+        "excludeSelectors": [],
+        "requireSelectors": [],
+        "readbackSha256": "<SHA256_OF_CANONICAL_ACCESS_POLICY_READBACK>",
+        "evidenceRef": "<ACCESS_POLICY_READBACK_REFERENCE>"
+      },
+      "testerGroupMembership": {
+        "groupId": "<DEDICATED_CLIENT_PORTAL_STAGING_GROUP_ID>",
+        "issuerSubjectSha256": ["<SHA256_OF_ISSUER_NEWLINE_LOWERCASE_SUBJECT_SHA256>"],
+        "readbackSha256": "<SHA256_OF_CANONICAL_GROUP_MEMBERSHIP_READBACK>",
+        "evidenceRef": "<GROUP_MEMBERSHIP_READBACK_REFERENCE>"
+      },
+      "productionAccess": {
+        "before": {
+          "applicationId": "<PRODUCTION_CLIENT_PORTAL_ACCESS_APPLICATION_ID>",
+          "policyIds": ["<PRODUCTION_CLIENT_PORTAL_ACCESS_POLICY_ID>"],
+          "configSha256": "<PRODUCTION_ACCESS_CONFIG_SHA256>"
+        },
+        "after": {
+          "applicationId": "<PRODUCTION_CLIENT_PORTAL_ACCESS_APPLICATION_ID>",
+          "policyIds": ["<PRODUCTION_CLIENT_PORTAL_ACCESS_POLICY_ID>"],
+          "configSha256": "<PRODUCTION_ACCESS_CONFIG_SHA256>"
+        },
+        "evidenceRef": "<PRODUCTION_ACCESS_BEFORE_AFTER_READBACK_REFERENCE>"
+      }
+    },
     "publicAccess": {
       "applicationName": "Ledge Top Client Public Staging",
       "applicationId": "<CLIENT_PUBLIC_BYPASS_APPLICATION_ID>",
@@ -367,7 +413,10 @@
     },
     "approvalRef": "<APPROVAL_REFERENCE>",
     "tests": {
-      "portalDisabled404": false,
+      "staffSyntheticWorkspaceAccessVerified": false,
+      "clientAdmissionDenied": false,
+      "invitationSendingDenied": false,
+      "automaticEnrollmentDenied": false,
       "invalidAudienceDenied": false,
       "unprovisionedIdentityDenied": false,
       "crossAccountDenied": false,
@@ -529,7 +578,11 @@
         "0221_verified_recipient_delivery_authority.sql",
         "0222_verified_recipient_delivery_cross_manager_revoke.sql",
         "0223_operations_portal_workspace_publications.sql",
-        "0225_operations_portal_workspace_publication_cancellations.sql"
+        "0224_operations_portal_native_recipient_authority.sql",
+        "0225_operations_portal_workspace_publication_cancellations.sql",
+        "0226_operations_portal_native_workspace_cleanup.sql",
+        "0227_operations_portal_native_delivery_authority.sql",
+        "0228_operations_portal_native_content_start_audit.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
@@ -704,7 +757,13 @@
         "0151_verified_recipient_delivery_authority_outbox.sql",
         "0152_operations_portal_workspace_reservations.sql",
         "0153_operations_portal_workspace_publication_outbox.sql",
-        "0155_operations_portal_workspace_publication_cancellations.sql"
+        "0154_operations_portal_native_recipient_authority.sql",
+        "0155_operations_portal_workspace_publication_cancellations.sql",
+        "0156_operations_portal_workspace_publication_invocations.sql",
+        "0157_operations_portal_native_workspace_cleanup.sql",
+        "0158_operations_portal_native_delivery_authority.sql",
+        "0159_operations_portal_native_delivery_recovery_invocations.sql",
+        "0160_operations_portal_native_recipient_labels.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
@@ -742,8 +801,8 @@
           "applyEvidenceRef": "<EVIDENCE_REFERENCE>",
           "readbackEvidenceRef": "<EVIDENCE_REFERENCE>",
           "transformedFiles": ["0002_seed_initial_staff.sql"],
-          "ledgerCount": 143,
-          "finalMigration": "0225_operations_portal_workspace_publication_cancellations.sql",
+          "ledgerCount": 147,
+          "finalMigration": "0228_operations_portal_native_content_start_audit.sql",
           "sourceSeedSha256": "<CANONICAL_SEED_SHA256>",
           "generatedSeedSha256": "<GENERATED_SEED_SHA256>",
           "databaseWasEmpty": false,
@@ -770,8 +829,8 @@
           "applyEvidenceRef": "<EVIDENCE_REFERENCE>",
           "readbackEvidenceRef": "<EVIDENCE_REFERENCE>",
           "transformedFiles": ["0002_seed_acl.sql"],
-          "ledgerCount": 154,
-          "finalMigration": "0155_operations_portal_workspace_publication_cancellations.sql",
+          "ledgerCount": 160,
+          "finalMigration": "0160_operations_portal_native_recipient_labels.sql",
           "sourceSeedSha256": "<CANONICAL_SEED_SHA256>",
           "generatedSeedSha256": "<GENERATED_SEED_SHA256>",
           "databaseWasEmpty": false,
@@ -934,7 +993,6 @@
   },
   "deployments": {
 "delivery": { "versionId": "<IMMUTABLE_STAGING_VERSION_ID>", "releaseCommit": "5ca70d4f5ec834bfddf7bff68ffc1d89c6fd32a7", "configSha256": "<SHA256>", "deployedAt": "<ISO_8601_TIMESTAMP>", "bindingsVerified": false, "healthCheckPassed": false, "hostAdmissionDenied": false, "disabledFeatureFlags": [
-      "CLIENT_PORTAL_ENABLED",
       "CLIENT_PORTAL_CONTENT_AUDIT_ENABLED",
       "CLIENT_PORTAL_REQUEST_V2_ENABLED",
       "CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED",

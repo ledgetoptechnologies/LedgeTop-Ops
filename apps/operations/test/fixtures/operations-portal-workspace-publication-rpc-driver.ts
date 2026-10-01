@@ -4,6 +4,9 @@ import { cancelOperationsPortalWorkspacePublication,
   type OperationsPortalWorkspacePublicationCancellationBinding }
   from "../../src/worker/operations-portal-workspace-publication-cancellations";
 import type { AuthenticatedNativeStaffWithAdmissionVersion } from "../../src/worker/native-staff-auth";
+import { reserveOperationsPortalWorkspacePublicationInvocation,
+  type OperationsPortalWorkspacePublicationInvocationAction }
+  from "../../src/worker/operations-portal-workspace-publication-invocations";
 
 type ClientBinding = OperationsPortalWorkspacePublicationBinding & OperationsPortalWorkspacePublicationCancellationBinding
   & { fetch(request: Request): Promise<Response> };
@@ -14,6 +17,21 @@ const json = (value: unknown, status = 200) => Response.json(value, { status });
 async function note(db: D1Database, kind: string) {
   await db.prepare(`INSERT INTO rpc_publication_test_calls(kind,count) VALUES(?,1)
     ON CONFLICT(kind) DO UPDATE SET count=count+1`).bind(kind).run();
+}
+async function invocation(db: D1Database, operationId: string,
+  action: OperationsPortalWorkspacePublicationInvocationAction) {
+  const row = await db.prepare(`SELECT authorized_by_staff_id staffId,authorized_access_subject accessSubject,
+      authorized_email email,authorized_admission_version admissionVersion,authorized_profile_version profileVersion,
+      authorized_verified_until verifiedUntil FROM operations_portal_workspace_publication_commands WHERE operation_id=?`)
+    .bind(operationId).first<{staffId:string;accessSubject:string;email:string;admissionVersion:number;
+      profileVersion:number;verifiedUntil:string}>();
+  if (!row) throw new Error("missing-test-command");
+  const invocationId = crypto.randomUUID();
+  await reserveOperationsPortalWorkspacePublicationInvocation(db, { identity: { kind: "native", staffId: row.staffId,
+    verifiedAccessSubject: row.accessSubject, email: row.email, displayName: "RPC Publication Owner",
+    profileVersion: row.profileVersion }, admissionVersion: row.admissionVersion, verifiedUntil: row.verifiedUntil },
+  { invocationId, operationId, action, reason: `RPC test ${action} invocation` });
+  return invocationId;
 }
 
 export default {
@@ -42,7 +60,8 @@ export default {
             async getPublicationStatus() { throw new Error("status-not-expected-before-first-attempt"); } }
           : env.CLIENT_PUBLICATION;
       const dispatched = await dispatchOperationsPortalWorkspacePublication({ db: env.OPS_DB,
-        operationId: input.reservation.operationId, binding });
+        operationId: input.reservation.operationId, binding,
+        invocationId: await invocation(env.OPS_DB, input.reservation.operationId, "publish"), action: "publish" });
       const outbox = await env.OPS_DB.prepare(`SELECT state,remote_attempted,last_error_code
         FROM operations_portal_workspace_publication_outbox WHERE operation_id=?`)
         .bind(input.reservation.operationId).first();
@@ -54,7 +73,7 @@ export default {
         await note(env.OPS_DB, "recovery:publish"); return env.CLIENT_PUBLICATION.publishWorkspace(publication);
       }, async getPublicationStatus(publication) {
         await note(env.OPS_DB, "recovery:status"); return env.CLIENT_PUBLICATION.getPublicationStatus(publication);
-      } } }));
+      } }, invocationId: await invocation(env.OPS_DB, input.operationId, "publish"), action: "publish" }));
     if (action === "cancel-discard") {
       const binding: OperationsPortalWorkspacePublicationCancellationBinding = {
         async getPublicationDisposition(publication) { await note(env.OPS_DB, "cancel:disposition");
@@ -66,7 +85,8 @@ export default {
         },
       };
       return json(await cancelOperationsPortalWorkspacePublication({ db: env.OPS_DB,
-        operationId: input.operationId, binding }));
+        operationId: input.operationId, binding,
+        invocationId: await invocation(env.OPS_DB, input.operationId, "cancel") }));
     }
     if (action === "cancel") {
       const binding: OperationsPortalWorkspacePublicationCancellationBinding = {
@@ -76,17 +96,20 @@ export default {
           return env.CLIENT_PUBLICATION.cancelWorkspacePublication(publication); },
       };
       const result = await cancelOperationsPortalWorkspacePublication({ db: env.OPS_DB,
-        operationId: input.operationId, binding });
+        operationId: input.operationId, binding,
+        invocationId: await invocation(env.OPS_DB, input.operationId, "cancel") });
       const outbox = await env.OPS_DB.prepare(`SELECT state,remote_attempted,last_error_code
         FROM operations_portal_workspace_publication_outbox WHERE operation_id=?`).bind(input.operationId).first();
       return json({ result, outbox });
     }
     if (action === "race") {
+      const publishInvocation = await invocation(env.OPS_DB, input.operationId, "publish");
+      const cancelInvocation = await invocation(env.OPS_DB, input.operationId, "cancel");
       const [dispatch, cancellation] = await Promise.allSettled([
         dispatchOperationsPortalWorkspacePublication({ db: env.OPS_DB, operationId: input.operationId,
-          binding: env.CLIENT_PUBLICATION }),
+          binding: env.CLIENT_PUBLICATION, invocationId: publishInvocation, action: "publish" }),
         cancelOperationsPortalWorkspacePublication({ db: env.OPS_DB, operationId: input.operationId,
-          binding: env.CLIENT_PUBLICATION }),
+          binding: env.CLIENT_PUBLICATION, invocationId: cancelInvocation }),
       ]);
       const rejected = (value: PromiseRejectedResult) => ({ error:
         value.reason instanceof Error ? value.reason.message : "rejected" });

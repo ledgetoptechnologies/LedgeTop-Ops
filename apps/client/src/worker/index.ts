@@ -15,6 +15,8 @@ export { ClientAuthorityWorkspaceBindingIngress } from "./client-authority-works
 export { ClientPortalAuthorityV2Ingress } from "./client-portal-authority-v2-entrypoint";
 export { VerifiedRecipientDeliveryAuthorityIngress } from "./verified-recipient-delivery-authority-entrypoint";
 export { OperationsPortalWorkspacePublicationIngress } from "./operations-portal-workspace-publication-entrypoint";
+export { OperationsPortalNativeRecipientAuthorityIngress } from "./operations-portal-native-recipient-authority-entrypoint";
+export { OperationsPortalNativeDeliveryAuthorityIngress } from "./operations-portal-native-delivery-authority-entrypoint";
 import { friendlyBulkFailure } from "./bulk-download-errors";
 import type { Env, ShareRow } from "./types";
 export { BulkDownloadWorkflow } from "./workflow";
@@ -32,7 +34,9 @@ import { listDownloadableObjects, summarizeDownloadableObjects } from "./downloa
 import { listPublicShareLocations, resolvePublicShareLocation } from "./public-locations";
 import { createClientPortalRouter } from "./client-portal/routes";
 import { createOperationsHomeRouter } from "./client-portal/operations-home-routes";
+import { createOperationsNativeDeliveryRouter } from "./client-portal/operations-native-delivery-routes";
 import { handleRecipientEnrollmentHttp } from "./client-portal/recipient-enrollment-http";
+import { handleOperationsNativeRecipientEnrollmentHttp } from "./client-portal/operations-native-recipient-enrollment-http";
 import { acceptRequestAttachmentScanReceipt, cleanupExpiredRequestAttachments, readRequestAttachmentScanReceipt } from "./client-portal/request-attachments";
 import { createClientDelegatedPublicRouter } from "./client-delegated-public";
 import { clientOnboardingRecipientRouter } from "./client-onboarding-recipient";
@@ -1085,6 +1089,9 @@ app.post("/api/internal/client-request-attachments/:attachmentId/scanned", async
 // Mount before legacy PA-backed admission; the independent router still
 // verifies client Access and an exact explicit Operations home permission.
 app.route("/api/client/v2/operations", createOperationsHomeRouter());
+// Native file access verifies the individual Access identity and current
+// authority in both Workers; historical PA admission is not its authority.
+app.route("/api/client/operations/data", createOperationsNativeDeliveryRouter());
 app.all("/api/client/v2/recipient-enrollment/*", c => handleRecipientEnrollmentHttp(c.req.raw, {
   env: c.env,
   enabled: c.env.CLIENT_PORTAL_ENABLED === "true" && c.env.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED === "true",
@@ -1092,6 +1099,16 @@ app.all("/api/client/v2/recipient-enrollment/*", c => handleRecipientEnrollmentH
   origin: c.env.CLIENT_PORTAL_ORIGIN ?? "",
   csrfSecret: c.env.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_CSRF_SECRET ?? "",
   binding: c.env.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_BRIDGE,
+}));
+// Native consent must not pass through historical PA-backed client admission.
+// The handler independently verifies Access identity, CSRF and staging scope.
+app.all("/api/client/operations/recipient-enrollment/*", c => handleOperationsNativeRecipientEnrollmentHttp(c.req.raw, {
+  env: c.env,
+  enabled: c.env.CLIENT_PORTAL_ENABLED === "true" && c.env.CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED === "true",
+  environment: c.env.ENVIRONMENT,
+  origin: c.env.CLIENT_PORTAL_ORIGIN ?? "",
+  csrfSecret: c.env.CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_CSRF_SECRET ?? "",
+  binding: c.env.OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT,
 }));
 app.route("/api/client", createClientPortalRouter({ pricingHintProvider: projectAlphaPricingHintProvider }));
 app.route("/api/client-onboarding", clientOnboardingRecipientRouter);

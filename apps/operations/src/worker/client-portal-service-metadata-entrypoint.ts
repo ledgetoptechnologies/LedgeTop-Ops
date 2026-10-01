@@ -6,7 +6,10 @@ import type { Env } from "./types";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const keys = ["protocolVersion", "authorityId", "workspaceId", "ownershipEpoch", "grantRevision", "issuer", "subject"] as const;
-type MetadataEntrypointEnv = Pick<Env, "OPS_DB"> & { CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED?: string };
+type MetadataEntrypointEnv = Pick<Env, "OPS_DB"> & {
+  CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED?: string;
+  CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED?: string;
+};
 
 export type ClientPortalServiceMetadataEnvelopeV1 = Readonly<{
   ok: boolean; protocolVersion: 1; authorityId: string; workspaceId: string; ownershipEpoch: number;
@@ -43,7 +46,8 @@ export async function readClientPortalServiceMetadataRpc(env: MetadataEntrypoint
   const request = parse(input);
   if (!request) return { ok: false, protocolVersion: 1, code: "invalid_request" };
   if (env.CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED !== "true") return { ok: false, ...echo(request), code: "disabled" };
-  const result = await readClientPortalServiceMetadata(env.OPS_DB, request);
+  const result = await readClientPortalServiceMetadata(env.OPS_DB, request,
+    env.CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED === "true");
   return result.ok ? { ok: true, ...echo(request), services: result.services }
     : { ok: false, ...echo(request), code: result.code };
 }

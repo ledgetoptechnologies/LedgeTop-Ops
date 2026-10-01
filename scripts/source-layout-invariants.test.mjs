@@ -271,8 +271,16 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   // workspace-binding writers, and the non-content enrollment reader remain off.
   // Approved staging-only recipient bridge is present but remains default-off.
   // Reviewed recipient-delivery authority adds only explicit disabled flags.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "5fc6d63b984e4c03fe8e06a57fecc55793ccfe576dbe298a033b470ea66d8198");
+  // Native recipient/data transport flags are explicit and remain disabled;
+  // their staging-only reader binding and audit secret are absent here.
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "b424712ba7d1031b9f7790a5cb69275dcc06d98d3ddcb0d8739161bd8a70bb69");
   const config = readJson("apps/client/wrangler.jsonc");
+  for (const flag of ["CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED",
+    "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_WRITER_ENABLED", "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_STATUS_ENABLED",
+    "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_READ_ENABLED", "CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_ENABLED"])
+    assert.equal(config.vars[flag], "false");
+  assert.equal(config.vars.CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_HMAC_SECRET, undefined);
+  assert.equal(config.services?.find(service => service.binding === "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER"), undefined);
   assert.equal(config.vars.CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_WRITER_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_STATUS_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED, "false");
@@ -401,8 +409,11 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
 });
 
 test("the deployed Operations Worker keeps catalog and inactive binding transport private and default-off", () => {
-  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "0bb2b0680d1acd9eabb6e080e72193dc2c8f8b955448241ef00d97b58f47acfd");
+  // The only reviewed delta here is an explicit disabled native recipient home flag.
+  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "a51b4df46017b857f1c8ec67dbc2f7b8b801cd406c796990445790d2546dab68");
   const config = readJson("apps/operations/wrangler.jsonc");
+  assert.equal(config.vars.CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED, "false");
+  assert.equal(config.services?.find(service => service.binding === "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY"), undefined);
   assert.equal(config.vars.VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_DISPATCH_ENABLED, "false");
   assert.equal(config.services?.find((service) => service.binding === "VERIFIED_RECIPIENT_DELIVERY_AUTHORITY"), undefined);
   assert.equal(config.vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED, "false");

@@ -4,6 +4,176 @@ Updated September 30, 2026. The owner approved implementation and resumption aft
 
 ### Current checkpoint — September 30, 2026 (UTC)
 
+#### Reconciled staging handoff — current worktree
+
+- Current local inventory is Operations 160 SQL files through `0160` and Client
+  147 SQL files through `0228`. The generated migration-only profile deliberately
+  contains only Ops `0152`–`0160` and Client `0223`–`0228`, with deployment
+  fields stripped. Do not describe these local files as remotely applied.
+- Fresh staging facts remain exactly Operations **151 applied migrations through
+  0151** and Client **141 applied migrations through 0222**. Both remote
+  foreign-key checks returned zero. Cloudflare dashboard Time Travel restore
+  points were created before the proposed advance: Ops
+  `00000bd2-00000024-000050f6-268daa8a3e12733024d6ba321beb7786`; Client
+  `00000d57-00000008-000050f6-31acee3d6f0dd714d8370dc42de3d22a`.
+  These are dashboard bookmark/restore points, not exported SQL backups, and no
+  restore is claimed.
+- No `0152`–`0160` or `0223`–`0228` staging migration was applied and no new
+  Worker version was deployed. The configured Wrangler CLI authentication had
+  expired. Dashboard read access did not authorize substituting credentials, so
+  the migration/deployment sequence stopped safely at the baseline.
+- Current-source verification passed Client and Operations TypeScript checks.
+  The focused migration-profile, native route-mount and migration-byte evidence
+  run passed 14 tests with one Windows symlink-capability skip. This confirms
+  the expected suffix, default-off route/configuration invariants and pinned
+  delivery migrations; it is not live staging acceptance. Previously recorded
+  focused populated-D1, HTTP, API, RPC and desktop/mobile profile cohorts remain
+  component evidence only. The broad application test chain was interrupted and
+  is not reported as passing.
+- Verified local implementation now includes default-off native recipient
+  consent and owner-manager boundaries, publication/cancellation, workspace
+  cleanup and recovery, explicit recipient-to-folder delivery authority, Client
+  browsing/content-start audit and display labels. Native routes precede legacy
+  PA admission while public-share paths remain separate. None of this grants
+  access until the exact migrations, private bindings, flags and signed runtime
+  identities are present and current.
+- Independent authorization review found and closed a high-severity
+  sibling-client isolation gap in native folder delivery: an organization-root
+  recipient could otherwise be paired with a project assigned to another
+  client in that same organization. Unreleased migration `0158`, grant
+  issuance, and the live reader now require an exact project-client match, or
+  an explicitly organization-wide project whose organization equals the exact
+  authorized root. Publication revision, workspace/authority identity, command,
+  receipt and snapshot pins are also checked against the current workspace.
+  The populated-D1 regression passed for denied sibling-client access and
+  allowed exact-client/organization-wide controls; focused authority tests
+  passed 20/20, Ops type-check passed, and the migration-profile/evidence cohort
+  passed 11 tests with one Windows symlink-capability skip. The migration's
+  SHA-256 is `034c830a00eab4ac259493e4af36d2eab2ab4f91883278fc1cbf578fffefb35b`.
+  These are local results; the fix is not applied to staging yet.
+- The isolated migration-only profile now has a read-only live-ledger gate
+  using the pinned Wrangler CLI. It requires exact ordered history before
+  applying the expected suffix and fails closed on auth, malformed output or
+  any mismatch; it never applies migrations itself. Profile tests pass 8/8
+  with one Windows symlink-capability skip, and generate/check pass. The live
+  gate has not run because Wrangler CLI authentication is expired.
+- Next action: refresh the intended Wrangler authorization; re-read both exact
+  ledgers/database IDs/foreign-key checks and retain the restore points; generate
+  and check the isolated migration profile; apply Client/Ops suffixes in the
+  reviewed order; verify ledgers/schema; upload and inspect exact default-off
+  versions before deployment. Then run signed positive consent → owner confirm →
+  explicit folder share → browse/preview/range/content-audit acceptance, plus
+  wrong-person/customer/folder isolation, replay, revoke and rollback. Rerun the
+  interrupted broad suite without competing database fixtures. Production PA
+  update, production activation and public-link changes remain separate gates.
+
+Latest independent populated-D1 recovery acceptance passed one integration case
+in 94.86 seconds against current source, superseding the fixture failure below.
+It verifies short-lived original invocation expiry and fresh-manager recovery,
+bounded/idempotent reservation, concurrent one-apply/one-audit semantics, immutable
+IDs/audit and current denial/revocation. Owner browser acceptance independently
+passed all 16 desktop/mobile cases; Ops type-check passed. These are local
+fixtures, not remote enrollment/download acceptance or production release proof.
+
+Latest owner-control verification: root independently passed 33 unit tests across
+the strict owner API parser, closed dispatch response boundary and staging-only
+owner HTTP handler. Root's release/configuration harness again passed 125 tests.
+Target-scoped sharing discovery and final fresh-manager revalidation are present
+in the local draft. The new recovery D1 fixture must be rerun after replacing
+an invalid direct staff-admission update with the canonical transition. Final
+browser verification, useful recipient/folder labels, shared registration,
+staging deployment and live acceptance remain; no new production readiness is
+claimed. The owner reiterated explicit authorization for all staging work.
+
+Latest native folder-access increment (supersedes historical component statuses
+below): combined dashboard/file-browser placement passed an independent 62-case
+desktop/mobile cohort; public-link/transport compatibility passed 32 cases; the
+Client real-D1/audit cohort passed six cases. The actual private Ops reader class
+passed four local Worker RPC boundary cases, including forged inputs and missing
+database proof. Root's current release/configuration/API harness passed 125 cases,
+and Client type-check passed. Ops0158's corrected populated workflow and ordered
+schema chain passed; its tested bytes are now pinned in standard CI. Details and
+limits are in `docs/staging/native-folder-access-implementation.md`.
+
+Owner selected-folder controls and additive Ops0159 current-manager recovery are
+still local drafts. Independent review identified invocation-ID mutation, missing
+latest-command rechecks during claim/retry, and an unclaimed reservation that
+could block fresh-manager recovery after the original actor expires. These must
+be corrected and exercised against real D1 before freezing the recovery migration.
+Shared reader export/environment registration previously hit the approval guard
+and has not been bypassed. New native bytes are not committed, pushed, covered by
+the older candidate CI, deployed or accepted live. The complete goal and owner
+production PA update checkpoint remain pending; component tests are not launch
+acceptance.
+
+Owner authorization update: the owner explicitly approved all necessary staging
+work, clearing the specific native recipient 0154/0224 and current-manager
+invocation guard implementation holds. Implement and test these locally and in
+staging; preserve atomic checks, trusted identity, deny-winning scopes, explicit
+enrollment, cross-client isolation and revocation. This does not authorize
+production deployment, client activation in production or public-link changes.
+Two smaller implementation agents are assigned disjoint authority and invoker
+cohorts; root owns integration and independent release acceptance. Earlier
+unanswered-approval statements below are historical, not the current blocker.
+
+Newest independent-review checkpoint: native browser consent passed 14
+desktop/mobile tests (including the unchanged legacy flow); route parsing passed
+five tests; Client type-check/build passed. Browser API responses were mocked,
+so these are UI/protocol checks, not live grant or folder-access acceptance.
+The current-owner exact-operation recovery HTTP boundary passed 28 tests,
+including revocation and pending recovery; independent HTTP review found no
+safety blocker. First-party manager UI and recovery discoverability after reload
+remain. Ops type-check passed; the prior owner and metadata suites passed 37
+tests together.
+Independent review found two release blockers hidden by earlier component
+results: the Ops authority dispatcher assumed `operation_id` on publication
+snapshots, absent from actual reviewed migration 0153; and confirm/revoke replay
+could be rejected after a lost response entered a transitional state. The native
+implementation agent is repairing both and replacing publication stubs with
+actual-schema tests, including immutable-outbox recovery. No new local bytes
+have been committed, pushed or remotely deployed. The production checkpoint
+remains pending. Earlier draft-syntax evidence below is superseded by this review.
+
+Earlier local integration: separate native Client consent and Ops manager routes
+are mounted before legacy PA admission. Manager issue/review/cancel/confirm/revoke
+use trusted native staff and current exact-target authorization, bounded JSON,
+CSRF, default-off flags and staging enforcement. Root's manager HTTP suite passed
+18 tests, the three source-mount checks passed and Ops type-check passed. The
+recipient agent reports 16 passing Client tests; its joined Ops D1 suite found a
+syntax error in draft 0154's request guard and is repairing it. The invoker agent
+reports passing real-D1 guard (1), publication (3), cancellation (3) and the
+affected two-Worker race (1) suites. Independent joined acceptance is not yet
+complete; none of these new local bytes has been deployed or accepted by CI.
+
+Root integration now explicitly selects native service-home discovery on both
+Client and Ops using the default-off
+`CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED` switch. Native selection
+never falls back to legacy PA-backed recipient authority. Client reader tests:
+18 passed (including missing native schema denial), Client type-check passed;
+Ops metadata/entrypoint tests: 15 passed. These are local component regressions,
+not positive native enrollment acceptance. Configuration/type generation and
+the real grant-to-dashboard/revocation test still need integration verification.
+
+Latest candidate: `ccd85a62c59982d3f456a4cf60dce7f75bce2e03`, pushed to draft
+PR139, not merged/deployed. Exact CI `36708979711` is terminal successful: all
+ten jobs passed. Incoming diagnostics and reviewed compatibility fixtures are
+in this candidate. This is component CI acceptance, not native live recipient
+or production acceptance; later local documentation edits are outside that CI.
+
+Fresh read-only staging baseline now covers both databases. Ops is 151/0151;
+Client is 141/0222. Both exact migration-name prefixes match the candidate's
+corresponding historical prefix. Checked authority domains, current acknowledged
+portal access, PA work in flight and foreign-key violations are zero; Client's
+publication tables remain absent. These checks do not attest deployed SQL bytes
+or replace positive enrollment/data-access acceptance. Configured CLI 7403
+remains a technical rollout issue; native-authority/current-manager approvals
+are cleared by the latest explicit staging authorization.
+No migration, deployment, automatic client activation or public-link change
+followed from this readback. The production PA owner checkpoint is not reached.
+
+Earlier component checkpoints follow; their "current" labels refer only to the
+recorded historical revision and must not override this latest checkpoint.
+
 Current pushed candidate is `311788aa10f29a3bfcddec349f98b5d121452054`
 on draft PR #139, not merged or deployed. Exact CI `36706274796` is terminal
 successful: all ten jobs passed. This applies to the pushed 311788a bytes only,
@@ -9141,3 +9311,81 @@ that as a Worker denial or work around browser protection. No staging binding,
 portal membership, Delivery grant, public-link change, or production PA update
 occurred. Keep flags off pending a reviewed, exact-scope live acceptance window
 and separate real recipient browser acceptance.
+
+## September 30 native-recipient local verification follow-up
+
+- Staging authorization is unrestricted within the agreed staging scope; do
+  not request repeated permission for migrations, configuration or testing.
+  Production authority, public links and the owner PA checkpoint stay separate.
+- Root independently verified 32/32 tests: four actual-0153/0154 D1 authority
+  cases plus 28 current-owner HTTP cases. Repaired publication lineage,
+  immutable wire replay, exact-operation recovery and status-only reconciliation
+  after publication drift pass. No stale new grant is applied.
+- A closed-inventory, ordered empty-schema migration rehearsal passed 1/1:
+  156 Ops and 144 Client migrations, zero foreign-key violations. This does not
+  establish populated historical workflow or live deployment acceptance.
+- Native manager UI review identified and repaired network-rejection handling.
+  Root independently passed five API tests and twelve mocked desktop/mobile
+  browser tests, covering identical retry bodies, CSRF renewal, reload guards
+  and stored-operation recovery. Root's new native-home HTTP-adapter suite and
+  existing home routes passed 12/12, with Client type-check passing. These
+  adapter/browser tests do not substitute for live signed-identity acceptance.
+- Next bounded cohort: workspace-wide revoke only after recipient cleanup, plus
+  owner-authorized cleanup from immutable historical pins after topology drift.
+  Explicit recipient-to-folder grants and actual file-reader acceptance follow.
+- No new commit, push, remote migration, deployment, production PA update,
+  client activation or public-link mutation is claimed by this checkpoint.
+
+### Workspace cleanup and file-access follow-up
+
+- Owner HTTP now exposes staging-only exact workspace read, revoke and recovery
+  actions. Root's boundary suite passed 41/41 and both application type-checks
+  passed independently. Recovery matches the stored operation and resulting
+  ownership epoch; an active workspace cannot be recovered as an old revoke.
+- Real 0157/0226 cleanup migration/workflow tests are separate and still pending.
+  Root review requires frozen replay to survive renewed staff authentication and
+  recipient cleanup to remain possible after target/customer relationship drift.
+  Current-authority checks must remain mandatory without recreating stale grants.
+- The folder audit confirms service-home and topology snapshots do not authorize
+  bytes. See `docs/staging/native-folder-access-implementation.md` for the exact
+  independent per-recipient folder grant and storage-adapter requirements.
+
+### September 30 staging gate and bundle reconciliation
+
+- The local Operations and Client staging Wrangler configs were reconciled to
+  the reviewed native-authority acceptance contract: dedicated staging
+  Operations entrypoint, exact service bindings/asset routes, and explicit
+  staging-only recipient/delivery flags. The obsolete, unreviewed
+  `CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED` field was removed.
+  These configs are local ignored staging files; this does not represent a
+  deployment or a production change.
+- `npm run staging:check` passes with no remote action. The staging preflight
+  suite passes 27/27. Native migration profile tests pass 8 with 1 Windows
+  symlink-capability skip; profile `--check` passes. Bootstrap tests pass 19
+  with 4 Windows symlink-capability skips. After reconciling release inventory
+  fixtures and disabled-flag evidence, the full staging-evidence suite passes
+  37/37. Inventory now binds the complete Client 147-file chain through 0228
+  and Operations 160-file chain through 0160; current Ops0158 digest is
+  `034c830a00eab4ac259493e4af36d2eab2ab4f91883278fc1cbf578fffefb35b`.
+- Client and Operations type checks pass. Both application builds pass; Vite
+  reports oversized client chunks (including the existing map/editor bundles),
+  which is a performance follow-up rather than a build failure. Both staging
+  Wrangler `deploy --dry-run --config wrangler.staging.json` bundle checks pass;
+  the Operations container image was built locally only. No Worker was
+  deployed.
+- The full Client Vitest suite is still running serially under session 80477;
+  its final result is not yet known and must not be represented as passing.
+  Focused local authority/UI checks remain useful evidence but do not replace
+  this suite or live staging acceptance.
+- Wrangler's local CLI credentials remain expired. No current remote ledger
+  gate, D1 migration, backup/export, secret update, or staging deployment has
+  occurred. The last known live baseline remains Ops 0151 and Client 0222, but
+  that historical readback must be refreshed with the read-only exact-ledger
+  gates immediately before any apply.
+- Safe next order after CLI reauthorization: current exact live ledger gates;
+  fresh staging recovery evidence; apply only additive Ops0152-0160 and
+  Client0223-0228 suffixes with runtime flags off; post-apply exact ledgers and
+  foreign-key checks; deploy/test Client reader before Operations issuer; then
+  enable the reviewed staging acceptance flags and exercise signed recipient
+  enrollment, selected-folder browse/download, denial and revocation. Do not
+  deploy production PA or alter existing public links at this step.

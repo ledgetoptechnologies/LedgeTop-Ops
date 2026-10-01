@@ -11,7 +11,7 @@ export interface OperationsNativeRecipientEnrollmentBinding {
   inspectNativeEnrollment(input: { protocolVersion: 1; intentId: string; opaqueToken: string }): Promise<unknown>;
   redeemNativeEnrollment(input: { protocolVersion: 1; intentId: string; opaqueToken: string; operationId: string;
     acknowledged: true; acknowledgedTarget: NativeRecipientConsentTarget;
-    principal: { issuer: string; subject: string }; verifiedUntil: string }): Promise<unknown>;
+    principal: { issuer: string; subject: string }; recipientLabel: string; verifiedUntil: string }): Promise<unknown>;
 }
 export interface OperationsNativeRecipientEnrollmentHttpDependencies {
   env: Env; enabled: boolean; environment: string; origin: string; csrfSecret: string;
@@ -32,6 +32,19 @@ function opaque(input: unknown, maximum = 191): input is string {
   if (typeof input !== "string" || !input || Array.from(input).length > maximum || /\p{C}/u.test(input)) return false;
   const bytes = new TextEncoder().encode(input);
   return bytes.byteLength <= maximum * 4 && new TextDecoder("utf-8", { fatal: true }).decode(bytes) === input;
+}
+function accessAssertedRecipientLabel(email: string): string | null {
+  if (!opaque(email, 320) || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(email)) return null;
+  const characters = Array.from(email.toLowerCase());
+  if (characters.length <= 160) return characters.join("");
+  const separator = email.lastIndexOf("@");
+  const domain = separator > 0 ? `@${email.slice(separator + 1).toLowerCase()}` : "";
+  const domainCharacters = Array.from(domain);
+  if (domainCharacters.length < 120) {
+    const local = Array.from(email.slice(0, separator).toLowerCase());
+    return `${local.slice(0, 159 - domainCharacters.length).join("")}…${domain}`;
+  }
+  return `${characters.slice(0, 159).join("")}…`;
 }
 function instant(input: unknown): input is string {
   if (typeof input !== "string" || input.length !== 24) return false;
@@ -93,6 +106,12 @@ async function boundedRpc(call: () => Promise<unknown>): Promise<unknown> {
     timer = setTimeout(() => reject(Error("transport")), 1500);
   })]); } finally { if (timer !== undefined) clearTimeout(timer); }
 }
+function canonicalRpc(input: unknown, keys: readonly string[]): Record<string, unknown> | null {
+  if (typeof input !== "string" || new TextEncoder().encode(input).byteLength > 4096) return null;
+  let parsed: unknown;
+  try { parsed = JSON.parse(input); } catch { return null; }
+  return JSON.stringify(parsed) === input ? exact(parsed, keys) : null;
+}
 
 /** Separately named native consent path: never translates a native target into
  * a PA selection. Consent becomes pending review, not home or file access. */
@@ -132,7 +151,7 @@ export async function handleOperationsNativeRecipientEnrollmentHttp(request: Req
       || typeof input.opaqueToken !== "string" || !TOKEN.test(input.opaqueToken)) return response({ error: "Invalid request" }, 400);
     if (!fresh()) return response({ error: "Sign-in required" }, 401);
     if (inspect) {
-      const result = exact(await boundedRpc(() => dependencies.binding!.inspectNativeEnrollment({ protocolVersion: 1,
+      const result = canonicalRpc(await boundedRpc(() => dependencies.binding!.inspectNativeEnrollment({ protocolVersion: 1,
         intentId: input.intentId as string, opaqueToken: input.opaqueToken as string })), ["intentId", "revision", "state", "target", "expiresAt"]);
       if (!fresh()) return response({ error: "Sign-in required" }, 401);
       const selected = result && exact(result.target, ["targetId", "targetRevision", "clientRecordId", "displayLabel"]);
@@ -147,10 +166,13 @@ export async function handleOperationsNativeRecipientEnrollmentHttp(request: Req
     const selected = target(input.acknowledgedTarget);
     if (!selected || input.acknowledged !== true || typeof input.operationId !== "string" || !UUID.test(input.operationId))
       return response({ error: "Invalid request" }, 400);
+    const recipientLabel = accessAssertedRecipientLabel(verified.principal.email);
+    if (!recipientLabel) return response({ error: "Enrollment is unavailable" }, 403);
     const intentId = input.intentId, opaqueToken = input.opaqueToken, operationId = input.operationId;
-    const result = exact(await boundedRpc(() => dependencies.binding!.redeemNativeEnrollment({ protocolVersion: 1,
+    const result = canonicalRpc(await boundedRpc(() => dependencies.binding!.redeemNativeEnrollment({ protocolVersion: 1,
       intentId, opaqueToken, operationId, acknowledged: true, acknowledgedTarget: selected,
-      principal: { issuer: verified.principal.issuer, subject: verified.principal.subject }, verifiedUntil: verified.verifiedUntil })),
+      principal: { issuer: verified.principal.issuer, subject: verified.principal.subject }, recipientLabel,
+      verifiedUntil: verified.verifiedUntil })),
       ["intentId", "revision", "state"]);
     if (!fresh()) return response({ error: "Sign-in required" }, 401);
     return result?.intentId === intentId && result.revision === 2 && result.state === "pending"

@@ -1,17 +1,20 @@
 import { useEffect, useRef, useState } from "react";
 
 type State = "opening" | "ready" | "submitting" | "uncertain" | "submitted" | "retryable" | "unavailable";
-type Target = Readonly<{ clientRecordId: string; selectionId: string; displayLabel: string }>;
-const BASE = "/api/client/v2/recipient-enrollment";
+type Protocol = "legacy" | "operations-native";
+type Target = Readonly<{ clientRecordId: string; displayLabel: string }> &
+  (Readonly<{ selectionId: string }> | Readonly<{ targetId: string; targetRevision: number }>);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const CSRF = /^\d{1,12}\.[0-9a-f]{64}$/;
 
 class RequestFailure extends Error {
   constructor(readonly uncertain: boolean) { super(uncertain ? "uncertain" : "unavailable"); }
 }
-async function request(path: string, init: RequestInit = {}): Promise<unknown> {
-  const response = await fetch(`${BASE}${path}`, { ...init, credentials: "same-origin",
-    headers: { "X-Recipient-Enrollment-Request": "1", ...init.headers } });
+async function request(protocol: Protocol, path: string, init: RequestInit = {}): Promise<unknown> {
+  const base = protocol === "operations-native" ? "/api/client/operations/recipient-enrollment" : "/api/client/v2/recipient-enrollment";
+  const requestHeader = protocol === "operations-native" ? "X-Operations-Enrollment-Request" : "X-Recipient-Enrollment-Request";
+  const response = await fetch(`${base}${path}`, { ...init, credentials: "same-origin",
+    headers: { [requestHeader]: "1", ...init.headers } });
   if (!response.ok) throw new RequestFailure(response.status >= 500 || response.status === 429);
   try { return await response.json(); } catch { throw new RequestFailure(true); }
 }
@@ -24,14 +27,21 @@ function session(value: unknown): string | null {
   const parsed = ownRecord(value, ["csrfToken"]);
   return parsed && typeof parsed.csrfToken === "string" && CSRF.test(parsed.csrfToken) ? parsed.csrfToken : null;
 }
-function inspected(value: unknown, intentId: string): Target | null {
+function inspected(value: unknown, intentId: string, protocol: Protocol): Target | null {
   const parsed = ownRecord(value, ["intentId", "revision", "state", "target", "expiresAt"]);
-  const target = parsed && ownRecord(parsed.target, ["clientRecordId", "selectionId", "displayLabel"]);
+  const target = parsed && ownRecord(parsed.target, protocol === "operations-native"
+    ? ["clientRecordId", "targetId", "targetRevision", "displayLabel"] : ["clientRecordId", "selectionId", "displayLabel"]);
   if (!parsed || parsed.intentId !== intentId || parsed.revision !== 1 || parsed.state !== "issued"
     || typeof parsed.expiresAt !== "string" || !Number.isFinite(Date.parse(parsed.expiresAt)) || Date.parse(parsed.expiresAt) <= Date.now()
     || !target || typeof target.clientRecordId !== "string" || !target.clientRecordId || target.clientRecordId.length > 200
-    || typeof target.selectionId !== "string" || !UUID.test(target.selectionId)
     || typeof target.displayLabel !== "string" || !target.displayLabel || target.displayLabel.length > 300) return null;
+  if (protocol === "operations-native") {
+    if (typeof target.targetId !== "string" || !UUID.test(target.targetId) || typeof target.targetRevision !== "number"
+      || !Number.isSafeInteger(target.targetRevision) || target.targetRevision < 1) return null;
+    return { clientRecordId: target.clientRecordId, targetId: target.targetId,
+      targetRevision: target.targetRevision, displayLabel: target.displayLabel };
+  }
+  if (typeof target.selectionId !== "string" || !UUID.test(target.selectionId)) return null;
   return { clientRecordId: target.clientRecordId, selectionId: target.selectionId, displayLabel: target.displayLabel };
 }
 function redeemed(value: unknown, intentId: string): boolean {
@@ -39,7 +49,9 @@ function redeemed(value: unknown, intentId: string): boolean {
   return Boolean(parsed && parsed.intentId === intentId && parsed.revision === 2 && parsed.state === "pending");
 }
 
-export function ClientPortalRecipientEnrollmentApp({ intentId, opaqueToken }: { intentId: string; opaqueToken: string }) {
+export function ClientPortalRecipientEnrollmentApp({ intentId, opaqueToken, protocol = "legacy" }: {
+  intentId: string; opaqueToken: string; protocol?: Protocol;
+}) {
   const [state, setState] = useState<State>(intentId && opaqueToken ? "opening" : "unavailable");
   const [target, setTarget] = useState<Target | null>(null);
   const [acknowledged, setAcknowledged] = useState(false);
@@ -53,12 +65,12 @@ export function ClientPortalRecipientEnrollmentApp({ intentId, opaqueToken }: { 
     setState("opening");
     const work = (async () => {
       try {
-        const token = session(await request("/session"));
+        const token = session(await request(protocol, "/session"));
         if (!token) throw new RequestFailure(true);
         csrf.current = token;
-        const reviewed = inspected(await request("/inspect", { method: "POST",
+        const reviewed = inspected(await request(protocol, "/inspect", { method: "POST",
           headers: { "Content-Type": "application/json", "X-CSRF-Token": token },
-          body: JSON.stringify({ intentId, opaqueToken }) }), intentId);
+          body: JSON.stringify({ intentId, opaqueToken }) }), intentId, protocol);
         if (!reviewed) throw new RequestFailure(false);
         setTarget(reviewed);
         setState("ready");
@@ -69,7 +81,7 @@ export function ClientPortalRecipientEnrollmentApp({ intentId, opaqueToken }: { 
     opening.current = work;
     return work;
   };
-  useEffect(() => { if (intentId && opaqueToken) void open(); }, [intentId, opaqueToken]);
+  useEffect(() => { if (intentId && opaqueToken) void open(); }, [intentId, opaqueToken, protocol]);
 
   const confirm = async (refreshSession = false) => {
     if (!target || !acknowledged || submitting.current || !csrf.current) return;
@@ -78,14 +90,16 @@ export function ClientPortalRecipientEnrollmentApp({ intentId, opaqueToken }: { 
     setState("submitting");
     try {
       if (refreshSession) {
-        const renewed = session(await request("/session"));
+        const renewed = session(await request(protocol, "/session"));
         if (!renewed) throw new RequestFailure(true);
         csrf.current = renewed;
       }
-      const result = await request("/redeem", { method: "POST",
+      const result = await request(protocol, "/redeem", { method: "POST",
         headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf.current },
         body: JSON.stringify({ intentId, opaqueToken, operationId: operationId.current, acknowledged: true,
-          acknowledgedTarget: { clientRecordId: target.clientRecordId, selectionId: target.selectionId } }) });
+          acknowledgedTarget: "targetId" in target
+            ? { targetId: target.targetId, targetRevision: target.targetRevision, clientRecordId: target.clientRecordId }
+            : { clientRecordId: target.clientRecordId, selectionId: target.selectionId } }) });
       setState(redeemed(result, intentId) ? "submitted" : "unavailable");
     } catch (error) {
       setState(error instanceof RequestFailure && error.uncertain ? "uncertain" : "unavailable");

@@ -2,6 +2,7 @@ import { CLIENT_PORTAL_SERVICE_METADATA_MAX_RESPONSE_BYTES,
   type ClientPortalServiceMetadataRequestV1, type ClientPortalServiceMetadataV1 } from "../../../../../packages/shared/src/client-portal-service-metadata";
 import type { Env } from "../types";
 import type { VerifiedClientPrincipal } from "./types";
+import { readNativeOperationsPortalHomes } from "./operations-native-recipient-read";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const TIMEOUT_MS = 1_500;
@@ -14,6 +15,7 @@ export interface OperationsServiceMetadataBinding {
 }
 export type OperationsServiceHomeEnv = Pick<Env, "DELIVERY_DB"> & {
   CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED?: string;
+  CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED?: string;
   CLIENT_PORTAL_SERVICE_METADATA_READER?: OperationsServiceMetadataBinding;
 };
 export type OperationsServiceHomeResult = Readonly<{ ok: true; authorityId: string; workspaceId: string;
@@ -31,6 +33,15 @@ async function currentAuthorities(env: OperationsServiceHomeEnv, principal: Pick
   authorityId?: string): Promise<AuthorityRow[] | null> {
   if ((authorityId !== undefined && !UUID.test(authorityId)) || principal.issuer.length < 1 || principal.issuer.length > 512 || principal.issuer.trim() !== principal.issuer
     || principal.subject.length < 1 || principal.subject.length > 512 || principal.subject.trim() !== principal.subject) return [];
+  // Select one authority protocol explicitly. A missing native grant or schema
+  // must never fall back to a historical PA-backed recipient grant.
+  if (env.CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED === "true") {
+    const homes = await readNativeOperationsPortalHomes(env.DELIVERY_DB, principal, true);
+    if (homes === null) return null;
+    return homes.filter(home => authorityId === undefined || home.authorityId === authorityId)
+      .map(home => ({ authority_id: home.authorityId, workspace_id: home.workspaceId,
+        ownership_epoch: home.ownershipEpoch, grant_revision: home.grantRevision }));
+  }
   try {
     const db = env.DELIVERY_DB.withSession?.("first-primary") ?? env.DELIVERY_DB;
     const result = await db.prepare(`SELECT binding.client_authority_id authority_id,binding.workspace_id,

@@ -233,6 +233,14 @@ describe("Operations service home against explicit permission ledger", () => {
     await expect(readOperationsServiceHomes(realEnv(read), principal)).resolves.toEqual({ ok: false, code: "denied" });
   });
 
+  it("does not use a historical grant when native discovery is selected but its migration is absent", async () => {
+    const read = vi.fn(async () => response({ grantRevision: 1 }));
+    const selected = { ...realEnv(read), CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED: "true" };
+    await expect(readOperationsServiceHomes(selected, principal)).resolves.toEqual({ ok: false, code: "unavailable" });
+    await expect(readOperationsServiceHome(selected, principal, authorityId)).resolves.toEqual({ ok: false, code: "denied" });
+    expect(read).not.toHaveBeenCalled();
+  });
+
   it("removes home permission without revoking the inert enrollment", async () => {
     await writeClientPortalAuthorityV3(writerEnv(), homeGrant("remove-two", 1, false));
     expect(await db.prepare("SELECT state FROM portal_operations_principal_grant_heads").first("state")).toBe("active");
