@@ -5,7 +5,7 @@
     "remoteRef": "<REMOTE_REF_CONTAINING_RELEASE_COMMIT>",
     "verifiedAt": "<ISO_8601_TIMESTAMP>",
     "evidenceRef": "<EVIDENCE_REFERENCE>",
-    "runtimeCandidateCommit": "5ca70d4f5ec834bfddf7bff68ffc1d89c6fd32a7",
+    "runtimeCandidateCommit": "PENDING_OPERATIONS_COMMIT",
     "runtimeCandidatePushed": false,
     "runtimeEvidenceRef": "<EVIDENCE_REFERENCE>"
   },
@@ -763,7 +763,10 @@
         "0157_operations_portal_native_workspace_cleanup.sql",
         "0158_operations_portal_native_delivery_authority.sql",
         "0159_operations_portal_native_delivery_recovery_invocations.sql",
-        "0160_operations_portal_native_recipient_labels.sql"
+        "0160_operations_portal_native_recipient_labels.sql",
+        "0161_project_alpha_api_v2_inventory_observations.sql",
+        "0162_project_alpha_directory_read_adoption_claims.sql",
+        "0163_project_alpha_directory_read_adoption_field_review_receipts.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
@@ -829,8 +832,8 @@
           "applyEvidenceRef": "<EVIDENCE_REFERENCE>",
           "readbackEvidenceRef": "<EVIDENCE_REFERENCE>",
           "transformedFiles": ["0002_seed_acl.sql"],
-          "ledgerCount": 160,
-          "finalMigration": "0160_operations_portal_native_recipient_labels.sql",
+          "ledgerCount": 163,
+          "finalMigration": "0163_project_alpha_directory_read_adoption_field_review_receipts.sql",
           "sourceSeedSha256": "<CANONICAL_SEED_SHA256>",
           "generatedSeedSha256": "<GENERATED_SEED_SHA256>",
           "databaseWasEmpty": false,
@@ -1029,16 +1032,19 @@
       "CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED",
       "CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED",
       "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED",
+      "CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED",
         "CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_WRITER_ENABLED",
         "CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_STATUS_ENABLED",
       "CLOUD_TRANSFER_DROPBOX_ENABLED",
       "CLOUD_TRANSFER_GOOGLE_ENABLED",
       "CLOUD_TRANSFER_GOOGLE_PICKER_CLIENT_ENABLED"
     ], "evidenceRef": "<EVIDENCE_REFERENCE>" },
-    "operations": { "versionId": "<IMMUTABLE_STAGING_VERSION_ID>", "releaseCommit": "5ca70d4f5ec834bfddf7bff68ffc1d89c6fd32a7", "configSha256": "<SHA256>", "deployedAt": "<ISO_8601_TIMESTAMP>", "bindingsVerified": false, "healthCheckPassed": false, "hostAdmissionDenied": false, "disabledFeatureFlags": [
+    "operations": { "versionId": "<IMMUTABLE_STAGING_VERSION_ID>", "releaseCommit": "PENDING_OPERATIONS_COMMIT", "configSha256": "<SHA256>", "deployedAt": "<ISO_8601_TIMESTAMP>", "bindingsVerified": false, "healthCheckPassed": false, "hostAdmissionDenied": false, "disabledFeatureFlags": [
       "NATIVE_INTEGRATION_CONTROL_ENABLED",
       "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED",
       "PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED",
+      "PROJECT_ALPHA_API_V2_SYNC_ENABLED",
+      "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED",
       "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED",
       "PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED",
       "PROJECT_ALPHA_DELIVERY_GUEST_ENABLED",
@@ -1050,6 +1056,7 @@
       "CLIENT_PORTAL_AUTHORITY_V2_OUTBOX_ENABLED",
       "CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED",
       "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED",
+      "CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED",
         "VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_DISPATCH_ENABLED",
       "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ENABLED",
       "CLIENT_HUB_PA_CONTACT_ASSIGNMENTS_ENABLED",
@@ -1069,6 +1076,7 @@
       "VIEWER_INTEGRATION_ENABLED",
       "VIEWER_PROCESSING_ENABLED",
       "VIEWER_PUBLIC_SHARES_ENABLED",
+      "VIEWER_WORKSPACE_RENEWAL_CORS_ENABLED",
       "CLIENT_VIEWER_SESSION_ISSUER_ENABLED",
       "CLIENT_VIEWER_SHARES_ENABLED",
       "DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED",
@@ -1077,7 +1085,7 @@
       "DROPBOX_IMPORT_ENABLED",
       "R2_PURGE_ENABLED"
     ], "evidenceRef": "<EVIDENCE_REFERENCE>" },
-    "ops-sync": { "versionId": "<IMMUTABLE_STAGING_VERSION_ID>", "releaseCommit": "5ca70d4f5ec834bfddf7bff68ffc1d89c6fd32a7", "configSha256": "<SHA256>", "deployedAt": "<ISO_8601_TIMESTAMP>", "bindingsVerified": false, "healthCheckPassed": false, "hostAdmissionDenied": false, "disabledFeatureFlags": [], "evidenceRef": "<EVIDENCE_REFERENCE>" }
+    "ops-sync": { "versionId": "<IMMUTABLE_STAGING_VERSION_ID>", "releaseCommit": "PENDING_OPERATIONS_COMMIT", "configSha256": "<SHA256>", "deployedAt": "<ISO_8601_TIMESTAMP>", "bindingsVerified": false, "healthCheckPassed": false, "hostAdmissionDenied": false, "disabledFeatureFlags": [], "evidenceRef": "<EVIDENCE_REFERENCE>" }
   },
   "infrastructure": {
     "remoteInventoryVerified": false,

@@ -11,12 +11,9 @@ export const STAGING_PROJECT_ALPHA_ORIGIN = "https://pa-staging.ledgetoptechnolo
 // independent cross-repository gate; reset it before changing any pin.
 export const RELEASE_CONTRACT_FINALIZED = false;
 export const RELEASE_CANDIDATES = Object.freeze({
-  // Runtime changes end here. Commits after this boundary only make the
-  // contract/CI verification portable and must not silently move the runtime pin.
-  // The executable boundary is the reviewed Access-authenticated PA API-v2
-  // secret-envelope commit. The following contract-only commit pins it
-  // without making the release-packet HEAD self-referential.
-  operations: "5ca70d4f5ec834bfddf7bff68ffc1d89c6fd32a7",
+  // The API-v2 sync/read-adoption branch is intentionally unpinned until its
+  // reviewed runtime files and migrations are committed and pushed.
+  operations: "PENDING_OPERATIONS_COMMIT",
   viewer: "32cece808289a942ce902797535ccff6e24763e3",
   projectAlpha: "31deb85b87b95de27dc9e90a5591e036ae96709e",
 });
@@ -456,7 +453,22 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0158_operations_portal_native_delivery_authority.sql",
     "0159_operations_portal_native_delivery_recovery_invocations.sql",
     "0160_operations_portal_native_recipient_labels.sql",
+    "0161_project_alpha_api_v2_inventory_observations.sql",
+    "0162_project_alpha_directory_read_adoption_claims.sql",
+    "0163_project_alpha_directory_read_adoption_field_review_receipts.sql",
+    "0164_project_alpha_directory_read_adoption_authority_recheck.sql",
   ]),
+});
+
+export const REQUIRED_STAGING_MIGRATION_SHA256 = Object.freeze({
+  operations: Object.freeze({
+    "0123_native_directory_authority_history.sql": "5e36893c738c6a058271db521e4c5e8907009f135c25ee635f2f1ec709b3caf5",
+    "0124_project_alpha_project_adoption_review_evidence.sql": "b35a14babab1e10caf5420fe8d1209a81009b5bd55cfcb0361a4a3085c503a05",
+    "0161_project_alpha_api_v2_inventory_observations.sql": "1b6fbb3b3ce8b50dbb553fd38ec8544c25f88a2837d8523b5ddeb0494534bd45",
+    "0162_project_alpha_directory_read_adoption_claims.sql": "4bd97d25bd96a0a872bd3106ab936ab3fe1806b7456aec6cf02c92195715d1b0",
+    "0163_project_alpha_directory_read_adoption_field_review_receipts.sql": "ef4abf5411e8fd4e10d4daeb94dd4ca3469ae7d179d2b135a9d04ca4a0cf12aa",
+    "0164_project_alpha_directory_read_adoption_authority_recheck.sql": "e54cf701bf8943f13223b998b8c4e8209232762c86834b1e7a384b8775ddb5a4",
+  }),
 });
 
 // Every additive capability must be present and false in a release-preparation
@@ -511,6 +523,8 @@ export const REQUIRED_DISABLED_FEATURE_FLAGS = Object.freeze({
     "NATIVE_INTEGRATION_CONTROL_ENABLED",
     "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED",
     "PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED",
+    "PROJECT_ALPHA_API_V2_SYNC_ENABLED",
+    "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED",
     "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED",
     "PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED",
     "PROJECT_ALPHA_DELIVERY_GUEST_ENABLED",
@@ -542,6 +556,7 @@ export const REQUIRED_DISABLED_FEATURE_FLAGS = Object.freeze({
     "VIEWER_INTEGRATION_ENABLED",
     "VIEWER_PROCESSING_ENABLED",
     "VIEWER_PUBLIC_SHARES_ENABLED",
+    "VIEWER_WORKSPACE_RENEWAL_CORS_ENABLED",
     "CLIENT_VIEWER_SESSION_ISSUER_ENABLED",
     "CLIENT_VIEWER_SHARES_ENABLED",
     "DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED",
@@ -729,6 +744,8 @@ export const FEATURE_FLAG_ACTIVATION_POLICIES = Object.freeze({
     NATIVE_INTEGRATION_CONTROL_ENABLED: Object.freeze({ prohibitedReason: "Native integration control requires a separately approved native-authority and origin-bound activation packet" }),
     PROJECT_ALPHA_DRAFT_QUOTES_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaDraftQuotes", "projectAlphaCatalogProjection"]) }),
     PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED: Object.freeze({ prohibitedReason: "Project Alpha catalog promotion coordination requires separately approved source-of-truth, reconciliation, and staging acceptance evidence" }),
+    PROJECT_ALPHA_API_V2_SYNC_ENABLED: Object.freeze({ prohibitedReason: "API-v2 inventory sync requires migrations 0161-0163, a reviewed staging-only connection envelope, and a separately approved bounded activation packet" }),
+    PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED: Object.freeze({ prohibitedReason: "Exact Directory read adoption requires migrations 0161-0163, current native Directory authority, and a separately approved staging-only review window" }),
     PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED: Object.freeze({ prohibitedReason: "Project-v2 activation is limited to a separately approved, manually invoked joined staging window with remote migration 0122, native project authority, rollback, and public-link preservation evidence" }),
     PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED: Object.freeze({ prohibitedReason: "Project Alpha managed delivery requires migration 0069/0147/0031 and an independently approved end-to-end intent, notification, and revocation activation window" }),
     PROJECT_ALPHA_DELIVERY_GUEST_ENABLED: Object.freeze({ prohibitedReason: "Guest delivery remains explicit-only and requires a separate public-bearer notification and revocation approval after the portal intent path is proven" }),
@@ -759,6 +776,7 @@ export const FEATURE_FLAG_ACTIVATION_POLICIES = Object.freeze({
     CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED: Object.freeze({ prohibitedReason: "Automatic Project Alpha email eligibility requires explicit opt-out onboarding approval and paired Client enforcement" }),
     VIEWER_INTEGRATION_ENABLED: Object.freeze({ gates: Object.freeze(["viewerDeployment", "viewerServiceContract"]), stagingGates: Object.freeze(["viewerDeployment"]) }),
     VIEWER_PROCESSING_ENABLED: Object.freeze({ gates: Object.freeze(["viewerDeployment", "viewerServiceContract", "viewerProcessing"]), stagingGates: Object.freeze(["viewerDeployment", "viewerServiceContract"]) }),
+    VIEWER_WORKSPACE_RENEWAL_CORS_ENABLED: Object.freeze({ gates: Object.freeze(["viewerDeployment", "viewerServiceContract", "viewerProcessing"]), stagingGates: Object.freeze(["viewerDeployment", "viewerServiceContract"]) }),
     VIEWER_PUBLIC_SHARES_ENABLED: Object.freeze({ gates: Object.freeze(["viewerDeployment", "viewerPublicShares"]), stagingGates: Object.freeze(["viewerDeployment"]) }),
     CLIENT_VIEWER_SESSION_ISSUER_ENABLED: Object.freeze({ gates: Object.freeze(["viewerDeployment", "viewerServiceContract", "viewerClientSessions"]), stagingGates: Object.freeze(["viewerDeployment", "viewerServiceContract"]) }),
     CLIENT_VIEWER_SHARES_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaPortalProjection", "viewerDeployment", "viewerPublicShares", "viewerClientShares"]), stagingGates: Object.freeze(["viewerDeployment", "viewerServiceContract"]) }),
@@ -794,6 +812,7 @@ export const FEATURE_FLAG_DEPENDENCY_WINDOWS = Object.freeze({
     requestedFlags: Object.freeze([
       "operations.VIEWER_INTEGRATION_ENABLED",
       "operations.VIEWER_PROCESSING_ENABLED",
+      "operations.VIEWER_WORKSPACE_RENEWAL_CORS_ENABLED",
     ]),
     requiresViewerProcessingPlatform: true,
     requiresViewerWorkerProfile: true,
@@ -923,6 +942,8 @@ export const STAGING_STATIC_VARS = Object.freeze({
     PROJECT_ALPHA_DRAFT_QUOTES_ENABLED: "false",
     PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED: "false",
     PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED: "false",
+    PROJECT_ALPHA_API_V2_SYNC_ENABLED: "false",
+    PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED: "false",
     PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED: "false",
     PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ENABLED: "false",
     PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED: "false",
@@ -966,6 +987,7 @@ export const STAGING_STATIC_VARS = Object.freeze({
     VIEWER_INTEGRATION_ENABLED: "false",
     VIEWER_PROCESSING_ENABLED: "false",
     VIEWER_PUBLIC_SHARES_ENABLED: "false",
+    VIEWER_WORKSPACE_RENEWAL_CORS_ENABLED: "false",
     VIEWER_BASE_URL: "https://viewer-staging.ledgetopdroneservices.com",
     VIEWER_SERVICE_KEY_ID: "ops-staging-v1",
     VIEWER_EVENT_KEY_ID: "viewer-staging-v1",
@@ -1036,7 +1058,7 @@ export const STAGING_ALLOWED_VAR_NAMES = Object.freeze({
     "ENVIRONMENT", "TEAM_DOMAIN", "OPERATIONS_AUD",
     "NATIVE_INTEGRATION_CONTROL_ENABLED", "NATIVE_INTEGRATION_CONTROL_ORIGIN",
     "DELIVERY_BASE_URL", "CLIENT_PORTAL_ORIGINS", "PUBLIC_SHARE_ORIGIN",
-    "PROJECT_ALPHA_BASE_URL", "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED", "PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED", "PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED", "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED",
+    "PROJECT_ALPHA_BASE_URL", "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED", "PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED", "PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED", "PROJECT_ALPHA_API_V2_SYNC_ENABLED", "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED", "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED",
     "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ENABLED", "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_SOURCE_ID", "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ORIGIN",
     "PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED", "PROJECT_ALPHA_DELIVERY_GUEST_ENABLED",
     "CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED", "CLIENT_PORTAL_NATIVE_RECIPIENT_OWNER_ENABLED",
@@ -1056,7 +1078,7 @@ export const STAGING_ALLOWED_VAR_NAMES = Object.freeze({
     "AUTHENTICATED_DELIVERY_GRANTS_ENABLED", "PROJECT_ACCESS_EXPIRY_NOTIFICATIONS_ENABLED",
     "AUTHENTICATED_DELIVERY_CREATION_ENABLED",
     "AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED", "CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED",
-    "VIEWER_INTEGRATION_ENABLED", "VIEWER_PROCESSING_ENABLED", "VIEWER_PUBLIC_SHARES_ENABLED", "VIEWER_BASE_URL",
+    "VIEWER_INTEGRATION_ENABLED", "VIEWER_PROCESSING_ENABLED", "VIEWER_PUBLIC_SHARES_ENABLED", "VIEWER_WORKSPACE_RENEWAL_CORS_ENABLED", "VIEWER_BASE_URL",
     "VIEWER_SERVICE_KEY_ID", "VIEWER_EVENT_KEY_ID", "VIEWER_EVENT_PREVIOUS_KEY_ID", "DEFAULT_UNITS",
     "CLIENT_VIEWER_SESSION_ISSUER_ENABLED", "CLIENT_VIEWER_SHARES_ENABLED",
     "DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED", "APPLICATION_KEY", "TFR_REGION",

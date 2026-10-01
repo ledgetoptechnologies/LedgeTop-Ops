@@ -2,8 +2,8 @@
 
 This profile is a migration-only staging rehearsal boundary. The byte-pinned
 pre-candidate bases contain 143 Client files and 154 Operations files. The full
-reviewed source inventories contain 147 Client files through `0228` and 160
-Operations files through `0160`. Profile generation does not alter either source
+reviewed source inventories contain 147 Client files through `0228` and 163
+Operations files through `0163`. Profile generation does not alter either source
 inventory, any production Wrangler configuration, feature flag, route, binding,
 CI workflow, or remote resource.
 
@@ -18,9 +18,9 @@ The generator first verifies the byte-pinned canonical base chains and every
 new native migration. It then copies only the expected suffix after the required
 staging baselines into ignored, app-local directories and emits minimal configs
 containing only the staging account and one exact D1 binding. The expected suffix
-is Operations `0152` through `0160` (including the reviewed gap files `0154` and
-`0156`–`0160`) and Client `0223` through `0228` (including `0224` and
-`0226`–`0228`).
+is Operations `0152` through `0163` (including the reviewed gap files `0154` and
+`0156`–`0160`, plus API-v2 adoption migrations `0161`–`0163`) and Client `0223`
+through `0228` (including `0224` and `0226`–`0228`).
 
 The generated configs contain no Worker entrypoint, vars, routes, services,
 assets, schedules, queues, storage bindings, or feature activation. Generation

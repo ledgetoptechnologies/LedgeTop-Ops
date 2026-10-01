@@ -11,6 +11,17 @@ import { acquireProjectAlphaDirectoryReconciliationFinding,
   readProjectAlphaDirectoryReconciliationFindingContext } from "./project-alpha-directory-reconciliation-review";
 import { reserveProjectAlphaProjectAdoptionReview } from "./project-alpha-project-adoption-review-consumer";
 import { planProjectAlphaProjectAdoptionBind } from "./project-alpha-project-adoption-bind-consumer";
+import {
+  readConfiguredProjectAlphaProjectBindingStatus,
+} from "./project-alpha-project-binding-status-api-v2";
+import {
+  sendConfiguredProjectAlphaProjectBindingRevisionRefreshCommand,
+} from "./project-alpha-project-binding-revision-refresh-api-v2";
+import {
+  produceProjectAlphaProjectAdoptionReview,
+  type ProjectAlphaProjectAdoptionReviewProducerOutcome,
+} from "./project-alpha-project-adoption-review-producer";
+import { auditStatement } from "./request-security";
 import type { Env, StaffPrincipal } from "./types";
 
 type Variables = { principal: StaffPrincipal; administrator: boolean };
@@ -37,6 +48,15 @@ const acquireSchema = z.object({
 const activationSchema = z.object({ reviewItemId: UUID, idempotencyKey: IDEMPOTENCY }).strict();
 const reservationSchema = z.object({ reviewItemId: UUID, idempotencyKey: IDEMPOTENCY }).strict();
 const bindSchema = z.object({ reservationId: UUID }).strict();
+const projectAdoptionReviewSchema = z.object({
+  sourceId: SOURCE_ID,
+  externalProjectId: RECORD_ID,
+  projectAlphaPublicId: PUBLIC_ID,
+}).strict();
+const projectBindingRefreshSchema = z.object({
+  sourceId: SOURCE_ID,
+  externalProjectId: RECORD_ID,
+}).strict();
 const reconciliationAdoptionSchema = z.object({
   findingId: UUID,
   recordId: RECORD_ID,
@@ -46,6 +66,30 @@ const reconciliationAdoptionSchema = z.object({
 
 function enabled(env: Pick<Env, "PROJECT_ALPHA_PRIVATE_ADMIN_TRANSPORT_ENABLED">): boolean {
   return env.PROJECT_ALPHA_PRIVATE_ADMIN_TRANSPORT_ENABLED === "true";
+}
+
+function projectAdoptionReviewEnabled(env: Pick<Env, "ENVIRONMENT" | "PROJECT_ALPHA_PROJECT_ADOPTION_REVIEW_ENABLED">): boolean {
+  return env.ENVIRONMENT === "staging" && env.PROJECT_ALPHA_PROJECT_ADOPTION_REVIEW_ENABLED === "true";
+}
+
+function projectBindingRefreshEnabled(env: Pick<Env, "ENVIRONMENT" | "PROJECT_ALPHA_PROJECT_BINDING_REVISION_REFRESH_ENABLED">): boolean {
+  return env.ENVIRONMENT === "staging" && env.PROJECT_ALPHA_PROJECT_BINDING_REVISION_REFRESH_ENABLED === "true";
+}
+
+function sanitizedProjectAdoptionReviewOutcome(outcome: ProjectAlphaProjectAdoptionReviewProducerOutcome):
+  ProjectAlphaProjectAdoptionReviewProducerOutcome {
+  switch (outcome.status) {
+    case "reviewed":
+      return { status: "reviewed", reviewItemId: outcome.reviewItemId, requestSha256: outcome.requestSha256, replayed: outcome.replayed };
+    case "rejected":
+      return { status: "rejected", reason: outcome.reason };
+    case "blocked":
+      return { status: "blocked", reason: outcome.reason };
+    case "conflict":
+      return { status: "conflict", reason: outcome.reason };
+    case "uncertain":
+      return { status: "uncertain", reason: outcome.reason };
+  }
 }
 
 async function json<T>(request: Request, schema: z.ZodType<T>, label: string): Promise<T> {
@@ -187,6 +231,74 @@ export function registerProjectAlphaPrivateAdminRoutes(app: App): void {
     await currentReviewer(c.env, c.get("principal"));
     return c.json(await reserveProjectAlphaProjectAdoptionReview(c.env,
       principalActor(c.get("principal")), input));
+  });
+
+  app.post(`${PROJECT_ALPHA_PRIVATE_ADMIN_ROUTE}/projects/adoption/review`, async c => {
+    if (!projectAdoptionReviewEnabled(c.env)) throw new HTTPException(404, { message: "Not found" });
+    const input = await json(c.req.raw, projectAdoptionReviewSchema, "Project adoption review");
+    const idempotencyKey = c.req.header("Idempotency-Key");
+    if (!idempotencyKey || !IDEMPOTENCY.safeParse(idempotencyKey).success)
+      throw new HTTPException(400, { message: "A UUID Idempotency-Key is required" });
+    const reviewer = await currentReviewer(c.env, c.get("principal"));
+    const outcome = sanitizedProjectAdoptionReviewOutcome(await produceProjectAlphaProjectAdoptionReview(
+      c.env,
+      { staffId: reviewer.staffId, accessSubject: reviewer.accessSubject },
+      { ...input, idempotencyKey },
+      fetch,
+    ));
+    await c.env.OPS_DB.batch([await auditStatement(
+      c.env,
+      c.req.raw,
+      c.get("principal"),
+      "integration.project_alpha_project_adoption_review_completed",
+      "project_alpha_project_adoption_review",
+      idempotencyKey,
+      null,
+      {
+        status: outcome.status,
+        ...(outcome.status === "blocked" || outcome.status === "rejected" || outcome.status === "conflict"
+          ? { reason: outcome.reason } : {}),
+      },
+    )]);
+    return c.json({ outcome });
+  });
+
+  app.post(`${PROJECT_ALPHA_PRIVATE_ADMIN_ROUTE}/projects/bindings/refresh`, async c => {
+    if (!projectBindingRefreshEnabled(c.env)) throw new HTTPException(404, { message: "Not found" });
+    const input = await json(c.req.raw, projectBindingRefreshSchema, "Project binding revision refresh");
+    const commandId = c.req.header("Idempotency-Key");
+    if (!commandId || !IDEMPOTENCY.safeParse(commandId).success)
+      throw new HTTPException(400, { message: "A UUID Idempotency-Key is required" });
+    const status = await readConfiguredProjectAlphaProjectBindingStatus(c.env, input.sourceId, input.externalProjectId);
+    if (status.status !== "binding_stale") {
+      return c.json({ outcome: status.status === "observed"
+        ? { status: "current", revision: status.response.resource.revision }
+        : { status: "not_refreshed", reason: status.status === "disabled" ? "source_disabled" : status.status } });
+    }
+    const stale = status.response;
+    const outcome = await sendConfiguredProjectAlphaProjectBindingRevisionRefreshCommand(c.env, input.sourceId, {
+      commandId,
+      externalId: stale.binding.externalId,
+      expectedPublicId: stale.binding.publicId,
+      expectedPriorRevision: stale.binding.revision,
+      expectedRevision: stale.resource.revision,
+      expectedProjectionSha256: stale.resource.projectionSha256,
+      expectedAuthorizationGeneration: stale.authorizationGeneration,
+    });
+    const sanitized = outcome.status === "acknowledged"
+      ? { status: "refreshed", revision: outcome.response.result.resource.revision, replayed: outcome.response.replayed }
+      : { status: outcome.status, ...("reason" in outcome ? { reason: outcome.reason } : {}) };
+    await c.env.OPS_DB.batch([await auditStatement(
+      c.env,
+      c.req.raw,
+      c.get("principal"),
+      "integration.project_alpha_project_binding_revision_refresh_completed",
+      "project_alpha_project_binding",
+      commandId,
+      null,
+      sanitized,
+    )]);
+    return c.json({ outcome: sanitized });
   });
 
   app.post(`${PROJECT_ALPHA_PRIVATE_ADMIN_ROUTE}/projects/adoption/bind`, async c => {

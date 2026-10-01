@@ -32,6 +32,8 @@ test("renders all three exact staging configs without placeholders", () => {
     && entrypoint === "OperationsPortalNativeDeliveryAuthorizationReader"));
   assert.equal(configs.operations.vars.NATIVE_INTEGRATION_CONTROL_ENABLED, "false");
   assert.equal(configs.operations.vars.NATIVE_INTEGRATION_CONTROL_ORIGIN, "");
+  assert.equal(configs.operations.vars.PROJECT_ALPHA_API_V2_SYNC_ENABLED, "false");
+  assert.equal(configs.operations.vars.PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED, "false");
   assert.equal(configs.operations.vars.CLIENT_REQUEST_TRIAGE_TO, values.STAGING_TRIAGE_EMAIL);
   assert.equal(configs.operations.main, "src/worker/staging-native-authority-entrypoint.ts");
   assert.equal(configs.operations.vars.OPERATIONS_PORTAL_NATIVE_DELIVERY_OWNER_ENABLED, "true");

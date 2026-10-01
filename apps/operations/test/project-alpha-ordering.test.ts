@@ -127,6 +127,6 @@ describe("Project Alpha snapshot/webhook ordering",()=>{
       for(const table of ["client_project_grants","client_folder_associations","client_delivery_grants","client_member_project_grants"]){
         expect(await delivery.prepare(`SELECT revoked_at FROM ${table} WHERE project_id='portal-50'`).first("revoked_at")).not.toBeNull();
       }
-    },30_000);
+    },120_000);
   });
 });

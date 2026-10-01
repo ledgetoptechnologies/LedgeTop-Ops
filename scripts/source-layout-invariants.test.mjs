@@ -410,7 +410,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
 
 test("the deployed Operations Worker keeps catalog and inactive binding transport private and default-off", () => {
   // The only reviewed delta here is an explicit disabled native recipient home flag.
-  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "a51b4df46017b857f1c8ec67dbc2f7b8b801cd406c796990445790d2546dab68");
+  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "41427cfe4d94ae59ebe251397a2481b235958e44716c9c2d586fad6c7b887b39");
   const config = readJson("apps/operations/wrangler.jsonc");
   assert.equal(config.vars.CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED, "false");
   assert.equal(config.services?.find(service => service.binding === "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY"), undefined);

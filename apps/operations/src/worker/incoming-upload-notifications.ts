@@ -1,6 +1,5 @@
 import { hasPermission } from "./acl";
-import { NotificationMailDeliveryUncertain, notificationMailFailureCode,
-  sendNotificationMail, validateNotificationMailTransport } from "./mailer";
+import { NotificationMailDeliveryUncertain, sendNotificationMail, validateNotificationMailTransport } from "./mailer";
 import type { Env } from "./types";
 
 const MAX_ATTEMPTS = 3;
@@ -104,36 +103,19 @@ export async function processIncomingUploadNotifications(env: Env): Promise<numb
       .bind(MAX_ATTEMPTS, MAX_ATTEMPTS).first<IncomingUploadNotificationRow>();
     if (!row) break;
 
-    const priorMarker = attemptMarker(row.attempt_count);
-    if (row.status === "processing" && row.last_error_code === priorMarker) {
+    // A legacy worker may have delivered before it could persist any marker.
+    // Never reclaim expired processing work into another send.
+    if (row.status === "processing") {
       const held = await env.DELIVERY_DB.prepare(`UPDATE incoming_upload_notification_digests SET
           status='failed',lease_expires_at=NULL,last_error_code=?,updated_at=datetime('now')
-        WHERE id=? AND status='processing' AND attempt_count=? AND last_error_code=?
+        WHERE id=? AND status='processing' AND attempt_count=? AND last_error_code IS ?
           AND lease_expires_at IS ? AND datetime(lease_expires_at)<=datetime('now')`)
-        .bind(RECONCILIATION_REQUIRED, row.id, row.attempt_count, priorMarker, row.lease_expires_at).run();
+        .bind(RECONCILIATION_REQUIRED, row.id, row.attempt_count, row.last_error_code, row.lease_expires_at).run();
       if (!held.meta.changes) processed -= 1;
       continue;
     }
 
-    if (row.status === "processing" && row.attempt_count >= MAX_ATTEMPTS) {
-      const exhausted = await env.DELIVERY_DB.prepare(`UPDATE incoming_upload_notification_digests SET
-          status='failed',lease_expires_at=NULL,last_error_code='mail-attempts-exhausted-without-send',updated_at=datetime('now')
-        WHERE id=? AND status='processing' AND attempt_count=? AND last_error_code IS ?
-          AND lease_expires_at IS ? AND datetime(lease_expires_at)<=datetime('now')`)
-        .bind(row.id, row.attempt_count, row.last_error_code, row.lease_expires_at).run();
-      if (!exhausted.meta.changes) processed -= 1;
-      continue;
-    }
-
-    const claimed = row.status === "processing"
-      ? await env.DELIVERY_DB.prepare(`UPDATE incoming_upload_notification_digests SET
-          attempt_count=attempt_count+1,lease_expires_at=datetime('now','+10 minutes'),
-          last_error_code=NULL,updated_at=datetime('now')
-        WHERE id=? AND status='processing' AND attempt_count=? AND attempt_count<?
-          AND last_error_code IS ? AND lease_expires_at IS ?
-          AND datetime(lease_expires_at)<=datetime('now')`)
-        .bind(row.id, row.attempt_count, MAX_ATTEMPTS, row.last_error_code, row.lease_expires_at).run()
-      : await env.DELIVERY_DB.prepare(`UPDATE incoming_upload_notification_digests SET
+    const claimed = await env.DELIVERY_DB.prepare(`UPDATE incoming_upload_notification_digests SET
           status='processing',attempt_count=attempt_count+1,lease_expires_at=datetime('now','+10 minutes'),
           last_error_code=NULL,updated_at=datetime('now')
         WHERE id=? AND status=? AND attempt_count=? AND attempt_count<? AND last_error_code IS ?
@@ -195,8 +177,8 @@ export async function processIncomingUploadNotifications(env: Env): Promise<numb
     const text = `${contributor} uploaded ${count} (${bytes}) for “${title}”. The files were received and are pending verification. They will remain quarantined until verification is complete.`;
     try {
       validateNotificationMailTransport(env);
-    } catch (error) {
-      await retryOrFail(env, row.id, claimedRow.attempt_count, notificationMailFailureCode(error));
+    } catch {
+      await retryOrFail(env, row.id, claimedRow.attempt_count, "mail-transport-failed");
       continue;
     }
     const marker = attemptMarker(claimedRow.attempt_count);
@@ -233,7 +215,7 @@ export async function processIncomingUploadNotifications(env: Env): Promise<numb
         await holdForReconciliation(env, row.id, claimedRow.attempt_count, marker);
         continue;
       }
-      await retryOrFail(env, row.id, claimedRow.attempt_count, notificationMailFailureCode(error), marker);
+      await retryOrFail(env, row.id, claimedRow.attempt_count, "mail-transport-failed", marker);
     }
   }
   return processed;

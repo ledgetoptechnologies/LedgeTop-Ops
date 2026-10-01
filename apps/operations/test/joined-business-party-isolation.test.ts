@@ -69,8 +69,8 @@ beforeAll(async () => {
   const hierarchy = splitD1MigrationStatements(readFileSync(new URL("../../client/migrations/0121_client_workspace_hierarchy_v2.sql", import.meta.url), "utf8"));
   // This joined fixture needs the canonical v2 authority schema, not 0121's
   // one-time legacy backfill (whose source tables intentionally are absent).
-  const legacyBackfillSources = /\b(?:FROM|JOIN)\s+(?:client_identity_links|client_account_members|client_project_grants|client_member_project_grants|client_folder_associations|projects)\b/i;
-  await delivery.batch(hierarchy.filter(sql => !legacyBackfillSources.test(sql)).map(sql => delivery.prepare(sql)));
+  const legacyBackfillSource = /\b(?:FROM|JOIN)\s+(?:client_identity_links|client_accounts|client_account_members|client_account_memberships|projects|client_project_grants|client_delivery_grants|client_member_project_grants|client_folder_associations)\b/iu;
+  await delivery.batch(hierarchy.filter(sql => !legacyBackfillSource.test(sql)).map(sql => delivery.prepare(sql)));
 });
 afterAll(async () => runtime.dispose());
 
