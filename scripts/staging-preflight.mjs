@@ -1,7 +1,8 @@
 import fs from "node:fs";
+import crypto from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { APP_SOURCE_DIRS, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_SECRETS, STAGING_ACCOUNT_ID, STAGING_ALLOWED_VAR_NAMES, STAGING_HOSTS, STAGING_INVENTORY, STAGING_REQUEST_ATTACHMENT_R2_CORS, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
+import { APP_SOURCE_DIRS, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_MIGRATION_SHA256, REQUIRED_STAGING_SECRETS, STAGING_ACCOUNT_ID, STAGING_ALLOWED_VAR_NAMES, STAGING_HOSTS, STAGING_INVENTORY, STAGING_REQUEST_ATTACHMENT_R2_CORS, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const apps = ["delivery", "operations", "ops-sync"];
@@ -332,6 +333,12 @@ export function validateMigrationInventory(base = root) {
     const actual = entries.filter((entry) => entry.isFile() && !entry.isSymbolicLink() && entry.name.endsWith(".sql") && entry.name.localeCompare(first) >= 0).map((entry) => entry.name).sort();
     const expected = [...REQUIRED_STAGING_MIGRATIONS[app]];
     if (JSON.stringify(actual) !== JSON.stringify(expected)) errors.push(`${app} release migration inventory must exactly match the ordered contract`);
+    for (const [name, expectedSha256] of Object.entries(REQUIRED_STAGING_MIGRATION_SHA256[app] ?? {})) {
+      const file = path.join(directory, name);
+      if (!actual.includes(name)) continue;
+      const actualSha256 = crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+      if (actualSha256 !== expectedSha256) errors.push(`${app} release migration ${name} SHA-256 does not match the reviewed contract`);
+    }
   }
   return errors;
 }
