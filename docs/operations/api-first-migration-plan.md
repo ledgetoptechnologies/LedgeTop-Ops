@@ -5983,3 +5983,18 @@ pending; this requirement does not claim a deployed UI change.
 - No production PA update, client enrollment/activation, public-link change, or
   production deployment was made. No production checkpoint should be issued
   until staging proves the API-v2 sync and the portal rollout checklist gates.
+
+### October 1 — bounded API-v2 inventory continuation boundary
+
+- Raw upstream Directory and Project inventory cursors are private transport
+  data. Operations must never return them to browser code or record them in
+  audit metadata. The browser receives only short-lived AES-GCM continuation
+  tokens bound to the authenticated actor, selected source, one inventory
+  surface, fixed page limit, source-instance/application/history identity, and
+  authorization generation.
+- Each explicit operator click may request at most one bounded page for one
+  surface. Directory and Project continuations remain independent; there is no
+  automatic pagination. An invalid, expired, identity-drifted, generation-
+  drifted, or otherwise stale token stops that surface and requires an explicit
+  inventory restart. Continuation does not auto-match records, create or
+  activate mappings or access, or write to Project Alpha.

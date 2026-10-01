@@ -3,6 +3,8 @@ import { expect, test, type Page, type Route } from "@playwright/test";
 const endpoint = "/api/admin/integrations/project-alpha/connectors";
 const readAcceptanceEndpoint = "/api/admin/api-v2/project-alpha/read-acceptance";
 const readAcceptanceConnectionsEndpoint = `${readAcceptanceEndpoint}/connections`;
+const inventoryEndpoint = "/api/admin/integrations/project-alpha/api-v2/sync-page";
+const adoptionEndpoint = "/api/admin/integrations/project-alpha/api-v2/directory/read-adoptions";
 const primary = "project-alpha:primary", secondary = "project-alpha:secondary";
 type Connector = { sourceId: string; displayName: string; producerBindingId: string; snapshotOrigin: string; snapshotBasePath: string;
   applicationKey: string; profile: "primary_legacy" | "business_data"; state: "pending" | "active" | "suspended" | "retired";
@@ -14,8 +16,11 @@ type Directory = { connectors: Connector[]; legacyPrimary: boolean; health: Arra
 type ApiV2ReadAcceptanceConfig = { status: "configured" | "unconfigured" | "misconfigured"; readAcceptanceEnabled: boolean;
   connections: Array<{ sourceId: string; enabled: boolean }> };
 const connector = (sourceId = secondary): Connector => ({ sourceId, displayName: sourceId === primary ? "LTDS Project Alpha" : "LTT Project Alpha", producerBindingId: sourceId === primary ? "ltds" : "ltt", snapshotOrigin: sourceId === primary ? "https://alpha.example.test" : "https://alpha-secondary.example.test", snapshotBasePath: "/", applicationKey: "ltds_ops", profile: sourceId === primary ? "primary_legacy" : "business_data", state: "active", readVisible: true, activeRevision: 1, version: 2 });
-async function fixture(page: Page, data: Directory, apiV2Config: ApiV2ReadAcceptanceConfig = { status: "unconfigured", readAcceptanceEnabled: false, connections: [] }) {
+type OperatorResponse = Record<string, unknown>;
+type OperatorResponses = { inventory?: OperatorResponse | ((body: Record<string, unknown> | null, requestIndex: number) => OperatorResponse); reserve?: unknown; compare?: unknown; seal?: unknown };
+async function fixture(page: Page, data: Directory, operator: OperatorResponses = {}, apiV2Config: ApiV2ReadAcceptanceConfig = { status: "unconfigured", readAcceptanceEnabled: false, connections: [] }) {
   const requests: Array<{ path: string; method: string; body: Record<string, unknown> | null }> = [];
+  let inventoryRequestIndex = 0;
   await page.route("**/api/**", async route => {
     const path = new URL(route.request().url()).pathname;
     if (path === "/api/session") return route.fulfill({ json: { user: { id: "admin", email: "admin@example.test", displayName: "Admin", status: "Active", profileType: "Administrator", isAdministrator: true, permissions: ["administration.view", "integrations.manage"], divisions: [] }, csrfToken: "csrf", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: {} } });
@@ -29,8 +34,26 @@ async function fixture(page: Page, data: Directory, apiV2Config: ApiV2ReadAccept
         capabilities: { status: "verified", exactIdentityMatch: true, exactContractMatch: true },
         directory: { status: "observed", count: 2 }, projects: { status: "observed", count: 3 } } });
     }
-    if (!path.startsWith(endpoint)) return route.fulfill({ status: 404, json: { error: "Unexpected endpoint" } });
     const body = route.request().postData() ? route.request().postDataJSON() as Record<string, unknown> : null;
+    if (path === inventoryEndpoint && route.request().method() === "POST") {
+      requests.push({ path, method: route.request().method(), body });
+      if (!operator.inventory) return route.fulfill({ status: 404, json: { error: "Not found" } });
+      const response = typeof operator.inventory === "function" ? operator.inventory(body, inventoryRequestIndex++) : operator.inventory;
+      return route.fulfill({ json: response });
+    }
+    if (path === adoptionEndpoint && route.request().method() === "POST") {
+      requests.push({ path, method: route.request().method(), body });
+      return operator.reserve ? route.fulfill({ json: operator.reserve }) : route.fulfill({ status: 404, json: { error: "Not found" } });
+    }
+    if (path.startsWith(`${adoptionEndpoint}/`) && path.endsWith("/field-comparison") && route.request().method() === "POST") {
+      requests.push({ path, method: route.request().method(), body });
+      return operator.compare ? route.fulfill({ json: operator.compare }) : route.fulfill({ status: 404, json: { error: "Not found" } });
+    }
+    if (path.startsWith(`${adoptionEndpoint}/`) && path.endsWith("/field-review") && route.request().method() === "POST") {
+      requests.push({ path, method: route.request().method(), body });
+      return operator.seal ? route.fulfill({ json: operator.seal }) : route.fulfill({ status: 404, json: { error: "Not found" } });
+    }
+    if (!path.startsWith(endpoint)) return route.fulfill({ status: 404, json: { error: "Unexpected endpoint" } });
     requests.push({ path, method: route.request().method(), body });
     if (path === endpoint && route.request().method() === "GET") return route.fulfill({ json: data });
     if (path.endsWith("/sync") && route.request().method() === "POST") return route.fulfill({ json: { status: "success" } });
@@ -92,7 +115,7 @@ test("shows and tests API-v2 sources independently of legacy connector rows", as
   const sourceId = "project-alpha:staging";
   const requests = await fixture(page, { connectors: [], legacyPrimary: true, health: [], recovery: [],
     portal: { available: false, authorities: [], recovery: null }, projectManagement: [] },
-  { status: "configured", readAcceptanceEnabled: true, connections: [{ sourceId, enabled: true }] });
+  {}, { status: "configured", readAcceptanceEnabled: true, connections: [{ sourceId, enabled: true }] });
   await page.goto("/administration");
   const group = page.getByRole("region", { name: "Project Alpha API v2 read-only connections" });
   await expect(group).toContainText(sourceId);
@@ -104,10 +127,136 @@ test("shows and tests API-v2 sources independently of legacy connector rows", as
 
 test("keeps read acceptance unavailable when its deployment flag or source is disabled", async ({ page }) => {
   await fixture(page, { connectors: [], legacyPrimary: false, health: [], recovery: [], portal: { available: false, authorities: [], recovery: null }, projectManagement: [] },
-    { status: "configured", readAcceptanceEnabled: false, connections: [{ sourceId: "project-alpha:staging", enabled: false }] });
+    {}, { status: "configured", readAcceptanceEnabled: false, connections: [{ sourceId: "project-alpha:staging", enabled: false }] });
   await page.goto("/administration");
   const group = page.getByRole("region", { name: "Project Alpha API v2 read-only connections" });
   await expect(group).toContainText("Connection is disabled by deployment configuration.");
   await expect(group).toContainText("Read-only acceptance is disabled by deployment configuration.");
   await expect(group.getByRole("button", { name: "Verify read-only API connection" })).toBeDisabled();
+});
+
+test("requests only one explicit bounded API-v2 inventory page and stops on a stale binding", async ({ page }) => {
+  const requests = await fixture(page, { connectors: [connector()], legacyPrimary: false, health: [], recovery: [], portal: { available: true, authorities: [], recovery: null }, projectManagement: [] }, {
+    inventory: { status: "partial", directory: { status: "persisted", itemCount: 2, conflictCount: 0, hasMore: true, continuationToken: "opaque-directory-1" },
+      projects: { status: "blocked", reason: "binding_stale" } },
+  });
+  await page.goto("/administration");
+  await page.getByText("Staging API-v2 operator review").click();
+  const inventory = page.getByRole("region", { name: "Bounded API-v2 inventory" });
+  await inventory.getByRole("button", { name: "Read one bounded inventory page" }).click();
+  await expect(inventory).toContainText("Directory: 2 observed · 0 conflicts · more pages remain");
+  await expect(inventory).toContainText("Projects: stopped because the exact binding is stale");
+  await expect(inventory.getByRole("button", { name: "Continue Directory" })).toBeVisible();
+  await expect(inventory.getByRole("button", { name: "Continue Projects" })).toHaveCount(0);
+  await expect(inventory).not.toContainText("opaque-directory-1");
+  expect(requests.filter(request => request.path === inventoryEndpoint)).toEqual([{
+    path: inventoryEndpoint, method: "POST", body: { sourceId: secondary, limit: 100 },
+  }]);
+});
+
+test("continues Directory and Projects independently with exactly one page per explicit click", async ({ page }) => {
+  const responses = [
+    { status: "completed", directory: { status: "persisted", itemCount: 2, conflictCount: 0, hasMore: true, continuationToken: "opaque-directory-1" },
+      projects: { status: "persisted", itemCount: 3, conflictCount: 0, hasMore: true, continuationToken: "opaque-project-1" } },
+    { status: "completed", directory: { status: "persisted", itemCount: 4, conflictCount: 0, hasMore: true, continuationToken: "opaque-directory-2" },
+      projects: { status: "not_requested" } },
+    { status: "partial", directory: { status: "not_requested" },
+      projects: { status: "conflicted", itemCount: 1, conflictCount: 1, hasMore: false } },
+    { status: "completed", directory: { status: "persisted", itemCount: 1, conflictCount: 0, hasMore: false },
+      projects: { status: "not_requested" } },
+  ];
+  const requests = await fixture(page, { connectors: [connector()], legacyPrimary: false, health: [], recovery: [], portal: { available: true, authorities: [], recovery: null }, projectManagement: [] }, {
+    inventory: (_body, index) => responses[index]!,
+  });
+  await page.goto("/administration");
+  await page.getByText("Staging API-v2 operator review").click();
+  const inventory = page.getByRole("region", { name: "Bounded API-v2 inventory" });
+  await inventory.getByRole("button", { name: "Read one bounded inventory page" }).click();
+  await expect(inventory.getByRole("button", { name: "Continue Directory" })).toBeVisible();
+  await expect(inventory.getByRole("button", { name: "Continue Projects" })).toBeVisible();
+  expect(requests.filter(request => request.path === inventoryEndpoint)).toHaveLength(1);
+
+  await inventory.getByRole("button", { name: "Continue Directory" }).click();
+  await expect(inventory).toContainText("Directory: 4 observed");
+  await expect(inventory).toContainText("Projects: 3 observed");
+  expect(requests.filter(request => request.path === inventoryEndpoint)).toHaveLength(2);
+
+  await inventory.getByRole("button", { name: "Continue Projects" }).click();
+  await expect(inventory).toContainText("Projects: 1 observed · 1 conflicts · page complete");
+  await expect(inventory.getByRole("button", { name: "Continue Projects" })).toHaveCount(0);
+  await expect(inventory.getByRole("button", { name: "Continue Directory" })).toBeVisible();
+  expect(requests.filter(request => request.path === inventoryEndpoint)).toHaveLength(3);
+
+  await inventory.getByRole("button", { name: "Continue Directory" }).click();
+  await expect(inventory).toContainText("Directory: 1 observed · 0 conflicts · page complete");
+  await expect(inventory.getByRole("button", { name: /Continue Directory|Continue Projects/ })).toHaveCount(0);
+  await expect(inventory).not.toContainText(/opaque-directory|opaque-project/);
+  expect(requests.filter(request => request.path === inventoryEndpoint)).toEqual([
+    { path: inventoryEndpoint, method: "POST", body: { sourceId: secondary, limit: 100 } },
+    { path: inventoryEndpoint, method: "POST", body: { sourceId: secondary, limit: 100, directoryContinuationToken: "opaque-directory-1" } },
+    { path: inventoryEndpoint, method: "POST", body: { sourceId: secondary, limit: 100, projectContinuationToken: "opaque-project-1" } },
+    { path: inventoryEndpoint, method: "POST", body: { sourceId: secondary, limit: 100, directoryContinuationToken: "opaque-directory-2" } },
+  ]);
+});
+
+test("keeps the staging operator actions default-off when the route is unavailable", async ({ page }) => {
+  const requests = await fixture(page, { connectors: [connector()], legacyPrimary: false, health: [], recovery: [], portal: { available: true, authorities: [], recovery: null }, projectManagement: [] });
+  await page.goto("/administration");
+  await page.getByText("Staging API-v2 operator review").click();
+  const inventory = page.getByRole("region", { name: "Bounded API-v2 inventory" });
+  await inventory.getByRole("button", { name: "Read one bounded inventory page" }).click();
+  await expect(inventory.getByRole("alert")).toContainText("staging-only operation is disabled");
+  expect(requests.filter(request => request.path === inventoryEndpoint)).toHaveLength(1);
+});
+
+test("reveals exact-record values only after explicit compare and seals enum-only field dispositions", async ({ page }) => {
+  const reviewId = "80000000-0000-4000-8000-000000000008", receiptId = "90000000-0000-4000-8000-000000000009";
+  const comparedFields = [
+    { field: "name", localValue: "Private local value", projectAlphaValue: "Private Project Alpha value", equal: false },
+    { field: "email", localValue: "same@example.test", projectAlphaValue: "same@example.test", equal: true },
+    { field: "phone", localValue: null, projectAlphaValue: null, equal: true },
+    { field: "address_line1", localValue: "One Main", projectAlphaValue: "One Main", equal: true },
+    { field: "address_line2", localValue: "", projectAlphaValue: "", equal: true },
+    { field: "city", localValue: "Example", projectAlphaValue: "Example", equal: true },
+    { field: "state", localValue: "TX", projectAlphaValue: "TX", equal: true },
+    { field: "postal_code", localValue: "75001", projectAlphaValue: "75001", equal: true },
+    { field: "country", localValue: "US", projectAlphaValue: "US", equal: true },
+    { field: "client_type", localValue: "business", projectAlphaValue: "business", equal: true },
+    { field: "organization_public_id", localValue: null, projectAlphaValue: null, equal: true },
+  ];
+  const requests = await fixture(page, { connectors: [connector()], legacyPrimary: false, health: [], recovery: [], portal: { available: true, authorities: [], recovery: null }, projectManagement: [] }, {
+    reserve: { outcome: { status: "reserved", reviewId, claimId: "claim", state: "inactive" } },
+    compare: { outcome: { status: "compared", reviewId, resourceType: "client", fields: comparedFields } },
+    seal: { outcome: { status: "sealed", receiptId } },
+  });
+  await page.goto("/administration");
+  await page.getByText("Staging API-v2 operator review").click();
+  const review = page.getByRole("region", { name: "Exact-record field review" });
+  await review.getByLabel("Exact local record ID").fill("local-record-7");
+  await review.getByLabel("Expected local record version").fill("3");
+  await review.getByLabel("Exact Project Alpha public ID").fill("a".repeat(32));
+  await review.getByRole("button", { name: "Reserve exact pair" }).click();
+  await expect(review).toContainText("Field values remain hidden until you explicitly compare them");
+  await expect(page.getByText("Private local value")).toHaveCount(0);
+  expect(requests.filter(request => request.path.includes("field-comparison"))).toEqual([]);
+
+  await review.getByRole("button", { name: "Compare authorized fields" }).click();
+  await expect(review.getByText("Private local value")).toBeVisible();
+  await expect(review.getByText("Private Project Alpha value")).toBeVisible();
+  await expect(review.getByRole("button", { name: "Seal field review" })).toBeDisabled();
+  await review.getByLabel("Name disposition").selectOption("retain_local");
+  page.once("dialog", dialog => void dialog.accept());
+  await review.getByRole("button", { name: "Seal field review" }).click();
+  await expect(review).toContainText("Field review sealed. No local profile or Project Alpha values were changed.");
+  await expect(page.getByText("Private local value")).toHaveCount(0);
+
+  expect(requests.filter(request => request.path.startsWith(adoptionEndpoint))).toEqual([
+    { path: adoptionEndpoint, method: "POST", body: { sourceId: secondary, resourceType: "client", recordId: "local-record-7", expectedLocalRecordVersion: 3, projectAlphaPublicId: "a".repeat(32) } },
+    { path: `${adoptionEndpoint}/${reviewId}/field-comparison`, method: "POST", body: {} },
+    { path: `${adoptionEndpoint}/${reviewId}/field-review`, method: "POST", body: { decisions: {
+      name: "retain_local", email: "unchanged", phone: "unchanged", address_line1: "unchanged", address_line2: "unchanged",
+      city: "unchanged", state: "unchanged", postal_code: "unchanged", country: "unchanged", client_type: "unchanged",
+      organization_public_id: "unchanged",
+    } } },
+  ]);
 });

@@ -335,9 +335,9 @@ test("requires origin-restriction proof and public token shape for verified Mapb
   assert(errors.some((error) => error.includes("restricted public pk. tokens")), errors.join(" | "));
 });
 
-test("pins the current paired Ops runtime and Project Alpha API-v2 migration boundary", () => {
+test("keeps the uncommitted Ops runtime unpinned and pins the Project Alpha API-v2 migration boundary", () => {
   assert.equal(RELEASE_CONTRACT_FINALIZED, false);
-  assert.equal(RELEASE_CANDIDATES.operations, "5ca70d4f5ec834bfddf7bff68ffc1d89c6fd32a7");
+  assert.equal(RELEASE_CANDIDATES.operations, "PENDING_OPERATIONS_COMMIT");
   assert.equal(RELEASE_CANDIDATES.projectAlpha, "31deb85b87b95de27dc9e90a5591e036ae96709e");
   assert.equal(PROJECT_ALPHA_STAGING.migrations["0066_generic_portal_v2_integration.sql"], "12cfd32e4854bddf763a5fe80653fe7494ab5f9e82b592bf0da05eed78f3e886");
   assert.equal(PROJECT_ALPHA_STAGING.migrations["0102_api_v2_project_synchronization.sql"], "63e2010529678ce866adaa38ea7a54084b1384adcc56e02727cfbbc3584959a0");
@@ -481,7 +481,7 @@ test("requires evidence for the 0179 compatible-writer drain before 0180-0186", 
     assert(errors.some((error) => error.includes(expected)), `${expected}: ${errors.join(" | ")}`);
   }
 });
-test("requires an ordered 0054-0124 remote ledger, a quiescent open-fence check, and compatible Operations writers", () => {
+test("requires an ordered 0054-0127 remote ledger, a quiescent open-fence check, and compatible Operations writers", () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-evidence-operations-migration-gate-"));
   const { evidence, configs, configHashes } = fixture(base);
   [evidence.migrations.operations.expected[40], evidence.migrations.operations.expected[41]] =
@@ -669,13 +669,16 @@ test("checked-in evidence example stays complete as migrations, flags, gates, an
   assert.equal(example.migrations.freshBootstrap.mode, "generated-empty-d1");
   assert.deepEqual(example.migrations.freshBootstrap.applications.delivery.transformedFiles, ["0002_seed_initial_staff.sql"]);
   assert.deepEqual(example.migrations.freshBootstrap.applications.operations.transformedFiles, ["0002_seed_acl.sql"]);
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(-6), [
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(-9), [
     "0119_project_alpha_project_v2_persistence_ledger.sql",
     "0120_project_alpha_project_v2_canonical_settlement.sql",
     "0121_project_alpha_project_v2_settlement_proof_expiry.sql",
     "0122_project_alpha_project_v2_canonical_activation.sql",
     "0123_native_directory_authority_history.sql",
     "0124_project_alpha_project_adoption_review_evidence.sql",
+    "0125_project_alpha_api_v2_inventory_observations.sql",
+    "0126_project_alpha_directory_read_adoption_claims.sql",
+    "0127_project_alpha_directory_read_adoption_field_review_receipts.sql",
   ]);
   const operationsDirectoryStart = REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0054_project_alpha_directory_outbox.sql");
   assert.deepEqual(
