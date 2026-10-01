@@ -312,12 +312,12 @@ function ApiV2OperatorPanel({ connectors, disabled }: { connectors: Connector[];
         <button type="submit" className="button-ghost button-small" disabled={disabled || reviewBusy || Boolean(reviewId)}>{reviewBusy && !reviewId ? "Reserving exact pair…" : "Reserve exact pair"}</button>
       </form>
       {reviewId && !comparison && <button type="button" className="button-ghost button-small" disabled={disabled || reviewBusy} onClick={() => void compare()}>{reviewBusy ? "Comparing authorized fields…" : "Compare authorized fields"}</button>}
-      {comparison && <div role="group" aria-label="Compared field dispositions"><table><thead><tr><th>Field</th><th>Local value</th><th>Project Alpha value</th><th>Disposition</th></tr></thead><tbody>
+      {comparison && <div role="group" aria-label="Compared field dispositions"><div className="project-alpha-field-review-table-scroll" tabIndex={0} aria-label="Compared fields; scroll horizontally to view each value and disposition"><table><thead><tr><th>Field</th><th>Local value</th><th>Project Alpha value</th><th>Disposition</th></tr></thead><tbody>
         {comparison.fields.map(field => <tr key={field.field}><th scope="row">{FIELD_LABELS[field.field]}</th><td>{valueCell(field.localValue)}</td><td>{valueCell(field.projectAlphaValue)}</td><td>{field.equal
           ? <span>Unchanged</span>
           : <select aria-label={`${FIELD_LABELS[field.field]} disposition`} value={decisions[field.field] ?? ""} disabled={reviewBusy} onChange={event => setDecisions(current => ({ ...current, [field.field]: event.target.value as DirectoryFieldDecision }))}>
             <option value="">Select disposition</option><option value="retain_local">Retain local</option><option value="adopt_project_alpha">Adopt Project Alpha</option><option value="requires_follow_up">Requires follow-up</option></select>}</td></tr>)}
-      </tbody></table><button type="button" className="button-ghost button-small" disabled={disabled || reviewBusy || !allDecided} onClick={() => void seal()}>{reviewBusy ? "Sealing review…" : "Seal field review"}</button></div>}
+      </tbody></table></div><button type="button" className="button-ghost button-small" disabled={disabled || reviewBusy || !allDecided} onClick={() => void seal()}>{reviewBusy ? "Sealing review…" : "Seal field review"}</button></div>}
       {reviewMessage && <p role="status" className="notice">{reviewMessage}</p>}{reviewError && <p role="alert" className="notice">{reviewError}</p>}
     </section>
   </details>;

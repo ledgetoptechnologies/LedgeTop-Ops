@@ -307,6 +307,8 @@
 
 .table-card { padding: 0; overflow: auto; }
 table { border-collapse: collapse; width: 100%; }
+.project-alpha-field-review-table-scroll { max-width: 100%; overflow-x: auto; overscroll-behavior-inline: contain; }
+.project-alpha-field-review-table-scroll table { min-width: 760px; }
 th, td {
   text-align: left;
   padding: .85rem 1rem;
