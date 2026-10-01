@@ -363,9 +363,9 @@ release-candidate placeholder remains.
 
 The current candidate inventory extends through Client `0213` (including both
 distinct `0199` filenames), Operations `0128`, and Project Alpha `0102`. The
-Operations runtime candidate remains `PENDING_OPERATIONS_COMMIT` until the
-API-v2 sync/read-adoption branch is committed, pushed, and independently
-reviewed; do not substitute the dirty worktree HEAD. Project Alpha is pinned
+Operations API-v2 sync/read-adoption runtime candidate is pinned to pushed
+commit `a59fc646b41bb88f254793430b0a4ba830dc259e`; it has not passed the
+current staging release gates or been deployed. Project Alpha is pinned
 independently at PR184 head `31deb85b87b95de27dc9e90a5591e036ae96709e`.
 Keep `RELEASE_CONTRACT_FINALIZED=false` until independent cross-repository,
 image, migration, and live staging evidence is complete. Any runtime change

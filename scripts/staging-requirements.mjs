@@ -11,9 +11,9 @@ export const STAGING_PROJECT_ALPHA_ORIGIN = "https://pa-staging.ledgetoptechnolo
 // independent cross-repository gate; reset it before changing any pin.
 export const RELEASE_CONTRACT_FINALIZED = false;
 export const RELEASE_CANDIDATES = Object.freeze({
-  // The API-v2 sync/read-adoption branch is intentionally unpinned until its
-  // reviewed runtime files and migrations are committed and pushed.
-  operations: "PENDING_OPERATIONS_COMMIT",
+  // The pushed API-v2 sync/read-adoption runtime is pinned independently from
+  // the still-unfinalized cross-repository release contract.
+  operations: "a59fc646b41bb88f254793430b0a4ba830dc259e",
   viewer: "32cece808289a942ce902797535ccff6e24763e3",
   projectAlpha: "31deb85b87b95de27dc9e90a5591e036ae96709e",
 });

@@ -223,7 +223,7 @@ function fixture(base) {
         ownerEmailSha256: "e".repeat(64), generatedAt: "2026-07-30T12:00:00Z", generatorEvidenceRef: "ticket:migrations:fresh-bootstrap:generator",
         applications: {
           delivery: { configPath: "apps/client/wrangler.staging.bootstrap.json", manifestPath: "apps/client/.staging-bootstrap/manifest.json", transformedFiles: ["0002_seed_initial_staff.sql"], ledgerCount: 132, finalMigration: "0213_incoming_rclone_promotion.sql", sourceSeedSha256: "1".repeat(64), generatedSeedSha256: "2".repeat(64), databaseWasEmpty: true, generatedChainVerified: true, appliedWithBootstrapConfig: true, appliedExactlyOnce: true, singleSyntheticOwnerVerified: true, canonicalHumanRowsAbsent: true, ownerRoleVerified: true, ledgerMatchesGeneratedChain: true, both0199FilenamesExactlyOnce: true, secondListEmpty: true, idempotentReapplyPassed: true, foreignKeyCheckPassed: true, evidenceRef: "ticket:migrations:fresh-bootstrap:delivery" },
-          operations: { configPath: "apps/operations/wrangler.staging.bootstrap.json", manifestPath: "apps/operations/.staging-bootstrap/manifest.json", transformedFiles: ["0002_seed_acl.sql"], ledgerCount: 124, finalMigration: "0124_project_alpha_project_adoption_review_evidence.sql", sourceSeedSha256: "3".repeat(64), generatedSeedSha256: "4".repeat(64), databaseWasEmpty: true, generatedChainVerified: true, appliedWithBootstrapConfig: true, appliedExactlyOnce: true, singleSyntheticOwnerVerified: true, canonicalHumanRowsAbsent: true, ownerRoleVerified: true, ledgerMatchesGeneratedChain: true, portableCatalogSeedVerified: true, secondListEmpty: true, idempotentReapplyPassed: true, foreignKeyCheckPassed: true, evidenceRef: "ticket:migrations:fresh-bootstrap:operations" },
+          operations: { configPath: "apps/operations/wrangler.staging.bootstrap.json", manifestPath: "apps/operations/.staging-bootstrap/manifest.json", transformedFiles: ["0002_seed_acl.sql"], ledgerCount: 128, finalMigration: "0128_project_alpha_project_binding_revision_refresh_ledger.sql", sourceSeedSha256: "3".repeat(64), generatedSeedSha256: "4".repeat(64), databaseWasEmpty: true, generatedChainVerified: true, appliedWithBootstrapConfig: true, appliedExactlyOnce: true, singleSyntheticOwnerVerified: true, canonicalHumanRowsAbsent: true, ownerRoleVerified: true, ledgerMatchesGeneratedChain: true, portableCatalogSeedVerified: true, secondListEmpty: true, idempotentReapplyPassed: true, foreignKeyCheckPassed: true, evidenceRef: "ticket:migrations:fresh-bootstrap:operations" },
         },
       },
       delivery: { expected: [...REQUIRED_STAGING_MIGRATIONS.delivery], appliedToStaging: true, listEvidenceRef: "ticket:migrations:delivery:list", applyEvidenceRef: "ticket:migrations:delivery:apply", secondListEmpty: true, foreignKeyCheckPassed: true, idempotentReapplyPassed: true, videoRecoveryCompleted: true, videoRowsPendingForTrueNas: true, legacyBridgeAcceptanceMatrixPassed: true, serviceAssignmentV2ExpandApplied: true, serviceAssignmentCompatibleWriterVersionId: "delivery-staging-compatible-writer-version", serviceAssignmentOldWritersDrained: true, serviceAssignmentContractMigrationsApplied: true, serviceAssignmentBarrierEvidenceRef: "ticket:migrations:delivery:service-assignment-barrier", nativePortalMigrationsAppliedBeforeFinalWorkers: true, nativePortalCapabilitiesDefaultOffAtDeploy: true, nativePortalRollbackDrainReviewed: true, nativePortalReleaseEvidenceRef: "ticket:migrations:native-portal-release", authenticatedContentMigrationAppliedBeforeFinalWorkers: true, authenticatedContentCollectionNotStarted: true, authenticatedContentRetentionGateClosed: true, authenticatedContentSecretProvisioned: true, authenticatedContentDefaultOffAtDeploy: true, authenticatedContentReleaseEvidenceRef: "ticket:migrations:authenticated-content-release", verifiedAt: "2026-07-30T12:00:00Z", verificationEvidenceRef: "ticket:migrations:delivery:verify" },
@@ -335,9 +335,9 @@ test("requires origin-restriction proof and public token shape for verified Mapb
   assert(errors.some((error) => error.includes("restricted public pk. tokens")), errors.join(" | "));
 });
 
-test("keeps the uncommitted Ops runtime unpinned and pins the Project Alpha API-v2 migration boundary", () => {
+test("pins the pushed Ops runtime without finalizing the cross-repository release contract", () => {
   assert.equal(RELEASE_CONTRACT_FINALIZED, false);
-  assert.equal(RELEASE_CANDIDATES.operations, "PENDING_OPERATIONS_COMMIT");
+  assert.equal(RELEASE_CANDIDATES.operations, "a59fc646b41bb88f254793430b0a4ba830dc259e");
   assert.equal(RELEASE_CANDIDATES.projectAlpha, "31deb85b87b95de27dc9e90a5591e036ae96709e");
   assert.equal(PROJECT_ALPHA_STAGING.migrations["0066_generic_portal_v2_integration.sql"], "12cfd32e4854bddf763a5fe80653fe7494ab5f9e82b592bf0da05eed78f3e886");
   assert.equal(PROJECT_ALPHA_STAGING.migrations["0102_api_v2_project_synchronization.sql"], "63e2010529678ce866adaa38ea7a54084b1384adcc56e02727cfbbc3584959a0");
@@ -667,6 +667,8 @@ test("checked-in evidence example stays complete as migrations, flags, gates, an
   for (const app of ["delivery", "operations"]) assert.deepEqual(example.migrations[app].expected, [...REQUIRED_STAGING_MIGRATIONS[app]], `migrations.${app}`);
   assert.equal(example.migrations.freshBootstrap.schemaVersion, 1);
   assert.equal(example.migrations.freshBootstrap.mode, "generated-empty-d1");
+  assert.equal(example.migrations.freshBootstrap.applications.operations.ledgerCount, 128);
+  assert.equal(example.migrations.freshBootstrap.applications.operations.finalMigration, "0128_project_alpha_project_binding_revision_refresh_ledger.sql");
   assert.deepEqual(example.migrations.freshBootstrap.applications.delivery.transformedFiles, ["0002_seed_initial_staff.sql"]);
   assert.deepEqual(example.migrations.freshBootstrap.applications.operations.transformedFiles, ["0002_seed_acl.sql"]);
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(-10), [
