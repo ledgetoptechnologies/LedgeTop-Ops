@@ -2,6 +2,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{1
 const TOKEN = /^[0-9a-f]{64}$/;
 const OPERATIONS_NATIVE_ENROLLMENT_ORIGINS = new Set([
   "https://client-staging.ledgetopdroneservices.com",
+  // Playwright exercises the built portal through Vite preview on this exact origin.
+  "http://127.0.0.1:4173",
 ]);
 
 /**
