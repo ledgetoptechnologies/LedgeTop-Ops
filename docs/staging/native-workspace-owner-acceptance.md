@@ -180,6 +180,46 @@ be requested.
   were independently obtained through its command query path. No raw invitation
   secrets, handoff payloads, credentials or private client fields were read.
 
+## Secret-only staging activation and invitation classification — 2026-10-02
+
+- Follow-up live-issuance checks show both pending invitations have no current
+  issuer authority. Their one-time reveals were already consumed; the future
+  expiration alone does not make the October 9 invitation usable. Preserve both
+  rows. A fresh bounded synthetic onboarding issuance is still required.
+- The secret-version asset serialization difference was reviewed against
+  [Cloudflare HTML handling](https://developers.cloudflare.com/workers/static-assets/routing/advanced/html-handling/):
+  omitted `html_handling` defaults to `auto-trailing-slash`. A fresh comparison
+  normalized only that documented default and deployment provenance, excluded
+  only the two added secrets, and found all existing effective resources equal.
+  This supersedes the earlier unexplained-drift hold for the secret-only version.
+- Rechecked exact Client staging traffic before promotion. Deployed only
+  `03934748-73a5-47a3-b280-245afd39e46b` at 100 percent, deployment
+  `91798418-7c1b-4cbc-8e73-4c8dcc94131f`. Existing code, versioned flags and bindings
+  were preserved. Wrangler also synchronized configured non-versioned logging
+  settings; no claim of byte-identical deployment metadata is made.
+- Post-deployment readback confirms both native secret names now exist as
+  `secret_text`, alongside the four prior secrets. No secret values were read
+  or printed. This is prerequisite preparation, not recipient enrollment or
+  successful file-access acceptance. No production Worker or public link changed.
+- Keep previous Client version `2512de43-cd37-4118-97d9-d0c241a3fabd` as the exact
+  pre-secret rollback reference. Future native-window rollback should use a
+  freshly verified default-off base retaining the two required secrets.
+
+## Exact-revision CI and next live acceptance — 2026-10-02
+
+- GitHub Actions run `37052911043` completed successfully for published revision
+  `af31f14c6b56300167a50e8a12838fa1a4ae4b85`; all ten jobs passed. The Operations
+  test step ran from `19:17:52Z` to `19:38:01Z`, then its build passed. Earlier
+  polling did not establish a hang, and no restart was needed.
+- The signed-in staging `/administration/client-onboarding` form rendered with
+  bounded invitation issuance and authorized submission review. This read-only
+  inspection did not issue an invitation, create a customer, or activate access.
+- The previous synthetic area's inactive allow rows deliberately prevent another
+  fresh provision there. Preserve that conflict guard and retained audit history;
+  review a fresh isolated synthetic area instead of reactivating old authority.
+  A reviewed open/paired-close driver and live onboarding, recipient enrollment,
+  selected-folder browsing and revocation acceptance remain required.
+
 ## Historical joined-fixture recheck — 2026-10-02
 
 - The long-lived full Operations run started at 12:02, before the historical
