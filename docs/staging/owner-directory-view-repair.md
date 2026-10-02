@@ -56,7 +56,10 @@ Existing public links and all production client access must remain unchanged.
 - Full local Operations suite is still running; no full-suite pass is claimed.
   CI run `37037904494` is not green: Operations mobile and both Client browser
   suites passed, but the Client test job failed; its failure is under focused
-  investigation. The Operations test job is still pending completion.
+  investigation. That run is now terminal: the Operations test job also failed
+  because its historical 0152 lineage fixture calls a current 0165-chain packet
+  builder. This mismatch is under focused repair; the current packet's release
+  validation must not be relaxed to accommodate historical test setup.
 - The Client failure was a stale full-chain fixture pin (164 Operations
   migrations instead of the current 165). The fixture now pins migration `0165`
   and its focused complete-bootstrap/idempotency rehearsal passes (1 test).

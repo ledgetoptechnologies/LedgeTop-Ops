@@ -15,6 +15,12 @@ Project Alpha. Production registration and production access remain unchanged.
   deployment variables, bindings and secrets.
 - The handler uses the existing reservation, snapshot/publication, invocation
   and dispatch services. It does not insert authority heads directly.
+- `scripts/staging-native-workspace-acceptance-profile.mjs` provides a pure,
+  validated configuration transformation for paired acceptance: the two Ops
+  gates above plus Client `CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED`.
+  It changes only those three flags, verifies the private staging destination,
+  rejects partial activation and unrelated drift, and performs no file writes
+  or deployments. Recipient service-home activation is a separate profile.
 
 ## Safe acceptance order
 
@@ -47,3 +53,7 @@ Local adapter and scaffold tests are not live sign-in/data proof. Full PA–Ops
 reconciliation, retry/idempotency and portal acceptance remain release gates.
 Only after those gates pass should the owner production PA update checkpoint
 be requested.
+
+Local evidence on 2026-10-02: 11 owner-handler tests passed, Operations
+typecheck/build passed, and 35 paired-workspace-profile/scaffold/preflight tests
+passed. No live workspace or recipient grant was created by these checks.
