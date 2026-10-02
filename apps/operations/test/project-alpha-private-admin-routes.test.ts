@@ -256,6 +256,17 @@ describe("private Project Alpha administrator transport", () => {
     expect(mocks.bindingRefresh).not.toHaveBeenCalled();
   });
 
+  it("returns only the typed staging preflight reason when PA lacks a binding-status route", async () => {
+    mocks.bindingStatus.mockResolvedValue({ status: "blocked", reason: "preflight", preflight: {
+      status: "incompatible", reason: "missing_endpoint", httpStatus: 200,
+    } });
+    const response = await fixture({ projectBindingRefreshEnabled: true }).send(
+      "/projects/bindings/refresh", { sourceId: "project-alpha:staging", externalProjectId: "synthetic-stale-project" }, key);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ outcome: { status: "not_refreshed", reason: "preflight_missing_endpoint" } });
+    expect(mocks.bindingRefresh).not.toHaveBeenCalled();
+  });
+
   it("guards and bounds the sanitized reconciliation finding feed", async () => {
     expect((await fixture({ administrator: false }).get(
       "/directory/reconciliation/findings?sourceId=project-alpha:primary")).status).toBe(403);

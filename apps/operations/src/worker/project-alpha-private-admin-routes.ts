@@ -271,9 +271,15 @@ export function registerProjectAlphaPrivateAdminRoutes(app: App): void {
       throw new HTTPException(400, { message: "A UUID Idempotency-Key is required" });
     const status = await readConfiguredProjectAlphaProjectBindingStatus(c.env, input.sourceId, input.externalProjectId);
     if (status.status !== "binding_stale") {
+      // This maintenance route is staging-only. Preserve only the typed,
+      // non-sensitive probe reason so operators can distinguish a missing PA
+      // feature route from a missing key scope; never expose raw responses.
+      const preflightReason = status.status === "blocked" && status.reason === "preflight"
+        && status.preflight && status.preflight.status !== "verified" ? status.preflight.reason : undefined;
       return c.json({ outcome: status.status === "observed"
         ? { status: "current", revision: status.response.resource.revision }
-        : { status: "not_refreshed", reason: status.status === "disabled" ? "source_disabled" : status.status } });
+        : { status: "not_refreshed", reason: preflightReason ? `preflight_${preflightReason}`
+          : status.status === "disabled" ? "source_disabled" : status.status } });
     }
     const stale = status.response;
     const outcome = await sendConfiguredProjectAlphaProjectBindingRevisionRefreshCommand(c.env, input.sourceId, {
@@ -285,9 +291,12 @@ export function registerProjectAlphaPrivateAdminRoutes(app: App): void {
       expectedProjectionSha256: stale.resource.projectionSha256,
       expectedAuthorizationGeneration: stale.authorizationGeneration,
     });
+    const preflightReason = outcome.status === "blocked" && outcome.reason === "preflight"
+      && outcome.preflight && outcome.preflight.status !== "verified" ? outcome.preflight.reason : undefined;
     const sanitized = outcome.status === "acknowledged"
       ? { status: "refreshed", revision: outcome.response.result.resource.revision, replayed: outcome.response.replayed }
-      : { status: outcome.status, ...("reason" in outcome ? { reason: outcome.reason } : {}) };
+      : { status: outcome.status, ...(preflightReason ? { reason: `preflight_${preflightReason}` }
+        : "reason" in outcome ? { reason: outcome.reason } : {}) };
     await c.env.OPS_DB.batch([await auditStatement(
       c.env,
       c.req.raw,

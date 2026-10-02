@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-test("shows staging binding refresh only after a stale read acceptance and confirms the exact ID", async ({ page }) => {
+test("shows safe PA preflight diagnostics after exact-ID staging binding refresh", async ({ page }) => {
   let refreshRequest: { body: unknown; csrf: string | null; idempotency: string | null } | null = null;
   await page.route("**/api/**", async route => {
     const request = route.request();
@@ -24,7 +24,7 @@ test("shows staging binding refresh only after a stale read acceptance and confi
     if (path === "/api/admin/project-alpha/private/projects/bindings/refresh") {
       refreshRequest = { body: JSON.parse(request.postData() || "null"), csrf: request.headers()["x-csrf-token"] ?? null,
         idempotency: request.headers()["idempotency-key"] ?? null };
-      return route.fulfill({ json: { outcome: { status: "refreshed" } } });
+      return route.fulfill({ json: { outcome: { status: "not_refreshed", reason: "preflight_missing_endpoint" } } });
     }
     return route.fulfill({ status: 404, json: { error: "not found" } });
   });
@@ -36,7 +36,7 @@ test("shows staging binding refresh only after a stale read acceptance and confi
   await page.getByLabel("Exact external Project ID", { exact: true }).fill("pa-staging-project-123");
   await page.getByLabel("Confirm exact external Project ID", { exact: true }).fill("pa-staging-project-123");
   await page.getByRole("button", { name: "Refresh staging binding", exact: true }).click();
-  await expect(page.getByRole("status")).toContainText("Binding refresh completed.");
+  await expect(page.getByRole("status")).toContainText("Binding was not refreshed (preflight missing endpoint)");
   expect(refreshRequest).toEqual({ body: { sourceId: "project-alpha:staging", externalProjectId: "pa-staging-project-123" }, csrf: "csrf-test", idempotency: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/) });
 });
 

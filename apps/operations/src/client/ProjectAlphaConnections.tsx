@@ -79,7 +79,10 @@ function safeBindingRefreshOutcome(value: unknown): BindingRefreshOutcome | null
   if (!record(value) || typeof value.status !== "string") return null;
   const allowedStatuses = ["refreshed", "current", "not_refreshed", "blocked", "rejected", "conflict", "uncertain"];
   if (!allowedStatuses.includes(value.status)) return null;
-  const allowedReasons = ["source_disabled", "not_found", "binding_stale", "transport", "authorization", "contract", "storage"];
+  const allowedReasons = ["source_disabled", "not_found", "binding_stale", "transport", "authorization", "contract", "storage",
+    "preflight_configuration", "preflight_transport", "preflight_timeout", "preflight_credentials_or_scope", "preflight_http_status",
+    "preflight_rate_limit", "preflight_response_limit", "preflight_invalid_contract", "preflight_source_mismatch",
+    "preflight_application_mismatch", "preflight_history_epoch_mismatch", "preflight_missing_capability", "preflight_missing_endpoint"];
   return { status: value.status, ...(typeof value.reason === "string" && allowedReasons.includes(value.reason) ? { reason: value.reason } : {}) };
 }
 function bindingRefreshMessage(outcome: BindingRefreshOutcome): string {
