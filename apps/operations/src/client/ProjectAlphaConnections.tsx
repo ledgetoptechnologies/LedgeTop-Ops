@@ -213,7 +213,10 @@ function inventorySurfaceText(label: string, surface: InventoryRequestedSurface)
 }
 function valueCell(value: string | null) { return value === null ? <em>Not set</em> : value === "" ? <em>Empty string</em> : <code>{value}</code>; }
 
+const STAGING_DIRECTORY_OWNER_VIEW_GRANT_ENDPOINT = "/api/admin/staging/directory/owner-profile-view-grant";
 function ApiV2OperatorPanel({ disabled }: { disabled: boolean }) {
+  const [ownerViewGrantEnabled, setOwnerViewGrantEnabled] = useState(false);
+  const [ownerGrantBusy, setOwnerGrantBusy] = useState(false), [ownerGrantMessage, setOwnerGrantMessage] = useState("");
   const [available, setAvailable] = useState<boolean | null>(null), [sources, setSources] = useState<string[]>([]), [sourceError, setSourceError] = useState("");
   const [inventorySource, setInventorySource] = useState("");
   const [inventoryBusy, setInventoryBusy] = useState<"initial" | "directory" | "projects" | null>(null);
@@ -231,12 +234,13 @@ function ApiV2OperatorPanel({ disabled }: { disabled: boolean }) {
   const [reviewBusy, setReviewBusy] = useState(false), [reviewError, setReviewError] = useState(""), [reviewMessage, setReviewMessage] = useState("");
   useEffect(() => {
     let live = true;
-    api<{ sources?: unknown }>(API_V2_SOURCES_ENDPOINT).then(result => {
+    api<{ sources?: unknown; stagingDirectoryOwnerViewGrantEnabled?: boolean }>(API_V2_SOURCES_ENDPOINT).then(result => {
       if (!live) return;
       if (!Array.isArray(result.sources) || result.sources.some(source => typeof source !== "string"
         || !/^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/.test(source))) throw new Error("invalid source list");
       const listed = [...new Set(result.sources)].sort();
       setAvailable(true);
+      setOwnerViewGrantEnabled(result.stagingDirectoryOwnerViewGrantEnabled === true);
       setSources(listed);
       setInventorySource(current => listed.includes(current) ? current : listed[0] ?? "");
       setReviewSource(current => listed.includes(current) ? current : listed[0] ?? "");
@@ -356,10 +360,24 @@ function ApiV2OperatorPanel({ disabled }: { disabled: boolean }) {
     } catch (caught) { setReviewError(operatorError(caught, "The field-review receipt could not be verified. Treat the seal outcome as uncertain and refresh before retrying.")); }
     finally { setReviewBusy(false); }
   };
+  const grantOwnerView = async () => {
+    if (disabled || ownerGrantBusy || !ownerViewGrantEnabled) return;
+    if (!window.confirm("Grant only the protected Operations owner global Directory profile-view access in staging? This does not grant edit, client activation, PA writes, portal access, or public-link authority.")) return;
+    setOwnerGrantBusy(true); setOwnerGrantMessage("");
+    try {
+      const response = await api<{ status?: string; permission?: string; scope?: string }>(STAGING_DIRECTORY_OWNER_VIEW_GRANT_ENDPOINT, {
+        method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ confirm: true }),
+      });
+      if ((response.status !== "granted" && response.status !== "already_granted")
+        || response.permission !== "directory.profile.view" || response.scope !== "global") throw new Error("Grant response could not be verified.");
+      setOwnerGrantMessage(response.status === "granted" ? "Staging owner profile-view permission granted and audited." : "Staging owner profile-view permission was already active.");
+    } catch (caught) { setOwnerGrantMessage(operatorError(caught, "The staging owner view grant could not be verified. Refresh before retrying.")); }
+    finally { setOwnerGrantBusy(false); }
+  };
   const allDecided = Boolean(comparison) && comparison!.fields.every(field => Boolean(decisions[field.field]));
   if (available !== true) return null;
   return <details className="alpha-connection"><summary>Staging API-v2 operator review</summary>
-    <p>This default-off panel reads and stores one bounded inventory page, then supports an explicit exact-record comparison. It never auto-matches records, changes access, publishes links, activates anything, or writes to Project Alpha.</p>
+    <p>This default-off panel reads and stores one bounded inventory page, then supports an explicit exact-record comparison. It never auto-matches records, changes client access, publishes links, activates clients, or writes to Project Alpha. A separately enabled staging-only control can grant the protected owner profile-view access.</p>
     {sourceError && <p role="alert" className="notice">{sourceError}</p>}
     {sources.length === 0 ? <p role="status">No enabled API-v2 sources are available to review. Legacy connector records are not used to discover API-v2 connections.</p> : <>
     <ul aria-label="Enabled API-v2 sources">{sources.map(sourceId => <li key={sourceId}><strong>{sourceId}</strong>
@@ -380,6 +398,9 @@ function ApiV2OperatorPanel({ disabled }: { disabled: boolean }) {
       {inventoryError && <p role="alert" className="notice">{inventoryError}</p>}
     </section>
     <section aria-label="Exact-record field review"><h3>Exact-record field review</h3>
+      {ownerViewGrantEnabled && <div><h4>Staging owner profile review</h4><p>This one-time action grants the protected owner only global Directory profile-view access. It does not change client access or Project Alpha.</p>
+        <button type="button" className="button-ghost button-small" disabled={disabled || ownerGrantBusy} onClick={() => void grantOwnerView()}>{ownerGrantBusy ? "Granting view access…" : "Grant owner profile view"}</button>
+        {ownerGrantMessage && <p role="status" className="notice">{ownerGrantMessage}</p>}</div>}
       <form onSubmit={reserve} aria-busy={reviewBusy}>
         <label>Deployment source<select value={reviewSource} disabled={disabled || reviewBusy || Boolean(reviewId)} onChange={event => { setReviewSource(event.target.value); resetReview(); }}>
           {sources.map(sourceId => <option key={sourceId} value={sourceId}>{sourceId}</option>)}</select></label>

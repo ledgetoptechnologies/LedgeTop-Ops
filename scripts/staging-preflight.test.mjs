@@ -9,6 +9,7 @@ import { APP_SOURCE_DIRS, FEATURE_FLAG_ACTIVATION_POLICIES, REQUIRED_DISABLED_FE
 
 const audiences = Object.freeze({ delivery: "c".repeat(64), operations: "d".repeat(64), "ops-sync": "b".repeat(64) });
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const operationsWorkspacePage = "/administration/client-portal/operations-workspaces";
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
 function stagingConfig(app) {
@@ -337,6 +338,26 @@ test("rejects an Operations staging config without the required SPA assets bindi
   const errors = validateApp("operations", operations, productionFrom(stagingConfig("operations")));
   assert(errors.some((error) => error.includes("operations assets does not match the approved staging inventory")), errors.join(" | "));
 });
+test("routes the workspace owner page through the guarded staging Worker exactly once", () => {
+  const approvedRoutes = STAGING_INVENTORY.operations.assets.run_worker_first;
+  assert.deepEqual(approvedRoutes, [
+    "/api/*", "/health", "/r/*",
+    "/administration/client-portal/operations-recipients",
+    "/administration/client-portal/operations-delivery-authority",
+    operationsWorkspacePage,
+  ]);
+  assert.equal(approvedRoutes.filter((route) => route === operationsWorkspacePage).length, 1);
+
+  const missing = stagingConfig("operations");
+  missing.assets.run_worker_first = missing.assets.run_worker_first.filter((route) => route !== operationsWorkspacePage);
+  let errors = validateApp("operations", missing, productionFrom(stagingConfig("operations")));
+  assert(errors.some((error) => error.includes("operations assets does not match the approved staging inventory")), errors.join(" | "));
+
+  const duplicated = stagingConfig("operations");
+  duplicated.assets.run_worker_first.push(operationsWorkspacePage);
+  errors = validateApp("operations", duplicated, productionFrom(stagingConfig("operations")));
+  assert(errors.some((error) => error.includes("operations assets does not match the approved staging inventory")), errors.join(" | "));
+});
 test("resolves logical delivery staging files from apps/client", () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-staging-layout-"));
   for (const app of ["delivery", "operations", "ops-sync"]) {
@@ -405,7 +426,7 @@ test("requires every portal-v2 and Operations capability to be explicitly false"
   }
 });
 
-test("pins the native portal, Operations 0054-0160 gap-aware chain, both 0199 files, and the 0200-0228 gap-aware release contract", () => {
+test("pins the native portal, Operations 0054-0165 gap-aware chain, both 0199 files, and the 0200-0228 gap-aware release contract", () => {
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-46), [
     "0184_native_client_feedback.sql",
     "0185_native_service_request_ownership.sql",
@@ -497,6 +518,7 @@ test("pins the native portal, Operations 0054-0160 gap-aware chain, both 0199 fi
     "0162_project_alpha_directory_read_adoption_claims.sql",
     "0163_project_alpha_directory_read_adoption_field_review_receipts.sql",
     "0164_project_alpha_directory_read_adoption_authority_recheck.sql",
+    "0165_project_alpha_inventory_generation_surface_scope.sql",
   ]);
   const nativeDirectoryStart = REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0054_project_alpha_directory_outbox.sql");
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(nativeDirectoryStart, nativeDirectoryStart + 3), [

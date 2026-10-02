@@ -6,6 +6,7 @@ import test from "node:test";
 import { renderConfigs, REQUIRED_STAGING_CONFIG_VALUES, validateRenderedConfigs, validateValues, writeRenderedConfigs } from "./staging-config-scaffold.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
+const operationsWorkspacePage = "/administration/client-portal/operations-workspaces";
 const values = Object.freeze({
   DELIVERY_STAGING_ACCESS_AUD: "a".repeat(64),
   OPERATIONS_STAGING_ACCESS_AUD: "b".repeat(64),
@@ -37,6 +38,17 @@ test("renders all three exact staging configs without placeholders", () => {
   assert.equal(configs.operations.vars.CLIENT_REQUEST_TRIAGE_TO, values.STAGING_TRIAGE_EMAIL);
   assert.equal(configs.operations.main, "src/worker/staging-native-authority-entrypoint.ts");
   assert.equal(configs.operations.vars.OPERATIONS_PORTAL_NATIVE_DELIVERY_OWNER_ENABLED, "true");
+  assert.equal(configs.operations.vars.OPERATIONS_PORTAL_WORKSPACE_OWNER_ENABLED, "false");
+  assert.equal(configs.operations.vars.OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_DISPATCH_ENABLED, "false");
+  assert.deepEqual(configs.operations.assets.run_worker_first, [
+    "/api/*", "/health", "/r/*",
+    "/administration/client-portal/operations-recipients",
+    "/administration/client-portal/operations-delivery-authority",
+    operationsWorkspacePage,
+  ]);
+  assert.equal(configs.operations.assets.run_worker_first.filter((route) => route === operationsWorkspacePage).length, 1);
+  assert(configs.operations.services.some(({ binding, service, entrypoint }) => binding === "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION"
+    && service === "ledgetop-clients-staging" && entrypoint === "OperationsPortalWorkspacePublicationIngress"));
   assert(configs.operations.services.some(({ binding, entrypoint }) => binding === "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY"
     && entrypoint === "OperationsPortalNativeDeliveryAuthorityIngress"));
   assert.equal(configs["ops-sync"].vars.CF_ACCESS_GROUP_ID, values.STAGING_ACCESS_GROUP_ID);
@@ -46,6 +58,8 @@ test("renders all three exact staging configs without placeholders", () => {
 test("keeps native authority registration out of production Wrangler configs", () => {
   const client = JSON.parse(fs.readFileSync(path.join(root, "apps/client/wrangler.jsonc"), "utf8"));
   const operations = JSON.parse(fs.readFileSync(path.join(root, "apps/operations/wrangler.jsonc"), "utf8"));
+  assert.equal(operations.assets?.run_worker_first?.includes(operationsWorkspacePage) ?? false, false,
+    "operations production must not register the staging-only workspace owner page");
   for (const flag of ["CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED",
     "CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_WRITER_ENABLED", "CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_STATUS_ENABLED"])
     assert.equal(Object.hasOwn(client.vars ?? {}, flag), false, `client production must omit ${flag}`);
@@ -55,11 +69,13 @@ test("keeps native authority registration out of production Wrangler configs", (
     assert.equal(client.vars?.[flag], "false", `client production must preserve ${flag}=false`);
   for (const flag of ["CLIENT_PORTAL_NATIVE_RECIPIENT_OWNER_ENABLED",
     "OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY_DISPATCH_ENABLED", "OPERATIONS_PORTAL_NATIVE_DELIVERY_OWNER_ENABLED",
-    "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_DISPATCH_ENABLED", "OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED"])
+    "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_DISPATCH_ENABLED", "OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED",
+    "OPERATIONS_PORTAL_WORKSPACE_OWNER_ENABLED", "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_DISPATCH_ENABLED"])
     assert.equal(Object.hasOwn(operations.vars ?? {}, flag), false, `operations production must omit ${flag}`);
   for (const binding of ["OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT", "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER"])
     assert.equal((client.services ?? []).some(service => service.binding === binding), false, `client production must omit ${binding}`);
-  for (const binding of ["OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY", "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY"])
+  for (const binding of ["OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY", "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY",
+    "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION"])
     assert.equal((operations.services ?? []).some(service => service.binding === binding), false, `operations production must omit ${binding}`);
 });
 

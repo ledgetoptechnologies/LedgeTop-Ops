@@ -344,6 +344,8 @@ function FileBrowser({
     controller: AbortController;
     promise: Promise<PortalFilePage>;
   } | null>(null);
+  const consumedContinuation = useRef<{ version: number; folderId: string | null; cursor: string } | null>(null);
+  const authoritativeContinuation = useRef<{ version: number; folderId: string | null; cursor: string | null } | null>(null);
   const prefetchedPage = useRef<{ folderId: string | null; cursor: string; page: PortalFilePage } | null>(null);
   const loadMoreSentinel = useRef<HTMLDivElement | null>(null);
   const lastAutoCursor = useRef("");
@@ -354,6 +356,8 @@ function FileBrowser({
     const controller = new AbortController();
     pageRequest.current?.controller.abort();
     pageRequest.current = null;
+    consumedContinuation.current = null;
+    authoritativeContinuation.current = { version, folderId, cursor: null };
     prefetchedPage.current = null;
     lastAutoCursor.current = "";
     setLoading(true);
@@ -372,7 +376,9 @@ function FileBrowser({
         setFiles(result.files);
         setFolders(result.folders ?? []);
         setBreadcrumbs(result.breadcrumbs ?? []);
-        setContinuationFolderId(result.folderId ?? folderId);
+        const resultFolderId = result.folderId ?? folderId;
+        authoritativeContinuation.current = { version, folderId: resultFolderId, cursor: result.cursor };
+        setContinuationFolderId(resultFolderId);
         setCursor(result.cursor);
       } catch (caught) {
         if (!active || controller.signal.aborted || (caught as Error).name === "AbortError") return;
@@ -396,6 +402,8 @@ function FileBrowser({
       controller.abort();
       pageRequest.current?.controller.abort();
       pageRequest.current = null;
+      consumedContinuation.current = null;
+      authoritativeContinuation.current = null;
       prefetchedPage.current = null;
     };
   }, [folderId, load, retryVersion]);
@@ -448,6 +456,17 @@ function FileBrowser({
     const requestCursor = cursor;
     const requestFolderId = continuationFolderId;
     const version = browserVersion.current;
+    const authoritative = authoritativeContinuation.current;
+    if (authoritative?.version !== version || authoritative.folderId !== requestFolderId || authoritative.cursor !== requestCursor) return;
+    const consumed = consumedContinuation.current;
+    if (consumed?.version === version && consumed.folderId === requestFolderId && consumed.cursor === requestCursor) return;
+    consumedContinuation.current = { version, folderId: requestFolderId, cursor: requestCursor };
+    const releaseContinuation = () => {
+      const current = consumedContinuation.current;
+      if (current?.version === version && current.folderId === requestFolderId && current.cursor === requestCursor) {
+        consumedContinuation.current = null;
+      }
+    };
     setLoadingMore(true);
     setError(null);
     try {
@@ -455,8 +474,10 @@ function FileBrowser({
       const result = prepared?.folderId === requestFolderId && prepared.cursor === requestCursor
         ? prepared.page
         : await requestPage(requestFolderId, requestCursor);
-      if (!result || version !== browserVersion.current) return;
+      if (!result) { releaseContinuation(); return; }
+      if (version !== browserVersion.current) return;
       if (prefetchedPage.current?.folderId === requestFolderId && prefetchedPage.current.cursor === requestCursor) prefetchedPage.current = null;
+      authoritativeContinuation.current = { version, folderId: requestFolderId, cursor: result.cursor };
       setFiles(current => {
         const ids = new Set(current.map(file => file.id));
         return [...current, ...result.files.filter(file => !ids.has(file.id))];
@@ -467,9 +488,11 @@ function FileBrowser({
       });
       setCursor(result.cursor);
     } catch (caught) {
+      releaseContinuation();
       if ((caught as Error).name === "AbortError" || version !== browserVersion.current) return;
       const status = (caught as RequestError).status;
       if ([401, 403, 404, 410].includes(status ?? 0)) {
+        authoritativeContinuation.current = { version, folderId: requestFolderId, cursor: null };
         setFiles([]);
         setFolders([]);
         setBreadcrumbs([]);

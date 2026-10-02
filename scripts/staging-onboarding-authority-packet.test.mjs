@@ -13,12 +13,12 @@ const repositoryRoot = path.resolve(import.meta.dirname, "..");
 const owner = Object.freeze({ email: "owner@staging.example.test", displayName: "Synthetic Staging Owner", clientStaffId: "staging-client-owner", operationsStaffId: "staging-operations-owner" });
 const subject = "staging-access-subject-001", evidenceSha = "0123456789abcdef".repeat(4);
 const issuedAt = new Date(Date.now() - 60_000).toISOString(), expiresAt = new Date(Date.now() + 2 * 60 * 60_000).toISOString();
-const REVIEWED_OPERATIONS_152 = Object.freeze({ count: 152,
-  finalMigration: "0152_operations_portal_workspace_reservations.sql",
-  namesSha256: "a3eb1153187e13a1013b3d5ddd3dcc0c3d93ba2a272bb3650246df9ea9d8e109",
-  chainSha256: "f854aa66e1bb1b3c81feb7a11b18d654b11232d5e3732234ebff12e779f6e3a9" });
+const REVIEWED_OPERATIONS_165 = Object.freeze({ count: 165,
+  finalMigration: "0165_project_alpha_inventory_generation_surface_scope.sql",
+  namesSha256: "410fc8c0497d9e736ccfbc5acfdf568138c323cb0d1a72520c96e29571118c4b",
+  chainSha256: "5d671c4cbc5b2a0cf66f7e903395ed2d22b820aa60af9c8076836262ac6cb835" });
 const sha256 = value => createHash("sha256").update(value).digest("hex");
-function reviewedOperationsMigrations() { const directory=path.join(repositoryRoot,"apps","operations","migrations"), names=fs.readdirSync(directory).filter(name=>name.endsWith(".sql")).sort().slice(0,REVIEWED_OPERATIONS_152.count); assert.equal(names.length,REVIEWED_OPERATIONS_152.count); assert.equal(names.at(-1),REVIEWED_OPERATIONS_152.finalMigration); assert.equal(sha256(names.join("\n")),REVIEWED_OPERATIONS_152.namesSha256); assert.equal(sha256(names.map(name=>`${name}\0${sha256(fs.readFileSync(path.join(directory,name),"utf8"))}`).join("\n")),REVIEWED_OPERATIONS_152.chainSha256); return {directory,names}; }
+function reviewedOperationsMigrations() { const directory=path.join(repositoryRoot,"apps","operations","migrations"), names=fs.readdirSync(directory).filter(name=>name.endsWith(".sql")).sort().slice(0,REVIEWED_OPERATIONS_165.count); assert.equal(names.length,REVIEWED_OPERATIONS_165.count); assert.equal(names.at(-1),REVIEWED_OPERATIONS_165.finalMigration); assert.equal(sha256(names.join("\n")),REVIEWED_OPERATIONS_165.namesSha256); assert.equal(sha256(names.map(name=>`${name}\0${sha256(fs.readFileSync(path.join(directory,name),"utf8"))}`).join("\n")),REVIEWED_OPERATIONS_165.chainSha256); return {directory,names}; }
 
 function oldInput() { return { schemaVersion: 3, packet: { packetId: "staging-authority-project-v2-prior", mode: "create", operatorKind: "synthetic", staffId: owner.operationsStaffId, email: owner.email, displayName: owner.displayName, accessSubject: subject, issuedAt, expiresAt, reason: "Prior bounded staging authority", expected: { admissionVersion: 0, profileVersion: 0, grantVersion: 0, grantGeneration: 0 }, evidence: { changeTicket: "prior-change", reviewer: "prior-reviewer", bindingEvidenceSha256: evidenceSha } } }; }
 function input(overrides = {}) { const base = { schemaVersion: 1, packet: { packetId: "staging-onboarding-authority-positive-001", purpose: "client-onboarding-positive-acceptance", operatorKind: "synthetic", staffId: owner.operationsStaffId, email: owner.email, displayName: owner.displayName, accessSubject: subject, businessAreaId: "area-default", issuedAt, expiresAt, reason: "Bounded positive client onboarding acceptance", expected: { admissionVersion: 2, profileVersion: 1 }, evidence: { changeTicket: "onboarding-change", reviewer: "onboarding-reviewer", bindingEvidenceSha256: evidenceSha } } }; return { ...base, ...overrides, packet: { ...base.packet, ...(overrides.packet ?? {}) } }; }
@@ -96,10 +96,10 @@ test("revoke requires no in-flight actor work and rolls back atomically", () => 
   assert.deepEqual(row(db,"SELECT active FROM native_directory_grants WHERE id=?",artifact.ids.grant),{active:1});
 });
 
-test("builds a reviewed 152-migration, staging-only, sanitized, one-file packet", () => {
+test("builds a reviewed 165-migration, staging-only, sanitized, one-file packet", () => {
   const base=fixture(), artifact=buildOnboardingAuthorityArtifacts(base,input(),"revoke");
-  assert.equal(artifact.provision.manifest.canonicalMigrationCount,REVIEWED_OPERATIONS_152.count);
-  assert.equal(artifact.provision.manifest.canonicalMigrationChainSha256,REVIEWED_OPERATIONS_152.chainSha256);
+  assert.equal(artifact.provision.manifest.canonicalMigrationCount,REVIEWED_OPERATIONS_165.count);
+  assert.equal(artifact.provision.manifest.canonicalMigrationChainSha256,REVIEWED_OPERATIONS_165.chainSha256);
   assert.equal(artifact.provision.sql.includes("project.shared.sync"),false);
   assert.equal(artifact.provision.sql.includes("'business_area'"),true);
   assert.equal(JSON.stringify(artifact.provision.manifest).includes(subject),false);
@@ -108,10 +108,8 @@ test("builds a reviewed 152-migration, staging-only, sanitized, one-file packet"
   assert.deepEqual(validateGeneratedOnboardingAuthority(base,artifact),[]);
 });
 
-test("reviewed onboarding packets reject an appended current-chain 0153 migration", () => {
+test("reviewed onboarding packets reject an unreviewed migration after the exact 0165 chain", () => {
   const base=fixture();
-  fs.copyFileSync(
-    path.join(repositoryRoot,"apps","operations","migrations","0153_operations_portal_workspace_publication_outbox.sql"),
-    path.join(base,"apps","operations","migrations","0153_operations_portal_workspace_publication_outbox.sql"));
-  assert.throws(()=>buildOnboardingAuthorityArtifacts(base,input(),"provision"),/exact reviewed 152-file Operations chain/);
+  fs.writeFileSync(path.join(base,"apps","operations","migrations","0166_unreviewed_staging_test.sql"),"SELECT 1;\n");
+  assert.throws(()=>buildOnboardingAuthorityArtifacts(base,input(),"provision"),/exact reviewed 165-file Operations chain/);
 });

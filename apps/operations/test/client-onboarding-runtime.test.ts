@@ -118,9 +118,23 @@ describe("bounded client profile onboarding runtime", () => {
   });
 
   it("enforces current issuer authority and a separate atomic public quota", async () => {
-    const rateKey = `client-onboarding:ip:${"1".padStart(64, "0")}`;
-    const outcomes = await Promise.all(Array.from({ length: 8 }, () =>
-      consumeClientOnboardingRateLimit(db, rateKey, 2, 60)));
+    let outcomes: boolean[] | undefined;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      // SQLite evaluates time per queued write, so a burst spanning a minute
+      // legitimately consumes two buckets. Only assert atomicity in one bucket.
+      const before = await db.withSession("first-primary").prepare(
+        "SELECT CAST(unixepoch('now')/60 AS INTEGER) bucket").first<number>("bucket");
+      expect(typeof before === "number" && Number.isSafeInteger(before) && before >= 0).toBe(true);
+      const rateKey = `client-onboarding:ip:${(++serial).toString(16).padStart(64, "0")}`;
+      const burst = await Promise.all(Array.from({ length: 8 }, () =>
+        consumeClientOnboardingRateLimit(db, rateKey, 2, 60)));
+      const after = await db.withSession("first-primary").prepare(
+        "SELECT CAST(unixepoch('now')/60 AS INTEGER) bucket").first<number>("bucket");
+      expect(typeof after === "number" && Number.isSafeInteger(after) && after >= 0).toBe(true);
+      if (before === after) { outcomes = burst; break; }
+    }
+    expect(outcomes, "quota burst must execute within one SQLite minute bucket").toBeDefined();
+    if (!outcomes) throw Error("quota_test_stable_window_unavailable");
     expect(outcomes.filter(Boolean)).toHaveLength(2);
     await expect(consumeClientOnboardingRateLimit(db, "192.0.2.1", 2, 60))
       .rejects.toThrow("client_onboarding_rate_limit_unavailable");

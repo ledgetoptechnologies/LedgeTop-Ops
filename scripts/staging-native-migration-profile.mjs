@@ -44,7 +44,7 @@ export const NATIVE_MIGRATION_PROFILES = Object.freeze({
     baseNamesSha256: "8c1557d412ccdf708e1af03e84a3e74b5cdd030e40dcca4611e3f0e794340189",
     baseContentsSha256: "d138d25feb4bb40ced50773d3d28ab9975d45e15f8956200539d196060682588",
     remoteBaseline: "0151_verified_recipient_delivery_authority_outbox.sql",
-    finalMigration: "0164_project_alpha_directory_read_adoption_authority_recheck.sql",
+    finalMigration: "0165_project_alpha_inventory_generation_surface_scope.sql",
     candidates: Object.freeze({
       "0154_operations_portal_native_recipient_authority.sql": "01d7aa68c70c5321c4f6974051a25ed0dd8b2fdd6db9f348f01334147c8a777d",
       "0156_operations_portal_workspace_publication_invocations.sql": "0cc8d7ab4b9ccd906c1c83b52db37e9fde702449973d81dd0490f52c47e8a819",
@@ -56,6 +56,7 @@ export const NATIVE_MIGRATION_PROFILES = Object.freeze({
       "0162_project_alpha_directory_read_adoption_claims.sql": "4bd97d25bd96a0a872bd3106ab936ab3fe1806b7456aec6cf02c92195715d1b0",
       "0163_project_alpha_directory_read_adoption_field_review_receipts.sql": "ef4abf5411e8fd4e10d4daeb94dd4ca3469ae7d179d2b135a9d04ca4a0cf12aa",
       "0164_project_alpha_directory_read_adoption_authority_recheck.sql": "e54cf701bf8943f13223b998b8c4e8209232762c86834b1e7a384b8775ddb5a4",
+      "0165_project_alpha_inventory_generation_surface_scope.sql": "efbe9458b09ee22abe6fb496c05f71c6589baa0eed9692d5008aefb0e5fc6f6e",
     }),
     expectedAppliedMigrations: Object.freeze([
       "0152_operations_portal_workspace_reservations.sql",
@@ -71,6 +72,7 @@ export const NATIVE_MIGRATION_PROFILES = Object.freeze({
       "0162_project_alpha_directory_read_adoption_claims.sql",
       "0163_project_alpha_directory_read_adoption_field_review_receipts.sql",
       "0164_project_alpha_directory_read_adoption_authority_recheck.sql",
+      "0165_project_alpha_inventory_generation_surface_scope.sql",
     ]),
   }),
 });

@@ -17,6 +17,7 @@ import {
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const clone = (value) => structuredClone(value);
+const operationsWorkspacePage = "/administration/client-portal/operations-workspaces";
 const values = Object.freeze({
   DELIVERY_STAGING_ACCESS_AUD: "a".repeat(64),
   OPERATIONS_STAGING_ACCESS_AUD: "b".repeat(64),
@@ -62,6 +63,8 @@ test("builds the separately named three-gate native portal acceptance profile", 
     "CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED",
   ]));
   assert.deepEqual(validateNativePortalAcceptanceConfigs(sources, candidates, productionConfigs), []);
+  assert.deepEqual(candidates.operations.assets.run_worker_first, sources.operations.assets.run_worker_first);
+  assert.equal(candidates.operations.assets.run_worker_first.filter((route) => route === operationsWorkspacePage).length, 1);
   for (const app of Object.keys(candidates)) {
     const comparable = clone(candidates[app]);
     for (const [flag, value] of Object.entries(NATIVE_PORTAL_ACCEPTANCE_ACTIVATION_VALUES[app])) {

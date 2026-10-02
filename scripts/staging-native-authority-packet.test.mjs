@@ -22,20 +22,20 @@ const issuedAt = new Date(Date.now() - 5 * 60 * 1000).toISOString();
 const expiresAt = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
 const acquisitionRecord = Object.freeze({ id: "staging-directory-acquisition-record", kind: "organization", version: 1 });
 const activationId = "10000000-0000-4000-8000-000000000001";
-const REVIEWED_OPERATIONS_152 = Object.freeze({ count: 152,
-  finalMigration: "0152_operations_portal_workspace_reservations.sql",
-  namesSha256: "a3eb1153187e13a1013b3d5ddd3dcc0c3d93ba2a272bb3650246df9ea9d8e109",
-  chainSha256: "f854aa66e1bb1b3c81feb7a11b18d654b11232d5e3732234ebff12e779f6e3a9" });
+const REVIEWED_OPERATIONS_165 = Object.freeze({ count: 165,
+  finalMigration: "0165_project_alpha_inventory_generation_surface_scope.sql",
+  namesSha256: "410fc8c0497d9e736ccfbc5acfdf568138c323cb0d1a72520c96e29571118c4b",
+  chainSha256: "5d671c4cbc5b2a0cf66f7e903395ed2d22b820aa60af9c8076836262ac6cb835" });
 const sha256 = value => createHash("sha256").update(value).digest("hex");
 function reviewedOperationsMigrations() {
   const directory = path.join(repositoryRoot, "apps", "operations", "migrations");
   const names = fs.readdirSync(directory).filter(name => name.endsWith(".sql")).sort()
-    .slice(0, REVIEWED_OPERATIONS_152.count);
-  assert.equal(names.length, REVIEWED_OPERATIONS_152.count);
-  assert.equal(names.at(-1), REVIEWED_OPERATIONS_152.finalMigration);
-  assert.equal(sha256(names.join("\n")), REVIEWED_OPERATIONS_152.namesSha256);
+    .slice(0, REVIEWED_OPERATIONS_165.count);
+  assert.equal(names.length, REVIEWED_OPERATIONS_165.count);
+  assert.equal(names.at(-1), REVIEWED_OPERATIONS_165.finalMigration);
+  assert.equal(sha256(names.join("\n")), REVIEWED_OPERATIONS_165.namesSha256);
   assert.equal(sha256(names.map(name => `${name}\0${sha256(fs.readFileSync(path.join(directory, name), "utf8"))}`).join("\n")),
-    REVIEWED_OPERATIONS_152.chainSha256);
+    REVIEWED_OPERATIONS_165.chainSha256);
   return { directory, names };
 }
 
@@ -830,9 +830,9 @@ test("builds separate one-migration configs with a dedicated ledger and sanitize
   assert.match(artifact.provision.sql, /scope_kind='global'|,'global'/);
   assert.match(artifact.provision.sql, /SELECT count\(\*\) FROM d1_migrations/);
   assert.deepEqual(artifact.provision.manifest.canonicalOperationsLedger, {
-    count: REVIEWED_OPERATIONS_152.count,
-    finalMigration: REVIEWED_OPERATIONS_152.finalMigration,
-    chainSha256: REVIEWED_OPERATIONS_152.chainSha256,
+    count: REVIEWED_OPERATIONS_165.count,
+    finalMigration: REVIEWED_OPERATIONS_165.finalMigration,
+    chainSha256: REVIEWED_OPERATIONS_165.chainSha256,
   });
   assert.deepEqual(artifact.provision.manifest.directoryGrant, {
     id: `staging-directory-profile-edit:${owner.operationsStaffId}`,
@@ -873,13 +873,10 @@ test("fails closed for wrong staging identity and canonical migration drift", ()
   assert.throws(() => buildAuthorityArtifacts(drift, input(), "provision"), /contents changed/);
 });
 
-test("reviewed authority packets reject an appended current-chain 0153 migration", () => {
+test("reviewed authority packets reject an unreviewed migration after the exact 0165 chain", () => {
   const base = fixture();
-  fs.copyFileSync(
-    path.join(repositoryRoot, "apps", "operations", "migrations", "0153_operations_portal_workspace_publication_outbox.sql"),
-    path.join(base, "apps", "operations", "migrations", "0153_operations_portal_workspace_publication_outbox.sql"),
-  );
-  assert.throws(() => buildAuthorityArtifacts(base, input(), "provision"), /exact reviewed 152-file Operations chain/);
+  fs.writeFileSync(path.join(base, "apps", "operations", "migrations", "0166_unreviewed_staging_test.sql"), "SELECT 1;\n");
+  assert.throws(() => buildAuthorityArtifacts(base, input(), "provision"), /exact reviewed 165-file Operations chain/);
 });
 
 test("full canonical schema provisions, revokes, and reactivates exact native authority", () => {

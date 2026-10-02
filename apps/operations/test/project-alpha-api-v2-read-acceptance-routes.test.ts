@@ -105,7 +105,7 @@ describe("Project Alpha API-v2 read acceptance route", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("Cache-Control")).toBe("no-store");
     const body = await response.json() as Record<string, unknown>;
-    expect(body).toEqual({ sources: ["project-alpha:primary", "project-alpha:staging"] });
+    expect(body).toEqual({ sources: ["project-alpha:primary", "project-alpha:staging"], stagingDirectoryOwnerViewGrantEnabled: false });
     expect(JSON.stringify(body)).not.toContain("apiKey");
     expect(JSON.stringify(body)).not.toContain("private-pa");
   });
