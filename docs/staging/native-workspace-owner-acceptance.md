@@ -342,6 +342,14 @@ be requested.
   existing suffix assertion remains unchanged; complete canonical-chain checks
   still reject missing, extra or modified migrations. These are local test
   results, not a successful full preparation run or live acceptance evidence.
+- Published tooling candidate `6fbcc6dd` exposed a clean-runner setup defect in
+  the newly covered evidence test: ignored local staging config files were not
+  available in GitHub CI. The test-only follow-up renders checked-in templates
+  with synthetic values in an isolated temporary fixture, copies the reviewed
+  migration/config/manifest inputs, verifies missing files are rejected, and
+  retains full preflight and evidence assertions. Focused evidence tests passed
+  55/55. Actual local staging configs are still checked by release preparation;
+  this fixture does not prove deployment or live authorization.
 - Use `/administration/client-portal/operations-recipients` and its native
   Operations issuer. Legacy `client_portal_recipient_enrollment_*` ledgers and
   legacy workspace-selection IDs are not prerequisites for this route.

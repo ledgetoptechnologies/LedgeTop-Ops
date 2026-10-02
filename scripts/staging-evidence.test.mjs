@@ -7,6 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { validateEvidence as validateEvidenceContract } from "./staging-evidence.mjs";
 import { validateFiles as validateStagingFiles } from "./staging-preflight.mjs";
+import { renderConfigs, writeRenderedConfigs } from "./staging-config-scaffold.mjs";
 import { BOOTSTRAP_APPS } from "./staging-bootstrap.mjs";
 import { FEATURE_FLAG_ACTIVATION_POLICIES, FEATURE_FLAG_DEPENDENCY_WINDOWS, PROJECT_ALPHA_STAGING, RELEASE_CANDIDATES, RELEASE_CONTRACT_FINALIZED, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_EXTERNAL_GATES, REQUIRED_EXTERNAL_GATE_PROOFS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_SECRETS, STAGING_ACCOUNT_ID, STAGING_CLIENT_PORTAL, STAGING_HOSTS, STAGING_INVENTORY, STAGING_STATIC_VARS, STAGING_VIEWER } from "./staging-requirements.mjs";
 
@@ -344,43 +345,80 @@ test("accepts complete, current, config-bound non-secret release evidence", () =
   assert.deepEqual(validateEvidence(evidence, { base, head: evidence.releaseCommit, configs, configHashes: evidence.configSha256, now, sourceControlVerified: true, allowUnfinalizedContractForTest: true }), []);
 });
 
-test("the same checked-in staging config satisfies preflight and staff-synthetic evidence", () => {
+test("the same rendered checked-in staging templates satisfy preflight and staff-synthetic evidence", () => {
   const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-  assert.deepEqual(validateStagingFiles(repositoryRoot), []);
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-evidence-same-config-"));
-  const item = fixture(base);
-  const configs = {};
-  const configHashes = {};
-  for (const app of ["delivery", "operations", "ops-sync"]) {
-    const sourceDir = { delivery: "client", operations: "operations", "ops-sync": "ops-sync" }[app];
-    const file = path.join(repositoryRoot, "apps", sourceDir, "wrangler.staging.json");
-    const body = fs.readFileSync(file);
-    configs[app] = JSON.parse(body.toString("utf8"));
-    configHashes[app] = digest(body);
-    item.evidence.configSha256[app] = configHashes[app];
-    item.evidence.deployments[app].configSha256 = configHashes[app];
+  try {
+    const sourceDirs = { delivery: "client", operations: "operations", "ops-sync": "ops-sync" };
+    for (const [app, sourceDir] of Object.entries(sourceDirs)) {
+      const appDir = path.join(base, "apps", sourceDir);
+      fs.mkdirSync(appDir, { recursive: true });
+      fs.copyFileSync(path.join(repositoryRoot, "apps", sourceDir, "wrangler.jsonc"), path.join(appDir, "wrangler.jsonc"));
+      for (const migration of REQUIRED_STAGING_MIGRATIONS[app] ?? []) {
+        const migrationsDir = path.join(appDir, "migrations");
+        fs.mkdirSync(migrationsDir, { recursive: true });
+        fs.copyFileSync(path.join(repositoryRoot, "apps", sourceDir, "migrations", migration), path.join(migrationsDir, migration));
+      }
+    }
+    const stagingDocsDir = path.join(base, "docs", "staging");
+    fs.mkdirSync(stagingDocsDir, { recursive: true });
+    for (const name of ["request-attachments-r2-cors.json", "staging-secret-manifest.json"])
+      fs.copyFileSync(path.join(repositoryRoot, "docs", "staging", name), path.join(stagingDocsDir, name));
+
+    assert.deepEqual(validateStagingFiles(base).sort(), Object.values(sourceDirs)
+      .map((sourceDir) => `${path.join("apps", sourceDir, "wrangler.staging.json")} is missing`).sort());
+    const rendered = renderConfigs(repositoryRoot, {
+      DELIVERY_STAGING_ACCESS_AUD: "a".repeat(64),
+      OPERATIONS_STAGING_ACCESS_AUD: "b".repeat(64),
+      PROJECT_ALPHA_OPS_SYNC_STAGING_ACCESS_AUD: "c".repeat(64),
+      DEDICATED_CLIENT_PORTAL_STAGING_ACCESS_AUD: "d".repeat(64),
+      STAGING_PROJECT_ALPHA_SOURCE_ID: "project-alpha:staging",
+      STAGING_PROJECT_ALPHA_HTTPS_ORIGIN: "https://pa-staging.ledgetoptechnologies.com",
+      CLIENT_STAGING_RESTRICTED_MAPBOX_PUBLIC_TOKEN: "pk.client-staging-test",
+      OPERATIONS_STAGING_RESTRICTED_MAPBOX_PUBLIC_TOKEN: "pk.operations-staging-test",
+      MAPBOX_STAGING_ACCEPTANCE_DEFERRED: "false",
+      STAGING_EMAIL_DOMAIN: "staging.example.test",
+      STAGING_TRIAGE_EMAIL: "triage@staging.example.test",
+      STAGING_ACCESS_GROUP_ID: "staging-group-id",
+      STAGING_ACCESS_GROUP_NAME: "LTDS Staging Testers",
+    });
+    writeRenderedConfigs(base, rendered);
+    assert.deepEqual(validateStagingFiles(base), []);
+
+    const item = fixture(base);
+    const configs = {};
+    const configHashes = {};
+    for (const [app, sourceDir] of Object.entries(sourceDirs)) {
+      const body = fs.readFileSync(path.join(base, "apps", sourceDir, "wrangler.staging.json"));
+      configs[app] = JSON.parse(body.toString("utf8"));
+      configHashes[app] = digest(body);
+      item.evidence.configSha256[app] = configHashes[app];
+      item.evidence.deployments[app].configSha256 = configHashes[app];
+    }
+    const audiences = {
+      delivery: configs.delivery.vars.POLICY_AUD,
+      operations: configs.operations.vars.OPERATIONS_AUD,
+      "ops-sync": configs["ops-sync"].vars.CF_ACCESS_AUD,
+    };
+    item.evidence.access.audiences = { ...audiences };
+    for (const app of ["delivery", "operations", "ops-sync"])
+      item.evidence.access.applications[app].audience = audiences[app];
+    item.evidence.access.groupId = configs["ops-sync"].vars.CF_ACCESS_GROUP_ID;
+    item.evidence.access.groupName = configs["ops-sync"].vars.CF_ACCESS_GROUP_NAME;
+    item.evidence.clientPortal.audience = configs.delivery.vars.CLIENT_ACCESS_AUD;
+    const mapboxDeferred = configs.delivery.vars.MAPBOX_STAGING_ACCEPTANCE_DEFERRED === "true";
+    item.evidence.infrastructure.mapbox = {
+      state: mapboxDeferred ? "deferred" : "verified",
+      stagingTokensConfigured: !mapboxDeferred,
+      productionAcceptanceRequired: mapboxDeferred,
+      originRestrictionsVerified: !mapboxDeferred,
+      evidenceRef: "ticket:mapbox:same-config",
+    };
+    assert.deepEqual(validateEvidence(item.evidence, { base, head: item.evidence.releaseCommit, configs,
+      configHashes, now, sourceControlVerified: true }), []);
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
   }
-  const audiences = {
-    delivery: configs.delivery.vars.POLICY_AUD,
-    operations: configs.operations.vars.OPERATIONS_AUD,
-    "ops-sync": configs["ops-sync"].vars.CF_ACCESS_AUD,
-  };
-  item.evidence.access.audiences = { ...audiences };
-  for (const app of ["delivery", "operations", "ops-sync"])
-    item.evidence.access.applications[app].audience = audiences[app];
-  item.evidence.access.groupId = configs["ops-sync"].vars.CF_ACCESS_GROUP_ID;
-  item.evidence.access.groupName = configs["ops-sync"].vars.CF_ACCESS_GROUP_NAME;
-  item.evidence.clientPortal.audience = configs.delivery.vars.CLIENT_ACCESS_AUD;
-  const mapboxDeferred = configs.delivery.vars.MAPBOX_STAGING_ACCEPTANCE_DEFERRED === "true";
-  item.evidence.infrastructure.mapbox = {
-    state: mapboxDeferred ? "deferred" : "verified",
-    stagingTokensConfigured: !mapboxDeferred,
-    productionAcceptanceRequired: mapboxDeferred,
-    originRestrictionsVerified: !mapboxDeferred,
-    evidenceRef: "ticket:mapbox:same-config",
-  };
-  assert.deepEqual(validateEvidence(item.evidence, { base, head: item.evidence.releaseCommit, configs,
-    configHashes, now, sourceControlVerified: true }), []);
 });
 
 test("operational verification reflects the final cross-repository pin gate", () => {
