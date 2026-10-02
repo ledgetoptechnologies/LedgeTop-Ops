@@ -135,6 +135,43 @@ The standalone rehearsal does not retain permissions for portal use. A live
 onboarding acceptance window must use a separately reviewed provision/paired
 revoke around the actual UI flow; do not claim the rehearsal creates clients.
 
+## Retained UI acceptance window — 2026-10-02
+
+The standalone rehearsal intentionally closes immediately. The separate
+`scripts/staging-native-authority-window.mjs` driver can retain exactly the same
+two scoped grants while exercising onboarding, without changing the compiler or
+its authority predicates. Twenty-five focused tests passed independently, including
+real local D1 evaluated guards, insert CAS and post-insert rollback.
+
+- `prepare` requires the exact staging binding and reviewed 165-migration ledger.
+  It creates only an explicitly selected `staging-native-only-` area, in a guarded
+  atomic batch, and rejects existing references or differing area state.
+  Discovery excludes only D1's documented reserved `_cf_KV` table, not an
+  application-table allowlist or a wildcard system-table prefix. Every other
+  schema/reference failure remains fail-closed with a sanitized stage code.
+- `open` requires that exact fresh area, reads current authority and database
+  time, saves the private provision artifact before mutation, and verifies the
+  immutable receipt, complete grant/history readback and direct area references.
+- Preparation and opening are separate transactions. Run them in a controlled
+  staging sequence without concurrent fixture writers; do not claim a global
+  cross-action isolation guarantee. The unchanged compiler still guards the
+  actual authority transaction.
+- The default 60-minute `closeBy` is an operator cleanup deadline, not automatic
+  grant expiration. `close` or `recover` must use the exact saved provision file
+  and the existing paired revocation workflow. Preserve the synthetic area and
+  durable audit history; never delete them to make another provision pass.
+
+```text
+node scripts/staging-native-authority-window.mjs prepare --config apps/operations/wrangler.staging.native-authority-binding.json --area-id staging-native-only-portal-acceptance-20261002-window-2 --area-name "Synthetic portal acceptance — 2026-10-02 window 2"
+node scripts/staging-native-authority-window.mjs open --config apps/operations/wrangler.staging.native-authority-binding.json --area-id staging-native-only-portal-acceptance-20261002-window-2 --area-name "Synthetic portal acceptance — 2026-10-02 window 2" --window-minutes 60
+node scripts/staging-native-authority-window.mjs close --config apps/operations/wrangler.staging.native-authority-binding.json --recover .backups/staging-native-authority/<approval-id>/provision.json
+```
+
+These commands prepare only onboarding edit/link authority. They do not grant
+portal, financial, project-management or file access. Review and exercise those
+independent workflows after the customer fixture exists. No live outcome is
+claimed by the local test result or these example commands.
+
 ## Native folder acceptance follow-up
 
 - The local owner UI now loads an authorized shared-project folder proof rather

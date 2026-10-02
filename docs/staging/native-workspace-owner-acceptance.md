@@ -209,7 +209,8 @@ be requested.
 
 - GitHub Actions run `37052911043` completed successfully for published revision
   `af31f14c6b56300167a50e8a12838fa1a4ae4b85`; all ten jobs passed. The Operations
-  test step ran from `19:17:52Z` to `19:38:01Z`, then its build passed. Earlier
+  test step ran from `19:17:52Z` to `19:38:01Z`: all 356 test files and 3,387
+  tests passed, then its build passed. Earlier
   polling did not establish a hang, and no restart was needed.
 - The signed-in staging `/administration/client-onboarding` form rendered with
   bounded invitation issuance and authorized submission review. This read-only
@@ -219,6 +220,33 @@ be requested.
   review a fresh isolated synthetic area instead of reactivating old authority.
   A reviewed open/paired-close driver and live onboarding, recipient enrollment,
   selected-folder browsing and revocation acceptance remain required.
+
+## Fresh fixture preparation diagnosis — 2026-10-02
+
+- Two failed preparation attempts created no synthetic area and issued no
+  grants. Independent read-only D1 checks showed 165 migrations, zero migration
+  insertion-order mismatches and zero rows for the exact window-2 area ID.
+- Sanitized diagnostics isolated failure to reference discovery. D1 schema
+  enumeration includes its provider-reserved `_cf_KV` table. The corrected driver
+  excludes exactly that documented internal table while dynamically checking
+  every other table; no application authorization predicate was relaxed.
+  See [D1 reserved-table guidance](https://developers.cloudflare.com/d1/best-practices/import-export-data/).
+- Independent root rerun passed all 25 focused driver tests, including real
+  Miniflare discovery, reserved-table no-introspection and atomic rollback cases.
+  The subsequent live preparation retry completed successfully, exit 0, with
+  `status=prepared`, `references=0` and verified staging target. It created only
+  `staging-native-only-portal-acceptance-20261002-window-2`; no authority window
+  was opened, grants issued, customer created or portal access activated.
+- Bounded staging reads found one synthetic shared-project head with one current
+  immutable revision, organization ownership and no physical folder association.
+  The owner's existing exact-resource portal-management allow covers that
+  organization. This is a candidate, not an acknowledged publication or file
+  access. No project/customer ownership was changed.
+- Staging has zero service definitions and zero customer-service enrollment
+  heads. The enrollment writer is currently unmounted; a real authenticated
+  owner workflow and reviewed service catalog provisioning remain prerequisites
+  for selected-service acceptance, not conditions to bypass with direct data
+  seeding or a valid empty dashboard.
 
 ## Historical joined-fixture recheck — 2026-10-02
 
