@@ -211,7 +211,7 @@ function inventorySurfaceText(label: string, surface: InventoryRequestedSurface)
 function valueCell(value: string | null) { return value === null ? <em>Not set</em> : value === "" ? <em>Empty string</em> : <code>{value}</code>; }
 
 function ApiV2OperatorPanel({ disabled }: { disabled: boolean }) {
-  const [sources, setSources] = useState<string[] | null>(null), [sourceError, setSourceError] = useState("");
+  const [available, setAvailable] = useState<boolean | null>(null), [sources, setSources] = useState<string[]>([]), [sourceError, setSourceError] = useState("");
   const [inventorySource, setInventorySource] = useState("");
   const [inventoryBusy, setInventoryBusy] = useState<"initial" | "directory" | "projects" | null>(null);
   const [directoryInventory, setDirectoryInventory] = useState<InventoryDisplaySurface | null>(null);
@@ -233,15 +233,17 @@ function ApiV2OperatorPanel({ disabled }: { disabled: boolean }) {
       if (!Array.isArray(result.sources) || result.sources.some(source => typeof source !== "string"
         || !/^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/.test(source))) throw new Error("invalid source list");
       const listed = [...new Set(result.sources)].sort();
+      setAvailable(true);
       setSources(listed);
       setInventorySource(current => listed.includes(current) ? current : listed[0] ?? "");
       setReviewSource(current => listed.includes(current) ? current : listed[0] ?? "");
       setSourceError("");
     }).catch(caught => {
       if (live) {
+        const disabledOnDeployment = caught instanceof ApiError && caught.status === 404;
+        setAvailable(!disabledOnDeployment);
         setSources([]);
-        setSourceError(caught instanceof ApiError && caught.status === 404 ? ""
-          : operatorError(caught, "API-v2 source configuration could not be loaded."));
+        setSourceError(disabledOnDeployment ? "" : operatorError(caught, "API-v2 source configuration could not be loaded."));
       }
     });
     return () => { live = false; };
@@ -352,7 +354,7 @@ function ApiV2OperatorPanel({ disabled }: { disabled: boolean }) {
     finally { setReviewBusy(false); }
   };
   const allDecided = Boolean(comparison) && comparison!.fields.every(field => Boolean(decisions[field.field]));
-  if (sources === null || (sources.length === 0 && !sourceError)) return null;
+  if (available !== true) return null;
   return <details className="alpha-connection"><summary>Staging API-v2 operator review</summary>
     <p>This default-off panel reads and stores one bounded inventory page, then supports an explicit exact-record comparison. It never auto-matches records, changes access, publishes links, activates anything, or writes to Project Alpha.</p>
     {sourceError && <p role="alert" className="notice">{sourceError}</p>}
