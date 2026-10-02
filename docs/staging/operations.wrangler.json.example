@@ -8,7 +8,7 @@
   "workers_dev": false,
   "preview_urls": false,
   "routes": [{ "pattern": "ops-staging.ledgetopdroneservices.com", "custom_domain": true }],
-  "assets": { "binding": "ASSETS", "directory": "./dist/client", "not_found_handling": "single-page-application", "run_worker_first": ["/api/*", "/health", "/r/*", "/administration/client-portal/operations-recipients", "/administration/client-portal/operations-delivery-authority"] },
+  "assets": { "binding": "ASSETS", "directory": "./dist/client", "not_found_handling": "single-page-application", "run_worker_first": ["/api/*", "/health", "/r/*", "/administration/client-portal/operations-recipients", "/administration/client-portal/operations-delivery-authority", "/administration/client-portal/operations-workspaces"] },
   "vars": {
     "PUBLIC_BASE_URL": "https://ops-staging.ledgetopdroneservices.com",
     "EXPECTED_HOST": "ops-staging.ledgetopdroneservices.com",

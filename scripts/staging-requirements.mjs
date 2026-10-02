@@ -1195,7 +1195,7 @@ export const STAGING_INVENTORY = Object.freeze({
       { binding: "THUMBNAIL_QUEUE", queue: "ltds-thumbnail-jobs-staging" },
     ],
     crons: ["*/15 * * * *", "*/5 * * * *", "2-57/5 * * * *", "17 * * * *", "4-59/15 * * * *"],
-    assets: { binding: "ASSETS", directory: "./dist/client", not_found_handling: "single-page-application", run_worker_first: ["/api/*", "/health", "/r/*", "/administration/client-portal/operations-recipients", "/administration/client-portal/operations-delivery-authority"] },
+    assets: { binding: "ASSETS", directory: "./dist/client", not_found_handling: "single-page-application", run_worker_first: ["/api/*", "/health", "/r/*", "/administration/client-portal/operations-recipients", "/administration/client-portal/operations-delivery-authority", "/administration/client-portal/operations-workspaces"] },
     observability: { enabled: true, head_sampling_rate: 1 },
     stream: { binding: "STREAM" },
     durable_objects: { bindings: [{ name: "THUMBNAIL_RENDERER", class_name: "ThumbnailRendererContainer" }] },

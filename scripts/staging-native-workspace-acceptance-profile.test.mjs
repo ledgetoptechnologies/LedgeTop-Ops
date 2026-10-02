@@ -7,6 +7,7 @@ import { buildNativeWorkspaceAcceptanceConfigs as build, validateNativeWorkspace
   WORKSPACE_ACCEPTANCE_ACTIVATION_VALUES as gates } from "./staging-native-workspace-acceptance-profile.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
+const operationsWorkspacePage = "/administration/client-portal/operations-workspaces";
 function state() {
   const configs = renderConfigs(root, {
     DELIVERY_STAGING_ACCESS_AUD: "a".repeat(64), OPERATIONS_STAGING_ACCESS_AUD: "b".repeat(64),
@@ -27,6 +28,8 @@ test("activates only the paired publication gates without changing sources or pr
   const candidates = build(sources, production);
   assert.deepEqual(validate(sources, candidates, production), []);
   assert.deepEqual({ sources, production }, before);
+  assert.deepEqual(candidates.operations.assets.run_worker_first, sources.operations.assets.run_worker_first);
+  assert.equal(candidates.operations.assets.run_worker_first.filter((route) => route === operationsWorkspacePage).length, 1);
   for (const app of ["delivery", "operations"]) {
     const restored = structuredClone(candidates[app]);
     for (const flag of Object.keys(gates[app])) {

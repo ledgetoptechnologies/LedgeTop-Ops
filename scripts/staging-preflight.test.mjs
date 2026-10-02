@@ -9,6 +9,7 @@ import { APP_SOURCE_DIRS, FEATURE_FLAG_ACTIVATION_POLICIES, REQUIRED_DISABLED_FE
 
 const audiences = Object.freeze({ delivery: "c".repeat(64), operations: "d".repeat(64), "ops-sync": "b".repeat(64) });
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const operationsWorkspacePage = "/administration/client-portal/operations-workspaces";
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
 function stagingConfig(app) {
@@ -335,6 +336,26 @@ test("rejects an Operations staging config without the required SPA assets bindi
   const operations = stagingConfig("operations");
   delete operations.assets;
   const errors = validateApp("operations", operations, productionFrom(stagingConfig("operations")));
+  assert(errors.some((error) => error.includes("operations assets does not match the approved staging inventory")), errors.join(" | "));
+});
+test("routes the workspace owner page through the guarded staging Worker exactly once", () => {
+  const approvedRoutes = STAGING_INVENTORY.operations.assets.run_worker_first;
+  assert.deepEqual(approvedRoutes, [
+    "/api/*", "/health", "/r/*",
+    "/administration/client-portal/operations-recipients",
+    "/administration/client-portal/operations-delivery-authority",
+    operationsWorkspacePage,
+  ]);
+  assert.equal(approvedRoutes.filter((route) => route === operationsWorkspacePage).length, 1);
+
+  const missing = stagingConfig("operations");
+  missing.assets.run_worker_first = missing.assets.run_worker_first.filter((route) => route !== operationsWorkspacePage);
+  let errors = validateApp("operations", missing, productionFrom(stagingConfig("operations")));
+  assert(errors.some((error) => error.includes("operations assets does not match the approved staging inventory")), errors.join(" | "));
+
+  const duplicated = stagingConfig("operations");
+  duplicated.assets.run_worker_first.push(operationsWorkspacePage);
+  errors = validateApp("operations", duplicated, productionFrom(stagingConfig("operations")));
   assert(errors.some((error) => error.includes("operations assets does not match the approved staging inventory")), errors.join(" | "));
 });
 test("resolves logical delivery staging files from apps/client", () => {
