@@ -123,6 +123,34 @@ be requested.
   secret workflow before enrollment/content acceptance, without printing their
   values. The name check does not validate secret contents or runtime health.
 
+## Subsequent staging preparation — 2026-10-02
+
+- Published candidate `af31f14c6b56300167a50e8a12838fa1a4ae4b85` includes the
+  canonical owner-page Worker-first route correction (`625731d4`). Applied only
+  that route correction to the ignored Ops base and both acceptance configs.
+  Full staging preflight, portal pair validation and workspace pair validation
+  now pass on disk. Their earlier dry-run evidence does not cover this correction;
+  fresh upload/dry-run gates remain. Focused route/profile tests passed 41/41.
+- Bootstrap test pins now match all 165 canonical Ops migrations. Its isolated
+  run passed 19 tests with four Windows symlink-permission skips and no failures.
+- Exact candidate CI run `37052911043` is in progress. The preceding run
+  `37051093191` is terminal cancelled: nine jobs succeeded, while the Operations
+  job was cancelled. Neither result proves the new candidate's complete CI.
+- Prepared only the two missing Client native enrollment/audit secrets using
+  cryptographic random values through in-memory stdin to `versions secret bulk`.
+  Undeployed version `03934748-73a5-47a3-b280-245afd39e46b` contains both names as
+  `secret_text`. No values were printed, written to source, or published.
+- Re-read deployed traffic after preparation: Client remains at version
+  `2512de43-cd37-4118-97d9-d0c241a3fabd`, 100 percent, deployment
+  `ceea1cfc-f581-4a20-b29f-598df0f708bd`. No enrollment or grant was activated.
+- Wrangler 4.118.0's latest-version secret listing failed while reading bindings;
+  exact-version JSON inspection verified the secret names instead. Comparison
+  found all existing bindings unchanged, but the API serialized an explicit
+  asset `html_handling=auto-trailing-slash` where the deployed version omitted
+  that field, plus deployment provenance metadata. Do not claim byte-identical
+  resources or blindly promote this secret-preparation version. Validate the
+  final reviewed code/config candidate and exact rollback before traffic changes.
+
 ## Historical joined-fixture recheck — 2026-10-02
 
 - The long-lived full Operations run started at 12:02, before the historical
