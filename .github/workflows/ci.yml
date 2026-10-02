@@ -33,7 +33,7 @@ jobs:
         run: npm ci --prefix apps/operations
 
       - name: Verify non-deploying staging release gates
-        run: node --test scripts/staging-preflight.test.mjs scripts/staging-bootstrap.test.mjs scripts/staging-evidence.test.mjs scripts/staging-acceptance.test.mjs scripts/staging-native-client-onboarding-acceptance-profile.test.mjs
+        run: node --test scripts/staging-preflight.test.mjs scripts/staging-bootstrap.test.mjs scripts/staging-evidence.test.mjs scripts/staging-acceptance.test.mjs scripts/staging-native-client-onboarding-acceptance-profile.test.mjs scripts/staging-ops-project-v2-joined-acceptance-profile.test.mjs
 
       - name: Verify governed staging authority packets locally
         run: node --test scripts/staging-native-authority-packet.test.mjs scripts/staging-bounded-guards.test.mjs scripts/staging-onboarding-authority-packet.test.mjs scripts/staging-native-authority-window.test.mjs
