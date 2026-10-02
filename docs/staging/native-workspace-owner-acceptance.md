@@ -262,6 +262,91 @@ be requested.
 - Preserve the original full run and its diagnostic result independently;
   do not restart it solely because it is quiet or overwrite its failure evidence.
 
+## Native recipient fixture selection and remaining gates — 2026-10-02
+
+- Published tooling revision `809dbfca3d73db7b0e4d200508261c9cb738f144`
+  passed all 74 local governed-packet tests. Exact-revision CI run `37057812050`
+  passed `source-invariants`, including the locked Operations dependency install
+  and new authority-window tests; the overall run remained in progress.
+- The same run's desktop Client browser job subsequently failed one of 252
+  tests: `client-portal.spec.ts:840`, progressive rendering of 1,200 immediate
+  children. Its exact request-count/concurrency assertion at line 878 differed
+  from expectation; 251 tests passed and the dual-domain follow-up was skipped.
+  Preserve the failure evidence and diagnose it before calling this revision
+  release-ready. A local rerun alone must not erase this exact-revision result.
+- Follow-up diagnosis found a stale pagination callback could replay a consumed
+  cursor after prefetch completed but before React committed continuation state.
+  The fix synchronously fences the authoritative generation/folder/cursor and
+  releases only matching failed requests for retry. The original 1,200-item
+  browser test and its exact eight-request assertion remain unchanged.
+  A separate deterministic stale-observer regression requires the observer to
+  exist and proves pages remain `[0,1,2]` after its outdated callback fires.
+  Both cases passed 20 repeated desktop checks and two mobile checks; Client
+  typecheck and build passed. These are local follow-up results, not a green
+  result for run `37057812050` or completed live recipient acceptance.
+- Use `/administration/client-portal/operations-recipients` and its native
+  Operations issuer. Legacy `client_portal_recipient_enrollment_*` ledgers and
+  legacy workspace-selection IDs are not prerequisites for this route.
+- An organization-root recipient needs one active
+  `operations_portal_workspace_reservation_heads` target and an actual client-kind
+  Directory record explicitly related to that organization. A shared-project
+  head with `client_record_id=NULL` is neither the target nor a client identity.
+- Owner permission is checked against the workspace root: effective
+  `directory.portal_access.manage` allow, no applicable deny, and current trusted
+  admission/profile/grant generation and qualifying role. Global profile-view
+  permission alone cannot authorize recipient issuance.
+- Before grant dispatch, the current acknowledged workspace publication must
+  contain the exact client member under that organization. The issuer rechecks
+  the target revision and relationship version through issue, redeem and confirm.
+  A successful issue alone is not successful materialization or recipient access.
+- Native recipient enrollment grants service-home authority only. Actual file
+  access additionally requires acknowledged native folder reservation and
+  independently reviewed delivery authority; an empty service dashboard does
+  not prove selected-service or file acceptance.
+- Direct read-only staging D1 count diagnostics returned zero active native
+  workspace reservations and zero client-kind relationships under the selected
+  synthetic organization. Both queries reported `changes=0`, `rows_written=0`
+  and `changed_db=false`. Therefore that existing project/organization is not
+  currently a ready recipient fixture; reserve/publish an explicitly authorized
+  workspace and establish a reviewed actual client relationship before issuance.
+- The Ops onboarding form was accessible in the signed-in browser. Navigation
+  to the synthetic Client staging onboarding path was rejected by that browser
+  with `ERR_BLOCKED_BY_CLIENT`. No invitation was issued or authority window
+  opened while that recipient UI gate could not be tested. Do not bypass the
+  browser rejection or infer that the server returned an application error.
+- The authenticated customer-service enrollment route remains unimplemented:
+  authorization review stopped that new mutation surface, and direct human
+  approval was requested. Existing writer authorization must remain unchanged;
+  neither direct enrollment-table seeds nor broad grants are a substitute.
+- Service-definition provisioning is also missing, but PA's financial catalog
+  is not the authority for these definitions. Migration 0146 and the migration
+  plan explicitly separate Ops-owned service enrollment/availability from PA
+  prices, products and assignments. Model broad provider-qualified service lines
+  such as drone services and website hosting, not one entitlement per invoice
+  item. Creating a definition must never enroll a customer or grant portal/data
+  access. Customer-scoped `directory.enrollment.manage` must not imply global
+  definition-administration authority. Current immutable definitions also need
+  an explicit rename/retirement policy before claiming ongoing administration.
+
+Evidence anchors: `operations-portal-native-recipient-authority.ts`,
+`operations-portal-native-recipient-authority-dispatch.ts:81` and migration
+`0152_operations_portal_workspace_reservations.sql`. This section records source
+prerequisites and observed browser behavior, not a completed live portal test.
+
+## Branch cleanup eligibility — 2026-10-02
+
+- Read-only Ops remote audit found 49 heads. All 48 topic heads are covered by
+  active-worktree or open-PR exclusions; no eligible deletion remains.
+  Remote `main`: `bb8422c77bbcad9093662e8da9d235c40d27282d`.
+- Read-only PA audit verified `C:/Projects/Project-Alpha` against the configured
+  `ledgetoptechnologies/Project-Alpha` remote and found 26 heads. Protecting
+  `main`, `dev`, active worktrees and open PRs left seven graph candidates;
+  every one contained commits not in remote `main`, so none is eligible.
+  Remote `main`: `1513b6a860a045e1a22e916e282699dea5ce2469`;
+  protected `dev`: `4c075e999d51ac2d1e5de64c55133b126ff9bb28`.
+- Open-PR head SHAs matched current remote refs in both audits. No squash-merge
+  assumption, fetch, prune, branch deletion or worktree archival was used.
+
 Local evidence on 2026-10-02: 14 owner-handler tests passed, including exact
 folder reserve/revoke, domain-denial short circuit and replay; Operations
 typecheck/build passed, and 35 paired-workspace-profile/scaffold/preflight tests
