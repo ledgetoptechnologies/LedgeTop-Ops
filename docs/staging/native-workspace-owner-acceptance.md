@@ -320,6 +320,11 @@ be requested.
   was rejected before execution; independent SELECTs produced the recorded
   results without changing guards or schema. Recheck remaining authority/delivery
   ledgers and current pins immediately before an actual activation transition.
+- Final result for `37059753833`: all ten jobs passed at exact published revision
+  `949b0e6f94ed912026eaad2cbdd861bf44a15113`. Operations completed 356 test
+  files and 3,387 tests, followed by a successful build. This satisfies that
+  revision's CI gate; it does not prove live recipient sign-in, selected file
+  access, service enrollment, production readiness or the owner PA checkpoint.
 - Use `/administration/client-portal/operations-recipients` and its native
   Operations issuer. Legacy `client_portal_recipient_enrollment_*` ledgers and
   legacy workspace-selection IDs are not prerequisites for this route.
