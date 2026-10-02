@@ -284,6 +284,17 @@ be requested.
   Both cases passed 20 repeated desktop checks and two mobile checks; Client
   typecheck and build passed. These are local follow-up results, not a green
   result for run `37057812050` or completed live recipient acceptance.
+- Published follow-up `949b0e6f94ed912026eaad2cbdd861bf44a15113` started
+  exact-revision CI run `37059753833`. The older run `37057812050` is terminal
+  cancelled (Operations cancelled; the desktop browser failure remains recorded).
+  Fresh source-invariants, ops-sync, incoming-pickup and thumbnail jobs passed;
+  remaining app/browser jobs were still live at this checkpoint.
+- Additional focused recovery coverage passed: five FileBrowser cases on desktop
+  and the same five on mobile, plus seven neighboring native delivery cases.
+  The added tests prove a 503 continuation can retry the identical cursor and a
+  403 clears private rows and prevents a captured stale observer from reissuing.
+  Existing folder-change/late-response and exact eight-page checks remain intact.
+  Client typecheck passed. This adds test coverage only, not new access authority.
 - Use `/administration/client-portal/operations-recipients` and its native
   Operations issuer. Legacy `client_portal_recipient_enrollment_*` ledgers and
   legacy workspace-selection IDs are not prerequisites for this route.

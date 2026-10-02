@@ -937,6 +937,91 @@ test("a stale project-file observer callback cannot replay an already consumed c
   expect({ requestedPages, maximumInFlight }).toEqual({ requestedPages: [0, 1, 2], maximumInFlight: 1 });
 });
 
+test("a transient project-file continuation failure releases the matching cursor for explicit retry", async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(window, "requestIdleCallback", { configurable: true, value: () => 1 });
+    Object.defineProperty(window, "cancelIdleCallback", { configurable: true, value: () => {} });
+    Object.defineProperty(window, "IntersectionObserver", { configurable: true, value: class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+      takeRecords() { return []; }
+      readonly root = null;
+      readonly rootMargin = "0px";
+      readonly thresholds = [0];
+    } });
+  });
+  const requestedCursors: Array<string | null> = [];
+  await mockAuthorizedPortal(page);
+  await page.route("**/api/client/projects/project-a/files**", async route => {
+    const url = new URL(route.request().url());
+    const folder = url.searchParams.get("folder");
+    if (folder !== "pf1_retry") return route.fulfill({ json: { files: [], folders: [{ id: "pf1_retry", name: "Retry fixture" }],
+      breadcrumbs: [{ id: null, name: "Project files" }], folderId: null, prefix: "", cursor: null } });
+    const cursor = url.searchParams.get("cursor");
+    requestedCursors.push(cursor);
+    if (!cursor) return route.fulfill({ json: { files: [{ ...filePage.files[0]!, id: "retry-initial", name: "retry-initial.pdf" }], folders: [],
+      breadcrumbs: [{ id: null, name: "Project files" }, { id: folder, name: "Retry fixture" }], folderId: folder, prefix: "", cursor: "retry-next" } });
+    if (requestedCursors.length === 2) return route.fulfill({ status: 503, json: { error: "Temporary continuation failure" } });
+    return route.fulfill({ json: { files: [{ ...filePage.files[0]!, id: "retry-success", name: "retry-success.pdf" }], folders: [],
+      breadcrumbs: [{ id: null, name: "Project files" }, { id: folder, name: "Retry fixture" }], folderId: folder, prefix: "", cursor: null } });
+  });
+  await page.goto("/portal/projects/project-a?tab=files");
+  await page.getByRole("button", { name: /Retry fixture/ }).click();
+  await expect(page.getByText("retry-initial.pdf")).toBeVisible();
+  await page.getByRole("button", { name: "Load more" }).click();
+  await expect(page.getByRole("alert")).toContainText("More files could not be loaded.");
+  await page.getByRole("button", { name: "Load more" }).click();
+  await expect(page.getByText("retry-success.pdf")).toBeVisible();
+  expect(requestedCursors).toEqual([null, "retry-next", "retry-next"]);
+});
+
+test("a project-file continuation denial clears private rows and fences stale observer callbacks", async ({ page }) => {
+  await page.addInitScript(() => {
+    const callbacks: IntersectionObserverCallback[] = [];
+    Object.defineProperty(window, "__portalDenialObservers", { value: callbacks });
+    Object.defineProperty(window, "requestIdleCallback", { configurable: true, value: () => 1 });
+    Object.defineProperty(window, "cancelIdleCallback", { configurable: true, value: () => {} });
+    Object.defineProperty(window, "IntersectionObserver", { configurable: true, value: class {
+      constructor(callback: IntersectionObserverCallback) { callbacks.push(callback); }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+      takeRecords() { return []; }
+      readonly root = null;
+      readonly rootMargin = "0px";
+      readonly thresholds = [0];
+    } });
+  });
+  let continuationCalls = 0;
+  await mockAuthorizedPortal(page);
+  await page.route("**/api/client/projects/project-a/files**", async route => {
+    const url = new URL(route.request().url());
+    const folder = url.searchParams.get("folder");
+    if (folder !== "pf1_denied") return route.fulfill({ json: { files: [], folders: [{ id: "pf1_denied", name: "Denied fixture" }],
+      breadcrumbs: [{ id: null, name: "Project files" }], folderId: null, prefix: "", cursor: null } });
+    if (!url.searchParams.has("cursor")) return route.fulfill({ json: { files: [{ ...filePage.files[0]!, id: "denied-private", name: "denied-private.pdf" }], folders: [],
+      breadcrumbs: [{ id: null, name: "Project files" }, { id: folder, name: "Denied fixture" }], folderId: folder, prefix: "", cursor: "denied-next" } });
+    continuationCalls += 1;
+    return route.fulfill({ status: 403, json: { error: "File authority changed" } });
+  });
+  await page.goto("/portal/projects/project-a?tab=files");
+  await page.getByRole("button", { name: /Denied fixture/ }).click();
+  await expect(page.getByText("denied-private.pdf")).toBeVisible();
+  await page.getByRole("button", { name: "Load more" }).click();
+  await expect(page.getByText("denied-private.pdf")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Load more" })).toHaveCount(0);
+  await page.evaluate(() => {
+    const callbacks = (window as unknown as { __portalDenialObservers: IntersectionObserverCallback[] }).__portalDenialObservers;
+    const staleCallback = callbacks[0];
+    if (!staleCallback) throw new Error("The denied pagination observer was not installed.");
+    staleCallback([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver);
+  });
+  await page.waitForTimeout(25);
+  expect(continuationCalls).toBe(1);
+  await expect(page.getByText("denied-private.pdf")).toHaveCount(0);
+});
+
 test("leaving a folder aborts a continuation and ignores its stale result", async ({ page }) => {
   let continuationStarted = false;
   const fixture = async (url: URL): Promise<PortalFilePage> => {
