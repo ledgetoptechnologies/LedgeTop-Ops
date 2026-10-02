@@ -151,6 +151,35 @@ be requested.
   resources or blindly promote this secret-preparation version. Validate the
   final reviewed code/config candidate and exact rollback before traffic changes.
 
+## Refreshed staging drain checks — 2026-10-02
+
+- Preserved exact deployed notification/invitation senders and the Operations
+  triage recipient in both ignored bases and their paired profiles. All three
+  validators pass after these edits. Fresh Wrangler dry-runs passed for both
+  Workers in both windows (four bundles); no version upload or deployment.
+- Read-only staging PA counts show zero pending/leased directory, relationship
+  and project outboxes; zero directory write fences and active project command
+  reservations; zero unresolved acquisition/revision-refresh latest events.
+- One historical Project-v2 event remains `uncertain` at version 2, while its
+  outbox is `terminal`, has no lease, and has no success receipt. The dispatcher
+  explicitly treats uncertainty as terminal and does not retry terminal rows.
+  Preserve this evidence unchanged. It is not running work and does not prove
+  successful Project-v2 write acceptance.
+- Read-only portal counts show zero in-flight legacy/native authority,
+  delivery, workspace/publication and cleanup outboxes; zero active recipient,
+  delivery, workspace/folder reservation or publication heads; zero unresolved
+  native recipient intents, cleanup invocations and onboarding decision fences.
+- Two onboarding invitations remain `pending`: one is expired, one remains
+  valid until October 9. There are no undecided submissions or active onboarding
+  identity bindings. Do not delete or silently revoke those invitations to
+  manufacture a clean baseline. Verify their fixture provenance and either
+  finish the intended onboarding acceptance or document a bounded temporary
+  window closure with exact restoration before new portal deployment.
+- The direct query readback returned zero rows written. Wrangler file mode
+  returned execution metadata rather than SELECT results; the aggregate results
+  were independently obtained through its command query path. No raw invitation
+  secrets, handoff payloads, credentials or private client fields were read.
+
 ## Historical joined-fixture recheck — 2026-10-02
 
 - The long-lived full Operations run started at 12:02, before the historical
