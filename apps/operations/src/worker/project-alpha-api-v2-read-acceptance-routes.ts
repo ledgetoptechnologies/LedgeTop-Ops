@@ -17,6 +17,7 @@ import {
   type ProjectAlphaProjectInventoryOutcome,
 } from "./project-alpha-project-inventory-api-v2";
 import type { Env, StaffPrincipal } from "./types";
+import { stagingDirectoryOwnerViewGrantEnabled } from "./staging-directory-owner-view-grant";
 
 type Variables = { principal: StaffPrincipal; administrator: boolean };
 type App = Hono<{ Bindings: Env; Variables: Variables }>;
@@ -155,6 +156,7 @@ export function registerProjectAlphaApiV2ReadAcceptanceRoutes(app: App): void {
     return c.json({
       ...listProjectAlphaApiV2Connections(c.env),
       readAcceptanceEnabled: projectAlphaApiV2ReadAcceptanceEnabled(c.env),
+      stagingDirectoryOwnerViewGrantEnabled: stagingDirectoryOwnerViewGrantEnabled(c.env),
     });
   });
 

@@ -96,7 +96,7 @@ describe("Project Alpha API-v2 read acceptance route", () => {
     const { sendInventory } = fixture(false);
     const response = await sendInventory();
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ status: "configured", connections: [{ sourceId, enabled: true }], readAcceptanceEnabled: false });
+    expect(await response.json()).toEqual({ status: "configured", connections: [{ sourceId, enabled: true }], readAcceptanceEnabled: false, stagingDirectoryOwnerViewGrantEnabled: false });
     expect(mocks.inventory).toHaveBeenCalledTimes(1);
     expect(mocks.batch).not.toHaveBeenCalled();
     expect(response.headers.get("Cache-Control")).toBe("no-store");
