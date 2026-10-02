@@ -134,6 +134,7 @@ test("builds only the explicit joined recipient-enrollment activation window", (
   assert.equal(candidates.operations.vars.CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ORIGIN, "");
   assert.equal(candidates.delivery.vars.CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_WRITER_ENABLED, "false");
   assert.equal(candidates.delivery.vars.CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_STATUS_ENABLED, "false");
+  assert.equal(candidates.delivery.vars.CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED, "false");
   assert.equal(candidates.operations.vars.VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_DISPATCH_ENABLED, "false");
   assert.equal(Object.hasOwn(candidates.delivery.vars, "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_CSRF_SECRET"), false);
 });
@@ -156,10 +157,12 @@ test("rejects any candidate drift outside the known flag window", () => {
   const candidates = buildRecipientEnrollmentConfigs(sources, productionConfigs);
   candidates.operations.routes[0].pattern = "ops.ledgetopdroneservices.com";
   candidates.delivery.vars.CLIENT_AUTHORITY_WORKSPACE_BINDING_WRITER_ENABLED = "true";
+  candidates.delivery.vars.CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED = "true";
   candidates.delivery.vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_CSRF_SECRET = "not-a-real-secret";
   const errors = validateRecipientEnrollmentConfigs(sources, candidates, productionConfigs);
   assert(errors.some((error) => error.includes("outside the explicit reviewed activation window")), errors.join(" | "));
   assert(errors.some((error) => error.includes("keep CLIENT_AUTHORITY_WORKSPACE_BINDING_WRITER_ENABLED=false")), errors.join(" | "));
+  assert(errors.some((error) => error.includes("keep CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED=false")), errors.join(" | "));
   assert(errors.some((error) => error.includes("must not be written")), errors.join(" | "));
 });
 

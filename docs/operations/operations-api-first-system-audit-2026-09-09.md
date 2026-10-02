@@ -4,6 +4,34 @@ Prepared September 9, 2026. **Decision document, not an implementation or deploy
 
 **September 10 follow-up:** [Recorded answers and revised implementation decisions](api-first-decisions-2026-09-10.md) supersede the recommendations below where noted, particularly PA-first project creation, employee review, billing recipients and expansion sequencing. The source findings and test results below remain dated audit evidence, not deployment status.
 
+## September 30 implementation audit delta
+
+This delta reconciles the original findings with the current local worktree. It
+does not rewrite the September 9 evidence baseline or certify a deployment.
+
+| Audit area | Verified current local evidence | Remaining gap or action |
+| --- | --- | --- |
+| F01/F02/F05/F06 — explicit native authority | Separate default-off recipient consent and owner-manager HTTP/RPC boundaries are mounted ahead of legacy PA admission. Strict parsers, exact operation replay/recovery, deny-winning checks and native service-home selection have focused coverage. | Deploy nothing until exact staging bindings and flags are inspected. Prove real signed identities, positive consent and revocation; do not infer authority from service-home metadata. |
+| F04/F14 — durable ownership and recovery | Local Ops publication, cancellation, cleanup and current-manager recovery migrations extend through `0160`; Client publication, recipient, cleanup, delivery and content-audit migrations extend through `0228`. Focused populated-D1, transport and recovery evidence is recorded in the migration register. | Local files are not applied state. Verify migrated populated staging behavior, lost-response replay, topology drift cleanup and rollback against the exact deployed versions. |
+| F05/F08 — portal and public-link isolation | Native delivery routes are ordered before PA admission, while source-layout tests preserve existing public-share routes. Checked-in production flags remain off and the new production reader/audit bindings remain absent. | Run signed staging browse/preview/range/download/content-audit acceptance plus wrong-person, wrong-customer, wrong-folder and revoke-during-read denials. Recheck existing public-link behavior live. |
+| Migration safety | The migration-only profile produces only Ops `0152`–`0160` and Client `0223`–`0228` after byte-pinned bases. Current focused profile/route/evidence run passed 14 tests with one Windows symlink-capability skip; both application TypeScript checks passed. | The broad app test chain was interrupted, so no full-suite pass is claimed. Rerun it without competing database fixtures before release. |
+| Recipient and folder isolation | Independent review found a candidate high-severity cross-client project/folder pairing under a shared organization workspace. The local, unreleased `0158` migration, grant issuer and final reader now enforce exact client ownership, or exact-root organization-wide scope, and bind publication/receipt/snapshot pins to the live workspace. Populated-D1 sibling-client denial and allowed-scope controls pass; authority tests 20/20 and Ops type-check pass. | The fix remains local/unapplied. Re-run staging profile gate and the same positive/negative acceptance only after authenticated staging migration/deployment; retain the sibling-client denial test. |
+| Staging state | Dashboard readback remains exactly Ops 151 applied migrations through `0151` and Client 141 through `0222`; both foreign-key checks returned zero. Dashboard Time Travel restore points exist for each database. | Configured Wrangler CLI authentication expired. No new migration or deploy occurred; refresh only the intended CLI authorization, then repeat preflight and migration-first/default-off rollout. |
+
+The restore points are Operations
+`00000bd2-00000024-000050f6-268daa8a3e12733024d6ba321beb7786` and Client
+`00000d57-00000008-000050f6-31acee3d6f0dd714d8370dc42de3d22a`.
+They are Cloudflare dashboard bookmark/Time Travel restore points, not SQL
+exports, and no restore is claimed. Local inventory is 160 Operations SQL files
+through `0160` and 147 Client SQL files through `0228`; do not confuse those
+candidate counts with the live staging ledgers above.
+
+The original critical warning is narrowed but still valid: the current source
+has concrete native authority, recovery and data-access candidates, yet the
+coordinated staging migration/deployment and positive end-to-end access proof
+have not occurred. Production PA update, authority cutover, client activation
+and public-link mutation remain unproven and unauthorized by this audit delta.
+
 ## September 22 implementation delta
 
 This table updates implementation evidence without rewriting the September 9

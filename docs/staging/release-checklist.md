@@ -180,8 +180,19 @@ not become active deployments.
   feature version. Record credential fingerprints and secret names only, never
   `draftQuote.apiKey` or `draftQuote.hmacSecret` values;
 
-`CLIENT_PORTAL_ENABLED` and every feature listed in
-`REQUIRED_DISABLED_FEATURE_FLAGS` must be explicitly `false`;
+`CLIENT_PORTAL_ENABLED` must be explicitly `true` for the reviewed
+`staff-synthetic-acceptance` phase. The evidence packet must prove that only
+one approved staff tester can use a synthetic workspace, while client
+admission, invitation sending, automatic enrollment, and broad Access policies
+remain disabled. Every feature listed in `REQUIRED_DISABLED_FEATURE_FLAGS`
+must still be explicitly `false`;
+the admission evidence must bind the exact protected application and Allow
+policy IDs to the dedicated tester group, contain no additional include,
+exclude, require, or Bypass selectors, and match the one approved tester's
+hashed issuer/subject identity to the complete hashed group-membership set.
+Production Access before/after application IDs, ordered policy IDs, and
+canonical configuration hashes must be identical. The public-path Bypass
+application is validated separately and does not authorize portal admission.
 `CLIENT_PORTAL_ORIGIN` and Operations `DELIVERY_BASE_URL` must be the client
 staging origin. `PUBLIC_SHARE_ORIGIN` on both Workers and Client
 `PUBLIC_BASE_URL` must be the anonymous delivery staging origin.
@@ -214,6 +225,16 @@ bootstrap window also requires that administrator's exact active global
 window. Invoke the joined Project route only through
 `POST /api/admin/project-alpha/projects/v2/commands` with a command-matching
 `Idempotency-Key`; there is no scheduled or public/client invocation path.
+
+`PROJECT_ALPHA_API_V2_SYNC_ENABLED` and
+`PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED` are also required to be
+explicitly `false` in every release-preparation configuration. The sync window
+requires migration `0161`, a reviewed staging-only
+`PROJECT_ALPHA_API_V2_CONNECTIONS` envelope, and a separate activation version.
+The exact read-adoption window additionally requires migrations `0162` and
+`0163`, `ENVIRONMENT=staging`, current native staff admission, and the exact
+reviewed Directory authority. Never enable either flag in a baseline upload or
+carry it into the restored all-false version.
 
 Create and revoke that native admission and both grants only with the reviewed
 [staging native authority packet](native-authority-packet.md). Provision and
@@ -442,18 +463,16 @@ migration hashes. Set `RELEASE_CONTRACT_FINALIZED=true` only after independent
 comparison with those repositories. The verifier intentionally fails while any
 release-candidate placeholder remains.
 
-The earlier release candidate inventory extended through Client `0214` (including both
-distinct `0199` filenames), Operations `0139`, and Project Alpha `0102`. The
-reviewed Operations runtime boundary is commit
-`5ca70d4f5ec834bfddf7bff68ffc1d89c6fd32a7`, which adds default-off,
-fail-closed Cloudflare Access service-auth support to the PA API-v2 connection
-secret. This following contract-only commit pins that exact executable SHA so
-the release-packet HEAD is not self-referential. Project Alpha is pinned
+The current candidate inventory extends through Client `0228` (including both
+distinct `0199` filenames), Operations `0163`, and Project Alpha `0102`. The
+Operations runtime candidate remains `PENDING_OPERATIONS_COMMIT` until the
+combined portal and API-v2 sync/read-adoption candidate is committed, pushed,
+and independently reviewed; do not substitute the dirty worktree HEAD.
+Project Alpha is pinned
 independently at PR184 head `31deb85b87b95de27dc9e90a5591e036ae96709e`.
 Keep `RELEASE_CONTRACT_FINALIZED=false` until independent cross-repository,
 image, migration, and live staging evidence is complete. Any runtime change
-after `5ca70d4` requires a newly reviewed non-circular boundary and coordinated
-evidence refresh.
+requires a newly reviewed non-circular boundary and coordinated evidence refresh.
 
 September 27 source-only update: the staging migration inventory and example
 packet now extend through Client `0218` and Operations `0144`, including the
@@ -611,10 +630,11 @@ owner input, then use only those configs for the first full apply. The ordinary
 configs would replay the canonical named-human `0002` rows. A populated or
 partially migrated database must never use the bootstrap configs. Attach both
 generated manifests and complete `migrations.freshBootstrap`; the current
-schema-version-2 proof requires a new truthful empty-D1 rehearsal with 139/147
-ledger rows, both Client `0199` filenames exactly once, final `0220`/`0147`,
-canonical-human absence, the one synthetic owner and its role, the retained
-Operations ACL catalog, no pending reapply, and an empty foreign-key check.
+schema-version-2 proof requires a new truthful empty-D1 rehearsal with the
+current `BOOTSTRAP_APPS` ledger counts, both Client `0199` filenames exactly
+once, final `0228`/`0163`, canonical-human absence, the one synthetic owner and
+its role, the retained Operations ACL catalog, no pending reapply, and an empty
+foreign-key check.
 
 The September 18 schema-version-1 proof remains historical evidence for the
 133/139 chains through `0214`/`0139`. Preserve that record unchanged; it cannot
@@ -632,7 +652,6 @@ single disposable database; record target-specific creation, apply, and
 readback references in the existing schema-version-2 `freshBootstrap` gate.
 This disposable proof does not replace or rename the historical rehearsal and
 does not authorize any production or canonical-staging reset.
-
 It also requires the pushed source ref, exact deployed version/config hashes,
 an ordered remote migration-ledger readback, a pre-migration open-fence and
 writer/scheduler-quiescence check, compatible-writer ordering evidence,
@@ -707,11 +726,20 @@ apply time and is the explicit exception to this packet's normal
 migration-first order. Confirm every predecessor is already applied; otherwise
 resolve those predecessors in a separately reviewed release.
 
-For Operations, preserve the full ordered `0054` through `0139` suffix in the
+For Operations, preserve the full ordered `0054` through `0163` suffix in the
 remote Wrangler ledger. Attach the list output that proves every filename is in
 the exact checked-in order, with no duplicate, renamed, skipped, or unexpected
 row. A local migration-chain run, a directory listing, or a successful raw SQL
 parse is not remote-ledger evidence.
+
+The local preflight additionally locks the newly reviewed suffix bytes:
+`0123`=`5e36893c738c6a058271db521e4c5e8907009f135c25ee635f2f1ec709b3caf5`,
+`0124`=`b35a14babab1e10caf5420fe8d1209a81009b5bd55cfcb0361a4a3085c503a05`,
+`0161`=`1b6fbb3b3ce8b50dbb553fd38ec8544c25f88a2837d8523b5ddeb0494534bd45`,
+`0162`=`4bd97d25bd96a0a872bd3106ab936ab3fe1806b7456aec6cf02c92195715d1b0`,
+and `0163`=`ef4abf5411e8fd4e10d4daeb94dd4ca3469ae7d179d2b135a9d04ca4a0cf12aa`.
+Any content change requires an explicit contract/checksum review; never edit an
+already-applied migration to make a later rollout pass.
 
 Before the first Operations migration action, inspect and record every open
 directory/outbox/onboarding/native-integration/reconciliation fence. Stop unless
@@ -719,7 +747,7 @@ all are terminal or deliberately cancelled, then close mutation ingress and
 drain HTTP requests, queue consumers, leases, schedulers, and reconciliation
 batches. The evidence must prove this quiescent state and name the compatible
 Operations writer version already handling all traffic. Do not apply `0054`-
-`0139` while an old writer, an in-flight fence, or a scheduled/retry worker can
+`0163` while an old writer, an in-flight fence, or a scheduled/retry worker can
 commit a pre-migration assumption. Keep the compatible writer in place through
 the final ledger readback; use a compatible fix forward, never a pre-suffix
 writer rollback.
@@ -806,7 +834,8 @@ Confirm Operations
 `0014_staff_acl_controls.sql` through
 `0052_project_operational_reassignment_recovery.sql` and
 `0053_project_internal_notes.sql`, then Operations `0054` through
-`0139_native_directory_staging_empty_enrollment_fixture_guard.sql` in
+`0139_native_directory_staging_empty_enrollment_fixture_guard.sql` through
+`0163_project_alpha_directory_read_adoption_field_review_receipts.sql` in
 that exact ledger order. Migration `0100` removes
 `share_version` from the delivery-grant parent key so existing share
 rotation/revocation updates cannot be blocked by a portal grant; the grant

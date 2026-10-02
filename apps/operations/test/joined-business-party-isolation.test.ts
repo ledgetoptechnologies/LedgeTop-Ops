@@ -57,12 +57,20 @@ beforeAll(async () => {
   await registerVisibleTestSource(ops, secondary, "Independent Alpha B");
   await ops.prepare("UPDATE client_hub_directory_state SET ready=1 WHERE id='directory'").run();
 
-  await delivery.exec("CREATE TABLE client_accounts(id TEXT PRIMARY KEY)");
+  await delivery.exec(compact(`CREATE TABLE client_accounts(
+    id TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active',
+    project_alpha_client_id TEXT,
+    project_alpha_organization_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`));
   const hierarchy = splitD1MigrationStatements(readFileSync(new URL("../../client/migrations/0121_client_workspace_hierarchy_v2.sql", import.meta.url), "utf8"));
   // This joined fixture needs the canonical v2 authority schema, not 0121's
   // one-time legacy backfill (whose source tables intentionally are absent).
-  await delivery.batch(hierarchy.filter(sql => !sql.includes("client_identity_links") && !sql.includes("client_account_memberships")
-    && !sql.includes("client_project_grants") && !sql.includes("client_delivery_grants")).map(sql => delivery.prepare(sql)));
+  const legacyBackfillSource = /\b(?:FROM|JOIN)\s+(?:client_identity_links|client_accounts|client_account_members|client_account_memberships|projects|client_project_grants|client_delivery_grants|client_member_project_grants|client_folder_associations)\b/iu;
+  await delivery.batch(hierarchy.filter(sql => !legacyBackfillSource.test(sql)).map(sql => delivery.prepare(sql)));
 });
 afterAll(async () => runtime.dispose());
 

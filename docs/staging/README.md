@@ -21,6 +21,9 @@ Never reuse a production worker name, host, Access audience, D1 ID, R2 bucket, q
 The client portal release program is specified in
 [client-portal-rollout.md](client-portal-rollout.md). Its config is default-off;
 the existing Delivery staging Access app is not the client identity app.
+The separate three-gate service-home window is documented in
+[native-portal-service-home-acceptance.md](native-portal-service-home-acceptance.md);
+it never changes the default-off base or production configs.
 
 ## Prepare local configuration
 
@@ -94,6 +97,12 @@ rehearsal is documented in
 [pa-api-v2-directory-acceptance.md](pa-api-v2-directory-acceptance.md). It
 requires an exact feature-flag/capability contract and an exactly scoped key;
 it does not enable an Operations connection or change source authority.
+
+The bounded Operations-side Project Alpha API-v2 read/sync and exact-record
+review window is documented in
+[project-alpha-api-v2-acceptance-profile.md](project-alpha-api-v2-acceptance-profile.md).
+Its five gates are enabled only in a separately generated ignored staging
+config; the base and production configs remain default-off.
 
 Preserve all fail-closed feature variables, then run:
 

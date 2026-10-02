@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -12,12 +13,18 @@ const repositoryRoot = path.resolve(import.meta.dirname, "..");
 const owner = Object.freeze({ email: "owner@staging.example.test", displayName: "Synthetic Staging Owner", clientStaffId: "staging-client-owner", operationsStaffId: "staging-operations-owner" });
 const subject = "staging-access-subject-001", evidenceSha = "0123456789abcdef".repeat(4);
 const issuedAt = new Date(Date.now() - 60_000).toISOString(), expiresAt = new Date(Date.now() + 2 * 60 * 60_000).toISOString();
+const REVIEWED_OPERATIONS_152 = Object.freeze({ count: 152,
+  finalMigration: "0152_operations_portal_workspace_reservations.sql",
+  namesSha256: "a3eb1153187e13a1013b3d5ddd3dcc0c3d93ba2a272bb3650246df9ea9d8e109",
+  chainSha256: "f854aa66e1bb1b3c81feb7a11b18d654b11232d5e3732234ebff12e779f6e3a9" });
+const sha256 = value => createHash("sha256").update(value).digest("hex");
+function reviewedOperationsMigrations() { const directory=path.join(repositoryRoot,"apps","operations","migrations"), names=fs.readdirSync(directory).filter(name=>name.endsWith(".sql")).sort().slice(0,REVIEWED_OPERATIONS_152.count); assert.equal(names.length,REVIEWED_OPERATIONS_152.count); assert.equal(names.at(-1),REVIEWED_OPERATIONS_152.finalMigration); assert.equal(sha256(names.join("\n")),REVIEWED_OPERATIONS_152.namesSha256); assert.equal(sha256(names.map(name=>`${name}\0${sha256(fs.readFileSync(path.join(directory,name),"utf8"))}`).join("\n")),REVIEWED_OPERATIONS_152.chainSha256); return {directory,names}; }
 
 function oldInput() { return { schemaVersion: 3, packet: { packetId: "staging-authority-project-v2-prior", mode: "create", operatorKind: "synthetic", staffId: owner.operationsStaffId, email: owner.email, displayName: owner.displayName, accessSubject: subject, issuedAt, expiresAt, reason: "Prior bounded staging authority", expected: { admissionVersion: 0, profileVersion: 0, grantVersion: 0, grantGeneration: 0 }, evidence: { changeTicket: "prior-change", reviewer: "prior-reviewer", bindingEvidenceSha256: evidenceSha } } }; }
 function input(overrides = {}) { const base = { schemaVersion: 1, packet: { packetId: "staging-onboarding-authority-positive-001", purpose: "client-onboarding-positive-acceptance", operatorKind: "synthetic", staffId: owner.operationsStaffId, email: owner.email, displayName: owner.displayName, accessSubject: subject, businessAreaId: "area-default", issuedAt, expiresAt, reason: "Bounded positive client onboarding acceptance", expected: { admissionVersion: 2, profileVersion: 1 }, evidence: { changeTicket: "onboarding-change", reviewer: "onboarding-reviewer", bindingEvidenceSha256: evidenceSha } } }; return { ...base, ...overrides, packet: { ...base.packet, ...(overrides.packet ?? {}) } }; }
-function fixture() { const base=fs.mkdtempSync(path.join(os.tmpdir(),"ltds-onboarding-authority-")), app=path.join(base,"apps","operations"); fs.mkdirSync(app,{recursive:true}); fs.cpSync(path.join(repositoryRoot,"apps","operations","migrations"),path.join(app,"migrations"),{recursive:true}); fs.copyFileSync(path.join(repositoryRoot,"docs","staging","operations.wrangler.json.example"),path.join(app,"wrangler.staging.json")); return base; }
+function fixture() { const base=fs.mkdtempSync(path.join(os.tmpdir(),"ltds-onboarding-authority-")), app=path.join(base,"apps","operations"), migrations=path.join(app,"migrations"), reviewed=reviewedOperationsMigrations(); fs.mkdirSync(migrations,{recursive:true}); for(const name of reviewed.names) fs.copyFileSync(path.join(reviewed.directory,name),path.join(migrations,name)); fs.copyFileSync(path.join(repositoryRoot,"docs","staging","operations.wrangler.json.example"),path.join(app,"wrangler.staging.json")); return base; }
 function apply(db, source, name, table="d1_migrations") { db.exec("BEGIN"); try { db.exec(source); db.prepare(`INSERT INTO ${table}(name) VALUES(?)`).run(name); db.exec("COMMIT"); } catch(error) { try { db.exec("ROLLBACK"); } catch {} throw error; } }
-function database() { const db=new DatabaseSync(":memory:"); db.exec("PRAGMA foreign_keys=ON; CREATE TABLE d1_migrations(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE,applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL)"); const directory=path.join(repositoryRoot,"apps","operations","migrations"); for(const name of fs.readdirSync(directory).filter(n=>n.endsWith(".sql")).sort()) { let source=fs.readFileSync(path.join(directory,name),"utf8"); if(name==="0002_seed_acl.sql") source=transformSeed("operations",source,owner); apply(db,source,name); } db.prepare("UPDATE staff_users SET access_subject=?,last_seen_at=datetime('now'),updated_at=datetime('now') WHERE id=?").run(subject,owner.operationsStaffId); db.prepare("INSERT INTO native_business_areas(id,name,active) VALUES('area-default','Fixture area',1)").run(); db.exec(`CREATE TABLE ${AUTHORITY_MIGRATIONS_TABLE}(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE,applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL)`); return db; }
+function database() { const db=new DatabaseSync(":memory:"); db.exec("PRAGMA foreign_keys=ON; CREATE TABLE d1_migrations(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE,applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL)"); const {directory,names}=reviewedOperationsMigrations(); for(const name of names) { let source=fs.readFileSync(path.join(directory,name),"utf8"); if(name==="0002_seed_acl.sql") source=transformSeed("operations",source,owner); apply(db,source,name); } db.prepare("UPDATE staff_users SET access_subject=?,last_seen_at=datetime('now'),updated_at=datetime('now') WHERE id=?").run(subject,owner.operationsStaffId); db.prepare("INSERT INTO native_business_areas(id,name,active) VALUES('area-default','Fixture area',1)").run(); db.exec(`CREATE TABLE ${AUTHORITY_MIGRATIONS_TABLE}(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE,applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL)`); return db; }
 function priorInactive(db, base) { const prior=buildAuthorityArtifacts(base,oldInput(),"revoke"); apply(db,prior.provision.sql,prior.provision.name,AUTHORITY_MIGRATIONS_TABLE); apply(db,prior.revoke.sql,prior.revoke.name,AUTHORITY_MIGRATIONS_TABLE); return prior; }
 function row(db, source, ...args) { const value=db.prepare(source).get(...args); return value ? {...value} : value; }
 
@@ -89,13 +96,22 @@ test("revoke requires no in-flight actor work and rolls back atomically", () => 
   assert.deepEqual(row(db,"SELECT active FROM native_directory_grants WHERE id=?",artifact.ids.grant),{active:1});
 });
 
-test("builds a 147-migration, staging-only, sanitized, one-file packet", () => {
+test("builds a reviewed 152-migration, staging-only, sanitized, one-file packet", () => {
   const base=fixture(), artifact=buildOnboardingAuthorityArtifacts(base,input(),"revoke");
-  assert.equal(artifact.provision.manifest.canonicalMigrationCount,147);
+  assert.equal(artifact.provision.manifest.canonicalMigrationCount,REVIEWED_OPERATIONS_152.count);
+  assert.equal(artifact.provision.manifest.canonicalMigrationChainSha256,REVIEWED_OPERATIONS_152.chainSha256);
   assert.equal(artifact.provision.sql.includes("project.shared.sync"),false);
   assert.equal(artifact.provision.sql.includes("'business_area'"),true);
   assert.equal(JSON.stringify(artifact.provision.manifest).includes(subject),false);
   assert.equal(artifact.configs.provision.d1_databases.find(row=>row.binding==="OPS_DB").migrations_table,ONBOARDING_AUTHORITY_MIGRATIONS_TABLE);
   assert.equal(writeOnboardingAuthority(base,artifact).length,6);
   assert.deepEqual(validateGeneratedOnboardingAuthority(base,artifact),[]);
+});
+
+test("reviewed onboarding packets reject an appended current-chain 0153 migration", () => {
+  const base=fixture();
+  fs.copyFileSync(
+    path.join(repositoryRoot,"apps","operations","migrations","0153_operations_portal_workspace_publication_outbox.sql"),
+    path.join(base,"apps","operations","migrations","0153_operations_portal_workspace_publication_outbox.sql"));
+  assert.throws(()=>buildOnboardingAuthorityArtifacts(base,input(),"provision"),/exact reviewed 152-file Operations chain/);
 });

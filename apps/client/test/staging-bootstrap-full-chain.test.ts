@@ -23,7 +23,11 @@ function portableFixture(): string {
   ] as const) {
     const directory = path.join(base, "apps", source);
     fs.mkdirSync(directory, { recursive: true });
-    fs.cpSync(path.join(repositoryRoot, "apps", source, "migrations"), path.join(directory, "migrations"), { recursive: true });
+    const sourceMigrations = path.join(repositoryRoot, "apps", source, "migrations");
+    const destinationMigrations = path.join(directory, "migrations");
+    fs.mkdirSync(destinationMigrations);
+    for (const name of fs.readdirSync(sourceMigrations).filter(name => name.endsWith(".sql")))
+      fs.copyFileSync(path.join(sourceMigrations, name), path.join(destinationMigrations, name));
     fs.copyFileSync(path.join(repositoryRoot, "docs", "staging", example), path.join(directory, "wrangler.staging.json"));
   }
   return base;
@@ -94,10 +98,10 @@ describe("local-only complete staging bootstrap migration rehearsal", () => {
   });
 
   it("applies both reviewed chains to empty local D1 databases and stays idempotent", async () => {
-    expect(artifacts.delivery.files).toHaveLength(140);
-    expect(artifacts.operations.files).toHaveLength(151);
-    expect(artifacts.delivery.files.at(-1)?.name).toBe("0221_verified_recipient_delivery_authority.sql");
-    expect(artifacts.operations.files.at(-1)?.name).toBe("0151_verified_recipient_delivery_authority_outbox.sql");
+    expect(artifacts.delivery.files).toHaveLength(147);
+    expect(artifacts.operations.files).toHaveLength(164);
+    expect(artifacts.delivery.files.at(-1)?.name).toBe("0228_operations_portal_native_content_start_audit.sql");
+    expect(artifacts.operations.files.at(-1)?.name).toBe("0164_project_alpha_directory_read_adoption_authority_recheck.sql");
     expect(artifacts.delivery.files.filter(file => file.name.startsWith("0199_")).map(file => file.name)).toEqual([
       "0199_incoming_upload_pickup_lifecycle.sql", "0199_native_viewer_grants.sql",
     ]);
@@ -117,6 +121,15 @@ describe("local-only complete staging bootstrap migration rehearsal", () => {
 
     expect(await rows(delivery, "PRAGMA foreign_key_check")).toEqual([]);
     expect(await rows(operations, "PRAGMA foreign_key_check")).toEqual([]);
+    for (const table of ["operations_portal_workspace_publication_commands",
+      "operations_portal_workspace_publication_heads", "operations_portal_workspace_publication_snapshots",
+      "operations_portal_workspace_publication_history", "operations_portal_workspace_publication_receipts"]) {
+      expect(await count(delivery, table)).toBe(0);
+    }
+    for (const table of ["operations_portal_workspace_reservation_commands",
+      "operations_portal_workspace_reservation_heads", "operations_portal_folder_reservation_heads"]) {
+      expect(await count(operations, table)).toBe(0);
+    }
     expect(await rows<{ id: string; email: string }>(delivery, "SELECT id,email FROM staff_users ORDER BY id"))
       .toEqual([{ id: owner.clientStaffId, email: owner.email }]);
     expect(await rows<{ role: string }>(delivery, "SELECT role FROM staff_users WHERE id=?", owner.clientStaffId))
@@ -167,6 +180,34 @@ describe("local-only complete staging bootstrap migration rehearsal", () => {
       "SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name LIKE 'client_portal_authority_v2_outbox%v3%' ORDER BY name");
     expect(opsGuards).toHaveLength(3);
     expect(opsGuards.every(row => row.sql.includes("permissions_json") && row.sql.includes("protocol_version"))).toBe(true);
+
+    const resourceHeadColumns = await rows<{ name: string }>(delivery,
+      "PRAGMA table_info(portal_verified_recipient_delivery_authority_heads)");
+    expect(resourceHeadColumns.map(column => column.name)).toEqual(expect.arrayContaining([
+      "created_operation_id", "created_request_fingerprint", "created_by_staff_id",
+      "created_by_access_subject", "created_by_admission_version", "created_by_profile_version",
+      "created_by_grant_generation", "created_by_verified_until",
+    ]));
+    const resourceAuditColumns = await rows<{ name: string }>(delivery,
+      "PRAGMA table_info(portal_verified_recipient_delivery_authority_audit)");
+    expect(resourceAuditColumns.map(column => column.name)).toEqual(expect.arrayContaining([
+      "actor_staff_id", "actor_access_subject", "actor_admission_version",
+      "actor_profile_version", "actor_grant_generation", "actor_verified_until",
+    ]));
+    for (const table of ["portal_verified_recipient_delivery_authority_heads",
+      "portal_verified_recipient_delivery_authority_audit", "portal_verified_recipient_delivery_authority_receipts"])
+      expect(await count(delivery, table)).toBe(0);
+    const resourceGuards = await rows<{ name: string }>(delivery,
+      "SELECT name FROM sqlite_schema WHERE type='trigger' AND name LIKE 'verified_recipient_delivery_%'");
+    expect(resourceGuards.map(guard => guard.name)).toEqual(expect.arrayContaining([
+      "verified_recipient_delivery_head_renewal_current_proof_guard",
+      "verified_recipient_delivery_head_creation_provenance_guard",
+      "verified_recipient_delivery_head_creation_provenance_update_guard",
+      "verified_recipient_delivery_head_revoke_exact_guard",
+      "verified_recipient_delivery_audit_actor_shape_guard",
+      "verified_recipient_delivery_audit_actor_guard",
+      "verified_recipient_delivery_audit_no_update",
+    ]));
 
     const before = [await count(delivery, "sqlite_schema"), await count(operations, "sqlite_schema")];
     expect(await applyPending(delivery, artifacts.delivery)).toEqual([]);

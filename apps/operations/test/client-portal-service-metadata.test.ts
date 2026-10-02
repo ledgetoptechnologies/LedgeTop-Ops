@@ -75,6 +75,11 @@ describe("private client portal service metadata reader", () => {
       ] });
   });
 
+  it("does not fall back to historical receipts when native authority is selected", async () => {
+    await expect(readClientPortalServiceMetadata(db, request(), true))
+      .resolves.toEqual({ ok: false, protocolVersion: 1, code: "denied" });
+  });
+
   it("fails closed for swapped principals, grant mismatch, and binding receipt mismatch", async () => {
     await expect(readClientPortalServiceMetadata(db, { ...request(), issuer: subject, subject: issuer }))
       .resolves.toMatchObject({ ok: false, code: "denied" });

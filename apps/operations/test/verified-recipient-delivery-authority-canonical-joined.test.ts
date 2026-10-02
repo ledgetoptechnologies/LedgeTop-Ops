@@ -1,7 +1,10 @@
 import {Miniflare} from "miniflare";
 import {afterAll,beforeAll,describe,expect,it,vi} from "vitest";
-import {applyCanonicalChain,authorizeCanonicalUuidAcquisition,canonicalUuidOrganization,createAcquisitionPrerequisite,establishGovernedEmptyEnrollmentFixture,
-  establishCleanV3Authority,transitionCleanV3ToV4Acquisition,transitionCleanV4ToV6PortalAuthority,revokeCleanV6PortalAuthority,
+import {applyCanonicalChain,authorizeCanonicalUuidAcquisition,canonicalUuidOrganization,createAcquisitionPrerequisite,
+  establishGovernedEmptyEnrollmentFixture,
+  establishCleanV3Authority,establishHistoricalPreservedOnboardingLineage,transitionCleanV3ToV4Acquisition,
+  transitionCleanV4ToV6PortalAuthority,transitionHistoricalOnboardingToV7Acquisition,transitionHistoricalV7ToV8PortalAuthority,
+  revokeCleanV6PortalAuthority,revokeHistoricalV8PortalAuthority,
   writeGovernedCanonicalUuidOrganization} from "./helpers/verified-recipient-canonical-lineage";
 import {selectPortalWorkspaceBinding} from "../src/worker/client-portal-workspace-binding-selection";
 import {canonicalOwner} from "./helpers/verified-recipient-canonical-lineage";
@@ -67,10 +70,10 @@ describe("verified recipient authority canonical joined prerequisite",()=>{
   afterAll(async()=>runtime.dispose());
 
   it("creates the governed canonical fixture and rejects its non-UUID record as ineligible for workspace selection",async()=>{
-    const operations=await applyCanonicalChain(ops,"operations","0151_verified_recipient_delivery_authority_outbox.sql",true);
+    const operations=await applyCanonicalChain(ops,"operations","0152_operations_portal_workspace_reservations.sql",true);
     const delivery=await applyCanonicalChain(client,"client","0221_verified_recipient_delivery_authority.sql");
-    expect(operations).toHaveLength(151);expect(delivery).toHaveLength(140);
-    expect(await ops.prepare("SELECT count(*) count FROM d1_migrations").first("count")).toBe(151);
+    expect(operations).toHaveLength(152);expect(delivery).toHaveLength(140);
+    expect(await ops.prepare("SELECT count(*) count FROM d1_migrations").first("count")).toBe(152);
     expect(await client.prepare("SELECT count(*) count FROM d1_migrations").first("count")).toBe(140);
     await expect(createAcquisitionPrerequisite(ops)).rejects.toThrow(/directory|authority|admission|denied|guard/i);
     expect(await ops.prepare("SELECT count(*) count FROM operations_directory_records WHERE record_id='60000000-0000-4000-8000-000000000001'").first("count")).toBe(0);
@@ -160,7 +163,7 @@ describe("verified recipient authority canonical joined prerequisite",()=>{
     const isolated=new Miniflare({modules:true,compatibilityDate:"2026-08-06",script:"export default {}",d1Databases:{OPS_DB:crypto.randomUUID()}});
     try{
       const database=await isolated.getD1Database("OPS_DB") as unknown as D1Database;
-      await applyCanonicalChain(database,"operations","0151_verified_recipient_delivery_authority_outbox.sql",true);
+      await applyCanonicalChain(database,"operations","0152_operations_portal_workspace_reservations.sql",true);
       await establishCleanV3Authority(database);
       const written=await writeGovernedCanonicalUuidOrganization(database);
       expect(written.outcome).toMatchObject({status:"written",recordId:canonicalUuidOrganization.recordId,version:1});
@@ -201,6 +204,108 @@ describe("verified recipient authority canonical joined prerequisite",()=>{
         .first("count")).toBe(1);
       expect(await database.prepare("SELECT count(*) count FROM verified_recipient_delivery_authority_commands")
         .first("count")).toBe(0);
+    }finally{await isolated.dispose();}
+  },240_000);
+
+  it("rehearses immutable historical v2 through real onboarding, v7 acquisition, activation, and v8 selection",async()=>{
+    const isolated=new Miniflare({modules:true,compatibilityDate:"2026-08-06",script:"export default {}",d1Databases:{OPS_DB:crypto.randomUUID()}});
+    try{
+      const database=await isolated.getD1Database("OPS_DB") as unknown as D1Database;
+      const historical=await establishHistoricalPreservedOnboardingLineage(database);
+      expect(historical).toMatchObject({
+        sourceCommit:"332ffbb947c3dc50a96f7b0fc5e2a976f693bdbc",
+        sourceTree:"c07acd54f7c0e747b66e97ea7d9656210b7d7007",
+        historicalManifest:{schemaVersion:2,canonicalOperationsLedger:{count:122,
+          finalMigration:"0122_project_alpha_project_v2_canonical_activation.sql",
+          chainSha256:"20f127ae3193884494a021ac2f1851f6c2db06834d6f94498850d315e02df5d7"}},
+      });
+      expect(await database.prepare("SELECT count(*) count FROM d1_migrations").first("count")).toBe(152);
+      expect((await database.prepare(`SELECT grant_version,active,grant_generation FROM native_directory_grant_history
+        WHERE staff_id=? AND permission='directory.profile.edit' AND scope_kind='global' ORDER BY grant_version`)
+        .bind(canonicalOwner.operationsStaffId).all()).results).toEqual([{grant_version:1,active:0,grant_generation:1}]);
+      expect((await database.prepare(`SELECT grant_version,active,grant_generation FROM native_directory_grant_history
+        WHERE grant_id=? ORDER BY grant_version`).bind(historical.onboardingGrantId).all()).results).toEqual([
+        {grant_version:1,active:0,grant_generation:2},{grant_version:2,active:1,grant_generation:3},
+      ]);
+
+      const written=await writeGovernedCanonicalUuidOrganization(database);
+      expect(written.outcome).toMatchObject({status:"written",replayed:false,recordId:canonicalUuidOrganization.recordId,version:1});
+      if(written.outcome.status!=="written")throw Error("historical canonical writer failed");
+      await expect(dispatchProjectAlphaDirectoryProfileOutboxCommand({OPS_DB:database,PROJECT_ALPHA_API_V2_CONNECTIONS:connections},
+        canonicalUuidOrganization.sourceId,written.outcome.commandIds[0]!,createRemote())).resolves.toMatchObject({status:"acknowledged",replayed:false});
+
+      const authority=await transitionHistoricalOnboardingToV7Acquisition(database);
+      expect(authority.reviewer).toMatchObject({admissionVersion:5,profileVersion:1,grantGeneration:6});
+      expect((await database.prepare(`SELECT grant_version,active,grant_generation FROM native_directory_grant_history
+        WHERE grant_id=? ORDER BY grant_version`).bind(historical.onboardingGrantId).all()).results).toEqual([
+        {grant_version:1,active:0,grant_generation:2},{grant_version:2,active:1,grant_generation:3},
+        {grant_version:3,active:0,grant_generation:4},
+      ]);
+      expect((await database.prepare(`SELECT permission,scope_kind,active,grant_version,grant_generation
+        FROM native_directory_grant_history WHERE staff_id=? ORDER BY grant_generation`)
+        .bind(canonicalOwner.operationsStaffId).all()).results).toEqual([
+        {permission:"directory.profile.edit",scope_kind:"global",active:0,grant_version:1,grant_generation:1},
+        {permission:"directory.profile.edit",scope_kind:"business_area",active:0,grant_version:1,grant_generation:2},
+        {permission:"directory.profile.edit",scope_kind:"business_area",active:1,grant_version:2,grant_generation:3},
+        {permission:"directory.profile.edit",scope_kind:"business_area",active:0,grant_version:3,grant_generation:4},
+        {permission:"directory.profile.edit",scope_kind:"global",active:1,grant_version:2,grant_generation:5},
+        {permission:"directory.identity.link",scope_kind:"resource",active:1,grant_version:1,grant_generation:6},
+      ]);
+
+      const fetcher=projectAlphaRemote(),request={reviewId:"80000000-0000-4000-8000-000000000001",
+        commandId:"80000000-0000-4000-8000-000000000002",sourceId:acquiredSource.sourceId,
+        recordId:canonicalUuidOrganization.recordId,resourceType:"organization" as const,
+        projectAlphaPublicId:canonicalUuidOrganization.publicId,localRecordVersion:1,reviewer:authority.reviewer};
+      const acquired=await acquireProjectAlphaExistingDirectoryBinding({OPS_DB:database,PROJECT_ALPHA_API_V2_CONNECTIONS:connections},request,fetcher);
+      expect(acquired).toMatchObject({status:"acquired",replayed:false});if(acquired.status!=="acquired")throw Error(JSON.stringify(acquired));
+      await expect(acquireProjectAlphaExistingDirectoryBinding({OPS_DB:database,PROJECT_ALPHA_API_V2_CONNECTIONS:connections},request,fetcher))
+        .resolves.toEqual({...acquired,replayed:true});
+      const activationRequest={reviewItemId:acquired.reviewReceiptId,idempotencyKey:"80000000-0000-4000-8000-000000000003"};
+      const activated=await activateProjectAlphaExistingDirectoryBinding({OPS_DB:database,PROJECT_ALPHA_API_V2_CONNECTIONS:connections},
+        activationRequest,{staffId:canonicalOwner.operationsStaffId,accessSubject:canonicalOwner.accessSubject},fetcher);
+      expect(activated).toMatchObject({status:"activated",replayed:false,recordId:canonicalUuidOrganization.recordId});
+      if(activated.status!=="activated")throw Error(JSON.stringify(activated));
+      await expect(activateProjectAlphaExistingDirectoryBinding({OPS_DB:database,PROJECT_ALPHA_API_V2_CONNECTIONS:connections},
+        activationRequest,{staffId:canonicalOwner.operationsStaffId,accessSubject:canonicalOwner.accessSubject},fetcher))
+        .resolves.toEqual({...activated,replayed:true});
+      expect(await database.prepare(`SELECT directory_grant_generation FROM project_alpha_existing_directory_binding_activation_receipts
+        WHERE activation_id=?`).bind(activated.activationId).first("directory_grant_generation")).toBe(6);
+      expect(await database.prepare(`SELECT count(*) count FROM project_alpha_existing_directory_binding_activation_receipts activation
+        JOIN project_alpha_existing_directory_binding_acquired_mapping_receipts acquired ON acquired.receipt_id=activation.acquired_receipt_id
+        JOIN project_alpha_acquired_native_owner_claims claim ON claim.claim_id=activation.native_owner_claim_id
+        JOIN project_alpha_active_directory_mappings active ON active.provenance_id=activation.activation_id
+        WHERE activation.activation_id=? AND activation.review_receipt_id=? AND activation.record_id=?
+          AND active.mapping_kind='acquired' AND claim.receipt_id=acquired.receipt_id`)
+        .bind(activated.activationId,acquired.reviewReceiptId,canonicalUuidOrganization.recordId).first("count")).toBe(1);
+
+      const portal=await transitionHistoricalV7ToV8PortalAuthority(database,activated.activationId);
+      const priorHistory=(await database.prepare(`SELECT grant_id,grant_version,active,grant_generation FROM native_directory_grant_history
+        WHERE grant_id IN (?,?,?) ORDER BY grant_id,grant_version`)
+        .bind(authority.v7.ids.directoryGrant,authority.v7.ids.identityGrant,historical.onboardingGrantId).all()).results;
+      expect(priorHistory).toHaveLength(8);
+      const selectionCommand={selectionId:"80000000-0000-4000-8000-000000000004",recordId:canonicalUuidOrganization.recordId,
+        activationId:activated.activationId,workspaceId:"canonical-historical-workspace",sourceWorkspaceId:"canonical-historical-source",
+        checkpoint:{sourceGeneration:"generation-1",sourceSequence:1,snapshotGenerationId:"snapshot-1"}};
+      const selection=await selectPortalWorkspaceBinding(database,portal.actor,selectionCommand);
+      expect(selection).toMatchObject({recordId:canonicalUuidOrganization.recordId,activationId:activated.activationId,
+        rootType:"organization",rootPublicId:canonicalUuidOrganization.publicId,state:"inactive",replayed:false});
+      await expect(selectPortalWorkspaceBinding(database,portal.actor,selectionCommand)).resolves.toEqual({...selection,replayed:true});
+      expect((await database.prepare(`SELECT permission,scope_kind,resource_id,active FROM native_directory_grants
+        WHERE staff_id=? ORDER BY permission,scope_kind`).bind(canonicalOwner.operationsStaffId).all()).results).toEqual([
+        {permission:"directory.identity.link",scope_kind:"resource",resource_id:canonicalUuidOrganization.recordId,active:0},
+        {permission:"directory.portal_access.manage",scope_kind:"resource",resource_id:canonicalUuidOrganization.recordId,active:1},
+        {permission:"directory.profile.edit",scope_kind:"business_area",resource_id:null,active:0},
+        {permission:"directory.profile.edit",scope_kind:"global",resource_id:null,active:0},
+      ]);
+      await revokeHistoricalV8PortalAuthority(database);
+      expect((await database.prepare(`SELECT grant_id,grant_version,active,grant_generation FROM native_directory_grant_history
+        WHERE grant_id IN (?,?,?) ORDER BY grant_id,grant_version`)
+        .bind(authority.v7.ids.directoryGrant,authority.v7.ids.identityGrant,historical.onboardingGrantId).all()).results).toEqual(priorHistory);
+      expect((await database.prepare(`SELECT grant_version,active,grant_generation FROM native_directory_grant_history
+        WHERE grant_id=? ORDER BY grant_version`).bind(portal.v8.ids.portalAccessGrant).all()).results).toEqual([
+        {grant_version:1,active:1,grant_generation:9},{grant_version:2,active:0,grant_generation:10},
+      ]);
+      await expect(selectPortalWorkspaceBinding(database,portal.actor,selectionCommand)).rejects.toThrow("portal_workspace_binding_selection_denied");
     }finally{await isolated.dispose();}
   },240_000);
 });

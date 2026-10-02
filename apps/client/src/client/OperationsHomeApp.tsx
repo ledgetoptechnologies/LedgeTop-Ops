@@ -1,4 +1,5 @@
 import type { PortalOperationsHomeResponse } from "./portal-api";
+import { OperationsNativeDataBrowser } from "./OperationsNativeDataBrowser";
 
 export function OperationsServiceSummary({ response, embedded = false }: {
   response: PortalOperationsHomeResponse;
@@ -18,6 +19,19 @@ export function OperationsServiceSummary({ response, embedded = false }: {
           </ul>}
       </div>)}
   </section>;
+}
+
+export function OperationsNativeServicePanel({ response, embedded = false }: {
+  response: PortalOperationsHomeResponse;
+  embedded?: boolean;
+}) {
+  const nativeDataScope = JSON.stringify(response.homes
+    .map(home => JSON.stringify([home.authorityId, home.workspaceId, home.ownershipEpoch, home.grantRevision]))
+    .sort());
+  return <>
+    <OperationsServiceSummary response={response} embedded={embedded} />
+    <OperationsNativeDataBrowser key={nativeDataScope} />
+  </>;
 }
 
 export function OperationsHomeApp({ response, clientUnavailable = false, onRetryClient }: {
@@ -40,7 +54,7 @@ export function OperationsHomeApp({ response, clientUnavailable = false, onRetry
         <p>Your Operations service summary is still available. You can retry without the unavailable workspace selection.</p>
         {onRetryClient && <button type="button" className="button-ghost" onClick={onRetryClient}>Try available client workspaces</button>}
       </section>}
-      <OperationsServiceSummary response={response} />
+      <OperationsNativeServicePanel response={response} />
     </main>
   </div>;
 }

@@ -4,7 +4,12 @@ import { api, ApiError } from "./api";
 
 const ENDPOINT = "/api/admin/integrations/project-alpha/connectors";
 const READ_ACCEPTANCE_ENDPOINT = "/api/admin/integrations/project-alpha/api-v2/read-acceptance";
+const API_V2_SOURCES_ENDPOINT = "/api/admin/integrations/project-alpha/api-v2/sources";
+const API_V2_SYNC_ENDPOINT = "/api/admin/integrations/project-alpha/api-v2/sync-page";
+const DIRECTORY_READ_ADOPTION_ENDPOINT = "/api/admin/integrations/project-alpha/api-v2/directory/read-adoptions";
+const PROJECT_BINDING_REFRESH_ENDPOINT = "/api/admin/project-alpha/private/projects/bindings/refresh";
 const PRIMARY = "project-alpha:primary";
+const STAGING = "project-alpha:staging";
 type Connector = {
   sourceId: string; displayName: string; producerBindingId: string; snapshotOrigin: string; snapshotBasePath: string;
   applicationKey: string; profile: "primary_legacy" | "business_data"; state: "pending" | "active" | "suspended" | "retired";
@@ -22,6 +27,33 @@ type Directory = { connectors: Connector[]; health: Health[]; legacyPrimary: boo
 type ReadAcceptancePart = { status: string; count?: number; exactIdentityMatch?: boolean; exactContractMatch?: boolean };
 type ReadAcceptance = { sourceId: string; readOnly: boolean; capabilities: ReadAcceptancePart;
   directory: ReadAcceptancePart; projects: ReadAcceptancePart };
+type BindingRefreshOutcome = { status: string; reason?: string };
+type InventoryPageSurface = { status: "persisted" | "conflicted"; itemCount: number; conflictCount: number; hasMore: boolean; continuationToken?: string };
+type InventoryRequestedSurface = InventoryPageSurface
+  | { status: "blocked"; reason: "transport" | "contract" | "authorization" | "binding_stale" | "storage" | "cursor_stale" };
+type InventoryDisplaySurface = Omit<InventoryPageSurface, "continuationToken"> | Exclude<InventoryRequestedSurface, InventoryPageSurface>;
+type InventorySurface = InventoryRequestedSurface | { status: "not_requested" };
+type InventoryResult = { status: "completed" | "partial"; directory: InventorySurface; projects: InventorySurface }
+  | { status: "disabled" }
+  | { status: "blocked"; reason: "connection" | "capabilities" | "storage" }
+  | { status: "rejected"; reason: "invalid_input" };
+type DirectoryResourceType = "client" | "organization";
+type DirectoryField = "name" | "email" | "phone" | "address_line1" | "address_line2" | "city" | "state"
+  | "postal_code" | "country" | "client_type" | "organization_public_id";
+type DirectoryFieldDecision = "unchanged" | "retain_local" | "adopt_project_alpha" | "requires_follow_up";
+type FieldComparison = { status: "compared"; reviewId: string; resourceType: DirectoryResourceType; fields: Array<{
+  field: DirectoryField; localValue: string | null; projectAlphaValue: string | null; equal: boolean;
+}> };
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const PA_PUBLIC_ID = /^[0-9a-f]{32}$/;
+const ORGANIZATION_FIELDS: readonly DirectoryField[] = ["name", "email", "phone", "address_line1", "address_line2", "city", "state", "postal_code", "country"];
+const CLIENT_FIELDS: readonly DirectoryField[] = [...ORGANIZATION_FIELDS, "client_type", "organization_public_id"];
+const FIELD_LABELS: Record<DirectoryField, string> = {
+  name: "Name", email: "Email", phone: "Phone", address_line1: "Address line 1", address_line2: "Address line 2",
+  city: "City", state: "State", postal_code: "Postal code", country: "Country", client_type: "Client type",
+  organization_public_id: "Organization public ID",
+};
 
 function date(value: string | null) { return value ? new Date(value.includes("T") ? value : `${value.replace(" ", "T")}Z`).toLocaleString() : "Not yet"; }
 function SyncHealth({ health }: { health?: Health }) {
@@ -43,8 +75,26 @@ function RecoveryStatus({ connector, recovery }: { connector: Connector; recover
   return <p><strong>Scheduled recovery</strong> · {connector.state === "active" ? "Eligible by deployment configuration" : `Paused by deployment configuration (${connector.state})`}<br />
     {recovery ? <>Last attempt: {labels[recovery.status]} · Last success: {date(recovery.lastSuccessAt)}{recovery.nextAttemptAt && <><br />Next attempt not before: {date(recovery.nextAttemptAt)}</>}{recovery.errorCode && <><br />Last recovery error: {recovery.errorCode}</>}{recovery.failureCount > 0 && <> · Failure count: {recovery.failureCount}</>}</> : "Recovery status unavailable."}</p>;
 }
-function ReadAcceptanceCheck({ connector, disabled }: { connector: Connector; disabled: boolean }) {
+function safeBindingRefreshOutcome(value: unknown): BindingRefreshOutcome | null {
+  if (!record(value) || typeof value.status !== "string") return null;
+  const allowedStatuses = ["refreshed", "current", "not_refreshed", "blocked", "rejected", "conflict", "uncertain"];
+  if (!allowedStatuses.includes(value.status)) return null;
+  const allowedReasons = ["source_disabled", "not_found", "binding_stale", "transport", "authorization", "contract", "storage",
+    "preflight_configuration", "preflight_transport", "preflight_timeout", "preflight_credentials_or_scope", "preflight_http_status",
+    "preflight_rate_limit", "preflight_response_limit", "preflight_invalid_contract", "preflight_source_mismatch",
+    "preflight_application_mismatch", "preflight_history_epoch_mismatch", "preflight_missing_capability", "preflight_missing_endpoint"];
+  return { status: value.status, ...(typeof value.reason === "string" && allowedReasons.includes(value.reason) ? { reason: value.reason } : {}) };
+}
+function bindingRefreshMessage(outcome: BindingRefreshOutcome): string {
+  if (outcome.status === "refreshed") return "Binding refresh completed.";
+  if (outcome.status === "current") return "The binding is already current.";
+  if (outcome.status === "not_refreshed") return `Binding was not refreshed${outcome.reason ? ` (${outcome.reason.replaceAll("_", " ")})` : "."}`;
+  return `Binding refresh was not completed${outcome.reason ? ` (${outcome.reason.replaceAll("_", " ")})` : "."}`;
+}
+function ReadAcceptanceCheck({ connector, disabled }: { connector: Pick<Connector, "sourceId" | "state">; disabled: boolean }) {
   const [busy, setBusy] = useState(false), [result, setResult] = useState<ReadAcceptance | null>(null), [error, setError] = useState("");
+  const [externalProjectId, setExternalProjectId] = useState(""), [confirmedExternalProjectId, setConfirmedExternalProjectId] = useState("");
+  const [refreshBusy, setRefreshBusy] = useState(false), [refreshOutcome, setRefreshOutcome] = useState<BindingRefreshOutcome | null>(null), [refreshError, setRefreshError] = useState("");
   const verify = async () => {
     if (busy || disabled || connector.state !== "active") return;
     setBusy(true); setResult(null); setError("");
@@ -63,6 +113,28 @@ function ReadAcceptanceCheck({ connector, disabled }: { connector: Connector; di
     && result.capabilities.status === "verified" && result.capabilities.exactIdentityMatch === true
     && result.capabilities.exactContractMatch === true && result.directory.status === "observed"
     && result.projects.status === "observed";
+  const staleStagingBinding = connector.sourceId === STAGING && result?.projects.status === "binding_stale";
+  const refresh = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const projectId = externalProjectId.trim(), confirmation = confirmedExternalProjectId.trim();
+    if (!staleStagingBinding || refreshBusy || disabled) return;
+    if (!projectId || projectId !== externalProjectId || confirmation !== confirmedExternalProjectId
+      || projectId.length > 191 || /\p{C}/u.test(projectId) || projectId !== confirmation) {
+      setRefreshError("Enter the exact external Project ID twice so it can be confirmed."); return;
+    }
+    setRefreshBusy(true); setRefreshError(""); setRefreshOutcome(null);
+    try {
+      const response = await api<{ outcome?: unknown }>(PROJECT_BINDING_REFRESH_ENDPOINT, {
+        method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({ sourceId: STAGING, externalProjectId: projectId }),
+      });
+      const outcome = safeBindingRefreshOutcome(response.outcome);
+      if (!outcome) throw new Error("The binding refresh response could not be verified.");
+      setRefreshOutcome(outcome);
+    } catch (caught) {
+      setRefreshError(operatorError(caught, "The staging binding refresh could not be completed."));
+    } finally { setRefreshBusy(false); }
+  };
   return <div className="alpha-read-acceptance" role="group" aria-label="Read-only API verification">
     <button type="button" className="button-ghost button-small" disabled={busy || disabled || connector.state !== "active"}
       onClick={() => void verify()}>{busy ? "Verifying read connection…" : "Verify read-only API connection"}</button>
@@ -70,7 +142,264 @@ function ReadAcceptanceCheck({ connector, disabled }: { connector: Connector; di
       ? `API v2 read connection verified · Directory ${result.directory.count ?? 0} · Projects ${result.projects.count ?? 0}`
       : `API v2 read verification did not pass · Capabilities ${result.capabilities.status} · Directory ${result.directory.status} · Projects ${result.projects.status}`}</p>}
     {error && <p role="alert" className="notice">{error}</p>}
+    {staleStagingBinding && <form onSubmit={refresh} aria-busy={refreshBusy} className="alpha-binding-refresh">
+      <p><strong>Staging project binding is stale.</strong> Confirm the exact external Project ID before requesting a guarded refresh.</p>
+      <label htmlFor="staging-binding-project-id">Exact external Project ID</label>
+      <input id="staging-binding-project-id" value={externalProjectId} disabled={refreshBusy || disabled}
+        onChange={event => { setExternalProjectId(event.target.value); setRefreshError(""); setRefreshOutcome(null); }} maxLength={191} autoCapitalize="none" autoCorrect="off" spellCheck={false} />
+      <label htmlFor="staging-binding-project-id-confirm">Confirm exact external Project ID</label>
+      <input id="staging-binding-project-id-confirm" value={confirmedExternalProjectId} disabled={refreshBusy || disabled}
+        onChange={event => { setConfirmedExternalProjectId(event.target.value); setRefreshError(""); setRefreshOutcome(null); }} maxLength={191} autoCapitalize="none" autoCorrect="off" spellCheck={false} />
+      <button type="submit" className="button-ghost button-small" disabled={refreshBusy || disabled}>{refreshBusy ? "Refreshing binding…" : "Refresh staging binding"}</button>
+      {refreshOutcome && <p role="status" className="notice">{bindingRefreshMessage(refreshOutcome)}</p>}
+      {refreshError && <p role="alert" className="notice">{refreshError}</p>}
+    </form>}
   </div>;
+}
+function record(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
+function inventorySurface(value: unknown): value is InventorySurface {
+  if (!record(value)) return false;
+  if (value.status === "not_requested") return Object.keys(value).length === 1;
+  if (value.status === "blocked") return ["transport", "contract", "authorization", "binding_stale", "storage", "cursor_stale"].includes(String(value.reason));
+  if ((value.status !== "persisted" && value.status !== "conflicted") || !Number.isInteger(value.itemCount)
+    || Number(value.itemCount) < 0 || !Number.isInteger(value.conflictCount) || Number(value.conflictCount) < 0
+    || typeof value.hasMore !== "boolean") return false;
+  return value.hasMore
+    ? typeof value.continuationToken === "string" && value.continuationToken.length >= 1 && value.continuationToken.length <= 2048
+    : value.continuationToken === undefined;
+}
+function inventoryResult(value: unknown): value is InventoryResult {
+  if (!record(value) || !["completed", "partial", "disabled", "blocked", "rejected"].includes(String(value.status))) return false;
+  if (value.status === "completed" || value.status === "partial") return inventorySurface(value.directory) && inventorySurface(value.projects);
+  if (value.status === "disabled") return Object.keys(value).length === 1;
+  return value.status === "blocked"
+    ? ["connection", "capabilities", "storage"].includes(String(value.reason))
+    : value.status === "rejected" && value.reason === "invalid_input";
+}
+function inventoryPageResult(value: InventoryResult, continuation?: "directory" | "projects"):
+  value is Extract<InventoryResult, { status: "completed" | "partial" }> {
+  if (value.status !== "completed" && value.status !== "partial") return false;
+  if (!continuation) return value.directory.status !== "not_requested" && value.projects.status !== "not_requested";
+  const requested = continuation === "directory" ? value.directory : value.projects;
+  const other = continuation === "directory" ? value.projects : value.directory;
+  return requested.status !== "not_requested" && other.status === "not_requested";
+}
+function fieldComparison(value: unknown, reviewId: string): value is FieldComparison {
+  if (!record(value) || value.status !== "compared" || value.reviewId !== reviewId
+    || (value.resourceType !== "client" && value.resourceType !== "organization") || !Array.isArray(value.fields)) return false;
+  const expected = value.resourceType === "client" ? CLIENT_FIELDS : ORGANIZATION_FIELDS;
+  if (value.fields.length !== expected.length) return false;
+  const seen = new Set<string>();
+  return value.fields.every(item => {
+    if (!record(item) || !expected.includes(item.field as DirectoryField) || seen.has(String(item.field))
+      || !(item.localValue === null || typeof item.localValue === "string")
+      || !(item.projectAlphaValue === null || typeof item.projectAlphaValue === "string") || typeof item.equal !== "boolean"
+      || item.equal !== Object.is(item.localValue, item.projectAlphaValue)) return false;
+    seen.add(String(item.field)); return true;
+  });
+}
+function operatorError(caught: unknown, fallback: string): string {
+  return caught instanceof ApiError && caught.status === 404
+    ? "This staging-only operation is disabled. No action was taken."
+    : caught instanceof ApiError && caught.status === 403
+      ? "Current administrator, permission, and native staff authority is required. No values were disclosed."
+      : fallback;
+}
+function inventorySurfaceText(label: string, surface: InventoryRequestedSurface): string {
+  if (surface.status === "blocked") return surface.reason === "binding_stale"
+    ? `${label}: stopped because the exact binding is stale. Review the binding before another inventory request.`
+    : `${label}: blocked (${surface.reason.replaceAll("_", " ")}).`;
+  return `${label}: ${surface.itemCount} observed · ${surface.conflictCount} conflicts${surface.hasMore ? " · more pages remain" : " · page complete"}.`;
+}
+function valueCell(value: string | null) { return value === null ? <em>Not set</em> : value === "" ? <em>Empty string</em> : <code>{value}</code>; }
+
+function ApiV2OperatorPanel({ disabled }: { disabled: boolean }) {
+  const [available, setAvailable] = useState<boolean | null>(null), [sources, setSources] = useState<string[]>([]), [sourceError, setSourceError] = useState("");
+  const [inventorySource, setInventorySource] = useState("");
+  const [inventoryBusy, setInventoryBusy] = useState<"initial" | "directory" | "projects" | null>(null);
+  const [directoryInventory, setDirectoryInventory] = useState<InventoryDisplaySurface | null>(null);
+  const [projectInventory, setProjectInventory] = useState<InventoryDisplaySurface | null>(null);
+  const [directoryContinuationToken, setDirectoryContinuationToken] = useState("");
+  const [projectContinuationToken, setProjectContinuationToken] = useState("");
+  const [inventoryStopped, setInventoryStopped] = useState({ directory: "", projects: "" });
+  const [inventoryError, setInventoryError] = useState("");
+  const [reviewSource, setReviewSource] = useState(""), [resourceType, setResourceType] = useState<DirectoryResourceType>("client");
+  const [recordId, setRecordId] = useState(""), [localVersion, setLocalVersion] = useState("1"), [projectAlphaPublicId, setProjectAlphaPublicId] = useState("");
+  const [reviewId, setReviewId] = useState(""), [comparison, setComparison] = useState<FieldComparison | null>(null);
+  const reservationKey = useRef("");
+  const [decisions, setDecisions] = useState<Partial<Record<DirectoryField, DirectoryFieldDecision>>>({});
+  const [reviewBusy, setReviewBusy] = useState(false), [reviewError, setReviewError] = useState(""), [reviewMessage, setReviewMessage] = useState("");
+  useEffect(() => {
+    let live = true;
+    api<{ sources?: unknown }>(API_V2_SOURCES_ENDPOINT).then(result => {
+      if (!live) return;
+      if (!Array.isArray(result.sources) || result.sources.some(source => typeof source !== "string"
+        || !/^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/.test(source))) throw new Error("invalid source list");
+      const listed = [...new Set(result.sources)].sort();
+      setAvailable(true);
+      setSources(listed);
+      setInventorySource(current => listed.includes(current) ? current : listed[0] ?? "");
+      setReviewSource(current => listed.includes(current) ? current : listed[0] ?? "");
+      setSourceError("");
+    }).catch(caught => {
+      if (live) {
+        const disabledOnDeployment = caught instanceof ApiError && caught.status === 404;
+        setAvailable(!disabledOnDeployment);
+        setSources([]);
+        setSourceError(disabledOnDeployment ? "" : operatorError(caught, "API-v2 source configuration could not be loaded."));
+      }
+    });
+    return () => { live = false; };
+  }, []);
+  const clearInventory = () => {
+    setDirectoryInventory(null); setProjectInventory(null); setDirectoryContinuationToken(""); setProjectContinuationToken("");
+    setInventoryStopped({ directory: "", projects: "" }); setInventoryError("");
+  };
+  const applyInventorySurface = (surface: "directory" | "projects", value: InventoryRequestedSurface) => {
+    const setValue = surface === "directory" ? setDirectoryInventory : setProjectInventory;
+    const setToken = surface === "directory" ? setDirectoryContinuationToken : setProjectContinuationToken;
+    if (value.status === "blocked") {
+      setValue(value);
+      setToken("");
+      setInventoryStopped(current => ({ ...current, [surface]: `${surface === "directory" ? "Directory" : "Projects"} continuation stopped. Restart the bounded inventory before requesting this surface again.` }));
+    } else {
+      const { continuationToken, ...display } = value;
+      setValue(display);
+      setToken(continuationToken ?? "");
+      setInventoryStopped(current => ({ ...current, [surface]: "" }));
+    }
+  };
+  const runInventory = async (continuation?: "directory" | "projects") => {
+    const token = continuation === "directory" ? directoryContinuationToken
+      : continuation === "projects" ? projectContinuationToken : "";
+    if (disabled || inventoryBusy || !inventorySource || continuation && !token) return;
+    setInventoryBusy(continuation ?? "initial");
+    if (!continuation) clearInventory();
+    else setInventoryStopped(current => ({ ...current, [continuation]: "" }));
+    setInventoryError("");
+    try {
+      const body = { sourceId: inventorySource, limit: 100, ...(continuation === "directory" ? { directoryContinuationToken: token }
+        : continuation === "projects" ? { projectContinuationToken: token } : {}) };
+      const result = await api<unknown>(API_V2_SYNC_ENDPOINT, { method: "POST", body: JSON.stringify(body) });
+      if (!inventoryResult(result) || !inventoryPageResult(result, continuation)) throw new Error("invalid inventory response");
+      if (!continuation) {
+        applyInventorySurface("directory", result.directory as InventoryRequestedSurface);
+        applyInventorySurface("projects", result.projects as InventoryRequestedSurface);
+      } else applyInventorySurface(continuation,
+        (continuation === "directory" ? result.directory : result.projects) as InventoryRequestedSurface);
+    } catch (caught) {
+      if (!continuation) setInventoryError(operatorError(caught, "The bounded inventory response could not be verified. No further page was requested."));
+      else {
+        if (continuation === "directory") setDirectoryContinuationToken(""); else setProjectContinuationToken("");
+        const stale = caught instanceof ApiError && caught.status === 409;
+        setInventoryStopped(current => ({ ...current, [continuation]: `${continuation === "directory" ? "Directory" : "Projects"} continuation stopped${stale ? " because its inventory or token is stale" : " after an error"}. Restart the bounded inventory before requesting this surface again.` }));
+      }
+    } finally { setInventoryBusy(null); }
+  };
+  const clearComparison = () => { setReviewId(""); setComparison(null); setDecisions({}); setReviewError(""); setReviewMessage(""); };
+  const resetReview = () => { reservationKey.current = ""; clearComparison(); };
+  const reserve = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault(); if (disabled || reviewBusy) return;
+    const selectedRecord = recordId.trim(), selectedPublicId = projectAlphaPublicId.trim(), version = Number(localVersion);
+    if (!reviewSource || !selectedRecord || selectedRecord.length > 191 || /\p{C}/u.test(selectedRecord)
+      || !Number.isInteger(version) || version < 1 || !PA_PUBLIC_ID.test(selectedPublicId)) {
+      setReviewError("Enter one active source, an exact local record ID and positive version, and a 32-character lowercase Project Alpha public ID."); return;
+    }
+    setReviewBusy(true); clearComparison();
+    try {
+      const response = await api<{ outcome?: unknown }>(DIRECTORY_READ_ADOPTION_ENDPOINT, { method: "POST",
+        headers: { "Idempotency-Key": reservationKey.current ||= crypto.randomUUID() }, body: JSON.stringify({ sourceId: reviewSource, resourceType,
+          recordId: selectedRecord, expectedLocalRecordVersion: version, projectAlphaPublicId: selectedPublicId }) });
+      const outcome = response.outcome;
+      if (record(outcome) && (outcome.status === "reserved" || outcome.status === "replayed") && outcome.state === "inactive"
+        && typeof outcome.reviewId === "string" && UUID.test(outcome.reviewId)) {
+        setReviewId(outcome.reviewId); setReviewMessage("Exact pair reserved as inactive. Field values remain hidden until you explicitly compare them.");
+      } else if (record(outcome) && outcome.status === "disabled") setReviewError("This staging-only operation is disabled. No action was taken.");
+      else if (record(outcome) && ["blocked", "rejected", "conflict"].includes(String(outcome.status)))
+        setReviewError(`The exact pair was not reserved (${String(outcome.status).replaceAll("_", " ")}). No comparison was performed.`);
+      else throw new Error("invalid reservation response");
+    } catch (caught) { setReviewError(operatorError(caught, "The exact-pair reservation response could not be verified.")); }
+    finally { setReviewBusy(false); }
+  };
+  const compare = async () => {
+    if (disabled || reviewBusy || !reviewId) return;
+    setReviewBusy(true); setComparison(null); setDecisions({}); setReviewError(""); setReviewMessage("");
+    try {
+      const response = await api<{ outcome?: unknown }>(`${DIRECTORY_READ_ADOPTION_ENDPOINT}/${encodeURIComponent(reviewId)}/field-comparison`,
+        { method: "POST", body: JSON.stringify({}) });
+      const outcome = response.outcome;
+      if (fieldComparison(outcome, reviewId)) {
+        setComparison(outcome); setDecisions(Object.fromEntries(outcome.fields.filter(field => field.equal).map(field => [field.field, "unchanged"])));
+        setReviewMessage("Authorized comparison loaded. Review every differing field before sealing.");
+      } else if (record(outcome) && outcome.status === "disabled") setReviewError("This staging-only operation is disabled. No values were disclosed.");
+      else if (record(outcome) && ["blocked", "rejected"].includes(String(outcome.status)))
+        setReviewError("The comparison is no longer current or authorized. No values were disclosed.");
+      else throw new Error("invalid comparison response");
+    } catch (caught) { setReviewError(operatorError(caught, "The field-comparison response could not be verified. No values were disclosed.")); }
+    finally { setReviewBusy(false); }
+  };
+  const seal = async () => {
+    if (disabled || reviewBusy || !comparison || comparison.fields.some(field => !decisions[field.field])) return;
+    if (!window.confirm("Seal these enum-only field dispositions? This does not update local records or Project Alpha.")) return;
+    setReviewBusy(true); setReviewError(""); setReviewMessage("");
+    try {
+      const response = await api<{ outcome?: unknown }>(`${DIRECTORY_READ_ADOPTION_ENDPOINT}/${encodeURIComponent(comparison.reviewId)}/field-review`,
+        { method: "POST", body: JSON.stringify({ decisions }) });
+      const outcome = response.outcome;
+      if (record(outcome) && (outcome.status === "sealed" || outcome.status === "replayed")
+        && typeof outcome.receiptId === "string" && UUID.test(outcome.receiptId)) {
+        reservationKey.current = ""; setComparison(null); setDecisions({}); setReviewId(""); setRecordId(""); setProjectAlphaPublicId(""); setLocalVersion("1");
+        setReviewMessage("Field review sealed. No local profile or Project Alpha values were changed.");
+      } else if (record(outcome) && ["disabled", "blocked", "rejected", "conflict"].includes(String(outcome.status)))
+        setReviewError("The review could not be sealed because its exact evidence is disabled, stale, invalid, or already sealed.");
+      else throw new Error("invalid field-review response");
+    } catch (caught) { setReviewError(operatorError(caught, "The field-review receipt could not be verified. Treat the seal outcome as uncertain and refresh before retrying.")); }
+    finally { setReviewBusy(false); }
+  };
+  const allDecided = Boolean(comparison) && comparison!.fields.every(field => Boolean(decisions[field.field]));
+  if (available !== true) return null;
+  return <details className="alpha-connection"><summary>Staging API-v2 operator review</summary>
+    <p>This default-off panel reads and stores one bounded inventory page, then supports an explicit exact-record comparison. It never auto-matches records, changes access, publishes links, activates anything, or writes to Project Alpha.</p>
+    {sourceError && <p role="alert" className="notice">{sourceError}</p>}
+    {sources.length === 0 ? <p role="status">No enabled API-v2 sources are available to review. Legacy connector records are not used to discover API-v2 connections.</p> : <>
+    <ul aria-label="Enabled API-v2 sources">{sources.map(sourceId => <li key={sourceId}><strong>{sourceId}</strong>
+      <ReadAcceptanceCheck connector={{ sourceId, state: "active" }} disabled={disabled} /></li>)}</ul>
+    <section aria-label="Bounded API-v2 inventory"><h3>Bounded inventory evidence</h3>
+      <label>Deployment source<select value={inventorySource} disabled={disabled || Boolean(inventoryBusy)} onChange={event => { setInventorySource(event.target.value); clearInventory(); }}>
+        {sources.map(sourceId => <option key={sourceId} value={sourceId}>{sourceId}</option>)}</select></label>
+      <button type="button" className="button-ghost button-small" disabled={disabled || Boolean(inventoryBusy) || !inventorySource} onClick={() => void runInventory()}>{inventoryBusy === "initial" ? "Reading one bounded page…" : directoryInventory || projectInventory || inventoryStopped.directory || inventoryStopped.projects || inventoryError ? "Restart bounded inventory" : "Read one bounded inventory page"}</button>
+      <p>Continuation tokens stay in this browser session and are never displayed. Each button click requests at most one page; continuation is never automatic.</p>
+      {directoryInventory && <div className="notice" role={directoryInventory.status === "blocked" ? "alert" : "status"}><p>{inventorySurfaceText("Directory", directoryInventory)}</p>
+        {directoryContinuationToken && <button type="button" className="button-ghost button-small" disabled={disabled || Boolean(inventoryBusy)} onClick={() => void runInventory("directory")}>{inventoryBusy === "directory" ? "Continuing Directory…" : "Continue Directory"}</button>}
+      </div>}
+      {inventoryStopped.directory && <p role="alert" className="notice">{inventoryStopped.directory}</p>}
+      {projectInventory && <div className="notice" role={projectInventory.status === "blocked" ? "alert" : "status"}><p>{inventorySurfaceText("Projects", projectInventory)}</p>
+        {projectContinuationToken && <button type="button" className="button-ghost button-small" disabled={disabled || Boolean(inventoryBusy)} onClick={() => void runInventory("projects")}>{inventoryBusy === "projects" ? "Continuing Projects…" : "Continue Projects"}</button>}
+      </div>}
+      {inventoryStopped.projects && <p role="alert" className="notice">{inventoryStopped.projects}</p>}
+      {inventoryError && <p role="alert" className="notice">{inventoryError}</p>}
+    </section>
+    <section aria-label="Exact-record field review"><h3>Exact-record field review</h3>
+      <form onSubmit={reserve} aria-busy={reviewBusy}>
+        <label>Deployment source<select value={reviewSource} disabled={disabled || reviewBusy || Boolean(reviewId)} onChange={event => { setReviewSource(event.target.value); resetReview(); }}>
+          {sources.map(sourceId => <option key={sourceId} value={sourceId}>{sourceId}</option>)}</select></label>
+        <label>Record type<select value={resourceType} disabled={disabled || reviewBusy || Boolean(reviewId)} onChange={event => { setResourceType(event.target.value as DirectoryResourceType); resetReview(); }}><option value="client">Client</option><option value="organization">Organization</option></select></label>
+        <label>Exact local record ID<input value={recordId} maxLength={191} disabled={disabled || reviewBusy || Boolean(reviewId)} onChange={event => { setRecordId(event.target.value); resetReview(); }} /></label>
+        <label>Expected local record version<input type="number" min="1" step="1" value={localVersion} disabled={disabled || reviewBusy || Boolean(reviewId)} onChange={event => { setLocalVersion(event.target.value); resetReview(); }} /></label>
+        <label>Exact Project Alpha public ID<input value={projectAlphaPublicId} maxLength={32} autoCapitalize="none" autoCorrect="off" spellCheck={false} disabled={disabled || reviewBusy || Boolean(reviewId)} onChange={event => { setProjectAlphaPublicId(event.target.value); resetReview(); }} /></label>
+        <button type="submit" className="button-ghost button-small" disabled={disabled || reviewBusy || Boolean(reviewId)}>{reviewBusy && !reviewId ? "Reserving exact pair…" : "Reserve exact pair"}</button>
+      </form>
+      {reviewId && !comparison && <button type="button" className="button-ghost button-small" disabled={disabled || reviewBusy} onClick={() => void compare()}>{reviewBusy ? "Comparing authorized fields…" : "Compare authorized fields"}</button>}
+      {comparison && <div role="group" aria-label="Compared field dispositions"><div className="project-alpha-field-review-table-scroll" tabIndex={0} aria-label="Compared fields; scroll horizontally to view each value and disposition"><table><thead><tr><th>Field</th><th>Local value</th><th>Project Alpha value</th><th>Disposition</th></tr></thead><tbody>
+        {comparison.fields.map(field => <tr key={field.field}><th scope="row">{FIELD_LABELS[field.field]}</th><td>{valueCell(field.localValue)}</td><td>{valueCell(field.projectAlphaValue)}</td><td>{field.equal
+          ? <span>Unchanged</span>
+          : <select aria-label={`${FIELD_LABELS[field.field]} disposition`} value={decisions[field.field] ?? ""} disabled={reviewBusy} onChange={event => setDecisions(current => ({ ...current, [field.field]: event.target.value as DirectoryFieldDecision }))}>
+            <option value="">Select disposition</option><option value="retain_local">Retain local</option><option value="adopt_project_alpha">Adopt Project Alpha</option><option value="requires_follow_up">Requires follow-up</option></select>}</td></tr>)}
+      </tbody></table></div><button type="button" className="button-ghost button-small" disabled={disabled || reviewBusy || !allDecided} onClick={() => void seal()}>{reviewBusy ? "Sealing review…" : "Seal field review"}</button></div>}
+      {reviewMessage && <p role="status" className="notice">{reviewMessage}</p>}{reviewError && <p role="alert" className="notice">{reviewError}</p>}
+    </section>
+    </>}
+  </details>;
 }
 function projectManagementTemplateError(value: string): string | null {
   const template = value.trim();
@@ -222,12 +551,11 @@ export function ProjectAlphaConnections() {
           primaryActive={data.legacyPrimary || data.connectors.some(row => row.sourceId === PRIMARY && row.state === "active")}
           disabled={loading || Boolean(syncing)} onAction={action => void portalAction(connector, action)} />
         <ProjectManagement connector={connector} route={management} disabled={loading || Boolean(syncing)} onRefresh={() => setRevision(value => value + 1)} />
-        <div className="alpha-connection-actions"><button type="button" disabled={loading || Boolean(syncing) || connector.state !== "active"} onClick={() => void sync(connector)}>{syncing === connector.sourceId ? "Synchronizing…" : "Sync now"}</button>
-          <ReadAcceptanceCheck key={`${connector.sourceId}:${connector.version}:${connector.activeRevision}:${revision}`}
-            connector={connector} disabled={loading || Boolean(syncing)} /></div>
+        <div className="alpha-connection-actions"><button type="button" disabled={loading || Boolean(syncing) || connector.state !== "active"} onClick={() => void sync(connector)}>{syncing === connector.sourceId ? "Synchronizing…" : "Sync now"}</button></div>
         <details><summary>Connection details</summary><dl><dt>Source</dt><dd>{connector.sourceId}</dd><dt>Producer</dt><dd>{connector.producerBindingId}</dd><dt>Destination</dt><dd>{connector.snapshotOrigin}{connector.snapshotBasePath}</dd><dt>Application</dt><dd>{connector.applicationKey}</dd><dt>Revision</dt><dd>{connector.activeRevision}</dd></dl><p>These values are read-only here. Change the reviewed deployment source manifest and deploy Operations; do not paste credentials into this page.</p></details>
       </section>;
     })}
+    <ApiV2OperatorPanel disabled={loading || Boolean(syncing)} />
     {data?.portal?.recovery && <div className="notice" role="status"><p>A prior portal coordination operation is unfinished. Recovery cancels that uncertain update and pauses affected client portals; it never registers a source or retries activation.</p><button type="button" disabled={loading || Boolean(syncing)} onClick={() => void recoverPortalUpdate()}>Recover unfinished portal update</button></div>}
   </div></Card>;
 }

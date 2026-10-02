@@ -31,6 +31,13 @@ const EVENT_CLOCK_SKEW_SECONDS = 300;
 const opaqueId = z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/);
 const idempotencyKey = z.string().min(16).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/);
 const unitsSchema = z.object({ displayUnits: z.enum(["imperial", "metric"]) }).strict();
+
+export function viewerGrantAuthorizationExpiresAt(accessExpiresAt: number | undefined, nowMilliseconds = Date.now()): string {
+  if (!Number.isSafeInteger(accessExpiresAt) || accessExpiresAt! > 8_640_000_000_000 ||
+      accessExpiresAt! * 1000 <= nowMilliseconds + 60_000)
+    throw new HTTPException(401, { message: "Operations authorization is missing or too close to expiry to open a Viewer workspace" });
+  return new Date(Math.min(nowMilliseconds + 30 * 60_000, accessExpiresAt! * 1000)).toISOString();
+}
 const eventSchema = z.object({
   schemaVersion: z.literal(1),
   eventId: opaqueId,
@@ -520,6 +527,9 @@ export function registerViewerProcessingRoutes(app: ViewerApp): void {
     const permissions = await viewerAdminPermissions(c.env, principal);
     if (!permissions.includes("viewer.projects.read"))
       throw new HTTPException(403, { message: "Global viewer.view permission required" });
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    if (!Number.isSafeInteger(principal.accessExpiresAt) || principal.accessExpiresAt! <= nowSeconds + 60)
+      throw new HTTPException(401, { message: "Operations authorization is too close to expiry to open a Viewer workspace" });
     const units = await resolveViewerUnits(c.env, principal.id);
     const events = viewerProcessingEnabled(c.env)
       ? await c.env.OPS_DB.prepare(`SELECT event_id,event_type,occurred_at,project_id,project_display_name,task_id,task_display_name,attempt_id,
@@ -556,6 +566,7 @@ export function registerViewerProcessingRoutes(app: ViewerApp): void {
   app.post("/api/viewer/admin-grant", async c => {
     if (!viewerProcessingEnabled(c.env)) throw new HTTPException(404, { message: "Not found" });
     const principal = c.get("principal");
+    const authorizationExpiresAt = viewerGrantAuthorizationExpiresAt(principal.accessExpiresAt);
     const key = idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
     if (!key.success) throw new HTTPException(400, { message: "A valid Idempotency-Key is required" });
     const permissions = await viewerAdminPermissions(c.env, principal);
@@ -565,7 +576,7 @@ export function registerViewerProcessingRoutes(app: ViewerApp): void {
     try {
       const grant = await viewerServiceClient(c.env).createAdminGrant({
         subject: `ops:${principal.id}`.slice(0, 200), permissions,
-        authorizationExpiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+        authorizationExpiresAt,
         displayUnits: units,
         idempotencyKey: key.data,
       });

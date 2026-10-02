@@ -5,6 +5,8 @@ import type { Env, StaffPrincipal } from "../src/worker/types";
 
 const mocks = vi.hoisted(() => ({
   scope: vi.fn(), acquire: vi.fn(), activate: vi.fn(), reserve: vi.fn(), bind: vi.fn(), first: vi.fn(),
+  produce: vi.fn(),
+  bindingStatus: vi.fn(), bindingRefresh: vi.fn(),
   reconciliationList: vi.fn(), reconciliationAcquire: vi.fn(),
   reconciliationRecords: vi.fn(),
   reconciliationContext: vi.fn(),
@@ -28,6 +30,15 @@ vi.mock("../src/worker/project-alpha-project-adoption-review-consumer", () => ({
 vi.mock("../src/worker/project-alpha-project-adoption-bind-consumer", () => ({
   planProjectAlphaProjectAdoptionBind: mocks.bind,
 }));
+vi.mock("../src/worker/project-alpha-project-adoption-review-producer", () => ({
+  produceProjectAlphaProjectAdoptionReview: mocks.produce,
+}));
+vi.mock("../src/worker/project-alpha-project-binding-status-api-v2", () => ({
+  readConfiguredProjectAlphaProjectBindingStatus: mocks.bindingStatus,
+}));
+vi.mock("../src/worker/project-alpha-project-binding-revision-refresh-api-v2", () => ({
+  sendConfiguredProjectAlphaProjectBindingRevisionRefreshCommand: mocks.bindingRefresh,
+}));
 
 import {
   PROJECT_ALPHA_PRIVATE_ADMIN_ROUTE,
@@ -44,7 +55,7 @@ const key = "10000000-0000-4000-8000-000000000003";
 const reservationId = "10000000-0000-4000-8000-000000000004";
 const publicId = "a".repeat(32);
 
-function fixture(options: { enabled?: boolean; administrator?: boolean; global?: boolean; denied?: boolean; directoryView?: boolean } = {}) {
+function fixture(options: { enabled?: boolean; adoptionReviewEnabled?: boolean; projectBindingRefreshEnabled?: boolean; administrator?: boolean; global?: boolean; denied?: boolean; directoryView?: boolean } = {}) {
   const app = new Hono<{ Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } }>();
   app.use("/api/*", async (c, next) => {
     c.set("principal", principal);
@@ -55,12 +66,17 @@ function fixture(options: { enabled?: boolean; administrator?: boolean; global?:
   registerProjectAlphaPrivateAdminRoutes(app);
   const env = {
     PROJECT_ALPHA_PRIVATE_ADMIN_TRANSPORT_ENABLED: options.enabled === false ? "false" : "true",
+    PROJECT_ALPHA_PROJECT_ADOPTION_REVIEW_ENABLED: options.adoptionReviewEnabled === true ? "true" : "false",
+    PROJECT_ALPHA_PROJECT_BINDING_REVISION_REFRESH_ENABLED: options.projectBindingRefreshEnabled === true ? "true" : "false",
     OPERATIONS_SESSION_SECRET: "operations-session-secret-0123456789abcdef",
+    AUDIT_IP_SECRET: "audit-ip-secret-0123456789abcdef",
+    ENVIRONMENT: "staging",
+    EXPECTED_HOST: "ops.example.test",
     OPERATIONS_ORIGINS: "https://ops.example.test",
     OPS_DB: { prepare: vi.fn((sql: string) => ({ bind: vi.fn(() => ({
       first: sql.includes("FROM native_directory_grants allowed")
         ? vi.fn().mockResolvedValue(options.directoryView === false ? null : { ok: 1 }) : mocks.first,
-    })) })) },
+    })) })), batch: vi.fn().mockResolvedValue([]) },
   } as unknown as Env;
   mocks.first.mockResolvedValue({ admissionVersion: 3, profileVersion: 4, grantGeneration: 5 });
   mocks.scope.mockResolvedValue({ global: options.global ?? true, deniedGlobal: options.denied ?? false });
@@ -87,6 +103,17 @@ describe("private Project Alpha administrator transport", () => {
     mocks.activate.mockResolvedValue({ status: "activated", activationId: key, reviewItemId: reviewId, idempotencyKey: key, replayed: false });
     mocks.reserve.mockResolvedValue({ status: "reserved", reservationId, reviewItemId: reviewId, idempotencyKey: key, replayed: false });
     mocks.bind.mockResolvedValue({ status: "planned", bridgeId: key, reservationId, commandId, requestSha256: "b".repeat(64), replayed: false });
+    mocks.produce.mockResolvedValue({ status: "reviewed", reviewItemId: reviewId, requestSha256: "c".repeat(64), replayed: false });
+    mocks.bindingStatus.mockResolvedValue({ status: "binding_stale", httpStatus: 409, response: {
+      apiVersion: "2", sourceInstanceId: "00000000-0000-4000-8000-000000000001",
+      applicationId: "00000000-0000-4000-8000-000000000002", historyEpoch: "00000000-0000-4000-8000-000000000003",
+      requestId: "00000000-0000-4000-8000-000000000004", error: { code: "binding_stale" }, authorizationGeneration: "7",
+      binding: { externalId: "pa-project-1", publicId, revision: "2" },
+      resource: { revision: "10", projectionSha256: "d".repeat(64) },
+    } });
+    mocks.bindingRefresh.mockResolvedValue({ status: "acknowledged", httpStatus: 200, response: {
+      replayed: false, result: { resource: { revision: "10" } },
+    } });
     mocks.reconciliationList.mockResolvedValue({ items: [], nextCursor: null });
     mocks.reconciliationRecords.mockResolvedValue({ items: [], nextCursor: null });
     mocks.reconciliationContext.mockResolvedValue({ findingId: reviewId, resourceType: "organization",
@@ -155,6 +182,89 @@ describe("private Project Alpha administrator transport", () => {
       { staffId: principal.id, accessSubject: principal.accessSubject }, fetch);
     expect(mocks.bind).toHaveBeenCalledWith(expect.anything(), { staffId: principal.id, accessSubject: principal.accessSubject },
       { reservationId });
+  });
+
+  it("keeps the PA-origin project review entry default-off and staging-only", async () => {
+    const { send } = fixture();
+    const body = { sourceId: "project-alpha:primary", externalProjectId: "pa-project-1", projectAlphaPublicId: publicId };
+    expect((await send("/projects/adoption/review", body, key)).status).toBe(404);
+    expect(mocks.produce).not.toHaveBeenCalled();
+    const enabled = fixture({ adoptionReviewEnabled: true });
+    (enabled.env as unknown as { ENVIRONMENT: string }).ENVIRONMENT = "production";
+    expect((await enabled.send("/projects/adoption/review", body, key)).status).toBe(404);
+    expect(mocks.produce).not.toHaveBeenCalled();
+  });
+
+  it("requires a strict PA project selection and header idempotency key, then records only a sanitized outcome", async () => {
+    const body = { sourceId: "project-alpha:primary", externalProjectId: "pa-project-1", projectAlphaPublicId: publicId };
+    const { send, env } = fixture({ adoptionReviewEnabled: true });
+    expect((await send("/projects/adoption/review", { ...body, secret: "nope" }, key)).status).toBe(400);
+    expect((await send("/projects/adoption/review", body, "not-a-uuid")).status).toBe(400);
+    expect(mocks.produce).not.toHaveBeenCalled();
+
+    const response = await send("/projects/adoption/review", body, key);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ outcome: {
+      status: "reviewed", reviewItemId: reviewId, requestSha256: "c".repeat(64), replayed: false,
+    } });
+    expect(mocks.produce).toHaveBeenCalledWith(expect.anything(),
+      { staffId: principal.id, accessSubject: principal.accessSubject },
+      { ...body, idempotencyKey: key }, fetch);
+    expect(env.OPS_DB.batch).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not expose producer internals when the PA review is blocked", async () => {
+    mocks.produce.mockResolvedValue({ status: "blocked", reason: "authority", internalToken: "secret" });
+    const { send } = fixture({ adoptionReviewEnabled: true });
+    const response = await send("/projects/adoption/review", {
+      sourceId: "project-alpha:primary", externalProjectId: "pa-project-1", projectAlphaPublicId: publicId,
+    }, key);
+    expect(await response.json()).toEqual({ outcome: { status: "blocked", reason: "authority" } });
+  });
+
+  it("keeps PA binding revision refresh staging-only and builds CAS fields only from fresh PA status", async () => {
+    const body = { sourceId: "project-alpha:primary", externalProjectId: "pa-project-1" };
+    expect((await fixture().send("/projects/bindings/refresh", body, key)).status).toBe(404);
+    const production = fixture({ projectBindingRefreshEnabled: true });
+    (production.env as unknown as { ENVIRONMENT: string }).ENVIRONMENT = "production";
+    expect((await production.send("/projects/bindings/refresh", body, key)).status).toBe(404);
+    expect(mocks.bindingStatus).not.toHaveBeenCalled();
+
+    const { send, env } = fixture({ projectBindingRefreshEnabled: true });
+    expect((await send("/projects/bindings/refresh", { ...body, expectedRevision: "999" }, key)).status).toBe(400);
+    expect((await send("/projects/bindings/refresh", body, "invalid")).status).toBe(400);
+    const response = await send("/projects/bindings/refresh", body, key);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ outcome: { status: "refreshed", revision: "10", replayed: false } });
+    expect(mocks.bindingStatus).toHaveBeenCalledWith(expect.anything(), body.sourceId, body.externalProjectId);
+    expect(mocks.bindingRefresh).toHaveBeenCalledWith(expect.anything(), body.sourceId, {
+      commandId: key, externalId: "pa-project-1", expectedPublicId: publicId, expectedPriorRevision: "2",
+      expectedRevision: "10", expectedProjectionSha256: "d".repeat(64), expectedAuthorizationGeneration: "7",
+    });
+    expect(env.OPS_DB.batch).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not refresh when the just-read binding is current", async () => {
+    mocks.bindingStatus.mockResolvedValue({ status: "observed", httpStatus: 200, response: {
+      binding: { externalId: "pa-project-1", publicId, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z" },
+      resource: { revision: "10" },
+    } });
+    const response = await fixture({ projectBindingRefreshEnabled: true }).send(
+      "/projects/bindings/refresh", { sourceId: "project-alpha:primary", externalProjectId: "pa-project-1" }, key);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ outcome: { status: "current", revision: "10" } });
+    expect(mocks.bindingRefresh).not.toHaveBeenCalled();
+  });
+
+  it("returns only the typed staging preflight reason when PA lacks a binding-status route", async () => {
+    mocks.bindingStatus.mockResolvedValue({ status: "blocked", reason: "preflight", preflight: {
+      status: "incompatible", reason: "missing_endpoint", httpStatus: 200,
+    } });
+    const response = await fixture({ projectBindingRefreshEnabled: true }).send(
+      "/projects/bindings/refresh", { sourceId: "project-alpha:staging", externalProjectId: "synthetic-stale-project" }, key);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ outcome: { status: "not_refreshed", reason: "preflight_missing_endpoint" } });
+    expect(mocks.bindingRefresh).not.toHaveBeenCalled();
   });
 
   it("guards and bounds the sanitized reconciliation finding feed", async () => {

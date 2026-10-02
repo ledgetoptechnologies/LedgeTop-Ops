@@ -138,10 +138,21 @@ test("Directory API-v2 staging contract suite remains a required CI check", () =
   assert(workflow.includes("scripts/pa-api-v2-directory-staging-acceptance.test.mjs"));
 });
 
+test("Project Alpha API-v2 staging profile remains a default-off guarded CI gate", () => {
+  const workflow = read(".github/workflows/ci.yml");
+  const packageJson = JSON.parse(read("package.json"));
+  assert(workflow.includes("scripts/staging-project-alpha-api-v2-acceptance-profile.test.mjs"));
+  assert(packageJson.scripts.test.includes("scripts/staging-project-alpha-api-v2-acceptance-profile.test.mjs"));
+  assert(packageJson.scripts["staging:project-alpha-api-v2-acceptance:generate"]);
+  assert(packageJson.scripts["staging:project-alpha-api-v2-acceptance:check"]);
+});
+
 test("governed staging authority packets retain dependency-free local CI coverage", () => {
   const workflow = read(".github/workflows/ci.yml");
   assert(workflow.includes("name: Verify governed staging authority packets locally"));
   assert(workflow.includes("run: node --test scripts/staging-native-authority-packet.test.mjs"));
+  assert(workflow.includes("scripts/staging-bounded-guards.test.mjs"));
+  assert(workflow.includes("scripts/staging-onboarding-authority-packet.test.mjs"));
 });
 
 test("Client Portal browser acceptance remains a required CI job", () => {
@@ -269,8 +280,16 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   // workspace-binding writers, and the non-content enrollment reader remain off.
   // Approved staging-only recipient bridge is present but remains default-off.
   // Reviewed recipient-delivery authority adds only explicit disabled flags.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "fa3cee1b61b987eac8e158ed2561232df2358889679079e7dc12570b7db69d0a");
+  // Native recipient/data transport flags are explicit and remain disabled;
+  // their staging-only reader binding and audit secret are absent here.
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "b424712ba7d1031b9f7790a5cb69275dcc06d98d3ddcb0d8739161bd8a70bb69");
   const config = readJson("apps/client/wrangler.jsonc");
+  for (const flag of ["CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED",
+    "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_WRITER_ENABLED", "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_STATUS_ENABLED",
+    "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_READ_ENABLED", "CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_ENABLED"])
+    assert.equal(config.vars[flag], "false");
+  assert.equal(config.vars.CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_HMAC_SECRET, undefined);
+  assert.equal(config.services?.find(service => service.binding === "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER"), undefined);
   assert.equal(config.vars.CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_WRITER_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_STATUS_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED, "false");
@@ -308,6 +327,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.equal(config.vars.CLIENT_PORTAL_AUTHORITY_V2_STATUS_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_AUTHORITY_V2_ENROLLMENT_STATUS_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED, "false");
   assert.equal(config.vars.OPS_PORTAL_ACCESS_AUTHORITY_SHADOW_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_CONTENT_AUDIT_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_NOTIFICATION_MIGRATION_MAINTENANCE, "false");
@@ -398,8 +418,11 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
 });
 
 test("the deployed Operations Worker keeps catalog and inactive binding transport private and default-off", () => {
-  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "0bb2b0680d1acd9eabb6e080e72193dc2c8f8b955448241ef00d97b58f47acfd");
+  // Newly mounted PA adoption and binding-refresh routes remain disabled in production by default.
+  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "3f2cd2a5e3bd3de3cb1f949f5810b8a636e1ca610e67ff501ce8e9dac74e8b4d");
   const config = readJson("apps/operations/wrangler.jsonc");
+  assert.equal(config.vars.CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED, "false");
+  assert.equal(config.services?.find(service => service.binding === "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY"), undefined);
   assert.equal(config.vars.VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_DISPATCH_ENABLED, "false");
   assert.equal(config.services?.find((service) => service.binding === "VERIFIED_RECIPIENT_DELIVERY_AUTHORITY"), undefined);
   assert.equal(config.vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED, "false");
@@ -409,6 +432,8 @@ test("the deployed Operations Worker keeps catalog and inactive binding transpor
   assert.equal(config.vars.CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED, "false");
+  assert.equal(config.vars.PROJECT_ALPHA_PROJECT_ADOPTION_REVIEW_ENABLED, "false");
+  assert.equal(config.vars.PROJECT_ALPHA_PROJECT_BINDING_REVISION_REFRESH_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_ACCESS_AUTHORITY_OUTBOX_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_AUTHORITY_V2_OUTBOX_ENABLED, "false");

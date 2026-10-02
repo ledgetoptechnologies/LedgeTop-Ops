@@ -93,7 +93,7 @@ import {
 import { BRAND } from "@ltds/shared";
 import { readClientViewerUnits, writeClientViewerUnits } from "./viewer-units-preference";
 import { clientViewerShellPath, nativeClientViewerShellPath } from "./ClientViewerShell";
-import { OperationsHomeApp, OperationsServiceSummary } from "./OperationsHomeApp";
+import { OperationsHomeApp, OperationsNativeServicePanel } from "./OperationsHomeApp";
 import {
   clientPortalPath,
   clientProjectPath,
@@ -2827,7 +2827,7 @@ export function ClientPortalApp({
   }, [operationsHomeResponse]);
 
   const operationsHomeSummary = currentOperationsHome
-    ? <OperationsServiceSummary response={currentOperationsHome} embedded />
+    ? <OperationsNativeServicePanel response={currentOperationsHome} embedded />
     : operationsHomeResponse
       ? <section className="portal-card" role="status" aria-label="Operations service summary status">
         <h2>{operationsHomeStatus === "checking" ? "Refreshing Operations services" : "Operations services unavailable"}</h2>

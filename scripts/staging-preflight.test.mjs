@@ -5,9 +5,10 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { validateApp, validateCrossApp, validateFiles, validateMigrationInventory, validateRequestAttachmentCors, validateSecretManifest } from "./staging-preflight.mjs";
-import { APP_SOURCE_DIRS, FEATURE_FLAG_ACTIVATION_POLICIES, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_SECRETS, STAGING_ACCOUNT_ID, STAGING_ALLOWED_VAR_NAMES, STAGING_HOSTS, STAGING_INVENTORY, STAGING_PROJECT_ALPHA_ORIGIN, STAGING_REQUEST_ATTACHMENT_R2_CORS, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
+import { APP_SOURCE_DIRS, FEATURE_FLAG_ACTIVATION_POLICIES, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_MIGRATION_SHA256, REQUIRED_STAGING_SECRETS, STAGING_ACCOUNT_ID, STAGING_ALLOWED_VAR_NAMES, STAGING_HOSTS, STAGING_INVENTORY, STAGING_PROJECT_ALPHA_ORIGIN, STAGING_REQUEST_ATTACHMENT_R2_CORS, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
 
 const audiences = Object.freeze({ delivery: "c".repeat(64), operations: "d".repeat(64), "ops-sync": "b".repeat(64) });
+const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
 function stagingConfig(app) {
@@ -29,7 +30,7 @@ function stagingConfig(app) {
       ...(app === "delivery" ? {
         POLICY_AUD: audiences.delivery,
         PUBLIC_BASE_URL: `https://${STAGING_HOSTS.delivery}`,
-        CLIENT_PORTAL_ENABLED: "false",
+        CLIENT_PORTAL_ENABLED: "true",
         CLIENT_PORTAL_ORIGIN: `https://${STAGING_HOSTS.client}`,
         CLIENT_ACCESS_TEAM_DOMAIN: STAGING_STATIC_VARS.delivery.CLIENT_ACCESS_TEAM_DOMAIN,
         CLIENT_ACCESS_AUD: "a".repeat(64),
@@ -170,9 +171,15 @@ test("rejects missing, unexpected, or non-regular release migrations", () => {
   for (const app of ["delivery", "operations"]) {
     const directory = path.join(base, "apps", APP_SOURCE_DIRS[app], "migrations");
     fs.mkdirSync(directory, { recursive: true });
-    for (const name of REQUIRED_STAGING_MIGRATIONS[app]) fs.writeFileSync(path.join(directory, name), "-- migration\n");
+    for (const name of REQUIRED_STAGING_MIGRATIONS[app]) {
+      const reviewed = REQUIRED_STAGING_MIGRATION_SHA256[app]?.[name];
+      if (reviewed) fs.copyFileSync(path.join(repositoryRoot, "apps", APP_SOURCE_DIRS[app], "migrations", name), path.join(directory, name));
+      else fs.writeFileSync(path.join(directory, name), "-- migration\n");
+    }
   }
   assert.deepEqual(validateMigrationInventory(base), []);
+  fs.appendFileSync(path.join(base, "apps", "operations", "migrations", "0163_project_alpha_directory_read_adoption_field_review_receipts.sql"), "\n-- drift\n");
+  assert(validateMigrationInventory(base).some((error) => error.includes("0163_project_alpha_directory_read_adoption_field_review_receipts.sql SHA-256")));
   fs.rmSync(path.join(base, "apps", "client", "migrations", "0213_incoming_rclone_promotion.sql"));
   fs.writeFileSync(path.join(base, "apps", "client", "migrations", "0214_unreviewed.sql"), "-- unexpected\n");
   assert(validateMigrationInventory(base).some((error) => error.includes("delivery release migration inventory")));
@@ -264,6 +271,10 @@ test("requires shared staging resources to agree", () => {
   configs.delivery.services.find(service => service.binding === "VIEWER_SESSION_ISSUER").entrypoint = "WrongViewerIssuer";
   configs.delivery.services.find(service => service.binding === "CLIENT_PORTAL_SERVICE_METADATA_READER").entrypoint = "WrongMetadataReader";
   configs.delivery.services.find(service => service.binding === "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_BRIDGE").entrypoint = "WrongRecipientEnrollmentBridge";
+  configs.delivery.services.find(service => service.binding === "OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT").entrypoint = "WrongNativeRecipientIngress";
+  configs.delivery.services.find(service => service.binding === "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER").entrypoint = "WrongNativeDeliveryReader";
+  configs.operations.services.find(service => service.binding === "OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY").entrypoint = "WrongNativeRecipientAuthority";
+  configs.operations.services.find(service => service.binding === "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY").entrypoint = "WrongNativeDeliveryAuthority";
   configs["ops-sync"].services[0].entrypoint = "WrongPortalIngress";
   configs.delivery.vars.PROJECT_ALPHA_PORTAL_APPLICATION_KEY = "wrong-application-key";
   const errors = validateCrossApp(configs);
@@ -272,6 +283,10 @@ test("requires shared staging resources to agree", () => {
   assert(errors.some((error) => error.includes("Viewer session issuer")));
   assert(errors.some((error) => error.includes("service metadata reader")));
   assert(errors.some((error) => error.includes("recipient enrollment bridge")));
+  assert(errors.some((error) => error.includes("native recipient enrollment")));
+  assert(errors.some((error) => error.includes("native authorization reader")));
+  assert(errors.some((error) => error.includes("native recipient authority")));
+  assert(errors.some((error) => error.includes("native delivery authority")));
   assert(errors.some((error) => error.includes("portal projection ingress")));
   assert(errors.some((error) => error.includes("application key")));
 });
@@ -334,7 +349,11 @@ test("resolves logical delivery staging files from apps/client", () => {
   for (const app of ["delivery", "operations"]) {
     const directory = path.join(base, "apps", APP_SOURCE_DIRS[app], "migrations");
     fs.mkdirSync(directory, { recursive: true });
-    for (const name of REQUIRED_STAGING_MIGRATIONS[app]) fs.writeFileSync(path.join(directory, name), "-- migration\n");
+    for (const name of REQUIRED_STAGING_MIGRATIONS[app]) {
+      const reviewed = REQUIRED_STAGING_MIGRATION_SHA256[app]?.[name];
+      if (reviewed) fs.copyFileSync(path.join(repositoryRoot, "apps", APP_SOURCE_DIRS[app], "migrations", name), path.join(directory, name));
+      else fs.writeFileSync(path.join(directory, name), "-- migration\n");
+    }
   }
   const corsDirectory = path.join(base, "docs", "staging");
   fs.mkdirSync(corsDirectory, { recursive: true });
@@ -344,10 +363,10 @@ test("resolves logical delivery staging files from apps/client", () => {
   fs.renameSync(path.join(base, "apps", "client"), path.join(base, "apps", "delivery"));
   assert(validateFiles(base).some((error) => error.includes(path.join("apps", "client", "wrangler.staging.json"))));
 });
-test("fails closed on client portal activation, host namespace origins, and audience reuse", () => {
+test("fails closed on client portal deactivation, host namespace origins, and audience reuse", () => {
   const staging = stagingConfig("delivery");
   const production = productionFrom(staging);
-  staging.vars.CLIENT_PORTAL_ENABLED = "true";
+  staging.vars.CLIENT_PORTAL_ENABLED = "false";
   staging.vars.CLIENT_PORTAL_ORIGIN = "https://other-staging.example";
   staging.vars.PUBLIC_SHARE_ORIGIN = `https://${STAGING_HOSTS.client}`;
   staging.vars.PUBLIC_BASE_URL = staging.vars.PUBLIC_SHARE_ORIGIN;
@@ -386,8 +405,8 @@ test("requires every portal-v2 and Operations capability to be explicitly false"
   }
 });
 
-test("pins the native portal, Operations 0054-0151, both 0199 files, and the 0200-0221 release contract", () => {
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-39), [
+test("pins the native portal, Operations 0054-0160 gap-aware chain, both 0199 files, and the 0200-0228 gap-aware release contract", () => {
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-46), [
     "0184_native_client_feedback.sql",
     "0185_native_service_request_ownership.sql",
     "0186_delivery_notification_authority_provenance.sql",
@@ -427,6 +446,13 @@ test("pins the native portal, Operations 0054-0151, both 0199 files, and the 020
     "0219_operations_portal_authority_v2.sql",
     "0220_operations_portal_authority_v3_permissions.sql",
     "0221_verified_recipient_delivery_authority.sql",
+    "0222_verified_recipient_delivery_cross_manager_revoke.sql",
+    "0223_operations_portal_workspace_publications.sql",
+    "0224_operations_portal_native_recipient_authority.sql",
+    "0225_operations_portal_workspace_publication_cancellations.sql",
+    "0226_operations_portal_native_workspace_cleanup.sql",
+    "0227_operations_portal_native_delivery_authority.sql",
+    "0228_operations_portal_native_content_start_audit.sql",
   ]);
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0123_native_directory_authority_history.sql")), [
     "0123_native_directory_authority_history.sql",
@@ -458,6 +484,19 @@ test("pins the native portal, Operations 0054-0151, both 0199 files, and the 020
     "0149_client_portal_recipient_enrollment_sql_fences.sql",
     "0150_client_portal_recipient_enrollment_cancellation.sql",
     "0151_verified_recipient_delivery_authority_outbox.sql",
+    "0152_operations_portal_workspace_reservations.sql",
+    "0153_operations_portal_workspace_publication_outbox.sql",
+    "0154_operations_portal_native_recipient_authority.sql",
+    "0155_operations_portal_workspace_publication_cancellations.sql",
+    "0156_operations_portal_workspace_publication_invocations.sql",
+    "0157_operations_portal_native_workspace_cleanup.sql",
+    "0158_operations_portal_native_delivery_authority.sql",
+    "0159_operations_portal_native_delivery_recovery_invocations.sql",
+    "0160_operations_portal_native_recipient_labels.sql",
+    "0161_project_alpha_api_v2_inventory_observations.sql",
+    "0162_project_alpha_directory_read_adoption_claims.sql",
+    "0163_project_alpha_directory_read_adoption_field_review_receipts.sql",
+    "0164_project_alpha_directory_read_adoption_authority_recheck.sql",
   ]);
   const nativeDirectoryStart = REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0054_project_alpha_directory_outbox.sql");
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(nativeDirectoryStart, nativeDirectoryStart + 3), [
@@ -471,6 +510,11 @@ test("pins the native portal, Operations 0054-0151, both 0199 files, and the 020
   assert.equal(STAGING_STATIC_VARS.delivery.CLIENT_PORTAL_CONTENT_AUDIT_ENABLED, "false");
   assert.equal(STAGING_STATIC_VARS.delivery.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED, "false");
   assert.equal(STAGING_STATIC_VARS.operations.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED, "false");
+  for (const flag of ["PROJECT_ALPHA_API_V2_SYNC_ENABLED", "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED"]) {
+    assert(REQUIRED_DISABLED_FEATURE_FLAGS.operations.includes(flag), flag);
+    assert(STAGING_ALLOWED_VAR_NAMES.operations.includes(flag), flag);
+    assert.equal(STAGING_STATIC_VARS.operations[flag], "false", flag);
+  }
   assert.equal(STAGING_STATIC_VARS.delivery.PROJECT_ALPHA_PORTAL_SYNC_ENABLED, "true");
   assert.equal(STAGING_STATIC_VARS.delivery.PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED, "false");
   assert.equal(STAGING_STATIC_VARS.delivery.PROJECT_ALPHA_PORTAL_APPLICATION_KEY, STAGING_STATIC_VARS["ops-sync"].APPLICATION_KEY);

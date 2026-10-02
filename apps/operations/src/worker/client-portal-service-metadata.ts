@@ -89,18 +89,82 @@ LEFT JOIN operations_customer_service_enrollments enrollment
 LEFT JOIN operations_service_definitions definition ON definition.service_id=enrollment.service_id
 ORDER BY definition.service_id LIMIT ?`;
 
+export const nativeClientPortalServiceMetadataQuery = `WITH matching_authority AS (
+  SELECT recipient.recipient_binding_id,recipient.target_client_record_id customer_record_id
+  FROM operations_portal_native_recipient_authority_heads recipient
+  JOIN operations_portal_native_recipient_intents intent
+    ON intent.intent_id=recipient.enrollment_intent_id AND intent.state='active'
+      AND intent.recipient_binding_id=recipient.recipient_binding_id
+      AND intent.grant_operation_id=recipient.latest_operation_id
+      AND intent.access_issuer=recipient.issuer AND intent.access_subject=recipient.subject
+  JOIN operations_portal_native_workspace_authority_heads workspace
+    ON workspace.target_id=recipient.target_id AND workspace.state='active'
+      AND workspace.ownership_epoch=recipient.ownership_epoch
+  JOIN operations_portal_workspace_reservation_heads target
+    ON target.target_id=workspace.target_id AND target.state='active'
+      AND target.revision=workspace.target_revision
+      AND target.client_authority_id=workspace.client_authority_id AND target.workspace_id=workspace.workspace_id
+      AND target.root_kind=workspace.root_kind AND target.root_record_id=workspace.root_record_id
+  JOIN operations_portal_native_authority_commands command
+    ON command.operation_id=recipient.latest_operation_id AND command.action='recipient.grant'
+      AND command.target_id=workspace.target_id AND command.target_revision=workspace.target_revision
+      AND command.client_authority_id=workspace.client_authority_id AND command.workspace_id=workspace.workspace_id
+      AND command.recipient_binding_id=recipient.recipient_binding_id
+      AND command.enrollment_intent_id=intent.intent_id AND command.target_client_record_id=recipient.target_client_record_id
+      AND command.issuer=recipient.issuer AND command.subject=recipient.subject
+      AND command.resulting_ownership_epoch=recipient.ownership_epoch
+      AND command.resulting_grant_revision=recipient.grant_revision
+      AND command.permission_schema_version=3 AND command.permissions_json=recipient.permissions_json
+  JOIN operations_portal_native_authority_outbox outbox
+    ON outbox.operation_id=command.operation_id AND outbox.state='acknowledged'
+  JOIN operations_portal_native_authority_receipts receipt
+    ON receipt.operation_id=outbox.operation_id AND receipt.request_fingerprint=outbox.request_fingerprint
+      AND receipt.target_id=workspace.target_id AND receipt.client_authority_id=workspace.client_authority_id
+      AND receipt.workspace_id=workspace.workspace_id AND receipt.recipient_binding_id=recipient.recipient_binding_id
+      AND receipt.enrollment_intent_id=intent.intent_id AND receipt.issuer=recipient.issuer AND receipt.subject=recipient.subject
+      AND receipt.ownership_epoch=recipient.ownership_epoch AND receipt.grant_revision=recipient.grant_revision
+      AND receipt.resulting_state='active' AND receipt.permission_schema_version=3
+      AND receipt.permissions_json=recipient.permissions_json
+  JOIN client_onboarding_recipient_identity_bindings identity
+    ON identity.binding_id=recipient.recipient_binding_id AND identity.status='active'
+      AND identity.target_client_record_id=recipient.target_client_record_id
+      AND identity.access_issuer=recipient.issuer AND identity.access_subject=recipient.subject
+      AND (identity.expires_at IS NULL OR datetime(identity.expires_at)>datetime('now'))
+  JOIN operations_directory_client_organizations relation
+    ON relation.client_record_id=recipient.target_client_record_id
+      AND relation.relationship_version=intent.target_relationship_version
+  WHERE workspace.client_authority_id=? AND workspace.workspace_id=?
+    AND recipient.ownership_epoch=? AND recipient.grant_revision=? AND recipient.issuer=? AND recipient.subject=?
+    AND recipient.state='active' AND recipient.permission_schema_version=3
+    AND recipient.permissions_json='["operations.service_home.read"]'
+    AND (recipient.expires_at IS NULL OR datetime(recipient.expires_at)>datetime('now'))
+    AND ((workspace.root_kind='organization' AND relation.organization_record_id=workspace.root_record_id)
+      OR (workspace.root_kind='standalone_client' AND recipient.target_client_record_id=workspace.root_record_id
+        AND relation.organization_record_id IS NULL))
+), exact_authority AS (
+  SELECT min(customer_record_id) customer_record_id FROM matching_authority HAVING count(*)=1
+)
+SELECT definition.service_id,definition.provider_id,definition.display_name,enrollment.revision
+FROM exact_authority authority
+LEFT JOIN operations_customer_service_enrollments enrollment
+  ON enrollment.customer_record_id=authority.customer_record_id AND enrollment.state='active'
+LEFT JOIN operations_service_definitions definition ON definition.service_id=enrollment.service_id
+ORDER BY definition.service_id LIMIT ?`;
+
 /**
  * Reads descriptive service metadata for one already-authorized portal principal.
  * This is not content authorization and intentionally returns no PA identifiers,
  * URLs, content grants, organization-wide service inheritance, or mutation power.
  */
 export async function readClientPortalServiceMetadata(db: D1Database,
-  raw: unknown): Promise<ClientPortalServiceMetadataResultV1> {
+  raw: unknown, nativeAuthority = false): Promise<ClientPortalServiceMetadataResultV1> {
   const request = parseRequest(raw);
   if (!request) return failure("invalid_request");
   try {
     const session = db.withSession("first-primary");
-    const rows = await session.prepare(clientPortalServiceMetadataQuery).bind(request.authorityId, request.workspaceId,
+    // Protocol selection is server configuration, never a caller-controlled field.
+    // Missing native evidence fails closed without consulting historical grants.
+    const rows = await session.prepare(nativeAuthority ? nativeClientPortalServiceMetadataQuery : clientPortalServiceMetadataQuery).bind(request.authorityId, request.workspaceId,
       request.ownershipEpoch, request.grantRevision, request.issuer, request.subject, MAX_SERVICES + 2).all<ServiceRow>();
     if (!rows.success || rows.results.length === 0) return failure("denied");
     if (rows.results.length > MAX_SERVICES + 1) return failure("overflow");

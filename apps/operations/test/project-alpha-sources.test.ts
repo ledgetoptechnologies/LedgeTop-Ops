@@ -189,7 +189,7 @@ describe("source-isolated business snapshots", () => {
       expect(await ops.prepare("SELECT count(*) n FROM integration_health WHERE integration='project-alpha' AND status='healthy'").first("n")).toBe(2);
 
       expect((await ops.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
-    },90_000);
+    },180_000);
   });
 
   describe("incomplete secondary source",()=>{

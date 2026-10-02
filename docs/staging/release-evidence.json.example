@@ -5,7 +5,7 @@
     "remoteRef": "<REMOTE_REF_CONTAINING_RELEASE_COMMIT>",
     "verifiedAt": "<ISO_8601_TIMESTAMP>",
     "evidenceRef": "<EVIDENCE_REFERENCE>",
-    "runtimeCandidateCommit": "5ca70d4f5ec834bfddf7bff68ffc1d89c6fd32a7",
+    "runtimeCandidateCommit": "PENDING_OPERATIONS_COMMIT",
     "runtimeCandidatePushed": false,
     "runtimeEvidenceRef": "<EVIDENCE_REFERENCE>"
   },
@@ -331,7 +331,8 @@
       "https://client-staging.ledgetopdroneservices.com",
       "https://portal-staging.ledgetoptechnologies.com"
     ],
-    "enabled": false,
+    "releasePhase": "staff-synthetic-acceptance",
+    "runtimeEnabled": true,
     "teamDomain": "https://ledgetoptechnologies.cloudflareaccess.com",
     "applicationName": "Ledge Top Client Portal Staging",
     "applicationId": "<CLIENT_PORTAL_ACCESS_APPLICATION_ID>",
@@ -356,6 +357,51 @@
     ],
     "accessReadbackEvidenceRef": "<ACCESS_APPLICATION_AUDIENCE_DESTINATION_POLICY_READBACK_REFERENCE>",
     "rollbackSnapshotRef": "<ACCESS_AND_CUSTOM_DOMAIN_ROLLBACK_SNAPSHOT_REFERENCE>",
+    "admission": {
+      "mode": "explicit-staff-synthetic-only",
+      "clientAdmissionEnabled": false,
+      "invitationSendingEnabled": false,
+      "automaticEnrollmentEnabled": false,
+      "syntheticWorkspaceOnly": true,
+      "approvedStaffTester": {
+        "issuer": "https://ledgetoptechnologies.cloudflareaccess.com",
+        "subjectSha256": "<SHA256_OF_APPROVED_ACCESS_SUBJECT>",
+        "issuerSubjectSha256": "<SHA256_OF_ISSUER_NEWLINE_LOWERCASE_SUBJECT_SHA256>",
+        "identityReadbackSha256": "<SHA256_OF_IDENTITY_READBACK>",
+        "activeOperationsUser": false,
+        "evidenceRef": "<VERIFIED_ISSUER_SUBJECT_READBACK_REFERENCE>"
+      },
+      "protectedAccessPolicy": {
+        "applicationId": "<CLIENT_PORTAL_ACCESS_APPLICATION_ID>",
+        "policyId": "<CLIENT_PORTAL_ALLOW_POLICY_ID>",
+        "decision": "allow",
+        "bypass": false,
+        "includeSelectors": [{ "type": "group", "id": "<DEDICATED_CLIENT_PORTAL_STAGING_GROUP_ID>" }],
+        "excludeSelectors": [],
+        "requireSelectors": [],
+        "readbackSha256": "<SHA256_OF_CANONICAL_ACCESS_POLICY_READBACK>",
+        "evidenceRef": "<ACCESS_POLICY_READBACK_REFERENCE>"
+      },
+      "testerGroupMembership": {
+        "groupId": "<DEDICATED_CLIENT_PORTAL_STAGING_GROUP_ID>",
+        "issuerSubjectSha256": ["<SHA256_OF_ISSUER_NEWLINE_LOWERCASE_SUBJECT_SHA256>"],
+        "readbackSha256": "<SHA256_OF_CANONICAL_GROUP_MEMBERSHIP_READBACK>",
+        "evidenceRef": "<GROUP_MEMBERSHIP_READBACK_REFERENCE>"
+      },
+      "productionAccess": {
+        "before": {
+          "applicationId": "<PRODUCTION_CLIENT_PORTAL_ACCESS_APPLICATION_ID>",
+          "policyIds": ["<PRODUCTION_CLIENT_PORTAL_ACCESS_POLICY_ID>"],
+          "configSha256": "<PRODUCTION_ACCESS_CONFIG_SHA256>"
+        },
+        "after": {
+          "applicationId": "<PRODUCTION_CLIENT_PORTAL_ACCESS_APPLICATION_ID>",
+          "policyIds": ["<PRODUCTION_CLIENT_PORTAL_ACCESS_POLICY_ID>"],
+          "configSha256": "<PRODUCTION_ACCESS_CONFIG_SHA256>"
+        },
+        "evidenceRef": "<PRODUCTION_ACCESS_BEFORE_AFTER_READBACK_REFERENCE>"
+      }
+    },
     "publicAccess": {
       "applicationName": "Ledge Top Client Public Staging",
       "applicationId": "<CLIENT_PUBLIC_BYPASS_APPLICATION_ID>",
@@ -367,7 +413,10 @@
     },
     "approvalRef": "<APPROVAL_REFERENCE>",
     "tests": {
-      "portalDisabled404": false,
+      "staffSyntheticWorkspaceAccessVerified": false,
+      "clientAdmissionDenied": false,
+      "invitationSendingDenied": false,
+      "automaticEnrollmentDenied": false,
       "invalidAudienceDenied": false,
       "unprovisionedIdentityDenied": false,
       "crossAccountDenied": false,
@@ -526,7 +575,14 @@
         "0218_client_authority_workspace_binding.sql",
         "0219_operations_portal_authority_v2.sql",
         "0220_operations_portal_authority_v3_permissions.sql",
-        "0221_verified_recipient_delivery_authority.sql"
+        "0221_verified_recipient_delivery_authority.sql",
+        "0222_verified_recipient_delivery_cross_manager_revoke.sql",
+        "0223_operations_portal_workspace_publications.sql",
+        "0224_operations_portal_native_recipient_authority.sql",
+        "0225_operations_portal_workspace_publication_cancellations.sql",
+        "0226_operations_portal_native_workspace_cleanup.sql",
+        "0227_operations_portal_native_delivery_authority.sql",
+        "0228_operations_portal_native_content_start_audit.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
@@ -698,7 +754,20 @@
         "0148_client_portal_recipient_enrollment.sql",
         "0149_client_portal_recipient_enrollment_sql_fences.sql",
         "0150_client_portal_recipient_enrollment_cancellation.sql",
-        "0151_verified_recipient_delivery_authority_outbox.sql"
+        "0151_verified_recipient_delivery_authority_outbox.sql",
+        "0152_operations_portal_workspace_reservations.sql",
+        "0153_operations_portal_workspace_publication_outbox.sql",
+        "0154_operations_portal_native_recipient_authority.sql",
+        "0155_operations_portal_workspace_publication_cancellations.sql",
+        "0156_operations_portal_workspace_publication_invocations.sql",
+        "0157_operations_portal_native_workspace_cleanup.sql",
+        "0158_operations_portal_native_delivery_authority.sql",
+        "0159_operations_portal_native_delivery_recovery_invocations.sql",
+        "0160_operations_portal_native_recipient_labels.sql",
+        "0161_project_alpha_api_v2_inventory_observations.sql",
+        "0162_project_alpha_directory_read_adoption_claims.sql",
+        "0163_project_alpha_directory_read_adoption_field_review_receipts.sql",
+        "0164_project_alpha_directory_read_adoption_authority_recheck.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
@@ -736,8 +805,8 @@
           "applyEvidenceRef": "<EVIDENCE_REFERENCE>",
           "readbackEvidenceRef": "<EVIDENCE_REFERENCE>",
           "transformedFiles": ["0002_seed_initial_staff.sql"],
-          "ledgerCount": 140,
-          "finalMigration": "0221_verified_recipient_delivery_authority.sql",
+          "ledgerCount": 147,
+          "finalMigration": "0228_operations_portal_native_content_start_audit.sql",
           "sourceSeedSha256": "<CANONICAL_SEED_SHA256>",
           "generatedSeedSha256": "<GENERATED_SEED_SHA256>",
           "databaseWasEmpty": false,
@@ -764,8 +833,8 @@
           "applyEvidenceRef": "<EVIDENCE_REFERENCE>",
           "readbackEvidenceRef": "<EVIDENCE_REFERENCE>",
           "transformedFiles": ["0002_seed_acl.sql"],
-          "ledgerCount": 151,
-          "finalMigration": "0151_verified_recipient_delivery_authority_outbox.sql",
+          "ledgerCount": 163,
+          "finalMigration": "0163_project_alpha_directory_read_adoption_field_review_receipts.sql",
           "sourceSeedSha256": "<CANONICAL_SEED_SHA256>",
           "generatedSeedSha256": "<GENERATED_SEED_SHA256>",
           "databaseWasEmpty": false,
@@ -928,7 +997,6 @@
   },
   "deployments": {
 "delivery": { "versionId": "<IMMUTABLE_STAGING_VERSION_ID>", "releaseCommit": "5ca70d4f5ec834bfddf7bff68ffc1d89c6fd32a7", "configSha256": "<SHA256>", "deployedAt": "<ISO_8601_TIMESTAMP>", "bindingsVerified": false, "healthCheckPassed": false, "hostAdmissionDenied": false, "disabledFeatureFlags": [
-      "CLIENT_PORTAL_ENABLED",
       "CLIENT_PORTAL_CONTENT_AUDIT_ENABLED",
       "CLIENT_PORTAL_REQUEST_V2_ENABLED",
       "CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED",
@@ -963,17 +1031,21 @@
       "CLIENT_PORTAL_AUTHORITY_V2_STATUS_ENABLED",
       "CLIENT_PORTAL_AUTHORITY_V2_ENROLLMENT_STATUS_ENABLED",
       "CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED",
+      "CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED",
       "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED",
+      "CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED",
         "CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_WRITER_ENABLED",
         "CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_STATUS_ENABLED",
       "CLOUD_TRANSFER_DROPBOX_ENABLED",
       "CLOUD_TRANSFER_GOOGLE_ENABLED",
       "CLOUD_TRANSFER_GOOGLE_PICKER_CLIENT_ENABLED"
     ], "evidenceRef": "<EVIDENCE_REFERENCE>" },
-    "operations": { "versionId": "<IMMUTABLE_STAGING_VERSION_ID>", "releaseCommit": "5ca70d4f5ec834bfddf7bff68ffc1d89c6fd32a7", "configSha256": "<SHA256>", "deployedAt": "<ISO_8601_TIMESTAMP>", "bindingsVerified": false, "healthCheckPassed": false, "hostAdmissionDenied": false, "disabledFeatureFlags": [
+    "operations": { "versionId": "<IMMUTABLE_STAGING_VERSION_ID>", "releaseCommit": "PENDING_OPERATIONS_COMMIT", "configSha256": "<SHA256>", "deployedAt": "<ISO_8601_TIMESTAMP>", "bindingsVerified": false, "healthCheckPassed": false, "hostAdmissionDenied": false, "disabledFeatureFlags": [
       "NATIVE_INTEGRATION_CONTROL_ENABLED",
       "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED",
       "PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED",
+      "PROJECT_ALPHA_API_V2_SYNC_ENABLED",
+      "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED",
       "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED",
       "PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED",
       "PROJECT_ALPHA_DELIVERY_GUEST_ENABLED",
@@ -985,6 +1057,7 @@
       "CLIENT_PORTAL_AUTHORITY_V2_OUTBOX_ENABLED",
       "CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED",
       "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED",
+      "CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED",
         "VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_DISPATCH_ENABLED",
       "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ENABLED",
       "CLIENT_HUB_PA_CONTACT_ASSIGNMENTS_ENABLED",
@@ -1004,6 +1077,7 @@
       "VIEWER_INTEGRATION_ENABLED",
       "VIEWER_PROCESSING_ENABLED",
       "VIEWER_PUBLIC_SHARES_ENABLED",
+      "VIEWER_WORKSPACE_RENEWAL_CORS_ENABLED",
       "CLIENT_VIEWER_SESSION_ISSUER_ENABLED",
       "CLIENT_VIEWER_SHARES_ENABLED",
       "DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED",
@@ -1012,7 +1086,7 @@
       "DROPBOX_IMPORT_ENABLED",
       "R2_PURGE_ENABLED"
     ], "evidenceRef": "<EVIDENCE_REFERENCE>" },
-    "ops-sync": { "versionId": "<IMMUTABLE_STAGING_VERSION_ID>", "releaseCommit": "5ca70d4f5ec834bfddf7bff68ffc1d89c6fd32a7", "configSha256": "<SHA256>", "deployedAt": "<ISO_8601_TIMESTAMP>", "bindingsVerified": false, "healthCheckPassed": false, "hostAdmissionDenied": false, "disabledFeatureFlags": [], "evidenceRef": "<EVIDENCE_REFERENCE>" }
+    "ops-sync": { "versionId": "<IMMUTABLE_STAGING_VERSION_ID>", "releaseCommit": "PENDING_OPERATIONS_COMMIT", "configSha256": "<SHA256>", "deployedAt": "<ISO_8601_TIMESTAMP>", "bindingsVerified": false, "healthCheckPassed": false, "hostAdmissionDenied": false, "disabledFeatureFlags": [], "evidenceRef": "<EVIDENCE_REFERENCE>" }
   },
   "infrastructure": {
     "remoteInventoryVerified": false,

@@ -16,7 +16,7 @@ let delivery: D1Database;
 let ops: D1Database;
 let env: Env;
 
-function scriptedSocket(options: { authCode?: number; suppressFinalReply?: boolean } = {}) {
+function scriptedSocket(options: { authCode?: number; suppressFinalReply?: boolean; greeting?: string } = {}) {
   const writes: string[] = [];
   let controller!: ReadableStreamDefaultController<Uint8Array>;
   let step = 0;
@@ -25,7 +25,7 @@ function scriptedSocket(options: { authCode?: number; suppressFinalReply?: boole
   const readable = new ReadableStream<Uint8Array>({
     start(value) {
       controller = value;
-      controller.enqueue(new TextEncoder().encode("220 Ready\r\n"));
+      controller.enqueue(new TextEncoder().encode(options.greeting ?? "220 Ready\r\n"));
     },
   });
   const writable = new WritableStream<Uint8Array>({
@@ -193,6 +193,20 @@ describe("incoming upload notification joined SMTP outcomes", () => {
     expect(smtp.connect).toHaveBeenCalledOnce();
   });
 
+  it("keeps connection and protocol failure details out of durable state", async () => {
+    smtp.connect.mockImplementationOnce(() => { throw new Error("private connection detail"); });
+    expect(await processIncomingUploadNotifications(env)).toBe(1);
+    expect(await row()).toEqual({ status: "retry", attempt_count: 1,
+      delivered_at: null, last_error_code: "mail-transport-failed" });
+
+    await makeDue();
+    const invalid = scriptedSocket({ greeting: "not-an-smtp-response\r\n" });
+    smtp.connect.mockReturnValueOnce(invalid.socket);
+    expect(await processIncomingUploadNotifications(env)).toBe(1);
+    expect(await row()).toEqual({ status: "retry", attempt_count: 2,
+      delivered_at: null, last_error_code: "mail-transport-failed" });
+    expect(invalid.writes).toHaveLength(0);
+  });
   it("does not send when the exact-attempt marker CAS loses ownership", async () => {
     const real = delivery;
     const database = new Proxy(real, {
@@ -256,7 +270,39 @@ describe("incoming upload notification joined SMTP outcomes", () => {
     expect(await row()).toMatchObject({ status: "processing", attempt_count: 2, last_error_code: null });
   });
 
-  it("holds marked or exhausted expired work and increments a reclaimable unmarked attempt", async () => {
+  it("does not overwrite or send when an expired-processing hold loses to lease renewal", async () => {
+    await delivery.prepare(`UPDATE incoming_upload_notification_digests SET status='processing',attempt_count=1,
+      lease_expires_at=datetime('now','-1 second'),last_error_code=NULL`).run();
+    const real = delivery;
+    let renewLease = true;
+    const database = new Proxy(real, {
+      get(target, property, receiver) {
+        if (property !== "prepare") return Reflect.get(target, property, receiver);
+        return (sql: string) => {
+          const prepared = target.prepare(sql);
+          if (!/SET\s+status='failed',lease_expires_at=NULL,last_error_code=\?/.test(sql)) return prepared;
+          return { bind: (...values: unknown[]) => {
+            const bound = prepared.bind(...values);
+            return { run: async () => {
+              if (renewLease) {
+                renewLease = false;
+                await real.prepare(`UPDATE incoming_upload_notification_digests SET
+                  lease_expires_at=datetime('now','+10 minutes'),last_error_code='new-owner-state'
+                  WHERE id='incoming-upload-digest:request-one:contributor-one:v1'`).run();
+              }
+              return bound.run();
+            } };
+          } };
+        };
+      },
+    }) as unknown as D1Database;
+
+    expect(await processIncomingUploadNotifications({ ...env, DELIVERY_DB: database })).toBe(0);
+    expect(await row()).toMatchObject({ status: "processing", attempt_count: 1, last_error_code: "new-owner-state" });
+    expect(smtp.connect).not.toHaveBeenCalled();
+  });
+
+  it("holds marked, exhausted, and legacy unmarked expired work without resending", async () => {
     await delivery.prepare(`UPDATE incoming_upload_notification_digests SET status='processing',attempt_count=3,
       lease_expires_at=datetime('now','-1 second'),last_error_code='mail-send-attempted:a3'`).run();
     expect(await processIncomingUploadNotifications(env)).toBe(1);
@@ -264,21 +310,21 @@ describe("incoming upload notification joined SMTP outcomes", () => {
       last_error_code: "mail-delivery-uncertain-reconciliation-required" });
     expect(smtp.connect).not.toHaveBeenCalled();
 
-    await delivery.prepare(`UPDATE incoming_upload_notification_digests SET status='processing',attempt_count=3,
-      lease_expires_at=datetime('now','-1 second'),last_error_code=NULL`).run();
-    expect(await processIncomingUploadNotifications(env)).toBe(1);
-    expect(await row()).toEqual({ status: "failed", attempt_count: 3,
-      delivered_at: null, last_error_code: "mail-transport-failed" });
-    expect(smtp.connect).not.toHaveBeenCalled();
+    for (const attempt of [1, 2, 3]) {
+      await delivery.prepare(`UPDATE incoming_upload_notification_digests SET status='processing',attempt_count=?,
+        lease_expires_at=datetime('now','-1 second'),last_error_code=NULL`).bind(attempt).run();
+      expect(await processIncomingUploadNotifications(env)).toBe(1);
+      expect(await row()).toEqual({ status: "failed", attempt_count: attempt,
+        delivered_at: null, last_error_code: "mail-delivery-uncertain-reconciliation-required" });
+      expect(smtp.connect).not.toHaveBeenCalled();
+    }
 
     await delivery.prepare(`UPDATE incoming_upload_notification_digests SET status='processing',attempt_count=2,
-      lease_expires_at=datetime('now','-1 second'),last_error_code=NULL`).run();
-    const accepted = scriptedSocket();
-    smtp.connect.mockReturnValue(accepted.socket);
+      lease_expires_at=datetime('now','-1 second'),last_error_code='owner-authorization-check-failed'`).run();
     expect(await processIncomingUploadNotifications(env)).toBe(1);
-    expect(await row()).toEqual({ status: "sent", attempt_count: 3,
-      delivered_at: expect.any(String), last_error_code: null });
-    expect(smtp.connect).toHaveBeenCalledOnce();
+    expect(await row()).toEqual({ status: "failed", attempt_count: 2,
+      delivered_at: null, last_error_code: "mail-delivery-uncertain-reconciliation-required" });
+    expect(smtp.connect).not.toHaveBeenCalled();
   });
 
   it("leaves the marker durable when the terminal hold write fails, then holds it after lease expiry", async () => {

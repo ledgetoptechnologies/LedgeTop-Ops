@@ -1,11 +1,15 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
-import type { ClientPortalServiceMetadataRequestV1, ClientPortalServiceMetadataV1 } from "../../../../packages/shared/src/client-portal-service-metadata";
+import { CLIENT_PORTAL_SERVICE_METADATA_MAX_RESPONSE_BYTES,
+  type ClientPortalServiceMetadataRequestV1, type ClientPortalServiceMetadataV1 } from "../../../../packages/shared/src/client-portal-service-metadata";
 import { readClientPortalServiceMetadata } from "./client-portal-service-metadata";
 import type { Env } from "./types";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const keys = ["protocolVersion", "authorityId", "workspaceId", "ownershipEpoch", "grantRevision", "issuer", "subject"] as const;
-type MetadataEntrypointEnv = Pick<Env, "OPS_DB"> & { CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED?: string };
+type MetadataEntrypointEnv = Pick<Env, "OPS_DB"> & {
+  CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED?: string;
+  CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED?: string;
+};
 
 export type ClientPortalServiceMetadataEnvelopeV1 = Readonly<{
   ok: boolean; protocolVersion: 1; authorityId: string; workspaceId: string; ownershipEpoch: number;
@@ -42,14 +46,22 @@ export async function readClientPortalServiceMetadataRpc(env: MetadataEntrypoint
   const request = parse(input);
   if (!request) return { ok: false, protocolVersion: 1, code: "invalid_request" };
   if (env.CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED !== "true") return { ok: false, ...echo(request), code: "disabled" };
-  const result = await readClientPortalServiceMetadata(env.OPS_DB, request);
+  const result = await readClientPortalServiceMetadata(env.OPS_DB, request,
+    env.CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED === "true");
   return result.ok ? { ok: true, ...echo(request), services: result.services }
     : { ok: false, ...echo(request), code: result.code };
 }
 
+function responseWire(value: ClientPortalServiceMetadataEnvelopeV1): string {
+  const wire = JSON.stringify(value);
+  if (new TextEncoder().encode(wire).byteLength > CLIENT_PORTAL_SERVICE_METADATA_MAX_RESPONSE_BYTES)
+    return JSON.stringify({ ok: false, protocolVersion: 1, code: "overflow" });
+  return wire;
+}
+
 /** Named private service-binding entrypoint. It is never mounted as HTTP. */
 export class ClientPortalServiceMetadataReader extends WorkerEntrypoint<Env> {
-  readServiceMetadata(input: unknown): Promise<ClientPortalServiceMetadataEnvelopeV1> {
-    return readClientPortalServiceMetadataRpc(this.env, input);
+  async readServiceMetadata(input: unknown): Promise<string> {
+    return responseWire(await readClientPortalServiceMetadataRpc(this.env, input));
   }
 }

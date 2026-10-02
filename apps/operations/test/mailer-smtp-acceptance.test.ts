@@ -4,7 +4,8 @@ import type { Env } from "../src/worker/types";
 const smtp = vi.hoisted(() => ({ connect: vi.fn() }));
 vi.mock("cloudflare:sockets", () => ({ connect: smtp.connect }));
 
-import { NotificationMailDeliveryUncertain, sendNotificationMail, type OutboundMail } from "../src/worker/mailer";
+import { NotificationMailDeliveryUncertain, notificationMailFailureCode, sendNotificationMail,
+  validateNotificationMailTransport, type OutboundMail } from "../src/worker/mailer";
 
 const mail: OutboundMail = {
   to: "recipient@example.test",
@@ -23,9 +24,14 @@ const environment = {
   SMTP_FROM: "sender@example.test",
 } as Env;
 
+async function failure(operation: () => unknown | Promise<unknown>): Promise<unknown> {
+  try { await operation(); throw new Error("expected operation to fail"); }
+  catch (error) { return error; }
+}
+
 function scriptedSocket(options: { finalDataCode?: number; authCode?: number; closeThrows?: boolean;
   greeting?: string; replyDelayMs?: number; suppressFinalReply?: boolean; bodyWriteRejects?: boolean;
-  finalReplyText?: string } = {}) {
+  finalReplyText?: string; readFailsBeforeGreeting?: boolean } = {}) {
   const writes: string[] = [];
   const replyTimers: Array<ReturnType<typeof setTimeout>> = [];
   let controller!: ReadableStreamDefaultController<Uint8Array>;
@@ -35,7 +41,8 @@ function scriptedSocket(options: { finalDataCode?: number; authCode?: number; cl
   const readable = new ReadableStream<Uint8Array>({
     start(value) {
       controller = value;
-      controller.enqueue(new TextEncoder().encode(options.greeting ?? "220 Ready\r\n"));
+      if (options.readFailsBeforeGreeting) controller.error(new Error("private read failure"));
+      else controller.enqueue(new TextEncoder().encode(options.greeting ?? "220 Ready\r\n"));
     },
   });
   const writable = new WritableStream<Uint8Array>({
@@ -84,7 +91,9 @@ describe("SMTP acceptance boundary", () => {
     const scripted = scriptedSocket({ finalDataCode: 550, closeThrows: true });
     smtp.connect.mockReturnValue(scripted.socket);
 
-    await expect(sendNotificationMail(environment, mail)).rejects.toThrow("SMTP server rejected the request (550)");
+    const error = await failure(() => sendNotificationMail(environment, mail));
+    expect(error).toHaveProperty("message", "SMTP server rejected the request (550)");
+    expect(notificationMailFailureCode(error)).toBe("mail-smtp-rejected");
     expect(scripted.close).toHaveBeenCalledOnce();
   });
 
@@ -92,7 +101,9 @@ describe("SMTP acceptance boundary", () => {
     const scripted = scriptedSocket({ authCode: 535 });
     smtp.connect.mockReturnValue(scripted.socket);
 
-    await expect(sendNotificationMail(environment, mail)).rejects.toThrow("SMTP server rejected the request (535)");
+    const error = await failure(() => sendNotificationMail(environment, mail));
+    expect(error).toHaveProperty("message", "SMTP server rejected the request (535)");
+    expect(notificationMailFailureCode(error)).toBe("mail-smtp-authentication-failed");
     expect(scripted.writes).toHaveLength(4);
   });
 
@@ -106,7 +117,10 @@ describe("SMTP acceptance boundary", () => {
     await vi.advanceTimersByTimeAsync(46_000);
     const result = await settled;
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error).toHaveProperty("message", "SMTP connection timed out");
+    if (!result.ok) {
+      expect(result.error).toHaveProperty("message", "SMTP connection timed out");
+      expect(notificationMailFailureCode(result.error)).toBe("mail-transport-timeout");
+    }
     expect(scripted.close).toHaveBeenCalled();
     expect(scripted.writes.some(line => line.includes("\r\n.\r\n"))).toBe(false);
   });
@@ -118,7 +132,9 @@ describe("SMTP acceptance boundary", () => {
     ]) {
       const scripted = scriptedSocket({ greeting });
       smtp.connect.mockReturnValue(scripted.socket);
-      await expect(sendNotificationMail(environment, mail)).rejects.toThrow(/response exceeded/);
+      const error = await failure(() => sendNotificationMail(environment, mail));
+      expect(error).toHaveProperty("message", expect.stringMatching(/response exceeded/));
+      expect(notificationMailFailureCode(error)).toBe("mail-smtp-protocol-failed");
       expect(scripted.writes).toHaveLength(0);
       expect(scripted.close).toHaveBeenCalled();
     }
@@ -161,5 +177,30 @@ describe("SMTP acceptance boundary", () => {
       NOTIFICATION_FROM: "sender@example.test", NOTIFICATION_EMAIL: binding };
     await expect(sendNotificationMail(enabled, mail)).rejects.toEqual(new NotificationMailDeliveryUncertain());
     expect(send).toHaveBeenCalledOnce();
+  });
+
+  it("classifies connection, configuration and opaque failures without inspecting private details", async () => {
+    const broken = scriptedSocket({ readFailsBeforeGreeting: true });
+    smtp.connect.mockReturnValue(broken.socket);
+    const connection = await failure(() => sendNotificationMail(environment, mail));
+    expect(notificationMailFailureCode(connection)).toBe("mail-connection-failed");
+
+    const configuration = await failure(() => validateNotificationMailTransport({ ...environment, SMTP_PASSWORD: "" }));
+    expect(notificationMailFailureCode(configuration)).toBe("mail-configuration-invalid");
+
+    const opaque = new Proxy({}, {
+      get() { throw new Error("private provider detail"); },
+      getPrototypeOf() { throw new Error("private provider detail"); },
+    });
+    expect(notificationMailFailureCode(opaque)).toBe("mail-transport-unknown");
+    expect(notificationMailFailureCode(new Error("private provider detail"))).toBe("mail-transport-unknown");
+  });
+
+  it("classifies a greeting rejection by SMTP stage instead of numeric code alone", async () => {
+    const rejected = scriptedSocket({ greeting: "535 Synthetic greeting rejection\r\n" });
+    smtp.connect.mockReturnValue(rejected.socket);
+    const error = await failure(() => sendNotificationMail(environment, mail));
+    expect(notificationMailFailureCode(error)).toBe("mail-smtp-rejected");
+    expect(rejected.writes).toHaveLength(0);
   });
 });

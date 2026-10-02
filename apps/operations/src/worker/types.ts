@@ -12,6 +12,10 @@ export type Env = Omit<
   | "PROJECT_ALPHA_API_V2_MONITOR_RECIPIENT"
   | "PROJECT_ALPHA_DIRECTORY_RECONCILIATION_ENABLED"
   | "PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ENABLED"
+  | "PROJECT_ALPHA_API_V2_SYNC_ENABLED"
+  | "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED"
+  | "PROJECT_ALPHA_PROJECT_ADOPTION_REVIEW_ENABLED"
+  | "PROJECT_ALPHA_PROJECT_BINDING_REVISION_REFRESH_ENABLED"
   | "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED"
   | "PROJECT_ALPHA_PRIVATE_ADMIN_TRANSPORT_ENABLED"
   | "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ENABLED"
@@ -30,6 +34,7 @@ export type Env = Omit<
   | "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED"
   | "CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED"
   | "CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED"
+  | "CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED"
   | "CLIENT_PORTAL_HIERARCHY_V2_ENABLED"
   | "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED"
   | "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED"
@@ -37,6 +42,7 @@ export type Env = Omit<
   | "AUTHENTICATED_DELIVERY_CREATION_ENABLED"
   | "PROJECT_ACCESS_EXPIRY_NOTIFICATIONS_ENABLED"
   | "AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED"
+  | "VIEWER_WORKSPACE_RENEWAL_CORS_ENABLED"
   | "CLIENT_PORTAL_ORIGINS"
   | "OPERATIONS_ORIGINS"
   | "CLIENT_HUB_PA_CONTACT_ASSIGNMENTS_ENABLED"
@@ -103,6 +109,14 @@ export type Env = Omit<
   PROJECT_ALPHA_DIRECTORY_RECONCILIATION_ENABLED?: string;
   /** Default-off administrator-only API-v2 capabilities and inventory readiness check. */
   PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ENABLED?: string;
+  /** Default-off bounded API-v2 inventory evidence ingestion. */
+  PROJECT_ALPHA_API_V2_SYNC_ENABLED?: string;
+  /** Staging-only, administrator-protected exact adoption of already-bound Directory identities. */
+  PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED?: string;
+  /** Staging-only, default-off PA-origin project adoption review evidence entry route. */
+  PROJECT_ALPHA_PROJECT_ADOPTION_REVIEW_ENABLED?: string;
+  /** Staging-only administrator endpoint for refreshing an already-authorized stale Project binding. */
+  PROJECT_ALPHA_PROJECT_BINDING_REVISION_REFRESH_ENABLED?: string;
   /** Default-off, manually invoked administrator-only Project-v2 staging acceptance. */
   PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED?: string;
   /** Default-off administrator transport for private PA Directory and Project consumers. */
@@ -172,6 +186,14 @@ export type Env = Omit<
   CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED?: string;
   /** Default-off private service metadata RPC; never grants content access. */
   CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED?: string;
+  /** Default-off native authority selection; never falls back to PA-backed grants. */
+  CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED?: string;
+  CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED?: string;
+  /** Separate default-off staging manager HTTP surface; no legacy owner inference. */
+  CLIENT_PORTAL_NATIVE_RECIPIENT_OWNER_ENABLED?: string;
+  OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY_DISPATCH_ENABLED?: string;
+  /** Staging-only private audited grant/revoke transport; not a public HTTP endpoint. */
+  OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY?: Service & import("./operations-portal-native-recipient-authority-dispatch").OperationsPortalNativeRecipientAuthorityBinding;
   /** Enables staff recovery for the additive client workspace hierarchy. */
   CLIENT_PORTAL_HIERARCHY_V2_ENABLED?: string;
   /** Must match the Client deployment before publishing relation-backed grants. */
@@ -262,6 +284,8 @@ export type Env = Omit<
   VIEWER_INTEGRATION_ENABLED?: string;
   /** Default-off administrative dataset and processing control plane. */
   VIEWER_PROCESSING_ENABLED?: string;
+  /** Default-off credentialed exact-origin Viewer background-session renewal transport. */
+  VIEWER_WORKSPACE_RENEWAL_CORS_ENABLED?: string;
   /** Default-off staff creation and revocation of bearer public Viewer links. */
   VIEWER_PUBLIC_SHARES_ENABLED?: string;
   VIEWER_BASE_URL?: string;
@@ -296,6 +320,8 @@ export interface StaffPrincipal {
   displayName: string;
   accessSubject: string;
   projectAlphaUserId: string | null;
+  /** Verified Cloudflare Access JWT expiry, when present on the assertion. */
+  accessExpiresAt?: number;
 }
 
 export interface GrantRow {

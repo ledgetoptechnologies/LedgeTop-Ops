@@ -66,6 +66,8 @@ import { registerProjectAlphaConnectorAdminRoutes, portalAuthorityErrorResponse 
 import { registerProjectAlphaProjectV2AcceptanceRoutes } from "./project-alpha-project-v2-acceptance-routes";
 import { registerProjectAlphaPrivateAdminRoutes } from "./project-alpha-private-admin-routes";
 import { registerProjectAlphaApiV2ReadAcceptanceRoutes } from "./project-alpha-api-v2-read-acceptance-routes";
+import { registerProjectAlphaApiV2SyncRoutes } from "./project-alpha-api-v2-sync-routes";
+import { registerProjectAlphaDirectoryReadAdoptionRoutes } from "./project-alpha-directory-read-adoption-routes";
 import { PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ROUTE, projectAlphaDirectoryV2BootstrapAcceptanceEnabled, registerProjectAlphaDirectoryV2BootstrapAcceptanceRoutes } from "./project-alpha-directory-v2-bootstrap-acceptance-routes";
 import { PortalSourceAuthorityError } from "../../../client/src/worker/project-alpha-portal-authority";
 import { ensureDeploymentConfiguredProjectAlphaConnectors, ProjectAlphaConnectorError } from "./project-alpha-connectors";
@@ -81,6 +83,8 @@ import { handleClientOnboardingStaffHttp } from "./client-onboarding-staff-http"
 import { handleWorkspaceBindingAdminHttp } from "./client-portal-workspace-binding-admin-http";
 import { handleAuthorityV3OwnerHttp } from "./client-portal-authority-v3-owner-http";
 import { handleRecipientEnrollmentOwnerHttp } from "./client-portal-recipient-enrollment-owner-http";
+import { handleOperationsNativeRecipientOwnerHttp } from "./operations-portal-native-recipient-owner-http";
+import { dispatchViewerWorkspaceRenewal } from "./viewer-workspace-renewal";
 import { consumeNativeStaffOnboardingRateLimit } from "./native-staff-onboarding-rate-limit";
 import {
   auditStatement,
@@ -506,6 +510,27 @@ async function dispatchRecipientEnrollmentOwner(c:Context<{Bindings:Env;Variable
 }
 app.use("/api/native-client-portal/recipient-enrollment",dispatchRecipientEnrollmentOwner);
 app.use("/api/native-client-portal/recipient-enrollment/*",dispatchRecipientEnrollmentOwner);
+// Native Operations enrollment has its own target model and authority ledger.
+// Dispatch before PA-backed staff admission; the handler verifies native staff.
+async function dispatchOperationsNativeRecipientOwner(c: Context<{ Bindings: Env; Variables: Variables }>) {
+  return handleOperationsNativeRecipientOwnerHttp(c.req.raw, {
+    environment: c.env.ENVIRONMENT,
+    expectedHost: c.env.EXPECTED_HOST,
+    configuration: {
+      enabled: c.env.CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED === "true"
+        && c.env.CLIENT_PORTAL_NATIVE_RECIPIENT_OWNER_ENABLED === "true",
+      issuer: c.env.TEAM_DOMAIN ?? "",
+      staffAudience: c.env.OPERATIONS_AUD,
+      origin: `https://${c.env.EXPECTED_HOST}`,
+      recipientOrigin: c.env.DELIVERY_BASE_URL,
+      csrfSecret: c.env.OPERATIONS_SESSION_SECRET,
+    },
+    database: c.env.OPS_DB,
+    dispatch: c.env,
+  });
+}
+app.use("/api/native-client-portal/operations-recipient-enrollment", dispatchOperationsNativeRecipientOwner);
+app.use("/api/native-client-portal/operations-recipient-enrollment/*", dispatchOperationsNativeRecipientOwner);
 // This is intentionally before staff authentication. A disabled staging
 // fixture must be indistinguishable from an absent route, even to a request
 // without a valid Operations session.
@@ -525,6 +550,13 @@ app.use(NATIVE_DIRECTORY_STAGING_EMPTY_ENROLLMENT_FIXTURE_ROUTE, async (c, next)
     && !nativeDirectoryStagingEmptyEnrollmentFixtureEnabled(c.env)) return c.json({ error: "Not found" }, 404);
   await next();
 });
+// Viewer is a separate origin. This exact route family performs its own
+// credentialed CORS, bound-staff authentication, CSRF challenge, and rate
+// limiting, so it must terminate before the generic same-origin API guard.
+app.use("/api/viewer/workspace/session-renewal", async c =>
+  dispatchViewerWorkspaceRenewal(c.req.raw, c.env));
+app.use("/api/viewer/workspace/session-renewal/*", async c =>
+  dispatchViewerWorkspaceRenewal(c.req.raw, c.env));
 app.use("/api/*", async (c, next) => {
   if (viewerMachineEventRequest(c.req.method, c.req.path) || projectAlphaDeliveryMachineRequest(c.req.method, c.req.path)) {
     await next();
@@ -3259,6 +3291,8 @@ app.get("/api/admin/delivery-change-recovery", async (c) => {
 });
 registerProjectAlphaConnectorAdminRoutes(app);
 registerProjectAlphaApiV2ReadAcceptanceRoutes(app);
+registerProjectAlphaApiV2SyncRoutes(app);
+registerProjectAlphaDirectoryReadAdoptionRoutes(app);
 registerProjectAlphaProjectV2AcceptanceRoutes(app);
 registerProjectAlphaPrivateAdminRoutes(app);
 registerProjectAlphaDirectoryV2BootstrapAcceptanceRoutes(app);
@@ -3592,6 +3626,7 @@ export { ClientDelegatedShareSigner } from "./client-delegated-share-signer";
 export { ViewerSessionIssuer } from "./viewer-session-issuer-entrypoint";
 export { ClientOnboardingRecipientBridge } from "./client-onboarding-recipient-entrypoint";
 export { ClientPortalRecipientEnrollmentBridge } from "./client-portal-recipient-enrollment-entrypoint";
+export { OperationsPortalNativeRecipientEnrollmentIngress } from "./operations-portal-native-recipient-enrollment-entrypoint";
 export { ClientPortalServiceMetadataReader } from "./client-portal-service-metadata-entrypoint";
 export { ProjectAlphaDeliveryIntentIngress } from "./project-alpha-delivery-intent-entrypoint";
 export { ProjectAlphaCatalogPromotionWorkflow } from "./project-alpha-catalog-promotion-workflow";
