@@ -1,10 +1,45 @@
 # Ledge Top Ops + Project Alpha staging status
 
-Updated: 2026-10-01 15:17 UTC
+Updated: 2026-10-02 (live read-acceptance checkpoint)
 
 ## Short version
 
-The integration is **not yet proven end-to-end or ready for production cutover**. Staging has a default-off API-v2 candidate and portal groundwork, but live Project inventory still returns `binding_stale`; client identity/data access has not passed with a real authorized test client; and the Ops Sync staging Worker is absent. No production PA updates, production client access, or existing public-link changes were made.
+The integration is **not yet proven end-to-end or ready for production cutover**.
+A fresh signed-in Operations staging API-v2 read check succeeded on October 2:
+Directory 14 records, Projects 2 records. The older `binding_stale` result below
+is historical and was not reproduced by this check. Live recipient sign-in,
+selected file access, and revocation remain unproven. The absent legacy Ops
+Sync Worker is not a safe substitute or required fix for API-v2 read acceptance.
+No production PA updates, production client access, or existing public-link
+changes were made.
+
+## Current October 2 checkpoint
+
+- The owner browser at Operations staging completed **Verify read-only API
+  connection** for the explicitly configured `project-alpha:staging` source.
+  Its current result is `API v2 read connection verified · Directory 14 ·
+  Projects 2`. This does not prove all configured production sources, full
+  reconciliation, write authority, or client access.
+- **Read one bounded inventory page** then completed for the same source:
+  Directory 14 observed, 0 conflicts, page complete; Projects 2 observed,
+  0 conflicts, page complete. This verifies the live bounded inventory path
+  and its reported persistence result; it does not activate mappings, clients,
+  recipients, folders, or public links.
+- Ops staging version `363c9714-bd6f-4eeb-96df-fef681f4a44a` and Client staging
+  version `2512de43-cd37-4118-97d9-d0c241a3fabd` are the read-back 100-percent
+  deployments. No new candidate was deployed for this read verification.
+- Both staging migration lists report no pending migrations. The missing
+  native enrollment CSRF and native content-audit secrets still need secure
+  staging-only provisioning. Existing local/deployed configuration drift must
+  be reconciled before opening a portal test window.
+- The canonical staging workspace owner-page route correction passed 41
+  focused tests and is committed locally at `625731d4`. Publication and
+  exact-revision CI for that correction are still required. Existing CI on
+  the earlier published `f24a60f2` is a separate gate.
+
+The October 1 evidence below is retained as history, not current deployment or
+readiness proof. In particular its stale-binding and migration-count notes
+must not override the current readback.
 
 ## Verified so far
 
