@@ -325,6 +325,23 @@ be requested.
   files and 3,387 tests, followed by a successful build. This satisfies that
   revision's CI gate; it does not prove live recipient sign-in, selected file
   access, service enrollment, production readiness or the owner PA checkpoint.
+- The subsequent full non-deploying preparation gate at exact revision
+  `949b0e6f` passed preflight tests and bootstrap tests (19 passed, four Windows
+  symlink skips), but stopped at the evidence-verifier suite. Its synthetic
+  example/test fixtures and verifier tail still described Ops 0163/163 rather
+  than the canonical 0165/165 chain; four existing default-off flags also lacked
+  fail-closed activation-policy inventory entries. No upload or deployment was
+  attempted. CI's green result did not cover this evidence suite. The follow-up
+  adds the four non-deploying preparation suites to CI and repairs only stale
+  pins/examples and explicit prohibitions, without relaxing verifier predicates
+  or granting activation authority. Full preparation must pass again before
+  treating any candidate as upload-ready.
+- The bounded tooling repair passed the four preparation suites locally:
+  118 passed, zero failed, four Windows symlink skips (122 total). Companion
+  source/profile suites passed 137 tests with one Windows symlink skip. The
+  existing suffix assertion remains unchanged; complete canonical-chain checks
+  still reject missing, extra or modified migrations. These are local test
+  results, not a successful full preparation run or live acceptance evidence.
 - Use `/administration/client-portal/operations-recipients` and its native
   Operations issuer. Legacy `client_portal_recipient_enrollment_*` ledgers and
   legacy workspace-selection IDs are not prerequisites for this route.
