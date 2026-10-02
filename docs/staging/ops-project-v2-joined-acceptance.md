@@ -346,3 +346,22 @@ when explicitly armed and performs no rollback itself. Close the Ops route
 first, disable the selected connection, drain pending/leased work and actor
 fences, revoke the reviewed authority packet, and verify default-off and
 public-link preservation after the window.
+
+### Confirmed uncertain-command implementation gap
+
+The current `project-alpha-project-v2-pending-dispatcher.ts` deliberately
+terminalizes uncertain PA responses and requires trusted receipt recovery
+before any retry. The settlement adapter similarly blocks redispatch of
+uncertain/in-flight state. Therefore recovery after a deliberately lost
+PA-to-Ops acknowledgement is not merely missing from the harness: the current
+joined path cannot yet recover that receipt and complete settlement.
+
+Do not replace this behavior with a blind resend or label known-success replay
+as lost-response recovery. The implementation needs a separately reviewed,
+generic PA receipt-recovery contract and an audited Ops recovery transition,
+fenced to the original command ID/body hash, source/application/history,
+current authorization and exact local reservation. Unknown, conflicting,
+revoked or stale evidence must remain unresolved or explicitly rejected;
+receipt recovery must not create another project or broaden client access.
+The exact lookup protocol and any subsequent dispatch policy are not finalized
+or enabled by this profile.
