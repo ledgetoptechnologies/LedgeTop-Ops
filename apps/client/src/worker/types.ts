@@ -1,4 +1,4 @@
-import type { ClientDelegatedShareSignerBinding, ViewerSessionIssuerBinding } from "@ltds/shared";
+import type { ClientDelegatedShareSignerBinding, ProjectAlphaFinancialSummaryBinding, ViewerSessionIssuerBinding } from "@ltds/shared";
 
 export interface Env {
   DELIVERY_DB: D1Database;
@@ -116,6 +116,10 @@ export interface Env {
   /** Separate default-off client creation/revocation of Viewer public links. */
   CLIENT_VIEWER_SHARES_ENABLED?: string;
   VIEWER_SESSION_ISSUER?: ViewerSessionIssuerBinding;
+  /** Private Operations RPC; Project Alpha API credentials stay in Operations. */
+  PROJECT_ALPHA_FINANCIAL_SUMMARY?: ProjectAlphaFinancialSummaryBinding;
+  /** Default-off read-only invoice presentation from PA's dedicated API-v2 scope. */
+  CLIENT_PORTAL_PA_FINANCIAL_SUMMARY_ENABLED?: string;
   CLIENT_DELEGATED_SHARE_SESSION_SECRET?: string;
   CLIENT_DELEGATED_SHARE_KEY_ID?: string;
   /**

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  listProjectAlphaApiV2Connections,
   ProjectAlphaApiV2ConnectionConfigurationError,
   probeConfiguredProjectAlphaApiV2Connection,
   resolveProjectAlphaApiV2Connection,
@@ -26,6 +27,26 @@ function metadata(value: typeof ids.first) {
 }
 
 describe("deployment-owned Project Alpha API-v2 connections", () => {
+  it("lists only source selectors and enablement for the protected acceptance UI", () => {
+    const env = environment({ [first]: entry(first, ids.first, "https://source-a.example.test", true),
+      [second]: entry(second, ids.second, "https://source-b.example.test", false) });
+    const inventory = listProjectAlphaApiV2Connections(env);
+    expect(inventory).toEqual({ status: "configured", connections: [
+      { sourceId: first, enabled: true }, { sourceId: second, enabled: false },
+    ] });
+    const serialized = JSON.stringify(inventory);
+    for (const secret of [`secret-for-${first}`, `secret-for-${second}`, "https://source-a.example.test",
+      ids.first.source, ids.first.application, ids.first.epoch]) expect(serialized).not.toContain(secret);
+  });
+
+  it("reports absent configuration separately and fails closed for malformed secret envelopes", () => {
+    expect(listProjectAlphaApiV2Connections({})).toEqual({ status: "unconfigured", connections: [] });
+    for (const env of [rawEnvironment(""), rawEnvironment("not-json"),
+      environment({ [first]: { ...entry(first, ids.first, "https://source-a.example.test"), unexpected: "secret" } })]) {
+      expect(listProjectAlphaApiV2Connections(env)).toEqual({ status: "misconfigured", connections: [] });
+    }
+  });
+
   it("resolves isolated source-keyed instances and defaults omitted enablement to false", () => {
     const env = environment({ [first]: entry(first, ids.first, "https://source-a.example.test"), [second]: entry(second, ids.second, "https://source-b.example.test", true) });
     const one = resolveProjectAlphaApiV2Connection(env, first);

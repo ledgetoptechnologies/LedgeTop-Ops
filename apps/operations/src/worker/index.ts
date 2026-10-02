@@ -65,6 +65,9 @@ import { runProjectAlphaSnapshotRecovery } from "./project-alpha-snapshot-recove
 import { registerProjectAlphaConnectorAdminRoutes, portalAuthorityErrorResponse } from "./project-alpha-connector-admin";
 import { registerProjectAlphaProjectV2AcceptanceRoutes } from "./project-alpha-project-v2-acceptance-routes";
 import { registerProjectAlphaApiV2ReadAcceptanceRoutes } from "./project-alpha-api-v2-read-acceptance-routes";
+import { registerProjectAlphaApiV2SyncRoutes } from "./project-alpha-api-v2-sync-routes";
+import { registerProjectAlphaProjectBindingRefreshRoutes } from "./project-alpha-project-binding-refresh-routes";
+import { registerProjectAlphaDirectoryReadAdoptionRoutes } from "./project-alpha-directory-read-adoption-routes";
 import { PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ROUTE, projectAlphaDirectoryV2BootstrapAcceptanceEnabled, registerProjectAlphaDirectoryV2BootstrapAcceptanceRoutes } from "./project-alpha-directory-v2-bootstrap-acceptance-routes";
 import { PortalSourceAuthorityError } from "../../../client/src/worker/project-alpha-portal-authority";
 import { ensureDeploymentConfiguredProjectAlphaConnectors, ProjectAlphaConnectorError } from "./project-alpha-connectors";
@@ -3183,6 +3186,9 @@ app.get("/api/admin/delivery-change-recovery", async (c) => {
 });
 registerProjectAlphaConnectorAdminRoutes(app);
 registerProjectAlphaApiV2ReadAcceptanceRoutes(app);
+registerProjectAlphaApiV2SyncRoutes(app);
+registerProjectAlphaProjectBindingRefreshRoutes(app);
+registerProjectAlphaDirectoryReadAdoptionRoutes(app);
 registerProjectAlphaProjectV2AcceptanceRoutes(app);
 registerProjectAlphaDirectoryV2BootstrapAcceptanceRoutes(app);
 app.post("/api/admin/integrations/project-alpha/sync", async (c) => {
@@ -3490,3 +3496,4 @@ export { dispatchThumbnailRendererApi } from "./thumbnail-renderer-api";
 export { ClientDelegatedShareSigner } from "./client-delegated-share-signer";
 export { ViewerSessionIssuer } from "./viewer-session-issuer-entrypoint";
 export { ProjectAlphaDeliveryIntentIngress } from "./project-alpha-delivery-intent-entrypoint";
+export { ProjectAlphaFinancialSummary } from "./project-alpha-financial-summary-entrypoint";
