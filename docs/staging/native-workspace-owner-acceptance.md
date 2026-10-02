@@ -295,6 +295,31 @@ be requested.
   403 clears private rows and prevents a captured stale observer from reissuing.
   Existing folder-change/late-response and exact eight-page checks remain intact.
   Client typecheck passed. This adds test coverage only, not new access authority.
+- Exact-revision run `37059753833` subsequently passed both Client browser jobs:
+  desktop 253/253 and eight dual-domain checks; mobile 245 passed, eight skipped,
+  plus eight dual-domain checks. The desktop failure from the prior revision is
+  therefore resolved in CI, not merely in local reruns. The Operations and other
+  remaining application jobs were still live; this is not yet a full CI pass.
+- Refreshed live deployment inspection selected the newest timestamp, not the
+  first item in Wrangler's chronological list: Client remains
+  `03934748-73a5-47a3-b280-245afd39e46b` and Ops remains
+  `363c9714-bd6f-4eeb-96df-fef681f4a44a`, both at 100 percent. Exact-version
+  secret-name inspection confirms the Client native enrollment/audit secrets
+  remain present; no values were retrieved or printed. Ops' existing five PA
+  acceptance/transport flags and onboarding-admin flag are still true; the
+  validated baseline explicitly disables them. Do not describe that baseline
+  transition as preserving these temporary acceptance flags.
+- Fresh explicit-config `versions upload --strict --dry-run` checks passed for
+  both default-off staging candidates. These performed no upload or traffic
+  change. Read-only Ops staging drain checks found zero pending/leased Directory,
+  relationship and Project outboxes, zero Directory/onboarding decision fences,
+  zero pending/claimed native-recipient outboxes and zero pending/retry/dispatching
+  workspace publications. Migration count remains 165 with final migration 0165;
+  `PRAGMA foreign_key_check` returned no rows. Every successful diagnostic reported
+  `changes=0`, `rows_written=0`, `changed_db=false`. A compound SELECT diagnostic
+  was rejected before execution; independent SELECTs produced the recorded
+  results without changing guards or schema. Recheck remaining authority/delivery
+  ledgers and current pins immediately before an actual activation transition.
 - Use `/administration/client-portal/operations-recipients` and its native
   Operations issuer. Legacy `client_portal_recipient_enrollment_*` ledgers and
   legacy workspace-selection IDs are not prerequisites for this route.
