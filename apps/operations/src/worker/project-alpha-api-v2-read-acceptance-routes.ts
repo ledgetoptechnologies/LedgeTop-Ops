@@ -1,3 +1,4 @@
+import { stagingDirectoryOwnerViewGrantEnabled } from "./staging-directory-owner-view-grant";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
@@ -176,7 +177,7 @@ export function registerProjectAlphaApiV2ReadAcceptanceRoutes(app: App): void {
       throw new HTTPException(403, { message: "Global integrations.manage permission required" });
     c.header("Cache-Control", "no-store");
     try {
-      return c.json({ sources: listEnabledProjectAlphaApiV2SourceIds(c.env) });
+      return c.json({ sources: listEnabledProjectAlphaApiV2SourceIds(c.env), stagingDirectoryOwnerViewGrantEnabled: stagingDirectoryOwnerViewGrantEnabled(c.env) });
     } catch {
       // Never expose deployment secret parsing details through the admin API.
       return c.json({ sources: [], configuration: "unavailable" });

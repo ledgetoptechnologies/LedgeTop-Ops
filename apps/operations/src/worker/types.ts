@@ -25,6 +25,7 @@ export type Env = Omit<
   | "NATIVE_DIRECTORY_STAGING_EMPTY_ENROLLMENT_FIXTURE_BUSINESS_AREA_ID"
   | "NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED"
   | "NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED"
+  | "STAGING_DIRECTORY_PROFILE_VIEW_GRANT_ENABLED"
   | "NATIVE_INTEGRATION_CONTROL_ENABLED"
   | "NATIVE_INTEGRATION_CONTROL_ORIGIN"
   | "CLIENT_ONBOARDING_ADMIN_ENABLED"
@@ -137,6 +138,8 @@ export type Env = Omit<
   NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED?: string;
   /** Default-off native, explicit-grant authority for monitor lifecycle control. */
   NATIVE_INTEGRATION_CONTROL_ENABLED?: string;
+  /** Temporary, default-off, staging-only protected owner profile-view repair. */
+  STAGING_DIRECTORY_PROFILE_VIEW_GRANT_ENABLED?: string;
   /** Exact same-origin native monitor-control UI origin; no implicit fallback. */
   NATIVE_INTEGRATION_CONTROL_ORIGIN?: string;
   /** Default-off native staff issuance/reveal boundary for client profile onboarding. */

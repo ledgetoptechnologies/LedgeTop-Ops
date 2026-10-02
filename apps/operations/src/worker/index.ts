@@ -68,6 +68,7 @@ import { registerProjectAlphaPrivateAdminRoutes } from "./project-alpha-private-
 import { registerProjectAlphaApiV2ReadAcceptanceRoutes } from "./project-alpha-api-v2-read-acceptance-routes";
 import { registerProjectAlphaApiV2SyncRoutes } from "./project-alpha-api-v2-sync-routes";
 import { registerProjectAlphaDirectoryReadAdoptionRoutes } from "./project-alpha-directory-read-adoption-routes";
+import { registerStagingDirectoryOwnerViewGrantRoute } from "./staging-directory-owner-view-grant";
 import { PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ROUTE, projectAlphaDirectoryV2BootstrapAcceptanceEnabled, registerProjectAlphaDirectoryV2BootstrapAcceptanceRoutes } from "./project-alpha-directory-v2-bootstrap-acceptance-routes";
 import { PortalSourceAuthorityError } from "../../../client/src/worker/project-alpha-portal-authority";
 import { ensureDeploymentConfiguredProjectAlphaConnectors, ProjectAlphaConnectorError } from "./project-alpha-connectors";
@@ -3293,6 +3294,7 @@ registerProjectAlphaConnectorAdminRoutes(app);
 registerProjectAlphaApiV2ReadAcceptanceRoutes(app);
 registerProjectAlphaApiV2SyncRoutes(app);
 registerProjectAlphaDirectoryReadAdoptionRoutes(app);
+registerStagingDirectoryOwnerViewGrantRoute(app);
 registerProjectAlphaProjectV2AcceptanceRoutes(app);
 registerProjectAlphaPrivateAdminRoutes(app);
 registerProjectAlphaDirectoryV2BootstrapAcceptanceRoutes(app);
