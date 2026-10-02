@@ -1,6 +1,7 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 
 const endpoint = "/api/admin/integrations/project-alpha/connectors";
+const apiV2SourcesEndpoint = "/api/admin/integrations/project-alpha/api-v2/sources";
 const inventoryEndpoint = "/api/admin/integrations/project-alpha/api-v2/sync-page";
 const adoptionEndpoint = "/api/admin/integrations/project-alpha/api-v2/directory/read-adoptions";
 const primary = "project-alpha:primary", secondary = "project-alpha:secondary";
@@ -22,6 +23,8 @@ async function fixture(page: Page, data: Directory, operator: OperatorResponses 
     if (path === "/api/session") return route.fulfill({ json: { user: { id: "admin", email: "admin@example.test", displayName: "Admin", status: "Active", profileType: "Administrator", isAdministrator: true, permissions: ["administration.view", "integrations.manage"], divisions: [] }, csrfToken: "csrf", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: {} } });
     if (path === "/api/admin/audit") return route.fulfill({ json: { events: [] } });
     if (path === "/api/admin/portal-workflow-readiness") return route.fulfill({ json: { ready: false, workflows: {} } });
+    if (path === apiV2SourcesEndpoint && route.request().method() === "GET")
+      return route.fulfill({ json: { sources: [secondary] } });
     const body = route.request().postData() ? route.request().postDataJSON() as Record<string, unknown> : null;
     if (path === inventoryEndpoint && route.request().method() === "POST") {
       requests.push({ path, method: route.request().method(), body });

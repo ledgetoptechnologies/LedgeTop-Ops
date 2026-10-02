@@ -4,6 +4,7 @@ import { api, ApiError } from "./api";
 
 const ENDPOINT = "/api/admin/integrations/project-alpha/connectors";
 const READ_ACCEPTANCE_ENDPOINT = "/api/admin/integrations/project-alpha/api-v2/read-acceptance";
+const API_V2_SOURCES_ENDPOINT = "/api/admin/integrations/project-alpha/api-v2/sources";
 const API_V2_SYNC_ENDPOINT = "/api/admin/integrations/project-alpha/api-v2/sync-page";
 const DIRECTORY_READ_ADOPTION_ENDPOINT = "/api/admin/integrations/project-alpha/api-v2/directory/read-adoptions";
 const PROJECT_BINDING_REFRESH_ENDPOINT = "/api/admin/project-alpha/private/projects/bindings/refresh";
@@ -87,7 +88,7 @@ function bindingRefreshMessage(outcome: BindingRefreshOutcome): string {
   if (outcome.status === "not_refreshed") return `Binding was not refreshed${outcome.reason ? ` (${outcome.reason.replaceAll("_", " ")})` : "."}`;
   return `Binding refresh was not completed${outcome.reason ? ` (${outcome.reason.replaceAll("_", " ")})` : "."}`;
 }
-function ReadAcceptanceCheck({ connector, disabled }: { connector: Connector; disabled: boolean }) {
+function ReadAcceptanceCheck({ connector, disabled }: { connector: Pick<Connector, "sourceId" | "state">; disabled: boolean }) {
   const [busy, setBusy] = useState(false), [result, setResult] = useState<ReadAcceptance | null>(null), [error, setError] = useState("");
   const [externalProjectId, setExternalProjectId] = useState(""), [confirmedExternalProjectId, setConfirmedExternalProjectId] = useState("");
   const [refreshBusy, setRefreshBusy] = useState(false), [refreshOutcome, setRefreshOutcome] = useState<BindingRefreshOutcome | null>(null), [refreshError, setRefreshError] = useState("");
@@ -209,9 +210,9 @@ function inventorySurfaceText(label: string, surface: InventoryRequestedSurface)
 }
 function valueCell(value: string | null) { return value === null ? <em>Not set</em> : value === "" ? <em>Empty string</em> : <code>{value}</code>; }
 
-function ApiV2OperatorPanel({ connectors, disabled }: { connectors: Connector[]; disabled: boolean }) {
-  const active = connectors.filter(connector => connector.state === "active");
-  const [inventorySource, setInventorySource] = useState(active[0]?.sourceId ?? "");
+function ApiV2OperatorPanel({ disabled }: { disabled: boolean }) {
+  const [sources, setSources] = useState<string[] | null>(null), [sourceError, setSourceError] = useState("");
+  const [inventorySource, setInventorySource] = useState("");
   const [inventoryBusy, setInventoryBusy] = useState<"initial" | "directory" | "projects" | null>(null);
   const [directoryInventory, setDirectoryInventory] = useState<InventoryDisplaySurface | null>(null);
   const [projectInventory, setProjectInventory] = useState<InventoryDisplaySurface | null>(null);
@@ -219,16 +220,32 @@ function ApiV2OperatorPanel({ connectors, disabled }: { connectors: Connector[];
   const [projectContinuationToken, setProjectContinuationToken] = useState("");
   const [inventoryStopped, setInventoryStopped] = useState({ directory: "", projects: "" });
   const [inventoryError, setInventoryError] = useState("");
-  const [reviewSource, setReviewSource] = useState(active[0]?.sourceId ?? ""), [resourceType, setResourceType] = useState<DirectoryResourceType>("client");
+  const [reviewSource, setReviewSource] = useState(""), [resourceType, setResourceType] = useState<DirectoryResourceType>("client");
   const [recordId, setRecordId] = useState(""), [localVersion, setLocalVersion] = useState("1"), [projectAlphaPublicId, setProjectAlphaPublicId] = useState("");
   const [reviewId, setReviewId] = useState(""), [comparison, setComparison] = useState<FieldComparison | null>(null);
   const reservationKey = useRef("");
   const [decisions, setDecisions] = useState<Partial<Record<DirectoryField, DirectoryFieldDecision>>>({});
   const [reviewBusy, setReviewBusy] = useState(false), [reviewError, setReviewError] = useState(""), [reviewMessage, setReviewMessage] = useState("");
   useEffect(() => {
-    if (!active.some(connector => connector.sourceId === inventorySource)) setInventorySource(active[0]?.sourceId ?? "");
-    if (!active.some(connector => connector.sourceId === reviewSource)) setReviewSource(active[0]?.sourceId ?? "");
-  }, [active, inventorySource, reviewSource]);
+    let live = true;
+    api<{ sources?: unknown }>(API_V2_SOURCES_ENDPOINT).then(result => {
+      if (!live) return;
+      if (!Array.isArray(result.sources) || result.sources.some(source => typeof source !== "string"
+        || !/^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/.test(source))) throw new Error("invalid source list");
+      const listed = [...new Set(result.sources)].sort();
+      setSources(listed);
+      setInventorySource(current => listed.includes(current) ? current : listed[0] ?? "");
+      setReviewSource(current => listed.includes(current) ? current : listed[0] ?? "");
+      setSourceError("");
+    }).catch(caught => {
+      if (live) {
+        setSources([]);
+        setSourceError(caught instanceof ApiError && caught.status === 404 ? ""
+          : operatorError(caught, "API-v2 source configuration could not be loaded."));
+      }
+    });
+    return () => { live = false; };
+  }, []);
   const clearInventory = () => {
     setDirectoryInventory(null); setProjectInventory(null); setDirectoryContinuationToken(""); setProjectContinuationToken("");
     setInventoryStopped({ directory: "", projects: "" }); setInventoryError("");
@@ -334,13 +351,17 @@ function ApiV2OperatorPanel({ connectors, disabled }: { connectors: Connector[];
     } catch (caught) { setReviewError(operatorError(caught, "The field-review receipt could not be verified. Treat the seal outcome as uncertain and refresh before retrying.")); }
     finally { setReviewBusy(false); }
   };
-  if (connectors.length === 0) return null;
   const allDecided = Boolean(comparison) && comparison!.fields.every(field => Boolean(decisions[field.field]));
+  if (sources === null || (sources.length === 0 && !sourceError)) return null;
   return <details className="alpha-connection"><summary>Staging API-v2 operator review</summary>
     <p>This default-off panel reads and stores one bounded inventory page, then supports an explicit exact-record comparison. It never auto-matches records, changes access, publishes links, activates anything, or writes to Project Alpha.</p>
+    {sourceError && <p role="alert" className="notice">{sourceError}</p>}
+    {sources.length === 0 ? <p role="status">No enabled API-v2 sources are available to review. Legacy connector records are not used to discover API-v2 connections.</p> : <>
+    <ul aria-label="Enabled API-v2 sources">{sources.map(sourceId => <li key={sourceId}><strong>{sourceId}</strong>
+      <ReadAcceptanceCheck connector={{ sourceId, state: "active" }} disabled={disabled} /></li>)}</ul>
     <section aria-label="Bounded API-v2 inventory"><h3>Bounded inventory evidence</h3>
       <label>Deployment source<select value={inventorySource} disabled={disabled || Boolean(inventoryBusy)} onChange={event => { setInventorySource(event.target.value); clearInventory(); }}>
-        {active.map(connector => <option key={connector.sourceId} value={connector.sourceId}>{connector.displayName}</option>)}</select></label>
+        {sources.map(sourceId => <option key={sourceId} value={sourceId}>{sourceId}</option>)}</select></label>
       <button type="button" className="button-ghost button-small" disabled={disabled || Boolean(inventoryBusy) || !inventorySource} onClick={() => void runInventory()}>{inventoryBusy === "initial" ? "Reading one bounded page…" : directoryInventory || projectInventory || inventoryStopped.directory || inventoryStopped.projects || inventoryError ? "Restart bounded inventory" : "Read one bounded inventory page"}</button>
       <p>Continuation tokens stay in this browser session and are never displayed. Each button click requests at most one page; continuation is never automatic.</p>
       {directoryInventory && <div className="notice" role={directoryInventory.status === "blocked" ? "alert" : "status"}><p>{inventorySurfaceText("Directory", directoryInventory)}</p>
@@ -356,7 +377,7 @@ function ApiV2OperatorPanel({ connectors, disabled }: { connectors: Connector[];
     <section aria-label="Exact-record field review"><h3>Exact-record field review</h3>
       <form onSubmit={reserve} aria-busy={reviewBusy}>
         <label>Deployment source<select value={reviewSource} disabled={disabled || reviewBusy || Boolean(reviewId)} onChange={event => { setReviewSource(event.target.value); resetReview(); }}>
-          {active.map(connector => <option key={connector.sourceId} value={connector.sourceId}>{connector.displayName}</option>)}</select></label>
+          {sources.map(sourceId => <option key={sourceId} value={sourceId}>{sourceId}</option>)}</select></label>
         <label>Record type<select value={resourceType} disabled={disabled || reviewBusy || Boolean(reviewId)} onChange={event => { setResourceType(event.target.value as DirectoryResourceType); resetReview(); }}><option value="client">Client</option><option value="organization">Organization</option></select></label>
         <label>Exact local record ID<input value={recordId} maxLength={191} disabled={disabled || reviewBusy || Boolean(reviewId)} onChange={event => { setRecordId(event.target.value); resetReview(); }} /></label>
         <label>Expected local record version<input type="number" min="1" step="1" value={localVersion} disabled={disabled || reviewBusy || Boolean(reviewId)} onChange={event => { setLocalVersion(event.target.value); resetReview(); }} /></label>
@@ -372,6 +393,7 @@ function ApiV2OperatorPanel({ connectors, disabled }: { connectors: Connector[];
       </tbody></table></div><button type="button" className="button-ghost button-small" disabled={disabled || reviewBusy || !allDecided} onClick={() => void seal()}>{reviewBusy ? "Sealing review…" : "Seal field review"}</button></div>}
       {reviewMessage && <p role="status" className="notice">{reviewMessage}</p>}{reviewError && <p role="alert" className="notice">{reviewError}</p>}
     </section>
+    </>}
   </details>;
 }
 function projectManagementTemplateError(value: string): string | null {
@@ -524,13 +546,11 @@ export function ProjectAlphaConnections() {
           primaryActive={data.legacyPrimary || data.connectors.some(row => row.sourceId === PRIMARY && row.state === "active")}
           disabled={loading || Boolean(syncing)} onAction={action => void portalAction(connector, action)} />
         <ProjectManagement connector={connector} route={management} disabled={loading || Boolean(syncing)} onRefresh={() => setRevision(value => value + 1)} />
-        <div className="alpha-connection-actions"><button type="button" disabled={loading || Boolean(syncing) || connector.state !== "active"} onClick={() => void sync(connector)}>{syncing === connector.sourceId ? "Synchronizing…" : "Sync now"}</button>
-          <ReadAcceptanceCheck key={`${connector.sourceId}:${connector.version}:${connector.activeRevision}:${revision}`}
-            connector={connector} disabled={loading || Boolean(syncing)} /></div>
+        <div className="alpha-connection-actions"><button type="button" disabled={loading || Boolean(syncing) || connector.state !== "active"} onClick={() => void sync(connector)}>{syncing === connector.sourceId ? "Synchronizing…" : "Sync now"}</button></div>
         <details><summary>Connection details</summary><dl><dt>Source</dt><dd>{connector.sourceId}</dd><dt>Producer</dt><dd>{connector.producerBindingId}</dd><dt>Destination</dt><dd>{connector.snapshotOrigin}{connector.snapshotBasePath}</dd><dt>Application</dt><dd>{connector.applicationKey}</dd><dt>Revision</dt><dd>{connector.activeRevision}</dd></dl><p>These values are read-only here. Change the reviewed deployment source manifest and deploy Operations; do not paste credentials into this page.</p></details>
       </section>;
     })}
-    {data && <ApiV2OperatorPanel connectors={data.connectors} disabled={loading || Boolean(syncing)} />}
+    <ApiV2OperatorPanel disabled={loading || Boolean(syncing)} />
     {data?.portal?.recovery && <div className="notice" role="status"><p>A prior portal coordination operation is unfinished. Recovery cancels that uncertain update and pauses affected client portals; it never registers a source or retries activation.</p><button type="button" disabled={loading || Boolean(syncing)} onClick={() => void recoverPortalUpdate()}>Recover unfinished portal update</button></div>}
   </div></Card>;
 }
