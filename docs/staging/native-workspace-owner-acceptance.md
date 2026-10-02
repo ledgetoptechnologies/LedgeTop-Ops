@@ -24,6 +24,33 @@ Project Alpha. Production registration and production access remain unchanged.
 
 ## Safe acceptance order
 
+Before step 2, prepare the separate bounded onboarding pair with
+`npm run staging:client-onboarding:generate` and validate it with
+`npm run staging:client-onboarding:check`. This is a local transformation, not
+a deployment or a grant. It requires validated default-off sources, leaves
+production untouched, and changes only the three onboarding flag placements
+and the exact Ops staging admin origin. It rejects unrelated workspace,
+recipient-service-home, resource or origin drift.
+
+Before routing this pair, verify current Ops secret names
+`OPERATIONS_SESSION_SECRET`, `CLIENT_ONBOARDING_HANDOFF_KEYRING`,
+`AUDIT_IP_SECRET` and `PROJECT_ALPHA_API_V2_CONNECTIONS`, exact migration/drain
+state, and rollback versions. The builder does not inspect secret values.
+Open Ops first, Client second; close Client first, Ops second. Keep this
+window separate from workspace publication and recipient service-home windows.
+Use the independently reviewed two-permission native-only authority window
+for actual approval, and close it using its exact saved provision artifact;
+the configuration profile itself grants no authority and has no automatic
+expiry. Do not issue an invitation while browser onboarding navigation remains
+blocked. Temporary outputs stay ignored under their fixed per-app staging paths.
+
+Local preparation on 2026-10-02 passed all ten onboarding-profile tests and
+42 adjacent profile/scaffold/source-contract tests. The actual ignored pair
+was generated and checked successfully. CI and release preparation now include
+the profile suite. This is not live onboarding approval or client-access proof:
+the in-app Client root renders “Access not provisioned”, while navigation to the
+synthetic onboarding path still reports `ERR_BLOCKED_BY_CLIENT`.
+
 1. Verify current native admission/profile versions and deny-aware grants.
    Staging owner role alone does not replace the domain permission checks.
    Never apply an old authority packet against a different current generation.
