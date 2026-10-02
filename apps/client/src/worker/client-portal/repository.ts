@@ -1090,6 +1090,25 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
     return row ? mapProject(row) : null;
   },
 
+  async getProjectFinancialReference(
+    env: Env,
+    session: ClientPortalSession,
+    projectId: string,
+  ): Promise<{ sourceId: string; projectPublicId: string } | null> {
+    const row = await portalDb(env).prepare(`
+      SELECT COALESCE(p.project_alpha_source_id,'project-alpha:primary') source_id,
+        p.project_alpha_project_id project_public_id
+      FROM client_project_grants g
+      ${sessionJoin}
+      JOIN projects p ON p.id=g.project_id AND p.active=1
+      WHERE g.account_id=a.id AND g.project_id=? AND g.revoked_at IS NULL ${memberProjectConstraint}
+        AND p.project_alpha_project_id IS NOT NULL
+    `).bind(session.accountId, session.identityId, projectId)
+      .first<{ source_id: string; project_public_id: string }>();
+    if (!row || !/^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/.test(row.source_id) || !/^[0-9a-f]{32}$/.test(row.project_public_id)) return null;
+    return { sourceId: row.source_id, projectPublicId: row.project_public_id };
+  },
+
   async listProjectFiles(
     env: Env,
     session: ClientPortalSession,

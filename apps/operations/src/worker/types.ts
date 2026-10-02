@@ -42,6 +42,10 @@ export type Env = Omit<
   PROJECT_ALPHA_CONNECTOR_CREDENTIALS?: string;
   /** Versioned, deployment-owned API-v2 connections. Never accepted from a browser or connector registry request. */
   PROJECT_ALPHA_API_V2_CONNECTIONS?: string;
+  /** Default-off PA API-v2 invoice summary bridge for the Client Worker RPC. */
+  PROJECT_ALPHA_FINANCIAL_SUMMARY_ENABLED?: string;
+  /** Exact HTTPS origins permitted for existing PA public invoice/payment links. Defaults to each API origin. */
+  PROJECT_ALPHA_FINANCIAL_SUMMARY_PUBLIC_ORIGINS?: string;
   /** Default-off bounded API-v2 health/incident monitor. */
   PROJECT_ALPHA_API_V2_MONITOR_ENABLED?: string;
   /** Explicit deployment-owned owner mailbox for outage alerts; never inferred from Project Alpha data. */

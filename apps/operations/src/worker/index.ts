@@ -3496,3 +3496,4 @@ export { dispatchThumbnailRendererApi } from "./thumbnail-renderer-api";
 export { ClientDelegatedShareSigner } from "./client-delegated-share-signer";
 export { ViewerSessionIssuer } from "./viewer-session-issuer-entrypoint";
 export { ProjectAlphaDeliveryIntentIngress } from "./project-alpha-delivery-intent-entrypoint";
+export { ProjectAlphaFinancialSummary } from "./project-alpha-financial-summary-entrypoint";

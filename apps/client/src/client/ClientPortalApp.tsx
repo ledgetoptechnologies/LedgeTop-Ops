@@ -19,6 +19,7 @@ import {
   completePortalRequestAttachment,
   initializePortalRequestAttachment,
   loadPortalBootstrap,
+  loadPortalProjectFinancialSummary,
   isAuthenticatedDeliveryFolderHandle,
   loadPortalAuthenticatedDeliveryFiles,
   loadPortalPastDeliveries,
@@ -2050,6 +2051,7 @@ function ProjectWorkspace({
   feedback,
   viewer,
   viewerDisplayUnits,
+  viewBilling,
   onSaved,
   onCancelRequest,
   cancellingRequestId,
@@ -2067,6 +2069,7 @@ function ProjectWorkspace({
   feedback: boolean;
   viewer: boolean;
   viewerDisplayUnits: "imperial" | "metric";
+  viewBilling: boolean;
   onSaved: (request: PortalServiceRequest) => void;
   onCancelRequest: (request: PortalServiceRequest) => void;
   cancellingRequestId: string | null;
@@ -2150,6 +2153,7 @@ function ProjectWorkspace({
       </nav>
       {tab === "overview" && (
         <div className="portal-overview-grid">
+          {viewBilling && <ProjectBillingSummary projectId={project.id} />}
           <Card title="Project overview">
             <p className="portal-summary">
               {project.summary ||
@@ -2261,6 +2265,43 @@ function ProjectWorkspace({
       )}
     </>
   );
+}
+
+function ProjectBillingSummary({ projectId }: { projectId: string }) {
+  const [state, setState] = useState<{ status: "loading" } | { status: "ready"; summary: Awaited<ReturnType<typeof loadPortalProjectFinancialSummary>> } | { status: "unavailable" }>({ status: "loading" });
+  useEffect(() => {
+    const controller = new AbortController();
+    setState({ status: "loading" });
+    void loadPortalProjectFinancialSummary(projectId, null, controller.signal)
+      .then(summary => { if (!controller.signal.aborted) setState({ status: "ready", summary }); })
+      .catch(() => { if (!controller.signal.aborted) setState({ status: "unavailable" }); });
+    return () => controller.abort();
+  }, [projectId]);
+
+  if (state.status === "loading") return <Card title="Project Alpha billing"><p role="status">Loading billing details…</p></Card>;
+  if (state.status === "unavailable") return <Card title="Project Alpha billing"><p>Billing information is temporarily unavailable. Please try again later.</p></Card>;
+  const { invoices, returnedPageTotals, nextCursor } = state.summary;
+  return <Card title="Project Alpha billing" className="portal-overview-wide">
+    <p>Invoices and payment status are read from Project Alpha. Payments, receipts, and financial emails continue to be handled there.</p>
+    <dl className="portal-detail-list">
+      <div><dt>Invoice total on this page</dt><dd>{returnedPageTotals.invoiceTotal}</dd></div>
+      <div><dt>Paid on this page</dt><dd>{returnedPageTotals.amountPaid}</dd></div>
+      <div><dt>Balance due on this page</dt><dd>{returnedPageTotals.balanceDue}</dd></div>
+    </dl>
+    {invoices.length === 0 ? <p>No invoices are currently available for this project.</p> : <ul className="portal-request-list">
+      {invoices.map((invoice, index) => <li key={`${invoice.documentNumber ?? "invoice"}:${index}`}>
+        <div><strong>{invoice.documentNumber === null ? "Invoice" : `Invoice #${invoice.documentNumber}`}</strong>
+          <span>{invoice.status.replaceAll("_", " ")} · Total {invoice.total} · Paid {invoice.amountPaid} · Due {invoice.balanceDue}</span>
+          {invoice.dueDate && <span>Due {formatDate(invoice.dueDate)}</span>}
+        </div>
+        <div className="portal-actions">
+          {invoice.invoicePublicUrl && <a className="button-ghost" href={invoice.invoicePublicUrl} target="_blank" rel="noopener noreferrer">View invoice</a>}
+          {invoice.paymentPublicUrl && <a className="button-primary" href={invoice.paymentPublicUrl} target="_blank" rel="noopener noreferrer">Pay invoice</a>}
+        </div>
+      </li>)}
+    </ul>}
+    {nextCursor && <p>More invoices are available in Project Alpha. This page shows only the invoices returned above.</p>}
+  </Card>;
 }
 
 function DelegatedSharePanel({ workspaceId }: { workspaceId: string }) {
@@ -3079,6 +3120,7 @@ export function ClientPortalApp({
         feedback={capabilities.feedback}
         viewer={capabilities.viewer}
         viewerDisplayUnits={gate.data.resourceMode === "native" ? "imperial" : gate.data.viewerDisplayUnits}
+        viewBilling={capabilities.viewBilling}
         onSaved={onSaved}
         onCancelRequest={onCancelRequest}
         cancellingRequestId={cancellingRequestId}

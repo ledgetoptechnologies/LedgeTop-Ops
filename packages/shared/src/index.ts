@@ -62,6 +62,7 @@ export * from "./notification-migration-maintenance";
 export * from "./client-audit-timeline";
 export * from "./service-assignments";
 export * from "./native-portal-scopes";
+export * from "./project-alpha-financial-summary";
 
 export type Permission = (typeof PERMISSIONS)[number];
 export type PermissionScope = "global" | "division" | "assigned" | "own";

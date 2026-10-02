@@ -66,6 +66,11 @@ export interface ClientProject {
   lastUpdateAt?: string | null;
 }
 
+export interface ClientProjectFinancialReference {
+  sourceId: string;
+  projectPublicId: string;
+}
+
 export interface ClientPortalFile {
   id: string;
   name: string;
@@ -403,6 +408,7 @@ export interface ClientPortalRepository {
   resolveSession(env: Env, principal: VerifiedClientPrincipal): Promise<ClientPortalSession | null>;
   listProjects(env: Env, session: ClientPortalSession): Promise<ClientProject[]>;
   getProject(env: Env, session: ClientPortalSession, projectId: string): Promise<ClientProject | null>;
+  getProjectFinancialReference?(env: Env, session: ClientPortalSession, projectId: string): Promise<ClientProjectFinancialReference | null>;
   listProjectFiles(env: Env, session: ClientPortalSession, projectId: string, cursor?: string | null, folderId?: string | null): Promise<ClientFilePage | null>;
   listPastDeliveries(env: Env, session: ClientPortalSession, cursor?: string | null): Promise<ClientFilePage>;
   listProjectFileLocations(env: Env, session: ClientPortalSession, projectId: string): Promise<DeliveryLocationCollection | null>;
