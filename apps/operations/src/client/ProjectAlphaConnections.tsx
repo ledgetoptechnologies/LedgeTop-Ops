@@ -7,6 +7,7 @@ const READ_ACCEPTANCE_ENDPOINT = "/api/admin/api-v2/project-alpha/read-acceptanc
 const READ_ACCEPTANCE_CONNECTIONS_ENDPOINT = `${READ_ACCEPTANCE_ENDPOINT}/connections`;
 const API_V2_SYNC_ENDPOINT = "/api/admin/integrations/project-alpha/api-v2/sync-page";
 const DIRECTORY_READ_ADOPTION_ENDPOINT = "/api/admin/integrations/project-alpha/api-v2/directory/read-adoptions";
+const STAGING_DIRECTORY_OWNER_VIEW_GRANT_ENDPOINT = "/api/admin/staging/directory/owner-profile-view-grant";
 const PRIMARY = "project-alpha:primary";
 type Connector = {
   sourceId: string; displayName: string; producerBindingId: string; snapshotOrigin: string; snapshotBasePath: string;
@@ -23,7 +24,7 @@ type ProjectManagementRoute = { sourceId: string; version: number; revision: num
 type Directory = { connectors: Connector[]; health: Health[]; legacyPrimary: boolean; recovery?: Recovery[] | null;
   portal?: PortalStatus; projectManagement?: ProjectManagementRoute[] };
 type ApiV2ReadAcceptanceConfig = { status: "configured" | "unconfigured" | "misconfigured";
-  readAcceptanceEnabled: boolean; connections: Array<{ sourceId: string; enabled: boolean }> };
+  readAcceptanceEnabled: boolean; stagingDirectoryOwnerViewGrantEnabled?: boolean; connections: Array<{ sourceId: string; enabled: boolean }> };
 type ApiV2OperatorConnection = { sourceId: string; enabled: boolean };
 type ReadAcceptancePart = { status: string; count?: number; exactIdentityMatch?: boolean; exactContractMatch?: boolean };
 type ReadAcceptance = { sourceId: string; readOnly: boolean; capabilities: ReadAcceptancePart;
@@ -165,7 +166,7 @@ function inventorySurfaceText(label: string, surface: InventoryRequestedSurface)
 }
 function valueCell(value: string | null) { return value === null ? <em>Not set</em> : value === "" ? <em>Empty string</em> : <code>{value}</code>; }
 
-function ApiV2OperatorPanel({ connections, disabled }: { connections: ApiV2OperatorConnection[]; disabled: boolean }) {
+function ApiV2OperatorPanel({ connections, disabled, ownerViewGrantEnabled }: { connections: ApiV2OperatorConnection[]; disabled: boolean; ownerViewGrantEnabled: boolean }) {
   const active = connections.filter(connection => connection.enabled)
     .map(connection => ({ sourceId: connection.sourceId, displayName: connection.sourceId }));
   const [inventorySource, setInventorySource] = useState(active[0]?.sourceId ?? "");
@@ -182,6 +183,7 @@ function ApiV2OperatorPanel({ connections, disabled }: { connections: ApiV2Opera
   const reservationKey = useRef("");
   const [decisions, setDecisions] = useState<Partial<Record<DirectoryField, DirectoryFieldDecision>>>({});
   const [reviewBusy, setReviewBusy] = useState(false), [reviewError, setReviewError] = useState(""), [reviewMessage, setReviewMessage] = useState("");
+  const [ownerGrantBusy, setOwnerGrantBusy] = useState(false), [ownerGrantMessage, setOwnerGrantMessage] = useState("");
   useEffect(() => {
     if (!active.some(connector => connector.sourceId === inventorySource)) setInventorySource(active[0]?.sourceId ?? "");
     if (!active.some(connector => connector.sourceId === reviewSource)) setReviewSource(active[0]?.sourceId ?? "");
@@ -291,10 +293,24 @@ function ApiV2OperatorPanel({ connections, disabled }: { connections: ApiV2Opera
     } catch (caught) { setReviewError(operatorError(caught, "The field-review receipt could not be verified. Treat the seal outcome as uncertain and refresh before retrying.")); }
     finally { setReviewBusy(false); }
   };
+  const grantOwnerView = async () => {
+    if (disabled || ownerGrantBusy || !ownerViewGrantEnabled) return;
+    if (!window.confirm("Grant only the protected Operations owner global Directory profile-view access in staging? This does not grant edit, client activation, PA writes, portal access, or public-link authority.")) return;
+    setOwnerGrantBusy(true); setOwnerGrantMessage("");
+    try {
+      const response = await api<{ status?: string; permission?: string; scope?: string }>(STAGING_DIRECTORY_OWNER_VIEW_GRANT_ENDPOINT, {
+        method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ confirm: true }),
+      });
+      if ((response.status !== "granted" && response.status !== "already_granted")
+        || response.permission !== "directory.profile.view" || response.scope !== "global") throw new Error("Grant response could not be verified.");
+      setOwnerGrantMessage(response.status === "granted" ? "Staging owner profile-view permission granted and audited." : "Staging owner profile-view permission was already active.");
+    } catch (caught) { setOwnerGrantMessage(operatorError(caught, "The staging owner view grant could not be verified. Refresh before retrying.")); }
+    finally { setOwnerGrantBusy(false); }
+  };
   if (connections.length === 0) return null;
   const allDecided = Boolean(comparison) && comparison!.fields.every(field => Boolean(decisions[field.field]));
   return <details className="alpha-connection"><summary>Staging API-v2 operator review</summary>
-    <p>This default-off panel reads and stores one bounded inventory page, then supports an explicit exact-record comparison. It never auto-matches records, changes access, publishes links, activates anything, or writes to Project Alpha.</p>
+    <p>This default-off panel reads and stores one bounded inventory page, then supports an explicit exact-record comparison. It never auto-matches records, changes client access, publishes links, activates clients, or writes to Project Alpha. A separately enabled staging-only control can grant the protected owner profile-view access.</p>
     <section aria-label="Bounded API-v2 inventory"><h3>Bounded inventory evidence</h3>
       <label>Deployment source<select value={inventorySource} disabled={disabled || Boolean(inventoryBusy)} onChange={event => { setInventorySource(event.target.value); clearInventory(); }}>
         {active.map(connector => <option key={connector.sourceId} value={connector.sourceId}>{connector.displayName}</option>)}</select></label>
@@ -311,6 +327,9 @@ function ApiV2OperatorPanel({ connections, disabled }: { connections: ApiV2Opera
       {inventoryError && <p role="alert" className="notice">{inventoryError}</p>}
     </section>
     <section aria-label="Exact-record field review"><h3>Exact-record field review</h3>
+      {ownerViewGrantEnabled && <div><h4>Staging owner profile review</h4><p>This one-time action grants the protected owner only global Directory profile-view access. It does not change client access or Project Alpha.</p>
+        <button type="button" className="button-ghost button-small" disabled={disabled || ownerGrantBusy} onClick={() => void grantOwnerView()}>{ownerGrantBusy ? "Granting view access…" : "Grant owner profile view"}</button>
+        {ownerGrantMessage && <p role="status" className="notice">{ownerGrantMessage}</p>}</div>}
       <form onSubmit={reserve} aria-busy={reviewBusy}>
         <label>Deployment source<select value={reviewSource} disabled={disabled || reviewBusy || Boolean(reviewId)} onChange={event => { setReviewSource(event.target.value); resetReview(); }}>
           {active.map(connector => <option key={connector.sourceId} value={connector.sourceId}>{connector.displayName}</option>)}</select></label>
@@ -513,7 +532,7 @@ export function ProjectAlphaConnections() {
         <details><summary>Connection details</summary><dl><dt>Source</dt><dd>{connector.sourceId}</dd><dt>Producer</dt><dd>{connector.producerBindingId}</dd><dt>Destination</dt><dd>{connector.snapshotOrigin}{connector.snapshotBasePath}</dd><dt>Application</dt><dd>{connector.applicationKey}</dd><dt>Revision</dt><dd>{connector.activeRevision}</dd></dl><p>These values are read-only here. Change the reviewed deployment source manifest and deploy Operations; do not paste credentials into this page.</p></details>
       </section>;
     })}
-    {apiV2Config?.status === "configured" && <ApiV2OperatorPanel connections={apiV2Config.connections} disabled={loading || Boolean(syncing)} />}
+    {apiV2Config?.status === "configured" && <ApiV2OperatorPanel connections={apiV2Config.connections} disabled={loading || Boolean(syncing)} ownerViewGrantEnabled={apiV2Config.stagingDirectoryOwnerViewGrantEnabled === true} />}
     {data?.portal?.recovery && <div className="notice" role="status"><p>A prior portal coordination operation is unfinished. Recovery cancels that uncertain update and pauses affected client portals; it never registers a source or retries activation.</p><button type="button" disabled={loading || Boolean(syncing)} onClick={() => void recoverPortalUpdate()}>Recover unfinished portal update</button></div>}
   </div></Card>;
 }
