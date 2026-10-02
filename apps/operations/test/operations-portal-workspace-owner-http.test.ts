@@ -1,10 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const calls = vi.hoisted(() => ({ auth: vi.fn(), reserveWorkspace: vi.fn(), reservePublication: vi.fn(),
-  reserveInvocation: vi.fn(), dispatch: vi.fn() }));
+const calls = vi.hoisted(() => ({ auth: vi.fn(), reserveWorkspace: vi.fn(), reserveFolder: vi.fn(), revokeFolder: vi.fn(),
+  reservePublication: vi.fn(), reserveInvocation: vi.fn(), dispatch: vi.fn() }));
 vi.mock("../src/worker/native-staff-auth", () => ({ authenticateNativeStaffWithAdmissionVersion: calls.auth }));
 vi.mock("../src/worker/operations-portal-workspace-reservations", () => ({
-  reserveOperationsPortalWorkspace: calls.reserveWorkspace,
+  reserveOperationsPortalWorkspace: calls.reserveWorkspace, reserveOperationsPortalFolder: calls.reserveFolder,
+  revokeOperationsPortalFolder: calls.revokeFolder,
 }));
 vi.mock("../src/worker/operations-portal-workspace-publication-outbox", () => ({
   reserveOperationsPortalWorkspacePublication: calls.reservePublication,
@@ -31,6 +32,17 @@ function input() { return { workspace: { operationId: id(1), targetId: id(2), cl
   rootRecordVersion: 4, relationshipVersion: null, expectedRevision: 0, reason: "Create exact staging workspace" },
   publication: { operationId: id(4), publicationId: id(5), snapshotId: id(6), checkpointId: id(7),
     invocationId: id(8), expectedRevision: 0, reason: "Publish exact staging workspace" } }; }
+function folderInput(action: "reserve" | "revoke" = "reserve") { return { folder: action === "reserve"
+  ? { operationId: id(10), targetId: id(2), reservationId: id(11), expectedRevision: 0,
+    expectedWorkspaceRevision: 1, externalProjectId: "project-1", projectVersion: 7,
+    opsFolderProjectId: "folder-project-1", opsDivisionId: "division-1", baseR2Prefix: "clients/root/",
+    baseMatchMethod: "confirmed_exact", baseConfirmedBy: "source-receipt-1",
+    baseConfirmedAt: "2026-10-02T12:00:00.000Z", clientFolderBindingId: "binding-1",
+    selectedR2Prefix: "clients/root/selected/", reason: "Reserve exact selected folder" }
+  : { operationId: id(12), targetId: id(2), reservationId: id(11), expectedRevision: 1,
+    reason: "Revoke exact selected folder" }, publication: { operationId: id(13), publicationId: id(14),
+    snapshotId: id(15), checkpointId: id(16), invocationId: id(17), expectedRevision: 4,
+    reason: "Publish exact folder change" } }; }
 async function csrf(d: Dependencies) { const response = await handle(new Request(`${base}/csrf`), d);
   return (await response.json() as { csrfToken: string }).csrfToken; }
 function post(path: string, body: unknown, token: string, key: string) { return new Request(`${base}/${path}`, { method: "POST",
@@ -40,6 +52,10 @@ function post(path: string, body: unknown, token: string, key: string) { return 
 describe("operations portal workspace owner HTTP", () => {
   beforeEach(() => { vi.clearAllMocks(); calls.auth.mockResolvedValue(actor);
     calls.reserveWorkspace.mockResolvedValue({ operationId: id(1), targetId: id(2), revision: 1, replayed: false });
+    calls.reserveFolder.mockResolvedValue({ operationId: id(10), targetId: id(2), reservationId: id(11), revision: 1,
+      state: "active", replayed: false });
+    calls.revokeFolder.mockResolvedValue({ operationId: id(12), targetId: id(2), reservationId: id(11), revision: 2,
+      state: "revoked", replayed: false });
     calls.reservePublication.mockResolvedValue({ operationId: id(4), publicationRevision: 1, replayed: false });
     calls.reserveInvocation.mockResolvedValue({ state: "authorized", replayed: false });
     calls.dispatch.mockResolvedValue({ operationId: id(4), status: "acknowledged" }); });
@@ -132,5 +148,38 @@ describe("operations portal workspace owner HTTP", () => {
     expect(calls.reserveInvocation).toHaveBeenCalledWith(d.database, actor, { ...recovery, action: "recover" });
     expect(calls.dispatch).toHaveBeenCalledWith({ db: d.database, binding: d.publication,
       operationId: id(4), invocationId: id(9), action: "recover" });
+  });
+
+  it("reserves the exact selected folder and publishes at the explicit current revision", async () => {
+    const d = deps(), body = folderInput(), token = await csrf(d);
+    calls.reservePublication.mockResolvedValue({ operationId: id(13), publicationRevision: 5, replayed: false });
+    calls.dispatch.mockResolvedValue({ operationId: id(13), status: "acknowledged" });
+    const response = await handle(post("reserve-folder-and-publish", body, token, id(10)), d);
+    expect(response.status).toBe(200);
+    expect(calls.reserveFolder).toHaveBeenCalledWith(d.database, actor, body.folder);
+    expect(calls.reservePublication).toHaveBeenCalledWith(d.database, actor, expect.objectContaining({
+      operationId: id(13), targetId: id(2), expectedRevision: 4 }));
+    expect(await response.json()).toMatchObject({ reservationId: id(11), folderState: "active",
+      publicationRevision: 5, publicationState: "acknowledged" });
+  });
+
+  it("short-circuits folder publication on real domain denial", async () => {
+    calls.reserveFolder.mockRejectedValue(new Error("operations_portal_workspace_reservation_denied"));
+    const d = deps(), body = folderInput(), response = await handle(post("reserve-folder-and-publish", body,
+      await csrf(d), id(10)), d);
+    expect(response.status).toBe(403); expect(calls.reservePublication).not.toHaveBeenCalled();
+    expect(calls.reserveInvocation).not.toHaveBeenCalled(); expect(calls.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("replays exact folder revocation and publication without changing IDs", async () => {
+    const d = deps(), body = folderInput("revoke"), token = await csrf(d);
+    calls.revokeFolder.mockResolvedValue({ operationId: id(12), targetId: id(2), reservationId: id(11), revision: 2,
+      state: "revoked", replayed: true });
+    calls.reservePublication.mockResolvedValue({ operationId: id(13), publicationRevision: 5, replayed: true });
+    calls.dispatch.mockResolvedValue({ operationId: id(13), status: "acknowledged", replayed: true });
+    const response = await handle(post("revoke-folder-and-publish", body, token, id(12)), d);
+    expect(response.status).toBe(200); expect(await response.json()).toMatchObject({ folderState: "revoked",
+      folderReplayed: true, publicationReplayed: true });
+    expect(calls.revokeFolder).toHaveBeenCalledWith(d.database, actor, body.folder);
   });
 });

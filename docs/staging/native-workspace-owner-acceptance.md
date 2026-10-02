@@ -40,7 +40,15 @@ Project Alpha. Production registration and production access remain unchanged.
    recovery ID. Do not generate a replacement workspace because an observation
    timed out. Recovery uses a new audited invocation for the same publication.
 5. Verify the staging Client publication receipt and exact snapshot, then add
-   only the explicitly selected synthetic folder through its audited workflow.
+   only the explicitly selected synthetic folder through the owner page's folder
+   reservation form (`reserve-folder-and-publish`). Supply the exact current
+   workspace, project and publication revisions, confirmed Ops folder/division,
+   base R2 prefix and confirmation metadata, selected prefix, and client folder
+   binding ID. The existing domain service independently checks these inputs
+   and current permission; caller-supplied confirmation does not establish it.
+   Folder revocation (`revoke-folder-and-publish`) checks the exact reservation
+   revision and republishes the complete snapshot at the explicit publication
+   revision. Neither operation changes a public delivery link or deletes files.
 6. Enroll the verified synthetic recipient and test sign-in, selected service
    visibility, selected file access, unauthorized identity denial and revocation.
    Workspace publication alone grants no recipient access.
@@ -54,6 +62,7 @@ reconciliation, retry/idempotency and portal acceptance remain release gates.
 Only after those gates pass should the owner production PA update checkpoint
 be requested.
 
-Local evidence on 2026-10-02: 11 owner-handler tests passed, Operations
+Local evidence on 2026-10-02: 14 owner-handler tests passed, including exact
+folder reserve/revoke, domain-denial short circuit and replay; Operations
 typecheck/build passed, and 35 paired-workspace-profile/scaffold/preflight tests
 passed. No live workspace or recipient grant was created by these checks.

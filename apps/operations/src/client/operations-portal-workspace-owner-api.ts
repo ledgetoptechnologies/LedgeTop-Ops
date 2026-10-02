@@ -20,6 +20,19 @@ export async function reserveAndPublishOperationsWorkspace(csrfToken: string, bo
     ...headers, "X-CSRF-Token": csrfToken, "Idempotency-Key": operationId,
   }, body: JSON.stringify(body) }));
 }
+async function mutateFolder(csrfToken: string, path: "reserve-folder-and-publish" | "revoke-folder-and-publish",
+  body: unknown) {
+  const operationId = body && typeof body === "object" && "folder" in body && body.folder
+    && typeof body.folder === "object" && "operationId" in body.folder ? body.folder.operationId : null;
+  if (typeof operationId !== "string") throw new Error("invalid_request");
+  return value(await fetch(`${BASE}/${path}`, { method: "POST", credentials: "same-origin", headers: {
+    ...headers, "X-CSRF-Token": csrfToken, "Idempotency-Key": operationId,
+  }, body: JSON.stringify(body) }));
+}
+export const reserveAndPublishOperationsFolder = (csrfToken: string, body: unknown) =>
+  mutateFolder(csrfToken, "reserve-folder-and-publish", body);
+export const revokeAndPublishOperationsFolder = (csrfToken: string, body: unknown) =>
+  mutateFolder(csrfToken, "revoke-folder-and-publish", body);
 export async function recoverOperationsWorkspacePublication(csrfToken: string, operationId: string, reason: string) {
   const invocationId = crypto.randomUUID();
   return value(await fetch(`${BASE}/recover-publication`, { method: "POST", credentials: "same-origin", headers: {

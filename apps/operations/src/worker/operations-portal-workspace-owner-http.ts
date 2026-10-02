@@ -2,7 +2,8 @@ import { readBoundedJson } from "./bounded-json";
 import { HTTPException } from "hono/http-exception";
 import { authenticateNativeStaffWithAdmissionVersion, type NativeStaffAccessConfiguration,
   type AuthenticatedNativeStaffWithAdmissionVersion } from "./native-staff-auth";
-import { reserveOperationsPortalWorkspace, type ReserveOperationsPortalWorkspace }
+import { reserveOperationsPortalFolder, reserveOperationsPortalWorkspace, revokeOperationsPortalFolder,
+  type ReserveOperationsPortalFolder, type ReserveOperationsPortalWorkspace, type RevokeOperationsPortalFolder }
   from "./operations-portal-workspace-reservations";
 import { reserveOperationsPortalWorkspacePublication, dispatchOperationsPortalWorkspacePublication,
   type OperationsPortalWorkspacePublicationBinding, type ReserveOperationsPortalWorkspacePublicationInput }
@@ -58,11 +59,42 @@ function publicationInput(value: unknown): PublicationInput | null {
   for (const key of ["operationId", "publicationId", "snapshotId", "checkpointId", "invocationId"] as const)
     if (typeof row[key] !== "string" || !UUID.test(row[key])) return null;
   const expectedRevision = version(row.expectedRevision, true), reason = text(row.reason, 500);
-  if (expectedRevision !== 0 || !reason || new Set([row.operationId, row.publicationId, row.snapshotId,
+  if (expectedRevision === null || !reason || new Set([row.operationId, row.publicationId, row.snapshotId,
     row.checkpointId, row.invocationId]).size !== 5) return null;
   return { operationId: row.operationId as string, publicationId: row.publicationId as string,
     targetId: "", snapshotId: row.snapshotId as string, checkpointId: row.checkpointId as string,
-    invocationId: row.invocationId as string, expectedRevision: 0, reason };
+    invocationId: row.invocationId as string, expectedRevision, reason };
+}
+function reserveFolderInput(value: unknown): ReserveOperationsPortalFolder | null {
+  const keys = ["operationId", "targetId", "reservationId", "expectedRevision", "expectedWorkspaceRevision",
+    "externalProjectId", "projectVersion", "opsFolderProjectId", "opsDivisionId", "baseR2Prefix", "baseMatchMethod",
+    "baseConfirmedBy", "baseConfirmedAt", "clientFolderBindingId", "selectedR2Prefix", "reason"] as const;
+  const row = exact(value, keys); if (!row) return null;
+  for (const key of ["operationId", "targetId", "reservationId"] as const)
+    if (typeof row[key] !== "string" || !UUID.test(row[key])) return null;
+  const expectedRevision = version(row.expectedRevision, true), expectedWorkspaceRevision = version(row.expectedWorkspaceRevision);
+  const projectVersion = version(row.projectVersion), reason = text(row.reason, 500);
+  const strings = Object.fromEntries(["externalProjectId", "opsFolderProjectId", "opsDivisionId", "baseR2Prefix",
+    "baseMatchMethod", "baseConfirmedBy", "baseConfirmedAt", "clientFolderBindingId", "selectedR2Prefix"]
+    .map(key => [key, text(row[key], key === "baseMatchMethod" ? 40 : key === "baseConfirmedAt" ? 64
+      : key === "baseR2Prefix" || key === "selectedR2Prefix" ? 1_000 : key === "clientFolderBindingId" ? 200 : 191)]));
+  if (expectedRevision !== 0 || expectedWorkspaceRevision === null || projectVersion === null || !reason
+    || Object.values(strings).some(value => value === null)) return null;
+  return { operationId: row.operationId as string, targetId: row.targetId as string,
+    reservationId: row.reservationId as string, expectedRevision: 0, expectedWorkspaceRevision,
+    externalProjectId: strings.externalProjectId!, projectVersion, opsFolderProjectId: strings.opsFolderProjectId!,
+    opsDivisionId: strings.opsDivisionId!, baseR2Prefix: strings.baseR2Prefix!, baseMatchMethod: strings.baseMatchMethod!,
+    baseConfirmedBy: strings.baseConfirmedBy!, baseConfirmedAt: strings.baseConfirmedAt!,
+    clientFolderBindingId: strings.clientFolderBindingId!, selectedR2Prefix: strings.selectedR2Prefix!, reason };
+}
+function revokeFolderInput(value: unknown): RevokeOperationsPortalFolder | null {
+  const row = exact(value, ["operationId", "targetId", "reservationId", "expectedRevision", "reason"]);
+  if (!row || typeof row.operationId !== "string" || !UUID.test(row.operationId)
+    || typeof row.targetId !== "string" || !UUID.test(row.targetId)
+    || typeof row.reservationId !== "string" || !UUID.test(row.reservationId)) return null;
+  const expectedRevision = version(row.expectedRevision), reason = text(row.reason, 500);
+  return expectedRevision === null || !reason ? null : { operationId: row.operationId, targetId: row.targetId,
+    reservationId: row.reservationId, expectedRevision, reason };
 }
 function settings(d: OperationsPortalWorkspaceOwnerHttpDependencies) {
   try {
@@ -110,7 +142,9 @@ export async function handleOperationsPortalWorkspaceOwnerHttp(request: Request,
   dependencies: OperationsPortalWorkspaceOwnerHttpDependencies): Promise<Response> {
   try {
     const config = settings(dependencies), url = new URL(request.url);
-    if (url.origin !== config.origin || (url.pathname !== `${BASE}/csrf` && url.pathname !== `${BASE}/reserve-and-publish`
+    const mutation = url.pathname === `${BASE}/reserve-and-publish`
+      || url.pathname === `${BASE}/reserve-folder-and-publish` || url.pathname === `${BASE}/revoke-folder-and-publish`;
+    if (url.origin !== config.origin || (url.pathname !== `${BASE}/csrf` && !mutation
       && url.pathname !== `${BASE}/recover-publication`))
       throw new Failure(404, "not_found");
     const actor = await authenticateNativeStaffWithAdmissionVersion(request, dependencies.database, config.access);
@@ -130,9 +164,36 @@ export async function handleOperationsPortalWorkspaceOwnerHttp(request: Request,
         binding: dependencies.publication, operationId: body.operationId, invocationId: body.invocationId, action: "recover" });
       return response(200, { operationId: dispatch.operationId, status: dispatch.status, replayed: dispatch.replayed === true });
     }
+    if (url.pathname === `${BASE}/reserve-folder-and-publish` || url.pathname === `${BASE}/revoke-folder-and-publish`) {
+      const body = exact(await readBoundedJson(request, 8192, "operations workspace folder owner"), ["folder", "publication"]);
+      const folder = url.pathname === `${BASE}/reserve-folder-and-publish`
+        ? reserveFolderInput(body?.folder) : revokeFolderInput(body?.folder);
+      const publication = publicationInput(body?.publication);
+      if (!folder || !publication || request.headers.get("Idempotency-Key") !== folder.operationId)
+        throw new Failure(400, "invalid_request");
+      const changed = url.pathname === `${BASE}/reserve-folder-and-publish`
+        ? await reserveOperationsPortalFolder(dependencies.database, actor, folder as ReserveOperationsPortalFolder)
+        : await revokeOperationsPortalFolder(dependencies.database, actor, folder as RevokeOperationsPortalFolder);
+      const staged = await reserveOperationsPortalWorkspacePublication(dependencies.database, actor, {
+        operationId: publication.operationId, publicationId: publication.publicationId, targetId: changed.targetId,
+        snapshotId: publication.snapshotId, checkpointId: publication.checkpointId,
+        expectedRevision: publication.expectedRevision, reason: publication.reason });
+      await reserveOperationsPortalWorkspacePublicationInvocation(dependencies.database, actor, {
+        invocationId: publication.invocationId, operationId: publication.operationId, action: "publish",
+        reason: publication.reason });
+      const dispatched = await dispatchOperationsPortalWorkspacePublication({ db: dependencies.database,
+        binding: dependencies.publication, operationId: publication.operationId,
+        invocationId: publication.invocationId, action: "publish" });
+      return response(200, { folderOperationId: changed.operationId, targetId: changed.targetId,
+        reservationId: changed.reservationId, folderRevision: changed.revision, folderState: changed.state,
+        folderReplayed: changed.replayed, publicationOperationId: staged.operationId,
+        publicationRevision: staged.publicationRevision, publicationState: dispatched.status,
+        publicationReplayed: staged.replayed || dispatched.replayed === true });
+    }
     const body = exact(await readBoundedJson(request, 8192, "operations workspace owner"), ["workspace", "publication"]);
     const workspace = workspaceInput(body?.workspace), publication = publicationInput(body?.publication);
-    if (!workspace || !publication || request.headers.get("Idempotency-Key") !== workspace.operationId)
+    if (!workspace || !publication || publication.expectedRevision !== 0
+      || request.headers.get("Idempotency-Key") !== workspace.operationId)
       throw new Failure(400, "invalid_request");
     const reserved = await reserveOperationsPortalWorkspace(dependencies.database, actor, workspace);
     const staged = await reserveOperationsPortalWorkspacePublication(dependencies.database, actor, {
