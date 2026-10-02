@@ -62,14 +62,17 @@ async function applyArtifact(database:D1Database,sql:string,name:string){
   await database.batch([...statements.map(value=>database.prepare(value)),database.prepare(`INSERT INTO ${AUTHORITY_MIGRATIONS_TABLE}(name) VALUES(?)`).bind(name)]);
 }
 const evidence="0123456789abcdef".repeat(4);
-const fixtureArtifacts=new WeakMap<object,{base:string;v5:ReturnType<typeof buildAuthorityArtifacts>}>();
-const cleanArtifacts=new WeakMap<object,{base:string;v3:ReturnType<typeof buildAuthorityArtifacts>;v4?:ReturnType<typeof buildAuthorityArtifacts>}>();
+const fixtureArtifacts=new WeakMap<object,{base:string;v5:ReturnType<typeof buildAuthorityArtifacts>;native:Historical0152Producer}>();
+const cleanArtifacts=new WeakMap<object,{base:string;v3:ReturnType<typeof buildAuthorityArtifacts>;native:Historical0152Producer;v4?:ReturnType<typeof buildAuthorityArtifacts>}>();
 const cleanPortalArtifacts=new WeakMap<object,ReturnType<typeof buildAuthorityArtifacts>>();
 type HistoricalArtifact=ReturnType<typeof buildAuthorityArtifacts>;
 type HistoricalFixtureState={base:string;sourceCommit:string;sourceTree:string;historical:HistoricalArtifact;
-  onboarding:ReturnType<typeof buildOnboardingAuthorityArtifacts>;v7?:ReturnType<typeof buildAuthorityArtifacts>;
+  onboarding:ReturnType<typeof buildOnboardingAuthorityArtifacts>;native:typeof buildAuthorityArtifacts;
+  v7?:ReturnType<typeof buildAuthorityArtifacts>;
   v8?:ReturnType<typeof buildAuthorityArtifacts>};
 const historicalFixtureArtifacts=new WeakMap<object,HistoricalFixtureState>();
+type Historical0152Producer={buildAuthorityArtifacts:(base:string,input:unknown,phase:"provision"|"revoke")=>HistoricalArtifact};
+type Historical0152Onboarding={buildOnboardingAuthorityArtifacts:(base:string,input:unknown,phase:"provision"|"revoke")=>ReturnType<typeof buildOnboardingAuthorityArtifacts>};
 function packet(schemaVersion:number,purpose?:string,expected?:Record<string,unknown>){
   const now=Date.now();return{schemaVersion,packet:{packetId:schemaVersion===3?"staging-authority-canonical-joined-v3":"staging-authority-canonical-joined-v5",mode:schemaVersion===3?"create":"reactivate",operatorKind:"synthetic",
     staffId:canonicalOwner.operationsStaffId,email:canonicalOwner.email,displayName:canonicalOwner.displayName,accessSubject:canonicalOwner.accessSubject,
@@ -91,7 +94,59 @@ const historicalSourcePaths=Object.keys(historicalSourcePins);
 
 function digest(algorithm:"sha1"|"sha256",value:Uint8Array|string){return createHash(algorithm).update(value).digest("hex");}
 function gitBlobDigest(value:Uint8Array){
-  return createHash("sha1").update(`blob ${value.byteLength}\0`).update(value).digest("hex");
+  const bytes=Buffer.from(value);
+  return createHash("sha1").update(Buffer.from(`blob ${bytes.length}\0`)).update(bytes).digest("hex");
+}
+
+/** Materializes the reviewed 0152 producers. The current packet modules are
+ * intentionally kept on the 0165 gate; only historical canonical fixtures
+ * use this separately pinned producer bundle. */
+async function historical0152ArtifactBase(){
+  const root=resolve(fileURLToPath(new URL("../../../../",import.meta.url)));
+  const bundle=JSON.parse(readFileSync(new URL("../fixtures/historical-0152-authority-sources.json",import.meta.url),"utf8")) as {
+    fixtureVersion:number;sourceCommit:string;sourceTree:string;
+    files:Array<{path:string;gitBlob:string;sha256:string;gzipBase64:string}>};
+  if(bundle.fixtureVersion!==1||bundle.sourceCommit!=="97178689c2f517fe49d86decd18bb56fdb0e8170"
+    ||bundle.sourceTree!=="adfe2c737c576f6a03dd8c5430b27af334ca0386")
+    throw Error("historical-0152-source-pin-mismatch");
+  const expectedPaths=[
+    "scripts/staging-native-authority-packet.mjs","scripts/staging-onboarding-authority-packet.mjs",
+    "scripts/staging-requirements.mjs","scripts/staging-bootstrap.mjs",
+    "scripts/staging-bounded-guards.mjs",
+    "docs/staging/operations.wrangler.json.example"];
+  if(JSON.stringify(bundle.files.map(file=>file.path))!==JSON.stringify(expectedPaths))
+    throw Error("historical-0152-source-inventory-mismatch");
+  const expected=Object.freeze({
+    "scripts/staging-native-authority-packet.mjs":["e5ac9040ed277ee200d15d91db043598a4f4001b","c204fe3cf9fd22650e82f88aadd8d4c1eb1ff6318b5e76265d2d9450b524cca1"],
+    "scripts/staging-onboarding-authority-packet.mjs":["7e3d5f271e77fa357acdbe88a82fd0a20c9b31d2","6a98403f193b7c72df6dd45859522f4fc9f1a6314cd1c5fe320a164bb82bb206"],
+    "scripts/staging-requirements.mjs":["96a6884c35331441c751dec63cc373c27d16e748","60e02a7b894ee1a3eae71f1760762f3d9a96b139b7e2a28b850855910fd6b7c9"],
+    "scripts/staging-bootstrap.mjs":["d482a42a02fcda2ad53227d9de0280688058c7c6","bdd0adae56b394545e06c0ccd81dba3f20868cccbf5c70f41dc1fb54b1e2c29a"],
+    "scripts/staging-bounded-guards.mjs":["07b035d8af5c0b79d521733425bc77e788f360b2","97a7108fdac41935552b978c989fec2bfcb6d55012fcc521feb1515ce3d46923"],
+    "docs/staging/operations.wrangler.json.example":["369e1b31339f1d855958564b88fc7b1e3fdec3bf","3254b174394140011363c2364de596711b05a292b36397c96432cd47eb37bbf3"]}) as Record<string,[string,string]>;
+  const base=mkdtempSync(join(tmpdir(),"ltds-historical-0152-authority-"));
+  for(const file of bundle.files){
+    const pin=expected[file.path];
+    if(!pin||file.gitBlob!==pin[0]||file.sha256!==pin[1])
+      throw Error(`historical-0152-source-metadata-mismatch:${file.path}`);
+    const bytes=gunzipSync(Buffer.from(file.gzipBase64,"base64"));
+    if(digest("sha256",bytes)!==file.sha256)
+      throw Error(`historical-0152-source-content-mismatch:${file.path}`);
+    const target=join(base,...file.path.split("/"));mkdirSync(resolve(target,".."),{recursive:true});writeFileSync(target,bytes);
+  }
+  const sourceDirectory=join(root,"apps","operations","migrations"),targetDirectory=join(base,"apps","operations","migrations");
+  mkdirSync(targetDirectory,{recursive:true});
+  const names=readdirSync(sourceDirectory).filter(name=>/^\d{4}_.+\.sql$/.test(name)&&name<="0152_operations_portal_workspace_reservations.sql").sort();
+  if(names.length!==152||names.at(-1)!=="0152_operations_portal_workspace_reservations.sql"
+    ||digest("sha256",names.join("\n"))!=="a3eb1153187e13a1013b3d5ddd3dcc0c3d93ba2a272bb3650246df9ea9d8e109")
+    throw Error("historical-0152-migration-contract-mismatch");
+  const contents=names.map(name=>`${name}\0${digest("sha256",readFileSync(join(sourceDirectory,name)))}`);
+  if(digest("sha256",contents.join("\n"))!=="f854aa66e1bb1b3c81feb7a11b18d654b11232d5e3732234ebff12e779f6e3a9")
+    throw Error("historical-0152-migration-content-contract-mismatch");
+  for(const name of names)copyFileSync(join(sourceDirectory,name),join(targetDirectory,name));
+  copyFileSync(join(base,"docs","staging","operations.wrangler.json.example"),join(base,"apps","operations","wrangler.staging.json"));
+  return{base,
+    native:await import(pathToFileURL(join(base,"scripts","staging-native-authority-packet.mjs")).href) as Historical0152Producer,
+    onboarding:await import(pathToFileURL(join(base,"scripts","staging-onboarding-authority-packet.mjs")).href) as Historical0152Onboarding};
 }
 
 /** Materializes reviewed historical producer bytes carried by the test fixture.
@@ -178,15 +233,15 @@ export async function establishHistoricalPreservedOnboardingLineage(database:D1D
   await applyArtifact(database,historical.revoke.sql,historical.revoke.name);
   await applyCanonicalTail(database,fixture.bundle.operationsMigrationContract.finalMigration,"0152_operations_portal_workspace_reservations.sql");
   await database.prepare("INSERT INTO native_business_areas(id,name,active) VALUES('area-default','Reviewed staging area',1)").run();
-  const base=artifactBase(),onboardingInput={schemaVersion:1,packet:{packetId:"staging-onboarding-authority-canonical-history",
+  const fixture0152=await historical0152ArtifactBase(),base=fixture0152.base,onboardingInput={schemaVersion:1,packet:{packetId:"staging-onboarding-authority-canonical-history",
     purpose:"client-onboarding-positive-acceptance",operatorKind:"synthetic",staffId:canonicalOwner.operationsStaffId,
     email:canonicalOwner.email,displayName:canonicalOwner.displayName,accessSubject:canonicalOwner.accessSubject,businessAreaId:"area-default",
     issuedAt:new Date(now-60_000).toISOString(),expiresAt:new Date(now+3_600_000).toISOString(),
     reason:"Canonical historical onboarding lineage rehearsal",expected:{admissionVersion:2,profileVersion:1},
     evidence:{changeTicket:"canonical-history-onboarding",reviewer:"canonical-reviewer",bindingEvidenceSha256:evidence}}};
-  const onboarding=buildOnboardingAuthorityArtifacts(base,onboardingInput,"revoke");
+  const onboarding=fixture0152.onboarding.buildOnboardingAuthorityArtifacts(base,onboardingInput,"revoke");
   await applyArtifact(database,onboarding.provision.sql,onboarding.provision.name);
-  historicalFixtureArtifacts.set(database as object,{base,sourceCommit:fixture.bundle.sourceCommit,sourceTree:fixture.bundle.sourceTree,historical,onboarding});
+  historicalFixtureArtifacts.set(database as object,{base,sourceCommit:fixture.bundle.sourceCommit,sourceTree:fixture.bundle.sourceTree,historical,onboarding,native:fixture0152.native});
   return{sourceCommit:fixture.bundle.sourceCommit,sourceTree:fixture.bundle.sourceTree,
     historicalManifest:historical.provision.manifest,onboardingGrantId:onboarding.ids.grant};
 }
@@ -206,7 +261,7 @@ export async function transitionHistoricalOnboardingToV7Acquisition(database:D1D
       profileHistoryGenerations:[1],onboardingHistoryGenerations:[2,3,4],identityGrantVersion:0,identityHistoryGenerations:[],
       identityGrantState:"absent",directoryAuthorityState:"v7-profile-plus-onboarding-inactive"},
     evidence:{changeTicket:"canonical-history-v7",reviewer:"canonical-reviewer",bindingEvidenceSha256:evidence}}};
-  const v7=buildAuthorityArtifacts(saved.base,input,"revoke");await applyArtifact(database,v7.provision.sql,v7.provision.name);saved.v7=v7;
+  const v7=saved.native.buildAuthorityArtifacts(saved.base,input,"revoke");await applyArtifact(database,v7.provision.sql,v7.provision.name);saved.v7=v7;
   const current=await database.prepare(`SELECT admission.version admission_version,profile.version profile_version,
       generation.generation grant_generation FROM native_staff_admissions admission
     JOIN native_staff_profiles profile ON profile.staff_id=admission.staff_id
@@ -233,7 +288,7 @@ export async function transitionHistoricalV7ToV8PortalAuthority(database:D1Datab
       identityGrantVersion:2,identityHistoryGenerations:[6,8],portalGrantVersion:0,portalHistoryGenerations:[],
       portalGrantState:"absent",directoryAuthorityState:"v7-acquisition-plus-onboarding-inactive"},
     evidence:{changeTicket:"canonical-history-v8",reviewer:"canonical-reviewer",bindingEvidenceSha256:evidence}}};
-  const v8=buildAuthorityArtifacts(saved.base,input,"revoke");await applyArtifact(database,v8.provision.sql,v8.provision.name);saved.v8=v8;
+  const v8=saved.native.buildAuthorityArtifacts(saved.base,input,"revoke");await applyArtifact(database,v8.provision.sql,v8.provision.name);saved.v8=v8;
   return{v8,actor:{identity:{kind:"native" as const,staffId:canonicalOwner.operationsStaffId,
     verifiedAccessSubject:canonicalOwner.accessSubject,email:canonicalOwner.email,displayName:canonicalOwner.displayName,profileVersion:1},
     admissionVersion:7,verifiedUntil:new Date(Date.now()+30*60_000).toISOString()}};
@@ -247,13 +302,13 @@ export async function establishGovernedEmptyEnrollmentFixture(database:D1Databas
   await database.prepare("UPDATE staff_users SET access_subject=?,last_seen_at=datetime('now'),updated_at=datetime('now') WHERE id=?")
     .bind(canonicalOwner.accessSubject,canonicalOwner.operationsStaffId).run();
   await database.prepare(`CREATE TABLE ${AUTHORITY_MIGRATIONS_TABLE}(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE,applied_at TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL)`).run();
-  const base=artifactBase(),v3=buildAuthorityArtifacts(base,packet(3),"revoke");
+  const fixture0152=await historical0152ArtifactBase(),base=fixture0152.base,v3=fixture0152.native.buildAuthorityArtifacts(base,packet(3),"revoke");
   await applyArtifact(database,v3.provision.sql,v3.provision.name);await applyArtifact(database,v3.revoke.sql,v3.revoke.name);
   await database.prepare("INSERT OR IGNORE INTO native_business_areas(id,name,active) VALUES('area-default','Reviewed staging area',1)").run();
-  const v5=buildAuthorityArtifacts(base,packet(5,"staging-empty-enrollment-fixture",{admissionVersion:2,profileVersion:1,grantVersion:2,grantGeneration:2}),"provision");
+  const v5=fixture0152.native.buildAuthorityArtifacts(base,packet(5,"staging-empty-enrollment-fixture",{admissionVersion:2,profileVersion:1,grantVersion:2,grantGeneration:2}),"provision");
   try{await applyArtifact(database,v5.provision.sql,v5.provision.name);}
   catch(error){return{status:"blocked" as const,stage:"reviewed-onboarding-lineage" as const,error:String(error)};}
-  fixtureArtifacts.set(database as object,{base,v5});
+  fixtureArtifacts.set(database as object,{base,v5,native:fixture0152.native});
   const scope={businessAreaId:"area-default",divisionId:null};
   await database.prepare(`INSERT INTO native_directory_create_admissions
     (id,staff_id,bound_access_subject,record_id,record_kind,scopes_json,profile_json,destinations_json,issued_by)
@@ -326,7 +381,7 @@ export async function authorizeCanonicalUuidAcquisition(database:D1Database){
     issuedAt:new Date(now-60_000).toISOString(),expiresAt:new Date(now+3_600_000).toISOString(),reason:"Canonical joined UUID acquisition",
     expected:{admissionVersion:4,profileVersion:1,grantVersion:4,grantGeneration:4,directoryAuthorityState:"v5-fixture-inactive"},
     evidence:{changeTicket:"canonical-joined-acquisition",reviewer:"canonical-reviewer",bindingEvidenceSha256:evidence}}};
-  const acquisition=buildAuthorityArtifacts(saved.base,input,"provision");
+  const acquisition=saved.native.buildAuthorityArtifacts(saved.base,input,"provision");
   await applyArtifact(database,acquisition.provision.sql,acquisition.provision.name);
   const current=await database.prepare(`SELECT admission.version admission_version,profile.version profile_version,
       generation.generation grant_generation FROM native_staff_admissions admission
@@ -343,8 +398,8 @@ export async function establishCleanV3Authority(database:D1Database){
     .bind(canonicalOwner.accessSubject,canonicalOwner.operationsStaffId).run();
   await database.prepare(`CREATE TABLE ${AUTHORITY_MIGRATIONS_TABLE}(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE,applied_at TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL)`).run();
   await database.prepare("INSERT INTO native_business_areas(id,name,active) VALUES('area-default','Reviewed staging area',1)").run();
-  const base=artifactBase(),v3=buildAuthorityArtifacts(base,packet(3),"provision");
-  await applyArtifact(database,v3.provision.sql,v3.provision.name);cleanArtifacts.set(database as object,{base,v3});
+  const fixture0152=await historical0152ArtifactBase(),base=fixture0152.base,v3=fixture0152.native.buildAuthorityArtifacts(base,packet(3),"provision");
+  await applyArtifact(database,v3.provision.sql,v3.provision.name);cleanArtifacts.set(database as object,{base,v3,native:fixture0152.native});
 }
 
 export async function transitionCleanV3ToV4Acquisition(database:D1Database){
@@ -356,7 +411,7 @@ export async function transitionCleanV3ToV4Acquisition(database:D1Database){
     issuedAt:new Date(now-60_000).toISOString(),expiresAt:new Date(now+3_600_000).toISOString(),reason:"Canonical clean v4 acquisition",
     expected:{admissionVersion:2,profileVersion:1,grantVersion:2,grantGeneration:2,directoryAuthorityState:"v3-profile-only-inactive"},
     evidence:{changeTicket:"canonical-clean-v4",reviewer:"canonical-reviewer",bindingEvidenceSha256:evidence}}};
-  const v4=buildAuthorityArtifacts(saved.base,input,"provision");await applyArtifact(database,v4.provision.sql,v4.provision.name);
+  const v4=saved.native.buildAuthorityArtifacts(saved.base,input,"provision");await applyArtifact(database,v4.provision.sql,v4.provision.name);
   saved.v4=v4;
   return{staffId:canonicalOwner.operationsStaffId,accessSubject:canonicalOwner.accessSubject,admissionVersion:3,profileVersion:1,grantGeneration:4};
 }
@@ -371,7 +426,7 @@ export async function transitionCleanV4ToV6PortalAuthority(database:D1Database,a
     expected:{admissionVersion:4,profileVersion:1,grantVersion:4,grantGeneration:4,directoryGrantGeneration:6,
       profileGrantVersion:4,identityGrantVersion:2,portalGrantVersion:0,portalGrantState:"absent",directoryAuthorityState:"v4-acquisition-inactive"},
     evidence:{changeTicket:"canonical-clean-v6",reviewer:"canonical-reviewer",bindingEvidenceSha256:evidence}}};
-  const v6=buildAuthorityArtifacts(saved.base,input,"provision");await applyArtifact(database,v6.provision.sql,v6.provision.name);
+  const v6=saved.native.buildAuthorityArtifacts(saved.base,input,"provision");await applyArtifact(database,v6.provision.sql,v6.provision.name);
   cleanPortalArtifacts.set(database as object,v6);
   return{admissionVersion:5,profileVersion:1};
 }
