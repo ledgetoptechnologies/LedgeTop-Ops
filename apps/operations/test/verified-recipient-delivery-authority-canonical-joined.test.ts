@@ -70,10 +70,10 @@ describe("verified recipient authority canonical joined prerequisite",()=>{
   afterAll(async()=>runtime.dispose());
 
   it("creates the governed canonical fixture and rejects its non-UUID record as ineligible for workspace selection",async()=>{
-    const operations=await applyCanonicalChain(ops,"operations","0152_operations_portal_workspace_reservations.sql",true);
+    const operations=await applyCanonicalChain(ops,"operations","0165_project_alpha_inventory_generation_surface_scope.sql",true);
     const delivery=await applyCanonicalChain(client,"client","0221_verified_recipient_delivery_authority.sql");
-    expect(operations).toHaveLength(152);expect(delivery).toHaveLength(140);
-    expect(await ops.prepare("SELECT count(*) count FROM d1_migrations").first("count")).toBe(152);
+    expect(operations).toHaveLength(165);expect(delivery).toHaveLength(140);
+    expect(await ops.prepare("SELECT count(*) count FROM d1_migrations").first("count")).toBe(165);
     expect(await client.prepare("SELECT count(*) count FROM d1_migrations").first("count")).toBe(140);
     await expect(createAcquisitionPrerequisite(ops)).rejects.toThrow(/directory|authority|admission|denied|guard/i);
     expect(await ops.prepare("SELECT count(*) count FROM operations_directory_records WHERE record_id='60000000-0000-4000-8000-000000000001'").first("count")).toBe(0);
@@ -163,7 +163,7 @@ describe("verified recipient authority canonical joined prerequisite",()=>{
     const isolated=new Miniflare({modules:true,compatibilityDate:"2026-08-06",script:"export default {}",d1Databases:{OPS_DB:crypto.randomUUID()}});
     try{
       const database=await isolated.getD1Database("OPS_DB") as unknown as D1Database;
-      await applyCanonicalChain(database,"operations","0152_operations_portal_workspace_reservations.sql",true);
+      await applyCanonicalChain(database,"operations","0165_project_alpha_inventory_generation_surface_scope.sql",true);
       await establishCleanV3Authority(database);
       const written=await writeGovernedCanonicalUuidOrganization(database);
       expect(written.outcome).toMatchObject({status:"written",recordId:canonicalUuidOrganization.recordId,version:1});
@@ -219,7 +219,7 @@ describe("verified recipient authority canonical joined prerequisite",()=>{
           finalMigration:"0122_project_alpha_project_v2_canonical_activation.sql",
           chainSha256:"20f127ae3193884494a021ac2f1851f6c2db06834d6f94498850d315e02df5d7"}},
       });
-      expect(await database.prepare("SELECT count(*) count FROM d1_migrations").first("count")).toBe(152);
+      expect(await database.prepare("SELECT count(*) count FROM d1_migrations").first("count")).toBe(165);
       expect((await database.prepare(`SELECT grant_version,active,grant_generation FROM native_directory_grant_history
         WHERE staff_id=? AND permission='directory.profile.edit' AND scope_kind='global' ORDER BY grant_version`)
         .bind(canonicalOwner.operationsStaffId).all()).results).toEqual([{grant_version:1,active:0,grant_generation:1}]);
