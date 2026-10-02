@@ -69,6 +69,33 @@ reconciliation, retry/idempotency and portal acceptance remain release gates.
 Only after those gates pass should the owner production PA update checkpoint
 be requested.
 
+## Local paired configuration checkpoint — 2026-10-02
+
+- Reconstructed the missing default staging configurations with the reviewed
+  scaffold and existing validated non-secret values; no existing config was
+  overwritten. Full staging preflight passed.
+- Generated and checked the paired native recipient service-home profile.
+- Rendered the separate workspace profile through its pure builder, wrote the
+  pair locally, and revalidated the actual on-disk files against the bases.
+- All seven generated staging config files are ignored by Git, including the
+  scaffold's separate ops-sync base. No config or private values were published.
+- Client local build passed. Wrangler 4.118.0 dry-runs passed for both apps in
+  both windows (four bundles). Ops dry-runs also built the existing local
+  renderer image; no image upload or remote resource change occurred.
+- Workspace profile files are `apps/client/wrangler.staging.native-workspace-acceptance.json`
+  and `apps/operations/wrangler.staging.native-workspace-acceptance.json`.
+- Recipient profile files are `apps/client/wrangler.staging.native-portal-acceptance.json`
+  and `apps/operations/wrangler.staging.native-portal-acceptance.json`.
+- These are validated local candidates, not live activation evidence. Before
+  deployment, pin the accepted release revision, check actual deployed
+  configuration/bindings and migration readback, and retain the exact rollback
+  versions. GitHub publication and exact-head remote CI remain separate gates.
+- Open the workspace window Client then Ops; close it Ops then Client. Open the
+  recipient service-home window Ops then Client; close it Client then Ops. Do
+  not hand-combine the independently validated activation windows.
+- The synthetic onboarding permission rehearsal left no active grants. Actual
+  onboarding acceptance still needs its own reviewed bounded provision/revoke.
+
 Local evidence on 2026-10-02: 14 owner-handler tests passed, including exact
 folder reserve/revoke, domain-denial short circuit and replay; Operations
 typecheck/build passed, and 35 paired-workspace-profile/scaffold/preflight tests
