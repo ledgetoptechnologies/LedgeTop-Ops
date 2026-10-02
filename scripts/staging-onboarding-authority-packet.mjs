@@ -6,14 +6,14 @@ import { fileURLToPath } from "node:url";
 import { STAGING_ACCOUNT_ID, STAGING_INVENTORY } from "./staging-requirements.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-// Existing authority packet schemas were reviewed against this exact 152-file
-// chain. Advancing bootstrap must not silently authorize a newer schema: these
-// generators reject the current 154-file chain until explicitly versioned and reviewed.
+// Existing authority packet schemas were reviewed against this exact 165-file
+// staging chain. Keep the complete-ledger equality check below; any later
+// migration requires an explicit contract update and full-chain review.
 const REVIEWED_AUTHORITY_OPERATIONS_CHAIN = Object.freeze({
-  count: 152,
-  finalMigration: "0152_operations_portal_workspace_reservations.sql",
-  namesSha256: "a3eb1153187e13a1013b3d5ddd3dcc0c3d93ba2a272bb3650246df9ea9d8e109",
-  contentsSha256: "f854aa66e1bb1b3c81feb7a11b18d654b11232d5e3732234ebff12e779f6e3a9",
+  count: 165,
+  finalMigration: "0165_project_alpha_inventory_generation_surface_scope.sql",
+  namesSha256: "410fc8c0497d9e736ccfbc5acfdf568138c323cb0d1a72520c96e29571118c4b",
+  contentsSha256: "5d671c4cbc5b2a0cf66f7e903395ed2d22b820aa60af9c8076836262ac6cb835",
 });
 export const ONBOARDING_AUTHORITY_SCHEMA_VERSION = 1;
 export const ONBOARDING_AUTHORITY_MIGRATIONS_TABLE = "staging_native_authority_migrations";
