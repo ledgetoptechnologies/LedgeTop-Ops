@@ -10,6 +10,7 @@ import { ClientOnboardingStaff } from "./ClientOnboardingStaff";
 import { ClientPortalRecipientEnrollment } from "./ClientPortalRecipientEnrollment";
 import { OperationsNativeRecipientEnrollment } from "./OperationsNativeRecipientEnrollment";
 import { OperationsNativeDeliveryAuthority } from "./OperationsNativeDeliveryAuthority";
+import { OperationsPortalWorkspaceOwner } from "./OperationsPortalWorkspaceOwner";
 
 const nativeOwnerHost = window.location.protocol === "https:"
   && window.location.hostname === "ops-staging.ledgetopdroneservices.com"
@@ -21,7 +22,11 @@ const operationsRecipientEnrollmentRoute = nativeOwnerHost
   && window.location.pathname === "/administration/client-portal/operations-recipients";
 const operationsDeliveryAuthorityRoute = nativeOwnerHost
   && window.location.pathname === "/administration/client-portal/operations-delivery-authority";
-createRoot(document.getElementById("root")!).render(<StrictMode>{operationsDeliveryAuthorityRoute
+const operationsWorkspaceRoute = nativeOwnerHost
+  && window.location.pathname === "/administration/client-portal/operations-workspaces";
+createRoot(document.getElementById("root")!).render(<StrictMode>{operationsWorkspaceRoute
+  ? <OperationsPortalWorkspaceOwner />
+  : operationsDeliveryAuthorityRoute
   ? <OperationsNativeDeliveryAuthority />
   : operationsRecipientEnrollmentRoute
   ? <OperationsNativeRecipientEnrollment />

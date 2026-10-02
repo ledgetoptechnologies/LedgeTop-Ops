@@ -49,6 +49,8 @@
     "OPERATIONS_PORTAL_NATIVE_DELIVERY_OWNER_ENABLED": "true",
     "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_DISPATCH_ENABLED": "true",
     "OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED": "true",
+    "OPERATIONS_PORTAL_WORKSPACE_OWNER_ENABLED": "false",
+    "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_DISPATCH_ENABLED": "false",
     "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED": "false",
     "CLIENT_ONBOARDING_ADMIN_ENABLED": "false",
     "CLIENT_ONBOARDING_ADMIN_ORIGIN": "",
@@ -145,7 +147,8 @@
     { "binding": "OPS_INVENTORY_CATALOG_STAGING", "service": "ledgetop-clients-staging", "entrypoint": "OpsInventoryCatalogStagingIngress" },
     { "binding": "OPS_INVENTORY_CATALOG_PROMOTION", "service": "ledgetop-clients-staging", "entrypoint": "OpsInventoryCatalogPromotionCoordinator" },
     { "binding": "OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY", "service": "ledgetop-clients-staging", "entrypoint": "OperationsPortalNativeRecipientAuthorityIngress" },
-    { "binding": "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY", "service": "ledgetop-clients-staging", "entrypoint": "OperationsPortalNativeDeliveryAuthorityIngress" }
+    { "binding": "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY", "service": "ledgetop-clients-staging", "entrypoint": "OperationsPortalNativeDeliveryAuthorityIngress" },
+    { "binding": "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION", "service": "ledgetop-clients-staging", "entrypoint": "OperationsPortalWorkspacePublicationIngress" }
   ],
   "durable_objects": {
     "bindings": [{ "name": "THUMBNAIL_RENDERER", "class_name": "ThumbnailRendererContainer" }]

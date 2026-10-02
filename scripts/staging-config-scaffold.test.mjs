@@ -37,6 +37,10 @@ test("renders all three exact staging configs without placeholders", () => {
   assert.equal(configs.operations.vars.CLIENT_REQUEST_TRIAGE_TO, values.STAGING_TRIAGE_EMAIL);
   assert.equal(configs.operations.main, "src/worker/staging-native-authority-entrypoint.ts");
   assert.equal(configs.operations.vars.OPERATIONS_PORTAL_NATIVE_DELIVERY_OWNER_ENABLED, "true");
+  assert.equal(configs.operations.vars.OPERATIONS_PORTAL_WORKSPACE_OWNER_ENABLED, "false");
+  assert.equal(configs.operations.vars.OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_DISPATCH_ENABLED, "false");
+  assert(configs.operations.services.some(({ binding, service, entrypoint }) => binding === "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION"
+    && service === "ledgetop-clients-staging" && entrypoint === "OperationsPortalWorkspacePublicationIngress"));
   assert(configs.operations.services.some(({ binding, entrypoint }) => binding === "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY"
     && entrypoint === "OperationsPortalNativeDeliveryAuthorityIngress"));
   assert.equal(configs["ops-sync"].vars.CF_ACCESS_GROUP_ID, values.STAGING_ACCESS_GROUP_ID);
@@ -55,11 +59,13 @@ test("keeps native authority registration out of production Wrangler configs", (
     assert.equal(client.vars?.[flag], "false", `client production must preserve ${flag}=false`);
   for (const flag of ["CLIENT_PORTAL_NATIVE_RECIPIENT_OWNER_ENABLED",
     "OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY_DISPATCH_ENABLED", "OPERATIONS_PORTAL_NATIVE_DELIVERY_OWNER_ENABLED",
-    "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_DISPATCH_ENABLED", "OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED"])
+    "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_DISPATCH_ENABLED", "OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED",
+    "OPERATIONS_PORTAL_WORKSPACE_OWNER_ENABLED", "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_DISPATCH_ENABLED"])
     assert.equal(Object.hasOwn(operations.vars ?? {}, flag), false, `operations production must omit ${flag}`);
   for (const binding of ["OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT", "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER"])
     assert.equal((client.services ?? []).some(service => service.binding === binding), false, `client production must omit ${binding}`);
-  for (const binding of ["OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY", "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY"])
+  for (const binding of ["OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY", "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY",
+    "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION"])
     assert.equal((operations.services ?? []).some(service => service.binding === binding), false, `operations production must omit ${binding}`);
 });
 
