@@ -44,12 +44,12 @@ function artifactBase(){
   const root=resolve(fileURLToPath(new URL("../../../../",import.meta.url)));
   const base=mkdtempSync(join(tmpdir(),"ltds-canonical-authority-")),app=join(base,"apps","operations");
   const sourceMigrations=join(root,"apps","operations","migrations"),targetMigrations=join(app,"migrations");
-  const names=readdirSync(sourceMigrations).filter(name=>/^\d{4}_.+\.sql$/.test(name)&&name<="0152_operations_portal_workspace_reservations.sql").sort();
+  const names=readdirSync(sourceMigrations).filter(name=>/^\d{4}_.+\.sql$/.test(name)&&name<="0165_project_alpha_inventory_generation_surface_scope.sql").sort();
   const contents=names.map(name=>`${name}\0${createHash("sha256").update(readFileSync(join(sourceMigrations,name))).digest("hex")}`);
-  if(names.length!==152||names.at(-1)!=="0152_operations_portal_workspace_reservations.sql"
-    ||createHash("sha256").update(names.join("\n")).digest("hex")!=="a3eb1153187e13a1013b3d5ddd3dcc0c3d93ba2a272bb3650246df9ea9d8e109"
-    ||createHash("sha256").update(contents.join("\n")).digest("hex")!=="f854aa66e1bb1b3c81feb7a11b18d654b11232d5e3732234ebff12e779f6e3a9")
-    throw Error("canonical-reviewed-0152-migration-contract-mismatch");
+  if(names.length!==165||names.at(-1)!=="0165_project_alpha_inventory_generation_surface_scope.sql"
+    ||createHash("sha256").update(names.join("\n")).digest("hex")!=="410fc8c0497d9e736ccfbc5acfdf568138c323cb0d1a72520c96e29571118c4b"
+    ||createHash("sha256").update(contents.join("\n")).digest("hex")!=="5d671c4cbc5b2a0cf66f7e903395ed2d22b820aa60af9c8076836262ac6cb835")
+    throw Error("canonical-reviewed-0165-migration-contract-mismatch");
   mkdirSync(targetMigrations,{recursive:true});
   for(const name of names)copyFileSync(join(sourceMigrations,name),join(targetMigrations,name));
   mkdirSync(join(base,"docs","staging"),{recursive:true});
@@ -176,7 +176,7 @@ export async function establishHistoricalPreservedOnboardingLineage(database:D1D
   const historical=historicalProducer.buildAuthorityArtifacts(fixture.base,historicalInput,"revoke");
   await applyArtifact(database,historical.provision.sql,historical.provision.name);
   await applyArtifact(database,historical.revoke.sql,historical.revoke.name);
-  await applyCanonicalTail(database,fixture.bundle.operationsMigrationContract.finalMigration,"0152_operations_portal_workspace_reservations.sql");
+  await applyCanonicalTail(database,fixture.bundle.operationsMigrationContract.finalMigration,"0165_project_alpha_inventory_generation_surface_scope.sql");
   await database.prepare("INSERT INTO native_business_areas(id,name,active) VALUES('area-default','Reviewed staging area',1)").run();
   const base=artifactBase(),onboardingInput={schemaVersion:1,packet:{packetId:"staging-onboarding-authority-canonical-history",
     purpose:"client-onboarding-positive-acceptance",operatorKind:"synthetic",staffId:canonicalOwner.operationsStaffId,
