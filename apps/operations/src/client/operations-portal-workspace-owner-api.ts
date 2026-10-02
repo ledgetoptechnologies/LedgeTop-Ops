@@ -39,3 +39,35 @@ export async function recoverOperationsWorkspacePublication(csrfToken: string, o
     ...headers, "X-CSRF-Token": csrfToken, "Idempotency-Key": invocationId,
   }, body: JSON.stringify({ operationId, invocationId, reason }) }));
 }
+import type { OperationsPortalSharedProjectFolder, ConfirmOperationsPortalSharedProjectFolder }
+  from "../worker/operations-portal-shared-project-folders";
+
+function projectFolderProof(body: unknown, targetId: string, externalProjectId: string): OperationsPortalSharedProjectFolder {
+  if (!body || typeof body !== "object" || !("targetId" in body) || body.targetId !== targetId
+    || !("externalProjectId" in body) || body.externalProjectId !== externalProjectId
+    || !("projectName" in body) || typeof body.projectName !== "string"
+    || !("projectVersion" in body) || typeof body.projectVersion !== "number" || !Number.isSafeInteger(body.projectVersion)
+    || body.projectVersion < 1 || !("association" in body)) throw new Error("invalid_response");
+  const raw = body.association;
+  if (raw === null) return { targetId, externalProjectId, projectName: body.projectName, projectVersion: body.projectVersion, association: null };
+  if (!raw || typeof raw !== "object" || !("opsFolderProjectId" in raw) || typeof raw.opsFolderProjectId !== "string"
+    || !("opsDivisionId" in raw) || typeof raw.opsDivisionId !== "string"
+    || !("baseR2Prefix" in raw) || typeof raw.baseR2Prefix !== "string"
+    || !("baseMatchMethod" in raw) || (raw.baseMatchMethod !== "manual" && raw.baseMatchMethod !== "unique_rule" && raw.baseMatchMethod !== "project_alpha")
+    || !("baseConfirmedBy" in raw) || typeof raw.baseConfirmedBy !== "string"
+    || !("baseConfirmedAt" in raw) || typeof raw.baseConfirmedAt !== "string") throw new Error("invalid_response");
+  return { targetId, externalProjectId, projectName: body.projectName, projectVersion: body.projectVersion,
+    association: { opsFolderProjectId: raw.opsFolderProjectId, opsDivisionId: raw.opsDivisionId, baseR2Prefix: raw.baseR2Prefix,
+      baseMatchMethod: raw.baseMatchMethod, baseConfirmedBy: raw.baseConfirmedBy, baseConfirmedAt: raw.baseConfirmedAt } };
+}
+export async function lookupOperationsProjectFolder(targetId: string, externalProjectId: string) {
+  const query = new URLSearchParams({ targetId, externalProjectId });
+  return projectFolderProof(await value(await fetch(`${BASE}/project-folder?${query}`, {
+    credentials: "same-origin", cache: "no-store",
+  })), targetId, externalProjectId);
+}
+export async function confirmOperationsProjectFolder(csrfToken: string, body: ConfirmOperationsPortalSharedProjectFolder) {
+  return projectFolderProof(await value(await fetch(`${BASE}/confirm-project-folder`, { method: "POST", credentials: "same-origin",
+    headers: { ...headers, "X-CSRF-Token": csrfToken }, body: JSON.stringify(body),
+  })), body.targetId, body.externalProjectId);
+}

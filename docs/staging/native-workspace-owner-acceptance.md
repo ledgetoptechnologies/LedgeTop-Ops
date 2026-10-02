@@ -39,16 +39,23 @@ Project Alpha. Production registration and production access remain unchanged.
    The UI retains the exact request for replay and pre-fills the publication
    recovery ID. Do not generate a replacement workspace because an observation
    timed out. Recovery uses a new audited invocation for the same publication.
-5. Verify the staging Client publication receipt and exact snapshot, then add
-   only the explicitly selected synthetic folder through the owner page's folder
-   reservation form (`reserve-folder-and-publish`). Supply the exact current
-   workspace, project and publication revisions, confirmed Ops folder/division,
-   base R2 prefix and confirmation metadata, selected prefix, and client folder
-   binding ID. The existing domain service independently checks these inputs
-   and current permission; caller-supplied confirmation does not establish it.
+5. Verify the staging Client publication receipt and exact snapshot. In the
+   owner page, load the explicitly selected shared project by workspace target
+   and external project ID. Confirm its exact destination division/base prefix
+   using the returned project version and complete prior association proof.
+   The server derives the confirmer and confirmation timestamp; these are not
+   editable authority fields. Then reserve only the selected synthetic folder
+   (`reserve-folder-and-publish`), supplying workspace/publication revisions,
+   selected prefix, reservation ID and client folder binding ID. Project/base
+   confirmation fields are read-only, loaded from the authorized server proof.
+   The domain service independently rechecks these inputs and current authority.
    Folder revocation (`revoke-folder-and-publish`) checks the exact reservation
    revision and republishes the complete snapshot at the explicit publication
    revision. Neither operation changes a public delivery link or deletes files.
+   Retained uncertain requests may replay only while the visible workspace or
+   folder selection still exactly matches their original semantic fields.
+   If a selection changed, restore it or use publication recovery rather than
+   silently submitting the old retained operation under a new project.
 6. Enroll the verified synthetic recipient and test sign-in, selected service
    visibility, selected file access, unauthorized identity denial and revocation.
    Workspace publication alone grants no recipient access.

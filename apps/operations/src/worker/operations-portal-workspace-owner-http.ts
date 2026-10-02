@@ -10,6 +10,9 @@ import { reserveOperationsPortalWorkspacePublication, dispatchOperationsPortalWo
   from "./operations-portal-workspace-publication-outbox";
 import { reserveOperationsPortalWorkspacePublicationInvocation }
   from "./operations-portal-workspace-publication-invocations";
+import { lookupOperationsPortalSharedProjectFolder, confirmOperationsPortalSharedProjectFolder,
+  type ConfirmOperationsPortalSharedProjectFolder, type OperationsPortalSharedProjectFolderAssociation }
+  from "./operations-portal-shared-project-folders";
 
 const BASE = "/api/native-client-portal/operations-workspaces";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -96,6 +99,26 @@ function revokeFolderInput(value: unknown): RevokeOperationsPortalFolder | null 
   return expectedRevision === null || !reason ? null : { operationId: row.operationId, targetId: row.targetId,
     reservationId: row.reservationId, expectedRevision, reason };
 }
+function associationInput(value: unknown): OperationsPortalSharedProjectFolderAssociation | null {
+  const row = exact(value, ["opsFolderProjectId", "opsDivisionId", "baseR2Prefix", "baseMatchMethod", "baseConfirmedBy", "baseConfirmedAt"]);
+  if (!row) return null;
+  const opsFolderProjectId = text(row.opsFolderProjectId, 191), opsDivisionId = text(row.opsDivisionId, 191);
+  const baseR2Prefix = text(row.baseR2Prefix, 1000), baseConfirmedBy = text(row.baseConfirmedBy, 191);
+  const baseConfirmedAt = text(row.baseConfirmedAt, 64);
+  if (!opsFolderProjectId || !opsDivisionId || !baseR2Prefix || !baseConfirmedBy || !baseConfirmedAt
+    || (row.baseMatchMethod !== "manual" && row.baseMatchMethod !== "unique_rule" && row.baseMatchMethod !== "project_alpha")) return null;
+  return { opsFolderProjectId, opsDivisionId, baseR2Prefix, baseMatchMethod: row.baseMatchMethod, baseConfirmedBy, baseConfirmedAt };
+}
+function confirmProjectFolderInput(value: unknown): ConfirmOperationsPortalSharedProjectFolder | null {
+  const row = exact(value, ["targetId", "externalProjectId", "expectedProjectVersion", "expectedAssociation", "opsDivisionId", "baseR2Prefix"]);
+  if (!row || typeof row.targetId !== "string" || !UUID.test(row.targetId)) return null;
+  const externalProjectId = text(row.externalProjectId, 191), expectedProjectVersion = version(row.expectedProjectVersion);
+  const opsDivisionId = text(row.opsDivisionId, 191), baseR2Prefix = text(row.baseR2Prefix, 1000);
+  const expectedAssociation = row.expectedAssociation === null ? null : associationInput(row.expectedAssociation);
+  if (!externalProjectId || expectedProjectVersion === null || !opsDivisionId || !baseR2Prefix
+    || (row.expectedAssociation !== null && !expectedAssociation)) return null;
+  return { targetId: row.targetId, externalProjectId, expectedProjectVersion, expectedAssociation, opsDivisionId, baseR2Prefix };
+}
 function settings(d: OperationsPortalWorkspaceOwnerHttpDependencies) {
   try {
     const origin = new URL(d.configuration.origin), issuer = new URL(d.configuration.issuer);
@@ -143,15 +166,29 @@ export async function handleOperationsPortalWorkspaceOwnerHttp(request: Request,
   try {
     const config = settings(dependencies), url = new URL(request.url);
     const mutation = url.pathname === `${BASE}/reserve-and-publish`
-      || url.pathname === `${BASE}/reserve-folder-and-publish` || url.pathname === `${BASE}/revoke-folder-and-publish`;
+      || url.pathname === `${BASE}/reserve-folder-and-publish` || url.pathname === `${BASE}/revoke-folder-and-publish`
+      || url.pathname === `${BASE}/confirm-project-folder`;
     if (url.origin !== config.origin || (url.pathname !== `${BASE}/csrf` && !mutation
-      && url.pathname !== `${BASE}/recover-publication`))
+      && url.pathname !== `${BASE}/recover-publication` && url.pathname !== `${BASE}/project-folder`))
       throw new Failure(404, "not_found");
     const actor = await authenticateNativeStaffWithAdmissionVersion(request, dependencies.database, config.access);
     if (url.pathname === `${BASE}/csrf` && request.method === "GET")
       return response(200, { csrfToken: await csrf(config.secret, config.origin, actor) });
+    if (url.pathname === `${BASE}/project-folder`) {
+      if (request.method !== "GET") throw new Failure(405, "method_not_allowed");
+      const keys = [...url.searchParams.keys()].sort();
+      const targetId = url.searchParams.get("targetId"), externalProjectId = text(url.searchParams.get("externalProjectId"), 191);
+      if (keys.length !== 2 || keys[0] !== "externalProjectId" || keys[1] !== "targetId"
+        || !targetId || !UUID.test(targetId) || !externalProjectId) throw new Failure(400, "invalid_request");
+      return response(200, await lookupOperationsPortalSharedProjectFolder(dependencies.database, actor, { targetId, externalProjectId }));
+    }
     if (request.method !== "POST") throw new Failure(405, "method_not_allowed");
     sameOrigin(request, config.origin); await csrf(config.secret, config.origin, actor, request);
+    if (url.pathname === `${BASE}/confirm-project-folder`) {
+      const input = confirmProjectFolderInput(await readBoundedJson(request, 4096, "operations native project folder confirmation"));
+      if (!input) throw new Failure(400, "invalid_request");
+      return response(200, await confirmOperationsPortalSharedProjectFolder(dependencies.database, actor, input));
+    }
     if (url.pathname === `${BASE}/recover-publication`) {
       const body = exact(await readBoundedJson(request, 2048, "operations workspace publication recovery"),
         ["operationId", "invocationId", "reason"]);
@@ -216,6 +253,8 @@ export async function handleOperationsPortalWorkspaceOwnerHttp(request: Request,
     if (error instanceof HTTPException && (error.status === 400 || error.status === 413))
       return response(error.status, { error: error.status === 413 ? "payload_too_large" : "invalid_request" });
     const denied = error instanceof Error && (error.message.includes("_denied") || error.message === "native_staff_access_denied");
+    if (error instanceof Error && error.message === "operations_portal_shared_project_folder_invalid")
+      return response(400, { error: "invalid_request" });
     return response(denied ? 403 : 409, { error: denied ? "denied" : "conflict" });
   }
 }

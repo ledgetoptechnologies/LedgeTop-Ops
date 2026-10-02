@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const calls = vi.hoisted(() => ({ auth: vi.fn(), reserveWorkspace: vi.fn(), reserveFolder: vi.fn(), revokeFolder: vi.fn(),
-  reservePublication: vi.fn(), reserveInvocation: vi.fn(), dispatch: vi.fn() }));
+  reservePublication: vi.fn(), reserveInvocation: vi.fn(), dispatch: vi.fn(), lookupProjectFolder: vi.fn(), confirmProjectFolder: vi.fn() }));
 vi.mock("../src/worker/native-staff-auth", () => ({ authenticateNativeStaffWithAdmissionVersion: calls.auth }));
 vi.mock("../src/worker/operations-portal-workspace-reservations", () => ({
   reserveOperationsPortalWorkspace: calls.reserveWorkspace, reserveOperationsPortalFolder: calls.reserveFolder,
@@ -13,6 +13,10 @@ vi.mock("../src/worker/operations-portal-workspace-publication-outbox", () => ({
 }));
 vi.mock("../src/worker/operations-portal-workspace-publication-invocations", () => ({
   reserveOperationsPortalWorkspacePublicationInvocation: calls.reserveInvocation,
+}));
+vi.mock("../src/worker/operations-portal-shared-project-folders", () => ({
+  lookupOperationsPortalSharedProjectFolder: calls.lookupProjectFolder,
+  confirmOperationsPortalSharedProjectFolder: calls.confirmProjectFolder,
 }));
 import { handleOperationsPortalWorkspaceOwnerHttp as handle,
   type OperationsPortalWorkspaceOwnerHttpDependencies as Dependencies }
@@ -58,7 +62,46 @@ describe("operations portal workspace owner HTTP", () => {
       state: "revoked", replayed: false });
     calls.reservePublication.mockResolvedValue({ operationId: id(4), publicationRevision: 1, replayed: false });
     calls.reserveInvocation.mockResolvedValue({ state: "authorized", replayed: false });
-    calls.dispatch.mockResolvedValue({ operationId: id(4), status: "acknowledged" }); });
+    calls.dispatch.mockResolvedValue({ operationId: id(4), status: "acknowledged" });
+    calls.lookupProjectFolder.mockResolvedValue({ targetId: id(2), externalProjectId: "project-1", projectName: "Synthetic project",
+      projectVersion: 7, association: null });
+    calls.confirmProjectFolder.mockResolvedValue({ targetId: id(2), externalProjectId: "project-1", projectName: "Synthetic project",
+      projectVersion: 7, association: { opsFolderProjectId: "project-1", opsDivisionId: "division-1", baseR2Prefix: "synthetic/project/",
+        baseMatchMethod: "manual", baseConfirmedBy: "owner", baseConfirmedAt: "2026-10-02T12:00:00.000Z" } }); });
+
+  it("looks up an exact native project proof without calling publication operations", async () => {
+    const d = deps(), response = await handle(new Request(`${base}/project-folder?targetId=${id(2)}&externalProjectId=project-1`), d);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(calls.lookupProjectFolder).toHaveBeenCalledWith(d.database, actor, { targetId: id(2), externalProjectId: "project-1" });
+    expect(calls.reserveWorkspace).not.toHaveBeenCalled(); expect(calls.dispatch).not.toHaveBeenCalled();
+  });
+
+  it.each([`targetId=${id(2)}`, `targetId=${id(2)}&externalProjectId=project-1&actor=forged`,
+    `targetId=${id(2)}&targetId=${id(2)}&externalProjectId=project-1`, "targetId=invalid&externalProjectId=project-1"])
+    ("rejects malformed or broadened folder lookup: %s", async query => {
+      expect((await handle(new Request(`${base}/project-folder?${query}`), deps())).status).toBe(400);
+      expect(calls.lookupProjectFolder).not.toHaveBeenCalled();
+    });
+
+  it("confirmation requires CSRF and sends only the exact full prior proof to the native service", async () => {
+    const d = deps(), token = await csrf(d), body = { targetId: id(2), externalProjectId: "project-1", expectedProjectVersion: 7,
+      expectedAssociation: null, opsDivisionId: "division-1", baseR2Prefix: "synthetic/project/" };
+    expect((await handle(post("confirm-project-folder", body, "", id(31)), d)).status).toBe(403);
+    expect(calls.confirmProjectFolder).not.toHaveBeenCalled();
+    expect((await handle(post("confirm-project-folder", { ...body, confirmedBy: "forged" }, token, id(31)), d)).status).toBe(400);
+    expect((await handle(post("confirm-project-folder", { ...body, expectedAssociation: {} }, token, id(31)), d)).status).toBe(400);
+    const response = await handle(post("confirm-project-folder", body, token, id(31)), d);
+    expect(response.status).toBe(200);
+    expect(calls.confirmProjectFolder).toHaveBeenCalledWith(d.database, actor, body);
+    expect(calls.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("native folder authority denials remain denied and do not publish", async () => {
+    calls.lookupProjectFolder.mockRejectedValue(new Error("operations_portal_shared_project_folder_denied"));
+    expect((await handle(new Request(`${base}/project-folder?targetId=${id(2)}&externalProjectId=project-1`), deps())).status).toBe(403);
+    expect(calls.dispatch).not.toHaveBeenCalled();
+  });
 
   it.each([
     ["disabled", (d: Dependencies) => ({ ...d, configuration: { ...d.configuration, enabled: false } })],
@@ -83,7 +126,9 @@ describe("operations portal workspace owner HTTP", () => {
   it("requires the actor-bound CSRF token and exact same-origin browser context", async () => {
     const d = deps(), token = await csrf(d), body = input();
     expect((await handle(post("reserve-and-publish", body, "", id(1)), d)).status).toBe(403);
-    expect((await handle(post("reserve-and-publish", body, `${token.slice(0, -1)}0`, id(1)), d)).status).toBe(403);
+    const corrupted = `${token.slice(0, -1)}${token.endsWith("0") ? "1" : "0"}`;
+    expect(corrupted).not.toBe(token);
+    expect((await handle(post("reserve-and-publish", body, corrupted, id(1)), d)).status).toBe(403);
     const crossOrigin = post("reserve-and-publish", body, token, id(1));
     crossOrigin.headers.set("Origin", "https://evil.example.test");
     expect((await handle(crossOrigin, d)).status).toBe(403);

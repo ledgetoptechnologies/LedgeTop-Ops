@@ -1,11 +1,11 @@
 # Client onboarding native-only authority packet
 
-Status: **local validation passed; staging binding transport verified read-only**.
+Status: **local validation and live synthetic provision/revoke rehearsal passed**.
 The replaced initial draft failed its seven tests. The schema-version-2
 replacement passed 26 tests against the complete current 165-migration schema,
 including failures after a real grant write and trigger-generated history.
-No remote application or staging grant has been performed. Do not treat local
-test fixtures or a compiled artifact as evidence of live portal acceptance.
+The live rehearsal temporarily issued and then revoked exactly the two approved
+synthetic-area grants. This is not evidence of full live portal acceptance.
 
 This staging-only packet adds exactly two Directory allows to an already active, verified native operator:
 `directory.profile.edit` and `directory.identity.link`, both restricted to one reviewed synthetic business area.
@@ -76,10 +76,10 @@ both actor and target branches of management/admin fences, pending and leased
 Project/Directory outbox rejection, terminal outbox acceptance, and a
 trigger-injected post-write active-work fence with complete rollback.
 
-Read-only staging inspection on 2026-10-02 confirmed 165 applied migrations and
+Before the live rehearsal, read-only staging inspection on 2026-10-02 confirmed 165 applied migrations and
 zero `staging-native-only-` business areas. The dedicated binding configuration
 contains only the pinned staging account, Worker name, and `OPS_DB` database;
-no production resources or application secrets. A synthetic area must still be
+no production resources or application secrets. A synthetic area had to be
 explicitly selected and created before provision. No staging grant was issued
 by this inspection.
 
@@ -102,3 +102,61 @@ existing configured OAuth login; do not copy credential files into artifacts.
 Remote binding behavior and transactional batch semantics were checked against
 [Wrangler's API documentation](https://developers.cloudflare.com/workers/wrangler/api/#getplatformproxy)
 and [D1's batch documentation](https://developers.cloudflare.com/d1/worker-api/d1-database/#batch).
+
+## Live synthetic rehearsal — 2026-10-02
+
+- `scripts/staging-native-authority-packet-rehearsal.test.mjs`: 12 tests passed,
+  including durable recovery, lost responses, evidence-write failure, and
+  unsafe artifact paths. Independent review found no code blocker.
+- Fixed synthetic scope: `staging-native-only-portal-acceptance-20261002`.
+- Provision issued exactly two business-area allows; paired revoke deactivated
+  exactly those two rows. Prior admission/profile/grants/history were preserved.
+- Full readback verified cleanup. A subsequent `--recover` returned
+  `already-revoked` and `cleanupVerified: true`; authority was not restored.
+- Private evidence is retained under ignored `.backups/staging-native-authority/`
+  in approval directory `ee1e8419-ea40-4680-bd20-1d20c64dc256`. Never publish the
+  raw identity snapshots or canonical approval/receipt payloads.
+- Durable ledger/history rows and the synthetic business-area fixture remain;
+  no active packet grants remain. No production resources, clients, public
+  links, or portal enrollment were changed.
+
+Provision evidence must be safely saved before mutation. Later evidence-write
+failures cannot block revoke. If transport or current-state verification fails,
+recover from the exact existing `provision.json`; do not start a fresh packet
+or relax the state guards. Recovery preserves the original IDs, reads exact
+immutable paired receipts, and uses fresh database-clock timestamps.
+
+```text
+node scripts/staging-native-authority-packet-rehearsal.mjs --config apps/operations/wrangler.staging.native-authority-binding.json --confirm-synthetic-provision-and-paired-revoke
+node scripts/staging-native-authority-packet-rehearsal.mjs --config apps/operations/wrangler.staging.native-authority-binding.json --recover .backups/staging-native-authority/<approval-id>/provision.json
+```
+
+The standalone rehearsal does not retain permissions for portal use. A live
+onboarding acceptance window must use a separately reviewed provision/paired
+revoke around the actual UI flow; do not claim the rehearsal creates clients.
+
+## Native folder acceptance follow-up
+
+- The local owner UI now loads an authorized shared-project folder proof rather
+  than asking the operator to enter confirmation identity or timestamps.
+- Confirmation and folder publication remain separate actions. These changes
+  do not activate a recipient or alter an existing public link.
+- A retained uncertain folder request is checked against every visible folder
+  field and the publication revision/reason before retry. Switching projects
+  cannot silently replay a request for the previous project.
+- Focused owner HTTP and workspace/folder retry regressions passed 26/26, and
+  client API regressions passed 5/5. The six real-D1 folder service cases passed
+  against the complete canonical chain through migration 0165. The Operations
+  TypeScript check and local build passed. Independent review found no remaining
+  code blocker after old-division authority, monotonic confirmation and retry
+  selection fixes. The build reported its existing large-client-chunk warning.
+- Final independent root run passed all 37 cases together across four files in
+  52.67 seconds. An earlier combined run exposed a test-only CSRF corruption
+  that could accidentally equal the original token; the fixture now guarantees
+  a different valid-format token. Runtime CSRF checks were not changed.
+- Full live portal acceptance and production readiness are not yet established.
+  Latest-chain local execution does not replace signed-in staging acceptance.
+- Remote publication of the new scripts and evidence documentation is awaiting
+  explicit approval because the repository may be public and the payload includes
+  internal staging identifiers and non-secret rehearsal metadata. Raw private
+  evidence, credentials, and identity snapshots must remain excluded.
