@@ -96,6 +96,20 @@ be requested.
 - The synthetic onboarding permission rehearsal left no active grants. Actual
   onboarding acceptance still needs its own reviewed bounded provision/revoke.
 
+## Historical joined-fixture recheck — 2026-10-02
+
+- The long-lived full Operations run started at 12:02, before the historical
+  authority-producer pin correction committed at 12:59 as `17b532b9`. It later
+  reported four failures in the canonical joined recipient/delivery suite.
+- An independent isolated rerun of that exact suite against clean current
+  commit `5a524c48` passed all four tests, exit 0, in 175.09 seconds. No source
+  or authorization guard changes were required.
+- The current-revision result supports the corrected historical fixture; it
+  does not turn the earlier mixed-time full run into current-head acceptance,
+  nor establish live PA sync, recipient sign-in or file-access readiness.
+- Preserve the original full run and its diagnostic result independently;
+  do not restart it solely because it is quiet or overwrite its failure evidence.
+
 Local evidence on 2026-10-02: 14 owner-handler tests passed, including exact
 folder reserve/revoke, domain-denial short circuit and replay; Operations
 typecheck/build passed, and 35 paired-workspace-profile/scaffold/preflight tests
