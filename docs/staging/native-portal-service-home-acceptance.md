@@ -44,6 +44,12 @@ Open the private RPC first by deploying the reviewed Operations candidate, then
 deploy the reviewed Client candidate. Do not hand-copy one of these flags into
 the base config and do not deploy a partial profile.
 
+Before opening the window, record both current immutable version IDs, their
+traffic weights, and the deployed configuration/binding inventory. A generated
+local base is not automatically equivalent to the deployed configuration.
+Resolve non-profile drift before upload; do not overwrite existing PA test,
+onboarding, or notification settings as an incidental profile change.
+
 Immediately after acceptance, restore default-off in the opposite order:
 
 1. deploy a reviewed Client version from `apps/client/wrangler.staging.json`;
@@ -54,3 +60,9 @@ Immediately after acceptance, restore default-off in the opposite order:
 Closing Client first removes the reachable service-home route before the
 Operations private RPC is disabled. The base and production configs are never
 rewritten by this generator, so they remain the rollback inputs.
+
+Those base files are valid rollback inputs only when their settings match the
+reviewed pre-window deployment. Otherwise restore the recorded immutable
+default-off versions, Client first then Operations, and verify the actual
+deployed gates and bindings. A local `staging:check` pass alone cannot prove
+remote rollback or configuration parity.

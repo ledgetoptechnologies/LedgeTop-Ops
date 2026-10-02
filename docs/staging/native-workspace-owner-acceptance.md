@@ -96,6 +96,33 @@ be requested.
 - The synthetic onboarding permission rehearsal left no active grants. Actual
   onboarding acceptance still needs its own reviewed bounded provision/revoke.
 
+## Live pre-window inventory — 2026-10-02
+
+- Read-only deployment inventory confirms Operations version
+  `363c9714-bd6f-4eeb-96df-fef681f4a44a` and Client version
+  `2512de43-cd37-4118-97d9-d0c241a3fabd`, each at 100 percent traffic.
+  These are rollback reference points, not acceptance of the new candidate.
+- The generated Operations base differs from the deployed version in five
+  PA acceptance/transport flags, onboarding enablement/origin, and notification
+  sender/triage settings. The Client invitation sender also differs. Preserving
+  the existing PA/onboarding flags fails the default-off base preflight, so
+  these differences need an explicit reviewed window plan, not blind copying
+  or bypassing the validator.
+- The generated workspace configuration also lacks the exact owner-page
+  Worker-first route. Fix the canonical staging inventory and add regression
+  coverage before rebuilding or uploading a candidate. The existing server
+  gates must receive that request even when the feature is disabled.
+- No version upload, deployment, gate change, or new grant occurred during
+  these inventory checks. Re-read current versions before a later deployment.
+- Remote migration-list checks report no pending Operations or Client staging
+  migrations. This is a ledger check, not proof of live authorization or content.
+- Secret-name inventory confirms both
+  `CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_CSRF_SECRET` and
+  `CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_HMAC_SECRET` are absent from
+  Client staging. Provision fresh staging-only secrets through the reviewed
+  secret workflow before enrollment/content acceptance, without printing their
+  values. The name check does not validate secret contents or runtime health.
+
 ## Historical joined-fixture recheck — 2026-10-02
 
 - The long-lived full Operations run started at 12:02, before the historical
