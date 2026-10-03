@@ -59,8 +59,11 @@ async function migrate(): Promise<void> {
       source_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,
       external_project_id TEXT,project_alpha_public_id TEXT);`;
   await database.batch(splitD1MigrationStatements(prerequisites).map(statement => database.prepare(statement)));
-  const sql = readFileSync(new URL("0125_project_alpha_api_v2_inventory_observations.sql", directory), "utf8");
-  await database.batch(splitD1MigrationStatements(sql).map(statement => database.prepare(statement)));
+  for (const name of ["0125_project_alpha_api_v2_inventory_observations.sql",
+    "0128_project_alpha_inventory_generation_surface_scope.sql"]) {
+    const sql = readFileSync(new URL(name, directory), "utf8");
+    await database.batch(splitD1MigrationStatements(sql).map(statement => database.prepare(statement)));
+  }
 }
 
 function directoryObserved(overrides: Record<string, unknown> = {}) {
