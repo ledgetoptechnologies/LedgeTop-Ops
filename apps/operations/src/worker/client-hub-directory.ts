@@ -146,14 +146,81 @@ export function clientHubDetailPath(root: Pick<ClientHubRoot, "source_id" | "roo
 }
 const visibleRoot = "root.status NOT IN ('closed','inactive')";
 const visibleSource = `(root.source_id='delivery:local' OR ${projectAlphaReadVisibleSql("root.source_id")})`;
+const canonicalBusinessMapping = `(SELECT min(mapping.project_alpha_public_id)
+  FROM project_alpha_active_directory_mappings mapping
+  JOIN operations_directory_records record ON record.record_id=mapping.external_id
+    AND record.record_kind=mapping.resource_type
+  JOIN operations_directory_revisions revision ON revision.record_id=record.record_id
+    AND revision.version=record.current_version
+  JOIN project_alpha_api_v2_directory_observations_current observation
+    ON observation.source_id=mapping.source_id
+    AND observation.source_instance_id=mapping.source_instance_id
+    AND observation.application_id=mapping.application_id
+    AND observation.history_epoch_id=mapping.history_epoch_id
+    AND observation.resource_type=mapping.resource_type
+    AND observation.project_alpha_public_id=mapping.project_alpha_public_id
+    AND observation.present=1 AND observation.last_action='upsert' AND observation.has_conflict=0
+    AND observation.binding_external_id=mapping.external_id AND observation.binding_status='active'
+    AND observation.binding_resource_revision=observation.resource_revision
+  LEFT JOIN operations_directory_client_organizations relationship
+    ON relationship.client_record_id=mapping.external_id AND mapping.resource_type='client'
+  WHERE mapping.source_id=root.source_id AND mapping.external_id=root.public_id
+    AND mapping.resource_type=CASE root.kind WHEN 'organization' THEN 'organization' ELSE 'client' END
+    AND (root.kind='organization' OR relationship.organization_record_id IS NULL)
+    AND NOT EXISTS(SELECT 1 FROM project_alpha_active_directory_mappings candidate
+      WHERE candidate.source_id=mapping.source_id AND candidate.resource_type=mapping.resource_type
+        AND (candidate.external_id=mapping.external_id
+          OR candidate.project_alpha_public_id=mapping.project_alpha_public_id)
+        AND (candidate.external_id<>mapping.external_id
+          OR candidate.project_alpha_public_id<>mapping.project_alpha_public_id
+          OR candidate.provenance_id<>mapping.provenance_id
+          OR candidate.source_instance_id<>mapping.source_instance_id
+          OR candidate.application_id<>mapping.application_id
+          OR candidate.history_epoch_id<>mapping.history_epoch_id))
+  HAVING count(*)=1)`;
+const canonicalBusinessMappingCount = `(SELECT count(*)
+  FROM project_alpha_active_directory_mappings mapping
+  JOIN operations_directory_records record ON record.record_id=mapping.external_id
+    AND record.record_kind=mapping.resource_type
+  JOIN operations_directory_revisions revision ON revision.record_id=record.record_id
+    AND revision.version=record.current_version
+  JOIN project_alpha_api_v2_directory_observations_current observation
+    ON observation.source_id=mapping.source_id
+    AND observation.source_instance_id=mapping.source_instance_id
+    AND observation.application_id=mapping.application_id
+    AND observation.history_epoch_id=mapping.history_epoch_id
+    AND observation.resource_type=mapping.resource_type
+    AND observation.project_alpha_public_id=mapping.project_alpha_public_id
+    AND observation.present=1 AND observation.last_action='upsert' AND observation.has_conflict=0
+    AND observation.binding_external_id=mapping.external_id AND observation.binding_status='active'
+    AND observation.binding_resource_revision=observation.resource_revision
+  LEFT JOIN operations_directory_client_organizations relationship
+    ON relationship.client_record_id=mapping.external_id AND mapping.resource_type='client'
+  WHERE mapping.source_id=root.source_id AND mapping.external_id=root.public_id
+    AND mapping.resource_type=CASE root.kind WHEN 'organization' THEN 'organization' ELSE 'client' END
+    AND (root.kind='organization' OR relationship.organization_record_id IS NULL)
+    AND NOT EXISTS(SELECT 1 FROM project_alpha_active_directory_mappings candidate
+      WHERE candidate.source_id=mapping.source_id AND candidate.resource_type=mapping.resource_type
+        AND (candidate.external_id=mapping.external_id
+          OR candidate.project_alpha_public_id=mapping.project_alpha_public_id)
+        AND (candidate.external_id<>mapping.external_id
+          OR candidate.project_alpha_public_id<>mapping.project_alpha_public_id
+          OR candidate.provenance_id<>mapping.provenance_id
+          OR candidate.source_instance_id<>mapping.source_instance_id
+          OR candidate.application_id<>mapping.application_id
+          OR candidate.history_epoch_id<>mapping.history_epoch_id)))`;
+const canonicalBusinessMappingExists = `EXISTS(SELECT 1 FROM project_alpha_active_directory_mappings mapping
+  WHERE mapping.source_id=root.source_id AND mapping.external_id=root.public_id
+    AND mapping.resource_type=CASE root.kind WHEN 'organization' THEN 'organization' ELSE 'client' END)`;
 // An index refresh can lag an authoritative business reassignment/deactivation.
 // Only live business roots belong to this source. A portal UUID by itself never
 // establishes a business-root mapping, even when it resembles a record ID.
 const liveBusinessRoot = `(root.root_namespace<>'business' OR (
-  (root.kind='organization' AND EXISTS (SELECT 1 FROM pa_organizations organization
+  (NOT ${canonicalBusinessMappingExists} AND root.kind='organization' AND EXISTS (SELECT 1 FROM pa_organizations organization
     WHERE organization.id=root.public_id AND organization.projection_source_id=root.source_id AND organization.active=1)) OR
-  (root.kind='standalone_client' AND EXISTS (SELECT 1 FROM pa_clients client
-    WHERE client.id=root.public_id AND client.projection_source_id=root.source_id AND client.active=1 AND client.organization_id IS NULL))))`;
+  (NOT ${canonicalBusinessMappingExists} AND root.kind='standalone_client' AND EXISTS (SELECT 1 FROM pa_clients client
+    WHERE client.id=root.public_id AND client.projection_source_id=root.source_id AND client.active=1 AND client.organization_id IS NULL)) OR
+  ${canonicalBusinessMapping} IS NOT NULL))`;
 
 /** Recheck the native admission, profile, and grant epoch from the primary.
  * Review-only profile data is never authorized by the legacy staff principal. */
@@ -221,9 +288,11 @@ function reviewedRowPermissionSql(): string {
               WHERE scope.record_id=display.record_id AND scope.active=1 AND scope.division_id=deny_row.division_id)))))`;
 }
 const currentMapping = `CASE WHEN root.root_namespace='business'
-  THEN CASE WHEN root.kind='organization' THEN (SELECT ${validatedUniquePublicIdExpression("pa_organizations", "source")}
+  THEN CASE WHEN ${canonicalBusinessMappingCount}=1 THEN ${canonicalBusinessMapping}
+    WHEN NOT ${canonicalBusinessMappingExists} THEN CASE WHEN root.kind='organization' THEN (SELECT ${validatedUniquePublicIdExpression("pa_organizations", "source")}
     FROM pa_organizations source WHERE source.id=root.public_id AND source.projection_source_id=root.source_id)
-  ELSE (SELECT ${validatedUniquePublicIdExpression("pa_clients", "source")} FROM pa_clients source WHERE source.id=root.public_id AND source.projection_source_id=root.source_id) END
+    ELSE (SELECT ${validatedUniquePublicIdExpression("pa_clients", "source")} FROM pa_clients source WHERE source.id=root.public_id AND source.projection_source_id=root.source_id) END
+    ELSE NULL END
   ELSE root.pa_public_id END`;
 function unavailable(): never {
   throw new HTTPException(503, { message: "The client directory is being prepared; please retry shortly" });
@@ -431,6 +500,74 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
             SELECT 1 FROM pa_clients contact WHERE contact.id=search.record_id AND contact.projection_source_id=root.source_id AND contact.active=1 AND
               ((root.kind='organization' AND contact.organization_id=root.public_id) OR
                (root.kind='standalone_client' AND contact.id=root.public_id AND contact.organization_id IS NULL))))
+          OR (search.record_type='ops_directory_client' AND search.project_id IS NULL AND EXISTS (
+            SELECT 1 FROM project_alpha_active_directory_mappings contact
+            JOIN operations_directory_records contact_record ON contact_record.record_id=contact.external_id
+              AND contact_record.record_kind=contact.resource_type
+            JOIN operations_directory_revisions contact_revision ON contact_revision.record_id=contact_record.record_id
+              AND contact_revision.version=contact_record.current_version
+            JOIN project_alpha_api_v2_directory_observations_current contact_observation
+              ON contact_observation.source_id=contact.source_id
+              AND contact_observation.source_instance_id=contact.source_instance_id
+              AND contact_observation.application_id=contact.application_id
+              AND contact_observation.history_epoch_id=contact.history_epoch_id
+              AND contact_observation.resource_type=contact.resource_type
+              AND contact_observation.project_alpha_public_id=contact.project_alpha_public_id
+              AND contact_observation.present=1 AND contact_observation.last_action='upsert'
+              AND contact_observation.has_conflict=0
+              AND contact_observation.binding_external_id=contact.external_id
+              AND contact_observation.binding_status='active'
+              AND contact_observation.binding_resource_revision=contact_observation.resource_revision
+            JOIN pa_connectors contact_connector ON contact_connector.source_id=contact.source_id
+              AND contact_connector.state='active' AND contact_connector.read_visible=1
+            LEFT JOIN operations_directory_client_organizations contact_relationship
+              ON contact_relationship.client_record_id=contact.external_id
+            LEFT JOIN project_alpha_active_directory_mappings contact_parent
+              ON contact_parent.external_id=contact_relationship.organization_record_id
+              AND contact_parent.source_id=contact.source_id
+              AND contact_parent.source_instance_id=contact.source_instance_id
+              AND contact_parent.application_id=contact.application_id
+              AND contact_parent.history_epoch_id=contact.history_epoch_id
+              AND contact_parent.resource_type='organization'
+            LEFT JOIN project_alpha_api_v2_directory_observations_current contact_parent_observation
+              ON contact_parent_observation.source_id=contact_parent.source_id
+              AND contact_parent_observation.source_instance_id=contact_parent.source_instance_id
+              AND contact_parent_observation.application_id=contact_parent.application_id
+              AND contact_parent_observation.history_epoch_id=contact_parent.history_epoch_id
+              AND contact_parent_observation.resource_type=contact_parent.resource_type
+              AND contact_parent_observation.project_alpha_public_id=contact_parent.project_alpha_public_id
+              AND contact_parent_observation.present=1 AND contact_parent_observation.last_action='upsert'
+              AND contact_parent_observation.has_conflict=0
+              AND contact_parent_observation.binding_external_id=contact_parent.external_id
+              AND contact_parent_observation.binding_status='active'
+              AND contact_parent_observation.binding_resource_revision=contact_parent_observation.resource_revision
+            WHERE contact.source_id=root.source_id AND contact.resource_type='client'
+              AND contact.external_id=search.record_id
+              AND NOT EXISTS(SELECT 1 FROM project_alpha_active_directory_mappings duplicate
+                WHERE duplicate.source_id=contact.source_id AND duplicate.resource_type='client'
+                  AND (duplicate.external_id=contact.external_id
+                    OR duplicate.project_alpha_public_id=contact.project_alpha_public_id)
+                  AND (duplicate.external_id<>contact.external_id
+                    OR duplicate.project_alpha_public_id<>contact.project_alpha_public_id
+                    OR duplicate.provenance_id<>contact.provenance_id
+                    OR duplicate.source_instance_id<>contact.source_instance_id
+                    OR duplicate.application_id<>contact.application_id
+                    OR duplicate.history_epoch_id<>contact.history_epoch_id))
+              AND ((root.kind='organization' AND contact_parent.external_id=root.public_id
+                  AND contact_parent_observation.source_id IS NOT NULL
+                  AND NOT EXISTS(SELECT 1 FROM project_alpha_active_directory_mappings duplicate_parent
+                    WHERE duplicate_parent.source_id=contact_parent.source_id
+                      AND duplicate_parent.resource_type='organization'
+                      AND (duplicate_parent.external_id=contact_parent.external_id
+                        OR duplicate_parent.project_alpha_public_id=contact_parent.project_alpha_public_id)
+                      AND (duplicate_parent.external_id<>contact_parent.external_id
+                        OR duplicate_parent.project_alpha_public_id<>contact_parent.project_alpha_public_id
+                        OR duplicate_parent.provenance_id<>contact_parent.provenance_id
+                        OR duplicate_parent.source_instance_id<>contact_parent.source_instance_id
+                        OR duplicate_parent.application_id<>contact_parent.application_id
+                        OR duplicate_parent.history_epoch_id<>contact_parent.history_epoch_id)))
+                OR (root.kind='standalone_client' AND contact.external_id=root.public_id
+                  AND contact_relationship.organization_record_id IS NULL))))
           OR (search.record_type='pa_project' AND search.record_id=search.project_id AND EXISTS (
             SELECT 1 FROM pa_projects p LEFT JOIN pa_clients owner ON owner.id=p.client_id AND owner.projection_source_id=p.projection_source_id AND owner.active=1
             WHERE p.id=search.project_id AND p.projection_source_id=root.source_id AND ${filter.sql} AND

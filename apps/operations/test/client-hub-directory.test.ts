@@ -70,6 +70,10 @@ describe("source-qualified Client Hub directory", () => {
       CREATE TABLE project_alpha_directory_read_adoption_field_review_audit(receipt_id TEXT);
       CREATE TABLE operations_directory_records(record_id TEXT PRIMARY KEY,record_kind TEXT,current_version INTEGER);
       CREATE TABLE operations_directory_revisions(record_id TEXT,version INTEGER,profile_json TEXT,PRIMARY KEY(record_id,version));
+      CREATE TABLE operations_directory_client_organizations(client_record_id TEXT PRIMARY KEY,organization_record_id TEXT,relationship_version INTEGER);
+      CREATE TABLE project_alpha_active_directory_mappings(source_id TEXT,resource_type TEXT,external_id TEXT,
+        project_alpha_public_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,
+        provenance_id TEXT,mapping_kind TEXT,created_at TEXT);
       CREATE TABLE project_alpha_api_v2_directory_observations_current(
         source_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,resource_type TEXT,
         project_alpha_public_id TEXT,present INTEGER,last_action TEXT,has_conflict INTEGER,resource_revision TEXT,
@@ -122,6 +126,54 @@ describe("source-qualified Client Hub directory", () => {
     expect(populated0166Upgrade.search).toEqual({ record_type: "account", record_id: "upgrade-client",
       field: "name", normalized_value: "preserved upgrade client" });
     expect(populated0166Upgrade.foreignKeys).toEqual([]);
+  });
+
+  it("authorizes canonical Directory contact name and email search through current ownership", async () => {
+    await registerVisibleTestSource(db, "project-alpha:primary", "Project Alpha");
+    await db.prepare("UPDATE pa_connectors SET state='active',version=version+1 WHERE source_id='project-alpha:primary'").run();
+    const organizationId = "6".repeat(32), clientId = "7".repeat(32);
+    await db.batch([
+      db.prepare("INSERT INTO operations_directory_records VALUES('search-org','organization',1)"),
+      db.prepare("INSERT INTO operations_directory_records VALUES('search-client','client',1)"),
+      db.prepare("INSERT INTO operations_directory_revisions VALUES('search-org',1,?)")
+        .bind(JSON.stringify({ name: "Search Organization" })),
+      db.prepare("INSERT INTO operations_directory_revisions VALUES('search-client',1,?)")
+        .bind(JSON.stringify({ name: "Astral 😀 Contact", email: "canonical-search@example.test" })),
+      db.prepare(`INSERT INTO project_alpha_active_directory_mappings
+        VALUES('project-alpha:primary','organization','search-org',?,'search-instance','search-app','search-history','org-proof','acquired','2026-01-01')`)
+        .bind(organizationId),
+      db.prepare(`INSERT INTO project_alpha_active_directory_mappings
+        VALUES('project-alpha:primary','client','search-client',?,'search-instance','search-app','search-history','client-proof','acquired','2026-01-01')`)
+        .bind(clientId),
+      db.prepare(`INSERT INTO project_alpha_api_v2_directory_observations_current VALUES
+        ('project-alpha:primary','search-instance','search-app','search-history','organization',?,1,'upsert',0,'org-rev','search-org','active','org-rev','org-request')`)
+        .bind(organizationId),
+      db.prepare(`INSERT INTO project_alpha_api_v2_directory_observations_current VALUES
+        ('project-alpha:primary','search-instance','search-app','search-history','client',?,1,'upsert',0,'client-rev','search-client','active','client-rev','client-request')`)
+        .bind(clientId),
+      db.prepare("INSERT INTO operations_directory_client_organizations VALUES('search-client','search-org',1)"),
+      db.prepare(`INSERT INTO client_hub_roots(source_id,root_namespace,kind,public_id,pa_public_id,mapping_status,
+        display_name,sort_name,status,portal_status,account_count,project_count,request_count,contact_count)
+        VALUES('project-alpha:primary','business','organization','search-org',?,'mapped','Search Organization','search organization',
+          'active','not_provisioned',0,0,0,1)`).bind(organizationId),
+      db.prepare(`INSERT INTO client_hub_search_values
+        (source_id,root_namespace,kind,root_public_id,record_type,record_id,field,normalized_value)
+        VALUES('project-alpha:primary','business','organization','search-org','ops_directory_client','search-client','contact','astral 😀 contact')`),
+      db.prepare(`INSERT INTO client_hub_search_values
+        (source_id,root_namespace,kind,root_public_id,record_type,record_id,field,normalized_value)
+        VALUES('project-alpha:primary','business','organization','search-org','ops_directory_client','search-client','email','canonical-search@example.test')`),
+    ]);
+    expect((await listClientHubRoots(env, staff, { q: "astral 😀" })).clients.map(row => row.public_id)).toEqual(["search-org"]);
+    expect((await listClientHubRoots(env, staff, { q: "canonical-search@example" })).clients.map(row => row.public_id)).toEqual(["search-org"]);
+
+    // An active mapping with the same local/PA identity but a different
+    // authority tuple is ambiguous even if only the original tuple has a
+    // current observation. Search must fail closed instead of accepting the
+    // first tuple that happens to join.
+    await db.prepare(`INSERT INTO project_alpha_active_directory_mappings
+      VALUES('project-alpha:primary','client','search-client',?,'other-instance','other-app','other-history',
+        'other-proof','acquired','2026-01-02')`).bind(clientId).run();
+    expect((await listClientHubRoots(env, staff, { q: "canonical-search@example" })).clients).toEqual([]);
   });
 
   it("hydrates a revoked root independently of workspace projection readiness", async () => {

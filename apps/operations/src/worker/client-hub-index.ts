@@ -10,11 +10,12 @@ const PAGE_SIZE = 20;
 // Count statements, including statements within D1 batches. A contact page can
 // write three fields per record; a page count alone cannot bound subrequests.
 const QUERY_BUDGET = 800;
-const PHASES = ["organizations", "standalone", "reviewed", "workspaces", "accounts", "contacts", "reviewed_contacts", "principals", "projects", "sweep"] as const;
+const PHASES = ["canonical_organizations", "canonical_standalone", "organizations", "standalone", "reviewed", "workspaces", "accounts",
+  "canonical_contacts", "contacts", "reviewed_contacts", "principals", "projects", "sweep"] as const;
 type Phase = typeof PHASES[number];
 const PAGE_QUERY_COST: Record<Phase, number> = {
-  organizations: 45, standalone: 45, workspaces: 46, accounts: 45,
-  reviewed: 45, contacts: 123, reviewed_contacts: 85, principals: 84, projects: 43, sweep: 4,
+  canonical_organizations: 48, canonical_standalone: 48, organizations: 45, standalone: 45, workspaces: 46, accounts: 45,
+  reviewed: 45, canonical_contacts: 123, contacts: 123, reviewed_contacts: 85, principals: 84, projects: 43, sweep: 4,
 };
 type Kind = "organization" | "standalone_client";
 type Namespace = "business" | "portal" | "account" | "review";
@@ -39,6 +40,34 @@ interface SearchValue {
 }
 const normalize = (value: string) => value.normalize("NFC").toLocaleLowerCase("en-US").trim();
 const leaseGuard = "EXISTS(SELECT 1 FROM client_hub_directory_state WHERE id='directory' AND lease_token=? AND lease_until>datetime('now'))";
+const currentCanonicalMapping = (mapping: string, observation: string) => `
+  ${observation}.source_id=${mapping}.source_id
+  AND ${observation}.source_instance_id=${mapping}.source_instance_id
+  AND ${observation}.application_id=${mapping}.application_id
+  AND ${observation}.history_epoch_id=${mapping}.history_epoch_id
+  AND ${observation}.resource_type=${mapping}.resource_type
+  AND ${observation}.project_alpha_public_id=${mapping}.project_alpha_public_id
+  AND ${observation}.present=1 AND ${observation}.last_action='upsert' AND ${observation}.has_conflict=0
+  AND ${observation}.binding_external_id=${mapping}.external_id
+  AND ${observation}.binding_status='active'
+  AND ${observation}.binding_resource_revision=${observation}.resource_revision`;
+const uniqueCurrentCanonicalMapping = (mapping: string) => `1=(SELECT count(*)
+  FROM project_alpha_active_directory_mappings candidate
+  JOIN project_alpha_api_v2_directory_observations_current candidate_observation
+    ON ${currentCanonicalMapping("candidate", "candidate_observation")}
+  WHERE candidate.source_id=${mapping}.source_id
+    AND candidate.resource_type=${mapping}.resource_type
+    AND (candidate.project_alpha_public_id=${mapping}.project_alpha_public_id
+      OR candidate.external_id=${mapping}.external_id))`;
+
+function tupleCursor(cursor: string): [string, string] {
+  if (!cursor) return ["", ""];
+  try {
+    const parsed: unknown = JSON.parse(cursor);
+    return Array.isArray(parsed) && parsed.length === 2 && parsed.every(value => typeof value === "string")
+      ? parsed as [string, string] : ["", ""];
+  } catch { return ["", ""]; }
+}
 
 function nextPhase(phase: Phase): Phase | null { return PHASES[PHASES.indexOf(phase) + 1] || null; }
 
@@ -54,9 +83,9 @@ function contactFields(payload: string): { email?: string; phone?: string } {
   try { value = JSON.parse(payload); } catch { return {}; }
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const record = value as Record<string, unknown>;
-  const email = typeof record.email === "string" && record.email.length <= 320 ? record.email : undefined;
+  const email = typeof record.email === "string" && Array.from(record.email).length <= 320 ? record.email : undefined;
   const rawPhone = record.phone ?? record.phone_number;
-  const phone = typeof rawPhone === "string" && rawPhone.length <= 80 ? rawPhone.replace(/\D/g, "") : undefined;
+  const phone = typeof rawPhone === "string" && Array.from(rawPhone).length <= 80 ? rawPhone.replace(/\D/g, "") : undefined;
   return { email, phone };
 }
 
@@ -156,7 +185,46 @@ async function writeSearch(env: IndexEnv, values: SearchValue[], generation: num
 async function rootPage(env: IndexEnv, phase: Phase, cursor: string, generation: number, token: string) {
   let rows: Array<Root & { cursor: string }>;
   const ops = env.OPS_DB.withSession("first-primary"), delivery = env.DELIVERY_DB.withSession("first-primary");
-  if (phase === "organizations" || phase === "standalone") {
+  if (phase === "canonical_organizations" || phase === "canonical_standalone") {
+    const organizations = phase === "canonical_organizations", key = tupleCursor(cursor);
+    const sources = (await ops.prepare(`SELECT mapping.source_id,'business' root_namespace,
+      '${organizations ? "organization" : "standalone_client"}' kind,
+      mapping.external_id public_id,mapping.project_alpha_public_id pa_public_id,'mapped' mapping_status,
+      json_extract(revision.profile_json,'$.name') display_name,'active' status,
+      revision.profile_json,mapping.source_id cursor_source,mapping.external_id cursor_public,
+      ${organizations ? `(SELECT count(*) FROM operations_directory_client_organizations relationship
+        JOIN project_alpha_active_directory_mappings child ON child.external_id=relationship.client_record_id
+          AND child.source_id=mapping.source_id AND child.source_instance_id=mapping.source_instance_id
+          AND child.application_id=mapping.application_id AND child.history_epoch_id=mapping.history_epoch_id
+          AND child.resource_type='client'
+        JOIN operations_directory_records child_record ON child_record.record_id=child.external_id AND child_record.record_kind='client'
+        JOIN operations_directory_revisions child_revision ON child_revision.record_id=child_record.record_id
+          AND child_revision.version=child_record.current_version
+        JOIN project_alpha_api_v2_directory_observations_current child_observation
+          ON ${currentCanonicalMapping("child", "child_observation")}
+        WHERE relationship.organization_record_id=mapping.external_id
+          AND ${uniqueCurrentCanonicalMapping("child")})` : "1"} contact_count
+      FROM project_alpha_active_directory_mappings mapping
+      JOIN operations_directory_records record ON record.record_id=mapping.external_id AND record.record_kind=mapping.resource_type
+      JOIN operations_directory_revisions revision ON revision.record_id=record.record_id AND revision.version=record.current_version
+      JOIN project_alpha_api_v2_directory_observations_current observation
+        ON ${currentCanonicalMapping("mapping", "observation")}
+      JOIN pa_connectors connector ON connector.source_id=mapping.source_id AND connector.state='active' AND connector.read_visible=1
+      ${organizations ? "" : `LEFT JOIN operations_directory_client_organizations relationship ON relationship.client_record_id=mapping.external_id`}
+      WHERE mapping.resource_type='${organizations ? "organization" : "client"}'
+        AND ${uniqueCurrentCanonicalMapping("mapping")}
+        ${organizations ? "" : "AND relationship.organization_record_id IS NULL"}
+        AND json_type(revision.profile_json,'$.name')='text'
+        AND length(trim(json_extract(revision.profile_json,'$.name'))) BETWEEN 1 AND 150
+        AND (mapping.source_id,mapping.external_id)>(?,?)
+      ORDER BY mapping.source_id COLLATE BINARY,mapping.external_id COLLATE BINARY LIMIT ?`)
+      .bind(key[0], key[1], PAGE_SIZE).all<Omit<Root, "cursor"> & {
+        profile_json: string; cursor_source: string; cursor_public: string;
+      }>()).results;
+    rows = sources.map(({ profile_json: _profile, cursor_source, cursor_public, ...source }) => ({
+      ...source, cursor: JSON.stringify([cursor_source, cursor_public]),
+    }));
+  } else if (phase === "organizations" || phase === "standalone") {
     const organizations = phase === "organizations";
     const table = organizations ? "pa_organizations" : "pa_clients";
     const sources = (await ops.prepare(`SELECT source.projection_source_id source_id,'business' root_namespace,
@@ -165,6 +233,12 @@ async function rootPage(env: IndexEnv, phase: Phase, cursor: string, generation:
       ${validatedUniquePublicIdExpression(table, "source")} pa_public_id,
       ${organizations ? "(SELECT count(*) FROM pa_clients contact WHERE contact.organization_id=source.id AND contact.projection_source_id=source.projection_source_id AND contact.active=1)" : "1"} contact_count
       FROM ${table} source WHERE source.active=1 ${organizations ? "" : "AND source.organization_id IS NULL"}
+        AND NOT EXISTS(SELECT 1 FROM project_alpha_active_directory_mappings mapping
+          JOIN project_alpha_api_v2_directory_observations_current observation
+            ON ${currentCanonicalMapping("mapping", "observation")}
+          WHERE mapping.source_id=source.projection_source_id
+            AND mapping.resource_type='${organizations ? "organization" : "client"}'
+            AND mapping.project_alpha_public_id=${validatedUniquePublicIdExpression(table, "source")})
         AND source.id>? ORDER BY source.id COLLATE BINARY LIMIT ?`)
       .bind(cursor, PAGE_SIZE).all<Omit<Root, "mapping_status"> & { cursor: string; payload_json: string }>()).results;
     rows = sources.map(({ payload_json, ...source }) => {
@@ -231,9 +305,56 @@ async function rootPage(env: IndexEnv, phase: Phase, cursor: string, generation:
 async function searchPage(env: IndexEnv, phase: Phase, cursor: string, generation: number, token: string) {
   const values: SearchValue[] = [];
   let count = 0, next = cursor;
-  if (phase === "contacts") {
+  if (phase === "canonical_contacts") {
+    const key = tupleCursor(cursor);
+    const rows = (await env.OPS_DB.withSession("first-primary").prepare(`SELECT child.source_id,
+      child.external_id public_id,child.external_id record_id,revision.profile_json,
+      CASE WHEN relationship.organization_record_id IS NULL THEN child.external_id
+        ELSE parent.external_id END root_public_id,
+      CASE WHEN relationship.organization_record_id IS NULL THEN 'standalone_client' ELSE 'organization' END kind
+      FROM project_alpha_active_directory_mappings child
+      JOIN operations_directory_records record ON record.record_id=child.external_id AND record.record_kind='client'
+      JOIN operations_directory_revisions revision ON revision.record_id=record.record_id AND revision.version=record.current_version
+      JOIN project_alpha_api_v2_directory_observations_current observation
+        ON ${currentCanonicalMapping("child", "observation")}
+      JOIN pa_connectors connector ON connector.source_id=child.source_id AND connector.state='active' AND connector.read_visible=1
+      LEFT JOIN operations_directory_client_organizations relationship ON relationship.client_record_id=child.external_id
+      LEFT JOIN project_alpha_active_directory_mappings parent ON parent.external_id=relationship.organization_record_id
+        AND parent.source_id=child.source_id AND parent.source_instance_id=child.source_instance_id
+        AND parent.application_id=child.application_id AND parent.history_epoch_id=child.history_epoch_id
+        AND parent.resource_type='organization'
+      LEFT JOIN project_alpha_api_v2_directory_observations_current parent_observation
+        ON ${currentCanonicalMapping("parent", "parent_observation")}
+      WHERE child.resource_type='client' AND (relationship.organization_record_id IS NULL OR parent_observation.source_id IS NOT NULL)
+        AND ${uniqueCurrentCanonicalMapping("child")}
+        AND (relationship.organization_record_id IS NULL OR ${uniqueCurrentCanonicalMapping("parent")})
+        AND (child.source_id,child.external_id)>(?,?)
+      ORDER BY child.source_id COLLATE BINARY,child.external_id COLLATE BINARY LIMIT ?`)
+      .bind(key[0], key[1], PAGE_SIZE).all<{ source_id: string; public_id: string; record_id: string;
+        profile_json: string; root_public_id: string; kind: Kind }>()).results;
+    count = rows.length;
+    if (rows.length) next = JSON.stringify([rows.at(-1)!.source_id, rows.at(-1)!.public_id]);
+    for (const row of rows) {
+      let profile: unknown;
+      try { profile = JSON.parse(row.profile_json); } catch { continue; }
+      if (!profile || typeof profile !== "object" || Array.isArray(profile)) continue;
+      const name = (profile as Record<string, unknown>).name;
+      if (typeof name !== "string" || !name.trim() || Array.from(name).length > 150) continue;
+      const base = { source: row.source_id, namespace: "business" as const, kind: row.kind,
+        root: row.root_public_id, type: "ops_directory_client", id: row.record_id };
+      values.push({ ...base, field: "contact", value: name });
+      const fields = contactFields(row.profile_json);
+      if (fields.email) values.push({ ...base, field: "email", value: fields.email });
+      if (fields.phone) values.push({ ...base, field: "phone", value: fields.phone });
+    }
+  } else if (phase === "contacts") {
     const rows = (await env.OPS_DB.withSession("first-primary").prepare(`SELECT id,name,organization_id,payload_json,projection_source_id FROM pa_clients
-      WHERE active=1 AND id>? ORDER BY id COLLATE BINARY LIMIT ?`).bind(cursor, PAGE_SIZE)
+      WHERE active=1 AND NOT EXISTS(SELECT 1 FROM project_alpha_active_directory_mappings mapping
+        JOIN project_alpha_api_v2_directory_observations_current observation
+          ON ${currentCanonicalMapping("mapping", "observation")}
+        WHERE mapping.source_id=pa_clients.projection_source_id AND mapping.resource_type='client'
+          AND mapping.project_alpha_public_id=${validatedUniquePublicIdExpression("pa_clients", "pa_clients")})
+        AND id>? ORDER BY id COLLATE BINARY LIMIT ?`).bind(cursor, PAGE_SIZE)
       .all<{ id: string; name: string; organization_id: string | null; payload_json: string; projection_source_id: string }>()).results;
     count = rows.length; next = rows.at(-1)?.id || cursor;
     for (const row of rows) {
@@ -314,7 +435,7 @@ export async function reconcileClientHubIndex(env: IndexEnv, maxPages = 20): Pro
   if (!state) return { status: "busy", pages: 0 };
   const started = Date.now();
   let reservedQueries = 2; // Lease acquisition and release.
-  let phase = (state.backfill_phase || "organizations") as Phase, cursor = state.backfill_cursor || "", pages = 0;
+  let phase = (state.backfill_phase || PHASES[0]) as Phase, cursor = state.backfill_cursor || "", pages = 0;
   try {
     if (!PHASES.includes(phase)) throw new Error("client-hub-index-invalid-phase");
     while (pages < maxPages && Date.now() - started < 20_000) {
@@ -341,7 +462,7 @@ export async function reconcileClientHubIndex(env: IndexEnv, maxPages = 20): Pro
         console.log(JSON.stringify({ event: "client_hub.index.complete", pages }));
         return { status: "complete", pages };
       }
-      const result = ["organizations", "standalone", "reviewed", "workspaces", "accounts"].includes(phase)
+      const result = ["canonical_organizations", "canonical_standalone", "organizations", "standalone", "reviewed", "workspaces", "accounts"].includes(phase)
         ? await rootPage(env, phase, cursor, state.generation, token)
         : await searchPage(env, phase, cursor, state.generation, token);
       if (result.count < PAGE_SIZE) { phase = nextPhase(phase)!; cursor = ""; }

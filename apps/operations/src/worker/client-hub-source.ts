@@ -49,6 +49,9 @@ export interface ClientHubSourceRoot {
   id: string; display_name: string; organization_id: string | null; active: number;
   pa_public_id: string | null; mapping_status: ClientHubMappingStatus;
 }
+export type CanonicalClientHubSourceResolution =
+  | { state: "absent" | "invalid"; root: null }
+  | { state: "current"; root: ClientHubSourceRoot };
 
 export async function resolveClientHubSourceRoot(
   env: Pick<Env, "OPS_DB">, kind: ClientHubSourceKind, internalId: string, sourceId: string = PRIMARY_ALPHA_SOURCE_ID,
@@ -65,4 +68,58 @@ export async function resolveClientHubSourceRoot(
   return { id: row.id, display_name: row.display_name, organization_id: row.organization_id, active: row.active,
     pa_public_id: row.pa_public_id,
     mapping_status: parsed.pa_public_id && !row.pa_public_id ? "ambiguous" : parsed.mapping_status };
+}
+
+/** Resolve an explicitly activated API-v2 Directory mapping by its Operations
+ * record ID. Inventory evidence alone is never sufficient, and any competing
+ * current mapping for either side of the identity fails closed. */
+export async function resolveCanonicalClientHubSourceRoot(
+  env: Pick<Env, "OPS_DB">, kind: ClientHubSourceKind, recordId: string, sourceId: string,
+): Promise<CanonicalClientHubSourceResolution> {
+  const resourceType = kind === "organization" ? "organization" : "client";
+  const current = (mapping: string, observation: string) => `
+    ${observation}.source_id=${mapping}.source_id
+    AND ${observation}.source_instance_id=${mapping}.source_instance_id
+    AND ${observation}.application_id=${mapping}.application_id
+    AND ${observation}.history_epoch_id=${mapping}.history_epoch_id
+    AND ${observation}.resource_type=${mapping}.resource_type
+    AND ${observation}.project_alpha_public_id=${mapping}.project_alpha_public_id
+    AND ${observation}.present=1 AND ${observation}.last_action='upsert' AND ${observation}.has_conflict=0
+    AND ${observation}.binding_external_id=${mapping}.external_id
+    AND ${observation}.binding_status='active'
+    AND ${observation}.binding_resource_revision=${observation}.resource_revision`;
+  const db = env.OPS_DB.withSession("first-primary");
+  const exists = await db.prepare(`SELECT count(*) count FROM project_alpha_active_directory_mappings
+    WHERE source_id=? AND resource_type=? AND external_id=?`).bind(sourceId, resourceType, recordId).first<number>("count");
+  if (!exists) return { state: "absent", root: null };
+  const rows = await db.prepare(`SELECT mapping.external_id id,
+    mapping.project_alpha_public_id pa_public_id,revision.profile_json,relationship.organization_record_id
+    FROM project_alpha_active_directory_mappings mapping
+    JOIN operations_directory_records record ON record.record_id=mapping.external_id AND record.record_kind=mapping.resource_type
+    JOIN operations_directory_revisions revision ON revision.record_id=record.record_id AND revision.version=record.current_version
+    JOIN project_alpha_api_v2_directory_observations_current observation ON ${current("mapping", "observation")}
+    JOIN pa_connectors connector ON connector.source_id=mapping.source_id AND connector.state='active' AND connector.read_visible=1
+    LEFT JOIN operations_directory_client_organizations relationship
+      ON relationship.client_record_id=mapping.external_id AND mapping.resource_type='client'
+    WHERE mapping.source_id=? AND mapping.resource_type=? AND mapping.external_id=?
+      AND (?='organization' OR relationship.organization_record_id IS NULL)
+      AND 1=(SELECT count(*) FROM project_alpha_active_directory_mappings candidate
+        JOIN project_alpha_api_v2_directory_observations_current candidate_observation
+          ON ${current("candidate", "candidate_observation")}
+        WHERE candidate.source_id=mapping.source_id AND candidate.resource_type=mapping.resource_type
+          AND (candidate.external_id=mapping.external_id
+            OR candidate.project_alpha_public_id=mapping.project_alpha_public_id))
+    LIMIT 2`).bind(sourceId, resourceType, recordId, resourceType)
+    .all<{ id: string; pa_public_id: string; profile_json: string; organization_record_id: string | null }>();
+  if (rows.results.length !== 1) return { state: "invalid", root: null };
+  const row = rows.results[0]!;
+  let profile: unknown;
+  try { profile = JSON.parse(row.profile_json); } catch { return { state: "invalid", root: null }; }
+  if (!profile || typeof profile !== "object" || Array.isArray(profile)) return { state: "invalid", root: null };
+  const name = (profile as Record<string, unknown>).name;
+  if (typeof name !== "string" || !name.trim() || Array.from(name).length > 150)
+    return { state: "invalid", root: null };
+  return { state: "current", root: { id: row.id, display_name: name,
+    organization_id: kind === "organization" ? null : row.organization_record_id,
+    active: 1, pa_public_id: row.pa_public_id, mapping_status: "mapped" } };
 }

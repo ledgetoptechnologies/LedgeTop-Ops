@@ -105,6 +105,16 @@ async function fixture() {
     CREATE TABLE pa_projects(id TEXT PRIMARY KEY,name TEXT,status TEXT,start_date TEXT,end_date TEXT,
       client_id TEXT,organization_id TEXT,manager_user_id TEXT,active INTEGER,payload_json TEXT,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
     CREATE TABLE pa_users(id TEXT PRIMARY KEY,display_name TEXT,active INTEGER,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
+    CREATE TABLE operations_directory_records(record_id TEXT PRIMARY KEY,record_kind TEXT,current_version INTEGER);
+    CREATE TABLE operations_directory_revisions(record_id TEXT,version INTEGER,profile_json TEXT,PRIMARY KEY(record_id,version));
+    CREATE TABLE operations_directory_client_organizations(client_record_id TEXT PRIMARY KEY,organization_record_id TEXT,relationship_version INTEGER);
+    CREATE TABLE project_alpha_active_directory_mappings(source_id TEXT,resource_type TEXT,external_id TEXT,
+      project_alpha_public_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,
+      provenance_id TEXT,mapping_kind TEXT,created_at TEXT);
+    CREATE TABLE project_alpha_api_v2_directory_observations_current(source_id TEXT,source_instance_id TEXT,
+      application_id TEXT,history_epoch_id TEXT,resource_type TEXT,project_alpha_public_id TEXT,present INTEGER,
+      last_action TEXT,has_conflict INTEGER,resource_revision TEXT,binding_external_id TEXT,binding_status TEXT,
+      binding_resource_revision TEXT,request_id TEXT);
     INSERT INTO pa_organizations(id,name,active,payload_json) VALUES('pa-org','Organization One',1,'{"public_id":"${organizationUuid}"}');
     INSERT INTO pa_clients(id,name,organization_id,active) VALUES('pa-child-login','Login Contact','pa-org',1);
     INSERT INTO pa_clients(id,name,organization_id,active) VALUES('pa-child-no-login','No Login Contact','pa-org',1);
@@ -226,6 +236,22 @@ async function readCollection(app: Awaited<ReturnType<typeof fixture>>["app"], e
   return response.json() as Promise<CollectionResponse>;
 }
 
+async function addCanonicalRecord(ops: D1Database, input: { externalId: string; publicId: string;
+  kind: "organization" | "client"; name: string; profile?: Record<string, unknown>; conflict?: boolean }) {
+  await ops.batch([
+    ops.prepare("INSERT INTO operations_directory_records VALUES(?,?,1)").bind(input.externalId, input.kind),
+    ops.prepare("INSERT INTO operations_directory_revisions VALUES(?,1,?)")
+      .bind(input.externalId, JSON.stringify({ name: input.name, ...input.profile })),
+    ops.prepare(`INSERT INTO project_alpha_active_directory_mappings
+      VALUES('project-alpha:primary',?,?,?,'canonical-instance','canonical-application','canonical-history','proof','acquired','2026-01-01')`)
+      .bind(input.kind, input.externalId, input.publicId),
+    ops.prepare(`INSERT INTO project_alpha_api_v2_directory_observations_current
+      VALUES('project-alpha:primary','canonical-instance','canonical-application','canonical-history',?,?,1,'upsert',?,
+        'revision-one',?,'active','revision-one','request')`)
+      .bind(input.kind, input.publicId, input.conflict ? 1 : 0, input.externalId),
+  ]);
+}
+
 function interceptRootCommit(database: D1Database, beforeCommit: () => Promise<void>): D1Database {
   let fired = false;
   return new Proxy(database, { get(target, property) {
@@ -269,6 +295,58 @@ async function revokeRoot(app: Awaited<ReturnType<typeof fixture>>["app"], env: 
 }
 
 describe("Client Hub bounded detail collections", () => {
+  it("hydrates canonical organization and standalone details and lists contacts by Operations IDs", async () => {
+    const { app, env, ops } = await fixture();
+    await registerVisibleTestSource(ops, "project-alpha:primary", "Project Alpha");
+    await ops.prepare("UPDATE pa_connectors SET state='active',version=version+1 WHERE source_id='project-alpha:primary'").run();
+    await addCanonicalRecord(ops, { externalId: "ops-org", publicId: "d".repeat(32), kind: "organization", name: "API Organization" });
+    await addCanonicalRecord(ops, { externalId: "ops-contact", publicId: "e".repeat(32), kind: "client", name: "API Contact",
+      profile: { email: "api-contact@example.test", notes: "not returned" } });
+    await addCanonicalRecord(ops, { externalId: "ops-standalone", publicId: "f".repeat(32), kind: "client", name: "API Standalone",
+      profile: { phone: "+1 920 555 0199", private_price: 500 } });
+    await ops.prepare("INSERT INTO operations_directory_client_organizations VALUES('ops-contact','ops-org',1)").run();
+    await ops.batch([
+      ops.prepare(`INSERT INTO client_hub_roots(source_id,root_namespace,kind,public_id,pa_public_id,mapping_status,
+        display_name,sort_name,status,portal_status,account_count,project_count,request_count,contact_count)
+        VALUES('project-alpha:primary','business','organization','ops-org',?,'mapped','API Organization','api organization','active','not_provisioned',0,0,0,1)`)
+        .bind("d".repeat(32)),
+      ops.prepare(`INSERT INTO client_hub_roots(source_id,root_namespace,kind,public_id,pa_public_id,mapping_status,
+        display_name,sort_name,status,portal_status,account_count,project_count,request_count,contact_count)
+        VALUES('project-alpha:primary','business','standalone_client','ops-standalone',?,'mapped','API Standalone','api standalone','active','not_provisioned',0,0,0,1)`)
+        .bind("f".repeat(32)),
+    ]);
+    const orgPath = "http://local/api/client-hub/sources/project-alpha%3Aprimary/business/organizations/ops-org";
+    const standaloneCanonicalPath = "http://local/api/client-hub/sources/project-alpha%3Aprimary/business/standalone/ops-standalone";
+    const organization = await app.request(orgPath, {}, env);
+    expect(organization.status).toBe(200);
+    expect((await organization.json() as { client: Record<string, unknown>; contacts: Array<Record<string, unknown>> }))
+      .toMatchObject({ client: { public_id: "ops-org", pa_public_id: "d".repeat(32) },
+        contacts: [{ public_id: "ops-contact", organization_id: "ops-org", email: "api-contact@example.test" }] });
+    const standalone = await app.request(standaloneCanonicalPath, {}, env);
+    expect(standalone.status).toBe(200);
+    const standaloneBody = await standalone.json() as { client: Record<string, unknown>; contacts: Array<Record<string, unknown>> };
+    expect(standaloneBody.client).toMatchObject({ public_id: "ops-standalone", pa_public_id: "f".repeat(32) });
+    expect(standaloneBody.contacts).toEqual([expect.objectContaining({ public_id: "ops-standalone", phone: "+1 920 555 0199" })]);
+    expect(JSON.stringify([standaloneBody, await (await app.request(orgPath, {}, env)).json()])).not.toMatch(/not returned|private_price|500/);
+
+    await addCanonicalRecord(ops, { externalId: "duplicate-org", publicId: "d".repeat(32), kind: "organization", name: "Duplicate" });
+    expect((await app.request(orgPath, {}, env)).status).toBe(404);
+  });
+
+  it("does not fall back to a coincidental legacy row when canonical proof is stale or conflicted", async () => {
+    const { app, env, ops } = await fixture();
+    await registerVisibleTestSource(ops, "project-alpha:primary", "Project Alpha");
+    await ops.prepare("UPDATE pa_connectors SET state='active',version=version+1 WHERE source_id='project-alpha:primary'").run();
+    await ops.prepare("INSERT INTO pa_organizations VALUES('coincidental','Legacy Coincidental',1,'{}','project-alpha:primary')").run();
+    await addCanonicalRecord(ops, { externalId: "coincidental", publicId: "9".repeat(32), kind: "organization",
+      name: "Invalid Canonical", conflict: true });
+    await ops.prepare(`INSERT INTO client_hub_roots(source_id,root_namespace,kind,public_id,pa_public_id,mapping_status,
+      display_name,sort_name,status,portal_status,account_count,project_count,request_count,contact_count)
+      VALUES('project-alpha:primary','business','organization','coincidental',?,'mapped','Cached','cached','active','not_provisioned',0,0,0,0)`)
+      .bind("9".repeat(32)).run();
+    const response = await app.request("http://local/api/client-hub/sources/project-alpha%3Aprimary/business/organizations/coincidental", {}, env);
+    expect(response.status).toBe(404);
+  });
   it("fences a portal-root revoke when team.view is denied after resolution but before commit", async () => {
     const { app, env, delivery } = await fixture(), current = await rootAccessContext(app, env);
     const raced = { ...env, DELIVERY_DB: interceptRootCommit(env.DELIVERY_DB, async () => {

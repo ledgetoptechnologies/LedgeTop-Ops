@@ -5,6 +5,7 @@ import { eligibilityBlockManagementEnabled, portalOperationsManagementEnabled } 
 import { portalDenyPolicyManagementEnabled } from "./client-portal-deny-policies";
 import { readClientHubBusinessProjectPolicy } from "./client-hub-project-policy";
 import { businessContactChannels, businessContactChannelsSql } from "./client-business-contact";
+import { validatedUniquePublicIdExpression } from "./client-hub-source";
 import type { ClientHubRoot } from "./client-hub-directory";
 import type { Env, StaffPrincipal } from "./types";
 import { requireProjectAlphaReadVisibility } from "./project-alpha-read-visibility";
@@ -38,6 +39,26 @@ interface Query {
   select: string; from: string; where: string; values: string[]; order: string[]; descending: boolean;
   keys: string[]; business?: boolean;
 }
+
+const currentCanonicalMapping = (mapping: string, observation: string) => `
+  ${observation}.source_id=${mapping}.source_id
+  AND ${observation}.source_instance_id=${mapping}.source_instance_id
+  AND ${observation}.application_id=${mapping}.application_id
+  AND ${observation}.history_epoch_id=${mapping}.history_epoch_id
+  AND ${observation}.resource_type=${mapping}.resource_type
+  AND ${observation}.project_alpha_public_id=${mapping}.project_alpha_public_id
+  AND ${observation}.present=1 AND ${observation}.last_action='upsert' AND ${observation}.has_conflict=0
+  AND ${observation}.binding_external_id=${mapping}.external_id
+  AND ${observation}.binding_status='active'
+  AND ${observation}.binding_resource_revision=${observation}.resource_revision`;
+const uniqueCurrentCanonicalMapping = (mapping: string) => `1=(SELECT count(*)
+  FROM project_alpha_active_directory_mappings candidate
+  JOIN project_alpha_api_v2_directory_observations_current candidate_observation
+    ON ${currentCanonicalMapping("candidate", "candidate_observation")}
+  WHERE candidate.source_id=${mapping}.source_id
+    AND candidate.resource_type=${mapping}.resource_type
+    AND (candidate.project_alpha_public_id=${mapping}.project_alpha_public_id
+      OR candidate.external_id=${mapping}.external_id))`;
 
 export function isClientHubCollection(value: string): value is ClientHubCollection {
   return (CLIENT_HUB_COLLECTIONS as readonly string[]).includes(value);
@@ -146,9 +167,46 @@ function collectionQuery(context: ClientHubCollectionContext, collection: Client
   const root = context.root, scope = accountScope(root);
   const common = { where: scope.where, values: scope.values, descending: true };
   switch (collection) {
-    case "businessContacts": return { select: `id public_id,organization_id,name display_name,${businessContactChannelsSql()}`, from: "pa_clients",
-      where: `active=1 AND projection_source_id=? AND ${root.kind === "organization" ? "organization_id=?" : "id=? AND organization_id IS NULL"}`,
-      values: [root.source_id, root.public_id], order: ["id"], descending: false, keys: ["public_id"], business: true };
+    case "businessContacts": return {
+      select: `contact_projection.public_id,contact_projection.organization_id,contact_projection.display_name,
+        ${businessContactChannelsSql("contact_projection.payload_json")}`,
+      from: `(SELECT contact.id public_id,contact.organization_id,contact.name display_name,contact.payload_json
+        FROM pa_clients contact
+        WHERE contact.active=1 AND contact.projection_source_id=?
+          AND ${root.kind === "organization" ? "contact.organization_id=?" : "contact.id=? AND contact.organization_id IS NULL"}
+          AND NOT EXISTS(SELECT 1 FROM project_alpha_active_directory_mappings mapped
+            JOIN project_alpha_api_v2_directory_observations_current mapped_observation
+              ON ${currentCanonicalMapping("mapped", "mapped_observation")}
+            WHERE mapped.source_id=contact.projection_source_id AND mapped.resource_type='client'
+              AND mapped.project_alpha_public_id=${validatedUniquePublicIdExpression("pa_clients", "contact")})
+        UNION ALL
+        SELECT child.external_id public_id,parent.external_id organization_id,
+          json_extract(revision.profile_json,'$.name') display_name,revision.profile_json payload_json
+        FROM project_alpha_active_directory_mappings child
+        JOIN operations_directory_records record ON record.record_id=child.external_id AND record.record_kind='client'
+        JOIN operations_directory_revisions revision ON revision.record_id=record.record_id AND revision.version=record.current_version
+        JOIN project_alpha_api_v2_directory_observations_current observation
+          ON ${currentCanonicalMapping("child", "observation")}
+        JOIN pa_connectors connector ON connector.source_id=child.source_id
+          AND connector.state='active' AND connector.read_visible=1
+        LEFT JOIN operations_directory_client_organizations relationship ON relationship.client_record_id=child.external_id
+        LEFT JOIN project_alpha_active_directory_mappings parent ON parent.external_id=relationship.organization_record_id
+          AND parent.source_id=child.source_id AND parent.source_instance_id=child.source_instance_id
+          AND parent.application_id=child.application_id AND parent.history_epoch_id=child.history_epoch_id
+          AND parent.resource_type='organization'
+        LEFT JOIN project_alpha_api_v2_directory_observations_current parent_observation
+          ON ${currentCanonicalMapping("parent", "parent_observation")}
+        WHERE child.source_id=? AND child.resource_type='client'
+          AND ${root.kind === "organization"
+            ? "parent.external_id=? AND parent_observation.source_id IS NOT NULL"
+            : "child.external_id=? AND relationship.organization_record_id IS NULL"}
+          AND ${uniqueCurrentCanonicalMapping("child")}
+          AND (relationship.organization_record_id IS NULL OR ${uniqueCurrentCanonicalMapping("parent")})
+          AND json_type(revision.profile_json,'$.name')='text'
+          AND length(trim(json_extract(revision.profile_json,'$.name'))) BETWEEN 1 AND 150) contact_projection`,
+      where: "1=1", values: [root.source_id, root.public_id, root.source_id, root.public_id],
+      order: ["contact_projection.public_id"], descending: false, keys: ["public_id"], business: true,
+    };
     case "accounts": return { ...common,
       select: "account.id,account.display_name,account.status,account.project_alpha_client_id,account.project_alpha_organization_id,account.created_at,account.updated_at",
       from: "client_accounts account", order: ["COALESCE(account.created_at,'')", "account.id"], keys: ["id"] };

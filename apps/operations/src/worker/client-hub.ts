@@ -5,7 +5,8 @@ import { listClientAuditTimeline, parseClientAuditTimelineFilters } from "./clie
 import { sqlScope } from "./acl";
 import { clientHubDetailPath, clientHubRouteKind, findClientHubRoot, listClientHubRoots,
   isClientHubRootNamespace, isClientHubSource, type ClientHubKind, type ClientHubReviewAuthority, type ClientHubRoot } from "./client-hub-directory";
-import { isAlphaPublicId, isBusinessProjectionSource, resolveClientHubSourceRoot, validatedUniquePublicIdExpression } from "./client-hub-source";
+import { isAlphaPublicId, isBusinessProjectionSource, resolveCanonicalClientHubSourceRoot,
+  resolveClientHubSourceRoot, validatedUniquePublicIdExpression } from "./client-hub-source";
 import { resolveClientHubWorkspace, type ClientHubWorkspace } from "./client-hub-workspace";
 import { CLIENT_HUB_COLLECTIONS, createClientHubCollectionContext, isClientHubCollection, listClientHubCollection,
   type ClientHubCollectionContext, type ClientHubPermissions } from "./client-hub-collections";
@@ -174,7 +175,9 @@ async function liveDetailRoot(env: Env, root: WorkspaceRow): Promise<WorkspaceRo
       portal_status: resolved.status === "mapped" ? portal.status : "projection_pending" };
   }
   if (root.root_namespace !== "business") throw new HTTPException(404, { message: "Client not found" });
-  const source = await resolveClientHubSourceRoot(env, root.kind, root.public_id, root.source_id);
+  const canonical = await resolveCanonicalClientHubSourceRoot(env, root.kind, root.public_id, root.source_id);
+  const source = canonical.state === "current" ? canonical.root
+    : canonical.state === "absent" ? await resolveClientHubSourceRoot(env, root.kind, root.public_id, root.source_id) : null;
   if (!source || !source.active || (root.kind === "standalone_client" && source.organization_id !== null))
     throw new HTTPException(404, { message: "Client not found" });
   // Business provenance is not a portal grant. Resolve only a same-source,
@@ -220,7 +223,9 @@ async function resolveDetailContext(env: Env, principal: StaffPrincipal, kind: C
     if (!(error instanceof HTTPException) || !(error.status === 404 || (error.status === 503
       && error.message === "The client directory is being prepared; please retry shortly"))
       || !sourceId || !isBusinessProjectionSource(sourceId) || rootNamespace !== "business") throw error;
-    const source = await resolveClientHubSourceRoot(env, kind, publicId, sourceId);
+    const canonical = await resolveCanonicalClientHubSourceRoot(env, kind, publicId, sourceId);
+    const source = canonical.state === "current" ? canonical.root
+      : canonical.state === "absent" ? await resolveClientHubSourceRoot(env, kind, publicId, sourceId) : null;
     if (!source?.active || (kind === "standalone_client" && source.organization_id !== null)) throw error;
     indexed = { source_id: sourceId, root_namespace: "business", kind, public_id: source.id,
       pa_public_id: source.pa_public_id, mapping_status: source.mapping_status, display_name: source.display_name,
