@@ -36,7 +36,8 @@ test("shows safe PA preflight diagnostics after exact-ID staging binding refresh
   await page.getByLabel("Exact external Project ID", { exact: true }).fill("pa-staging-project-123");
   await page.getByLabel("Confirm exact external Project ID", { exact: true }).fill("pa-staging-project-123");
   await page.getByRole("button", { name: "Refresh staging binding", exact: true }).click();
-  await expect(page.getByRole("status")).toContainText("Binding was not refreshed (preflight missing endpoint)");
+  await expect(page.getByRole("status").filter({ hasText: "Binding was not refreshed (preflight missing endpoint)" }))
+    .toContainText("Binding was not refreshed (preflight missing endpoint)");
   expect(refreshRequest).toEqual({ body: { sourceId: "project-alpha:staging", externalProjectId: "pa-staging-project-123" }, csrf: "csrf-test", idempotency: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/) });
 });
 
