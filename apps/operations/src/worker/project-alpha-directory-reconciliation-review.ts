@@ -396,7 +396,8 @@ export async function acquireProjectAlphaDirectoryReconciliationFinding(
   try {
     result = await acquire(env, { reviewId: current.reviewId, commandId: current.commandId,
       sourceId: current.sourceId, recordId: current.recordId, resourceType: current.resourceType,
-      projectAlphaPublicId: current.remotePublicId, localRecordVersion: current.expectedRecordVersion,
+      projectAlphaPublicId: current.remotePublicId, expectedProjectAlphaRevision: current.remoteRevision,
+      expectedAuthorizationGeneration: current.authorizationGeneration, localRecordVersion: current.expectedRecordVersion,
       reviewer: { staffId: current.reviewerStaffId, accessSubject: current.reviewerAccessSubject,
         admissionVersion: current.reviewerAdmissionVersion, profileVersion: current.reviewerProfileVersion,
         grantGeneration: current.reviewerGrantGeneration } }, fetch);

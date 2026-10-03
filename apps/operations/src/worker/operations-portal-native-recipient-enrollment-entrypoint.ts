@@ -36,11 +36,12 @@ export async function inspectOperationsPortalNativeRecipientEnrollmentRpc(
     || typeof value.opaqueToken !== "string" || !TOKEN.test(value.opaqueToken)) return unavailable();
   try {
     const review = await inspectOperationsPortalNativeRecipientIntent(env.OPS_DB, value.intentId, value.opaqueToken);
-    const displayLabel = await env.OPS_DB.withSession("first-primary").prepare(`SELECT json_extract(revision.profile_json,'$.name')
+    const displayLabel = await env.OPS_DB.withSession("first-primary").prepare(`SELECT
+      json_extract(revision.profile_json,'$.name') display_label
       FROM operations_portal_native_recipient_intents intent
       JOIN operations_directory_records record ON record.record_id=intent.target_client_record_id
       JOIN operations_directory_revisions revision ON revision.record_id=record.record_id AND revision.version=record.current_version
-      WHERE intent.intent_id=? AND record.record_kind='client'`).bind(value.intentId).first<string>();
+      WHERE intent.intent_id=? AND record.record_kind='client'`).bind(value.intentId).first<string>("display_label");
     if (!displayLabel || displayLabel.length > 300 || /[\u0000-\u001f\u007f]/u.test(displayLabel)) return unavailable();
     return JSON.stringify({ intentId: review.intentId, revision: review.revision, state: review.state,
       target: { ...review.target, displayLabel }, expiresAt: review.expiresAt });

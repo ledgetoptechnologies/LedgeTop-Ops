@@ -7,6 +7,7 @@ const READ_ACCEPTANCE_ENDPOINT = "/api/admin/integrations/project-alpha/api-v2/r
 const API_V2_SOURCES_ENDPOINT = "/api/admin/integrations/project-alpha/api-v2/sources";
 const API_V2_SYNC_ENDPOINT = "/api/admin/integrations/project-alpha/api-v2/sync-page";
 const DIRECTORY_READ_ADOPTION_ENDPOINT = "/api/admin/integrations/project-alpha/api-v2/directory/read-adoptions";
+const DIRECTORY_READ_ADOPTION_CANDIDATES_ENDPOINT = `${DIRECTORY_READ_ADOPTION_ENDPOINT}/candidates`;
 const PROJECT_BINDING_REFRESH_ENDPOINT = "/api/admin/project-alpha/private/projects/bindings/refresh";
 const PRIMARY = "project-alpha:primary";
 const STAGING = "project-alpha:staging";
@@ -41,6 +42,10 @@ type DirectoryResourceType = "client" | "organization";
 type DirectoryField = "name" | "email" | "phone" | "address_line1" | "address_line2" | "city" | "state"
   | "postal_code" | "country" | "client_type" | "organization_public_id";
 type DirectoryFieldDecision = "unchanged" | "retain_local" | "adopt_project_alpha" | "requires_follow_up";
+type DirectoryCandidate = { source: { sourceId: string; sourceInstanceId: string; applicationId: string; historyEpoch: string };
+  resourceType: DirectoryResourceType; projectAlphaPublicId: string; resourceRevision: string; authorizationGeneration: string;
+  binding: { externalId: string; status: "active"; resourceRevision: string }; conflictState: "clear" };
+type DirectoryCandidatePage = { items: DirectoryCandidate[]; nextCursor: string | null };
 type FieldComparison = { status: "compared"; reviewId: string; resourceType: DirectoryResourceType; fields: Array<{
   field: DirectoryField; localValue: string | null; projectAlphaValue: string | null; equal: boolean;
 }> };
@@ -227,9 +232,13 @@ function ApiV2OperatorPanel({ disabled }: { disabled: boolean }) {
   const [inventoryStopped, setInventoryStopped] = useState({ directory: "", projects: "" });
   const [inventoryError, setInventoryError] = useState("");
   const [reviewSource, setReviewSource] = useState(""), [resourceType, setResourceType] = useState<DirectoryResourceType>("client");
-  const [recordId, setRecordId] = useState(""), [localVersion, setLocalVersion] = useState("1"), [projectAlphaPublicId, setProjectAlphaPublicId] = useState("");
+  const [recordId, setRecordId] = useState(""), [localVersion, setLocalVersion] = useState("1");
+  const [candidates, setCandidates] = useState<DirectoryCandidate[]>([]), [candidateCursor, setCandidateCursor] = useState<string | null>(null);
+  const [selectedCandidate, setSelectedCandidate] = useState<DirectoryCandidate | null>(null);
+  const [candidateBusy, setCandidateBusy] = useState(false), [candidateError, setCandidateError] = useState("");
   const [reviewId, setReviewId] = useState(""), [comparison, setComparison] = useState<FieldComparison | null>(null);
-  const reservationKey = useRef("");
+  const reservationKey = useRef(""), finalizationKey = useRef("");
+  const [sealedReceiptId, setSealedReceiptId] = useState("");
   const [decisions, setDecisions] = useState<Partial<Record<DirectoryField, DirectoryFieldDecision>>>({});
   const [reviewBusy, setReviewBusy] = useState(false), [reviewError, setReviewError] = useState(""), [reviewMessage, setReviewMessage] = useState("");
   useEffect(() => {
@@ -301,19 +310,51 @@ function ApiV2OperatorPanel({ disabled }: { disabled: boolean }) {
     } finally { setInventoryBusy(null); }
   };
   const clearComparison = () => { setReviewId(""); setComparison(null); setDecisions({}); setReviewError(""); setReviewMessage(""); };
-  const resetReview = () => { reservationKey.current = ""; clearComparison(); };
+  const resetReview = () => { reservationKey.current = ""; finalizationKey.current = ""; setSealedReceiptId(""); clearComparison(); };
+  const loadCandidates = async (cursor?: string | null, append = false) => {
+    if (disabled || candidateBusy || !reviewSource) return;
+    setCandidateBusy(true); setCandidateError("");
+    try {
+      const query = new URLSearchParams({ sourceId: reviewSource, limit: "50", ...(cursor ? { cursor } : {}) });
+      const response = await api<unknown>(`${DIRECTORY_READ_ADOPTION_CANDIDATES_ENDPOINT}?${query.toString()}`);
+      if (!record(response) || !Array.isArray(response.items) || !(response.nextCursor === null || typeof response.nextCursor === "string"))
+        throw new Error("invalid candidate response");
+      const parsed = response.items.filter((item): item is DirectoryCandidate => record(item) && record(item.source) && record(item.binding)
+        && item.source.sourceId === reviewSource && typeof item.source.sourceInstanceId === "string"
+        && typeof item.source.applicationId === "string" && typeof item.source.historyEpoch === "string"
+        && (item.resourceType === "client" || item.resourceType === "organization")
+        && typeof item.projectAlphaPublicId === "string" && PA_PUBLIC_ID.test(item.projectAlphaPublicId)
+        && typeof item.resourceRevision === "string" && typeof item.authorizationGeneration === "string"
+        && item.binding.status === "active" && typeof item.binding.externalId === "string"
+        && item.binding.resourceRevision === item.resourceRevision && item.conflictState === "clear");
+      if (parsed.length !== response.items.length || parsed.length > 50) throw new Error("invalid candidate item");
+      setCandidates(current => append ? [...current, ...parsed] : parsed);
+      setCandidateCursor(response.nextCursor);
+      setSelectedCandidate(null);
+      setRecordId("");
+      setLocalVersion("1");
+      resetReview();
+    } catch (caught) {
+      setCandidateError(operatorError(caught, "Eligible Project Alpha candidates could not be loaded. Refresh the list before continuing."));
+      if (!append) { setCandidates([]); setCandidateCursor(null); setSelectedCandidate(null); }
+    } finally { setCandidateBusy(false); }
+  };
   const reserve = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault(); if (disabled || reviewBusy) return;
-    const selectedRecord = recordId.trim(), selectedPublicId = projectAlphaPublicId.trim(), version = Number(localVersion);
+    const selectedRecord = recordId.trim(), version = Number(localVersion), selected = selectedCandidate;
     if (!reviewSource || !selectedRecord || selectedRecord.length > 191 || /\p{C}/u.test(selectedRecord)
-      || !Number.isInteger(version) || version < 1 || !PA_PUBLIC_ID.test(selectedPublicId)) {
-      setReviewError("Enter one active source, an exact local record ID and positive version, and a 32-character lowercase Project Alpha public ID."); return;
+      || !Number.isInteger(version) || version < 1 || !selected || selected.resourceType !== resourceType || selected.source.sourceId !== reviewSource) {
+      setReviewError("Select one eligible Project Alpha record and enter its exact Operations record ID and positive version."); return;
     }
     setReviewBusy(true); clearComparison();
     try {
       const response = await api<{ outcome?: unknown }>(DIRECTORY_READ_ADOPTION_ENDPOINT, { method: "POST",
         headers: { "Idempotency-Key": reservationKey.current ||= crypto.randomUUID() }, body: JSON.stringify({ sourceId: reviewSource, resourceType,
-          recordId: selectedRecord, expectedLocalRecordVersion: version, projectAlphaPublicId: selectedPublicId }) });
+          recordId: selectedRecord, expectedLocalRecordVersion: version, sourceInstanceId: selected.source.sourceInstanceId,
+          applicationId: selected.source.applicationId, historyEpoch: selected.source.historyEpoch,
+          projectAlphaPublicId: selected.projectAlphaPublicId, resourceRevision: selected.resourceRevision,
+          authorizationGeneration: selected.authorizationGeneration, bindingExternalId: selected.binding.externalId,
+          bindingResourceRevision: selected.binding.resourceRevision }) });
       const outcome = response.outcome;
       if (record(outcome) && (outcome.status === "reserved" || outcome.status === "replayed") && outcome.state === "inactive"
         && typeof outcome.reviewId === "string" && UUID.test(outcome.reviewId)) {
@@ -352,12 +393,31 @@ function ApiV2OperatorPanel({ disabled }: { disabled: boolean }) {
       const outcome = response.outcome;
       if (record(outcome) && (outcome.status === "sealed" || outcome.status === "replayed")
         && typeof outcome.receiptId === "string" && UUID.test(outcome.receiptId)) {
-        reservationKey.current = ""; setComparison(null); setDecisions({}); setReviewId(""); setRecordId(""); setProjectAlphaPublicId(""); setLocalVersion("1");
-        setReviewMessage("Field review sealed. No local profile or Project Alpha values were changed.");
+        setSealedReceiptId(outcome.receiptId); setComparison(null); setDecisions({}); setReviewId("");
+        setReviewMessage("Field review sealed. Review the finalization warning and explicitly finalize to apply the selected fields and binding.");
       } else if (record(outcome) && ["disabled", "blocked", "rejected", "conflict"].includes(String(outcome.status)))
         setReviewError("The review could not be sealed because its exact evidence is disabled, stale, invalid, or already sealed.");
       else throw new Error("invalid field-review response");
     } catch (caught) { setReviewError(operatorError(caught, "The field-review receipt could not be verified. Treat the seal outcome as uncertain and refresh before retrying.")); }
+    finally { setReviewBusy(false); }
+  };
+  const finalize = async () => {
+    if (disabled || reviewBusy || !sealedReceiptId) return;
+    if (!window.confirm("Finalize this sealed review? Explicitly adopted scalar fields will update the Operations record, Project Alpha will be rebound to that exact record, and the canonical mapping will activate. This does not grant client portal, Delivery, folder, workspace, or public-link access.")) return;
+    setReviewBusy(true); setReviewError(""); setReviewMessage("");
+    try {
+      const response = await api<{ outcome?: unknown }>(`${DIRECTORY_READ_ADOPTION_ENDPOINT}/field-reviews/${encodeURIComponent(sealedReceiptId)}/finalize`, {
+        method: "POST", headers: { "Idempotency-Key": finalizationKey.current ||= crypto.randomUUID() }, body: JSON.stringify({}),
+      });
+      const outcome = response.outcome;
+      if (record(outcome) && (outcome.status === "finalized" || outcome.status === "replayed")
+        && typeof outcome.finalizationId === "string" && UUID.test(outcome.finalizationId)) {
+        resetReview(); setRecordId(""); setLocalVersion("1"); setSelectedCandidate(null);
+        setReviewMessage("Exact Directory mapping finalized. No client portal, Delivery, workspace, folder, or public-link access was granted.");
+      } else if (record(outcome) && ["disabled", "blocked", "rejected", "conflict", "uncertain"].includes(String(outcome.status)))
+        setReviewError(`Finalization stopped at ${typeof outcome.stage === "string" ? outcome.stage.replaceAll("_", " ") : "its safety gate"}. Refresh and perform a new review if evidence or authority is stale.`);
+      else throw new Error("invalid finalization response");
+    } catch (caught) { setReviewError(operatorError(caught, "Finalization could not be verified. Retry with the same browser session before starting a new review.")); }
     finally { setReviewBusy(false); }
   };
   const grantOwnerView = async () => {
@@ -402,13 +462,26 @@ function ApiV2OperatorPanel({ disabled }: { disabled: boolean }) {
         <button type="button" className="button-ghost button-small" disabled={disabled || ownerGrantBusy} onClick={() => void grantOwnerView()}>{ownerGrantBusy ? "Granting view access…" : "Grant owner profile view"}</button>
         {ownerGrantMessage && <p role="status" className="notice">{ownerGrantMessage}</p>}</div>}
       <form onSubmit={reserve} aria-busy={reviewBusy}>
-        <label>Deployment source<select value={reviewSource} disabled={disabled || reviewBusy || Boolean(reviewId)} onChange={event => { setReviewSource(event.target.value); resetReview(); }}>
+        <label>Deployment source<select value={reviewSource} disabled={disabled || reviewBusy || candidateBusy || Boolean(reviewId)} onChange={event => { setReviewSource(event.target.value); setCandidates([]); setCandidateCursor(null); setSelectedCandidate(null); resetReview(); }}>
           {sources.map(sourceId => <option key={sourceId} value={sourceId}>{sourceId}</option>)}</select></label>
-        <label>Record type<select value={resourceType} disabled={disabled || reviewBusy || Boolean(reviewId)} onChange={event => { setResourceType(event.target.value as DirectoryResourceType); resetReview(); }}><option value="client">Client</option><option value="organization">Organization</option></select></label>
+        <label>Record type<select value={resourceType} disabled={disabled || reviewBusy || candidateBusy || Boolean(reviewId)} onChange={event => { setResourceType(event.target.value as DirectoryResourceType); setSelectedCandidate(null); resetReview(); }}><option value="client">Client</option><option value="organization">Organization</option></select></label>
+        <div role="group" aria-label="Eligible Project Alpha records">
+          <button type="button" className="button-ghost button-small" disabled={disabled || candidateBusy || reviewBusy || Boolean(reviewId)} onClick={() => void loadCandidates(null)}>{candidateBusy ? "Loading eligible records…" : "Refresh eligible Project Alpha records"}</button>
+          {candidateError && <p role="alert" className="notice">{candidateError}</p>}
+          {candidates.filter(candidate => candidate.resourceType === resourceType).map(candidate => {
+            const value = `${candidate.source.sourceInstanceId}:${candidate.source.applicationId}:${candidate.source.historyEpoch}:${candidate.resourceType}:${candidate.projectAlphaPublicId}`;
+            const selectedValue = selectedCandidate && `${selectedCandidate.source.sourceInstanceId}:${selectedCandidate.source.applicationId}:${selectedCandidate.source.historyEpoch}:${selectedCandidate.resourceType}:${selectedCandidate.projectAlphaPublicId}`;
+            return <label key={value}><input type="radio" name="project-alpha-directory-candidate" value={value}
+              checked={selectedValue === value} disabled={disabled || candidateBusy || reviewBusy || Boolean(reviewId)}
+              onChange={() => { resetReview(); setSelectedCandidate(candidate); }} />
+              {candidate.resourceType} · {candidate.projectAlphaPublicId} · revision {candidate.resourceRevision} · binding {candidate.binding.externalId}</label>;
+          })}
+          {!candidateBusy && candidates.filter(candidate => candidate.resourceType === resourceType).length === 0 && <p role="status">No eligible unreserved {resourceType} records on this page.</p>}
+          {candidateCursor && <button type="button" className="button-ghost button-small" disabled={disabled || candidateBusy || reviewBusy || Boolean(reviewId)} onClick={() => void loadCandidates(candidateCursor, true)}>{candidateBusy ? "Loading more…" : "Load more eligible records"}</button>}
+        </div>
         <label>Exact local record ID<input value={recordId} maxLength={191} disabled={disabled || reviewBusy || Boolean(reviewId)} onChange={event => { setRecordId(event.target.value); resetReview(); }} /></label>
         <label>Expected local record version<input type="number" min="1" step="1" value={localVersion} disabled={disabled || reviewBusy || Boolean(reviewId)} onChange={event => { setLocalVersion(event.target.value); resetReview(); }} /></label>
-        <label>Exact Project Alpha public ID<input value={projectAlphaPublicId} maxLength={32} autoCapitalize="none" autoCorrect="off" spellCheck={false} disabled={disabled || reviewBusy || Boolean(reviewId)} onChange={event => { setProjectAlphaPublicId(event.target.value); resetReview(); }} /></label>
-        <button type="submit" className="button-ghost button-small" disabled={disabled || reviewBusy || Boolean(reviewId)}>{reviewBusy && !reviewId ? "Reserving exact pair…" : "Reserve exact pair"}</button>
+        <button type="submit" className="button-ghost button-small" disabled={disabled || reviewBusy || Boolean(reviewId) || !selectedCandidate}>{reviewBusy && !reviewId ? "Reserving exact pair…" : "Reserve selected exact pair"}</button>
       </form>
       {reviewId && !comparison && <button type="button" className="button-ghost button-small" disabled={disabled || reviewBusy} onClick={() => void compare()}>{reviewBusy ? "Comparing authorized fields…" : "Compare authorized fields"}</button>}
       {comparison && <div role="group" aria-label="Compared field dispositions"><div className="project-alpha-field-review-table-scroll" tabIndex={0} aria-label="Compared fields; scroll horizontally to view each value and disposition"><table><thead><tr><th>Field</th><th>Local value</th><th>Project Alpha value</th><th>Disposition</th></tr></thead><tbody>
@@ -417,6 +490,8 @@ function ApiV2OperatorPanel({ disabled }: { disabled: boolean }) {
           : <select aria-label={`${FIELD_LABELS[field.field]} disposition`} value={decisions[field.field] ?? ""} disabled={reviewBusy} onChange={event => setDecisions(current => ({ ...current, [field.field]: event.target.value as DirectoryFieldDecision }))}>
             <option value="">Select disposition</option><option value="retain_local">Retain local</option><option value="adopt_project_alpha">Adopt Project Alpha</option><option value="requires_follow_up">Requires follow-up</option></select>}</td></tr>)}
       </tbody></table></div><button type="button" className="button-ghost button-small" disabled={disabled || reviewBusy || !allDecided} onClick={() => void seal()}>{reviewBusy ? "Sealing review…" : "Seal field review"}</button></div>}
+      {sealedReceiptId && <div role="group" aria-label="Finalize sealed Directory review"><p>This applies only the sealed scalar dispositions, rebinds the exact Project Alpha identity, and activates the one-to-one canonical mapping. Unsupported relationship changes require a new review. Client portal, Delivery, workspace, folder, and public-link access remain unchanged.</p>
+        <button type="button" className="button-ghost button-small" disabled={disabled || reviewBusy} onClick={() => void finalize()}>{reviewBusy ? "Finalizing exact mapping…" : "Finalize sealed review"}</button></div>}
       {reviewMessage && <p role="status" className="notice">{reviewMessage}</p>}{reviewError && <p role="alert" className="notice">{reviewError}</p>}
     </section>
     </>}

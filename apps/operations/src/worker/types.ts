@@ -14,6 +14,7 @@ export type Env = Omit<
   | "PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ENABLED"
   | "PROJECT_ALPHA_API_V2_SYNC_ENABLED"
   | "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED"
+  | "PROJECT_ALPHA_DIRECTORY_LOCAL_PROFILE_ADOPTION_ENABLED"
   | "PROJECT_ALPHA_PROJECT_ADOPTION_REVIEW_ENABLED"
   | "PROJECT_ALPHA_PROJECT_BINDING_REVISION_REFRESH_ENABLED"
   | "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED"
@@ -66,6 +67,8 @@ export type Env = Omit<
   | "VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_DISPATCH_ENABLED"
   | "VERIFIED_RECIPIENT_DELIVERY_AUTHORITY"
 > & {
+  /** Explicit because Operations modules are also type-checked from sibling Worker projects with narrower generated Env types. */
+  ENVIRONMENT?: string;
   PROJECT_ALPHA_API_KEY?: string;
   /** Temporary release barrier for the preserving client-notification table rebuild. */
   CLIENT_PORTAL_NOTIFICATION_MIGRATION_MAINTENANCE?: string;
@@ -114,6 +117,8 @@ export type Env = Omit<
   PROJECT_ALPHA_API_V2_SYNC_ENABLED?: string;
   /** Staging-only, administrator-protected exact adoption of already-bound Directory identities. */
   PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED?: string;
+  /** Separate default-off staging gate for applying explicitly adopted scalar PA profile fields locally. */
+  PROJECT_ALPHA_DIRECTORY_LOCAL_PROFILE_ADOPTION_ENABLED?: string;
   /** Staging-only, default-off PA-origin project adoption review evidence entry route. */
   PROJECT_ALPHA_PROJECT_ADOPTION_REVIEW_ENABLED?: string;
   /** Staging-only administrator endpoint for refreshing an already-authorized stale Project binding. */

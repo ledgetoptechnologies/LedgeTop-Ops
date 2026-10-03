@@ -10,15 +10,16 @@ const PAGE_SIZE = 20;
 // Count statements, including statements within D1 batches. A contact page can
 // write three fields per record; a page count alone cannot bound subrequests.
 const QUERY_BUDGET = 800;
-const PHASES = ["organizations", "standalone", "workspaces", "accounts", "contacts", "principals", "projects", "sweep"] as const;
+const PHASES = ["organizations", "standalone", "reviewed", "workspaces", "accounts", "contacts", "reviewed_contacts", "principals", "projects", "sweep"] as const;
 type Phase = typeof PHASES[number];
 const PAGE_QUERY_COST: Record<Phase, number> = {
   organizations: 45, standalone: 45, workspaces: 46, accounts: 45,
-  contacts: 123, principals: 84, projects: 43, sweep: 4,
+  reviewed: 45, contacts: 123, reviewed_contacts: 85, principals: 84, projects: 43, sweep: 4,
 };
 type Kind = "organization" | "standalone_client";
-type Namespace = "business" | "portal" | "account";
-type IndexEnv = Pick<Env, "OPS_DB" | "DELIVERY_DB">;
+type Namespace = "business" | "portal" | "account" | "review";
+type IndexEnv = Pick<Env, "OPS_DB" | "DELIVERY_DB">
+  & Partial<Pick<Env, "ENVIRONMENT" | "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED">>;
 interface State { generation: number; backfill_phase: string | null; backfill_cursor: string | null }
 interface Root {
   source_id: string; root_namespace: Namespace; kind: Kind; public_id: string; display_name: string;
@@ -62,7 +63,7 @@ function contactFields(payload: string): { email?: string; phone?: string } {
 async function rootFacts(env: IndexEnv, roots: Root[]): Promise<Facts[]> {
   if (!roots.length) return [];
   const key = (root: Pick<Root, "source_id" | "root_namespace" | "kind" | "public_id">) => JSON.stringify([root.source_id, root.root_namespace, root.kind, root.public_id]);
-  const linked = await resolveClientHubWorkspaces(env, roots.filter(root => root.root_namespace !== "account").map(root => ({
+  const linked = await resolveClientHubWorkspaces(env, roots.filter(root => root.root_namespace === "business" || root.root_namespace === "portal").map(root => ({
     key: key(root), source_id: root.source_id, kind: root.kind, business_id: root.root_namespace === "business" ? root.public_id : null,
     pa_public_id: root.pa_public_id, workspace_id: root.root_namespace === "portal" ? root.public_id : null,
   })));
@@ -89,7 +90,7 @@ async function rootFacts(env: IndexEnv, roots: Root[]): Promise<Facts[]> {
     const root = roots.find(root => key(root) === key(fact))!;
     return { ...fact, legacy_account_id: root.root_namespace === "account" ? root.public_id
       : root.source_id === PA ? link?.workspace?.legacy_account_id ?? null : null,
-      portal_status: link?.workspace?.status ?? (link?.status === "conflict" ? "mapping_conflict" : link?.status === "pending" ? "projection_pending"
+      portal_status: root.root_namespace === "review" ? "review_only" : link?.workspace?.status ?? (link?.status === "conflict" ? "mapping_conflict" : link?.status === "pending" ? "projection_pending"
         : root.root_namespace === "business" && root.mapping_status !== "mapped" ? "mapping_unavailable"
           : root.source_id === PA ? "not_provisioned" : "not_supported") };
   });
@@ -170,6 +171,37 @@ async function rootPage(env: IndexEnv, phase: Phase, cursor: string, generation:
       const parsed = readClientHubSourcePublicId(payload_json);
       return { ...source, mapping_status: parsed.pa_public_id && !source.pa_public_id ? "ambiguous" : parsed.mapping_status };
     });
+  } else if (phase === "reviewed") {
+    if (env.ENVIRONMENT !== "staging" || env.PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED !== "true") rows = [];
+    else rows = (await ops.prepare(`SELECT display.source_id,'review' root_namespace,'standalone_client' kind,
+      display.projection_id public_id,display.project_alpha_public_id pa_public_id,'not_applicable' mapping_status,
+      display.display_name,'reviewed_display_only' status,1 contact_count,display.projection_id cursor
+      FROM project_alpha_reviewed_standalone_client_displays display
+      JOIN project_alpha_api_v2_directory_observations_current observation
+        ON observation.source_id=display.source_id AND observation.source_instance_id=display.source_instance_id
+       AND observation.application_id=display.application_id AND observation.history_epoch_id=display.history_epoch_id
+       AND observation.resource_type='client' AND observation.project_alpha_public_id=display.project_alpha_public_id
+      JOIN project_alpha_api_v2_inventory_receipts inventory
+        ON inventory.source_id=observation.source_id AND inventory.source_instance_id=observation.source_instance_id
+       AND inventory.application_id=observation.application_id AND inventory.history_epoch_id=observation.history_epoch_id
+       AND inventory.inventory_kind='directory' AND inventory.request_id=observation.request_id
+      WHERE display.state='display_only' AND display.projection_id>?
+        AND observation.present=1 AND observation.last_action='upsert' AND observation.has_conflict=0
+        AND observation.resource_revision=display.project_alpha_revision
+        AND observation.binding_external_id=display.external_id AND observation.binding_status='active'
+        AND observation.binding_resource_revision=observation.resource_revision
+        AND inventory.authorization_generation=display.authorization_generation
+        AND NOT EXISTS(SELECT 1 FROM project_alpha_directory_mappings mapping
+          WHERE mapping.source_id=display.source_id AND mapping.source_instance_id=display.source_instance_id
+            AND mapping.application_id=display.application_id AND mapping.resource_type='client'
+            AND (mapping.external_id=display.external_id OR mapping.project_alpha_public_id=display.project_alpha_public_id))
+        AND NOT EXISTS(SELECT 1 FROM project_alpha_acquired_canonical_mappings mapping
+          WHERE mapping.source_id=display.source_id AND mapping.source_instance_id=display.source_instance_id
+            AND mapping.application_id=display.application_id AND mapping.resource_type='client'
+            AND (mapping.record_id=display.record_id OR mapping.external_id=display.external_id
+              OR mapping.project_alpha_public_id=display.project_alpha_public_id))
+      ORDER BY display.projection_id COLLATE BINARY LIMIT ?`).bind(cursor, PAGE_SIZE)
+      .all<Root & { cursor: string }>()).results;
   } else if (phase === "accounts") {
     rows = (await delivery.prepare(`SELECT '${LOCAL}' source_id,'account' root_namespace,'standalone_client' kind,
       id public_id,NULL pa_public_id,'not_applicable' mapping_status,display_name,status,0 contact_count,id cursor
@@ -211,6 +243,21 @@ async function searchPage(env: IndexEnv, phase: Phase, cursor: string, generatio
       const fields = contactFields(row.payload_json);
       if (fields.email) values.push({ ...base, field: "email", value: fields.email });
       if (fields.phone) values.push({ ...base, field: "phone", value: fields.phone });
+    }
+  } else if (phase === "reviewed_contacts") {
+    if (env.ENVIRONMENT === "staging" && env.PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED === "true") {
+      const rows = (await env.OPS_DB.withSession("first-primary").prepare(`SELECT projection_id,source_id,display_name,email,phone
+        FROM project_alpha_reviewed_standalone_client_displays WHERE state='display_only' AND projection_id>?
+        ORDER BY projection_id COLLATE BINARY LIMIT ?`).bind(cursor, PAGE_SIZE)
+        .all<{projection_id:string;source_id:string;display_name:string;email:string|null;phone:string|null}>()).results;
+      count=rows.length; next=rows.at(-1)?.projection_id||cursor;
+      for(const row of rows){
+        const base={source:row.source_id,namespace:"review" as const,kind:"standalone_client" as const,
+          root:row.projection_id,type:"api_v2_reviewed_client",id:row.projection_id};
+        values.push({...base,field:"contact",value:row.display_name});
+        if(row.email) values.push({...base,field:"email",value:row.email});
+        if(row.phone) values.push({...base,field:"phone",value:row.phone.replace(/\D/g,"")});
+      }
     }
   } else if (phase === "principals") {
     const key = cursor ? JSON.parse(cursor) as [string, string] : ["", ""];
@@ -294,7 +341,7 @@ export async function reconcileClientHubIndex(env: IndexEnv, maxPages = 20): Pro
         console.log(JSON.stringify({ event: "client_hub.index.complete", pages }));
         return { status: "complete", pages };
       }
-      const result = ["organizations", "standalone", "workspaces", "accounts"].includes(phase)
+      const result = ["organizations", "standalone", "reviewed", "workspaces", "accounts"].includes(phase)
         ? await rootPage(env, phase, cursor, state.generation, token)
         : await searchPage(env, phase, cursor, state.generation, token);
       if (result.count < PAGE_SIZE) { phase = nextPhase(phase)!; cursor = ""; }

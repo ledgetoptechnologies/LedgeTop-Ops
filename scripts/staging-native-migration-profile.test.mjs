@@ -53,7 +53,7 @@ test("builds only the exact migration suffixes and strips every deployment field
     "0151_verified_recipient_delivery_authority_outbox.sql");
   assert.equal(profiles.client.manifest.requiredRemoteBaseline,
     "0222_verified_recipient_delivery_cross_manager_revoke.sql");
-  assert.equal(profiles.operations.manifest.reviewedFinalChain.count, 165);
+  assert.equal(profiles.operations.manifest.reviewedFinalChain.count, 169);
   assert.equal(profiles.client.manifest.reviewedFinalChain.count, 147);
   for (const profile of Object.values(profiles)) {
     assert.deepEqual(Object.keys(profile.config).sort(), ["$schema", "account_id", "d1_databases", "name"]);
@@ -80,8 +80,8 @@ test("rejects an extra SQL file and a changed native migration", () => {
 
   const changed = fixture();
   fs.appendFileSync(path.join(changed, "apps", "operations", "migrations",
-    "0159_operations_portal_native_delivery_recovery_invocations.sql"), " ");
-  assert.throws(() => buildProfiles(changed), /native candidate changed: 0159_/);
+    "0168_project_alpha_directory_read_adoption_local_profiles.sql"), " ");
+  assert.throws(() => buildProfiles(changed), /native candidate changed: 0168_/);
 });
 
 test("rejects a missing or changed pinned base migration", () => {

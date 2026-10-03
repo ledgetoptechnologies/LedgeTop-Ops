@@ -181,6 +181,8 @@ test("rejects missing, unexpected, or non-regular release migrations", () => {
   assert.deepEqual(validateMigrationInventory(base), []);
   fs.appendFileSync(path.join(base, "apps", "operations", "migrations", "0163_project_alpha_directory_read_adoption_field_review_receipts.sql"), "\n-- drift\n");
   assert(validateMigrationInventory(base).some((error) => error.includes("0163_project_alpha_directory_read_adoption_field_review_receipts.sql SHA-256")));
+  fs.appendFileSync(path.join(base, "apps", "operations", "migrations", "0168_project_alpha_directory_read_adoption_local_profiles.sql"), "\n-- drift\n");
+  assert(validateMigrationInventory(base).some((error) => error.includes("0168_project_alpha_directory_read_adoption_local_profiles.sql SHA-256")));
   fs.rmSync(path.join(base, "apps", "client", "migrations", "0213_incoming_rclone_promotion.sql"));
   fs.writeFileSync(path.join(base, "apps", "client", "migrations", "0214_unreviewed.sql"), "-- unexpected\n");
   assert(validateMigrationInventory(base).some((error) => error.includes("delivery release migration inventory")));
@@ -426,7 +428,7 @@ test("requires every portal-v2 and Operations capability to be explicitly false"
   }
 });
 
-test("pins the native portal, Operations 0054-0165 gap-aware chain, both 0199 files, and the 0200-0228 gap-aware release contract", () => {
+test("pins the native portal, Operations 0054-0169 gap-aware chain, both 0199 files, and the 0200-0228 gap-aware release contract", () => {
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-46), [
     "0184_native_client_feedback.sql",
     "0185_native_service_request_ownership.sql",
@@ -519,6 +521,10 @@ test("pins the native portal, Operations 0054-0165 gap-aware chain, both 0199 fi
     "0163_project_alpha_directory_read_adoption_field_review_receipts.sql",
     "0164_project_alpha_directory_read_adoption_authority_recheck.sql",
     "0165_project_alpha_inventory_generation_surface_scope.sql",
+    "0166_project_alpha_reviewed_standalone_display.sql",
+    "0167_project_alpha_directory_read_adoption_finalizations.sql",
+    "0168_project_alpha_directory_read_adoption_local_profiles.sql",
+    "0169_project_alpha_existing_directory_binding_generation_evidence.sql",
   ]);
   const nativeDirectoryStart = REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0054_project_alpha_directory_outbox.sql");
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(nativeDirectoryStart, nativeDirectoryStart + 3), [

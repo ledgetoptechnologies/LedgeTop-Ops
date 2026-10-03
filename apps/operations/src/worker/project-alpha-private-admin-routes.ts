@@ -43,6 +43,8 @@ const acquireSchema = z.object({
   recordId: RECORD_ID,
   resourceType: z.enum(["client", "organization"]),
   projectAlphaPublicId: PUBLIC_ID,
+  expectedProjectAlphaRevision: z.string().regex(/^[1-9][0-9]{0,18}$/),
+  expectedAuthorizationGeneration: z.string().regex(/^(?:0|[1-9][0-9]{0,18})$/),
   localRecordVersion: positiveInteger,
 }).strict();
 const activationSchema = z.object({ reviewItemId: UUID, idempotencyKey: IDEMPOTENCY }).strict();

@@ -153,7 +153,8 @@ describe("private Project Alpha administrator transport", () => {
     expect((await send("/projects/adoption/reserve", valid, commandId)).status).toBe(400);
     expect((await send("/directory/acquire", {
       reviewId, commandId, sourceId: "project-alpha:primary", recordId: "record-1", resourceType: "organization",
-      projectAlphaPublicId: publicId, localRecordVersion: 1,
+      projectAlphaPublicId: publicId, expectedProjectAlphaRevision: "3", expectedAuthorizationGeneration: "7",
+      localRecordVersion: 1,
     }, commandId, { "Content-Length": String(33 * 1024) })).status).toBe(413);
     expect(mocks.reserve).not.toHaveBeenCalled();
   });
@@ -162,7 +163,8 @@ describe("private Project Alpha administrator transport", () => {
     const { send } = fixture();
     const input = {
       reviewId, commandId, sourceId: "project-alpha:primary", recordId: "record-1", resourceType: "organization",
-      projectAlphaPublicId: publicId, localRecordVersion: 1,
+      projectAlphaPublicId: publicId, expectedProjectAlphaRevision: "3", expectedAuthorizationGeneration: "7",
+      localRecordVersion: 1,
     };
     expect((await send("/directory/acquire", input, commandId)).status).toBe(200);
     expect(mocks.acquire).toHaveBeenCalledWith(expect.anything(), {

@@ -20,10 +20,17 @@ export type ProjectAlphaDirectoryReadAdoptionActor = Readonly<{
 
 export type ProjectAlphaDirectoryReadAdoptionInput = Readonly<{
   sourceId: string;
+  sourceInstanceId: string;
+  applicationId: string;
+  historyEpoch: string;
   resourceType: ProjectAlphaDirectoryReadKind;
   recordId: string;
   expectedLocalRecordVersion: number;
   projectAlphaPublicId: string;
+  resourceRevision: string;
+  authorizationGeneration: string;
+  bindingExternalId: string;
+  bindingResourceRevision: string;
   idempotencyKey: string;
   actor: ProjectAlphaDirectoryReadAdoptionActor;
 }>;
@@ -70,12 +77,22 @@ function safeId(value: unknown, max = 191): value is string {
 }
 
 function validInput(input: ProjectAlphaDirectoryReadAdoptionInput): boolean {
+  const positiveRevision = /^[1-9][0-9]{0,18}$/;
+  const generation = /^(?:0|[1-9][0-9]{0,18})$/;
   return !!input && typeof input === "object" && !Array.isArray(input)
     && SOURCE_ID.test(input.sourceId)
+    && UUID.test(input.sourceInstanceId)
+    && UUID.test(input.applicationId)
+    && UUID.test(input.historyEpoch)
     && (input.resourceType === "client" || input.resourceType === "organization")
     && safeId(input.recordId)
     && Number.isInteger(input.expectedLocalRecordVersion) && input.expectedLocalRecordVersion >= 1
     && PUBLIC_ID.test(input.projectAlphaPublicId)
+    && positiveRevision.test(input.resourceRevision)
+    && generation.test(input.authorizationGeneration)
+    && safeId(input.bindingExternalId)
+    && positiveRevision.test(input.bindingResourceRevision)
+    && input.bindingResourceRevision === input.resourceRevision
     && UUID.test(input.idempotencyKey)
     && !!input.actor && typeof input.actor === "object" && !Array.isArray(input.actor)
     && safeId(input.actor.staffId) && safeId(input.actor.accessSubject)
@@ -115,8 +132,11 @@ async function eligibleObservation(db: D1Database, input: ProjectAlphaDirectoryR
     JOIN native_staff_admissions admission ON admission.staff_id=? AND admission.active=1
       AND admission.bound_access_subject=? AND admission.version=?
     JOIN native_staff_profiles profile ON profile.staff_id=admission.staff_id AND profile.version=?
-    WHERE observation.source_id=? AND observation.resource_type=?
-      AND observation.project_alpha_public_id=? AND observation.present=1 AND observation.last_action='upsert'
+    WHERE observation.source_id=? AND observation.source_instance_id=? AND observation.application_id=?
+      AND observation.history_epoch_id=? AND observation.resource_type=?
+      AND observation.project_alpha_public_id=? AND observation.resource_revision=?
+      AND receipt.authorization_generation=? AND observation.binding_external_id=?
+      AND observation.binding_resource_revision=? AND observation.present=1 AND observation.last_action='upsert'
       AND observation.binding_external_id IS NOT NULL AND observation.binding_status='active'
       AND observation.binding_resource_revision=observation.resource_revision AND observation.has_conflict=0
       AND EXISTS(SELECT 1 FROM native_directory_grants allow_row
@@ -170,7 +190,9 @@ async function eligibleObservation(db: D1Database, input: ProjectAlphaDirectoryR
     LIMIT 1`).bind(
       input.recordId, input.resourceType, input.expectedLocalRecordVersion,
       input.actor.staffId, input.actor.accessSubject, input.actor.admissionVersion, input.actor.profileVersion,
-      input.sourceId, input.resourceType, input.projectAlphaPublicId,
+      input.sourceId, input.sourceInstanceId, input.applicationId, input.historyEpoch, input.resourceType,
+      input.projectAlphaPublicId, input.resourceRevision, input.authorizationGeneration,
+      input.bindingExternalId, input.bindingResourceRevision,
     ).first<Observation>();
 }
 
@@ -188,9 +210,12 @@ export async function reserveProjectAlphaDirectoryReadAdoption(
   if (!validInput(input)) return { status: "rejected", reason: "invalid_input" };
 
   const requestSha256 = await digest({
-    sourceId: input.sourceId, resourceType: input.resourceType, recordId: input.recordId,
+    sourceId: input.sourceId, sourceInstanceId: input.sourceInstanceId, applicationId: input.applicationId,
+    historyEpoch: input.historyEpoch, resourceType: input.resourceType, recordId: input.recordId,
     expectedLocalRecordVersion: input.expectedLocalRecordVersion,
-    projectAlphaPublicId: input.projectAlphaPublicId,
+    projectAlphaPublicId: input.projectAlphaPublicId, resourceRevision: input.resourceRevision,
+    authorizationGeneration: input.authorizationGeneration, bindingExternalId: input.bindingExternalId,
+    bindingResourceRevision: input.bindingResourceRevision,
     actor: input.actor,
   });
   const prior = replay(await existing(env.OPS_DB, input.idempotencyKey), requestSha256);

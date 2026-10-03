@@ -1,10 +1,10 @@
 import {Miniflare} from "miniflare";
 import {afterAll,beforeAll,describe,expect,it,vi} from "vitest";
-import {applyCanonicalChain,authorizeCanonicalUuidAcquisition,canonicalUuidOrganization,createAcquisitionPrerequisite,
+import {applyCanonicalChain,applyCanonicalMigrationSchema,applyCanonicalTail,authorizeCanonicalUuidAcquisition,canonicalUuidOrganization,createAcquisitionPrerequisite,
   establishGovernedEmptyEnrollmentFixture,
   establishCleanV3Authority,establishHistoricalPreservedOnboardingLineage,transitionCleanV3ToV4Acquisition,
   transitionCleanV4ToV6PortalAuthority,transitionHistoricalOnboardingToV7Acquisition,transitionHistoricalV7ToV8PortalAuthority,
-  revokeCleanV6PortalAuthority,revokeHistoricalV8PortalAuthority,
+  registerCanonicalMigration,revokeCleanV6PortalAuthority,revokeHistoricalV8PortalAuthority,
   writeGovernedCanonicalUuidOrganization} from "./helpers/verified-recipient-canonical-lineage";
 import {selectPortalWorkspaceBinding} from "../src/worker/client-portal-workspace-binding-selection";
 import {canonicalOwner} from "./helpers/verified-recipient-canonical-lineage";
@@ -33,6 +33,7 @@ function createRemote():typeof fetch{return vi.fn<typeof fetch>(async(input,init
 });}
 function projectAlphaRemote():typeof fetch{
   const bindingPath=`/api/v2/bindings/organization/status/${Buffer.from(canonicalUuidOrganization.recordId).toString("base64url")}`;
+  let authorizationGeneration="8";
   return vi.fn<typeof fetch>(async(input,init)=>{
     const path=new URL(String(input)).pathname,headers=new Headers(init?.headers),requestId=crypto.randomUUID();
     const reply=(value:Record<string,unknown>)=>new Response(JSON.stringify({...value,requestId}),{headers:{"Content-Type":"application/json","Cache-Control":"no-store","X-Request-ID":requestId}});
@@ -46,15 +47,19 @@ function projectAlphaRemote():typeof fetch{
     if(headers.get("Authorization")!=="Bearer test-secret")throw Error("unexpected PA authority");
     if(path===`/api/v2/directory/organizations/${canonicalUuidOrganization.publicId}`)return reply({apiVersion:"2",
       sourceInstanceId:acquiredSource.sourceInstanceId,applicationId:acquiredSource.applicationId,
-      historyEpoch:acquiredSource.historyEpochId,authorizationGeneration:"8",resource:{type:"organization",id:canonicalUuidOrganization.publicId,revision:"7"},
+      historyEpoch:acquiredSource.historyEpochId,authorizationGeneration,resource:{type:"organization",id:canonicalUuidOrganization.publicId,revision:"7"},
       data:{publicId:canonicalUuidOrganization.publicId,name:"Canonical joined UUID organization",email:"canonical@example.test",phone:null,
         address:{line1:"1 Canonical Way",line2:null,city:"Austin",state:"TX",postalCode:"78701",country:"US"}}});
     if(path===bindingPath)return reply({apiVersion:"2",sourceInstanceId:acquiredSource.sourceInstanceId,
-      applicationId:acquiredSource.applicationId,historyEpoch:acquiredSource.historyEpochId,authorizationGeneration:"8",
+      applicationId:acquiredSource.applicationId,historyEpoch:acquiredSource.historyEpochId,authorizationGeneration,
       binding:{type:"organization",externalId:canonicalUuidOrganization.recordId,publicId:canonicalUuidOrganization.publicId,createdAt:new Date().toISOString()},resource:{revision:"7",present:true}});
-    if(path==="/api/v2/directory/organizations/bindings/commands")return reply({replayed:false,sourceInstanceId:acquiredSource.sourceInstanceId,
-      applicationId:acquiredSource.applicationId,historyEpoch:acquiredSource.historyEpochId,
-      result:{binding:{publicId:canonicalUuidOrganization.publicId},resource:{type:"organization",id:canonicalUuidOrganization.recordId,revision:"7"}}});
+    if(path==="/api/v2/directory/organizations/bindings/commands"){
+      const body=JSON.parse(String(init?.body));if(body.expectedAuthorizationGeneration!==authorizationGeneration)throw Error("stale generation");
+      authorizationGeneration=String(BigInt(authorizationGeneration)+1n);
+      return reply({replayed:false,sourceInstanceId:acquiredSource.sourceInstanceId,
+        applicationId:acquiredSource.applicationId,historyEpoch:acquiredSource.historyEpochId,
+        result:{binding:{publicId:canonicalUuidOrganization.publicId},resource:{type:"organization",id:canonicalUuidOrganization.recordId,revision:"7"},authorizationGeneration}});
+    }
     throw Error(`unexpected PA request ${path}`);
   });
 }
@@ -110,10 +115,14 @@ describe("verified recipient authority canonical joined prerequisite",()=>{
         AND intent.state='acknowledged' AND intent.record_id=? AND mapping.external_id=intent.external_canonical_id`)
       .bind(written.outcome.commandIds[0],canonicalUuidOrganization.recordId).first("count")).toBe(1);
     const authority=await authorizeCanonicalUuidAcquisition(ops);
+    expect(await applyCanonicalTail(ops,"0152_operations_portal_workspace_reservations.sql",
+      "0169_project_alpha_existing_directory_binding_generation_evidence.sql")).toHaveLength(17);
+    expect(await ops.prepare("SELECT count(*) count FROM d1_migrations").first("count")).toBe(169);
     const fetcher=projectAlphaRemote(),reviewId="40000000-0000-4000-8000-000000000001",commandId="40000000-0000-4000-8000-000000000002";
     const acquired=await acquireProjectAlphaExistingDirectoryBinding({OPS_DB:ops,PROJECT_ALPHA_API_V2_CONNECTIONS:connections},{reviewId,commandId,
       sourceId:acquiredSource.sourceId,recordId:canonicalUuidOrganization.recordId,resourceType:"organization",
-      projectAlphaPublicId:canonicalUuidOrganization.publicId,localRecordVersion:1,reviewer:authority.reviewer},fetcher);
+      projectAlphaPublicId:canonicalUuidOrganization.publicId,expectedProjectAlphaRevision:"7",expectedAuthorizationGeneration:"8",
+      localRecordVersion:1,reviewer:authority.reviewer},fetcher);
     expect(acquired).toMatchObject({status:"acquired",replayed:false});
     if(acquired.status!=="acquired")throw Error(`canonical acquisition failed: ${JSON.stringify(acquired)}`);
     expect(await ops.prepare(`SELECT count(*) count FROM project_alpha_existing_directory_binding_review_evidence review
@@ -171,10 +180,12 @@ describe("verified recipient authority canonical joined prerequisite",()=>{
       await expect(dispatchProjectAlphaDirectoryProfileOutboxCommand({OPS_DB:database,PROJECT_ALPHA_API_V2_CONNECTIONS:connections},
         canonicalUuidOrganization.sourceId,written.outcome.commandIds[0]!,createRemote())).resolves.toMatchObject({status:"acknowledged"});
       const reviewer=await transitionCleanV3ToV4Acquisition(database),fetcher=projectAlphaRemote();
+      await applyCanonicalMigrationSchema(database,"0169_project_alpha_existing_directory_binding_generation_evidence.sql");
       const acquired=await acquireProjectAlphaExistingDirectoryBinding({OPS_DB:database,PROJECT_ALPHA_API_V2_CONNECTIONS:connections},{
         reviewId:"70000000-0000-4000-8000-000000000001",commandId:"70000000-0000-4000-8000-000000000002",
         sourceId:acquiredSource.sourceId,recordId:canonicalUuidOrganization.recordId,resourceType:"organization",
-        projectAlphaPublicId:canonicalUuidOrganization.publicId,localRecordVersion:1,reviewer},fetcher);
+        projectAlphaPublicId:canonicalUuidOrganization.publicId,expectedProjectAlphaRevision:"7",expectedAuthorizationGeneration:"8",
+        localRecordVersion:1,reviewer},fetcher);
       expect(acquired).toMatchObject({status:"acquired",replayed:false});if(acquired.status!=="acquired")throw Error(JSON.stringify(acquired));
       const activated=await activateProjectAlphaExistingDirectoryBinding({OPS_DB:database,PROJECT_ALPHA_API_V2_CONNECTIONS:connections},
         {reviewItemId:acquired.reviewReceiptId,idempotencyKey:"70000000-0000-4000-8000-000000000003"},
@@ -204,6 +215,7 @@ describe("verified recipient authority canonical joined prerequisite",()=>{
         .first("count")).toBe(1);
       expect(await database.prepare("SELECT count(*) count FROM verified_recipient_delivery_authority_commands")
         .first("count")).toBe(0);
+      await registerCanonicalMigration(database,"0169_project_alpha_existing_directory_binding_generation_evidence.sql");
     }finally{await isolated.dispose();}
   },240_000);
 
@@ -235,6 +247,7 @@ describe("verified recipient authority canonical joined prerequisite",()=>{
         canonicalUuidOrganization.sourceId,written.outcome.commandIds[0]!,createRemote())).resolves.toMatchObject({status:"acknowledged",replayed:false});
 
       const authority=await transitionHistoricalOnboardingToV7Acquisition(database);
+      await applyCanonicalMigrationSchema(database,"0169_project_alpha_existing_directory_binding_generation_evidence.sql");
       expect(authority.reviewer).toMatchObject({admissionVersion:5,profileVersion:1,grantGeneration:6});
       expect((await database.prepare(`SELECT grant_version,active,grant_generation FROM native_directory_grant_history
         WHERE grant_id=? ORDER BY grant_version`).bind(historical.onboardingGrantId).all()).results).toEqual([
@@ -255,7 +268,8 @@ describe("verified recipient authority canonical joined prerequisite",()=>{
       const fetcher=projectAlphaRemote(),request={reviewId:"80000000-0000-4000-8000-000000000001",
         commandId:"80000000-0000-4000-8000-000000000002",sourceId:acquiredSource.sourceId,
         recordId:canonicalUuidOrganization.recordId,resourceType:"organization" as const,
-        projectAlphaPublicId:canonicalUuidOrganization.publicId,localRecordVersion:1,reviewer:authority.reviewer};
+        projectAlphaPublicId:canonicalUuidOrganization.publicId,expectedProjectAlphaRevision:"7",expectedAuthorizationGeneration:"8",
+        localRecordVersion:1,reviewer:authority.reviewer};
       const acquired=await acquireProjectAlphaExistingDirectoryBinding({OPS_DB:database,PROJECT_ALPHA_API_V2_CONNECTIONS:connections},request,fetcher);
       expect(acquired).toMatchObject({status:"acquired",replayed:false});if(acquired.status!=="acquired")throw Error(JSON.stringify(acquired));
       await expect(acquireProjectAlphaExistingDirectoryBinding({OPS_DB:database,PROJECT_ALPHA_API_V2_CONNECTIONS:connections},request,fetcher))
@@ -306,6 +320,7 @@ describe("verified recipient authority canonical joined prerequisite",()=>{
         {grant_version:1,active:1,grant_generation:9},{grant_version:2,active:0,grant_generation:10},
       ]);
       await expect(selectPortalWorkspaceBinding(database,portal.actor,selectionCommand)).rejects.toThrow("portal_workspace_binding_selection_denied");
+      await registerCanonicalMigration(database,"0169_project_alpha_existing_directory_binding_generation_evidence.sql");
     }finally{await isolated.dispose();}
   },240_000);
 });

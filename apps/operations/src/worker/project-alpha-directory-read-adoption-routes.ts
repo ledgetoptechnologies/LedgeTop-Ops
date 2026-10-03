@@ -8,10 +8,12 @@ import {
   reserveProjectAlphaDirectoryReadAdoption,
   type ProjectAlphaDirectoryReadAdoptionActor,
 } from "./project-alpha-directory-read-adoption";
+import { listProjectAlphaDirectoryReadAdoptionCandidates } from "./project-alpha-directory-read-adoption-candidates";
 import {
   compareProjectAlphaDirectoryReadAdoptionFields,
   sealProjectAlphaDirectoryReadAdoptionFieldReview,
 } from "./project-alpha-directory-read-adoption-field-review";
+import { finalizeProjectAlphaDirectoryReadAdoption } from "./project-alpha-directory-read-adoption-runtime-finalizer";
 import { auditStatement } from "./request-security";
 import type { Env, StaffPrincipal } from "./types";
 
@@ -25,15 +27,26 @@ export const PROJECT_ALPHA_DIRECTORY_READ_ADOPTION_COMPARE_ROUTE =
   `${PROJECT_ALPHA_DIRECTORY_READ_ADOPTION_ROUTE}/:reviewId/field-comparison`;
 export const PROJECT_ALPHA_DIRECTORY_READ_ADOPTION_FIELD_REVIEW_ROUTE =
   `${PROJECT_ALPHA_DIRECTORY_READ_ADOPTION_ROUTE}/:reviewId/field-review`;
+export const PROJECT_ALPHA_DIRECTORY_READ_ADOPTION_CANDIDATES_ROUTE =
+  `${PROJECT_ALPHA_DIRECTORY_READ_ADOPTION_ROUTE}/candidates`;
+export const PROJECT_ALPHA_DIRECTORY_READ_ADOPTION_FINALIZE_ROUTE =
+  `${PROJECT_ALPHA_DIRECTORY_READ_ADOPTION_ROUTE}/field-reviews/:receiptId/finalize`;
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const requestSchema = z.object({
   sourceId: z.string().regex(/^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/),
+  sourceInstanceId: z.string().regex(UUID),
+  applicationId: z.string().regex(UUID),
+  historyEpoch: z.string().regex(UUID),
   resourceType: z.enum(["client", "organization"]),
   recordId: z.string().min(1).max(191).refine(value => !/\p{C}/u.test(value)),
   expectedLocalRecordVersion: z.number().int().min(1),
   projectAlphaPublicId: z.string().regex(/^[0-9a-f]{32}$/),
-}).strict();
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  resourceRevision: z.string().regex(/^[1-9][0-9]{0,18}$/),
+  authorizationGeneration: z.string().regex(/^(?:0|[1-9][0-9]{0,18})$/),
+  bindingExternalId: z.string().min(1).max(191).refine(value => !/\p{C}/u.test(value)),
+  bindingResourceRevision: z.string().regex(/^[1-9][0-9]{0,18}$/),
+}).strict().refine(value => value.bindingResourceRevision === value.resourceRevision);
 const fieldDecision = z.enum(["unchanged", "retain_local", "adopt_project_alpha", "requires_follow_up"]);
 const commonDecisions = {
   name: fieldDecision, email: fieldDecision, phone: fieldDecision, address_line1: fieldDecision,
@@ -87,10 +100,60 @@ async function requireReviewAdministrator(c: AppContext): Promise<ProjectAlphaDi
   return nativeActor(c);
 }
 
+async function runtimeActor(c: AppContext): Promise<ProjectAlphaDirectoryReadAdoptionActor & { grantGeneration: number }> {
+  const actor = await requireReviewAdministrator(c);
+  const generation = await c.env.OPS_DB.prepare(`SELECT generation FROM native_directory_grant_generations WHERE staff_id=?`)
+    .bind(actor.staffId).first<number>("generation");
+  if (!Number.isSafeInteger(generation) || Number(generation) < 1)
+    throw new HTTPException(403, { message: "Current native Directory authority is required" });
+  return Object.freeze({ ...actor, grantGeneration: Number(generation) });
+}
+
 /** Mounted after Operations' authenticated mutation middleware, which supplies
  * same-origin and CSRF enforcement. This route adds staging, administrator,
  * global integrations.manage, and current native-identity gates. */
 export function registerProjectAlphaDirectoryReadAdoptionRoutes(app: App): void {
+  app.post(PROJECT_ALPHA_DIRECTORY_READ_ADOPTION_FINALIZE_ROUTE, async c => {
+    const actor = await runtimeActor(c);
+    const receiptId = c.req.param("receiptId");
+    if (!UUID.test(receiptId)) throw new HTTPException(400, { message: "Field-review receipt ID is invalid" });
+    const parsed = comparisonSchema.safeParse(await readBoundedJson(c.req.raw, 128, "Project Alpha Directory finalization"));
+    if (!parsed.success) throw new HTTPException(400, { message: "Directory finalization request is invalid" });
+    const idempotencyKey = c.req.header("Idempotency-Key");
+    if (!idempotencyKey || !UUID.test(idempotencyKey))
+      throw new HTTPException(400, { message: "A UUID Idempotency-Key is required" });
+    const outcome = await finalizeProjectAlphaDirectoryReadAdoption(c.env, {
+      fieldReviewReceiptId: receiptId, idempotencyKey, actor,
+    });
+    await c.env.OPS_DB.batch([await auditStatement(c.env, c.req.raw, c.get("principal"),
+      "integration.project_alpha_directory_read_adoption_finalization_completed",
+      "project_alpha_directory_read_adoption_finalization", receiptId, null,
+      { status: outcome.status, ...("stage" in outcome ? { stage: outcome.stage } : {}),
+        ...("reason" in outcome ? { reason: outcome.reason } : {}) })]);
+    return c.json({ outcome });
+  });
+
+  app.get(PROJECT_ALPHA_DIRECTORY_READ_ADOPTION_CANDIDATES_ROUTE, async c => {
+    await requireReviewAdministrator(c);
+    const url = new URL(c.req.url);
+    if ([...url.searchParams.keys()].some(key => !["sourceId", "limit", "cursor"].includes(key)))
+      throw new HTTPException(400, { message: "Directory adoption candidate query is invalid" });
+    if (url.searchParams.getAll("sourceId").length !== 1 || url.searchParams.getAll("limit").length > 1
+      || url.searchParams.getAll("cursor").length > 1)
+      throw new HTTPException(400, { message: "Directory adoption candidate query is invalid" });
+    const sourceId = url.searchParams.get("sourceId");
+    const rawLimit = url.searchParams.get("limit") ?? "25";
+    if (!sourceId || !/^[1-9][0-9]{0,2}$/u.test(rawLimit) || Number(rawLimit) > 100)
+      throw new HTTPException(400, { message: "Directory adoption candidate query is invalid" });
+    const page = await listProjectAlphaDirectoryReadAdoptionCandidates(c.env, {
+      sourceId,
+      limit: Number(rawLimit),
+      ...(url.searchParams.has("cursor") ? { cursor: url.searchParams.get("cursor") ?? "" } : {}),
+    });
+    if (!page) throw new HTTPException(400, { message: "Directory adoption candidate query is invalid" });
+    return c.json(page);
+  });
+
   app.post(PROJECT_ALPHA_DIRECTORY_READ_ADOPTION_COMPARE_ROUTE, async c => {
     const actor = await requireReviewAdministrator(c);
     const reviewId = c.req.param("reviewId");

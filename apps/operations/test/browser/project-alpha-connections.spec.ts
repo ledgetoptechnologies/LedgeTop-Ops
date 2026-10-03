@@ -4,6 +4,7 @@ const endpoint = "/api/admin/integrations/project-alpha/connectors";
 const apiV2SourcesEndpoint = "/api/admin/integrations/project-alpha/api-v2/sources";
 const inventoryEndpoint = "/api/admin/integrations/project-alpha/api-v2/sync-page";
 const adoptionEndpoint = "/api/admin/integrations/project-alpha/api-v2/directory/read-adoptions";
+const adoptionCandidatesEndpoint = `${adoptionEndpoint}/candidates`;
 const primary = "project-alpha:primary", secondary = "project-alpha:secondary";
 type Connector = { sourceId: string; displayName: string; producerBindingId: string; snapshotOrigin: string; snapshotBasePath: string;
   applicationKey: string; profile: "primary_legacy" | "business_data"; state: "pending" | "active" | "suspended" | "retired";
@@ -14,9 +15,9 @@ type Directory = { connectors: Connector[]; legacyPrimary: boolean; health: Arra
   projectManagement?: Array<{ sourceId: string; version: number; revision: number; enabled: boolean; reviewedUrlTemplate: string | null }> };
 const connector = (sourceId = secondary): Connector => ({ sourceId, displayName: sourceId === primary ? "LTDS Project Alpha" : "LTT Project Alpha", producerBindingId: sourceId === primary ? "ltds" : "ltt", snapshotOrigin: sourceId === primary ? "https://alpha.example.test" : "https://alpha-secondary.example.test", snapshotBasePath: "/", applicationKey: "ltds_ops", profile: sourceId === primary ? "primary_legacy" : "business_data", state: "active", readVisible: true, activeRevision: 1, version: 2 });
 type OperatorResponse = Record<string, unknown>;
-type OperatorResponses = { inventory?: OperatorResponse | ((body: Record<string, unknown> | null, requestIndex: number) => OperatorResponse); reserve?: unknown; compare?: unknown; seal?: unknown };
+type OperatorResponses = { inventory?: OperatorResponse | ((body: Record<string, unknown> | null, requestIndex: number) => OperatorResponse); candidates?: unknown; reserve?: unknown; compare?: unknown; seal?: unknown; finalize?: unknown };
 async function fixture(page: Page, data: Directory, operator: OperatorResponses = {}) {
-  const requests: Array<{ path: string; method: string; body: Record<string, unknown> | null }> = [];
+  const requests: Array<{ path: string; method: string; body: Record<string, unknown> | null; query?: string }> = [];
   let inventoryRequestIndex = 0;
   await page.route("**/api/**", async route => {
     const path = new URL(route.request().url()).pathname;
@@ -32,6 +33,10 @@ async function fixture(page: Page, data: Directory, operator: OperatorResponses 
       const response = typeof operator.inventory === "function" ? operator.inventory(body, inventoryRequestIndex++) : operator.inventory;
       return route.fulfill({ json: response });
     }
+    if (path === adoptionCandidatesEndpoint && route.request().method() === "GET") {
+      requests.push({ path, method: route.request().method(), body: null, query: new URL(route.request().url()).search.slice(1) });
+      return operator.candidates ? route.fulfill({ json: operator.candidates }) : route.fulfill({ status: 404, json: { error: "Not found" } });
+    }
     if (path === adoptionEndpoint && route.request().method() === "POST") {
       requests.push({ path, method: route.request().method(), body });
       return operator.reserve ? route.fulfill({ json: operator.reserve }) : route.fulfill({ status: 404, json: { error: "Not found" } });
@@ -43,6 +48,10 @@ async function fixture(page: Page, data: Directory, operator: OperatorResponses 
     if (path.startsWith(`${adoptionEndpoint}/`) && path.endsWith("/field-review") && route.request().method() === "POST") {
       requests.push({ path, method: route.request().method(), body });
       return operator.seal ? route.fulfill({ json: operator.seal }) : route.fulfill({ status: 404, json: { error: "Not found" } });
+    }
+    if (path.startsWith(`${adoptionEndpoint}/field-reviews/`) && path.endsWith("/finalize") && route.request().method() === "POST") {
+      requests.push({ path, method: route.request().method(), body });
+      return operator.finalize ? route.fulfill({ json: operator.finalize }) : route.fulfill({ status: 404, json: { error: "Not found" } });
     }
     if (!path.startsWith(endpoint)) return route.fulfill({ status: 404, json: { error: "Unexpected endpoint" } });
     requests.push({ path, method: route.request().method(), body });
@@ -186,17 +195,24 @@ test("reveals exact-record values only after explicit compare and seals enum-onl
     { field: "organization_public_id", localValue: null, projectAlphaValue: null, equal: true },
   ];
   const requests = await fixture(page, { connectors: [connector()], legacyPrimary: false, health: [], recovery: [], portal: { available: true, authorities: [], recovery: null }, projectManagement: [] }, {
+    candidates: { items: [{ source: { sourceId: secondary, sourceInstanceId: "10000000-0000-4000-8000-000000000001",
+      applicationId: "20000000-0000-4000-8000-000000000002", historyEpoch: "30000000-0000-4000-8000-000000000003" },
+      resourceType: "client", projectAlphaPublicId: "a".repeat(32), resourceRevision: "3", authorizationGeneration: "7",
+      binding: { externalId: "pa-client-77", status: "active", resourceRevision: "3" }, conflictState: "clear" }], nextCursor: null },
     reserve: { outcome: { status: "reserved", reviewId, claimId: "claim", state: "inactive" } },
     compare: { outcome: { status: "compared", reviewId, resourceType: "client", fields: comparedFields } },
     seal: { outcome: { status: "sealed", receiptId } },
+    finalize: { outcome: { status: "finalized", finalizationId: "90000000-0000-4000-8000-000000000009",
+      activationId: "a0000000-0000-4000-8000-00000000000a", recordId: "local-record-7", resourceType: "client", adoptedFields: [] } },
   });
   await page.goto("/administration");
   await page.getByText("Staging API-v2 operator review").click();
   const review = page.getByRole("region", { name: "Exact-record field review" });
+  await review.getByRole("button", { name: "Refresh eligible Project Alpha records" }).click();
+  await review.getByRole("radio", { name: `client · ${"a".repeat(32)} · revision 3 · binding pa-client-77` }).check();
   await review.getByLabel("Exact local record ID").fill("local-record-7");
   await review.getByLabel("Expected local record version").fill("3");
-  await review.getByLabel("Exact Project Alpha public ID").fill("a".repeat(32));
-  await review.getByRole("button", { name: "Reserve exact pair" }).click();
+  await review.getByRole("button", { name: "Reserve selected exact pair" }).click();
   await expect(review).toContainText("Field values remain hidden until you explicitly compare them");
   await expect(page.getByText("Private local value")).toHaveCount(0);
   expect(requests.filter(request => request.path.includes("field-comparison"))).toEqual([]);
@@ -208,16 +224,25 @@ test("reveals exact-record values only after explicit compare and seals enum-onl
   await review.getByLabel("Name disposition").selectOption("retain_local");
   page.once("dialog", dialog => void dialog.accept());
   await review.getByRole("button", { name: "Seal field review" }).click();
-  await expect(review).toContainText("Field review sealed. No local profile or Project Alpha values were changed.");
+  await expect(review).toContainText("Field review sealed. Review the finalization warning");
   await expect(page.getByText("Private local value")).toHaveCount(0);
+  await expect(review).toContainText("Client portal, Delivery, workspace, folder, and public-link access remain unchanged.");
+  page.once("dialog", dialog => void dialog.accept());
+  await review.getByRole("button", { name: "Finalize sealed review" }).click();
+  await expect(review).toContainText("No client portal, Delivery, workspace, folder, or public-link access was granted.");
 
   expect(requests.filter(request => request.path.startsWith(adoptionEndpoint))).toEqual([
-    { path: adoptionEndpoint, method: "POST", body: { sourceId: secondary, resourceType: "client", recordId: "local-record-7", expectedLocalRecordVersion: 3, projectAlphaPublicId: "a".repeat(32) } },
+    { path: adoptionCandidatesEndpoint, method: "GET", body: null, query: `sourceId=${encodeURIComponent(secondary)}&limit=50` },
+    { path: adoptionEndpoint, method: "POST", body: { sourceId: secondary, resourceType: "client", recordId: "local-record-7", expectedLocalRecordVersion: 3,
+      sourceInstanceId: "10000000-0000-4000-8000-000000000001", applicationId: "20000000-0000-4000-8000-000000000002",
+      historyEpoch: "30000000-0000-4000-8000-000000000003", projectAlphaPublicId: "a".repeat(32), resourceRevision: "3",
+      authorizationGeneration: "7", bindingExternalId: "pa-client-77", bindingResourceRevision: "3" } },
     { path: `${adoptionEndpoint}/${reviewId}/field-comparison`, method: "POST", body: {} },
     { path: `${adoptionEndpoint}/${reviewId}/field-review`, method: "POST", body: { decisions: {
       name: "retain_local", email: "unchanged", phone: "unchanged", address_line1: "unchanged", address_line2: "unchanged",
       city: "unchanged", state: "unchanged", postal_code: "unchanged", country: "unchanged", client_type: "unchanged",
       organization_public_id: "unchanged",
     } } },
+    { path: `${adoptionEndpoint}/field-reviews/${receiptId}/finalize`, method: "POST", body: {} },
   ]);
 });

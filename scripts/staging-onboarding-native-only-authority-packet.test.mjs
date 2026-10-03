@@ -97,12 +97,12 @@ async function seedDirectoryOutbox(db,values,state){
   return commandId;
 }
 
-test('guarded native-only packet against the complete current 165-migration schema',async t=>{
+test('guarded native-only packet against the complete current 168-migration schema',async t=>{
   const mf=new Miniflare({modules:true,script:"export default {fetch(){return new Response('ok')}}",d1Databases:{DB:id(900)}});
   try {
     const db=await mf.getD1Database('DB');
     const files=fs.readdirSync(path.join(root,'apps/operations/migrations')).filter(name=>/^\d{4}_.+\.sql$/.test(name)).sort();
-    assert.equal(files.length,165);
+    assert.equal(files.length,168);
     await db.prepare('CREATE TABLE d1_migrations(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE NOT NULL,applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)').run();
     for(const name of files){
       const sql=fs.readFileSync(path.join(root,'apps/operations/migrations',name),'utf8').replace(/\r\n/g,'\n');

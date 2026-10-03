@@ -11,6 +11,7 @@ import {
   type ProjectAlphaDirectoryProfileObservation,
   type ProjectAlphaDirectoryReadKind,
 } from "./project-alpha-directory-read-api-v2";
+import { generation, nextGeneration } from "./project-alpha-project-transport";
 
 export type ProjectAlphaExistingDirectoryAcquisitionEnvironment = ProjectAlphaApiV2ConnectionEnvironment & Readonly<{ OPS_DB: D1Database }>;
 export type ProjectAlphaExistingDirectoryAcquisitionInput = Readonly<{
@@ -20,6 +21,8 @@ export type ProjectAlphaExistingDirectoryAcquisitionInput = Readonly<{
   recordId: string;
   resourceType: ProjectAlphaDirectoryReadKind;
   projectAlphaPublicId: string;
+  expectedProjectAlphaRevision: string;
+  expectedAuthorizationGeneration: string;
   localRecordVersion: number;
   reviewer: Readonly<{
     staffId: string;
@@ -70,11 +73,15 @@ function safeText(value: unknown): value is string {
 }
 function positiveSafe(value: unknown): value is number { return Number.isSafeInteger(value) && (value as number) >= 1; }
 function input(value: unknown): value is ProjectAlphaExistingDirectoryAcquisitionInput {
-  return plain(value) && exact(value, ["reviewId", "commandId", "sourceId", "recordId", "resourceType", "projectAlphaPublicId", "localRecordVersion", "reviewer"])
+  return plain(value) && exact(value, ["reviewId", "commandId", "sourceId", "recordId", "resourceType", "projectAlphaPublicId",
+    "expectedProjectAlphaRevision", "expectedAuthorizationGeneration", "localRecordVersion", "reviewer"])
     && UUID.test(value.reviewId as string) && UUID.test(value.commandId as string) && value.reviewId !== value.commandId
     && typeof value.sourceId === "string" && SOURCE_ID.test(value.sourceId) && safeText(value.recordId)
     && (value.resourceType === "client" || value.resourceType === "organization")
     && typeof value.projectAlphaPublicId === "string" && PUBLIC_ID.test(value.projectAlphaPublicId)
+    && typeof value.expectedProjectAlphaRevision === "string" && /^[1-9][0-9]{0,18}$/.test(value.expectedProjectAlphaRevision)
+    && generation(value.expectedProjectAlphaRevision)
+    && generation(value.expectedAuthorizationGeneration) && nextGeneration(value.expectedAuthorizationGeneration) !== null
     && positiveSafe(value.localRecordVersion) && plain(value.reviewer)
     && exact(value.reviewer, ["staffId", "accessSubject", "admissionVersion", "profileVersion", "grantGeneration"])
     && safeText(value.reviewer.staffId) && safeText(value.reviewer.accessSubject)
@@ -250,14 +257,24 @@ export async function acquireProjectAlphaExistingDirectoryBinding(
       acquiredReceiptId: prior.receipt_id, replayed: true };
   } catch { return { status: "uncertain", reason: "database" }; }
 
+  let reservedBefore: Reservation[];
+  try { reservedBefore = await reservations(env.OPS_DB, selected); }
+  catch { return { status: "uncertain", reason: "database" }; }
+  if (reservedBefore.length > 1) return { status: "conflict", reason: "reservation" };
+
   const preRead = await readConfiguredProjectAlphaDirectoryProfile(env, selected.sourceId, selected.resourceType,
     selected.projectAlphaPublicId, send);
   if (preRead.status !== "observed") return preRead.status === "uncertain"
     ? { status: "uncertain", reason: "transport" } : { status: "blocked", reason: "remote" };
   const pre = preRead.observation;
+  if (pre.resource.revision !== selected.expectedProjectAlphaRevision
+    || (reservedBefore.length === 0 && pre.authorizationGeneration !== selected.expectedAuthorizationGeneration))
+    return { status: "blocked", reason: "remote" };
   const parent = selected.resourceType === "client" ? pre.profile.organizationPublicId ?? null : null;
   const command: ProjectAlphaExistingDirectoryBindingCommand = Object.freeze({ commandId: selected.commandId,
-    externalId: selected.recordId, expectedPublicId: selected.projectAlphaPublicId, expectedRevision: pre.resource.revision });
+    externalId: selected.recordId, expectedPublicId: selected.projectAlphaPublicId,
+    expectedRevision: selected.expectedProjectAlphaRevision,
+    expectedAuthorizationGeneration: selected.expectedAuthorizationGeneration });
   const commandCanonical = canonicalProjectAlphaExistingDirectoryBindingCommand(command);
   if (!commandCanonical) return { status: "rejected", reason: "invalid_input" };
   const requestSha256 = await digest(commandCanonical.body);
@@ -274,7 +291,7 @@ export async function acquireProjectAlphaExistingDirectoryBinding(
 
   let reservation: Reservation;
   try {
-    const existing = await reservations(env.OPS_DB, selected);
+    const existing = reservedBefore;
     if (existing.length > 1) return { status: "conflict", reason: "reservation" };
     if (existing.length === 1) {
       reservation = existing[0]!;
@@ -318,10 +335,19 @@ export async function acquireProjectAlphaExistingDirectoryBinding(
   } catch { return { status: "conflict", reason: "reservation" }; }
 
   const stateBefore = await latestState(env.OPS_DB, selected.commandId).catch(() => null);
-  let acquisitionEvidence = await env.OPS_DB.prepare(`SELECT destination_origin,pa_request_id,pa_replayed,response_sha256
+  let acknowledgedAuthorizationGeneration: string | null = null;
+  let acquisitionEvidence = await env.OPS_DB.prepare(`SELECT destination_origin,pa_request_id,pa_replayed,response_sha256,
+      expected_authorization_generation,result_authorization_generation
     FROM project_alpha_existing_directory_binding_acquisition_response_receipts WHERE command_id=?`)
-    .bind(selected.commandId).first<{ destination_origin: string; pa_request_id: string; pa_replayed: number; response_sha256: string }>()
+    .bind(selected.commandId).first<{ destination_origin: string; pa_request_id: string; pa_replayed: number; response_sha256: string;
+      expected_authorization_generation: string | null; result_authorization_generation: string | null }>()
     .catch(() => null);
+  if (acquisitionEvidence) {
+    if (acquisitionEvidence.expected_authorization_generation !== selected.expectedAuthorizationGeneration
+      || acquisitionEvidence.result_authorization_generation !== nextGeneration(selected.expectedAuthorizationGeneration))
+      return { status: "conflict", reason: "evidence" };
+    acknowledgedAuthorizationGeneration = acquisitionEvidence.result_authorization_generation;
+  }
   if (!acquisitionEvidence || stateBefore?.state !== "acknowledged") {
     const outcome = await sendConfiguredProjectAlphaExistingDirectoryBinding(env, selected.sourceId, selected.resourceType, command, send);
     if (outcome.status !== "acknowledged") {
@@ -332,6 +358,7 @@ export async function acquireProjectAlphaExistingDirectoryBinding(
     }
     const evidence = validatedProjectAlphaExistingDirectoryBindingEvidence(outcome);
     if (!evidence || evidence.requestSha256 !== requestSha256) return { status: "conflict", reason: "evidence" };
+    acknowledgedAuthorizationGeneration = evidence.response.result.authorizationGeneration;
     try {
       const latest = await latestState(env.OPS_DB, selected.commandId);
       if (!latest || (latest.state !== "pending" && latest.state !== "uncertain"))
@@ -339,23 +366,31 @@ export async function acquireProjectAlphaExistingDirectoryBinding(
       await env.OPS_DB.batch([
         env.OPS_DB.prepare(`INSERT INTO project_alpha_existing_directory_binding_acquisition_response_receipts(
           command_id,source_instance_id,application_id,history_epoch_id,resource_type,external_id,
-          project_alpha_public_id,project_alpha_revision,destination_origin,pa_request_id,pa_replayed,response_sha256)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).bind(selected.commandId, identity.sourceInstanceId, identity.applicationId,
+          project_alpha_public_id,project_alpha_revision,destination_origin,pa_request_id,pa_replayed,response_sha256,
+          expected_authorization_generation,result_authorization_generation)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(selected.commandId, identity.sourceInstanceId, identity.applicationId,
             identity.historyEpoch, selected.resourceType, selected.recordId, selected.projectAlphaPublicId,
             command.expectedRevision, evidence.destinationOrigin, evidence.response.requestId,
-            evidence.response.replayed ? 1 : 0, evidence.responseSha256),
+            evidence.response.replayed ? 1 : 0, evidence.responseSha256,
+            command.expectedAuthorizationGeneration, evidence.response.result.authorizationGeneration),
         env.OPS_DB.prepare(`INSERT INTO project_alpha_existing_directory_binding_acquisition_events(
           command_id,state_version,transition_id,request_sha256,state,occurred_at) VALUES(?,?,?,?, 'acknowledged',?)`)
           .bind(selected.commandId, latest.state_version + 1, crypto.randomUUID(), requestSha256, now()),
       ]);
       acquisitionEvidence = { destination_origin: evidence.destinationOrigin, pa_request_id: evidence.response.requestId,
-        pa_replayed: evidence.response.replayed ? 1 : 0, response_sha256: evidence.responseSha256 };
+        pa_replayed: evidence.response.replayed ? 1 : 0, response_sha256: evidence.responseSha256,
+        expected_authorization_generation: command.expectedAuthorizationGeneration,
+        result_authorization_generation: evidence.response.result.authorizationGeneration };
     } catch {
-      const saved = await env.OPS_DB.prepare(`SELECT destination_origin,pa_request_id,pa_replayed,response_sha256
+      const saved = await env.OPS_DB.prepare(`SELECT destination_origin,pa_request_id,pa_replayed,response_sha256,
+          expected_authorization_generation,result_authorization_generation
         FROM project_alpha_existing_directory_binding_acquisition_response_receipts WHERE command_id=?`)
         .bind(selected.commandId).first<typeof acquisitionEvidence>().catch(() => null);
-      if (!saved) return { status: "uncertain", reason: "database" };
+      if (!saved || saved.expected_authorization_generation !== command.expectedAuthorizationGeneration
+        || saved.result_authorization_generation !== nextGeneration(command.expectedAuthorizationGeneration))
+        return { status: "uncertain", reason: "database" };
       acquisitionEvidence = saved;
+      acknowledgedAuthorizationGeneration = saved.result_authorization_generation;
     }
   }
 
@@ -367,7 +402,9 @@ export async function acquireProjectAlphaExistingDirectoryBinding(
   if (profileAfter.status !== "observed" || bindingAfter.status !== "observed") return { status: "uncertain", reason: "post_read" };
   if (!sameProfile(pre, profileAfter.observation)
     || bindingAfter.observation.resource.revision !== command.expectedRevision
-    || profileAfter.observation.authorizationGeneration !== bindingAfter.observation.authorizationGeneration)
+    || profileAfter.observation.authorizationGeneration !== bindingAfter.observation.authorizationGeneration
+    || (acknowledgedAuthorizationGeneration !== null
+      && profileAfter.observation.authorizationGeneration !== acknowledgedAuthorizationGeneration))
     return { status: "conflict", reason: "evidence" };
   const postParent = selected.resourceType === "client" ? profileAfter.observation.profile.organizationPublicId ?? null : null;
   if (postParent !== parent) return { status: "conflict", reason: "evidence" };

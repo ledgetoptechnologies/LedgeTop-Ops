@@ -241,7 +241,8 @@ describe("administrator reconciliation review service", () => {
     const readProfile = vi.fn(async () => observed(sourceA, selected.publics[0]!));
     const acquire = vi.fn(async (_env, input: Record<string, unknown>) => {
       expect(input).toMatchObject({ sourceId: sourceA, recordId, resourceType: "organization",
-        projectAlphaPublicId: selected.publics[0], localRecordVersion: 2 });
+        projectAlphaPublicId: selected.publics[0], expectedProjectAlphaRevision: "9",
+        expectedAuthorizationGeneration: "7", localRecordVersion: 2 });
       return { status: "acquired" as const, reviewReceiptId: "r", commandId: String(input.commandId),
         acquiredReceiptId: uuid(), replayed: false };
     });

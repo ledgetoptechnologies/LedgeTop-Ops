@@ -26,10 +26,10 @@ const AREA_ID = /^staging-native-only-[a-z0-9-]+$/;
 const AREA_KEYS = Object.freeze(["id", "name", "active"]);
 const RESERVED_D1_TABLES = Object.freeze(new Set(["_cf_KV"]));
 const CHAIN = Object.freeze({
-  count: 165,
-  final: "0165_project_alpha_inventory_generation_surface_scope.sql",
-  names: "410fc8c0497d9e736ccfbc5acfdf568138c323cb0d1a72520c96e29571118c4b",
-  contents: "5d671c4cbc5b2a0cf66f7e903395ed2d22b820aa60af9c8076836262ac6cb835",
+  count: 169,
+  final: "0169_project_alpha_existing_directory_binding_generation_evidence.sql",
+  names: "e4ec1dc19f4e8a975b8a617771ede5948abef5b920179865da8c7ce91c94bf47",
+  contents: "88c7e2dad54e06d0bf97567ab988240ded1e340ac418068970b301191ce68ede",
 });
 
 const all = async (db, sql, ...args) => (await db.prepare(sql).bind(...args).all()).results;

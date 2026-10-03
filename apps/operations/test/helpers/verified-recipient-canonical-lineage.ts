@@ -188,7 +188,7 @@ function historicalArtifactBase(){
   return{base,bundle,names};
 }
 
-async function applyCanonicalTail(database:D1Database,after:string,final:string){
+export async function applyCanonicalTail(database:D1Database,after:string,final:string){
   const directory=new URL("../../../operations/migrations/",import.meta.url);
   const names=readdirSync(directory).filter(name=>/^\d{4}_.+\.sql$/.test(name)&&name>after&&name<=final).sort();
   if(names.at(-1)!==final)throw Error("canonical-operations-tail-final-migration-missing");
@@ -198,6 +198,20 @@ async function applyCanonicalTail(database:D1Database,after:string,final:string)
       database.prepare("INSERT INTO d1_migrations(name) VALUES(?)").bind(name)]);
   }
   return names;
+}
+
+/** Applies one selected reviewed additive migration to a deliberately
+ * historical authority fixture without pretending that fixture is a current
+ * full-chain rehearsal. */
+export async function applyCanonicalMigrationSchema(database:D1Database,name:string){
+  if(!/^\d{4}_.+\.sql$/.test(name))throw Error("canonical-operations-migration-name-invalid");
+  const directory=new URL("../../../operations/migrations/",import.meta.url);
+  const statements=splitD1MigrationStatements(readFileSync(new URL(name,directory),"utf8"));
+  await database.batch(statements.map(statement=>database.prepare(statement)));
+}
+export async function registerCanonicalMigration(database:D1Database,name:string){
+  if(!/^\d{4}_.+\.sql$/.test(name))throw Error("canonical-operations-migration-name-invalid");
+  await database.prepare("INSERT INTO d1_migrations(name) VALUES(?)").bind(name).run();
 }
 
 /** Builds the real pre-0123 schema-v2 bootstrap lineage, then applies the
