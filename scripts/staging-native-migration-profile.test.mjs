@@ -50,9 +50,11 @@ test("builds only the exact migration suffixes and strips every deployment field
   assert.deepEqual(profiles.client.files.map(({ name }) => name),
     [...NATIVE_MIGRATION_PROFILES.client.expectedAppliedMigrations]);
   assert.equal(profiles.operations.manifest.requiredRemoteBaseline,
-    "0151_verified_recipient_delivery_authority_outbox.sql");
+    "0165_project_alpha_inventory_generation_surface_scope.sql");
   assert.equal(profiles.client.manifest.requiredRemoteBaseline,
-    "0222_verified_recipient_delivery_cross_manager_revoke.sql");
+    "0228_operations_portal_native_content_start_audit.sql");
+  assert.equal(profiles.operations.expectedRemoteAppliedMigrations.length, 165);
+  assert.equal(profiles.client.expectedRemoteAppliedMigrations.length, 147);
   assert.equal(profiles.operations.manifest.reviewedFinalChain.count, 169);
   assert.equal(profiles.client.manifest.reviewedFinalChain.count, 147);
   for (const profile of Object.values(profiles)) {
@@ -105,8 +107,8 @@ test("writes deterministic ignored outputs and detects stale or extra output", (
   assert.equal(config.main, undefined);
   assert.equal(config.d1_databases[0].database_id, NATIVE_MIGRATION_PROFILES.client.databaseId);
 
-  fs.appendFileSync(path.join(profiles.client.migrationsDirectory,
-    NATIVE_MIGRATION_PROFILES.client.expectedAppliedMigrations[0]), " ");
+  fs.appendFileSync(path.join(profiles.operations.migrationsDirectory,
+    NATIVE_MIGRATION_PROFILES.operations.expectedAppliedMigrations[0]), " ");
   assert.throws(() => validateGenerated(base), /generated migration changed/);
 
   writeProfiles(base);
@@ -137,14 +139,14 @@ test("refuses output symlinks and unignored output paths", (t) => {
 
 test("refuses a nested ignore override or tracked concrete generated migration", () => {
   const overridden = fixture();
-  const name = NATIVE_MIGRATION_PROFILES.client.expectedAppliedMigrations[0];
+  const name = NATIVE_MIGRATION_PROFILES.operations.expectedAppliedMigrations[0];
   fs.appendFileSync(path.join(overridden, ".gitignore"), [
-    "!apps/client/.staging-bootstrap/",
-    "!apps/client/.staging-bootstrap/native-portal-migrations/",
-    "apps/client/.staging-bootstrap/native-portal-migrations/manifest.json",
-    "!apps/client/.staging-bootstrap/native-portal-migrations/migrations/",
-    "apps/client/.staging-bootstrap/native-portal-migrations/migrations/*",
-    `!apps/client/.staging-bootstrap/native-portal-migrations/migrations/${name}`,
+    "!apps/operations/.staging-bootstrap/",
+    "!apps/operations/.staging-bootstrap/native-portal-migrations/",
+    "apps/operations/.staging-bootstrap/native-portal-migrations/manifest.json",
+    "!apps/operations/.staging-bootstrap/native-portal-migrations/migrations/",
+    "apps/operations/.staging-bootstrap/native-portal-migrations/migrations/*",
+    `!apps/operations/.staging-bootstrap/native-portal-migrations/migrations/${name}`,
     "",
   ].join("\n"));
   assert.throws(() => buildProfiles(overridden), new RegExp(`not effectively ignored: .*${name}`));
