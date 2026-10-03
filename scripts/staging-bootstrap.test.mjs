@@ -18,8 +18,17 @@ function fixture() {
   ]) {
     const directory = path.join(base, "apps", source);
     fs.mkdirSync(directory, { recursive: true });
-    fs.cpSync(path.join(repositoryRoot, "apps", source, "migrations"), path.join(directory, "migrations"), { recursive: true });
+    const sourceMigrations = path.join(repositoryRoot, "apps", source, "migrations");
+    const destinationMigrations = path.join(directory, "migrations");
+    fs.mkdirSync(destinationMigrations);
+    for (const name of fs.readdirSync(sourceMigrations).filter(name => name.endsWith(".sql")))
+      fs.copyFileSync(path.join(sourceMigrations, name), path.join(destinationMigrations, name));
     fs.copyFileSync(path.join(repositoryRoot, "docs", "staging", example), path.join(directory, "wrangler.staging.json"));
+  }
+  for (const source of ["client", "operations", "ops-sync"]) {
+    const directory = path.join(base, "apps", source);
+    fs.mkdirSync(directory, { recursive: true });
+    fs.copyFileSync(path.join(repositoryRoot, "apps", source, "wrangler.jsonc"), path.join(directory, "wrangler.jsonc"));
   }
   fs.writeFileSync(path.join(base, "owner.json"), JSON.stringify({ owner }));
   return base;
@@ -55,7 +64,7 @@ test("builds full isolated chains, changes exactly 0002, and preserves staging c
   const base = fixture();
   const artifacts = buildArtifacts(base, owner);
   for (const [app, artifact] of Object.entries(artifacts)) {
-    assert.equal(artifact.files.length, app === "delivery" ? 132 : 122, app);
+    assert.equal(artifact.files.length, app === "delivery" ? 147 : 170, app);
     assert.deepEqual(artifact.manifest.transformedFiles, [artifact.entry.seed]);
     assert.equal(artifact.files.find(({ name }) => name.startsWith("0001_")).transformed, false);
     assert.equal(artifact.config.name.endsWith("-staging"), true);
@@ -102,11 +111,11 @@ test("rejects a mutated secondary Operations DELIVERY_DB binding", () => {
 
 test("rejects any missing or extra canonical migration filename", () => {
   const missing = fixture();
-  fs.rmSync(path.join(missing, "apps", "client", "migrations", "0213_incoming_rclone_promotion.sql"));
-  assert.throws(() => buildArtifacts(missing, owner), /exact complete ordered 132-file chain/);
+  fs.rmSync(path.join(missing, "apps", "client", "migrations", "0214_ops_inventory_catalog_staging.sql"));
+  assert.throws(() => buildArtifacts(missing, owner), /exact complete ordered 147-file chain/);
   const extra = fixture();
   fs.writeFileSync(path.join(extra, "apps", "operations", "migrations", "0123_unreviewed.sql"), "-- unreviewed\n");
-  assert.throws(() => buildArtifacts(extra, owner), /exact complete ordered 122-file chain/);
+  assert.throws(() => buildArtifacts(extra, owner), /exact complete ordered 170-file chain/);
 });
 
 test("rejects one-byte content drift in an ordinary canonical migration", () => {
@@ -178,18 +187,123 @@ test("checked-in canonical 0002 migrations remain the reviewed source shapes", (
   assert.match(sourceOperations, /staff-beau-koltz/);
 });
 
-test("builds the complete checked-in 132/122 chains with both Client 0199 filenames", () => {
+test("builds the complete checked-in 147/170 gap-aware chains with both Client 0199 filenames", () => {
   const base = fixture();
   const artifacts = buildArtifacts(base, owner);
-  assert.equal(artifacts.delivery.files.length, 132);
-  assert.equal(artifacts.operations.files.length, 122);
+  assert.equal(artifacts.delivery.files.length, 147);
+  assert.equal(artifacts.operations.files.length, 170);
   assert.deepEqual(artifacts.delivery.files.filter(({ name }) => name.startsWith("0199_")).map(({ name }) => name), [
     "0199_incoming_upload_pickup_lifecycle.sql", "0199_native_viewer_grants.sql",
   ]);
-  assert.equal(artifacts.delivery.files.at(-1).name, "0213_incoming_rclone_promotion.sql");
-  assert.equal(artifacts.operations.files.at(-1).name, "0122_project_alpha_project_v2_canonical_activation.sql");
+  assert.equal(artifacts.delivery.files.at(-1).name, "0228_operations_portal_native_content_start_audit.sql");
+  assert.equal(artifacts.operations.files.at(-1).name, "0170_client_hub_canonical_directory_projection_reset.sql");
   assert.deepEqual(artifacts.delivery.manifest.transformedFiles, ["0002_seed_initial_staff.sql"]);
   assert.deepEqual(artifacts.operations.manifest.transformedFiles, ["0002_seed_acl.sql"]);
-  assert.equal(artifacts.delivery.manifest.sourceChainSha256, "c5b6271f9edff677237c45734bbf1b6eeebaaf1c7256b6b561ea1e2c03adb4a0");
-  assert.equal(artifacts.operations.manifest.sourceChainSha256, "20f127ae3193884494a021ac2f1851f6c2db06834d6f94498850d315e02df5d7");
+  assert.equal(artifacts.delivery.manifest.sourceChainSha256, "8a6cb183feae5ec6490cb4710f02a3289a05421786b9593e6392803a1e890f5c");
+  assert.equal(artifacts.operations.manifest.sourceChainSha256, "c6f49bfedbdb02866f624ec18d0e79f8068836ef57febdc44c97193d4f769192");
+});
+
+const disposableTargets = (runId = "portal-home-20260928") => ({ runId, applications: {
+  delivery: { databaseName: `client-data-staging-rehearsal-${runId}`, databaseId: "11111111-1111-4111-8111-111111111111" },
+  operations: { databaseName: `ltds-ops-staging-rehearsal-${runId}`, databaseId: "22222222-2222-4222-8222-222222222222" },
+} });
+
+test("builds isolated run-scoped migration-only disposable rehearsal artifacts", () => {
+  const base = fixture(), targets = disposableTargets();
+  const artifacts = buildArtifacts(base, owner, { disposableTargets: targets });
+  for (const [app, artifact] of Object.entries(artifacts)) {
+    const target = targets.applications[app];
+    assert.equal(artifact.runDirectory, `.staging-bootstrap/rehearsals/${targets.runId}`);
+    assert.equal(artifact.configFilename, `wrangler.staging.bootstrap.${targets.runId}.json`);
+    assert.deepEqual(Object.keys(artifact.config).sort(), ["account_id", "d1_databases", "name", "vars"]);
+    assert.equal(artifact.config.name, `${artifact.entry.workerName}-rehearsal-${targets.runId}`);
+    assert.deepEqual(artifact.config.vars, { ENVIRONMENT: "staging" });
+    assert.deepEqual(artifact.config.d1_databases, [{ binding: artifact.entry.binding, database_name: target.databaseName,
+      database_id: target.databaseId, migrations_dir: `${artifact.runDirectory}/migrations` }]);
+    for (const forbidden of ["main", "routes", "assets", "services", "secrets", "triggers", "workflows", "containers"])
+      assert.equal(Object.hasOwn(artifact.config, forbidden), false, `${app} excludes ${forbidden}`);
+    assert.equal(artifact.manifest.mode, "disposable-remote-rehearsal");
+    assert.equal(artifact.manifest.runId, targets.runId);
+    assert.deepEqual(artifact.manifest.disposableTarget, { workerName: artifact.config.name,
+      databaseName: target.databaseName, databaseId: target.databaseId });
+    assert.equal(artifact.manifest.canonicalSource.databaseName, artifact.entry.databaseName);
+  }
+  const written = writeGenerated(base, artifacts);
+  assert(written.every(file => file.includes(targets.runId)));
+  assert.deepEqual(validateGenerated(base, artifacts), []);
+});
+
+test("disposable rehearsal targets fail closed on malformed, reused, current, or production identities", () => {
+  const cases = [];
+  cases.push({ runId: "../escape", applications: disposableTargets().applications });
+  cases.push({ ...disposableTargets(), extra: true });
+  cases.push({ ...disposableTargets(), applications: { delivery: disposableTargets().applications.delivery } });
+  const malformed = disposableTargets(); malformed.applications.delivery.databaseId = "not-a-uuid"; cases.push(malformed);
+  const wrongName = disposableTargets(); wrongName.applications.delivery.databaseName = "some-staging-database"; cases.push(wrongName);
+  const duplicate = disposableTargets(); duplicate.applications.operations.databaseId = duplicate.applications.delivery.databaseId; cases.push(duplicate);
+  const current = disposableTargets(); current.applications.delivery.databaseId = "b6f653ab-9acd-4421-9ad0-207754b59aeb"; cases.push(current);
+  const production = disposableTargets(); production.applications.operations.databaseId = "6ebf7514-d306-4615-ae56-ad869c874dbd"; cases.push(production);
+  for (const targets of cases) assert.throws(() => buildArtifacts(fixture(), owner, { disposableTargets: targets }),
+    /strict runId|exactly delivery and operations|exact name|UUIDv4|distinct|must not reuse/);
+});
+
+test("canonical source guards run before disposable target validation", () => {
+  const base = fixture(), targets = disposableTargets();
+  targets.runId = "../invalid";
+  fs.appendFileSync(path.join(base, "apps", "client", "migrations", "0003_delivery_platform.sql"), " ");
+  assert.throws(() => buildArtifacts(base, owner, { disposableTargets: targets }),
+    /delivery canonical migration contents do not match the reviewed full-chain digest/);
+});
+
+test("disposable rehearsal requires regular strict production configs and rejects output drift", () => {
+  const malformedBase = fixture();
+  fs.writeFileSync(path.join(malformedBase, "apps", "client", "wrangler.jsonc"), "// not strict JSON\n{}");
+  assert.throws(() => buildArtifacts(malformedBase, owner, { disposableTargets: disposableTargets() }), /strict JSON/);
+  const productionDriftBase = fixture(), productionFile = path.join(productionDriftBase, "apps", "operations", "wrangler.jsonc");
+  const productionConfig = JSON.parse(fs.readFileSync(productionFile, "utf8"));
+  productionConfig.d1_databases[0].database_id = "33333333-3333-4333-8333-333333333333";
+  fs.writeFileSync(productionFile, JSON.stringify(productionConfig));
+  assert.throws(() => buildArtifacts(productionDriftBase, owner, { disposableTargets: disposableTargets() }), /reviewed production inventory/);
+  const driftBase = fixture(), artifacts = buildArtifacts(driftBase, owner, { disposableTargets: disposableTargets() });
+  writeGenerated(driftBase, artifacts);
+  const generated = path.join(driftBase, "apps", "client", artifacts.delivery.configFilename);
+  fs.appendFileSync(generated, " ");
+  assert(validateGenerated(driftBase, artifacts).some(error => error.includes("stale or was edited")));
+  assert.throws(() => writeGenerated(driftBase, artifacts), /invalid or stale/);
+});
+
+test("disposable rehearsal rejects a symlinked production config", (t) => {
+  const base = fixture(), production = path.join(base, "apps", "operations", "wrangler.jsonc");
+  const target = path.join(base, "production-config.target");
+  fs.copyFileSync(production, target); fs.rmSync(production);
+  if (!symlinkOrSkip(t, target, production, "file")) return;
+  assert.throws(() => buildArtifacts(base, owner, { disposableTargets: disposableTargets() }),
+    /production config must be a regular non-symlink file/);
+});
+
+test("disposable target input is local, regular, strict JSON and drives run-scoped CLI output", () => {
+  const base = fixture(), targetFile = path.join(base, "targets.json");
+  fs.writeFileSync(targetFile, JSON.stringify(disposableTargets()));
+  const written = run(["--write", "--values", "owner.json", "--disposable-targets", "targets.json"], base);
+  assert(written.length > 0 && written.every(file => file.includes("portal-home-20260928")));
+  run(["--check", "--values", "owner.json", "--disposable-targets", "targets.json"], base);
+  assert.throws(() => run(["--check", "--values", "owner.json", "--disposable-targets", "../outside.json"], base), /remain below/);
+  fs.writeFileSync(targetFile, "// not strict JSON\n{}");
+  assert.throws(() => run(["--check", "--values", "owner.json", "--disposable-targets", "targets.json"], base), /strict JSON/);
+});
+
+test("disposable target input rejects a symlink", (t) => {
+  const linkBase = fixture(), link = path.join(linkBase, "targets.json"), source = path.join(linkBase, "targets.source.json");
+  fs.writeFileSync(source, JSON.stringify(disposableTargets()));
+  if (!symlinkOrSkip(t, source, link, "file")) return;
+  assert.throws(() => run(["--check", "--values", "owner.json", "--disposable-targets", "targets.json"], linkBase),
+    /must be a regular non-symlink file/);
+});
+
+test("disposable target input rejects a symlinked ancestor", (t) => {
+  const base = fixture(), real = path.join(base, "target-input-real"), link = path.join(base, "target-input-link");
+  fs.mkdirSync(real); fs.writeFileSync(path.join(real, "targets.json"), JSON.stringify(disposableTargets()));
+  if (!symlinkOrSkip(t, real, link, process.platform === "win32" ? "junction" : "dir")) return;
+  assert.throws(() => run(["--check", "--values", "owner.json", "--disposable-targets", "target-input-link/targets.json"], base),
+    /ancestor .*regular non-symlink directory/);
 });

@@ -1,5 +1,7 @@
 export { PRIMARY_ALPHA_SOURCE_ID, PRIMARY_CATALOG_SOURCE, createCatalogSourceContext } from "./source-identity";
 export type { CatalogSourceContext } from "./source-identity";
+export * from "./client-onboarding-fields";
+export * from "./client-onboarding-recipient";
 
 import type {
   ViewerDisplayUnits,
@@ -62,6 +64,7 @@ export * from "./notification-migration-maintenance";
 export * from "./client-audit-timeline";
 export * from "./service-assignments";
 export * from "./native-portal-scopes";
+export * from "./api-v2-portal-publication-proof";
 
 export type Permission = (typeof PERMISSIONS)[number];
 export type PermissionScope = "global" | "division" | "assigned" | "own";

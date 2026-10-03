@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 4,
+  "packet": {
+    "packetId": "staging-authority-directory-acquisition-001",
+    "purpose": "existing-directory-acquisition",
+    "recordId": "REPLACE_WITH_REVIEWED_DISPOSABLE_RECORD_ID",
+    "recordKind": "organization",
+    "recordVersion": 1,
+    "mode": "create",
+    "operatorKind": "synthetic",
+    "staffId": "staging-operations-owner",
+    "email": "owner@staging.example.test",
+    "displayName": "Synthetic Staging Owner",
+    "accessSubject": "REPLACE_WITH_REVIEWED_ACCESS_SUBJECT",
+    "issuedAt": "2026-09-17T15:00:00.000Z",
+    "expiresAt": "2026-09-17T17:00:00.000Z",
+    "reason": "Bounded existing Directory acquisition staging acceptance",
+    "expected": {
+      "admissionVersion": 0,
+      "profileVersion": 0,
+      "grantVersion": 0,
+      "grantGeneration": 0,
+      "directoryAuthorityState": "absent"
+    },
+    "evidence": {
+      "changeTicket": "REPLACE_WITH_APPROVED_CHANGE_TICKET",
+      "reviewer": "REPLACE_WITH_INDEPENDENT_REVIEWER_REFERENCE",
+      "bindingEvidenceSha256": "REPLACE_WITH_64_LOWERCASE_HEX_CHARACTERS"
+    }
+  }
+}

@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { Card, EmptyState, StatusPill } from "@ltds/ui";
 import { api, ApiError } from "./api";
+import { NativeDirectoryProfileCreate } from "./NativeDirectoryProfileEditor";
 
 export type ClientKind = "organization" | "standalone_client";
-export type ClientRootNamespace = "business" | "portal" | "account";
+export type ClientRootNamespace = "business" | "portal" | "account" | "review";
 export interface ClientSummary {
   workspace_id: string | null;
   kind: ClientKind;
@@ -130,6 +131,8 @@ function statusTone(status: string): "neutral" | "success" | "warning" | "danger
 }
 
 export function clientPortalStatus(client: ClientSummary): { label: string; tone: "neutral" | "success" | "warning" | "danger"; description?: string } {
+  if (client.root_namespace === "review") return { label: "Reviewed record", tone: "neutral",
+    description: "This Project Alpha record is available for staff review only. It does not create portal, workspace, delivery, or public-link access." };
   const isProjectAlphaBusiness = client.root_namespace === "business" && client.source_id?.startsWith("project-alpha:");
   const unlinkedProjectAlphaWorkspace = {
     label: "Portal workspace not linked", tone: "warning" as const,
@@ -170,7 +173,7 @@ function ClientPortalStatusPill({ client }: { client: ClientSummary }) {
     {portal.description && <small>{portal.description}</small>}</span>;
 }
 
-export function ClientDirectory() {
+export function ClientDirectory({ nativeDirectoryProfileWrites = false }: { nativeDirectoryProfileWrites?: boolean }) {
   const [query, setQuery] = useState(readQuery);
   const [draft, setDraft] = useState(query.q);
   const [clients, setClients] = useState<ClientSummary[]>([]);
@@ -315,6 +318,7 @@ export function ClientDirectory() {
       </div>
     </div>
     <p className="client-directory-status">Recent order uses business record updates you can access; synchronization and page views do not count.</p>
+    {nativeDirectoryProfileWrites && <NativeDirectoryProfileCreate />}
     <div className="client-directory-filters" role="group" aria-label="Client type">
       {FILTERS.map(filter => <button key={filter.kind} type="button" className="button-ghost"
         aria-pressed={query.kind === filter.kind}
@@ -334,7 +338,12 @@ export function ClientDirectory() {
         onClick={() => void load(query, failedCursor.current)}>{staleCursor ? "Refresh clients" : "Retry clients"}</button>
     </Card>}
     <div className="client-directory-grid" aria-busy={Boolean(loading)}>
-      {clients.map(client => <a className="client-directory-card" key={clientKey(client)}
+      {clients.map(client => client.root_namespace === "review" ? <div className="client-directory-card" key={clientKey(client)}
+        aria-label={`${client.display_name} reviewed Project Alpha record`}>
+        <div className="client-directory-card-header"><small>Individual client · review only</small><ClientPortalStatusPill client={client} /></div>
+        <h3>{client.display_name}</h3>{client.source_name && <small>{client.source_name}</small>}
+        <p className="client-directory-status">Display-only staging projection. No client workspace or access has been created.</p>
+      </div> : <a className="client-directory-card" key={clientKey(client)}
         href={detailPath(client, query)} aria-label={`Open ${client.business_party_name || client.display_name} client workspace`}>
         <div className="client-directory-card-header"><small>{client.kind === "organization" ? "Organization" : "Individual client"}</small>
           {!client.business_party_id && <ClientPortalStatusPill client={client} />}</div>

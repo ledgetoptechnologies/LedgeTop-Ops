@@ -309,3 +309,59 @@ proofs, and one revoke receipt.
 
 This is a passing, merge-ready staging checkpoint subject to exact CI and the
 normal owner approval; it does not authorize production cutover.
+
+## October 2, 2026 — isolated candidate preparation, not live acceptance
+
+The joined route now has a separate checked Operations configuration profile:
+
+```sh
+npm run staging:ops-project-v2:profile:test
+npm run staging:ops-project-v2:profile:generate
+npm run staging:ops-project-v2:profile:check
+```
+
+These commands are local-only. The generated, ignored output is
+`apps/operations/wrangler.staging.ops-project-v2-joined-acceptance.json`.
+Its sole allowed change from the validated default-off staging baseline is
+`PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED=false` to `true`. Production must
+remain explicitly default-off. Any other flag, resource, route, or binding
+drift is rejected; stale existing output is not overwritten. Do not combine
+this profile with the five-gate sync/adoption/refresh profile or a portal
+acceptance window.
+
+Generating the candidate neither enables a connection nor grants authority.
+Before any reviewed live use, re-read the exact deployed revisions, scoped
+PA capabilities and feature window, selected source/application/history,
+current authorization generations and organization/client proof, Ops native
+admission/profile/grants and deny state, drained ledgers/fences, rollback
+targets, and the unchanged public-link baseline. Review the selected private
+connection envelope separately without printing its value.
+
+The September 21 checkpoint above proves its recorded CREATE, successful
+replay, changed-body conflict, settlement and activation only. It is not
+current-version UPDATE/BIND acceptance, live stale/revoked-authority denial,
+or recovery after a deliberately lost acknowledgement. Those remain separate
+release gates. The existing joined harness creates durable synthetic records
+when explicitly armed and performs no rollback itself. Close the Ops route
+first, disable the selected connection, drain pending/leased work and actor
+fences, revoke the reviewed authority packet, and verify default-off and
+public-link preservation after the window.
+
+### Confirmed uncertain-command implementation gap
+
+The current `project-alpha-project-v2-pending-dispatcher.ts` deliberately
+terminalizes uncertain PA responses and requires trusted receipt recovery
+before any retry. The settlement adapter similarly blocks redispatch of
+uncertain/in-flight state. Therefore recovery after a deliberately lost
+PA-to-Ops acknowledgement is not merely missing from the harness: the current
+joined path cannot yet recover that receipt and complete settlement.
+
+Do not replace this behavior with a blind resend or label known-success replay
+as lost-response recovery. The implementation needs a separately reviewed,
+generic PA receipt-recovery contract and an audited Ops recovery transition,
+fenced to the original command ID/body hash, source/application/history,
+current authorization and exact local reservation. Unknown, conflicting,
+revoked or stale evidence must remain unresolved or explicitly rejected;
+receipt recovery must not create another project or broaden client access.
+The exact lookup protocol and any subsequent dispatch policy are not finalized
+or enabled by this profile.

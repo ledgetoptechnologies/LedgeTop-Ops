@@ -138,6 +138,23 @@ test("Directory API-v2 staging contract suite remains a required CI check", () =
   assert(workflow.includes("scripts/pa-api-v2-directory-staging-acceptance.test.mjs"));
 });
 
+test("Project Alpha API-v2 staging profile remains a default-off guarded CI gate", () => {
+  const workflow = read(".github/workflows/ci.yml");
+  const packageJson = JSON.parse(read("package.json"));
+  assert(workflow.includes("scripts/staging-project-alpha-api-v2-acceptance-profile.test.mjs"));
+  assert(packageJson.scripts.test.includes("scripts/staging-project-alpha-api-v2-acceptance-profile.test.mjs"));
+  assert(packageJson.scripts["staging:project-alpha-api-v2-acceptance:generate"]);
+  assert(packageJson.scripts["staging:project-alpha-api-v2-acceptance:check"]);
+});
+
+test("governed staging authority packets retain dependency-free local CI coverage", () => {
+  const workflow = read(".github/workflows/ci.yml");
+  assert(workflow.includes("name: Verify governed staging authority packets locally"));
+  assert(workflow.includes("run: node --test scripts/staging-native-authority-packet.test.mjs"));
+  assert(workflow.includes("scripts/staging-bounded-guards.test.mjs"));
+  assert(workflow.includes("scripts/staging-onboarding-authority-packet.test.mjs"));
+});
+
 test("Client Portal browser acceptance remains a required CI job", () => {
   const workflow = read(".github/workflows/ci.yml");
   assert(workflow.includes("client-browser:"));
@@ -191,6 +208,7 @@ const expectedPublicRoutes = [
   "GET|HEAD /api/public/shares/:publicId/items/:itemRef/preview",
   "GET|HEAD /api/public/shares/:publicId/items/:itemRef/source",
   "GET|HEAD /api/public/shares/:publicId/items/:itemRef/thumbnail",
+  "GET|HEAD /onboarding/:invitationId",
   "GET|HEAD /portal",
   "GET|HEAD /portal/*",
   "GET|HEAD /assets/*",
@@ -258,9 +276,24 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   // The digest intentionally moved with the reviewed canonical portal hosts
   // and explicit legacy compatibility origin. Keep the field assertions so a future config change
   // cannot hide behind a digest refresh.
-  // Reviewed addition: the notification migration maintenance switch is off by default.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "936b0b8960e24ecc0fb0f7a2adc11b1f0c447abd8ff49d7a4d5871c58e476151");
+  // Reviewed additions: catalog coordination, portal authority, inactive
+  // workspace-binding writers, and the non-content enrollment reader remain off.
+  // Approved staging-only recipient bridge is present but remains default-off.
+  // Reviewed recipient-delivery authority adds only explicit disabled flags.
+  // Native recipient/data transport flags are explicit and remain disabled;
+  // their staging-only reader binding and audit secret are absent here.
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "b424712ba7d1031b9f7790a5cb69275dcc06d98d3ddcb0d8739161bd8a70bb69");
   const config = readJson("apps/client/wrangler.jsonc");
+  for (const flag of ["CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED",
+    "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_WRITER_ENABLED", "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_STATUS_ENABLED",
+    "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_READ_ENABLED", "CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_ENABLED"])
+    assert.equal(config.vars[flag], "false");
+  assert.equal(config.vars.CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_HMAC_SECRET, undefined);
+  assert.equal(config.services?.find(service => service.binding === "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER"), undefined);
+  assert.equal(config.vars.CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_WRITER_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_STATUS_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_CSRF_SECRET, undefined);
   assert.equal(config.name, "ledgetop-clients");
   assert.equal(config.main, "src/worker/index.ts");
   assert.deepEqual(config.routes, [
@@ -277,7 +310,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
     binding: "ASSETS",
     directory: "./dist/client",
     not_found_handling: "single-page-application",
-    run_worker_first: ["/", "/api/*", "/s/*", "/client-share/*", "/portal*", "/assets/*", "/health"],
+    run_worker_first: ["/", "/api/*", "/s/*", "/client-share/*", "/portal*", "/onboarding/*", "/assets/*", "/health"],
   });
   assert.equal(config.vars.PUBLIC_BASE_URL, "https://portal.ledgetopdroneservices.com");
   assert.equal(config.vars.PUBLIC_SHARE_ORIGIN, "https://portal.ledgetopdroneservices.com");
@@ -287,6 +320,15 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.equal(config.vars.LEGACY_CLIENT_ORIGINS, "https://client.ledgetopdroneservices.com");
   assert.equal(config.vars.CLIENT_ACCESS_AUDS, `${config.vars.CLIENT_ACCESS_AUD},3bc9637846ccf4e1343b969cc8f14ed2cb0628956293463cf164c4080fa47e57`);
   assert.equal(config.vars.CLIENT_PORTAL_ENABLED, "true");
+  assert.equal(config.vars.CLIENT_AUTHORITY_WORKSPACE_CLAIM_WRITER_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_AUTHORITY_WORKSPACE_BINDING_WRITER_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_AUTHORITY_WORKSPACE_BINDING_STATUS_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_AUTHORITY_V2_WRITER_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_AUTHORITY_V2_STATUS_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_AUTHORITY_V2_ENROLLMENT_STATUS_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED, "false");
+  assert.equal(config.vars.OPS_PORTAL_ACCESS_AUTHORITY_SHADOW_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_CONTENT_AUDIT_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_NOTIFICATION_MIGRATION_MAINTENANCE, "false");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_HMAC_KEY_ID, "");
@@ -317,6 +359,8 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.equal(config.vars.CLIENT_PORTAL_ACCESS_ENROLLMENT_READY, "false");
   assert.equal(config.vars.CLIENT_DELEGATED_SHARES_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_SYNC_ENABLED, "false");
+  assert.equal(config.vars.OPS_INVENTORY_CATALOG_SYNC_ENABLED, "false");
+  assert.equal(config.vars.OPS_INVENTORY_CATALOG_PROMOTION_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_PORTAL_SYNC_ENABLED, "true");
   assert.equal(config.vars.PROJECT_ALPHA_SERVICE_ASSIGNMENT_SYNC_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_SERVICE_ASSIGNMENT_POLICY_ENABLED, "false");
@@ -339,6 +383,16 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   }]);
   assert.deepEqual(config.services, [
     {
+      binding: "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_BRIDGE",
+      service: "ledgetop-ops",
+      entrypoint: "ClientPortalRecipientEnrollmentBridge",
+    },
+    {
+      binding: "CLIENT_PORTAL_SERVICE_METADATA_READER",
+      service: "ledgetop-ops",
+      entrypoint: "ClientPortalServiceMetadataReader",
+    },
+    {
       binding: "CLIENT_DELEGATED_SHARE_SIGNER",
       service: "ledgetop-ops",
       entrypoint: "ClientDelegatedShareSigner",
@@ -348,6 +402,11 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
       service: "ledgetop-ops",
       entrypoint: "ViewerSessionIssuer",
     },
+    {
+      binding: "CLIENT_ONBOARDING_RECIPIENT_BRIDGE",
+      service: "ledgetop-ops",
+      entrypoint: "ClientOnboardingRecipientBridge",
+    },
   ]);
   assert.equal(config.images, undefined);
   assert.deepEqual(config.stream, { binding: "STREAM" });
@@ -356,6 +415,63 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
     { name: "ltds-cloud-transfer", binding: "CLOUD_TRANSFER_WORKFLOW", class_name: "CloudTransferWorkflow" },
   ]);
   assert.deepEqual(config.ratelimits.map((item) => [item.name, item.namespace_id, item.simple.limit]), expectedRateLimits);
+});
+
+test("the deployed Operations Worker keeps catalog and inactive binding transport private and default-off", () => {
+  // Newly mounted PA adoption and binding-refresh routes remain disabled in production by default.
+  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "3f2cd2a5e3bd3de3cb1f949f5810b8a636e1ca610e67ff501ce8e9dac74e8b4d");
+  const config = readJson("apps/operations/wrangler.jsonc");
+  assert.equal(config.vars.CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED, "false");
+  assert.equal(config.services?.find(service => service.binding === "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY"), undefined);
+  assert.equal(config.vars.VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_DISPATCH_ENABLED, "false");
+  assert.equal(config.services?.find((service) => service.binding === "VERIFIED_RECIPIENT_DELIVERY_AUTHORITY"), undefined);
+  assert.equal(config.vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ORIGIN, "");
+  assert.equal(config.vars.CLIENT_ONBOARDING_ADMIN_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED, "false");
+  assert.equal(config.vars.PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED, "false");
+  assert.equal(config.vars.PROJECT_ALPHA_PROJECT_ADOPTION_REVIEW_ENABLED, "false");
+  assert.equal(config.vars.PROJECT_ALPHA_PROJECT_BINDING_REVISION_REFRESH_ENABLED, "false");
+  assert.equal(config.vars.PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_ACCESS_AUTHORITY_OUTBOX_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_AUTHORITY_V2_OUTBOX_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_AUTHORITY_WORKSPACE_BINDING_OUTBOX_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ORIGIN, "");
+  assert.equal(config.vars.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ORIGIN, "");
+  assert.deepEqual(config.services?.find((service) => service.binding === "CLIENT_AUTHORITY_WORKSPACE_BINDING"), {
+    binding: "CLIENT_AUTHORITY_WORKSPACE_BINDING",
+    service: "ledgetop-clients",
+    entrypoint: "ClientAuthorityWorkspaceBindingIngress",
+  });
+  assert.deepEqual(config.services?.find((service) => service.binding === "CLIENT_PORTAL_AUTHORITY_V2"), {
+    binding: "CLIENT_PORTAL_AUTHORITY_V2", service: "ledgetop-clients", entrypoint: "ClientPortalAuthorityV2Ingress",
+  });
+  assert.deepEqual(config.services?.find((service) => service.binding === "OPS_INVENTORY_CATALOG_STAGING"), {
+    binding: "OPS_INVENTORY_CATALOG_STAGING",
+    service: "ledgetop-clients",
+    entrypoint: "OpsInventoryCatalogStagingIngress",
+  });
+  assert.deepEqual(config.services?.find((service) => service.binding === "OPS_INVENTORY_CATALOG_PROMOTION"), {
+    binding: "OPS_INVENTORY_CATALOG_PROMOTION",
+    service: "ledgetop-clients",
+    entrypoint: "OpsInventoryCatalogPromotionCoordinator",
+  });
+  assert.deepEqual(config.services?.find((service) => service.binding === "CLIENT_PORTAL_ACCESS_AUTHORITY"), {
+    binding: "CLIENT_PORTAL_ACCESS_AUTHORITY",
+    service: "ledgetop-clients",
+    entrypoint: "OpsPortalAccessAuthorityIngress",
+  });
+  assert.deepEqual(config.workflows?.find((workflow) => workflow.binding === "OPS_CATALOG_PROMOTION_WORKFLOW"), {
+    name: "ledgetop-ops-catalog-promotion",
+    binding: "OPS_CATALOG_PROMOTION_WORKFLOW",
+    class_name: "ProjectAlphaCatalogPromotionWorkflow",
+  });
+  assert.equal(config.workflows?.find((workflow) => workflow.binding === "OPS_CATALOG_PROMOTION_WORKFLOW")?.schedules, undefined);
+  assert(!config.triggers.crons.some((cron) => /catalog/i.test(cron)));
 });
 
 test("public route, host-namespace guard, health, and isolated cookie contracts remain reviewed", () => {

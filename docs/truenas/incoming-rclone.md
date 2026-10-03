@@ -1,5 +1,32 @@
 # Incoming uploads with TrueNAS Cloud Sync
 
+## September 28 notification diagnosis
+
+The owner confirmed the hourly `ready/` PULL/MOVE test downloaded locally;
+mail remains a separate acceptance requirement. A read-only query against the
+deployed Operations `DELIVERY_DB` (`client-data`) found one recorded digest:
+`failed`, `mail-transport-failed`, three attempts, created September 11 at
+00:49:26 UTC and last updated at 01:30:48 UTC. No filenames, recipient details,
+tokens or object data were queried and no rows were written. This historical
+digest does not establish the cause of a current provider rejection.
+
+Serving Ops version `9a2e6997-c8f0-4e7b-ad7a-7d09fff5b4af` selects Gmail SMTP
+(`SMTP_NOTIFICATIONS_ENABLED=true`); the SMTP password binding exists, but its
+value and validity were not inspected. There is no automatic fallback to the
+Cloudflare email binding on SMTP failure. An absent Sent-folder item is not
+transport evidence; use the digest outcome and provider evidence, followed by
+an explicitly authorized controlled send. Open PR117's ambiguous-delivery
+handling and joined processor/mailer acceptance remain separate from pickup
+proof. Follow-on PR117 commit `18ed16a` repairs an accepted-send/failed-receipt
+duplicate with durable exact-attempt markers and stale-worker fences. Local
+implementation, independent QA and orchestrator checks all passed 27 focused
+tests; TypeScript passed. This is a feature-branch repair, not a production
+deployment or inbox-delivery proof. Ambiguous marked sends require operator
+reconciliation, even if a crash occurred before actual transport. Do not reset
+or resend the historical digest through raw D1.
+
+## Historical implementation notes
+
 Status: implementation in progress, not an activation checklist that has passed.
 This is the intended rclone-native contract. Do not switch production paths
 until the matching promotion, download, recovery, and browser tests pass.

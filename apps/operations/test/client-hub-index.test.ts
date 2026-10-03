@@ -17,6 +17,18 @@ async function fixture() {
     CREATE TABLE pa_organizations(id TEXT PRIMARY KEY,name TEXT,active INTEGER,payload_json TEXT,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
     CREATE TABLE pa_clients(id TEXT PRIMARY KEY,name TEXT,organization_id TEXT,active INTEGER,payload_json TEXT,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
     CREATE TABLE pa_projects(id TEXT PRIMARY KEY,name TEXT,organization_id TEXT,client_id TEXT,active INTEGER,payload_json TEXT NOT NULL DEFAULT '{}',projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
+    CREATE TABLE pa_connectors(source_id TEXT PRIMARY KEY,state TEXT,read_visible INTEGER);
+    CREATE TABLE operations_directory_records(record_id TEXT PRIMARY KEY,record_kind TEXT,current_version INTEGER);
+    CREATE TABLE operations_directory_revisions(record_id TEXT,version INTEGER,profile_json TEXT,PRIMARY KEY(record_id,version));
+    CREATE TABLE operations_directory_client_organizations(client_record_id TEXT PRIMARY KEY,organization_record_id TEXT,relationship_version INTEGER);
+    CREATE TABLE project_alpha_active_directory_mappings(source_id TEXT,resource_type TEXT,external_id TEXT,
+      project_alpha_public_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,
+      provenance_id TEXT,mapping_kind TEXT,created_at TEXT);
+    CREATE TABLE project_alpha_api_v2_directory_observations_current(source_id TEXT,source_instance_id TEXT,
+      application_id TEXT,history_epoch_id TEXT,resource_type TEXT,project_alpha_public_id TEXT,present INTEGER,
+      last_action TEXT,has_conflict INTEGER,resource_revision TEXT,binding_external_id TEXT,binding_status TEXT,
+      binding_resource_revision TEXT,request_id TEXT);
+    INSERT INTO pa_connectors VALUES('project-alpha:primary','active',1);
   `);
   await execute(ops, readFileSync(new URL("../migrations/0032_client_hub_directory.sql", import.meta.url), "utf8"));
   await ops.batch(splitD1MigrationStatements(readFileSync(new URL("../migrations/0034_client_hub_projection_sources.sql", import.meta.url), "utf8")).map(statement => ops.prepare(statement)));
@@ -64,6 +76,25 @@ async function finish(env: { OPS_DB: D1Database; DELIVERY_DB: D1Database }) {
 async function nextCycle(ops: D1Database) {
   await ops.prepare("UPDATE client_hub_directory_state SET next_run_at=NULL").run();
 }
+async function canonicalRecord(ops: D1Database, record: { externalId: string; publicId: string;
+  kind: "organization" | "client"; profile: Record<string, unknown>; instance?: string; conflict?: boolean }) {
+  const instance = record.instance ?? "instance-one";
+  await ops.batch([
+    ops.prepare("INSERT OR IGNORE INTO operations_directory_records VALUES(?,?,1)")
+      .bind(record.externalId, record.kind),
+    ops.prepare("INSERT OR IGNORE INTO operations_directory_revisions VALUES(?,1,?)")
+      .bind(record.externalId, JSON.stringify(record.profile)),
+    ops.prepare(`INSERT INTO project_alpha_active_directory_mappings
+      (source_id,resource_type,external_id,project_alpha_public_id,source_instance_id,application_id,history_epoch_id,provenance_id,mapping_kind,created_at)
+      VALUES('project-alpha:primary',?,?,?,?,?,'history-one','proof','acquired','2026-01-01')`)
+      .bind(record.kind, record.externalId, record.publicId, instance, `application-${instance}`),
+    ops.prepare(`INSERT INTO project_alpha_api_v2_directory_observations_current
+      (source_id,source_instance_id,application_id,history_epoch_id,resource_type,project_alpha_public_id,present,last_action,
+        has_conflict,resource_revision,binding_external_id,binding_status,binding_resource_revision,request_id)
+      VALUES('project-alpha:primary',?,?,'history-one',?,?,1,'upsert',?,'revision-one',?,'active','revision-one','request')`)
+      .bind(instance, `application-${instance}`, record.kind, record.publicId, record.conflict ? 1 : 0, record.externalId),
+  ]);
+}
 async function projectWorkspace(delivery: D1Database, workspace: string, kind: string, root: string, legacy = false) {
   const generation = `generation-${workspace}`, sequence = legacy ? 0 : 1;
   await delivery.batch([
@@ -76,6 +107,93 @@ async function projectWorkspace(delivery: D1Database, workspace: string, kind: s
 }
 
 describe("resumable Client Hub index", { timeout: 60_000 }, () => {
+  it("restarts a pre-canonical persisted phase at the canonical phase after the rollout migration", async () => {
+    const { ops, env } = await fixture(), organizationId = "0".repeat(32);
+    await canonicalRecord(ops, { externalId: "upgrade-canonical-org", publicId: organizationId,
+      kind: "organization", profile: { name: "Upgrade canonical organization" } });
+    await ops.prepare(`INSERT INTO client_hub_roots(source_id,root_namespace,kind,public_id,pa_public_id,mapping_status,
+      display_name,sort_name,status,portal_status,account_count,project_count,request_count,contact_count,scan_generation)
+      VALUES('project-alpha:primary','business','organization','upgrade-legacy-org',?,'mapped',
+        'Upgrade legacy organization','upgrade legacy organization','active','not_provisioned',0,0,0,0,11)`).bind(organizationId).run();
+    await ops.prepare(`UPDATE client_hub_directory_state
+      SET ready=1,revision=7,generation=11,backfill_phase='contacts',backfill_cursor='old-contact',
+        next_run_at=datetime('now','+1 day'),lease_token='old-worker',lease_until=datetime('now','+1 day')
+      WHERE id='directory'`).run();
+
+    await ops.batch(splitD1MigrationStatements(readFileSync(
+      new URL("../migrations/0170_client_hub_canonical_directory_projection_reset.sql", import.meta.url), "utf8",
+    )).map(statement => ops.prepare(statement)));
+
+    expect(await ops.prepare(`SELECT ready,revision,generation,backfill_phase,backfill_cursor,next_run_at,
+      lease_token,lease_until FROM client_hub_directory_state WHERE id='directory'`).first()).toEqual({
+      ready: 0, revision: 8, generation: 12, backfill_phase: null, backfill_cursor: null,
+      next_run_at: null, lease_token: null, lease_until: null,
+    });
+    expect(await reconcileClientHubIndex(env, 1)).toEqual({ status: "progress", pages: 1 });
+    expect(await ops.prepare("SELECT ready FROM client_hub_directory_state WHERE id='directory'").first("ready")).toBe(0);
+    expect(await ops.prepare("SELECT public_id FROM client_hub_roots WHERE public_id='upgrade-canonical-org'")
+      .first("public_id")).toBe("upgrade-canonical-org");
+    expect(await ops.prepare("SELECT count(*) count FROM client_hub_roots WHERE status='active'").first("count")).toBe(2);
+    await finish(env);
+    expect(await ops.prepare("SELECT ready FROM client_hub_directory_state WHERE id='directory'").first("ready")).toBe(1);
+    expect((await ops.prepare("SELECT public_id FROM client_hub_roots WHERE status='active' ORDER BY public_id").all()).results)
+      .toEqual([{ public_id: "upgrade-canonical-org" }]);
+  });
+
+  it("indexes only exact current canonical mappings, suppresses their legacy mirrors, and remains idempotent", async () => {
+    const { ops, env } = await fixture(), organizationId = "1".repeat(32), clientId = "2".repeat(32);
+    await canonicalRecord(ops, { externalId: "canonical-org", publicId: organizationId,
+      kind: "organization", profile: { name: "Canonical Organization", private_note: "do not index" } });
+    await canonicalRecord(ops, { externalId: "canonical-client", publicId: clientId, kind: "client",
+      profile: { name: "Canonical Contact", email: "canonical@example.test", phone: "+1 (920) 555-0100",
+        notes: "private contact notes", price: 999 } });
+    await ops.prepare("INSERT INTO operations_directory_client_organizations VALUES('canonical-client','canonical-org',1)").run();
+    await ops.batch([
+      ops.prepare("INSERT INTO pa_organizations VALUES('legacy-org','Legacy mirror',1,?,'project-alpha:primary')")
+        .bind(JSON.stringify({ public_id: organizationId })),
+      ops.prepare("INSERT INTO pa_clients VALUES('legacy-client','Legacy mirror contact','legacy-org',1,?,'project-alpha:primary')")
+        .bind(JSON.stringify({ public_id: clientId, email: "legacy@example.test" })),
+      ops.prepare("INSERT INTO pa_projects(id,name,organization_id,client_id,active) VALUES('canonical-project','Canonical Project','legacy-org','legacy-client',1)"),
+    ]);
+    expect(await reconcileClientHubIndex(env, 1)).toEqual({ status: "progress", pages: 1 });
+    expect(await ops.prepare("SELECT public_id FROM client_hub_roots WHERE public_id='canonical-org'").first("public_id"))
+      .toBe("canonical-org");
+    await finish(env);
+    expect((await ops.prepare(`SELECT public_id,pa_public_id,display_name,contact_count FROM client_hub_roots
+      WHERE source_id='project-alpha:primary' AND root_namespace='business'`).all()).results)
+      .toEqual([{ public_id: "canonical-org", pa_public_id: organizationId,
+        display_name: "Canonical Organization", contact_count: 1 }]);
+    const values = (await ops.prepare(`SELECT record_type,field,normalized_value FROM client_hub_search_values
+      WHERE root_public_id=? ORDER BY field`).bind("canonical-org").all()).results;
+    expect(values).toEqual([
+      { record_type: "ops_directory_client", field: "contact", normalized_value: "canonical contact" },
+      { record_type: "ops_directory_client", field: "email", normalized_value: "canonical@example.test" },
+      { record_type: "ops_directory_client", field: "phone", normalized_value: "19205550100" },
+      { record_type: "pa_project", field: "project", normalized_value: "canonical project canonical-project" },
+    ]);
+    expect(JSON.stringify(values)).not.toMatch(/private|999|legacy@example/);
+    const revision = await ops.prepare("SELECT revision FROM client_hub_directory_state").first("revision");
+    await nextCycle(ops); await finish(env);
+    expect(await ops.prepare("SELECT revision FROM client_hub_directory_state").first("revision")).toBe(revision);
+    expect(await ops.prepare("SELECT count(*) count FROM client_hub_roots WHERE public_id='canonical-org'").first("count")).toBe(1);
+  });
+
+  it("fails closed for conflicting or ambiguous canonical mappings", async () => {
+    const { ops, env } = await fixture(), conflicting = "3".repeat(32), ambiguous = "4".repeat(32);
+    await canonicalRecord(ops, { externalId: "conflicting", publicId: conflicting, kind: "organization",
+      profile: { name: "Conflicting" }, conflict: true });
+    await canonicalRecord(ops, { externalId: "ambiguous-a", publicId: ambiguous, kind: "organization",
+      profile: { name: "Ambiguous A" }, instance: "instance-a" });
+    await canonicalRecord(ops, { externalId: "ambiguous-b", publicId: ambiguous, kind: "organization",
+      profile: { name: "Ambiguous B" }, instance: "instance-b" });
+    await ops.prepare("INSERT INTO pa_organizations VALUES('legacy-conflicting','Legacy conflicting mirror',1,?,'project-alpha:primary')")
+      .bind(JSON.stringify({ public_id: conflicting })).run();
+    await finish(env);
+    expect(await ops.prepare("SELECT count(*) count FROM client_hub_roots WHERE public_id IN ('conflicting','legacy-conflicting','ambiguous-a','ambiguous-b')")
+      .first("count")).toBe(0);
+    expect(await ops.prepare("SELECT count(*) count FROM client_hub_search_values WHERE root_public_id='legacy-conflicting'")
+      .first("count")).toBe(0);
+  });
   it("indexes an exactly authorized secondary portal without borrowing primary account associations", async () => {
     const { ops, delivery, env } = await fixture(), publicId = "a".repeat(32);
     await ops.prepare(`INSERT INTO pa_organizations(id,name,active,payload_json,projection_source_id)
@@ -113,6 +231,8 @@ describe("resumable Client Hub index", { timeout: 60_000 }, () => {
     const { ops, env } = await fixture();
     await ops.prepare(`WITH RECURSIVE sequence(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM sequence WHERE n<619)
       INSERT INTO pa_organizations(id,name,active,payload_json) SELECT printf('%04d',n),'Organization '||printf('%04d',n),1,'{}' FROM sequence`).run();
+    expect(await reconcileClientHubIndex(env, 1)).toEqual({ status: "progress", pages: 1 });
+    expect(await reconcileClientHubIndex(env, 1)).toEqual({ status: "progress", pages: 1 });
     expect(await reconcileClientHubIndex(env, 1)).toEqual({ status: "progress", pages: 1 });
     expect(await ops.prepare("SELECT count(*) count FROM client_hub_roots").first("count")).toBe(20);
     expect(await ops.prepare("SELECT ready FROM client_hub_directory_state").first("ready")).toBe(0);

@@ -1,3 +1,4 @@
+import { stagingDirectoryOwnerViewGrantEnabled } from "./staging-directory-owner-view-grant";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
@@ -5,7 +6,7 @@ import { sqlScope } from "./acl";
 import { readBoundedJson } from "./bounded-json";
 import { auditStatement } from "./request-security";
 import { probeProjectAlphaApiV2, type ProjectAlphaApiV2Probe } from "./project-alpha-api-v2";
-import { withEnabledConfiguredProjectAlphaApiV2Connection } from "./project-alpha-api-v2-connections";
+import { listEnabledProjectAlphaApiV2SourceIds, withEnabledConfiguredProjectAlphaApiV2Connection } from "./project-alpha-api-v2-connections";
 import {
   PROJECT_ALPHA_DIRECTORY_INVENTORY_ENDPOINT,
   readProjectAlphaDirectoryInventoryAfterVerifiedCapabilities,
@@ -16,6 +17,11 @@ import {
   readProjectAlphaProjectInventoryAfterVerifiedCapabilities,
   type ProjectAlphaProjectInventoryOutcome,
 } from "./project-alpha-project-inventory-api-v2";
+import {
+  PROJECT_ALPHA_CATALOG_INVENTORY_ENDPOINT,
+  readProjectAlphaCatalogInventoryAfterVerifiedCapabilities,
+  type ProjectAlphaCatalogInventoryOutcome,
+} from "./project-alpha-catalog-inventory-api-v2";
 import type { Env, StaffPrincipal } from "./types";
 
 type Variables = { principal: StaffPrincipal; administrator: boolean };
@@ -28,6 +34,8 @@ type App = Hono<{ Bindings: Env; Variables: Variables }>;
  */
 export const PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ROUTE =
   "/api/admin/integrations/project-alpha/api-v2/read-acceptance";
+export const PROJECT_ALPHA_API_V2_SOURCES_ROUTE =
+  "/api/admin/integrations/project-alpha/api-v2/sources";
 
 const sourceId = z.string().regex(/^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/);
 const requestSchema = z.object({ sourceId }).strict();
@@ -125,11 +133,26 @@ async function safeProject(outcome: ProjectAlphaProjectInventoryOutcome): Promis
   };
 }
 
+/** Item contents intentionally remain uninspected and unreturned until PA
+ * publishes its complete question schema. This proves only the immutable
+ * snapshot envelope required for a later, separately authorized sync. */
+async function safeCatalog(outcome: ProjectAlphaCatalogInventoryOutcome): Promise<Record<string, unknown>> {
+  if (outcome.status !== "observed") return outcomeFailure(outcome);
+  const inventory = outcome.response;
+  return {
+    status: "observed", requestId: inventory.requestId, snapshotId: inventory.snapshotId,
+    totalCount: inventory.totalCount, pageCount: inventory.items.length, hasMore: inventory.nextCursor !== null,
+    envelopeSha256: await sha256({ snapshotId: inventory.snapshotId, totalCount: inventory.totalCount,
+      itemCount: inventory.items.length, hasMore: inventory.nextCursor !== null }),
+  };
+}
+
 function acceptanceSummary(
   sourceIdValue: string,
   capabilities: Record<string, unknown>,
   directory: Record<string, unknown>,
   projects: Record<string, unknown>,
+  catalog: Record<string, unknown>,
 ): Record<string, unknown> {
   return {
     sourceId: sourceIdValue,
@@ -137,12 +160,30 @@ function acceptanceSummary(
     capabilities,
     directory,
     projects,
+    catalog,
   };
 }
 
 /** Mounted after Operations' authenticated /api mutation middleware. That
  * middleware supplies same-origin and CSRF protection before this route runs. */
 export function registerProjectAlphaApiV2ReadAcceptanceRoutes(app: App): void {
+  app.get(PROJECT_ALPHA_API_V2_SOURCES_ROUTE, async c => {
+    if (!projectAlphaApiV2ReadAcceptanceEnabled(c.env))
+      throw new HTTPException(404, { message: "Not found" });
+    if (!c.get("administrator"))
+      throw new HTTPException(403, { message: "Administrator access required" });
+    const permission = await sqlScope(c.env, c.get("principal"), "integrations.manage");
+    if (!permission.global || permission.deniedGlobal)
+      throw new HTTPException(403, { message: "Global integrations.manage permission required" });
+    c.header("Cache-Control", "no-store");
+    try {
+      return c.json({ sources: listEnabledProjectAlphaApiV2SourceIds(c.env), stagingDirectoryOwnerViewGrantEnabled: stagingDirectoryOwnerViewGrantEnabled(c.env) });
+    } catch {
+      // Never expose deployment secret parsing details through the admin API.
+      return c.json({ sources: [], configuration: "unavailable" });
+    }
+  });
+
   app.post(PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ROUTE, async c => {
     if (!projectAlphaApiV2ReadAcceptanceEnabled(c.env))
       throw new HTTPException(404, { message: "Not found" });
@@ -167,16 +208,23 @@ export function registerProjectAlphaApiV2ReadAcceptanceRoutes(app: App): void {
         ]);
         if (probe.status !== "verified") {
           const unavailable = { status: "not_attempted", reason: "capabilities" };
-          return acceptanceSummary(requestedSourceId, safeProbe(probe), unavailable, unavailable);
+          return acceptanceSummary(requestedSourceId, safeProbe(probe), unavailable, unavailable, unavailable);
         }
         const directory = await readProjectAlphaDirectoryInventoryAfterVerifiedCapabilities(connection, requestedSourceId,
           { type: "all", limit: 200 }, fetch);
         const projects = await readProjectAlphaProjectInventoryAfterVerifiedCapabilities(connection, { limit: 200 }, fetch);
+        // Catalog inventory is additive. Its absence must not make the
+        // established directory/project acceptance diagnostics unavailable.
+        const catalogProbe = await probeProjectAlphaApiV2(connection, [], fetch, [PROJECT_ALPHA_CATALOG_INVENTORY_ENDPOINT]);
+        const catalog = catalogProbe.status === "verified"
+          ? await safeCatalog(await readProjectAlphaCatalogInventoryAfterVerifiedCapabilities(connection, { limit: 200 }, fetch))
+          : { status: "not_attempted", reason: "capabilities", capability: safeProbe(catalogProbe) };
         return acceptanceSummary(requestedSourceId, safeProbe(probe), await safeDirectory(directory),
-          await safeProject(projects));
+          await safeProject(projects), catalog);
       });
     const result = selected.status === "enabled" ? selected.value : acceptanceSummary(requestedSourceId,
       { status: selected.status, exactIdentityMatch: false, exactContractMatch: false },
+      { status: "not_attempted", reason: "connection" },
       { status: "not_attempted", reason: "connection" },
       { status: "not_attempted", reason: "connection" });
 

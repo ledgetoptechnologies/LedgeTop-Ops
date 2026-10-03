@@ -54,6 +54,7 @@ describe("authenticated delivery grant live authorization", () => {
         binding_source_version TEXT NOT NULL,audience_type TEXT NOT NULL,audience_public_id TEXT NOT NULL,
         audience_source_version TEXT NOT NULL,grant_version INTEGER NOT NULL DEFAULT 1 CHECK(grant_version>=1),
         status TEXT NOT NULL DEFAULT 'active',expires_at TEXT);
+      CREATE TABLE portal_client_authority_workspace_claims(workspace_id TEXT PRIMARY KEY,state TEXT NOT NULL);
     `));
     await db.exec(executable(denialMigration));
     await db.exec(executable(grantMigration));
@@ -94,6 +95,71 @@ describe("authenticated delivery grant live authorization", () => {
     expect([...await listAuthorizedAuthenticatedDeliveryPrefixes(env, principal, "workspace-a")]).toEqual(["clients/a/"]);
     expect(await authorizeAuthenticatedDeliveryGrant(env, { ...principal, subject: "subject-b" }, "workspace-a", "binding-a")).toBe(true);
     expect(await authorizeAuthenticatedDeliveryGrant(env, { ...principal, subject: "different" }, "workspace-a", "binding-a")).toBe(false);
+  });
+
+  describe("integration-owned delivery grants and Client authority claims", () => {
+    beforeAll(async () => {
+      await db.batch([
+        db.prepare(`INSERT INTO portal_v2_identity_eligibility_bindings
+          (identity_id,workspace_id,principal_public_id,principal_source_version,verified_email)
+          VALUES('identity-a','workspace-a','principal-a','principal-v1','person@example.test')`),
+        db.prepare(`INSERT INTO project_alpha_delivery_portal_grants
+          (id,workspace_id,folder_binding_id,binding_source_version,audience_type,audience_public_id,audience_source_version)
+          VALUES('integration-grant-a','workspace-a','binding-integration','binding-integration-v1','principal','principal-a','principal-v1')`),
+        db.prepare(`INSERT INTO portal_v2_directory_entities
+          (workspace_id,generation_id,entity_type,public_id,parent_public_id,display_name,source_version)
+          VALUES('workspace-a','generation-a','project','project-integration','org-a','Integration Project','binding-integration-v1')`),
+        db.prepare(`INSERT INTO portal_v2_folder_bindings
+          (id,workspace_id,owner_scope_type,owner_public_id,r2_prefix,source_version)
+          VALUES('binding-integration','workspace-a','project','project-integration','clients/integration/','binding-integration-v1')`),
+        db.prepare("DELETE FROM portal_v2_entitlements WHERE id='delivery-a'"),
+      ]);
+    });
+
+    afterAll(async () => {
+      await db.batch([
+        db.prepare("DELETE FROM portal_client_authority_workspace_claims WHERE workspace_id='workspace-a'"),
+        db.prepare("DELETE FROM project_alpha_delivery_portal_grants WHERE id='integration-grant-a'"),
+        db.prepare("DELETE FROM portal_v2_folder_bindings WHERE id='binding-integration'"),
+        db.prepare("DELETE FROM portal_v2_directory_entities WHERE public_id='project-integration'"),
+        db.prepare("DELETE FROM portal_v2_identity_eligibility_bindings WHERE workspace_id='workspace-a'"),
+        db.prepare(`INSERT INTO portal_v2_entitlements
+          (id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id)
+          VALUES('delivery-a','workspace-a','identity-a','delivery.view','allow','project','project-a')`),
+      ]);
+    });
+
+    it("allows the integration-owned grant without a Client authority claim", async () => {
+      await db.prepare("DELETE FROM portal_client_authority_workspace_claims WHERE workspace_id='workspace-a'").run();
+      const [authorized,prefixes]=await Promise.all([
+        authorizeAuthenticatedDeliveryGrant(env,principal,"workspace-a","binding-integration"),
+        listAuthorizedAuthenticatedDeliveryPrefixes(env,principal,"workspace-a"),
+      ]);
+      expect(authorized).toBe(true);
+      expect(prefixes).toEqual(new Set(["clients/integration/"]));
+    });
+
+    it("denies the integration-owned grant while the workspace has an active Client authority claim", async () => {
+      await db.prepare(`INSERT INTO portal_client_authority_workspace_claims(workspace_id,state) VALUES('workspace-a','active')
+        ON CONFLICT(workspace_id) DO UPDATE SET state=excluded.state`).run();
+      const [authorized,prefixes]=await Promise.all([
+        authorizeAuthenticatedDeliveryGrant(env,principal,"workspace-a","binding-integration"),
+        listAuthorizedAuthenticatedDeliveryPrefixes(env,principal,"workspace-a"),
+      ]);
+      expect(authorized).toBe(false);
+      expect(prefixes).toEqual(new Set());
+    });
+
+    it("allows the integration-owned grant after the Client authority claim is released", async () => {
+      await db.prepare(`INSERT INTO portal_client_authority_workspace_claims(workspace_id,state) VALUES('workspace-a','released')
+        ON CONFLICT(workspace_id) DO UPDATE SET state=excluded.state`).run();
+      const [authorized,prefixes]=await Promise.all([
+        authorizeAuthenticatedDeliveryGrant(env,principal,"workspace-a","binding-integration"),
+        listAuthorizedAuthenticatedDeliveryPrefixes(env,principal,"workspace-a"),
+      ]);
+      expect(authorized).toBe(true);
+      expect(prefixes).toEqual(new Set(["clients/integration/"]));
+    });
   });
 
   it("keeps secondary unbridged native workspaces unavailable despite matching identity and grants", async () => {

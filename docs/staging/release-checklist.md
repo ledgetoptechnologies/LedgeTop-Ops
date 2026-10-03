@@ -180,8 +180,19 @@ not become active deployments.
   feature version. Record credential fingerprints and secret names only, never
   `draftQuote.apiKey` or `draftQuote.hmacSecret` values;
 
-`CLIENT_PORTAL_ENABLED` and every feature listed in
-`REQUIRED_DISABLED_FEATURE_FLAGS` must be explicitly `false`;
+`CLIENT_PORTAL_ENABLED` must be explicitly `true` for the reviewed
+`staff-synthetic-acceptance` phase. The evidence packet must prove that only
+one approved staff tester can use a synthetic workspace, while client
+admission, invitation sending, automatic enrollment, and broad Access policies
+remain disabled. Every feature listed in `REQUIRED_DISABLED_FEATURE_FLAGS`
+must still be explicitly `false`;
+the admission evidence must bind the exact protected application and Allow
+policy IDs to the dedicated tester group, contain no additional include,
+exclude, require, or Bypass selectors, and match the one approved tester's
+hashed issuer/subject identity to the complete hashed group-membership set.
+Production Access before/after application IDs, ordered policy IDs, and
+canonical configuration hashes must be identical. The public-path Bypass
+application is validated separately and does not authorize portal admission.
 `CLIENT_PORTAL_ORIGIN` and Operations `DELIVERY_BASE_URL` must be the client
 staging origin. `PUBLIC_SHARE_ORIGIN` on both Workers and Client
 `PUBLIC_BASE_URL` must be the anonymous delivery staging origin.
@@ -214,6 +225,16 @@ bootstrap window also requires that administrator's exact active global
 window. Invoke the joined Project route only through
 `POST /api/admin/project-alpha/projects/v2/commands` with a command-matching
 `Idempotency-Key`; there is no scheduled or public/client invocation path.
+
+`PROJECT_ALPHA_API_V2_SYNC_ENABLED` and
+`PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED` are also required to be
+explicitly `false` in every release-preparation configuration. The sync window
+requires migration `0161`, a reviewed staging-only
+`PROJECT_ALPHA_API_V2_CONNECTIONS` envelope, and a separate activation version.
+The exact read-adoption window additionally requires migrations `0162` and
+`0163`, `ENVIRONMENT=staging`, current native staff admission, and the exact
+reviewed Directory authority. Never enable either flag in a baseline upload or
+carry it into the restored all-false version.
 
 Create and revoke that native admission and both grants only with the reviewed
 [staging native authority packet](native-authority-packet.md). Provision and
@@ -272,6 +293,98 @@ Client must set `PROJECT_ALPHA_PORTAL_SYNC_ENABLED=true`, keep
 Project Alpha catalog/portal Access audience, HMAC key ID, or portal HMAC
 secret; the catalog path must use the same Ops Sync audience and application
 key.
+
+Deploy the Client staging Worker export before deploying the Operations
+staging Worker that binds `OPS_INVENTORY_CATALOG_STAGING` to
+`ledgetop-clients-staging`/`OpsInventoryCatalogStagingIngress` and
+`OPS_INVENTORY_CATALOG_PROMOTION` to the route-less
+`OpsInventoryCatalogPromotionCoordinator`. Keep both
+`PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED=false` and
+`PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED=false`; bindings alone
+do not authorize a catalog run or promotion. A deliberate promotion must pin
+the operator-selected registry ID, source ID, reviewed snapshot ID, and
+expected Client checkpoint sequence; it must never discover or advance that
+authority automatically.
+Promotion still does not activate client access, public links, draft quotes,
+or portal catalog reads. Use the same Client-before-Operations order for
+production.
+
+The only approved operator trigger is the authenticated Wrangler Workflow CLI;
+there is no HTTP or scheduled trigger. Before any activation, use a dedicated,
+least-privilege staging Cloudflare profile to read the exact authority:
+
+```powershell
+npx wrangler d1 execute client-data-staging --remote --config apps/client/wrangler.staging.json --command "SELECT registry_id,source_id,source_instance_id,application_id,history_epoch,state FROM ops_inventory_catalog_staging_sources WHERE source_id='project-alpha:primary' ORDER BY registry_id;"
+npx wrangler d1 execute client-data-staging --remote --config apps/client/wrangler.staging.json --command "SELECT source_id,active_generation_id,source_generation,source_sequence FROM pa_service_catalog_checkpoint WHERE source_id='project-alpha:primary';"
+```
+
+Migration `0214` creates an **empty, disabled** catalog source registry. It does
+not enroll the PA source. If the first query has no exact row, stop: after the
+PA catalog endpoint and its scoped key pass staging acceptance, create one
+registry row through a separately reviewed D1 change using the source ID and
+source-instance/application/history-epoch UUIDs verified against both the
+bound PA capabilities response and the pinned Operations connection. Back up
+staging D1 first. Insert with `state='disabled'`, read it back, and activate
+only that exact row to `state='staging'` in a second reviewed action. A duplicate
+or different epoch/application is a conflict, never a reason to pick a row by
+name or let the Workflow enroll it. Do not use the example registry ID below
+until the readback supplies the real ID. No registry row was enrolled in the
+September 23 default-off infrastructure checkpoint.
+
+Have a human compare the selected staging registry identity with the pinned
+Operations connection and record the reviewed registry ID, source ID, current
+checkpoint sequence, and change/approval reference. Never discover, increment,
+or substitute these values inside the Workflow. `approvalId` and the Workflow
+instance ID are correlation fields only; Cloudflare/Wrangler authentication and
+the staging account role authorize the operator. After a separately reviewed
+deployment but before enabling any catalog flag, trigger a unique default-off
+instance and inspect its step history:
+
+```powershell
+npx wrangler workflows trigger ledgetop-ops-catalog-promotion-staging '{"protocolVersion":1,"action":"stage","registryId":17,"sourceId":"project-alpha:primary","approvalId":"CHG-2026-0917-RETRY-GATE"}' --config apps/operations/wrangler.staging.json --id catalog-stage-CHG-2026-0917-retry-gate-4f2c1a
+npx wrangler workflows instances describe ledgetop-ops-catalog-promotion-staging catalog-stage-CHG-2026-0917-retry-gate-4f2c1a --config apps/operations/wrangler.staging.json
+```
+
+Record a nested `disabled` outcome and exactly one attempt of
+`stage-project-alpha-catalog`, with no retry entry. Do not enable
+the flags if the deployed runtime reports any retry. After this runtime gate
+and a separately reviewed staging deployment enables both Operations catalog
+flags and the Client promotion flag, invoke a `stage` instance first:
+
+```powershell
+npx wrangler workflows trigger ledgetop-ops-catalog-promotion-staging '{"protocolVersion":1,"action":"stage","registryId":17,"sourceId":"project-alpha:primary","approvalId":"CHG-2026-0917-STAGE"}' --config apps/operations/wrangler.staging.json --id catalog-stage-CHG-2026-0917-4f2c1a
+```
+
+Record and review the exact nested `snapshotId` returned by that stage action.
+Read the checkpoint again, then promote only that reviewed snapshot hash:
+
+```powershell
+npx wrangler d1 execute client-data-staging --remote --config apps/client/wrangler.staging.json --command "SELECT source_id,active_generation_id,source_generation,source_sequence FROM pa_service_catalog_checkpoint WHERE source_id='project-alpha:primary';"
+npx wrangler workflows trigger ledgetop-ops-catalog-promotion-staging '{"protocolVersion":1,"action":"promote","registryId":17,"sourceId":"project-alpha:primary","expectedSnapshotId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","expectedSourceSequence":8,"approvalId":"CHG-2026-0917-PROMOTE"}' --config apps/operations/wrangler.staging.json --id catalog-promote-CHG-2026-0917-8b7d2e
+```
+
+The promote action reads Project Alpha again and compares its snapshot hash
+before any staging RPC. A mismatch is a bounded `snapshot_mismatch` result with
+zero staging or promotion calls; the operator must restart the stage/review
+ceremony rather than accept the new snapshot implicitly.
+
+The Workflow performs one non-retrying step and returns only the approval
+correlation plus the bounded staging/promotion outcome. It must not log or
+return Project Alpha credentials, catalog item content, or claimed operator
+identity. The custom instance ID must be unique for this Workflow, must not be
+reused for another attempt, and must remain at most 100 characters. A top-level
+`completed` value means only that the Workflow step returned: the operator must
+inspect the nested outcome and promotion status before recording success. A
+disabled result requires configuration review; a stale result
+requires a fresh human read and a new approved invocation, never an automatic
+retry with a newer checkpoint.
+
+The generic Project Alpha inventory contract permits service names through 255
+characters, while this Operations-to-Client catalog consumer is currently
+canonicalized at 160. A valid Project Alpha name of 161–255 characters produces
+`catalog_contract` before staging and blocks this consumer until the source is
+normalized or an explicit canonical expansion is separately reviewed. Do not
+narrow the generic Project Alpha API contract to work around this gate.
 
 Client migration `0189_primary_staff_folder_bindings.sql` must be applied and
 verified before deploying the Operations build that exposes primary Client
@@ -350,18 +463,27 @@ migration hashes. Set `RELEASE_CONTRACT_FINALIZED=true` only after independent
 comparison with those repositories. The verifier intentionally fails while any
 release-candidate placeholder remains.
 
-The current candidate inventory extends through Client `0213` (including both
-distinct `0199` filenames), Operations `0122`, and Project Alpha `0102`. The
-reviewed Operations runtime boundary is commit
-`5ca70d4f5ec834bfddf7bff68ffc1d89c6fd32a7`, which adds default-off,
-fail-closed Cloudflare Access service-auth support to the PA API-v2 connection
-secret. This following contract-only commit pins that exact executable SHA so
-the release-packet HEAD is not self-referential. Project Alpha is pinned
+The current candidate inventory extends through Client `0228` (including both
+distinct `0199` filenames), Operations `0163`, and Project Alpha `0102`. The
+Operations runtime candidate remains `PENDING_OPERATIONS_COMMIT` until the
+combined portal and API-v2 sync/read-adoption candidate is committed, pushed,
+and independently reviewed; do not substitute the dirty worktree HEAD.
+Project Alpha is pinned
 independently at PR184 head `31deb85b87b95de27dc9e90a5591e036ae96709e`.
 Keep `RELEASE_CONTRACT_FINALIZED=false` until independent cross-repository,
 image, migration, and live staging evidence is complete. Any runtime change
-after `5ca70d4` requires a newly reviewed non-circular boundary and coordinated
-evidence refresh.
+requires a newly reviewed non-circular boundary and coordinated evidence refresh.
+
+September 27 source-only update: the staging migration inventory and example
+packet now extend through Client `0218` and Operations `0144`, including the
+inactive workspace-binding command and private Client receipt. The generated
+Ops staging binding is pinned to `ledgetop-clients-staging`; its writer, outbox,
+and owner action remain default-off. These manifest changes are **not** proof
+that either staging D1 has applied the new migrations or that a Worker version
+has been deployed. Recheck the live migration list, exact Worker versions,
+binding target, and both-D1 backups before a bounded activation window. The
+older Project Alpha/Viewer release pins in this packet still require independent
+refresh and do not authorize a production cutover.
 
 The live Project Alpha staging instance reports `v31deb85`. API key ID `1`
 is bound to generic API-v2 application
@@ -507,12 +629,29 @@ Generate and check the ignored bootstrap configs from the approved synthetic
 owner input, then use only those configs for the first full apply. The ordinary
 configs would replay the canonical named-human `0002` rows. A populated or
 partially migrated database must never use the bootstrap configs. Attach both
-generated manifests and complete `migrations.freshBootstrap`; the required
-proof includes 132/122 ledger rows, both Client `0199` filenames exactly once,
-final `0213`/`0122`, canonical-human absence, the one synthetic owner and its
-role, the retained Operations ACL catalog, no pending reapply, and an empty
+generated manifests and complete `migrations.freshBootstrap`; the current
+schema-version-2 proof requires a new truthful empty-D1 rehearsal with the
+current `BOOTSTRAP_APPS` ledger counts, both Client `0199` filenames exactly
+once, final `0228`/`0163`, canonical-human absence, the one synthetic owner and
+its role, the retained Operations ACL catalog, no pending reapply, and an empty
 foreign-key check.
 
+The September 18 schema-version-1 proof remains historical evidence for the
+133/139 chains through `0214`/`0139`. Preserve that record unchanged; it cannot
+satisfy the current schema-version-2 release gate and must not be relabeled as
+a new rehearsal.
+
+When the canonical staging databases are already populated, do not reset or
+reuse them for this proof. Create two new run-scoped staging-only D1 databases,
+record their returned names and IDs in the local disposable-target input, and
+generate the run-scoped bootstrap artifacts with `--disposable-targets`. The
+generator must first validate the ordinary canonical staging config and full
+migration digests, then reject any target that reuses a configured staging or
+production database identity. Apply each minimal generated config only to its
+single disposable database; record target-specific creation, apply, and
+readback references in the existing schema-version-2 `freshBootstrap` gate.
+This disposable proof does not replace or rename the historical rehearsal and
+does not authorize any production or canonical-staging reset.
 It also requires the pushed source ref, exact deployed version/config hashes,
 an ordered remote migration-ledger readback, a pre-migration open-fence and
 writer/scheduler-quiescence check, compatible-writer ordering evidence,
@@ -587,11 +726,20 @@ apply time and is the explicit exception to this packet's normal
 migration-first order. Confirm every predecessor is already applied; otherwise
 resolve those predecessors in a separately reviewed release.
 
-For Operations, preserve the full ordered `0054` through `0122` suffix in the
+For Operations, preserve the full ordered `0054` through `0163` suffix in the
 remote Wrangler ledger. Attach the list output that proves every filename is in
 the exact checked-in order, with no duplicate, renamed, skipped, or unexpected
 row. A local migration-chain run, a directory listing, or a successful raw SQL
 parse is not remote-ledger evidence.
+
+The local preflight additionally locks the newly reviewed suffix bytes:
+`0123`=`5e36893c738c6a058271db521e4c5e8907009f135c25ee635f2f1ec709b3caf5`,
+`0124`=`b35a14babab1e10caf5420fe8d1209a81009b5bd55cfcb0361a4a3085c503a05`,
+`0161`=`1b6fbb3b3ce8b50dbb553fd38ec8544c25f88a2837d8523b5ddeb0494534bd45`,
+`0162`=`4bd97d25bd96a0a872bd3106ab936ab3fe1806b7456aec6cf02c92195715d1b0`,
+and `0163`=`ef4abf5411e8fd4e10d4daeb94dd4ca3469ae7d179d2b135a9d04ca4a0cf12aa`.
+Any content change requires an explicit contract/checksum review; never edit an
+already-applied migration to make a later rollout pass.
 
 Before the first Operations migration action, inspect and record every open
 directory/outbox/onboarding/native-integration/reconciliation fence. Stop unless
@@ -599,7 +747,7 @@ all are terminal or deliberately cancelled, then close mutation ingress and
 drain HTTP requests, queue consumers, leases, schedulers, and reconciliation
 batches. The evidence must prove this quiescent state and name the compatible
 Operations writer version already handling all traffic. Do not apply `0054`-
-`0122` while an old writer, an in-flight fence, or a scheduled/retry worker can
+`0163` while an old writer, an in-flight fence, or a scheduled/retry worker can
 commit a pre-migration assumption. Keep the compatible writer in place through
 the final ledger readback; use a compatible fix forward, never a pre-suffix
 writer rollback.
@@ -686,7 +834,8 @@ Confirm Operations
 `0014_staff_acl_controls.sql` through
 `0052_project_operational_reassignment_recovery.sql` and
 `0053_project_internal_notes.sql`, then Operations `0054` through
-`0122_project_alpha_project_v2_canonical_activation.sql` in
+`0139_native_directory_staging_empty_enrollment_fixture_guard.sql` through
+`0163_project_alpha_directory_read_adoption_field_review_receipts.sql` in
 that exact ledger order. Migration `0100` removes
 `share_version` from the delivery-grant parent key so existing share
 rotation/revocation updates cannot be blocked by a portal grant; the grant
