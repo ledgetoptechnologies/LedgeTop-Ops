@@ -219,6 +219,8 @@ async function fixture() {
 afterEach(async () => {
   vi.clearAllMocks();
   acl.sqlScope.mockResolvedValue({ global: true, deniedGlobal: false });
+  acl.hasPermission.mockImplementation(async (_env: unknown, _principal: unknown, permission: string) =>
+    ["delivery.share.audit", "viewer.view"].includes(permission));
   acl.isAdministrator.mockResolvedValue(true);
   principal.id = "staff-one";
   await Promise.all(active.splice(0).map(item => item.dispose()));
@@ -297,6 +299,8 @@ async function revokeRoot(app: Awaited<ReturnType<typeof fixture>>["app"], env: 
 describe("Client Hub bounded detail collections", () => {
   it("hydrates canonical organization and standalone details and lists contacts by Operations IDs", async () => {
     const { app, env, ops } = await fixture();
+    acl.hasPermission.mockImplementation(async (_env: unknown, _principal: unknown, permission: string) =>
+      ["delivery.share.audit", "viewer.view", "projects.view"].includes(permission));
     await registerVisibleTestSource(ops, "project-alpha:primary", "Project Alpha");
     await ops.prepare("UPDATE pa_connectors SET state='active',version=version+1 WHERE source_id='project-alpha:primary'").run();
     await addCanonicalRecord(ops, { externalId: "ops-org", publicId: "d".repeat(32), kind: "organization", name: "API Organization" });
@@ -306,6 +310,26 @@ describe("Client Hub bounded detail collections", () => {
       profile: { phone: "+1 920 555 0199", private_price: 500 } });
     await ops.prepare("INSERT INTO operations_directory_client_organizations VALUES('ops-contact','ops-org',1)").run();
     await ops.batch([
+      ops.prepare("INSERT INTO pa_organizations VALUES('legacy-api-org','Legacy API Organization',1,?,'project-alpha:primary')")
+        .bind(JSON.stringify({ public_id: "d".repeat(32) })),
+      ops.prepare("INSERT INTO pa_clients VALUES('legacy-api-contact','Legacy API Contact','legacy-api-org',1,?,'project-alpha:primary')")
+        .bind(JSON.stringify({ public_id: "e".repeat(32), email: "legacy-project-contact@example.test" })),
+      // This legacy organization happens to reuse the Operations external ID.
+      // Its contact must never join the canonical root by that coincidental ID.
+      ops.prepare("INSERT INTO pa_organizations VALUES('ops-org','Unrelated Legacy Organization',1,?,'project-alpha:primary')")
+        .bind(JSON.stringify({ public_id: "1".repeat(32) })),
+      ops.prepare("INSERT INTO pa_clients VALUES('collision-contact','Private Collision Contact','ops-org',1,?,'project-alpha:primary')")
+        .bind(JSON.stringify({ public_id: "2".repeat(32), email: "must-not-leak@example.test" })),
+      ops.prepare("INSERT INTO pa_organizations VALUES('foreign-project-org','Foreign Project Organization',1,?,'project-alpha:primary')")
+        .bind(JSON.stringify({ public_id: "5".repeat(32) })),
+      ops.prepare("INSERT INTO pa_clients VALUES('foreign-project-contact','Foreign Project Contact','foreign-project-org',1,?,'project-alpha:primary')")
+        .bind(JSON.stringify({ public_id: "6".repeat(32), email: "foreign-project@example.test" })),
+      ops.prepare(`INSERT INTO pa_projects(id,name,status,start_date,end_date,client_id,organization_id,manager_user_id,active,payload_json)
+        VALUES('canonical-project','Canonical Project','active','2026-01-01',NULL,'legacy-api-contact','legacy-api-org',NULL,1,
+          '{"description":"Canonical project detail"}')`),
+      ops.prepare(`INSERT INTO pa_projects(id,name,status,start_date,end_date,client_id,organization_id,manager_user_id,active,payload_json)
+        VALUES('explicit-org-project','Explicit Organization Project','active','2026-01-01',NULL,
+          'foreign-project-contact','legacy-api-org',NULL,1,'{"description":"Explicit organization wins"}')`),
       ops.prepare(`INSERT INTO client_hub_roots(source_id,root_namespace,kind,public_id,pa_public_id,mapping_status,
         display_name,sort_name,status,portal_status,account_count,project_count,request_count,contact_count)
         VALUES('project-alpha:primary','business','organization','ops-org',?,'mapped','API Organization','api organization','active','not_provisioned',0,0,0,1)`)
@@ -319,9 +343,27 @@ describe("Client Hub bounded detail collections", () => {
     const standaloneCanonicalPath = "http://local/api/client-hub/sources/project-alpha%3Aprimary/business/standalone/ops-standalone";
     const organization = await app.request(orgPath, {}, env);
     expect(organization.status).toBe(200);
-    expect((await organization.json() as { client: Record<string, unknown>; contacts: Array<Record<string, unknown>> }))
+    const organizationBody = await organization.json() as { client: Record<string, unknown>;
+      contacts: Array<Record<string, unknown>>; businessProjects: Array<Record<string, unknown>> };
+    expect(organizationBody)
       .toMatchObject({ client: { public_id: "ops-org", pa_public_id: "d".repeat(32) },
         contacts: [{ public_id: "ops-contact", organization_id: "ops-org", email: "api-contact@example.test" }] });
+    expect(organizationBody.contacts.map(contact => contact.public_id)).toEqual(["ops-contact"]);
+    expect(JSON.stringify(organizationBody)).not.toContain("must-not-leak@example.test");
+    expect(organizationBody.businessProjects.map(project => project.id).sort()).toEqual(["canonical-project", "explicit-org-project"]);
+    const project = await app.request(orgPath + "/business-projects/canonical-project", {}, env);
+    expect(project.status).toBe(200);
+    expect(await project.json()).toMatchObject({ canonicalRoot: { publicId: "ops-org" },
+      project: { id: "canonical-project", description: "Canonical project detail" },
+      linkedContact: { id: "legacy-api-contact", email: "legacy-project-contact@example.test" } });
+    const explicitOrganizationProject = await app.request(orgPath + "/business-projects/explicit-org-project", {}, env);
+    expect(explicitOrganizationProject.status).toBe(200);
+    const explicitOrganizationProjectBody = await explicitOrganizationProject.json();
+    expect(explicitOrganizationProjectBody).toMatchObject({
+      project: { id: "explicit-org-project", description: "Explicit organization wins" },
+      linkedContact: null, availability: { linkedContact: "unavailable" },
+    });
+    expect(JSON.stringify(explicitOrganizationProjectBody)).not.toContain("foreign-project@example.test");
     const standalone = await app.request(standaloneCanonicalPath, {}, env);
     expect(standalone.status).toBe(200);
     const standaloneBody = await standalone.json() as { client: Record<string, unknown>; contacts: Array<Record<string, unknown>> };
@@ -337,15 +379,24 @@ describe("Client Hub bounded detail collections", () => {
     const { app, env, ops } = await fixture();
     await registerVisibleTestSource(ops, "project-alpha:primary", "Project Alpha");
     await ops.prepare("UPDATE pa_connectors SET state='active',version=version+1 WHERE source_id='project-alpha:primary'").run();
-    await ops.prepare("INSERT INTO pa_organizations VALUES('coincidental','Legacy Coincidental',1,'{}','project-alpha:primary')").run();
-    await addCanonicalRecord(ops, { externalId: "coincidental", publicId: "9".repeat(32), kind: "organization",
+    const publicId = "9".repeat(32);
+    await ops.prepare("INSERT INTO pa_organizations VALUES('legacy-org','Legacy Coincidental',1,?,'project-alpha:primary')")
+      .bind(JSON.stringify({ public_id: publicId })).run();
+    await addCanonicalRecord(ops, { externalId: "ops-org", publicId, kind: "organization",
       name: "Invalid Canonical", conflict: true });
     await ops.prepare(`INSERT INTO client_hub_roots(source_id,root_namespace,kind,public_id,pa_public_id,mapping_status,
       display_name,sort_name,status,portal_status,account_count,project_count,request_count,contact_count)
-      VALUES('project-alpha:primary','business','organization','coincidental',?,'mapped','Cached','cached','active','not_provisioned',0,0,0,0)`)
-      .bind("9".repeat(32)).run();
-    const response = await app.request("http://local/api/client-hub/sources/project-alpha%3Aprimary/business/organizations/coincidental", {}, env);
-    expect(response.status).toBe(404);
+      VALUES('project-alpha:primary','business','organization','legacy-org',?,'mapped','Cached legacy','cached legacy','active','not_provisioned',0,0,0,0)`)
+      .bind(publicId).run();
+    const path = "http://local/api/client-hub/sources/project-alpha%3Aprimary/business/organizations/legacy-org";
+    expect((await app.request(path, {}, env)).status).toBe(404);
+
+    await ops.prepare(`UPDATE project_alpha_api_v2_directory_observations_current
+      SET has_conflict=0,binding_resource_revision='stale-revision' WHERE binding_external_id='ops-org'`).run();
+    expect((await app.request(path, {}, env)).status).toBe(404);
+
+    await ops.prepare("DELETE FROM project_alpha_api_v2_directory_observations_current WHERE binding_external_id='ops-org'").run();
+    expect((await app.request(path, {}, env)).status).toBe(404);
   });
   it("fences a portal-root revoke when team.view is denied after resolution but before commit", async () => {
     const { app, env, delivery } = await fixture(), current = await rootAccessContext(app, env);

@@ -33,7 +33,7 @@ function configFile(t, value = reviewedConfig()) {
   return filename;
 }
 
-function fakeDb({ row = { migration_count: 169, final_migration: "0169_project_alpha_existing_directory_binding_generation_evidence.sql" } } = {}) {
+function fakeDb({ row = { migration_count: 170, final_migration: "0170_client_hub_canonical_directory_projection_reset.sql" } } = {}) {
   const state = { prepared: [], batches: 0 };
   return {
     state,
@@ -125,7 +125,7 @@ test("status uses exact proxy options, one read-only aggregate, sanitized output
     workerName: STAGING_TARGET.workerName,
     binding: STAGING_TARGET.binding,
     databaseName: STAGING_TARGET.databaseName,
-    migrations: { count: 169, final: "0169_project_alpha_existing_directory_binding_generation_evidence.sql" },
+    migrations: { count: 170, final: "0170_client_hub_canonical_directory_projection_reset.sql" },
     mutationsPerformed: false,
   });
   assert.doesNotMatch(logs[0], /staff|grant|admission|access_subject/i);

@@ -173,10 +173,11 @@ function collectionQuery(context: ClientHubCollectionContext, collection: Client
       from: `(SELECT contact.id public_id,contact.organization_id,contact.name display_name,contact.payload_json
         FROM pa_clients contact
         WHERE contact.active=1 AND contact.projection_source_id=?
+          AND NOT EXISTS(SELECT 1 FROM project_alpha_active_directory_mappings canonical_root
+            WHERE canonical_root.source_id=? AND canonical_root.external_id=?
+              AND canonical_root.resource_type=?)
           AND ${root.kind === "organization" ? "contact.organization_id=?" : "contact.id=? AND contact.organization_id IS NULL"}
           AND NOT EXISTS(SELECT 1 FROM project_alpha_active_directory_mappings mapped
-            JOIN project_alpha_api_v2_directory_observations_current mapped_observation
-              ON ${currentCanonicalMapping("mapped", "mapped_observation")}
             WHERE mapped.source_id=contact.projection_source_id AND mapped.resource_type='client'
               AND mapped.project_alpha_public_id=${validatedUniquePublicIdExpression("pa_clients", "contact")})
         UNION ALL
@@ -204,7 +205,8 @@ function collectionQuery(context: ClientHubCollectionContext, collection: Client
           AND (relationship.organization_record_id IS NULL OR ${uniqueCurrentCanonicalMapping("parent")})
           AND json_type(revision.profile_json,'$.name')='text'
           AND length(trim(json_extract(revision.profile_json,'$.name'))) BETWEEN 1 AND 150) contact_projection`,
-      where: "1=1", values: [root.source_id, root.public_id, root.source_id, root.public_id],
+      where: "1=1", values: [root.source_id, root.source_id, root.public_id,
+        root.kind === "organization" ? "organization" : "client", root.public_id, root.source_id, root.public_id],
       order: ["contact_projection.public_id"], descending: false, keys: ["public_id"], business: true,
     };
     case "accounts": return { ...common,

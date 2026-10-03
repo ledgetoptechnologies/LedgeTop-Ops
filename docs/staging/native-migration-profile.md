@@ -3,7 +3,7 @@
 This profile is a migration-only staging rehearsal boundary. The currently
 pinned staging baselines contain 147 Client migrations through `0228` and 165
 Operations migrations through `0165`. The reviewed candidate suffix contains
-no Client migrations and only Operations `0166`–`0169`. These counts and hashes
+no Client migrations and only Operations `0166`–`0170`. These counts and hashes
 are deliberately specific to the currently verified staging databases; a
 different remote ledger must fail closed and requires a new review. Profile
 generation does not alter either source inventory, any production Wrangler
@@ -20,7 +20,7 @@ The generator first verifies the byte-pinned canonical base chains and every
 new native migration. It then copies only the expected suffix after the required
 staging baselines into ignored, app-local directories and emits minimal configs
 containing only the staging account and one exact D1 binding. At this checkpoint,
-the Operations suffix is `0166`–`0169`; the Client suffix is empty because its
+the Operations suffix is `0166`–`0170`; the Client suffix is empty because its
 staging ledger is already at the reviewed final migration `0228`.
 
 The generated configs contain no Worker entrypoint, vars, routes, services,
@@ -47,7 +47,11 @@ user-entered, or earlier evidence is not treated as current live state.
 
 Stop unless both gates have just passed, the exact staging IDs match, current
 private backups and recovery evidence exist, and the generated migration list
-is exactly Operations `0166`–`0169` with no Client SQL files. Applying these
+is exactly Operations `0166`–`0170` with no Client SQL files. Applying these
 Operations migrations, deploying the matching Worker candidate, runtime
 activation, and live acceptance are separate gates. A successful ledger gate
 does not authorize any production action.
+
+Migration `0170` updates Client Hub index state and is not down-migratable.
+Rollback requires a verified pre-migration staging backup or a separately
+reviewed forward repair; rolling back only the Worker does not reverse it.

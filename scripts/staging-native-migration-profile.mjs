@@ -32,18 +32,20 @@ export const NATIVE_MIGRATION_PROFILES = Object.freeze({
     baseNamesSha256: "410fc8c0497d9e736ccfbc5acfdf568138c323cb0d1a72520c96e29571118c4b",
     baseContentsSha256: "5d671c4cbc5b2a0cf66f7e903395ed2d22b820aa60af9c8076836262ac6cb835",
     remoteBaseline: "0165_project_alpha_inventory_generation_surface_scope.sql",
-    finalMigration: "0169_project_alpha_existing_directory_binding_generation_evidence.sql",
+    finalMigration: "0170_client_hub_canonical_directory_projection_reset.sql",
     candidates: Object.freeze({
       "0166_project_alpha_reviewed_standalone_display.sql": "84fbbd9914fb911d7056657ae5bffc703f22519a209e9e304db72dee4f33a501",
       "0167_project_alpha_directory_read_adoption_finalizations.sql": "807c48566dce6d741e482b15d6b040d7463cbc5e4deefb4d72a4b9a3d5b16886",
       "0168_project_alpha_directory_read_adoption_local_profiles.sql": "a8ccc227611cb519fb0cfb253ff2c50aec66850e62a33024a587525b24eaaaa4",
       "0169_project_alpha_existing_directory_binding_generation_evidence.sql": "efba1fc86e73674bf7866cbdc78f8c83024fbe2fae53de3375bdc00c3a37006e",
+      "0170_client_hub_canonical_directory_projection_reset.sql": "b41499b4b947cf954ec4ca51d95d1e9a252bd91cfc2553e1bcf108ac5f87c9d6",
     }),
     expectedAppliedMigrations: Object.freeze([
       "0166_project_alpha_reviewed_standalone_display.sql",
       "0167_project_alpha_directory_read_adoption_finalizations.sql",
       "0168_project_alpha_directory_read_adoption_local_profiles.sql",
       "0169_project_alpha_existing_directory_binding_generation_evidence.sql",
+      "0170_client_hub_canonical_directory_projection_reset.sql",
     ]),
   }),
 });

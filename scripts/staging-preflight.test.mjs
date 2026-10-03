@@ -428,7 +428,7 @@ test("requires every portal-v2 and Operations capability to be explicitly false"
   }
 });
 
-test("pins the native portal, Operations 0054-0169 gap-aware chain, both 0199 files, and the 0200-0228 gap-aware release contract", () => {
+test("pins the native portal, Operations 0054-0170 gap-aware chain, both 0199 files, and the 0200-0228 gap-aware release contract", () => {
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-46), [
     "0184_native_client_feedback.sql",
     "0185_native_service_request_ownership.sql",
@@ -525,6 +525,7 @@ test("pins the native portal, Operations 0054-0169 gap-aware chain, both 0199 fi
     "0167_project_alpha_directory_read_adoption_finalizations.sql",
     "0168_project_alpha_directory_read_adoption_local_profiles.sql",
     "0169_project_alpha_existing_directory_binding_generation_evidence.sql",
+    "0170_client_hub_canonical_directory_projection_reset.sql",
   ]);
   const nativeDirectoryStart = REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0054_project_alpha_directory_outbox.sql");
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(nativeDirectoryStart, nativeDirectoryStart + 3), [

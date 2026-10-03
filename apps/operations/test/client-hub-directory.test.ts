@@ -163,6 +163,14 @@ describe("source-qualified Client Hub directory", () => {
         (source_id,root_namespace,kind,root_public_id,record_type,record_id,field,normalized_value)
         VALUES('project-alpha:primary','business','organization','search-org','ops_directory_client','search-client','email','canonical-search@example.test')`),
     ]);
+    // The same Operations external ID in another source is not authorized by
+    // the primary source's exact canonical tuple.
+    await registerVisibleTestSource(db, "project-alpha:secondary", "Secondary Project Alpha");
+    await roots([{ id: "secondary-search-org", kind: "organization", source: "project-alpha:secondary" }]);
+    await db.prepare(`INSERT INTO client_hub_search_values
+      (source_id,root_namespace,kind,root_public_id,record_type,record_id,field,normalized_value)
+      VALUES('project-alpha:secondary','business','organization','secondary-search-org',
+        'ops_directory_client','search-client','email','canonical-search@example.test')`).run();
     expect((await listClientHubRoots(env, staff, { q: "astral 😀" })).clients.map(row => row.public_id)).toEqual(["search-org"]);
     expect((await listClientHubRoots(env, staff, { q: "canonical-search@example" })).clients.map(row => row.public_id)).toEqual(["search-org"]);
 
@@ -796,6 +804,48 @@ describe("source-qualified Client Hub directory", () => {
     expect((await listClientHubRoots(env, staff, { q: "renovation" })).clients.map(client => client.public_id)).toEqual(["a", "b"]);
     await db.prepare("INSERT INTO staff_permission_overrides VALUES('staff-a','projects.view','deny','global',NULL)").run();
     expect((await listClientHubRoots(env, staff, { q: "renovation" })).clients).toEqual([]);
+  });
+
+  it("matches canonical project search through the exact PA public owner identity", async () => {
+    await registerVisibleTestSource(db, "project-alpha:primary", "Project Alpha");
+    await db.prepare("UPDATE pa_connectors SET state='active',version=version+1 WHERE source_id='project-alpha:primary'").run();
+    const organizationPublicId = "3".repeat(32);
+    await db.batch([
+      db.prepare("INSERT INTO operations_directory_records VALUES('ops-project-org','organization',1)"),
+      db.prepare("INSERT INTO operations_directory_revisions VALUES('ops-project-org',1,?)")
+        .bind(JSON.stringify({ name: "Canonical Project Organization" })),
+      db.prepare(`INSERT INTO project_alpha_active_directory_mappings
+        VALUES('project-alpha:primary','organization','ops-project-org',?,'project-instance','project-app',
+          'project-history','project-proof','acquired','2026-01-01')`).bind(organizationPublicId),
+      db.prepare(`INSERT INTO project_alpha_api_v2_directory_observations_current VALUES
+        ('project-alpha:primary','project-instance','project-app','project-history','organization',?,1,'upsert',0,
+          'project-root-revision','ops-project-org','active','project-root-revision','project-root-request')`)
+        .bind(organizationPublicId),
+      db.prepare("INSERT INTO pa_organizations(id,name,active,payload_json) VALUES('legacy-project-org','Legacy Project Organization',1,?)")
+        .bind(JSON.stringify({ public_id: organizationPublicId })),
+      db.prepare("INSERT INTO pa_clients(id,name,active,organization_id,payload_json) VALUES('legacy-project-client','Project Contact',1,'legacy-project-org',?)")
+        .bind(JSON.stringify({ public_id: "4".repeat(32) })),
+      db.prepare(`INSERT INTO pa_projects(id,name,active,manager_user_id,client_id,organization_id,payload_json)
+        VALUES('canonical-search-project','Canonical Search Project',1,'pa-user-a','legacy-project-client','legacy-project-org','{}')`),
+      db.prepare(`INSERT INTO client_hub_roots(source_id,root_namespace,kind,public_id,pa_public_id,mapping_status,
+        display_name,sort_name,status,portal_status,account_count,project_count,request_count,contact_count)
+        VALUES('project-alpha:primary','business','organization','ops-project-org',?,'mapped',
+          'Canonical Project Organization','canonical project organization','active','not_provisioned',0,1,0,1)`)
+        .bind(organizationPublicId),
+      db.prepare(`INSERT INTO client_hub_search_values
+        (source_id,root_namespace,kind,root_public_id,record_type,record_id,field,normalized_value,project_id)
+        VALUES('project-alpha:primary','business','organization','ops-project-org','pa_project',
+          'canonical-search-project','project','canonical search project','canonical-search-project')`),
+      db.prepare("INSERT INTO staff_role_assignments VALUES('staff-a','projects','global',NULL)"),
+    ]);
+    expect((await listClientHubRoots(env, staff, { q: "Canonical Search" })).clients.map(root => root.public_id))
+      .toEqual(["ops-project-org"]);
+
+    // A second same-source legacy owner exporting the same PA identity makes
+    // project ownership ambiguous even though the canonical mapping is unique.
+    await db.prepare("INSERT INTO pa_organizations(id,name,active,payload_json) VALUES('ambiguous-project-org','Ambiguous',1,?)")
+      .bind(JSON.stringify({ public_id: organizationPublicId })).run();
+    expect((await listClientHubRoots(env, staff, { q: "Canonical Search" })).clients).toEqual([]);
   });
 
   async function scopedProject() {

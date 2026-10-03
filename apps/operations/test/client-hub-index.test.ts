@@ -111,6 +111,10 @@ describe("resumable Client Hub index", { timeout: 60_000 }, () => {
     const { ops, env } = await fixture(), organizationId = "0".repeat(32);
     await canonicalRecord(ops, { externalId: "upgrade-canonical-org", publicId: organizationId,
       kind: "organization", profile: { name: "Upgrade canonical organization" } });
+    await ops.prepare(`INSERT INTO client_hub_roots(source_id,root_namespace,kind,public_id,pa_public_id,mapping_status,
+      display_name,sort_name,status,portal_status,account_count,project_count,request_count,contact_count,scan_generation)
+      VALUES('project-alpha:primary','business','organization','upgrade-legacy-org',?,'mapped',
+        'Upgrade legacy organization','upgrade legacy organization','active','not_provisioned',0,0,0,0,11)`).bind(organizationId).run();
     await ops.prepare(`UPDATE client_hub_directory_state
       SET ready=1,revision=7,generation=11,backfill_phase='contacts',backfill_cursor='old-contact',
         next_run_at=datetime('now','+1 day'),lease_token='old-worker',lease_until=datetime('now','+1 day')
@@ -122,12 +126,18 @@ describe("resumable Client Hub index", { timeout: 60_000 }, () => {
 
     expect(await ops.prepare(`SELECT ready,revision,generation,backfill_phase,backfill_cursor,next_run_at,
       lease_token,lease_until FROM client_hub_directory_state WHERE id='directory'`).first()).toEqual({
-      ready: 1, revision: 8, generation: 12, backfill_phase: null, backfill_cursor: null,
+      ready: 0, revision: 8, generation: 12, backfill_phase: null, backfill_cursor: null,
       next_run_at: null, lease_token: null, lease_until: null,
     });
     expect(await reconcileClientHubIndex(env, 1)).toEqual({ status: "progress", pages: 1 });
+    expect(await ops.prepare("SELECT ready FROM client_hub_directory_state WHERE id='directory'").first("ready")).toBe(0);
     expect(await ops.prepare("SELECT public_id FROM client_hub_roots WHERE public_id='upgrade-canonical-org'")
       .first("public_id")).toBe("upgrade-canonical-org");
+    expect(await ops.prepare("SELECT count(*) count FROM client_hub_roots WHERE status='active'").first("count")).toBe(2);
+    await finish(env);
+    expect(await ops.prepare("SELECT ready FROM client_hub_directory_state WHERE id='directory'").first("ready")).toBe(1);
+    expect((await ops.prepare("SELECT public_id FROM client_hub_roots WHERE status='active' ORDER BY public_id").all()).results)
+      .toEqual([{ public_id: "upgrade-canonical-org" }]);
   });
 
   it("indexes only exact current canonical mappings, suppresses their legacy mirrors, and remains idempotent", async () => {
@@ -143,6 +153,7 @@ describe("resumable Client Hub index", { timeout: 60_000 }, () => {
         .bind(JSON.stringify({ public_id: organizationId })),
       ops.prepare("INSERT INTO pa_clients VALUES('legacy-client','Legacy mirror contact','legacy-org',1,?,'project-alpha:primary')")
         .bind(JSON.stringify({ public_id: clientId, email: "legacy@example.test" })),
+      ops.prepare("INSERT INTO pa_projects(id,name,organization_id,client_id,active) VALUES('canonical-project','Canonical Project','legacy-org','legacy-client',1)"),
     ]);
     expect(await reconcileClientHubIndex(env, 1)).toEqual({ status: "progress", pages: 1 });
     expect(await ops.prepare("SELECT public_id FROM client_hub_roots WHERE public_id='canonical-org'").first("public_id"))
@@ -158,6 +169,7 @@ describe("resumable Client Hub index", { timeout: 60_000 }, () => {
       { record_type: "ops_directory_client", field: "contact", normalized_value: "canonical contact" },
       { record_type: "ops_directory_client", field: "email", normalized_value: "canonical@example.test" },
       { record_type: "ops_directory_client", field: "phone", normalized_value: "19205550100" },
+      { record_type: "pa_project", field: "project", normalized_value: "canonical project canonical-project" },
     ]);
     expect(JSON.stringify(values)).not.toMatch(/private|999|legacy@example/);
     const revision = await ops.prepare("SELECT revision FROM client_hub_directory_state").first("revision");
@@ -174,8 +186,12 @@ describe("resumable Client Hub index", { timeout: 60_000 }, () => {
       profile: { name: "Ambiguous A" }, instance: "instance-a" });
     await canonicalRecord(ops, { externalId: "ambiguous-b", publicId: ambiguous, kind: "organization",
       profile: { name: "Ambiguous B" }, instance: "instance-b" });
+    await ops.prepare("INSERT INTO pa_organizations VALUES('legacy-conflicting','Legacy conflicting mirror',1,?,'project-alpha:primary')")
+      .bind(JSON.stringify({ public_id: conflicting })).run();
     await finish(env);
-    expect(await ops.prepare("SELECT count(*) count FROM client_hub_roots WHERE public_id IN ('conflicting','ambiguous-a','ambiguous-b')")
+    expect(await ops.prepare("SELECT count(*) count FROM client_hub_roots WHERE public_id IN ('conflicting','legacy-conflicting','ambiguous-a','ambiguous-b')")
+      .first("count")).toBe(0);
+    expect(await ops.prepare("SELECT count(*) count FROM client_hub_search_values WHERE root_public_id='legacy-conflicting'")
       .first("count")).toBe(0);
   });
   it("indexes an exactly authorized secondary portal without borrowing primary account associations", async () => {

@@ -73,7 +73,7 @@ Existing local evidence is intentionally split by boundary:
   `30dd4b02-96f2-48e0-8e43-d3f8505d670b` and Client staging is version
   `9006973d-2934-41a7-ab24-d0a3cde58f14`, each at 100%. Candidate Ops PR #145
   is `b5f1c3827a4ec5175d83919074a7b9ab8a5d178e`; its CI passes, but it is not
-  deployed. Operations D1 is applied through `0165`, with `0166`–`0169`
+  deployed. Operations D1 is applied through `0165`, with `0166`–`0170`
   pending; Client D1 is applied through `0228` with no pending migrations.
 - The Operations admin/recipient bridge and Client onboarding recipient bridge
   are default-off. A JSON `{"error":"Not found"}` from
@@ -88,7 +88,7 @@ Existing local evidence is intentionally split by boundary:
   in chat, logs, screenshots, or documentation.
 
 The next staging order is: preserve and verify backups; run the migration-only
-ledger gate against the exact current histories; apply only Ops `0166`–`0169`;
+ledger gate against the exact current histories; apply only Ops `0166`–`0170`;
 deploy the reviewed exact-head Ops candidate and verify revision/rollback;
 re-read the current Project binding and complete explicit synthetic canonical
 mapping/replay; then exercise real synthetic onboarding, recipient enrollment,

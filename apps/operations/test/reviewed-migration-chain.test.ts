@@ -30,8 +30,8 @@ describe("reviewed release migration fixtures", () => {
   it("selects the immutable release inventories including the promoted native portal migrations", () => {
     const operations = reviewedOperationsMigrationNames(new URL("../migrations/", import.meta.url));
     const client = reviewedClientMigrationNames(new URL("../../client/migrations/", import.meta.url));
-    expect(operations).toHaveLength(169);
-    expect(operations.at(-1)).toBe("0169_project_alpha_existing_directory_binding_generation_evidence.sql");
+    expect(operations).toHaveLength(170);
+    expect(operations.at(-1)).toBe("0170_client_hub_canonical_directory_projection_reset.sql");
     expect(operations).toContain("0154_operations_portal_native_recipient_authority.sql");
     expect(operations).toContain("0158_operations_portal_native_delivery_authority.sql");
     expect(client).toHaveLength(147);

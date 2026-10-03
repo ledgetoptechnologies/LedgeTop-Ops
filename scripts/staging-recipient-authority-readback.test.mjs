@@ -165,7 +165,7 @@ test("captures the exact known inactive two-grant lineage as ready without mutat
   assert.deepEqual(artifact.directory.history.map(row => [row.grant_id, row.grant_version, row.grant_generation]), [
     [globalId, 1, 2], [onboardingId, 1, 2], [onboardingId, 2, 3], [onboardingId, 3, 4],
   ]);
-  assert.equal(artifact.source.localCanonicalLedger.finalMigration, "0169_project_alpha_existing_directory_binding_generation_evidence.sql");
+  assert.equal(artifact.source.localCanonicalLedger.finalMigration, "0170_client_hub_canonical_directory_projection_reset.sql");
   assert.equal(artifact.source.localCanonicalLedger.attestsRemoteAppliedSql, false);
   assert.equal(artifact.checks.migrationLedgerNamesMatchCanonical, true);
   assert.deepEqual(artifact.reviewedHistoryGenerations, reviewedHistoryGenerations);
@@ -196,7 +196,7 @@ test("wrong positive reviewed generation inputs fail closed even when the rows a
   });
 });
 
-test("every readback query prepares and executes against the complete canonical 169-migration schema", () => {
+test("every readback query prepares and executes against the complete canonical 170-migration schema", () => {
   const database = canonicalDatabase();
   try {
     const selection = { staffId, recordId };

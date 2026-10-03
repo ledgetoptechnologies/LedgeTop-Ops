@@ -210,7 +210,9 @@ const canonicalBusinessMappingCount = `(SELECT count(*)
           OR candidate.application_id<>mapping.application_id
           OR candidate.history_epoch_id<>mapping.history_epoch_id)))`;
 const canonicalBusinessMappingExists = `EXISTS(SELECT 1 FROM project_alpha_active_directory_mappings mapping
-  WHERE mapping.source_id=root.source_id AND mapping.external_id=root.public_id
+  WHERE mapping.source_id=root.source_id
+    AND (mapping.external_id=root.public_id
+      OR (root.pa_public_id IS NOT NULL AND mapping.project_alpha_public_id=root.pa_public_id))
     AND mapping.resource_type=CASE root.kind WHEN 'organization' THEN 'organization' ELSE 'client' END)`;
 // An index refresh can lag an authoritative business reassignment/deactivation.
 // Only live business roots belong to this source. A portal UUID by itself never
@@ -475,11 +477,14 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
   const cursor = options.cursor === undefined ? null : decodeCursor(options.cursor);
   const asOf = cursor?.asOf ?? new Date().toISOString();
   const { filter, policy: projectPolicy } = await projectSearchAccess(env, principal);
-  const policy = await sha256(JSON.stringify([projectPolicy, reviewPolicy]));
-  if (cursor && (cursor.q !== q || cursor.kind !== (kind ?? null) || cursor.source !== (source ?? null) || cursor.grouping !== grouping
-    || cursor.sort !== sort || cursor.policy !== policy || cursor.portalProof !== portal.fingerprint))
-    throw new HTTPException(400, { message: "Client directory cursor does not match this search" });
+  const db = env.OPS_DB.withSession("first-primary");
   const clauses = [visibleRoot, visibleSource, liveBusinessRoot], values: unknown[] = [];
+  let loadCanonicalContactSearch = async (): Promise<{ fingerprint: string; matchesJson: string }> => ({
+    fingerprint: EMPTY_PORTAL_PROOF, matchesJson: "[]",
+  });
+  let canonicalContactSearch = await loadCanonicalContactSearch();
+  let searchAuthorizedRootsCte = "";
+  const searchCteValues: unknown[] = [];
   if (reviewPolicy && reviewAuthority) {
     clauses.push(`(root.root_namespace<>'review' OR root.public_id IN (SELECT value FROM json_each(?)))`);
     values.push(reviewState.idsJson);
@@ -491,109 +496,237 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
     // D1 limits LIKE/GLOB patterns to 50 bytes. Literal instr supports the full
     // 200-character search contract without wildcard interpretation.
     const portalRoots = JSON.stringify(portal.roots);
-    clauses.push(`(instr(root.sort_name,?)>0 OR instr(party.sort_name,?)>0 OR EXISTS (
-      SELECT 1 FROM client_hub_search_values search WHERE search.source_id=root.source_id
-        AND search.root_namespace=root.root_namespace AND search.kind=root.kind AND search.root_public_id=root.public_id
-        AND ((search.root_namespace='business'
-          AND (instr(search.normalized_value,?)>0${phone.length >= 3 ? " OR (search.field='phone' AND instr(search.normalized_value,?)>0)" : ""})
-          AND ((search.record_type='pa_client' AND search.project_id IS NULL AND EXISTS (
-            SELECT 1 FROM pa_clients contact WHERE contact.id=search.record_id AND contact.projection_source_id=root.source_id AND contact.active=1 AND
-              ((root.kind='organization' AND contact.organization_id=root.public_id) OR
-               (root.kind='standalone_client' AND contact.id=root.public_id AND contact.organization_id IS NULL))))
-          OR (search.record_type='ops_directory_client' AND search.project_id IS NULL AND EXISTS (
-            SELECT 1 FROM project_alpha_active_directory_mappings contact
-            JOIN operations_directory_records contact_record ON contact_record.record_id=contact.external_id
-              AND contact_record.record_kind=contact.resource_type
-            JOIN operations_directory_revisions contact_revision ON contact_revision.record_id=contact_record.record_id
-              AND contact_revision.version=contact_record.current_version
-            JOIN project_alpha_api_v2_directory_observations_current contact_observation
-              ON contact_observation.source_id=contact.source_id
-              AND contact_observation.source_instance_id=contact.source_instance_id
-              AND contact_observation.application_id=contact.application_id
-              AND contact_observation.history_epoch_id=contact.history_epoch_id
-              AND contact_observation.resource_type=contact.resource_type
-              AND contact_observation.project_alpha_public_id=contact.project_alpha_public_id
-              AND contact_observation.present=1 AND contact_observation.last_action='upsert'
-              AND contact_observation.has_conflict=0
-              AND contact_observation.binding_external_id=contact.external_id
-              AND contact_observation.binding_status='active'
-              AND contact_observation.binding_resource_revision=contact_observation.resource_revision
-            JOIN pa_connectors contact_connector ON contact_connector.source_id=contact.source_id
-              AND contact_connector.state='active' AND contact_connector.read_visible=1
-            LEFT JOIN operations_directory_client_organizations contact_relationship
-              ON contact_relationship.client_record_id=contact.external_id
-            LEFT JOIN project_alpha_active_directory_mappings contact_parent
-              ON contact_parent.external_id=contact_relationship.organization_record_id
-              AND contact_parent.source_id=contact.source_id
-              AND contact_parent.source_instance_id=contact.source_instance_id
-              AND contact_parent.application_id=contact.application_id
-              AND contact_parent.history_epoch_id=contact.history_epoch_id
-              AND contact_parent.resource_type='organization'
-            LEFT JOIN project_alpha_api_v2_directory_observations_current contact_parent_observation
-              ON contact_parent_observation.source_id=contact_parent.source_id
-              AND contact_parent_observation.source_instance_id=contact_parent.source_instance_id
-              AND contact_parent_observation.application_id=contact_parent.application_id
-              AND contact_parent_observation.history_epoch_id=contact_parent.history_epoch_id
-              AND contact_parent_observation.resource_type=contact_parent.resource_type
-              AND contact_parent_observation.project_alpha_public_id=contact_parent.project_alpha_public_id
-              AND contact_parent_observation.present=1 AND contact_parent_observation.last_action='upsert'
-              AND contact_parent_observation.has_conflict=0
-              AND contact_parent_observation.binding_external_id=contact_parent.external_id
-              AND contact_parent_observation.binding_status='active'
-              AND contact_parent_observation.binding_resource_revision=contact_parent_observation.resource_revision
-            WHERE contact.source_id=root.source_id AND contact.resource_type='client'
-              AND contact.external_id=search.record_id
-              AND NOT EXISTS(SELECT 1 FROM project_alpha_active_directory_mappings duplicate
-                WHERE duplicate.source_id=contact.source_id AND duplicate.resource_type='client'
-                  AND (duplicate.external_id=contact.external_id
-                    OR duplicate.project_alpha_public_id=contact.project_alpha_public_id)
-                  AND (duplicate.external_id<>contact.external_id
-                    OR duplicate.project_alpha_public_id<>contact.project_alpha_public_id
-                    OR duplicate.provenance_id<>contact.provenance_id
-                    OR duplicate.source_instance_id<>contact.source_instance_id
-                    OR duplicate.application_id<>contact.application_id
-                    OR duplicate.history_epoch_id<>contact.history_epoch_id))
-              AND ((root.kind='organization' AND contact_parent.external_id=root.public_id
-                  AND contact_parent_observation.source_id IS NOT NULL
-                  AND NOT EXISTS(SELECT 1 FROM project_alpha_active_directory_mappings duplicate_parent
-                    WHERE duplicate_parent.source_id=contact_parent.source_id
-                      AND duplicate_parent.resource_type='organization'
-                      AND (duplicate_parent.external_id=contact_parent.external_id
-                        OR duplicate_parent.project_alpha_public_id=contact_parent.project_alpha_public_id)
-                      AND (duplicate_parent.external_id<>contact_parent.external_id
-                        OR duplicate_parent.project_alpha_public_id<>contact_parent.project_alpha_public_id
-                        OR duplicate_parent.provenance_id<>contact_parent.provenance_id
-                        OR duplicate_parent.source_instance_id<>contact_parent.source_instance_id
-                        OR duplicate_parent.application_id<>contact_parent.application_id
-                        OR duplicate_parent.history_epoch_id<>contact_parent.history_epoch_id)))
-                OR (root.kind='standalone_client' AND contact.external_id=root.public_id
-                  AND contact_relationship.organization_record_id IS NULL))))
-          OR (search.record_type='pa_project' AND search.record_id=search.project_id AND EXISTS (
-            SELECT 1 FROM pa_projects p LEFT JOIN pa_clients owner ON owner.id=p.client_id AND owner.projection_source_id=p.projection_source_id AND owner.active=1
-            WHERE p.id=search.project_id AND p.projection_source_id=root.source_id AND ${filter.sql} AND
-              ((root.kind='organization' AND COALESCE(p.organization_id,owner.organization_id)=root.public_id) OR
-               (root.kind='standalone_client' AND p.client_id=root.public_id AND owner.id IS NOT NULL
-                 AND COALESCE(p.organization_id,owner.organization_id) IS NULL))))))
-        OR (search.root_namespace='review' AND search.record_type='api_v2_reviewed_client'
-          AND (instr(search.normalized_value,?)>0${phone.length >= 3 ? " OR (search.field='phone' AND instr(search.normalized_value,?)>0)" : ""})
-          AND EXISTS(SELECT 1 FROM project_alpha_reviewed_standalone_client_displays display
-            WHERE display.projection_id=search.record_id AND display.source_id=root.source_id
-              AND display.project_alpha_public_id=root.pa_public_id AND display.state='display_only'))
-        OR (search.record_type='portal_principal' AND EXISTS (
-          SELECT 1 FROM json_each(?) proof WHERE
-            json_extract(proof.value,'$.sourceId')=root.source_id
-            AND json_extract(proof.value,'$.workspaceId')=root.workspace_id
-            AND json_extract(proof.value,'$.rootType')=root.kind
-            AND (json_extract(proof.value,'$.rootPublicId')=${currentMapping}
-              OR (json_extract(proof.value,'$.legacyRoot')=1 AND root.source_id='project-alpha:primary'
-                AND root.legacy_account_id IS NOT NULL AND json_extract(proof.value,'$.rootPublicId')=root.public_id)))))))`);
-    values.push(q, q, q);
-    if (phone.length >= 3) values.push(phone);
-    values.push(...filter.values);
-    values.push(q);
-    if (phone.length >= 3) values.push(phone);
-    values.push(portalRoots);
+    // Evaluate the canonical contact proof separately. Nesting the complete
+    // tuple/ownership proof inside the legacy search OR exceeds D1's expression
+    // depth limit. Its exact facts are fingerprinted and re-read before release.
+    const canonicalContactSearchSql = `SELECT DISTINCT contact.source_id,
+        CASE WHEN contact_relationship.organization_record_id IS NULL THEN 'standalone_client' ELSE 'organization' END root_kind,
+        COALESCE(contact_parent.external_id,contact.external_id) root_public_id,
+        contact.external_id record_id,
+        contact.provenance_id contact_provenance_id,
+        contact.source_instance_id contact_source_instance_id,
+        contact.application_id contact_application_id,
+        contact.history_epoch_id contact_history_epoch_id,
+        contact_record.current_version contact_record_version,
+        contact_observation.resource_revision contact_resource_revision,
+        contact_parent.provenance_id parent_provenance_id,
+        contact_parent.source_instance_id parent_source_instance_id,
+        contact_parent.application_id parent_application_id,
+        contact_parent.history_epoch_id parent_history_epoch_id,
+        contact_parent_observation.resource_revision parent_resource_revision
+      FROM client_hub_search_values canonical_search
+      JOIN project_alpha_active_directory_mappings contact
+        ON contact.source_id=canonical_search.source_id AND contact.resource_type='client'
+        AND contact.external_id=canonical_search.record_id
+      JOIN operations_directory_records contact_record ON contact_record.record_id=contact.external_id
+        AND contact_record.record_kind='client'
+      JOIN operations_directory_revisions contact_revision ON contact_revision.record_id=contact_record.record_id
+        AND contact_revision.version=contact_record.current_version
+      JOIN project_alpha_api_v2_directory_observations_current contact_observation
+        ON contact_observation.source_id=contact.source_id
+        AND contact_observation.source_instance_id=contact.source_instance_id
+        AND contact_observation.application_id=contact.application_id
+        AND contact_observation.history_epoch_id=contact.history_epoch_id
+        AND contact_observation.resource_type='client'
+        AND contact_observation.project_alpha_public_id=contact.project_alpha_public_id
+        AND contact_observation.present=1 AND contact_observation.last_action='upsert'
+        AND contact_observation.has_conflict=0
+        AND contact_observation.binding_external_id=contact.external_id
+        AND contact_observation.binding_status='active'
+        AND contact_observation.binding_resource_revision=contact_observation.resource_revision
+      JOIN pa_connectors contact_connector ON contact_connector.source_id=contact.source_id
+        AND contact_connector.state='active' AND contact_connector.read_visible=1
+      LEFT JOIN operations_directory_client_organizations contact_relationship
+        ON contact_relationship.client_record_id=contact.external_id
+      LEFT JOIN project_alpha_active_directory_mappings contact_parent
+        ON contact_parent.external_id=contact_relationship.organization_record_id
+        AND contact_parent.source_id=contact.source_id
+        AND contact_parent.source_instance_id=contact.source_instance_id
+        AND contact_parent.application_id=contact.application_id
+        AND contact_parent.history_epoch_id=contact.history_epoch_id
+        AND contact_parent.resource_type='organization'
+      LEFT JOIN project_alpha_api_v2_directory_observations_current contact_parent_observation
+        ON contact_parent_observation.source_id=contact_parent.source_id
+        AND contact_parent_observation.source_instance_id=contact_parent.source_instance_id
+        AND contact_parent_observation.application_id=contact_parent.application_id
+        AND contact_parent_observation.history_epoch_id=contact_parent.history_epoch_id
+        AND contact_parent_observation.resource_type='organization'
+        AND contact_parent_observation.project_alpha_public_id=contact_parent.project_alpha_public_id
+        AND contact_parent_observation.present=1 AND contact_parent_observation.last_action='upsert'
+        AND contact_parent_observation.has_conflict=0
+        AND contact_parent_observation.binding_external_id=contact_parent.external_id
+        AND contact_parent_observation.binding_status='active'
+        AND contact_parent_observation.binding_resource_revision=contact_parent_observation.resource_revision
+      WHERE canonical_search.record_type='ops_directory_client' AND canonical_search.project_id IS NULL
+        AND (instr(canonical_search.normalized_value,?)>0${phone.length >= 3 ? " OR (canonical_search.field='phone' AND instr(canonical_search.normalized_value,?)>0)" : ""})
+        AND NOT EXISTS(SELECT 1 FROM project_alpha_active_directory_mappings duplicate
+          WHERE duplicate.source_id=contact.source_id AND duplicate.resource_type='client'
+            AND (duplicate.external_id=contact.external_id
+              OR duplicate.project_alpha_public_id=contact.project_alpha_public_id)
+            AND (duplicate.external_id<>contact.external_id
+              OR duplicate.project_alpha_public_id<>contact.project_alpha_public_id
+              OR duplicate.provenance_id<>contact.provenance_id
+              OR duplicate.source_instance_id<>contact.source_instance_id
+              OR duplicate.application_id<>contact.application_id
+              OR duplicate.history_epoch_id<>contact.history_epoch_id))
+        AND ((contact_relationship.organization_record_id IS NULL)
+          OR (contact_parent_observation.source_id IS NOT NULL
+            AND NOT EXISTS(SELECT 1 FROM project_alpha_active_directory_mappings duplicate_parent
+              WHERE duplicate_parent.source_id=contact_parent.source_id
+                AND duplicate_parent.resource_type='organization'
+                AND (duplicate_parent.external_id=contact_parent.external_id
+                  OR duplicate_parent.project_alpha_public_id=contact_parent.project_alpha_public_id)
+                AND (duplicate_parent.external_id<>contact_parent.external_id
+                  OR duplicate_parent.project_alpha_public_id<>contact_parent.project_alpha_public_id
+                  OR duplicate_parent.provenance_id<>contact_parent.provenance_id
+                  OR duplicate_parent.source_instance_id<>contact_parent.source_instance_id
+                  OR duplicate_parent.application_id<>contact_parent.application_id
+                  OR duplicate_parent.history_epoch_id<>contact_parent.history_epoch_id))))
+      ORDER BY contact.source_id,root_kind,root_public_id,record_id LIMIT 1001`;
+    const canonicalSearchBindings = [q, ...(phone.length >= 3 ? [phone] : [])];
+    loadCanonicalContactSearch = async () => {
+      const rows = (await db.prepare(canonicalContactSearchSql).bind(...canonicalSearchBindings).all<Record<string, unknown>>()).results;
+      if (rows.length > 1000) unavailable();
+      const roots = rows.map(row => ({ sourceId: row.source_id, kind: row.root_kind, publicId: row.root_public_id,
+        recordId: row.record_id }));
+      if (roots.some(root => typeof root.sourceId !== "string" || !isClientHubSource(root.sourceId)
+        || typeof root.kind !== "string" || !isClientHubKind(root.kind)
+        || typeof root.publicId !== "string" || !root.publicId || root.publicId.length > 512
+        || typeof root.recordId !== "string" || !root.recordId || root.recordId.length > 512)) unavailable();
+      return { fingerprint: await sha256(JSON.stringify(rows)), matchesJson: JSON.stringify(roots) };
+    };
+    canonicalContactSearch = await loadCanonicalContactSearch();
+    searchAuthorizedRootsCte = `search_authorized_roots AS MATERIALIZED (
+      SELECT root.source_id,root.root_namespace,root.kind,root.public_id
+      FROM client_hub_roots root
+      LEFT JOIN business_party_links membership ON root.root_namespace='business'
+        AND membership.source_id=root.source_id AND membership.record_id=root.public_id
+        AND membership.record_kind=CASE root.kind WHEN 'organization' THEN 'organization' ELSE 'client' END
+        AND membership.unlinked_at IS NULL
+      LEFT JOIN business_parties party ON party.id=membership.party_id AND party.status='active'
+        AND ${readableBusinessPartySql("party.id")}
+      WHERE instr(root.sort_name,?)>0 OR instr(party.sort_name,?)>0
+      UNION
+      SELECT search.source_id,search.root_namespace,search.kind,search.root_public_id
+      FROM client_hub_search_values search
+      WHERE search.root_namespace='business'
+        AND (instr(search.normalized_value,?)>0${phone.length >= 3 ? " OR (search.field='phone' AND instr(search.normalized_value,?)>0)" : ""})
+        AND ((search.record_type='pa_client' AND search.project_id IS NULL AND EXISTS (
+          SELECT 1 FROM pa_clients contact WHERE contact.id=search.record_id
+            AND contact.projection_source_id=search.source_id AND contact.active=1
+            AND NOT EXISTS(SELECT 1 FROM project_alpha_active_directory_mappings mapped
+              WHERE mapped.source_id=contact.projection_source_id AND mapped.resource_type='client'
+                AND mapped.project_alpha_public_id=${validatedUniquePublicIdExpression("pa_clients", "contact")})
+            AND ((search.kind='organization' AND contact.organization_id=search.root_public_id)
+              OR (search.kind='standalone_client' AND contact.id=search.root_public_id AND contact.organization_id IS NULL))))
+          OR (search.record_type='ops_directory_client' AND search.project_id IS NULL
+            AND EXISTS(SELECT 1 FROM json_each(?) canonical_match
+              WHERE json_extract(canonical_match.value,'$.sourceId')=search.source_id
+                AND json_extract(canonical_match.value,'$.recordId')=search.record_id
+                AND json_extract(canonical_match.value,'$.kind')=search.kind
+                AND json_extract(canonical_match.value,'$.publicId')=search.root_public_id)))
+      UNION
+      SELECT search.source_id,search.root_namespace,search.kind,search.root_public_id
+      FROM client_hub_search_values search
+      JOIN pa_projects p ON p.id=search.project_id AND p.projection_source_id=search.source_id AND p.active=1
+      LEFT JOIN pa_clients owner ON owner.id=p.client_id
+        AND owner.projection_source_id=p.projection_source_id AND owner.active=1
+      LEFT JOIN pa_organizations project_organization
+        ON project_organization.id=COALESCE(p.organization_id,owner.organization_id)
+        AND project_organization.projection_source_id=p.projection_source_id AND project_organization.active=1
+      LEFT JOIN project_alpha_active_directory_mappings project_root
+        ON project_root.source_id=search.source_id AND project_root.external_id=search.root_public_id
+        AND project_root.resource_type=CASE search.kind WHEN 'organization' THEN 'organization' ELSE 'client' END
+      LEFT JOIN operations_directory_records project_root_record
+        ON project_root_record.record_id=project_root.external_id
+        AND project_root_record.record_kind=project_root.resource_type
+      LEFT JOIN operations_directory_revisions project_root_revision
+        ON project_root_revision.record_id=project_root_record.record_id
+        AND project_root_revision.version=project_root_record.current_version
+      LEFT JOIN project_alpha_api_v2_directory_observations_current project_root_observation
+        ON project_root_observation.source_id=project_root.source_id
+        AND project_root_observation.source_instance_id=project_root.source_instance_id
+        AND project_root_observation.application_id=project_root.application_id
+        AND project_root_observation.history_epoch_id=project_root.history_epoch_id
+        AND project_root_observation.resource_type=project_root.resource_type
+        AND project_root_observation.project_alpha_public_id=project_root.project_alpha_public_id
+        AND project_root_observation.present=1 AND project_root_observation.last_action='upsert'
+        AND project_root_observation.has_conflict=0
+        AND project_root_observation.binding_external_id=project_root.external_id
+        AND project_root_observation.binding_status='active'
+        AND project_root_observation.binding_resource_revision=project_root_observation.resource_revision
+      LEFT JOIN operations_directory_client_organizations project_root_relationship
+        ON project_root_relationship.client_record_id=project_root.external_id
+        AND project_root.resource_type='client'
+      WHERE search.root_namespace='business' AND search.record_type='pa_project'
+        AND search.record_id=search.project_id AND instr(search.normalized_value,?)>0
+        AND ${filter.sql}
+        AND ((project_root_observation.source_id IS NOT NULL AND project_root_revision.record_id IS NOT NULL
+            AND NOT EXISTS(SELECT 1 FROM project_alpha_active_directory_mappings duplicate_project_root
+              WHERE duplicate_project_root.source_id=project_root.source_id
+                AND duplicate_project_root.resource_type=project_root.resource_type
+                AND (duplicate_project_root.external_id=project_root.external_id
+                  OR duplicate_project_root.project_alpha_public_id=project_root.project_alpha_public_id)
+                AND (duplicate_project_root.external_id<>project_root.external_id
+                  OR duplicate_project_root.project_alpha_public_id<>project_root.project_alpha_public_id
+                  OR duplicate_project_root.provenance_id<>project_root.provenance_id
+                  OR duplicate_project_root.source_instance_id<>project_root.source_instance_id
+                  OR duplicate_project_root.application_id<>project_root.application_id
+                  OR duplicate_project_root.history_epoch_id<>project_root.history_epoch_id))
+            AND ((search.kind='organization' AND project_organization.id IS NOT NULL
+                AND ${validatedUniquePublicIdExpression("pa_organizations", "project_organization")}=project_root.project_alpha_public_id)
+              OR (search.kind='standalone_client' AND owner.id IS NOT NULL
+                AND COALESCE(p.organization_id,owner.organization_id) IS NULL
+                AND project_root_relationship.organization_record_id IS NULL
+                AND ${validatedUniquePublicIdExpression("pa_clients", "owner")}=project_root.project_alpha_public_id)))
+          OR (search.kind='organization'
+            AND COALESCE(p.organization_id,owner.organization_id)=search.root_public_id
+            AND NOT EXISTS(SELECT 1 FROM project_alpha_active_directory_mappings canonical_claim
+              WHERE canonical_claim.source_id=search.source_id AND canonical_claim.resource_type='organization'
+                AND (canonical_claim.external_id=search.root_public_id
+                  OR canonical_claim.project_alpha_public_id=${validatedUniquePublicIdExpression("pa_organizations", "project_organization")})))
+          OR (search.kind='standalone_client' AND p.client_id=search.root_public_id AND owner.id IS NOT NULL
+            AND COALESCE(p.organization_id,owner.organization_id) IS NULL
+            AND NOT EXISTS(SELECT 1 FROM project_alpha_active_directory_mappings canonical_claim
+              WHERE canonical_claim.source_id=search.source_id AND canonical_claim.resource_type='client'
+                AND (canonical_claim.external_id=search.root_public_id
+                  OR canonical_claim.project_alpha_public_id=${validatedUniquePublicIdExpression("pa_clients", "owner")}))))
+      UNION
+      SELECT search.source_id,search.root_namespace,search.kind,search.root_public_id
+      FROM client_hub_search_values search
+      JOIN client_hub_roots reviewed_root ON reviewed_root.source_id=search.source_id
+        AND reviewed_root.root_namespace=search.root_namespace AND reviewed_root.kind=search.kind
+        AND reviewed_root.public_id=search.root_public_id
+      JOIN project_alpha_reviewed_standalone_client_displays display
+        ON display.projection_id=search.record_id AND display.source_id=search.source_id
+        AND display.project_alpha_public_id=reviewed_root.pa_public_id AND display.state='display_only'
+      WHERE search.root_namespace='review' AND search.record_type='api_v2_reviewed_client'
+        AND search.root_public_id IN (SELECT value FROM json_each(?))
+        AND (instr(search.normalized_value,?)>0${phone.length >= 3 ? " OR (search.field='phone' AND instr(search.normalized_value,?)>0)" : ""})
+      UNION
+      SELECT root.source_id,root.root_namespace,root.kind,root.public_id
+      FROM client_hub_roots root JOIN json_each(?) proof
+        ON json_extract(proof.value,'$.sourceId')=root.source_id
+        AND json_extract(proof.value,'$.workspaceId')=root.workspace_id
+        AND json_extract(proof.value,'$.rootType')=root.kind
+        AND (json_extract(proof.value,'$.rootPublicId')=${currentMapping}
+          OR (json_extract(proof.value,'$.legacyRoot')=1 AND root.source_id='project-alpha:primary'
+            AND root.legacy_account_id IS NOT NULL AND json_extract(proof.value,'$.rootPublicId')=root.public_id))
+    )`;
+    searchCteValues.push(q, q, q);
+    if (phone.length >= 3) searchCteValues.push(phone);
+    searchCteValues.push(canonicalContactSearch.matchesJson,
+      q, ...filter.values, reviewState.idsJson, q);
+    if (phone.length >= 3) searchCteValues.push(phone);
+    searchCteValues.push(portalRoots);
+    clauses.push(`EXISTS(SELECT 1 FROM search_authorized_roots matched
+      WHERE matched.source_id=root.source_id AND matched.root_namespace=root.root_namespace
+        AND matched.kind=root.kind AND matched.public_id=root.public_id)`);
   }
+  const policy = await sha256(JSON.stringify([projectPolicy, reviewPolicy, canonicalContactSearch.fingerprint]));
+  if (cursor && (cursor.q !== q || cursor.kind !== (kind ?? null) || cursor.source !== (source ?? null) || cursor.grouping !== grouping
+    || cursor.sort !== sort || cursor.policy !== policy || cursor.portalProof !== portal.fingerprint))
+    throw new HTTPException(400, { message: "Client directory cursor does not match this search" });
   // Match and authorize individual records first, then collapse the matching
   // records into customers before LIMIT/cursor application. Browser-only
   // deduplication would skip customers or repeat a party across pages.
@@ -601,9 +734,8 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
   const pageAfter = !cursor ? "" : sort === "name" ? `AND ${afterName}`
     : `AND (COALESCE(root.live_activity_at,'')<? OR (COALESCE(root.live_activity_at,'')=? AND ${afterName}))`;
   const activity = businessActivityRecencyCte(filter, asOf);
-  const pageValues = [...activity.values, ...values,
+  const pageValues = [...activity.values, ...searchCteValues, ...values,
     ...(cursor ? [...(sort === "recent" ? [cursor.after[0], cursor.after[0]] : []), ...cursor.after.slice(1)] : []), limit + 1];
-  const db = env.OPS_DB.withSession("first-primary");
   // State and page share one transaction. The writer advances revision only
   // alongside effective root/search changes, so mutable names cannot skip rows.
   type Snapshot = Pick<ClientHubDirectoryState, "revision" | "ready" | "last_success_at"> & { source_read_revision: number | null; activity_revision: number | null };
@@ -615,7 +747,7 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
       (SELECT revision FROM client_business_activity_state WHERE singleton=1) activity_revision,
       (SELECT read_revision FROM pa_connector_directory_state WHERE id='directory') source_read_revision
       FROM client_hub_directory_state WHERE id='directory'`),
-    db.prepare(`WITH ${activity.sql}, matching AS (
+    db.prepare(`WITH ${activity.sql}${searchAuthorizedRootsCte ? `, ${searchAuthorizedRootsCte}` : ""}, matching AS (
       SELECT root.*,${currentMapping} live_pa_public_id,
         party.id business_party_id,party.display_name business_party_name,
         CASE WHEN ${grouping === "customers" ? "party.id IS NOT NULL" : "0=1"} THEN (
@@ -665,19 +797,19 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
   // Permissions are read before the SQL batch. Recheck them and the effective
   // source/ownership epoch before releasing names or permission-scoped recency.
   // No claim of a cross-request snapshot: a changed context requires a reload.
-  const [currentScope, currentProjectAccess, currentState, currentPortal, currentReviewPolicy] = await Promise.all([
+  const [currentScope, currentProjectAccess, currentState, currentPortal, currentReviewPolicy, currentCanonicalSearch] = await Promise.all([
     sqlScope(env, principal, "team.view"), projectSearchAccess(env, principal),
     env.OPS_DB.withSession("first-primary").prepare(`SELECT revision,
       (SELECT revision FROM client_business_activity_state WHERE singleton=1) activity_revision,
       (SELECT read_revision FROM pa_connector_directory_state WHERE id='directory') source_read_revision
       FROM client_hub_directory_state WHERE id='directory'`).first<Snapshot>(), portalContactProof(env, q),
-    currentReviewAuthority(env, principal, reviewAuthority),
+    currentReviewAuthority(env, principal, reviewAuthority), loadCanonicalContactSearch(),
   ]);
   if (!currentScope.global || currentScope.deniedGlobal)
     throw new HTTPException(403, { message: "Global team.view permission required" });
   if (currentState?.source_read_revision !== state.source_read_revision) sourcesChanged();
   if (currentPortal.fingerprint !== portal.fingerprint) changed();
-  const currentPolicy = await sha256(JSON.stringify([currentProjectAccess.policy, currentReviewPolicy.policy]));
+  const currentPolicy = await sha256(JSON.stringify([currentProjectAccess.policy, currentReviewPolicy.policy, currentCanonicalSearch.fingerprint]));
   if (currentPolicy !== policy || currentState?.revision !== state.revision || currentState?.activity_revision !== state.activity_revision) changed();
   const roots = results[1]!.results.filter((row): row is LiveRoot => "root_namespace" in row);
   const page = roots.slice(0, limit);

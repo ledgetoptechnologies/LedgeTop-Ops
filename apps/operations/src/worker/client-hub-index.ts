@@ -15,7 +15,7 @@ const PHASES = ["canonical_organizations", "canonical_standalone", "organization
 type Phase = typeof PHASES[number];
 const PAGE_QUERY_COST: Record<Phase, number> = {
   canonical_organizations: 48, canonical_standalone: 48, organizations: 45, standalone: 45, workspaces: 46, accounts: 45,
-  reviewed: 45, canonical_contacts: 123, contacts: 123, reviewed_contacts: 85, principals: 84, projects: 43, sweep: 4,
+  reviewed: 45, canonical_contacts: 123, contacts: 123, reviewed_contacts: 85, principals: 84, projects: 44, sweep: 4,
 };
 type Kind = "organization" | "standalone_client";
 type Namespace = "business" | "portal" | "account" | "review";
@@ -234,8 +234,6 @@ async function rootPage(env: IndexEnv, phase: Phase, cursor: string, generation:
       ${organizations ? "(SELECT count(*) FROM pa_clients contact WHERE contact.organization_id=source.id AND contact.projection_source_id=source.projection_source_id AND contact.active=1)" : "1"} contact_count
       FROM ${table} source WHERE source.active=1 ${organizations ? "" : "AND source.organization_id IS NULL"}
         AND NOT EXISTS(SELECT 1 FROM project_alpha_active_directory_mappings mapping
-          JOIN project_alpha_api_v2_directory_observations_current observation
-            ON ${currentCanonicalMapping("mapping", "observation")}
           WHERE mapping.source_id=source.projection_source_id
             AND mapping.resource_type='${organizations ? "organization" : "client"}'
             AND mapping.project_alpha_public_id=${validatedUniquePublicIdExpression(table, "source")})
@@ -350,8 +348,6 @@ async function searchPage(env: IndexEnv, phase: Phase, cursor: string, generatio
   } else if (phase === "contacts") {
     const rows = (await env.OPS_DB.withSession("first-primary").prepare(`SELECT id,name,organization_id,payload_json,projection_source_id FROM pa_clients
       WHERE active=1 AND NOT EXISTS(SELECT 1 FROM project_alpha_active_directory_mappings mapping
-        JOIN project_alpha_api_v2_directory_observations_current observation
-          ON ${currentCanonicalMapping("mapping", "observation")}
         WHERE mapping.source_id=pa_clients.projection_source_id AND mapping.resource_type='client'
           AND mapping.project_alpha_public_id=${validatedUniquePublicIdExpression("pa_clients", "pa_clients")})
         AND id>? ORDER BY id COLLATE BINARY LIMIT ?`).bind(cursor, PAGE_SIZE)
@@ -408,14 +404,43 @@ async function searchPage(env: IndexEnv, phase: Phase, cursor: string, generatio
       if (row.email_hint) values.push({ ...base, field: "email", value: row.email_hint });
     }
   } else {
-    const rows = (await env.OPS_DB.withSession("first-primary").prepare(`SELECT project.id,project.name,project.projection_source_id,
-      COALESCE(project.organization_id,client.organization_id) organization_id,project.client_id
+    const db = env.OPS_DB.withSession("first-primary");
+    const rows = (await db.prepare(`SELECT project.id,project.name,project.projection_source_id,
+      COALESCE(project.organization_id,client.organization_id) organization_id,project.client_id,
+      ${validatedUniquePublicIdExpression("pa_organizations", "organization")} organization_pa_public_id,
+      ${validatedUniquePublicIdExpression("pa_clients", "client")} client_pa_public_id
       FROM pa_projects project LEFT JOIN pa_clients client ON client.id=project.client_id AND client.projection_source_id=project.projection_source_id AND client.active=1
+      LEFT JOIN pa_organizations organization ON organization.id=COALESCE(project.organization_id,client.organization_id)
+        AND organization.projection_source_id=project.projection_source_id AND organization.active=1
       WHERE project.active=1 AND project.id>? ORDER BY project.id COLLATE BINARY LIMIT ?`)
-      .bind(cursor, PAGE_SIZE).all<{ id: string; name: string; organization_id: string | null; client_id: string | null; projection_source_id: string }>()).results;
+      .bind(cursor, PAGE_SIZE).all<{ id: string; name: string; organization_id: string | null; client_id: string | null;
+        projection_source_id: string; organization_pa_public_id: string | null; client_pa_public_id: string | null }>()).results;
     count = rows.length; next = rows.at(-1)?.id || cursor;
+    const identities = [...new Map(rows.flatMap(row => {
+      const paPublicId = row.organization_pa_public_id ?? row.client_pa_public_id;
+      if (!paPublicId) return [];
+      const resourceType = row.organization_pa_public_id ? "organization" : "client";
+      const key = JSON.stringify([row.projection_source_id, resourceType, paPublicId]);
+      return [[key, { source_id: row.projection_source_id, resource_type: resourceType, pa_public_id: paPublicId }] as const];
+    })).values()];
+    const mappingRows = identities.length ? (await db.prepare(`SELECT mapping.source_id,mapping.resource_type,
+      mapping.project_alpha_public_id pa_public_id,mapping.external_id,
+      CASE WHEN observation.source_id IS NOT NULL AND connector.source_id IS NOT NULL THEN 1 ELSE 0 END current
+      FROM project_alpha_active_directory_mappings mapping
+      LEFT JOIN project_alpha_api_v2_directory_observations_current observation
+        ON ${currentCanonicalMapping("mapping", "observation")}
+      LEFT JOIN pa_connectors connector ON connector.source_id=mapping.source_id
+        AND connector.state='active' AND connector.read_visible=1
+      WHERE ${identities.map(() => "(mapping.source_id=? AND mapping.resource_type=? AND mapping.project_alpha_public_id=?)").join(" OR ")}`)
+      .bind(...identities.flatMap(identity => [identity.source_id, identity.resource_type, identity.pa_public_id]))
+      .all<{ source_id: string; resource_type: string; pa_public_id: string; external_id: string; current: number }>()).results : [];
     for (const row of rows) {
-      const root = row.organization_id || row.client_id;
+      const resourceType = row.organization_pa_public_id ? "organization" : "client";
+      const paPublicId = row.organization_pa_public_id ?? row.client_pa_public_id;
+      const mapped = paPublicId ? mappingRows.filter(mapping => mapping.source_id === row.projection_source_id
+        && mapping.resource_type === resourceType && mapping.pa_public_id === paPublicId) : [];
+      if (mapped.length && (mapped.length !== 1 || mapped[0]!.current !== 1)) continue;
+      const root = mapped[0]?.external_id ?? row.organization_id ?? row.client_id;
       if (root) values.push({ source: row.projection_source_id, namespace: "business", kind: row.organization_id ? "organization" : "standalone_client", root,
         type: "pa_project", id: row.id, field: "project", value: `${row.name} ${row.id}`, project: row.id });
     }

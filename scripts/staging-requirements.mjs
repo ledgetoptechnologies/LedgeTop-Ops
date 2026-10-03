@@ -462,6 +462,7 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0167_project_alpha_directory_read_adoption_finalizations.sql",
     "0168_project_alpha_directory_read_adoption_local_profiles.sql",
     "0169_project_alpha_existing_directory_binding_generation_evidence.sql",
+    "0170_client_hub_canonical_directory_projection_reset.sql",
   ]),
 });
 
@@ -478,6 +479,7 @@ export const REQUIRED_STAGING_MIGRATION_SHA256 = Object.freeze({
     "0167_project_alpha_directory_read_adoption_finalizations.sql": "807c48566dce6d741e482b15d6b040d7463cbc5e4deefb4d72a4b9a3d5b16886",
     "0168_project_alpha_directory_read_adoption_local_profiles.sql": "a8ccc227611cb519fb0cfb253ff2c50aec66850e62a33024a587525b24eaaaa4",
     "0169_project_alpha_existing_directory_binding_generation_evidence.sql": "efba1fc86e73674bf7866cbdc78f8c83024fbe2fae53de3375bdc00c3a37006e",
+    "0170_client_hub_canonical_directory_projection_reset.sql": "b41499b4b947cf954ec4ca51d95d1e9a252bd91cfc2553e1bcf108ac5f87c9d6",
   }),
 });
 

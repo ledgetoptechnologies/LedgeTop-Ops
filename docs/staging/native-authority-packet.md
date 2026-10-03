@@ -96,7 +96,7 @@ recorded later in this file.
 ## Safety model
 
 The checked-in generator validates the exact staging account, Operations D1 ID,
-complete D1 binding inventory, and the exact reviewed 169-file Operations
+complete D1 binding inventory, and the exact reviewed 170-file Operations
 migration chain. Generated files are ignored. Provision and revoke use separate
 Wrangler configs and separate one-file migration directories so applying the
 provision config cannot select the revoke migration.
@@ -141,7 +141,7 @@ in the ignored local directory with operator-only filesystem access.
 
 1. Keep both acceptance-route flags and the selected PA connection disabled.
 2. Apply and verify the complete reviewed staging Operations migration chain
-   through `0169_project_alpha_existing_directory_binding_generation_evidence.sql`. Confirm
+   through `0170_client_hub_canonical_directory_projection_reset.sql`. Confirm
    that no native staff-management, directory, or Project command fence is open
    and neither Project nor Directory outbox has pending or leased actor work.
 3. Sign in once through the ordinary staging Operations Access application so

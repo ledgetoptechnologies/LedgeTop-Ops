@@ -241,11 +241,11 @@ function preparationHarness(options = {}) {
     root: "C:\\private-root",
     withBinding: async (_config, callback) => callback({ db: {}, target: STAGING_TARGET }),
     reviewedMigrations: () => options.expectedMigrations
-      ?? ["0169_project_alpha_existing_directory_binding_generation_evidence.sql"],
+      ?? ["0170_client_hub_canonical_directory_projection_reset.sql"],
     readMigrations: async () => {
       if (options.ledgerReadFails) throw new Error("private transport detail");
       return options.actualMigrations
-        ?? ["0169_project_alpha_existing_directory_binding_generation_evidence.sql"];
+        ?? ["0170_client_hub_canonical_directory_projection_reset.sql"];
     },
     referenceTables: async () => ["native_directory_grants", "native_directory_grant_history"],
     referenceCounts: async () => [

@@ -8,9 +8,9 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const STAGING_TARGET = Object.freeze({accountId:"846c924bf17bf4f3dd15c97a4c5d1d51",workerName:"ledgetop-ops-staging",
   hostname:"ops-staging.ledgetopdroneservices.com",databaseId:"78b34173-b168-4e3d-9832-bb9d245cc6b8",
   databaseName:"ltds-ops-staging",binding:"OPS_DB",environment:"staging"});
-const CHAIN = Object.freeze({count:169,final:"0169_project_alpha_existing_directory_binding_generation_evidence.sql",
-  names:"e4ec1dc19f4e8a975b8a617771ede5948abef5b920179865da8c7ce91c94bf47",
-  contents:"88c7e2dad54e06d0bf97567ab988240ded1e340ac418068970b301191ce68ede"});
+const CHAIN = Object.freeze({count:170,final:"0170_client_hub_canonical_directory_projection_reset.sql",
+  names:"1245797f5990a7ed2e0f68d1a97e2b4dcdccf4cc725d75bec4c496d3c46e2fff",
+  contents:"c6f49bfedbdb02866f624ec18d0e79f8068836ef57febdc44c97193d4f769192"});
 const PERMISSIONS = ["directory.profile.edit","directory.identity.link"];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const TS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;

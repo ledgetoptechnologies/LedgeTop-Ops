@@ -53,14 +53,36 @@ export type CanonicalClientHubSourceResolution =
   | { state: "absent" | "invalid"; root: null }
   | { state: "current"; root: ClientHubSourceRoot };
 
+const CANONICAL_DIRECTORY_TABLES = [
+  "project_alpha_active_directory_mappings",
+  "operations_directory_records",
+  "operations_directory_revisions",
+  "project_alpha_api_v2_directory_observations_current",
+  "operations_directory_client_organizations",
+] as const;
+
+async function canonicalDirectorySchemaState(db: D1DatabaseSession): Promise<"absent" | "incomplete" | "complete"> {
+  const rows = await db.prepare(`SELECT name FROM sqlite_master WHERE type='table'
+    AND name IN (${CANONICAL_DIRECTORY_TABLES.map(() => "?").join(",")})`)
+    .bind(...CANONICAL_DIRECTORY_TABLES).all<{ name: string }>();
+  const names = new Set(rows.results.map(row => row.name));
+  if (!names.has("project_alpha_active_directory_mappings")) return "absent";
+  return CANONICAL_DIRECTORY_TABLES.every(name => names.has(name)) ? "complete" : "incomplete";
+}
+
 export async function resolveClientHubSourceRoot(
   env: Pick<Env, "OPS_DB">, kind: ClientHubSourceKind, internalId: string, sourceId: string = PRIMARY_ALPHA_SOURCE_ID,
 ): Promise<ClientHubSourceRoot | null> {
   const table = kind === "organization" ? "pa_organizations" : "pa_clients";
+  const db = env.OPS_DB.withSession("first-primary");
+  const canonicalSchema = await canonicalDirectorySchemaState(db);
   const row = await env.OPS_DB.withSession("first-primary").prepare(`SELECT source.id,source.name display_name,
     ${kind === "organization" ? "NULL" : "source.organization_id"} organization_id,source.active,source.payload_json,
     ${validatedUniquePublicIdExpression(table, "source")} pa_public_id
     FROM ${table} source WHERE source.id=? AND source.projection_source_id=?
+      ${canonicalSchema === "absent" ? "" : `AND NOT EXISTS(SELECT 1 FROM project_alpha_active_directory_mappings mapping
+        WHERE mapping.source_id=source.projection_source_id AND mapping.resource_type='${kind === "organization" ? "organization" : "client"}'
+          AND mapping.project_alpha_public_id=${validatedUniquePublicIdExpression(table, "source")})`}
       AND ${projectAlphaReadVisibleSql("source.projection_source_id")}`).bind(internalId, sourceId)
     .first<Omit<ClientHubSourceRoot, "mapping_status"> & { payload_json: string }>();
   if (!row) return null;
@@ -89,6 +111,9 @@ export async function resolveCanonicalClientHubSourceRoot(
     AND ${observation}.binding_status='active'
     AND ${observation}.binding_resource_revision=${observation}.resource_revision`;
   const db = env.OPS_DB.withSession("first-primary");
+  const schema = await canonicalDirectorySchemaState(db);
+  if (schema === "absent") return { state: "absent", root: null };
+  if (schema === "incomplete") return { state: "invalid", root: null };
   const exists = await db.prepare(`SELECT count(*) count FROM project_alpha_active_directory_mappings
     WHERE source_id=? AND resource_type=? AND external_id=?`).bind(sourceId, resourceType, recordId).first<number>("count");
   if (!exists) return { state: "absent", root: null };

@@ -772,7 +772,8 @@
         "0166_project_alpha_reviewed_standalone_display.sql",
         "0167_project_alpha_directory_read_adoption_finalizations.sql",
         "0168_project_alpha_directory_read_adoption_local_profiles.sql",
-        "0169_project_alpha_existing_directory_binding_generation_evidence.sql"
+        "0169_project_alpha_existing_directory_binding_generation_evidence.sql",
+        "0170_client_hub_canonical_directory_projection_reset.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
@@ -838,8 +839,8 @@
           "applyEvidenceRef": "<EVIDENCE_REFERENCE>",
           "readbackEvidenceRef": "<EVIDENCE_REFERENCE>",
           "transformedFiles": ["0002_seed_acl.sql"],
-          "ledgerCount": 169,
-          "finalMigration": "0169_project_alpha_existing_directory_binding_generation_evidence.sql",
+          "ledgerCount": 170,
+          "finalMigration": "0170_client_hub_canonical_directory_projection_reset.sql",
           "sourceSeedSha256": "<CANONICAL_SEED_SHA256>",
           "generatedSeedSha256": "<GENERATED_SEED_SHA256>",
           "databaseWasEmpty": false,

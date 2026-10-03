@@ -4,6 +4,7 @@ import { clientHubDetailPath } from "./client-hub-directory";
 import { clientHubBusinessProjectOwnership, clientHubBusinessProjectSourceProof } from "./client-hub-business-projects";
 import { readClientHubBusinessProjectPolicy, type ClientHubBusinessProjectPolicy } from "./client-hub-project-policy";
 import type { ClientHubCollectionContext } from "./client-hub-collections";
+import { validatedUniquePublicIdExpression } from "./client-hub-source";
 import type { Env, StaffPrincipal } from "./types";
 
 export interface ClientHubBusinessProjectDetail {
@@ -64,7 +65,16 @@ async function readRow(env: Env, context: ClientHubCollectionContext, projectId:
   // A stale/out-of-root client reference must not expose another client's
   // contact details even when the project itself remains visible here.
   const contact = context.root.kind === "organization"
-    ? "contact.organization_id=?" : "contact.id=? AND contact.organization_id IS NULL";
+    ? context.root.pa_public_id
+      ? `EXISTS(SELECT 1 FROM pa_organizations contact_organization
+          WHERE contact_organization.id=contact.organization_id
+            AND contact_organization.projection_source_id=contact.projection_source_id
+            AND contact_organization.active=1
+            AND ${validatedUniquePublicIdExpression("pa_organizations", "contact_organization")}=?)`
+      : "contact.organization_id=?"
+    : context.root.pa_public_id
+      ? `${validatedUniquePublicIdExpression("pa_clients", "contact") }=? AND contact.organization_id IS NULL`
+      : "contact.id=? AND contact.organization_id IS NULL";
   return env.OPS_DB.withSession("first-primary").prepare(`SELECT p.id,p.name,p.status,p.start_date,p.end_date,
     p.client_id,p.organization_id,${sourceText("$.description", 8000)} description,${sourceText("$.created_at", 64)} created_at,
     manager.id manager_id,manager.display_name manager_name,contact.id contact_id,contact.name contact_name,
@@ -73,7 +83,7 @@ async function readRow(env: Env, context: ClientHubCollectionContext, projectId:
       LEFT JOIN pa_clients contact ON contact.id=p.client_id AND contact.projection_source_id=p.projection_source_id AND contact.active=1 AND (${contact})
       LEFT JOIN pa_users manager ON manager.id=p.manager_user_id AND manager.projection_source_id=p.projection_source_id AND manager.active=1
     WHERE p.id=? AND (${owner.sql}) AND (${policy.filter.sql}) LIMIT 1`)
-    .bind(context.root.public_id, projectId, ...owner.values, ...policy.filter.values).first<DetailRow>();
+    .bind(context.root.pa_public_id ?? context.root.public_id, projectId, ...owner.values, ...policy.filter.values).first<DetailRow>();
 }
 
 /** Read-only projected business data, not a portal grant or a write capability.
