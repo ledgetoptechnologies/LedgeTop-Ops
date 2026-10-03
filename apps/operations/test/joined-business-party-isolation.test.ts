@@ -48,6 +48,10 @@ beforeAll(async () => {
     CREATE TABLE pa_operation_assignments(operation_id TEXT,user_id TEXT,active INTEGER,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
     CREATE TABLE pa_tasks(id TEXT,project_id TEXT,active INTEGER,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
     CREATE TABLE pa_task_assignments(task_id TEXT,user_id TEXT,active INTEGER,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
+    -- The Client Hub query references this projection even when review-only
+    -- roots are excluded; its full constraints are covered by migration tests.
+    CREATE TABLE project_alpha_reviewed_standalone_client_displays(
+      projection_id TEXT PRIMARY KEY,source_id TEXT,project_alpha_public_id TEXT,state TEXT);
   `));
   await ops.batch(splitD1MigrationStatements(readFileSync(new URL("../migrations/0032_client_hub_directory.sql", import.meta.url), "utf8")).map(sql => ops.prepare(sql)));
   await ops.batch(splitD1MigrationStatements(readFileSync(new URL("../migrations/0034_client_hub_projection_sources.sql", import.meta.url), "utf8")).map(sql => ops.prepare(sql)));
