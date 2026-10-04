@@ -99,9 +99,9 @@ describe("local-only complete staging bootstrap migration rehearsal", () => {
 
   it("applies both reviewed chains to empty local D1 databases and stays idempotent", async () => {
     expect(artifacts.delivery.files).toHaveLength(147);
-    expect(artifacts.operations.files).toHaveLength(169);
+    expect(artifacts.operations.files).toHaveLength(171);
     expect(artifacts.delivery.files.at(-1)?.name).toBe("0228_operations_portal_native_content_start_audit.sql");
-    expect(artifacts.operations.files.at(-1)?.name).toBe("0169_project_alpha_existing_directory_binding_generation_evidence.sql");
+    expect(artifacts.operations.files.at(-1)?.name).toBe("0171_project_alpha_active_directory_update_guard.sql");
     expect(artifacts.delivery.files.filter(file => file.name.startsWith("0199_")).map(file => file.name)).toEqual([
       "0199_incoming_upload_pickup_lifecycle.sql", "0199_native_viewer_grants.sql",
     ]);
@@ -180,6 +180,20 @@ describe("local-only complete staging bootstrap migration rehearsal", () => {
       "SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name LIKE 'client_portal_authority_v2_outbox%v3%' ORDER BY name");
     expect(opsGuards).toHaveLength(3);
     expect(opsGuards.every(row => row.sql.includes("permissions_json") && row.sql.includes("protocol_version"))).toBe(true);
+
+    const activeDirectoryView = await rows<{ sql: string }>(operations,
+      "SELECT sql FROM sqlite_master WHERE type='view' AND name='project_alpha_active_directory_mappings'");
+    expect(activeDirectoryView).toHaveLength(1);
+    expect(activeDirectoryView[0].sql).toContain("external_id AS record_id");
+    expect(activeDirectoryView[0].sql).toContain("project_alpha_existing_directory_binding_activation_receipts");
+    const activeDirectoryGuards = await rows<{ name: string; sql: string }>(operations,
+      "SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name IN ('operations_shared_projects_bound_refresh_guard','operations_shared_projects_no_update') ORDER BY name");
+    expect(activeDirectoryGuards.map(row => row.name)).toEqual([
+      "operations_shared_projects_bound_refresh_guard", "operations_shared_projects_no_update",
+    ]);
+    expect(activeDirectoryGuards.every(row => row.sql.includes("project_alpha_active_directory_mappings")
+      && row.sql.includes("d.record_id=NEW.organization_record_id")
+      && row.sql.includes("d.record_id=NEW.client_record_id"))).toBe(true);
 
     const resourceHeadColumns = await rows<{ name: string }>(delivery,
       "PRAGMA table_info(portal_verified_recipient_delivery_authority_heads)");
