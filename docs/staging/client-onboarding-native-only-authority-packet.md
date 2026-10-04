@@ -2,8 +2,9 @@
 
 Status: **local validation and live synthetic provision/revoke rehearsal passed**.
 The replaced initial draft failed its seven tests. The schema-version-2
-replacement passed 26 tests against the complete current 165-migration schema,
-including failures after a real grant write and trigger-generated history.
+replacement's current fixture is pinned to the complete 171-migration schema
+ending at `0171_project_alpha_active_directory_update_guard.sql`. Its 26-case
+suite includes failures after a real grant write and trigger-generated history.
 The live rehearsal temporarily issued and then revoked exactly the two approved
 synthetic-area grants. This is not evidence of full live portal acceptance.
 
@@ -21,7 +22,8 @@ IDs are derived with `nativeOnlyGrantIds(staffId, businessAreaId, approvalId)`.
 `priorProvision` is null for provision and contains the exact original immutable
 approval and receipt for revoke.
 
-The compiler pins all 165 migration names and source-content hashes. The
+The compiler pins all 171 migration names and source-content hashes through
+`0171_project_alpha_active_directory_update_guard.sql`. The
 transaction verifies exact applied-migration name equality, full native
 admission/profile/generation rows, and complete per-staff grant/history sets in
 both directions. Prior grant rows and the entire history prefix are unchanged.
@@ -76,15 +78,20 @@ both actor and target branches of management/admin fences, pending and leased
 Project/Directory outbox rejection, terminal outbox acceptance, and a
 trigger-injected post-write active-work fence with complete rollback.
 
-Before the live rehearsal, read-only staging inspection on 2026-10-02 confirmed 165 applied migrations and
-zero `staging-native-only-` business areas. The dedicated binding configuration
+Before the live rehearsal, read-only staging inspection on 2026-10-02 confirmed
+the complete then-current applied ledger and zero `staging-native-only-`
+business areas. The current compiler has since been refreshed and now requires
+the exact 171-migration ledger through
+`0171_project_alpha_active_directory_update_guard.sql`. The dedicated binding configuration
 contains only the pinned staging account, Worker name, and `OPS_DB` database;
 no production resources or application secrets. A synthetic area had to be
 explicitly selected and created before provision. No staging grant was issued
 by this inspection.
 
-The runner passed 19 local tests and its live read-only status check returned
-the expected staging database with 165 migrations ending at `0165`. Its CLI is
+The runner passed 19 local tests and its historical live read-only status check
+returned the expected staging database with its complete then-current ledger.
+Before any new use, status must return the compiler's exact 171 migrations ending
+at `0171_project_alpha_active_directory_update_guard.sql`. Its CLI is
 read-only; writes are available only through the reviewed module helper. It
 validates the complete minimal regular JSON configuration before and after
 opening Wrangler's remote binding, refuses extra/production resources, suppresses
@@ -143,7 +150,8 @@ two scoped grants while exercising onboarding, without changing the compiler or
 its authority predicates. Twenty-five focused tests passed independently, including
 real local D1 evaluated guards, insert CAS and post-insert rollback.
 
-- `prepare` requires the exact staging binding and reviewed 165-migration ledger.
+- `prepare` requires the exact staging binding and reviewed 171-migration ledger
+  ending at `0171_project_alpha_active_directory_update_guard.sql`.
   It creates only an explicitly selected `staging-native-only-` area, in a guarded
   atomic batch, and rejects existing references or differing area state.
   Discovery excludes only D1's documented reserved `_cf_KV` table, not an
@@ -183,7 +191,9 @@ claimed by the local test result or these example commands.
   cannot silently replay a request for the previous project.
 - Focused owner HTTP and workspace/folder retry regressions passed 26/26, and
   client API regressions passed 5/5. The six real-D1 folder service cases passed
-  against the complete canonical chain through migration 0165. The Operations
+  against the complete canonical chain current at the time. That historical run
+  is not evidence for the present 171-migration chain through
+  `0171_project_alpha_active_directory_update_guard.sql`. The Operations
   TypeScript check and local build passed. Independent review found no remaining
   code blocker after old-division authority, monotonic confirmation and retry
   selection fixes. The build reported its existing large-client-chunk warning.
@@ -193,7 +203,8 @@ claimed by the local test result or these example commands.
   a different valid-format token. Runtime CSRF checks were not changed.
 - Full live portal acceptance and production readiness are not yet established.
   Latest-chain local execution does not replace signed-in staging acceptance.
-- Remote publication of the new scripts and evidence documentation is awaiting
-  explicit approval because the repository may be public and the payload includes
-  internal staging identifiers and non-secret rehearsal metadata. Raw private
-  evidence, credentials, and identity snapshots must remain excluded.
+- Reviewed staging scripts and documentation have standing publication approval
+  from 2026-10-02, but this document does not establish that this exact revision
+  was pushed. Check the remote for the exact reviewed commit before relying on
+  publication status. The approval excludes raw private evidence, credentials,
+  and identity snapshots; those must remain unpublished.
