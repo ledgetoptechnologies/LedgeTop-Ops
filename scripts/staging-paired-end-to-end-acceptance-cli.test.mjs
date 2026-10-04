@@ -94,6 +94,36 @@ test("a valid existing pair is not overwritten", () => {
   assert.deepEqual(Object.values(CONFIGS).map(files => fs.readFileSync(path.join(base, files.output), "utf8")), before);
 });
 
+test("a second publish race cleans only invocation-created output and temporaries", () => {
+  const base = fixture();
+  const inputs = Object.values(CONFIGS).flatMap(files => [files.source, files.production])
+    .concat(SECRET_NAMES).map(relative => [relative, fs.readFileSync(path.join(base, relative), "utf8")]);
+  const firstOutput = path.join(base, CONFIGS.delivery.output);
+  const secondOutput = path.join(base, CONFIGS.operations.output);
+  const interloper = "racing output must survive\n";
+  const originalLinkSync = fs.linkSync;
+  let publishes = 0;
+  fs.linkSync = (existingPath, newPath) => {
+    publishes += 1;
+    if (publishes === 2) fs.writeFileSync(secondOutput, interloper, { flag: "wx" });
+    return originalLinkSync(existingPath, newPath);
+  };
+  try {
+    assert.throws(() => run(["--write"], base), error => error?.code === "EEXIST");
+  } finally {
+    fs.linkSync = originalLinkSync;
+  }
+
+  assert.equal(publishes, 2);
+  assert.equal(fs.existsSync(firstOutput), false);
+  assert.equal(fs.readFileSync(secondOutput, "utf8"), interloper);
+  for (const [relative, bytes] of inputs) assert.equal(fs.readFileSync(path.join(base, relative), "utf8"), bytes);
+  for (const files of Object.values(CONFIGS)) {
+    const directory = path.dirname(path.join(base, files.output));
+    assert.deepEqual(fs.readdirSync(directory).filter(name => name.includes(".tmp-")), []);
+  }
+});
+
 test("requires the names-only secret inventory", () => {
   assert.throws(() => run(["--write"], fixture({ secrets: false })), /operations-staging-secret-names.json is missing/);
   const base = fixture(), inventory = path.join(base, SECRET_NAMES);
