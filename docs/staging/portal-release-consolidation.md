@@ -3,7 +3,7 @@
 ## Current status — 2026-10-04
 
 - The consolidated runtime candidate is committed at exact revision `538dff936c2049fc16416b639a4ef6a986ab3b25`, and its source worktree was clean when the current full release gate began. It combines the API-v2 and tracked recipient/runtime lineages described below. This document is a work record, not acceptance evidence.
-- Full release gate session `72257` is still live. It has not produced a terminal passing result; do not infer success from focused suites, compilation, builds, or dry-runs.
+- Full release gate session `72257` finished unsuccessfully on the unchanged runtime baseline: Client had 1,535 passing tests and one stale 169-versus-171 migration-inventory failure. The runner correctly refused release preparation. Do not infer a full release pass from the corrected focused suite.
 - The original API-only candidate remains unchanged. Its superseded local gate was deliberately cancelled after verifying the live process tree, so current-candidate Worker regressions can run. Cancellation was not a timeout diagnosis or passing evidence.
 - Recipient enrollment and explicitly selected-folder delivery authority require the complete tracked schema/runtime lineage. Enabling diagnostic staging flags or passing service-summary checks does not prove client file access.
 - Preserve API-v2 configured source/application/history identity checks, Ops/PA record-ID separation, canonical project proof, and pagination-safe mirror suppression when resolving runtime conflicts.
@@ -13,13 +13,17 @@
 
 - Focused Operations regressions pass `67/67`, covering 52 Client Hub Directory cases and 15 project-read settlement/activation cases.
 - Operations-home desktop/mobile browser coverage passes `54/54`, including the native-home account menu and logout behavior.
-- These focused results do not replace full gate session `72257`, which remains pending without a terminal pass.
+- These focused results do not replace the failed baseline full gate or the required corrected-revision CI and staging acceptance.
 - The reviewed tooling was published in draft PR #146 at `d0f73e91633a324c2acc2c6e421bdf327f312b89`; it has not been merged or deployed. CI run `37226218688` completed with failures, so this revision is not a release checkpoint.
 - CI source invariants, both Client browser jobs, thumbnail renderer, Incoming pickup, and Ops Sync passed. Both Ops browser jobs failed the same three stale project fixtures; the corrected fixtures now pass all 34 targeted desktop/mobile checks (`da81ffe9`).
 - The corrected complete-chain rehearsal passed against isolated local D1 databases: all 147 Client and 171 Operations migrations, idempotency, the canonical active-mapping view and rebuilt guard checks. The three focused Ops chain suites passed 25 tests; the Client full-chain case and its nine receiver preflight cases passed (`ec12cf1d`).
 - The index query reservation omitted up to three active-mapping validation reads per source-backed page. `88d55526` corrects the reserved cost without increasing the 800-query cap. The index and legacy connector suites passed all 40 tests; the legacy snapshot regression now explicitly requires no unactivated API-v2 mapping authority.
 - Acquired-mapping test fixtures now include the canonical `record_id` contract and use the correct D1 batch execution method. All 39 focused activation-consumer/project-producer tests passed, retaining relationship-loss, collision, revoked-authority, replay and public-link preservation checks (`f4331386`).
-- The remaining PA-identity fixture verification is still running. These focused passes do not establish full corrected-revision CI or live staging sync/recipient acceptance.
+- PA-identity fixture verification passed all 32 tests across the source, operational-memory and recurring-copy suites, including explicit 409 denial when no proven PA internal ID exists. No Ops route/public-ID fallback was added.
+- The corrected candidate was published at `c4804f7253c81401b95c1ead6d568d8a09c659c0` in draft PR #146. CI run `37228373731` is active; its Client job found strict TypeScript indexing errors in the new full-chain assertions before runtime tests. Optional indexing preserves missing-view assertion failures, and Client type-checking passes after that correction. A subsequent exact-revision CI pass is still required.
+- The strict-indexing correction also passed the complete isolated migration rehearsal and nine receiver preflight cases. Actual local staging configuration validation and all three generated Worker-type drift checks passed. Explicit-config Client, Operations and Ops Sync staging bundle dry-runs passed with staging resource bindings; no upload or Cloudflare mutation occurred. These were baseline bundle checks, not deployment of the composed acceptance window.
+- The CI contract list now includes the previously omitted native migration-profile, recipient-route-mount and delivery-migration-evidence suites. The exact expanded command passed 172 cases locally (169 passed, three Windows symlink-policy skips, zero failures); Linux CI must verify its own complete result.
+- The local joined portal runner is active under session `24750`, covering groups j1 through j7. Its result and live authenticated staging acceptance are still outstanding; starting the runner is not acceptance evidence.
 - The current read-only D1 aggregate query fails with error `7403` (`account invalid or not authorized`). The signed-in browser session remains valid, but that does not establish Wrangler/D1 reauthentication; no reauthentication has been completed or claimed.
 
 ## Historical migration hold and reconciliation record

@@ -184,8 +184,8 @@ describe("local-only complete staging bootstrap migration rehearsal", () => {
     const activeDirectoryView = await rows<{ sql: string }>(operations,
       "SELECT sql FROM sqlite_master WHERE type='view' AND name='project_alpha_active_directory_mappings'");
     expect(activeDirectoryView).toHaveLength(1);
-    expect(activeDirectoryView[0].sql).toContain("external_id AS record_id");
-    expect(activeDirectoryView[0].sql).toContain("project_alpha_existing_directory_binding_activation_receipts");
+    expect(activeDirectoryView[0]?.sql).toContain("external_id AS record_id");
+    expect(activeDirectoryView[0]?.sql).toContain("project_alpha_existing_directory_binding_activation_receipts");
     const activeDirectoryGuards = await rows<{ name: string; sql: string }>(operations,
       "SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name IN ('operations_shared_projects_bound_refresh_guard','operations_shared_projects_no_update') ORDER BY name");
     expect(activeDirectoryGuards.map(row => row.name)).toEqual([
