@@ -54,9 +54,9 @@ function clientDetail() {
     contextVersion: "client-context", capabilities: { directory: true, requests: false, delivery: false, viewer: false },
     businessParty: null, canManageBusinessParties: false };
 }
-function projectDetail() {
+function projectDetail(origin: "pa" | "canonical" = "pa") {
   return { canonicalRoot, client: { display_name: "Acme Construction", detail_path: clientPath }, contextVersion: "project-context", refreshedAt: asOf,
-    project: { id: "project-one", name: "Church survey", status: "active", description: null, start_date: null, end_date: null, created_at: null, manager: null },
+    project: { id: "project-one", origin, name: "Church survey", status: "active", description: null, start_date: null, end_date: null, created_at: null, manager: null },
     operationalWorkspaceAvailable: true, auditTimelineAvailable: true,
     linkedContact: null, availability: { linkedContact: "not_projected", siteContacts: "not_projected", billingContacts: "not_projected", projectMemory: "not_projected" } };
 }
@@ -70,7 +70,7 @@ function operationalWorkspace() {
     contactPage: { available: false, reason: "permission_required", nextCursor: null, hasMore: false, returned: 0, limit: 25 } };
 }
 type Handler = (route: Route, url: URL) => Promise<unknown>;
-async function fixture(page: Page, timelineHandler: Handler, options: { feedbackEnabled?: boolean } = {}) {
+async function fixture(page: Page, timelineHandler: Handler, options: { feedbackEnabled?: boolean; projectOrigin?: "pa" | "canonical" } = {}) {
   const calls: URL[] = [];
   await page.route("**/api/**", route => {
     const url = new URL(route.request().url()); calls.push(url);
@@ -79,7 +79,7 @@ async function fixture(page: Page, timelineHandler: Handler, options: { feedback
       timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null,
       capabilities: { clientFeedback: { enabled: options.feedbackEnabled ?? false } } } });
     if (url.pathname === clientApi) return route.fulfill({ json: clientDetail() });
-    if (url.pathname === projectApi) return route.fulfill({ json: projectDetail() });
+    if (url.pathname === projectApi) return route.fulfill({ json: projectDetail(options.projectOrigin) });
     if (url.pathname === `${projectApi}/internal-notes` && route.request().method() === "GET") return route.fulfill({ json: {
       canonicalRoot, contextVersion: "project-context", projectId: "project-one", notes: [], capabilities: { canManageNotes: false },
     } });
@@ -312,6 +312,14 @@ test("project timeline renders redacted operational activity without new authori
   expect(await section.getByRole("button", { name: /grant|authorize|invite/i }).count()).toBe(0);
   await page.setViewportSize({ width: 375, height: 850 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(376);
+});
+
+test("project timeline rejects a detail from a different project namespace before rendering audit controls", async ({ page }) => {
+  await fixture(page, (route, url) => route.fulfill({ json: timeline(url, [], null, "project-context", "project-one") }),
+    { projectOrigin: "canonical" });
+  await page.goto(projectPath);
+  await expect(page.getByRole("alert")).toContainText("context changed");
+  await expect(projectTimeline(page)).toHaveCount(0);
 });
 
 test("all applied filters survive refresh and browser history without exposing continuation state", async ({ page }) => {
