@@ -9,7 +9,6 @@ import { parseRemoteLedgerJson, validateExactRemoteLedger, verifyLiveRemoteLedge
 
 const root = path.resolve(import.meta.dirname, "..");
 const temporary = [];
-const installedWrangler = path.join(root, "apps", "client", "node_modules", "wrangler", "bin", "wrangler.js");
 
 function fixture() {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-native-migration-profile-"));
@@ -163,6 +162,8 @@ test("refuses a nested ignore override or tracked concrete generated migration",
 
 test("live ledger gate uses only a read-only query and requires the exact pre-suffix history", () => {
   const base = fixture();
+  const installedWrangler = path.join(base, "mock-wrangler.js");
+  fs.writeFileSync(installedWrangler, "// Never executed: the test injects its read-only command runner.\n", { flag: "wx" });
   const profiles = writeProfiles(base);
   const expected = profiles.client.expectedRemoteAppliedMigrations;
   let invocation;
@@ -189,10 +190,23 @@ test("live ledger gate uses only a read-only query and requires the exact pre-su
 
 test("live ledger gate fails closed when the remote read cannot be completed", () => {
   const base = fixture();
+  const installedWrangler = path.join(base, "mock-wrangler.js");
+  fs.writeFileSync(installedWrangler, "// Never executed: the test injects its failing command runner.\n", { flag: "wx" });
   writeProfiles(base);
   assert.throws(() => verifyLiveRemoteLedger(base, "operations", () => ({
     status: 1,
     stdout: "",
     stderr: "authentication unavailable",
   }), { cliPath: installedWrangler }), /read-only remote ledger query failed: authentication unavailable/);
+});
+
+test("live ledger gate rejects a missing pinned launcher before invoking any runner", () => {
+  const base = fixture();
+  writeProfiles(base);
+  let invoked = false;
+  assert.throws(() => verifyLiveRemoteLedger(base, "client", () => {
+    invoked = true;
+    throw new Error("runner must not execute");
+  }, { cliPath: path.join(base, "missing-wrangler.js") }), /pinned Wrangler CLI entrypoint is missing/);
+  assert.equal(invoked, false);
 });
