@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { HTTPException } from "hono/http-exception";
 import type { ClientHubCollectionContext } from "./client-hub-collections";
+import { clientHubAlphaInternalId } from "./client-hub-source";
 import { projectAlphaReadVisibleSql } from "./project-alpha-read-visibility";
 import type { Env, StaffPrincipal } from "./types";
 
@@ -67,7 +68,7 @@ async function rootProof(env: Environment, context: ClientHubCollectionContext):
     const table = root.kind === "organization" ? "pa_organizations" : "pa_clients";
     const row = await db(env).prepare(`SELECT id,projection_source_id,active,last_sync_id FROM ${table}
       WHERE id=? AND projection_source_id=? AND active=1 ${root.kind === "standalone_client" ? "AND organization_id IS NULL" : ""}
-      AND ${projectAlphaReadVisibleSql("projection_source_id")} LIMIT 1`).bind(root.public_id, root.source_id).first<Record<string, unknown>>();
+      AND ${projectAlphaReadVisibleSql("projection_source_id")} LIMIT 1`).bind(clientHubAlphaInternalId(root, context.paRootId), root.source_id).first<Record<string, unknown>>();
     if (!row) throw new HTTPException(404, { message: "Client workspace is unavailable" });
     return JSON.stringify(row);
   }

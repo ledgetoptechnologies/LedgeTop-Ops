@@ -150,14 +150,14 @@ function exactOutbox(source: Candidate): boolean {
 }
 async function directoryRecord(db: D1Database, source: Candidate, type: "organization" | "client", publicId: string | null): Promise<string | null | "missing"> {
   if (publicId === null) return null;
-  const rows = await db.prepare(`SELECT mapping.external_id
-    FROM project_alpha_directory_mappings mapping
-    JOIN operations_directory_records record ON record.record_id=mapping.external_id AND record.record_kind=?
+  const rows = await db.prepare(`SELECT mapping.record_id
+    FROM project_alpha_active_directory_mappings mapping
+    JOIN operations_directory_records record ON record.record_id=mapping.record_id AND record.record_kind=?
     WHERE mapping.source_id=? AND mapping.source_instance_id=? AND mapping.application_id=?
       AND mapping.history_epoch_id=? AND mapping.resource_type=? AND mapping.project_alpha_public_id=?`)
     .bind(type, source.source_id, source.source_instance_id, source.application_id,
-      source.history_epoch_id, type, publicId).all<{ external_id: string }>();
-  return rows.results.length === 1 ? rows.results[0]!.external_id : "missing";
+      source.history_epoch_id, type, publicId).all<{ record_id: string }>();
+  return rows.results.length === 1 ? rows.results[0]!.record_id : "missing";
 }
 async function state(db: D1Database, source: Candidate): Promise<"ok" | "authority" | "stale"> {
   if (source.live_grant_generation !== source.expected_grant_generation || source.scopes_json === null) return "authority";

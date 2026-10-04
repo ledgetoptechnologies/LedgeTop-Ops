@@ -666,7 +666,11 @@
         "0124_project_alpha_project_adoption_review_evidence.sql",
         "0125_project_alpha_api_v2_inventory_observations.sql",
         "0126_project_alpha_directory_read_adoption_claims.sql",
-        "0127_project_alpha_directory_read_adoption_field_review_receipts.sql"
+        "0127_project_alpha_directory_read_adoption_field_review_receipts.sql",
+        "0128_project_alpha_inventory_generation_surface_scope.sql",
+        "0129_project_alpha_existing_directory_binding_activation.sql",
+        "0130_project_alpha_active_directory_project_guard.sql",
+        "0131_project_alpha_active_directory_update_guard.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
@@ -719,8 +723,8 @@
           "configPath": "apps/operations/wrangler.staging.bootstrap.json",
           "manifestPath": "apps/operations/.staging-bootstrap/manifest.json",
           "transformedFiles": ["0002_seed_acl.sql"],
-          "ledgerCount": 127,
-          "finalMigration": "0127_project_alpha_directory_read_adoption_field_review_receipts.sql",
+          "ledgerCount": 131,
+          "finalMigration": "0131_project_alpha_active_directory_update_guard.sql",
           "sourceSeedSha256": "<CANONICAL_SEED_SHA256>",
           "generatedSeedSha256": "<GENERATED_SEED_SHA256>",
           "databaseWasEmpty": false,

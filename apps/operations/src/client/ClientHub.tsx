@@ -55,7 +55,7 @@ interface ClientDetailResponse {
   projectAlphaContactRolesAvailable?: boolean;
   projectAlphaContactRoles?: ProjectAlphaContactRolePage;
 }
-interface BusinessProject extends CollectionItem { id: string; name: string; status: string | null; start_date: string | null; end_date: string | null; manager_name: string | null; created_at: string | null }
+interface BusinessProject extends CollectionItem { id: string; origin: "pa" | "canonical"; name: string; status: string | null; start_date: string | null; end_date: string | null; manager_name: string | null; created_at: string | null }
 interface ProjectManagementResult {
   canonicalRoot: CanonicalClientRoot;
   contextVersion: string;
@@ -420,7 +420,7 @@ function BusinessProjects({ initial, page, client, contextVersion, contextSignal
         client={client} contextVersion={contextVersion} contextSignal={contextSignal} onInvalidated={onInvalidated} requestParams={{ filter }}
         emptyTitle="No matching business projects" emptyDetail="Try another status. Shared work and portal access are listed separately.">
         {items => <div className="simple-rows">{items.map(project => {
-          const href = businessProjectHref(client, project.id);
+          const href = businessProjectHref(client, project.id, project.origin);
           return <div key={collectionKey("businessProjects", project)}><div>
           {href ? <a className="client-hub-project-link" href={href}><strong>{project.name}</strong></a> : <strong>{project.name}</strong>}
           <small>{project.manager_name ? `Manager: ${project.manager_name}` : "Manager not recorded"}</small>

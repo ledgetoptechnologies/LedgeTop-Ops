@@ -108,13 +108,16 @@ test("rollout manifest is pinned to the current receiver migration boundary", ()
     "apps/operations/migrations/0051_client_hub_internal_notes.sql",
     "apps/operations/migrations/0052_project_operational_reassignment_recovery.sql",
     "apps/operations/migrations/0053_project_internal_notes.sql",
-    "apps/operations/migrations/0122_project_alpha_project_v2_canonical_activation.sql",
+    "apps/operations/migrations/0128_project_alpha_inventory_generation_surface_scope.sql",
+    "apps/operations/migrations/0129_project_alpha_existing_directory_binding_activation.sql",
+    "apps/operations/migrations/0130_project_alpha_active_directory_project_guard.sql",
+    "apps/operations/migrations/0131_project_alpha_active_directory_update_guard.sql",
   ]) assert.equal(exists(migration), true, `missing rollout migration ${migration}`);
 
   assert.match(manifest, /Client migrations through `0213`/);
   assert.match(manifest, /R8c — Authenticated delivery recovery and bell/);
   assert.match(manifest, /No migrations to apply/);
-  assert.match(manifest, /Operations through `0122`/);
+  assert.match(manifest, /Operations through `0131`/);
   assert.match(manifest, /Project Alpha `0102`/);
 });
 

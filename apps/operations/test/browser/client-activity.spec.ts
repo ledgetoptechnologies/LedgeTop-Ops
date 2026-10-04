@@ -28,14 +28,14 @@ async function fixture(page: Page, directory: Handler, activity?: Handler) {
     if (url.pathname === clientApi) return route.fulfill({ json: { client: root(), contacts: [], accounts: [], projects: [], requests: [],
       deliveryGrants: [], authenticatedDeliveryGrants: [], viewerGrants: [], contextVersion: "client-context", capabilities,
       businessActivityAvailable: true,
-      businessProjects: [{ id: "project-one", name: "Site inspection", status: "active", start_date: null, end_date: null, created_at: null, manager_name: null }],
+      businessProjects: [{ id: "project-one", origin: "pa", name: "Site inspection", status: "active", start_date: null, end_date: null, created_at: null, manager_name: null }],
       pages: { businessProjects: { available: true, reason: null, nextCursor: null, hasMore: false, returned: 1, limit: 5 } },
       portalIdentities: { items: [], page: { available: false, reason: "workspace_unavailable", nextCursor: null, hasMore: false, returned: 0, limit: 5 },
         contextVersion: "client-context", refreshedAt: activityAsOf, capabilities: { canManagePortal: false, canManageEligibilityBlocks: false } } } });
     if (url.pathname === `${clientApi}/business-projects/project-one`) return route.fulfill({ json: {
       canonicalRoot: { sourceId: source, rootNamespace: "business", kind: "organization", publicId: "42" },
       client: { display_name: "Acme customer", detail_path: clientPath }, contextVersion: "project-context", refreshedAt: activityAsOf,
-      project: { id: "project-one", name: "Site inspection", description: null, status: "active", start_date: null, end_date: null, created_at: null, manager: null },
+      project: { id: "project-one", origin: "pa", name: "Site inspection", description: null, status: "active", start_date: null, end_date: null, created_at: null, manager: null },
       businessActivityAvailable: true,
       linkedContact: null, availability: { linkedContact: "not_projected", siteContacts: "not_projected", billingContacts: "not_projected", projectMemory: "not_projected" } } });
     if (url.pathname === `${clientApi}/business-projects/project-one/internal-notes` && route.request().method() === "GET") return route.fulfill({ json: {

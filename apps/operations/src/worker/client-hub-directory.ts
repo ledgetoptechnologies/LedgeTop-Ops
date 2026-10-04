@@ -2,7 +2,8 @@ import { HTTPException } from "hono/http-exception";
 import { hasLocalGlobalAllow, hasPermission, isAdministrator, sqlScope } from "./acl";
 import { paProjectFilter } from "./visibility";
 import { sha256 } from "./crypto";
-import { isBusinessProjectionSource, validatedUniquePublicIdExpression, type ClientHubMappingStatus } from "./client-hub-source";
+import { clientHubActiveDirectoryIdentities, clientHubActiveDirectoryIdentitySql, isBusinessProjectionSource,
+  sourcePublicIdExpression, validatedUniquePublicIdExpression, type ClientHubMappingStatus } from "./client-hub-source";
 import type { Env, StaffPrincipal } from "./types";
 import { projectAlphaReadVisibleSql } from "./project-alpha-read-visibility";
 import { readableBusinessPartySql } from "./business-parties";
@@ -19,6 +20,9 @@ export interface ClientHubRoot {
   /** Namespace-local key: internal business ID, exact portal workspace ID, or
    * local account ID. Only pa_public_id contains the exported Alpha public ID. */
   public_id: string;
+  /** Project Alpha internal row key, internal-only; public_id remains the
+   * namespace-canonical Operations key for business roots. */
+  pa_internal_id?: string | null;
   pa_public_id: string | null;
   mapping_status: ClientHubMappingStatus;
   display_name: string;
@@ -134,16 +138,46 @@ const visibleSource = `(root.source_id='delivery:local' OR ${projectAlphaReadVis
 // An index refresh can lag an authoritative business reassignment/deactivation.
 // Only live business roots belong to this source. A portal UUID by itself never
 // establishes a business-root mapping, even when it resembles a record ID.
-const liveBusinessRoot = `(root.root_namespace<>'business' OR (
+const legacyLiveBusinessRoot = `(root.root_namespace<>'business' OR (
   (root.kind='organization' AND EXISTS (SELECT 1 FROM pa_organizations organization
     WHERE organization.id=root.public_id AND organization.projection_source_id=root.source_id AND organization.active=1)) OR
   (root.kind='standalone_client' AND EXISTS (SELECT 1 FROM pa_clients client
     WHERE client.id=root.public_id AND client.projection_source_id=root.source_id AND client.active=1 AND client.organization_id IS NULL))))`;
-const currentMapping = `CASE WHEN root.root_namespace='business'
+const legacyCurrentMapping = `CASE WHEN root.root_namespace='business'
   THEN CASE WHEN root.kind='organization' THEN (SELECT ${validatedUniquePublicIdExpression("pa_organizations", "source")}
     FROM pa_organizations source WHERE source.id=root.public_id AND source.projection_source_id=root.source_id)
   ELSE (SELECT ${validatedUniquePublicIdExpression("pa_clients", "source")} FROM pa_clients source WHERE source.id=root.public_id AND source.projection_source_id=root.source_id) END
   ELSE root.pa_public_id END`;
+const activeTupleUnique = (alias: string) => `(SELECT count(*) FROM project_alpha_active_directory_mappings candidate
+  WHERE candidate.source_id=${alias}.source_id AND candidate.source_instance_id=${alias}.source_instance_id
+    AND candidate.application_id=${alias}.application_id AND candidate.history_epoch_id=${alias}.history_epoch_id
+    AND candidate.resource_type=${alias}.resource_type
+    AND (candidate.record_id=${alias}.record_id OR candidate.external_id=${alias}.external_id
+      OR candidate.project_alpha_public_id=${alias}.project_alpha_public_id))=1`;
+const activeBusinessMapping = (currentMapping: string) => `(SELECT mapping.project_alpha_public_id
+  FROM project_alpha_active_directory_mappings mapping
+  JOIN operations_directory_records record ON record.record_id=mapping.record_id AND record.record_kind=mapping.resource_type
+  WHERE mapping.record_id=root.public_id AND mapping.source_id=root.source_id
+    AND mapping.resource_type=CASE root.kind WHEN 'organization' THEN 'organization' ELSE 'client' END
+    AND ${currentMapping} AND ${activeTupleUnique("mapping")} LIMIT 1)`;
+const activeBusinessExternalId = (currentMapping: string) => `(SELECT mapping.external_id FROM project_alpha_active_directory_mappings mapping
+  WHERE mapping.record_id=root.public_id AND mapping.source_id=root.source_id
+    AND mapping.resource_type=CASE root.kind WHEN 'organization' THEN 'organization' ELSE 'client' END
+    AND ${currentMapping} AND ${activeTupleUnique("mapping")} LIMIT 1)`;
+const activeLiveBusinessRoot = (currentMapping: string) => `(root.root_namespace<>'business' OR EXISTS (
+  SELECT 1 FROM project_alpha_active_directory_mappings mapping
+  JOIN operations_directory_records record ON record.record_id=mapping.record_id AND record.record_kind=mapping.resource_type
+  JOIN pa_organizations organization ON root.kind='organization' AND organization.id=mapping.external_id
+    AND organization.projection_source_id=mapping.source_id AND organization.active=1
+    AND mapping.project_alpha_public_id=${sourcePublicIdExpression("organization")}
+  WHERE mapping.record_id=root.public_id AND mapping.source_id=root.source_id AND mapping.resource_type='organization'
+    AND ${currentMapping} AND ${activeTupleUnique("mapping")}) OR (root.root_namespace='business' AND root.kind='standalone_client' AND EXISTS (
+  SELECT 1 FROM project_alpha_active_directory_mappings mapping
+  JOIN operations_directory_records record ON record.record_id=mapping.record_id AND record.record_kind=mapping.resource_type
+  JOIN pa_clients client ON client.id=mapping.external_id AND client.projection_source_id=mapping.source_id
+    AND client.active=1 AND client.organization_id IS NULL AND mapping.project_alpha_public_id=${sourcePublicIdExpression("client")}
+  WHERE mapping.record_id=root.public_id AND mapping.source_id=root.source_id AND mapping.resource_type='client'
+    AND ${currentMapping} AND ${activeTupleUnique("mapping")})))`;
 function unavailable(): never {
   throw new HTTPException(503, { message: "The client directory is being prepared; please retry shortly" });
 }
@@ -318,6 +352,14 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
   if (cursor && (cursor.q !== q || cursor.kind !== (kind ?? null) || cursor.source !== (source ?? null) || cursor.grouping !== grouping
     || cursor.sort !== sort || cursor.policy !== policy || cursor.portalProof !== portal.fingerprint))
     throw new HTTPException(400, { message: "Client directory cursor does not match this search" });
+  const activeIdentities = await clientHubActiveDirectoryIdentities(env);
+  const activeMappings = activeIdentities !== null;
+  const currentIdentity = clientHubActiveDirectoryIdentitySql("mapping", activeIdentities ?? []);
+  const liveBusinessRoot = activeMappings ? activeLiveBusinessRoot(currentIdentity) : legacyLiveBusinessRoot;
+  const currentMapping = activeMappings
+    ? `CASE WHEN root.root_namespace='business' THEN ${activeBusinessMapping(currentIdentity)} ELSE root.pa_public_id END`
+    : legacyCurrentMapping;
+  const currentExternalId = activeMappings ? activeBusinessExternalId(currentIdentity) : "root.public_id";
   const clauses = [visibleRoot, visibleSource, liveBusinessRoot], values: unknown[] = [];
   if (kind) { clauses.push("root.kind=?"); values.push(kind); }
   if (source) { clauses.push("root.source_id=?"); values.push(source); }
@@ -333,13 +375,13 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
           AND (instr(search.normalized_value,?)>0${phone.length >= 3 ? " OR (search.field='phone' AND instr(search.normalized_value,?)>0)" : ""})
           AND ((search.record_type='pa_client' AND search.project_id IS NULL AND EXISTS (
             SELECT 1 FROM pa_clients contact WHERE contact.id=search.record_id AND contact.projection_source_id=root.source_id AND contact.active=1 AND
-              ((root.kind='organization' AND contact.organization_id=root.public_id) OR
-               (root.kind='standalone_client' AND contact.id=root.public_id AND contact.organization_id IS NULL))))
+              ((root.kind='organization' AND contact.organization_id=${currentExternalId}) OR
+               (root.kind='standalone_client' AND contact.id=${currentExternalId} AND contact.organization_id IS NULL))))
           OR (search.record_type='pa_project' AND search.record_id=search.project_id AND EXISTS (
             SELECT 1 FROM pa_projects p LEFT JOIN pa_clients owner ON owner.id=p.client_id AND owner.projection_source_id=p.projection_source_id AND owner.active=1
             WHERE p.id=search.project_id AND p.projection_source_id=root.source_id AND ${filter.sql} AND
-              ((root.kind='organization' AND COALESCE(p.organization_id,owner.organization_id)=root.public_id) OR
-               (root.kind='standalone_client' AND p.client_id=root.public_id AND owner.id IS NOT NULL
+              ((root.kind='organization' AND COALESCE(p.organization_id,owner.organization_id)=${currentExternalId}) OR
+               (root.kind='standalone_client' AND p.client_id=${currentExternalId} AND owner.id IS NOT NULL
                  AND COALESCE(p.organization_id,owner.organization_id) IS NULL))))))
         OR (search.record_type='portal_principal' AND EXISTS (
           SELECT 1 FROM json_each(?) proof WHERE
@@ -348,7 +390,7 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
             AND json_extract(proof.value,'$.rootType')=root.kind
             AND (json_extract(proof.value,'$.rootPublicId')=${currentMapping}
               OR (json_extract(proof.value,'$.legacyRoot')=1 AND root.source_id='project-alpha:primary'
-                AND root.legacy_account_id IS NOT NULL AND json_extract(proof.value,'$.rootPublicId')=root.public_id)))))))`);
+                AND root.legacy_account_id IS NOT NULL AND json_extract(proof.value,'$.rootPublicId')=${currentExternalId})))))))`);
     values.push(q, q, q);
     if (phone.length >= 3) values.push(phone);
     values.push(...filter.values);
@@ -472,9 +514,14 @@ export async function findClientHubRoot(env: Env, kind: ClientHubKind, publicId:
     (rootNamespace !== undefined && !isClientHubRootNamespace(rootNamespace)))
     throw new HTTPException(404, { message: "Client not found" });
   const db = env.OPS_DB.withSession("first-primary");
-  const rows = await db.prepare(`SELECT root.* FROM client_hub_roots root
+  const activeIdentities = await clientHubActiveDirectoryIdentities(env);
+  const activeMappings = activeIdentities !== null;
+  const currentIdentity = clientHubActiveDirectoryIdentitySql("mapping", activeIdentities ?? []);
+  const liveBusinessRoot = activeMappings ? activeLiveBusinessRoot(currentIdentity) : legacyLiveBusinessRoot;
+  const rootLookupSql = `SELECT root.* FROM client_hub_roots root
     WHERE root.kind=? AND root.public_id=? AND ${visibleRoot} AND ${visibleSource} AND ${liveBusinessRoot}${sourceId === undefined ? "" : " AND root.source_id=?"}
-      ${rootNamespace === undefined ? "" : " AND root.root_namespace=?"} LIMIT 2`)
+      ${rootNamespace === undefined ? "" : " AND root.root_namespace=?"} LIMIT 2`;
+  const rows = await db.prepare(rootLookupSql)
     .bind(kind, publicId, ...(sourceId === undefined ? [] : [sourceId]), ...(rootNamespace === undefined ? [] : [rootNamespace])).all<ClientHubRoot>();
   if (rows.results.length > 1)
     throw new HTTPException(409, { message: "This client link is ambiguous. Open the client from Client Hub" });

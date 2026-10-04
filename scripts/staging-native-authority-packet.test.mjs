@@ -245,7 +245,7 @@ test("revoke fails atomically while an actor command is pending", () => {
 
 test("provision rejects canonical-ledger drift before writing authority", () => {
   const db = canonicalDatabase(), artifact = buildAuthorityArtifacts(fixture(), input(), "provision");
-  db.prepare("DELETE FROM d1_migrations WHERE name='0122_project_alpha_project_v2_canonical_activation.sql'").run();
+  db.prepare("DELETE FROM d1_migrations WHERE name='0131_project_alpha_active_directory_update_guard.sql'").run();
   assert.throws(() => applyMigration(db, artifact.provision.sql, artifact.provision.name, AUTHORITY_MIGRATIONS_TABLE));
   assert.equal(queryOne(db, "SELECT count(*) count FROM native_staff_admissions WHERE staff_id=?", owner.operationsStaffId).count, 0);
   assert.equal(queryOne(db, "SELECT count(*) count FROM native_directory_grants WHERE staff_id=?", owner.operationsStaffId).count, 0);
@@ -326,12 +326,15 @@ test("late revoke failure rolls every authority change and audit write back", ()
 
 test("provision fails closed on pre-existing directory authority", () => {
   const db = canonicalDatabase(), artifact = buildAuthorityArtifacts(fixture(), input(), "provision");
+  db.prepare(`INSERT INTO native_staff_admissions(staff_id,bound_access_subject,active,admitted_by)
+    VALUES(?,?,1,?)`).run(owner.operationsStaffId, subject, owner.operationsStaffId);
   db.prepare(`INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,active,granted_by)
     VALUES('pre-existing-directory-grant',?,'directory.profile.view','allow','global',1,?)`)
     .run(owner.operationsStaffId, owner.operationsStaffId);
   assert.throws(() => applyMigration(db, artifact.provision.sql, artifact.provision.name, AUTHORITY_MIGRATIONS_TABLE));
   assert.equal(queryOne(db, "SELECT count(*) count FROM native_directory_grants WHERE staff_id=?", owner.operationsStaffId).count, 1);
-  assert.equal(queryOne(db, "SELECT count(*) count FROM native_staff_admissions WHERE staff_id=?", owner.operationsStaffId).count, 0);
+  assert.deepEqual(queryOne(db, "SELECT active,bound_access_subject FROM native_staff_admissions WHERE staff_id=?", owner.operationsStaffId),
+    { active: 1, bound_access_subject: subject });
   assert.equal(queryOne(db, "SELECT count(*) count FROM native_staff_bootstrap_receipts").count, 0);
   assert.equal(queryOne(db, `SELECT count(*) count FROM ${AUTHORITY_MIGRATIONS_TABLE}`).count, 0);
   db.close();

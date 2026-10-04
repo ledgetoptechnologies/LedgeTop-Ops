@@ -6,7 +6,7 @@ import { readNativeFeedbackRecord, type NativeFeedbackRecord } from "../../../cl
 import { base64Url, sha256 } from "./crypto";
 import { readClientHubBusinessProjectDetail } from "./client-hub-business-project-detail";
 import type { ClientHubCollectionContext } from "./client-hub-collections";
-import { validatedUniquePublicIdExpression } from "./client-hub-source";
+import { clientHubAlphaInternalId, validatedUniquePublicIdExpression } from "./client-hub-source";
 import { projectAlphaReadVisibleSql } from "./project-alpha-read-visibility";
 import {
   readStaffFeedbackEvents,
@@ -157,7 +157,7 @@ async function deliveryMapping(env: Env, context: ClientHubCollectionContext, pr
     WHERE account.status='active' AND account.project_alpha_source_id=? AND ${owner}
       AND project.active=1 AND project.project_alpha_source_id=? AND project.project_alpha_project_id=?
       AND project_grant.revoked_at IS NULL ORDER BY account.id,project.id LIMIT 2`)
-    .bind(PRIMARY_ALPHA_SOURCE_ID, root.public_id, PRIMARY_ALPHA_SOURCE_ID, projectId).all<DeliveryProjectMapping>();
+    .bind(PRIMARY_ALPHA_SOURCE_ID, clientHubAlphaInternalId(root, context.paRootId), PRIMARY_ALPHA_SOURCE_ID, projectId).all<DeliveryProjectMapping>();
   if (rows.results.length > 1) changed();
   return rows.results[0] ?? null;
 }
@@ -176,7 +176,7 @@ async function deliveryRootMapping(env:Env,context:ClientHubCollectionContext):P
     account.status account_status,account.project_alpha_source_id account_source_id,
     account.project_alpha_client_id account_client_id,account.project_alpha_organization_id account_organization_id
     FROM client_accounts account WHERE account.status='active' AND account.project_alpha_source_id=? AND ${owner}
-    ORDER BY account.id LIMIT 2`).bind(PRIMARY_ALPHA_SOURCE_ID,root.public_id).all<DeliveryRootMapping>();
+    ORDER BY account.id LIMIT 2`).bind(PRIMARY_ALPHA_SOURCE_ID,clientHubAlphaInternalId(root, context.paRootId)).all<DeliveryRootMapping>();
   if(rows.results.length>1)changed();
   return rows.results[0]??null;
 }

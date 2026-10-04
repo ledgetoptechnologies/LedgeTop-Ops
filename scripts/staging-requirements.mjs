@@ -400,6 +400,10 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0125_project_alpha_api_v2_inventory_observations.sql",
     "0126_project_alpha_directory_read_adoption_claims.sql",
     "0127_project_alpha_directory_read_adoption_field_review_receipts.sql",
+    "0128_project_alpha_inventory_generation_surface_scope.sql",
+    "0129_project_alpha_existing_directory_binding_activation.sql",
+    "0130_project_alpha_active_directory_project_guard.sql",
+    "0131_project_alpha_active_directory_update_guard.sql",
   ]),
 });
 
@@ -410,6 +414,10 @@ export const REQUIRED_STAGING_MIGRATION_SHA256 = Object.freeze({
     "0125_project_alpha_api_v2_inventory_observations.sql": "1b6fbb3b3ce8b50dbb553fd38ec8544c25f88a2837d8523b5ddeb0494534bd45",
     "0126_project_alpha_directory_read_adoption_claims.sql": "4bd97d25bd96a0a872bd3106ab936ab3fe1806b7456aec6cf02c92195715d1b0",
     "0127_project_alpha_directory_read_adoption_field_review_receipts.sql": "ef4abf5411e8fd4e10d4daeb94dd4ca3469ae7d179d2b135a9d04ca4a0cf12aa",
+    "0128_project_alpha_inventory_generation_surface_scope.sql": "beba624ebade335c8e80689edb92fea6a42ccb97be02d356ca8fd7038f479748",
+    "0129_project_alpha_existing_directory_binding_activation.sql": "e0d743ae358a0a3f6931090a08d051fcf9172d328b3cc51bb3627a70b86d1eb4",
+    "0130_project_alpha_active_directory_project_guard.sql": "68c1680a8def3ce75049323c6fc492436e5faa3ba80506a9a42eee4f24ca9c39",
+    "0131_project_alpha_active_directory_update_guard.sql": "313b2b91eb422792a0c758d5525ee173b44b488e0d7797363acb8ce4d53ba8d8",
   }),
 });
 

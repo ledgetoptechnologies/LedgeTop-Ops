@@ -7,15 +7,15 @@ const runtimes: Miniflare[] = [];
 afterAll(async () => { for (const runtime of runtimes) await runtime.dispose(); });
 
 describe("existing PA directory acquisition migration chain", () => {
-  it("applies through 0124 without changing populated canonical history or activating acquired mappings", async () => {
+  it("applies through the current API-v2 activation guards without changing canonical history or implicitly activating mappings", async () => {
     const runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06",
       script: "export default {fetch(){return new Response('ok')}}", d1Databases: ["OPS_DB"] });
     runtimes.push(runtime);
     const database = await runtime.getD1Database("OPS_DB") as D1Database;
     const directory = new URL("../migrations/", import.meta.url);
     const migrations = readdirSync(directory)
-      .filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0124").sort();
-    expect(migrations.at(-1)).toBe("0124_project_alpha_project_adoption_review_evidence.sql");
+      .filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0131").sort();
+    expect(migrations.at(-1)).toBe("0131_project_alpha_active_directory_update_guard.sql");
     const recordId = "11111111-1111-4111-8111-111111111111";
     const profile = JSON.stringify({ name: "Synthetic Existing", email: "existing@example.test", phone: null,
       address: { line1: null, line2: null, city: null, state: null, postalCode: null, country: null }, clientType: "business" });

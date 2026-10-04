@@ -3,7 +3,7 @@ import { expect, test, type Page, type Route } from "@playwright/test";
 const source = "project-alpha:primary";
 const clientPath = "/clients/sources/project-alpha%3Aprimary/business/organizations/42";
 const clientApi = "/api/client-hub/sources/project-alpha%3Aprimary/business/organizations/42";
-const projectPath = `${clientPath}/projects/project-one`;
+const projectPath = `${clientPath}/projects/pa/project-one`;
 const projectApi = `${clientApi}/business-projects/project-one`;
 const asOf = "2026-08-26T19:00:00.000Z";
 const canonicalRoot = { sourceId: source, rootNamespace: "business", kind: "organization", publicId: "42" };

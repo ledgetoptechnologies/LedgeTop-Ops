@@ -5,6 +5,7 @@ import { eligibilityBlockManagementEnabled, portalOperationsManagementEnabled } 
 import { portalDenyPolicyManagementEnabled } from "./client-portal-deny-policies";
 import { readClientHubBusinessProjectPolicy } from "./client-hub-project-policy";
 import { businessContactChannels, businessContactChannelsSql } from "./client-business-contact";
+import { clientHubAlphaInternalId, resolveClientHubSourceRoot } from "./client-hub-source";
 import type { ClientHubRoot } from "./client-hub-directory";
 import type { Env, StaffPrincipal } from "./types";
 import { requireProjectAlphaReadVisibility } from "./project-alpha-read-visibility";
@@ -23,6 +24,8 @@ export interface ClientHubCollectionPage {
 }
 export interface ClientHubCollectionContext {
   root: ClientHubRoot;
+  /** Live-resolved PA row ID, distinct from the Operations route ID. */
+  paRootId?: string | null;
   access: ClientHubPermissions;
   contextVersion: string;
   canonicalRoot: { sourceId: string; rootNamespace: string; kind: string; publicId: string };
@@ -48,6 +51,17 @@ export function isClientHubCollection(value: string): value is ClientHubCollecti
  * selected projection proof, actor, or permission changes. It is not a grant. */
 export async function createClientHubCollectionContext(env: Env, principal: StaffPrincipal,
   root: ClientHubRoot, access: ClientHubPermissions): Promise<ClientHubCollectionContext> {
+  let liveRoot = root;
+  if (root.root_namespace === "business" && root.source_id.startsWith("project-alpha:")) {
+    const source = await resolveClientHubSourceRoot(env, root.kind, root.public_id, root.source_id);
+    if (!source?.active) throw new HTTPException(404, { message: "Client not found" });
+    if ((root.pa_internal_id && root.pa_internal_id !== source.pa_internal_id)
+      || (root.pa_public_id && root.pa_public_id !== source.pa_public_id))
+      throw new HTTPException(409, { message: "This client's Project Alpha identity changed; refresh before continuing" });
+    liveRoot = { ...root, pa_internal_id: source.pa_internal_id, pa_public_id: source.pa_public_id,
+      mapping_status: source.mapping_status, display_name: source.display_name };
+  }
+  root = liveRoot;
   const visibility = await requireProjectAlphaReadVisibility(env, root.source_id);
   const scope = accountScope(root);
   // Migration 0103 uniquely indexes each non-null Alpha organization/client
@@ -90,11 +104,12 @@ export async function createClientHubCollectionContext(env: Env, principal: Staf
   const canonicalRoot = { sourceId: root.source_id, rootNamespace: root.root_namespace, kind: root.kind, publicId: root.public_id };
   const businessProjectPolicy = await readClientHubBusinessProjectPolicy(env, principal);
   const contextVersion = await sha256(JSON.stringify([canonicalRoot, principal.id, access, visibility.read_revision, root.source_name,
-    root.pa_public_id, root.mapping_status, root.status, root.workspace_id, root.legacy_account_id,
+    root.pa_internal_id ?? null, root.pa_public_id, root.mapping_status, root.status, root.workspace_id, root.legacy_account_id,
     root.portal_status, proof?.results ?? [], accountProof.results, await isAdministrator(env, principal),
     eligibilityBlockManagementEnabled(env), portalOperationsManagementEnabled(env), portalDenyPolicyManagementEnabled(env),
     businessProjectPolicy.proof]));
-  return { root, access, canonicalRoot, contextVersion };
+  return { root, paRootId: root.root_namespace === "business" && root.source_id.startsWith("project-alpha:")
+    ? root.pa_internal_id ?? null : null, access, canonicalRoot, contextVersion };
 }
 
 function rootTuple(context: ClientHubCollectionContext): string[] {
@@ -121,12 +136,12 @@ function decode(value: string): Cursor {
     return cursor as Cursor;
   } catch { throw new HTTPException(400, { message: "Client collection cursor is invalid" }); }
 }
-function accountScope(root: ClientHubRoot): { where: string; values: string[] } {
+function accountScope(root: ClientHubRoot, paRootId?: string | null): { where: string; values: string[] } {
   if (root.root_namespace === "business" && root.source_id !== "project-alpha:primary") return { where: "0=1", values: [] };
   if (root.root_namespace === "portal") return { where: "0=1", values: [] };
   if (root.root_namespace === "account") return { where: "account.id=? AND account.project_alpha_source_id IS NULL AND account.project_alpha_client_id IS NULL AND account.project_alpha_organization_id IS NULL", values: [root.public_id] };
   return { where: `account.project_alpha_source_id='project-alpha:primary' AND ${root.kind === "organization" ? "account.project_alpha_organization_id=?"
-    : "account.project_alpha_client_id=? AND account.project_alpha_organization_id IS NULL"}`, values: [root.public_id] };
+    : "account.project_alpha_client_id=? AND account.project_alpha_organization_id IS NULL"}`, values: [clientHubAlphaInternalId(root, paRootId)] };
 }
 function availability(context: ClientHubCollectionContext, collection: ClientHubCollection): ClientHubCollectionPage["reason"] {
   if (!context.access.directory || (collection === "requests" && !context.access.requests)
@@ -139,12 +154,12 @@ function availability(context: ClientHubCollectionContext, collection: ClientHub
   return null;
 }
 function collectionQuery(context: ClientHubCollectionContext, collection: ClientHubCollection): Query {
-  const root = context.root, scope = accountScope(root);
+  const root = context.root, scope = accountScope(root, context.paRootId);
   const common = { where: scope.where, values: scope.values, descending: true };
   switch (collection) {
     case "businessContacts": return { select: `id public_id,organization_id,name display_name,${businessContactChannelsSql()}`, from: "pa_clients",
       where: `active=1 AND projection_source_id=? AND ${root.kind === "organization" ? "organization_id=?" : "id=? AND organization_id IS NULL"}`,
-      values: [root.source_id, root.public_id], order: ["id"], descending: false, keys: ["public_id"], business: true };
+      values: [root.source_id, clientHubAlphaInternalId(root, context.paRootId)], order: ["id"], descending: false, keys: ["public_id"], business: true };
     case "accounts": return { ...common,
       select: "account.id,account.display_name,account.status,account.project_alpha_client_id,account.project_alpha_organization_id,account.created_at,account.updated_at",
       from: "client_accounts account", order: ["COALESCE(account.created_at,'')", "account.id"], keys: ["id"] };

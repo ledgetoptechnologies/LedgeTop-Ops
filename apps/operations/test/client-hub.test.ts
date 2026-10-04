@@ -201,7 +201,11 @@ async function fixture() {
   const app = new Hono<{ Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } }>();
   app.use("*", async (c, next) => { c.set("principal", principal); c.set("administrator", true); await next(); });
   registerClientHubRoutes(app);
-  const env = { OPS_DB: ops, DELIVERY_DB: delivery, CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED: "true",
+  const env = { OPS_DB: ops, DELIVERY_DB: delivery, PROJECT_ALPHA_API_V2_CONNECTIONS: JSON.stringify({ version: 1, instances: {
+    "project-alpha:primary": { sourceId: "project-alpha:primary", enabled: true, baseUrl: "https://alpha.example.test/", apiKey: "test-key",
+      sourceInstanceId: "00000000-0000-4000-8000-000000000001", applicationId: "00000000-0000-4000-8000-000000000002",
+      historyEpoch: "00000000-0000-4000-8000-000000000003" },
+  } }), CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED: "true",
     CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: "true", CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED: "true" } as Env;
   return { app, env, ops, delivery };
 }
@@ -440,13 +444,17 @@ describe("Client Hub bounded detail collections", () => {
       acl.hasPermission.mockImplementation(async (_env, _principal, permission) =>
         ["delivery.share.audit", "viewer.view", "projects.view"].includes(permission));
       const url = organizationPath + "/business-projects/business-one";
-      const first = await app.request(url, {}, env);
+      const typedUrl = url + "?origin=pa";
+      const first = await app.request(typedUrl, {}, env);
       expect(first.status).toBe(200);
       const result = await first.json() as { contextVersion: string };
       expect(result).toMatchObject({ canonicalRoot: { sourceId: "project-alpha:primary", rootNamespace: "business", publicId: "pa-org" },
-        project: { id: "business-one", description: "Business detail" }, linkedContact: { id: "pa-child-login", sourceField: "project.client_id" } });
-      expect((await app.request(url + "?expectedContextVersion=" + result.contextVersion, {}, env)).status).toBe(200);
-      expect((await app.request(url + "?expectedContextVersion=" + "b".repeat(43), {}, env)).status).toBe(409);
+        project: { id: "business-one", origin: "pa", description: "Business detail" }, linkedContact: { id: "pa-child-login", sourceField: "project.client_id" } });
+      expect((await app.request(typedUrl + "&expectedContextVersion=" + result.contextVersion, {}, env)).status).toBe(200);
+      expect((await app.request(typedUrl + "&expectedContextVersion=" + "b".repeat(43), {}, env)).status).toBe(409);
+      expect((await app.request(url + "?origin=unknown", {}, env)).status).toBe(400);
+      // Retained one-segment bookmarks are unambiguously PA-only.
+      expect((await app.request(url, {}, env)).status).toBe(200);
       expect((await app.request(organizationPath + "/business-projects/hidden-project", {}, env)).status).toBe(404);
       expect((await app.request(url.replace("/business/organizations/pa-org", "/portal/organizations/workspace-org"), {}, env)).status).toBe(404);
       expect((await app.request(url.replace("project-alpha%3Aprimary/business", "delivery%3Alocal/account"), {}, env)).status).toBe(404);
@@ -723,6 +731,28 @@ describe("Client Hub bounded detail collections", () => {
     const first = await readCollection(app, env, organizationPath, "businessContacts", null, 1);
     expect(first.canonicalRoot).toEqual({ sourceId: "project-alpha:primary", rootNamespace: "business", kind: "organization", publicId: "pa-org" });
     expect((await readCollection(app, env, organizationPath, "businessContacts", first.page.nextCursor, 1)).items).toHaveLength(1);
+  }, 30_000);
+
+  it("retains legacy portal aliases across unequal Ops, PA-internal, and PA-public IDs without exposing the internal ID", async () => {
+    const { app, env, ops } = await fixture();
+    await applySql(ops, `CREATE TABLE operations_directory_records(record_id TEXT PRIMARY KEY,record_kind TEXT);
+      CREATE TABLE active_mapping_rows(source_id TEXT,resource_type TEXT,record_id TEXT,external_id TEXT,project_alpha_public_id TEXT,
+        source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT);
+      CREATE VIEW project_alpha_active_directory_mappings AS SELECT source_id,resource_type,record_id,external_id,
+        project_alpha_public_id,source_instance_id,application_id,history_epoch_id FROM active_mapping_rows;
+      INSERT INTO operations_directory_records VALUES('ops-org','organization');
+      INSERT INTO active_mapping_rows VALUES('project-alpha:primary','organization','ops-org','pa-org','${organizationUuid}',
+        '00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000002','00000000-0000-4000-8000-000000000003');`);
+    const response = await app.request("http://local/api/client-hub/sources/project-alpha%3Aprimary/portal/organizations/workspace-org", {}, env);
+    expect(response.status).toBe(200);
+    const detail = await response.json() as { client: Record<string, unknown>; contacts: unknown[] };
+    expect(detail.client).toMatchObject({ root_namespace: "business", public_id: "ops-org", pa_public_id: organizationUuid });
+    expect(detail.client).not.toHaveProperty("pa_internal_id");
+    expect(detail.contacts).toHaveLength(2);
+    // The PA internal ID is deliberately also an old cached route key. Once
+    // acquired mappings are active, it must not resolve as an Ops route ID.
+    const staleInternalRoute = await app.request("http://local/api/client-hub/sources/project-alpha%3Aprimary/business/organizations/pa-org", {}, env);
+    expect(staleInternalRoute.status, await staleInternalRoute.text()).toBe(404);
   }, 30_000);
 
   it("does not bypass canonical ID validation through live-source fallback", async () => {

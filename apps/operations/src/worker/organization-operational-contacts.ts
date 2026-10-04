@@ -2,7 +2,7 @@ import { z } from "zod";
 import { HTTPException } from "hono/http-exception";
 import { businessContactChannels, businessContactChannelsSql } from "./client-business-contact";
 import { clientHubBusinessProjectSourceProof } from "./client-hub-business-projects";
-import { isBusinessProjectionSource } from "./client-hub-source";
+import { clientHubAlphaInternalId, isBusinessProjectionSource } from "./client-hub-source";
 import type { ClientHubCollectionContext } from "./client-hub-collections";
 import { projectAlphaReadVisibleSql } from "./project-alpha-read-visibility";
 import type { Env, StaffPrincipal } from "./types";
@@ -87,7 +87,7 @@ function validateContext(context: ClientHubCollectionContext, expected?: string)
 async function rootRow(database: Database, context: ClientHubCollectionContext): Promise<RootRow | null> {
   return database.prepare(`SELECT id,projection_source_id,active,last_sync_id FROM pa_organizations
     WHERE id=? AND projection_source_id=? AND active=1 AND ${projectAlphaReadVisibleSql("projection_source_id")} LIMIT 1`)
-    .bind(context.root.public_id, context.root.source_id).first<RootRow>();
+    .bind(clientHubAlphaInternalId(context.root, context.paRootId), context.root.source_id).first<RootRow>();
 }
 async function permission(database: Database, principal: StaffPrincipal, key: "team.view" | "organization.contacts.manage"): Promise<boolean> {
   return (await database.prepare(`SELECT ${globalPermissionSql(key)} allowed FROM staff_users actor
@@ -130,7 +130,8 @@ async function replay(env: Environment, principal: StaffPrincipal, context: Clie
   expectedContextVersion: string, expectedFingerprint: string,
   receipt: ReceiptRow): Promise<OrganizationOperationalContactsMutationResult> {
   if (receipt.operation_kind !== "contacts_save" || receipt.request_fingerprint !== expectedFingerprint
-    || receipt.projection_source_id !== context.root.source_id || receipt.organization_id !== context.root.public_id)
+    || receipt.projection_source_id !== context.root.source_id
+    || receipt.organization_id !== clientHubAlphaInternalId(context.root, context.paRootId))
     throw new HTTPException(409, { message: "This operation key was already used for a different organization contact change" });
   await prepareOrganization(env, principal, context, true, expectedContextVersion);
   return { ...receiptResult(receipt), replayed: true };

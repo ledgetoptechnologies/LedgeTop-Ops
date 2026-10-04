@@ -1,5 +1,49 @@
 # Staging release gate and command packet
 
+## October 4, 2026 local project-list checkpoint
+
+- The broader local integration run passed 47/47 tests across acquisition,
+  settlement, command production, Client Hub source and index suites.
+- Existing Ops staging has experimental migration history through 0169.
+  Do not replay canonical 0125-0129 CREATE migrations there: their executable
+  SQL is already present under earlier staging filenames. History was preserved
+  using staging-only forward migrations 0170 and 0171, byte-identical to the
+  candidate's 0130 and 0131. Both are applied; readback confirms exact normalized
+  view/trigger bodies, separate Ops record_id and PA external_id columns,
+  zero foreign-key violations, and no pending migrations in that packet.
+- A private pre-change schema/data backup is retained only in the ignored
+  staging packet directory. No queued Directory/Project/relationship writes or
+  relevant transactional fences were active. The connector fence's existing
+  write_guard=1 row is a persistent successful-proof sentinel, not a work lease.
+- These schema checks do not prove the current candidate is deployed or the
+  joined portal flow works. Candidate release preparation, bounded live API-v2
+  sync, recipient enrollment, selected-folder access, denial/revocation checks,
+  and public-link parity remain required before the production owner checkpoint.
+- The isolated portal integration candidate now suppresses PA mirror rows with
+  a materialized, complete canonical-display proof before cursor filtering and
+  page limits. This preserves later projects when multiple mirrors lead a page
+  without nesting the proof beyond SQLite expression limits.
+- Canonical live rechecks now retain the requested lifecycle filter. Synthetic
+  regressions cover valid suppression, stale fallback, public-ID non-disclosure,
+  unrelated IDs resembling route markers, and pagination through leading mirrors.
+- Focused local project-list/detail suites: 27/27 passed. Ops TypeScript passed.
+  This is local evidence, not remote deployment or client-portal acceptance.
+- The canonical display proof now also requires the configured current
+  source/application/history tuple and exact active root mapping. Regressions
+  reject internally consistent retired heads and disabled sources; list,
+  detail, recheck and mirror suppression share the same proof. The expanded
+  focused suites passed 27/27 again; independent bounded review found no
+  additional correctness issue. Staging preflight/evidence tests passed 56/56.
+- Viewer staging was separately browser-verified after the user-authorized
+  integration/workspace-launch window, at Ops version
+  `2051f543-77b8-4908-bddc-52c7fead023e`. Keep that live window separate from
+  the default-off baseline. A subsequent Ops staging code deployment must
+  explicitly preserve the approved live Viewer variables and private secret;
+  baseline validation alone does not prove runtime parity.
+- Production PA update, production client access, existing public links, and
+  production cutover remain unchanged and unproven. Joined staging sync and
+  recipient/file-access acceptance are still required before the owner checkpoint.
+
 This packet prepares commands; it does not authorize running them. Keep the
 client portal, Dropbox, Google, permanent purge, and incoming uploads disabled.
 The client-specific sequence is in
@@ -361,7 +405,7 @@ comparison with those repositories. The verifier intentionally fails while any
 release-candidate placeholder remains.
 
 The current candidate inventory extends through Client `0213` (including both
-distinct `0199` filenames), Operations `0127`, and Project Alpha `0102`. The
+distinct `0199` filenames), Operations `0131`, and Project Alpha `0102`. The
 Operations runtime candidate remains `PENDING_OPERATIONS_COMMIT` until the
 API-v2 sync/read-adoption branch is committed, pushed, and independently
 reviewed; do not substitute the dirty worktree HEAD. Project Alpha is pinned
@@ -516,8 +560,8 @@ owner input, then use only those configs for the first full apply. The ordinary
 configs would replay the canonical named-human `0002` rows. A populated or
 partially migrated database must never use the bootstrap configs. Attach both
 generated manifests and complete `migrations.freshBootstrap`; the required
-proof includes 132/127 ledger rows, both Client `0199` filenames exactly once,
-final `0213`/`0127`, canonical-human absence, the one synthetic owner and its
+proof includes 132/131 ledger rows, both Client `0199` filenames exactly once,
+final `0213`/`0131`, canonical-human absence, the one synthetic owner and its
 role, the retained Operations ACL catalog, no pending reapply, and an empty
 foreign-key check.
 
@@ -595,7 +639,7 @@ apply time and is the explicit exception to this packet's normal
 migration-first order. Confirm every predecessor is already applied; otherwise
 resolve those predecessors in a separately reviewed release.
 
-For Operations, preserve the full ordered `0054` through `0127` suffix in the
+For Operations, preserve the full ordered `0054` through `0131` suffix in the
 remote Wrangler ledger. Attach the list output that proves every filename is in
 the exact checked-in order, with no duplicate, renamed, skipped, or unexpected
 row. A local migration-chain run, a directory listing, or a successful raw SQL
@@ -606,7 +650,11 @@ The local preflight additionally locks the newly reviewed suffix bytes:
 `0124`=`b35a14babab1e10caf5420fe8d1209a81009b5bd55cfcb0361a4a3085c503a05`,
 `0125`=`1b6fbb3b3ce8b50dbb553fd38ec8544c25f88a2837d8523b5ddeb0494534bd45`,
 `0126`=`4bd97d25bd96a0a872bd3106ab936ab3fe1806b7456aec6cf02c92195715d1b0`,
-and `0127`=`ef4abf5411e8fd4e10d4daeb94dd4ca3469ae7d179d2b135a9d04ca4a0cf12aa`.
+`0127`=`ef4abf5411e8fd4e10d4daeb94dd4ca3469ae7d179d2b135a9d04ca4a0cf12aa`,
+`0128`=`beba624ebade335c8e80689edb92fea6a42ccb97be02d356ca8fd7038f479748`,
+`0129`=`e0d743ae358a0a3f6931090a08d051fcf9172d328b3cc51bb3627a70b86d1eb4`,
+`0130`=`68c1680a8def3ce75049323c6fc492436e5faa3ba80506a9a42eee4f24ca9c39`,
+and `0131`=`313b2b91eb422792a0c758d5525ee173b44b488e0d7797363acb8ce4d53ba8d8`.
 Any content change requires an explicit contract/checksum review; never edit an
 already-applied migration to make a later rollout pass.
 
@@ -616,7 +664,7 @@ all are terminal or deliberately cancelled, then close mutation ingress and
 drain HTTP requests, queue consumers, leases, schedulers, and reconciliation
 batches. The evidence must prove this quiescent state and name the compatible
 Operations writer version already handling all traffic. Do not apply `0054`-
-`0127` while an old writer, an in-flight fence, or a scheduled/retry worker can
+`0131` while an old writer, an in-flight fence, or a scheduled/retry worker can
 commit a pre-migration assumption. Keep the compatible writer in place through
 the final ledger readback; use a compatible fix forward, never a pre-suffix
 writer rollback.
@@ -703,7 +751,7 @@ Confirm Operations
 `0014_staff_acl_controls.sql` through
 `0052_project_operational_reassignment_recovery.sql` and
 `0053_project_internal_notes.sql`, then Operations `0054` through
-`0127_project_alpha_directory_read_adoption_field_review_receipts.sql` in
+`0131_project_alpha_active_directory_update_guard.sql` in
 that exact ledger order. Migration `0100` removes
 `share_version` from the delivery-grant parent key so existing share
 rotation/revocation updates cannot be blocked by a portal grant; the grant
@@ -731,7 +779,7 @@ routes; `0018`/`0019` must precede
 browser-upload and conflict-resolution routes; `0020` must precede the internal
 SOP library; `0021` must precede Project Alpha sync hardening; `0022` must
 precede bounded R2 retry state; and `0023` must precede project/task SOP
-revision pinning. Migration `0131` seeds a cutoff-pinned,
+revision pinning. Client migration `0131` seeds a cutoff-pinned,
 video-only recovery pass; confirm it reaches `completed` and that repaired rows
 remain pending until the authenticated TrueNAS worker claims them. It must not
 publish those rows to the Cloudflare thumbnail queue. Worker

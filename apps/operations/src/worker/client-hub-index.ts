@@ -1,5 +1,7 @@
 import type { Env } from "./types";
-import { readClientHubSourcePublicId, validatedUniquePublicIdExpression, type ClientHubMappingStatus } from "./client-hub-source";
+import { clientHubActiveDirectoryIdentities, clientHubActiveDirectoryIdentitySql, clientHubAlphaInternalId,
+  readClientHubSourcePublicId, sourcePublicIdExpression, validatedUniquePublicIdExpression,
+  type ClientHubMappingStatus } from "./client-hub-source";
 import { resolveClientHubWorkspaces } from "./client-hub-workspace";
 
 // This is a rebuildable staff search index, never an identity/access authority.
@@ -18,11 +20,11 @@ const PAGE_QUERY_COST: Record<Phase, number> = {
 };
 type Kind = "organization" | "standalone_client";
 type Namespace = "business" | "portal" | "account";
-type IndexEnv = Pick<Env, "OPS_DB" | "DELIVERY_DB">;
+type IndexEnv = Pick<Env, "OPS_DB" | "DELIVERY_DB" | "PROJECT_ALPHA_API_V2_CONNECTIONS">;
 interface State { generation: number; backfill_phase: string | null; backfill_cursor: string | null }
 interface Root {
   source_id: string; root_namespace: Namespace; kind: Kind; public_id: string; display_name: string;
-  pa_public_id: string | null; mapping_status: ClientHubMappingStatus;
+  pa_internal_id?: string | null; pa_public_id: string | null; mapping_status: ClientHubMappingStatus;
   status: string; contact_count: number;
 }
 interface Facts {
@@ -61,19 +63,30 @@ function contactFields(payload: string): { email?: string; phone?: string } {
 
 async function rootFacts(env: IndexEnv, roots: Root[]): Promise<Facts[]> {
   if (!roots.length) return [];
+  // D1's SQLite build has a lower bound-variable ceiling than desktop SQLite.
+  // Six bound values per root means a 20-row page exceeds that ceiling; retain
+  // the public page size but split only this read into safe, ordered chunks.
+  if (roots.length > 16) {
+    const facts: Facts[] = [];
+    for (let offset = 0; offset < roots.length; offset += 16)
+      facts.push(...await rootFacts(env, roots.slice(offset, offset + 16)));
+    return facts;
+  }
   const key = (root: Pick<Root, "source_id" | "root_namespace" | "kind" | "public_id">) => JSON.stringify([root.source_id, root.root_namespace, root.kind, root.public_id]);
   const linked = await resolveClientHubWorkspaces(env, roots.filter(root => root.root_namespace !== "account").map(root => ({
-    key: key(root), source_id: root.source_id, kind: root.kind, business_id: root.root_namespace === "business" ? root.public_id : null,
+    key: key(root), source_id: root.source_id, kind: root.kind,
+    business_id: root.root_namespace === "business" ? clientHubAlphaInternalId(root) : null,
     pa_public_id: root.pa_public_id, workspace_id: root.root_namespace === "portal" ? root.public_id : null,
   })));
-  const values = roots.flatMap(root => [root.source_id, root.root_namespace, root.kind, root.public_id, linked.get(key(root))?.workspace?.id ?? null]);
+  const values = roots.flatMap(root => [root.source_id, root.root_namespace, root.kind, root.public_id,
+    root.root_namespace === "business" ? clientHubAlphaInternalId(root) : null, linked.get(key(root))?.workspace?.id ?? null]);
   const accountMatch = `(CASE WHEN wanted.root_namespace='account' THEN account.id=wanted.public_id
       AND account.project_alpha_source_id IS NULL AND account.project_alpha_client_id IS NULL AND account.project_alpha_organization_id IS NULL
-    WHEN wanted.root_namespace='business' AND wanted.source_id='${PA}' THEN account.project_alpha_source_id=wanted.source_id AND ((wanted.kind='organization' AND account.project_alpha_organization_id=wanted.public_id)
-      OR (wanted.kind='standalone_client' AND account.project_alpha_client_id=wanted.public_id AND account.project_alpha_organization_id IS NULL))
+    WHEN wanted.root_namespace='business' AND wanted.source_id='${PA}' THEN account.project_alpha_source_id=wanted.source_id AND ((wanted.kind='organization' AND account.project_alpha_organization_id=wanted.pa_internal_id)
+      OR (wanted.kind='standalone_client' AND account.project_alpha_client_id=wanted.pa_internal_id AND account.project_alpha_organization_id IS NULL))
     ELSE 0 END)`;
   const counts = (await env.DELIVERY_DB.withSession("first-primary").prepare(`
-    WITH wanted(source_id,root_namespace,kind,public_id,workspace_id) AS (VALUES ${roots.map(() => "(?,?,?,?,?)").join(",")})
+    WITH wanted(source_id,root_namespace,kind,public_id,pa_internal_id,workspace_id) AS (VALUES ${roots.map(() => "(?,?,?,?,?,?)").join(",")})
     SELECT wanted.*,
       (SELECT count(*) FROM client_accounts account WHERE ${accountMatch}) account_count,
       (SELECT count(DISTINCT grant_row.project_id) FROM client_project_grants grant_row
@@ -158,15 +171,40 @@ async function rootPage(env: IndexEnv, phase: Phase, cursor: string, generation:
   if (phase === "organizations" || phase === "standalone") {
     const organizations = phase === "organizations";
     const table = organizations ? "pa_organizations" : "pa_clients";
-    const sources = (await ops.prepare(`SELECT source.projection_source_id source_id,'business' root_namespace,
+    const activeIdentities = await clientHubActiveDirectoryIdentities(env);
+    const activeMappings = activeIdentities !== null;
+    const currentMapping = clientHubActiveDirectoryIdentitySql("mapping", activeIdentities ?? []);
+    const sources = activeMappings ? (await ops.prepare(`SELECT source.projection_source_id source_id,'business' root_namespace,
       '${organizations ? "organization" : "standalone_client"}' kind,
-      source.id public_id,source.name display_name,'active' status,source.id cursor,source.payload_json,
+      mapping.record_id public_id,mapping.external_id pa_internal_id,source.name display_name,'active' status,source.id cursor,source.payload_json,
+      mapping.project_alpha_public_id pa_public_id,
+      ${organizations ? `(SELECT count(*) FROM pa_clients contact
+        WHERE contact.organization_id=source.id AND contact.projection_source_id=source.projection_source_id AND contact.active=1)` : "1"} contact_count
+      FROM ${table} source JOIN project_alpha_active_directory_mappings mapping
+        ON mapping.source_id=source.projection_source_id
+        AND mapping.resource_type='${organizations ? "organization" : "client"}' AND mapping.external_id=source.id
+        AND mapping.project_alpha_public_id=${sourcePublicIdExpression("source")}
+        AND ${currentMapping}
+      JOIN operations_directory_records record ON record.record_id=mapping.record_id AND record.record_kind=mapping.resource_type
+      WHERE source.active=1 ${organizations ? "" : "AND source.organization_id IS NULL"}
+        AND (SELECT count(*) FROM project_alpha_active_directory_mappings candidate
+          WHERE candidate.source_id=mapping.source_id AND candidate.source_instance_id=mapping.source_instance_id
+            AND candidate.application_id=mapping.application_id AND candidate.history_epoch_id=mapping.history_epoch_id
+            AND candidate.resource_type=mapping.resource_type
+            AND (candidate.record_id=mapping.record_id OR candidate.external_id=mapping.external_id
+              OR candidate.project_alpha_public_id=mapping.project_alpha_public_id))=1
+        AND source.id>? ORDER BY source.id COLLATE BINARY LIMIT ?`)
+      .bind(cursor, PAGE_SIZE).all<Omit<Root, "mapping_status"> & { cursor: string; payload_json: string }>()).results
+      : (await ops.prepare(`SELECT source.projection_source_id source_id,'business' root_namespace,
+      '${organizations ? "organization" : "standalone_client"}' kind,
+      source.id public_id,source.id pa_internal_id,source.name display_name,'active' status,source.id cursor,source.payload_json,
       ${validatedUniquePublicIdExpression(table, "source")} pa_public_id,
       ${organizations ? "(SELECT count(*) FROM pa_clients contact WHERE contact.organization_id=source.id AND contact.projection_source_id=source.projection_source_id AND contact.active=1)" : "1"} contact_count
       FROM ${table} source WHERE source.active=1 ${organizations ? "" : "AND source.organization_id IS NULL"}
         AND source.id>? ORDER BY source.id COLLATE BINARY LIMIT ?`)
       .bind(cursor, PAGE_SIZE).all<Omit<Root, "mapping_status"> & { cursor: string; payload_json: string }>()).results;
     rows = sources.map(({ payload_json, ...source }) => {
+      if (activeMappings) return { ...source, mapping_status: "mapped" as const };
       const parsed = readClientHubSourcePublicId(payload_json);
       return { ...source, mapping_status: parsed.pa_public_id && !source.pa_public_id ? "ambiguous" : parsed.mapping_status };
     });
@@ -200,13 +238,52 @@ async function searchPage(env: IndexEnv, phase: Phase, cursor: string, generatio
   const values: SearchValue[] = [];
   let count = 0, next = cursor;
   if (phase === "contacts") {
-    const rows = (await env.OPS_DB.withSession("first-primary").prepare(`SELECT id,name,organization_id,payload_json,projection_source_id FROM pa_clients
-      WHERE active=1 AND id>? ORDER BY id COLLATE BINARY LIMIT ?`).bind(cursor, PAGE_SIZE)
-      .all<{ id: string; name: string; organization_id: string | null; payload_json: string; projection_source_id: string }>()).results;
+    const activeIdentities = await clientHubActiveDirectoryIdentities(env);
+    const activeMappings = activeIdentities !== null;
+    const currentMapping = clientHubActiveDirectoryIdentitySql("mapping", activeIdentities ?? []);
+    const rows = (await env.OPS_DB.withSession("first-primary").prepare(`SELECT client.id,client.name,client.organization_id,client.payload_json,client.projection_source_id,
+      ${activeMappings ? `(
+        SELECT mapping.record_id FROM project_alpha_active_directory_mappings mapping
+        WHERE mapping.source_id=client.projection_source_id AND mapping.resource_type='client'
+          AND mapping.external_id=client.id AND mapping.project_alpha_public_id=${sourcePublicIdExpression("client")}
+          AND ${currentMapping}
+          AND (SELECT count(*) FROM project_alpha_active_directory_mappings candidate
+            WHERE candidate.source_id=mapping.source_id AND candidate.source_instance_id=mapping.source_instance_id
+              AND candidate.application_id=mapping.application_id AND candidate.history_epoch_id=mapping.history_epoch_id
+              AND candidate.resource_type=mapping.resource_type
+              AND (candidate.record_id=mapping.record_id OR candidate.external_id=mapping.external_id
+                OR candidate.project_alpha_public_id=mapping.project_alpha_public_id))=1
+      )` : "NULL"} canonical_record_id,
+      ${activeMappings ? `(
+        SELECT mapping.record_id FROM project_alpha_active_directory_mappings mapping
+        WHERE mapping.source_id=client.projection_source_id AND mapping.resource_type='organization'
+          AND mapping.external_id=client.organization_id
+          AND mapping.project_alpha_public_id=${sourcePublicIdExpression("parent_source")}
+          AND ${currentMapping}
+          AND (SELECT count(*) FROM project_alpha_active_directory_mappings candidate
+            WHERE candidate.source_id=mapping.source_id AND candidate.source_instance_id=mapping.source_instance_id
+              AND candidate.application_id=mapping.application_id AND candidate.history_epoch_id=mapping.history_epoch_id
+              AND candidate.resource_type=mapping.resource_type
+              AND (candidate.record_id=mapping.record_id OR candidate.external_id=mapping.external_id
+                OR candidate.project_alpha_public_id=mapping.project_alpha_public_id))=1
+      )` : "NULL"} canonical_organization_id
+      FROM pa_clients client LEFT JOIN pa_organizations parent_source
+        ON parent_source.id=client.organization_id AND parent_source.projection_source_id=client.projection_source_id
+      WHERE client.active=1 AND client.id>? ORDER BY client.id COLLATE BINARY LIMIT ?`).bind(cursor, PAGE_SIZE)
+      .all<{ id: string; name: string; organization_id: string | null; payload_json: string; projection_source_id: string;
+        canonical_record_id: string | null; canonical_organization_id: string | null }>()).results;
     count = rows.length; next = rows.at(-1)?.id || cursor;
     for (const row of rows) {
-      const base = { source: row.projection_source_id, namespace: "business" as const, kind: (row.organization_id ? "organization" : "standalone_client") as Kind,
-        root: row.organization_id || row.id, type: "pa_client", id: row.id };
+      const canonical = activeMappings && row.canonical_record_id !== null;
+      const canonicalOrganization = canonical && row.organization_id !== null && row.canonical_organization_id !== null;
+      // Do not make a linked PA client appear as a standalone Ops customer
+      // merely because its organization has not been explicitly mapped.
+      if (activeMappings && row.organization_id !== null && !row.canonical_organization_id) continue;
+      const base = { source: row.projection_source_id, namespace: "business" as const,
+        kind: (canonicalOrganization || (!activeMappings && row.organization_id) ? "organization" : "standalone_client") as Kind,
+        root: canonicalOrganization ? row.canonical_organization_id! : canonical ? row.canonical_record_id! : row.organization_id || row.id,
+        type: "pa_client", id: row.id };
+      if (activeMappings && !canonical) continue;
       values.push({ ...base, field: "contact", value: row.name });
       const fields = contactFields(row.payload_json);
       if (fields.email) values.push({ ...base, field: "email", value: fields.email });
@@ -240,14 +317,44 @@ async function searchPage(env: IndexEnv, phase: Phase, cursor: string, generatio
       if (row.email_hint) values.push({ ...base, field: "email", value: row.email_hint });
     }
   } else {
+    const activeIdentities = await clientHubActiveDirectoryIdentities(env);
+    const activeMappings = activeIdentities !== null;
+    const currentMapping = clientHubActiveDirectoryIdentitySql("mapping", activeIdentities ?? []);
     const rows = (await env.OPS_DB.withSession("first-primary").prepare(`SELECT project.id,project.name,project.projection_source_id,
-      COALESCE(project.organization_id,client.organization_id) organization_id,project.client_id
+      COALESCE(project.organization_id,client.organization_id) organization_id,project.client_id,
+      ${activeMappings ? `CASE WHEN COALESCE(project.organization_id,client.organization_id) IS NOT NULL THEN (
+        SELECT mapping.record_id FROM project_alpha_active_directory_mappings mapping
+        JOIN pa_organizations org ON org.id=mapping.external_id AND org.projection_source_id=mapping.source_id
+        WHERE mapping.source_id=project.projection_source_id AND mapping.resource_type='organization'
+          AND mapping.external_id=COALESCE(project.organization_id,client.organization_id)
+          AND mapping.project_alpha_public_id=${sourcePublicIdExpression("org")}
+          AND ${currentMapping}
+          AND (SELECT count(*) FROM project_alpha_active_directory_mappings candidate
+            WHERE candidate.source_id=mapping.source_id AND candidate.source_instance_id=mapping.source_instance_id
+              AND candidate.application_id=mapping.application_id AND candidate.history_epoch_id=mapping.history_epoch_id
+              AND candidate.resource_type=mapping.resource_type
+              AND (candidate.record_id=mapping.record_id OR candidate.external_id=mapping.external_id
+                OR candidate.project_alpha_public_id=mapping.project_alpha_public_id))=1
+      ) ELSE (
+        SELECT mapping.record_id FROM project_alpha_active_directory_mappings mapping
+        JOIN pa_clients source_client ON source_client.id=mapping.external_id AND source_client.projection_source_id=mapping.source_id
+        WHERE mapping.source_id=project.projection_source_id AND mapping.resource_type='client'
+          AND mapping.external_id=project.client_id AND mapping.project_alpha_public_id=${sourcePublicIdExpression("source_client")}
+          AND ${currentMapping}
+          AND (SELECT count(*) FROM project_alpha_active_directory_mappings candidate
+            WHERE candidate.source_id=mapping.source_id AND candidate.source_instance_id=mapping.source_instance_id
+              AND candidate.application_id=mapping.application_id AND candidate.history_epoch_id=mapping.history_epoch_id
+              AND candidate.resource_type=mapping.resource_type
+              AND (candidate.record_id=mapping.record_id OR candidate.external_id=mapping.external_id
+                OR candidate.project_alpha_public_id=mapping.project_alpha_public_id))=1
+      ) END` : "NULL"} canonical_root_id
       FROM pa_projects project LEFT JOIN pa_clients client ON client.id=project.client_id AND client.projection_source_id=project.projection_source_id AND client.active=1
       WHERE project.active=1 AND project.id>? ORDER BY project.id COLLATE BINARY LIMIT ?`)
-      .bind(cursor, PAGE_SIZE).all<{ id: string; name: string; organization_id: string | null; client_id: string | null; projection_source_id: string }>()).results;
+      .bind(cursor, PAGE_SIZE).all<{ id: string; name: string; organization_id: string | null; client_id: string | null; projection_source_id: string; canonical_root_id: string | null }>()).results;
     count = rows.length; next = rows.at(-1)?.id || cursor;
     for (const row of rows) {
-      const root = row.organization_id || row.client_id;
+      const root = activeMappings ? row.canonical_root_id : row.organization_id || row.client_id;
+      if (activeMappings && row.organization_id !== null && !row.canonical_root_id) continue;
       if (root) values.push({ source: row.projection_source_id, namespace: "business", kind: row.organization_id ? "organization" : "standalone_client", root,
         type: "pa_project", id: row.id, field: "project", value: `${row.name} ${row.id}`, project: row.id });
     }

@@ -4,6 +4,7 @@ import { clientHubBusinessProjectOwnership, clientHubBusinessProjectSourceProof 
 import { readClientHubBusinessProjectPolicy, type ClientHubBusinessProjectPolicy } from "./client-hub-project-policy";
 import type { ClientHubCollectionContext } from "./client-hub-collections";
 import { projectAlphaReadVisibleSql } from "./project-alpha-read-visibility";
+import { clientHubAlphaInternalId } from "./client-hub-source";
 import { PROJECT_MEMORY_SECTIONS, PROJECT_OPERATIONAL_CONTACT_ROLES,
   type ProjectMemorySection, type ProjectMemorySnapshot, type ProjectOperationalContactRole } from "./project-operational-memory";
 import type { Env, StaffPrincipal } from "./types";
@@ -98,15 +99,16 @@ function rootKind(context: ClientHubCollectionContext): "organization" | "client
   return context.root.kind === "organization" ? "organization" : "client";
 }
 function rootOwnershipSql(context: ClientHubCollectionContext, alias: string, owner: string): { sql: string; values: unknown[] } {
+  const paRootId = clientHubAlphaInternalId(context.root, context.paRootId);
   return context.root.kind === "organization"
-    ? { sql: `(${alias}.organization_id=? OR (${alias}.organization_id IS NULL AND ${owner}.organization_id=?))`, values: [context.root.public_id, context.root.public_id] }
-    : { sql: `${alias}.client_id=? AND ${alias}.organization_id IS NULL AND ${owner}.id IS NOT NULL AND ${owner}.organization_id IS NULL`, values: [context.root.public_id] };
+    ? { sql: `(${alias}.organization_id=? OR (${alias}.organization_id IS NULL AND ${owner}.organization_id=?))`, values: [paRootId, paRootId] }
+    : { sql: `${alias}.client_id=? AND ${alias}.organization_id IS NULL AND ${owner}.id IS NOT NULL AND ${owner}.organization_id IS NULL`, values: [paRootId] };
 }
 async function rootRow(db: Database, context: ClientHubCollectionContext): Promise<RootRow | null> {
   const table = context.root.kind === "organization" ? "pa_organizations" : "pa_clients";
   return db.prepare(`SELECT last_sync_id FROM ${table} WHERE id=? AND projection_source_id=? AND active=1
     ${context.root.kind === "organization" ? "" : "AND organization_id IS NULL"}
-    AND ${projectAlphaReadVisibleSql("projection_source_id")} LIMIT 1`).bind(context.root.public_id, context.root.source_id).first<RootRow>();
+    AND ${projectAlphaReadVisibleSql("projection_source_id")} LIMIT 1`).bind(clientHubAlphaInternalId(context.root, context.paRootId), context.root.source_id).first<RootRow>();
 }
 async function projectRow(db: Database, context: ClientHubCollectionContext, projectId: string,
   policy: ClientHubBusinessProjectPolicy): Promise<ProjectRow | null> {
@@ -189,7 +191,7 @@ async function overlay(db: Database, context: ClientHubCollectionContext, projec
     for (const item of wanted) {
       const live = await db.prepare(`SELECT 1 ok FROM pa_clients WHERE id=? AND projection_source_id=? AND active=1 AND
         ${context.root.kind === "organization" ? "organization_id=?" : "id=? AND organization_id IS NULL"}`)
-        .bind(item.contact_id, source, context.root.public_id).first<number>("ok");
+        .bind(item.contact_id, source, clientHubAlphaInternalId(context.root, context.paRootId)).first<number>("ok");
       if (live !== 1) changed();
     }
   }

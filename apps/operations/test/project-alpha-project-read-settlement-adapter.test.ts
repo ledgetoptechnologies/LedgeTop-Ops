@@ -88,12 +88,14 @@ beforeAll(async () => {
   runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06", script: "export default {fetch(){return new Response('ok')}}", d1Databases: ["OPS_DB"] });
   db = await runtime.getD1Database("OPS_DB") as D1Database;
   await migrate("0062_project_alpha_project_outbox.sql"); await migrate("0063_project_alpha_project_adoption.sql"); await migrate("0064_project_alpha_project_history_epoch.sql");
-  await db.exec("CREATE TABLE native_staff_admissions(staff_id TEXT PRIMARY KEY,active INTEGER,bound_access_subject TEXT,version INTEGER); CREATE TABLE native_staff_profiles(staff_id TEXT PRIMARY KEY,login_email TEXT,version INTEGER); CREATE TABLE native_business_areas(id TEXT PRIMARY KEY,active INTEGER); CREATE TABLE native_business_divisions(id TEXT PRIMARY KEY,business_area_id TEXT,active INTEGER,UNIQUE(business_area_id,id)); CREATE TABLE operations_directory_records(record_id TEXT PRIMARY KEY,record_kind TEXT); CREATE TABLE project_alpha_directory_mappings(source_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,resource_type TEXT,external_id TEXT,project_alpha_public_id TEXT); CREATE TABLE operations_directory_client_organizations(client_record_id TEXT,organization_record_id TEXT);");
+  await db.exec("CREATE TABLE native_staff_admissions(staff_id TEXT PRIMARY KEY,active INTEGER,bound_access_subject TEXT,version INTEGER); CREATE TABLE native_staff_profiles(staff_id TEXT PRIMARY KEY,login_email TEXT,version INTEGER); CREATE TABLE native_business_areas(id TEXT PRIMARY KEY,active INTEGER); CREATE TABLE native_business_divisions(id TEXT PRIMARY KEY,business_area_id TEXT,active INTEGER,UNIQUE(business_area_id,id)); CREATE TABLE operations_directory_records(record_id TEXT PRIMARY KEY,record_kind TEXT); CREATE TABLE project_alpha_directory_mappings(source_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,resource_type TEXT,external_id TEXT,project_alpha_public_id TEXT,command_id TEXT,created_at TEXT DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now'))); CREATE TABLE project_alpha_existing_directory_binding_activation_receipts(activation_id TEXT PRIMARY KEY,source_id TEXT,resource_type TEXT,record_id TEXT,external_id TEXT,project_alpha_public_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,activated_at TEXT); CREATE VIEW project_alpha_active_directory_mappings AS SELECT source_id,resource_type,external_id,project_alpha_public_id,source_instance_id,application_id,history_epoch_id,'legacy' mapping_kind FROM project_alpha_directory_mappings; CREATE TABLE operations_directory_client_organizations(client_record_id TEXT,organization_record_id TEXT);");
   await migrate("0086_native_shared_projects.sql");
   await db.exec("CREATE TABLE delivery_public_shares(id TEXT PRIMARY KEY,url TEXT,payload BLOB); CREATE TABLE delivery_records(id TEXT PRIMARY KEY,payload BLOB); INSERT INTO delivery_public_shares VALUES('share','https://public.example.test/secret',x'000102ff'); INSERT INTO delivery_records VALUES('delivery',x'00ff8041'); INSERT INTO operations_shared_projects(external_project_id,name,lifecycle,scopes_json) VALUES('sentinel','Sentinel','active','[]'); INSERT INTO operations_shared_project_revisions(external_project_id,version,pa_revision,read_json,refresh_command_id) VALUES('sentinel',1,NULL,'{\"sentinel\":true}',NULL);");
   await migrate("0119_project_alpha_project_v2_persistence_ledger.sql"); await migrate("0120_project_alpha_project_v2_canonical_settlement.sql");
   await migrate("0121_project_alpha_project_v2_settlement_proof_expiry.sql");
   await migrate("0122_project_alpha_project_v2_canonical_activation.sql");
+  await migrate("0130_project_alpha_active_directory_project_guard.sql");
+  await migrate("0131_project_alpha_active_directory_update_guard.sql");
 });
 afterAll(async () => runtime.dispose());
 
@@ -310,6 +312,27 @@ describe("unmounted project v2 canonical activation", () => {
       .resolves.toEqual({ status: "blocked", reason: "authority" });
   });
 
+  it("fails closed when an acquired directory mapping has a different history epoch", async () => {
+    const setup = await settled();
+    const otherEpoch = uuid();
+    await db.batch([
+      db.prepare("DELETE FROM project_alpha_directory_mappings WHERE external_id=?").bind(setup.organizationRecordId),
+      db.prepare(`INSERT INTO project_alpha_existing_directory_binding_activation_receipts(
+        activation_id,source_id,resource_type,record_id,external_id,project_alpha_public_id,source_instance_id,application_id,history_epoch_id,activated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?)`).bind(uuid(), "project-alpha:primary", "organization", setup.organizationRecordId,
+        "pa-org-internal-drifted", setup.selectedOrganizationPublicId, source, application, otherEpoch, "2026-10-01T00:00:00.000Z"),
+    ]);
+
+    await expect(activateProjectAlphaProjectV2Canonical({ OPS_DB: db }, setup.settlementId))
+      .resolves.toEqual({ status: "blocked", reason: "directory" });
+    expect(await db.prepare("SELECT count(*) n FROM operations_shared_projects WHERE external_project_id=?")
+      .bind(setup.value.externalId).first("n")).toBe(0);
+    expect(await db.prepare("SELECT state FROM project_alpha_project_outbox WHERE command_id=?")
+      .bind(setup.value.commandId).first("state")).toBe("pending");
+    expect(await db.prepare("SELECT count(*) n FROM project_alpha_project_v2_canonical_activation_receipts WHERE settlement_id=?")
+      .bind(setup.settlementId).first("n")).toBe(0);
+  });
+
   it("fails closed on revoked authority and converges concurrent activation on one receipt", async () => {
     const revoked = await settled();
     await db.prepare("UPDATE native_staff_admissions SET active=0 WHERE staff_id=?").bind(revoked.staff).run();
@@ -332,6 +355,16 @@ describe("unmounted project v2 canonical activation", () => {
     const created = await settled();
     const initial = await activateProjectAlphaProjectV2Canonical({ OPS_DB: db }, created.settlementId);
     expect(initial).toMatchObject({ status: "activated", version: 1 });
+    await db.batch([
+      db.prepare("DELETE FROM project_alpha_directory_mappings WHERE external_id=?").bind(created.organizationRecordId),
+      db.prepare(`INSERT INTO project_alpha_existing_directory_binding_activation_receipts(
+        activation_id,source_id,resource_type,record_id,external_id,project_alpha_public_id,source_instance_id,application_id,history_epoch_id,activated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?)`).bind(uuid(), "project-alpha:primary", "organization", created.organizationRecordId,
+        "pa-org-external-different-from-ops-id", created.selectedOrganizationPublicId, source, application, epoch, "2026-10-01T00:00:00.000Z"),
+    ]);
+    expect(await db.prepare("SELECT record_id,external_id,mapping_kind FROM project_alpha_active_directory_mappings WHERE record_id=?")
+      .bind(created.organizationRecordId).first()).toEqual({ record_id: created.organizationRecordId,
+        external_id: "pa-org-external-different-from-ops-id", mapping_kind: "acquired" });
     const actor = await db.prepare(`SELECT actor_staff_id,actor_access_subject,actor_admission_version,
       actor_profile_version,actor_email,grant_generation FROM native_project_command_proofs WHERE command_id=?`)
       .bind(created.value.commandId).first<{actor_staff_id:string;actor_access_subject:string;actor_admission_version:number;actor_profile_version:number;actor_email:string;grant_generation:number}>();
@@ -408,7 +441,7 @@ describe("unmounted project v2 canonical activation", () => {
     const bindCommand = await settleProjectAlphaProjectV2Command({ OPS_DB: db }, "bind", connection, bind, bindSender);
     expect(bindCommand).toMatchObject({ status: "acknowledged" });
     const bindRead = { ...readBody(), resource: { type: "project", id: bindPublic, revision: "1", projectionSha256: bindProjection },
-      data: { ...readBody().data, name: "Bound project", organizationPublicId: null } };
+      data: { ...readBody().data, name: "Bound project", organizationPublicId: created.selectedOrganizationPublicId } };
     const bindSettlement = await settleProjectAlphaProjectV2Read({ OPS_DB: db }, (bindCommand as {receiptId:string}).receiptId, connection, reader(bindRead));
     expect(bindSettlement).toMatchObject({ status: "settled" });
     const bound = await activateProjectAlphaProjectV2Canonical({ OPS_DB: db }, (bindSettlement as {settlementId:string}).settlementId);
