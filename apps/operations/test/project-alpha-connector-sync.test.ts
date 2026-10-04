@@ -177,7 +177,11 @@ describe("registered source snapshot end-to-end", () => {
     expect(JSON.parse(organization?.payload_json ?? "null")).toMatchObject({ public_id: "a".repeat(32) });
     expect(JSON.parse(client?.payload_json ?? "null")).toMatchObject({ public_id: "b".repeat(32) });
     await expect(resolveClientHubSourceRoot(env, "organization", organization!.id, source.sourceId)).resolves
-      .toMatchObject({ pa_public_id: "a".repeat(32), mapping_status: "mapped" });
+      // A legacy snapshot is not an activated, deployment-pinned API-v2 mapping.
+      // Keep its projection intact without inventing Client Hub authority.
+      .toBeNull();
+    expect(await ops.prepare("SELECT count(*) count FROM project_alpha_active_directory_mappings WHERE source_id=?")
+      .bind(source.sourceId).first("count")).toBe(0);
     expect(await ops.prepare("SELECT name FROM pa_projects WHERE id='5'").first("name")).toBe("Primary project");
     expect(await ops.prepare("SELECT display_name FROM pa_users WHERE id='1'").first("display_name")).toBe("Primary user");
     expect(await ops.prepare("SELECT count(*) count FROM pa_application_entitlements WHERE projection_source_id=?").bind(source.sourceId).first("count")).toBe(0);

@@ -16,8 +16,10 @@ const QUERY_BUDGET = 800;
 const PHASES = ["organizations", "standalone", "reviewed", "workspaces", "accounts", "contacts", "reviewed_contacts", "principals", "projects", "sweep"] as const;
 type Phase = typeof PHASES[number];
 const PAGE_QUERY_COST: Record<Phase, number> = {
-  organizations: 45, standalone: 45, workspaces: 46, accounts: 45,
-  reviewed: 45, contacts: 123, reviewed_contacts: 85, principals: 84, projects: 43, sweep: 4,
+  // Source-backed pages also inspect the active mapping relation, its columns,
+  // and its configured source identities (up to three additional queries).
+  organizations: 48, standalone: 48, workspaces: 46, accounts: 45,
+  reviewed: 45, contacts: 126, reviewed_contacts: 85, principals: 84, projects: 46, sweep: 4,
 };
 type Kind = "organization" | "standalone_client";
 type Namespace = "business" | "portal" | "account" | "review";
