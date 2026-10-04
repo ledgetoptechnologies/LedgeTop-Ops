@@ -5,7 +5,22 @@ Directory-adoption window with the paired native-workspace and native
 service-home profiles. Every constituent builder validates the same untouched
 default-off Client and Operations sources; the composer merges only their
 exported flag deltas and then requires full-object equality for both candidates.
-It performs no file writes, CLI actions, network calls, or deployment.
+The pure composer performs no file writes, network calls, or deployment. Its
+dedicated local CLI can materialize or verify one ignored, indivisible pair:
+
+```powershell
+node scripts/staging-paired-end-to-end-acceptance-cli.mjs --write
+node scripts/staging-paired-end-to-end-acceptance-cli.mjs --check
+```
+
+The CLI reads the validated default-off staging and production configurations
+plus the names-only `.backups/operations-staging-secret-names.json` inventory.
+It writes only
+`apps/client/wrangler.staging.paired-end-to-end-acceptance.json` and
+`apps/operations/wrangler.staging.paired-end-to-end-acceptance.json`, with
+private file permissions. It never overwrites an existing candidate, rejects a
+missing, partial, stale, symlinked, non-ignored, or escaped pair, and performs
+no deployment, network request, credential read, or production mutation.
 
 The pair is indivisible: missing Client or Operations configuration, an omitted
 gate, an extra variable/resource, changed URL or Viewer key, an invalid

@@ -119,7 +119,8 @@ describe("default-off Project Alpha contact-role adapter", () => {
   it("reads exact project roles only after an exact source/root project mapping is available", async () => {
     const { env, ops } = await fixture();
     expect(await exactBusinessProjectPublicId(env, context(), "project-internal")).toBe(projectPublicId);
-    expect(await exactBusinessProjectPublicId(env, context({ public_id: "another-org" }), "project-internal")).toBeNull();
+    expect(await exactBusinessProjectPublicId(env, context({ public_id: "another-ops-root" }), "project-internal")).toBe(projectPublicId);
+    expect(await exactBusinessProjectPublicId(env, context({ pa_internal_id: "another-org" }), "project-internal")).toBeNull();
     const result = await listProjectAlphaContactRoles(env, context(), { project: true, projectPublicId, limit: 10 });
     expect(result).toMatchObject({ state: "populated", returned: 1, items: [{ scopeType: "project", role: "billing_contact",
       primary: true, primaryBilling: true, sendProjectInvoices: true, canViewInvoiceLinks: true }] });
