@@ -88,6 +88,19 @@ describe("private existing Directory binding activation consumer", () => {
       const sql = readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8");
       await db.batch(splitD1MigrationStatements(sql).map(statement => db.prepare(statement)));
     }
+    // Runtime consumers use the canonical record_id added to the active mapping
+    // contract by migration 0170. This focused fixture cannot apply 0170 because
+    // it deliberately omits the shared-project tables and guards rebuilt there.
+    const activeMappingView = `DROP VIEW project_alpha_active_directory_mappings;
+      CREATE VIEW project_alpha_active_directory_mappings AS
+      SELECT source_id,resource_type,external_id AS record_id,external_id,project_alpha_public_id,source_instance_id,
+        application_id,history_epoch_id,command_id AS provenance_id,'legacy' AS mapping_kind,created_at
+      FROM project_alpha_directory_mappings
+      UNION ALL
+      SELECT source_id,resource_type,record_id,external_id,project_alpha_public_id,source_instance_id,
+        application_id,history_epoch_id,activation_id AS provenance_id,'acquired' AS mapping_kind,activated_at AS created_at
+      FROM project_alpha_existing_directory_binding_activation_receipts;`;
+    await db.batch(splitD1MigrationStatements(activeMappingView).map(statement => db.prepare(statement)));
   });
 
   afterEach(async () => { await runtime.dispose(); });

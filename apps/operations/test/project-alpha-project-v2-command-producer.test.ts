@@ -36,13 +36,19 @@ async function actor() {
 async function directory(sourceId: string, sourceInstanceId: string, applicationId: string, historyEpochId: string, mappingKind: "legacy" | "acquired" = "legacy") {
   const organizationRecordId = uuid(), clientRecordId = uuid(), organizationPublicId = crypto.randomUUID().replaceAll("-", ""), clientPublicId = crypto.randomUUID().replaceAll("-", "");
   const mappingTable = mappingKind === "legacy" ? "project_alpha_directory_mappings" : "project_alpha_existing_directory_binding_activation_receipts";
+  const mappingColumns = mappingKind === "legacy"
+    ? "source_id,source_instance_id,application_id,history_epoch_id,resource_type,external_id,project_alpha_public_id"
+    : "source_id,source_instance_id,application_id,history_epoch_id,resource_type,external_id,project_alpha_public_id,record_id";
+  const mappingValues = mappingKind === "legacy" ? "?,?,?,?,?,?,?" : "?,?,?,?,?,?,?,?";
+  const mapping = (resourceType: "organization" | "client", recordId: string, publicId: string) =>
+    db.prepare(`INSERT INTO ${mappingTable}(${mappingColumns}) VALUES(${mappingValues})`)
+      .bind(sourceId, sourceInstanceId, applicationId, historyEpochId, resourceType, recordId, publicId,
+        ...(mappingKind === "acquired" ? [recordId] : []));
   await db.batch([
     db.prepare("INSERT INTO operations_directory_records(record_id,record_kind) VALUES(?,'organization')").bind(organizationRecordId),
     db.prepare("INSERT INTO operations_directory_records(record_id,record_kind) VALUES(?,'client')").bind(clientRecordId),
-    db.prepare(`INSERT INTO ${mappingTable}(source_id,source_instance_id,application_id,history_epoch_id,resource_type,external_id,project_alpha_public_id)
-      VALUES(?,?,?,?,?,?,?)`).bind(sourceId, sourceInstanceId, applicationId, historyEpochId, "organization", organizationRecordId, organizationPublicId),
-    db.prepare(`INSERT INTO ${mappingTable}(source_id,source_instance_id,application_id,history_epoch_id,resource_type,external_id,project_alpha_public_id)
-      VALUES(?,?,?,?,?,?,?)`).bind(sourceId, sourceInstanceId, applicationId, historyEpochId, "client", clientRecordId, clientPublicId),
+    mapping("organization", organizationRecordId, organizationPublicId),
+    mapping("client", clientRecordId, clientPublicId),
     db.prepare("INSERT INTO operations_directory_client_organizations(client_record_id,organization_record_id) VALUES(?,?)").bind(clientRecordId, organizationRecordId),
   ]);
   return { organizationRecordId, clientRecordId, organizationPublicId, clientPublicId };
@@ -130,8 +136,11 @@ describe("unmounted project-v2 command producer", () => {
     const guards = await db.prepare(`SELECT name,sql FROM sqlite_master WHERE type='trigger'
       AND name IN ('operations_shared_projects_bound_refresh_guard','operations_shared_projects_no_update') ORDER BY name`).all<{ name: string; sql: string }>();
     expect(guards.results).toHaveLength(2);
-    expect(guards.results.every(guard => guard.sql.includes("project_alpha_directory_mappings")
-      && !guard.sql.includes("project_alpha_active_directory_mappings"))).toBe(true);
+    const guardSql = Object.fromEntries(guards.results.map(guard => [guard.name, guard.sql]));
+    expect(guardSql.operations_shared_projects_bound_refresh_guard).toContain("project_alpha_directory_mappings customer");
+    expect(guardSql.operations_shared_projects_bound_refresh_guard).toContain("project_alpha_active_directory_mappings d");
+    expect(guardSql.operations_shared_projects_no_update).toContain("project_alpha_active_directory_mappings d");
+    expect(guards.results.every(guard => guard.sql.includes("r.record_id=d.record_id"))).toBe(true);
     expect((await db.prepare("SELECT id,url,hex(payload) payload FROM delivery_public_shares ORDER BY id").all()).results).toEqual(publicBefore.results);
 
     const unlinked = await createAction("project-alpha:one", "acquired");
