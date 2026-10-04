@@ -100,6 +100,72 @@ test("accepts the exact approved isolated staging inventory", () => {
     assert.deepEqual(validateApp(app, staging, productionFrom(staging)), []);
   }
 });
+test("pins the inactive workspace binding to staging and keeps its release flags off", () => {
+  const base = stagingConfig("operations");
+  const production = productionFrom(base);
+  const wrongTarget = structuredClone(base);
+  wrongTarget.services.find((item) => item.binding === "CLIENT_AUTHORITY_WORKSPACE_BINDING").service = "ledgetop-clients";
+  const targetErrors = validateApp("operations", wrongTarget, production);
+  assert(targetErrors.some((error) => error.includes("service") && error.includes("CLIENT_AUTHORITY_WORKSPACE_BINDING")), targetErrors.join(" | "));
+  const enabled = structuredClone(base);
+  enabled.vars.CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ENABLED = "true";
+  enabled.vars.CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ORIGIN = "https://ops.ledgetopdroneservices.com";
+  enabled.vars.CLIENT_AUTHORITY_WORKSPACE_BINDING_OUTBOX_ENABLED = "true";
+  const errors = validateApp("operations", enabled, production);
+  assert(errors.some((error) => error.includes("CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ENABLED")), errors.join(" | "));
+  assert(errors.some((error) => error.includes("CLIENT_AUTHORITY_WORKSPACE_BINDING_OUTBOX_ENABLED")), errors.join(" | "));
+  assert(errors.some((error) => error.includes("workspace binding admin requires the exact Ops HTTPS staging origin")), errors.join(" | "));
+});
+
+test("authority v3 owner origin is blank only while disabled and exact when enabled", () => {
+  const disabled = stagingConfig("operations"), production = productionFrom(disabled);
+  assert.deepEqual(validateApp("operations", disabled, production), []);
+  disabled.vars.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ORIGIN = "https://ops-staging.example.test";
+  assert(validateApp("operations", disabled, production).some(error => error.includes("authority v3 owner origin")));
+  const enabled = stagingConfig("operations");
+  enabled.vars.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ENABLED = "true";
+  enabled.vars.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ORIGIN = `https://${STAGING_HOSTS.operations}`;
+  assert(!validateApp("operations", enabled, productionFrom(stagingConfig("operations"))).some(error => error.includes("exact Ops HTTPS staging origin")));
+  enabled.vars.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ORIGIN = "https://wrong-staging.example.test";
+  assert(validateApp("operations", enabled, productionFrom(stagingConfig("operations"))).some(error => error.includes("exact Ops HTTPS staging origin")));
+});
+test("recipient enrollment stays staging-only, separately gated, and secret-backed", () => {
+  const delivery = stagingConfig("delivery");
+  const operations = stagingConfig("operations");
+  const configs = { delivery, operations, "ops-sync": stagingConfig("ops-sync") };
+  const bridge = delivery.services.find(({ binding }) => binding === "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_BRIDGE");
+
+  assert.deepEqual(bridge, {
+    binding: "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_BRIDGE",
+    service: "ledgetop-ops-staging",
+    entrypoint: "ClientPortalRecipientEnrollmentBridge",
+  });
+  assert.equal(Object.hasOwn(delivery.vars, "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_CSRF_SECRET"), false);
+  assert(REQUIRED_STAGING_SECRETS.delivery.includes("CLIENT_PORTAL_RECIPIENT_ENROLLMENT_CSRF_SECRET"));
+  assert.match(FEATURE_FLAG_ACTIVATION_POLICIES.delivery.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED.prohibitedReason, /separately reviewed staging-only activation window/);
+  assert.match(FEATURE_FLAG_ACTIVATION_POLICIES.operations.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED.prohibitedReason, /independent from owner mutation authority/);
+  assert.match(FEATURE_FLAG_ACTIVATION_POLICIES.operations.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ENABLED.prohibitedReason, /separate reviewed activation/);
+
+  bridge.service = "ledgetop-ops";
+  let errors = validateApp("delivery", delivery, productionFrom(stagingConfig("delivery")));
+  assert(errors.some((error) => error.includes("services") || error.includes("service CLIENT_PORTAL_RECIPIENT_ENROLLMENT_BRIDGE")), errors.join(" | "));
+  errors = validateCrossApp(configs);
+  assert(errors.some((error) => error.includes("recipient enrollment bridge")), errors.join(" | "));
+
+  const disabledWithOrigin = stagingConfig("operations");
+  disabledWithOrigin.vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ORIGIN = `https://${STAGING_HOSTS.operations}`;
+  errors = validateApp("operations", disabledWithOrigin, productionFrom(stagingConfig("operations")));
+  assert(errors.some((error) => error.includes("owner origin must remain empty while disabled")), errors.join(" | "));
+
+  const enabled = stagingConfig("operations");
+  enabled.vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ENABLED = "true";
+  enabled.vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ORIGIN = `https://${STAGING_HOSTS.operations}`;
+  errors = validateApp("operations", enabled, productionFrom(stagingConfig("operations")));
+  assert(!errors.some((error) => error.includes("exact Ops HTTPS staging origin")), errors.join(" | "));
+  enabled.vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ORIGIN = "https://ops.ledgetopdroneservices.com";
+  errors = validateApp("operations", enabled, productionFrom(stagingConfig("operations")));
+  assert(errors.some((error) => error.includes("exact Ops HTTPS staging origin")), errors.join(" | "));
+});
 test("rejects missing, unexpected, or non-regular release migrations", () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-staging-migrations-"));
   for (const app of ["delivery", "operations"]) {
@@ -210,14 +276,18 @@ test("keeps native integration control inert", () => {
 test("requires shared staging resources to agree", () => {
   const configs = { delivery: stagingConfig("delivery"), operations: stagingConfig("operations"), "ops-sync": stagingConfig("ops-sync") };
   configs.operations.d1_databases[1].database_id = "wrong";
-  configs.delivery.services[0].service = "wrong-ops-staging";
-  configs.delivery.services[1].entrypoint = "WrongViewerIssuer";
+  configs.delivery.services.find(service => service.binding === "CLIENT_DELEGATED_SHARE_SIGNER").service = "wrong-ops-staging";
+  configs.delivery.services.find(service => service.binding === "VIEWER_SESSION_ISSUER").entrypoint = "WrongViewerIssuer";
+  configs.delivery.services.find(service => service.binding === "CLIENT_PORTAL_SERVICE_METADATA_READER").entrypoint = "WrongMetadataReader";
+  configs.delivery.services.find(service => service.binding === "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_BRIDGE").entrypoint = "WrongRecipientEnrollmentBridge";
   configs["ops-sync"].services[0].entrypoint = "WrongPortalIngress";
   configs.delivery.vars.PROJECT_ALPHA_PORTAL_APPLICATION_KEY = "wrong-application-key";
   const errors = validateCrossApp(configs);
   assert(errors.some((error) => error.includes("DELIVERY_DB")));
   assert(errors.some((error) => error.includes("delegated-share signer")));
   assert(errors.some((error) => error.includes("Viewer session issuer")));
+  assert(errors.some((error) => error.includes("service metadata reader")));
+  assert(errors.some((error) => error.includes("recipient enrollment bridge")));
   assert(errors.some((error) => error.includes("portal projection ingress")));
   assert(errors.some((error) => error.includes("application key")));
 });
@@ -336,11 +406,11 @@ test("requires every portal-v2 and Operations capability to be explicitly false"
   }
 });
 
-test("pins the native portal, Operations 0054-0131, both 0199 files, and the 0200-0213 release contract", () => {
-  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.length, 118);
+test("pins the native portal, the complete Operations chain, both 0199 files, and the 0200-0221 release contract", () => {
+  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.length, 145);
   assert.equal(REQUIRED_STAGING_MIGRATIONS.operations[0], "0014_staff_acl_controls.sql");
-  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.at(-1), "0131_project_alpha_active_directory_update_guard.sql");
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-31), [
+  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.at(-1), "0151_verified_recipient_delivery_authority_outbox.sql");
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-39), [
     "0184_native_client_feedback.sql",
     "0185_native_service_request_ownership.sql",
     "0186_delivery_notification_authority_provenance.sql",
@@ -372,24 +442,55 @@ test("pins the native portal, Operations 0054-0131, both 0199 files, and the 020
     "0211_incoming_upload_verification_lifecycle.sql",
     "0212_incoming_upload_archive_inventory.sql",
     "0213_incoming_rclone_promotion.sql",
+    "0214_ops_inventory_catalog_staging.sql",
+    "0215_operations_portal_access_authority_shadow.sql",
+    "0216_client_authority_workspace_ownership_claim.sql",
+    "0217_client_authority_workspace_claim_evidence.sql",
+    "0218_client_authority_workspace_binding.sql",
+    "0219_operations_portal_authority_v2.sql",
+    "0220_operations_portal_authority_v3_permissions.sql",
+    "0221_verified_recipient_delivery_authority.sql",
   ]);
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(-13), [
-    "0119_project_alpha_project_v2_persistence_ledger.sql",
-    "0120_project_alpha_project_v2_canonical_settlement.sql",
-    "0121_project_alpha_project_v2_settlement_proof_expiry.sql",
-    "0122_project_alpha_project_v2_canonical_activation.sql",
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0123_native_directory_authority_history.sql")), [
     "0123_native_directory_authority_history.sql",
     "0124_project_alpha_project_adoption_review_evidence.sql",
     "0125_project_alpha_api_v2_inventory_observations.sql",
+    "0125_project_alpha_existing_directory_binding_activation.sql",
     "0126_project_alpha_directory_read_adoption_claims.sql",
+    "0126_project_alpha_project_active_directory_mapping_bridge.sql",
     "0127_project_alpha_directory_read_adoption_field_review_receipts.sql",
+    "0127_project_alpha_existing_directory_binding_activation_evidence_transition.sql",
     "0128_project_alpha_inventory_generation_surface_scope.sql",
+    "0128_project_alpha_project_adoption_bind_bridge.sql",
     "0129_project_alpha_existing_directory_binding_activation.sql",
+    "0129_project_alpha_existing_directory_binding_activation_relationship.sql",
     "0130_project_alpha_active_directory_project_guard.sql",
+    "0130_project_alpha_project_adoption_review_producer.sql",
     "0131_project_alpha_active_directory_update_guard.sql",
+    "0131_project_alpha_project_active_directory_mapping_guards.sql",
+    "0132_operations_directory_acquired_relationship_dependencies.sql",
+    "0133_project_alpha_directory_relationship_outbox.sql",
+    "0134_native_directory_create_admission_relationships.sql",
+    "0135_operations_directory_relationship_canonical_ids.sql",
+    "0136_project_alpha_directory_reconciliation.sql",
+    "0137_project_alpha_directory_reconciliation_scheduler.sql",
+    "0138_project_alpha_directory_reconciliation_review.sql",
+    "0139_native_directory_staging_empty_enrollment_fixture_guard.sql",
+    "0140_client_onboarding_one_time_reveal.sql",
+    "0141_deferred_directory_client_materialization.sql",
+    "0142_client_portal_access_authority_outbox.sql",
+    "0143_client_portal_workspace_binding_selection.sql",
+    "0144_client_portal_workspace_binding_outbox.sql",
+    "0145_client_portal_authority_v2_outbox.sql",
+    "0146_ops_customer_service_enrollments.sql",
+    "0147_client_portal_authority_v3_permissions.sql",
+    "0148_client_portal_recipient_enrollment.sql",
+    "0149_client_portal_recipient_enrollment_sql_fences.sql",
+    "0150_client_portal_recipient_enrollment_cancellation.sql",
+    "0151_verified_recipient_delivery_authority_outbox.sql",
   ]);
-  const operationsStart = REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0054_project_alpha_directory_outbox.sql");
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(operationsStart, operationsStart + 3), [
+  const nativeDirectoryStart = REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0054_project_alpha_directory_outbox.sql");
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(nativeDirectoryStart, nativeDirectoryStart + 3), [
     "0054_project_alpha_directory_outbox.sql",
     "0055_operations_directory_authority.sql",
     "0056_operations_directory_materialization.sql",

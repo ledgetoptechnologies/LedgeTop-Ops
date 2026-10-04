@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Miniflare } from "miniflare";
 import { readFileSync } from "node:fs";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
@@ -16,11 +16,13 @@ const nativeEpochId = "20000000-0000-4000-8000-000000000005";
 const recordId = "30000000-0000-4000-8000-000000000001";
 const idempotencyKey = "40000000-0000-4000-8000-000000000001";
 const changedIdempotencyKey = "40000000-0000-4000-8000-000000000002";
+const reviewer = { staffId: "staff", accessSubject: "access|staff" };
 const publicId = "a".repeat(32);
 const requestHash = "1".repeat(64);
 const bindingHash = "2".repeat(64);
 const responseHash = "3".repeat(64);
 const profileHash = "4".repeat(64);
+const reviewedHash = "5".repeat(64);
 
 const connection = (overrides: Record<string, unknown> = {}) => JSON.stringify({ version: 1, instances: {
   [sourceId]: { sourceId, enabled: true, baseUrl: "https://pa.example.test", apiKey: "test-secret",
@@ -79,7 +81,9 @@ describe("private existing Directory binding activation consumer", () => {
       "0116_project_alpha_acquired_canonical_mapping_activation.sql",
       "0117_project_alpha_native_owner_epoch_claims.sql",
       "0123_native_directory_authority_history.sql",
-      "0129_project_alpha_existing_directory_binding_activation.sql"]) {
+      "0125_project_alpha_existing_directory_binding_activation.sql",
+      "0127_project_alpha_existing_directory_binding_activation_evidence_transition.sql",
+      "0129_project_alpha_existing_directory_binding_activation_relationship.sql"]) {
       const sql = readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8");
       await db.batch(splitD1MigrationStatements(sql).map(statement => db.prepare(statement)));
     }
@@ -102,7 +106,7 @@ describe("private existing Directory binding activation consumer", () => {
       VALUES(?,?,?,?,?,?,?,?,?,?,'7','50000000-0000-4000-8000-000000000001',?,'staff','access|staff',1,1,
         COALESCE(?,strftime('%Y-%m-%dT%H:%M:%fZ','now')),1)`)
       .bind(reviewItemId,requestHash,recordId,sourceId,sourceInstanceId,applicationId,historyEpochId,kind,recordId,
-        publicId,bindingHash,options.reviewedAt ?? null).run();
+        publicId,options.bindingHash ?? reviewedHash,options.reviewedAt ?? null).run();
     await db.prepare(`INSERT INTO project_alpha_existing_directory_binding_acquisition_commands(
       command_id,request_sha256,record_id,source_id,source_instance_id,application_id,history_epoch_id,
       resource_type,external_id,project_alpha_public_id,project_alpha_revision,review_receipt_id)
@@ -140,8 +144,52 @@ describe("private existing Directory binding activation consumer", () => {
       .bind(acquiredReceiptId).run();
   }
 
-  const call = (key = idempotencyKey, raw: unknown = { reviewItemId, idempotencyKey: key }, rawConnection = connection()) =>
-    activateProjectAlphaExistingDirectoryBinding({ OPS_DB: db, PROJECT_ALPHA_API_V2_CONNECTIONS: rawConnection }, raw);
+  function freshReads(options: { profileRevision?: string; bindingRevision?: string; bindingStatus?: number;
+    invalidContract?: boolean; transport?: boolean; kind?: "organization" | "client"; parentPublicId?: string | null } = {}) {
+    let ids = 10;
+    const kind = options.kind ?? "organization", plural = kind === "client" ? "clients" : "organizations";
+    return vi.fn<typeof fetch>(async request => {
+      if (options.transport) throw new Error("transport");
+      const path = new URL(String(request)).pathname;
+      const requestId = `91000000-0000-4000-8000-${String(ids++).padStart(12,"0")}`;
+      const response = (value: Record<string,unknown>,status=200) => new Response(status === 404 ? null : JSON.stringify({ ...value,requestId }), {
+        status,headers: { "Content-Type": "application/json", "Cache-Control": "no-store", "X-Request-ID": requestId },
+      });
+      if (path === "/api/v2/capabilities") return response({ apiVersion: "2",sourceInstanceId,applicationId,
+        historyEpoch: historyEpochId,grantedCapabilities: ["api.capabilities.read",`directory.${plural}.read`,
+          `directory.${plural}.binding_status.read`].map(name => ({ name })),implementedEndpoints: [
+          { method: "GET",path: "/api/v2/capabilities",requiredCapability: "api.capabilities.read" },
+          { method: "GET",path: `/api/v2/directory/${plural}/{publicId}`,requiredCapability: `directory.${plural}.read`,requiresSourceInstanceId: true,requiresApplicationId: true,requiresHistoryEpoch: true },
+          { method: "GET",path: `/api/v2/bindings/${kind}/status/{base64urlExternalId}`,requiredCapability: `directory.${plural}.binding_status.read`,requiresSourceInstanceId: true,requiresApplicationId: true,requiresHistoryEpoch: true },
+        ] });
+      if (path.startsWith("/api/v2/directory/")) return response({ apiVersion: "2",sourceInstanceId,applicationId,
+        historyEpoch: historyEpochId,authorizationGeneration: "8",resource: { type: kind,id: publicId,revision: options.profileRevision ?? "7" },
+        data: { publicId,name: "Current Customer",email: null,phone: null,address: { line1: null,line2: null,city: null,state: null,postalCode: null,country: null },
+          ...(kind === "client" ? { clientType: "business",organizationPublicId: options.parentPublicId ?? null } : {}) },
+        ...(options.invalidContract ? { unexpected: true } : {}) });
+      if (options.bindingStatus === 404 || options.bindingStatus === 409) return response({},options.bindingStatus);
+      return response({ apiVersion: "2",sourceInstanceId,applicationId,historyEpoch: historyEpochId,
+        authorizationGeneration: "8",binding: { type: kind,externalId: recordId,publicId,createdAt: "2026-09-22T12:00:00.000Z" },
+        resource: { revision: options.bindingRevision ?? "7",present: true },
+        ...(options.invalidContract ? { unexpected: true } : {}) });
+    });
+  }
+
+  const call = (key = idempotencyKey, raw: unknown = { reviewItemId, idempotencyKey: key }, rawConnection = connection(),
+    actor: unknown = reviewer, send: typeof fetch = freshReads()) =>
+    activateProjectAlphaExistingDirectoryBinding({ OPS_DB: db, PROJECT_ALPHA_API_V2_CONNECTIONS: rawConnection }, raw, actor, send);
+
+  const directActivation = (hashes: { acquisition?: string; profile?: string; binding?: string } = {}) =>
+    db.prepare(`INSERT INTO project_alpha_existing_directory_binding_activation_receipts(
+      activation_id,review_receipt_id,idempotency_key,acquired_receipt_id,native_owner_claim_id,
+      record_id,source_id,source_instance_id,application_id,history_epoch_id,resource_type,external_id,
+      project_alpha_public_id,project_alpha_revision,local_record_version,request_sha256,
+      acquisition_evidence_sha256,profile_evidence_sha256,binding_status_evidence_sha256,
+      activated_by_staff_id,directory_grant_generation)
+      VALUES('90000000-0000-4000-8000-000000000001',?,?,?,?,?,?,?,?,?,?,?,?, '7',1,?,?,?,?, 'staff',1)`)
+      .bind(reviewItemId,idempotencyKey,acquiredReceiptId,claimId,recordId,sourceId,sourceInstanceId,
+        applicationId,historyEpochId,"organization",recordId,publicId,requestHash,
+        hashes.acquisition ?? responseHash,hashes.profile ?? profileHash,hashes.binding ?? bindingHash).run();
 
   it("activates once, replays exactly, and preserves dormant, legacy, and public-link rows", async () => {
     await seed();
@@ -203,16 +251,39 @@ describe("private existing Directory binding activation consumer", () => {
       .resolves.toEqual({ status: "blocked", reason: "source" });
   });
 
-  it("blocks mismatched immutable evidence hashes", async () => {
-    await seed({ acquiredBindingHash: "9".repeat(64) });
+  it("blocks reused evidence roles", async () => {
+    await seed({ acquiredBindingHash: reviewedHash });
     await expect(call()).resolves.toEqual({ status: "blocked", reason: "stale_evidence" });
     expect(await db.prepare("SELECT count(*) count FROM project_alpha_existing_directory_binding_activation_receipts")
       .first("count")).toBe(0);
   });
 
-  it("requires a current explicit client relationship decision", async () => {
+  it("rejects swapped and unrelated activation evidence while accepting the exact distinct transition", async () => {
+    await seed();
+    await expect(directActivation({ profile: bindingHash, binding: profileHash })).rejects.toThrow(/current exact authority and evidence/);
+    await expect(directActivation({ acquisition: "9".repeat(64) })).rejects.toThrow(/current exact authority and evidence/);
+    await expect(directActivation()).resolves.toBeDefined();
+  });
+
+  it("accepts a standalone client only when both PA and native state have no parent", async () => {
     await seed({ kind: "client", relationship: "missing" });
-    await expect(call()).resolves.toEqual({ status: "blocked", reason: "relationship" });
+    await expect(call(idempotencyKey,{ reviewItemId,idempotencyKey },connection(),reviewer,
+      freshReads({ kind: "client",parentPublicId: null }))).resolves.toMatchObject({ status: "activated" });
+  });
+
+  it("blocks a standalone PA client when native state has an unexpected current parent", async () => {
+    const parentRecord = "30000000-0000-4000-8000-000000000099", parentPublic = "b".repeat(32);
+    await seed({ kind: "client", relationship: "missing" });
+    await db.batch([
+      db.prepare("INSERT INTO operations_directory_records VALUES(?,'organization',1)").bind(parentRecord),
+      db.prepare("INSERT INTO operations_directory_client_organizations VALUES(?,?)").bind(recordId,parentRecord),
+      db.prepare(`INSERT INTO project_alpha_directory_mappings(source_id,resource_type,external_id,project_alpha_public_id,
+        source_instance_id,application_id,history_epoch_id,command_id,created_at)
+        VALUES(?,'organization',?,?,?,?,?,'parent-command','2026-09-22T00:00:00.000Z')`)
+        .bind(sourceId,parentRecord,parentPublic,sourceInstanceId,applicationId,historyEpochId),
+    ]);
+    await expect(call(idempotencyKey,{ reviewItemId,idempotencyKey },connection(),reviewer,
+      freshReads({ kind: "client",parentPublicId: null }))).resolves.toEqual({ status: "blocked",reason: "relationship" });
     expect(await db.prepare("SELECT count(*) count FROM project_alpha_existing_directory_binding_activation_receipts")
       .first("count")).toBe(0);
   });
@@ -227,5 +298,33 @@ describe("private existing Directory binding activation consumer", () => {
     });
     await expect(call(idempotencyKey,accessor)).resolves.toEqual({ status: "rejected", reason: "invalid_action" });
     expect(accessed).toBe(false);
+  });
+
+  it("requires the authenticated server actor to match the immutable reviewer identity", async () => {
+    await seed();
+    const send = freshReads();
+    await expect(call(idempotencyKey,{ reviewItemId,idempotencyKey },connection(),
+      { staffId: "other",accessSubject: "access|staff" },send)).resolves.toEqual({ status: "blocked",reason: "actor" });
+    await expect(call(idempotencyKey,{ reviewItemId,idempotencyKey },connection(),
+      { staffId: "staff",accessSubject: "access|other" },send)).resolves.toEqual({ status: "blocked",reason: "actor" });
+    await expect(call(idempotencyKey,{ reviewItemId,idempotencyKey },connection(),
+      { staffId: "staff",accessSubject: "access|staff",credential: "forbidden" },send))
+      .resolves.toEqual({ status: "rejected",reason: "invalid_actor" });
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["profile revision",{ profileRevision: "8" },"blocked"],
+    ["binding revision",{ bindingRevision: "8" },"blocked"],
+    ["unbound",{ bindingStatus: 404 },"blocked"],
+    ["retarget conflict",{ bindingStatus: 409 },"blocked"],
+    ["invalid contract",{ invalidContract: true },"uncertain"],
+    ["transport",{ transport: true },"uncertain"],
+  ] as const)("requires a fresh exact PA binding and fails closed for %s", async (_label,options,status) => {
+    await seed();
+    await expect(call(idempotencyKey,{ reviewItemId,idempotencyKey },connection(),reviewer,freshReads(options)))
+      .resolves.toMatchObject({ status,reason: "remote" });
+    expect(await db.prepare("SELECT count(*) FROM project_alpha_existing_directory_binding_activation_receipts")
+      .first("count(*)")).toBe(0);
   });
 });

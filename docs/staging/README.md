@@ -124,19 +124,54 @@ changes only Client `0002_seed_initial_staff.sql` and Operations
 digest, and emits source/derived SHA-256 manifests. Apply a fresh
 empty database only with the generated `wrangler.staging.bootstrap.json` for
 that application. Do not use these configs for an existing database. Confirm
-the full 132-row Client ledger (both `0199` filenames once, final `0213`) and
-131-row Operations ledger (final `0131`), a second list/apply with no pending
+the complete current Client and Operations ledgers, including both Client
+`0199` filenames exactly once, only after the consolidated migration inventory
+has been rebaselined. The prior 132/131 and 139/147 counts describe earlier
+candidate snapshots and must not be reused as current proof. Require a second
+list/apply with no pending
 migrations, one synthetic owner in each database, the Operations owner role and
 portable ACL catalog, and an empty `PRAGMA foreign_key_check`. Record those
 results in `migrations.freshBootstrap` without storing the owner email.
+
+The current release gate requires schema-version-2 fresh-bootstrap evidence
+for these 139/147 chains. Preserve the September 18 schema-version-1 rehearsal
+(133/139) unchanged; it cannot satisfy the current gate. Do not claim a new
+empty-D1 rehearsal from generator/unit tests alone. Submit truthful new
+full-chain remote rehearsal evidence before claiming this release gate passed.
+
+If the canonical staging databases are populated, create two new disposable
+staging D1 resources instead of resetting them. Save their returned identities
+in an ignored local JSON file with exactly this shape (replace the example run
+and UUIDs):
+
+```json
+{"runId":"portal-home-yyyymmdd","applications":{"delivery":{"databaseName":"client-data-staging-rehearsal-portal-home-yyyymmdd","databaseId":"11111111-1111-4111-8111-111111111111"},"operations":{"databaseName":"ltds-ops-staging-rehearsal-portal-home-yyyymmdd","databaseId":"22222222-2222-4222-8222-222222222222"}}}
+```
+
+Generate and check with:
+
+```text
+npm run staging:bootstrap:generate -- --disposable-targets .backups/staging-bootstrap-targets.json
+npm run staging:bootstrap:check -- --disposable-targets .backups/staging-bootstrap-targets.json
+```
+
+This mode still validates the exact canonical
+staging source configuration and migration digests, additionally rejects every
+configured staging or production D1 identity, and emits run-scoped configs with
+exactly one disposable D1 binding. These configs are migration-only; do not use
+them to deploy a Worker. Attribute the resulting proof to the disposable names
+and IDs in the existing schema-version-2 evidence gate.
 
 Cloudflare's remote D1 migration transport does not accept a nested
 `SELECT CASE ... RAISE(...) END` statement inside a trigger even though local
 SQLite does. The canonical chains use the equivalent portable form
 `SELECT RAISE(...) WHERE <predicate>`, and the source-layout invariant rejects
-reintroducing the remote-incompatible form. The historical September 18, 2026
-fresh-chain rehearsal applied the then-current 132 Client and 122 Operations
-migrations through Wrangler
+reintroducing the remote-incompatible form. Historical September 18, 2026
+records describe two reviewed snapshots: one records 132 Client and 122
+Operations migrations, while a later record reports 133 Client and 139
+Operations migrations. Preserve both records as historical evidence; neither
+count satisfies the current consolidated release gate. Those rehearsals ran
+through Wrangler
 to isolated staging D1 databases, confirmed no pending migrations on a second
 list, and returned an empty foreign-key check. Existing databases continue to
 skip those already-recorded migration names; never remove or replay their
@@ -163,12 +198,19 @@ authority. Before the separately approved Directory-v2 bootstrap and joined
 Project-v2 acceptance windows, follow the
 [staging native authority packet](native-authority-packet.md). Its generator
 creates ignored, reviewable provision and revoke migrations with separate
-configs and a dedicated staging-only migration ledger. Packet schema v2 creates
-exactly one global `directory.profile.edit` allow and one global
-`project.shared.sync` allow, records both in immutable approval/receipt evidence,
-and deactivates both during revoke. It does not expose an issuer route, alter a
-normal Access token, touch the canonical migration chain, or perform a remote
-action. Raw D1 inserts or updates are not an alternative.
+configs and a dedicated staging-only migration ledger. The baseline packet
+grants global `directory.profile.edit` and `project.shared.sync`; later
+purpose-bound packet schemas have distinct, documented grants and exact-state
+guards. Review the selected purpose and both generated artifacts rather than
+assuming baseline grants. Provision and revoke record immutable evidence and
+leave the canonical migration chain alone. The generator does not expose an
+issuer route, alter a normal Access token, or perform a remote action. Raw D1
+inserts or updates are not an alternative.
+
+The separate [client onboarding recipient acceptance](client-onboarding-recipient-acceptance.md)
+uses only a synthetic proposed client and read-only staff review. It requires
+a purpose-bound staging authority window and keyring; it does not activate
+portal access or prove two-instance Project Alpha synchronization.
 
 Evidence collection normally enables one staging flag. The Viewer processing,
 public-share, Client-session, and Client-share cases require exact multi-flag

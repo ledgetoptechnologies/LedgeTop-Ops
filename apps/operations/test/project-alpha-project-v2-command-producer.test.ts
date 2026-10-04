@@ -33,24 +33,25 @@ async function actor() {
   ]);
   return { staffId, accessSubject, email, admissionVersion: 1, profileVersion: 1 };
 }
-async function directory(sourceId: string, sourceInstanceId: string, applicationId: string, historyEpochId: string) {
+async function directory(sourceId: string, sourceInstanceId: string, applicationId: string, historyEpochId: string, mappingKind: "legacy" | "acquired" = "legacy") {
   const organizationRecordId = uuid(), clientRecordId = uuid(), organizationPublicId = crypto.randomUUID().replaceAll("-", ""), clientPublicId = crypto.randomUUID().replaceAll("-", "");
+  const mappingTable = mappingKind === "legacy" ? "project_alpha_directory_mappings" : "project_alpha_existing_directory_binding_activation_receipts";
   await db.batch([
     db.prepare("INSERT INTO operations_directory_records(record_id,record_kind) VALUES(?,'organization')").bind(organizationRecordId),
     db.prepare("INSERT INTO operations_directory_records(record_id,record_kind) VALUES(?,'client')").bind(clientRecordId),
-    db.prepare(`INSERT INTO project_alpha_directory_mappings(source_id,source_instance_id,application_id,history_epoch_id,resource_type,external_id,project_alpha_public_id)
+    db.prepare(`INSERT INTO ${mappingTable}(source_id,source_instance_id,application_id,history_epoch_id,resource_type,external_id,project_alpha_public_id)
       VALUES(?,?,?,?,?,?,?)`).bind(sourceId, sourceInstanceId, applicationId, historyEpochId, "organization", organizationRecordId, organizationPublicId),
-    db.prepare(`INSERT INTO project_alpha_directory_mappings(source_id,source_instance_id,application_id,history_epoch_id,resource_type,external_id,project_alpha_public_id)
+    db.prepare(`INSERT INTO ${mappingTable}(source_id,source_instance_id,application_id,history_epoch_id,resource_type,external_id,project_alpha_public_id)
       VALUES(?,?,?,?,?,?,?)`).bind(sourceId, sourceInstanceId, applicationId, historyEpochId, "client", clientRecordId, clientPublicId),
     db.prepare("INSERT INTO operations_directory_client_organizations(client_record_id,organization_record_id) VALUES(?,?)").bind(clientRecordId, organizationRecordId),
   ]);
   return { organizationRecordId, clientRecordId, organizationPublicId, clientPublicId };
 }
-async function createAction(sourceId = "project-alpha:one"): Promise<Extract<ProjectAlphaProjectV2CommandProducerAction, { operation: "create" }>> {
+async function createAction(sourceId = "project-alpha:one", mappingKind: "legacy" | "acquired" = "legacy"): Promise<Extract<ProjectAlphaProjectV2CommandProducerAction, { operation: "create" }>> {
   const sourceInstanceId = sourceId === "project-alpha:one" ? sourceOne : sourceTwo;
   const applicationId = sourceId === "project-alpha:one" ? appOne : appTwo;
   const historyEpochId = sourceId === "project-alpha:one" ? epochOne : epochTwo;
-  const [staff, records] = await Promise.all([actor(), directory(sourceId, sourceInstanceId, applicationId, historyEpochId)]);
+  const [staff, records] = await Promise.all([actor(), directory(sourceId, sourceInstanceId, applicationId, historyEpochId, mappingKind)]);
   return { sourceId, actor: { ...staff, verifiedUntil: until, scopes: [] }, operation: "create", local: { expectedLocalVersion: 0, expectedLocalProjectionSha256: null },
     directory: { organizationRecordId: records.organizationRecordId, clientRecordId: records.clientRecordId },
     command: { commandId: uuid(), externalId: `ops/project-${sequence}`, expectedAuthorizationGeneration: "0",
@@ -118,6 +119,34 @@ describe("unmounted project-v2 command producer", () => {
     expect(await db.prepare("SELECT count(*) n FROM project_alpha_project_v2_canonical_intents WHERE command_id IN (?,?)").bind(one.command.commandId, two.command.commandId).first("n")).toBe(2);
     expect((await db.prepare("SELECT id,url,hex(payload) payload FROM delivery_public_shares").all()).results).toEqual(publicBefore.results);
     expect((await db.prepare("SELECT id,hex(payload) payload FROM delivery_records").all()).results).toEqual(deliveryBefore.results);
+  });
+
+  it("accepts activated mappings without legacy copies and fails closed on relationship loss or cross-view collisions", async () => {
+    const activated = await createAction("project-alpha:one", "acquired");
+    const publicBefore = await db.prepare("SELECT id,url,hex(payload) payload FROM delivery_public_shares ORDER BY id").all();
+    await expect(planProjectAlphaProjectV2Command(env(), activated)).resolves.toMatchObject({ status: "queued", replayed: false });
+    expect(await db.prepare("SELECT count(*) n FROM project_alpha_directory_mappings WHERE external_id IN (?,?)")
+      .bind(activated.directory.organizationRecordId, activated.directory.clientRecordId).first("n")).toBe(0);
+    const guards = await db.prepare(`SELECT name,sql FROM sqlite_master WHERE type='trigger'
+      AND name IN ('operations_shared_projects_bound_refresh_guard','operations_shared_projects_no_update') ORDER BY name`).all<{ name: string; sql: string }>();
+    expect(guards.results).toHaveLength(2);
+    expect(guards.results.every(guard => guard.sql.includes("project_alpha_directory_mappings")
+      && !guard.sql.includes("project_alpha_active_directory_mappings"))).toBe(true);
+    expect((await db.prepare("SELECT id,url,hex(payload) payload FROM delivery_public_shares ORDER BY id").all()).results).toEqual(publicBefore.results);
+
+    const unlinked = await createAction("project-alpha:one", "acquired");
+    await db.prepare("DELETE FROM operations_directory_client_organizations WHERE client_record_id=?")
+      .bind(unlinked.directory.clientRecordId).run();
+    await expect(planProjectAlphaProjectV2Command(env(), unlinked)).resolves.toEqual({ status: "blocked", reason: "directory" });
+    expect(await db.prepare("SELECT count(*) n FROM project_alpha_project_outbox WHERE command_id=?").bind(unlinked.command.commandId).first("n")).toBe(0);
+
+    const collision = await createAction("project-alpha:one", "acquired");
+    await db.prepare(`INSERT INTO project_alpha_directory_mappings(source_id,source_instance_id,application_id,history_epoch_id,resource_type,external_id,project_alpha_public_id)
+      VALUES(?,?,?,?,?,?,?)`).bind(collision.sourceId, sourceOne, appOne, epochOne, "organization",
+      collision.directory.organizationRecordId, collision.command.organization.expectedPublicId).run();
+    await expect(planProjectAlphaProjectV2Command(env(), collision)).resolves.toEqual({ status: "blocked", reason: "directory" });
+    expect(await db.prepare("SELECT count(*) n FROM project_alpha_project_outbox WHERE command_id=?").bind(collision.command.commandId).first("n")).toBe(0);
+    expect((await db.prepare("SELECT id,url,hex(payload) payload FROM delivery_public_shares ORDER BY id").all()).results).toEqual(publicBefore.results);
   });
 
   it("replays byte-identical command IDs and rejects a changed canonical body", async () => {

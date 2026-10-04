@@ -36,16 +36,37 @@
     "LEGACY_CLIENT_REQUEST_PA_QUOTE_LINK_ENABLED": "false",
     "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED": "false",
     "PROJECT_ALPHA_API_V2_MONITOR_ENABLED": "false",
+    "PROJECT_ALPHA_DIRECTORY_RECONCILIATION_ENABLED": "false",
     "PROJECT_ALPHA_API_V2_MONITOR_RECIPIENT": "",
     "PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ENABLED": "false",
     "PROJECT_ALPHA_API_V2_SYNC_ENABLED": "false",
     "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED": "false",
+    "PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED": "false",
+    "PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED": "false",
+    "CLIENT_PORTAL_ACCESS_AUTHORITY_OUTBOX_ENABLED": "false",
+    "CLIENT_PORTAL_AUTHORITY_V2_OUTBOX_ENABLED": "false",
+    "CLIENT_AUTHORITY_WORKSPACE_BINDING_OUTBOX_ENABLED": "false",
+    "CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ENABLED": "false",
+    "CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ORIGIN": "",
+    "CLIENT_PORTAL_AUTHORITY_V3_OWNER_ENABLED": "false",
+    "CLIENT_PORTAL_AUTHORITY_V3_OWNER_ORIGIN": "",
+    "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED": "false",
+    "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ENABLED": "false",
+    "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ORIGIN": "",
+    "VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_DISPATCH_ENABLED": "false",
     "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED": "false",
+    "PROJECT_ALPHA_PRIVATE_ADMIN_TRANSPORT_ENABLED": "false",
+    "NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED": "false",
+    "NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED": "false",
     "NATIVE_INTEGRATION_CONTROL_ENABLED": "false",
+    "CLIENT_ONBOARDING_ADMIN_ENABLED": "false",
+    "CLIENT_ONBOARDING_ADMIN_ORIGIN": "",
     "NATIVE_INTEGRATION_CONTROL_ORIGIN": "",
     "CLIENT_PORTAL_NOTIFICATION_MIGRATION_MAINTENANCE": "false",
     "DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED": "false",
     "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED": "false",
+    "CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED": "false",
+    "CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED": "false",
     "CLIENT_PORTAL_HIERARCHY_V2_ENABLED": "true",
     "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED": "false",
     "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED": "false",
@@ -105,7 +126,7 @@
   },
   "send_email": [{ "name": "NOTIFICATION_EMAIL", "allowed_sender_addresses": ["delivery@ledgetopdroneservices.com"] }],
   "observability": { "enabled": true, "head_sampling_rate": 1 },
-  "triggers": { "crons": ["*/15 * * * *", "*/5 * * * *", "2-57/5 * * * *", "17 * * * *", "4-59/15 * * * *", "3-58/5 * * * *"] },
+  "triggers": { "crons": ["*/15 * * * *", "*/5 * * * *", "2-57/5 * * * *", "17 * * * *", "4-59/15 * * * *", "3-58/5 * * * *", "1-56/5 * * * *", "6-51/15 * * * *"] },
   "r2_buckets": [
     { "binding": "DATA_BUCKET", "bucket_name": "client-data" },
     { "binding": "INCOMING_BUCKET", "bucket_name": "ltds-incoming" }
@@ -146,6 +167,33 @@
     ]
   },
   "stream": { "binding": "STREAM" },
+  "services": [
+    {
+      "binding": "CLIENT_AUTHORITY_WORKSPACE_BINDING",
+      "service": "ledgetop-clients",
+      "entrypoint": "ClientAuthorityWorkspaceBindingIngress"
+    },
+    {
+      "binding": "OPS_INVENTORY_CATALOG_STAGING",
+      "service": "ledgetop-clients",
+      "entrypoint": "OpsInventoryCatalogStagingIngress"
+    },
+    {
+      "binding": "OPS_INVENTORY_CATALOG_PROMOTION",
+      "service": "ledgetop-clients",
+      "entrypoint": "OpsInventoryCatalogPromotionCoordinator"
+    },
+    {
+      "binding": "CLIENT_PORTAL_ACCESS_AUTHORITY",
+      "service": "ledgetop-clients",
+      "entrypoint": "OpsPortalAccessAuthorityIngress"
+    },
+    {
+      "binding": "CLIENT_PORTAL_AUTHORITY_V2",
+      "service": "ledgetop-clients",
+      "entrypoint": "ClientPortalAuthorityV2Ingress"
+    }
+  ],
   "durable_objects": {
     "bindings": [
       { "name": "THUMBNAIL_RENDERER", "class_name": "ThumbnailRendererContainer" }
@@ -185,6 +233,11 @@
       "name": "ltds-dropbox-import",
       "binding": "DROPBOX_IMPORT_WORKFLOW",
       "class_name": "DropboxImportWorkflow"
+    },
+    {
+      "name": "ledgetop-ops-catalog-promotion",
+      "binding": "OPS_CATALOG_PROMOTION_WORKFLOW",
+      "class_name": "ProjectAlphaCatalogPromotionWorkflow"
     }
   ]
 }

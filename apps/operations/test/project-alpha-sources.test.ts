@@ -1,6 +1,6 @@
 import { readFile, readdir } from "node:fs/promises";
 import { resolve } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll,afterEach,beforeAll,describe,expect,it,vi } from "vitest";
 import { Miniflare } from "miniflare";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import { syncProjectAlpha, syncProjectAlphaForSource } from "../src/worker/project-alpha";
@@ -14,6 +14,21 @@ const other = createProjectAlphaSourceContext("project-alpha:secondary");
 const connection = (secondary = false) => ({ baseUrl: secondary ? "https://secondary.example.test" : "https://primary.example.test",
   apiKey: secondary ? "secondary-secret" : "primary-secret", applicationKey: "external_operations" });
 const at = "2026-08-26T00:00:00Z";
+const fixtureTiming = process.env.LTDS_TEST_FIXTURE_TIMING === "1";
+const mark = (label: string, started: number, detail = "") => {
+  if (fixtureTiming) console.info(`[project-alpha-sources-timing] ${label} elapsedMs=${Math.round(performance.now() - started)}${detail}`);
+};
+async function timed<T>(label: string, action: () => T | Promise<T>): Promise<T> {
+  const started = performance.now();mark(`${label}:start`,started);
+  try { const value = await action();mark(`${label}:end`,started);return value; }
+  catch (error) { mark(`${label}:error`,started);throw error; }
+}
+type Disposer=()=>Promise<void>;
+function ownedDisposer(action:()=>Promise<void>,register:(dispose:Disposer)=>void):Disposer{
+  let result:Promise<void>|undefined;
+  const dispose=()=>result??=(async()=>action())();
+  register(dispose);return dispose;
+}
 function snapshot(label: string, populated = true) {
   const payload: Record<string, unknown> = { generated_at: at, has_more: false, next_page: null,
     ...Object.fromEntries(collections.map(name => [name, []])) };
@@ -36,29 +51,43 @@ function snapshot(label: string, populated = true) {
   return payload;
 }
 
-async function databaseFixture() {
+async function databaseFixture(label:string,register:(dispose:Disposer)=>void) {
+  const fixtureStarted=performance.now();mark(`${label}:fixture:start`,fixtureStarted);
   const runtime = new Miniflare({ modules: true, script: "export default {fetch(){return new Response('ok')}}", d1Databases: ["OPS_DB", "DELIVERY_DB"] });
-  const ops = await runtime.getD1Database("OPS_DB") as D1Database;
-  const delivery = await runtime.getD1Database("DELIVERY_DB") as D1Database;
+  const dispose=ownedDisposer(()=>timed(`${label}:runtime-dispose`,()=>runtime.dispose()),register);
+  mark(`${label}:miniflare-created`,fixtureStarted);
   try {
-    for (const [db, path] of [[ops, "../migrations"], [delivery, "../../client/migrations"]] as const) {
+    const ops = await timed(`${label}:get-ops-db`,()=>runtime.getD1Database("OPS_DB")) as D1Database;
+    const delivery = await timed(`${label}:get-delivery-db`,()=>runtime.getD1Database("DELIVERY_DB")) as D1Database;
+    for (const [db, path, chain] of [[ops, "../migrations", "operations"], [delivery, "../../client/migrations", "client"]] as const) {
+      const chainStarted=performance.now(),names=(await readdir(resolve(import.meta.dirname,path))).filter(name=>/^\d+.*\.sql$/.test(name)).sort();
+      mark(`${label}:${chain}-migrations:start`,chainStarted,` count=0 total=${names.length}`);
       const directory = resolve(import.meta.dirname, path);
-      for (const name of (await readdir(directory)).filter(name => /^\d+.*\.sql$/.test(name)).sort()) {
+      let completed=0;
+      for (const name of names) {
         const statements = splitD1MigrationStatements(await readFile(resolve(directory, name), "utf8"));
         if (statements.length) await db.batch(statements.map(sql => db.prepare(sql)));
+        completed+=1;
+        if(completed%25===0)mark(`${label}:${chain}-migrations:progress`,chainStarted,` count=${completed} total=${names.length}`);
       }
+      mark(`${label}:${chain}-migrations:end`,chainStarted,` count=${completed} total=${names.length}`);
     }
     const env = { OPS_DB: ops, DELIVERY_DB: delivery, PROJECT_ALPHA_BASE_URL: connection().baseUrl,
       PROJECT_ALPHA_API_KEY: connection().apiKey, APPLICATION_KEY: connection().applicationKey } as Env;
+    mark(`${label}:fixture:end`,fixtureStarted);
     return { runtime, ops, delivery, env };
-  } catch (error) { await runtime.dispose(); throw error; }
+  } catch (error) { mark(`${label}:fixture:error`,fixtureStarted);await dispose();throw error; }
 }
 afterEach(() => vi.unstubAllGlobals());
+type Fixture=Awaited<ReturnType<typeof databaseFixture>>;
 
 describe("source-isolated business snapshots", () => {
-  it("captures first-load dated client/org/project observations after owner projection and does not turn replay clocks into activity", async () => {
-    const { runtime, ops, env } = await databaseFixture();
-    try {
+  describe("dated owner projection",()=>{
+    let fixture:Fixture|undefined,dispose:Disposer|undefined;
+    beforeAll(async()=>{fixture=await databaseFixture("dated",value=>{dispose=value;});},90_000);
+    afterAll(async()=>{if(dispose)await dispose();},30_000);
+    it("captures first-load dated client/org/project observations after owner projection and does not turn replay clocks into activity", async () => {
+      const {ops,env}=fixture!;
       const payload = snapshot("Dated");
       for (const [collection, updatedAt] of [
         ["organizations", "2026-01-01 01:02:03"],
@@ -72,7 +101,7 @@ describe("source-isolated business snapshots", () => {
       vi.stubGlobal("fetch", vi.fn(async () => Response.json(payload)));
       // The real writer projects clients before organizations. The client
       // observation therefore requires the post-all-rows owner-resolution hook.
-      await syncProjectAlpha(env);
+      await timed("dated:sync-first",()=>syncProjectAlpha(env));
       const before = (await ops.prepare("SELECT * FROM client_business_activity ORDER BY record_kind").all()).results;
       expect(before).toHaveLength(3);
       expect(before).toMatchObject([
@@ -87,16 +116,19 @@ describe("source-isolated business snapshots", () => {
           occurred_at: "2026-01-03T01:02:03.000Z", source_updated_at: "2026-01-03T01:02:03.000Z" },
       ]);
       payload.generated_at = "2026-08-27T00:00:00Z";
-      await syncProjectAlpha(env);
+      await timed("dated:sync-replay",()=>syncProjectAlpha(env));
       expect((await ops.prepare("SELECT * FROM client_business_activity ORDER BY record_kind").all()).results).toEqual(before);
       expect(await ops.prepare("SELECT count(*) n FROM client_business_activity WHERE record_kind NOT IN ('client','organization','project') OR occurred_at>=?")
         .bind(at).first("n")).toBe(0);
-    } finally { await runtime.dispose(); }
-  }, 60_000);
+    },60_000);
+  });
 
-  it("preserves primary IDs and all typed relationships while secondary IDs, payloads, health and fingerprints stay independent", async () => {
-    const { runtime, ops, delivery, env } = await databaseFixture();
-    try {
+  describe("primary and secondary source isolation",()=>{
+    let fixture:Fixture|undefined,dispose:Disposer|undefined;
+    beforeAll(async()=>{fixture=await databaseFixture("isolation",value=>{dispose=value;});},90_000);
+    afterAll(async()=>{if(dispose)await dispose();},30_000);
+    it("preserves primary IDs and all typed relationships while secondary IDs, payloads, health and fingerprints stay independent", async () => {
+      const {ops,delivery,env}=fixture!;
       const payloads = { primary: snapshot("Primary"), secondary: snapshot("Secondary") };
       // Exercise reconciliation beyond the bind-parameter budget as well as
       // two producers using identical business IDs.
@@ -106,15 +138,15 @@ describe("source-isolated business snapshots", () => {
         requests.push({ host: url.hostname, authorization: new Headers(init.headers).get("Authorization"), redirect: init.redirect });
         return Response.json(url.hostname.startsWith("secondary") ? payloads.secondary : payloads.primary);
       }));
-      await syncProjectAlpha(env);
+      await timed("isolation:sync-primary",()=>syncProjectAlpha(env));
       const staffBefore = await ops.prepare("SELECT * FROM staff_users ORDER BY id").all();
       const rolesBefore = await ops.prepare("SELECT * FROM staff_role_assignments ORDER BY id").all();
       const divisionsBefore = await ops.prepare("SELECT * FROM divisions ORDER BY id").all();
       const deliveryBefore = await delivery.prepare("SELECT * FROM client_accounts ORDER BY id").all();
       const primaryFingerprints = await ops.prepare("SELECT * FROM pa_projection_fingerprints WHERE projection_source_id=? ORDER BY collection").bind(PRIMARY_PROJECT_ALPHA_SOURCE.sourceId).all();
       // A forged boolean cannot elevate a secondary server context.
-      await syncProjectAlphaForSource({ ...env, DELIVERY_DB: undefined } as unknown as Env,
-        { ...other, staffAuthority: true }, connection(true));
+      await timed("isolation:sync-secondary-forged",()=>syncProjectAlphaForSource({ ...env, DELIVERY_DB: undefined } as unknown as Env,
+        { ...other, staffAuthority: true }, connection(true)));
       expect((await ops.prepare("SELECT * FROM staff_users ORDER BY id").all()).results).toEqual(staffBefore.results);
       expect((await ops.prepare("SELECT * FROM staff_role_assignments ORDER BY id").all()).results).toEqual(rolesBefore.results);
       expect((await ops.prepare("SELECT * FROM divisions ORDER BY id").all()).results).toEqual(divisionsBefore.results);
@@ -148,32 +180,45 @@ describe("source-isolated business snapshots", () => {
           .toEqual([{ id: expectedId }]);
       }
       const stableBId = projects[1]!.id;
-      await syncProjectAlphaForSource(env, other, connection(true));
+      await timed("isolation:sync-secondary",()=>syncProjectAlphaForSource(env,other,connection(true)));
       expect(await ops.prepare("SELECT id FROM pa_projects WHERE projection_source_id=?").bind(other.sourceId).first("id")).toBe(stableBId);
       payloads.primary = snapshot("Primary", false);
-      await syncProjectAlpha(env);
+      await timed("isolation:sync-primary-empty",()=>syncProjectAlpha(env));
       expect(await ops.prepare("SELECT active FROM pa_projects WHERE id='5'").first("active")).toBe(0);
       expect(await ops.prepare("SELECT active FROM pa_projects WHERE id=?").bind(stableBId).first("active")).toBe(1);
       expect(await ops.prepare("SELECT count(*) n FROM integration_health WHERE integration='project-alpha' AND status='healthy'").first("n")).toBe(2);
 
       expect((await ops.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
-    } finally { await runtime.dispose(); }
-  }, 180_000);
+    },90_000);
+  });
 
-  it("an incomplete secondary snapshot leaves primary records, health and its lease untouched", async () => {
-    const { runtime, ops, env } = await databaseFixture();
-    try {
+  describe("incomplete secondary source",()=>{
+    let fixture:Fixture|undefined,dispose:Disposer|undefined;
+    beforeAll(async()=>{fixture=await databaseFixture("incomplete",value=>{dispose=value;});},90_000);
+    afterAll(async()=>{if(dispose)await dispose();},30_000);
+    it("an incomplete secondary snapshot leaves primary records, health and its lease untouched", async () => {
+      const {ops,env}=fixture!;
       vi.stubGlobal("fetch", vi.fn(async () => Response.json(snapshot("Primary"))));
-      await syncProjectAlpha(env);
+      await timed("incomplete:sync-primary",()=>syncProjectAlpha(env));
       const before = (await ops.prepare("SELECT * FROM pa_projects").all()).results;
       await ops.prepare("INSERT INTO pa_projection_entity_leases(projection_source_id,entity_type,entity_id,owner_event_id,lease_until) VALUES(?,'integration_projection','project-alpha','primary-running',datetime('now','+1 hour'))").bind(PRIMARY_PROJECT_ALPHA_SOURCE.sourceId).run();
       vi.stubGlobal("fetch", vi.fn(async () => new Response("Unavailable", { status: 503 })));
-      await expect(syncProjectAlphaForSource(env, other, connection(true))).rejects.toThrow("project-alpha-http-503");
+      await expect(timed("incomplete:sync-secondary-error",()=>syncProjectAlphaForSource(env,other,connection(true)))).rejects.toThrow("project-alpha-http-503");
       expect((await ops.prepare("SELECT * FROM pa_projects").all()).results).toEqual(before);
       expect(await ops.prepare("SELECT status FROM integration_health WHERE integration='project-alpha' AND projection_source_id=?").bind(PRIMARY_PROJECT_ALPHA_SOURCE.sourceId).first("status")).toBe("healthy");
       expect(await ops.prepare("SELECT status FROM integration_health WHERE integration='project-alpha' AND projection_source_id=?").bind(other.sourceId).first("status")).toBe("error");
       expect(await ops.prepare("SELECT owner_event_id FROM pa_projection_entity_leases WHERE projection_source_id=?").bind(PRIMARY_PROJECT_ALPHA_SOURCE.sourceId).first("owner_event_id")).toBe("primary-running");
       expect(await ops.prepare("SELECT count(*) n FROM pa_projection_entity_leases WHERE projection_source_id=?").bind(other.sourceId).first("n")).toBe(0);
-    } finally { await runtime.dispose(); }
-  }, 60_000);
+    },60_000);
+  });
+
+  it("registers one fixture disposer before asynchronous setup can finish",async()=>{
+    let calls=0,registered:Disposer|undefined;
+    const dispose=ownedDisposer(async()=>{calls+=1;},value=>{registered=value;});
+    expect(registered).toBe(dispose);
+    const first=dispose(),second=registered!();
+    expect(first).toBe(second);
+    await Promise.all([first,second]);
+    expect(calls).toBe(1);
+  });
 });

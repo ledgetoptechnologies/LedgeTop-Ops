@@ -1,6 +1,6 @@
 import { readFile, readdir } from "node:fs/promises";
 import { resolve } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll,afterEach,beforeAll,describe,expect,it,vi } from "vitest";
 import { Miniflare } from "miniflare";
 import { applyProjectionEvent, completeEvent } from "../../ops-sync/src/projection";
 import type { Env as OpsSyncEnv, ProjectionEvent } from "../../ops-sync/src/types";
@@ -16,17 +16,35 @@ async function migrateOperations(db: D1Database): Promise<void> {
   }
 }
 
+type Disposer=()=>Promise<void>;
+type OrderingFixture={ops:D1Database;delivery:D1Database};
+function ownedDisposer(action:()=>Promise<void>,register:(dispose:Disposer)=>void):Disposer{
+  let result:Promise<void>|undefined;
+  const dispose=()=>result??=(async()=>action())();
+  register(dispose);return dispose;
+}
+async function orderingFixture(register:(dispose:Disposer)=>void):Promise<OrderingFixture>{
+  const runtime=new Miniflare({modules:true,script:"export default {fetch(){return new Response('ok')}}",d1Databases:["OPS_DB","DELIVERY_DB"]});
+  const dispose=ownedDisposer(()=>runtime.dispose(),register);
+  try{
+    const ops=await runtime.getD1Database("OPS_DB") as D1Database;
+    const delivery=await runtime.getD1Database("DELIVERY_DB") as D1Database;
+    await migrateOperations(ops);
+    return {ops,delivery};
+  }catch(error){await dispose();throw error;}
+}
+
 const collections=["users","business_units","worker_business_units","clients","organizations","projects","project_assignments","service_locations","application_entitlements","operations","operation_assignments","tasks","task_assignments","calendar_events"];
 
 afterEach(()=>vi.unstubAllGlobals());
 
 describe("Project Alpha snapshot/webhook ordering",()=>{
-  it("repairs a retired PA identity by the active entitled email after snapshots stabilize",async()=>{
-    const miniflare=new Miniflare({modules:true,script:"export default {fetch(){return new Response('ok')}}",d1Databases:["OPS_DB","DELIVERY_DB"]});
-    try{
-      const ops=await miniflare.getD1Database("OPS_DB") as D1Database;
-      const delivery=await miniflare.getD1Database("DELIVERY_DB") as D1Database;
-      await migrateOperations(ops);
+  describe("retired PA identity repair",()=>{
+    let fixture:OrderingFixture|undefined,dispose:Disposer|undefined;
+    beforeAll(async()=>{fixture=await orderingFixture(value=>{dispose=value;});},90_000);
+    afterAll(async()=>{if(dispose)await dispose();},30_000);
+    it("repairs a retired PA identity by the active entitled email after snapshots stabilize",async()=>{
+      const {ops,delivery}=fixture!;
       for(const statement of [
         "CREATE TABLE client_accounts(id TEXT PRIMARY KEY,status TEXT NOT NULL,display_name TEXT,project_alpha_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary',project_alpha_client_id TEXT,project_alpha_organization_id TEXT,updated_at TEXT)",
         "CREATE TABLE projects(id TEXT PRIMARY KEY,project_alpha_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary',project_alpha_project_id TEXT,project_name TEXT,client_name TEXT,status TEXT,summary TEXT,source_updated_at TEXT,active INTEGER NOT NULL,updated_at TEXT)",
@@ -46,15 +64,15 @@ describe("Project Alpha snapshot/webhook ordering",()=>{
 
       expect(await ops.prepare("SELECT project_alpha_user_id FROM staff_users WHERE id='legacy'").first("project_alpha_user_id")).toBe("current-pa-user");
       expect(await ops.prepare("SELECT status FROM staff_users WHERE id='legacy'").first("status")).toBe("active");
-    }finally{await miniflare.dispose();}
-  },120_000);
+    },30_000);
+  });
 
-  it("preserves a newer webhook projection when an older snapshot runs afterward",async()=>{
-    const miniflare=new Miniflare({modules:true,script:"export default {fetch(){return new Response('ok')}}",d1Databases:["OPS_DB","DELIVERY_DB"]});
-    try{
-      const ops=await miniflare.getD1Database("OPS_DB") as D1Database;
-      const delivery=await miniflare.getD1Database("DELIVERY_DB") as D1Database;
-      await migrateOperations(ops);
+  describe("webhook and snapshot ordering",()=>{
+    let fixture:OrderingFixture|undefined,dispose:Disposer|undefined;
+    beforeAll(async()=>{fixture=await orderingFixture(value=>{dispose=value;});},90_000);
+    afterAll(async()=>{if(dispose)await dispose();},30_000);
+    it("preserves a newer webhook projection when an older snapshot runs afterward",async()=>{
+      const {ops,delivery}=fixture!;
       for(const statement of [
         "CREATE TABLE client_accounts(id TEXT PRIMARY KEY,status TEXT NOT NULL,display_name TEXT,project_alpha_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary',project_alpha_client_id TEXT,project_alpha_organization_id TEXT,updated_at TEXT)",
         "CREATE TABLE projects(id TEXT PRIMARY KEY,project_alpha_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary',project_alpha_project_id TEXT,project_name TEXT,client_name TEXT,status TEXT,summary TEXT,source_updated_at TEXT,active INTEGER NOT NULL,updated_at TEXT)",
@@ -109,6 +127,6 @@ describe("Project Alpha snapshot/webhook ordering",()=>{
       for(const table of ["client_project_grants","client_folder_associations","client_delivery_grants","client_member_project_grants"]){
         expect(await delivery.prepare(`SELECT revoked_at FROM ${table} WHERE project_id='portal-50'`).first("revoked_at")).not.toBeNull();
       }
-    }finally{await miniflare.dispose();}
-  },120_000);
+    },30_000);
+  });
 });

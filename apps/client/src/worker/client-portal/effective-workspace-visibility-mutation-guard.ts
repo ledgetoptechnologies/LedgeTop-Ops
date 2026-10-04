@@ -13,6 +13,9 @@ export async function readEffectiveWorkspaceVisibilityMutationGuard(
     'portal_v2_identity_eligibility_bindings', 'portal_v2_identity_eligibility_legacy_bridges',
     'pa_portal_principals',
   ]);
+  const claimTablePresent = await d1TablesPresent(env.DELIVERY_DB, ['portal_client_authority_workspace_claims']);
+  const claimGuard = claimTablePresent ? `AND NOT EXISTS(SELECT 1 FROM portal_client_authority_workspace_claims claim
+      WHERE claim.workspace_id=visibility_context.workspace_id AND claim.state='active')` : '';
   const shell = shellReady ? `EXISTS(${eligiblePortalShellQuery(true, 'visibility_context.workspace_id', 'visibility_context.identity_id')})` : '0';
   const live = `entitlement.workspace_id=visibility_context.workspace_id
     AND entitlement.identity_id=visibility_context.identity_id AND entitlement.capability='workspace.view'
@@ -26,7 +29,7 @@ export async function readEffectiveWorkspaceVisibilityMutationGuard(
   }) : '1';
   return {
     sql: `EXISTS(WITH visibility_context(workspace_id,identity_id) AS (VALUES (?,?))
-      SELECT 1 FROM visibility_context WHERE ${shell} OR (
+      SELECT 1 FROM visibility_context WHERE 1=1 ${claimGuard} AND (${shell} OR (
         (SELECT COUNT(*) FROM portal_v2_entitlements entitlement WHERE ${live}
           AND ${projectAccessCapacitySql('entitlement', termsReady)})<=200
         AND NOT EXISTS(SELECT 1 FROM portal_v2_entitlements entitlement WHERE ${live}
@@ -35,7 +38,7 @@ export async function readEffectiveWorkspaceVisibilityMutationGuard(
         AND EXISTS(SELECT 1 FROM portal_v2_entitlements entitlement WHERE ${live}
           AND entitlement.effect='allow' AND entitlement.scope_type='workspace'
           AND entitlement.scope_public_id=visibility_context.workspace_id AND ${terms})
-      ))`,
+      )))`,
     bindings: [context.workspaceId, context.identityId],
   };
 }

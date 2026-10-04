@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { Card, EmptyState, StatusPill } from "@ltds/ui";
 import { api, ApiError } from "./api";
+import { NativeDirectoryProfileCreate } from "./NativeDirectoryProfileEditor";
 
 export type ClientKind = "organization" | "standalone_client";
 export type ClientRootNamespace = "business" | "portal" | "account";
@@ -170,7 +171,7 @@ function ClientPortalStatusPill({ client }: { client: ClientSummary }) {
     {portal.description && <small>{portal.description}</small>}</span>;
 }
 
-export function ClientDirectory() {
+export function ClientDirectory({ nativeDirectoryProfileWrites = false }: { nativeDirectoryProfileWrites?: boolean }) {
   const [query, setQuery] = useState(readQuery);
   const [draft, setDraft] = useState(query.q);
   const [clients, setClients] = useState<ClientSummary[]>([]);
@@ -315,6 +316,7 @@ export function ClientDirectory() {
       </div>
     </div>
     <p className="client-directory-status">Recent order uses business record updates you can access; synchronization and page views do not count.</p>
+    {nativeDirectoryProfileWrites && <NativeDirectoryProfileCreate />}
     <div className="client-directory-filters" role="group" aria-label="Client type">
       {FILTERS.map(filter => <button key={filter.kind} type="button" className="button-ghost"
         aria-pressed={query.kind === filter.kind}
