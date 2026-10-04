@@ -7,7 +7,7 @@ import type { Env } from "../src/worker/types";
 const active: Miniflare[] = [];
 const orgPublicId = "a".repeat(32), projectPublicId = "b".repeat(32);
 function context(overrides: Partial<ClientHubCollectionContext["root"]> = {}): ClientHubCollectionContext {
-  return { root: { source_id: "project-alpha:primary", root_namespace: "business", kind: "organization", public_id: "org-internal",
+  return { root: { source_id: "project-alpha:primary", root_namespace: "business", kind: "organization", public_id: "org-internal", pa_internal_id: "org-internal",
     pa_public_id: orgPublicId, mapping_status: "mapped", display_name: "Acme", sort_name: "acme", status: "active",
     portal_status: "active", workspace_id: "workspace-one", legacy_account_id: null, account_count: 0, project_count: 1,
     request_count: 0, contact_count: 2, meaningful_activity_at: null, source_version: "root-v1", indexed_at: "", scan_generation: 1,

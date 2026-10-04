@@ -14,7 +14,12 @@
 - Focused Operations regressions pass `67/67`, covering 52 Client Hub Directory cases and 15 project-read settlement/activation cases.
 - Operations-home desktop/mobile browser coverage passes `54/54`, including the native-home account menu and logout behavior.
 - These focused results do not replace full gate session `72257`, which remains pending without a terminal pass.
-- Staging tooling commits `7e662e85`, `c654`, and `75d47abf` are local review checkpoints only. They have not been pushed or deployed.
+- The reviewed tooling was published in draft PR #146 at `d0f73e91633a324c2acc2c6e421bdf327f312b89`; it has not been merged or deployed. CI run `37226218688` completed with failures, so this revision is not a release checkpoint.
+- CI source invariants, both Client browser jobs, thumbnail renderer, Incoming pickup, and Ops Sync passed. Both Ops browser jobs failed the same three stale project fixtures; the corrected fixtures now pass all 34 targeted desktop/mobile checks (`da81ffe9`).
+- The corrected complete-chain rehearsal passed against isolated local D1 databases: all 147 Client and 171 Operations migrations, idempotency, the canonical active-mapping view and rebuilt guard checks. The three focused Ops chain suites passed 25 tests; the Client full-chain case and its nine receiver preflight cases passed (`ec12cf1d`).
+- The index query reservation omitted up to three active-mapping validation reads per source-backed page. `88d55526` corrects the reserved cost without increasing the 800-query cap. The index and legacy connector suites passed all 40 tests; the legacy snapshot regression now explicitly requires no unactivated API-v2 mapping authority.
+- Acquired-mapping test fixtures now include the canonical `record_id` contract and use the correct D1 batch execution method. All 39 focused activation-consumer/project-producer tests passed, retaining relationship-loss, collision, revoked-authority, replay and public-link preservation checks (`f4331386`).
+- The remaining PA-identity fixture verification is still running. These focused passes do not establish full corrected-revision CI or live staging sync/recipient acceptance.
 - The current read-only D1 aggregate query fails with error `7403` (`account invalid or not authorized`). The signed-in browser session remains valid, but that does not establish Wrangler/D1 reauthentication; no reauthentication has been completed or claimed.
 
 ## Historical migration hold and reconciliation record

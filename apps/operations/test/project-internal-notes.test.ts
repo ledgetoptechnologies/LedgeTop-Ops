@@ -12,7 +12,7 @@ const actor = { id: "staff-beau-koltz", email: "beaukoltz@ledgetopdroneservices.
 const key = () => `project_note_${crypto.randomUUID()}`;
 let runtime: Miniflare, ops: D1Database, env: Env, sequence = 0;
 function context(source = "project-alpha:primary", id = "notes-org"): ClientHubCollectionContext {
-  return { root: { source_id: source as `project-alpha:${string}`, root_namespace: "business", kind: "organization", public_id: id,
+  return { root: { source_id: source as `project-alpha:${string}`, root_namespace: "business", kind: "organization", public_id: id, pa_internal_id: id,
     pa_public_id: id, mapping_status: "mapped", display_name: id, source_name: "Project Alpha", sort_name: id, status: "active",
     portal_status: "active", workspace_id: null, legacy_account_id: null, account_count: 0, project_count: 0, request_count: 0,
     contact_count: 0, meaningful_activity_at: null, source_version: "r1", indexed_at: "2026-09-02T00:00:00.000Z", scan_generation: 1 },

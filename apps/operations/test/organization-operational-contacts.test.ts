@@ -53,7 +53,7 @@ async function fixture(): Promise<Fixture> {
         .bind(id, name, org, JSON.stringify(payload), `contact-sync-${id}`, src)),
   ]);
   return { organizationId, primaryId, deliveryId, secondDeliveryId, otherId, secondaryId,
-    context: { root: { source_id: source, root_namespace: "business", kind: "organization", public_id: organizationId,
+    context: { root: { source_id: source, root_namespace: "business", kind: "organization", public_id: organizationId, pa_internal_id: organizationId,
       pa_public_id: organizationId, mapping_status: "mapped", display_name: `Organization ${n}`, source_name: "Project Alpha",
       sort_name: `organization ${n}`, status: "active", portal_status: "none", workspace_id: null, legacy_account_id: null,
       account_count: 0, project_count: 0, request_count: 0, contact_count: 3, meaningful_activity_at: null,

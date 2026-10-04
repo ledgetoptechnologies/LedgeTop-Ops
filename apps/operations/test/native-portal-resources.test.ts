@@ -287,7 +287,7 @@ describe('source-owned native portal resources with real signed projection and l
         AND json_extract(payload_json,'$.public_id')=?`).bind(f.source,rootId).first<string>('id'))!;
       const localProject=(await opsDb.prepare(`SELECT id FROM pa_projects WHERE projection_source_id=?
         AND json_extract(payload_json,'$.public_id')=?`).bind(f.source,projectId).first<string>('id'))!;
-      const context={root:{source_id:f.source,root_namespace:'business',kind:'organization',public_id:localRoot,pa_public_id:rootId,
+      const context={root:{source_id:f.source,root_namespace:'business',kind:'organization',public_id:localRoot,pa_internal_id:localRoot,pa_public_id:rootId,
         mapping_status:'mapped',display_name:`Customer ${f.name}`,sort_name:`customer ${f.name}`,status:'active',portal_status:'active',
         workspace_id:f.workspace,legacy_account_id:null,account_count:0,project_count:1,request_count:0,contact_count:0,
         meaningful_activity_at:null,source_version:'root-v1',indexed_at:'',scan_generation:1},
@@ -405,7 +405,7 @@ describe('source-owned native portal resources with real signed projection and l
       const clientFeedback=await createFeedback({kind:'file',projectId:null,fileId:filePage.files[0]!.id},'Please review the client file.');
       const localRoot=(await opsDb.prepare(`SELECT id FROM pa_organizations WHERE projection_source_id=?
         AND json_extract(payload_json,'$.public_id')=?`).bind(a.source,rootId).first<string>('id'))!;
-      const historyContext={root:{source_id:a.source,root_namespace:'business',kind:'organization',public_id:localRoot,pa_public_id:rootId,
+      const historyContext={root:{source_id:a.source,root_namespace:'business',kind:'organization',public_id:localRoot,pa_internal_id:localRoot,pa_public_id:rootId,
         mapping_status:'mapped',display_name:'Customer a',sort_name:'customer a',status:'active',portal_status:'active',workspace_id:a.workspace,
         legacy_account_id:null,account_count:0,project_count:1,request_count:0,contact_count:0,meaningful_activity_at:null,source_version:'root-v1',
         indexed_at:'',scan_generation:1},canonicalRoot:{sourceId:a.source,rootNamespace:'business',kind:'organization',publicId:localRoot},

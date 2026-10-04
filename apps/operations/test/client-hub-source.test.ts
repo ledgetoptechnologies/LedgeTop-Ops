@@ -1,7 +1,7 @@
 import { Miniflare } from "miniflare";
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
-import { hasClientHubActiveDirectoryMappings, isAlphaPublicId, readClientHubSourcePublicId,
+import { clientHubAlphaInternalId, hasClientHubActiveDirectoryMappings, isAlphaPublicId, readClientHubSourcePublicId,
   resolveClientHubSourceRoot, resolveClientHubSourceRootByAlphaIdentity, sourcePublicIdExpression } from "../src/worker/client-hub-source";
 import { applyConnectorSchema, registerVisibleTestSource } from "./helpers/project-alpha-connectors";
 
@@ -16,6 +16,14 @@ describe("explicit Alpha source public IDs", () => {
     "project-alpha:primary": { sourceId: "project-alpha:primary", enabled: true, baseUrl: "https://alpha.example.test/",
       apiKey: "test-key", ...identity },
   } }) });
+  it("requires a proven Alpha internal ID and never falls back to the Ops route or public ID", () => {
+    const unresolved = { source_id: "project-alpha:primary", root_namespace: "business", public_id: "ops-route-id",
+      pa_public_id: publicId };
+    expect(() => clientHubAlphaInternalId(unresolved)).toThrow(expect.objectContaining({ status: 409 }));
+    expect(clientHubAlphaInternalId(unresolved, "proven-alpha-id")).toBe("proven-alpha-id");
+    expect(clientHubAlphaInternalId({ ...unresolved, pa_internal_id: "resolved-alpha-id" })).toBe("resolved-alpha-id");
+  });
+
   it("preserves the native 32-hex representation and never guesses from internal IDs", () => {
     expect(isAlphaPublicId(publicId)).toBe(true);
     expect(readClientHubSourcePublicId(JSON.stringify({ id: 42, public_id: publicId })))
