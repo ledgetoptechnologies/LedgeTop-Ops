@@ -2,14 +2,22 @@
 
 ## Current status — 2026-10-04
 
-- The isolated consolidation branch merges API-v2 candidate `65d62fa01d87cb3e9cc51f42add23e35897ed4e9` with the tracked recipient implementation at `2a4e4d5053452b55ea8409f480a87f8ef6caa990`.
-- The first lineage merge is committed at `0211f589`; the complete descendant merge is resolved and staged but not yet committed, pushed, or deployed. This document is a work record, not acceptance evidence.
+- The consolidated runtime candidate is committed at exact revision `538dff936c2049fc16416b639a4ef6a986ab3b25`, and its source worktree was clean when the current full release gate began. It combines the API-v2 and tracked recipient/runtime lineages described below. This document is a work record, not acceptance evidence.
+- Full release gate session `72257` is still live. It has not produced a terminal passing result; do not infer success from focused suites, compilation, builds, or dry-runs.
 - The original API-only candidate remains unchanged. Its superseded local gate was deliberately cancelled after verifying the live process tree, so current-candidate Worker regressions can run. Cancellation was not a timeout diagnosis or passing evidence.
 - Recipient enrollment and explicitly selected-folder delivery authority require the complete tracked schema/runtime lineage. Enabling diagnostic staging flags or passing service-summary checks does not prove client file access.
 - Preserve API-v2 configured source/application/history identity checks, Ops/PA record-ID separation, canonical project proof, and pagination-safe mirror suppression when resolving runtime conflicts.
 - Preserve recipient proof verification, explicit owner confirmation, audited/idempotent enrollment, cancellation/recovery, selected-folder authority, and revocation checks from the recipient lineage. Keep those capabilities default-off in checked-in release configuration.
 
-## Migration hold
+### Current checkpoint
+
+- Focused Operations regressions pass `67/67`, covering 52 Client Hub Directory cases and 15 project-read settlement/activation cases.
+- Operations-home desktop/mobile browser coverage passes `54/54`, including the native-home account menu and logout behavior.
+- These focused results do not replace full gate session `72257`, which remains pending without a terminal pass.
+- Staging tooling commits `7e662e85`, `c654`, and `75d47abf` are local review checkpoints only. They have not been pushed or deployed.
+- The current read-only D1 aggregate query fails with error `7403` (`account invalid or not authorized`). The signed-in browser session remains valid, but that does not establish Wrangler/D1 reauthentication; no reauthentication has been completed or claimed.
+
+## Historical migration hold and reconciliation record
 
 - Both branches independently introduced distinct Operations migration filenames with prefixes `0125` through `0131`. Git can combine these files without reporting a conflict; that does not prove their execution order is correct.
 - Some files are equivalent schema changes under different filenames. Applying both can recreate or overwrite authorization objects, even if migration ledgers treat them as different entries.
@@ -20,7 +28,7 @@
 - Do not substitute the later remote tip: it includes `0170_client_hub_canonical_directory_projection_reset.sql`, which is not part of this acceptance step. Preserve the exact guard filenames already applied in the separate staging packet; inspect the live ledger before considering any projection reset.
 - Seven release-script conflict resolutions pass static syntax checks, but their transitional migration-count pin is not release-ready evidence. Recompute inventory/count/hash contracts after complete lineage and duplicate reconciliation; do not deploy the transitional merge.
 
-## Verified consolidation work
+## Historical and verified consolidation work
 
 - First lineage merge checkpoint: `0211f589`. Ops and Client TypeScript checks passed at that first combined runtime state. The subsequent descendant merge is still in progress; those results do not cover its unresolved changes.
 - A fresh read-only query of the live staging D1 migration ledger returned the historical `0160`–`0169` filenames followed by `0170_project_alpha_active_directory_project_guard.sql` and `0171_project_alpha_active_directory_update_guard.sql`. It returned no projection-reset migration. The query reported zero rows written.
