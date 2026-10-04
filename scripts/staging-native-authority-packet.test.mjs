@@ -22,6 +22,22 @@ const issuedAt = new Date(Date.now() - 5 * 60 * 1000).toISOString();
 const expiresAt = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
 const acquisitionRecord = Object.freeze({ id: "staging-directory-acquisition-record", kind: "organization", version: 1 });
 const activationId = "10000000-0000-4000-8000-000000000001";
+const REVIEWED_OPERATIONS_171 = Object.freeze({ count: 171,
+  finalMigration: "0171_project_alpha_active_directory_update_guard.sql",
+  namesSha256: "bc4590b90cccd1842b2496906986355cfde7522e970ac3ec95039cace437f61d",
+  chainSha256: "e3feca1f403a06f15495017fd843ac48173e39be2478f8d6b5060c262c0b1f5c" });
+const sha256 = value => createHash("sha256").update(value).digest("hex");
+function reviewedOperationsMigrations() {
+  const directory = path.join(repositoryRoot, "apps", "operations", "migrations");
+  const names = fs.readdirSync(directory).filter(name => name.endsWith(".sql")).sort()
+    .slice(0, REVIEWED_OPERATIONS_171.count);
+  assert.equal(names.length, REVIEWED_OPERATIONS_171.count);
+  assert.equal(names.at(-1), REVIEWED_OPERATIONS_171.finalMigration);
+  assert.equal(sha256(names.join("\n")), REVIEWED_OPERATIONS_171.namesSha256);
+  assert.equal(sha256(names.map(name => `${name}\0${sha256(fs.readFileSync(path.join(directory, name), "utf8"))}`).join("\n")),
+    REVIEWED_OPERATIONS_171.chainSha256);
+  return { directory, names };
+}
 
 function input(overrides = {}) {
   const value = {
@@ -121,6 +137,7 @@ function seedActivationReceipt(db, id = activationId, record = acquisitionRecord
   if (bypassGuards) db.exec(`DROP TRIGGER project_alpha_existing_directory_binding_activation_exact;
     DROP TRIGGER project_alpha_existing_directory_binding_activation_authority;
     DROP TRIGGER project_alpha_existing_directory_binding_activation_relationship;
+    DROP TRIGGER project_alpha_existing_directory_binding_activation_generation_exact;
     PRAGMA foreign_keys=OFF;`);
   db.prepare(`INSERT INTO project_alpha_existing_directory_binding_activation_receipts(
     activation_id,review_receipt_id,idempotency_key,acquired_receipt_id,native_owner_claim_id,
@@ -163,8 +180,9 @@ function establishReviewedOnboardingLineage(db) {
 function fixture() {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-native-authority-"));
   const app = path.join(base, "apps", "operations");
-  fs.mkdirSync(app, { recursive: true });
-  fs.cpSync(path.join(repositoryRoot, "apps", "operations", "migrations"), path.join(app, "migrations"), { recursive: true });
+  const migrations = path.join(app, "migrations"), reviewed = reviewedOperationsMigrations();
+  fs.mkdirSync(migrations, { recursive: true });
+  for (const name of reviewed.names) fs.copyFileSync(path.join(reviewed.directory, name), path.join(migrations, name));
   fs.copyFileSync(path.join(repositoryRoot, "docs", "staging", "operations.wrangler.json.example"), path.join(app, "wrangler.staging.json"));
   return base;
 }
@@ -188,8 +206,8 @@ function applyMigration(db, sql, name, table = "d1_migrations") {
 function canonicalDatabase(databaseOwner = owner) {
   const db = new DatabaseSync(":memory:");
   db.exec("PRAGMA foreign_keys=ON; CREATE TABLE d1_migrations(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE,applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL)");
-  const directory = path.join(repositoryRoot, "apps", "operations", "migrations");
-  for (const name of fs.readdirSync(directory).filter(name => name.endsWith(".sql")).sort()) {
+  const { directory, names } = reviewedOperationsMigrations();
+  for (const name of names) {
     const source = fs.readFileSync(path.join(directory, name), "utf8");
     const seeded = name === "0002_seed_acl.sql" && databaseOwner === owner
       ? transformSeed("operations", source, owner) : source;
@@ -813,9 +831,9 @@ test("builds separate one-migration configs with a dedicated ledger and sanitize
   assert.match(artifact.provision.sql, /scope_kind='global'|,'global'/);
   assert.match(artifact.provision.sql, /SELECT count\(\*\) FROM d1_migrations/);
   assert.deepEqual(artifact.provision.manifest.canonicalOperationsLedger, {
-    count: 151,
-    finalMigration: "0151_verified_recipient_delivery_authority_outbox.sql",
-    chainSha256: "c9ca6374a7470a94e7cd3ec9aa047f38a6e841607840f2f8323325013178f9c2",
+    count: REVIEWED_OPERATIONS_171.count,
+    finalMigration: REVIEWED_OPERATIONS_171.finalMigration,
+    chainSha256: REVIEWED_OPERATIONS_171.chainSha256,
   });
   assert.deepEqual(artifact.provision.manifest.directoryGrant, {
     id: `staging-directory-profile-edit:${owner.operationsStaffId}`,
@@ -854,6 +872,12 @@ test("fails closed for wrong staging identity and canonical migration drift", ()
   const drift = fixture();
   fs.appendFileSync(path.join(drift, "apps", "operations", "migrations", "0086_native_shared_projects.sql"), " ");
   assert.throws(() => buildAuthorityArtifacts(drift, input(), "provision"), /contents changed/);
+});
+
+test("reviewed authority packets reject an unreviewed migration after the exact 0171 chain", () => {
+  const base = fixture();
+  fs.writeFileSync(path.join(base, "apps", "operations", "migrations", "0170_unreviewed_staging_test.sql"), "SELECT 1;\n");
+  assert.throws(() => buildAuthorityArtifacts(base, input(), "provision"), /exact reviewed 171-file Operations chain/);
 });
 
 test("full canonical schema provisions, revokes, and reactivates exact native authority", () => {

@@ -141,8 +141,14 @@ describe("verified recipient delivery authority joined minimal protocol integrat
       deliveryDb.prepare("INSERT INTO portal_operations_authority_v2_receipts VALUES(?,?,?,?,?,1,1,'active',3,?)").bind(homeOperationId,clientAuthorityId,workspaceId,"https://team.cloudflareaccess.com","access|recipient",'["operations.service_home.read"]'),
       deliveryDb.prepare("INSERT INTO portal_project_access_terms VALUES('terms-one',?,?,?,?,?,NULL)").bind(workspaceId,sourceId,projectPublicId,"customer","until_revoked"),
     ]);
-    const clientMigration=readFileSync(new URL("../../client/migrations/0221_verified_recipient_delivery_authority.sql",import.meta.url),"utf8");
-    await deliveryDb.batch(splitD1MigrationStatements(clientMigration).map(statement=>deliveryDb.prepare(statement)));
+    // The current writer requires immutable creation provenance and distinct
+    // operation-actor columns from 0222. An old minimal 0221-only fixture must
+    // not be used as evidence for the newer joined protocol.
+    for (const name of ["0221_verified_recipient_delivery_authority.sql",
+      "0222_verified_recipient_delivery_cross_manager_revoke.sql"]) {
+      const clientMigration=readFileSync(new URL(`../../client/migrations/${name}`,import.meta.url),"utf8");
+      await deliveryDb.batch(splitD1MigrationStatements(clientMigration).map(statement=>deliveryDb.prepare(statement)));
+    }
   }, 30_000);
   afterEach(async () => runtime.dispose());
 

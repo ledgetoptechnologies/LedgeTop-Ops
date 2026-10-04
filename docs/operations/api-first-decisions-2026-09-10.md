@@ -8,6 +8,68 @@ This is a design addendum, not a claim that the replacement architecture is impl
 
 **Implementation authorized:** The owner subsequently asked to continue the migration and retained work with generic open-source PA behavior and preservation of existing Ops client public links. The [current implementation objective and task register](api-first-migration-plan.md) records this scope and its release gates.
 
+## September 30 current-source and staging reconciliation
+
+The architecture decisions remain unchanged, but the implementation has moved
+past the September 22 candidate described below. Current local source contains
+the default-off native recipient consent/manager boundaries, workspace
+publication and cleanup flows, explicit per-recipient delivery authority,
+current-manager recovery, Client delivery browsing/content-start audit, and
+recipient display labels. The native routes are ordered ahead of the historical
+PA-backed admission paths without replacing existing public-share routes.
+Production configuration remains off and does not acquire the new private reader
+binding or audit secret from this local work.
+
+The current local migration inventory is Operations `0152`–`0160` after the
+reviewed `0151` base (160 SQL files total) and Client `0223`–`0228` after the
+reviewed `0222` base (147 SQL files total). This is source progress only. Fresh
+staging readback remains exactly Operations **151 applied migrations through
+0151** and Client **141 applied migrations through 0222**, with zero foreign-key
+check rows in both databases. Cloudflare dashboard Time Travel restore points
+were created before the proposed advance:
+
+- Operations D1: `00000bd2-00000024-000050f6-268daa8a3e12733024d6ba321beb7786`
+- Client D1: `00000d57-00000008-000050f6-31acee3d6f0dd714d8370dc42de3d22a`
+
+These are dashboard bookmark/Time Travel restore points, not exported SQL
+backups and not evidence that a restore was performed. No new staging migration
+or Worker deployment followed: the configured Wrangler CLI authentication had
+expired, so the rollout stopped instead of substituting credentials or treating
+dashboard access as CLI authorization.
+
+Current focused verification passed both application TypeScript checks and the
+native migration-profile/route/migration-evidence cohort: 14 tests passed and
+one Windows symlink-capability case was skipped. Earlier focused populated-D1,
+HTTP, API, RPC and desktop/mobile profile evidence is recorded in the migration
+register and the folder-access checkpoint. The broad application test chain was
+interrupted and is **not** a full-suite pass.
+
+### September 30 recipient isolation review
+
+An independent review found a high-severity candidate: delivery issuance could
+pair a recipient enrolled for one client with a client-scoped project belonging
+to a sibling client under the same organization root. The local fix requires
+the selected project to belong to the recipient's exact client, except for a
+deliberately organization-wide project whose organization matches the exact
+workspace root. Issuance, database transition guards and final content reads
+also pin publication revision, workspace identity, command, receipt and
+snapshot to current state. Populated-D1 sibling-denial and valid-scope controls
+pass 1/1, focused Ops authority tests pass 20/20, and Ops type-check passes.
+Migration `0158` is still an unapplied local candidate; its updated digest is
+`034c830a00eab4ac259493e4af36d2eab2ab4f91883278fc1cbf578fffefb35b`. This
+fix must be included in the staging rollout and revalidated there before any
+client is activated.
+
+Remaining release gates are therefore operational and end-to-end as well as
+code-level: refresh the intended Wrangler authentication; recheck the exact
+ledger, database IDs, restore points and generated migration-only suffix; apply
+and verify migrations before an exact default-off version deployment; inspect
+bindings/flags; then prove a signed staging recipient consent, owner confirmation,
+explicit folder share, browse/preview/range/content audit, revocation,
+cross-client isolation and rollback. Rerun the interrupted broad suite without
+competing database fixtures. Production PA updates, production activation and
+public-link changes remain outside this checkpoint.
+
 ## September 22 implementation status addendum
 
 - Operations PR [#107](https://github.com/ledgetoptechnologies/LedgeTop-Ops/pull/107)

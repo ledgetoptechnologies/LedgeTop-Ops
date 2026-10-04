@@ -23,7 +23,7 @@ async function runMigration(db: D1Database, name: string): Promise<void> {
 }
 
 describe("Project Alpha API-v2 inventory authorization generations", () => {
-  it("scopes regression checks per surface and preserves historical conflict evidence", async () => {
+  it("scopes regression checks per surface without rewriting immutable historical conflict evidence", async () => {
     const runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06",
       script: "export default {fetch(){return new Response('local-test')}}", d1Databases: ["OPS_DB"] });
     try {
@@ -40,7 +40,7 @@ describe("Project Alpha API-v2 inventory authorization generations", () => {
           source_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,
           external_project_id TEXT,project_alpha_public_id TEXT);`;
       await db.batch(splitD1MigrationStatements(prerequisites).map(statement => db.prepare(statement)));
-      await runMigration(db, "0125_project_alpha_api_v2_inventory_observations.sql");
+      await runMigration(db, "0161_project_alpha_api_v2_inventory_observations.sql");
 
       await insertReceipt(db, "directory", "11111111-1111-4111-8111-111111111111", "48", "a".repeat(64));
       await insertReceipt(db, "project", "22222222-2222-4222-8222-222222222222", "7", "b".repeat(64));
@@ -49,7 +49,7 @@ describe("Project Alpha API-v2 inventory authorization generations", () => {
       expect(historical).toEqual({ conflict_kind: "authorization_generation_regressed",
         details_json: JSON.stringify({ observedAuthorizationGeneration: "7", priorAuthorizationGeneration: "48" }) });
 
-      await runMigration(db, "0128_project_alpha_inventory_generation_surface_scope.sql");
+      await runMigration(db, "0165_project_alpha_inventory_generation_surface_scope.sql");
       await insertReceipt(db, "project", "33333333-3333-4333-8333-333333333333", "8", "c".repeat(64));
       expect(await db.prepare(`SELECT count(*) AS n FROM project_alpha_api_v2_inventory_conflicts`)
         .first<number>("n")).toBe(1);

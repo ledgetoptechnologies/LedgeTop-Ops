@@ -96,14 +96,14 @@ recorded later in this file.
 ## Safety model
 
 The checked-in generator validates the exact staging account, Operations D1 ID,
-complete D1 binding inventory, and the exact rebaselined Operations
+complete D1 binding inventory, and the exact reviewed 171-file Operations
 migration chain. Generated files are ignored. Provision and revoke use separate
 Wrangler configs and separate one-file migration directories so applying the
 provision config cannot select the revoke migration.
 
 Both configs use the staging-only
 `staging_native_authority_migrations` migration table. They do not add rows to
-the canonical `d1_migrations` ledger. Each migration rechecks the exact current
+the canonical `d1_migrations` ledger. Each migration rechecks the exact 171-name
 canonical ledger in D1 and its expected auxiliary-ledger predecessor before any
 authority mutation. Wrangler migration rollback, database constraints, final
 sentinel checks, immutable bootstrap approvals/receipts, admission versions, and
@@ -140,9 +140,10 @@ in the ignored local directory with operator-only filesystem access.
 ## Prepare and review
 
 1. Keep both acceptance-route flags and the selected PA connection disabled.
-2. Apply and verify the canonical Operations migrations through the current
-   rebaselined final migration. The prior `0131` and `0150` endpoints are
-   historical packet boundaries and do not prove the consolidated chain. Confirm
+2. Apply and verify the complete reviewed staging Operations migration chain
+   through `0171_project_alpha_active_directory_update_guard.sql`. The prior
+   `0131`, `0150`, and `0169` endpoints remain historical packet boundaries and
+   do not prove the consolidated chain. Confirm
    that no native staff-management, directory, or Project command fence is open
    and neither Project nor Directory outbox has pending or leased actor work.
 3. Sign in once through the ordinary staging Operations Access application so

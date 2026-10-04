@@ -189,8 +189,9 @@ describe("recipient enrollment joined acceptance", () => {
     await expect(readClientPortalServiceMetadata(opsDb, { protocolVersion: 1, authorityId, workspaceId,
       ownershipEpoch: 1, grantRevision: 1, issuer, subject: principal.subject })).resolves.toMatchObject({ ok: true, services: [] });
     const homeEnv = { DELIVERY_DB: clientDb, CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED: "true",
-      CLIENT_PORTAL_SERVICE_METADATA_READER: { readServiceMetadata: (input: unknown) => readClientPortalServiceMetadataRpc({
-        OPS_DB: opsDb, CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED: "true" }, input) } };
+      CLIENT_PORTAL_SERVICE_METADATA_READER: { readServiceMetadata: async (input: unknown) => JSON.stringify(
+        await readClientPortalServiceMetadataRpc({ OPS_DB: opsDb,
+          CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED: "true" }, input)) } };
     // Miniflare serializes the two D1 bindings slowly on Windows; freeze only the transport deadline while retaining
     // the real Client discovery query and real Operations metadata query.
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });

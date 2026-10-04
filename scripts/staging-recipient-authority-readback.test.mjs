@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import test from "node:test";
+import test, { after } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   IDENTITY_COLLISIONS_QUERY,
@@ -20,6 +20,7 @@ import {
   writePrivateArtifact,
 } from "./staging-recipient-authority-readback.mjs";
 import { transformSeed } from "./staging-bootstrap.mjs";
+import { STAGING_ACCOUNT_ID, STAGING_INVENTORY } from "./staging-requirements.mjs";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const staffId = "staging-operations-owner";
@@ -33,13 +34,28 @@ const reviewedHistoryGenerations = Object.freeze({
   globalHistoryGeneration: 2,
   onboardingHistoryGenerations: Object.freeze([2, 3, 4]),
 });
+const canonicalNames = fs.readdirSync(path.join(repositoryRoot, "apps", "operations", "migrations"))
+  .filter(name => /^\d{4}_.+\.sql$/.test(name)).sort();
+const reviewedRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-recipient-readback-"));
+const reviewedOperations = path.join(reviewedRoot, "apps", "operations");
+fs.mkdirSync(path.join(reviewedOperations, "migrations"), { recursive: true });
+const stagingConfigFixture = {
+  account_id: STAGING_ACCOUNT_ID,
+  name: STAGING_INVENTORY.operations.name,
+  vars: { ENVIRONMENT: "staging", PUBLIC_BASE_URL: "https://ops-staging.ledgetopdroneservices.com" },
+  routes: STAGING_INVENTORY.operations.routes,
+  d1_databases: STAGING_INVENTORY.operations.d1_databases,
+};
+fs.writeFileSync(path.join(reviewedOperations, "wrangler.staging.json"), JSON.stringify(stagingConfigFixture));
+for (const name of canonicalNames) fs.copyFileSync(
+  path.join(repositoryRoot, "apps", "operations", "migrations", name),
+  path.join(reviewedOperations, "migrations", name));
+after(() => fs.rmSync(reviewedRoot, { recursive: true, force: true }));
 const readbackInput = Object.freeze({
-  base: repositoryRoot,
+  base: reviewedRoot,
   selection: Object.freeze({ staffId, recordId }),
   expectations: reviewedHistoryGenerations,
 });
-const canonicalNames = fs.readdirSync(path.join(repositoryRoot, "apps", "operations", "migrations"))
-  .filter(name => /^\d{4}_.+\.sql$/.test(name)).sort();
 
 const grant = (overrides = {}) => ({
   id: globalId, staff_id: staffId, permission: "directory.profile.edit", effect: "allow", scope_kind: "global",
@@ -149,7 +165,7 @@ test("captures the exact known inactive two-grant lineage as ready without mutat
   assert.deepEqual(artifact.directory.history.map(row => [row.grant_id, row.grant_version, row.grant_generation]), [
     [globalId, 1, 2], [onboardingId, 1, 2], [onboardingId, 2, 3], [onboardingId, 3, 4],
   ]);
-  assert.equal(artifact.source.localCanonicalLedger.finalMigration, "0151_verified_recipient_delivery_authority_outbox.sql");
+  assert.equal(artifact.source.localCanonicalLedger.finalMigration, "0171_project_alpha_active_directory_update_guard.sql");
   assert.equal(artifact.source.localCanonicalLedger.attestsRemoteAppliedSql, false);
   assert.equal(artifact.checks.migrationLedgerNamesMatchCanonical, true);
   assert.deepEqual(artifact.reviewedHistoryGenerations, reviewedHistoryGenerations);
@@ -180,7 +196,7 @@ test("wrong positive reviewed generation inputs fail closed even when the rows a
   });
 });
 
-test("every readback query prepares and executes against the complete canonical 150-migration schema", () => {
+test("every readback query prepares and executes against the complete canonical 171-migration schema", () => {
   const database = canonicalDatabase();
   try {
     const selection = { staffId, recordId };
@@ -205,7 +221,7 @@ test("canonical 0150 cancellation receipts exclude canceled intents while every 
   const database = canonicalDatabase();
   try {
     // This reduced local fixture bypasses write-side guards and foreign keys only
-    // to exercise the readback SELECT against the actual canonical 150 schema.
+    // to exercise the readback SELECT against the actual canonical 168 schema.
     // The cancellation runtime and its guarded write path are covered elsewhere.
     database.exec(`PRAGMA foreign_keys=OFF;
       DROP TRIGGER client_portal_workspace_binding_selection_guard;
@@ -356,7 +372,7 @@ test("argument parser requires explicit bounded staging selections and rejects u
 });
 
 test("config validation rejects production or drifted account and database targets", () => {
-  const config = JSON.parse(fs.readFileSync(path.join(repositoryRoot, "apps", "operations", "wrangler.staging.json"), "utf8"));
+  const config = structuredClone(stagingConfigFixture);
   assert.equal(validateStagingConfigDocument(config).binding, "OPS_DB");
   assert.throws(() => validateStagingConfigDocument({ ...structuredClone(config), account_id: "production-account" }),
     /exact pinned staging target/);

@@ -3,10 +3,19 @@ import fs from "node:fs";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { fileURLToPath } from "node:url";
-import { BOOTSTRAP_APPS } from "./staging-bootstrap.mjs";
 import { STAGING_ACCOUNT_ID, STAGING_INVENTORY } from "./staging-requirements.mjs";
+import { boundedGuardInsert } from "./staging-bounded-guards.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+// Existing authority packet schemas were reviewed against this exact 171-file
+// staging chain. Keep the complete-ledger equality check below; any later
+// migration requires an explicit contract update and full-chain review.
+const REVIEWED_AUTHORITY_OPERATIONS_CHAIN = Object.freeze({
+  count: 171,
+  finalMigration: "0171_project_alpha_active_directory_update_guard.sql",
+  namesSha256: "bc4590b90cccd1842b2496906986355cfde7522e970ac3ec95039cace437f61d",
+  contentsSha256: "e3feca1f403a06f15495017fd843ac48173e39be2478f8d6b5060c262c0b1f5c",
+});
 export const PACKET_SCHEMA_VERSION = 3;
 export const ACQUISITION_PACKET_SCHEMA_VERSION = 4;
 export const FIXTURE_PACKET_SCHEMA_VERSION = 5;
@@ -1056,6 +1065,7 @@ function preservativeAcquisitionResult(packet, ids, versions, action) {
 }
 
 function provisionSqlPreservativeAcquisition(packet, ids, versions, names, migrationNames) {
+  const guardInsert = boundedGuardInsert;
   const table = guardTable(packet.packetId, "provision"), staff = sqlString(packet.staffId);
   const canonicalPlan = canonicalJson(plan(packet, "provision", ids, versions)), planSha = sha256(canonicalPlan);
   const verificationJson = verification(packet), verificationSha = sha256(verificationJson);
@@ -1112,6 +1122,7 @@ DROP TABLE ${table};
 }
 
 function revokeSqlPreservativeAcquisition(packet, ids, versions, provision, names, migrationNames) {
+  const guardInsert = boundedGuardInsert;
   const table = guardTable(packet.packetId, "revoke"), staff = sqlString(packet.staffId);
   const canonicalPlan = canonicalJson(plan(packet, "revoke", ids, versions)), planSha = sha256(canonicalPlan);
   const verificationJson = verification(packet), verificationSha = sha256(verificationJson);
@@ -1196,6 +1207,7 @@ function recipientEnrollmentResult(packet, ids, versions, action) {
 }
 
 function provisionSqlRecipientEnrollment(packet, ids, versions, names, migrationNames) {
+  const insertGuard = packet.purpose === PRESERVATIVE_RECIPIENT_ENROLLMENT_PURPOSE ? boundedGuardInsert : guardInsert;
   const table = guardTable(packet.packetId, "provision"), staff = sqlString(packet.staffId);
   const canonicalPlan = canonicalJson(plan(packet, "provision", ids, versions)), planSha = sha256(canonicalPlan);
   const verificationJson = verification(packet), verificationSha = sha256(verificationJson);
@@ -1249,7 +1261,7 @@ WHERE id=${sqlString(ids.portalAccessGrant)} AND staff_id=${staff} AND permissio
   return `PRAGMA foreign_keys = ON;
 -- Generated staging-only exact-resource recipient-enrollment portal authority packet.
 CREATE TABLE ${table}(ok INTEGER NOT NULL CHECK(ok=1));
-${guardInsert(table, `${canonicalLedger(names)}
+${insertGuard(table, `${canonicalLedger(names)}
     AND NOT EXISTS(SELECT 1 FROM ${AUTHORITY_MIGRATIONS_TABLE} WHERE name IN (${sqlString(migrationNames.provision)},${sqlString(migrationNames.revoke)}))
     AND ${commonPrecondition(packet, ids)}
     AND EXISTS(SELECT 1 FROM staff_role_assignments WHERE staff_id=${staff} AND role_id='role-owner' AND scope='global')
@@ -1261,12 +1273,13 @@ UPDATE native_staff_admissions SET active=1,version=version+1,updated_at=strftim
 WHERE staff_id=${staff} AND active=0 AND version=${versions.admissionBefore};
 ${portalMutation}
 ${receiptSql(packet, ids, "provision", canonicalPlan, planSha, verificationJson, verificationSha, result)}
-${guardInsert(table, final)}
+${insertGuard(table, final)}
 DROP TABLE ${table};
 `;
 }
 
 function revokeSqlRecipientEnrollment(packet, ids, versions, provision, names, migrationNames) {
+  const insertGuard = packet.purpose === PRESERVATIVE_RECIPIENT_ENROLLMENT_PURPOSE ? boundedGuardInsert : guardInsert;
   const table = guardTable(packet.packetId, "revoke"), staff = sqlString(packet.staffId);
   const canonicalPlan = canonicalJson(plan(packet, "revoke", ids, versions)), planSha = sha256(canonicalPlan);
   const verificationJson = verification(packet), verificationSha = sha256(verificationJson);
@@ -1321,7 +1334,7 @@ function revokeSqlRecipientEnrollment(packet, ids, versions, provision, names, m
   return `PRAGMA foreign_keys = ON;
 -- Generated staging-only exact-resource recipient-enrollment portal authority revocation packet.
 CREATE TABLE ${table}(ok INTEGER NOT NULL CHECK(ok=1));
-${guardInsert(table, precondition)}
+${insertGuard(table, precondition)}
 ${approvalSql(packet, ids, "revoke", canonicalPlan, planSha, verificationJson, verificationSha)}
 UPDATE native_directory_grants SET active=0
 WHERE id=${sqlString(ids.portalAccessGrant)} AND staff_id=${staff} AND permission='directory.portal_access.manage'
@@ -1331,7 +1344,7 @@ WHERE staff_id=${staff} AND active=1 AND version=${versions.admissionActive};
 UPDATE native_staff_bootstrap_approvals SET revoked_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
 WHERE approval_id=${sqlString(ids.provisionApproval)} AND revoked_at IS NULL;
 ${receiptSql(packet, ids, "revoke", canonicalPlan, planSha, verificationJson, verificationSha, result)}
-${guardInsert(table, final)}
+${insertGuard(table, final)}
 DROP TABLE ${table};
 `;
 }
@@ -1356,15 +1369,16 @@ function canonicalOperations(base) {
   for (const entry of entries) if (entry.name.endsWith(".sql") && (!entry.isFile() || entry.isSymbolicLink()))
     throw new Error(`Operations canonical migration ${entry.name} must be a regular non-symlink file`);
   const names = entries.filter(entry => entry.isFile() && !entry.isSymbolicLink() && entry.name.endsWith(".sql")).map(entry => entry.name).sort();
-  const contract = BOOTSTRAP_APPS.operations;
-  if (names.length !== contract.migrationCount || sha256(names.join("\n")) !== contract.migrationNamesSha256)
-    throw new Error(`authority source must be the exact complete ${contract.migrationCount}-file Operations chain (found ${names.length}, names ${sha256(names.join("\n"))}, final ${names.at(-1)})`);
+  const contract = REVIEWED_AUTHORITY_OPERATIONS_CHAIN;
+  if (names.length !== contract.count || names.at(-1) !== contract.finalMigration
+    || sha256(names.join("\n")) !== contract.namesSha256)
+    throw new Error(`authority source must be the exact reviewed ${contract.count}-file Operations chain (found ${names.length}, names ${sha256(names.join("\n"))}, final ${names.at(-1)})`);
   const contents = names.map(name => {
     const file = path.join(directory, name); requireRegularFile(file, `Operations canonical migration ${name}`);
     return `${name}\0${sha256(fs.readFileSync(file, "utf8"))}`;
   });
   const chainSha256 = sha256(contents.join("\n"));
-  if (chainSha256 !== contract.migrationContentsSha256) throw new Error("Operations canonical migration contents changed");
+  if (chainSha256 !== contract.contentsSha256) throw new Error("Operations reviewed authority migration contents changed");
   return { config, selected, chainSha256, names };
 }
 

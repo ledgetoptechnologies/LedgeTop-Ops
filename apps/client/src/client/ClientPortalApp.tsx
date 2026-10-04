@@ -12,6 +12,7 @@ import type { DeliveryLocationCollection } from "@ltds/shared";
 import type { RequestError } from "./bulk-download";
 import {
   cancelPortalServiceRequest,
+  loadOperationsHome,
   createPortalChangeRequest,
   createPortalServiceRequest,
   createPortalServiceDraft,
@@ -92,7 +93,7 @@ import {
 import { BRAND } from "@ltds/shared";
 import { readClientViewerUnits, writeClientViewerUnits } from "./viewer-units-preference";
 import { clientViewerShellPath, nativeClientViewerShellPath } from "./ClientViewerShell";
-import { OperationsHomeApp, OperationsServiceSummary } from "./OperationsHomeApp";
+import { OperationsHomeApp, OperationsNativeServicePanel } from "./OperationsHomeApp";
 import {
   clientPortalPath,
   clientProjectPath,
@@ -343,6 +344,8 @@ function FileBrowser({
     controller: AbortController;
     promise: Promise<PortalFilePage>;
   } | null>(null);
+  const consumedContinuation = useRef<{ version: number; folderId: string | null; cursor: string } | null>(null);
+  const authoritativeContinuation = useRef<{ version: number; folderId: string | null; cursor: string | null } | null>(null);
   const prefetchedPage = useRef<{ folderId: string | null; cursor: string; page: PortalFilePage } | null>(null);
   const loadMoreSentinel = useRef<HTMLDivElement | null>(null);
   const lastAutoCursor = useRef("");
@@ -353,6 +356,8 @@ function FileBrowser({
     const controller = new AbortController();
     pageRequest.current?.controller.abort();
     pageRequest.current = null;
+    consumedContinuation.current = null;
+    authoritativeContinuation.current = { version, folderId, cursor: null };
     prefetchedPage.current = null;
     lastAutoCursor.current = "";
     setLoading(true);
@@ -371,7 +376,9 @@ function FileBrowser({
         setFiles(result.files);
         setFolders(result.folders ?? []);
         setBreadcrumbs(result.breadcrumbs ?? []);
-        setContinuationFolderId(result.folderId ?? folderId);
+        const resultFolderId = result.folderId ?? folderId;
+        authoritativeContinuation.current = { version, folderId: resultFolderId, cursor: result.cursor };
+        setContinuationFolderId(resultFolderId);
         setCursor(result.cursor);
       } catch (caught) {
         if (!active || controller.signal.aborted || (caught as Error).name === "AbortError") return;
@@ -395,6 +402,8 @@ function FileBrowser({
       controller.abort();
       pageRequest.current?.controller.abort();
       pageRequest.current = null;
+      consumedContinuation.current = null;
+      authoritativeContinuation.current = null;
       prefetchedPage.current = null;
     };
   }, [folderId, load, retryVersion]);
@@ -447,6 +456,17 @@ function FileBrowser({
     const requestCursor = cursor;
     const requestFolderId = continuationFolderId;
     const version = browserVersion.current;
+    const authoritative = authoritativeContinuation.current;
+    if (authoritative?.version !== version || authoritative.folderId !== requestFolderId || authoritative.cursor !== requestCursor) return;
+    const consumed = consumedContinuation.current;
+    if (consumed?.version === version && consumed.folderId === requestFolderId && consumed.cursor === requestCursor) return;
+    consumedContinuation.current = { version, folderId: requestFolderId, cursor: requestCursor };
+    const releaseContinuation = () => {
+      const current = consumedContinuation.current;
+      if (current?.version === version && current.folderId === requestFolderId && current.cursor === requestCursor) {
+        consumedContinuation.current = null;
+      }
+    };
     setLoadingMore(true);
     setError(null);
     try {
@@ -454,8 +474,10 @@ function FileBrowser({
       const result = prepared?.folderId === requestFolderId && prepared.cursor === requestCursor
         ? prepared.page
         : await requestPage(requestFolderId, requestCursor);
-      if (!result || version !== browserVersion.current) return;
+      if (!result) { releaseContinuation(); return; }
+      if (version !== browserVersion.current) return;
       if (prefetchedPage.current?.folderId === requestFolderId && prefetchedPage.current.cursor === requestCursor) prefetchedPage.current = null;
+      authoritativeContinuation.current = { version, folderId: requestFolderId, cursor: result.cursor };
       setFiles(current => {
         const ids = new Set(current.map(file => file.id));
         return [...current, ...result.files.filter(file => !ids.has(file.id))];
@@ -466,9 +488,11 @@ function FileBrowser({
       });
       setCursor(result.cursor);
     } catch (caught) {
+      releaseContinuation();
       if ((caught as Error).name === "AbortError" || version !== browserVersion.current) return;
       const status = (caught as RequestError).status;
       if ([401, 403, 404, 410].includes(status ?? 0)) {
+        authoritativeContinuation.current = { version, folderId: requestFolderId, cursor: null };
         setFiles([]);
         setFolders([]);
         setBreadcrumbs([]);
@@ -2733,6 +2757,8 @@ export function ClientPortalApp({
   operationsHomeResponse?: PortalOperationsHomeResponse;
 }) {
   const initialRoute = parseClientPortalRoute(window.location.pathname);
+  const [currentOperationsHome, setCurrentOperationsHome] = useState<PortalOperationsHomeResponse | undefined>(operationsHomeResponse);
+  const [operationsHomeStatus, setOperationsHomeStatus] = useState<"current" | "checking" | "unavailable">("current");
   const [gate, setGate] = useState<PortalGate>({ status: "loading" });
   const gateRef = useRef(gate), bootstrapController = useRef<AbortController | null>(null);
   gateRef.current = gate;
@@ -2766,6 +2792,73 @@ export function ClientPortalApp({
       : `${gate.data.account.id}:${gate.data.selectedWorkspaceId ?? "legacy"}`
     : null;
   const requestAvailability = useRequestAvailability(switchingWorkspace ? null : requestContextKey, gate.status === "ready" ? gate.data.selectedWorkspaceId ?? null : null);
+
+  // Operations service-home labels are authorized separately from Client data.
+  // Revalidate when the portal returns to the foreground and periodically while
+  // visible; never keep rendering the last private summary after a denied or
+  // unverifiable response.
+  useEffect(() => {
+    setCurrentOperationsHome(operationsHomeResponse);
+    setOperationsHomeStatus("current");
+    if (!operationsHomeResponse) return;
+    let active = true;
+    let sequence = 0;
+    let lastStartedAt = 0;
+    let controller: AbortController | null = null;
+    const refresh = () => {
+      if (!active || document.visibilityState !== "visible") return;
+      const now = Date.now();
+      if (now - lastStartedAt < 1000) return;
+      lastStartedAt = now;
+      const requestSequence = ++sequence;
+      controller?.abort();
+      const requestController = new AbortController();
+      controller = requestController;
+      setCurrentOperationsHome(undefined);
+      setOperationsHomeStatus("checking");
+      void loadOperationsHome(undefined, requestController.signal).then(response => {
+        if (!active || requestController.signal.aborted || requestSequence !== sequence) return;
+        setCurrentOperationsHome(response);
+        setOperationsHomeStatus("current");
+      }).catch(() => {
+        if (!active || requestController.signal.aborted || requestSequence !== sequence) return;
+        setCurrentOperationsHome(undefined);
+        setOperationsHomeStatus("unavailable");
+      });
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") refresh();
+      else {
+        sequence++;
+        controller?.abort();
+        controller = null;
+        setCurrentOperationsHome(undefined);
+        setOperationsHomeStatus("checking");
+      }
+    };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    const timer = window.setInterval(refresh, 60_000);
+    return () => {
+      active = false;
+      sequence++;
+      controller?.abort();
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [operationsHomeResponse]);
+
+  const operationsHomeSummary = currentOperationsHome
+    ? <OperationsNativeServicePanel response={currentOperationsHome} embedded />
+    : operationsHomeResponse
+      ? <section className="portal-card" role="status" aria-label="Operations service summary status">
+        <h2>{operationsHomeStatus === "checking" ? "Refreshing Operations services" : "Operations services unavailable"}</h2>
+        <p>{operationsHomeStatus === "checking"
+          ? "Checking your current service access. The previous summary is hidden until it is verified."
+          : "Your Operations service summary could not be revalidated, so it is hidden. Refresh the portal to check access again."}</p>
+      </section>
+      : null;
   const pastDeliveryLoader = useMemo(
     () => (_folderId: string | null, cursor: string | null, signal: AbortSignal) => loadPortalPastDeliveries(cursor, undefined, signal),
     [],
@@ -2927,7 +3020,7 @@ export function ClientPortalApp({
       </PortalBoundary>
     );
   if (gate.status === "blocked") {
-    if (operationsHomeResponse) return <OperationsHomeApp response={operationsHomeResponse} clientUnavailable onRetryClient={() => {
+    if (currentOperationsHome) return <OperationsHomeApp response={currentOperationsHome} clientUnavailable onRetryClient={() => {
       setPortalWorkspaceSelection(null);
       window.location.assign("/portal");
     }} />;
@@ -3122,7 +3215,7 @@ export function ClientPortalApp({
         loadModels={project => loadNativeViewerModels(native,project)}
         shellPath={model=>nativeClientViewerShellPath({workspaceId:native.workspace.id,projectId:id,associationId:model.associationId,modelId:model.modelId})}
         persistUnits={null} />}
-      renderDashboardSupplement={operationsHomeResponse ? () => <OperationsServiceSummary response={operationsHomeResponse} embedded /> : undefined}
+      renderDashboardSupplement={operationsHomeSummary ? () => operationsHomeSummary : undefined}
       renderFiles={options => <FileBrowser key={options.folderId ?? "linked-file"} {...options} feedback={native.capabilities.feedback} nativeFeedbackWorkspaceId={native.workspace.id} workspaceId={native.workspace.id} mapToken={null} locationScopeLabel="" emptyTitle="No files shown" emptyDetail={options.folderId ? "This shared folder has no files on this page." : "Open a delivery folder to browse its files."} />} />;
   else if (page === "project")
     content = selectedProject ? (
@@ -3248,7 +3341,7 @@ export function ClientPortalApp({
         <Card title="Recent requests">
           <RequestList requests={requests} projects={projects} limit={4} />
         </Card>
-        {operationsHomeResponse && <OperationsServiceSummary response={operationsHomeResponse} embedded />}
+        {operationsHomeSummary}
       </>
     );
   else if (page === "projects")

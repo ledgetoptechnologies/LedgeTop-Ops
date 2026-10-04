@@ -2,13 +2,21 @@ import { readFileSync } from "node:fs";
 import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { clientHubDetailPath, findClientHubRoot, listClientHubRoots, normalizeClientHubText,
-  type ClientHubKind, type ClientHubSource } from "../src/worker/client-hub-directory";
+  type ClientHubKind, type ClientHubRoot, type ClientHubSource } from "../src/worker/client-hub-directory";
+import { createClientHubCollectionContext } from "../src/worker/client-hub-collections";
 import type { Env, StaffPrincipal } from "../src/worker/types";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import { applyConnectorSchema, registerVisibleTestSource } from "./helpers/project-alpha-connectors";
 import { applyBusinessPartySchema } from "./helpers/business-parties";
 
 const staff: StaffPrincipal = { id: "staff-a", email: "a@example.test", displayName: "A", accessSubject: "subject-a", projectAlphaUserId: "pa-user-a" };
+const reviewedIdentity = { sourceInstanceId: "11111111-1111-4111-8111-111111111111",
+  applicationId: "22222222-2222-4222-8222-222222222222", historyEpochId: "33333333-3333-4333-8333-333333333333" };
+const reviewedConnections = (enabled = true, historyEpoch = reviewedIdentity.historyEpochId) => JSON.stringify({ version: 1, instances: {
+  "project-alpha:primary": { sourceId: "project-alpha:primary", enabled, baseUrl: "https://alpha.example.test",
+    apiKey: "test-only", sourceInstanceId: reviewedIdentity.sourceInstanceId,
+    applicationId: reviewedIdentity.applicationId, historyEpoch },
+} });
 const migration = readFileSync(new URL("../migrations/0032_client_hub_directory.sql", import.meta.url), "utf8");
 const sql = (value: string) => value.replace(/^\s*--.*$/gm, "").replace(/\s*\n\s*/g, " ");
 
@@ -17,13 +25,16 @@ describe("source-qualified Client Hub directory", () => {
   let db: D1Database;
   let deliveryDb: D1Database;
   let env: Env;
+  let populated0166Upgrade: { root: unknown; search: unknown; foreignKeys: unknown[] };
   beforeAll(async () => {
     runtime = new Miniflare({ compatibilityDate: "2026-08-06", modules: true,
       script: "export default { fetch(){return new Response('ok')} }",
       d1Databases: { OPS_DB: "hub-directory", DELIVERY_DB: "hub-directory-delivery" } });
     db = await runtime.getD1Database("OPS_DB") as unknown as D1Database;
     deliveryDb = await runtime.getD1Database("DELIVERY_DB") as unknown as D1Database;
-    env = { OPS_DB: db, DELIVERY_DB: deliveryDb, CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED: "true" } as Env;
+    env = { OPS_DB: db, DELIVERY_DB: deliveryDb, CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED: "true",
+      ENVIRONMENT: "staging", PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED: "true",
+      PROJECT_ALPHA_API_V2_CONNECTIONS: reviewedConnections() } as Env;
     await deliveryDb.batch(splitD1MigrationStatements(readFileSync(
       new URL("../../client/migrations/0197_portal_root_access_policy.sql", import.meta.url), "utf8",
     )).map(statement => deliveryDb.prepare(statement)));
@@ -32,6 +43,13 @@ describe("source-qualified Client Hub directory", () => {
       CREATE TABLE staff_role_assignments(staff_id TEXT,role_id TEXT,scope TEXT,division_id TEXT);
       CREATE TABLE local_staff_role_assignments(staff_id TEXT,role_id TEXT,scope TEXT,division_id TEXT);
       CREATE TABLE staff_permission_overrides(staff_id TEXT,permission_key TEXT,effect TEXT,scope TEXT,division_id TEXT);
+      CREATE TABLE native_staff_admissions(staff_id TEXT PRIMARY KEY,bound_access_subject TEXT,active INTEGER,version INTEGER);
+      CREATE TABLE native_staff_profiles(staff_id TEXT PRIMARY KEY,login_email TEXT,version INTEGER);
+      CREATE TABLE native_directory_grant_generations(staff_id TEXT PRIMARY KEY,generation INTEGER);
+      CREATE TABLE native_directory_assignments(record_id TEXT,staff_id TEXT,active INTEGER);
+      CREATE TABLE native_directory_resource_scopes(record_id TEXT,scope_kind TEXT,business_area_id TEXT,division_id TEXT,active INTEGER);
+      CREATE TABLE native_directory_grants(id TEXT PRIMARY KEY,staff_id TEXT,permission TEXT,effect TEXT,scope_kind TEXT,
+        business_area_id TEXT,division_id TEXT,resource_id TEXT,active INTEGER);
       INSERT INTO role_permissions VALUES('directory','team.view'),('projects','projects.view');
       CREATE TABLE pa_organizations(id TEXT PRIMARY KEY,name TEXT NOT NULL DEFAULT '',last_sync_id TEXT,active INTEGER,payload_json TEXT NOT NULL DEFAULT '{}',projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
       CREATE TABLE pa_clients(id TEXT PRIMARY KEY,name TEXT NOT NULL DEFAULT '',last_sync_id TEXT,active INTEGER,organization_id TEXT,payload_json TEXT NOT NULL DEFAULT '{}',projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
@@ -44,21 +62,76 @@ describe("source-qualified Client Hub directory", () => {
     `));
     await db.exec(sql(migration));
     await db.batch(splitD1MigrationStatements(readFileSync(new URL("../migrations/0034_client_hub_projection_sources.sql", import.meta.url), "utf8")).map(statement => db.prepare(statement)));
+    await db.batch(splitD1MigrationStatements(readFileSync(new URL("../migrations/0042_client_hub_secondary_portal_visibility.sql", import.meta.url), "utf8")).map(statement => db.prepare(statement)));
+    await db.exec(sql(`
+      CREATE TABLE project_alpha_directory_read_adoption_reviews(
+        review_id TEXT PRIMARY KEY,source_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,
+        resource_type TEXT,record_id TEXT,external_id TEXT,project_alpha_public_id TEXT,project_alpha_revision TEXT,
+        authorization_generation TEXT,inventory_request_id TEXT,inventory_page_sha256 TEXT,profile_request_id TEXT,
+        binding_request_id TEXT,binding_evidence_sha256 TEXT);
+      CREATE TABLE project_alpha_directory_read_adoption_claims(claim_id TEXT PRIMARY KEY,state TEXT);
+      CREATE TABLE project_alpha_directory_read_adoption_field_review_receipts(
+        receipt_id TEXT PRIMARY KEY,review_id TEXT UNIQUE,claim_id TEXT,resource_type TEXT,record_id TEXT,
+        local_record_version INTEGER,project_alpha_profile_sha256 TEXT);
+      CREATE TABLE project_alpha_directory_read_adoption_field_decisions(
+        receipt_id TEXT,field_name TEXT,decision TEXT,PRIMARY KEY(receipt_id,field_name));
+      CREATE TABLE project_alpha_directory_read_adoption_field_review_audit(receipt_id TEXT);
+      CREATE TABLE operations_directory_records(record_id TEXT PRIMARY KEY,record_kind TEXT,current_version INTEGER);
+      CREATE TABLE operations_directory_revisions(record_id TEXT,version INTEGER,profile_json TEXT,PRIMARY KEY(record_id,version));
+      CREATE TABLE project_alpha_api_v2_directory_observations_current(
+        source_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,resource_type TEXT,
+        project_alpha_public_id TEXT,present INTEGER,last_action TEXT,has_conflict INTEGER,resource_revision TEXT,
+        binding_external_id TEXT,binding_status TEXT,binding_resource_revision TEXT,request_id TEXT);
+      CREATE TABLE project_alpha_api_v2_inventory_receipts(
+        source_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,inventory_kind TEXT,
+        request_id TEXT,authorization_generation TEXT,page_sha256 TEXT);
+      CREATE TABLE project_alpha_api_v2_inventory_conflicts(
+        source_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,
+        inventory_kind TEXT,resource_type TEXT,project_alpha_public_id TEXT,external_id TEXT);
+      CREATE TABLE project_alpha_directory_mappings(
+        source_id TEXT,source_instance_id TEXT,application_id TEXT,resource_type TEXT,external_id TEXT,project_alpha_public_id TEXT);
+      CREATE TABLE project_alpha_acquired_canonical_mappings(
+        source_id TEXT,source_instance_id TEXT,application_id TEXT,resource_type TEXT,record_id TEXT,external_id TEXT,project_alpha_public_id TEXT);
+    `));
+    await db.prepare(`INSERT INTO client_hub_roots(source_id,root_namespace,kind,public_id,display_name,sort_name,status,
+      portal_status,account_count,project_count,request_count,contact_count)
+      VALUES('delivery:local','account','standalone_client','upgrade-client','Preserved upgrade client','preserved upgrade client',
+        'active','not_provisioned',0,0,0,0)`).run();
+    await db.prepare(`INSERT INTO client_hub_search_values(source_id,root_namespace,kind,root_public_id,record_type,record_id,field,normalized_value)
+      VALUES('delivery:local','account','standalone_client','upgrade-client','account','upgrade-client','name','preserved upgrade client')`).run();
+    await db.batch(splitD1MigrationStatements(readFileSync(new URL("../migrations/0166_project_alpha_reviewed_standalone_display.sql", import.meta.url), "utf8")).map(statement => db.prepare(statement)));
+    populated0166Upgrade = {
+      root: await db.prepare(`SELECT source_id,root_namespace,kind,public_id,display_name FROM client_hub_roots WHERE public_id='upgrade-client'`).first(),
+      search: await db.prepare(`SELECT record_type,record_id,field,normalized_value FROM client_hub_search_values WHERE root_public_id='upgrade-client'`).first(),
+      foreignKeys: (await db.prepare("PRAGMA foreign_key_check").all()).results,
+    };
     await applyConnectorSchema(db);
     await applyBusinessPartySchema(db);
     await db.batch(splitD1MigrationStatements(readFileSync(new URL("../migrations/0037_client_business_activity.sql", import.meta.url), "utf8")).map(statement => db.prepare(statement)));
   });
   beforeEach(async () => {
+    env.ENVIRONMENT = "staging";
+    env.PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED = "true";
+    env.PROJECT_ALPHA_API_V2_CONNECTIONS = reviewedConnections();
     await deliveryDb.prepare("UPDATE portal_v2_root_access_policies SET state='active'").run();
     await db.batch([
       db.prepare("DELETE FROM client_hub_search_values"), db.prepare("DELETE FROM client_hub_roots"),
       db.prepare("DELETE FROM staff_role_assignments"), db.prepare("DELETE FROM staff_permission_overrides"),
+      db.prepare("DELETE FROM native_directory_grants"),
       db.prepare("DELETE FROM pa_projects"), db.prepare("DELETE FROM pa_project_assignments"),
       db.prepare("DELETE FROM pa_clients"), db.prepare("DELETE FROM pa_organizations"),
       db.prepare("INSERT INTO staff_role_assignments VALUES('staff-a','directory','global',NULL)"),
       db.prepare("UPDATE client_hub_directory_state SET ready=1,last_success_at=NULL WHERE id='directory'"),
       db.prepare("UPDATE pa_connectors SET read_visible=0,version=version+1 WHERE source_id<>'project-alpha:primary'"),
     ]);
+  });
+
+  it("preserves populated Client Hub roots, search rows, and foreign keys across migration 0166", () => {
+    expect(populated0166Upgrade.root).toEqual({ source_id: "delivery:local", root_namespace: "account",
+      kind: "standalone_client", public_id: "upgrade-client", display_name: "Preserved upgrade client" });
+    expect(populated0166Upgrade.search).toEqual({ record_type: "account", record_id: "upgrade-client",
+      field: "name", normalized_value: "preserved upgrade client" });
+    expect(populated0166Upgrade.foreignKeys).toEqual([]);
   });
 
   it("hydrates a revoked root independently of workspace projection readiness", async () => {
@@ -76,6 +149,192 @@ describe("source-qualified Client Hub directory", () => {
     expect(client).toMatchObject({ public_id: "revoked-org", pa_public_id: publicId,
       portal_access_state: "revoked" });
   });
+
+  it("hides reviewed PII rows absent current native authority and honors record-scoped profile-view grants and denies", async () => {
+    const projectionId="70000000-0000-4000-8000-000000000007";
+    const recordId="review-record-7";
+    await db.batch([
+      db.prepare(`INSERT INTO client_hub_roots(source_id,root_namespace,kind,public_id,pa_public_id,mapping_status,
+        display_name,sort_name,status,portal_status,workspace_id,legacy_account_id,account_count,project_count,request_count,contact_count)
+        VALUES('project-alpha:primary','review','standalone_client',?,?,'not_applicable','Reviewed Client','reviewed client',
+          'reviewed_display_only','review_only',NULL,NULL,0,0,0,1)`).bind(projectionId,"a".repeat(32)),
+      db.prepare(`INSERT INTO client_hub_search_values(source_id,root_namespace,kind,root_public_id,record_type,record_id,field,normalized_value)
+        VALUES('project-alpha:primary','review','standalone_client',?,'api_v2_reviewed_client',?,'contact','reviewed client')`)
+        .bind(projectionId,projectionId),
+      db.prepare(`INSERT INTO client_hub_search_values(source_id,root_namespace,kind,root_public_id,record_type,record_id,field,normalized_value)
+        VALUES('project-alpha:primary','review','standalone_client',?,'api_v2_reviewed_client',?,'email','reviewed@example.test')`)
+        .bind(projectionId,projectionId),
+      db.prepare(`INSERT INTO client_hub_search_values(source_id,root_namespace,kind,root_public_id,record_type,record_id,field,normalized_value)
+        VALUES('project-alpha:primary','review','standalone_client',?,'api_v2_reviewed_client',?,'phone','9205550100')`)
+        .bind(projectionId,projectionId),
+      db.prepare(`INSERT INTO project_alpha_directory_read_adoption_reviews
+        (review_id,source_id,source_instance_id,application_id,history_epoch_id,resource_type,record_id,external_id,
+          project_alpha_public_id,project_alpha_revision,authorization_generation,inventory_request_id,inventory_page_sha256,
+          profile_request_id,binding_request_id,binding_evidence_sha256)
+        VALUES('review-7','project-alpha:primary',?,?,?,'client',?,'external-7',
+          ?,'revision-7','generation-7','inventory-request','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          '70000000-0000-4000-8000-000000000008','70000000-0000-4000-8000-000000000009',
+          'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb')`)
+        .bind(reviewedIdentity.sourceInstanceId,reviewedIdentity.applicationId,reviewedIdentity.historyEpochId,recordId,"a".repeat(32)),
+      db.prepare("INSERT INTO project_alpha_directory_read_adoption_claims(claim_id,state) VALUES('claim-7','inactive')"),
+      db.prepare(`INSERT INTO project_alpha_directory_read_adoption_field_review_receipts
+        (receipt_id,review_id,claim_id,resource_type,record_id,local_record_version,project_alpha_profile_sha256)
+        VALUES('receipt-7','review-7','claim-7','client',?,1,'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc')`).bind(recordId),
+      db.prepare("INSERT INTO operations_directory_records(record_id,record_kind,current_version) VALUES(?,'client',1)").bind(recordId),
+      db.prepare(`INSERT INTO project_alpha_reviewed_standalone_client_displays
+        (projection_id,receipt_id,review_id,source_id,source_instance_id,application_id,history_epoch_id,resource_type,
+          record_id,external_id,project_alpha_public_id,project_alpha_revision,authorization_generation,inventory_request_id,
+          inventory_page_sha256,profile_request_id,profile_sha256,binding_request_id,binding_sha256,display_name,email,phone,state)
+        VALUES(?,'receipt-7','review-7','project-alpha:primary',?,?,?,'client',
+          ?,'external-7',?,'revision-7','generation-7','inventory-request',
+          'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','70000000-0000-4000-8000-000000000008',
+          'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+          '70000000-0000-4000-8000-000000000009','bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+          'Reviewed Client',NULL,NULL,'display_only')`)
+        .bind(projectionId,reviewedIdentity.sourceInstanceId,reviewedIdentity.applicationId,reviewedIdentity.historyEpochId,recordId,"a".repeat(32)),
+      db.prepare(`INSERT INTO project_alpha_api_v2_directory_observations_current
+        (source_id,source_instance_id,application_id,history_epoch_id,resource_type,project_alpha_public_id,present,last_action,
+          has_conflict,resource_revision,binding_external_id,binding_status,binding_resource_revision,request_id)
+        VALUES('project-alpha:primary',?,?,?,'client',?,1,'upsert',0,'revision-7','external-7','active','revision-7','inventory-request')`)
+        .bind(reviewedIdentity.sourceInstanceId,reviewedIdentity.applicationId,reviewedIdentity.historyEpochId,"a".repeat(32)),
+      db.prepare(`INSERT INTO project_alpha_api_v2_inventory_receipts
+        (source_id,source_instance_id,application_id,history_epoch_id,inventory_kind,request_id,authorization_generation,page_sha256)
+        VALUES('project-alpha:primary',?,?,?,'directory','inventory-request','generation-7',?)`)
+        .bind(reviewedIdentity.sourceInstanceId,reviewedIdentity.applicationId,reviewedIdentity.historyEpochId,"a".repeat(64)),
+    ]);
+    expect((await listClientHubRoots(env,staff,{q:"reviewed",sort:"name"})).clients).toHaveLength(0);
+    await expect(findClientHubRoot(env,"standalone_client",projectionId,"project-alpha:primary","review"))
+      .rejects.toMatchObject({status:404});
+
+    await db.batch([
+      db.prepare(`INSERT INTO native_staff_admissions(staff_id,bound_access_subject,active,version) VALUES(?, ?,1,1)`)
+        .bind(staff.id,staff.accessSubject),
+      db.prepare(`INSERT INTO native_staff_profiles(staff_id,login_email,version) VALUES(?,?,1)`).bind(staff.id,staff.email),
+      db.prepare(`INSERT INTO native_directory_grant_generations(staff_id,generation) VALUES(?,1)`).bind(staff.id),
+      db.prepare(`INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,resource_id,active)
+        VALUES('review-allow',?,'directory.profile.view','allow','resource',?,1)`).bind(staff.id,recordId),
+    ]);
+    const authority = {staffId:staff.id,accessSubject:staff.accessSubject,admissionVersion:1,profileVersion:1,
+      grantGeneration:1,verifiedUntil:new Date(Date.now()+60_000).toISOString()};
+    const listed=await listClientHubRoots(env,staff,{q:"reviewed",sort:"name",reviewAuthority:authority});
+    expect(listed.clients).toHaveLength(1);
+    expect(listed.clients[0]).toMatchObject({root_namespace:"review",public_id:projectionId,
+      status:"reviewed_display_only",portal_status:"review_only",workspace_id:null,account_count:0,project_count:0,request_count:0});
+    expect(listed.clients[0]).not.toHaveProperty("portal_access_state");
+    await db.prepare(`INSERT INTO project_alpha_api_v2_inventory_conflicts
+      (source_id,source_instance_id,application_id,history_epoch_id,inventory_kind,resource_type,project_alpha_public_id,external_id)
+      VALUES('project-alpha:primary','99999999-9999-4999-8999-999999999999',?,?,'directory','client',?,'external-7')`)
+      .bind(reviewedIdentity.applicationId,reviewedIdentity.historyEpochId,"a".repeat(32)).run();
+    expect((await listClientHubRoots(env,staff,{q:"reviewed",sort:"name",reviewAuthority:authority})).clients).toHaveLength(1);
+    await db.prepare(`INSERT INTO project_alpha_api_v2_inventory_conflicts
+      (source_id,source_instance_id,application_id,history_epoch_id,inventory_kind,resource_type,project_alpha_public_id,external_id)
+      VALUES('project-alpha:primary',?,?,?,'directory','client',?,'external-7')`)
+      .bind(reviewedIdentity.sourceInstanceId,reviewedIdentity.applicationId,reviewedIdentity.historyEpochId,"a".repeat(32)).run();
+    expect((await listClientHubRoots(env,staff,{q:"reviewed",sort:"name",reviewAuthority:authority})).clients).toHaveLength(0);
+    await db.prepare("DELETE FROM project_alpha_api_v2_inventory_conflicts").run();
+    let rotatedDuringPage=false;
+    let raceEnv:Env;
+    const raceDb=new Proxy(db,{get(target,key){
+      if(key==="withSession") return (constraint?:D1SessionBookmark|D1SessionConstraint)=>{
+        const session=target.withSession(constraint);
+        return new Proxy(session,{get(sessionTarget,sessionKey){
+          if(sessionKey==="batch") return async (statements:D1PreparedStatement[])=>{
+            const results=await session.batch(statements);
+            if(!rotatedDuringPage){
+              rotatedDuringPage=true;
+              raceEnv.PROJECT_ALPHA_API_V2_CONNECTIONS=reviewedConnections(true,"44444444-4444-4444-8444-444444444444");
+            }
+            return results;
+          };
+          const value=Reflect.get(sessionTarget,sessionKey);
+          return typeof value==="function"?value.bind(sessionTarget):value;
+        }});
+      };
+      const value=Reflect.get(target,key);
+      return typeof value==="function"?value.bind(target):value;
+    }});
+    raceEnv={...env,OPS_DB:raceDb};
+    await expect(listClientHubRoots(raceEnv,staff,{q:"reviewed",sort:"name",reviewAuthority:authority}))
+      .rejects.toMatchObject({status:409});
+    await db.prepare("UPDATE project_alpha_api_v2_directory_observations_current SET present=0 WHERE project_alpha_public_id=?")
+      .bind("a".repeat(32)).run();
+    expect((await listClientHubRoots(env,staff,{sort:"name",reviewAuthority:authority})).clients
+      .map(row=>row.public_id)).not.toContain(projectionId);
+    expect((await listClientHubRoots(env,staff,{q:"reviewed",sort:"name",reviewAuthority:authority})).clients).toHaveLength(0);
+    await db.prepare("UPDATE project_alpha_api_v2_directory_observations_current SET present=1 WHERE project_alpha_public_id=?")
+      .bind("a".repeat(32)).run();
+    await db.prepare("UPDATE project_alpha_api_v2_inventory_receipts SET authorization_generation='generation-8'").run();
+    expect((await listClientHubRoots(env,staff,{q:"reviewed",sort:"name",reviewAuthority:authority})).clients).toHaveLength(0);
+    await db.prepare("UPDATE project_alpha_api_v2_inventory_receipts SET authorization_generation='generation-7'").run();
+    env.PROJECT_ALPHA_API_V2_CONNECTIONS=reviewedConnections(true,"44444444-4444-4444-8444-444444444444");
+    expect((await listClientHubRoots(env,staff,{q:"reviewed",sort:"name",reviewAuthority:authority})).clients).toHaveLength(0);
+    env.PROJECT_ALPHA_API_V2_CONNECTIONS=reviewedConnections(false);
+    expect((await listClientHubRoots(env,staff,{q:"reviewed",sort:"name",reviewAuthority:authority})).clients).toHaveLength(0);
+    env.PROJECT_ALPHA_API_V2_CONNECTIONS=reviewedConnections();
+    await db.prepare(`INSERT INTO project_alpha_acquired_canonical_mappings
+      (source_id,source_instance_id,application_id,resource_type,record_id,external_id,project_alpha_public_id)
+      VALUES('project-alpha:primary',?,?,'client',?,'external-7',?)`)
+      .bind(reviewedIdentity.sourceInstanceId,reviewedIdentity.applicationId,recordId,"a".repeat(32)).run();
+    expect((await listClientHubRoots(env,staff,{q:"reviewed",sort:"name",reviewAuthority:authority})).clients).toHaveLength(0);
+    await db.prepare("DELETE FROM project_alpha_acquired_canonical_mappings WHERE record_id=?").bind(recordId).run();
+    expect((await listClientHubRoots(env,staff,{q:"reviewed",sort:"name",reviewAuthority:authority})).clients).toHaveLength(1);
+    env.PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED="false";
+    expect((await listClientHubRoots(env,staff,{q:"reviewed",sort:"name",reviewAuthority:authority})).clients).toHaveLength(0);
+    expect((await db.prepare("SELECT status FROM client_hub_roots WHERE public_id=?").bind(projectionId)
+      .first<string>("status"))).toBe("reviewed_display_only");
+    env.PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED="true";
+    const unrelated=await listClientHubRoots(env,staff,{q:"unrelated",sort:"name",reviewAuthority:authority});
+    expect(unrelated.clients.map(row=>row.public_id)).not.toContain(projectionId);
+    expect((await listClientHubRoots(env,staff,{q:"reviewed@example.test",sort:"name",reviewAuthority:authority})).clients
+      .map(row=>row.public_id)).toContain(projectionId);
+    expect((await listClientHubRoots(env,staff,{q:"(920) 555-0100",sort:"name",reviewAuthority:authority})).clients
+      .map(row=>row.public_id)).toContain(projectionId);
+    await expect(createClientHubCollectionContext(env,staff,listed.clients[0]! as ClientHubRoot,{directory:true,requests:true,delivery:true,viewer:true}))
+      .rejects.toMatchObject({status:404});
+    await roots([{id:"ordinary-local",name:"Ordinary local record",source:"delivery:local"}]);
+    const first=await listClientHubRoots(env,staff,{limit:1,sort:"name",reviewAuthority:authority});
+    expect(first.clients[0]?.public_id).toBe("ordinary-local");
+    expect(first.nextCursor).toBeTruthy();
+    await db.prepare("UPDATE native_directory_grant_generations SET generation=2 WHERE staff_id=?").bind(staff.id).run();
+    await expect(listClientHubRoots(env,staff,{limit:1,sort:"name",cursor:first.nextCursor!,
+      reviewAuthority:{...authority,grantGeneration:2}})).rejects.toMatchObject({status:400});
+
+    await db.batch([
+      db.prepare(`INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,resource_id,active)
+        VALUES('review-deny',?,'directory.profile.view','deny','resource',?,1)`).bind(staff.id,recordId),
+      db.prepare("UPDATE native_directory_grant_generations SET generation=3 WHERE staff_id=?").bind(staff.id),
+    ]);
+    expect((await listClientHubRoots(env,staff,{q:"reviewed",sort:"name",
+      reviewAuthority:{...authority,grantGeneration:3}})).clients).toHaveLength(0);
+    await db.batch([
+      db.prepare("UPDATE native_directory_grants SET active=0 WHERE staff_id=?").bind(staff.id),
+      db.prepare(`INSERT INTO native_directory_resource_scopes(record_id,scope_kind,business_area_id,division_id,active)
+        VALUES(?,'business_area','area-a',NULL,1)`).bind(recordId),
+      db.prepare(`INSERT INTO native_directory_resource_scopes(record_id,scope_kind,business_area_id,division_id,active)
+        VALUES(?,'division','area-a','division-a',1)`).bind(recordId),
+      db.prepare(`INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,business_area_id,active)
+        VALUES('review-area-allow',?,'directory.profile.view','allow','business_area','area-a',1)`).bind(staff.id),
+      db.prepare("UPDATE native_directory_grant_generations SET generation=4 WHERE staff_id=?").bind(staff.id),
+    ]);
+    expect((await listClientHubRoots(env,staff,{q:"reviewed",sort:"name",
+      reviewAuthority:{...authority,grantGeneration:4}})).clients).toHaveLength(1);
+    await db.batch([
+      db.prepare(`INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,division_id,active)
+        VALUES('review-division-deny',?,'directory.profile.view','deny','division','division-a',1)`).bind(staff.id),
+      db.prepare("UPDATE native_directory_grant_generations SET generation=5 WHERE staff_id=?").bind(staff.id),
+    ]);
+    expect((await listClientHubRoots(env,staff,{q:"reviewed",sort:"name",
+      reviewAuthority:{...authority,grantGeneration:5}})).clients).toHaveLength(0);
+    expect((await listClientHubRoots(env,staff,{reviewAuthority:{...authority,grantGeneration:5,
+      accessSubject:"forged-subject"}})).clients.map(row=>row.public_id)).toContain("ordinary-local");
+    expect((await listClientHubRoots(env,staff,{reviewAuthority:{...authority,grantGeneration:5,
+      profileVersion:2}})).clients.map(row=>row.public_id)).toContain("ordinary-local");
+    await db.prepare("UPDATE native_staff_admissions SET active=0,version=2 WHERE staff_id=?").bind(staff.id).run();
+    expect((await listClientHubRoots(env,staff,{reviewAuthority:{...authority,admissionVersion:2,
+      grantGeneration:5}})).clients.map(row=>row.public_id)).toContain("ordinary-local");
+  // This full authority matrix performs sequential D1 reads and mutations;
+  // retain every assertion while giving this one bounded test a full minute.
+  }, 60_000);
   afterAll(async () => runtime.dispose());
 
   async function roots(rows: Array<{ id: string; name?: string; kind?: ClientHubKind; source?: ClientHubSource; status?: string }>) {

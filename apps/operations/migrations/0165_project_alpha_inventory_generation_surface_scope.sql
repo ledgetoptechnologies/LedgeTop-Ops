@@ -1,6 +1,6 @@
 -- Directory and Project authorization generations advance independently in
 -- Project Alpha. Compare only receipts for the same inventory surface; keep
--- conflict evidence written by the earlier cross-surface check immutable.
+-- any conflict evidence written by the earlier cross-surface check immutable.
 CREATE TRIGGER project_alpha_api_v2_inventory_receipts_generation_conflict_surface_scoped
 AFTER INSERT ON project_alpha_api_v2_inventory_receipts
 WHEN EXISTS (SELECT 1 FROM project_alpha_api_v2_inventory_receipts prior

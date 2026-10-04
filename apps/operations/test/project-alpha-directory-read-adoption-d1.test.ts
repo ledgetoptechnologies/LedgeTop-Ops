@@ -43,15 +43,22 @@ async function migrate(): Promise<void> {
     CREATE TABLE project_alpha_directory_mappings(source_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,resource_type TEXT,external_id TEXT,project_alpha_public_id TEXT);
     CREATE TABLE project_alpha_acquired_canonical_mappings(source_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,resource_type TEXT,record_id TEXT,external_id TEXT,project_alpha_public_id TEXT);
     CREATE TABLE project_alpha_project_mappings(source_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,external_project_id TEXT,project_alpha_public_id TEXT);
+    CREATE TABLE pa_organizations(id TEXT PRIMARY KEY,active INTEGER,payload_json TEXT NOT NULL DEFAULT '{}');
+    CREATE TABLE pa_clients(id TEXT PRIMARY KEY,organization_id TEXT,active INTEGER,payload_json TEXT NOT NULL DEFAULT '{}');
     CREATE TABLE client_portal_accounts(id TEXT PRIMARY KEY,payload TEXT);
     CREATE TABLE delivery_records(id TEXT PRIMARY KEY,payload BLOB);
     CREATE TABLE delivery_public_shares(id TEXT PRIMARY KEY,url TEXT);
   `;
   await database.batch(splitD1MigrationStatements(prerequisites).map(statement => database.prepare(statement)));
+  await database.batch(splitD1MigrationStatements(readFileSync(
+    new URL("../migrations/0032_client_hub_directory.sql", import.meta.url), "utf8",
+  )).map(statement => database.prepare(statement)));
   for (const name of [
-    "0125_project_alpha_api_v2_inventory_observations.sql",
-    "0126_project_alpha_directory_read_adoption_claims.sql",
-    "0127_project_alpha_directory_read_adoption_field_review_receipts.sql",
+    "0161_project_alpha_api_v2_inventory_observations.sql",
+    "0162_project_alpha_directory_read_adoption_claims.sql",
+    "0163_project_alpha_directory_read_adoption_field_review_receipts.sql",
+    "0164_project_alpha_directory_read_adoption_authority_recheck.sql",
+    "0166_project_alpha_reviewed_standalone_display.sql",
   ]) {
     const sql = readFileSync(new URL(`../migrations/${name}`, import.meta.url), "utf8");
     await database.batch(splitD1MigrationStatements(sql).map(statement => database.prepare(statement)));
@@ -111,9 +118,28 @@ function dependencies(overrides: { externalId?: string; publicId?: string; revis
   };
 }
 
+function synchronizedDependencies(expectedReservations = 2): ProjectAlphaDirectoryReadAdoptionDependencies {
+  const reads = dependencies();
+  const readBinding = reads.readBinding;
+  let arrivals = 0;
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  return {
+    ...reads,
+    readBinding: vi.fn(async (...args: Parameters<typeof readBinding>) => {
+      arrivals += 1;
+      if (arrivals === expectedReservations) release();
+      await gate;
+      return readBinding(...args);
+    }),
+  };
+}
+
 function input(overrides: Partial<Parameters<typeof reserveProjectAlphaDirectoryReadAdoption>[1]> = {}) {
-  return { sourceId, resourceType: "client" as const, recordId, expectedLocalRecordVersion: 1,
-    projectAlphaPublicId: publicId, idempotencyKey: "70000000-0000-4000-8000-000000000007", actor,
+  return { sourceId, sourceInstanceId, applicationId, historyEpoch, resourceType: "client" as const,
+    recordId, expectedLocalRecordVersion: 1, projectAlphaPublicId: publicId, resourceRevision: "3",
+    authorizationGeneration: "7", bindingExternalId: paExternalId, bindingResourceRevision: "3",
+    idempotencyKey: "70000000-0000-4000-8000-000000000007", actor,
     ...overrides };
 }
 
@@ -159,6 +185,91 @@ describe("Project Alpha exact Directory read-adoption reservation", () => {
       .toBe("https://public.example.test/keep");
   });
 
+  it("serializes concurrent same-key reservations into one reservation and one replay", async () => {
+    await seed();
+    const reads = synchronizedDependencies();
+    const outcomes = await Promise.all([
+      reserveProjectAlphaDirectoryReadAdoption(env, input(), reads),
+      reserveProjectAlphaDirectoryReadAdoption(env, input(), reads),
+    ]);
+
+    expect(outcomes.map(outcome => outcome.status).sort()).toEqual(["replayed", "reserved"]);
+    const reserved = outcomes.find(outcome => outcome.status === "reserved");
+    const replayed = outcomes.find(outcome => outcome.status === "replayed");
+    expect(replayed).toEqual({ ...reserved, status: "replayed" });
+    expect(await count("project_alpha_directory_read_adoption_reviews")).toBe(1);
+    expect(await count("project_alpha_directory_read_adoption_claims")).toBe(1);
+    expect(await count("project_alpha_directory_mappings")).toBe(0);
+    expect(await count("project_alpha_acquired_canonical_mappings")).toBe(0);
+  });
+
+  it("allows only one of two concurrent request keys to reserve the same pair", async () => {
+    await seed();
+    const reads = synchronizedDependencies();
+    const outcomes = await Promise.all([
+      reserveProjectAlphaDirectoryReadAdoption(env, input(), reads),
+      reserveProjectAlphaDirectoryReadAdoption(env, input({
+        idempotencyKey: "71000000-0000-4000-8000-000000000007",
+      }), reads),
+    ]);
+
+    expect(outcomes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: "reserved", state: "inactive" }),
+      { status: "conflict", reason: "identity_reserved" },
+    ]));
+    expect(await count("project_alpha_directory_read_adoption_reviews")).toBe(1);
+    expect(await count("project_alpha_directory_read_adoption_claims")).toBe(1);
+    expect(await count("project_alpha_directory_mappings")).toBe(0);
+    expect(await count("project_alpha_acquired_canonical_mappings")).toBe(0);
+  });
+
+  it.each([
+    ["observed revision", async () => {
+      const requestId = "72000000-0000-4000-8000-000000000007";
+      await database.batch([
+        database.prepare(`INSERT INTO project_alpha_api_v2_inventory_receipts(
+          source_id,source_instance_id,application_id,history_epoch_id,inventory_kind,request_id,
+          authorization_generation,requested_cursor,next_cursor,page_sha256,item_count)
+          VALUES(?,?,?,?, 'directory',?,'8',NULL,NULL,?,1)`).bind(
+          sourceId, sourceInstanceId, applicationId, historyEpoch, requestId, "7".repeat(64),
+        ),
+        database.prepare(`INSERT INTO project_alpha_api_v2_directory_observations(
+          source_id,source_instance_id,application_id,history_epoch_id,request_id,resource_type,
+          project_alpha_public_id,resource_revision,present,last_action,projection_sha256,
+          binding_external_id,binding_status,binding_resource_revision)
+          VALUES(?,?,?,?,?,'client',?,'4',1,'upsert',?,?,'active','4')`).bind(
+          sourceId, sourceInstanceId, applicationId, historyEpoch, requestId,
+          publicId, "8".repeat(64), paExternalId,
+        ),
+      ]);
+    }],
+    ["local record version", async () => {
+      await database.prepare("UPDATE operations_directory_records SET current_version=2 WHERE record_id=?")
+        .bind(recordId).run();
+    }],
+    ["scoped authority", async () => {
+      await database.prepare("UPDATE native_directory_grants SET active=0 WHERE id='grant'").run();
+    }],
+  ] as const)("atomically rejects %s drift immediately before the guarded insert", async (_label, mutate) => {
+    await seed();
+    const reads = dependencies();
+    const readBinding = reads.readBinding;
+    const mutatingReads: ProjectAlphaDirectoryReadAdoptionDependencies = {
+      ...reads,
+      readBinding: vi.fn(async (...args: Parameters<typeof readBinding>) => {
+        await mutate();
+        return readBinding(...args);
+      }),
+    };
+
+    await expect(reserveProjectAlphaDirectoryReadAdoption(env, input(), mutatingReads))
+      .resolves.toEqual({ status: "blocked", reason: "storage" });
+    expect(await count("project_alpha_directory_read_adoption_reviews")).toBe(0);
+    expect(await count("project_alpha_directory_read_adoption_claims")).toBe(0);
+    expect(await count("project_alpha_directory_mappings")).toBe(0);
+    expect(await count("project_alpha_acquired_canonical_mappings")).toBe(0);
+  });
+
   it("rejects idempotency substitution and pair collisions without another claim", async () => {
     await seed();
     const first = await reserveProjectAlphaDirectoryReadAdoption(env, input(), dependencies());
@@ -190,6 +301,40 @@ describe("Project Alpha exact Directory read-adoption reservation", () => {
     expect(await database.prepare(`SELECT count(*) AS n FROM project_alpha_api_v2_inventory_conflicts
       WHERE conflict_kind='public_id_binding_changed'`).first<number>("n")).toBe(1);
     expect(await count("project_alpha_directory_read_adoption_claims")).toBe(1);
+  });
+
+  it("requires the exact candidate tuple, revision, generation, and binding selected by the reviewer", async () => {
+    await seed();
+    const staleSelections = [
+      { sourceInstanceId: "11000000-0000-4000-8000-000000000001" },
+      { applicationId: "22000000-0000-4000-8000-000000000002" },
+      { historyEpoch: "33000000-0000-4000-8000-000000000003" },
+      { resourceRevision: "4", bindingResourceRevision: "4" },
+      { authorizationGeneration: "8" },
+      { bindingExternalId: "different-pa-id" },
+    ];
+    for (const [index, stale] of staleSelections.entries()) {
+      await expect(reserveProjectAlphaDirectoryReadAdoption(env, input({
+        ...stale,
+        idempotencyKey: `71000000-0000-4000-8000-00000000000${index}`,
+      }), dependencies())).resolves.toEqual({ status: "blocked", reason: "selection_not_current" });
+    }
+    expect(await count("project_alpha_directory_read_adoption_reviews")).toBe(0);
+    expect(await count("project_alpha_directory_read_adoption_claims")).toBe(0);
+  });
+
+  it("rejects a selected Ops record outside the reviewer's current business-area authority", async () => {
+    await seed();
+    await database.batch([
+      database.prepare("UPDATE native_directory_grants SET scope_kind='business_area',business_area_id='area-allowed' WHERE id='grant'"),
+      database.prepare("INSERT INTO native_directory_resource_scopes VALUES(?,1,'area-other','division-1')").bind(recordId),
+    ]);
+    await expect(reserveProjectAlphaDirectoryReadAdoption(env, input(), dependencies()))
+      .resolves.toEqual({ status: "blocked", reason: "selection_not_current" });
+    expect(await count("project_alpha_directory_read_adoption_reviews")).toBe(0);
+    expect(await count("project_alpha_directory_read_adoption_claims")).toBe(0);
+    expect(await count("project_alpha_directory_mappings")).toBe(0);
+    expect(await count("project_alpha_acquired_canonical_mappings")).toBe(0);
   });
 
   it("rejects the older public ID when a newer observation collides on the same PA external ID", async () => {
@@ -293,6 +438,30 @@ describe("Project Alpha Directory adoption field-review receipt", () => {
     return result;
   }
 
+  it("creates only a review-only standalone display projection after explicit local display-field decisions", async () => {
+    const reserved=await reserve();
+    const decisions=fieldDecisions({email:"retain_local",phone:"retain_local"});
+    await expect(sealProjectAlphaDirectoryReadAdoptionFieldReview(env,{reviewId:reserved.reviewId,decisions,actor},dependencies().readProfile))
+      .resolves.toMatchObject({status:"sealed"});
+    const display=await database.prepare(`SELECT source_id,resource_type,record_id,external_id,project_alpha_public_id,
+      display_name,email,phone,state FROM project_alpha_reviewed_standalone_client_displays`).first<Record<string,unknown>>();
+    expect(display).toMatchObject({source_id:sourceId,resource_type:"client",record_id:recordId,external_id:paExternalId,
+      project_alpha_public_id:publicId,display_name:"Selected customer",email:"local@example.test",phone:null,state:"display_only"});
+    expect(await count("project_alpha_directory_mappings")).toBe(0);
+    expect(await count("project_alpha_acquired_canonical_mappings")).toBe(0);
+    expect(await count("client_hub_roots")).toBe(0);
+    expect(await database.prepare("SELECT payload FROM client_portal_accounts WHERE id='portal'").first<string>("payload")).toBe("keep");
+    expect(await database.prepare("SELECT url FROM delivery_public_shares WHERE id='share'").first<string>("url"))
+      .toBe("https://public.example.test/keep");
+  });
+
+  it("does not create a display projection while a displayed field still requires follow-up", async () => {
+    const reserved=await reserve();
+    await expect(sealProjectAlphaDirectoryReadAdoptionFieldReview(env,{reviewId:reserved.reviewId,decisions:fieldDecisions(),actor},dependencies().readProfile))
+      .resolves.toMatchObject({status:"sealed"});
+    expect(await count("project_alpha_reviewed_standalone_client_displays")).toBe(0);
+  });
+
   it("compares the exact local revision with a fresh PA profile without persisting raw values", async () => {
     const reserved=await reserve();
     const compared=await compareProjectAlphaDirectoryReadAdoptionFields(env,reserved.reviewId,actor,dependencies().readProfile);
@@ -316,6 +485,37 @@ describe("Project Alpha Directory adoption field-review receipt", () => {
     await expect(compareProjectAlphaDirectoryReadAdoptionFields(env,reserved.reviewId,actor,dependencies({authorizationGeneration:"8"}).readProfile))
       .resolves.toEqual({status:"blocked",reason:"pa_profile_changed"});
     expect(await count("project_alpha_directory_read_adoption_field_review_receipts")).toBe(0);
+  });
+
+  it("rechecks current identity-link authority and denies revoked or applicable denied access", async () => {
+    const revoked=await reserve();
+    await database.prepare("UPDATE native_directory_grants SET active=0 WHERE id='grant'").run();
+    await expect(compareProjectAlphaDirectoryReadAdoptionFields(env,revoked.reviewId,actor,dependencies().readProfile))
+      .resolves.toEqual({status:"blocked",reason:"reservation_not_current"});
+    await database.prepare("UPDATE native_directory_grants SET active=1 WHERE id='grant'").run();
+    await database.prepare("INSERT INTO native_directory_grants VALUES('deny',?,'directory.identity.link','deny','resource',NULL,NULL,?,1)")
+      .bind(actor.staffId,recordId).run();
+    await expect(compareProjectAlphaDirectoryReadAdoptionFields(env,revoked.reviewId,actor,dependencies().readProfile))
+      .resolves.toEqual({status:"blocked",reason:"reservation_not_current"});
+  });
+
+  it("enforces the same authority at the receipt insert boundary", async () => {
+    const reserved=await reserve();
+    const insertReceipt=async (receiptId:string) => database.prepare(`INSERT INTO project_alpha_directory_read_adoption_field_review_receipts(
+      receipt_id,review_id,claim_id,request_sha256,source_id,source_instance_id,application_id,history_epoch_id,resource_type,
+      record_id,external_id,project_alpha_public_id,project_alpha_revision,authorization_generation,local_record_version,
+      local_profile_sha256,project_alpha_profile_sha256,project_alpha_profile_request_id,reviewer_staff_id,reviewer_access_subject,
+      reviewer_admission_version,reviewer_profile_version,decision_count,reviewed_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+      receiptId,reserved.reviewId,reserved.claimId,"d".repeat(64),sourceId,sourceInstanceId,applicationId,historyEpoch,"client",
+      recordId,paExternalId,publicId,"3","7",1,"e".repeat(64),"f".repeat(64),profileRequestId,actor.staffId,accessSubject,1,1,11,
+      "2026-10-01T12:00:00.000Z").run();
+    await database.prepare("UPDATE native_directory_grants SET active=0 WHERE id='grant'").run();
+    await expect(insertReceipt("81000000-0000-4000-8000-000000000008")).rejects.toThrow(/current identity-link authority/);
+    await database.prepare("UPDATE native_directory_grants SET active=1 WHERE id='grant'").run();
+    await database.prepare("INSERT INTO native_directory_grants VALUES('deny',?,'directory.identity.link','deny','resource',NULL,NULL,?,1)")
+      .bind(actor.staffId,recordId).run();
+    await expect(insertReceipt("82000000-0000-4000-8000-000000000008")).rejects.toThrow(/current identity-link authority/);
   });
 
   it("seals every exact client field as enum-only evidence and preserves all authority and Delivery state", async () => {

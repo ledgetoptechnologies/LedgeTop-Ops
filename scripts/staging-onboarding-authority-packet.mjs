@@ -3,10 +3,18 @@ import fs from "node:fs";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { fileURLToPath } from "node:url";
-import { BOOTSTRAP_APPS } from "./staging-bootstrap.mjs";
 import { STAGING_ACCOUNT_ID, STAGING_INVENTORY } from "./staging-requirements.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+// Existing authority packet schemas were reviewed against this exact 171-file
+// staging chain. Keep the complete-ledger equality check below; any later
+// migration requires an explicit contract update and full-chain review.
+const REVIEWED_AUTHORITY_OPERATIONS_CHAIN = Object.freeze({
+  count: 171,
+  finalMigration: "0171_project_alpha_active_directory_update_guard.sql",
+  namesSha256: "bc4590b90cccd1842b2496906986355cfde7522e970ac3ec95039cace437f61d",
+  contentsSha256: "e3feca1f403a06f15495017fd843ac48173e39be2478f8d6b5060c262c0b1f5c",
+});
 export const ONBOARDING_AUTHORITY_SCHEMA_VERSION = 1;
 export const ONBOARDING_AUTHORITY_MIGRATIONS_TABLE = "staging_native_authority_migrations";
 const OUTPUT_ROOT = ".staging-onboarding-authority";
@@ -72,10 +80,12 @@ function canonicalOperations(base) {
   const selected = config.d1_databases.find(row => row.binding === "OPS_DB"), wanted = expected.d1_databases.find(row => row.binding === "OPS_DB");
   if (!selected || selected.database_name !== "ltds-ops-staging" || selected.database_id !== wanted?.database_id || selected.migrations_dir !== "migrations") throw new Error("authority source must use the exact canonical Operations D1 binding");
   const directory = path.join(app, "migrations"), names = fs.readdirSync(directory).filter(name => name.endsWith(".sql")).sort();
-  const contract = BOOTSTRAP_APPS.operations;
-  if (names.length !== contract.migrationCount || sha256(names.join("\n")) !== contract.migrationNamesSha256) throw new Error(`authority source must be the exact complete ${contract.migrationCount}-file Operations chain`);
+  const contract = REVIEWED_AUTHORITY_OPERATIONS_CHAIN;
+  if (names.length !== contract.count || names.at(-1) !== contract.finalMigration
+    || sha256(names.join("\n")) !== contract.namesSha256)
+    throw new Error(`authority source must be the exact reviewed ${contract.count}-file Operations chain`);
   const contents = names.map(name => { const file = path.join(directory, name); regular(file, name); return `${name}\0${sha256(fs.readFileSync(file, "utf8"))}`; });
-  if (sha256(contents.join("\n")) !== contract.migrationContentsSha256) throw new Error("Operations canonical migration contents changed");
+  if (sha256(contents.join("\n")) !== contract.contentsSha256) throw new Error("Operations reviewed authority migration contents changed");
   return { config, selected, names, chainSha256: sha256(contents.join("\n")) };
 }
 

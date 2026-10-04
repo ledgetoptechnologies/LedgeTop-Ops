@@ -611,7 +611,12 @@ describe('source-owned native portal resources with real signed projection and l
     const reader=download.body!.getReader();expect(new TextDecoder().decode((await reader.read()).value)).toBe('sou');await reader.cancel();
     expect((await request(file.downloadPath,{headers:{Range:'bytes=20-21'}})).status).toBe(416);
   });
-  it('audits native preview and download requests once without storing source paths',async()=>{
+  it('audits native preview and download requests once per window without storing source paths',async()=>{
+    // Deduplication is intentionally scoped to fixed ten-minute windows. A
+    // slow CI request may cross a real boundary; pin Date only so this test
+    // proves same-window behavior without changing timers or runtime policy.
+    const auditNow=new Date();
+    vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(auditNow);
     env.CLIENT_PORTAL_CONTENT_AUDIT_ENABLED='true';
     env.CLIENT_PORTAL_CONTENT_AUDIT_HMAC_SECRET='native-content-audit-secret-that-is-long-enough';
     try{
@@ -631,6 +636,7 @@ describe('source-owned native portal resources with real signed projection and l
       expect(JSON.stringify(events)).not.toContain('native/b/');
       expect(JSON.stringify(events)).not.toContain('etag-b');
     }finally{
+      vi.useRealTimers();
       env.CLIENT_PORTAL_CONTENT_AUDIT_ENABLED='false';delete env.CLIENT_PORTAL_CONTENT_AUDIT_HMAC_SECRET;
     }
   });

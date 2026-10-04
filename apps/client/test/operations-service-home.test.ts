@@ -5,6 +5,7 @@ import { splitD1MigrationStatements } from "./helpers/d1-migrations";
 import { writeClientAuthorityWorkspaceBinding } from "../src/worker/client-authority-workspace-binding";
 import { writeClientPortalAuthorityV2, writeClientPortalAuthorityV3 } from "../src/worker/client-portal-authority-v2";
 import { readOperationsServiceHome, readOperationsServiceHomes, type OperationsServiceHomeEnv } from "../src/worker/client-portal/operations-service-home";
+import { CLIENT_PORTAL_SERVICE_METADATA_MAX_RESPONSE_BYTES } from "../../../packages/shared/src/client-portal-service-metadata";
 
 const authorityId = "11111111-1111-4111-8111-111111111111";
 const principal = { issuer: "https://access.example.test", subject: "person-one" };
@@ -23,7 +24,11 @@ function env(read: (input: unknown) => Promise<unknown>, rows: Array<typeof tupl
   } };
   return { DELIVERY_DB: { withSession: () => ({ prepare: () => statement }) } as unknown as D1Database,
     CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED: enabled,
-    CLIENT_PORTAL_SERVICE_METADATA_READER: { readServiceMetadata: read } };
+    CLIENT_PORTAL_SERVICE_METADATA_READER: { readServiceMetadata: async input => JSON.stringify(await read(input)) } };
+}
+function wireEnv(read: (input: unknown) => Promise<string>, rows: Array<typeof tuple | null> = [tuple, tuple]): OperationsServiceHomeEnv {
+  const base = env(async () => response(), rows);
+  return { ...base, CLIENT_PORTAL_SERVICE_METADATA_READER: { readServiceMetadata: read } };
 }
 
 describe("Operations service home private helper", () => {
@@ -94,9 +99,26 @@ describe("Operations service home private helper", () => {
   it("rejects malformed and cross-tuple success responses", async () => {
     await expect(readOperationsServiceHome(env(async () => ({ ...response(), extra: true })), principal, authorityId))
       .resolves.toEqual({ ok: false, code: "unavailable" });
-    const accessor = response();
-    Object.defineProperty(accessor, "services", { enumerable: true, get: () => [] });
-    await expect(readOperationsServiceHome(env(async () => accessor), principal, authorityId))
+    await expect(readOperationsServiceHome(wireEnv(async () => `${JSON.stringify(response())} `), principal, authorityId))
+      .resolves.toEqual({ ok: false, code: "unavailable" });
+    await expect(readOperationsServiceHome(wireEnv(async () => "{"), principal, authorityId))
+      .resolves.toEqual({ ok: false, code: "unavailable" });
+    await expect(readOperationsServiceHome(wireEnv(async () => `"${"é".repeat(151_426)}"`), principal, authorityId))
+      .resolves.toEqual({ ok: false, code: "unavailable" });
+    const rawObject = wireEnv(async () => JSON.stringify(response()));
+    Reflect.set(rawObject.CLIENT_PORTAL_SERVICE_METADATA_READER!, "readServiceMetadata", async () => response());
+    await expect(readOperationsServiceHome(rawObject, principal, authorityId))
+      .resolves.toEqual({ ok: false, code: "unavailable" });
+    const hostileGetter = vi.fn(() => { throw Error("unexpected-object-access"); });
+    const hostileObject = Object.defineProperty({}, "services", { get: hostileGetter });
+    Reflect.set(rawObject.CLIENT_PORTAL_SERVICE_METADATA_READER!, "readServiceMetadata", async () => hostileObject);
+    await expect(readOperationsServiceHome(rawObject, principal, authorityId))
+      .resolves.toEqual({ ok: false, code: "unavailable" });
+    expect(hostileGetter).not.toHaveBeenCalled();
+    await expect(readOperationsServiceHome(wireEnv(async () => JSON.stringify({ ...response(), services: [
+      { ...response().services[0], extra: true },
+    ] })), principal, authorityId)).resolves.toEqual({ ok: false, code: "unavailable" });
+    await expect(readOperationsServiceHome(wireEnv(async () => `${JSON.stringify(response())}${" ".repeat(302_851)}`), principal, authorityId))
       .resolves.toEqual({ ok: false, code: "unavailable" });
     await expect(readOperationsServiceHome(env(async () => response({ workspaceId: "other" })), principal, authorityId))
       .resolves.toEqual({ ok: false, code: "unavailable" });
@@ -110,6 +132,25 @@ describe("Operations service home private helper", () => {
       grantRevision: 3, issuer: principal.issuer, subject: principal.subject, code: "denied" };
     await expect(readOperationsServiceHome(env(async () => denied), principal, authorityId))
       .resolves.toEqual({ ok: false, code: "denied" });
+  });
+
+  it("accepts the exact maximum UTF-8 wire and rejects one additional byte", async () => {
+    const control = "\u0001", workspaceId = control.repeat(200), issuer = control.repeat(512), subject = control.repeat(512);
+    const digits = [1, 2, 3, 4, 5, 6, 7, 14, 15, 16].map(value => String.fromCharCode(value));
+    const services = Array.from({ length: 100 }, (_, index) => ({
+      serviceId: `${control.repeat(189)}${digits[Math.floor(index / 10)]}${digits[index % 10]}`,
+      providerId: control.repeat(128), displayLabel: control.repeat(160), revision: Number.MAX_SAFE_INTEGER,
+    }));
+    const maxTuple = { authority_id: authorityId, workspace_id: workspaceId,
+      ownership_epoch: Number.MAX_SAFE_INTEGER, grant_revision: Number.MAX_SAFE_INTEGER };
+    const wire = JSON.stringify({ ok: true, protocolVersion: 1, authorityId, workspaceId,
+      ownershipEpoch: Number.MAX_SAFE_INTEGER, grantRevision: Number.MAX_SAFE_INTEGER, issuer, subject, services });
+    expect(new TextEncoder().encode(wire).byteLength).toBe(CLIENT_PORTAL_SERVICE_METADATA_MAX_RESPONSE_BYTES);
+    const maximum = wireEnv(async () => wire, [maxTuple, maxTuple]);
+    await expect(readOperationsServiceHome(maximum, { issuer, subject }, authorityId)).resolves.toMatchObject({ ok: true, services });
+    const oversized = wireEnv(async () => `${wire} `, [maxTuple, maxTuple]);
+    await expect(readOperationsServiceHome(oversized, { issuer, subject }, authorityId))
+      .resolves.toEqual({ ok: false, code: "unavailable" });
   });
 
   it("bounds a hung transport as unavailable", async () => {
@@ -169,7 +210,9 @@ describe("Operations service home against explicit permission ledger", () => {
   afterEach(async () => runtime.dispose());
 
   const realEnv = (read: (input: unknown) => Promise<unknown>): OperationsServiceHomeEnv => ({ DELIVERY_DB: db,
-    CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED: "true", CLIENT_PORTAL_SERVICE_METADATA_READER: { readServiceMetadata: read } });
+    CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED: "true", CLIENT_PORTAL_SERVICE_METADATA_READER: {
+      readServiceMetadata: async input => JSON.stringify(await read(input)),
+    } });
 
   it("returns an exact validated service list and distinguishes the same subject at another issuer", async () => {
     await expect(readOperationsServiceHome(realEnv(async () => response({ grantRevision: 1 })), principal, authorityId)).resolves.toEqual({
@@ -188,6 +231,14 @@ describe("Operations service home against explicit permission ledger", () => {
       .resolves.toEqual({ ok: false, code: "denied" });
     expect(read).not.toHaveBeenCalled();
     await expect(readOperationsServiceHomes(realEnv(read), principal)).resolves.toEqual({ ok: false, code: "denied" });
+  });
+
+  it("does not use a historical grant when native discovery is selected but its migration is absent", async () => {
+    const read = vi.fn(async () => response({ grantRevision: 1 }));
+    const selected = { ...realEnv(read), CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED: "true" };
+    await expect(readOperationsServiceHomes(selected, principal)).resolves.toEqual({ ok: false, code: "unavailable" });
+    await expect(readOperationsServiceHome(selected, principal, authorityId)).resolves.toEqual({ ok: false, code: "denied" });
+    expect(read).not.toHaveBeenCalled();
   });
 
   it("removes home permission without revoking the inert enrollment", async () => {

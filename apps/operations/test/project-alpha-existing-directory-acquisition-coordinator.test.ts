@@ -9,7 +9,8 @@ const application = "10000000-0000-4000-8000-000000000002", epoch = "10000000-00
 const recordId = "30000000-0000-4000-8000-000000000001", publicId = "a".repeat(32);
 const input = (overrides: Record<string, unknown> = {}) => ({ reviewId: "20000000-0000-4000-8000-000000000001",
   commandId: "20000000-0000-4000-8000-000000000002", sourceId, recordId, resourceType: "organization" as const,
-  projectAlphaPublicId: publicId, localRecordVersion: 1, reviewer: { staffId: "staff", accessSubject: "access|staff",
+  projectAlphaPublicId: publicId, expectedProjectAlphaRevision: "7", expectedAuthorizationGeneration: "4",
+  localRecordVersion: 1, reviewer: { staffId: "staff", accessSubject: "access|staff",
     admissionVersion: 1, profileVersion: 1, grantGeneration: 1 }, ...overrides });
 const envSecret = () => JSON.stringify({ version: 1, instances: { [sourceId]: { sourceId, enabled: true,
   baseUrl: "https://pa.example.test", apiKey: "server-secret", sourceInstanceId: source, applicationId: application,
@@ -63,7 +64,8 @@ describe("private existing Directory acquisition coordinator", () => {
       "0114_project_alpha_existing_directory_binding_acquisition_response_receipts.sql",
       "0115_project_alpha_existing_directory_binding_review_local_revision_fence.sql",
       "0116_project_alpha_acquired_canonical_mapping_activation.sql", "0117_project_alpha_native_owner_epoch_claims.sql",
-      "0123_native_directory_authority_history.sql", "0125_project_alpha_existing_directory_binding_activation.sql"]) {
+      "0123_native_directory_authority_history.sql", "0125_project_alpha_existing_directory_binding_activation.sql",
+      "0169_project_alpha_existing_directory_binding_generation_evidence.sql"]) {
       await db.batch(splitD1MigrationStatements(readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8"))
         .map(sql => db.prepare(sql)));
     }
@@ -109,7 +111,7 @@ describe("private existing Directory acquisition coordinator", () => {
       if (options.conflict) return json({ code: "COMMAND_CONFLICT" }, 409);
       const sent = JSON.parse(String(init?.body));
       return json({ replayed: postCalls > 1, result: { binding: { publicId: expectedPublic }, resource: { type: kind,
-        id: sent.externalId, revision: "7" } }, sourceInstanceId: expectedSource,
+        id: sent.externalId, revision: "7" }, authorizationGeneration: "5" }, sourceInstanceId: expectedSource,
         applicationId: options.foreignPost ? "90000000-0000-4000-8000-000000000001" : expectedApplication, historyEpoch: expectedEpoch });
     });
   }
@@ -118,6 +120,11 @@ describe("private existing Directory acquisition coordinator", () => {
     const send = transport(), env = { OPS_DB: db, PROJECT_ALPHA_API_V2_CONNECTIONS: envSecret() };
     const first = await acquireProjectAlphaExistingDirectoryBinding(env, input(), send);
     expect(first).toMatchObject({ status: "acquired", replayed: false });
+    const posted = JSON.parse(String(send.mock.calls.find(call => call[1]?.method === "POST")?.[1]?.body));
+    expect(posted).toMatchObject({ expectedRevision: "7", expectedAuthorizationGeneration: "4" });
+    expect(await db.prepare(`SELECT expected_authorization_generation,result_authorization_generation
+      FROM project_alpha_existing_directory_binding_acquisition_response_receipts`).first())
+      .toEqual({ expected_authorization_generation: "4", result_authorization_generation: "5" });
     expect(await db.prepare("SELECT activation_state,native_owner_epoch_id FROM project_alpha_acquired_canonical_mappings").first())
       .toEqual({ activation_state: "inactive", native_owner_epoch_id: null });
     expect(await db.prepare("SELECT state FROM project_alpha_acquired_mapping_activation").first("state")).toBe("inactive");

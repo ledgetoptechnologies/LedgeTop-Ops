@@ -94,11 +94,42 @@ async function reservation(db:D1Database,input:DirectoryAdoptionFieldReviewInput
 
 type Compared = Readonly<{ selected:Reservation; observed:Extract<Awaited<ReturnType<typeof readConfiguredProjectAlphaDirectoryProfile>>,{status:"observed"}>["observation"];
   local:Record<DirectoryAdoptionField,unknown>; remote:Record<DirectoryAdoptionField,unknown> }>;
+async function currentIdentityLinkAuthority(db:D1Database, selected:Reservation):Promise<boolean>{
+  const row=await db.prepare(`SELECT 1 AS allowed
+    FROM operations_directory_records record
+    WHERE record.record_id=? AND record.record_kind=?
+      AND EXISTS(SELECT 1 FROM native_directory_grants allow_row
+        WHERE allow_row.staff_id=? AND allow_row.permission='directory.identity.link'
+          AND allow_row.effect='allow' AND allow_row.active=1
+          AND (allow_row.scope_kind='global'
+            OR (allow_row.scope_kind='resource' AND allow_row.resource_id=record.record_id)
+            OR (allow_row.scope_kind='assigned' AND EXISTS(SELECT 1 FROM native_directory_assignments assignment
+              WHERE assignment.record_id=record.record_id AND assignment.staff_id=? AND assignment.active=1))
+            OR (allow_row.scope_kind='business_area' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes scope
+              WHERE scope.record_id=record.record_id AND scope.active=1 AND scope.business_area_id=allow_row.business_area_id))
+            OR (allow_row.scope_kind='division' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes scope
+              WHERE scope.record_id=record.record_id AND scope.active=1 AND scope.division_id=allow_row.division_id))))
+      AND NOT EXISTS(SELECT 1 FROM native_directory_grants deny_row
+        WHERE deny_row.staff_id=? AND deny_row.permission='directory.identity.link'
+          AND deny_row.effect='deny' AND deny_row.active=1
+          AND (deny_row.scope_kind='global'
+            OR (deny_row.scope_kind='resource' AND deny_row.resource_id=record.record_id)
+            OR (deny_row.scope_kind='assigned' AND EXISTS(SELECT 1 FROM native_directory_assignments assignment
+              WHERE assignment.record_id=record.record_id AND assignment.staff_id=? AND assignment.active=1))
+            OR (deny_row.scope_kind='business_area' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes scope
+              WHERE scope.record_id=record.record_id AND scope.active=1 AND scope.business_area_id=deny_row.business_area_id))
+            OR (deny_row.scope_kind='division' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes scope
+              WHERE scope.record_id=record.record_id AND scope.active=1 AND scope.division_id=deny_row.division_id))))`).bind(
+    selected.record_id,selected.resource_type,selected.reviewer_staff_id,selected.reviewer_staff_id,
+    selected.reviewer_staff_id,selected.reviewer_staff_id).first<{allowed:number}>();
+  return row?.allowed===1;
+}
 async function compareEvidence(env:Env,reviewId:string,actor:DirectoryAdoptionFieldReviewInput["actor"],readProfile:typeof readConfiguredProjectAlphaDirectoryProfile):Promise<Compared|Exclude<DirectoryAdoptionFieldComparisonOutcome,{status:"compared"}>>{
   if(env.ENVIRONMENT!=="staging" || env.PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED!=="true") return {status:"disabled"};
   if(!UUID.test(reviewId) || !actorValid(actor)) return {status:"rejected",reason:"invalid_input"};
   const selected=await reservation(env.OPS_DB,{reviewId,decisions:{} as DirectoryAdoptionFieldReviewInput["decisions"],actor});
   if(!selected) return {status:"blocked",reason:"reservation_not_current"};
+  if(!await currentIdentityLinkAuthority(env.OPS_DB,selected)) return {status:"blocked",reason:"reservation_not_current"};
   const local=localProfile(selected.profile_json,selected.resource_type);
   if(!local) return {status:"blocked",reason:"local_profile_contract"};
   const read=await readProfile(env,selected.source_id,selected.resource_type,selected.project_alpha_public_id);

@@ -9,6 +9,7 @@ import { APP_SOURCE_DIRS, FEATURE_FLAG_ACTIVATION_POLICIES, REQUIRED_DISABLED_FE
 
 const audiences = Object.freeze({ delivery: "c".repeat(64), operations: "d".repeat(64), "ops-sync": "b".repeat(64) });
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const operationsWorkspacePage = "/administration/client-portal/operations-workspaces";
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
 function stagingConfig(app) {
@@ -30,7 +31,7 @@ function stagingConfig(app) {
       ...(app === "delivery" ? {
         POLICY_AUD: audiences.delivery,
         PUBLIC_BASE_URL: `https://${STAGING_HOSTS.delivery}`,
-        CLIENT_PORTAL_ENABLED: "false",
+        CLIENT_PORTAL_ENABLED: "true",
         CLIENT_PORTAL_ORIGIN: `https://${STAGING_HOSTS.client}`,
         CLIENT_ACCESS_TEAM_DOMAIN: STAGING_STATIC_VARS.delivery.CLIENT_ACCESS_TEAM_DOMAIN,
         CLIENT_ACCESS_AUD: "a".repeat(64),
@@ -178,17 +179,12 @@ test("rejects missing, unexpected, or non-regular release migrations", () => {
     }
   }
   assert.deepEqual(validateMigrationInventory(base), []);
-  for (const name of [
-    "0128_project_alpha_inventory_generation_surface_scope.sql",
-    "0129_project_alpha_existing_directory_binding_activation.sql",
-    "0130_project_alpha_active_directory_project_guard.sql",
-    "0131_project_alpha_active_directory_update_guard.sql",
-  ]) {
-    const target = path.join(base, "apps", "operations", "migrations", name);
-    fs.appendFileSync(target, "\n-- drift\n");
-    assert(validateMigrationInventory(base).some((error) => error.includes(`${name} SHA-256`)), name);
-    fs.copyFileSync(path.join(repositoryRoot, "apps", "operations", "migrations", name), target);
-  }
+  fs.appendFileSync(path.join(base, "apps", "operations", "migrations", "0163_project_alpha_directory_read_adoption_field_review_receipts.sql"), "\n-- drift\n");
+  assert(validateMigrationInventory(base).some((error) => error.includes("0163_project_alpha_directory_read_adoption_field_review_receipts.sql SHA-256")));
+  fs.appendFileSync(path.join(base, "apps", "operations", "migrations", "0168_project_alpha_directory_read_adoption_local_profiles.sql"), "\n-- drift\n");
+  assert(validateMigrationInventory(base).some((error) => error.includes("0168_project_alpha_directory_read_adoption_local_profiles.sql SHA-256")));
+  fs.appendFileSync(path.join(base, "apps", "operations", "migrations", "0171_project_alpha_active_directory_update_guard.sql"), "\n-- drift\n");
+  assert(validateMigrationInventory(base).some((error) => error.includes("0171_project_alpha_active_directory_update_guard.sql SHA-256")));
   fs.rmSync(path.join(base, "apps", "client", "migrations", "0213_incoming_rclone_promotion.sql"));
   fs.writeFileSync(path.join(base, "apps", "client", "migrations", "0214_unreviewed.sql"), "-- unexpected\n");
   assert(validateMigrationInventory(base).some((error) => error.includes("delivery release migration inventory")));
@@ -280,6 +276,10 @@ test("requires shared staging resources to agree", () => {
   configs.delivery.services.find(service => service.binding === "VIEWER_SESSION_ISSUER").entrypoint = "WrongViewerIssuer";
   configs.delivery.services.find(service => service.binding === "CLIENT_PORTAL_SERVICE_METADATA_READER").entrypoint = "WrongMetadataReader";
   configs.delivery.services.find(service => service.binding === "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_BRIDGE").entrypoint = "WrongRecipientEnrollmentBridge";
+  configs.delivery.services.find(service => service.binding === "OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT").entrypoint = "WrongNativeRecipientIngress";
+  configs.delivery.services.find(service => service.binding === "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER").entrypoint = "WrongNativeDeliveryReader";
+  configs.operations.services.find(service => service.binding === "OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY").entrypoint = "WrongNativeRecipientAuthority";
+  configs.operations.services.find(service => service.binding === "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY").entrypoint = "WrongNativeDeliveryAuthority";
   configs["ops-sync"].services[0].entrypoint = "WrongPortalIngress";
   configs.delivery.vars.PROJECT_ALPHA_PORTAL_APPLICATION_KEY = "wrong-application-key";
   const errors = validateCrossApp(configs);
@@ -288,6 +288,10 @@ test("requires shared staging resources to agree", () => {
   assert(errors.some((error) => error.includes("Viewer session issuer")));
   assert(errors.some((error) => error.includes("service metadata reader")));
   assert(errors.some((error) => error.includes("recipient enrollment bridge")));
+  assert(errors.some((error) => error.includes("native recipient enrollment")));
+  assert(errors.some((error) => error.includes("native authorization reader")));
+  assert(errors.some((error) => error.includes("native recipient authority")));
+  assert(errors.some((error) => error.includes("native delivery authority")));
   assert(errors.some((error) => error.includes("portal projection ingress")));
   assert(errors.some((error) => error.includes("application key")));
 });
@@ -338,6 +342,26 @@ test("rejects an Operations staging config without the required SPA assets bindi
   const errors = validateApp("operations", operations, productionFrom(stagingConfig("operations")));
   assert(errors.some((error) => error.includes("operations assets does not match the approved staging inventory")), errors.join(" | "));
 });
+test("routes the workspace owner page through the guarded staging Worker exactly once", () => {
+  const approvedRoutes = STAGING_INVENTORY.operations.assets.run_worker_first;
+  assert.deepEqual(approvedRoutes, [
+    "/api/*", "/health", "/r/*",
+    "/administration/client-portal/operations-recipients",
+    "/administration/client-portal/operations-delivery-authority",
+    operationsWorkspacePage,
+  ]);
+  assert.equal(approvedRoutes.filter((route) => route === operationsWorkspacePage).length, 1);
+
+  const missing = stagingConfig("operations");
+  missing.assets.run_worker_first = missing.assets.run_worker_first.filter((route) => route !== operationsWorkspacePage);
+  let errors = validateApp("operations", missing, productionFrom(stagingConfig("operations")));
+  assert(errors.some((error) => error.includes("operations assets does not match the approved staging inventory")), errors.join(" | "));
+
+  const duplicated = stagingConfig("operations");
+  duplicated.assets.run_worker_first.push(operationsWorkspacePage);
+  errors = validateApp("operations", duplicated, productionFrom(stagingConfig("operations")));
+  assert(errors.some((error) => error.includes("operations assets does not match the approved staging inventory")), errors.join(" | "));
+});
 test("resolves logical delivery staging files from apps/client", () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-staging-layout-"));
   for (const app of ["delivery", "operations", "ops-sync"]) {
@@ -364,10 +388,10 @@ test("resolves logical delivery staging files from apps/client", () => {
   fs.renameSync(path.join(base, "apps", "client"), path.join(base, "apps", "delivery"));
   assert(validateFiles(base).some((error) => error.includes(path.join("apps", "client", "wrangler.staging.json"))));
 });
-test("fails closed on client portal activation, host namespace origins, and audience reuse", () => {
+test("fails closed on client portal deactivation, host namespace origins, and audience reuse", () => {
   const staging = stagingConfig("delivery");
   const production = productionFrom(staging);
-  staging.vars.CLIENT_PORTAL_ENABLED = "true";
+  staging.vars.CLIENT_PORTAL_ENABLED = "false";
   staging.vars.CLIENT_PORTAL_ORIGIN = "https://other-staging.example";
   staging.vars.PUBLIC_SHARE_ORIGIN = `https://${STAGING_HOSTS.client}`;
   staging.vars.PUBLIC_BASE_URL = staging.vars.PUBLIC_SHARE_ORIGIN;
@@ -406,11 +430,11 @@ test("requires every portal-v2 and Operations capability to be explicitly false"
   }
 });
 
-test("pins the native portal, the complete Operations chain, both 0199 files, and the 0200-0221 release contract", () => {
-  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.length, 145);
+test("pins the native portal, the complete Operations chain, both 0199 files, and the 0200-0228 release contract", () => {
+  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.length, 158);
   assert.equal(REQUIRED_STAGING_MIGRATIONS.operations[0], "0014_staff_acl_controls.sql");
-  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.at(-1), "0151_verified_recipient_delivery_authority_outbox.sql");
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-39), [
+  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.at(-1), "0171_project_alpha_active_directory_update_guard.sql");
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-46), [
     "0184_native_client_feedback.sql",
     "0185_native_service_request_ownership.sql",
     "0186_delivery_notification_authority_provenance.sql",
@@ -450,23 +474,23 @@ test("pins the native portal, the complete Operations chain, both 0199 files, an
     "0219_operations_portal_authority_v2.sql",
     "0220_operations_portal_authority_v3_permissions.sql",
     "0221_verified_recipient_delivery_authority.sql",
+    "0222_verified_recipient_delivery_cross_manager_revoke.sql",
+    "0223_operations_portal_workspace_publications.sql",
+    "0224_operations_portal_native_recipient_authority.sql",
+    "0225_operations_portal_workspace_publication_cancellations.sql",
+    "0226_operations_portal_native_workspace_cleanup.sql",
+    "0227_operations_portal_native_delivery_authority.sql",
+    "0228_operations_portal_native_content_start_audit.sql",
   ]);
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0123_native_directory_authority_history.sql")), [
     "0123_native_directory_authority_history.sql",
     "0124_project_alpha_project_adoption_review_evidence.sql",
-    "0125_project_alpha_api_v2_inventory_observations.sql",
     "0125_project_alpha_existing_directory_binding_activation.sql",
-    "0126_project_alpha_directory_read_adoption_claims.sql",
     "0126_project_alpha_project_active_directory_mapping_bridge.sql",
-    "0127_project_alpha_directory_read_adoption_field_review_receipts.sql",
     "0127_project_alpha_existing_directory_binding_activation_evidence_transition.sql",
-    "0128_project_alpha_inventory_generation_surface_scope.sql",
     "0128_project_alpha_project_adoption_bind_bridge.sql",
-    "0129_project_alpha_existing_directory_binding_activation.sql",
     "0129_project_alpha_existing_directory_binding_activation_relationship.sql",
-    "0130_project_alpha_active_directory_project_guard.sql",
     "0130_project_alpha_project_adoption_review_producer.sql",
-    "0131_project_alpha_active_directory_update_guard.sql",
     "0131_project_alpha_project_active_directory_mapping_guards.sql",
     "0132_operations_directory_acquired_relationship_dependencies.sql",
     "0133_project_alpha_directory_relationship_outbox.sql",
@@ -488,6 +512,26 @@ test("pins the native portal, the complete Operations chain, both 0199 files, an
     "0149_client_portal_recipient_enrollment_sql_fences.sql",
     "0150_client_portal_recipient_enrollment_cancellation.sql",
     "0151_verified_recipient_delivery_authority_outbox.sql",
+    "0152_operations_portal_workspace_reservations.sql",
+    "0153_operations_portal_workspace_publication_outbox.sql",
+    "0154_operations_portal_native_recipient_authority.sql",
+    "0155_operations_portal_workspace_publication_cancellations.sql",
+    "0156_operations_portal_workspace_publication_invocations.sql",
+    "0157_operations_portal_native_workspace_cleanup.sql",
+    "0158_operations_portal_native_delivery_authority.sql",
+    "0159_operations_portal_native_delivery_recovery_invocations.sql",
+    "0160_operations_portal_native_recipient_labels.sql",
+    "0161_project_alpha_api_v2_inventory_observations.sql",
+    "0162_project_alpha_directory_read_adoption_claims.sql",
+    "0163_project_alpha_directory_read_adoption_field_review_receipts.sql",
+    "0164_project_alpha_directory_read_adoption_authority_recheck.sql",
+    "0165_project_alpha_inventory_generation_surface_scope.sql",
+    "0166_project_alpha_reviewed_standalone_display.sql",
+    "0167_project_alpha_directory_read_adoption_finalizations.sql",
+    "0168_project_alpha_directory_read_adoption_local_profiles.sql",
+    "0169_project_alpha_existing_directory_binding_generation_evidence.sql",
+    "0170_project_alpha_active_directory_project_guard.sql",
+    "0171_project_alpha_active_directory_update_guard.sql",
   ]);
   const nativeDirectoryStart = REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0054_project_alpha_directory_outbox.sql");
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(nativeDirectoryStart, nativeDirectoryStart + 3), [

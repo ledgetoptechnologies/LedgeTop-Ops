@@ -46,7 +46,7 @@ let env: ProjectAlphaApiV2SyncEnvironment;
 async function migrate(): Promise<void> {
   const directory = new URL("../migrations/", import.meta.url);
   const names = readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/.test(name)).sort();
-  expect(names).toContain("0125_project_alpha_api_v2_inventory_observations.sql");
+  expect(names).toContain("0161_project_alpha_api_v2_inventory_observations.sql");
   const prerequisites = `
     CREATE TABLE pa_clients(id TEXT PRIMARY KEY);
     CREATE TABLE pa_projects(id TEXT PRIMARY KEY);
@@ -59,11 +59,20 @@ async function migrate(): Promise<void> {
       source_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,
       external_project_id TEXT,project_alpha_public_id TEXT);`;
   await database.batch(splitD1MigrationStatements(prerequisites).map(statement => database.prepare(statement)));
-  for (const name of ["0125_project_alpha_api_v2_inventory_observations.sql",
-    "0128_project_alpha_inventory_generation_surface_scope.sql"]) {
+  for (const name of ["0161_project_alpha_api_v2_inventory_observations.sql",
+    "0165_project_alpha_inventory_generation_surface_scope.sql"]) {
     const sql = readFileSync(new URL(name, directory), "utf8");
     await database.batch(splitD1MigrationStatements(sql).map(statement => database.prepare(statement)));
   }
+}
+
+async function insertGenerationReceipt(inventoryKind: "directory" | "project", requestId: string,
+  authorizationGeneration: string, digest: string): Promise<void> {
+  await database.prepare(`INSERT INTO project_alpha_api_v2_inventory_receipts(
+    source_id,source_instance_id,application_id,history_epoch_id,inventory_kind,
+    request_id,authorization_generation,page_sha256,item_count
+  ) VALUES(?,?,?,?,?,?,?,?,0)`).bind(sourceId, sourceInstanceId, applicationId, historyEpoch,
+    inventoryKind, requestId, authorizationGeneration, digest).run();
 }
 
 function directoryObserved(overrides: Record<string, unknown> = {}) {
@@ -135,6 +144,20 @@ describe("Project Alpha API-v2 inventory evidence ingestion", () => {
     for (const table of ["pa_clients", "pa_projects", "operations_directory_records",
       "project_alpha_directory_mappings", "operations_shared_projects", "project_alpha_project_mappings"])
       expect(await database.prepare(`SELECT count(*) n FROM ${table}`).first<number>("n"), table).toBe(0);
+  });
+
+  it("compares authorization generations only within the same inventory surface", async () => {
+    await insertGenerationReceipt("directory", "11111111-1111-4111-8111-111111111111", "48", "c".repeat(64));
+    await insertGenerationReceipt("project", "22222222-2222-4222-8222-222222222222", "8", "d".repeat(64));
+    expect(await database.prepare(`SELECT count(*) AS n FROM project_alpha_api_v2_inventory_conflicts`)
+      .first<number>("n")).toBe(0);
+
+    await insertGenerationReceipt("project", "33333333-3333-4333-8333-333333333333", "6", "e".repeat(64));
+    const conflict = await database.prepare(`SELECT inventory_kind,conflict_kind,details_json
+      FROM project_alpha_api_v2_inventory_conflicts`).first();
+    expect(conflict).toEqual({ inventory_kind: "project",
+      conflict_kind: "authorization_generation_regressed",
+      details_json: JSON.stringify({ observedAuthorizationGeneration: "6", priorAuthorizationGeneration: "8" }) });
   });
 
   it("records exact-ID collisions for review and never selects or creates a mapping", async () => {

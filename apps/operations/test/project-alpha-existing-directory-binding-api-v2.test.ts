@@ -8,15 +8,16 @@ const sourceId = "project-alpha:primary", source = "10000000-0000-4000-8000-0000
 const application = "10000000-0000-4000-8000-000000000002", epoch = "10000000-0000-4000-8000-000000000003";
 const requestId = "10000000-0000-4000-8000-000000000004", commandId = "20000000-0000-4000-8000-000000000001";
 const publicId = "a".repeat(32);
-const command = { commandId, externalId: "native-customer", expectedPublicId: publicId, expectedRevision: "7" };
+const command = { commandId, externalId: "native-customer", expectedPublicId: publicId, expectedRevision: "7",
+  expectedAuthorizationGeneration: "7" };
 const endpoint = { method: "POST", path: "/api/v2/directory/organizations/bindings/commands",
   requiredCapability: "directory.organizations.bind", requiresSourceInstanceId: true, requiresApplicationId: true,
   requiresExpectedPublicId: true, requiresExpectedRevision: true, requiresHistoryEpoch: true };
 const metadata = () => ({ apiVersion: "2", sourceInstanceId: source, applicationId: application, historyEpoch: epoch,
   requestId, grantedCapabilities: [{ name: "api.capabilities.read" }, { name: "directory.organizations.bind" }],
-  implementedEndpoints: [{ method: "GET", path: "/api/v2/capabilities", requiredCapability: "api.capabilities.read" }, endpoint] });
+  implementedEndpoints: [{ method: "GET", path: "/api/v2/capabilities", requiredCapability: "api.capabilities.read" }, { ...endpoint }] });
 const receipt = () => ({ replayed: false, result: { binding: { publicId },
-  resource: { type: "organization", id: "native-customer", revision: "7" } }, requestId,
+  resource: { type: "organization", id: "native-customer", revision: "7" }, authorizationGeneration: "8" }, requestId,
   sourceInstanceId: source, historyEpoch: epoch, applicationId: application });
 const response = (value: unknown, status = 200, extra: Record<string, string> = {}) => new Response(JSON.stringify(value), {
   status, headers: { "Content-Type": "application/json", "Cache-Control": "no-store", "X-Request-ID": requestId, ...extra },
@@ -60,10 +61,24 @@ describe("existing Directory binding API-v2 transport", () => {
     const send = vi.fn<typeof fetch>(async () => response(metadata()));
     const accessor = { ...command } as Record<string, unknown>;
     Object.defineProperty(accessor, "commandId", { enumerable: true, get: () => commandId });
-    for (const value of [accessor, { ...command, credential: "caller-secret" }, { ...command, expectedRevision: "07" }]) {
+    for (const value of [accessor, { ...command, credential: "caller-secret" }, { ...command, expectedRevision: "07" },
+      { commandId, externalId: "native-customer", expectedPublicId: publicId, expectedRevision: "7" },
+      { ...command, expectedAuthorizationGeneration: "07" }, { ...command, expectedAuthorizationGeneration: "9223372036854775807" }]) {
       expect(await sendConfiguredProjectAlphaExistingDirectoryBinding(env, sourceId, "organization", value, send))
         .toMatchObject({ status: "rejected", reason: "invalid_command" });
     }
     expect(send).not.toHaveBeenCalled();
+  });
+
+  it.each(["missing", "stale", "malformed", "extra-result"]) ("rejects %s result authorization generation evidence", async variant => {
+    const body = receipt() as Record<string, unknown>;
+    const result = body.result as Record<string, unknown>;
+    if (variant === "missing") delete result.authorizationGeneration;
+    if (variant === "stale") result.authorizationGeneration = "7";
+    if (variant === "malformed") result.authorizationGeneration = "08";
+    if (variant === "extra-result") result.untrusted = true;
+    const send = vi.fn<typeof fetch>(async url => String(url).endsWith("/capabilities") ? response(metadata()) : response(body));
+    await expect(sendConfiguredProjectAlphaExistingDirectoryBinding(env, sourceId, "organization", command, send))
+      .resolves.toMatchObject({ status: "uncertain", reason: "invalid_contract" });
   });
 });

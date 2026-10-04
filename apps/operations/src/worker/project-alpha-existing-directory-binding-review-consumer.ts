@@ -6,6 +6,7 @@ import {
   readConfiguredProjectAlphaDirectoryBindingStatus,
   readConfiguredProjectAlphaDirectoryProfile,
 } from "./project-alpha-directory-read-api-v2";
+import { generation, nextGeneration } from "./project-alpha-project-transport";
 
 /**
  * Private, default-off consumer for an already acquired Directory binding.
@@ -70,6 +71,8 @@ type Chain = Review & Readonly<{
   response_project_alpha_public_id: string;
   response_project_alpha_revision: string;
   response_sha256: string;
+  response_expected_authorization_generation: string | null;
+  response_result_authorization_generation: string | null;
   acquired_receipt_id: string;
   acquired_request_sha256: string;
   acquisition_evidence_sha256: string;
@@ -180,6 +183,8 @@ async function chain(db: D1Database, reviewItemId: string): Promise<Chain | null
       response.history_epoch_id response_history_epoch_id,response.resource_type response_resource_type,
       response.external_id response_external_id,response.project_alpha_public_id response_project_alpha_public_id,
       response.project_alpha_revision response_project_alpha_revision,response.response_sha256,
+      response.expected_authorization_generation response_expected_authorization_generation,
+      response.result_authorization_generation response_result_authorization_generation,
       acquired.receipt_id acquired_receipt_id,acquired.request_sha256 acquired_request_sha256,
       acquired.acquisition_evidence_sha256,acquired.profile_evidence_sha256,
       acquired.binding_status_evidence_sha256,mapping.record_id mapping_record_id,
@@ -224,6 +229,8 @@ function exactChain(value: Chain): boolean {
     && value.acquired_request_sha256 === value.request_sha256
     && value.claim_request_sha256 === value.request_sha256
     && value.response_sha256 === value.acquisition_evidence_sha256
+    && generation(value.response_expected_authorization_generation)
+    && nextGeneration(value.response_expected_authorization_generation) === value.response_result_authorization_generation
     && new Set([value.reviewed_binding_evidence_sha256,value.acquisition_evidence_sha256,
       value.profile_evidence_sha256,value.binding_status_evidence_sha256]).size === 4
     && value.response_source_instance_id === value.source_instance_id
@@ -373,7 +380,8 @@ export async function activateProjectAlphaExistingDirectoryBinding(
   }
   if (freshProfile.observation.resource.revision !== evidence.project_alpha_revision
     || freshBinding.observation.resource.revision !== evidence.project_alpha_revision
-    || freshProfile.observation.authorizationGeneration !== freshBinding.observation.authorizationGeneration)
+    || freshProfile.observation.authorizationGeneration !== freshBinding.observation.authorizationGeneration
+    || freshProfile.observation.authorizationGeneration !== acquired.response_result_authorization_generation)
     return { status: "blocked", reason: "remote" };
   if (evidence.resource_type === "client") {
     const parentPublicId = freshProfile.observation.profile.organizationPublicId ?? null;
@@ -408,14 +416,15 @@ export async function activateProjectAlphaExistingDirectoryBinding(
       record_id,source_id,source_instance_id,application_id,history_epoch_id,resource_type,external_id,
       project_alpha_public_id,project_alpha_revision,local_record_version,request_sha256,
       acquisition_evidence_sha256,profile_evidence_sha256,binding_status_evidence_sha256,
-      activated_by_staff_id,directory_grant_generation)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+      activated_by_staff_id,directory_grant_generation,expected_authorization_generation,result_authorization_generation)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
       activationId, input.reviewItemId, input.idempotencyKey, acquired.acquired_receipt_id, acquired.claim_id,
       evidence.record_id, evidence.source_id, evidence.source_instance_id, evidence.application_id,
       evidence.history_epoch_id, evidence.resource_type, evidence.external_id, evidence.project_alpha_public_id,
       evidence.project_alpha_revision, evidence.reviewed_local_record_version, evidence.request_sha256,
       acquired.acquisition_evidence_sha256, acquired.profile_evidence_sha256,
-      acquired.binding_status_evidence_sha256, evidence.reviewer_staff_id, before.grant_generation).run();
+      acquired.binding_status_evidence_sha256, evidence.reviewer_staff_id, before.grant_generation,
+      acquired.response_expected_authorization_generation, acquired.response_result_authorization_generation).run();
     if (inserted.meta.changes !== 1) return { status: "uncertain", reason: "database" };
     const saved = await prior(env.OPS_DB, input.reviewItemId, input.idempotencyKey);
     if (!saved || saved.activation_id !== activationId) return { status: "uncertain", reason: "database" };

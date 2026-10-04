@@ -1,8 +1,8 @@
-import { readFileSync, readdirSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Miniflare } from "miniflare";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
+import { reviewedOperationsMigrationNames } from "./helpers/reviewed-operations-migration-chain";
 import type { AuthenticatedNativeStaffWithAdmissionVersion } from "../src/worker/native-staff-auth";
 type SchemaObject = {type:string;name:string;tbl_name:string;sql:string|null};
 
@@ -26,9 +26,9 @@ describe("0150 cancellation preserves history after all prior canonical migratio
       script: "export default {}", d1Databases: { DB: crypto.randomUUID() } });
     db = await runtime.getD1Database("DB");
     const directory = new URL("../migrations/", import.meta.url);
-    const names = readdirSync(fileURLToPath(directory)).filter(name => /^\d{4}_.+\.sql$/.test(name)).sort();
-    expect(names).toHaveLength(151);
-    expect(names.at(-1)).toBe("0151_verified_recipient_delivery_authority_outbox.sql");
+    const names = reviewedOperationsMigrationNames(directory);
+    expect(names).toHaveLength(169);
+    expect(names.at(-1)).toBe("0169_project_alpha_existing_directory_binding_generation_evidence.sql");
     const candidateIndex = names.indexOf("0150_client_portal_recipient_enrollment_cancellation.sql");
     expect(candidateIndex).toBe(149);
     // Exercise 0150 at its real position, not whichever migration is newest.

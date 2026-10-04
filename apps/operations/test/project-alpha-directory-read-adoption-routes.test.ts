@@ -3,8 +3,8 @@ import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env, StaffPrincipal } from "../src/worker/types";
 
-const mocks = vi.hoisted(() => ({ scope: vi.fn(), authenticate: vi.fn(), reserve: vi.fn(), compare: vi.fn(), seal: vi.fn(),
-  audit: vi.fn(), batch: vi.fn() }));
+const mocks = vi.hoisted(() => ({ scope: vi.fn(), authenticate: vi.fn(), candidates: vi.fn(), reserve: vi.fn(), compare: vi.fn(), seal: vi.fn(), finalize: vi.fn(),
+  audit: vi.fn(), batch: vi.fn(), generation: vi.fn() }));
 vi.mock("../src/worker/acl", () => ({ sqlScope: mocks.scope }));
 vi.mock("../src/worker/native-staff-auth", () => ({
   authenticateNativeStaffWithAdmissionVersion: mocks.authenticate,
@@ -12,15 +12,23 @@ vi.mock("../src/worker/native-staff-auth", () => ({
 vi.mock("../src/worker/project-alpha-directory-read-adoption", () => ({
   reserveProjectAlphaDirectoryReadAdoption: mocks.reserve,
 }));
+vi.mock("../src/worker/project-alpha-directory-read-adoption-candidates", () => ({
+  listProjectAlphaDirectoryReadAdoptionCandidates: mocks.candidates,
+}));
 vi.mock("../src/worker/project-alpha-directory-read-adoption-field-review", () => ({
   compareProjectAlphaDirectoryReadAdoptionFields: mocks.compare,
   sealProjectAlphaDirectoryReadAdoptionFieldReview: mocks.seal,
+}));
+vi.mock("../src/worker/project-alpha-directory-read-adoption-runtime-finalizer", () => ({
+  finalizeProjectAlphaDirectoryReadAdoption: mocks.finalize,
 }));
 vi.mock("../src/worker/request-security", () => ({ auditStatement: mocks.audit }));
 
 import {
   PROJECT_ALPHA_DIRECTORY_READ_ADOPTION_COMPARE_ROUTE,
+  PROJECT_ALPHA_DIRECTORY_READ_ADOPTION_CANDIDATES_ROUTE,
   PROJECT_ALPHA_DIRECTORY_READ_ADOPTION_FIELD_REVIEW_ROUTE,
+  PROJECT_ALPHA_DIRECTORY_READ_ADOPTION_FINALIZE_ROUTE,
   PROJECT_ALPHA_DIRECTORY_READ_ADOPTION_ROUTE,
   registerProjectAlphaDirectoryReadAdoptionRoutes,
 } from "../src/worker/project-alpha-directory-read-adoption-routes";
@@ -29,15 +37,21 @@ const principal: StaffPrincipal = { id: "admin", email: "admin@example.test", di
   accessSubject: "native:staff:admin", projectAlphaUserId: null };
 const idempotencyKey = "70000000-0000-4000-8000-000000000007";
 const reviewId = "80000000-0000-4000-8000-000000000008";
+const receiptId = "90000000-0000-4000-8000-000000000009";
 const request = { sourceId: "project-alpha:primary", resourceType: "client",
-  recordId: "ops-customer-1", expectedLocalRecordVersion: 3, projectAlphaPublicId: "a".repeat(32) };
+  sourceInstanceId: "10000000-0000-4000-8000-000000000001",
+  applicationId: "20000000-0000-4000-8000-000000000002",
+  historyEpoch: "30000000-0000-4000-8000-000000000003",
+  recordId: "ops-customer-1", expectedLocalRecordVersion: 3, projectAlphaPublicId: "a".repeat(32),
+  resourceRevision: "3", authorizationGeneration: "7", bindingExternalId: "pa-client-77",
+  bindingResourceRevision: "3" };
 
 function fixture(enabled = true, administrator = true, environment = "staging") {
   const app = new Hono<{ Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } }>();
   app.use("*", async (c, next) => { c.set("principal", principal); c.set("administrator", administrator); await next(); });
   registerProjectAlphaDirectoryReadAdoptionRoutes(app);
   const env = { ENVIRONMENT: environment, PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED: enabled ? "true" : "false",
-    OPS_DB: { batch: mocks.batch }, TEAM_DOMAIN: "https://team.cloudflareaccess.com", OPERATIONS_AUD: "audience_12345678",
+    OPS_DB: { batch: mocks.batch, prepare: () => ({ bind: () => ({ first: mocks.generation }) }) }, TEAM_DOMAIN: "https://team.cloudflareaccess.com", OPERATIONS_AUD: "audience_12345678",
     AUDIT_IP_SECRET: "audit" } as unknown as Env;
   const send = (body: unknown = request, key = idempotencyKey) => app.request(
     `https://ops.example.test${PROJECT_ALPHA_DIRECTORY_READ_ADOPTION_ROUTE}`,
@@ -47,7 +61,13 @@ function fixture(enabled = true, administrator = true, environment = "staging") 
     {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)},env);
   const seal = (body:unknown) => app.request(`https://ops.example.test${PROJECT_ALPHA_DIRECTORY_READ_ADOPTION_FIELD_REVIEW_ROUTE.replace(":reviewId",reviewId)}`,
     {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)},env);
-  return { send, compare, seal };
+  const candidates = (query = `sourceId=project-alpha%3Aprimary&limit=2`) => app.request(
+    `https://ops.example.test${PROJECT_ALPHA_DIRECTORY_READ_ADOPTION_CANDIDATES_ROUTE}?${query}`,
+    { method: "GET" }, env);
+  const finalize = (body:unknown={}, key=idempotencyKey) => app.request(
+    `https://ops.example.test${PROJECT_ALPHA_DIRECTORY_READ_ADOPTION_FINALIZE_ROUTE.replace(":receiptId",receiptId)}`,
+    {method:"POST",headers:{"Content-Type":"application/json","Idempotency-Key":key},body:JSON.stringify(body)},env);
+  return { send, compare, seal, candidates, finalize };
 }
 
 beforeEach(() => {
@@ -57,15 +77,53 @@ beforeEach(() => {
     identity: { kind: "native", staffId: principal.id, verifiedAccessSubject: principal.accessSubject,
       email: principal.email, displayName: principal.displayName, profileVersion: 5 } });
   mocks.reserve.mockResolvedValue({ status: "reserved", reviewId: "review", claimId: "claim", state: "inactive" });
+  mocks.candidates.mockResolvedValue({ items: [{ source: { sourceId: "project-alpha:primary",
+    sourceInstanceId: "10000000-0000-4000-8000-000000000001",
+    applicationId: "20000000-0000-4000-8000-000000000002",
+    historyEpoch: "30000000-0000-4000-8000-000000000003" }, resourceType: "client",
+    projectAlphaPublicId: "a".repeat(32), resourceRevision: "3", authorizationGeneration: "7",
+    binding: { externalId: "pa-client-77", status: "active", resourceRevision: "3" }, conflictState: "clear" }],
+    nextCursor: null });
   mocks.compare.mockResolvedValue({ status:"compared",reviewId,resourceType:"client",fields:[
     {field:"name",localValue:"Private local name",projectAlphaValue:"Private PA name",equal:false},
   ] });
   mocks.seal.mockResolvedValue({status:"sealed",receiptId:"receipt"});
+  mocks.finalize.mockResolvedValue({status:"finalized",finalizationId:"a0000000-0000-4000-8000-00000000000a",
+    activationId:"b0000000-0000-4000-8000-00000000000b",recordId:"ops-customer-1",resourceType:"client",adoptedFields:[]});
+  mocks.generation.mockResolvedValue(6);
   mocks.audit.mockResolvedValue({});
   mocks.batch.mockResolvedValue([]);
 });
 
 describe("Project Alpha exact Directory read-adoption route", () => {
+  it("lists only bounded opaque candidates after every staff authorization gate", async () => {
+    const response = await fixture().candidates();
+    expect(response.status, await response.clone().text()).toBe(200);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    const payload = await response.json();
+    expect(payload).toEqual(await mocks.candidates.mock.results[0]!.value);
+    expect(JSON.stringify(payload)).not.toMatch(/name|email|phone|profile/i);
+    expect(mocks.candidates).toHaveBeenCalledWith(expect.objectContaining({ OPS_DB: expect.anything() }), {
+      sourceId: "project-alpha:primary", limit: 2,
+    });
+
+    mocks.candidates.mockClear();
+    expect((await fixture(false).candidates()).status).toBe(404);
+    expect((await fixture(true, false).candidates()).status).toBe(403);
+    mocks.scope.mockResolvedValueOnce({ global: false, deniedGlobal: false });
+    expect((await fixture().candidates()).status).toBe(403);
+    expect(mocks.candidates).not.toHaveBeenCalled();
+  });
+
+  it("rejects unbounded, ambiguous, and malformed candidate queries", async () => {
+    expect((await fixture().candidates("sourceId=project-alpha%3Aprimary&limit=101")).status).toBe(400);
+    expect((await fixture().candidates("sourceId=project-alpha%3Aprimary&sourceId=project-alpha%3Aother")).status).toBe(400);
+    expect((await fixture().candidates("sourceId=project-alpha%3Aprimary&limit=2&extra=true")).status).toBe(400);
+    expect((await fixture().candidates("limit=2")).status).toBe(400);
+    mocks.candidates.mockResolvedValueOnce(null);
+    expect((await fixture().candidates("sourceId=project-alpha%3Aprimary&cursor=invalid")).status).toBe(400);
+  });
+
   it("is staging-only and default-off before authentication or reservation", async () => {
     expect((await fixture(false).send()).status).toBe(404);
     expect((await fixture(true, true, "production").send()).status).toBe(404);
@@ -82,6 +140,8 @@ describe("Project Alpha exact Directory read-adoption route", () => {
   it("requires strict input, a UUID idempotency key, and matching current native identity", async () => {
     expect((await fixture().send({ ...request, fuzzyMatch: true })).status).toBe(400);
     expect((await fixture().send({ ...request, externalId: "browser-chosen-pa-id" })).status).toBe(400);
+    expect((await fixture().send({ ...request, sourceInstanceId: undefined })).status).toBe(400);
+    expect((await fixture().send({ ...request, resourceRevision: "4" })).status).toBe(400);
     expect((await fixture().send(request, "not-a-uuid")).status).toBe(400);
     mocks.authenticate.mockResolvedValueOnce({ admissionVersion: 4,
       identity: { staffId: "someone-else", verifiedAccessSubject: principal.accessSubject,
@@ -160,5 +220,19 @@ describe("Project Alpha exact Directory read-adoption route", () => {
     expect(await response.json()).toEqual({outcome:{status:"blocked",reason:"pa_profile_changed"}});
     expect(mocks.seal).not.toHaveBeenCalled();
     expect(mocks.batch).not.toHaveBeenCalled();
+  });
+
+  it("finalizes only an explicit sealed receipt with current native grant generation and UUID idempotency", async () => {
+    expect((await fixture().finalize({unexpected:true})).status).toBe(400);
+    expect((await fixture().finalize({},"invalid")).status).toBe(400);
+    const response=await fixture().finalize();
+    expect(response.status,await response.clone().text()).toBe(200);
+    expect(mocks.finalize).toHaveBeenCalledWith(expect.objectContaining({ENVIRONMENT:"staging"}),{
+      fieldReviewReceiptId:receiptId,idempotencyKey,actor:{staffId:principal.id,accessSubject:principal.accessSubject,
+        admissionVersion:4,profileVersion:5,grantGeneration:6},
+    });
+    expect(JSON.stringify(mocks.audit.mock.calls)).not.toContain(request.projectAlphaPublicId);
+    expect((await fixture(false).finalize()).status).toBe(404);
+    expect(mocks.finalize).toHaveBeenCalledTimes(1);
   });
 });

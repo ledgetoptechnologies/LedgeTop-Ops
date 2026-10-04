@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { Miniflare } from "miniflare";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
+import { reviewedOperationsMigrationNames } from "./helpers/reviewed-operations-migration-chain";
 
 const mail = vi.hoisted(() => ({ send: vi.fn(), ready: vi.fn() }));
 vi.mock("../src/worker/mailer", async importOriginal => {
@@ -34,7 +35,7 @@ beforeAll(async () => {
     script: "export default {fetch(){return new Response('local-test')}}", d1Databases: ["OPS_DB"] });
   database = await runtime.getD1Database("OPS_DB") as D1Database;
   const directory = new URL("../migrations/", import.meta.url);
-  const migrations = readdirSync(directory).filter(file => /^\d{4}_.*\.sql$/.test(file)).sort();
+  const migrations = reviewedOperationsMigrationNames(directory);
   expect(migrations).toEqual(expect.arrayContaining([
     "0087_project_alpha_api_v2_incidents.sql", "0088_project_alpha_api_v2_incident_alerts.sql",
     "0089_project_alpha_api_v2_monitor_lifecycle.sql",

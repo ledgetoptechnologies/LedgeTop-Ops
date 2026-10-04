@@ -21,7 +21,7 @@ type SourceTable = "pa_organizations" | "pa_clients" | "pa_projects";
 const ACTIVE_MAPPING_COLUMNS = ["source_id", "resource_type", "record_id", "external_id", "project_alpha_public_id",
   "source_instance_id", "application_id", "history_epoch_id"] as const;
 
-/** 0129 introduced this relation as a view and 0130 added record_id. Some test
+/** 0125 introduced this relation as a view and 0170 added record_id. Some test
  * and recovery databases materialize the same contract as a table, so inspect
  * sqlite_master rather than assuming either storage type. An existing but
  * incomplete relation is unsafe and must not silently fall back to payloads. */

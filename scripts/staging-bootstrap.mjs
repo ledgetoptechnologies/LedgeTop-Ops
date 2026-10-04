@@ -15,9 +15,9 @@ export const BOOTSTRAP_APPS = Object.freeze({
     binding: "DELIVERY_DB",
     databaseName: "client-data-staging",
     seed: "0002_seed_initial_staff.sql",
-    migrationCount: 140,
-    migrationNamesSha256: "ab5da8fe595444f7a4db2d460d4ee51b3ccb66b94922df75ff858c6df0780e03",
-    migrationContentsSha256: "ab2727c3d4520f1bb8fc59195b0e74ffd9eeb965eff8fdfa198bbaecbebb13e1",
+    migrationCount: 147,
+    migrationNamesSha256: "1adce32fb9cad385417f3f058664ecb105559c31a5efd8c87e9f642f97a45db9",
+    migrationContentsSha256: "8a6cb183feae5ec6490cb4710f02a3289a05421786b9593e6392803a1e890f5c",
   }),
   operations: Object.freeze({
     source: "operations",
@@ -25,12 +25,9 @@ export const BOOTSTRAP_APPS = Object.freeze({
     binding: "OPS_DB",
     databaseName: "ltds-ops-staging",
     seed: "0002_seed_acl.sql",
-    // This inventory currently contains both colliding 0125-0131 families.
-    // The release remains fail-closed until those migrations are reconciled
-    // into a safe forward-only sequence and these exact-chain pins are updated.
-    migrationCount: 158,
-    migrationNamesSha256: "aa73995502d44fc2bdc6ae8450cc59e30429a111234f3474540972886fb4a6a6",
-    migrationContentsSha256: "2a7837359615cf063f1932bf70b38aa37c69cf297bf48220e5ec5610b9cc2cd6",
+    migrationCount: 171,
+    migrationNamesSha256: "bc4590b90cccd1842b2496906986355cfde7522e970ac3ec95039cace437f61d",
+    migrationContentsSha256: "e3feca1f403a06f15495017fd843ac48173e39be2478f8d6b5060c262c0b1f5c",
   }),
 });
 export const PRODUCTION_DATABASE_IDENTITIES = Object.freeze([

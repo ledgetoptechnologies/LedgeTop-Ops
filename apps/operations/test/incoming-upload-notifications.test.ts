@@ -64,6 +64,7 @@ beforeEach(async () => {
   ]);
   await addCompletedUpload("upload-one", 4);
   mailer.sendNotificationMail.mockReset().mockResolvedValue(undefined);
+  mailer.validateNotificationMailTransport.mockReset();
   env = { DELIVERY_DB: delivery, OPS_DB: ops } as unknown as Env;
 });
 
@@ -169,6 +170,18 @@ describe("incoming upload owner notification digests", () => {
       .toEqual({ digest_version: 2, file_count: 1, total_bytes: 5, status: "pending" });
   });
 
+  it("stores only a generic closed error when mail preflight fails", async () => {
+    await releaseQuietWindow();
+    const privateFailure = new Error("secret configuration detail");
+    mailer.validateNotificationMailTransport.mockImplementationOnce(() => { throw privateFailure; });
+
+    expect(await processIncomingUploadNotifications(env)).toBe(1);
+    expect(await delivery.prepare("SELECT status,attempt_count,last_error_code FROM incoming_upload_notification_digests").first())
+      .toEqual({ status: "retry", attempt_count: 1, last_error_code: "mail-transport-failed" });
+    expect(await delivery.prepare("SELECT last_error_code FROM incoming_upload_notification_digests").first())
+      .not.toEqual({ last_error_code: privateFailure.message });
+    expect(mailer.sendNotificationMail).not.toHaveBeenCalled();
+  });
   it("requires reconciliation instead of resending after uncertain mail delivery", async () => {
     await releaseQuietWindow();
     const uncertain = new mailer.NotificationMailDeliveryUncertain();

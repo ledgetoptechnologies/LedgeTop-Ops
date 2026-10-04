@@ -84,7 +84,8 @@ function remote(state: Remote): typeof fetch {
         throw new Error("invalid PA bind request method or media type");
       assertIdentityHeaders();
       const command = JSON.parse(String(init.body));
-      const expected = { commandId, externalId: recordId, expectedPublicId: publicId, expectedRevision: state.revision };
+      const expected = { commandId, externalId: recordId, expectedPublicId: publicId, expectedRevision: state.revision,
+        expectedAuthorizationGeneration: "8" };
       if (JSON.stringify(command) !== JSON.stringify(expected))
         throw new Error("PA bind command did not preserve exact selection preconditions");
       if (state.bindResponse === "precondition_conflict")
@@ -94,9 +95,14 @@ function remote(state: Remote): typeof fetch {
       if (state.bindResponse === "malformed_success") return reply({ replayed: false, sourceInstanceId, applicationId,
         historyEpoch: historyEpochId, result: { binding: { publicId }, resource: { type: "organization", id: "wrong", revision: state.revision } },
       });
+      const replayed = state.bound;
+      const resultAuthorizationGeneration = String(BigInt(command.expectedAuthorizationGeneration) + 1n);
       state.bound = true;
-      return reply({ replayed: false, sourceInstanceId, applicationId, historyEpoch: historyEpochId,
-        result: { binding: { publicId }, resource: { type: "organization", id: recordId, revision: state.revision } },
+      state.profileGeneration = resultAuthorizationGeneration;
+      state.bindingGeneration = resultAuthorizationGeneration;
+      return reply({ replayed, sourceInstanceId, applicationId, historyEpoch: historyEpochId,
+        result: { binding: { publicId }, resource: { type: "organization", id: recordId, revision: state.revision },
+          authorizationGeneration: resultAuthorizationGeneration },
       });
     }
     throw new Error(`unexpected PA request: ${init?.method ?? "GET"} ${path}`);
@@ -143,7 +149,8 @@ describe("private existing Directory acquisition-to-activation acceptance harnes
       "0117_project_alpha_native_owner_epoch_claims.sql", "0123_native_directory_authority_history.sql",
       "0125_project_alpha_existing_directory_binding_activation.sql",
       "0127_project_alpha_existing_directory_binding_activation_evidence_transition.sql",
-      "0129_project_alpha_existing_directory_binding_activation_relationship.sql"]) {
+      "0129_project_alpha_existing_directory_binding_activation_relationship.sql",
+      "0169_project_alpha_existing_directory_binding_generation_evidence.sql"]) {
       await db.batch(splitD1MigrationStatements(readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8"))
         .map(sql => db.prepare(sql)));
     }
@@ -155,7 +162,8 @@ describe("private existing Directory acquisition-to-activation acceptance harnes
   async function acquire(fetcher: typeof fetch, generation = 1) {
     return acquireProjectAlphaExistingDirectoryBinding({ OPS_DB: db, PROJECT_ALPHA_API_V2_CONNECTIONS: connections }, {
       reviewId, commandId, sourceId, recordId, resourceType: "organization", projectAlphaPublicId: publicId,
-      localRecordVersion: 1, reviewer: { ...reviewer, admissionVersion: 1, profileVersion: 1, grantGeneration: generation },
+      expectedProjectAlphaRevision: "7", expectedAuthorizationGeneration: "8", localRecordVersion: 1,
+      reviewer: { ...reviewer, admissionVersion: 1, profileVersion: 1, grantGeneration: generation },
     }, fetcher);
   }
   async function activate(fetcher: typeof fetch, actor: unknown = reviewer) {
@@ -214,7 +222,7 @@ describe("private existing Directory acquisition-to-activation acceptance harnes
     state.revision = "8";
     await expect(activate(fetcher)).resolves.toEqual({ status: "blocked", reason: "remote" });
     expect(await activationCount()).toBe(0);
-    state.revision = "7"; state.profileGeneration = "9";
+    state.revision = "7"; state.profileGeneration = "10";
     await expect(activate(fetcher)).resolves.toEqual({ status: "blocked", reason: "remote" });
     expect(await activationCount()).toBe(0);
   });

@@ -1,6 +1,6 @@
 import {
-  boundedJsonWithBytes, canonicalConnection, decimal, endpoint, exact, externalId, isFailure,
-  plain, post, publicId, runPreflight, uuid,
+  boundedJsonWithBytes, canonicalConnection, decimal, endpoint, exact, externalId, generation, isFailure,
+  nextGeneration, plain, post, publicId, runPreflight, uuid,
   type ProjectAlphaProjectFailure,
 } from "./project-alpha-project-transport";
 import {
@@ -15,6 +15,7 @@ export type ProjectAlphaExistingDirectoryBindingCommand = Readonly<{
   externalId: string;
   expectedPublicId: string;
   expectedRevision: string;
+  expectedAuthorizationGeneration: string;
 }>;
 export type ProjectAlphaExistingDirectoryBindingSuccess = Readonly<{
   sourceInstanceId: string;
@@ -25,6 +26,7 @@ export type ProjectAlphaExistingDirectoryBindingSuccess = Readonly<{
   result: Readonly<{
     binding: Readonly<{ publicId: string }>;
     resource: Readonly<{ type: ProjectAlphaExistingDirectoryBindingKind; id: string; revision: string }>;
+    authorizationGeneration: string;
   }>;
 }>;
 export type ProjectAlphaExistingDirectoryBindingOutcome =
@@ -57,9 +59,10 @@ function route(kind: ProjectAlphaExistingDirectoryBindingKind): ProjectAlphaApiV
 }
 
 function command(value: unknown): value is ProjectAlphaExistingDirectoryBindingCommand {
-  return plain(value) && exact(value, ["commandId", "externalId", "expectedPublicId", "expectedRevision"])
+  return plain(value) && exact(value, ["commandId", "externalId", "expectedPublicId", "expectedRevision", "expectedAuthorizationGeneration"])
     && uuid(value.commandId) && externalId(value.externalId) && publicId(value.expectedPublicId)
-    && decimal(value.expectedRevision, true);
+    && decimal(value.expectedRevision, true) && generation(value.expectedAuthorizationGeneration)
+    && nextGeneration(value.expectedAuthorizationGeneration) !== null;
 }
 
 export function canonicalProjectAlphaExistingDirectoryBindingCommand(value: unknown): Readonly<{
@@ -69,7 +72,8 @@ export function canonicalProjectAlphaExistingDirectoryBindingCommand(value: unkn
   if (!command(value)) return null;
   try {
     const canonical = Object.freeze({ commandId: value.commandId, externalId: value.externalId,
-      expectedPublicId: value.expectedPublicId, expectedRevision: value.expectedRevision });
+      expectedPublicId: value.expectedPublicId, expectedRevision: value.expectedRevision,
+      expectedAuthorizationGeneration: value.expectedAuthorizationGeneration });
     const body = JSON.stringify(canonical);
     return new TextEncoder().encode(body).byteLength <= 32 * 1024
       ? Object.freeze({ command: canonical, body }) : null;
@@ -84,11 +88,13 @@ function success(value: unknown, kind: ProjectAlphaExistingDirectoryBindingKind,
     || value.sourceInstanceId !== connection.expectedSourceInstanceId
     || value.applicationId !== connection.expectedApplicationId
     || value.historyEpoch !== connection.expectedHistoryEpoch || !plain(value.result)
-    || !exact(value.result, ["resource", "binding"])) return false;
+    || !exact(value.result, ["resource", "binding", "authorizationGeneration"])) return false;
   const resource = value.result.resource, binding = value.result.binding;
   return plain(resource) && exact(resource, ["type", "id", "revision"])
     && resource.type === kind && resource.id === expected.externalId && resource.revision === expected.expectedRevision
-    && plain(binding) && exact(binding, ["publicId"]) && binding.publicId === expected.expectedPublicId;
+    && plain(binding) && exact(binding, ["publicId"]) && binding.publicId === expected.expectedPublicId
+    && generation(value.result.authorizationGeneration)
+    && value.result.authorizationGeneration === nextGeneration(expected.expectedAuthorizationGeneration);
 }
 
 function conflict(value: unknown, requestId: string | null): boolean {

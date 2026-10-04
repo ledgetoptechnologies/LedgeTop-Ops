@@ -3,6 +3,7 @@ import { clientHubActiveDirectoryIdentities, clientHubActiveDirectoryIdentitySql
   readClientHubSourcePublicId, sourcePublicIdExpression, validatedUniquePublicIdExpression,
   type ClientHubMappingStatus } from "./client-hub-source";
 import { resolveClientHubWorkspaces } from "./client-hub-workspace";
+import { clientHubReviewedDisplayIdentities, clientHubReviewedDisplayLiveSql } from "./client-hub-reviewed-display";
 
 // This is a rebuildable staff search index, never an identity/access authority.
 // A future connector must first isolate the authoritative projection producers.
@@ -12,15 +13,16 @@ const PAGE_SIZE = 20;
 // Count statements, including statements within D1 batches. A contact page can
 // write three fields per record; a page count alone cannot bound subrequests.
 const QUERY_BUDGET = 800;
-const PHASES = ["organizations", "standalone", "workspaces", "accounts", "contacts", "principals", "projects", "sweep"] as const;
+const PHASES = ["organizations", "standalone", "reviewed", "workspaces", "accounts", "contacts", "reviewed_contacts", "principals", "projects", "sweep"] as const;
 type Phase = typeof PHASES[number];
 const PAGE_QUERY_COST: Record<Phase, number> = {
   organizations: 45, standalone: 45, workspaces: 46, accounts: 45,
-  contacts: 123, principals: 84, projects: 43, sweep: 4,
+  reviewed: 45, contacts: 123, reviewed_contacts: 85, principals: 84, projects: 43, sweep: 4,
 };
 type Kind = "organization" | "standalone_client";
-type Namespace = "business" | "portal" | "account";
-type IndexEnv = Pick<Env, "OPS_DB" | "DELIVERY_DB" | "PROJECT_ALPHA_API_V2_CONNECTIONS">;
+type Namespace = "business" | "portal" | "account" | "review";
+type IndexEnv = Pick<Env, "OPS_DB" | "DELIVERY_DB" | "PROJECT_ALPHA_API_V2_CONNECTIONS">
+  & Partial<Pick<Env, "ENVIRONMENT" | "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED">>;
 interface State { generation: number; backfill_phase: string | null; backfill_cursor: string | null }
 interface Root {
   source_id: string; root_namespace: Namespace; kind: Kind; public_id: string; display_name: string;
@@ -73,7 +75,7 @@ async function rootFacts(env: IndexEnv, roots: Root[]): Promise<Facts[]> {
     return facts;
   }
   const key = (root: Pick<Root, "source_id" | "root_namespace" | "kind" | "public_id">) => JSON.stringify([root.source_id, root.root_namespace, root.kind, root.public_id]);
-  const linked = await resolveClientHubWorkspaces(env, roots.filter(root => root.root_namespace !== "account").map(root => ({
+  const linked = await resolveClientHubWorkspaces(env, roots.filter(root => root.root_namespace === "business" || root.root_namespace === "portal").map(root => ({
     key: key(root), source_id: root.source_id, kind: root.kind,
     business_id: root.root_namespace === "business" ? clientHubAlphaInternalId(root) : null,
     pa_public_id: root.pa_public_id, workspace_id: root.root_namespace === "portal" ? root.public_id : null,
@@ -102,7 +104,7 @@ async function rootFacts(env: IndexEnv, roots: Root[]): Promise<Facts[]> {
     const root = roots.find(root => key(root) === key(fact))!;
     return { ...fact, legacy_account_id: root.root_namespace === "account" ? root.public_id
       : root.source_id === PA ? link?.workspace?.legacy_account_id ?? null : null,
-      portal_status: link?.workspace?.status ?? (link?.status === "conflict" ? "mapping_conflict" : link?.status === "pending" ? "projection_pending"
+      portal_status: root.root_namespace === "review" ? "review_only" : link?.workspace?.status ?? (link?.status === "conflict" ? "mapping_conflict" : link?.status === "pending" ? "projection_pending"
         : root.root_namespace === "business" && root.mapping_status !== "mapped" ? "mapping_unavailable"
           : root.source_id === PA ? "not_provisioned" : "not_supported") };
   });
@@ -208,6 +210,18 @@ async function rootPage(env: IndexEnv, phase: Phase, cursor: string, generation:
       const parsed = readClientHubSourcePublicId(payload_json);
       return { ...source, mapping_status: parsed.pa_public_id && !source.pa_public_id ? "ambiguous" : parsed.mapping_status };
     });
+  } else if (phase === "reviewed") {
+    if (env.ENVIRONMENT !== "staging" || env.PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED !== "true") rows = [];
+    else {
+      const identities = await clientHubReviewedDisplayIdentities(env);
+      rows = (await ops.prepare(`SELECT display.source_id,'review' root_namespace,'standalone_client' kind,
+      display.projection_id public_id,display.project_alpha_public_id pa_public_id,'not_applicable' mapping_status,
+      display.display_name,'reviewed_display_only' status,1 contact_count,display.projection_id cursor
+      FROM project_alpha_reviewed_standalone_client_displays display
+      WHERE ${clientHubReviewedDisplayLiveSql("display", identities)} AND display.projection_id>?
+      ORDER BY display.projection_id COLLATE BINARY LIMIT ?`).bind(cursor, PAGE_SIZE)
+      .all<Root & { cursor: string }>()).results;
+    }
   } else if (phase === "accounts") {
     rows = (await delivery.prepare(`SELECT '${LOCAL}' source_id,'account' root_namespace,'standalone_client' kind,
       id public_id,NULL pa_public_id,'not_applicable' mapping_status,display_name,status,0 contact_count,id cursor
@@ -288,6 +302,23 @@ async function searchPage(env: IndexEnv, phase: Phase, cursor: string, generatio
       const fields = contactFields(row.payload_json);
       if (fields.email) values.push({ ...base, field: "email", value: fields.email });
       if (fields.phone) values.push({ ...base, field: "phone", value: fields.phone });
+    }
+  } else if (phase === "reviewed_contacts") {
+    if (env.ENVIRONMENT === "staging" && env.PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED === "true") {
+      const identities = await clientHubReviewedDisplayIdentities(env);
+      const rows = (await env.OPS_DB.withSession("first-primary").prepare(`SELECT projection_id,source_id,display_name,email,phone
+        FROM project_alpha_reviewed_standalone_client_displays display
+        WHERE ${clientHubReviewedDisplayLiveSql("display", identities)} AND projection_id>?
+        ORDER BY projection_id COLLATE BINARY LIMIT ?`).bind(cursor, PAGE_SIZE)
+        .all<{projection_id:string;source_id:string;display_name:string;email:string|null;phone:string|null}>()).results;
+      count=rows.length; next=rows.at(-1)?.projection_id||cursor;
+      for(const row of rows){
+        const base={source:row.source_id,namespace:"review" as const,kind:"standalone_client" as const,
+          root:row.projection_id,type:"api_v2_reviewed_client",id:row.projection_id};
+        values.push({...base,field:"contact",value:row.display_name});
+        if(row.email) values.push({...base,field:"email",value:row.email});
+        if(row.phone) values.push({...base,field:"phone",value:row.phone.replace(/\D/g,"")});
+      }
     }
   } else if (phase === "principals") {
     const key = cursor ? JSON.parse(cursor) as [string, string] : ["", ""];
@@ -401,7 +432,7 @@ export async function reconcileClientHubIndex(env: IndexEnv, maxPages = 20): Pro
         console.log(JSON.stringify({ event: "client_hub.index.complete", pages }));
         return { status: "complete", pages };
       }
-      const result = ["organizations", "standalone", "workspaces", "accounts"].includes(phase)
+      const result = ["organizations", "standalone", "reviewed", "workspaces", "accounts"].includes(phase)
         ? await rootPage(env, phase, cursor, state.generation, token)
         : await searchPage(env, phase, cursor, state.generation, token);
       if (result.count < PAGE_SIZE) { phase = nextPhase(phase)!; cursor = ""; }

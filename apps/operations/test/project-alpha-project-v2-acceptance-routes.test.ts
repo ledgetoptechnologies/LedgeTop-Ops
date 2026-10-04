@@ -28,6 +28,11 @@ const receiptId = "10000000-0000-4000-8000-000000000002";
 const settlementId = "10000000-0000-4000-8000-000000000003";
 const activationId = "10000000-0000-4000-8000-000000000004";
 const sha = "a".repeat(64);
+const selectedConnection = {
+  baseUrl: "https://pa.example.test", apiKey: "server-only",
+  expectedSourceInstanceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", expectedApplicationId: appId,
+  expectedHistoryEpoch: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+} as const;
 const requestBody = {
   sourceId: "project-alpha:staging", expectedApplicationId: appId, operation: "create", scopes: [],
   local: { expectedLocalVersion: 0, expectedLocalProjectionSha256: null },
@@ -36,6 +41,27 @@ const requestBody = {
     project: { name: "Acceptance project", description: null, estimatedStart: null, estimatedEnd: null },
     organization: { externalId: "organization-1", expectedPublicId: "a".repeat(32), expectedRevision: "1", expectedProjectionSha256: sha },
     client: null },
+} as const;
+const updateRequestBody = {
+  sourceId: requestBody.sourceId, expectedApplicationId: appId, operation: "update",
+  scopes: [{ scopeKind: "business_area", businessAreaId: "drone", divisionId: null }],
+  local: { expectedLocalVersion: 7, expectedLocalProjectionSha256: sha },
+  command: {
+    commandId: "20000000-0000-4000-8000-000000000001", externalId: "ops/project-update-1",
+    expectedRevision: "7", expectedProjectionSha256: sha, expectedAuthorizationGeneration: "5",
+    project: { name: "Acceptance project updated", description: "Joined update",
+      estimatedStart: "2026-10-01", estimatedEnd: "2026-10-31" },
+  },
+} as const;
+const bindRequestBody = {
+  sourceId: requestBody.sourceId, expectedApplicationId: appId, operation: "bind",
+  scopes: [{ scopeKind: "division", businessAreaId: "drone", divisionId: "survey" }],
+  local: { expectedLocalVersion: 9, expectedLocalProjectionSha256: sha },
+  command: {
+    commandId: "30000000-0000-4000-8000-000000000001", externalId: "ops/project-bind-1",
+    expectedPublicId: "b".repeat(32), expectedRevision: "9", expectedProjectionSha256: sha,
+    expectedAuthorizationGeneration: "6",
+  },
 } as const;
 
 function fixture(enabled = true, administrator = true, environment = "staging") {
@@ -63,10 +89,8 @@ describe("Project-v2 administrator joined-acceptance route", () => {
     mocks.resolve.mockReturnValue({ sourceId: requestBody.sourceId, enabled: true,
       connection: { baseUrl: "https://pa.example.test", expectedSourceInstanceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         expectedApplicationId: appId, expectedHistoryEpoch: "cccccccc-cccc-4ccc-8ccc-cccccccccccc" } });
-    mocks.withEnabled.mockImplementation(async (_env, _source, callback) => ({ status: "enabled", value: await callback({
-      baseUrl: "https://pa.example.test", apiKey: "server-only", expectedSourceInstanceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-      expectedApplicationId: appId, expectedHistoryEpoch: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
-    }) }));
+    mocks.withEnabled.mockImplementation(async (_env, _source, callback) =>
+      ({ status: "enabled", value: await callback(selectedConnection) }));
     mocks.plan.mockResolvedValue({ status: "queued", commandId, requestSha256: sha, replayed: false });
     mocks.dispatch.mockResolvedValue({ status: "acknowledged", receiptId, replayed: false });
     mocks.settle.mockResolvedValue({ status: "settled", settlementId, successReceiptId: receiptId, commandId, replayed: false });
@@ -124,6 +148,78 @@ describe("Project-v2 administrator joined-acceptance route", () => {
     expect(mocks.dispatch.mock.invocationCallOrder[0]).toBeLessThan(mocks.settle.mock.invocationCallOrder[0]!);
     expect(mocks.settle.mock.invocationCallOrder[0]).toBeLessThan(mocks.activate.mock.invocationCallOrder[0]!);
     expect(JSON.stringify(await (await fixture().send()).json())).not.toContain("server-only");
+  });
+
+  it.each([
+    {
+      operation: "update", body: updateRequestBody,
+      receiptId: "20000000-0000-4000-8000-000000000002",
+      settlementId: "20000000-0000-4000-8000-000000000003",
+      activationId: "20000000-0000-4000-8000-000000000004",
+    },
+    {
+      operation: "bind", body: bindRequestBody,
+      receiptId: "30000000-0000-4000-8000-000000000002",
+      settlementId: "30000000-0000-4000-8000-000000000003",
+      activationId: "30000000-0000-4000-8000-000000000004",
+    },
+  ] as const)("composes the strict $operation envelope through activation without exposing private evidence",
+    async ({ body, receiptId: operationReceiptId, settlementId: operationSettlementId,
+      activationId: operationActivationId }) => {
+      mocks.plan.mockResolvedValueOnce({ status: "queued", commandId: body.command.commandId,
+        requestSha256: sha, replayed: false, requestId: "private-plan-request" });
+      mocks.dispatch.mockResolvedValueOnce({ status: "acknowledged", receiptId: operationReceiptId,
+        replayed: false, requestId: "private-dispatch-request" });
+      mocks.settle.mockResolvedValueOnce({ status: "settled", settlementId: operationSettlementId,
+        successReceiptId: operationReceiptId, commandId: body.command.commandId, replayed: false,
+        apiKey: "private-settlement-key" });
+      mocks.activate.mockResolvedValueOnce({ status: "activated", activationId: operationActivationId,
+        settlementId: operationSettlementId, commandId: body.command.commandId,
+        externalProjectId: body.command.externalId, version: 11, replayed: false,
+        requestId: "private-activation-request" });
+      const state = fixture();
+
+      const routeResponse = await state.send(body, { "Idempotency-Key": body.command.commandId });
+
+      expect(routeResponse.status).toBe(200);
+      const json = await routeResponse.json();
+      expect(json).toEqual({ sourceId: body.sourceId, expectedApplicationId: appId, stage: "activate",
+        outcome: { status: "activated", activationId: operationActivationId,
+          settlementId: operationSettlementId, commandId: body.command.commandId,
+          externalProjectId: body.command.externalId, version: 11, replayed: false } });
+      expect(mocks.plan).toHaveBeenCalledOnce();
+      expect(mocks.plan).toHaveBeenCalledWith(state.env, {
+        sourceId: body.sourceId,
+        actor: { staffId: principal.id, accessSubject: principal.accessSubject,
+          email: principal.email, admissionVersion: 1, profileVersion: 1,
+          verifiedUntil: "2999-01-01T00:00:00.000Z", scopes: body.scopes },
+        operation: body.operation, scopes: body.scopes, local: body.local, command: body.command,
+      });
+      expect(mocks.dispatch).toHaveBeenCalledOnce();
+      expect(mocks.dispatch).toHaveBeenCalledWith(state.env, body.sourceId, body.command.commandId, fetch);
+      expect(mocks.settle).toHaveBeenCalledOnce();
+      expect(mocks.settle).toHaveBeenCalledWith(state.env, operationReceiptId, selectedConnection, fetch);
+      expect(mocks.activate).toHaveBeenCalledOnce();
+      expect(mocks.activate).toHaveBeenCalledWith(state.env, operationSettlementId);
+      expect(JSON.stringify(json)).not.toContain("private-");
+      expect(JSON.stringify(json)).not.toContain("server-only");
+    });
+
+  it("denies a stale update plan without dispatch, read settlement, or activation", async () => {
+    mocks.plan.mockResolvedValueOnce({ status: "blocked", reason: "stale", requestId: "private-plan-request" });
+    const state = fixture();
+
+    const routeResponse = await state.send(updateRequestBody,
+      { "Idempotency-Key": updateRequestBody.command.commandId });
+
+    expect(routeResponse.status).toBe(200);
+    await expect(routeResponse.json()).resolves.toEqual({ sourceId: updateRequestBody.sourceId,
+      expectedApplicationId: appId, stage: "plan", outcome: { status: "blocked", reason: "stale" } });
+    expect(mocks.plan).toHaveBeenCalledOnce();
+    expect(mocks.dispatch).not.toHaveBeenCalled();
+    expect(mocks.withEnabled).not.toHaveBeenCalled();
+    expect(mocks.settle).not.toHaveBeenCalled();
+    expect(mocks.activate).not.toHaveBeenCalled();
   });
 
   it("stops at the first non-success stage and exact replay does not broaden the route surface", async () => {

@@ -16,8 +16,8 @@ const apps = ["delivery", "operations", "ops-sync"];
 // must never satisfy the current release gate.
 const CURRENT_FRESH_BOOTSTRAP_SCHEMA_VERSION = 2;
 const CURRENT_FRESH_BOOTSTRAP_APPLICATIONS = Object.freeze({
-  delivery: Object.freeze({ source: "client", databaseName: BOOTSTRAP_APPS.delivery.databaseName, configPath: "apps/client/wrangler.staging.bootstrap.json", manifestPath: "apps/client/.staging-bootstrap/manifest.json", seed: "0002_seed_initial_staff.sql", ledgerCount: BOOTSTRAP_APPS.delivery.migrationCount, finalMigration: "0221_verified_recipient_delivery_authority.sql" }),
-  operations: Object.freeze({ source: "operations", databaseName: BOOTSTRAP_APPS.operations.databaseName, configPath: "apps/operations/wrangler.staging.bootstrap.json", manifestPath: "apps/operations/.staging-bootstrap/manifest.json", seed: "0002_seed_acl.sql", ledgerCount: BOOTSTRAP_APPS.operations.migrationCount, finalMigration: "0151_verified_recipient_delivery_authority_outbox.sql" }),
+  delivery: Object.freeze({ source: "client", databaseName: BOOTSTRAP_APPS.delivery.databaseName, configPath: "apps/client/wrangler.staging.bootstrap.json", manifestPath: "apps/client/.staging-bootstrap/manifest.json", seed: "0002_seed_initial_staff.sql", ledgerCount: BOOTSTRAP_APPS.delivery.migrationCount, finalMigration: "0228_operations_portal_native_content_start_audit.sql" }),
+  operations: Object.freeze({ source: "operations", databaseName: BOOTSTRAP_APPS.operations.databaseName, configPath: "apps/operations/wrangler.staging.bootstrap.json", manifestPath: "apps/operations/.staging-bootstrap/manifest.json", seed: "0002_seed_acl.sql", ledgerCount: BOOTSTRAP_APPS.operations.migrationCount, finalMigration: "0171_project_alpha_active_directory_update_guard.sql" }),
 });
 const DISPOSABLE_RUN_ID = /^[a-z0-9](?:[a-z0-9-]{1,18}[a-z0-9])$/;
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -310,7 +310,10 @@ export function validateEvidence(evidence, options = {}) {
   if (deliveryVars.PUBLIC_SHARE_ORIGIN !== `https://${STAGING_CLIENT_PORTAL.publicHostname}` ||
     deliveryVars.PUBLIC_BASE_URL !== deliveryVars.PUBLIC_SHARE_ORIGIN)
     errors.push("public share origin must match the anonymous Delivery staging host");
-  if (portal.enabled !== false || deliveryVars.CLIENT_PORTAL_ENABLED !== "false") errors.push("client portal must remain default-off in release preparation evidence");
+  if (portal.releasePhase !== STAGING_CLIENT_PORTAL.releasePhase)
+    errors.push("client portal release phase must match the reviewed staff-synthetic acceptance contract");
+  if (portal.runtimeEnabled !== true || deliveryVars.CLIENT_PORTAL_ENABLED !== "true")
+    errors.push("client portal runtime must be enabled only for the reviewed staff-synthetic staging acceptance phase");
   if (portal.teamDomain !== STAGING_STATIC_VARS.delivery.CLIENT_ACCESS_TEAM_DOMAIN || portal.teamDomain !== deliveryVars.CLIENT_ACCESS_TEAM_DOMAIN) errors.push("client portal Access team domain must match Delivery staging config");
   if (portal.applicationName !== STAGING_CLIENT_PORTAL.applicationName || !populated(portal.applicationId)) errors.push("client portal needs the dedicated Access application identity");
   if (!/^[a-f0-9]{64}$/i.test(portal.audience ?? "") || portal.audience !== deliveryVars.CLIENT_ACCESS_AUD) errors.push("client portal audience must match the dedicated Access app and Delivery staging config");
@@ -324,6 +327,48 @@ export function validateEvidence(evidence, options = {}) {
     errors.push("client portal Access application, audience, destination, and policy readback needs an evidence reference");
   if (!populated(portal.rollbackSnapshotRef))
     errors.push("client portal Access and custom-domain rollback snapshot needs an evidence reference");
+  const admission = portal.admission ?? {};
+  if (admission.mode !== STAGING_CLIENT_PORTAL.admissionMode)
+    errors.push("client portal admission must be restricted to explicit staff synthetic testers");
+  for (const proof of [
+    "clientAdmissionEnabled", "invitationSendingEnabled", "automaticEnrollmentEnabled",
+  ]) if (admission[proof] !== false) errors.push(`client portal admission ${proof} must remain false`);
+  if (admission.syntheticWorkspaceOnly !== true) errors.push("client portal admission must prove syntheticWorkspaceOnly");
+  const tester = admission.approvedStaffTester ?? {};
+  const expectedIssuerSubjectSha256 = typeof tester.issuer === "string" && sha256Hex(tester.subjectSha256)
+    ? crypto.createHash("sha256").update(`${tester.issuer}\n${tester.subjectSha256.toLowerCase()}`).digest("hex")
+    : null;
+  if (tester.issuer !== portal.teamDomain || !sha256Hex(tester.subjectSha256) || !sha256Hex(tester.issuerSubjectSha256)
+    || tester.issuerSubjectSha256.toLowerCase() !== expectedIssuerSubjectSha256
+    || !sha256Hex(tester.identityReadbackSha256) || tester.activeOperationsUser !== true || !populated(tester.evidenceRef))
+    errors.push("client portal admission must bind one active staff tester to a verified issuer and subject readback");
+  const protectedPolicy = admission.protectedAccessPolicy ?? {};
+  const expectedInclude = [{ type: "group", id: portal.groupId }];
+  if (protectedPolicy.applicationId !== portal.applicationId || !populated(protectedPolicy.policyId)
+    || protectedPolicy.decision !== "allow" || protectedPolicy.bypass !== false
+    || JSON.stringify(protectedPolicy.includeSelectors) !== JSON.stringify(expectedInclude)
+    || !sameSequence(protectedPolicy.excludeSelectors, []) || !sameSequence(protectedPolicy.requireSelectors, [])
+    || !sha256Hex(protectedPolicy.readbackSha256) || !populated(protectedPolicy.evidenceRef))
+    errors.push("client portal protected Access policy must be one exact dedicated-group Allow policy with no broad selectors, exclusions, requirements, or Bypass");
+  const membership = admission.testerGroupMembership ?? {};
+  if (membership.groupId !== portal.groupId
+    || !sameSequence(membership.issuerSubjectSha256, [tester.issuerSubjectSha256])
+    || !sha256Hex(membership.readbackSha256) || !populated(membership.evidenceRef))
+    errors.push("client portal tester group membership must contain exactly the approved issuer-subject hash");
+  const productionAccess = admission.productionAccess ?? {};
+  const productionBefore = productionAccess.before ?? {};
+  const productionAfter = productionAccess.after ?? {};
+  for (const [label, snapshot] of [["before", productionBefore], ["after", productionAfter]]) {
+    if (!populated(snapshot.applicationId) || !Array.isArray(snapshot.policyIds) || !snapshot.policyIds.length
+      || new Set(snapshot.policyIds).size !== snapshot.policyIds.length || snapshot.policyIds.some((id) => !populated(id))
+      || !sha256Hex(snapshot.configSha256))
+      errors.push(`client portal production Access ${label} snapshot must pin immutable application/policy IDs and a configuration hash`);
+  }
+  if (productionBefore.applicationId !== productionAfter.applicationId
+    || !sameSequence(productionBefore.policyIds, productionAfter.policyIds)
+    || productionBefore.configSha256 !== productionAfter.configSha256)
+    errors.push("client portal production Access before/after snapshots must be exactly unchanged");
+  if (!populated(productionAccess.evidenceRef)) errors.push("client portal production Access comparison needs a readback evidence reference");
   const publicAccess = portal.publicAccess ?? {};
   if (publicAccess.applicationName !== STAGING_CLIENT_PORTAL.publicApplicationName || !populated(publicAccess.applicationId) || !populated(publicAccess.policyId)) errors.push("client public paths need a separately identified Access Bypass application and policy");
   if (publicAccess.decision !== "bypass" || publicAccess.include !== "everyone") errors.push("client public path policy must be Bypass Everyone");
@@ -333,7 +378,10 @@ export function validateEvidence(evidence, options = {}) {
 
   const portalTests = portal.tests ?? {};
   for (const gate of [
-    "portalDisabled404",
+    "staffSyntheticWorkspaceAccessVerified",
+    "clientAdmissionDenied",
+    "invitationSendingDenied",
+    "automaticEnrollmentDenied",
     "invalidAudienceDenied",
     "unprovisionedIdentityDenied",
     "crossAccountDenied",

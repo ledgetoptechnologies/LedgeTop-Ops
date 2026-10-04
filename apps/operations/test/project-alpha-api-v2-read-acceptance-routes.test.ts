@@ -6,6 +6,7 @@ import type { Env, StaffPrincipal } from "../src/worker/types";
 const mocks = vi.hoisted(() => ({
   scope: vi.fn(),
   configured: vi.fn(),
+  sourceIds: vi.fn(),
   probe: vi.fn(),
   directory: vi.fn(),
   projects: vi.fn(),
@@ -16,6 +17,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("../src/worker/acl", () => ({ sqlScope: mocks.scope }));
 vi.mock("../src/worker/project-alpha-api-v2-connections", () => ({
+  listEnabledProjectAlphaApiV2SourceIds: mocks.sourceIds,
   withEnabledConfiguredProjectAlphaApiV2Connection: mocks.configured,
 }));
 vi.mock("../src/worker/project-alpha-api-v2", () => ({ probeProjectAlphaApiV2: mocks.probe }));
@@ -35,6 +37,7 @@ vi.mock("../src/worker/request-security", () => ({ auditStatement: mocks.audit }
 
 import {
   PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ROUTE,
+  PROJECT_ALPHA_API_V2_SOURCES_ROUTE,
   registerProjectAlphaApiV2ReadAcceptanceRoutes,
 } from "../src/worker/project-alpha-api-v2-read-acceptance-routes";
 
@@ -73,6 +76,7 @@ beforeEach(() => {
     baseUrl: "https://private-pa.example.test", apiKey: "server-only-api-key",
     expectedSourceInstanceId: sourceInstanceId, expectedApplicationId: applicationId, expectedHistoryEpoch: historyEpoch,
   }) }));
+  mocks.sourceIds.mockReturnValue(["project-alpha:primary", "project-alpha:staging"]);
   mocks.probe.mockResolvedValue({ status: "verified", sourceInstanceId, applicationId, historyEpoch, requestId,
     grantedCapabilities: ["api.capabilities.read", "directory.inventory.read", "projects.inventory.read", "catalog.inventory.read"] });
   mocks.directory.mockResolvedValue({ status: "observed", inventory: {
@@ -95,6 +99,29 @@ beforeEach(() => {
 });
 
 describe("Project Alpha API-v2 read acceptance route", () => {
+  it("lists only credential-free enabled source IDs for a globally authorized administrator", async () => {
+    const { app, env } = fixture();
+    const response = await app.request(`https://ops.example.test${PROJECT_ALPHA_API_V2_SOURCES_ROUTE}`, { method: "GET" }, env);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    const body = await response.json() as Record<string, unknown>;
+    expect(body).toEqual({ sources: ["project-alpha:primary", "project-alpha:staging"], stagingDirectoryOwnerViewGrantEnabled: false });
+    expect(JSON.stringify(body)).not.toContain("apiKey");
+    expect(JSON.stringify(body)).not.toContain("private-pa");
+  });
+
+  it("hides source discovery when disabled and denies non-admin or denied scope", async () => {
+    const disabled = fixture(false);
+    expect((await disabled.app.request(`https://ops.example.test${PROJECT_ALPHA_API_V2_SOURCES_ROUTE}`, { method: "GET" }, disabled.env)).status).toBe(404);
+    expect(mocks.sourceIds).not.toHaveBeenCalled();
+
+    const notAdmin = fixture(true, false);
+    expect((await notAdmin.app.request(`https://ops.example.test${PROJECT_ALPHA_API_V2_SOURCES_ROUTE}`, { method: "GET" }, notAdmin.env)).status).toBe(403);
+    mocks.scope.mockResolvedValueOnce({ global: false, deniedGlobal: false });
+    const denied = fixture();
+    expect((await denied.app.request(`https://ops.example.test${PROJECT_ALPHA_API_V2_SOURCES_ROUTE}`, { method: "GET" }, denied.env)).status).toBe(403);
+  });
+
   it("is default-off before configuration or remote reads", async () => {
     expect((await fixture(false).send()).status).toBe(404);
     expect(mocks.configured).not.toHaveBeenCalled();

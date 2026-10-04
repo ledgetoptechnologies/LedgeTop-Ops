@@ -32,10 +32,33 @@ export interface Env {
   CLIENT_PORTAL_AUTHORITY_V2_ENROLLMENT_STATUS_ENABLED?: string;
   /** Default-off service metadata consumer, independent of content permissions. */
   CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED?: string;
+  /** Default-off native authority selection; never falls back to PA-backed grants. */
+  CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED?: string;
+  CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED?: string;
+  /** Dedicated native consent CSRF key; never reused for historical enrollment. */
+  CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_CSRF_SECRET?: string;
+  CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_WRITER_ENABLED?: string;
+  CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_STATUS_ENABLED?: string;
+  /** Staging-only native delivery command consumer. Persistence alone never grants byte access. */
+  CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_WRITER_ENABLED?: string;
+  /** Staging-only exact-receipt recovery for the native delivery command consumer. */
+  CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_STATUS_ENABLED?: string;
+  /** Default-off native folder/index/media reads; requires a fresh private Operations proof. */
+  CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_READ_ENABLED?: string;
+  /** Default-off immutable native content-start audit, required before native byte handoff. */
+  CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_ENABLED?: string;
+  /** Dedicated HMAC key for native content/version fingerprints; configured as a secret, never a var. */
+  CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_HMAC_SECRET?: string;
+  /** Staging-only private proof reader; no public HTTP fallback. */
+  OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER?: Service & import("@ltds/shared/operations-portal-native-delivery-authority").OperationsPortalNativeDeliveryAuthorizationReaderBinding;
+  /** Staging-only private consent binding, separate from historical PA enrollment. */
+  OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT?: Service & import("./client-portal/operations-native-recipient-enrollment-http").OperationsNativeRecipientEnrollmentBinding;
   /** Staging-only verified-recipient consent; independent and default-off. */
   CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED?: string;
   CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_WRITER_ENABLED?: string;
   CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_STATUS_ENABLED?: string;
+  /** Data-only private Ops publication ingress; staging-only and default-off. */
+  CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED?: string;
   CLIENT_PORTAL_RECIPIENT_ENROLLMENT_CSRF_SECRET?: string;
   CLIENT_PORTAL_RECIPIENT_ENROLLMENT_BRIDGE?: Service & import("./client-portal/recipient-enrollment-http").RecipientEnrollmentBinding;
   /** Named Service binding plus its reviewed RPC contract; Wrangler cannot resolve a remote entrypoint's methods. */

@@ -1,6 +1,8 @@
-import type { ClientPortalServiceMetadataRequestV1, ClientPortalServiceMetadataV1 } from "../../../../../packages/shared/src/client-portal-service-metadata";
+import { CLIENT_PORTAL_SERVICE_METADATA_MAX_RESPONSE_BYTES,
+  type ClientPortalServiceMetadataRequestV1, type ClientPortalServiceMetadataV1 } from "../../../../../packages/shared/src/client-portal-service-metadata";
 import type { Env } from "../types";
 import type { VerifiedClientPrincipal } from "./types";
+import { readNativeOperationsPortalHomes } from "./operations-native-recipient-read";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const TIMEOUT_MS = 1_500;
@@ -9,10 +11,11 @@ const responseKeys = ["ok", "protocolVersion", "authorityId", "workspaceId", "ow
 const serviceKeys = ["serviceId", "providerId", "displayLabel", "revision"] as const;
 
 export interface OperationsServiceMetadataBinding {
-  readServiceMetadata(input: ClientPortalServiceMetadataRequestV1): Promise<unknown>;
+  readServiceMetadata(input: ClientPortalServiceMetadataRequestV1): Promise<string>;
 }
 export type OperationsServiceHomeEnv = Pick<Env, "DELIVERY_DB"> & {
   CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED?: string;
+  CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED?: string;
   CLIENT_PORTAL_SERVICE_METADATA_READER?: OperationsServiceMetadataBinding;
 };
 export type OperationsServiceHomeResult = Readonly<{ ok: true; authorityId: string; workspaceId: string;
@@ -30,6 +33,15 @@ async function currentAuthorities(env: OperationsServiceHomeEnv, principal: Pick
   authorityId?: string): Promise<AuthorityRow[] | null> {
   if ((authorityId !== undefined && !UUID.test(authorityId)) || principal.issuer.length < 1 || principal.issuer.length > 512 || principal.issuer.trim() !== principal.issuer
     || principal.subject.length < 1 || principal.subject.length > 512 || principal.subject.trim() !== principal.subject) return [];
+  // Select one authority protocol explicitly. A missing native grant or schema
+  // must never fall back to a historical PA-backed recipient grant.
+  if (env.CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED === "true") {
+    const homes = await readNativeOperationsPortalHomes(env.DELIVERY_DB, principal, true);
+    if (homes === null) return null;
+    return homes.filter(home => authorityId === undefined || home.authorityId === authorityId)
+      .map(home => ({ authority_id: home.authorityId, workspace_id: home.workspaceId,
+        ownership_epoch: home.ownershipEpoch, grant_revision: home.grantRevision }));
+  }
   try {
     const db = env.DELIVERY_DB.withSession?.("first-primary") ?? env.DELIVERY_DB;
     const result = await db.prepare(`SELECT binding.client_authority_id authority_id,binding.workspace_id,
@@ -142,13 +154,22 @@ function validateResponse(value: unknown, request: ClientPortalServiceMetadataRe
   return services;
 }
 
-async function boundedRpc(binding: OperationsServiceMetadataBinding, request: ClientPortalServiceMetadataRequestV1): Promise<unknown> {
+async function boundedRpc(binding: OperationsServiceMetadataBinding, request: ClientPortalServiceMetadataRequestV1): Promise<string> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([binding.readServiceMetadata(request), new Promise<never>((_resolve, reject) => {
       timer = setTimeout(() => reject(Error("operations-service-metadata-timeout")), TIMEOUT_MS);
     })]);
   } finally { if (timer !== undefined) clearTimeout(timer); }
+}
+
+function decodeResponse(wire: unknown): unknown {
+  if (typeof wire !== "string" || wire.length > CLIENT_PORTAL_SERVICE_METADATA_MAX_RESPONSE_BYTES
+    || new TextEncoder().encode(wire).byteLength > CLIENT_PORTAL_SERVICE_METADATA_MAX_RESPONSE_BYTES) return null;
+  try {
+    const parsed: unknown = JSON.parse(wire);
+    return JSON.stringify(parsed) === wire ? parsed : null;
+  } catch { return null; }
 }
 
 /** Requires explicit home permission; descriptive metadata never authorizes files or financial content. */
@@ -162,7 +183,7 @@ export async function readOperationsServiceHome(env: OperationsServiceHomeEnv,
     workspaceId: before.workspace_id, ownershipEpoch: before.ownership_epoch, grantRevision: before.grant_revision,
     issuer: principal.issuer, subject: principal.subject };
   let raw: unknown;
-  try { raw = await boundedRpc(env.CLIENT_PORTAL_SERVICE_METADATA_READER, request); }
+  try { raw = decodeResponse(await boundedRpc(env.CLIENT_PORTAL_SERVICE_METADATA_READER, request)); }
   catch { return { ok: false, code: "unavailable" }; }
   const services = validateResponse(raw, request);
   if (!services) {

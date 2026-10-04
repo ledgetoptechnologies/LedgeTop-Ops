@@ -51,6 +51,8 @@ export function isClientHubCollection(value: string): value is ClientHubCollecti
  * selected projection proof, actor, or permission changes. It is not a grant. */
 export async function createClientHubCollectionContext(env: Env, principal: StaffPrincipal,
   root: ClientHubRoot, access: ClientHubPermissions): Promise<ClientHubCollectionContext> {
+  if (root.root_namespace === "review")
+    throw new HTTPException(404, { message: "Review-only records are not client workspaces" });
   let liveRoot = root;
   if (root.root_namespace === "business" && root.source_id.startsWith("project-alpha:")) {
     const source = await resolveClientHubSourceRoot(env, root.kind, root.public_id, root.source_id);
@@ -137,6 +139,7 @@ function decode(value: string): Cursor {
   } catch { throw new HTTPException(400, { message: "Client collection cursor is invalid" }); }
 }
 function accountScope(root: ClientHubRoot, paRootId?: string | null): { where: string; values: string[] } {
+  if (root.root_namespace === "review") return { where: "0=1", values: [] };
   if (root.root_namespace === "business" && root.source_id !== "project-alpha:primary") return { where: "0=1", values: [] };
   if (root.root_namespace === "portal") return { where: "0=1", values: [] };
   if (root.root_namespace === "account") return { where: "account.id=? AND account.project_alpha_source_id IS NULL AND account.project_alpha_client_id IS NULL AND account.project_alpha_organization_id IS NULL", values: [root.public_id] };
@@ -144,6 +147,7 @@ function accountScope(root: ClientHubRoot, paRootId?: string | null): { where: s
     : "account.project_alpha_client_id=? AND account.project_alpha_organization_id IS NULL"}`, values: [clientHubAlphaInternalId(root, paRootId)] };
 }
 function availability(context: ClientHubCollectionContext, collection: ClientHubCollection): ClientHubCollectionPage["reason"] {
+  if (context.root.root_namespace === "review") return "not_applicable";
   if (!context.access.directory || (collection === "requests" && !context.access.requests)
     || (["deliveryGrants", "authenticatedDeliveryGrants"].includes(collection) && !context.access.delivery)
     || (collection === "viewerGrants" && !context.access.viewer)) return "permission_required";

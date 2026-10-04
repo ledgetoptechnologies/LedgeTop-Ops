@@ -182,9 +182,7 @@ async function exactHead(database: D1DatabaseSession, command: VerifiedRecipient
       AND source_id=? AND project_public_id=? AND project_source_version=? AND current_generation_id=?
       AND access_terms_id=? AND access_terms_kind=? AND access_terms_mode=?
       AND reviewed_expires_at IS ? AND effective_expires_at IS ? AND expires_at IS ?
-      AND reason_code=? AND owner_staff_id=? AND owner_access_subject=?
-      AND owner_admission_version=? AND owner_profile_version=? AND owner_grant_generation=?
-      AND owner_verified_until=? AND authority_revision=? AND state='active'`).bind(
+      AND reason_code=? AND authority_revision=? AND state='active'`).bind(
     command.authority.authorityId, command.selection.workspaceId, command.selection.clientAuthorityId,
     command.selection.selectionId, command.selection.clientRecordId, command.recipient.recipientBindingId, command.recipient.enrollmentIntentId,
     command.recipient.enrollmentRevision, command.recipient.issuer, command.recipient.subject,
@@ -193,10 +191,8 @@ async function exactHead(database: D1DatabaseSession, command: VerifiedRecipient
     command.resource.projectPublicId, command.resource.projectSourceVersion, command.resource.currentGenerationId,
     command.terms.accessTerms.id, command.terms.accessTerms.kind, command.terms.accessTerms.mode,
     command.terms.accessTerms.reviewedExpiresAt, command.terms.accessTerms.effectiveExpiresAt,
-    command.terms.expiresAt, command.terms.reasonCode, command.ownerProof.staffId,
-    command.ownerProof.verifiedAccessSubject, command.ownerProof.admissionVersion,
-    command.ownerProof.profileVersion, command.ownerProof.grantGeneration,
-    command.ownerProof.verifiedUntil, command.authority.expectedRevision).first<{ ok: number }>();
+    command.terms.expiresAt, command.terms.reasonCode,
+    command.authority.expectedRevision).first<{ ok: number }>();
   return row?.ok === 1;
 }
 
@@ -219,7 +215,7 @@ export async function applyVerifiedRecipientDeliveryAuthority(
   if (command.action === "revoke" && !await exactHead(database, command))
     throw new Error("verified-recipient-delivery-authority-cas-conflict");
 
-  const values = [command.authority.authorityId, command.selection.workspaceId, command.selection.clientAuthorityId,
+  const insertValues = [command.authority.authorityId, command.selection.workspaceId, command.selection.clientAuthorityId,
     command.selection.selectionId, command.selection.clientRecordId, command.recipient.recipientBindingId, command.recipient.enrollmentIntentId,
     command.recipient.enrollmentRevision, command.recipient.issuer, command.recipient.subject,
     command.homeAuthority.ownershipEpoch, command.homeAuthority.grantRevision, command.homeAuthority.grantOperationId,
@@ -229,17 +225,22 @@ export async function applyVerifiedRecipientDeliveryAuthority(
     command.terms.accessTerms.reviewedExpiresAt, command.terms.accessTerms.effectiveExpiresAt, command.terms.expiresAt,
     command.terms.reasonCode, command.ownerProof.staffId, command.ownerProof.verifiedAccessSubject,
     command.ownerProof.admissionVersion, command.ownerProof.profileVersion, command.ownerProof.grantGeneration,
-    command.ownerProof.verifiedUntil, command.authority.resultingRevision, command.action === "upsert" ? "active" : "revoked",
-    command.operationId];
+    command.ownerProof.verifiedUntil, command.operationId, request.hash, command.ownerProof.staffId,
+    command.ownerProof.verifiedAccessSubject, command.ownerProof.admissionVersion, command.ownerProof.profileVersion,
+    command.ownerProof.grantGeneration, command.ownerProof.verifiedUntil, command.authority.resultingRevision,
+    command.action === "upsert" ? "active" : "revoked", command.operationId];
   const statements = command.authority.expectedRevision === 0
     ? [database.prepare(`INSERT INTO portal_verified_recipient_delivery_authority_heads
       (authority_id,workspace_id,client_authority_id,selection_id,client_record_id,recipient_binding_id,enrollment_intent_id,enrollment_revision,issuer,subject,
        home_ownership_epoch,home_grant_revision,home_grant_operation_id,folder_binding_id,folder_binding_source_version,source_id,project_public_id,
        project_source_version,current_generation_id,access_terms_id,access_terms_kind,access_terms_mode,reviewed_expires_at,effective_expires_at,
        expires_at,reason_code,owner_staff_id,owner_access_subject,owner_admission_version,owner_profile_version,owner_grant_generation,
-       owner_verified_until,authority_revision,state,last_operation_id)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(...values),]
-    : [database.prepare(`UPDATE portal_verified_recipient_delivery_authority_heads SET
+       owner_verified_until,created_operation_id,created_request_fingerprint,created_by_staff_id,created_by_access_subject,
+       created_by_admission_version,created_by_profile_version,created_by_grant_generation,created_by_verified_until,
+       authority_revision,state,last_operation_id)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(...insertValues),]
+    : command.action === "upsert"
+      ? [database.prepare(`UPDATE portal_verified_recipient_delivery_authority_heads SET
       home_ownership_epoch=?,home_grant_revision=?,home_grant_operation_id=?,folder_binding_id=?,folder_binding_source_version=?,
       source_id=?,project_public_id=?,project_source_version=?,current_generation_id=?,access_terms_id=?,access_terms_kind=?,access_terms_mode=?,
       reviewed_expires_at=?,effective_expires_at=?,expires_at=?,reason_code=?,owner_staff_id=?,owner_access_subject=?,
@@ -262,11 +263,36 @@ export async function applyVerifiedRecipientDeliveryAuthority(
         command.selection.workspaceId,command.selection.clientAuthorityId,command.selection.selectionId,command.selection.clientRecordId,
         command.recipient.recipientBindingId,command.recipient.enrollmentIntentId,command.recipient.enrollmentRevision,
         command.recipient.issuer,command.recipient.subject,command.resource.folderBindingId,
-        command.resource.sourceId,command.resource.projectPublicId),];
+        command.resource.sourceId,command.resource.projectPublicId),]
+      : [database.prepare(`UPDATE portal_verified_recipient_delivery_authority_heads SET
+      authority_revision=?,state='revoked',last_operation_id=?,revoked_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+      updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+      WHERE authority_id=? AND authority_revision=? AND state='active'
+        AND workspace_id=? AND client_authority_id=? AND selection_id=? AND client_record_id=?
+        AND recipient_binding_id=? AND enrollment_intent_id=? AND enrollment_revision=? AND issuer=? AND subject=?
+        AND home_ownership_epoch=? AND home_grant_revision=? AND home_grant_operation_id=?
+        AND folder_binding_id=? AND folder_binding_source_version=? AND source_id=? AND project_public_id=?
+        AND project_source_version=? AND current_generation_id=? AND access_terms_id=? AND access_terms_kind=?
+        AND access_terms_mode=? AND reviewed_expires_at IS ? AND effective_expires_at IS ? AND expires_at IS ?
+        AND reason_code=?`)
+      .bind(command.authority.resultingRevision,command.operationId,command.authority.authorityId,
+        command.authority.expectedRevision,command.selection.workspaceId,command.selection.clientAuthorityId,
+        command.selection.selectionId,command.selection.clientRecordId,command.recipient.recipientBindingId,
+        command.recipient.enrollmentIntentId,command.recipient.enrollmentRevision,command.recipient.issuer,
+        command.recipient.subject,command.homeAuthority.ownershipEpoch,command.homeAuthority.grantRevision,
+        command.homeAuthority.grantOperationId,command.resource.folderBindingId,command.resource.folderBindingSourceVersion,
+        command.resource.sourceId,command.resource.projectPublicId,command.resource.projectSourceVersion,
+        command.resource.currentGenerationId,command.terms.accessTerms.id,command.terms.accessTerms.kind,
+        command.terms.accessTerms.mode,command.terms.accessTerms.reviewedExpiresAt,
+        command.terms.accessTerms.effectiveExpiresAt,command.terms.expiresAt,command.terms.reasonCode),];
   statements.push(database.prepare(`INSERT INTO portal_verified_recipient_delivery_authority_audit
-    (operation_id,request_fingerprint,request_json,authority_id,client_record_id,action,expected_revision,resulting_revision,resulting_state)
-    VALUES(?,?,?,?,?,?,?,?,?)`).bind(command.operationId,request.hash,request.json,command.authority.authorityId,command.selection.clientRecordId,command.action,
-      command.authority.expectedRevision,command.authority.resultingRevision,command.action === "upsert" ? "active" : "revoked"));
+    (operation_id,request_fingerprint,request_json,authority_id,client_record_id,action,expected_revision,resulting_revision,resulting_state,
+     actor_staff_id,actor_access_subject,actor_admission_version,actor_profile_version,actor_grant_generation,actor_verified_until)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(command.operationId,request.hash,request.json,command.authority.authorityId,
+      command.selection.clientRecordId,command.action,command.authority.expectedRevision,command.authority.resultingRevision,
+      command.action === "upsert" ? "active" : "revoked",command.ownerProof.staffId,
+      command.ownerProof.verifiedAccessSubject,command.ownerProof.admissionVersion,command.ownerProof.profileVersion,
+      command.ownerProof.grantGeneration,command.ownerProof.verifiedUntil));
   statements.push(database.prepare(`INSERT INTO portal_verified_recipient_delivery_authority_receipts
     (operation_id,request_fingerprint,request_json,authority_id,client_record_id,action,expected_revision,resulting_revision,resulting_state)
     VALUES(?,?,?,?,?,?,?,?,?)`).bind(command.operationId,request.hash,request.json,command.authority.authorityId,command.selection.clientRecordId,command.action,
