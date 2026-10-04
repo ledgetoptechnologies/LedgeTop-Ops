@@ -11,6 +11,8 @@
 
 ### Current checkpoint
 
+- Full local release preparation is running on frozen pushed revision `86d442f8c5ee635c376d5fcf2a881542fb78f3c2` under session `23421`; its preflight, contract and type checks passed, and Client Worker tests are in progress. Do not alter that worktree or claim its aggregate gate passed before terminal output. CI run `37230600103` targets the same revision; the expanded repository-contract step exposed an install-order defect because migration-ledger tests require the pinned Wrangler entrypoint. The isolated CI-only correction installs locked Operations dependencies before those contracts; its ordering regression and adjacent source invariants passed 20 tests. Other live CI jobs must finish before publishing the correction, so their useful full-suite diagnostics are not cancelled.
+
 - Focused Operations regressions pass `67/67`, covering 52 Client Hub Directory cases and 15 project-read settlement/activation cases.
 - Operations-home desktop/mobile browser coverage passes `54/54`, including the native-home account menu and logout behavior.
 - These focused results do not replace the failed baseline full gate or the required corrected-revision CI and staging acceptance.

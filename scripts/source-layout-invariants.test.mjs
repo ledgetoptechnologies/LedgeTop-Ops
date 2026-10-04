@@ -11,6 +11,15 @@ const read = (relative) => fs.readFileSync(path.join(root, relative), "utf8");
 const readJson = (relative) => JSON.parse(read(relative));
 const normalizedSha256 = (relative) => crypto.createHash("sha256").update(read(relative).replace(/\r\n/g, "\n")).digest("hex");
 
+test("CI installs the pinned Wrangler dependency before migration-ledger contract tests", () => {
+  const workflow = read(".github/workflows/ci.yml");
+  const sourceJob = workflow.slice(workflow.indexOf("  source-invariants:"), workflow.indexOf("  incoming-pickup:"));
+  const install = sourceJob.indexOf("run: npm ci --prefix apps/operations");
+  const contracts = sourceJob.indexOf("- name: Verify repository contracts");
+  assert.ok(install >= 0 && contracts > install, "locked dependencies must precede contracts requiring the Wrangler entrypoint");
+  assert.ok(sourceJob.includes("scripts/staging-native-migration-profile.test.mjs"));
+});
+
 function filesUnder(relativeDirectory, predicate = () => true) {
   return fs.readdirSync(path.join(root, relativeDirectory), { withFileTypes: true }).flatMap((entry) => {
     const relative = path.join(relativeDirectory, entry.name);
