@@ -37,6 +37,9 @@ test("renders all three exact staging configs without placeholders", () => {
   assert.equal(configs.operations.vars.PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED, "false");
   assert.equal(configs.operations.vars.CLIENT_REQUEST_TRIAGE_TO, values.STAGING_TRIAGE_EMAIL);
   assert.equal(configs.operations.main, "src/worker/staging-native-authority-entrypoint.ts");
+  assert.deepEqual(configs.operations.triggers?.crons,
+    JSON.parse(fs.readFileSync(path.join(root, "apps/operations/wrangler.jsonc"), "utf8")).triggers.crons,
+    "staging must preserve every Operations cron handler, including API-v2, outbox, and reconciliation schedules");
   assert.equal(configs.operations.vars.OPERATIONS_PORTAL_NATIVE_DELIVERY_OWNER_ENABLED, "true");
   assert.equal(configs.operations.vars.OPERATIONS_PORTAL_WORKSPACE_OWNER_ENABLED, "false");
   assert.equal(configs.operations.vars.OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_DISPATCH_ENABLED, "false");

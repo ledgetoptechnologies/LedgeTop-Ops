@@ -1217,7 +1217,7 @@ export const STAGING_INVENTORY = Object.freeze({
     queueProducers: [
       { binding: "THUMBNAIL_QUEUE", queue: "ltds-thumbnail-jobs-staging" },
     ],
-    crons: ["*/15 * * * *", "*/5 * * * *", "2-57/5 * * * *", "17 * * * *", "4-59/15 * * * *"],
+    crons: ["*/15 * * * *", "*/5 * * * *", "2-57/5 * * * *", "17 * * * *", "4-59/15 * * * *", "3-58/5 * * * *", "1-56/5 * * * *", "6-51/15 * * * *"],
     assets: { binding: "ASSETS", directory: "./dist/client", not_found_handling: "single-page-application", run_worker_first: ["/api/*", "/health", "/r/*", "/administration/client-portal/operations-recipients", "/administration/client-portal/operations-delivery-authority", "/administration/client-portal/operations-workspaces"] },
     observability: { enabled: true, head_sampling_rate: 1 },
     stream: { binding: "STREAM" },
