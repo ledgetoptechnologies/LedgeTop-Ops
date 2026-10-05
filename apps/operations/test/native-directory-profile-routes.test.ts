@@ -213,6 +213,15 @@ describe("native Directory profile routes", () => {
     expect(readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8")).toContain('"NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED": "false"');
   });
 
+  it("registers specific native directory routes before the generic Client Hub route family", () => {
+    const source = readFileSync(new URL("../src/worker/index.ts", import.meta.url), "utf8");
+    const nativeDirectory = source.indexOf("registerNativeDirectoryProfileRoutes(app);");
+    const genericClientHub = source.indexOf("registerClientHubRoutes(app);");
+    expect(nativeDirectory).toBeGreaterThanOrEqual(0);
+    expect(genericClientHub).toBeGreaterThanOrEqual(0);
+    expect(nativeDirectory).toBeLessThan(genericClientHub);
+  });
+
   it("reads the current canonical profile and server-owned scopes only with native view authority", async () => {
     const response = await fixture({ db: database() }).send(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/organizations/${ids.mutation}`, null, "GET");
     expect(response.status).toBe(200);
