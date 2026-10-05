@@ -771,7 +771,10 @@ describe('source-owned native portal resources with real signed projection and l
       accessTerms:{kind:'customer' as const,mode:'until_revoked' as const,expiresAt:null}};
     const preview=await previewNativeDeliveryGrant(opsEnv,staff,input);
     const created=await createNativeDeliveryGrant(opsEnv,staff,{...input,expectedContextVersion:preview.contextVersion},'native-customer-history');
-    const completedAt=new Date(Date.now()-40*86400_000).toISOString();
+    // Keep the completion timestamp 40 days before this immutable projection
+    // timestamp. Using Date.now() makes it drift past occurredAt over time,
+    // causing the authoritative lifecycle validator to reject this fixture.
+    const completedAt=new Date(Date.parse('2026-08-26T12:00:00.000Z')-40*86400_000).toISOString();
     const snapshot={...page(a),schemaVersion:3,deliveryId:'customer-history-page',sourceGeneration:'customer-history-generation',sourceSequence:100,
       snapshotHash:'c'.repeat(64),recordCount:8,
       relations:[{publicId:'history-owner',relationType:'contains',from:{type:'organization',publicId:rootId},to:{type:'project',publicId:projectId},sourceVersion:'relation-v1',active:true}],
