@@ -3,11 +3,23 @@ import { Card } from "@ltds/ui";
 import { api, ApiError } from "./api";
 
 const ROOT = "/api/admin/project-alpha/private/directory/reconciliation";
+const API_V2_SOURCES = "/api/admin/integrations/project-alpha/api-v2/sources";
+const STAGING_HOST = "ops-staging.ledgetopdroneservices.com";
 const PRODUCTION_SOURCES = ["project-alpha:primary", "project-alpha:secondary"] as const;
-const STAGING_SOURCES = ["project-alpha:staging"] as const;
-function reviewSources(): readonly string[] {
-  return window.location.hostname === "ops-staging.ledgetopdroneservices.com"
-    ? STAGING_SOURCES : PRODUCTION_SOURCES;
+const SOURCE_ID = /^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/;
+
+/** Staging source membership comes from the same deployment-owned API-v2
+ * manifest as bounded sync; production retains its reviewed pair until its
+ * separate cutover checkpoint. */
+export function projectAlphaDirectoryReviewSources(hostname: string, response?: unknown): readonly string[] {
+  if (hostname !== STAGING_HOST) return PRODUCTION_SOURCES;
+  if (!response || typeof response !== "object" || Array.isArray(response))
+    throw new Error("The staging Project Alpha source list could not be validated.");
+  const sources = (response as { sources?: unknown }).sources;
+  if (!Array.isArray(sources) || sources.length === 0 || sources.some(source => typeof source !== "string" || !SOURCE_ID.test(source))
+    || new Set(sources).size !== sources.length)
+    throw new Error("No valid enabled API-v2 sources are available for this staging workspace.");
+  return sources;
 }
 const ADOPTABLE = new Set(["extra_remote", "public_id_mismatch", "external_id_mismatch", "binding_mismatch"]);
 
@@ -47,7 +59,8 @@ const classificationLabels: Record<string, string> = {
 function sourceLabel(sourceId: string): string {
   if (sourceId === PRODUCTION_SOURCES[0]) return "Ledge Top Drone Services Project Alpha";
   if (sourceId === PRODUCTION_SOURCES[1]) return "Ledge Top Technologies Project Alpha";
-  if (sourceId === STAGING_SOURCES[0]) return "Project Alpha staging";
+  if (sourceId === "project-alpha:staging") return "Project Alpha staging";
+  if (SOURCE_ID.test(sourceId)) return `Project Alpha staging · ${sourceId}`;
   return "Unknown Project Alpha source";
 }
 function date(value: string): string {
@@ -157,13 +170,20 @@ function RecordSelection({ finding, onAcquired }: { finding: Finding; onAcquired
 
 export function ProjectAlphaDirectoryReconciliationReview() {
   const [items, setItems] = useState<Finding[]>([]), [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [sources, setSources] = useState<readonly string[]>(() => window.location.hostname === STAGING_HOST ? [] : PRODUCTION_SOURCES);
   const [loading, setLoading] = useState(true), [error, setError] = useState(""), [revision, setRevision] = useState(0);
 
   const load = async (signal: AbortSignal, cursor?: string) => {
     setLoading(true); setError("");
     try {
+      const selectedSources = cursor ? sources : window.location.hostname === STAGING_HOST
+        ? projectAlphaDirectoryReviewSources(window.location.hostname, await api<unknown>(API_V2_SOURCES, { signal }))
+        : PRODUCTION_SOURCES;
+      if (signal.aborted) return;
+      if (!selectedSources.length) throw new Error("No enabled Project Alpha source is available for reconciliation review.");
+      if (!cursor) setSources(selectedSources);
       const query = new URLSearchParams({ limit: "25" });
-      for (const sourceId of reviewSources()) query.append("sourceId", sourceId);
+      for (const sourceId of selectedSources) query.append("sourceId", sourceId);
       if (cursor) query.set("cursor", cursor);
       const page = await api<FindingPage>(`${ROOT}/findings?${query}`, { signal });
       if (signal.aborted) return;
