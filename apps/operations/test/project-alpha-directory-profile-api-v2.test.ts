@@ -31,8 +31,10 @@ function endpoint(kind: "client" | "organization", operation: "create" | "update
     ? { method: "POST", path: `/api/v2/directory/${plural}/commands`, requiredCapability: `directory.${plural}.create`, requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true }
     : { method: "POST", path: `/api/v2/directory/${plural}/{publicId}/profile/commands`, requiredCapability: `directory.${plural}.write`, requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true };
 }
-function capabilities(required: ProjectAlphaApiV2Endpoint) {
-  return { apiVersion: "2", sourceInstanceId: source, applicationId: application, historyEpoch: epoch, requestId, grantedCapabilities: [{ name: "api.capabilities.read" }, { name: required.requiredCapability }], implementedEndpoints: [{ method: "GET", path: "/api/v2/capabilities", requiredCapability: "api.capabilities.read" }, required] };
+function capabilities(required: ProjectAlphaApiV2Endpoint, extraGrantedCapabilities: string[] = []) {
+  return { apiVersion: "2", sourceInstanceId: source, applicationId: application, historyEpoch: epoch, requestId,
+    grantedCapabilities: [{ name: "api.capabilities.read" }, { name: required.requiredCapability }, ...extraGrantedCapabilities.map(name => ({ name }))],
+    implementedEndpoints: [{ method: "GET", path: "/api/v2/capabilities", requiredCapability: "api.capabilities.read" }, required] };
 }
 function json(value: unknown, status = 200, headers: Record<string, string> = {}) {
   return new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", "X-Request-ID": requestId, ...headers } });
@@ -66,13 +68,22 @@ describe("Project Alpha API-v2 Directory profile transport", () => {
   it("sends the exact PA client create contract, including the optional relationship field", async () => {
     const command: ProjectAlphaDirectoryClientCreateCommand = { commandId, externalId: "ops/client/42", expectedAuthorizationGeneration: "0", profile: clientProfile, organization: { externalId: "ops/org/9", expectedRevision: "3" } };
     const send = vi.fn<typeof fetch>(async (url, init) => {
-      if (String(url).endsWith("/capabilities")) return json(capabilities(endpoint("client", "create")));
+      if (String(url).endsWith("/capabilities")) return json(capabilities(endpoint("client", "create"), ["directory.clients.organization.assign"]));
       expect(String(url)).toBe("https://source-a.example.test/api/v2/directory/clients/commands");
       expect(init).toMatchObject({ method: "POST", redirect: "manual", credentials: "omit", cache: "no-store" });
       expect(JSON.parse(String(init?.body))).toEqual(command);
       return json(createReceipt("client", command.externalId, clientId), 201);
     });
     await expect(sendProjectAlphaDirectoryCreate(connection, "client", command, send)).resolves.toMatchObject({ status: "acknowledged", httpStatus: 201, response: { result: { resource: { type: "client", id: command.externalId, publicId: clientId, revision: "1" } } } });
+  });
+
+  it("requires the grant-only organization assignment scope before creating an attached client", async () => {
+    const command: ProjectAlphaDirectoryClientCreateCommand = { commandId, externalId: "ops/client/without-assignment", expectedAuthorizationGeneration: "0", profile: clientProfile, organization: { externalId: "ops/org/9", expectedRevision: "3" } };
+    const send = vi.fn<typeof fetch>(async url => json(capabilities(endpoint("client", "create"))));
+    await expect(sendProjectAlphaDirectoryCreate(connection, "client", command, send)).resolves.toMatchObject({
+      status: "blocked", reason: "preflight", preflight: { status: "unauthorized", reason: "missing_capability" },
+    });
+    expect(send).toHaveBeenCalledTimes(1);
   });
 
   it("accepts PA's exact create replay receipt as HTTP 200/replayed", async () => {

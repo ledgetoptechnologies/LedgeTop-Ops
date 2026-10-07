@@ -114,6 +114,7 @@ export async function probeProjectAlphaApiV2(
   requiredCapabilities: readonly string[] = [],
   send: typeof fetch = fetch,
   requiredEndpoints: readonly ProjectAlphaApiV2Endpoint[] = [],
+  requiredGrantedCapabilities: readonly string[] = [],
 ): Promise<ProjectAlphaApiV2Probe> {
   let url: URL, headers: Headers;
   try {
@@ -196,7 +197,7 @@ export async function probeProjectAlphaApiV2(
     if (connection.expectedHistoryEpoch !== undefined && data.historyEpoch !== connection.expectedHistoryEpoch) {
       return { status: "incompatible", reason: "history_epoch_mismatch", ...diagnostic };
     }
-    if (!["api.capabilities.read", ...requiredCapabilities, ...requiredEndpoints.map(endpoint => endpoint.requiredCapability)]
+    if (!["api.capabilities.read", ...requiredCapabilities, ...requiredGrantedCapabilities, ...requiredEndpoints.map(endpoint => endpoint.requiredCapability)]
       .every(capability => granted.includes(capability))) {
       return { status: "unauthorized", reason: "missing_capability", ...diagnostic };
     }

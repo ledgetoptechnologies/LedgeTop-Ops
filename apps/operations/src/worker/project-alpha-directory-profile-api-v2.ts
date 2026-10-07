@@ -276,7 +276,13 @@ export async function sendProjectAlphaDirectoryCreate(connectionInput: ProjectAl
     if ((kind !== "client" && kind !== "organization") || !createCommand(kind, inputCommand)) return { status: "rejected", reason: "invalid_command" };
     const body = requestBody(inputCommand); if (body === null) return { status: "rejected", reason: "request_limit" };
     if (typeof connection.expectedHistoryEpoch !== "string" || !uuid(connection.expectedHistoryEpoch)) return { status: "blocked", reason: "preflight", preflight: { status: "misconfigured", reason: "configuration" } };
-    const required = endpoint(kind, "create"); const preflight = await probeProjectAlphaApiV2(connection, [], send, [required]); if (preflight.status !== "verified") return preflightFailure(preflight);
+    const required = endpoint(kind, "create");
+    // PA checks this grant when a client is created with an organization, even
+    // when the optional standalone relationship-command routes are disabled.
+    const requiredGrantedCapabilities = kind === "client" && "organization" in inputCommand && inputCommand.organization !== null
+      ? ["directory.clients.organization.assign"] : [];
+    const preflight = await probeProjectAlphaApiV2(connection, [], send, [required], requiredGrantedCapabilities);
+    if (preflight.status !== "verified") return preflightFailure(preflight);
     const posted = await post(connection, required.path, body, [200, 201], send); if (!(posted instanceof Response)) return posted;
     const info = diagnostic(posted);
     try { const parsed = await boundedJson(posted); if (!createSuccess(parsed, kind, inputCommand, connection, info.requestId, posted.status)) return { status: "uncertain", reason: "invalid_contract", ...info }; const outcome = { status: "acknowledged" as const, httpStatus: posted.status as 200 | 201, response: parsed }; acknowledgements.set(outcome, { commandJson: body, responseJson: JSON.stringify(parsed), destinationOrigin: new URL(connection.baseUrl).origin }); return outcome; }
