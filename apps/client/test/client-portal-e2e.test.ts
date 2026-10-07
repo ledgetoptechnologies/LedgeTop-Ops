@@ -298,10 +298,17 @@ describe("client portal migrated-D1 end-to-end contract", () => {
     const deliveryResponse = await portal().request(`${portalOrigin}/projects/project-a/deliveries`, {}, env);
     expect(deliveryResponse.status).toBe(200);
     expect(await deliveryResponse.json()).toMatchObject({ deliveries: [{ shareId: "share-a", publicId: "public-a", shareVersion: 1 }] });
+    const handoffResponse = await portal().request(`${portalOrigin}/projects/project-a/deliveries/share-a/handoff`, {}, env);
+    expect(handoffResponse.status).toBe(302);
+    expect(handoffResponse.headers.get("Location")).toBe("/s/public-a");
+    expect(await db.prepare("SELECT public_id,share_version,revoked_at FROM shares WHERE id='share-a'").first())
+      .toEqual({ public_id: "public-a", share_version: 1, revoked_at: null });
 
     await db.prepare("UPDATE shares SET share_version=2 WHERE id='share-a'").run();
     const staleGrantResponse = await portal().request(`${portalOrigin}/projects/project-a/deliveries`, {}, env);
     expect(await staleGrantResponse.json()).toEqual({ deliveries: [] });
+    const staleHandoffResponse = await portal().request(`${portalOrigin}/projects/project-a/deliveries/share-a/handoff`, {}, env);
+    expect(staleHandoffResponse.status).toBe(404);
     await db.prepare("UPDATE shares SET share_version=1 WHERE id='share-a'").run();
   });
 
