@@ -56,6 +56,10 @@ async function schema(): Promise<void> {
     CREATE TABLE delivery_records(id TEXT PRIMARY KEY,payload TEXT);
     CREATE TABLE delivery_public_shares(id TEXT PRIMARY KEY,url TEXT);
     CREATE TABLE project_alpha_directory_reconciliation_actions(action_id TEXT PRIMARY KEY);
+    CREATE TABLE project_alpha_directory_reconciliation_action_outcomes(
+      action_id TEXT NOT NULL PRIMARY KEY REFERENCES project_alpha_directory_reconciliation_actions(action_id) ON DELETE RESTRICT,
+      status TEXT NOT NULL CHECK(status='acquired'), acquired_receipt_id TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL);
   `;
   await db.batch(splitD1MigrationStatements(prerequisites).map(statement => db.prepare(statement)));
   const migration = readFileSync(new URL("../migrations/0167_project_alpha_directory_read_adoption_finalizations.sql", import.meta.url), "utf8");

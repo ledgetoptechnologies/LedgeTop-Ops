@@ -2,6 +2,37 @@
 
 Updated: 2026-10-07 (local candidate reassessment; no remote deployment)
 
+## Local continuation (2026-10-07, after owner deferred Wrangler)
+
+- Wrangler, staging deployments, and remote migrations remain on hold until the
+  owner returns. No Cloudflare resource or production PA instance was changed.
+- Committed only six verified Operations D1 test-fixture updates as
+  `74b5b996` (`test: align portal fixtures with current directory mapping`).
+  They seed the current Directory revisions/outcome rows and apply the 0170
+  mapping-view contract where these focused fixtures intentionally retain an
+  older migration lineage. The seven-suite local run passed **45/45** under
+  elevated local Workerd; ordinary sandbox execution could not start Workerd
+  and is inconclusive. No Worker or D1 deployment was performed.
+- Remaining pre-existing candidate test edits and ignored `.tmp-checks`
+  artifacts were not staged or cleaned. The candidate is therefore still not
+  a clean release artifact.
+- The six previously audited PA local branch refs remain intact: Git's
+  non-forced delete rejected the first branch as not fully merged by ancestry.
+  No force-delete was attempted, and no branch or working file was removed.
+- After Wrangler OAuth completed, read-only `d1 migrations list --remote`
+  checks using the checked-in staging configs showed Ops staging has exactly
+  `0174`–`0180` pending and Client staging has no migrations pending. The
+  migration-only config's referenced bootstrap directory does not exist, so it
+  was not used. No remote migrations were applied.
+- API-v2 monitor control, canonical activation import graph, and Directory
+  read-adoption finalizer passed **20/20**; the canonical acquired-ID test and
+  live-0173 Worker compatibility passed **3/3**. The finalizer suite overlaps
+  with the earlier 45/45 batch, so the distinct selected local evidence is
+  **11 files / 59 tests passed** under elevated local Workerd. The acquired-ID
+  test took about nine seconds; its cap was tightened to 30 seconds, and the
+  live-0173 test's unnecessary timeout override was removed. This remains local
+  evidence, not live staging acceptance.
+
 ## Continuation refresh (2026-10-07, later)
 
 - A fresh local rerun confirms `npm run staging:check` and

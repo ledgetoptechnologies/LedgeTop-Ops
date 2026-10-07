@@ -246,7 +246,7 @@ describe("canonical Client Hub across the 0177 to 0178 boundary", { timeout: 240
     await writeOrganization(ops);
     await activateAcquiredMapping(ops);
     await finishIndex(env);
-  });
+  }, 30_000);
 
   afterAll(async () => runtime?.dispose());
 

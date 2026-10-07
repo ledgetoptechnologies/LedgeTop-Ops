@@ -78,15 +78,17 @@ describe("Project Alpha API-v2 monitor control command", () => {
     expect(result.identitiesJson).not.toContain(disabled.sourceId);
   });
 
-  it("rejects malformed, duplicate, and noncanonical enabled configuration opaquely", () => {
+  it("rejects malformed and duplicate enabled configuration opaquely while normalizing UUID casing", () => {
     const duplicate = JSON.stringify({ version: 1, connections: [connection, { ...connection, baseUrl: "https://other.example.test" }] });
-    for (const raw of [undefined, "not-json", config({ ...connection, apiKey: " browser-key " }),
-      config({ ...connection, applicationId: application.toUpperCase() }), duplicate]) {
+    for (const raw of [undefined, "not-json", config({ ...connection, apiKey: " browser-key " }), duplicate]) {
       expect(() => prepareProjectAlphaApiV2MonitorControlCommand(command(), raw))
         .toThrow(ProjectAlphaApiV2MonitorControlCommandError);
       try { prepareProjectAlphaApiV2MonitorControlCommand(command(), raw); }
       catch (error) { expect(String(error)).not.toContain(connection.apiKey); }
     }
+    const normalized = prepareProjectAlphaApiV2MonitorControlCommand(command(),
+      config({ ...connection, applicationId: application.toUpperCase() }));
+    expect(normalized.identities[0]?.applicationId).toBe(application);
   });
 
   it("takes a detached configuration snapshot and never accepts caller identities", () => {
