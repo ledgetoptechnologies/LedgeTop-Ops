@@ -195,6 +195,13 @@ beforeAll(async () => {
     const sql = readFileSync(new URL(`../migrations/${name}`, import.meta.url), "utf8");
     await operations.batch(splitD1MigrationStatements(sql).map(statement => operations.prepare(statement)));
   }
+  // Current directory writers query the Ops record ID separately from PA's
+  // external ID; refresh the mapping view while preserving this focused legacy
+  // fixture lineage.
+  const mappingViewMigration = readFileSync(new URL(
+    "../migrations/0170_project_alpha_active_directory_project_guard.sql", import.meta.url), "utf8");
+  await operations.batch(splitD1MigrationStatements(mappingViewMigration)
+    .map(statement => operations.prepare(statement)));
   expect(await applyCanonicalChain(client, "client", "0223_operations_portal_workspace_publications.sql")).toHaveLength(142);
   await seedManager();
   await operations.batch([
@@ -251,7 +258,7 @@ beforeAll(async () => {
 }, 240_000);
 afterAll(async () => runtime.dispose());
 
-describe("0153 native Operations workspace topology publication outbox", () => {
+describe("0153 native Operations workspace topology publication outbox with current 0170 mapping view", () => {
   it("closes exact source checkpoints through Client and recovers a lost response without widening authority", async () => {
     const owner = actor(), workspace = workspaceInput();
     await reserveOperationsPortalWorkspace(operations, owner, workspace);

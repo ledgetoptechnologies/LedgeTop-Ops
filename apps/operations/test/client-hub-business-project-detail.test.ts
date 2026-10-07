@@ -78,7 +78,8 @@ describe("read-only source-qualified business project detail", () => {
     const opsRoot = "ops-org-9", paInternalRoot = "org-a", paPublicRoot = "1".repeat(32);
     const opsClient = "ops-client-9", paPublicClient = "6".repeat(32);
     const opsProject = "ops-project-77", paPublicProject = "2".repeat(32), revision = "7", projection = "a".repeat(64);
-    await sql(db, `CREATE TABLE operations_directory_records(record_id TEXT PRIMARY KEY,record_kind TEXT);
+    await sql(db, `CREATE TABLE operations_directory_records(record_id TEXT PRIMARY KEY,record_kind TEXT,current_version INTEGER);
+      CREATE TABLE operations_directory_revisions(record_id TEXT,version INTEGER,profile_json TEXT,PRIMARY KEY(record_id,version));
       CREATE TABLE active_mapping_rows(source_id TEXT,resource_type TEXT,record_id TEXT,external_id TEXT,project_alpha_public_id TEXT,
         source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT);
       CREATE VIEW project_alpha_active_directory_mappings AS SELECT * FROM active_mapping_rows;
@@ -103,8 +104,10 @@ describe("read-only source-qualified business project detail", () => {
     const identity = { source_id: "project-alpha:primary", source_instance_id: "00000000-0000-4000-8000-000000000001",
       application_id: "00000000-0000-4000-8000-000000000002", history_epoch_id: "00000000-0000-4000-8000-000000000003" };
     await db.batch([
-      db.prepare("INSERT INTO operations_directory_records VALUES(?, 'organization')").bind(opsRoot),
-      db.prepare("INSERT INTO operations_directory_records VALUES(?, 'client')").bind(opsClient),
+      db.prepare("INSERT INTO operations_directory_records VALUES(?, 'organization',1)").bind(opsRoot),
+      db.prepare("INSERT INTO operations_directory_records VALUES(?, 'client',1)").bind(opsClient),
+      db.prepare("INSERT INTO operations_directory_revisions VALUES(?,1,?)").bind(opsRoot, JSON.stringify({ name: "Ops organization" })),
+      db.prepare("INSERT INTO operations_directory_revisions VALUES(?,1,?)").bind(opsClient, JSON.stringify({ name: "Ops client" })),
       db.prepare("INSERT INTO operations_directory_client_organizations VALUES(?,?)").bind(opsClient, opsRoot),
       db.prepare("UPDATE pa_organizations SET payload_json=? WHERE id=?").bind(JSON.stringify({ public_id: paPublicRoot }), paInternalRoot),
       db.prepare("UPDATE pa_clients SET payload_json=? WHERE id='client-a'").bind(JSON.stringify({ public_id: paPublicClient })),
@@ -296,7 +299,8 @@ describe("read-only source-qualified business project detail", () => {
     // release the project under that root.
     const opsRootB = "ops-org-10", paPublicRootB = "5".repeat(32), inboundResolution = "inbound-resolution-changed-owner";
     await db.batch([
-      db.prepare("INSERT INTO operations_directory_records VALUES(?, 'organization')").bind(opsRootB),
+      db.prepare("INSERT INTO operations_directory_records VALUES(?, 'organization',1)").bind(opsRootB),
+      db.prepare("INSERT INTO operations_directory_revisions VALUES(?,1,?)").bind(opsRootB, JSON.stringify({ name: "Ops organization B" })),
       db.prepare("UPDATE pa_organizations SET payload_json=? WHERE id='org-b'").bind(JSON.stringify({ public_id: paPublicRootB })),
       db.prepare(`INSERT INTO active_mapping_rows VALUES(?,?,?,?,?,?,?,?)`).bind(identity.source_id, "organization",
         opsRootB, "org-b", paPublicRootB, identity.source_instance_id, identity.application_id, identity.history_epoch_id),

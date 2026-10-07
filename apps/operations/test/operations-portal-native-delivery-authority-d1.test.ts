@@ -236,6 +236,10 @@ beforeAll(async () => {
     "0158_operations_portal_native_delivery_authority.sql",
     "0159_operations_portal_native_delivery_recovery_invocations.sql",
     "0160_operations_portal_native_recipient_labels.sql"]) await applyDraft(operations, "operations", name);
+  // The current directory writer expects the explicit Operations-record ID
+  // projection introduced by 0170; keep this focused fixture otherwise pinned
+  // to the historical 0153 + selected draft-migration lineage above.
+  await applyDraft(operations, "operations", "0170_project_alpha_active_directory_project_guard.sql");
   expect(await applyCanonicalChain(client, "client", "0223_operations_portal_workspace_publications.sql"))
     .toHaveLength(142);
   await applyDraft(client, "client", "0224_operations_portal_native_recipient_authority.sql");
@@ -285,7 +289,7 @@ beforeAll(async () => {
 }, 240_000);
 afterAll(async () => runtime.dispose());
 
-describe("Ops native selected-folder authority against real 0152-0158", () => {
+describe("Ops native selected-folder authority against real 0152-0160 plus current 0170 mapping view", () => {
   it("grants, dispatches, reads exact current proof, denies drift/retarget, and revokes locally first", async () => {
     const containment = async (candidate: string) => operations.prepare(`SELECT ? LIKE
       replace(replace(replace(r2_prefix,'\\','\\\\'),'%','\\%'),'_','\\_') || '%' ESCAPE '\\' matches

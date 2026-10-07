@@ -143,13 +143,15 @@ describe("Client Hub business project history", () => {
   it("uses the PA internal organization ID while preserving the distinct Ops route ID", async () => {
     const { db, env, project } = await fixture();
     const publicId = "11111111111111111111111111111111";
-    await db.exec("CREATE TABLE operations_directory_records(record_id TEXT PRIMARY KEY,record_kind TEXT)");
+    await db.exec(`CREATE TABLE operations_directory_records(record_id TEXT PRIMARY KEY,record_kind TEXT,current_version INTEGER);
+      CREATE TABLE operations_directory_revisions(record_id TEXT,version INTEGER,profile_json TEXT,PRIMARY KEY(record_id,version));`);
     await sql(db, `CREATE TABLE mapping_rows(source_id TEXT,resource_type TEXT,record_id TEXT,external_id TEXT,project_alpha_public_id TEXT,
       source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,active INTEGER)`);
     await sql(db, `CREATE VIEW project_alpha_active_directory_mappings AS SELECT source_id,resource_type,record_id,external_id,
       project_alpha_public_id,source_instance_id,application_id,history_epoch_id FROM mapping_rows WHERE active=1`);
     await db.batch([
-      db.prepare("INSERT INTO operations_directory_records VALUES('ops-org-9','organization')"),
+      db.prepare("INSERT INTO operations_directory_records VALUES('ops-org-9','organization',1)"),
+      db.prepare(`INSERT INTO operations_directory_revisions VALUES('ops-org-9',1,'{"name":"Ops Org 9"}')`),
       db.prepare("UPDATE pa_organizations SET payload_json=? WHERE id='org-a'").bind(JSON.stringify({ public_id: publicId })),
       db.prepare(`INSERT INTO mapping_rows VALUES('project-alpha:primary','organization','ops-org-9','org-a',?,
         '00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000002','00000000-0000-4000-8000-000000000003',1)`).bind(publicId),

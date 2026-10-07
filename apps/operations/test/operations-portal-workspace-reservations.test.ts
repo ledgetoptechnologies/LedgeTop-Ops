@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Miniflare } from "miniflare";
-import { applyCanonicalChain } from "./helpers/verified-recipient-canonical-lineage";
+import { applyCanonicalChain, applyCanonicalMigrationSchema } from "./helpers/verified-recipient-canonical-lineage";
 import { writeNativeDirectoryProfile, type NativeDirectoryCreateWrite,
   type NativeDirectoryProfileWriteOutcome } from "../src/worker/native-directory-profile-writer";
 import { writeNativeDirectoryRelationship } from "../src/worker/native-directory-relationship-writer";
@@ -197,6 +197,10 @@ beforeAll(async () => {
   db = await runtime.getD1Database("OPS_DB") as unknown as D1Database;
   const migrations = await applyCanonicalChain(db, "operations", "0152_operations_portal_workspace_reservations.sql", true);
   expect(migrations).toHaveLength(152);
+  // The current writer consumes the 0170 active-mapping projection (including
+  // the distinct Ops record_id). Keep the historical authority fixture, but
+  // install that exact current schema contract before exercising the writer.
+  await applyCanonicalMigrationSchema(db, "0170_project_alpha_active_directory_project_guard.sql");
   await seedManager("portal-manager-a", "both");
   await seedManager("portal-manager-b", "revoke");
   await db.batch([
@@ -217,7 +221,7 @@ beforeAll(async () => {
 }, 240_000);
 afterAll(async () => { await runtime.dispose(); });
 
-describe("0152 native Operations portal workspace reservations", () => {
+describe("native Operations portal workspace reservations against the current Directory mapping view", () => {
   it("reserves an Ops root and native project folders atomically without PA, grants, links, or outbox writes", async () => {
     const actor = authority("portal-manager-a"), workspaceInput = workspaceCommand();
     const beforeGrants = await db.prepare("SELECT count(*) n FROM native_directory_grants").first<number>("n");

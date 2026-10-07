@@ -50,8 +50,12 @@ beforeAll(async () => {
   ops = await runtime.getD1Database("OPS_DB") as D1Database;
   const delivery = await runtime.getD1Database("DELIVERY_DB") as D1Database, directory = new URL("../migrations/", import.meta.url);
   for (const filename of readdirSync(directory).filter(name => name.endsWith(".sql")).sort()) {
-    if (filename === "0058_operations_directory_write_authority.sql")
+    if (filename === "0058_operations_directory_write_authority.sql") {
       await ops.prepare("INSERT INTO operations_directory_records(record_id,record_kind,current_version) VALUES ('notes-org-1','organization',1),('notes-org-2','organization',1),('notes-org-3','organization',1)").run();
+      await ops.batch([1, 2, 3].map(index => ops.prepare(`INSERT INTO operations_directory_revisions
+        (record_id,version,mutation_id,profile_json) VALUES(?,1,?,?)`).bind(`notes-org-${index}`,
+        `notes-org-seed-${index}`, JSON.stringify({ name: `Notes Organization ${index}` }))));
+    }
     await ops.batch(splitD1MigrationStatements(readFileSync(new URL(filename, directory), "utf8")).map(sql => ops.prepare(sql)));
   }
   env = { OPS_DB: ops, DELIVERY_DB: delivery, PROJECT_ALPHA_API_V2_CONNECTIONS: connections } as Env;
