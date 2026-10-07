@@ -13,7 +13,7 @@ Updated: 2026-10-07 (local candidate reassessment; no remote deployment)
   older migration lineage. The seven-suite local run passed **45/45** under
   elevated local Workerd; ordinary sandbox execution could not start Workerd
   and is inconclusive. No Worker or D1 deployment was performed.
-- Remaining pre-existing candidate test edits and ignored `.tmp-checks`
+- Remaining pre-existing candidate test edits and untracked `.tmp-checks`
   artifacts were not staged or cleaned. The candidate is therefore still not
   a clean release artifact.
 - The six previously audited PA local branch refs remain intact: Git's
