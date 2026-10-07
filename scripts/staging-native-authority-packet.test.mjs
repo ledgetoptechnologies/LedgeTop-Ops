@@ -25,7 +25,7 @@ const activationId = "10000000-0000-4000-8000-000000000001";
 const REVIEWED_OPERATIONS_180 = Object.freeze({ count: 180,
   finalMigration: "0180_project_alpha_project_v2_recovery_authorization.sql",
   namesSha256: "8d7fdaaa7b453b32dd5e67d1a670554bc1c03aedf41c8ecadaddbbccf632e266",
-  chainSha256: "6603a620f33f7d6cd88e23189203ddcb8a753b16167cd5e8ae427a31cf51b4b3" });
+  chainSha256: "f69e09bebe37802ed39d9f6f40cb7643f1a0207c80f1653abc10154746ffdbb7" });
 const sha256 = value => createHash("sha256").update(value).digest("hex");
 function reviewedOperationsMigrations() {
   const directory = path.join(repositoryRoot, "apps", "operations", "migrations");
@@ -1011,12 +1011,15 @@ test("revoke fails atomically while an actor has a live Project-v2 recovery auth
     original_attempts,original_lease_token,original_lease_expires_at,original_outcome_json,request_sha256,operation,
     external_project_id,source_id,source_instance_id,application_id,history_epoch_id,destination_origin,
     expected_local_version,expected_local_projection_sha256,expected_mapping_state,expected_project_alpha_public_id,
+    original_actor_staff_id,original_actor_access_subject,original_actor_email,original_actor_admission_version,
+    original_actor_profile_version,original_actor_project_grant_generation,original_actor_scopes_json,
     actor_staff_id,actor_access_subject,actor_email,actor_admission_version,actor_profile_version,
     actor_project_grant_generation,actor_scopes_json,reason,expires_at)
     VALUES(?,?,2,'terminal_uncertain','terminal',1,NULL,NULL,'{}',?,'create',?,?,?,?,?,?,0,NULL,'absent',NULL,
-      ?,?,?,1,1,1,'[]','Guarded staging recovery',strftime('%Y-%m-%dT%H:%M:%fZ','now','+10 minutes'))`)
+      ?,?,?,?,?,?,'[]',?,?,?,1,1,1,'[]','Guarded staging recovery',strftime('%Y-%m-%dT%H:%M:%fZ','now','+10 minutes'))`)
     .run(authorizationId, commandId, requestSha256, externalProjectId, sourceId, sourceInstanceId, applicationId,
-      historyEpochId, destination, owner.operationsStaffId, subject, owner.email);
+      historyEpochId, destination, owner.operationsStaffId, subject, owner.email, 1, 1, 1,
+      owner.operationsStaffId, subject, owner.email);
   assert.equal(queryOne(db, `SELECT count(*) count FROM project_alpha_project_v2_live_recovery_authorizations
     WHERE actor_staff_id=?`, owner.operationsStaffId).count, 1);
 

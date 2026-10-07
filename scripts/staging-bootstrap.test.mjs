@@ -200,7 +200,7 @@ test("builds the complete checked-in 147/180 chains with both Client 0199 filena
   assert.deepEqual(artifacts.delivery.manifest.transformedFiles, ["0002_seed_initial_staff.sql"]);
   assert.deepEqual(artifacts.operations.manifest.transformedFiles, ["0002_seed_acl.sql"]);
   assert.equal(artifacts.delivery.manifest.sourceChainSha256, "8a6cb183feae5ec6490cb4710f02a3289a05421786b9593e6392803a1e890f5c");
-  assert.equal(artifacts.operations.manifest.sourceChainSha256, "6603a620f33f7d6cd88e23189203ddcb8a753b16167cd5e8ae427a31cf51b4b3");
+  assert.equal(artifacts.operations.manifest.sourceChainSha256, "f69e09bebe37802ed39d9f6f40cb7643f1a0207c80f1653abc10154746ffdbb7");
 });
 
 const disposableTargets = (runId = "portal-home-20260928") => ({ runId, applications: {

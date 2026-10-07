@@ -27,7 +27,7 @@ export const BOOTSTRAP_APPS = Object.freeze({
     seed: "0002_seed_acl.sql",
     migrationCount: 180,
     migrationNamesSha256: "8d7fdaaa7b453b32dd5e67d1a670554bc1c03aedf41c8ecadaddbbccf632e266",
-    migrationContentsSha256: "6603a620f33f7d6cd88e23189203ddcb8a753b16167cd5e8ae427a31cf51b4b3",
+    migrationContentsSha256: "f69e09bebe37802ed39d9f6f40cb7643f1a0207c80f1653abc10154746ffdbb7",
   }),
 });
 export const PRODUCTION_DATABASE_IDENTITIES = Object.freeze([

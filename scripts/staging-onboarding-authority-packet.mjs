@@ -13,7 +13,7 @@ const REVIEWED_AUTHORITY_OPERATIONS_CHAIN = Object.freeze({
   count: 180,
   finalMigration: "0180_project_alpha_project_v2_recovery_authorization.sql",
   namesSha256: "8d7fdaaa7b453b32dd5e67d1a670554bc1c03aedf41c8ecadaddbbccf632e266",
-  contentsSha256: "6603a620f33f7d6cd88e23189203ddcb8a753b16167cd5e8ae427a31cf51b4b3",
+  contentsSha256: "f69e09bebe37802ed39d9f6f40cb7643f1a0207c80f1653abc10154746ffdbb7",
 });
 export const ONBOARDING_AUTHORITY_SCHEMA_VERSION = 1;
 export const ONBOARDING_AUTHORITY_MIGRATIONS_TABLE = "staging_native_authority_migrations";
