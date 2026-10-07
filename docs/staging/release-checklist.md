@@ -593,10 +593,11 @@ that placeholder or a dirty worktree HEAD into evidence. The later
 contract-only commit pins its executable SHA without making the release-packet
 HEAD self-referential. The current candidate inventory extends through Client
 `0228` and Operations `0180`, including both distinct Client `0199` filenames.
-The
-Operations runtime candidate remains `PENDING_OPERATIONS_COMMIT` until the
-combined portal and API-v2 sync/read-adoption candidate is committed, pushed,
-and independently reviewed; do not substitute the dirty worktree HEAD.
+The combined portal and API-v2 sync/read-adoption candidate is pinned to
+`9d260ee83c97f2bb25c16e2cf7fdce93a05c5bf0`. It is committed locally but not
+yet pushed or independently reviewed; do not treat the pin alone as proof of
+publication or deployment. The example evidence records the candidate SHA,
+while `runtimeCandidatePushed` remains false until remote verification.
 Project Alpha is pinned
 independently at PR184 head `31deb85b87b95de27dc9e90a5591e036ae96709e`.
 Keep `RELEASE_CONTRACT_FINALIZED=false` until independent cross-repository,
